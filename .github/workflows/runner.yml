@@ -1,5 +1,6 @@
 name: 🔗 GHA
-on: [push, pull_request, merge_group, workflow_dispatch]
+# Giant engine: the full upstream platform matrix runs only on demand; giant_ci.yml runs on every push.
+on: [workflow_dispatch]
 
 concurrency:
   group: ${{ github.workflow }}|${{ github.ref_name }}
