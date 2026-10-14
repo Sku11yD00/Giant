@@ -179,6 +179,10 @@ protected:
 	virtual void shortcut_input(const Ref<InputEvent> &p_event) override;
 
 public:
+	// Giant engine: lets tools such as the MCP server observe every log message, including game output.
+	using MessageHook = void (*)(const String &p_msg, MessageType p_type);
+	static inline MessageHook message_hook = nullptr;
+
 	void add_message(const String &p_msg, MessageType p_type = MSG_TYPE_STD);
 	void register_undo_redo(UndoRedo *p_undo_redo);
 	void deinit();

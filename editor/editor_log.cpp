@@ -283,6 +283,10 @@ void EditorLog::_process_message(const String &p_msg, MessageType p_type, bool p
 }
 
 void EditorLog::add_message(const String &p_msg, MessageType p_type) {
+	if (message_hook) {
+		message_hook(p_msg, p_type);
+	}
+
 	// Make text split by new lines their own message.
 	// See #41321 for reasoning. At time of writing, multiple print()'s in running projects
 	// get grouped together and sent to the editor log as one message. This can mess with the
