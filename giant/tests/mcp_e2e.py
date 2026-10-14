@@ -64,10 +64,10 @@ class Client:
             headers["Mcp-Name"] = name
         return self.post(body, headers)
 
-    def tool(self, name, **arguments):
-        status, body = self.request("tools/call", {"name": name, "arguments": arguments}, name=name)
-        assert status == 200, (name, status, body)
-        assert "result" in body, (name, body)
+    def tool(self, tool_name, /, **arguments):
+        status, body = self.request("tools/call", {"name": tool_name, "arguments": arguments}, name=tool_name)
+        assert status == 200, (tool_name, status, body)
+        assert "result" in body, (tool_name, body)
         return body["result"]
 
 

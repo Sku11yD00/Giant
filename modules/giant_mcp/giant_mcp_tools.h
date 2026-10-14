@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/os/mutex.h"
+#include "core/string/ustring.h"
 #include "core/templates/local_vector.h"
 #include "core/variant/array.h"
 #include "core/variant/dictionary.h"

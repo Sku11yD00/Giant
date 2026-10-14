@@ -316,7 +316,7 @@ bool GiantMCPTools::_from_json(const Variant &p_json, int p_target_type, Variant
 		}
 		// [1, 2, 3] builds a Vector3, [1, 0, 0, 1] a Color, and so on.
 		Vector<Variant> values;
-		Vector<const Variant *> args;
+		LocalVector<const Variant *> args;
 		values.resize(in.size());
 		for (int i = 0; i < in.size(); i++) {
 			values.write[i] = in[i];
@@ -781,7 +781,7 @@ Dictionary GiantMCPTools::_call_method(const Dictionary &p_args) {
 		}
 		values.push_back(value);
 	}
-	Vector<const Variant *> args;
+	LocalVector<const Variant *> args;
 	for (int i = 0; i < values.size(); i++) {
 		args.push_back(&values[i]);
 	}
