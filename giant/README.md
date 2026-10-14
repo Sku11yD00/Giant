@@ -20,14 +20,15 @@ panel, for example `Giant MCP server listening on http://127.0.0.1:7400/mcp`.
 The address and access token are also written to `.godot/giant_mcp.json` inside the project.
 That folder is never committed, so the token stays on your PC.
 
-From the project folder, add the server to Claude Code:
+The Output panel also prints the full command with your token filled in. Copy that line and
+run it from the project folder to add the server to Claude Code:
 
 ```
-claude mcp add --transport http giant http://127.0.0.1:7400/mcp --header "Authorization: Bearer <token from .godot/giant_mcp.json>"
+claude mcp add --transport http giant http://127.0.0.1:7400/mcp --header "Authorization: Bearer <your token>"
 ```
 
-Settings live under Editor Settings > Giant MCP: turn the server on or off, change the port,
-or replace the token. `GIANT_MCP_PORT` and `GIANT_MCP_TOKEN` environment variables override them.
+Settings live under Editor Settings > Giant MCP (turn on Advanced Settings to see them): turn
+the server on or off, change the port, or replace the token. `GIANT_MCP_PORT` and `GIANT_MCP_TOKEN` environment variables override them.
 
 ### What an AI can do
 

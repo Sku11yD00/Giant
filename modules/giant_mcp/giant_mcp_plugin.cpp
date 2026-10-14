@@ -86,6 +86,8 @@ void GiantMCPPlugin::_start_server() {
 	}
 	_write_connection_file(server.get_port(), token);
 	print_line(vformat("Giant MCP server listening on http://127.0.0.1:%d%s", server.get_port(), GiantMCPServer::ENDPOINT_PATH));
+	// Show the ready-made command so connecting Claude Code is a single copy and paste.
+	print_line(vformat("To connect Claude Code, run: claude mcp add --transport http giant http://127.0.0.1:%d%s --header \"Authorization: Bearer %s\"", server.get_port(), GiantMCPServer::ENDPOINT_PATH, token));
 }
 
 void GiantMCPPlugin::_write_connection_file(int p_port, const String &p_token) {
