@@ -50,3 +50,19 @@ or replace the token. `GIANT_MCP_PORT` and `GIANT_MCP_TOKEN` environment variabl
 - Every request needs the bearer token.
 - Scene edits go through the editor's undo history.
 - Tools that delete or run arbitrary code are marked destructive, so AI clients ask before using them.
+
+## Updating to newer Godot versions
+
+This repository started from a single import of Godot's source, without upstream history.
+`giant/UPSTREAM` records the upstream commit it matches. To move to a newer Godot commit,
+apply the upstream changes between the recorded commit and the new one as a patch:
+
+```
+git clone --filter=blob:none https://github.com/godotengine/godot /tmp/godot-upstream
+git -C /tmp/godot-upstream diff --binary $(cat giant/UPSTREAM) <new commit> > /tmp/upstream.patch
+git apply --3way /tmp/upstream.patch
+echo <new commit> > giant/UPSTREAM
+```
+
+Resolve any conflicts in files marked `// Giant engine:`, run the tests, and commit the update
+as one commit named after the new upstream commit.
