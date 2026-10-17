@@ -33,7 +33,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwayland-bin mesa-vulkan-drivers
+          sudo apt-get install -y libwayland-bin mesa-vulkan-drivers xvfb
 
       - name: Build
         uses: ./.github/actions/godot-build
@@ -53,6 +53,17 @@ jobs:
 
       - name: MCP server end-to-end test
         run: python3 giant/tests/mcp_e2e.py ./bin/godot.linuxbsd.editor.double.x86_64
+
+      # Renders the prototype with a software Vulkan driver and fails on any script or engine error.
+      - name: Giant prototype runs and renders
+        run: python3 giant/tests/demo_smoke.py ./bin/godot.linuxbsd.editor.double.x86_64 giant-screenshots
+
+      - name: Upload prototype screenshots
+        if: always()
+        uses: ./.github/actions/upload-artifact
+        with:
+          name: giant-screenshots
+          path: giant-screenshots
 
   windows-editor:
     name: 🏁 Windows editor (download from this run's artifacts)
@@ -113,6 +124,7 @@ jobs:
         run: |
           Remove-Item bin/build_deps -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item bin/* -Include *.exp,*.lib,*.pdb -Force
+          Copy-Item giant/demo bin/giant-prototype -Recurse
 
       - name: Upload Windows editor
         uses: ./.github/actions/upload-artifact

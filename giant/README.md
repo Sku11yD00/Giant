@@ -11,6 +11,43 @@ branch and adds the systems the game needs on top.
   must look clean that way.
 - **AI control built in.** The editor runs an MCP server, so Claude Code, the in-editor assistant
   or any other MCP client can drive the whole engine.
+- **Giants.** Characters that grow smoothly from human size to kilometres tall, with jiggle,
+  hair, animation and skin detail that keep working at every size.
+
+## Try the giant prototype
+
+Open `giant/demo` in the Giant editor (in the Windows download it is the `giant-prototype`
+folder next to the editor) and press F5. Use the panel to grow her, change the time feel, make
+her walk and switch the detail layers off to see what normal textures would do. Keys 1, 2 and
+3 switch between orbiting her, walking around on foot, and flying.
+
+## Giants
+
+A giant is an ordinary character placed under a `GiantBody` node. The node's origin must sit
+on the ground between her feet.
+
+| Node | What it does |
+| --- | --- |
+| `GiantBody` | Sets her `height` in metres (the node's scale follows) and how slowly she moves at that size. `grow_to(height, seconds)` grows her smoothly. |
+| `GiantJiggle3D` | Jiggle and hair. Add it under the `Skeleton3D` and list the bones in `chains`. |
+| `GiantFootsteps3D` | Emits `footstep(foot, position, giant_height)` when a foot lands, for shake, dust and damage. |
+
+**Time feel.** Real physics makes something `s` times bigger move `sqrt(s)` times slower. A
+giant that obeys this exactly looks like slow motion; one that ignores it looks like a toy.
+`GiantBody.time_feel` blends the two: `0` moves like a human at every size, `1` is fully
+realistic, and the default `0.5` sits in between. Animation and jiggle both play at this tempo.
+
+**Jiggle and hair at any size.** `GiantJiggle3D` simulates in the giant's body space (skeleton
+space before her scale) and in her own time. The same settings therefore give the same shape at
+1.8 m and at 1.5 km, growing never makes anything jump, and the result barely depends on the
+frame rate. Unit tests in `modules/giant_core/tests` check all three.
+
+**Skin that never stretches.** Every mesh under a `GiantBody` gets the instance shader
+parameter `giant_scale`. A shader can use it to tile fine detail (pores, fabric weave) at a
+fixed size in world metres: as she grows, finer copies of the detail texture fade in, so a
+close-up of a 1 km giant looks as sharp as one of a person. See
+`giant/demo/giant/giant_skin.gdshader`. Give the character UVs at an even texel density in
+metres, as is normal for detail maps.
 
 ## Connecting Claude Code (or another AI tool)
 
@@ -44,6 +81,8 @@ the server on or off, change the port, or replace the token. `GIANT_MCP_PORT` an
 | `play`, `stop`, `get_log` | Run the game and read its output |
 | `undo`, `redo` | Step through the scene's undo history |
 | `screenshot` | See the 3D or 2D viewport, or the whole editor |
+
+The giant nodes are ordinary engine classes, so the same tools create, size and grow giants.
 
 ### Safety
 

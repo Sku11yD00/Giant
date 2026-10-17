@@ -151,6 +151,16 @@ def run(client):
     info = client.tool("describe_class", class_name="GPUParticles3D")["structuredContent"]
     check("describes engine classes", any(p["name"] == "amount" for p in info["properties"]), info.get("properties", [])[:5])
 
+    # Giants: an AI can make one and size it like any other node.
+    result = client.tool("create_node", type="GiantBody", name="Giant", properties={"rest_height": 2.0, "height": 300.0})
+    check("creates a giant", not result.get("isError"), text_of(result))
+    giant = client.tool("get_node", node_path="Giant", filter="scale")["structuredContent"]["properties"]
+    check("a 300 m giant is 150 times her model", giant.get("scale") == "Vector3(150, 150, 150)", giant)
+    result = client.tool("call_method", node_path="Giant", method="get_time_scale")
+    check("reads the giant's tempo", "0.28" in text_of(result) or "0.27" in text_of(result), text_of(result))
+    info = client.tool("describe_class", class_name="GiantJiggle3D")["structuredContent"]
+    check("documents the giant classes", "every giant size" in json.dumps(info), str(info)[:300])
+
     # Screenshots need a GPU; headless runs only check that the tool answers.
     result = client.tool("screenshot")
     check("screenshot answers", "content" in result, result)

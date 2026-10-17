@@ -37,7 +37,12 @@ bin/godot.linuxbsd.editor.double.x86_64 --headless --test
 
 # MCP server end-to-end test: starts a headless editor and drives it over MCP
 python3 giant/tests/mcp_e2e.py bin/godot.linuxbsd.editor.double.x86_64
+
+# Giant prototype: renders it (xvfb and a software Vulkan driver on Linux) and saves screenshots
+python3 giant/tests/demo_smoke.py bin/godot.linuxbsd.editor.double.x86_64 /tmp/giant-shots
 ```
+
+Look at the screenshots after any visual change: they are the only way to see the result.
 
 Run the narrowest test that covers your change first, then the full set before you finish.
 A change is not done until its test passes.
@@ -46,6 +51,8 @@ A change is not done until its test passes.
 
 | Path | What |
 | --- | --- |
+| `modules/giant_core/` | Giant nodes: `GiantBody` (size and time feel), `GiantJiggle3D`, `GiantFootsteps3D` |
+| `giant/demo/` | The giant prototype project |
 | `modules/giant_mcp/` | Built-in MCP server: lets Claude Code and the in-editor assistant drive the editor |
 | `editor/editor_log.*` | Upstream file with a small Giant hook so the MCP server can read log output |
 | `giant/README.md` | What the Giant engine adds and how to connect an AI to it |
