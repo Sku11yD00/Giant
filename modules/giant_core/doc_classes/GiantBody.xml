@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GiantBody" inherits="Node3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		The root node of a giant: sets her height in metres and how slowly she moves at that size.
+	</brief_description>
+	<description>
+		Put the giant's model under a [GiantBody]. The node's origin must sit on the ground between the feet, so growing scales the giant up from the ground. Setting [member height] sets the node's scale; do not scale the node yourself.
+		[b]Time feel:[/b] real physics makes a body that is [code]s[/code] times bigger move [code]sqrt(s)[/code] times slower. [member time_feel] picks how much of that slowdown to keep: [code]0[/code] moves like a human at every size, [code]1[/code] is fully realistic, and the default [code]0.5[/code] sits in between. The [member animation_mixer] and every [GiantJiggle3D] under the giant follow this tempo.
+		[b]Texture detail:[/b] every [GeometryInstance3D] under the giant receives the instance shader parameter [code]giant_scale[/code], so shaders can add finer detail as she grows. See [code]giant/README.md[/code].
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="advance">
+			<return type="void" />
+			<param index="0" name="delta" type="float" />
+			<description>
+				Advances growth and the [member animation_mixer] by [param delta] seconds of real time. Called automatically every frame while the game runs.
+			</description>
+		</method>
+		<method name="get_scale_factor" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns how many times bigger the giant is than her model: [member height] divided by [member rest_height].
+			</description>
+		</method>
+		<method name="get_time_scale" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns how fast the giant moves compared with human size, from [code]1.0[/code] (full speed) down. Animation and jiggle play at this speed.
+			</description>
+		</method>
+		<method name="grow_to">
+			<return type="void" />
+			<param index="0" name="height" type="float" />
+			<param index="1" name="duration" type="float" />
+			<description>
+				Smoothly changes [member height] to [param height] over [param duration] seconds. Growth is steady in log space, so 2 m to 20 m takes as long as 20 m to 200 m. Emits [signal growth_finished] at the end.
+			</description>
+		</method>
+		<method name="is_growing" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while a [method grow_to] is in progress.
+			</description>
+		</method>
+		<method name="stop_growing">
+			<return type="void" />
+			<description>
+				Stops a growth started by [method grow_to] at the current height.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="animation_mixer" type="NodePath" setter="set_animation_mixer" getter="get_animation_mixer" default="NodePath(&quot;&quot;)">
+			The [AnimationPlayer] or [AnimationTree] that animates the giant. While the game runs, the giant drives it at [method get_time_scale] speed.
+		</member>
+		<member name="height" type="float" setter="set_height" getter="get_height" default="1.8">
+			The giant's height in metres. Changing it scales the node about its origin.
+		</member>
+		<member name="rest_height" type="float" setter="set_rest_height" getter="get_rest_height" default="1.8">
+			The height in metres of the giant's model at scale 1.
+		</member>
+		<member name="time_feel" type="float" setter="set_time_feel" getter="get_time_feel" default="0.5">
+			How much slower the giant moves as she grows: [code]0[/code] never slows down, [code]1[/code] follows real physics, values in between blend the two.
+		</member>
+	</members>
+	<signals>
+		<signal name="growth_finished">
+			<description>
+				Emitted when a [method grow_to] reaches its target height.
+			</description>
+		</signal>
+		<signal name="height_changed">
+			<param index="0" name="height" type="float" />
+			<description>
+				Emitted whenever [member height] changes.
+			</description>
+		</signal>
+	</signals>
+</class>

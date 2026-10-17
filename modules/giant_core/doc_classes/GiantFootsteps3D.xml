@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GiantFootsteps3D" inherits="Node" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Emits a footstep signal when a giant's foot touches the ground.
+	</brief_description>
+	<description>
+		Watches [member foot_bones] of a [Skeleton3D] under a [GiantBody]. A foot must lift by [member lift_height] and come back within [member contact_height] of its rest height to count as a step. Heights are in body lengths, so the same settings work at every size. Use [signal footstep] for camera shake, dust and damage.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="update_feet">
+			<return type="void" />
+			<description>
+				Checks the feet once. Called automatically every frame while the game runs.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="contact_height" type="float" setter="set_contact_height" getter="get_contact_height" default="0.03">
+			How close to its rest height (in body metres) a lifted foot must come back to count as landing.
+		</member>
+		<member name="foot_bones" type="PackedStringArray" setter="set_foot_bones" getter="get_foot_bones" default="PackedStringArray(&quot;LeftFoot&quot;, &quot;RightFoot&quot;)">
+			The names of the foot bones to watch.
+		</member>
+		<member name="lift_height" type="float" setter="set_lift_height" getter="get_lift_height" default="0.08">
+			How far (in body metres) a foot must rise before its next landing counts.
+		</member>
+		<member name="skeleton_path" type="NodePath" setter="set_skeleton_path" getter="get_skeleton_path" default="NodePath(&quot;&quot;)">
+			The [Skeleton3D] whose feet are watched.
+		</member>
+	</members>
+	<signals>
+		<signal name="footstep">
+			<param index="0" name="foot" type="StringName" />
+			<param index="1" name="position" type="Vector3" />
+			<param index="2" name="giant_height" type="float" />
+			<description>
+				Emitted when a foot lands. [param position] is the point on the ground under the foot, in world space, and [param giant_height] is the giant's height in metres, a good guide for how hard to shake things.
+			</description>
+		</signal>
+	</signals>
+</class>

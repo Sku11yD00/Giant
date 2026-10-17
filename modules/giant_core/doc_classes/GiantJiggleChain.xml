@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GiantJiggleChain" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		One jiggling bone or bone chain, used by [GiantJiggle3D].
+	</brief_description>
+	<description>
+		Starts at [member root_bone] and follows the first child bone for [member bone_count] bones. Each bone springs back toward its animated pose relative to its parent. All values are at human size; [GiantJiggle3D] keeps them correct at every size.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="bone_count" type="int" setter="set_bone_count" getter="get_bone_count" default="1">
+			How many bones the chain has. Use 1 for a single jiggle bone and more for hair or tails.
+		</member>
+		<member name="damping_ratio" type="float" setter="set_damping_ratio" getter="get_damping_ratio" default="0.25">
+			How quickly the swing dies down. [code]0[/code] keeps bouncing, [code]1[/code] settles without overshoot.
+		</member>
+		<member name="frequency" type="float" setter="set_frequency" getter="get_frequency" default="2.5">
+			How many times per second (at human size) the bone bounces. Lower is floppier.
+		</member>
+		<member name="gravity" type="float" setter="set_gravity" getter="get_gravity" default="0.0">
+			Extra pull downward in m/s² at human size. Use about [code]9.8[/code] for hair and [code]0[/code] for jiggle that the animation already shapes.
+		</member>
+		<member name="max_angle" type="float" setter="set_max_angle" getter="get_max_angle" default="1.0471976">
+			The furthest the bone may swing away from its animated pose.
+		</member>
+		<member name="root_bone" type="StringName" setter="set_root_bone" getter="get_root_bone" default="&amp;&quot;&quot;">
+			The name of the first bone in the chain.
+		</member>
+		<member name="tip_length" type="float" setter="set_tip_length" getter="get_tip_length" default="0.0">
+			Length of the last bone when it has no child bone. [code]0[/code] reuses the bone's own length.
+		</member>
+	</members>
+</class>

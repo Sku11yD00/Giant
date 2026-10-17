@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GiantJiggle3D" inherits="SkeletonModifier3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Jiggle and hair physics that look the same at every giant size.
+	</brief_description>
+	<description>
+		Add as a child of the giant's [Skeleton3D] and list the bones to simulate in [member chains]. A chain is a single jiggling bone (bone count 1) or a strand such as a ponytail.
+		The simulation runs in the giant's body space (skeleton space, without the giant's scale) and in the giant's own time from [method GiantBody.get_time_scale]. So a 1 km giant jiggles with exactly the shape she has at human size, just at her slower tempo, and growing never makes anything jump. When the whole giant speeds up, stops or turns, the tails feel it as inertia measured in body lengths.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_effective_time_scale" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the time scale in use: [member time_scale_override] if it is zero or more, otherwise the nearest [GiantBody] ancestor's time scale, otherwise [code]1.0[/code].
+			</description>
+		</method>
+		<method name="get_joint_position" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="chain" type="int" />
+			<param index="1" name="joint" type="int" />
+			<description>
+				Returns the simulated tail of joint [param joint] in chain [param chain], in skeleton space. Useful for tests and debugging.
+			</description>
+		</method>
+		<method name="reset">
+			<return type="void" />
+			<description>
+				Puts every chain back to its animated pose with no motion.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="chains" type="GiantJiggleChain[]" setter="set_chains" getter="get_chains" default="[]">
+			The bones to simulate. See [GiantJiggleChain].
+		</member>
+		<member name="time_scale_override" type="float" setter="set_time_scale_override" getter="get_time_scale_override" default="-1.0">
+			When zero or more, the simulation uses this time scale instead of the giant's. [code]-1[/code] follows the giant.
+		</member>
+	</members>
+</class>
