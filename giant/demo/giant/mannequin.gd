@@ -49,7 +49,8 @@ const HAIR := Color(0.3, 0.17, 0.09)
 const SHOES := Color(0.12, 0.1, 0.09)
 
 # bone, start offset, end offset (both in the bone's rest space), start radius, end radius, colour.
-# Radii can be a Vector2 (side, front) to flatten the shape.
+# Radii can be a Vector2 (side, front) to flatten the shape. Where two parts meet at a joint,
+# the upper one ends a little thinner so their surfaces never fight over the same pixels.
 const PARTS := [
 	["Hips", Vector3(0, -0.06, 0), Vector3(0, 0.1, 0), Vector2(0.17, 0.12), Vector2(0.15, 0.1), SHORTS],
 	["Spine", Vector3(0, 0.0, 0), Vector3(0, 0.2, 0), Vector2(0.13, 0.095), Vector2(0.15, 0.1), TOP],
@@ -64,18 +65,18 @@ const PARTS := [
 	["Ponytail2", Vector3(0, 0, 0), Vector3(0, -0.1, 0), 0.042, 0.036, HAIR],
 	["Ponytail3", Vector3(0, 0, 0), Vector3(0, -0.1, 0), 0.036, 0.028, HAIR],
 	["Ponytail4", Vector3(0, 0, 0), Vector3(0, -0.09, 0), 0.028, 0.016, HAIR],
-	["UpperArm.L", Vector3(0, 0.02, 0), Vector3(0, -0.28, 0), 0.05, 0.04, SKIN],
+	["UpperArm.L", Vector3(0, 0.02, 0), Vector3(0, -0.28, 0), 0.05, 0.037, SKIN],
 	["LowerArm.L", Vector3(0, 0, 0), Vector3(0, -0.25, 0), 0.04, 0.03, SKIN],
 	["Hand.L", Vector3(0, 0, 0), Vector3(0, -0.15, 0.01), Vector2(0.035, 0.018), Vector2(0.03, 0.014), SKIN],
-	["UpperArm.R", Vector3(0, 0.02, 0), Vector3(0, -0.28, 0), 0.05, 0.04, SKIN],
+	["UpperArm.R", Vector3(0, 0.02, 0), Vector3(0, -0.28, 0), 0.05, 0.037, SKIN],
 	["LowerArm.R", Vector3(0, 0, 0), Vector3(0, -0.25, 0), 0.04, 0.03, SKIN],
 	["Hand.R", Vector3(0, 0, 0), Vector3(0, -0.15, 0.01), Vector2(0.035, 0.018), Vector2(0.03, 0.014), SKIN],
 	["UpperLeg.L", Vector3(0, 0.04, 0), Vector3(0, -0.2, 0), 0.088, 0.075, SHORTS],
-	["UpperLeg.L", Vector3(0, -0.2, 0), Vector3(0, -0.42, 0), 0.07, 0.055, SKIN],
+	["UpperLeg.L", Vector3(0, -0.2, 0), Vector3(0, -0.42, 0), 0.07, 0.051, SKIN],
 	["LowerLeg.L", Vector3(0, 0, 0), Vector3(0, -0.42, 0), 0.055, 0.038, SKIN],
 	["LeftFoot", Vector3(0, -0.02, -0.03), Vector3(0, -0.045, 0.15), Vector2(0.04, 0.035), Vector2(0.038, 0.02), SHOES],
 	["UpperLeg.R", Vector3(0, 0.04, 0), Vector3(0, -0.2, 0), 0.088, 0.075, SHORTS],
-	["UpperLeg.R", Vector3(0, -0.2, 0), Vector3(0, -0.42, 0), 0.07, 0.055, SKIN],
+	["UpperLeg.R", Vector3(0, -0.2, 0), Vector3(0, -0.42, 0), 0.07, 0.051, SKIN],
 	["LowerLeg.R", Vector3(0, 0, 0), Vector3(0, -0.42, 0), 0.055, 0.038, SKIN],
 	["RightFoot", Vector3(0, -0.02, -0.03), Vector3(0, -0.045, 0.15), Vector2(0.04, 0.035), Vector2(0.038, 0.02), SHOES],
 ]
