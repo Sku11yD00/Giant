@@ -42,7 +42,7 @@ const BONES := [
 	["Toe.R", "RightFoot", Vector3(0, -0.04, 0.15)],
 ]
 
-const SKIN := Color(0.85, 0.64, 0.52)
+const SKIN := Color(0.88, 0.6, 0.46)
 const TOP := Color(0.16, 0.32, 0.55)
 const SHORTS := Color(0.22, 0.22, 0.26)
 const HAIR := Color(0.3, 0.17, 0.09)
