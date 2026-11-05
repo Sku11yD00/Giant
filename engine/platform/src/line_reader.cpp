@@ -1,5 +1,8 @@
 #include "giant/platform/line_reader.h"
 
+#include "giant/core/assert.h"
+#include "giant/core/log.h"
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -10,11 +13,15 @@
 #include <windows.h>
 #else
 #include <cerrno>
+#include <poll.h>
 #include <unistd.h>
 #endif
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
+#include <exception>
 #include <mutex>
 #include <thread>
 
@@ -30,90 +37,127 @@ struct LineReader::Shared {
 
 namespace {
 
-// Raw reads of standard input, split into lines. Returns false at the end of
-// input or on an error.
-class StdinLines {
-public:
-    bool next(std::string& line) {
-        for (;;) {
-            if (const auto end = m_buffer.find('\n'); end != std::string::npos) {
-                line.assign(m_buffer, 0, end);
-                m_buffer.erase(0, end + 1);
-                return true;
-            }
-            char chunk[4096];
-            const long got = read_chunk(chunk, sizeof(chunk));
-            if (got <= 0) {
-                if (m_buffer.empty()) {
-                    return false;
+void push_line(LineReader::Shared& shared, std::string line) {
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back(); // Windows line endings
+    }
+    std::lock_guard lock(shared.mutex);
+    shared.lines.push_back(std::move(line));
+    shared.changed.notify_all();
+}
+
+// The reader thread: splits chunks into lines. Each chunk is only scanned
+// once, so long lines stay linear in time; overlong lines are dropped.
+void read_lines(LineReader::Shared& shared, const LineReader::ReadChunk& read) {
+    std::vector<char> chunk(64 * 1024);
+    std::string pending;
+    bool dropping = false; // inside a line that was too long
+    for (;;) {
+        const long got = read(chunk.data(), chunk.size());
+        if (got <= 0) {
+            break;
+        }
+        const char* data = chunk.data();
+        usize size = static_cast<usize>(got);
+        while (size > 0) {
+            const auto* newline = static_cast<const char*>(std::memchr(data, '\n', size));
+            const usize take = newline != nullptr ? static_cast<usize>(newline - data) : size;
+            if (!dropping) {
+                if (pending.size() + take > LineReader::k_max_line_bytes) {
+                    log_error("platform", "input line longer than 64 MiB dropped");
+                    pending.clear();
+                    pending.shrink_to_fit();
+                    dropping = true;
+                } else {
+                    pending.append(data, take);
                 }
-                line = std::move(m_buffer); // last line without a newline
-                m_buffer.clear();
-                return true;
             }
-            m_buffer.append(chunk, static_cast<std::size_t>(got));
+            if (newline == nullptr) {
+                break;
+            }
+            push_line(shared, dropping ? std::string(LineReader::k_too_long_line)
+                                       : std::move(pending));
+            pending.clear();
+            dropping = false;
+            data += take + 1;
+            size -= take + 1;
         }
     }
+    if (!pending.empty() && !dropping) {
+        push_line(shared, std::move(pending)); // last line without a newline
+    }
+}
 
-private:
-    static long read_chunk(char* data, std::size_t size) {
 #if defined(_WIN32)
+long read_stdin(char* data, usize size) {
+    const HANDLE handle = GetStdHandle(STD_INPUT_HANDLE);
+    static const bool is_pipe = GetFileType(handle) == FILE_TYPE_PIPE;
+    for (;;) {
         DWORD got = 0;
-        if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), data, static_cast<DWORD>(size), &got,
-                      nullptr)) {
-            return -1; // includes a closed pipe
-        }
-        return static_cast<long>(got);
-#else
-        for (;;) {
-            const ssize_t got = ::read(STDIN_FILENO, data, size);
-            if (got < 0 && errno == EINTR) {
-                continue;
+        if (!ReadFile(handle, data, static_cast<DWORD>(size), &got, nullptr)) {
+            if (GetLastError() == ERROR_MORE_DATA) {
+                return static_cast<long>(got); // message-mode pipe: the rest follows
             }
+            return -1; // ERROR_BROKEN_PIPE: the client closed its end
+        }
+        if (got == 0 && is_pipe) {
+            continue; // a zero-byte write on a pipe, not the end
+        }
+        return static_cast<long>(got); // 0 here: end of a file or console (Ctrl+Z)
+    }
+}
+#else
+long read_stdin(char* data, usize size) {
+    for (;;) {
+        const ssize_t got = ::read(STDIN_FILENO, data, size);
+        if (got >= 0) {
             return static_cast<long>(got);
         }
-#endif
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Handed a non-blocking stdin: wait for data instead of quitting.
+            pollfd fd{STDIN_FILENO, POLLIN, 0};
+            ::poll(&fd, 1, -1);
+            continue;
+        }
+        return -1;
     }
-
-    std::string m_buffer;
-};
+}
+#endif
 
 } // namespace
 
-LineReader::LineReader(ConstructKey) : m_shared(std::make_shared<Shared>()) {}
-
 std::unique_ptr<LineReader> LineReader::from_stdin() {
-    auto reader = std::make_unique<LineReader>(ConstructKey{});
-    reader->start([lines = std::make_shared<StdinLines>()](std::string& line) {
-        return lines->next(line);
-    });
-    return reader;
+    static std::atomic<bool> created{false};
+    const bool first = !created.exchange(true);
+    GIANT_ASSERT(first, "LineReader::from_stdin may only be called once per process");
+    return std::make_unique<LineReader>(&read_stdin);
 }
 
-LineReader::LineReader(std::istream& in) : m_shared(std::make_shared<Shared>()) {
-    start([&in](std::string& line) { return static_cast<bool>(std::getline(in, line)); });
-}
-
-void LineReader::start(std::function<bool(std::string&)> read_line) {
-    // The thread holds its own reference to the shared state, so it stays
-    // valid even if the reader is destroyed while the thread is blocked.
-    m_shared->thread = std::thread([shared = m_shared, read_line = std::move(read_line)] {
-        std::string line;
-        while (read_line(line)) {
-            if (!line.empty() && line.back() == '\r') {
-                line.pop_back(); // Windows line endings
-            }
+LineReader::LineReader(ReadChunk read) : m_shared(std::make_shared<Shared>()) {
+    try {
+        // The thread holds its own reference to the shared state, so it stays
+        // valid even if the reader is destroyed while the thread is blocked.
+        m_shared->thread = std::thread([shared = m_shared, read = std::move(read)] {
+            read_lines(*shared, read);
             std::lock_guard lock(shared->mutex);
-            shared->lines.push_back(std::move(line));
+            shared->ended = true;
             shared->changed.notify_all();
-        }
-        std::lock_guard lock(shared->mutex);
-        shared->ended = true;
-        shared->changed.notify_all();
-    });
+        });
+    } catch (const std::exception& e) {
+        // No exceptions leave the module: report it as input that ended.
+        log_error("platform", std::string("could not start the input thread: ") + e.what());
+        std::lock_guard lock(m_shared->mutex);
+        m_shared->ended = true;
+    }
 }
 
 LineReader::~LineReader() {
+    if (!m_shared->thread.joinable()) {
+        return;
+    }
     bool ended = false;
     {
         std::lock_guard lock(m_shared->mutex);
@@ -123,8 +167,8 @@ LineReader::~LineReader() {
         m_shared->thread.join();
     } else {
         // Still blocked in a read that may never return (stdin of a live
-        // process). The thread owns its state, so letting it go is safe; the
-        // process exit ends it.
+        // process). The thread owns its state, so letting it go is safe; it
+        // ends with the read or with the process.
         m_shared->thread.detach();
     }
 }

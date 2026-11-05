@@ -84,9 +84,17 @@ bool parse_options(int argc, char** argv, Options& out) {
 }
 
 // Answers every MCP message that arrived since the last frame. Returns false
-// once the client can no longer receive replies.
-bool pump_mcp(platform::LineReader& reader, ai::McpServer& server) {
+// once the client can no longer receive replies. Messages after a quit
+// request are not run.
+//
+// Replies are blocking writes: a client that stops reading entirely stalls
+// the editor once the pipe fills. MCP clients always read, so this is
+// accepted for now.
+bool pump_mcp(platform::LineReader& reader, ai::McpServer& server, const bool& quit_requested) {
     for (const std::string& line : reader.take_lines()) {
+        if (quit_requested) {
+            break;
+        }
         if (line.empty()) {
             continue;
         }
@@ -171,7 +179,8 @@ int run(const Options& options) {
 
     while (window->poll_events() && !state.quit_requested) {
         if (mcp_reader != nullptr) {
-            if (!pump_mcp(*mcp_reader, *mcp_server) || mcp_reader->finished()) {
+            if (!pump_mcp(*mcp_reader, *mcp_server, state.quit_requested) ||
+                mcp_reader->finished()) {
                 log_info("editor", "MCP client disconnected; closing");
                 break;
             }

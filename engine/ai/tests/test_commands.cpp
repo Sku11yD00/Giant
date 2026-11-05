@@ -215,3 +215,20 @@ GIANT_TEST("commands: input schemas must describe an object") {
     GIANT_CHECK(!registry.add({"string_type", "", Json{{"type", "string"}}, false, run}));
     set_console_logging(true);
 }
+
+GIANT_TEST("commands: runs in one merge group become one undo step") {
+    Fixture f;
+    GIANT_CHECK(f.registry.execute("set_value", {{"value", 1}}).ok);
+    for (int v = 2; v <= 5; ++v) {
+        GIANT_CHECK(f.registry.execute("set_value", {{"value", v}}, 77).ok);
+    }
+    GIANT_CHECK(f.registry.undo_history().size() == 2);
+    GIANT_CHECK(f.registry.undo_history().back().args["value"] == 5);
+    GIANT_CHECK(f.registry.undo());
+    GIANT_CHECK(f.value == 1); // back to before the drag
+    GIANT_CHECK(f.registry.redo());
+    GIANT_CHECK(f.value == 5);
+    // A new group starts a new step.
+    GIANT_CHECK(f.registry.execute("set_value", {{"value", 6}}, 78).ok);
+    GIANT_CHECK(f.registry.undo_history().size() == 3);
+}

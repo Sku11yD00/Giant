@@ -87,7 +87,12 @@ public:
     // Checks the arguments and runs the command. A missing or null `args`
     // means no arguments. A successful command that recorded changes goes on
     // the undo history and clears the redo history.
-    CommandResult execute(std::string_view name, const Json& args = Json::object());
+    //
+    // `merge_group`: consecutive runs of the same command with the same
+    // non-zero group become one undo step. UI drags use it (one group per
+    // drag), so dragging a colour picker is undone in one go.
+    CommandResult execute(std::string_view name, const Json& args = Json::object(),
+                          u64 merge_group = 0);
 
     bool can_undo() const { return !m_undo.empty(); }
     bool can_redo() const { return !m_redo.empty(); }
@@ -107,6 +112,7 @@ private:
     struct Entry {
         HistoryEntry what;
         std::vector<Change> changes;
+        u64 merge_group = 0;
     };
 
     void drop_history();

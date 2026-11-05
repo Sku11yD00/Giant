@@ -5,7 +5,8 @@
 
 Starts the editor with --mcp, then: initialize, tools/list, change the
 background colour, undo it, read the log, and quit. Then starts it again and
-closes the connection, which must close the editor too. Fails (exit 1) on any
+closes the connection, which must close the editor too, and once more as a
+client that crashes with requests in flight. Fails (exit 1) on any
 wrong answer, or if the editor does not exit cleanly.
 """
 import json
@@ -107,6 +108,27 @@ def main() -> int:
         return 1
     if code != 0:
         print(f"mcp_smoke: editor exit code {code} after disconnect", file=sys.stderr)
+        return 1
+
+    # A client that crashes with requests in flight (both pipes close while
+    # the editor still has replies to write) must not kill the editor.
+    editor = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=None)
+    ping = (json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n").encode()
+    editor.stdout.close()
+    try:
+        editor.stdin.write(ping * 200)
+        editor.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass  # the editor may already have closed; its exit code is checked below
+    try:
+        code = editor.wait(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        editor.kill()
+        print("mcp_smoke: editor kept running after the client crashed", file=sys.stderr)
+        return 1
+    if code != 0:
+        print(f"mcp_smoke: editor exit code {code} after the client crashed", file=sys.stderr)
         return 1
     print("mcp_smoke: all checks passed")
     return 0

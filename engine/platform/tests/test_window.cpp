@@ -113,3 +113,99 @@ GIANT_TEST("platform: events for another window are ignored") {
     GIANT_CHECK(!a->minimized());
     GIANT_CHECK(a->pixel_width() == 320);
 }
+
+namespace {
+void push(SDL_Event event) { SDL_PushEvent(&event); }
+} // namespace
+
+GIANT_TEST("platform: mouse, keyboard and text input arrive as input events") {
+    auto window = hidden_window(320, 200);
+    auto other = hidden_window(320, 200);
+    GIANT_CHECK(window != nullptr && other != nullptr);
+    if (window == nullptr || other == nullptr) {
+        return;
+    }
+    const SDL_WindowID id = window->sdl_window_id_for_tests();
+
+    SDL_Event e{};
+    e.type = SDL_EVENT_MOUSE_MOTION;
+    e.motion.windowID = id;
+    e.motion.x = 12.5f;
+    e.motion.y = 40.0f;
+    push(e);
+
+    e = {};
+    e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    e.button.windowID = id;
+    e.button.button = SDL_BUTTON_RIGHT;
+    e.button.down = true;
+    push(e);
+
+    e = {};
+    e.type = SDL_EVENT_MOUSE_WHEEL;
+    e.wheel.windowID = id;
+    e.wheel.y = 2.0f;
+    e.wheel.direction = SDL_MOUSEWHEEL_FLIPPED;
+    push(e);
+
+    e = {};
+    e.type = SDL_EVENT_KEY_DOWN;
+    e.key.windowID = id;
+    e.key.key = SDLK_Z;
+    e.key.mod = SDL_KMOD_LCTRL;
+    e.key.down = true;
+    push(e);
+
+    char text[] = "h\xC3\xA9";
+    e = {};
+    e.type = SDL_EVENT_TEXT_INPUT;
+    e.text.windowID = id;
+    e.text.text = text;
+    push(e);
+
+    // Another window's input is not ours.
+    e = {};
+    e.type = SDL_EVENT_KEY_DOWN;
+    e.key.windowID = other->sdl_window_id_for_tests();
+    e.key.key = SDLK_A;
+    push(e);
+
+    GIANT_CHECK(window->poll_events());
+    const auto events = window->take_input_events();
+    GIANT_CHECK(events.size() == 5);
+    if (events.size() == 5) {
+        using T = InputEvent::Type;
+        GIANT_CHECK(events[0].type == T::mouse_move && events[0].x == 12.5f && events[0].y == 40.0f);
+        GIANT_CHECK(events[1].type == T::mouse_button && events[1].button == MouseButton::right &&
+                    events[1].down);
+        GIANT_CHECK(events[2].type == T::mouse_wheel && events[2].y == -2.0f); // flipped
+        GIANT_CHECK(events[3].type == T::key && events[3].key == Key::z && events[3].down &&
+                    events[3].modifiers == modifier::ctrl);
+        GIANT_CHECK(events[4].type == T::text && events[4].text == "h\xC3\xA9");
+    }
+    GIANT_CHECK(window->take_input_events().empty());
+    // Input survives several polls until it is taken.
+    e = {};
+    e.type = SDL_EVENT_KEY_UP;
+    e.key.windowID = id;
+    e.key.key = SDLK_F5;
+    push(e);
+    GIANT_CHECK(window->poll_events());
+    GIANT_CHECK(window->poll_events());
+    const auto later = window->take_input_events();
+    GIANT_CHECK(later.size() == 1 && later[0].key == Key::f5 && !later[0].down);
+}
+
+GIANT_TEST("platform: text input and cursors can be switched") {
+    auto window = hidden_window(320, 200);
+    GIANT_CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    window->set_text_input(true);
+    window->set_text_input(false);
+    window->set_cursor(Window::Cursor::text);
+    window->set_cursor(Window::Cursor::hidden);
+    window->set_cursor(Window::Cursor::arrow);
+    GIANT_CHECK(window->poll_events());
+}

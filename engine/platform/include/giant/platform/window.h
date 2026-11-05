@@ -3,9 +3,11 @@
 #pragma once
 
 #include "giant/core/types.h"
+#include "giant/platform/input.h"
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace giant::platform {
 
@@ -33,7 +35,19 @@ public:
     Window& operator=(const Window&) = delete;
 
     // Processes pending events. Returns false once the user asked to close.
+    // Keyboard and mouse input is collected for take_input_events().
     bool poll_events();
+
+    // Input received since the last call, oldest first.
+    std::vector<InputEvent> take_input_events();
+
+    // Text input (on-screen keyboards, IME composition) is only delivered
+    // while enabled. Turn it on while a text field has focus.
+    void set_text_input(bool enabled);
+
+    enum class Cursor : u8 { arrow, text, resize_all, resize_ns, resize_ew, resize_nesw,
+                             resize_nwse, hand, not_allowed, hidden };
+    void set_cursor(Cursor cursor);
 
     // Size of the drawable area in pixels (not points), as last seen by
     // poll_events or at creation.
@@ -82,6 +96,9 @@ private:
     bool m_resized = false;
     bool m_minimized = false;
     bool m_close_requested = false;
+    bool m_text_input = false;
+    Cursor m_cursor = Cursor::arrow;
+    std::vector<InputEvent> m_input;
 };
 
 } // namespace giant::platform

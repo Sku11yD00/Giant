@@ -162,7 +162,8 @@ const CommandDesc* CommandRegistry::find(std::string_view name) const {
     return nullptr;
 }
 
-CommandResult CommandRegistry::execute(std::string_view name, const Json& args_in) {
+CommandResult CommandRegistry::execute(std::string_view name, const Json& args_in,
+                                       u64 merge_group) {
     GIANT_ASSERT(!m_running, "commands may not run other commands");
     if (m_running) {
         return CommandResult::failure("commands may not run other commands");
@@ -208,7 +209,18 @@ CommandResult CommandRegistry::execute(std::string_view name, const Json& args_i
         return result;
     }
     if (!context.changes().empty()) {
-        m_undo.push_back({{command_name, args}, std::move(context.changes())});
+        if (merge_group != 0 && !m_undo.empty() && m_redo.empty() &&
+            m_undo.back().merge_group == merge_group && m_undo.back().what.command == command_name) {
+            // Same drag: extend the step. Undo runs every change newest first,
+            // so it lands back on the state before the drag began.
+            Entry& entry = m_undo.back();
+            for (Change& change : context.changes()) {
+                entry.changes.push_back(std::move(change));
+            }
+            entry.what.args = args;
+            return result;
+        }
+        m_undo.push_back({{command_name, args}, std::move(context.changes()), merge_group});
         if (m_undo.size() > k_max_history) {
             m_undo.pop_front();
         }
