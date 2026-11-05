@@ -5,8 +5,13 @@
 // Lighting: one sun (GGX specular, Lambert diffuse) plus sky/ground ambient,
 // then exposure and the Khronos PBR Neutral tone mapper, which keeps base
 // colours true until highlights roll off. Written to an sRGB target.
+//
+// The far field: pixels past RenderSettings::far_field_distance (with
+// nothing drawn, or a mesh drawn farther) march the voxel world from there
+// and light the voxel they meet the same way.
 #include "common.slang"
 #include "decals.slang"
+#include "voxel_march.slang"
 
 struct ResolvePush {
     float4 background; // linear; where nothing was drawn
@@ -29,7 +34,16 @@ struct ResolvePush {
     uint tile_columns; // 0: no decals
     uint tile_rows;
     uint specular_aa;  // 1: widen highlights where normals change quickly
-    uint pad0;
+    // The far field: beyond far_start the voxel world stands in for the
+    // meshes left out there (voxel_level_count 0: off).
+    uint voxel_pool;
+    uint voxel_table;
+    uint voxel_levels;
+    uint voxel_levels_offset;
+    uint voxel_level_count;
+    uint voxel_bricks_per_axis;
+    float far_start;   // metres from the camera
+    float far_radius;  // instances this small are stand-ins (RenderSettings::far_field_max_radius)
 };
 ConstantBuffer<ResolvePush> push : register(b0);
 
@@ -113,6 +127,8 @@ struct Hit {
     uint material;
     uint cluster;  // the visible list's cluster index
     uint level;
+    float3 center; // the instance's bounding sphere, camera-relative
+    float radius;
 };
 
 Hit no_hit() {
@@ -123,6 +139,8 @@ Hit no_hit() {
     h.material = 0;
     h.cluster = 0;
     h.level = 0;
+    h.center = float3(0.0, 0.0, 0.0);
+    h.radius = 0.0;
     return h;
 }
 
@@ -153,6 +171,8 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     h.material = inst.material;
     h.cluster = entry.y;
     h.level = cluster.level;
+    h.center = to_world(inst, mesh.bounds.xyz);
+    h.radius = mesh.bounds.w * inst.max_scale;
     return h;
 }
 
@@ -180,49 +200,13 @@ float normal_variance(float3 n, uint instance) {
     return v;
 }
 
-[shader("pixel")]
-float4 ps_main(float4 position : SV_Position) : SV_Target {
-    const uint2 pixel = uint2(position.xy);
-    const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
-    const Frame f = load_frame(push.frame, push.frame_offset);
-    const bool hit = vis.x != 0;
-    Hit s = no_hit();
-    if (hit) {
-        s = surface_at(f, position, vis);
-    }
-    // Every pixel of the quad reaches this, drawn or not.
-    const float variance = normal_variance(s.n, s.instance);
-    if (!hit) {
-        return float4(push.background.rgb, 1.0);
-    }
-    const float3 n = s.n;
-    const float3 world = s.world;
-
-    if (f.debug_view != 0) {
-        // Flat colour shaded just enough to read the shape.
-        const float3 col = f.debug_view == 1 ? hash_color(s.cluster)
-                         : f.debug_view == 2 ? level_color(s.level)
-                                             : hash_color(s.cluster * 131u + vis.y);
-        const float shade = 0.35 + 0.65 * saturate(dot(n, f.sun_direction.xyz) * 0.5 + 0.5);
-        return float4(col * shade, 1.0);
-    }
+// Lights a surface: one sun (GGX specular, Lambert diffuse) plus the
+// hemisphere ambient, before exposure and tone mapping. `variance`: the
+// normal's change across the pixel (specular AA).
+float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
-
-    // The instance's material (the CPU keeps the index in range), then
-    // the decals over this pixel.
-    ByteAddressBuffer materials = read_buffer(push.materials);
-    const uint material_at = push.material_offset + min(s.material, push.material_count) * 32;
-    const float4 base_roughness = load4(materials, material_at);
-    const float4 emissive_metallic = load4(materials, material_at + 16);
-    float3 base = base_roughness.rgb;
-    float rough = base_roughness.a;
-    float metal = emissive_metallic.a;
-    float3 emissive = emissive_metallic.rgb;
-    const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
-    apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
-                 push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
     // Clamped so a mirror-smooth surface keeps a visible, stable highlight.
     const float roughness = clamp(rough, 0.045, 1.0);
     float alpha = roughness * roughness;
@@ -251,7 +235,83 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float3 ambient_specular = lerp(f.ground_light.rgb, f.sky_light.rgb, r.y * 0.5 + 0.5);
     const float3 env_fresnel = f0 + (max(1.0 - roughness, f0) - f0) * pow(1.0 - n_dot_v, 5.0);
     color += diffuse_color * ambient_diffuse + env_fresnel * ambient_specular * (1.0 - 0.7 * roughness);
+    return color + emissive;
+}
 
-    color += emissive;
+// Voxels have a colour and a normal only; the rest is a rough dielectric.
+static const float k_far_roughness = 0.8;
+
+[shader("pixel")]
+float4 ps_main(float4 position : SV_Position) : SV_Target {
+    const uint2 pixel = uint2(position.xy);
+    const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const bool hit = vis.x != 0;
+    Hit s = no_hit();
+    if (hit) {
+        s = surface_at(f, position, vis);
+    }
+    // Every pixel of the quad reaches this, drawn or not.
+    const float variance = normal_variance(s.n, s.instance);
+
+    // The far field: past far_start the meshes are left out (the CPU drops
+    // instances wholly beyond it) and the voxel world stands in, in front
+    // of whatever mesh is drawn there (lit view only).
+    if (f.debug_view == 0 && push.voxel_level_count != 0) {
+        const float mesh_t = hit ? length(s.world) : 3.0e38;
+        // A stand-in drawn as a mesh (straddling the distance, moving, or
+        // not in the voxel world yet): its own voxels must not cover it.
+        const float4 skip = hit && s.radius <= push.far_radius ? float4(s.center, s.radius)
+                                                               : float4(0.0, 0.0, 0.0, -1.0);
+        if (mesh_t > push.far_start) {
+            const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
+            const float3 dir = normalize(f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz);
+            VoxelWorld w;
+            w.pool = push.voxel_pool;
+            w.table = push.voxel_table;
+            w.levels = push.voxel_levels;
+            w.levels_offset = push.voxel_levels_offset;
+            w.level_count = push.voxel_level_count;
+            w.bricks_per_axis = push.voxel_bricks_per_axis;
+            w.stand_ins = 1u; // only what the CPU left out (meshes drawn keep their own look)
+            float t;
+            uint packed;
+            if (march_voxels(w, dir, push.far_start, mesh_t, skip, t, packed)) {
+                const float3 world = dir * t;
+                const float3 color = shade(f, world, unpack_normal(packed), unpack_color(packed), k_far_roughness,
+                                           0.0, float3(0.0, 0.0, 0.0), 0.0);
+                return float4(tone_map(color * f.exposure), 1.0);
+            }
+        }
+    }
+    if (!hit) {
+        return float4(push.background.rgb, 1.0);
+    }
+    const float3 n = s.n;
+    const float3 world = s.world;
+
+    if (f.debug_view != 0) {
+        // Flat colour shaded just enough to read the shape.
+        const float3 col = f.debug_view == 1 ? hash_color(s.cluster)
+                         : f.debug_view == 2 ? level_color(s.level)
+                                             : hash_color(s.cluster * 131u + vis.y);
+        const float shade_amount = 0.35 + 0.65 * saturate(dot(n, f.sun_direction.xyz) * 0.5 + 0.5);
+        return float4(col * shade_amount, 1.0);
+    }
+
+    // The instance's material (the CPU keeps the index in range), then
+    // the decals over this pixel.
+    ByteAddressBuffer materials = read_buffer(push.materials);
+    const uint material_at = push.material_offset + min(s.material, push.material_count) * 32;
+    const float4 base_roughness = load4(materials, material_at);
+    const float4 emissive_metallic = load4(materials, material_at + 16);
+    float3 base = base_roughness.rgb;
+    float rough = base_roughness.a;
+    float metal = emissive_metallic.a;
+    float3 emissive = emissive_metallic.rgb;
+    const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
+    apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
+                 push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
+    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance);
     return float4(tone_map(color * f.exposure), 1.0);
 }

@@ -72,6 +72,10 @@ enum class VoxelProbe : u8 {
 };
 const char* to_string(VoxelProbe probe);
 
+// An instance's bounding radius as the far field judges it: the mesh's
+// sphere times the largest |scale|, in float (as the GPU computes it).
+float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale);
+
 class VoxelScene {
 public:
     // A mesh by id, or null when it does not exist (any more). Ids are never
@@ -92,6 +96,12 @@ public:
     void update(rhi::CommandList& cmd, const DVec3& camera, std::span<const Instance> instances,
                 std::span<const Material> materials, u64 meshes_version, const MeshLookup& meshes,
                 float budget_ms);
+    // Instances whose bounding radius (the mesh's sphere times the largest
+    // |scale|) is at most this are stand-ins: their voxels carry the
+    // stand-in bit the far field shows (it stands in for them; bigger
+    // ones stay meshes, whose own voxels it must not draw over them).
+    // A change rebuilds the voxel world. Default 0: none.
+    void set_stand_in_radius(float radius);
     // A frame without update() (the voxel world switched off): this
     // frame's stats are zero, the bricks stay.
     void idle();
@@ -103,6 +113,14 @@ public:
     rhi::BufferHandle pool() const { return m_pool; }
     rhi::BufferHandle table() const { return m_table; }
     const VoxelStats& stats() const { return m_stats; }
+
+    // Whether the voxel world shows instance `index` (of the last update's
+    // instances) as it is now: a stand-in, inside the coarsest window, with every brick
+    // under it on every level built from it, none waiting to be found,
+    // built again or for room in the pool. Until then (just added or
+    // moved, a slab just come into view, a rebuild, a full pool) it must
+    // stay a mesh, or it would vanish.
+    bool holds(u32 index) const;
 
     // The pool index of a brick, or gpu::k_no_brick (none, or not built yet).
     u32 brick_index(u32 level, const voxel::BrickCoord& brick) const;
@@ -146,6 +164,7 @@ private:
         Vec3 color{}; // its material's, resolved
         Box box;      // world bounds (empty: no mesh)
         bool large = false; // in m_large, not the grid
+        bool stand_in = false; // small enough for the far field to stand in for
     };
     struct MeshCache {
         const geometry::ClusterMesh* mesh = nullptr; // null: missing
@@ -208,6 +227,7 @@ private:
     void touch_building(const Box& box); // a change there: the brick under way is built again after
     void set_slot(u32 level, u32 slot, u32 value, const voxel::BrickCoord& brick);
     void remove(u32 level, u32 slot, const voxel::BrickCoord& brick); // to k_no_brick, freeing its brick
+    void forget_stand_in(u32 level, u32 index); // a pool brick freed or rebuilt
     void grow_filled(u32 level, const voxel::BrickCoord& brick);
     void tighten_filled(u32 level);
     void upload_tables(rhi::CommandList& cmd);
@@ -230,6 +250,8 @@ private:
     std::vector<u32> m_free;     // pool indices
     u32 m_used = 0;
     std::vector<std::array<u32, voxel::k_brick_voxels / 32>> m_occupancy; // per pool index (probe)
+    std::vector<u8> m_has_stand_in;      // per pool index: any stand-in voxel
+    std::vector<u32> m_stand_in_bricks;  // per level: pool bricks with stand-in voxels
 
     // Work. Bricks to build, coarsest level first:
     std::unordered_set<Key, KeyHash> m_pending;
@@ -239,6 +261,9 @@ private:
     std::deque<Job> m_jobs;
     u32 m_rebuild_jobs = 0;    // of a full rebuild, still queued
     bool m_rebuild_again = false;
+    std::vector<voxel::BrickBox> m_job_bounds; // per level: around its queued jobs (count 0: none), for holds()
+    std::vector<std::vector<voxel::BrickBox>> m_job_boxes; // per level: the queued jobs' boxes
+    float m_stand_in_radius = 0.0f;
     // Changes not turned into jobs yet: where instances were (their bricks
     // are built again) and which instances changed (the bricks where they
     // are now are).

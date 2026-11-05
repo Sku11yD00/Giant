@@ -36,6 +36,7 @@ namespace giant::render {
 namespace gpu {
 struct MeshEntry; // src/gpu_layout.h
 struct Material;
+struct VoxelLevel;
 }
 class GeometryStreamer; // src/streaming.h
 class VoxelScene;       // src/voxel_scene.h
@@ -148,6 +149,15 @@ struct RenderSettings {
     // CPU time per frame for building voxel bricks (at least one is built
     // when any wait); the rest wait for the next frame.
     float voxel_ms_per_frame = 1.0f;
+    // The far field: past far_field_distance (metres) the voxel world
+    // stands in for small instances (bounding radius at most
+    // far_field_max_radius metres), which are not drawn as meshes at all.
+    // Larger ones (terrain, mountains, big buildings) stay meshes; the
+    // voxels show in front of them. Lit view only, and only with
+    // voxel_world on (a frozen voxel world would show stale far geometry).
+    bool voxel_far_field = true;
+    float far_field_distance = 3000.0f;
+    float far_field_max_radius = 50.0f;
 };
 
 struct FrameInput {
@@ -190,6 +200,9 @@ struct RenderStats {
     u32 voxel_missing = 0;        // bricks that did not fit in the pool (built as room frees up)
     bool voxel_overflow = false;  // voxel_missing > 0: the pool is full
     float voxel_cpu_ms = 0.0f;    // voxel work this frame
+    // The far field (this frame, on the CPU).
+    bool far_field = false; // on this frame
+    u32 far_culled = 0;     // instances left to the voxel world
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -207,8 +220,8 @@ struct RendererDesc {
     u64 geometry_pool_bytes = 256ull << 20;
     // At most this much is loaded per frame (the rest waits a frame).
     u64 stream_bytes_per_frame = 32ull << 20;
-    // The voxel world: its levels, and GPU memory for its bricks (2112
-    // bytes each; the default is 66 MiB).
+    // The voxel world: its levels, and GPU memory for its bricks (2176
+    // bytes each; the default is 68 MiB).
     voxel::ClipmapDesc voxel_clipmap{};
     u32 voxel_bricks = 32768;
 };
@@ -282,7 +295,7 @@ private:
     bool ensure_targets(u32 width, u32 height);
     bool ensure_cull_buffers(u32 instance_count);
     void destroy(Mesh& mesh);
-    void draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data, const DVec3& camera,
+    void draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
                      const Vec3& background); // the voxel debug view, in place of shading
     void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number);
     void cull_on_gpu(rhi::CommandList& cmd, const FrameData& data);
@@ -348,7 +361,10 @@ private:
     std::vector<Mesh> m_meshes;
     std::vector<MeshId> m_builtin; // by BuiltinMesh
     // Per-frame scratch, kept to avoid allocating every frame.
-    std::vector<u32> m_valid;    // instances (into frame.instances) with a live mesh
+    std::vector<u32> m_valid;    // instances (into frame.instances) with a live mesh, drawn as meshes
+    bool m_far_field = false;    // this frame
+    std::vector<gpu::VoxelLevel> m_voxel_levels; // this frame's, reused
+    u32 m_far_culled = 0;        // this frame: instances left to the voxel world
     std::vector<u32> m_selected; // CPU culling: clusters of one instance
     std::vector<u32> m_entries;  // CPU culling: (instance, cluster) pairs, flattened
     std::vector<u32> m_wanted;   // CPU culling: groups of one instance not loaded

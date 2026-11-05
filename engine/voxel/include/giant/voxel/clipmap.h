@@ -34,7 +34,7 @@ struct BrickBox {
 };
 
 struct ClipmapDesc {
-    u32 levels = 9;                 // 0.25 m to 64 m voxels: level 8 reaches about 8 km out
+    u32 levels = 11;                // 0.25 m to 256 m voxels: level 10 reaches about 30 km out
     float voxel_size = 0.25f;       // level 0, metres
     i32 bricks_per_axis = 32;       // per level and axis (a power of two)
 };

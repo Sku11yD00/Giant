@@ -242,9 +242,18 @@ struct ResolvePush {
     u32 tile_columns; // 0: no decals
     u32 tile_rows;
     u32 specular_aa;
-    u32 pad;
+    // The far field (voxel_march.slang): beyond far_start the voxel world
+    // stands in for the meshes left out there. voxel_level_count 0: off.
+    u32 voxel_pool;
+    u32 voxel_table;
+    u32 voxel_levels; // VoxelLevel per level
+    u32 voxel_levels_offset;
+    u32 voxel_level_count;
+    u32 voxel_bricks_per_axis;
+    float far_start; // metres from the camera
+    float far_radius; // instances this small are stand-ins: one still drawn ignores its own voxels
 };
-static_assert(sizeof(ResolvePush) == 96);
+static_assert(sizeof(ResolvePush) == 124);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {
@@ -261,7 +270,7 @@ static_assert(sizeof(SmaaPush) == 48);
 // voxels.slang: one clipmap level, in the frame's levels upload.
 struct VoxelLevel {
     float origin[4];   // xyz: the window's minimum corner, camera-relative; w: brick size (m)
-    i32 brick[4];      // xyz: the window's minimum brick (slots wrap on it); w: unused
+    i32 brick[4];      // xyz: the window's minimum brick (slots wrap on it); w: 1 if the far field need look (stand-ins)
     // Bounds around every brick of the level (camera-relative; may be loose,
     // never tight): rays that miss them skip the level. Empty: min > max.
     float filled_min[4];

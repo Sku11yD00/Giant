@@ -79,8 +79,8 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   culling, raster, depth pyramid, shading, anti-aliasing, UI); the Engine panel and
   `get_engine_info` show the times.
 - Part 2 (done): the voxel world. The scene is kept as a voxel copy around
-  the camera: 0.25 m voxels close up, doubling with each of 9 levels out to
-  64 m voxels about 8 km away, built from the meshes and kits (from coarse
+  the camera: 0.25 m voxels close up, doubling with each of 11 levels out to
+  256 m voxels about 30 km away, built from the meshes and kits (from coarse
   versions of dense meshes far out) and moved with the camera a slab at a
   time. Editing the scene rebuilds only what changed, and the work is
   spread over frames at about 1 ms of CPU each (a few ms on the frame the
@@ -89,6 +89,14 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   world holds at a point. The Engine panel's
   "Voxels" view (or `set_render_settings` `debug_view` `voxels`) shows it.
   It is what the far view, lighting and weather of the next parts read.
+- Part 3 (done): the far field. Past 3 km (`far_field_distance`), small
+  objects such as trees, rocks and props are no longer drawn as meshes at
+  all; the voxel world shows them instead, lit the same way, out to about
+  30 km. Big objects (terrain, mountains, large buildings) stay meshes at
+  every distance. This keeps forests of millions of trees affordable far
+  out. Far voxels are coarse (a far tree is a blob of a voxel or two);
+  sharper far detail comes with later parts. `last_frame.far_field.culled`
+  counts the objects left to the voxels.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

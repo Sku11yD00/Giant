@@ -121,6 +121,8 @@ bool VoxelScene::init() {
     m_loose.assign(levels, false);
     m_order.assign(levels, {});
     m_occupancy.assign(m_capacity, {});
+    m_has_stand_in.assign(m_capacity, 0);
+    m_stand_in_bricks.assign(levels, 0);
     m_free.clear();
     for (u32 i = m_capacity; i > 0; --i) {
         m_free.push_back(i - 1);
@@ -218,6 +220,34 @@ void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Materia
     c.color = color_of(in, materials);
     c.box = bounds_of(in, meshes);
     c.large = false;
+    const MeshCache* m = c.box.empty() ? nullptr : mesh_cache(in.mesh, meshes);
+    c.stand_in = m != nullptr && m->mesh != nullptr && stand_in_radius_of(*m->mesh, in.scale) <= m_stand_in_radius;
+}
+
+float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale) {
+    // In float, as the GPU works it out (resolve.slang): the two agree exactly.
+    const float s = std::max({std::fabs(scale.x), std::fabs(scale.y), std::fabs(scale.z)});
+    return mesh.bounds.radius * s;
+}
+
+void VoxelScene::set_stand_in_radius(float radius) {
+    const float r = radius > 0.0f ? radius : 0.0f; // NaN: none
+    if (r == m_stand_in_radius) {
+        return;
+    }
+    m_stand_in_radius = r;
+    bool any = false;
+    for (Copy& c : m_copies) {
+        // The same rule as set_copy, from the copy's own instance.
+        const auto it = m_meshes.find(c.instance.mesh);
+        const geometry::ClusterMesh* mesh = it != m_meshes.end() ? it->second.mesh : nullptr;
+        const bool stand_in = !c.box.empty() && mesh != nullptr && stand_in_radius_of(*mesh, c.instance.scale) <= r;
+        any = any || stand_in != c.stand_in;
+        c.stand_in = stand_in;
+    }
+    if (any && m_clipmap.placed()) {
+        request_rebuild();
+    }
 }
 
 // --- The grid -------------------------------------------------------------
@@ -588,6 +618,7 @@ void VoxelScene::enter(const voxel::BrickBox& box) {
                 const u32 slot = row + wrap(x);
                 u32& value = m_slots[base + slot];
                 if (value < gpu::k_unbuilt) {
+                    forget_stand_in(level, value);
                     m_free.push_back(value);
                     --m_used;
                     m_loose[level] = true;
@@ -720,11 +751,19 @@ void VoxelScene::set_slot(u32 level, u32 slot, u32 value, const voxel::BrickCoor
 void VoxelScene::remove(u32 level, u32 slot, const voxel::BrickCoord& brick) {
     const u32 s = level * m_clipmap.slots_per_level() + slot;
     if (m_slots[s] < gpu::k_unbuilt) {
+        forget_stand_in(level, m_slots[s]);
         m_free.push_back(m_slots[s]);
         --m_used;
         m_loose[level] = true;
     }
     set_slot(level, slot, gpu::k_no_brick, brick);
+}
+
+void VoxelScene::forget_stand_in(u32 level, u32 index) {
+    if (m_has_stand_in[index] != 0) {
+        m_has_stand_in[index] = 0;
+        --m_stand_in_bricks[level];
+    }
 }
 
 void VoxelScene::grow_filled(u32 level, const voxel::BrickCoord& b) {
@@ -806,7 +845,7 @@ bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_ti
                     if (mirrored) {
                         std::swap(b, d); // keep the facing outward
                     }
-                    m_builder.add_triangle(a, b, d, copy.color);
+                    m_builder.add_triangle(a, b, d, copy.color, copy.stand_in);
                 }
             }
         }
@@ -872,6 +911,15 @@ bool VoxelScene::finish_build(rhi::CommandList& cmd, bool& pool_writable) {
     }
     cmd.copy_buffer(m_pool, u64{index} * sizeof(voxel::Brick), upload.buffer, upload.offset, sizeof(brick));
     m_occupancy[index] = brick.occupancy;
+    forget_stand_in(level, index); // rebuilt in place: what it had
+    bool stands = false;
+    for (const u32 word : brick.stand_in) {
+        stands = stands || word != 0;
+    }
+    if (stands) {
+        m_has_stand_in[index] = 1;
+        ++m_stand_in_bricks[level];
+    }
     m_retry.erase(key);
     ++m_stats.uploaded;
     if (!here) {
@@ -1063,6 +1111,29 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     }
     upload_tables(cmd);
 
+    // Each level's queued jobs and a box around them, for holds() (most
+    // instances miss the box, so they cost nothing per job).
+    m_job_bounds.assign(m_clipmap.levels(), voxel::BrickBox{});
+    m_job_boxes.resize(m_clipmap.levels());
+    for (std::vector<voxel::BrickBox>& boxes : m_job_boxes) {
+        boxes.clear();
+    }
+    std::vector<bool> any(m_clipmap.levels(), false);
+    for (const Job& job : m_jobs) {
+        const u32 l = job.box.level;
+        m_job_boxes[l].push_back(job.box);
+        voxel::BrickBox& b = m_job_bounds[l];
+        b.level = l;
+        if (!any[l]) {
+            b.min = job.box.min;
+            b.max = job.box.max;
+            any[l] = true;
+        } else {
+            b.min = {std::min(b.min.x, job.box.min.x), std::min(b.min.y, job.box.min.y), std::min(b.min.z, job.box.min.z)};
+            b.max = {std::max(b.max.x, job.box.max.x), std::max(b.max.y, job.box.max.y), std::max(b.max.z, job.box.max.z)};
+        }
+    }
+
     m_stats.bricks = m_used;
     m_stats.pending = static_cast<u32>(m_pending.size() + m_jobs.size() + m_old.size() + m_changed.size() +
                                        (m_rebuild_again ? 1 : 0) + (m_building.active ? 1 : 0));
@@ -1111,6 +1182,55 @@ VoxelProbe VoxelScene::probe(u32 level, const DVec3& position) const {
     return (m_occupancy[m_slots[s]][i / 32] >> (i % 32) & 1u) != 0 ? VoxelProbe::solid : VoxelProbe::empty;
 }
 
+bool VoxelScene::holds(u32 index) const {
+    if (!m_clipmap.placed() || index >= m_copies.size() || m_rebuild_again || m_changed.count(index) != 0) {
+        return false;
+    }
+    if (!m_copies[index].stand_in) {
+        return false;
+    }
+    const Box& b = m_copies[index].box;
+    const u32 top = m_clipmap.levels() - 1;
+    if (b.empty() || !m_clipmap.contains(top, m_clipmap.brick_at(top, b.min)) ||
+        !m_clipmap.contains(top, m_clipmap.brick_at(top, b.max))) {
+        return false;
+    }
+    constexpr u64 k_most_bricks = 512; // more under one instance on a level: not worth checking
+    for (u32 level = 0; level <= top; ++level) {
+        const voxel::BrickBox box = m_clipmap.bricks_touching(level, b.min, b.max);
+        if (box.count() == 0) {
+            continue;
+        }
+        if (box.count() > k_most_bricks) {
+            return false;
+        }
+        if (level < m_job_bounds.size() && voxel::intersect(m_job_bounds[level], box).count() > 0) {
+            for (const voxel::BrickBox& job : m_job_boxes[level]) {
+                if (voxel::intersect(job, box).count() > 0) {
+                    return false; // bricks there still to be found or marked
+                }
+            }
+        }
+        for (i32 z = box.min.z; z < box.max.z; ++z) {
+            for (i32 y = box.min.y; y < box.max.y; ++y) {
+                for (i32 x = box.min.x; x < box.max.x; ++x) {
+                    const voxel::BrickCoord brick{x, y, z};
+                    const Key key{level, brick};
+                    const u32 s = level * m_clipmap.slots_per_level() + m_clipmap.slot(level, brick);
+                    const u32 value = m_slots[s];
+                    if (value == gpu::k_unbuilt || (value != gpu::k_no_brick && !(m_slot_bricks[s] == brick)) ||
+                        (!m_pending.empty() && m_pending.count(key) != 0) ||
+                        (!m_retry.empty() && m_retry.count(key) != 0) ||
+                        (m_building.active && m_building.key == key)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 void VoxelScene::write_levels(gpu::VoxelLevel* out, const DVec3& camera) const {
     const i32 n = m_clipmap.desc().bricks_per_axis;
     for (u32 level = 0; level < m_clipmap.levels(); ++level) {
@@ -1124,7 +1244,17 @@ void VoxelScene::write_levels(gpu::VoxelLevel* out, const DVec3& camera) const {
         l.brick[0] = o.x;
         l.brick[1] = o.y;
         l.brick[2] = o.z;
-        l.brick[3] = 0;
+        // Whether the far field (stand-in voxels only) need look at the
+        // level: it has stand-in bricks, or unbuilt slots a coarser level
+        // with some stands in for.
+        bool stands = false;
+        for (u32 up = level; up < m_clipmap.levels() && !stands; ++up) {
+            stands = m_stand_in_bricks[up] > 0;
+            if (up == level && !stands && m_unbuilt[level] == 0) {
+                break;
+            }
+        }
+        l.brick[3] = stands ? 1 : 0;
         // While part of the level is unbuilt, rays must look at every slot
         // there (to fall back to the coarser level).
         const voxel::BrickBox window{level, o, {o.x + n, o.y + n, o.z + n}};

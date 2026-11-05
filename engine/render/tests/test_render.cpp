@@ -166,6 +166,119 @@ GIANT_TEST("render: detail follows distance, the error setting and the view") {
     }
 }
 
+GIANT_TEST("render: small instances past the far-field distance are left to the voxel world") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+    instances[0].scale = {10, 10, 10};
+    instances[0].position = {0.0, 0.0, -1000.0};
+    instances[1] = instances[0];
+    instances[1].position = {0.0, 0.0, -100.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.settings.gpu_culling = false;
+    frame.settings.far_field_distance = 500.0f;
+    frame.settings.voxel_ms_per_frame = 50.0f;
+    // Draws until streaming and the voxel world have caught up.
+    const auto settle = [&] {
+        RenderStats st = s.settle(frame);
+        for (int i = 0; i < 200 && st.voxel_pending > 0; ++i) {
+            st = s.draw(frame);
+        }
+        return s.draw(frame);
+    };
+    // The first frame: its voxels are not built yet, so it stays a mesh.
+    frame.settings.voxel_ms_per_frame = 0.0f;
+    RenderStats st = s.draw(frame);
+    GIANT_CHECK(st.far_field && st.far_culled == 0);
+    frame.settings.voxel_ms_per_frame = 50.0f;
+    st = settle();
+    GIANT_CHECK(st.far_field && st.far_culled == 1 && st.instances == 1);
+    // Straddling the distance: still a mesh.
+    instances[0].position = {0.0, 0.0, -503.0};
+    st = s.draw(frame);
+    GIANT_CHECK(st.far_culled == 0 && st.instances == 2);
+    // Moved far out: a mesh until its voxels are rebuilt where it went
+    // (with no time to spare, that takes frames).
+    instances[0].position = {0.0, 0.0, -1000.0};
+    frame.settings.voxel_ms_per_frame = 0.0f;
+    GIANT_CHECK(s.draw(frame).far_culled == 0);
+    frame.settings.voxel_ms_per_frame = 50.0f;
+    GIANT_CHECK(settle().far_culled == 1);
+    // Too large to be left to the voxels: a mesh however far.
+    instances[0].scale = {120, 120, 120}; // radius 60 m (the sphere's is 0.5)
+    st = settle();
+    GIANT_CHECK(st.far_culled == 0 && st.instances == 2);
+    frame.settings.far_field_max_radius = 100.0f; // rebuilds the voxel world with it a stand-in
+    frame.settings.voxel_ms_per_frame = 0.0f; // (which takes frames)
+    GIANT_CHECK(s.draw(frame).far_culled == 0);
+    frame.settings.voxel_ms_per_frame = 50.0f;
+    GIANT_CHECK(settle().far_culled == 1);
+    // Past the voxel world's coarsest window (about 30 km): a mesh, or it would vanish.
+    instances[0].scale = {10, 10, 10};
+    instances[0].position = {0.0, 0.0, -40000.0};
+    st = settle();
+    GIANT_CHECK(st.far_culled == 0 && st.instances == 2);
+    // Off, with the voxel world frozen or in a debug view: every instance is a mesh.
+    instances[0].position = {0.0, 0.0, -1000.0};
+    GIANT_CHECK(settle().far_culled == 1);
+    frame.settings.voxel_far_field = false;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.far_field && st.far_culled == 0 && st.instances == 2);
+    frame.settings.voxel_far_field = true;
+    frame.settings.voxel_world = false;
+    GIANT_CHECK(s.draw(frame).far_culled == 0);
+    frame.settings.voxel_world = true;
+    for (const DebugView v : {DebugView::clusters, DebugView::lod_levels, DebugView::triangles, DebugView::voxels}) {
+        frame.settings.debug_view = v;
+        GIANT_CHECK(s.draw(frame).far_culled == 0);
+    }
+    // GPU culling leaves the same instances out (it never sees them).
+    frame.settings.debug_view = DebugView::lit;
+    frame.settings.gpu_culling = true;
+    GIANT_CHECK(settle().far_culled == 1);
+}
+
+GIANT_TEST("render: with the voxel pool full, far instances stay meshes") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    std::unique_ptr<rhi::Device> device = rhi::create_device(desc);
+    RendererDesc rd;
+    rd.voxel_bricks = 4; // far too few
+    std::unique_ptr<Renderer> renderer = Renderer::create(*device, rd);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    rhi::TextureDesc t;
+    t.width = 640;
+    t.height = 360;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(t);
+    std::vector<Instance> instances(30);
+    for (usize i = 0; i < instances.size(); ++i) {
+        instances[i].mesh = renderer->builtin(BuiltinMesh::sphere);
+        instances[i].scale = {10, 10, 10};
+        instances[i].position = {static_cast<double>(i) * 300.0 - 4500.0, 0.0, -5000.0};
+    }
+    FrameInput frame;
+    frame.instances = instances;
+    frame.settings.gpu_culling = false;
+    frame.settings.far_field_distance = 500.0f;
+    frame.settings.voxel_ms_per_frame = 50.0f;
+    RenderStats st;
+    for (int i = 0; i < 100; ++i) {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        renderer->render(*cmd, target, frame);
+        device->end_frame();
+        st = renderer->last_stats();
+    }
+    GIANT_CHECK(st.voxel_overflow && st.voxel_missing > 0);
+    // Only instances whose bricks all made it into the pool are left out.
+    GIANT_CHECK(st.far_culled < instances.size());
+    device->destroy(target);
+}
+
 GIANT_TEST("render: detail streams in as the camera nears") {
     NullScene s;
     if (s.renderer == nullptr) return;

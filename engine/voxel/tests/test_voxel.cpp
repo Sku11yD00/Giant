@@ -3,6 +3,7 @@
 
 #include "giant_test.h"
 
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -90,6 +91,27 @@ GIANT_TEST("voxel: a floor triangle fills one layer of the brick, facing up") {
     // Its hypotenuse x + z = 8 m cuts the 4 m brick nowhere: the whole layer.
     GIANT_CHECK(layer == 64);
     GIANT_CHECK(brick.count() == 64);
+}
+
+GIANT_TEST("voxel: stand-in triangles mark their voxels and keep their own colour") {
+    BrickBuilder b;
+    b.reset(0.5f);
+    // A grey floor over the whole layer, then a red stand-in over part of it.
+    b.add_triangle({-1, 1.25f, -1}, {-1, 1.25f, 9}, {9, 1.25f, -1}, {0.5f, 0.5f, 0.5f});
+    b.add_triangle({0.1f, 1.25f, 0.1f}, {0.1f, 1.25f, 0.4f}, {0.4f, 1.25f, 0.1f}, {0.9f, 0.0f, 0.0f}, true);
+    const Brick brick = b.build();
+    const u32 corner = voxel_index(0, 2, 0);
+    const u32 other = voxel_index(5, 2, 5);
+    GIANT_CHECK(brick.occupied(corner) && brick.stands_in(corner));
+    GIANT_CHECK(near(unpack_color(brick.voxels[corner]), {0.9f, 0.0f, 0.0f}, 0.05f)); // not mixed with the floor
+    GIANT_CHECK(brick.occupied(other) && !brick.stands_in(other));
+    u32 stand = 0;
+    for (const u32 w : brick.stand_in) stand += static_cast<u32>(std::popcount(w));
+    GIANT_CHECK(stand == 1);
+    // reset clears the stand-in sums too.
+    b.reset(0.5f);
+    b.add_triangle({0.1f, 1.25f, 0.1f}, {0.1f, 1.25f, 0.4f}, {0.4f, 1.25f, 0.1f}, {0.5f, 0.5f, 0.5f});
+    GIANT_CHECK(!b.build().stands_in(corner));
 }
 
 GIANT_TEST("voxel: a triangle outside the brick, or with no area, adds nothing") {

@@ -287,6 +287,9 @@ Json render_settings_json(const EditorState& state) {
             {"specular_antialiasing", state.render_settings.specular_antialiasing},
             {"voxel_world", state.render_settings.voxel_world},
             {"voxel_ms_per_frame", state.render_settings.voxel_ms_per_frame},
+            {"voxel_far_field", state.render_settings.voxel_far_field},
+            {"far_field_distance", state.render_settings.far_field_distance},
+            {"far_field_max_radius", state.render_settings.far_field_max_radius},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
               {"clusters", s.clusters},
@@ -301,7 +304,8 @@ Json render_settings_json(const EditorState& state) {
               {"voxels",
                {{"bricks", s.voxel_bricks}, {"capacity", s.voxel_capacity}, {"pending", s.voxel_pending},
                 {"built", s.voxel_built}, {"missing", s.voxel_missing}, {"overflow", s.voxel_overflow},
-                {"cpu_ms", s.voxel_cpu_ms}}}}}};
+                {"cpu_ms", s.voxel_cpu_ms}}},
+              {"far_field", {{"on", s.far_field}, {"culled", s.far_culled}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -990,13 +994,16 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "(1 = under a pixel; lower is sharper and slower). debug_view: lit (normal), clusters "
          "(each cluster coloured), lod_levels (red = full detail, then yellow, green, cyan, "
          "blue...), triangles, or voxels (the voxel copy of the scene: 0.25 m voxels near the "
-         "camera, doubling with each level out to about 8 km). gpu_culling: pick clusters on the GPU (default) or the CPU. "
+         "camera, doubling with each level out to about 30 km). gpu_culling: pick clusters on the GPU (default) or the CPU. "
          "occlusion_culling: skip what is hidden behind nearer geometry (GPU culling only). "
          "mesh_shaders: draw with mesh shaders when the GPU has them, else vertex shaders. "
          "antialiasing: smooth jagged edges (SMAA, no blur in motion; lit view only). "
          "specular_antialiasing: keep fine shiny detail from sparkling. "
          "voxel_world: keep the voxel copy of the scene up to date (default on). "
          "voxel_ms_per_frame: CPU time each frame may spend building it (default 1). "
+         "voxel_far_field: past far_field_distance metres (default 3000) the voxel world stands in "
+         "for instances whose bounding radius is at most far_field_max_radius metres (default 50); "
+         "they are not drawn as meshes (lit view, voxel_world on; last_frame.far_field.culled counts them). "
          "View state: not undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
@@ -1009,7 +1016,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"antialiasing", {{"type", "boolean"}}},
                 {"specular_antialiasing", {{"type", "boolean"}}},
                 {"voxel_world", {{"type", "boolean"}}},
-                {"voxel_ms_per_frame", number(0, 100, "Milliseconds. Default 1.")}}}},
+                {"voxel_ms_per_frame", number(0, 100, "Milliseconds. Default 1.")},
+                {"voxel_far_field", {{"type", "boolean"}}},
+                {"far_field_distance", number(0, 1e6, "Metres from the camera. Default 3000.")},
+                {"far_field_max_radius", number(0, 1e6, "Metres. Default 50.")}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -1024,6 +1034,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.specular_antialiasing = args.value("specular_antialiasing", r.specular_antialiasing);
              r.voxel_world = args.value("voxel_world", r.voxel_world);
              r.voxel_ms_per_frame = args.value("voxel_ms_per_frame", r.voxel_ms_per_frame);
+             r.voxel_far_field = args.value("voxel_far_field", r.voxel_far_field);
+             r.far_field_distance = args.value("far_field_distance", r.far_field_distance);
+             r.far_field_max_radius = args.value("far_field_max_radius", r.far_field_max_radius);
              return CommandResult::success(render_settings_json(state));
          }});
 
