@@ -535,6 +535,9 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
                 all = false;
                 ++m_stats.waiting;
                 no_room = no_room || !m_room_capped;
+                // Room was made but capped: keep it for this terminal group
+                // next frame instead of handing it to detail now.
+                roots_full = roots_full || m_room_capped;
             }
         }
         m.roots_loaded = all;

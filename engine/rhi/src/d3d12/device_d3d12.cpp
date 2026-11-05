@@ -51,10 +51,14 @@ constexpr u32 k_max_dsvs = 256;
 constexpr u32 k_sampler_count = 4;
 constexpr u32 k_push_dwords = k_max_push_constant_bytes / 4;
 constexpr u32 k_transient_chunk_bytes = 4u << 20;
-// Staging for initial data of resources created inside a frame: made at
-// init (k_staging_chunks per frame slot, 32 MiB, the default streaming
-// budget's worth), so steady state nothing is allocated mid-frame. Chunks
-// grown past those stay until unused for k_staging_trim_frames frames.
+// Transient chunks (cmd.upload, push data) made at init per frame slot:
+// 32 MiB, the default streaming budget's worth, so a streaming burst does
+// not create upload buffers mid-frame.
+constexpr u32 k_transient_chunks_at_init = 8;
+// Staging for initial data of resources created inside a frame (mesh
+// metadata, small tables): made at init (k_staging_chunks per frame slot,
+// 32 MiB), so steady state nothing is allocated mid-frame. Chunks grown
+// past those stay until unused for k_staging_trim_frames frames.
 constexpr u64 k_staging_chunk_bytes = 8ull << 20;
 constexpr u32 k_staging_chunks = 4;
 constexpr u64 k_staging_trim_frames = 120;
@@ -482,7 +486,7 @@ private:
         u64 size = 0;
     };
     StagingPiece stage_piece(u64 bytes);
-    // A new mapped chunk in `frame`'s staging; null resource (logged) on failure.
+    // A new mapped chunk in `frame`'s staging; null (logged) on failure.
     StagingChunk* add_staging_chunk(Frame& frame, u64 size, bool kept);
     // Inside a frame: the frame's upload list, opened on first use; null
     // when the device is lost. Runs before the frame's own list.
@@ -731,6 +735,13 @@ bool D3D12Device::init(const DeviceDesc& desc) {
                 return false;
             }
         }
+        for (u32 i = 0; i < k_transient_chunks_at_init; ++i) {
+            const BufferHandle buffer = create_transient_chunk(k_transient_chunk_bytes);
+            if (!buffer.valid()) {
+                return false;
+            }
+            frame.chunks.push_back({buffer, k_transient_chunk_bytes, 0});
+        }
     }
     return init_globals();
 }
@@ -861,6 +872,16 @@ bool D3D12Device::init_globals() {
 D3D12Device::~D3D12Device() {
     if (m_queue != nullptr && m_fence != nullptr) {
         wait_idle();
+        // Marked lost by a failed call while the GPU itself still runs (it
+        // was not removed): wait, bounded, for the work already submitted
+        // before releasing memory it may still read.
+        const u64 last = m_next_fence_value - 1;
+        if (m_lost && m_device != nullptr && m_fence_event != nullptr &&
+            m_device->GetDeviceRemovedReason() == S_OK && last > 0 &&
+            m_fence->GetCompletedValue() < last &&
+            SUCCEEDED(m_fence->SetEventOnCompletion(last, m_fence_event))) {
+            WaitForSingleObject(m_fence_event, k_gpu_wait_timeout_ms);
+        }
     }
     // Everything is idle: release in any order.
     for (Frame& frame : m_frame_slots) {

@@ -59,7 +59,9 @@ follow without touching the renderer.
   list; `end_frame` submits (and presents). Two frames in flight live on the
   device. Destroying anything is deferred until the GPU is done with it, so it
   is safe mid-frame. Per-frame transient memory (`allocate`, `upload`) holds
-  constants, instance lists and UI geometry.
+  constants, instance lists, streamed geometry and UI geometry; each slot
+  makes 32 MiB of it at init (the default streaming budget), so a streaming
+  burst does not create upload buffers mid-frame.
 - **Uploads (N2 part 1).** A buffer or texture created with initial data
   inside a frame never waits for the GPU: the data goes into the frame
   slot's staging memory (persistent, mapped upload-heap chunks of 8 MiB,
