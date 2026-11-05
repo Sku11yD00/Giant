@@ -44,6 +44,11 @@ Milestone **N1 Virtual geometry** (in progress):
   two-pass occlusion culling (hidden geometry is skipped), mesh shaders
   (with a vertex shader fallback) and a visibility buffer that shades each
   pixel once. The Engine panel has switches for each and shows what was hidden.
+- Part 4 (done): cluster streaming. Geometry lives in a fixed pool of GPU
+  memory that holds only the detail the view needs: closer detail loads over
+  a few frames as the camera moves (coarser clusters stand in until then),
+  and detail nobody has looked at for a while makes room. The Engine panel
+  shows how full the pool is.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

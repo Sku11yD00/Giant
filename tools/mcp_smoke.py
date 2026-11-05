@@ -190,7 +190,7 @@ def lod_gate(tool, call, check):
         rock = tool("create_entity", {"mesh": path, "scale": [10, 10, 10]})
         check(rock["shape"] == "mesh", "entity draws the mesh")
 
-        def triangles_from(distance, frames=3):
+        def triangles_from(distance, frames=6):  # streaming loads detail over frames
             tool("set_camera", {"position": [0, 0, distance], "look_at": [0, 0, 0]})
             for _ in range(frames):
                 call("ping")  # let a frame render
@@ -201,14 +201,14 @@ def lod_gate(tool, call, check):
             # GPU culling (the default): the same cut, counted on the GPU a
             # few frames late. Occlusion off, so it matches the CPU's cut.
             tool("set_render_settings", {"occlusion_culling": False})
-            gpu = triangles_from(9, frames=8)
+            gpu = triangles_from(9, frames=16)
             tool("set_render_settings", {"gpu_culling": False})
             cpu = triangles_from(9)
             check(gpu["from_gpu"] and not gpu["overflow"], f"GPU counts arrive: {gpu}")
             check(abs(gpu["triangles"] - cpu["triangles"]) <= cpu["triangles"] // 20,
                   f"the GPU cut matches the CPU's: {gpu} vs {cpu}")
             tool("set_render_settings", {"gpu_culling": True, "occlusion_culling": True})
-            occluded = triangles_from(9, frames=8)
+            occluded = triangles_from(9, frames=16)
             check(0 < occluded["triangles"] <= gpu["triangles"],
                   f"occlusion culling only removes: {occluded} vs {gpu}")
         tool("set_render_settings", {"gpu_culling": False})  # exact counts, every backend

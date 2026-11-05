@@ -20,6 +20,7 @@ static const uint k_slot_overflow = 5;
 static const uint k_slot_triangles = 6;
 static const uint k_slot_instances = 7;
 static const uint k_slot_range = 60; // base and count of the clusters a raster pass draws
+static const uint k_slot_requests = 62; // streaming requests this frame
 static const uint k_counter_slots = 64;
 
 static const uint k_overflow_queue = 1;
@@ -53,7 +54,11 @@ struct CullPush {
     uint instance_capacity;  // occluded instances
     uint mode;               // cs_prepare: 0 dispatch arguments, 1 raster arguments
     uint arg_offset;         // cs_prepare: where the arguments go, bytes
-    uint pad;
+    uint requests;           // streaming: (mesh, group) pairs wanted but not loaded
+    uint request_capacity;
+    uint usage;              // streaming: per global group, the last frame that used it
+    uint pad0;
+    uint pad1;
 };
 ConstantBuffer<CullPush> push : register(b0);
 
@@ -181,11 +186,22 @@ void cs_instances(uint3 id : SV_DispatchThreadID) {
     emit_roots(index, mesh);
 }
 
+// Streaming: asks for a group's geometry (read back by the CPU, which
+// loads it within a budget; until then coarser clusters stand in).
+void request_group(uint mesh, uint group) {
+    uint at;
+    counters().InterlockedAdd(k_slot_requests * 4, 1, at);
+    if (at < push.request_capacity) {
+        write_buffer(push.requests).Store2(at * k_entry_bytes, uint2(mesh, group));
+    }
+}
+
 // One cluster of a group whose replacement is too coarse: drawn if its
-// own detail is enough (or cannot get finer), in view and not hidden.
+// own detail is enough (or cannot get finer, or the finer version is not
+// loaded yet), in view and not hidden.
 void test_cluster(Frame f, uint instance, Instance inst, MeshEntry mesh, uint index) {
     const Cluster c = load_cluster(read_buffer_nonuniform(mesh.clusters), index);
-    if (c.refined != k_no_group) {
+    if (c.refined != k_no_group && group_offset(mesh, c.refined) != k_not_resident) {
         const Group finer = load_group(read_buffer_nonuniform(mesh.groups), c.refined);
         if (projected_error(f, inst, finer.bounds, finer.error) > f.threshold) {
             return; // a finer version is drawn instead
@@ -241,6 +257,13 @@ void cs_traverse(uint3 id : SV_DispatchThreadID) {
     if (projected_error(f, inst, group.bounds, group.error) <= f.threshold) {
         return;
     }
+    // Needed here. Not loaded: ask for it; the coarser clusters made from
+    // it are drawn meanwhile. Loaded: mark it used, so it stays.
+    if (group_offset(mesh, node.group) == k_not_resident) {
+        request_group(inst.mesh, node.group);
+        return;
+    }
+    write_buffer(push.usage).Store((mesh.group_base + node.group) * 4, f.frame_number);
     for (uint i = 0; i < group.cluster_count; ++i) {
         test_cluster(f, item.x, inst, mesh, group.first_cluster + i);
     }

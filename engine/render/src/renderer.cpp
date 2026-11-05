@@ -5,6 +5,7 @@
 #include "giant/geometry/mesh.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
+#include "streaming.h"
 
 #include <algorithm>
 #include <bit>
@@ -95,15 +96,16 @@ struct Renderer::FrameData {
     u32 entry_count = 0;
 };
 
-std::unique_ptr<Renderer> Renderer::create(rhi::Device& device) {
-    auto renderer = std::make_unique<Renderer>(ConstructKey{}, device);
+std::unique_ptr<Renderer> Renderer::create(rhi::Device& device, const RendererDesc& desc) {
+    auto renderer = std::make_unique<Renderer>(ConstructKey{}, device, desc);
     if (!renderer->init()) {
         return nullptr;
     }
     return renderer;
 }
 
-Renderer::Renderer(ConstructKey, rhi::Device& device) : m_device(device) {}
+Renderer::Renderer(ConstructKey, rhi::Device& device, const RendererDesc& desc)
+    : m_device(device), m_desc(desc) {}
 
 Renderer::~Renderer() {
     // Deferred by the device until the GPU is done with them.
@@ -127,6 +129,13 @@ Renderer::~Renderer() {
 }
 
 bool Renderer::init() {
+    m_streamer = std::make_unique<GeometryStreamer>(m_device, m_desc.geometry_pool_bytes);
+    if (!m_streamer->init()) {
+        return false;
+    }
+    GeometryStreamer::Budget budget;
+    budget.bytes_per_frame = std::max<u64>(m_desc.stream_bytes_per_frame, 1);
+    m_streamer->set_budget(budget);
     const auto compute = [this](rhi::ShaderCode code, const char* name) {
         rhi::ComputePipelineDesc desc;
         desc.compute = code;
@@ -188,8 +197,7 @@ bool Renderer::init() {
 }
 
 void Renderer::destroy(Mesh& mesh) {
-    for (const rhi::BufferHandle b :
-         {mesh.vertices, mesh.vertex_ids, mesh.triangles, mesh.clusters, mesh.groups, mesh.nodes}) {
+    for (const rhi::BufferHandle b : {mesh.clusters, mesh.groups, mesh.nodes}) {
         m_device.destroy(b);
     }
     mesh = {};
@@ -199,44 +207,16 @@ MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
     if (data.empty() || m_meshes.size() >= k_no_mesh) {
         return k_no_mesh;
     }
-    // Per cluster: its distinct vertices (global ids) and its triangles as
-    // three local indices, as mesh shaders want them.
-    std::vector<u32> vertex_ids;
-    std::vector<u32> triangles;
-    std::vector<gpu::Cluster> clusters;
-    clusters.reserve(data.clusters.size());
-    std::vector<u32> seen(data.vertices.size(), ~0u); // cluster that last numbered a vertex
-    std::vector<u32> local(data.vertices.size(), 0);
+    // Per cluster: where its geometry sits in its group's streamed data
+    // (the streamer lays that out below), then its LOD data.
+    std::vector<gpu::Cluster> clusters(data.clusters.size());
     for (u32 ci = 0; ci < data.clusters.size(); ++ci) {
         const geometry::Cluster& c = data.clusters[ci];
-        gpu::Cluster g{};
-        g.first_vertex = static_cast<u32>(vertex_ids.size());
-        g.first_triangle = static_cast<u32>(triangles.size());
-        g.triangle_count = c.triangle_count;
-        for (u32 t = 0; t < c.triangle_count; ++t) {
-            u32 corner[3];
-            for (u32 k = 0; k < 3; ++k) {
-                const u32 v = data.indices[c.first_index + t * 3 + k];
-                if (seen[v] != ci) {
-                    seen[v] = ci;
-                    local[v] = static_cast<u32>(vertex_ids.size()) - g.first_vertex;
-                    vertex_ids.push_back(v);
-                }
-                corner[k] = local[v];
-            }
-            triangles.push_back(corner[0] | (corner[1] << 8) | (corner[2] << 16));
-        }
-        g.vertex_count = static_cast<u32>(vertex_ids.size()) - g.first_vertex;
-        if (g.vertex_count > geometry::k_cluster_max_vertices ||
-            g.triangle_count > geometry::k_cluster_max_triangles) {
-            log_error("render", "a cluster is over 128 vertices or triangles; mesh not added");
-            return k_no_mesh;
-        }
+        gpu::Cluster& g = clusters[ci];
         g.group = c.group;
         g.refined = c.refined >= 0 ? static_cast<u32>(c.refined) : gpu::k_no_group;
         g.level = data.groups[c.group].depth;
         set_bounds(g.bounds, c.bounds.center, c.bounds.radius);
-        clusters.push_back(g);
     }
     std::vector<gpu::Group> groups;
     groups.reserve(data.groups.size());
@@ -292,16 +272,17 @@ MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
         desc.name = name;
         return m_device.create_buffer(desc, bytes);
     };
-    mesh.vertices = upload(bytes_of(data.vertices), "mesh vertices");
-    mesh.vertex_ids = upload(bytes_of(vertex_ids), "mesh cluster vertices");
-    mesh.triangles = upload(bytes_of(triangles), "mesh cluster triangles");
+    const u32 id = static_cast<u32>(m_meshes.size());
+    if (!m_streamer->add(id, data, clusters)) {
+        return k_no_mesh;
+    }
     mesh.clusters = upload(bytes_of(clusters), "mesh clusters");
     mesh.groups = upload(bytes_of(groups), "mesh cluster groups");
     mesh.nodes = upload(bytes_of(nodes), "mesh LOD tree");
-    for (const rhi::BufferHandle b :
-         {mesh.vertices, mesh.vertex_ids, mesh.triangles, mesh.clusters, mesh.groups, mesh.nodes}) {
+    for (const rhi::BufferHandle b : {mesh.clusters, mesh.groups, mesh.nodes}) {
         if (!b.valid()) {
             destroy(mesh);
+            m_streamer->remove(id);
             log_error("render", "could not upload a mesh (out of GPU memory?)");
             return k_no_mesh;
         }
@@ -318,6 +299,7 @@ void Renderer::remove_mesh(MeshId id) {
         return;
     }
     destroy(m_meshes[id]); // the slot stays, empty: ids are never reused
+    m_streamer->remove(id);
 }
 
 const geometry::ClusterMesh* Renderer::mesh(MeshId id) const {
@@ -447,6 +429,7 @@ void Renderer::read_stats_slot(u32 slot) {
     s.instances = counters[gpu::k_slot_instances];
     s.occluded_instances = counters[gpu::k_slot_occluded_instances];
     s.occluded_clusters = counters[gpu::k_slot_occluded_clusters];
+    m_request_count = counters[gpu::k_slot_requests];
     // A full retest list costs time only (the geometry is drawn at once);
     // a full queue or visible list drops geometry.
     s.overflow = (counters[gpu::k_slot_overflow] & (gpu::k_overflow_queue | gpu::k_overflow_visible)) != 0;
@@ -472,10 +455,11 @@ void Renderer::read_gpu_stats() {
         const u32 draws = m_stats.draws;
         m_stats = m_gpu_stats;
         m_stats.draws = draws;
+        copy_streaming_stats();
     }
 }
 
-void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height) {
+void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number) {
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
     const geometry::Frustum frustum = geometry::frustum_from_view_projection(view_proj);
     geometry::LodView lod;
@@ -491,7 +475,12 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
         lod.rotation = in.rotation;
         lod.scale = in.scale;
         m_selected.clear();
-        geometry::select_clusters(data, lod, m_selected);
+        m_wanted.clear();
+        m_touched.clear();
+        const geometry::LodResidency residency{&m_streamer->resident(in.mesh), &m_wanted, &m_touched};
+        geometry::select_clusters(data, lod, m_selected, &residency);
+        m_streamer->want(in.mesh, m_wanted);
+        m_streamer->touch(in.mesh, m_touched, frame_number);
         if (!m_selected.empty() && m_entries.size() / 2 < k_max_cpu_clusters) {
             ++m_stats.instances;
         }
@@ -582,11 +571,11 @@ void Renderer::build_hzb(rhi::CommandList& cmd) {
 
 void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
     CullBuffers& c = m_cull;
-    const auto rw = [&cmd, &c](bool with_args) {
+    const auto rw = [this, &cmd, &c](bool with_args) {
         // Every list the culling shaders write, ready for (more) writes; a
         // repeat is a UAV barrier, so the previous dispatch's writes land.
-        for (const rhi::BufferHandle b :
-             {c.counters, c.queues[0], c.queues[1], c.visible, c.occluded_clusters, c.occluded_instances}) {
+        for (const rhi::BufferHandle b : {c.counters, c.queues[0], c.queues[1], c.visible, c.occluded_clusters,
+                                          c.occluded_instances, m_streamer->requests(), m_streamer->usage()}) {
             cmd.barrier(b, rhi::ResourceState::shader_write);
         }
         if (with_args) {
@@ -610,6 +599,9 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
     base.visible_capacity = k_visible_capacity;
     base.occluded_capacity = k_occluded_capacity;
     base.instance_capacity = c.instance_capacity;
+    base.requests = m_device.write_descriptor(m_streamer->requests());
+    base.request_capacity = GeometryStreamer::k_request_capacity;
+    base.usage = m_device.write_descriptor(m_streamer->usage());
 
     const auto prepare = [&](u32 pass, u32 mode, u32 slot_in, u32 capacity, u32 arg_offset) {
         rw(true);
@@ -692,6 +684,7 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
     cmd.barrier(c.counters, rhi::ResourceState::copy_source);
     cmd.copy_buffer(c.readback[slot], 0, c.counters, 0, gpu::k_counter_bytes);
     c.readback_frame[slot] = frame_index;
+    m_streamer->after_cull(cmd, slot, frame_index);
 }
 
 void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameInput& frame) {
@@ -723,13 +716,23 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         if (best < 3) {
             read_stats_slot(best);
+            // Each frame's streaming requests are taken once.
+            if (m_cull.readback_frame[best] != m_requests_taken) {
+                m_requests_taken = m_cull.readback_frame[best];
+                m_streamer->take_gpu_requests(best, m_request_count);
+            }
         }
     }
+    // Load what culling asked for (and the coarsest levels of new meshes)
+    // before anything reads the geometry.
+    const u32 frame_number = static_cast<u32>(m_device.frames_completed() + 1); // 0 means never
+    m_streamer->update(cmd, frame_number);
 
     // Instances with a live mesh.
     m_valid.clear();
     for (u32 i = 0; i < frame.instances.size(); ++i) {
-        if (mesh(frame.instances[i].mesh) != nullptr) {
+        const MeshId id = frame.instances[i].mesh;
+        if (mesh(id) != nullptr && m_streamer->ready(id)) {
             m_valid.push_back(i);
         }
     }
@@ -799,6 +802,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     k.hzb_mips = m_hzb_mips;
     k.instance_count = static_cast<u32>(m_valid.size());
     k.occlusion = occlusion ? 1u : 0u;
+    k.pool = m_device.read_descriptor(m_streamer->pool());
+    k.frame_number = frame_number;
 
     FrameData data;
     data.frame = cmd.upload(bytes_of_one(k));
@@ -820,9 +825,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             continue; // levels 0: nothing drawn
         }
         gpu::MeshEntry& e = table[id];
-        e.vertices = m_device.read_descriptor(m.vertices);
-        e.vertex_ids = m_device.read_descriptor(m.vertex_ids);
-        e.triangles = m_device.read_descriptor(m.triangles);
+        e.residency = m_device.read_descriptor(m_streamer->residency_table(static_cast<u32>(id)));
+        e.group_base = m_streamer->group_base(static_cast<u32>(id));
         e.clusters = m_device.read_descriptor(m.clusters);
         e.groups = m_device.read_descriptor(m.groups);
         e.nodes = m_device.read_descriptor(m.nodes);
@@ -830,7 +834,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         set_bounds(e.bounds, m.data.bounds.center, m.data.bounds.radius);
         if (used[id]) {
             data.tree_levels = std::max(data.tree_levels, m.tree_levels);
-            for (const rhi::BufferHandle b : {m.vertices, m.vertex_ids, m.triangles, m.clusters, m.groups, m.nodes}) {
+            for (const rhi::BufferHandle b : {m.clusters, m.groups, m.nodes}) {
                 cmd.barrier(b, rhi::ResourceState::shader_read);
             }
         }
@@ -866,7 +870,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         m_gpu_stats = {};
         if (!gpu) {
-            select_on_cpu(frame, view_proj, height);
+            select_on_cpu(frame, view_proj, height, frame_number);
             // select_on_cpu stops at what one mesh dispatch takes (16 MiB of
             // entries, well inside one transient allocation).
             static_assert(u64{k_max_cpu_clusters} * 8 <= rhi::k_max_transient_allocation);
@@ -932,6 +936,18 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.draw(3);
     ++m_stats.draws;
     cmd.end_render_pass();
+    copy_streaming_stats();
+}
+
+void Renderer::copy_streaming_stats() {
+    const StreamingStats& s = m_streamer->stats();
+    m_stats.pool_bytes = s.pool_bytes;
+    m_stats.pool_used_bytes = s.used_bytes;
+    m_stats.resident_groups = s.resident_groups;
+    m_stats.total_groups = s.total_groups;
+    m_stats.streamed_in = s.loaded;
+    m_stats.evicted = s.evicted;
+    m_stats.waiting = s.waiting;
 }
 
 } // namespace giant::render

@@ -209,6 +209,7 @@ GIANT_TEST("editor: render settings are view state") {
                 !f.state.render_settings.mesh_shaders);
     GIANT_CHECK(!f.run("set_render_settings", {{"gpu_culling", "yes"}}).ok);
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("overflow"));
+    GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["streaming"].contains("pool_bytes"));
 }
 
 GIANT_TEST("editor: mesh paths have one spelling") {

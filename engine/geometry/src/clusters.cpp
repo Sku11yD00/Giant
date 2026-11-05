@@ -157,7 +157,8 @@ float projected_error(const LodBounds& bounds, const LodView& view) {
     return bounds.error * s / std::max(d, near_plane) * view.pixels_per_unit;
 }
 
-void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u32>& out) {
+void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u32>& out,
+                     const LodResidency* residency) {
     if (mesh.empty()) {
         return;
     }
@@ -166,6 +167,11 @@ void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u
         !sphere_in_frustum(*view.frustum, to_view(view, mesh.bounds.center), mesh.bounds.radius * s)) {
         return;
     }
+    const std::vector<u8>* resident =
+        residency != nullptr && residency->resident != nullptr && residency->resident->size() >= mesh.groups.size()
+            ? residency->resident
+            : nullptr;
+    const auto loaded = [resident](usize group) { return resident == nullptr || (*resident)[group] != 0; };
     const float threshold = view.threshold_pixels;
     // Depth-first over every per-level tree; a node precise enough for the
     // view holds nothing to draw (its groups' replacements are fine).
@@ -186,16 +192,28 @@ void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u
             }
             continue;
         }
-        const ClusterGroup& group = mesh.groups[static_cast<usize>(node.group)];
+        const usize gi = static_cast<usize>(node.group);
+        const ClusterGroup& group = mesh.groups[gi];
         if (projected_error(group.simplified, view) <= threshold) {
             continue; // the leaf's bounds are the group's, but do not rely on it
         }
+        if (!loaded(gi)) {
+            // Needed but not loaded: the clusters made from it draw instead.
+            if (residency->wanted != nullptr) {
+                residency->wanted->push_back(static_cast<u32>(gi));
+            }
+            continue;
+        }
+        if (resident != nullptr && residency->used != nullptr) {
+            residency->used->push_back(static_cast<u32>(gi));
+        }
         // The group's replacement is too coarse here. Draw each of its
-        // clusters whose own detail is enough (or that cannot get finer).
+        // clusters whose own detail is enough (or that cannot get finer, or
+        // whose finer version is not loaded).
         for (u32 i = 0; i < group.cluster_count; ++i) {
             const u32 index = group.first_cluster + i;
             const Cluster& c = mesh.clusters[index];
-            if (c.refined >= 0 &&
+            if (c.refined >= 0 && loaded(static_cast<usize>(c.refined)) &&
                 projected_error(mesh.groups[static_cast<usize>(c.refined)].simplified, view) > threshold) {
                 continue; // a finer version is drawn instead
             }
@@ -206,6 +224,39 @@ void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u
             out.push_back(index);
         }
     }
+}
+
+GroupLinks link_groups(const ClusterMesh& mesh) {
+    const usize n = mesh.groups.size();
+    // (child, parent) pairs, one per distinct link.
+    std::vector<std::pair<u32, u32>> links;
+    for (const Cluster& c : mesh.clusters) {
+        if (c.refined >= 0) {
+            links.push_back({static_cast<u32>(c.refined), c.group});
+        }
+    }
+    std::sort(links.begin(), links.end());
+    links.erase(std::unique(links.begin(), links.end()), links.end());
+    GroupLinks out;
+    out.parent_offsets.assign(n + 1, 0);
+    out.child_offsets.assign(n + 1, 0);
+    for (const auto& [child, parent] : links) {
+        ++out.parent_offsets[child + 1];
+        ++out.child_offsets[parent + 1];
+    }
+    for (usize g = 0; g < n; ++g) {
+        out.parent_offsets[g + 1] += out.parent_offsets[g];
+        out.child_offsets[g + 1] += out.child_offsets[g];
+    }
+    out.parents.resize(links.size());
+    out.children.resize(links.size());
+    std::vector<u32> parent_fill(out.parent_offsets.begin(), out.parent_offsets.end() - 1);
+    std::vector<u32> child_fill(out.child_offsets.begin(), out.child_offsets.end() - 1);
+    for (const auto& [child, parent] : links) {
+        out.parents[parent_fill[child]++] = parent;
+        out.children[child_fill[parent]++] = child;
+    }
+    return out;
 }
 
 } // namespace giant::geometry

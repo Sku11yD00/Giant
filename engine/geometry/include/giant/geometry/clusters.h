@@ -18,6 +18,7 @@
 #include "giant/geometry/mesh.h"
 
 #include <array>
+#include <span>
 #include <vector>
 
 namespace giant::geometry {
@@ -112,9 +113,39 @@ struct LodView {
 // (which the cut relies on). Non-uniform scale uses the largest axis.
 float projected_error(const LodBounds& bounds, const LodView& view);
 
+// Streaming: which groups' geometry is loaded. A group that is not loaded
+// counts as precise enough, so the coarser clusters made from it are drawn
+// instead; the cut stays whole as long as every loaded group's parents are
+// loaded too (GroupLinks), which holds from the terminal groups down.
+struct LodResidency {
+    const std::vector<u8>* resident = nullptr; // per group: nonzero when loaded
+    std::vector<u32>* wanted = nullptr;        // appends groups needed but not loaded
+    std::vector<u32>* used = nullptr;          // appends loaded groups the cut reached
+};
+
 // Appends the clusters of the cut for `view` (indices into mesh.clusters),
 // skipping clusters outside the frustum. Every part of the surface is
 // covered by exactly one chosen cluster.
-void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u32>& out);
+void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u32>& out,
+                     const LodResidency* residency = nullptr);
+
+// A group's parents are the coarser groups holding clusters simplified from
+// it; its children the finer groups its clusters were simplified from.
+// Terminal groups (no replacement) have no parents: they are the roots.
+struct GroupLinks {
+    std::vector<u32> parent_offsets; // groups + 1 entries: parents of g are
+    std::vector<u32> parents;        // parents[parent_offsets[g] .. parent_offsets[g + 1])
+    std::vector<u32> child_offsets;
+    std::vector<u32> children;
+
+    std::span<const u32> parents_of(u32 group) const {
+        return {parents.data() + parent_offsets[group], parent_offsets[group + 1] - parent_offsets[group]};
+    }
+    std::span<const u32> children_of(u32 group) const {
+        return {children.data() + child_offsets[group], child_offsets[group + 1] - child_offsets[group]};
+    }
+};
+GroupLinks link_groups(const ClusterMesh& mesh);
+inline bool is_root_group(const ClusterGroup& group) { return group.simplified.error >= k_terminal_error; }
 
 } // namespace giant::geometry

@@ -12,6 +12,10 @@
 //
 // The CPU can pick the clusters instead (RenderSettings::gpu_culling off):
 // the same cut, for reference and tests, on any backend.
+//
+// Geometry streams: a fixed pool of GPU memory holds the cluster groups the
+// view needs, loaded as culling asks for them and evicted when unused
+// (src/streaming.h). Until finer detail arrives, coarser clusters stand in.
 #pragma once
 
 #include "giant/core/math.h"
@@ -28,6 +32,7 @@ namespace giant::render {
 namespace gpu {
 struct MeshEntry; // src/gpu_layout.h
 }
+class GeometryStreamer; // src/streaming.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
@@ -108,6 +113,22 @@ struct RenderStats {
     u32 occluded_instances = 0; // hidden in the first pass (GPU, occlusion on)
     u32 occluded_clusters = 0;
     bool overflow = false; // a list was full: some geometry was dropped
+    // Streaming (this frame, on the CPU: never late).
+    u64 pool_bytes = 0;      // GPU memory for cluster geometry
+    u64 pool_used_bytes = 0;
+    u32 resident_groups = 0; // cluster groups loaded, of every mesh
+    u32 total_groups = 0;
+    u32 streamed_in = 0;     // groups loaded this frame
+    u32 evicted = 0;         // groups dropped this frame to make room
+    u32 waiting = 0;         // groups asked for but not loaded yet
+};
+
+struct RendererDesc {
+    // GPU memory for streamed cluster geometry. Every mesh's coarsest level
+    // must fit; more keeps more detail around.
+    u64 geometry_pool_bytes = 256ull << 20;
+    // At most this much is loaded per frame (the rest waits a frame).
+    u64 stream_bytes_per_frame = 32ull << 20;
 };
 
 class Renderer {
@@ -117,7 +138,7 @@ class Renderer {
 
 public:
     // Null (and logs why) if a pipeline cannot be created.
-    static std::unique_ptr<Renderer> create(rhi::Device& device);
+    static std::unique_ptr<Renderer> create(rhi::Device& device, const RendererDesc& desc = {});
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
@@ -147,15 +168,12 @@ public:
     static Mat4 view_projection(const View& view, float aspect);
 
     // Use create(); public only for make_unique.
-    Renderer(ConstructKey, rhi::Device& device);
+    Renderer(ConstructKey, rhi::Device& device, const RendererDesc& desc);
 
 private:
     struct Mesh {
         geometry::ClusterMesh data; // the CPU copy (CPU culling, stats, editor)
-        rhi::BufferHandle vertices;   // 24-byte vertices
-        rhi::BufferHandle vertex_ids; // u32 per cluster vertex, into vertices
-        rhi::BufferHandle triangles;  // u32 per cluster triangle: 3 local indices
-        rhi::BufferHandle clusters;   // gpu::Cluster
+        rhi::BufferHandle clusters;   // gpu::Cluster (geometry streams: GeometryStreamer)
         rhi::BufferHandle groups;     // gpu::Group
         rhi::BufferHandle nodes;      // gpu::Node
         u32 tree_levels = 0;          // deepest node, plus one
@@ -180,13 +198,18 @@ private:
     bool ensure_targets(u32 width, u32 height);
     bool ensure_cull_buffers(u32 instance_count);
     void destroy(Mesh& mesh);
-    void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height);
+    void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number);
     void cull_on_gpu(rhi::CommandList& cmd, const FrameData& data);
     void raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bool gpu);
     void build_hzb(rhi::CommandList& cmd);
     void read_stats_slot(u32 slot);
+    void copy_streaming_stats();
 
     rhi::Device& m_device;
+    RendererDesc m_desc;
+    std::unique_ptr<GeometryStreamer> m_streamer;
+    u32 m_request_count = 0; // GPU streaming requests in the slot read last
+    u64 m_requests_taken = ~u64{0}; // the frame whose requests were taken last
     // Pipelines.
     rhi::PipelineHandle m_raster_mesh;   // invalid without mesh shaders
     rhi::PipelineHandle m_raster_vertex;
@@ -226,6 +249,8 @@ private:
     std::vector<u32> m_valid;    // instances (into frame.instances) with a live mesh
     std::vector<u32> m_selected; // CPU culling: clusters of one instance
     std::vector<u32> m_entries;  // CPU culling: (instance, cluster) pairs, flattened
+    std::vector<u32> m_wanted;   // CPU culling: groups of one instance not loaded
+    std::vector<u32> m_touched;  // CPU culling: loaded groups it used
     std::vector<gpu::MeshEntry> m_table; // the mesh table
     std::vector<bool> m_used;            // meshes drawn this frame
     RenderStats m_stats;
