@@ -9,6 +9,8 @@
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
 
+#include <algorithm>
+#include <array>
 #include <functional>
 #include <vector>
 
@@ -25,6 +27,53 @@ struct EditorCamera {
 };
 
 class MeshLibrary;
+
+// The last few seconds of frame times, for get_engine_info (performance
+// checks such as the N1 gate run over MCP).
+struct FrameTimes {
+    static constexpr usize k_frames = 240;
+    std::array<float, k_frames> ms{};
+    usize count = 0; // frames recorded, ever
+    void add(float frame_ms) { ms[count++ % k_frames] = frame_ms; }
+    usize size() const { return std::min(count, k_frames); }
+    // The recorded times, oldest first.
+    std::vector<float> in_order() const {
+        std::vector<float> out;
+        out.reserve(size());
+        const usize start = count > k_frames ? count % k_frames : 0;
+        for (usize i = 0; i < size(); ++i) out.push_back(ms[(start + i) % k_frames]);
+        return out;
+    }
+    float average() const {
+        float sum = 0.0f;
+        for (usize i = 0; i < size(); ++i) sum += ms[i];
+        return size() > 0 ? sum / static_cast<float>(size()) : 0.0f;
+    }
+    float worst() const {
+        float w = 0.0f;
+        for (usize i = 0; i < size(); ++i) w = std::max(w, ms[i]);
+        return w;
+    }
+    // The frame time `fraction` of frames are at or under (0.5 median,
+    // 0.99 the 99th percentile). Consistency matters as much as the average.
+    float percentile(float fraction) const {
+        if (size() == 0) return 0.0f;
+        std::array<float, k_frames> sorted = ms;
+        const auto end = sorted.begin() + static_cast<std::ptrdiff_t>(size());
+        std::sort(sorted.begin(), end);
+        const auto rank = static_cast<usize>(fraction * static_cast<float>(size() - 1) + 0.5f);
+        return sorted[std::min(rank, size() - 1)];
+    }
+    // Stutters: frames half again over the median (at least one missed
+    // display refresh) and over it by more than 2 ms (not timer noise).
+    usize hitches() const {
+        const float median = percentile(0.5f);
+        const float limit = std::max(1.5f * median, median + 2.0f);
+        usize n = 0;
+        for (usize i = 0; i < size(); ++i) n += ms[i] > limit ? usize{1} : usize{0};
+        return n;
+    }
+};
 
 // What the commands read and change. Owned by main; outlives the registry.
 struct EditorState {
@@ -48,6 +97,7 @@ struct EditorState {
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
     render::RenderStats scene_stats;
+    FrameTimes frame_times; // updated by the main loop
     bool quit_requested = false;
     // Renders the editor as it looks now (viewport and panels) and returns
     // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.

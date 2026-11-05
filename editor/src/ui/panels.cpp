@@ -498,16 +498,16 @@ void EditorPanels::draw_commands() {
         if (ImGui::Button("Redo")) {
             run("redo");
         }
-        const auto undo = m_commands.undo_history();
-        const auto redo = m_commands.redo_history();
+        const auto undo = m_commands.undo_names();
+        const auto redo = m_commands.redo_names();
         if (undo.empty() && redo.empty()) {
             ImGui::TextDisabled("Nothing to undo yet.");
         }
-        for (const auto& entry : undo) {
-            ImGui::BulletText("%s", entry.command.c_str());
+        for (const auto& name : undo) {
+            ImGui::BulletText("%s", name.c_str());
         }
         for (auto it = redo.rbegin(); it != redo.rend(); ++it) {
-            ImGui::TextDisabled("  (undone) %s", it->command.c_str());
+            ImGui::TextDisabled("  (undone) %s", it->c_str());
         }
 
         ImGui::SeparatorText("All commands");
@@ -548,7 +548,8 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::SeparatorText("Frame");
         ImGui::Text("Frame time: %.2f ms", static_cast<double>(frame.frame_ms));
         const render::RenderStats& stats = m_state.scene_stats;
-        ImGui::Text("Scene: %u instances in %u draws", stats.instances, stats.draws);
+        ImGui::Text("Scene: %u instances in %u draws (+%u full-screen)", stats.instances, stats.draws,
+                    stats.post_draws);
         ImGui::Text("Clusters: %u, triangles: %u", stats.clusters, stats.triangles);
         if (stats.from_gpu) {
             ImGui::Text("Occluded: %u instances, %u clusters", stats.occluded_instances,
@@ -600,6 +601,14 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
             run("set_render_settings", {{"mesh_shaders", mesh}});
         }
         ImGui::EndDisabled();
+        bool aa = r.antialiasing;
+        if (ImGui::Checkbox("Anti-aliasing (SMAA)", &aa)) {
+            run("set_render_settings", {{"antialiasing", aa}});
+        }
+        bool specular = r.specular_antialiasing;
+        if (ImGui::Checkbox("Specular anti-aliasing", &specular)) {
+            run("set_render_settings", {{"specular_antialiasing", specular}});
+        }
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {
             ImGui::TextDisabled(m_state.dotnet_available ? "None loaded (load_scripts command)."

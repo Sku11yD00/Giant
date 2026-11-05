@@ -3,6 +3,7 @@ giant_module(render
     src/renderer.cpp
     src/decals.cpp
     src/streaming.cpp
+    src/smaa.cpp
   DEPENDS core rhi geometry
 )
 giant_shaders(render
@@ -19,7 +20,13 @@ giant_shaders(render
     shaders/raster.slang:ps_main:pixel:raster_ps
     shaders/resolve.slang:vs_main:vertex:resolve_vs
     shaders/resolve.slang:ps_main:pixel:resolve_ps
+    shaders/smaa.slang:vs_main:vertex:smaa_vs
+    shaders/smaa.slang:ps_edges:pixel:smaa_edges_ps
+    shaders/smaa.slang:ps_weights:pixel:smaa_weights_ps
+    shaders/smaa.slang:ps_blend:pixel:smaa_blend_ps
 )
+# SMAA's precomputed area and search tables (headers only).
+target_link_libraries(giant_render PRIVATE third_party::smaa)
 
 giant_module_tests(render
   SOURCES

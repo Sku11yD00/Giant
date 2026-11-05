@@ -80,7 +80,8 @@ GIANT_TEST("render: the scene is one raster draw and one shading pass on the nul
     GIANT_CHECK(renderer->last_stats().instances == 3);
     GIANT_CHECK(renderer->last_stats().clusters >= 3);
     GIANT_CHECK(!renderer->last_stats().from_gpu);
-    GIANT_CHECK(device->last_frame_stats().draws == 2);
+    GIANT_CHECK(renderer->last_stats().post_draws == 3); // SMAA: edges, weights, blend
+    GIANT_CHECK(device->last_frame_stats().draws == 2 + 3);
     // The background is cleared as linear colour: 0.5 is sRGB byte 188.
     const auto pixels = device->read_texture(target);
     GIANT_CHECK(pixels.size() == 64 * 32 * 4 && pixels[0] == 188 && pixels[1] == 0);
@@ -247,7 +248,7 @@ GIANT_TEST("render: GPU culling records valid work on the null device") {
                 GIANT_CHECK(stats.from_gpu);
                 // A raster pass per culling pass, then shading.
                 GIANT_CHECK(stats.draws == (occlusion ? 3u : 2u));
-                GIANT_CHECK(s.device->last_frame_stats().draws == stats.draws);
+                GIANT_CHECK(s.device->last_frame_stats().draws == stats.draws + stats.post_draws);
                 GIANT_CHECK(s.device->last_frame_stats().dispatches > 4);
             }
         }
@@ -405,7 +406,7 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.decals = decals;
     for (const bool gpu : {false, true}) {
         const auto stamped = draw(gpu, false, false);
-        GIANT_CHECK(renderer->last_stats().decals == 1 || gpu);
+        GIANT_CHECK(renderer->last_stats().decals == 1);
         if (stamped.size() == k_w * k_h * 4) {
             const usize centre = (static_cast<usize>(k_h / 2) * k_w + k_w / 2) * 4;
             GIANT_CHECK(stamped[centre] > 150 && stamped[centre + 1] < 40);
@@ -413,6 +414,74 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
             GIANT_CHECK(std::abs(int{stamped[lit]} - int{pixels[lit]}) <= 2); // outside the stamp: unchanged
         }
     }
+    // Anti-aliasing (on by default) only softens edges: with it off the
+    // silhouettes are hard steps, and every pixel SMAA changed sits on one.
+    frame.decals = {};
+    frame.settings.antialiasing = false;
+    const auto aliased = draw(false, false, false);
+    GIANT_CHECK(renderer->last_stats().post_draws == 0);
+    frame.settings.antialiasing = true;
+    const auto smoothed = draw(false, false, false);
+    GIANT_CHECK(renderer->last_stats().post_draws == 3);
+    if (aliased.size() == k_w * k_h * 4 && smoothed.size() == aliased.size()) {
+        const auto luma = [](const std::vector<u8>& p, u32 x, u32 y) {
+            const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+            return 0.2126 * p[i] + 0.7152 * p[i + 1] + 0.0722 * p[i + 2];
+        };
+        usize changed = 0;
+        usize off_edge = 0;
+        for (u32 y = 1; y + 1 < k_h; ++y) {
+            for (u32 x = 1; x + 1 < k_w; ++x) {
+                const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+                bool differs = false;
+                for (usize c = 0; c < 3; ++c) {
+                    differs = differs || std::abs(int{aliased[i + c]} - int{smoothed[i + c]}) > 2;
+                }
+                if (!differs) {
+                    continue;
+                }
+                ++changed;
+                const double l = luma(aliased, x, y);
+                const double step = std::max({std::abs(l - luma(aliased, x - 1, y)), std::abs(l - luma(aliased, x + 1, y)),
+                                              std::abs(l - luma(aliased, x, y - 1)), std::abs(l - luma(aliased, x, y + 1))});
+                off_edge += step < 8.0 ? 1 : 0;
+            }
+        }
+        GIANT_CHECK(changed > 10);                     // the silhouettes were smoothed
+        GIANT_CHECK(changed < aliased.size() / 4 / 8); // ...and only they
+        GIANT_CHECK(off_edge == 0);
+        const usize sky = (2 * k_w + 2) * 4;
+        GIANT_CHECK(smoothed[sky] == aliased[sky] && smoothed[sky + 2] == aliased[sky + 2]);
+    }
+    // Specular anti-aliasing only widens highlights where normals bend
+    // faster than a pixel shows: on this large smooth sphere, barely at all.
+    frame.settings.specular_antialiasing = false;
+    const auto unfiltered = draw(false, false, false);
+    frame.settings.specular_antialiasing = true;
+    GIANT_CHECK(differing(unfiltered) <= pixels.size() / 50);
+    // A small, mirror-like sphere a few pixels wide: its normals turn fast
+    // across each pixel, so the filter must widen its highlight (here it
+    // lights pixels whose centres the sharp highlight missed).
+    std::vector<Instance> shiny(1);
+    shiny[0].mesh = renderer->builtin(BuiltinMesh::sphere);
+    shiny[0].position = camera + DVec3{0.0, 0.0, -12.0};
+    shiny[0].scale = {0.8f, 0.8f, 0.8f};
+    std::vector<Material> mirror(1);
+    mirror[0].base_color = {0.05f, 0.05f, 0.05f};
+    mirror[0].roughness = 0.05f;
+    mirror[0].metallic = 1.0f;
+    frame.instances = shiny;
+    frame.materials = mirror;
+    frame.lighting.sun_direction = {0.0f, 0.0f, 1.0f}; // behind the camera: the highlight faces it
+    frame.settings.specular_antialiasing = false;
+    const auto sharp = draw(false, false, false);
+    frame.settings.specular_antialiasing = true;
+    const auto filtered = draw(false, false, false);
+    usize widened = 0;
+    for (usize i = 0; i < sharp.size() && i < filtered.size(); ++i) {
+        widened += std::abs(int{sharp[i]} - int{filtered[i]}) > 2 ? 1 : 0;
+    }
+    GIANT_CHECK(widened > 0);
     device->destroy(target);
     renderer.reset();
     device->wait_idle();

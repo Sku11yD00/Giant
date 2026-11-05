@@ -18,7 +18,9 @@ import sys
 import tempfile
 import threading
 
-TIMEOUT = 60  # seconds for the whole run
+from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
+
+TIMEOUT = 240  # seconds for the whole run (the N1 gate scene is large on the software renderer)
 
 
 def decode_png(data):
@@ -283,6 +285,60 @@ def kit_gate(tool, call, check):
     tool("new_scene")
 
 
+def n1_gate(tool, call, check):
+    """N1 part 6, the N1 gate scene (tools/n1_gate.py measures its speed on a real GPU): a
+    kit-built town and 10,000 trees in a fixed number of draws, with every bit of detail the
+    view asks for loaded, and anti-aliasing that only touches edges."""
+    materials = build_gate_scene(tool)
+    count = tool("list_entities")["count"]
+    check(count == ENTITIES, f"the town and 10,000 trees are placed, got {count} entities")
+    tool("set_render_settings", {"gpu_culling": False})
+
+    def settle():  # CPU culling: what a frame asks for loads by the next
+        for _ in range(40):
+            call("ping")
+            frame = tool("get_render_settings")["last_frame"]
+            if frame["streaming"]["waiting"] == 0 and frame["streaming"]["streamed_in"] == 0:
+                return frame
+        return frame
+
+    for position, look_at in flight_path(6):
+        tool("set_camera", {"position": position, "look_at": look_at})
+        frame = settle()
+        check(frame["draws"] == 2 and frame["post_draws"] == 3,
+              f"20,000 pieces still take one raster pass, one shading pass and 3 anti-aliasing passes, got {frame}")
+        check(frame["materials"] == materials, f"{materials} shared materials, got {frame['materials']}")
+        check(not frame["overflow"], f"nothing dropped, got {frame}")
+        check(frame["streaming"]["waiting"] == 0, f"all detail in view loaded (no late sharpening), got {frame}")
+    tool("set_render_settings", {"antialiasing": False})
+    call("ping")
+    check(tool("get_render_settings")["last_frame"]["post_draws"] == 0, "anti-aliasing turns off")
+    tool("set_render_settings", {"antialiasing": True, "gpu_culling": True})
+    if tool("get_engine_info")["backend"] != "null":
+        # Popping: small steps down the street change the image a little each time, evenly.
+        # This only catches large jumps (detail switching across much of the view, e.g. a
+        # whole level or the pool being flushed); the error bound (under a pixel) and the
+        # "nothing left waiting" checks above cover the fine scale.
+        changes, previous = [], None
+        for step in range(5):
+            z = -20.0 - step * 0.2
+            tool("set_camera", {"position": [STREET_X, 1.8, z], "look_at": [STREET_X, 1.6, z - 30]})
+            for _ in range(6):
+                call("ping")
+            shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 480}})
+            image = [c for c in shot["content"] if c["type"] == "image"][0]
+            width, height, pixels = decode_png(base64.b64decode(image["data"]))
+            # The middle of the viewport, away from the panels' changing numbers.
+            rows = range(int(height * 0.2), int(height * 0.6))
+            cols = range(int(width * 0.3), int(width * 0.65))
+            region = [pixels[(y * width + x) * 4 + c] for y in rows for x in cols for c in range(3)]
+            if previous is not None:
+                changes.append(sum(abs(a - b) for a, b in zip(region, previous)) / len(region))
+            previous = region
+        check(max(changes) <= 3 * min(changes) + 1.5, f"the view changes evenly while moving, got {changes}")
+    tool("new_scene")
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -371,6 +427,7 @@ def main() -> int:
         build_scene(tool, call, check)
         lod_gate(tool, call, check)
         kit_gate(tool, call, check)
+        n1_gate(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
         if sample:

@@ -57,7 +57,8 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     add(registry,
         {"get_engine_info",
          "Describes the running editor: version, graphics backend and adapter, whether the GPU "
-         "validation layer runs, frames completed, the last frame's draw counts and the window size in pixels.",
+         "validation layer runs, frames completed, the last frame's draw counts, frame times over the last 240 frames (average, median, 99th percentile, worst, hitches: frames 1.5x the median and 2 ms over it, and the times themselves, oldest first; wall clock, so vsync and "
+         "time spent running commands count) and the window size in pixels.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              const auto& adapter = state.device->adapter();
@@ -74,6 +75,14 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                                   {"scene_clusters", state.scene_stats.clusters},
                                   {"scene_triangles", state.scene_stats.triangles},
                                   {"gpu_draws", state.device->last_frame_stats().draws}}},
+                  {"frame_times", {{"frames", state.frame_times.size()},
+                                   {"average_ms", state.frame_times.average()},
+                                   {"worst_ms", state.frame_times.worst()},
+                                   {"median_ms", state.frame_times.percentile(0.5f)},
+                                   {"p99_ms", state.frame_times.percentile(0.99f)},
+                                   {"hitches", state.frame_times.hitches()},
+                                   {"recorded", state.frame_times.count},
+                                   {"recent_ms", state.frame_times.in_order()}}},
                   {"window", {{"pixel_width", state.window->pixel_width()},
                               {"pixel_height", state.window->pixel_height()},
                               {"point_width", state.window->point_width()},

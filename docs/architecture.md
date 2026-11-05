@@ -153,6 +153,16 @@ an offline cooker can use it without a device.
   ring, seeded splat and cracks), anti-aliased to the pixel's footprint;
   image stamps arrive with textures. Surfaces facing away from the stamp
   take none of it, and the box's top and bottom fade out.
+- **Anti-aliasing (N1 part 6, `src/smaa.h`, `shaders/smaa.slang`).** No
+  temporal anti-aliasing: nothing uses earlier frames, so the image is as
+  sharp moving as standing still. Edges: SMAA 1x (High preset, no diagonal
+  search) runs after shading in three full-screen passes (edges from luma,
+  blend weights from SMAA's area and search tables, then the blend into the
+  target); `RenderStats::post_draws` counts them. It is skipped in debug
+  views. Shading renders into its own sRGB image first. Specular: in the
+  shading pass, the change in normal across each 2x2 pixel quad (same
+  instance only) widens the GGX roughness (Kaplanyan-Hoffman style, capped),
+  so highlights on tight curves stay stable instead of flickering.
 - **CPU path.** `gpu_culling = false` chooses the cut on the CPU (frustum
   only) and feeds the same raster and shading passes; tests use it for
   exact counts.
@@ -172,6 +182,21 @@ lines and far-ring destruction. It is owned by `world` (edits) and mirrored on
 the GPU by `render` (drawing and lighting).
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
+
+Frame pacing counts as much as the average (AGENTS.md rule 9). Performance
+gates check the 99th percentile frame and count hitches (frames half again
+over the target frame time). Where it stands:
+
+- Done: no shader compiles at run time (shaders are built ahead) and every
+  pipeline is created at load (`Renderer::init`, the device's UI pipeline).
+  The C# GC runs in background, sustained low latency mode, and the script
+  host does not allocate per frame.
+- Known gaps, to close with world streaming (N2): buffers created with
+  initial data wait for the GPU (`submit_immediate`), which happens mid-frame
+  when the streamer grows its group table or a mesh is added; terminal
+  cluster groups load regardless of the per-frame budget; the 32 MiB per
+  frame streaming budget itself is untimed; mesh import reads and clusters
+  files on the main thread (editor only today).
 
 | GPU work | Budget |
 | --- | --- |

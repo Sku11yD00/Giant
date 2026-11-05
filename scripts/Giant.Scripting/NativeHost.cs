@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
@@ -51,6 +52,11 @@ public static unsafe class NativeHost
         }
         s_api = *(NativeApi*)api;
         s_mainThread = Environment.CurrentManagedThreadId;
+        // Fewer garbage collector pauses: full collections run in the
+        // background instead of blocking (unless memory runs short). Young
+        // collections still pause, which is why scripts must not allocate
+        // every frame.
+        GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
         return 0;
     }
 
@@ -90,12 +96,12 @@ public static unsafe class NativeHost
         }
         try
         {
-            ScriptSet scripts = s_scripts;
-            RunScripts(() =>
+            // A static lambda with its state passed in: no allocation per frame.
+            RunScripts(static (scripts, delta) =>
             {
                 s_context?.Drain(); // continuations of earlier awaits first
-                scripts.Update(deltaSeconds);
-            });
+                scripts.Update(delta);
+            }, s_scripts, deltaSeconds);
             return 0;
         }
         catch (Exception e)
@@ -162,14 +168,16 @@ public static unsafe class NativeHost
         }
     }
 
-    private static void RunScripts(Action action)
+    private static void RunScripts(Action action) => RunScripts(static (a, _) => a(), action, 0);
+
+    private static void RunScripts<T>(Action<T, float> action, T state, float value)
     {
         SynchronizationContext? previous = SynchronizationContext.Current;
         SynchronizationContext.SetSynchronizationContext(s_context);
         s_busy = true;
         try
         {
-            action();
+            action(state, value);
         }
         finally
         {
@@ -287,14 +295,15 @@ internal sealed class ScriptSet
         NativeHost.Log(1, $"loaded {_scripts.Count} script(s) from {Path.GetFileName(full)}");
     }
 
-    public void Start() => Each("OnStart", s => s.OnStart());
+    public void Start() => Each("OnStart", static (s, _) => s.OnStart(), 0f);
 
-    public void Update(float deltaSeconds) => Each("OnUpdate", s => s.OnUpdate(deltaSeconds));
+    // Static lambdas with the state passed in: nothing allocates per frame.
+    public void Update(float deltaSeconds) => Each("OnUpdate", static (s, delta) => s.OnUpdate(delta), deltaSeconds);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     public WeakReference Stop()
     {
-        Each("OnStop", s => s.OnStop());
+        Each("OnStop", static (s, _) => s.OnStop(), 0f);
         _scripts.Clear();
         _stopped.Clear();
         var weak = new WeakReference(_context);
@@ -303,7 +312,7 @@ internal sealed class ScriptSet
         return weak;
     }
 
-    private void Each(string what, Action<Script> action)
+    private void Each(string what, Action<Script, float> action, float value)
     {
         foreach (Script script in _scripts)
         {
@@ -313,7 +322,7 @@ internal sealed class ScriptSet
             }
             try
             {
-                action(script);
+                action(script, value);
             }
             catch (Exception e)
             {

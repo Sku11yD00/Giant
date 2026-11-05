@@ -28,8 +28,8 @@ struct ResolvePush {
     uint entry_offset;
     uint tile_columns; // 0: no decals
     uint tile_rows;
+    uint specular_aa;  // 1: widen highlights where normals change quickly
     uint pad0;
-    uint pad1;
 };
 ConstantBuffer<ResolvePush> push : register(b0);
 
@@ -105,14 +105,28 @@ float3 barycentrics(float3 dir, float3 a, float3 b, float3 c) {
     return w / max(w.x + w.y + w.z, 1e-12);
 }
 
-[shader("pixel")]
-float4 ps_main(float4 position : SV_Position) : SV_Target {
-    const uint2 pixel = uint2(position.xy);
-    const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
-    if (vis.x == 0) {
-        return float4(push.background.rgb, 1.0);
-    }
-    const Frame f = load_frame(push.frame, push.frame_offset);
+// What a pixel shows, rebuilt from the visibility buffer.
+struct Hit {
+    float3 world;  // camera-relative
+    float3 n;      // unit
+    uint instance; // into the frame's instances
+    uint material;
+    uint cluster;  // the visible list's cluster index
+    uint level;
+};
+
+Hit no_hit() {
+    Hit h;
+    h.world = float3(0.0, 0.0, 0.0);
+    h.n = float3(0.0, 1.0, 0.0);
+    h.instance = 0xFFFFFFFFu;
+    h.material = 0;
+    h.cluster = 0;
+    h.level = 0;
+    return h;
+}
+
+Hit surface_at(Frame f, float4 position, uint2 vis) {
     const uint2 entry = read_buffer(push.visible).Load2(push.visible_offset + (vis.x - 1) * 8);
     const Instance inst = load_instance(read_buffer(push.instances), push.instance_offset + entry.x * k_instance_bytes);
     const MeshEntry mesh = load_mesh(read_buffer(push.meshes), push.mesh_offset + inst.mesh * k_mesh_bytes);
@@ -132,14 +146,63 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float3 object_normal = cluster_normal(pool, geometry, cluster, corners.x) * w.x +
                                  cluster_normal(pool, geometry, cluster, corners.y) * w.y +
                                  cluster_normal(pool, geometry, cluster, corners.z) * w.z;
-    const float3 n = safe_normalize(to_world_normal(inst, object_normal), float3(0.0, 1.0, 0.0));
-    const float3 world = a * w.x + b * w.y + c * w.z;
+    Hit h;
+    h.n = safe_normalize(to_world_normal(inst, object_normal), float3(0.0, 1.0, 0.0));
+    h.world = a * w.x + b * w.y + c * w.z;
+    h.instance = entry.x;
+    h.material = inst.material;
+    h.cluster = entry.y;
+    h.level = cluster.level;
+    return h;
+}
+
+// Specular anti-aliasing (Tokuyoshi and Kaplanyan, "Improved Geometric
+// Specular Antialiasing", 2019): where the normal changes quickly across
+// the pixel's footprint, the highlight is widened to what the pixel really
+// covers, so fine bumps and far-off curves do not sparkle or crawl. The
+// change is measured against the neighbouring pixels of the 2x2 quad on the
+// same instance, so silhouettes do not count.
+static const float k_specular_aa_variance = 0.25; // the pixel filter's variance
+static const float k_specular_aa_limit = 0.18;    // the most roughness^4 it may add
+
+float normal_variance(float3 n, uint instance) {
+    const float3 nx = QuadReadAcrossX(n);
+    const float3 ny = QuadReadAcrossY(n);
+    const uint ix = QuadReadAcrossX(instance);
+    const uint iy = QuadReadAcrossY(instance);
+    float v = 0.0;
+    if (ix == instance) {
+        v += dot(nx - n, nx - n);
+    }
+    if (iy == instance) {
+        v += dot(ny - n, ny - n);
+    }
+    return v;
+}
+
+[shader("pixel")]
+float4 ps_main(float4 position : SV_Position) : SV_Target {
+    const uint2 pixel = uint2(position.xy);
+    const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const bool hit = vis.x != 0;
+    Hit s = no_hit();
+    if (hit) {
+        s = surface_at(f, position, vis);
+    }
+    // Every pixel of the quad reaches this, drawn or not.
+    const float variance = normal_variance(s.n, s.instance);
+    if (!hit) {
+        return float4(push.background.rgb, 1.0);
+    }
+    const float3 n = s.n;
+    const float3 world = s.world;
 
     if (f.debug_view != 0) {
         // Flat colour shaded just enough to read the shape.
-        const float3 col = f.debug_view == 1 ? hash_color(entry.y)
-                         : f.debug_view == 2 ? level_color(cluster.level)
-                                             : hash_color(entry.y * 131u + vis.y);
+        const float3 col = f.debug_view == 1 ? hash_color(s.cluster)
+                         : f.debug_view == 2 ? level_color(s.level)
+                                             : hash_color(s.cluster * 131u + vis.y);
         const float shade = 0.35 + 0.65 * saturate(dot(n, f.sun_direction.xyz) * 0.5 + 0.5);
         return float4(col * shade, 1.0);
     }
@@ -150,7 +213,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     // The instance's material (the CPU keeps the index in range), then
     // the decals over this pixel.
     ByteAddressBuffer materials = read_buffer(push.materials);
-    const uint material_at = push.material_offset + min(inst.material, push.material_count) * 32;
+    const uint material_at = push.material_offset + min(s.material, push.material_count) * 32;
     const float4 base_roughness = load4(materials, material_at);
     const float4 emissive_metallic = load4(materials, material_at + 16);
     float3 base = base_roughness.rgb;
@@ -162,7 +225,11 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
                  push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
     // Clamped so a mirror-smooth surface keeps a visible, stable highlight.
     const float roughness = clamp(rough, 0.045, 1.0);
-    const float alpha = roughness * roughness;
+    float alpha = roughness * roughness;
+    if (push.specular_aa != 0) {
+        const float kernel = min(2.0 * k_specular_aa_variance * variance, k_specular_aa_limit);
+        alpha = sqrt(saturate(alpha * alpha + kernel));
+    }
     const float metallic = saturate(metal);
     const float3 f0 = lerp(float3(0.04, 0.04, 0.04), base, metallic);
     const float3 diffuse_color = base * (1.0 - metallic);

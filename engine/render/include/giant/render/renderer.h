@@ -132,6 +132,12 @@ struct RenderSettings {
     // Draw with mesh shaders where the GPU has them (off: the vertex
     // shader fallback, as on GPUs without them).
     bool mesh_shaders = true;
+    // Smooths jagged geometry edges from the finished image (SMAA 1x): no
+    // history, so the image stays as sharp moving as standing still.
+    bool antialiasing = true;
+    // Widens shiny highlights where the surface curves faster than a pixel
+    // can show, so they do not sparkle or crawl.
+    bool specular_antialiasing = true;
 };
 
 struct FrameInput {
@@ -146,6 +152,7 @@ struct FrameInput {
 struct RenderStats {
     u32 instances = 0; // with at least one cluster drawn (GPU culling: passing instance culling)
     u32 draws = 0;     // draw calls this frame (raster passes and shading)
+    u32 post_draws = 0; // full-screen passes after shading (anti-aliasing): fixed, not per object
     u32 clusters = 0;
     u32 triangles = 0;
     // GPU culling: the counts above come from the GPU, from a frame or two
@@ -246,6 +253,7 @@ private:
     void cull_on_gpu(rhi::CommandList& cmd, const FrameData& data);
     void raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bool gpu);
     void build_hzb(rhi::CommandList& cmd);
+    void smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3& background); // after shading, into target
     void read_stats_slot(u32 slot);
     void copy_streaming_stats();
 
@@ -266,10 +274,18 @@ private:
     rhi::PipelineHandle m_cull_retest;
     rhi::PipelineHandle m_hzb_first;
     rhi::PipelineHandle m_hzb_down;
+    rhi::PipelineHandle m_smaa_edges;
+    rhi::PipelineHandle m_smaa_weights;
+    rhi::PipelineHandle m_smaa_blend;
+    rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables
+    rhi::TextureHandle m_smaa_search;
     // Targets, sized to the frame.
     rhi::TextureHandle m_depth;
     rhi::TextureHandle m_vis; // visibility buffer (rg32_uint)
     rhi::BufferHandle m_hzb;  // depth pyramid
+    rhi::TextureHandle m_color;   // shaded image before anti-aliasing (rgba8_srgb)
+    rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
+    rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)
     u32 m_width = 0;
     u32 m_height = 0;
     u32 m_hzb_width = 0;

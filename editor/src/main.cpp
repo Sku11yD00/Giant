@@ -386,6 +386,7 @@ int run(const Options& options) {
         const float delta = std::chrono::duration<float>(frame_start - last_frame).count();
         last_frame = frame_start;
         frame_info.frame_ms = 1000.0f * delta;
+        state.frame_times.add(frame_info.frame_ms);
 
         scripts.update(delta);
 

@@ -164,6 +164,7 @@ GIANT_TEST("commands: history is capped and listed oldest first") {
     const auto redo = f.registry.redo_history();
     GIANT_CHECK(redo.size() == 2);
     GIANT_CHECK(redo.front().args["value"] == static_cast<int>(CommandRegistry::k_max_history) + 9);
+    GIANT_CHECK(f.registry.undo_names().size() == history.size() - 2);
     const CommandResult listed = f.registry.execute("get_history");
     GIANT_CHECK(listed.ok && listed.value["redo"].size() == 2);
 }
@@ -239,4 +240,22 @@ GIANT_TEST("commands: game logic can change things without touching the undo his
     GIANT_CHECK(f.registry.execute("set_value", {{"value", 9}}, {0, false}).ok);
     GIANT_CHECK(f.value == 9);
     GIANT_CHECK(f.registry.undo_history().size() == 1);
+}
+
+GIANT_TEST("commands: history names come in the same order as the history") {
+    Fixture f;
+    // A second undoable command, so the order shows.
+    GIANT_CHECK(f.registry.add({"bump_value", "Adds one.", Json{{"type", "object"}}, false,
+                                [&f](const Json&, CommandContext& context) {
+                                    ++f.value;
+                                    context.record({[&f] { --f.value; }, [&f] { ++f.value; }});
+                                    return CommandResult::success({});
+                                }}));
+    GIANT_CHECK(f.registry.execute("set_value", {{"value", 3}}).ok);
+    GIANT_CHECK(f.registry.execute("bump_value").ok);
+    GIANT_CHECK((f.registry.undo_names() == std::vector<std::string>{"set_value", "bump_value"}));
+    GIANT_CHECK(f.registry.undo() && f.registry.undo());
+    // Next to redo first, as redo_history.
+    GIANT_CHECK((f.registry.redo_names() == std::vector<std::string>{"set_value", "bump_value"}));
+    GIANT_CHECK(f.registry.redo_history().front().command == "set_value");
 }
