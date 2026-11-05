@@ -45,8 +45,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+// clang-format off
+#include <windows.h> // before shellapi.h, which needs its types
 #include <shellapi.h>
-#include <windows.h>
+// clang-format on
 #endif
 
 namespace {
