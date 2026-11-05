@@ -257,7 +257,7 @@ def kit_gate(tool, call, check):
     check(len(placed["ids"]) == 200, "200 houses placed")
     check(tool("list_kits")["kits"][0]["placements"] == 200, "the kit knows its placements")
     tool("create_entity", {"name": "Glow", "shape": "decal", "position": [0, 0, -6], "scale": [8, 1, 8],
-                           "base_color": [0, 0, 0], "emissive": [4, 0, 0], "decal": {"shape": "disc"}})
+                           "base_color": [0, 0, 0], "emissive": [1, 0, 0], "decal": {"shape": "disc"}})
     tool("set_camera", {"position": [0, 6, 2], "look_at": [0, 0, -6]})
     tool("set_render_settings", {"gpu_culling": False})
     for _ in range(4):
@@ -276,7 +276,8 @@ def kit_gate(tool, call, check):
         # The glowing decal is where the camera looks (as the tower check).
         x, y = width // 2, height // 2
         r, g, b, _ = pixels[(y * width + x) * 4:(y * width + x) * 4 + 4]
-        check(r > 150 and g < 90 and b < 90, f"the decal glows red on the ground, got {(r, g, b)}")
+        # Red well above the rest (the tone mapper whitens bright highlights).
+        check(r > 150 and r - g > 60 and r - b > 60, f"the decal glows red on the ground, got {(r, g, b)}")
     tool("undo")  # the decal
     check(tool("list_entities")["count"] == 201, "undo removes the decal")
     tool("new_scene")
