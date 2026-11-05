@@ -79,6 +79,21 @@ std::vector<u8> encode_clear(Format format, const Color& color, float depth) {
     return px;
 }
 
+// Repeats one pixel over the whole image, doubling the copied block each
+// step (a per-pixel loop is far too slow for a 4K target in debug builds).
+void fill(std::vector<u8>& image, const std::vector<u8>& pixel) {
+    if (pixel.empty() || image.size() < pixel.size()) {
+        return;
+    }
+    std::memcpy(image.data(), pixel.data(), pixel.size());
+    usize filled = pixel.size();
+    while (filled < image.size()) {
+        const usize n = std::min(filled, image.size() - filled);
+        std::memcpy(image.data() + filled, image.data(), n);
+        filled += n;
+    }
+}
+
 class NullDevice;
 
 class NullSwapChain final : public SwapChain {
@@ -486,10 +501,7 @@ void NullCommandList::begin_render_pass(const RenderPassDesc& desc) {
         barrier(target.texture, ResourceState::render_target);
         m_pass_colors[i] = t->desc.format;
         if (target.load == LoadOp::clear) {
-            const std::vector<u8> px = encode_clear(t->desc.format, target.clear, 0.0f);
-            for (usize at = 0; at + px.size() <= t->pixels.size(); at += px.size()) {
-                std::copy(px.begin(), px.end(), t->pixels.begin() + static_cast<std::ptrdiff_t>(at));
-            }
+            fill(t->pixels, encode_clear(t->desc.format, target.clear, 0.0f));
         }
     }
     m_pass_color_count = desc.color_count;
@@ -503,11 +515,7 @@ void NullCommandList::begin_render_pass(const RenderPassDesc& desc) {
             barrier(desc.depth.texture, ResourceState::depth_write);
             m_pass_depth = t->desc.format;
             if (desc.depth.load == LoadOp::clear) {
-                const std::vector<u8> px = encode_clear(t->desc.format, {}, desc.depth.clear_depth);
-                for (usize at = 0; at + px.size() <= t->pixels.size(); at += px.size()) {
-                    std::copy(px.begin(), px.end(),
-                              t->pixels.begin() + static_cast<std::ptrdiff_t>(at));
-                }
+                fill(t->pixels, encode_clear(t->desc.format, {}, desc.depth.clear_depth));
             }
         }
     }

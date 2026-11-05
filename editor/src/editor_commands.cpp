@@ -22,7 +22,7 @@ using ai::Json;
 
 constexpr const char* k_version = "0.1.0";
 
-Json color_to_json(const rhi::Color& c) { return {{"r", c.r}, {"g", c.g}, {"b", c.b}}; }
+Json color_to_json(const Vec3& c) { return {{"r", c.x}, {"g", c.y}, {"b", c.z}}; }
 
 void add(ai::CommandRegistry& registry, ai::CommandDesc desc) {
     const bool added = registry.add(std::move(desc));
@@ -42,15 +42,19 @@ const char* mcp_instructions() {
     return "This is the Giant Engine editor. Every tool is an editor command; changes made "
            "through tools can be reverted with `undo` and repeated with `redo`, and "
            "`get_history` lists them. Read state with the get_* tools before changing it. "
-           "Colours are linear (not sRGB), each channel 0 to 1. Check `get_log` after a change "
-           "for warnings and errors.";
+           "Build scenes with create_entities (many at once) or create_entity, change them with "
+           "set_entity and set_lighting, frame them with set_camera (look_at is easiest) and "
+           "check the result with capture_screenshot. Units are metres and degrees; +Y is up, "
+           "-Z is north. Colours are linear (not sRGB), each channel 0 to 1. Check `get_log` "
+           "after a change for warnings and errors.";
 }
 
 void register_editor_commands(ai::CommandRegistry& registry, EditorState& state) {
+    register_scene_commands(registry, state);
     add(registry,
         {"get_engine_info",
          "Describes the running editor: version, graphics backend and adapter, whether the GPU "
-         "validation layer runs, frames presented and the window size in pixels.",
+         "validation layer runs, frames completed, the last frame's draw counts and the window size in pixels.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              const auto& adapter = state.device->adapter();
@@ -62,6 +66,9 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                   {"meets_minimum_spec", adapter.meets_minimum_spec()},
                   {"validation_enabled", state.device->validation_enabled()},
                   {"frames_completed", state.device->frames_completed()},
+                  {"last_frame", {{"scene_draws", state.scene_draws},
+                                  {"scene_instances", state.scene_instances},
+                                  {"gpu_draws", state.device->last_frame_stats().draws}}},
                   {"window", {{"pixel_width", state.window->pixel_width()},
                               {"pixel_height", state.window->pixel_height()},
                               {"point_width", state.window->point_width()},
@@ -93,16 +100,19 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
          }});
 
     add(registry,
-        {"get_clear_color", "Returns the viewport background colour (linear RGB, 0 to 1).",
+        {"get_clear_color",
+         "Returns the viewport background colour: the scene's sky colour (linear RGB, 0 to 1). "
+         "get_lighting has the rest of the lighting.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
-             return CommandResult::success(color_to_json(state.clear_color));
+             return CommandResult::success(color_to_json(state.scene.lighting.sky_color));
          }});
 
     add(registry,
         {"set_clear_color",
-         "Sets the viewport background colour, in linear RGB with each channel from 0 to 1 "
-         "(the screen shows it sRGB-encoded). Undoable.",
+         "Sets the viewport background colour, which is the scene's sky colour (it also lights "
+         "surfaces from above), in linear RGB with each channel from 0 to 1. Same as "
+         "set_lighting with sky_color. Undoable.",
          Json::parse(R"({"type": "object", "additionalProperties": false,
              "required": ["r", "g", "b"], "properties": {
              "r": {"type": "number", "minimum": 0, "maximum": 1},
@@ -110,12 +120,12 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
              "b": {"type": "number", "minimum": 0, "maximum": 1}}})"),
          false,
          [&state](const Json& args, CommandContext& context) {
-             const rhi::Color before = state.clear_color;
-             const rhi::Color after{args["r"].get<float>(), args["g"].get<float>(),
-                                    args["b"].get<float>(), 1.0f};
-             state.clear_color = after;
-             context.record({[&state, before] { state.clear_color = before; },
-                             [&state, after] { state.clear_color = after; }});
+             const Vec3 before = state.scene.lighting.sky_color;
+             const Vec3 after{args["r"].get<float>(), args["g"].get<float>(),
+                              args["b"].get<float>()};
+             state.scene.lighting.sky_color = after;
+             context.record({[&state, before] { state.scene.lighting.sky_color = before; },
+                             [&state, after] { state.scene.lighting.sky_color = after; }});
              return CommandResult::success(color_to_json(after));
          }});
 

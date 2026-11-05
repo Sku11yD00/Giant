@@ -17,6 +17,8 @@ namespace giant::editor {
 struct FrameInfo {
     float frame_ms = 0.0f;
     u32 ui_draw_calls = 0;
+    u32 scene_draws = 0;
+    u32 scene_instances = 0;
 };
 
 class EditorPanels {
@@ -29,7 +31,10 @@ public:
 
 private:
     void draw_menu_bar();
-    void draw_scene_settings();
+    void draw_scene_settings(); // the Scene panel: outliner, properties, lighting
+    void draw_outliner();
+    void draw_properties();
+    void draw_lighting();
     void draw_log();
     void draw_commands();
     void draw_engine(const FrameInfo& frame);

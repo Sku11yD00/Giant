@@ -36,6 +36,9 @@ public:
     // True when the UI wants the keyboard (a text field has focus), so
     // shortcuts and game input should leave it alone.
     bool wants_keyboard() const;
+    // True when the pointer is over a panel (or a panel is being dragged),
+    // so clicks belong to the UI rather than the 3D viewport.
+    bool wants_mouse() const;
 
     struct ConstructKey {
     private:

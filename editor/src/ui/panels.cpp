@@ -6,7 +6,9 @@
 #include <imgui_internal.h> // DockBuilder, for the first-run layout
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace giant::editor {
 
@@ -145,21 +147,186 @@ void EditorPanels::draw_menu_bar() {
     ImGui::EndMainMenuBar();
 }
 
+namespace {
+ai::Json triple_json(const float v[3]) { return ai::Json::array({v[0], v[1], v[2]}); }
+ai::Json triple_json(const Vec3& v) { return ai::Json::array({v.x, v.y, v.z}); }
+} // namespace
+
 void EditorPanels::draw_scene_settings() {
     if (ImGui::Begin(k_scene, &m_show_scene)) {
-        ImGui::SeparatorText("Viewport");
-        float color[3] = {m_state.clear_color.r, m_state.clear_color.g, m_state.clear_color.b};
-        // The command takes linear colour; the picker shows it as such.
-        if (ImGui::ColorEdit3("Background", color, ImGuiColorEditFlags_Float)) {
-            run("set_clear_color",
-                {{"r", std::clamp(color[0], 0.0f, 1.0f)},
-                 {"g", std::clamp(color[1], 0.0f, 1.0f)},
-                 {"b", std::clamp(color[2], 0.0f, 1.0f)}},
-                edit_group());
-        }
-        ImGui::TextDisabled("Linear RGB. Undo with Ctrl+Z.");
+        draw_outliner();
+        draw_properties();
+        draw_lighting();
     }
     ImGui::End();
+}
+
+void EditorPanels::draw_outliner() {
+    ImGui::SeparatorText("Entities");
+    for (const auto& [label, shape] : {std::pair{"+ Cube", "cube"}, std::pair{"+ Sphere", "sphere"},
+                                       std::pair{"+ Plane", "plane"}}) {
+        if (ImGui::SmallButton(label)) {
+            // In front of the camera, so it shows up where the person looks.
+            const EditorCamera& c = m_state.camera;
+            const Quat q = quat_from_euler({c.pitch_degrees, c.yaw_degrees, 0.0f});
+            const Vec3 ahead = rotate(q, {0.0f, 0.0f, -5.0f});
+            const DVec3 at = c.position + DVec3{ahead.x, ahead.y, ahead.z};
+            const ai::CommandResult result = m_commands.execute(
+                "create_entity", {{"shape", shape}, {"position", {at.x, at.y, at.z}}}, {});
+            if (result.ok) {
+                m_state.selected = result.value["id"].get<world::EntityId>();
+            } else {
+                log_warning("editor", "create_entity: " + result.error);
+            }
+        }
+        ImGui::SameLine();
+    }
+    ImGui::BeginDisabled(m_state.selected == 0);
+    if (ImGui::SmallButton("Delete")) {
+        run("delete_entities", {{"ids", {m_state.selected}}});
+    }
+    ImGui::EndDisabled();
+
+    const auto& entities = m_state.scene.entities();
+    if (ImGui::BeginChild("outliner", ImVec2(0, 160), ImGuiChildFlags_Borders)) {
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(entities.size()));
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                const world::Entity& e = entities[static_cast<usize>(i)];
+                ImGui::PushID(static_cast<int>(e.id));
+                const std::string label = e.name.empty() ? "(unnamed)" : e.name;
+                if (ImGui::Selectable(label.c_str(), e.id == m_state.selected)) {
+                    m_state.selected = e.id; // selection is view state
+                }
+                if (!e.visible) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(hidden)");
+                }
+                ImGui::PopID();
+            }
+        }
+        if (entities.empty()) {
+            ImGui::TextDisabled("Empty scene. Add a shape above, or ask the AI to build one.");
+        }
+    }
+    ImGui::EndChild();
+}
+
+void EditorPanels::draw_properties() {
+    const world::Entity* e = m_state.scene.find(m_state.selected);
+    if (e == nullptr) {
+        return;
+    }
+    ImGui::SeparatorText("Selected");
+    const ai::Json id = e->id;
+    const auto set = [this, &id](const char* field, ai::Json value) {
+        run("set_entity", {{"id", id}, {field, std::move(value)}}, edit_group());
+    };
+
+    std::array<char, 129> name{};
+    std::snprintf(name.data(), name.size(), "%s", e->name.c_str());
+    if (ImGui::InputText("Name", name.data(), name.size(), ImGuiInputTextFlags_EnterReturnsTrue)) {
+        set("name", std::string(name.data()));
+    }
+    int shape = static_cast<int>(e->shape);
+    const char* const shapes[] = {"cube", "sphere", "plane"};
+    if (ImGui::Combo("Shape", &shape, shapes, IM_ARRAYSIZE(shapes))) {
+        set("shape", shapes[shape]);
+    }
+    double position[3] = {e->transform.position.x, e->transform.position.y,
+                          e->transform.position.z};
+    if (ImGui::DragScalarN("Position", ImGuiDataType_Double, position, 3, 0.05f, nullptr, nullptr,
+                           "%.3f")) {
+        set("position", {position[0], position[1], position[2]});
+    }
+    const EulerDegrees r = euler_from_quat(e->transform.rotation);
+    float rotation[3] = {r.pitch, r.yaw, r.roll};
+    if (ImGui::DragFloat3("Rotation", rotation, 0.5f, -360.0f, 360.0f, "%.1f")) {
+        set("rotation", {{"pitch", rotation[0]}, {"yaw", rotation[1]}, {"roll", rotation[2]}});
+    }
+    float scale[3] = {e->transform.scale.x, e->transform.scale.y, e->transform.scale.z};
+    if (ImGui::DragFloat3("Scale", scale, 0.02f, 0.0001f, 1e6f, "%.3f")) {
+        for (float& v : scale) {
+            v = std::max(v, 0.0001f);
+        }
+        set("scale", triple_json(scale));
+    }
+    float color[3] = {e->material.base_color.x, e->material.base_color.y, e->material.base_color.z};
+    if (ImGui::ColorEdit3("Base colour", color, ImGuiColorEditFlags_Float)) {
+        for (float& v : color) {
+            v = std::clamp(v, 0.0f, 1.0f);
+        }
+        set("base_color", triple_json(color));
+    }
+    float roughness = e->material.roughness;
+    if (ImGui::SliderFloat("Roughness", &roughness, 0.0f, 1.0f)) {
+        set("roughness", std::clamp(roughness, 0.0f, 1.0f));
+    }
+    float metallic = e->material.metallic;
+    if (ImGui::SliderFloat("Metallic", &metallic, 0.0f, 1.0f)) {
+        set("metallic", std::clamp(metallic, 0.0f, 1.0f));
+    }
+    float emissive[3] = {e->material.emissive.x, e->material.emissive.y, e->material.emissive.z};
+    if (ImGui::ColorEdit3("Emissive", emissive, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR)) {
+        for (float& v : emissive) {
+            v = std::clamp(v, 0.0f, 1000.0f);
+        }
+        set("emissive", triple_json(emissive));
+    }
+    bool visible = e->visible;
+    if (ImGui::Checkbox("Visible", &visible)) {
+        set("visible", visible);
+    }
+}
+
+void EditorPanels::draw_lighting() {
+    ImGui::SeparatorText("Lighting");
+    const world::Lighting& l = m_state.scene.lighting;
+    const auto set = [this](const char* field, ai::Json value) {
+        run("set_lighting", {{field, std::move(value)}}, edit_group());
+    };
+    float elevation = l.sun_elevation_degrees;
+    if (ImGui::SliderFloat("Sun height", &elevation, -90.0f, 90.0f, "%.1f deg")) {
+        set("sun_elevation_degrees", std::clamp(elevation, -90.0f, 90.0f));
+    }
+    float azimuth = l.sun_azimuth_degrees;
+    if (ImGui::SliderFloat("Sun direction", &azimuth, 0.0f, 360.0f, "%.1f deg")) {
+        set("sun_azimuth_degrees", std::clamp(azimuth, 0.0f, 360.0f));
+    }
+    float sun_color[3] = {l.sun_color.x, l.sun_color.y, l.sun_color.z};
+    if (ImGui::ColorEdit3("Sun colour", sun_color, ImGuiColorEditFlags_Float)) {
+        set("sun_color", triple_json(Vec3{std::clamp(sun_color[0], 0.0f, 1.0f),
+                                          std::clamp(sun_color[1], 0.0f, 1.0f),
+                                          std::clamp(sun_color[2], 0.0f, 1.0f)}));
+    }
+    float sun = l.sun_intensity;
+    if (ImGui::SliderFloat("Sun strength", &sun, 0.0f, 20.0f)) {
+        set("sun_intensity", std::clamp(sun, 0.0f, 100.0f));
+    }
+    float sky[3] = {l.sky_color.x, l.sky_color.y, l.sky_color.z};
+    if (ImGui::ColorEdit3("Sky colour", sky, ImGuiColorEditFlags_Float)) {
+        set("sky_color", triple_json(Vec3{std::clamp(sky[0], 0.0f, 1.0f),
+                                          std::clamp(sky[1], 0.0f, 1.0f),
+                                          std::clamp(sky[2], 0.0f, 1.0f)}));
+    }
+    float ground[3] = {l.ground_color.x, l.ground_color.y, l.ground_color.z};
+    if (ImGui::ColorEdit3("Ground bounce", ground, ImGuiColorEditFlags_Float)) {
+        set("ground_color", triple_json(Vec3{std::clamp(ground[0], 0.0f, 1.0f),
+                                             std::clamp(ground[1], 0.0f, 1.0f),
+                                             std::clamp(ground[2], 0.0f, 1.0f)}));
+    }
+    float ambient = l.ambient_intensity;
+    if (ImGui::SliderFloat("Ambient", &ambient, 0.0f, 5.0f)) {
+        set("ambient_intensity", std::clamp(ambient, 0.0f, 100.0f));
+    }
+    float exposure = l.exposure;
+    if (ImGui::SliderFloat("Exposure", &exposure, 0.05f, 8.0f, "%.2f",
+                           ImGuiSliderFlags_Logarithmic)) {
+        set("exposure", std::clamp(exposure, 0.01f, 100.0f));
+    }
+    ImGui::TextDisabled("Colours are linear. Undo with Ctrl+Z.");
+    ImGui::TextDisabled("Fly: hold right mouse, W A S D, Q / E, Shift.");
 }
 
 void EditorPanels::draw_log() {
@@ -268,6 +435,7 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::Text("Validation layer: %s", m_state.device->validation_enabled() ? "on" : "off");
         ImGui::SeparatorText("Frame");
         ImGui::Text("Frame time: %.2f ms", static_cast<double>(frame.frame_ms));
+        ImGui::Text("Scene: %u instances in %u draws", frame.scene_instances, frame.scene_draws);
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),
                     m_state.window->pixel_height());

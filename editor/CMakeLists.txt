@@ -1,10 +1,13 @@
 add_executable(giant_editor
   src/main.cpp
   src/editor_commands.cpp
+  src/scene_commands.cpp
+  src/scene_render.cpp
+  src/viewport_camera.cpp
   src/ui/imgui_layer.cpp
   src/ui/panels.cpp
 )
-target_link_libraries(giant_editor PRIVATE giant::core giant::platform giant::rhi giant::script
+target_link_libraries(giant_editor PRIVATE giant::core giant::platform giant::rhi giant::render giant::world giant::script
                       giant::ai third_party::imgui)
 if(GIANT_DOTNET)
   add_dependencies(giant_editor giant_managed) # the C# API ships next to the editor

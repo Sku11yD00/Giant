@@ -15,6 +15,7 @@ import os
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 
 TIMEOUT = 60  # seconds for the whole run
@@ -42,6 +43,82 @@ def decode_png(data):
         raise RuntimeError("PNG data has the wrong size")
     pixels = b"".join(raw[y * (row + 1) + 1:(y + 1) * (row + 1)] for y in range(height))
     return width, height, pixels
+
+
+def build_scene(tool, call, check):
+    """N0's gate: build and light a scene through MCP alone, then save, load and undo."""
+    tool("new_scene")
+    check(tool("list_entities")["count"] == 0, "new scene is empty")
+    made = tool("create_entities", {"entities": [
+        {"name": "Ground", "shape": "plane", "scale": [200, 1, 200],
+         "base_color": [0.3, 0.45, 0.25], "roughness": 0.95},
+        {"name": "Tower", "shape": "cube", "position": [0, 2, 0], "scale": [2, 4, 2],
+         "base_color": [0.8, 0.3, 0.2]},
+        {"name": "Ball", "shape": "sphere", "position": [3, 1, 0], "scale": [2, 2, 2],
+         "base_color": [0.9, 0.8, 0.5], "metallic": 1, "roughness": 0.2},
+    ]})
+    ids = made["ids"]
+    check(len(ids) == 3 and len(set(ids)) == 3, "three entities with their own ids")
+    listed = tool("list_entities")
+    check([e["name"] for e in listed["entities"]] == ["Ground", "Tower", "Ball"], "outliner order")
+
+    lighting = tool("set_lighting", {"sun_elevation_degrees": 35, "sun_azimuth_degrees": 220,
+                                     "sun_intensity": 4})
+    check(lighting["sun_intensity"] == 4 and lighting["exposure"] == 1, "lighting set, rest kept")
+    camera = tool("set_camera", {"position": [8, 5, 10], "look_at": [0, 1.5, 0]})
+    check(abs(camera["yaw"] - 38.66) < 0.1 and camera["pitch"] < -10, f"camera aimed, got {camera}")
+
+    tower = tool("set_entity", {"id": ids[1], "base_color": [0.2, 0.3, 0.8],
+                                "rotation": {"yaw": 30}})
+    check(tower["base_color"] == [0.2, 0.30000001192092896, 0.800000011920929]
+          or abs(tower["base_color"][2] - 0.8) < 1e-6, "colour changed")
+    check(abs(tower["rotation"]["yaw"] - 30) < 1e-3, "rotated")
+    check(tower["position"] == [0, 2, 0], "untouched fields stay")
+    tool("undo")
+    check(abs(tool("get_entity", {"id": ids[1]})["base_color"][0] - 0.8) < 1e-6, "undo set_entity")
+    tool("redo")
+    missing = call("tools/call", {"name": "set_entity", "arguments": {"id": 999999}})
+    check(missing.get("isError") is True, "unknown id is a tool error")
+
+    for _ in range(3):
+        call("ping")  # let a frame render the scene
+    info = tool("get_engine_info")
+    check(info["last_frame"]["scene_instances"] == 3, f"3 instances drawn, got {info['last_frame']}")
+    check(info["last_frame"]["scene_draws"] == 3, "one draw per shape")
+    shot = call("tools/call", {"name": "capture_screenshot",
+                               "arguments": {"max_width": 800, "file_name": "mcp_scene"}})
+    check(not shot.get("isError"), "scene screenshot taken")
+    if info["backend"] != "null":
+        image = [c for c in shot["content"] if c["type"] == "image"][0]
+        width, height, pixels = decode_png(base64.b64decode(image["data"]))
+        x, y = width // 2, height // 2  # the tower, in the middle of the view
+        r, g, b, _ = pixels[(y * width + x) * 4:(y * width + x) * 4 + 4]
+        check(b > r and (r, g, b) != (108, 157, 219), f"the tower is drawn, got {(r, g, b)}")
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "town.scene.json")
+        saved = tool("save_scene", {"path": path})
+        check(saved["entities"] == 3 and os.path.isfile(path), "scene saved")
+        tool("delete_entities", {"ids": [ids[0]]})
+        check(tool("list_entities")["count"] == 2, "deleted")
+        tool("undo")
+        check(tool("list_entities")["entities"][0]["id"] == ids[0], "undo puts it back in place")
+        tool("new_scene")
+        check(tool("list_entities")["count"] == 0, "cleared")
+        check(tool("load_scene", {"path": path})["entities"] == 3, "scene loaded")
+        check(tool("get_lighting")["sun_intensity"] == 4, "lighting loaded")
+        tool("undo")
+        check(tool("list_entities")["count"] == 0, "undo the load")
+        tool("undo")
+        check(tool("list_entities")["count"] == 3, "undo the new scene")
+        bad_path = os.path.join(folder, "bad.scene.json")
+        with open(bad_path, "w", encoding="utf-8") as bad:
+            bad.write('{"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shap": 2}]}')
+        bad = call("tools/call", {"name": "load_scene", "arguments": {"path": bad_path}})
+        check(bad.get("isError") is True and "shap is not a known key" in bad["content"][0]["text"],
+              "a broken scene file is refused with the reason")
+        check(tool("list_entities")["count"] == 3, "a failed load changes nothing")
+    tool("new_scene")  # leave the default empty scene for the checks after this
 
 
 def main() -> int:
@@ -128,6 +205,8 @@ def main() -> int:
         check(abs(r - 108) <= 3 and abs(g - 157) <= 3 and abs(b - 219) <= 3,
               f"viewport pixel is the background colour, got {(r, g, b)}")
         check(os.path.isfile(info["saved_to"]), "screenshot saved")
+
+        build_scene(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
         if sample:

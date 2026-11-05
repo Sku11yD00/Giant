@@ -1,5 +1,5 @@
-// Giant Editor: N0 shell. Opens a window, starts the graphics device and
-// renders every frame. Everything it can do is a command (editor_commands.h),
+// Giant Editor. Opens a window, starts the graphics device and renders the
+// scene and panels every frame. Everything it can do is a command (editor_commands.h),
 // and --mcp lets Claude Code or another MCP client run those commands.
 //
 //   giant_editor [--frames N] [--backend null|d3d12] [--software] [--hidden]
@@ -11,7 +11,9 @@
 // --mcp speaks MCP over stdin/stdout (logs go to stderr); the editor closes
 // when the client disconnects. --scripts loads C# scripts at start-up.
 #include "editor_commands.h"
+#include "scene_render.h"
 #include "ui/imgui_layer.h"
+#include "viewport_camera.h"
 #include "ui/panels.h"
 
 #include "giant/ai/mcp_server.h"
@@ -19,6 +21,7 @@
 #include "giant/core/log_history.h"
 #include "giant/platform/line_reader.h"
 #include "giant/platform/window.h"
+#include "giant/render/renderer.h"
 #include "giant/rhi/rhi.h"
 #include "giant/script/script_host.h"
 
@@ -265,6 +268,11 @@ int run(const Options& options) {
         return 1;
     }
 
+    auto renderer = render::Renderer::create(*device);
+    if (renderer == nullptr) {
+        return 1;
+    }
+
     editor::EditorState state;
     state.window = window.get();
     state.device = device.get();
@@ -298,18 +306,41 @@ int run(const Options& options) {
     // After the registry, so scripts' OnStop can still run commands.
     ScriptRunner scripts(commands, state);
     state.scripts_to_load = options.scripts;
-    state.render_screenshot = [&] {
-        // Offscreen images store colour as given; the viewport colour is
-        // linear, so encode it to sRGB like the swap chain view does.
-        const auto encode = [](float c) {
-            c = std::clamp(c, 0.0f, 1.0f);
-            return c <= 0.0031308f ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-        };
-        const rhi::Color background{encode(state.clear_color.r), encode(state.clear_color.g),
-                                    encode(state.clear_color.b), 1.0f};
-        return rhi::render_ui_offscreen(*device, ui->frame(), window->pixel_width(),
-                                        window->pixel_height(), background);
+    std::vector<render::Instance> instances; // reused every frame
+    // Records the scene and the panels into `target` (an sRGB image).
+    const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
+        editor::scene_instances(state.scene, *renderer, instances);
+        render::FrameInput input;
+        input.view = editor::to_view(state.camera);
+        input.lighting = editor::scene_lighting(state.scene.lighting);
+        input.instances = instances;
+        renderer->render(cmd, target, input);
+        cmd.draw_ui(target, ui->frame());
     };
+    state.render_screenshot = [&]() -> std::vector<u8> {
+        // The same frame, offscreen: what the screen shows, sRGB-encoded.
+        rhi::TextureDesc desc;
+        desc.width = window->pixel_width();
+        desc.height = window->pixel_height();
+        desc.format = rhi::Format::rgba8_srgb;
+        desc.usage = rhi::TextureUsage::render_target;
+        desc.name = "screenshot";
+        const rhi::TextureHandle target = device->create_texture(desc);
+        if (!target.valid()) {
+            return {};
+        }
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        if (cmd == nullptr) {
+            device->destroy(target);
+            return {};
+        }
+        record_frame(*cmd, target);
+        device->end_frame();
+        std::vector<u8> pixels = device->read_texture(target);
+        device->destroy(target);
+        return pixels;
+    };
+    editor::ViewportCamera viewport_camera;
     editor::FrameInfo frame_info;
     auto last_frame = std::chrono::steady_clock::now();
 
@@ -353,6 +384,8 @@ int run(const Options& options) {
 
         // Build the UI first: what it changes shows in this frame.
         ui->begin_frame(delta, input);
+        viewport_camera.handle_input(input, ui->wants_mouse());
+        viewport_camera.update(state.camera, delta);
         panels.draw(frame_info);
         ui->end_frame();
         if (window->take_resized()) {
@@ -374,13 +407,13 @@ int run(const Options& options) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
             continue;
         }
-        rhi::RenderPassDesc pass;
-        pass.colors[0] = {swap_chain->current_texture(), rhi::LoadOp::clear, state.clear_color};
-        cmd->begin_render_pass(pass);
-        cmd->end_render_pass();
-        cmd->draw_ui(swap_chain->current_texture(), ui->frame());
+        record_frame(*cmd, swap_chain->current_texture());
         device->end_frame();
         frame_info.ui_draw_calls = device->last_frame_stats().ui_draws;
+        frame_info.scene_draws = renderer->last_stats().draws;
+        frame_info.scene_instances = renderer->last_stats().instances;
+        state.scene_draws = frame_info.scene_draws;
+        state.scene_instances = frame_info.scene_instances;
         skipped_in_a_row = 0;
         if (pace_null) {
             window->wait_events(16);
