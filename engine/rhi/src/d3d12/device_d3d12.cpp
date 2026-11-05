@@ -1228,7 +1228,11 @@ namespace {
 
 // One subobject of a pipeline state stream, laid out as d3dx12's
 // CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT: the type, then the value, aligned
-// to a pointer.
+// to a pointer. The padding that alignment adds is the point (C4324).
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 template <D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type, typename T>
 struct alignas(void*) StreamSubobject {
     D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Type;
@@ -1249,6 +1253,9 @@ struct MeshPipelineStream {
     StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, DXGI_SAMPLE_DESC> sample;
     StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY, D3D12_PRIMITIVE_TOPOLOGY_TYPE> topology;
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 } // namespace
 
