@@ -220,8 +220,8 @@ struct RendererDesc {
     u64 geometry_pool_bytes = 256ull << 20;
     // At most this much is loaded per frame (the rest waits a frame).
     u64 stream_bytes_per_frame = 32ull << 20;
-    // The voxel world: its levels, and GPU memory for its bricks (2112
-    // bytes each; the default is 66 MiB).
+    // The voxel world: its levels, and GPU memory for its bricks (2176
+    // bytes each; the default is 68 MiB).
     voxel::ClipmapDesc voxel_clipmap{};
     u32 voxel_bricks = 32768;
 };

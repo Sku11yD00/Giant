@@ -251,8 +251,9 @@ struct ResolvePush {
     u32 voxel_level_count;
     u32 voxel_bricks_per_axis;
     float far_start; // metres from the camera
+    float far_radius; // instances this small are stand-ins: a pixel showing one is left be
 };
-static_assert(sizeof(ResolvePush) == 120);
+static_assert(sizeof(ResolvePush) == 124);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {

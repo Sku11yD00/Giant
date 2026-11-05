@@ -828,6 +828,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.end_timing();
     if (settings.voxel_world) {
         cmd.begin_timing("voxels");
+        m_voxels->set_stand_in_radius(settings.far_field_max_radius);
         m_voxels->update(cmd, frame.view.position, frame.instances, frame.materials, m_meshes_version,
                          [this](MeshId id) { return mesh(id); }, std::clamp(settings.voxel_ms_per_frame, 0.0f, 1000.0f));
         cmd.end_timing();
@@ -1145,6 +1146,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         push.voxel_level_count = m_voxels->levels();
         push.voxel_bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
         push.far_start = static_cast<float>(far_distance);
+        push.far_radius = static_cast<float>(far_radius);
     } else {
         // Off: valid descriptors all the same (bindless reads are checked).
         push.voxel_pool = data.frame.descriptor;

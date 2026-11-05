@@ -210,8 +210,9 @@ GIANT_TEST("render: small instances past the far-field distance are left to the 
     instances[0].scale = {120, 120, 120}; // radius 60 m (the sphere's is 0.5)
     st = settle();
     GIANT_CHECK(st.far_culled == 0 && st.instances == 2);
-    frame.settings.far_field_max_radius = 100.0f;
-    GIANT_CHECK(s.draw(frame).far_culled == 1);
+    frame.settings.far_field_max_radius = 100.0f; // rebuilds the voxel world with it a stand-in
+    GIANT_CHECK(s.draw(frame).far_culled == 0);
+    GIANT_CHECK(settle().far_culled == 1);
     // Past the voxel world's coarsest window (about 30 km): a mesh, or it would vanish.
     instances[0].scale = {10, 10, 10};
     instances[0].position = {0.0, 0.0, -40000.0};

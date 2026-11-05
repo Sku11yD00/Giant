@@ -218,6 +218,34 @@ void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Materia
     c.color = color_of(in, materials);
     c.box = bounds_of(in, meshes);
     c.large = false;
+    const MeshCache* m = c.box.empty() ? nullptr : mesh_cache(in.mesh, meshes);
+    const double scale = std::max({std::fabs(static_cast<double>(in.scale.x)), std::fabs(static_cast<double>(in.scale.y)),
+                                   std::fabs(static_cast<double>(in.scale.z))});
+    c.stand_in = m != nullptr && m->mesh != nullptr &&
+                 static_cast<double>(m->mesh->bounds.radius) * scale <= m_stand_in_radius;
+}
+
+void VoxelScene::set_stand_in_radius(float radius) {
+    const double r = radius > 0.0f ? static_cast<double>(radius) : 0.0; // NaN: none
+    if (r == m_stand_in_radius) {
+        return;
+    }
+    m_stand_in_radius = r;
+    bool any = false;
+    for (Copy& c : m_copies) {
+        // The same rule as set_copy, from the copy's own instance.
+        const auto it = m_meshes.find(c.instance.mesh);
+        const geometry::ClusterMesh* mesh = it != m_meshes.end() ? it->second.mesh : nullptr;
+        const Vec3& sc = c.instance.scale;
+        const double scale = std::max({std::fabs(static_cast<double>(sc.x)), std::fabs(static_cast<double>(sc.y)),
+                                       std::fabs(static_cast<double>(sc.z))});
+        const bool stand_in = !c.box.empty() && mesh != nullptr && static_cast<double>(mesh->bounds.radius) * scale <= r;
+        any = any || stand_in != c.stand_in;
+        c.stand_in = stand_in;
+    }
+    if (any && m_clipmap.placed()) {
+        request_rebuild();
+    }
 }
 
 // --- The grid -------------------------------------------------------------
@@ -806,7 +834,7 @@ bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_ti
                     if (mirrored) {
                         std::swap(b, d); // keep the facing outward
                     }
-                    m_builder.add_triangle(a, b, d, copy.color);
+                    m_builder.add_triangle(a, b, d, copy.color, copy.stand_in);
                 }
             }
         }
@@ -1063,6 +1091,24 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     }
     upload_tables(cmd);
 
+    // Around each level's queued jobs, for holds() (one box a level, so it
+    // costs nothing per job).
+    m_job_bounds.assign(m_clipmap.levels(), voxel::BrickBox{});
+    std::vector<bool> any(m_clipmap.levels(), false);
+    for (const Job& job : m_jobs) {
+        const u32 l = job.box.level;
+        voxel::BrickBox& b = m_job_bounds[l];
+        b.level = l;
+        if (!any[l]) {
+            b.min = job.box.min;
+            b.max = job.box.max;
+            any[l] = true;
+        } else {
+            b.min = {std::min(b.min.x, job.box.min.x), std::min(b.min.y, job.box.min.y), std::min(b.min.z, job.box.min.z)};
+            b.max = {std::max(b.max.x, job.box.max.x), std::max(b.max.y, job.box.max.y), std::max(b.max.z, job.box.max.z)};
+        }
+    }
+
     m_stats.bricks = m_used;
     m_stats.pending = static_cast<u32>(m_pending.size() + m_jobs.size() + m_old.size() + m_changed.size() +
                                        (m_rebuild_again ? 1 : 0) + (m_building.active ? 1 : 0));
@@ -1115,6 +1161,9 @@ bool VoxelScene::holds(u32 index) const {
     if (!m_clipmap.placed() || index >= m_copies.size() || m_rebuild_again || m_changed.count(index) != 0) {
         return false;
     }
+    if (!m_copies[index].stand_in) {
+        return false;
+    }
     const Box& b = m_copies[index].box;
     const u32 top = m_clipmap.levels() - 1;
     if (b.empty() || !m_clipmap.contains(top, m_clipmap.brick_at(top, b.min)) ||
@@ -1130,10 +1179,8 @@ bool VoxelScene::holds(u32 index) const {
         if (box.count() > k_most_bricks) {
             return false;
         }
-        for (const Job& job : m_jobs) {
-            if (job.box.level == level && voxel::intersect(job.box, box).count() > 0) {
-                return false; // bricks there still to be found or marked
-            }
+        if (level < m_job_bounds.size() && voxel::intersect(m_job_bounds[level], box).count() > 0) {
+            return false; // bricks there may still be found or marked
         }
         for (i32 z = box.min.z; z < box.max.z; ++z) {
             for (i32 y = box.min.y; y < box.max.y; ++y) {

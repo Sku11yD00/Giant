@@ -7,11 +7,13 @@
 // filled bounds let the ray skip empty space in one step.
 //
 // Layouts: VoxelLevel in src/gpu_layout.h (64 bytes per level); bricks are
-// voxel::Brick (16 u32 of occupancy bits, then one packed u32 per voxel).
+// voxel::Brick (16 u32 of occupancy bits, one packed u32 per voxel, then 16
+// u32 of stand-in bits: voxels of the small objects the far field shows).
 #pragma once
 #include "common.slang"
 
-static const uint k_brick_bytes = 2112;
+static const uint k_brick_bytes = 2176;
+static const uint k_stand_in_offset = 2112; // the stand-in bits, after occupancy and voxels
 static const uint k_no_brick = 0xFFFFFFFFu;
 static const uint k_unbuilt = 0xFFFFFFFEu; // not built yet: use the next coarser level
 static const uint k_max_steps = 1024;
@@ -25,6 +27,7 @@ struct VoxelWorld {
     uint levels_offset;
     uint level_count;
     uint bricks_per_axis;
+    uint stand_ins;       // 1: only voxels with the stand-in bit (the far field), 0: every voxel
 };
 
 struct Level {
@@ -100,16 +103,11 @@ uint slot_of(int3 brick, int n) {
 }
 
 // The first filled voxel along the camera-relative ray `dir` (unit, from
-// the camera) from distance `t_start` up to `t_limit` (a mesh drawn
-// there). `surface` is that mesh's plane where the ray meets it (xyz: unit
-// normal facing the camera, w: its offset, dot(normal, hit point)); a
-// voxel counts only if it lies in front of that plane by more than 1.5 of
-// its own size, so the mesh's own voxels (up to a voxel proud of it) never
-// cover it, however grazing the ray. No mesh: a zero normal and an offset
-// of -3e38 accept every voxel. Out: the distance to the voxel and its
-// packed colour and normal.
-bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4 surface, out float hit_t,
-                  out uint packed) {
+// the camera) from distance `t_start` up to `t_limit` (a mesh drawn there,
+// or 3e38). With w.stand_ins only stand-in voxels count, so meshes still
+// drawn are never covered by their own voxels. Out: the distance to the
+// voxel and its packed colour and normal.
+bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, out float hit_t, out uint packed) {
     hit_t = 0.0;
     packed = 0u;
     // No division by zero: axis-parallel rays get a tiny slope.
@@ -204,9 +202,8 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
         const int3 v = clamp(int3(floor((p - sample_min) / voxel)), int3(0, 0, 0), int3(7, 7, 7));
         const uint i = uint(v.x + 8 * (v.y + 8 * v.z));
         const uint base = index * k_brick_bytes;
-        const uint word = pool.Load(base + (i >> 5) * 4);
-        // Filled, and not the drawn mesh's own voxel layer.
-        if (((word >> (i & 31u)) & 1u) != 0u && dot(surface.xyz, p) - surface.w > 1.5 * voxel) {
+        const uint word = pool.Load(base + (w.stand_ins != 0u ? k_stand_in_offset : 0u) + (i >> 5) * 4);
+        if (((word >> (i & 31u)) & 1u) != 0u) {
             hit_t = t;
             packed = pool.Load(base + 64 + i * 4);
             return true;

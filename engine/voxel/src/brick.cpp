@@ -121,7 +121,7 @@ void BrickBuilder::reset(float voxel_size) {
     m_touched = 0;
 }
 
-u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color) {
+u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color, bool stand_in) {
     const Vec3 face = cross(b - a, c - a);
     const Vec3 normal = normalize_or_zero(face);
     if (normal == Vec3{}) {
@@ -163,6 +163,11 @@ u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, cons
                 sum.color += color;
                 sum.normal += normal;
                 sum.weight += 1.0f;
+                if (stand_in) {
+                    sum.stand_color += color;
+                    sum.stand_normal += normal;
+                    sum.stand_weight += 1.0f;
+                }
             }
         }
     }
@@ -176,7 +181,11 @@ Brick BrickBuilder::build() const {
         const Sum& sum = m_sums[i];
         // Opposite faces in one voxel (a thin wall) cancel: pack_voxel
         // then falls back to +Y.
-        brick.set(i, pack_voxel(sum.color / sum.weight, sum.normal));
+        if (sum.stand_weight > 0.0f) {
+            brick.set(i, pack_voxel(sum.stand_color / sum.stand_weight, sum.stand_normal), true);
+        } else {
+            brick.set(i, pack_voxel(sum.color / sum.weight, sum.normal));
+        }
     }
     return brick;
 }

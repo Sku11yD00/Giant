@@ -43,6 +43,7 @@ struct ResolvePush {
     uint voxel_level_count;
     uint voxel_bricks_per_axis;
     float far_start;   // metres from the camera
+    float far_radius;  // instances this small are stand-ins (RenderSettings::far_field_max_radius)
 };
 ConstantBuffer<ResolvePush> push : register(b0);
 
@@ -126,6 +127,7 @@ struct Hit {
     uint material;
     uint cluster;  // the visible list's cluster index
     uint level;
+    float radius;  // the instance's bounding radius
 };
 
 Hit no_hit() {
@@ -136,6 +138,7 @@ Hit no_hit() {
     h.material = 0;
     h.cluster = 0;
     h.level = 0;
+    h.radius = 0.0;
     return h;
 }
 
@@ -166,6 +169,7 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     h.material = inst.material;
     h.cluster = entry.y;
     h.level = cluster.level;
+    h.radius = mesh.bounds.w * inst.max_scale;
     return h;
 }
 
@@ -252,7 +256,10 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     // of whatever mesh is drawn there (lit view only).
     if (f.debug_view == 0 && push.voxel_level_count != 0) {
         const float mesh_t = hit ? length(s.world) : 3.0e38;
-        if (mesh_t > push.far_start) {
+        // A stand-in drawn as a mesh (straddling the distance, or not in
+        // the voxel world yet) would be covered by its own voxels: left be.
+        const bool stand_in_mesh = hit && s.radius <= push.far_radius;
+        if (mesh_t > push.far_start && !stand_in_mesh) {
             const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
             const float3 dir = normalize(f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz);
             VoxelWorld w;
@@ -262,15 +269,10 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
             w.levels_offset = push.voxel_levels_offset;
             w.level_count = push.voxel_level_count;
             w.bricks_per_axis = push.voxel_bricks_per_axis;
-            // The drawn mesh's plane, facing the camera (none: every voxel counts).
-            float4 surface = float4(0.0, 0.0, 0.0, -3.0e38);
-            if (hit) {
-                const float3 facing = dot(s.n, dir) > 0.0 ? -s.n : s.n;
-                surface = float4(facing, dot(facing, s.world));
-            }
+            w.stand_ins = 1u; // only what the CPU left out (meshes drawn keep their own look)
             float t;
             uint packed;
-            if (march_voxels(w, dir, push.far_start, mesh_t, surface, t, packed)) {
+            if (march_voxels(w, dir, push.far_start, mesh_t, t, packed)) {
                 const float3 world = dir * t;
                 const float3 color = shade(f, world, unpack_normal(packed), unpack_color(packed), k_far_roughness,
                                            0.0, float3(0.0, 0.0, 0.0), 0.0);

@@ -84,8 +84,10 @@ struct Bench {
         const u32 z = static_cast<u32>((p.z - lo.z) / vs);
         const u32 i = voxel::voxel_index(x, y, z);
         packed = brick.voxels[i];
+        stand_in = brick.stands_in(i);
         return brick.occupied(i);
     }
+    bool stand_in = false; // the last voxel_at's stand-in bit
 };
 
 } // namespace
@@ -497,4 +499,35 @@ GIANT_TEST("voxel scene: one removed every other frame still builds the whole vi
     GIANT_CHECK(still_building_under([](std::vector<Instance>& in, int f) {
                     if (f % 2 == 0) in.pop_back();
                 }) == 0);
+}
+
+GIANT_TEST("voxel scene: small instances are stand-ins, held once built; big ones never") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    b.voxels->set_stand_in_radius(1.0f);
+    b.instances.resize(2);
+    b.instances[0].position = {0.3, 1.1, 0.2}; // off the voxel grid; the cube's sphere: radius about 0.87
+    b.instances[1].position = {-5.3, 2.1, -5.2};
+    b.instances[1].scale = {3.0f, 3.0f, 3.0f}; // radius about 2.6
+    b.step(0.0f);
+    GIANT_CHECK(!b.voxels->holds(0)); // not built yet
+    for (int i = 0; i < 50 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->holds(0) && !b.voxels->holds(1) && !b.voxels->holds(2));
+    u32 packed = 0;
+    GIANT_CHECK(b.voxel_at({0.8, 1.1, 0.2}, packed) && b.stand_in);   // the small cube's +X face
+    GIANT_CHECK(b.voxel_at({-3.8, 2.1, -5.2}, packed) && !b.stand_in); // the big one's
+    // Moved: not held until rebuilt where it went.
+    b.instances[0].position = {1.3, 1.1, 0.2};
+    b.step(0.0f);
+    GIANT_CHECK(!b.voxels->holds(0));
+    for (int i = 0; i < 50 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->holds(0));
+    // A larger radius makes the big one a stand-in too, after a rebuild.
+    b.voxels->set_stand_in_radius(5.0f);
+    b.step(0.0f);
+    GIANT_CHECK(!b.voxels->holds(1));
+    for (int i = 0; i < 100 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->holds(1));
+    GIANT_CHECK(b.voxel_at({-3.8, 2.1, -5.2}, packed) && b.stand_in);
 }

@@ -207,8 +207,8 @@ the GPU by `render` (drawing and lighting).
 Done in N2 part 2:
 
 - `engine/voxel` holds the plain-data pieces: bricks of 8x8x8 voxels (an
-  occupancy bit per voxel, then colour and normal packed in one u32; 2112
-  bytes, the GPU's layout too), a conservative triangle-box test to
+  occupancy bit per voxel, then colour and normal packed in one u32, then a
+  stand-in bit per voxel (part 3); 2176 bytes, the GPU's layout too), a conservative triangle-box test to
   voxelize surfaces without holes, and the clipmap. Level 0 has 0.25 m
   voxels; each of the 11 levels doubles them, so level 10 (256 m voxels)
   reaches about 30 km out. Each level is a window of 32 bricks per axis,
@@ -236,7 +236,7 @@ Done in N2 part 2:
   time, so a coarse brick over thousands of instances spreads over frames.
   Until a brick is rebuilt the old one stays; a slab that just came into
   view reads "unbuilt" and the next coarser level stands in. Bricks live in
-  a fixed GPU pool (`RendererDesc::voxel_bricks`, 32768 = 66 MiB) with one
+  a fixed GPU pool (`RendererDesc::voxel_bricks`, 32768 = 68 MiB) with one
   u32 slot table per level (only the changed range is copied, with no CPU
   wait); bricks that do not fit wait for room (`missing`). `probe_voxels`
   reads a CPU copy of the occupancy. The gate scene (town and 10,000
@@ -266,15 +266,22 @@ Done in N2 part 3, the far field:
   (terrain, mountains, big buildings) stay meshes at every distance,
   cluster LOD keeping them cheap. `RenderStats::far_culled` counts the
   ones left out.
+- Voxels remember what they stand in for: voxels touched by an instance
+  of at most `far_field_max_radius` (a stand-in) carry a stand-in bit, and
+  take that instance's colour and facing over the big surfaces sharing the
+  voxel (a far tree stays green over the ground it stands on). Changing
+  the radius rebuilds the voxel world.
 - The shading pass (`shaders/resolve.slang`) marches the voxels for every
-  pixel whose mesh hit (if any) is past the distance, from the distance
-  on, with the march the voxel view uses (`shaders/voxel_march.slang`). A
-  voxel counts only before the drawn mesh along the ray and in front of
-  its plane there by more than 1.5 voxels, so a mesh's own voxels (up to a
-  voxel proud of it) never cover it, even for rays grazing far ground. The
-  voxel's colour and normal are lit like a mesh (a rough dielectric).
-  Conservative voxels make a far mesh's silhouette up to a voxel fatter
-  where only voxels stand behind it (a ridge against the sky).
+  pixel whose mesh hit (if any) is past the distance, from the distance up
+  to that hit, with the march the voxel view uses
+  (`shaders/voxel_march.slang`), seeing only stand-in voxels. So meshes
+  still drawn (terrain, mountains, buildings) are never covered or fattened
+  by their own voxels, and small things left out show on top of them. The
+  voxel's colour and normal are lit like a mesh (a rough dielectric). A
+  stand-in voxel is up to a voxel larger than its object, so it can poke
+  out in front of a mesh just before it. Pixels showing a stand-in that is
+  still drawn as a mesh (straddling the distance, or not in the voxel
+  world yet) are left as they are, so its own voxels never cover it.
 - Lit view only, and only while the voxel world is kept up to date (a
   frozen one would show stale far geometry). The levels are written once a
   frame for the far field and the voxel view.

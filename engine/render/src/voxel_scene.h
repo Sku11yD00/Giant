@@ -92,6 +92,12 @@ public:
     void update(rhi::CommandList& cmd, const DVec3& camera, std::span<const Instance> instances,
                 std::span<const Material> materials, u64 meshes_version, const MeshLookup& meshes,
                 float budget_ms);
+    // Instances whose bounding radius (the mesh's sphere times the largest
+    // |scale|) is at most this are stand-ins: their voxels carry the
+    // stand-in bit the far field shows (it stands in for them; bigger
+    // ones stay meshes, whose own voxels it must not draw over them).
+    // A change rebuilds the voxel world. Default 0: none.
+    void set_stand_in_radius(float radius);
     // A frame without update() (the voxel world switched off): this
     // frame's stats are zero, the bricks stay.
     void idle();
@@ -105,7 +111,7 @@ public:
     const VoxelStats& stats() const { return m_stats; }
 
     // Whether the voxel world shows instance `index` (of the last update's
-    // instances) as it is now: inside the coarsest window, with every brick
+    // instances) as it is now: a stand-in, inside the coarsest window, with every brick
     // under it on every level built from it, none waiting to be found,
     // built again or for room in the pool. Until then (just added or
     // moved, a slab just come into view, a rebuild, a full pool) it must
@@ -154,6 +160,7 @@ private:
         Vec3 color{}; // its material's, resolved
         Box box;      // world bounds (empty: no mesh)
         bool large = false; // in m_large, not the grid
+        bool stand_in = false; // small enough for the far field to stand in for
     };
     struct MeshCache {
         const geometry::ClusterMesh* mesh = nullptr; // null: missing
@@ -247,6 +254,8 @@ private:
     std::deque<Job> m_jobs;
     u32 m_rebuild_jobs = 0;    // of a full rebuild, still queued
     bool m_rebuild_again = false;
+    std::vector<voxel::BrickBox> m_job_bounds; // per level: around its queued jobs (count 0: none), for holds()
+    double m_stand_in_radius = 0.0;
     // Changes not turned into jobs yet: where instances were (their bricks
     // are built again) and which instances changed (the bricks where they
     // are now are).
