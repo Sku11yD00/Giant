@@ -151,7 +151,10 @@ float projected_error(const LodBounds& bounds, const LodView& view) {
     const float s = max_abs_scale(view.scale);
     const Vec3 c = to_view(view, bounds.center);
     const float d = length(c) - bounds.radius * s;
-    return bounds.error * s / std::max(d, view.near_plane) * view.pixels_per_unit;
+    // A positive floor: with 0 the camera inside a zero-error sphere gives
+    // 0 / 0, and NaN would pass neither side of the cut (drawing both).
+    const float near_plane = std::max(1e-6f, view.near_plane); // NaN gives the floor too
+    return bounds.error * s / std::max(d, near_plane) * view.pixels_per_unit;
 }
 
 void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u32>& out) {

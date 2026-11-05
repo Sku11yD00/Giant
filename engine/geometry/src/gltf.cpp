@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <memory>
 #include <string_view>
 
@@ -14,27 +15,46 @@ namespace giant::geometry {
 namespace {
 
 struct FileContext {
-    bool allow_files = false; // false for memory imports: no external buffers
+    bool allow_files = false;      // false for memory imports: no external buffers
+    std::filesystem::path folder;  // external buffers must be inside it
+    u64 bytes_read = 0;            // all external buffers together
+    const char* refusal = nullptr; // why a buffer was refused, for the error
 };
 
 // cgltf reads external buffers through these, so paths are UTF-8 on every
 // platform (cgltf's own fopen is not, on Windows).
 cgltf_result read_file(const cgltf_memory_options*, const cgltf_file_options* options,
                        const char* path, cgltf_size* size, void** data) {
-    const auto* context = static_cast<const FileContext*>(options->user_data);
+    auto* context = static_cast<FileContext*>(options->user_data);
     if (!context->allow_files || path == nullptr) {
         return cgltf_result_file_not_found;
     }
     const std::string_view utf8(path);
-    std::ifstream file(std::filesystem::path(std::u8string(utf8.begin(), utf8.end())),
-                       std::ios::binary | std::ios::ate);
+    const std::filesystem::path file_path =
+        std::filesystem::path(std::u8string(utf8.begin(), utf8.end())).lexically_normal();
+    // A buffer URI may not reach outside the file's folder ("../", absolute).
+    const std::filesystem::path relative = file_path.lexically_relative(context->folder);
+    if (relative.empty() || *relative.begin() == "..") {
+        context->refusal = "a buffer file it refers to is outside the file's folder";
+        return cgltf_result_file_not_found;
+    }
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
     if (!file) {
         return cgltf_result_file_not_found;
     }
     const std::streamoff length = file.tellg();
-    if (length < 0 || static_cast<u64>(length) > k_max_import_file_bytes) {
+    if (length < 0 || static_cast<u64>(length) > k_max_import_file_bytes ||
+        context->bytes_read + static_cast<u64>(length) > k_max_import_file_bytes) {
+        context->refusal = "its buffer files are over 2 GiB together";
         return cgltf_result_io_error;
     }
+    // cgltf passes the buffer's declared byteLength and trusts the data to
+    // be that long; a shorter file must be refused here.
+    if (*size != 0 && static_cast<u64>(length) < *size) {
+        context->refusal = "a buffer file is shorter than the glTF says";
+        return cgltf_result_data_too_short;
+    }
+    context->bytes_read += static_cast<u64>(length);
     void* memory = std::malloc(length > 0 ? static_cast<usize>(length) : 1);
     if (memory == nullptr) {
         return cgltf_result_out_of_memory;
@@ -172,9 +192,23 @@ private:
         }
         const cgltf_size index_count = prim.indices != nullptr ? prim.indices->count : vertex_count;
         // Bound the work before allocating: any primitive type makes at
-        // most index_count triangles.
-        if (vertex_count > k_max_import_triangles * 3 || index_count > k_max_import_triangles * 3) {
+        // most index_count triangles. Vertices are counted over the whole
+        // file (a mesh shared by many nodes is read once per node), since an
+        // accessor without data costs nothing in the file.
+        if (index_count > k_max_import_triangles * 3) {
             return fail("the mesh has more than 16 million triangles");
+        }
+        m_vertices_read += vertex_count;
+        if (vertex_count > k_max_import_vertices || m_vertices_read > k_max_import_vertices) {
+            return fail("the file has more than 48 million vertices");
+        }
+        // cgltf 1.15 reads sparse values with the base view's stride, but
+        // the spec packs them tightly: refuse rather than read wrong data.
+        for (const cgltf_accessor* a : std::initializer_list<const cgltf_accessor*>{positions, normals, prim.indices}) {
+            if (a != nullptr && a->is_sparse &&
+                a->stride != cgltf_calc_size(a->type, a->component_type)) {
+                return fail("sparse accessors on interleaved buffers are not supported");
+            }
         }
 
         std::vector<Vec3> p(vertex_count);
@@ -220,16 +254,20 @@ private:
             }
         }
         if (normals != nullptr) {
-            const u32 base = static_cast<u32>(mesh.vertices.size());
-            for (cgltf_size i = 0; i < vertex_count; ++i) {
-                Vec3 d = transform.direction(n[i]);
-                if (!finite(d) || length_squared(d) == 0.0f) {
-                    d = {0, 1, 0};
-                }
-                mesh.vertices.push_back({p[i], d});
-            }
+            // Only the vertices that triangles use, so the mesh stays
+            // bounded by its triangle count.
+            constexpr u32 unused = ~u32{0};
+            std::vector<u32> remap(vertex_count, unused);
             for (const u32 i : triangles) {
-                mesh.indices.push_back(base + i);
+                if (remap[i] == unused) {
+                    remap[i] = static_cast<u32>(mesh.vertices.size());
+                    Vec3 d = transform.direction(n[i]);
+                    if (!finite(d) || length_squared(d) == 0.0f) {
+                        d = {0, 1, 0};
+                    }
+                    mesh.vertices.push_back({p[i], d});
+                }
+                mesh.indices.push_back(remap[i]);
             }
         } else {
             // glTF: without normals, a mesh is flat shaded.
@@ -286,11 +324,17 @@ private:
     bool m_warned_morph = false;
     bool m_warned_positions = false;
     bool m_warned_normals = false;
+    u64 m_vertices_read = 0;
 };
 
 ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, bool allow_files) {
     ImportResult result;
-    FileContext context{allow_files};
+    FileContext context;
+    context.allow_files = allow_files;
+    if (allow_files) {
+        const std::u8string u8(path_utf8.begin(), path_utf8.end());
+        context.folder = std::filesystem::path(u8).parent_path().lexically_normal();
+    }
     cgltf_options options{};
     options.file.read = &read_file;
     options.file.release = &release_file;
@@ -317,7 +361,8 @@ ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, boo
     }
     r = cgltf_load_buffers(&options, data.get(), path_utf8.c_str());
     if (r != cgltf_result_success) {
-        result.error = allow_files || r != cgltf_result_file_not_found
+        result.error = context.refusal != nullptr ? context.refusal
+                       : allow_files || r != cgltf_result_file_not_found
                            ? describe(r)
                            : "the file refers to external buffers; import it from a file instead";
         return result;
@@ -393,7 +438,13 @@ ImportResult import_gltf_file(const std::filesystem::path& path) {
         result.error = describe(cgltf_result_io_error);
         return result;
     }
-    const std::u8string utf8 = path.u8string();
+    // Absolute, so buffer URIs can be checked against the file's folder.
+    std::error_code ec;
+    std::filesystem::path full = std::filesystem::absolute(path, ec);
+    if (ec) {
+        full = path;
+    }
+    const std::u8string utf8 = full.lexically_normal().u8string();
     return import(bytes, std::string(utf8.begin(), utf8.end()), true);
 }
 

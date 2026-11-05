@@ -257,6 +257,22 @@ GIANT_TEST("geometry: strips and fans become triangle lists") {
     GIANT_CHECK(strip.mesh.indices.size() == 3 && fan.mesh.indices.size() == 3);
     GIANT_CHECK_NEAR(face_normal(strip.mesh, 0).z, 1.0, 1e-6);
     GIANT_CHECK_NEAR(face_normal(fan.mesh, 0).z, 1.0, 1e-6);
+
+    // A four-vertex strip: its second triangle is stored the other way
+    // round and must still face +Z.
+    std::vector<u8> bin;
+    append(bin, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0});
+    const std::string json =
+        R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
+        R"("meshes":[{"primitives":[{"attributes":{"POSITION":0},"mode":5}]}],)"
+        R"("buffers":[{"byteLength":48}],"bufferViews":[{"buffer":0,"byteLength":48}],)"
+        R"("accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}]})";
+    const ImportResult quad = import_gltf_memory(make_glb(json, bin));
+    GIANT_CHECK(quad.ok() && quad.mesh.indices.size() == 6);
+    if (quad.ok() && quad.mesh.indices.size() == 6) {
+        GIANT_CHECK_NEAR(face_normal(quad.mesh, 0).z, 1.0, 1e-6);
+        GIANT_CHECK_NEAR(face_normal(quad.mesh, 1).z, 1.0, 1e-6);
+    }
     // Points are skipped with a warning, leaving nothing: an error.
     const ImportResult points = import_triangle(true, "", "0");
     GIANT_CHECK(!points.ok() && !points.warnings.empty());
@@ -301,7 +317,80 @@ GIANT_TEST("geometry: a .gltf file reads its buffer from next to it") {
     if (!r.ok()) std::fprintf(stderr, "    %s\n", r.error.c_str());
     GIANT_CHECK(r.mesh.indices.size() == 3);
     GIANT_CHECK(!import_gltf_file(dir / "missing.gltf").ok());
+
+    // A buffer file shorter than its byteLength must not be read past.
+    {
+        std::ofstream bin(dir / "tri data.bin", std::ios::binary | std::ios::trunc);
+        bin.write(reinterpret_cast<const char*>(f.bin.data()), 4);
+    }
+    const ImportResult short_bin = import_gltf_file(dir / "tri.gltf");
+    GIANT_CHECK(!short_bin.ok() && short_bin.error.find("shorter") != std::string::npos);
+
+    // A buffer URI may not leave the file's folder.
+    TriangleFile outside = triangle_file(true, "");
+    outside.json.replace(outside.json.find(from), from.size(),
+                         R"("buffers":[{"uri":"../giant_outside.bin","byteLength":)");
+    std::ofstream(dir / "outside.gltf", std::ios::binary) << outside.json;
+    {
+        std::ofstream bin(dir.parent_path() / "giant_outside.bin", std::ios::binary);
+        bin.write(reinterpret_cast<const char*>(outside.bin.data()),
+                  static_cast<std::streamsize>(outside.bin.size()));
+    }
+    const ImportResult escaped = import_gltf_file(dir / "outside.gltf");
+    GIANT_CHECK(!escaped.ok() && escaped.error.find("outside") != std::string::npos);
+    std::filesystem::remove(dir.parent_path() / "giant_outside.bin");
     std::filesystem::remove_all(dir);
+}
+
+GIANT_TEST("geometry: vertex counts are bounded and unused vertices dropped") {
+    // Accessors without a bufferView are zeros and cost nothing in the file,
+    // so a tiny file can claim millions of vertices.
+    const auto file = [](u64 vertex_count, int nodes) {
+        std::vector<u8> bin;
+        append(bin, std::vector<u32>{0, 1, 2});
+        std::string node_list, node_defs;
+        for (int i = 0; i < nodes; ++i) {
+            node_list += (i ? "," : "") + std::to_string(i);
+            node_defs += std::string(i ? "," : "") + R"({"mesh":0,"translation":[)" + std::to_string(i) + ",0,0]}";
+        }
+        const std::string count = std::to_string(vertex_count);
+        const std::string json =
+            R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[)" + node_list + "]}]," +
+            R"("nodes":[)" + node_defs + "]," +
+            R"("meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]}],)" +
+            R"("buffers":[{"byteLength":12}],"bufferViews":[{"buffer":0,"byteLength":12}],)" +
+            R"("accessors":[{"componentType":5126,"count":)" + count + R"(,"type":"VEC3"},)" +
+            R"({"componentType":5126,"count":)" + count + R"(,"type":"VEC3"},)" +
+            R"({"bufferView":0,"componentType":5125,"count":3,"type":"SCALAR"}]})";
+        return make_glb(json, bin);
+    };
+    const ImportResult shared = import_gltf_memory(file(100'000, 8));
+    GIANT_CHECK(shared.ok());
+    GIANT_CHECK(shared.mesh.indices.size() == 24);
+    GIANT_CHECK(shared.mesh.vertices.size() <= 24); // not 800,000
+    const ImportResult huge = import_gltf_memory(file(k_max_import_vertices + 1, 1));
+    GIANT_CHECK(!huge.ok() && huge.error.find("vertices") != std::string::npos);
+}
+
+GIANT_TEST("geometry: sparse data on an interleaved buffer is refused") {
+    // cgltf would read the sparse values with the base view's stride.
+    std::vector<u8> bin;
+    append(bin, std::vector<float>{0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1});
+    const usize sparse_at = bin.size();
+    append(bin, std::vector<u32>{1});
+    append(bin, std::vector<float>{2, 0, 0});
+    const std::string json =
+        std::string(R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)") +
+        R"("meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1}}]}],)" +
+        R"("buffers":[{"byteLength":)" + std::to_string(bin.size()) + "}]," +
+        R"("bufferViews":[{"buffer":0,"byteLength":72,"byteStride":24},)" +
+        R"({"buffer":0,"byteOffset":)" + std::to_string(sparse_at) + R"(,"byteLength":4},)" +
+        R"({"buffer":0,"byteOffset":)" + std::to_string(sparse_at + 4) + R"(,"byteLength":12}],)" +
+        R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3",)" +
+        R"("sparse":{"count":1,"indices":{"bufferView":1,"componentType":5125},"values":{"bufferView":2}}},)" +
+        R"({"bufferView":0,"byteOffset":12,"componentType":5126,"count":3,"type":"VEC3"}]})";
+    const ImportResult r = import_gltf_memory(make_glb(json, bin));
+    GIANT_CHECK(!r.ok() && r.error.find("sparse") != std::string::npos);
 }
 
 GIANT_TEST("geometry: clusters cover the mesh and stay within limits") {
