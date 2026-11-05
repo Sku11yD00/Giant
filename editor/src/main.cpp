@@ -1,20 +1,35 @@
 // Giant Editor: N0 shell. Opens a window, starts the graphics device and
-// renders every frame. Panels, the viewport and the AI command layer build on
-// this loop in the next steps.
+// renders every frame. Everything it can do is a command (editor_commands.h),
+// and --mcp lets Claude Code or another MCP client run those commands.
 //
 //   giant_editor [--frames N] [--backend null|d3d12] [--software] [--hidden]
-//                [--debug-layer] [--require-validation] [--no-vsync]
+//                [--debug-layer] [--require-validation] [--no-vsync] [--mcp]
 //
 // --require-validation fails the run if the GPU validation layer is not
 // actually running (CI uses it so "no validation errors" means something).
+// --mcp speaks MCP over stdin/stdout (logs go to stderr); the editor closes
+// when the client disconnects.
+#include "editor_commands.h"
+
+#include "giant/ai/mcp_server.h"
 #include "giant/core/log.h"
+#include "giant/core/log_history.h"
+#include "giant/platform/line_reader.h"
 #include "giant/platform/window.h"
 #include "giant/rhi/rhi.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
+
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 namespace {
 
@@ -28,6 +43,7 @@ struct Options {
     bool debug_layer = false;
     bool require_validation = false;
     bool vsync = true;
+    bool mcp = false;
 };
 
 bool parse_options(int argc, char** argv, Options& out) {
@@ -56,6 +72,8 @@ bool parse_options(int argc, char** argv, Options& out) {
             out.require_validation = true;
         } else if (arg == "--no-vsync") {
             out.vsync = false;
+        } else if (arg == "--mcp") {
+            out.mcp = true;
         } else {
             log_error("editor", "unknown option: " + std::string(arg));
             return false;
@@ -64,7 +82,23 @@ bool parse_options(int argc, char** argv, Options& out) {
     return true;
 }
 
+// Answers every MCP message that arrived since the last frame.
+void pump_mcp(platform::LineReader& reader, ai::McpServer& server) {
+    for (const std::string& line : reader.take_lines()) {
+        if (line.empty()) {
+            continue;
+        }
+        if (auto reply = server.handle(line)) {
+            std::cout << *reply << '\n';
+        }
+    }
+    std::cout.flush();
+}
+
 int run(const Options& options) {
+    // Before anything logs, so the AI can read start-up messages too.
+    const LogHistory log_history;
+
     platform::WindowDesc window_desc;
     window_desc.title = "Giant Editor";
     window_desc.hidden = options.hidden;
@@ -96,9 +130,28 @@ int run(const Options& options) {
         return 1;
     }
 
-    // A clear day-sky blue until the renderer draws something. Linear colour:
-    // the back buffer view encodes it to sRGB for the screen.
-    const rhi::Color sky{0.15f, 0.34f, 0.71f, 1.0f};
+    editor::EditorState state;
+    state.window = window.get();
+    state.device = device.get();
+    state.log = &log_history;
+    ai::CommandRegistry commands;
+    editor::register_editor_commands(commands, state);
+
+    std::unique_ptr<platform::LineReader> mcp_reader;
+    std::unique_ptr<ai::McpServer> mcp_server;
+    if (options.mcp) {
+#if defined(_WIN32)
+        // Messages end in \n only; text mode would turn that into \r\n.
+        _setmode(_fileno(stdout), _O_BINARY);
+#endif
+        mcp_reader = platform::LineReader::from_stdin();
+        mcp_server = std::make_unique<ai::McpServer>(
+            commands, ai::McpServerInfo{"giant-editor", "0.1.0", editor::mcp_instructions()});
+        log_info("editor", "MCP server listening on stdin/stdout");
+    }
+    // The null backend has no display to wait for, so pace it like vsync
+    // instead of spinning a CPU core.
+    const bool pace_null = device->backend() == rhi::Backend::null && options.vsync;
 
     using clock = std::chrono::steady_clock;
     auto report_start = clock::now();
@@ -109,7 +162,17 @@ int run(const Options& options) {
     constexpr u64 k_max_skipped_frames = 1000;
     u64 skipped_in_a_row = 0;
 
-    while (window->poll_events()) {
+    while (window->poll_events() && !state.quit_requested) {
+        if (mcp_reader != nullptr) {
+            pump_mcp(*mcp_reader, *mcp_server);
+            if (mcp_reader->finished()) {
+                log_info("editor", "MCP client disconnected; closing");
+                break;
+            }
+            if (state.quit_requested) {
+                break;
+            }
+        }
         if (window->minimized()) {
             // Nothing to show: idle instead of spinning a CPU core.
             window->wait_events(100);
@@ -133,9 +196,12 @@ int run(const Options& options) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
             continue;
         }
-        device->clear(*swap_chain, sky);
+        device->clear(*swap_chain, state.clear_color);
         device->end_frame(*swap_chain);
         skipped_in_a_row = 0;
+        if (pace_null) {
+            window->wait_events(16);
+        }
 
         ++report_frames;
         const auto now = clock::now();

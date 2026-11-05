@@ -64,6 +64,18 @@ void Window::request_size(u32 width, u32 height) {
     SDL_SyncWindow(m_impl->window);
 }
 
+u32 Window::point_width() const {
+    int w = 0;
+    SDL_GetWindowSize(m_impl->window, &w, nullptr);
+    return static_cast<u32>(w > 0 ? w : 0);
+}
+
+u32 Window::point_height() const {
+    int h = 0;
+    SDL_GetWindowSize(m_impl->window, nullptr, &h);
+    return static_cast<u32>(h > 0 ? h : 0);
+}
+
 u32 Window::sdl_window_id_for_tests() const { return SDL_GetWindowID(m_impl->window); }
 
 void Window::request_minimize() {

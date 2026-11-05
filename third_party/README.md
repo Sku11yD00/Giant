@@ -6,6 +6,7 @@ pinned to an exact version and listed here before it is used.
 | Library | Version | Licence | Used by | Added in |
 | --- | --- | --- | --- | --- |
 | [SDL3](https://github.com/libsdl-org/SDL) | 3.2.24 (`a8589a8`) | zlib | platform (windows, input) | N0 part 2 |
+| [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0 (release archive, SHA-256 pinned) | MIT | ai (commands, MCP server) | N0 part 3 |
 
 Planned, from the plan's reuse table: Jolt Physics (MIT),
 meshoptimizer (MIT), METIS (Apache 2), Slang (Apache 2), D3D12 Memory

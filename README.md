@@ -23,7 +23,9 @@ Milestone **N0 Foundation**:
   asserts, double-precision world math, job system), architecture checker, CI.
 - Part 2 (done): SDL3 window, the graphics layer with a Direct3D 12 backend,
   and the editor app that opens a window and renders every frame.
-- Part 3 (next): editor panels, the C# script host, and the AI command layer.
+- Part 3 (in progress): the AI command layer and MCP server are in, so
+  Claude Code can drive the editor (see `docs/ai-control.md`). Next: editor
+  panels and the C# script host.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

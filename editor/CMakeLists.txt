@@ -1,5 +1,5 @@
-add_executable(giant_editor src/main.cpp)
-target_link_libraries(giant_editor PRIVATE giant::core giant::platform giant::rhi)
+add_executable(giant_editor src/main.cpp src/editor_commands.cpp)
+target_link_libraries(giant_editor PRIVATE giant::core giant::platform giant::rhi giant::ai)
 giant_apply_warnings(giant_editor)
 giant_apply_sanitizers(giant_editor)
 
@@ -18,4 +18,21 @@ if(GIANT_BUILD_TESTS)
     set_tests_properties(editor_smoke PROPERTIES ENVIRONMENT "SDL_VIDEO_DRIVER=dummy")
   endif()
   set_tests_properties(editor_smoke PROPERTIES TIMEOUT 120)
+
+  # Drive the editor over MCP the way Claude Code does.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_FOUND)
+    if(WIN32)
+      set(mcp_backend --software --debug-layer)
+    else()
+      set(mcp_backend --backend null)
+    endif()
+    add_test(NAME editor_mcp
+      COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/mcp_smoke.py
+              $<TARGET_FILE:giant_editor> --hidden ${mcp_backend})
+    set_tests_properties(editor_mcp PROPERTIES TIMEOUT 120)
+    if(NOT WIN32)
+      set_tests_properties(editor_mcp PROPERTIES ENVIRONMENT "SDL_VIDEO_DRIVER=dummy")
+    endif()
+  endif()
 endif()

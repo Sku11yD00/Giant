@@ -3,6 +3,7 @@ giant_module(core
     src/assert.cpp
     src/jobs.cpp
     src/log.cpp
+    src/log_history.cpp
 )
 
 find_package(Threads REQUIRED)
@@ -12,5 +13,6 @@ giant_module_tests(core
   SOURCES
     tests/test_assert_log.cpp
     tests/test_jobs.cpp
+    tests/test_log_history.cpp
     tests/test_math.cpp
 )

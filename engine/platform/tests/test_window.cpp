@@ -65,6 +65,9 @@ GIANT_TEST("platform: a size change is reported once") {
     GIANT_CHECK(!window->take_resized());
     GIANT_CHECK(window->pixel_width() == 400);
     GIANT_CHECK(window->pixel_height() == 300);
+    // The dummy driver has no high-DPI scaling, so points equal pixels.
+    GIANT_CHECK(window->point_width() == 400);
+    GIANT_CHECK(window->point_height() == 300);
 }
 
 GIANT_TEST("platform: minimise and restore are tracked") {

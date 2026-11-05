@@ -40,6 +40,11 @@ public:
     u32 pixel_width() const { return m_width; }
     u32 pixel_height() const { return m_height; }
 
+    // Size in screen points, the unit request_size takes. Equal to the pixel
+    // size unless the screen is high-DPI.
+    u32 point_width() const;
+    u32 point_height() const;
+
     // True once after the drawable size changed; the swap chain should resize.
     bool take_resized();
 
@@ -52,7 +57,7 @@ public:
 
     NativeWindow native() const;
 
-    // Asks the OS to resize or minimise the window. The change arrives as an
+    // Asks the OS to resize (in points) or minimise the window. The change arrives as an
     // event in the next poll_events (used by tests and the editor's layouts).
     void request_size(u32 width, u32 height);
     void request_minimize();

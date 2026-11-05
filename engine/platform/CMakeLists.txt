@@ -1,5 +1,6 @@
 giant_module(platform
   SOURCES
+    src/line_reader.cpp
     src/window_sdl.cpp
   DEPENDS core
 )
@@ -7,6 +8,7 @@ target_link_libraries(giant_platform PRIVATE SDL3::SDL3-static)
 
 giant_module_tests(platform
   SOURCES
+    tests/test_line_reader.cpp
     tests/test_window.cpp
 )
 # The tests post synthetic OS events, so they see SDL directly.
