@@ -1,7 +1,6 @@
 # Giant Engine
 
-A custom game engine for one kind of game: a huge, photoreal open world that a
-growing giantess can wreck, cities and forests included, with a sharp image
+A custom game engine for one kind of game: a huge, photoreal open world with a sharp image
 (no TAA smear, no motion blur) and an AI that can do every job in the editor.
 
 The full design is in the plan doc (v2 tab, "Custom engine plan"). The short
