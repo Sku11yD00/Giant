@@ -1138,7 +1138,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     push.tile_columns = data.tile_columns;
     push.tile_rows = data.tile_rows;
     push.specular_aa = settings.specular_antialiasing ? 1u : 0u;
-    if (far_field && data.voxel_levels.data != nullptr) {
+    // Nothing the far field could show (no level has stand-ins): no march.
+    const bool far_march = far_field && data.voxel_levels.data != nullptr &&
+                           std::any_of(m_voxel_levels.begin(), m_voxel_levels.end(),
+                                       [](const gpu::VoxelLevel& l) { return l.brick[3] != 0; });
+    if (far_march) {
         push.voxel_pool = m_device.read_descriptor(m_voxels->pool());
         push.voxel_table = m_device.read_descriptor(m_voxels->table());
         push.voxel_levels = data.voxel_levels.descriptor;

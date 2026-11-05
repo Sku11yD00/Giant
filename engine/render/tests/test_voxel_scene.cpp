@@ -531,3 +531,36 @@ GIANT_TEST("voxel scene: small instances are stand-ins, held once built; big one
     GIANT_CHECK(b.voxels->holds(1));
     GIANT_CHECK(b.voxel_at({-3.8, 2.1, -5.2}, packed) && b.stand_in);
 }
+
+GIANT_TEST("voxel scene: levels say whether the far field need look at them") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    b.voxels->set_stand_in_radius(1.0f);
+    b.instances.resize(1);
+    b.instances[0].position = {-5.3, 2.1, -5.2};
+    b.instances[0].scale = {3.0f, 3.0f, 3.0f}; // too big: a mesh, never a stand-in
+    const auto settle = [&] {
+        for (int i = 0; i < 100 && b.voxels->stats().pending > 0; ++i) b.step();
+    };
+    const auto stands = [&] {
+        std::vector<gpu::VoxelLevel> levels(b.voxels->levels());
+        b.voxels->write_levels(levels.data(), b.camera);
+        u32 n = 0;
+        for (const gpu::VoxelLevel& l : levels) n += l.brick[3] != 0 ? 1u : 0u;
+        return n;
+    };
+    b.step(0.0f);
+    settle();
+    GIANT_CHECK(b.voxels->stats().bricks > 0 && stands() == 0); // nothing for the far field
+    // A small one: every level holding it has stand-in bricks.
+    b.instances.push_back({});
+    b.instances[1].position = {0.3, 1.1, 0.2};
+    b.step();
+    settle();
+    GIANT_CHECK(stands() == b.voxels->levels());
+    // Gone again: the levels empty of stand-ins.
+    b.instances.pop_back();
+    b.step();
+    settle();
+    GIANT_CHECK(stands() == 0);
+}

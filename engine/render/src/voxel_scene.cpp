@@ -121,6 +121,8 @@ bool VoxelScene::init() {
     m_loose.assign(levels, false);
     m_order.assign(levels, {});
     m_occupancy.assign(m_capacity, {});
+    m_has_stand_in.assign(m_capacity, 0);
+    m_stand_in_bricks.assign(levels, 0);
     m_free.clear();
     for (u32 i = m_capacity; i > 0; --i) {
         m_free.push_back(i - 1);
@@ -616,6 +618,7 @@ void VoxelScene::enter(const voxel::BrickBox& box) {
                 const u32 slot = row + wrap(x);
                 u32& value = m_slots[base + slot];
                 if (value < gpu::k_unbuilt) {
+                    forget_stand_in(level, value);
                     m_free.push_back(value);
                     --m_used;
                     m_loose[level] = true;
@@ -748,11 +751,19 @@ void VoxelScene::set_slot(u32 level, u32 slot, u32 value, const voxel::BrickCoor
 void VoxelScene::remove(u32 level, u32 slot, const voxel::BrickCoord& brick) {
     const u32 s = level * m_clipmap.slots_per_level() + slot;
     if (m_slots[s] < gpu::k_unbuilt) {
+        forget_stand_in(level, m_slots[s]);
         m_free.push_back(m_slots[s]);
         --m_used;
         m_loose[level] = true;
     }
     set_slot(level, slot, gpu::k_no_brick, brick);
+}
+
+void VoxelScene::forget_stand_in(u32 level, u32 index) {
+    if (m_has_stand_in[index] != 0) {
+        m_has_stand_in[index] = 0;
+        --m_stand_in_bricks[level];
+    }
 }
 
 void VoxelScene::grow_filled(u32 level, const voxel::BrickCoord& b) {
@@ -900,6 +911,15 @@ bool VoxelScene::finish_build(rhi::CommandList& cmd, bool& pool_writable) {
     }
     cmd.copy_buffer(m_pool, u64{index} * sizeof(voxel::Brick), upload.buffer, upload.offset, sizeof(brick));
     m_occupancy[index] = brick.occupancy;
+    forget_stand_in(level, index); // rebuilt in place: what it had
+    bool stands = false;
+    for (const u32 word : brick.stand_in) {
+        stands = stands || word != 0;
+    }
+    if (stands) {
+        m_has_stand_in[index] = 1;
+        ++m_stand_in_bricks[level];
+    }
     m_retry.erase(key);
     ++m_stats.uploaded;
     if (!here) {
@@ -1224,7 +1244,17 @@ void VoxelScene::write_levels(gpu::VoxelLevel* out, const DVec3& camera) const {
         l.brick[0] = o.x;
         l.brick[1] = o.y;
         l.brick[2] = o.z;
-        l.brick[3] = 0;
+        // Whether the far field (stand-in voxels only) need look at the
+        // level: it has stand-in bricks, or unbuilt slots a coarser level
+        // with some stands in for.
+        bool stands = false;
+        for (u32 up = level; up < m_clipmap.levels() && !stands; ++up) {
+            stands = m_stand_in_bricks[up] > 0;
+            if (up == level && !stands && m_unbuilt[level] == 0) {
+                break;
+            }
+        }
+        l.brick[3] = stands ? 1 : 0;
         // While part of the level is unbuilt, rays must look at every slot
         // there (to fall back to the coarser level).
         const voxel::BrickBox window{level, o, {o.x + n, o.y + n, o.z + n}};

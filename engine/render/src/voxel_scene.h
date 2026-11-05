@@ -227,6 +227,7 @@ private:
     void touch_building(const Box& box); // a change there: the brick under way is built again after
     void set_slot(u32 level, u32 slot, u32 value, const voxel::BrickCoord& brick);
     void remove(u32 level, u32 slot, const voxel::BrickCoord& brick); // to k_no_brick, freeing its brick
+    void forget_stand_in(u32 level, u32 index); // a pool brick freed or rebuilt
     void grow_filled(u32 level, const voxel::BrickCoord& brick);
     void tighten_filled(u32 level);
     void upload_tables(rhi::CommandList& cmd);
@@ -249,6 +250,8 @@ private:
     std::vector<u32> m_free;     // pool indices
     u32 m_used = 0;
     std::vector<std::array<u32, voxel::k_brick_voxels / 32>> m_occupancy; // per pool index (probe)
+    std::vector<u8> m_has_stand_in;      // per pool index: any stand-in voxel
+    std::vector<u32> m_stand_in_bricks;  // per level: pool bricks with stand-in voxels
 
     // Work. Bricks to build, coarsest level first:
     std::unordered_set<Key, KeyHash> m_pending;

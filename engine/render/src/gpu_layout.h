@@ -270,7 +270,7 @@ static_assert(sizeof(SmaaPush) == 48);
 // voxels.slang: one clipmap level, in the frame's levels upload.
 struct VoxelLevel {
     float origin[4];   // xyz: the window's minimum corner, camera-relative; w: brick size (m)
-    i32 brick[4];      // xyz: the window's minimum brick (slots wrap on it); w: unused
+    i32 brick[4];      // xyz: the window's minimum brick (slots wrap on it); w: 1 if the far field need look (stand-ins)
     // Bounds around every brick of the level (camera-relative; may be loose,
     // never tight): rays that miss them skip the level. Empty: min > max.
     float filled_min[4];

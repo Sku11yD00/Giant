@@ -285,6 +285,10 @@ Done in N2 part 3, the far field:
   so its own voxels never cover it while others in front of it still
   show (other than ones that close to it: a far tree just before a moving
   car shows the car there).
+- The march is kept cheap: levels flag whether they (or a coarser level
+  standing in for their unbuilt slots) have stand-in bricks, so with none
+  a ray skips the level, and with none anywhere there is no march at all;
+  a brick without stand-in voxels is crossed in one step.
 - Lit view only, and only while the voxel world is kept up to date (a
   frozen one would show stale far geometry). The levels are written once a
   frame for the far field and the voxel view.

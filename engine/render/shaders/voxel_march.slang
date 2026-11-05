@@ -34,6 +34,7 @@ struct Level {
     float3 origin;     // the window's minimum corner, camera-relative
     float brick_size;  // metres
     int3 brick;        // the window's minimum brick
+    bool stands;       // the far field need look at it (it, or a coarser level standing in, has stand-ins)
     float3 filled_min; // around the level's bricks (min > max: none)
     float3 filled_max;
 };
@@ -44,7 +45,9 @@ Level load_level(ByteAddressBuffer b, uint offset, uint level) {
     Level l;
     l.origin = o.xyz;
     l.brick_size = o.w;
-    l.brick = asint(b.Load3(at + 16));
+    const int4 brick = asint(b.Load4(at + 16));
+    l.brick = brick.xyz;
+    l.stands = brick.w != 0;
     l.filled_min = load4(b, at + 32).xyz;
     l.filled_max = load4(b, at + 48).xyz;
     return l;
@@ -127,10 +130,7 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
     if (level_count == 0u || n <= 0) {
         return false;
     }
-    Level lv[k_max_levels];
-    for (uint li = 0; li < k_max_levels; ++li) {
-        lv[li] = load_level(levels, w.levels_offset, min(li, level_count - 1u));
-    }
+    const bool stand_ins = w.stand_ins != 0u;
 
     float t = t_start;
     // Every window holds the camera, so the ray leaves each (a box) once
@@ -142,11 +142,13 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
         }
         const float3 p = dir * t;
         // The finest level whose window holds the point.
+        // (Levels are loaded as needed, not into an array: a dynamically
+        // indexed local array spills, slowly on software GPUs.)
         uint level = level_count;
-        Level l = lv[0];
+        Level l = load_level(levels, w.levels_offset, 0);
         int3 local = int3(0, 0, 0);
         for (uint i = first; i < level_count; ++i) {
-            const Level c = lv[i];
+            const Level c = load_level(levels, w.levels_offset, i);
             const int3 b = int3(floor((p - c.origin) / c.brick_size));
             if (all(b >= int3(0, 0, 0)) && all(b < int3(n, n, n))) {
                 level = i;
@@ -164,7 +166,7 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
         const float window = l.brick_size * float(n);
         const float leave = exit_distance(p, inv_dir, l.origin, float3(window, window, window));
         const float reach = enter_distance(p, inv_dir, l.filled_min, l.filled_max);
-        if (reach < 0.0 || reach >= leave) {
+        if (reach < 0.0 || reach >= leave || (stand_ins && !l.stands)) {
             t += leave + l.brick_size * 1e-4;
             continue;
         }
@@ -184,7 +186,7 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
         if (index == k_unbuilt) {
             index = k_no_brick;
             for (uint j = level + 1; j < level_count; ++j) {
-                const Level c = lv[j];
+                const Level c = load_level(levels, w.levels_offset, j);
                 const int3 b = int3(floor((p - c.origin) / c.brick_size));
                 if (any(b < int3(0, 0, 0)) || any(b >= int3(n, n, n))) {
                     break;
@@ -202,11 +204,23 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
             t += brick_exit + l.brick_size * 1e-4;
             continue;
         }
+        const uint base = index * k_brick_bytes;
+        if (stand_ins) {
+            // A brick with no stand-in voxels (only meshes still drawn): skipped whole.
+            const uint4 m0 = pool.Load4(base + k_stand_in_offset);
+            const uint4 m1 = pool.Load4(base + k_stand_in_offset + 16);
+            const uint4 m2 = pool.Load4(base + k_stand_in_offset + 32);
+            const uint4 m3 = pool.Load4(base + k_stand_in_offset + 48);
+            const uint4 any_set = m0 | m1 | m2 | m3;
+            if ((any_set.x | any_set.y | any_set.z | any_set.w) == 0u) {
+                t += brick_exit + l.brick_size * 1e-4;
+                continue;
+            }
+        }
         const float voxel = sample_size / 8.0;
         const int3 v = clamp(int3(floor((p - sample_min) / voxel)), int3(0, 0, 0), int3(7, 7, 7));
         const uint i = uint(v.x + 8 * (v.y + 8 * v.z));
-        const uint base = index * k_brick_bytes;
-        const uint word = pool.Load(base + (w.stand_ins != 0u ? k_stand_in_offset : 0u) + (i >> 5) * 4);
+        const uint word = pool.Load(base + (stand_ins ? k_stand_in_offset : 0u) + (i >> 5) * 4);
         if (((word >> (i & 31u)) & 1u) != 0u && !(skip.w >= 0.0 && length(p - skip.xyz) < skip.w + 2.0 * voxel)) {
             hit_t = t;
             packed = pool.Load(base + 64 + i * 4);
