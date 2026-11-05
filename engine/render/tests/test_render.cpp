@@ -211,7 +211,9 @@ GIANT_TEST("render: small instances past the far-field distance are left to the 
     st = settle();
     GIANT_CHECK(st.far_culled == 0 && st.instances == 2);
     frame.settings.far_field_max_radius = 100.0f; // rebuilds the voxel world with it a stand-in
+    frame.settings.voxel_ms_per_frame = 0.0f; // (which takes frames)
     GIANT_CHECK(s.draw(frame).far_culled == 0);
+    frame.settings.voxel_ms_per_frame = 50.0f;
     GIANT_CHECK(settle().far_culled == 1);
     // Past the voxel world's coarsest window (about 30 km): a mesh, or it would vanish.
     instances[0].scale = {10, 10, 10};
