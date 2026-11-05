@@ -63,6 +63,29 @@ GIANT_TEST("json: odd schemas do not throw") {
     // whole number given as a float.
     const Json schema = Json::parse(R"({"type": "object", "additionalProperties": {"type": "string"},
         "properties": {"n": {"type": "integer"}}})");
-    GIANT_CHECK(validate_args(schema, Json::parse(R"({"x": 1, "n": 1e300})")).empty());
+    GIANT_CHECK(validate_args(schema, Json::parse(R"({"x": 1, "n": 1e15})")).empty());
     GIANT_CHECK(validate_args(Json(42), Json::object()).empty());
+}
+
+GIANT_TEST("json: deeply nested input is refused instead of overflowing the stack") {
+    const std::string deep = std::string(10000, '[') + std::string(10000, ']');
+    GIANT_CHECK(!parse_json(deep).has_value());
+    const std::string ok = std::string(60, '[') + std::string(60, ']');
+    GIANT_CHECK(parse_json(ok).has_value());
+    // Brackets inside strings do not count.
+    GIANT_CHECK(parse_json("{\"a\": \"" + std::string(200, '[') + "\\\"\"}").has_value());
+}
+
+GIANT_TEST("json: limits written in C++ work like parsed ones") {
+    const Json schema = {{"type", "string"}, {"minLength", 3}};
+    GIANT_CHECK(!validate_args(schema, "a").empty());
+    GIANT_CHECK(validate_args(schema, "abc").empty());
+    const Json items = {{"type", "array"}, {"maxItems", 1}};
+    GIANT_CHECK(!validate_args(items, Json::array({1, 2})).empty());
+}
+
+GIANT_TEST("json: integers beyond 2^53 written as floats are refused") {
+    const Json schema = {{"type", "integer"}};
+    GIANT_CHECK(validate_args(schema, 3.0).empty());
+    GIANT_CHECK(!validate_args(schema, 1e300).empty());
 }

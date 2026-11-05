@@ -50,10 +50,54 @@ Json entries_to_json(const std::vector<HistoryEntry>& entries) {
     return out;
 }
 
-void undo_all(std::vector<Change>& changes) {
-    for (auto it = changes.rbegin(); it != changes.rend(); ++it) {
-        it->undo();
+// Undo and redo functions must not throw. If one does anyway, the state can
+// no longer be trusted to match the history: report it and let the caller
+// drop the history.
+template <typename Fn>
+bool run_guarded(Fn&& fn, const char* what) {
+    try {
+        fn();
+        return true;
+    } catch (const std::exception& e) {
+        log_error("ai", std::string(what) + " threw: " + e.what());
+    } catch (...) {
+        log_error("ai", std::string(what) + " threw");
     }
+    return false;
+}
+
+bool undo_all(std::vector<Change>& changes) {
+    return run_guarded(
+        [&] {
+            for (auto it = changes.rbegin(); it != changes.rend(); ++it) {
+                it->undo();
+            }
+        },
+        "undo");
+}
+
+bool redo_all(std::vector<Change>& changes) {
+    return run_guarded(
+        [&] {
+            for (auto& change : changes) {
+                change.redo();
+            }
+        },
+        "redo");
+}
+
+// Clears m_running however the command ends.
+struct RunningFlag {
+    explicit RunningFlag(bool& flag) : m_flag(flag) { m_flag = true; }
+    ~RunningFlag() { m_flag = false; }
+    RunningFlag(const RunningFlag&) = delete;
+    RunningFlag& operator=(const RunningFlag&) = delete;
+    bool& m_flag;
+};
+
+const Json& empty_object() {
+    static const Json empty = Json::object();
+    return empty;
 }
 
 } // namespace
@@ -99,6 +143,12 @@ bool CommandRegistry::add(CommandDesc desc) {
         log_error("ai", "command has no run function: " + desc.name);
         return false;
     }
+    // MCP requires every tool's input schema to describe an object.
+    const auto type = desc.input_schema.find("type");
+    if (!desc.input_schema.is_object() || type == desc.input_schema.end() || *type != "object") {
+        log_error("ai", "command input schema must have \"type\": \"object\": " + desc.name);
+        return false;
+    }
     m_commands.push_back(std::move(desc));
     return true;
 }
@@ -121,7 +171,7 @@ CommandResult CommandRegistry::execute(std::string_view name, const Json& args_i
     if (command == nullptr) {
         return CommandResult::failure("unknown command: " + std::string(name));
     }
-    const Json args = args_in.is_null() ? Json::object() : args_in;
+    const Json& args = args_in.is_null() ? empty_object() : args_in;
     if (std::string error = validate_args(command->input_schema, args); !error.empty()) {
         return CommandResult::failure("invalid arguments: " + error);
     }
@@ -129,24 +179,32 @@ CommandResult CommandRegistry::execute(std::string_view name, const Json& args_i
     const bool read_only = command->read_only;
     const std::string command_name = command->name;
     CommandContext context;
-    m_running = true;
     CommandResult result;
-    try {
-        result = command->run(args, context);
-    } catch (const std::exception& e) {
-        // A safety net: commands should return failures, not throw.
-        result = CommandResult::failure("internal error in '" + command_name + "': " + e.what());
+    {
+        const RunningFlag running(m_running);
+        try {
+            result = command->run(args, context);
+        } catch (const std::exception& e) {
+            // A safety net: commands should return failures, not throw.
+            result = CommandResult::failure("internal error in '" + command_name + "': " + e.what());
+        } catch (...) {
+            result = CommandResult::failure("internal error in '" + command_name + "'");
+        }
     }
-    m_running = false;
 
+    const auto roll_back = [&] {
+        if (!undo_all(context.changes())) {
+            drop_history();
+        }
+    };
     if (read_only && !context.changes().empty()) {
         GIANT_ASSERT(false, "a read-only command recorded changes");
-        undo_all(context.changes());
+        roll_back();
         return CommandResult::failure("internal error: read-only command '" + command_name +
                                       "' changed something");
     }
     if (!result.ok) {
-        undo_all(context.changes());
+        roll_back();
         return result;
     }
     if (!context.changes().empty()) {
@@ -163,10 +221,12 @@ bool CommandRegistry::undo() {
     if (m_undo.empty()) {
         return false;
     }
-    Entry entry = std::move(m_undo.back());
+    if (!undo_all(m_undo.back().changes)) {
+        drop_history();
+        return false;
+    }
+    m_redo.push_back(std::move(m_undo.back()));
     m_undo.pop_back();
-    undo_all(entry.changes);
-    m_redo.push_back(std::move(entry));
     return true;
 }
 
@@ -174,13 +234,19 @@ bool CommandRegistry::redo() {
     if (m_redo.empty()) {
         return false;
     }
-    Entry entry = std::move(m_redo.back());
-    m_redo.pop_back();
-    for (auto& change : entry.changes) {
-        change.redo();
+    if (!redo_all(m_redo.back().changes)) {
+        drop_history();
+        return false;
     }
-    m_undo.push_back(std::move(entry));
+    m_undo.push_back(std::move(m_redo.back()));
+    m_redo.pop_back();
     return true;
+}
+
+void CommandRegistry::drop_history() {
+    log_error("ai", "an undo or redo failed; the undo history was cleared");
+    m_undo.clear();
+    m_redo.clear();
 }
 
 std::vector<HistoryEntry> CommandRegistry::undo_history() const {

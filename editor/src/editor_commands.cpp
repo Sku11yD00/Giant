@@ -114,21 +114,17 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     add(registry,
         {"set_window_size",
          "Resizes the editor window, in screen points (on a high-DPI screen the pixel size is "
-         "larger; get_engine_info reports both). Undoable.",
+         "larger; get_engine_info reports both, the pixel size from the next frame on). Window "
+         "size is view state, like a drag with the mouse, so it is not undoable.",
          Json::parse(R"({"type": "object", "additionalProperties": false,
              "required": ["width", "height"], "properties": {
              "width": {"type": "integer", "minimum": 320, "maximum": 7680},
              "height": {"type": "integer", "minimum": 240, "maximum": 4320}}})"),
          false,
-         [&state](const Json& args, CommandContext& context) {
-             const u32 old_w = state.window->point_width();
-             const u32 old_h = state.window->point_height();
+         [&state](const Json& args, CommandContext&) {
              const u32 w = args["width"].get<u32>();
              const u32 h = args["height"].get<u32>();
              state.window->request_size(w, h);
-             auto* window = state.window;
-             context.record({[window, old_w, old_h] { window->request_size(old_w, old_h); },
-                             [window, w, h] { window->request_size(w, h); }});
              return CommandResult::success({{"requested", {{"width", w}, {"height", h}}}});
          }});
 

@@ -19,6 +19,7 @@
 #include "giant/rhi/rhi.h"
 
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -82,8 +83,9 @@ bool parse_options(int argc, char** argv, Options& out) {
     return true;
 }
 
-// Answers every MCP message that arrived since the last frame.
-void pump_mcp(platform::LineReader& reader, ai::McpServer& server) {
+// Answers every MCP message that arrived since the last frame. Returns false
+// once the client can no longer receive replies.
+bool pump_mcp(platform::LineReader& reader, ai::McpServer& server) {
     for (const std::string& line : reader.take_lines()) {
         if (line.empty()) {
             continue;
@@ -93,6 +95,7 @@ void pump_mcp(platform::LineReader& reader, ai::McpServer& server) {
         }
     }
     std::cout.flush();
+    return static_cast<bool>(std::cout);
 }
 
 int run(const Options& options) {
@@ -143,6 +146,10 @@ int run(const Options& options) {
 #if defined(_WIN32)
         // Messages end in \n only; text mode would turn that into \r\n.
         _setmode(_fileno(stdout), _O_BINARY);
+#else
+        // A client that closes its end must not kill the editor mid-write;
+        // the failed write is noticed below and the editor closes cleanly.
+        std::signal(SIGPIPE, SIG_IGN);
 #endif
         mcp_reader = platform::LineReader::from_stdin();
         mcp_server = std::make_unique<ai::McpServer>(
@@ -164,8 +171,7 @@ int run(const Options& options) {
 
     while (window->poll_events() && !state.quit_requested) {
         if (mcp_reader != nullptr) {
-            pump_mcp(*mcp_reader, *mcp_server);
-            if (mcp_reader->finished()) {
+            if (!pump_mcp(*mcp_reader, *mcp_server) || mcp_reader->finished()) {
                 log_info("editor", "MCP client disconnected; closing");
                 break;
             }

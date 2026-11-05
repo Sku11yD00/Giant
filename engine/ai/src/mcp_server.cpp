@@ -20,7 +20,8 @@ Json result_reply(const Json& id, Json result) {
     return {{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}};
 }
 
-bool valid_id(const Json& id) { return id.is_string() || id.is_number_integer(); }
+// MCP request ids are strings or numbers.
+bool valid_id(const Json& id) { return id.is_string() || id.is_number(); }
 
 } // namespace
 
@@ -45,8 +46,10 @@ std::optional<std::string> McpServer::handle(std::string_view message) {
     const auto method_it = msg.find("method");
     const auto id_it = msg.find("id");
     if (method_it == msg.end()) {
-        // A response to something we never send, or junk: nothing to answer.
-        return std::nullopt;
+        if (msg.contains("result") || msg.contains("error")) {
+            return std::nullopt; // a response to something we never sent
+        }
+        return to_json_text(error_reply(nullptr, k_invalid_request, "not a JSON-RPC message"));
     }
     if (!method_it->is_string() || msg.value("jsonrpc", Json()) != "2.0") {
         const Json id = id_it != msg.end() && valid_id(*id_it) ? *id_it : Json();
@@ -58,8 +61,9 @@ std::optional<std::string> McpServer::handle(std::string_view message) {
     if (!valid_id(*id_it)) {
         return to_json_text(error_reply(nullptr, k_invalid_request, "id must be a string or integer"));
     }
+    static const Json no_params = Json::object();
     const auto params_it = msg.find("params");
-    const Json params = params_it != msg.end() ? *params_it : Json::object();
+    const Json& params = params_it != msg.end() ? *params_it : no_params;
     if (!params.is_object()) {
         return to_json_text(error_reply(*id_it, k_invalid_params, "params must be an object"));
     }
@@ -105,8 +109,9 @@ Json McpServer::handle_request(const std::string& method, const Json& params, co
         if (m_registry.find(name->get<std::string>()) == nullptr) {
             return error_reply(id, k_invalid_params, "unknown tool: " + name->get<std::string>());
         }
+        static const Json no_args;
         const auto args_it = params.find("arguments");
-        const Json args = args_it != params.end() ? *args_it : Json::object();
+        const Json& args = args_it != params.end() ? *args_it : no_args;
         const CommandResult outcome = m_registry.execute(name->get<std::string>(), args);
         if (!outcome.ok) {
             // A tool failure is a normal result the AI reads and can react to.

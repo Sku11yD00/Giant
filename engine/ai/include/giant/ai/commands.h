@@ -28,7 +28,9 @@ struct [[nodiscard]] CommandResult {
 };
 
 // One reversible change. `undo` puts things back as they were before the
-// change; `redo` makes the change again.
+// change; `redo` makes the change again. Neither may throw: if one does, the
+// registry logs it and clears the whole history, since it no longer matches
+// the state.
 struct Change {
     std::function<void()> undo;
     std::function<void()> redo;
@@ -53,7 +55,9 @@ struct CommandDesc {
     std::string name;
     // One or two sentences for the AI: what it does, and anything surprising.
     std::string description;
-    // JSON Schema for the arguments; arguments are checked before `run`.
+    // JSON Schema for the arguments, checked before `run`. Must be an object
+    // schema (MCP requires it). Give integer fields a minimum and maximum
+    // before converting them to C++ integer types.
     Json input_schema = Json{{"type", "object"}, {"additionalProperties", false}};
     // Changes nothing (safe to call any time). Read-only commands may not
     // record changes.
@@ -87,7 +91,8 @@ public:
 
     bool can_undo() const { return !m_undo.empty(); }
     bool can_redo() const { return !m_redo.empty(); }
-    // Undoes or redoes the newest entry. False if there is nothing to do.
+    // Undoes or redoes the newest entry. False if there is nothing to do (or
+    // the change threw, which clears the history).
     bool undo();
     bool redo();
 
@@ -103,6 +108,8 @@ private:
         HistoryEntry what;
         std::vector<Change> changes;
     };
+
+    void drop_history();
 
     std::vector<CommandDesc> m_commands;
     std::deque<Entry> m_undo; // newest at the back

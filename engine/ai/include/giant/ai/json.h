@@ -15,7 +15,7 @@ namespace giant::ai {
 
 using Json = nlohmann::json;
 
-// Null if `text` is not valid JSON.
+// Null if `text` is not valid JSON, or nests deeper than 64 levels.
 std::optional<Json> parse_json(std::string_view text);
 
 // Compact (indent < 0) or indented text; invalid UTF-8 is replaced.

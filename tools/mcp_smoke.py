@@ -90,6 +90,7 @@ def main() -> int:
     except Exception as error:  # report and fail
         print(f"mcp_smoke: {error}", file=sys.stderr)
         editor.kill()
+        editor.wait()
         return 1
     finally:
         timer.cancel()

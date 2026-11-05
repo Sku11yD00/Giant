@@ -167,3 +167,51 @@ GIANT_TEST("commands: history is capped and listed oldest first") {
     const CommandResult listed = f.registry.execute("get_history");
     GIANT_CHECK(listed.ok && listed.value["redo"].size() == 2);
 }
+
+GIANT_TEST("commands: a non-standard exception does not wedge the registry") {
+    CommandRegistry registry;
+    GIANT_CHECK(registry.add({"throws_int", "", Json{{"type", "object"}}, false,
+                              [](const Json&, CommandContext&) -> CommandResult { throw 42; }}));
+    GIANT_CHECK(!registry.execute("throws_int").ok);
+    GIANT_CHECK(!registry.execute("throws_int").ok); // still usable, no assert
+    GIANT_CHECK(registry.execute("get_history").ok);
+}
+
+GIANT_TEST("commands: an undo that throws clears the history instead of escaping") {
+    set_console_logging(false);
+    CommandRegistry registry;
+    int value = 0;
+    GIANT_CHECK(registry.add({"bad_undo", "", Json{{"type", "object"}}, false,
+                              [&value](const Json&, CommandContext& context) {
+                                  value = 1;
+                                  context.record({[]() { throw std::runtime_error("no"); },
+                                                  [&value] { value = 1; }});
+                                  return CommandResult::success();
+                              }}));
+    GIANT_CHECK(registry.execute("bad_undo").ok);
+    GIANT_CHECK(registry.can_undo());
+    GIANT_CHECK(!registry.execute("undo").ok);
+    GIANT_CHECK(!registry.can_undo() && !registry.can_redo());
+    set_console_logging(true);
+}
+
+GIANT_TEST("commands: a rollback that throws does not escape") {
+    set_console_logging(false);
+    CommandRegistry registry;
+    GIANT_CHECK(registry.add({"fail_bad_rollback", "", Json{{"type", "object"}}, false,
+                              [](const Json&, CommandContext& context) {
+                                  context.record({[]() { throw std::runtime_error("no"); }, [] {}});
+                                  return CommandResult::failure("failed");
+                              }}));
+    GIANT_CHECK(!registry.execute("fail_bad_rollback").ok);
+    set_console_logging(true);
+}
+
+GIANT_TEST("commands: input schemas must describe an object") {
+    set_console_logging(false);
+    CommandRegistry registry;
+    const auto run = [](const Json&, CommandContext&) { return CommandResult::success(); };
+    GIANT_CHECK(!registry.add({"no_type", "", Json::object(), false, run}));
+    GIANT_CHECK(!registry.add({"string_type", "", Json{{"type", "string"}}, false, run}));
+    set_console_logging(true);
+}

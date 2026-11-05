@@ -1,11 +1,49 @@
 #include "giant/ai/json.h"
 
 #include <cmath>
+#include <cstdint>
 #include <string>
 
 namespace giant::ai {
 
+namespace {
+
+// Deeper documents are refused: copying or printing JSON recurses once per
+// level, so a hostile message could otherwise overflow the stack.
+constexpr int k_max_depth = 64;
+
+bool within_depth(std::string_view text) {
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (const char c : text) {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+        } else if (c == '"') {
+            in_string = true;
+        } else if (c == '[' || c == '{') {
+            if (++depth > k_max_depth) {
+                return false;
+            }
+        } else if (c == ']' || c == '}') {
+            --depth;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 std::optional<Json> parse_json(std::string_view text) {
+    if (!within_depth(text)) {
+        return std::nullopt;
+    }
     Json value = Json::parse(text.begin(), text.end(), nullptr, /*allow_exceptions=*/false);
     if (value.is_discarded()) {
         return std::nullopt;
@@ -19,6 +57,18 @@ std::string to_json_text(const Json& value, int indent) {
 
 namespace {
 
+// A non-negative whole-number keyword (minLength etc.), however it was
+// written: parsed text gives unsigned numbers, C++ initialisers signed ones.
+std::optional<std::size_t> count_keyword(const Json& schema, const char* key) {
+    const auto it = schema.find(key);
+    if (it == schema.end()) return std::nullopt;
+    if (it->is_number_unsigned()) return it->get<std::size_t>();
+    if (it->is_number_integer() && it->get<std::int64_t>() >= 0) {
+        return static_cast<std::size_t>(it->get<std::int64_t>());
+    }
+    return std::nullopt;
+}
+
 std::string at(const std::string& path) { return path.empty() ? "arguments" : path; }
 
 bool has_type(const Json& value, const std::string& type) {
@@ -29,10 +79,11 @@ bool has_type(const Json& value, const std::string& type) {
     if (type == "number") return value.is_number();
     if (type == "integer") {
         if (value.is_number_integer()) return true;
-        // 3.0 counts as an integer, as JSON Schema says.
+        // 3.0 counts as an integer, as JSON Schema says. Floats beyond 2^53
+        // are refused: they cannot be converted to an integer type safely.
         if (!value.is_number_float()) return false;
         const double d = value.get<double>();
-        return std::isfinite(d) && std::trunc(d) == d;
+        return std::isfinite(d) && std::trunc(d) == d && std::fabs(d) <= 9007199254740992.0;
     }
     if (type == "null") return value.is_null();
     return false;
@@ -73,23 +124,19 @@ std::string validate(const Json& schema, const Json& value, const std::string& p
     if (value.is_string()) {
         // Length in bytes; good enough for the limits commands set.
         const auto length = value.get_ref<const std::string&>().size();
-        if (auto it = schema.find("minLength");
-            it != schema.end() && it->is_number_unsigned() && length < it->get<std::size_t>()) {
+        if (const auto min = count_keyword(schema, "minLength"); min && length < *min) {
             return at(path) + ": too short";
         }
-        if (auto it = schema.find("maxLength");
-            it != schema.end() && it->is_number_unsigned() && length > it->get<std::size_t>()) {
+        if (const auto max = count_keyword(schema, "maxLength"); max && length > *max) {
             return at(path) + ": too long";
         }
     }
     if (value.is_array()) {
-        if (auto it = schema.find("minItems");
-            it != schema.end() && it->is_number_unsigned() && value.size() < it->get<std::size_t>()) {
-            return at(path) + ": needs at least " + to_json_text(*it) + " items";
+        if (const auto min = count_keyword(schema, "minItems"); min && value.size() < *min) {
+            return at(path) + ": needs at least " + std::to_string(*min) + " items";
         }
-        if (auto it = schema.find("maxItems");
-            it != schema.end() && it->is_number_unsigned() && value.size() > it->get<std::size_t>()) {
-            return at(path) + ": allows at most " + to_json_text(*it) + " items";
+        if (const auto max = count_keyword(schema, "maxItems"); max && value.size() > *max) {
+            return at(path) + ": allows at most " + std::to_string(*max) + " items";
         }
         if (auto it = schema.find("items"); it != schema.end()) {
             for (std::size_t i = 0; i < value.size(); ++i) {

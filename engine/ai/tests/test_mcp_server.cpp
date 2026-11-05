@@ -124,6 +124,12 @@ GIANT_TEST("mcp: protocol errors use JSON-RPC error codes") {
         "params": {"name": "missing"}})")["error"]["code"] == -32602);
     GIANT_CHECK(f.call(R"({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": 3})")
                     ["error"]["code"] == -32602);
+    GIANT_CHECK(f.call("{}")["error"]["code"] == -32600);
+    const Json fractional = f.call(R"({"jsonrpc": "2.0", "id": 1.5, "method": "ping"})");
+    GIANT_CHECK(fractional["id"] == 1.5 && fractional.contains("result"));
+    const std::string deep = R"({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {"a": )" +
+                             std::string(10000, '[') + std::string(10000, ']') + "}}";
+    GIANT_CHECK(f.call(deep)["error"]["code"] == -32700);
     const Json ping = f.call(R"({"jsonrpc": "2.0", "id": 9, "method": "ping"})");
     GIANT_CHECK(ping["id"] == 9 && ping["result"].is_object());
 }
