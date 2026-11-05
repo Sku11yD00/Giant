@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
@@ -51,6 +52,10 @@ public static unsafe class NativeHost
         }
         s_api = *(NativeApi*)api;
         s_mainThread = Environment.CurrentManagedThreadId;
+        // No stutter from the garbage collector: background collections
+        // only, no blocking full collections while the game runs (scripts
+        // should still avoid allocating every frame).
+        GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
         return 0;
     }
 

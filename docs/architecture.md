@@ -183,6 +183,13 @@ the GPU by `render` (drawing and lighting).
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 
+Frame pacing counts as much as the average (AGENTS.md rule 9): no shader or
+pipeline compiles while the game runs (shaders are built ahead, pipelines are
+made at load), streaming and uploads stay within per-frame budgets and never
+block the main thread, and the C# GC runs in background, sustained low
+latency mode. Performance gates check the 99th percentile frame and count
+hitches (frames over twice the median).
+
 | GPU work | Budget |
 | --- | --- |
 | Geometry: culling, clusters, visibility buffer | 3.0 ms |

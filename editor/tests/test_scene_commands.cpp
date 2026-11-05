@@ -221,3 +221,19 @@ GIANT_TEST("editor: mesh paths have one spelling") {
     GIANT_CHECK(MeshLibrary::normalize("assets/./rocks/../rock.glb") == "assets/rock.glb");
     GIANT_CHECK(MeshLibrary::normalize("assets\\rock.glb") == "assets/rock.glb");
 }
+
+GIANT_TEST("editor: frame times report consistency, not just the average") {
+    FrameTimes t;
+    GIANT_CHECK(t.average() == 0.0f && t.percentile(0.99f) == 0.0f && t.hitches() == 0);
+    for (int i = 0; i < 300; ++i) {
+        t.add(i == 250 ? 50.0f : 16.0f); // one stutter among steady frames
+    }
+    GIANT_CHECK(t.size() == FrameTimes::k_frames);
+    GIANT_CHECK(t.percentile(0.5f) == 16.0f && t.worst() == 50.0f);
+    GIANT_CHECK(t.hitches() == 1);
+    GIANT_CHECK(t.percentile(0.99f) == 16.0f); // one frame in 240 is under 1%
+    t.add(40.0f);
+    t.add(40.0f);
+    t.add(40.0f);
+    GIANT_CHECK(t.percentile(0.99f) == 40.0f && t.hitches() == 4);
+}

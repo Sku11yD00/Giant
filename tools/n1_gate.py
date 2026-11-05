@@ -9,7 +9,8 @@ camera down a street of the town and up over the forest (about 20 seconds
 at 60 fps: each stop is two commands, a frame each), then reports frame
 times over the whole flight. It passes when the flight holds 60 fps
 (average frame under 16.7 ms; with vsync on a 60 Hz screen that is every
-frame on time), every stop takes the same fixed number of draws, nothing
+frame on time) without micro stutter (99th percentile frame under 20.8 ms,
+no frame over twice the median), every stop takes the same fixed number of draws, nothing
 overflows, and the detail the view asks for has loaded by the end (a group
 may wait a frame while flying; none may be left waiting).
 
@@ -26,6 +27,9 @@ TREES = 10_000
 HOUSES_X, HOUSES_Z = 20, 15
 SPACING = 9.0
 FRAME_BUDGET_MS = 1000.0 / 60.0
+# No micro stutter: the 99th percentile frame stays near the budget, and no
+# frame takes over twice the median (a hitch).
+P99_LIMIT_MS = FRAME_BUDGET_MS * 1.25
 
 
 def build_gate_scene(tool):
@@ -166,7 +170,9 @@ def main() -> int:
                 windows.append({**info_now["frame_times"], "frames": min(frames, 240)})
         times = {"frames": sum(w["frames"] for w in windows),
                  "average_ms": sum(w["average_ms"] for w in windows) / len(windows),
-                 "worst_ms": max(w["worst_ms"] for w in windows)}
+                 "worst_ms": max(w["worst_ms"] for w in windows),
+                 "p99_ms": max(w["p99_ms"] for w in windows),
+                 "hitches": sum(w["hitches"] for w in windows)}
         for _ in range(30):  # hovering at the end: what the view wants loads
             call("ping")
         left_waiting = tool("get_render_settings")["last_frame"]["streaming"]["waiting"]
@@ -178,7 +184,8 @@ def main() -> int:
               f"(+{frame['post_draws']} full-screen), {frame['materials']} materials, "
               f"{frame['triangles']} triangles in view at the end")
         print(f"n1_gate: frame time over the flight ({times['frames']} frames sampled): "
-              f"average {times['average_ms']:.2f} ms, worst {times['worst_ms']:.2f} ms")
+              f"average {times['average_ms']:.2f} ms, 99th percentile {times['p99_ms']:.2f} ms, "
+              f"worst {times['worst_ms']:.2f} ms, {times['hitches']} hitches")
         if bad_draws:
             failures.append(f"the draw count changed during the flight (stop, draws, post): {bad_draws[:5]}")
         if frame["draws"] != 2 or frame["post_draws"] != 3:
@@ -195,6 +202,10 @@ def main() -> int:
         real_gpu = not info["software_adapter"] and info["backend"] != "null"
         if real_gpu and times["average_ms"] > FRAME_BUDGET_MS + 0.3:
             failures.append(f"average frame {times['average_ms']:.2f} ms is over the 60 fps budget")
+        if real_gpu and times["p99_ms"] > P99_LIMIT_MS:
+            failures.append(f"99th percentile frame {times['p99_ms']:.2f} ms: frame pacing is uneven")
+        if real_gpu and times["hitches"] > 0:
+            failures.append(f"{times['hitches']} hitches (frames over twice the median): micro stutter")
         tool("quit_editor")
         editor.wait(timeout=60)
     except Exception as error:

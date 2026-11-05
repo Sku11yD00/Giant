@@ -46,6 +46,23 @@ struct FrameTimes {
         for (usize i = 0; i < size(); ++i) w = std::max(w, ms[i]);
         return w;
     }
+    // The frame time `fraction` of frames are at or under (0.5 median,
+    // 0.99 the 99th percentile). Consistency matters as much as the average.
+    float percentile(float fraction) const {
+        if (size() == 0) return 0.0f;
+        std::array<float, k_frames> sorted = ms;
+        const auto end = sorted.begin() + static_cast<std::ptrdiff_t>(size());
+        std::sort(sorted.begin(), end);
+        const auto rank = static_cast<usize>(fraction * static_cast<float>(size() - 1) + 0.5f);
+        return sorted[std::min(rank, size() - 1)];
+    }
+    // Stutters: frames over twice the median (a felt hitch at any frame rate).
+    usize hitches() const {
+        const float limit = 2.0f * percentile(0.5f);
+        usize n = 0;
+        for (usize i = 0; i < size(); ++i) n += ms[i] > limit ? usize{1} : usize{0};
+        return n;
+    }
 };
 
 // What the commands read and change. Owned by main; outlives the registry.

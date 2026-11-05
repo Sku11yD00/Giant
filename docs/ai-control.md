@@ -35,7 +35,7 @@ like late afternoon"; Claude calls the tools, looks at the result with
 
 | Command | Changes things | What it does |
 | --- | --- | --- |
-| `get_engine_info` | no | Version, graphics backend and GPU, validation layer, frames, frame times over the last 240 frames (average and worst, wall clock), window size |
+| `get_engine_info` | no | Version, graphics backend and GPU, validation layer, frames, frame times over the last 240 frames (average, median, 99th percentile, worst, and hitches: frames over twice the median; wall clock), window size |
 | `get_log` | no | Newest log lines, filtered by level |
 | `create_entity`, `create_entities` | yes, undoable | Adds shapes (cube, sphere, plane), imported meshes (`mesh`: a glTF/GLB path), kit placements (`kit`: a kit's name) or decals (`shape: decal` with `decal` settings: stamp shape `disc`, `rectangle`, `ring`, `splat` or `cracks`, opacity, softness, seed) with position, rotation, scale and material; many in one step |
 | `create_kit` | yes, undoable | Makes a kit, a reusable group of pieces, from `pieces` or `from_entities` (`replace_entities` swaps those for one placement); `replace` changes an existing kit and every placement |
