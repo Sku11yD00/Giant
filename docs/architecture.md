@@ -36,19 +36,50 @@ as plain data, so the graphics layer works headless and in tests.
 instances, weather values, voxel edits); it never includes `world` or `sim`.
 This keeps the renderer replaceable.
 
-## Graphics layer plan
+## Graphics layer
 
-N0's `rhi` is deliberately small: one device, swap chains, clear, present,
-and an offscreen read-back used to prove the device renders. N1 grows it into
-the real layer before any rendering code depends on its shape:
+`rhi` (engine/rhi/include/giant/rhi/rhi.h) is a thin, bindless layer. The
+rest of the engine reaches the GPU only through it, so a Vulkan backend can
+follow without touching the renderer.
 
-- Frames in flight move onto the device: a ring of per-frame command
-  allocators per recording thread, so several swap chains (editor viewports)
-  and headless frames work. Swap chains only acquire and present.
-- Recording moves into command lists; clears become command-list calls.
-- Buffers, textures, pipelines and bindless descriptors (shader model 6.6).
-- Swap chains track their device in debug builds so destroying the device
-  first is caught.
+- **Handles.** Buffers, textures and pipelines are `Handle<Tag>{index,
+  generation}` into device pools. A destroyed slot bumps its generation, so
+  a stale handle stops resolving instead of reaching whatever is created
+  there next. Zero is "none".
+- **Bindless.** Shader model 6.6: every shader-visible resource has a
+  descriptor index in one heap (`ResourceDescriptorHeap` in shaders), and
+  draws pass indices in up to 128 bytes of push constants (register b0).
+  One global root signature, so pipelines need no binding setup. Four fixed
+  samplers. Shaders include `giant/bindless.slang` (engine/rhi/shaders) and
+  never touch the heaps directly.
+- **Vertex pulling.** No vertex buffers or input layouts: vertex shaders read
+  what they need from buffers by `SV_VertexID`. Index buffers stay (32-bit).
+- **Frames.** `begin_frame(swap_chain or null)` returns the frame's command
+  list; `end_frame` submits (and presents). Two frames in flight live on the
+  device. Destroying anything is deferred until the GPU is done with it, so it
+  is safe mid-frame. Per-frame transient memory (`allocate`, `upload`) holds
+  constants, instance lists and UI geometry.
+- **States.** Each resource's state is tracked; `barrier()` moves it to what
+  the next use needs, and render passes move their own targets. Buffers fall
+  back to `common` after each frame, as D3D12 decays them.
+- **Conventions.** Reverse-Z depth (1 near, 0 at infinity, GREATER passes),
+  counter-clockwise front faces, back faces culled. Colour targets are sRGB
+  (`rgba8_srgb`); UI draws through a UNORM view so its gamma-space colours
+  show as picked.
+- **Backends.** D3D12 on the DirectX 12 Agility SDK (shipped in a `D3D12`
+  folder next to the exe), and a null backend that validates every call the
+  way the debug layer would (plus stale handles and pass/pipeline mismatches)
+  and emulates memory, clears and copies, so tests read results back without
+  a GPU. Windows CI runs every GPU test on WARP with the validation layer and
+  fails on any validation error.
+- **Shaders** are Slang, compiled at build time by `giant_shaders()`
+  (cmake/GiantShaders.cmake) to DXIL and embedded in the module; one Linux
+  CI job compiles them too, to catch errors there.
+
+The renderer (`render`) sits on top: plain per-frame data in (camera,
+lighting, instances), an image out. N1 part 1 is an instanced forward
+renderer; later parts replace its inside with clusters, GPU culling and a
+visibility buffer behind the same interface.
 
 ## Window events (known limit)
 

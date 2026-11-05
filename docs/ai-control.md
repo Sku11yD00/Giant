@@ -27,7 +27,9 @@ exe):
 
 The editor window opens when Claude Code connects and closes when it
 disconnects. Ask things like "make the background a sunset orange" or "what
-GPU is the editor using?"; Claude calls the tools and can undo what it did.
+GPU is the editor using?" or "build a small village with a church and light it
+like late afternoon"; Claude calls the tools, looks at the result with
+`capture_screenshot`, and can undo what it did.
 
 ## Commands so far
 
@@ -35,8 +37,15 @@ GPU is the editor using?"; Claude calls the tools and can undo what it did.
 | --- | --- | --- |
 | `get_engine_info` | no | Version, graphics backend and GPU, validation layer, frames, window size |
 | `get_log` | no | Newest log lines, filtered by level |
-| `get_clear_color` | no | Viewport background colour (linear RGB) |
-| `set_clear_color` | yes, undoable | Sets the background colour |
+| `create_entity`, `create_entities` | yes, undoable | Adds shapes (cube, sphere, plane) with position, rotation, scale and material; many in one step |
+| `set_entity` | yes, undoable | Changes any fields of one entity |
+| `delete_entities` | yes, undoable | Removes entities by id |
+| `get_entity`, `list_entities` | no | Reads entities (outliner order) |
+| `get_lighting`, `set_lighting` | `set` is undoable | Sun height and direction, sun, sky and ground light, exposure |
+| `get_clear_color`, `set_clear_color` | `set` is undoable | The sky colour, which is also the background |
+| `new_scene`, `load_scene` | yes, undoable | Empties the scene, or loads a `.scene.json` file |
+| `save_scene` | writes a file | Saves the scene as JSON text |
+| `get_camera`, `set_camera` | view only, not undoable | The viewport camera; `look_at` aims it |
 | `set_window_size` | view only, not undoable | Resizes the window (screen points) |
 | `undo`, `redo` | yes | Walks the change history |
 | `get_history` | no | What can be undone and redone |

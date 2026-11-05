@@ -28,9 +28,17 @@ Milestone **N0 Foundation**:
   panels (Dear ImGui, docked), and C# scripting on .NET 10 with reload
   (see `docs/scripting.md`).
 
+Milestone **N1 Virtual geometry** (in progress):
+
+- Part 1 (done): the real graphics layer (bindless, shader model 6.6,
+  frames in flight, Slang shaders, Agility SDK), the scene (entities,
+  lighting, save and load), a lit forward renderer and a 3D viewport with a
+  fly camera (hold the right mouse button, then W A S D). Claude can build,
+  light and photograph a scene over MCP alone, which closes N0's gate.
+
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
-close the window to exit. C# scripts need the .NET 10 runtime
+close the window to exit. Keep the `D3D12` folder next to the exe. C# scripts need the .NET 10 runtime
 (https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
 The earlier Godot-based work is archived on the branches
