@@ -52,20 +52,23 @@ function(giant_shaders module)
                 -I ${PROJECT_SOURCE_DIR}/engine/rhi/shaders
                 -o ${compiled} -depfile ${compiled}.d
         DEPFILE ${compiled}.d
-        DEPENDS ${src}
+        DEPENDS ${src} ${GIANT_SLANGC}
         COMMENT "Slang: ${file} (${entry})"
         VERBATIM)
       if(NOT WIN32)
         # Checked only: nothing to embed for the null backend.
         add_custom_command(
           OUTPUT ${blob}
+          COMMAND ${CMAKE_COMMAND} -E rm -f ${blob}
           COMMAND ${CMAKE_COMMAND} -E touch ${blob}
           DEPENDS ${compiled}
           VERBATIM)
       endif()
     else()
+      # Empty, even if an earlier build with shaders on left DXIL here.
       add_custom_command(
         OUTPUT ${blob}
+        COMMAND ${CMAKE_COMMAND} -E rm -f ${blob}
         COMMAND ${CMAKE_COMMAND} -E touch ${blob}
         DEPENDS ${src}
         VERBATIM)

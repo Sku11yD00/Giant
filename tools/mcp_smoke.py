@@ -77,6 +77,11 @@ def build_scene(tool, call, check):
     tool("undo")
     check(abs(tool("get_entity", {"id": ids[1]})["base_color"][0] - 0.8) < 1e-6, "undo set_entity")
     tool("redo")
+    before_camera = tool("get_camera")
+    refused = call("tools/call", {"name": "set_camera", "arguments": {
+        "position": [1, 1, 1], "look_at": [1, 1, 1], "vertical_fov_degrees": 20}})
+    check(refused.get("isError") is True and tool("get_camera") == before_camera,
+          "a refused set_camera leaves the camera alone")
     missing = call("tools/call", {"name": "set_entity", "arguments": {"id": 999999}})
     check(missing.get("isError") is True, "unknown id is a tool error")
 
@@ -99,7 +104,7 @@ def build_scene(tool, call, check):
         path = os.path.join(folder, "town.scene.json")
         saved = tool("save_scene", {"path": path})
         check(saved["entities"] == 3 and os.path.isfile(path), "scene saved")
-        tool("delete_entities", {"ids": [ids[0]]})
+        tool("delete_entities", {"ids": [ids[0], ids[0]]})  # listed twice is fine
         check(tool("list_entities")["count"] == 2, "deleted")
         tool("undo")
         check(tool("list_entities")["entities"][0]["id"] == ids[0], "undo puts it back in place")

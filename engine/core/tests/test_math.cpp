@@ -81,6 +81,29 @@ GIANT_TEST("math: euler angles round-trip") {
     GIANT_CHECK_NEAR(down.yaw, 40.0, 0.5);
 }
 
+GIANT_TEST("math: euler angles keep the rotation near straight up or down") {
+    // Editors decompose and rebuild rotations every drag frame, so the
+    // rotation must survive even where the angles are ambiguous.
+    const EulerDegrees cases[] = {{89.3f, 20, 30}, {89.5f, 20, 30}, {-89.7f, -50, 10},
+                                  {89.99f, 120, -40}, {90, 10, 0}};
+    for (const EulerDegrees& e : cases) {
+        const Quat q = quat_from_euler(e);
+        const Quat back = quat_from_euler(euler_from_quat(q));
+        for (const Vec3& axis : {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}}) {
+            GIANT_CHECK(near3(rotate(back, axis), rotate(q, axis), 2e-3f));
+        }
+    }
+    // A sweep of awkward angles, 1 degree apart, near both poles.
+    for (int pitch = 80; pitch <= 90; ++pitch) {
+        for (int sign = -1; sign <= 1; sign += 2) {
+            const Quat q = quat_from_euler({static_cast<float>(sign * pitch), 33, 71});
+            const Quat back = quat_from_euler(euler_from_quat(q));
+            GIANT_CHECK(near3(rotate(back, {0, 0, -1}), rotate(q, {0, 0, -1}), 2e-3f));
+            GIANT_CHECK(near3(rotate(back, {1, 0, 0}), rotate(q, {1, 0, 0}), 2e-3f));
+        }
+    }
+}
+
 GIANT_TEST("math: transform matrices match rotate and scale") {
     const Quat q = quat_from_euler({15, -60, 10});
     const Mat4 m = mat4_from_transform({1, 2, 3}, q, {2, 3, 4});

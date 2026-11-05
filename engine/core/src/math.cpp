@@ -26,10 +26,12 @@ EulerDegrees euler_from_quat(const Quat& q) {
     // R = Ry(yaw) * Rx(pitch) * Rz(roll) gives r[1][2] = -sin(pitch),
     // r[1][0] / r[1][1] = tan(roll) and r[0][2] / r[2][2] = tan(yaw).
     const Rotation3 m = rotation_matrix(normalize(q));
-    const float sin_pitch = std::clamp(-m.r[1][2], -1.0f, 1.0f);
+    // cos(pitch) from the other two entries of that row, so pitch stays
+    // accurate near +-90 degrees (asin loses precision there).
+    const float cos_pitch = std::hypot(m.r[1][0], m.r[1][1]);
     EulerDegrees e;
-    e.pitch = radians_to_degrees(std::asin(sin_pitch));
-    if (std::abs(sin_pitch) < 0.9999f) {
+    e.pitch = radians_to_degrees(std::atan2(-m.r[1][2], cos_pitch));
+    if (cos_pitch > 1e-6f) {
         e.yaw = radians_to_degrees(std::atan2(m.r[0][2], m.r[2][2]));
         e.roll = radians_to_degrees(std::atan2(m.r[1][0], m.r[1][1]));
     } else {

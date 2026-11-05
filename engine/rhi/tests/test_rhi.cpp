@@ -328,8 +328,8 @@ GIANT_TEST("rhi: transient memory is aligned, grows and is counted") {
     const TransientMemory b = cmd->allocate(20);
     GIANT_CHECK(a.data != nullptr && b.data != nullptr);
     GIANT_CHECK(a.descriptor != k_no_descriptor);
-    GIANT_CHECK(a.offset % 16 == 0 && b.offset % 16 == 0);
-    GIANT_CHECK(b.buffer == a.buffer && b.offset == a.offset + 16);
+    GIANT_CHECK(a.offset % k_transient_alignment == 0 && b.offset % k_transient_alignment == 0);
+    GIANT_CHECK(b.buffer == a.buffer && b.offset == a.offset + k_transient_alignment);
     GIANT_CHECK(a.size == 4 && b.size == 20);
 
     // Bigger than what is left: a new block, while the old pointers stay
@@ -346,7 +346,8 @@ GIANT_TEST("rhi: transient memory is aligned, grows and is counted") {
     std::memcpy(copy, uploaded.data, 12);
     GIANT_CHECK(copy[0] == 5 && copy[2] == 7);
     device->end_frame();
-    GIANT_CHECK(device->last_frame_stats().transient_bytes == 16 + 32 + (4u << 20) + 16);
+    // The same alignment as D3D12, so budgets measured on either agree.
+    GIANT_CHECK(device->last_frame_stats().transient_bytes == 3 * k_transient_alignment + (4u << 20));
 }
 
 GIANT_TEST("rhi: the null device checks and counts draws, dispatches and UI") {
@@ -431,6 +432,52 @@ GIANT_TEST("rhi: the null device checks and counts draws, dispatches and UI") {
     device->destroy(draw);
     device->destroy(fill);
     device->destroy(indices);
+}
+
+GIANT_TEST("rhi: empty draws and dispatches are no-ops, as in D3D12") {
+    auto device = null_device();
+    if (device == nullptr) {
+        GIANT_CHECK(false);
+        return;
+    }
+    ComputePipelineDesc desc;
+    const PipelineHandle pipeline = device->create_pipeline(desc);
+    CountAsserts asserts;
+    CommandList* cmd = device->begin_frame(nullptr);
+    cmd->set_pipeline(pipeline);
+    cmd->dispatch(0); // e.g. GPU culling of an empty scene
+    device->end_frame();
+    GIANT_CHECK(asserts.count() == 0);
+    device->destroy(pipeline);
+}
+
+GIANT_TEST("rhi: UI can show a texture rendered earlier in the frame") {
+    auto device = null_device();
+    if (device == nullptr) {
+        GIANT_CHECK(false);
+        return;
+    }
+    TextureDesc thumb_desc;
+    thumb_desc.width = 8;
+    thumb_desc.height = 8;
+    thumb_desc.format = Format::rgba8_unorm;
+    thumb_desc.usage = TextureUsage::render_target | TextureUsage::sampled;
+    const TextureHandle thumbnail = device->create_texture(thumb_desc);
+    TextureDesc target_desc = thumb_desc;
+    target_desc.usage = TextureUsage::render_target;
+    const TextureHandle target = device->create_texture(target_desc);
+    UiQuad quad(0, 0, 8, 8, rgba(255, 255, 255, 255), ui_texture_id(thumbnail));
+    CommandList* cmd = device->begin_frame(nullptr);
+    RenderPassDesc pass;
+    pass.colors[0] = {thumbnail, LoadOp::clear, {1, 0, 0, 1}};
+    cmd->begin_render_pass(pass);
+    cmd->end_render_pass();
+    cmd->draw_ui(target, quad.frame()); // moves the thumbnail to shader_read itself
+    device->end_frame();
+    GIANT_CHECK(device->last_frame_stats().ui_draws == 1);
+    GIANT_CHECK(device->last_frame_stats().barriers == 3); // thumbnail x2, target
+    device->destroy(thumbnail);
+    device->destroy(target);
 }
 
 GIANT_TEST("rhi: the null device catches misuse a GPU would crash on") {
@@ -788,6 +835,86 @@ GIANT_TEST("rhi: d3d12 frames keep going while resources are destroyed mid-fligh
     }
     GIANT_CHECK(device->frames_completed() == 8);
     device->wait_idle();
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
+GIANT_TEST("rhi: d3d12 keeps a resource used this frame alive past a mid-frame upload") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    GIANT_CHECK(device->adapter().agility_sdk_runtime);
+    ComputePipelineDesc desc;
+    desc.compute = shaders::test_fill_cs();
+    const PipelineHandle fill = device->create_pipeline(desc);
+    BufferDesc out_desc;
+    out_desc.size = 256;
+    out_desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
+    for (u32 frame = 0; frame < 6; ++frame) {
+        const BufferHandle used = device->create_buffer(out_desc);
+        CommandList* cmd = device->begin_frame(nullptr);
+        if (cmd == nullptr) {
+            break;
+        }
+        cmd->barrier(used, ResourceState::shader_write);
+        cmd->set_pipeline(fill);
+        cmd->push(std::array<u32, 4>{device->write_descriptor(used), 64, frame, 0});
+        cmd->dispatch(1);
+        // Streaming: destroy what this frame uses, then upload something new.
+        // The upload's own submit must not free `used` (or reuse its
+        // descriptor) before this frame finishes.
+        device->destroy(used);
+        const std::vector<u8> data(256, 7);
+        const BufferHandle streamed = device->create_buffer(out_desc, data);
+        GIANT_CHECK(streamed.valid());
+        cmd->barrier(streamed, ResourceState::shader_write);
+        cmd->push(std::array<u32, 4>{device->write_descriptor(streamed), 64, 100 + frame, 0});
+        cmd->dispatch(1);
+        device->end_frame();
+        GIANT_CHECK(as_u32(device->read_buffer(streamed))[1] == 102 + frame);
+        device->destroy(streamed);
+    }
+    device->destroy(fill);
+    device->wait_idle();
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
+GIANT_TEST("rhi: d3d12 UI samples a texture rendered earlier in the frame") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    TextureDesc thumb_desc;
+    thumb_desc.width = 8;
+    thumb_desc.height = 8;
+    thumb_desc.format = Format::rgba8_unorm;
+    thumb_desc.usage = TextureUsage::render_target | TextureUsage::sampled;
+    const TextureHandle thumbnail = device->create_texture(thumb_desc);
+    TextureDesc target_desc = thumb_desc;
+    target_desc.width = 16;
+    target_desc.usage = TextureUsage::render_target;
+    const TextureHandle target = device->create_texture(target_desc);
+    const UiQuad quad(0, 0, 16, 8, rgba(255, 255, 255, 255), ui_texture_id(thumbnail));
+    for (int i = 0; i < 2; ++i) { // twice: the second frame starts in shader_read
+        CommandList* cmd = device->begin_frame(nullptr);
+        if (cmd == nullptr) {
+            break;
+        }
+        RenderPassDesc pass;
+        pass.colors[0] = {thumbnail, LoadOp::clear, {0, 1, 0, 1}};
+        cmd->begin_render_pass(pass);
+        cmd->end_render_pass();
+        cmd->draw_ui(target, quad.frame());
+        device->end_frame();
+    }
+    const auto pixels = device->read_texture(target);
+    GIANT_CHECK(pixels.size() == 16 * 8 * 4);
+    if (pixels.size() == 16 * 8 * 4) {
+        GIANT_CHECK(near(pixel(pixels, 16, 8, 4), {0, 255, 0, 255}));
+    }
+    device->destroy(thumbnail);
+    device->destroy(target);
     GIANT_CHECK(device->validation_errors() == 0);
 }
 

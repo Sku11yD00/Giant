@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -443,6 +444,9 @@ private:
     Pool<DxTexture, TextureTag> m_textures;
     Pool<DxPipeline, PipelineTag> m_pipelines;
     std::deque<Retired> m_retired; // in fence order
+    // Destroyed while a frame records: stamped with that frame's fence in
+    // end_frame (an immediate submit mid-frame signals an earlier value).
+    std::vector<Retired> m_retired_this_frame;
 
     std::array<Frame, k_frames> m_frame_slots;
     u64 m_frame_index = 0; // frames begun
@@ -523,6 +527,24 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         SUCCEEDED(m_device.As(&m_info_queue))) {
         m_info_queue->SetMessageCountLimit(UINT64_MAX);
         log_info("rhi", "d3d12: GPU validation layer enabled");
+    }
+
+    // Which D3D12 runtime loaded: ours (exe folder\D3D12\D3D12Core.dll), or
+    // Windows' own when the D3D12 folder is missing or its version differs.
+    if (HMODULE core = GetModuleHandleW(L"D3D12Core.dll")) {
+        wchar_t core_path[MAX_PATH] = {};
+        wchar_t exe_path[MAX_PATH] = {};
+        GetModuleFileNameW(core, core_path, MAX_PATH);
+        GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+        const std::filesystem::path core_file(core_path);
+        const std::filesystem::path exe_file(exe_path);
+        m_info.agility_sdk_runtime =
+            core_file.parent_path().filename() == L"D3D12" &&
+            core_file.parent_path().parent_path() == exe_file.parent_path();
+    }
+    if (!m_info.agility_sdk_runtime) {
+        log_warning("rhi", "d3d12: using the Windows D3D12 runtime, not the bundled Agility SDK "
+                           "(is the D3D12 folder next to the exe?)");
     }
 
     DXGI_ADAPTER_DESC1 adapter_desc{};
@@ -753,7 +775,12 @@ void D3D12Device::wait_idle() {
 }
 
 void D3D12Device::retire(Retired retired) {
-    // Work recorded so far signals at most this value when it completes.
+    if (m_recording) {
+        // The frame being recorded may use it; it signals in end_frame.
+        m_retired_this_frame.push_back(std::move(retired));
+        return;
+    }
+    // Everything submitted so far signals at most this value when done.
     retired.fence = m_next_fence_value;
     m_retired.push_back(std::move(retired));
 }
@@ -1382,6 +1409,12 @@ void D3D12Device::end_frame() {
         check_gpu(m_swap_chain->swap_chain->Present(interval, flags), "Present");
     }
     frame.fence = signal();
+    for (Retired& r : m_retired_this_frame) {
+        // A failed signal (0, device lost) keeps them until destruction.
+        r.fence = frame.fence != 0 ? frame.fence : ~u64{0};
+        m_retired.push_back(std::move(r));
+    }
+    m_retired_this_frame.clear();
     m_swap_chain = nullptr;
     m_last_stats = m_stats;
     ++m_frames;
@@ -1699,11 +1732,15 @@ void D3D12CommandList::copy_buffer(BufferHandle dst, u64 dst_offset, BufferHandl
 }
 
 TransientMemory D3D12CommandList::allocate(u32 bytes) {
-    GIANT_ASSERT(bytes > 0, "empty transient allocation");
-    const u32 aligned = (bytes + 255u) & ~255u; // also fine for constant reads
+    GIANT_ASSERT(bytes > 0 && bytes <= k_max_transient_allocation,
+                 "transient allocations are 1 byte to 256 MiB");
+    if (bytes == 0 || bytes > k_max_transient_allocation) {
+        return {};
+    }
+    const u32 aligned = (bytes + (k_transient_alignment - 1)) & ~(k_transient_alignment - 1);
     TransientChunk* chunk = nullptr;
     for (TransientChunk& c : m_frame->chunks) {
-        if (c.used + aligned <= c.size) {
+        if (u64{c.used} + aligned <= c.size) {
             chunk = &c;
             break;
         }
@@ -1767,6 +1804,21 @@ void D3D12CommandList::draw_ui(TextureHandle target, const UiFrame& ui) {
         i_at += list.indices.size();
     }
 
+    // Sampled textures must be readable before the pass (barriers belong
+    // outside it); a texture drawn into earlier this frame is not yet.
+    for (const UiDrawList& list : ui.lists) {
+        for (const UiDrawCommand& cmd : list.commands) {
+            const TextureHandle texture = texture_from_ui_id(cmd.texture);
+            const DxTexture* tex = m_device.texture(texture);
+            GIANT_ASSERT(tex != nullptr && tex->read != k_no_descriptor &&
+                             tex->desc.format == Format::rgba8_unorm && !(texture == target),
+                         "UI command needs a live, sampled rgba8_unorm texture (not the target)");
+            if (tex != nullptr && tex->read != k_no_descriptor && !(texture == target) &&
+                tex->state != ResourceState::shader_read) {
+                barrier(texture, ResourceState::shader_read);
+            }
+        }
+    }
     barrier(target, ResourceState::render_target);
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_device.rtv(t->ui_rtv);
     m_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);

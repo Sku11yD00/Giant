@@ -181,7 +181,7 @@ void EditorPanels::draw_outliner() {
         }
         ImGui::SameLine();
     }
-    ImGui::BeginDisabled(m_state.selected == 0);
+    ImGui::BeginDisabled(m_state.scene.find(m_state.selected) == nullptr);
     if (ImGui::SmallButton("Delete")) {
         run("delete_entities", {{"ids", {m_state.selected}}});
     }

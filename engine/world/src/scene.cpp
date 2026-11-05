@@ -4,7 +4,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <set>
 
 namespace giant::world {
@@ -15,6 +17,7 @@ using Json = nlohmann::ordered_json;
 
 constexpr const char* k_format = "giant-scene";
 constexpr int k_version = 1;
+constexpr usize k_max_name_bytes = 128;
 
 } // namespace
 
@@ -49,6 +52,7 @@ EntityId Scene::add(Entity entity, std::optional<usize> at) {
     if (entity.id == 0) {
         entity.id = m_next_id;
     }
+    GIANT_ASSERT(entity.id <= k_max_entity_id, "entity ids are at most 2^53 - 1");
     GIANT_ASSERT(!m_index.contains(entity.id), "entity id already in use");
     m_next_id = std::max(m_next_id, entity.id + 1);
     const usize index = std::min(at.value_or(m_entities.size()), m_entities.size());
@@ -69,6 +73,59 @@ std::optional<Scene::Removed> Scene::remove(EntityId id) {
     m_index.erase(it);
     reindex(index);
     return removed;
+}
+
+std::vector<Scene::Removed> Scene::remove_many(std::span<const EntityId> ids) {
+    std::unordered_map<EntityId, bool> doomed;
+    for (const EntityId id : ids) {
+        if (m_index.contains(id)) {
+            doomed[id] = true;
+        }
+    }
+    std::vector<Removed> removed;
+    if (doomed.empty()) {
+        return removed;
+    }
+    removed.reserve(doomed.size());
+    std::vector<Entity> kept;
+    kept.reserve(m_entities.size() - doomed.size());
+    for (usize i = 0; i < m_entities.size(); ++i) {
+        if (doomed.contains(m_entities[i].id)) {
+            m_index.erase(m_entities[i].id);
+            removed.push_back({std::move(m_entities[i]), i});
+        } else {
+            kept.push_back(std::move(m_entities[i]));
+        }
+    }
+    m_entities = std::move(kept);
+    reindex(0);
+    return removed;
+}
+
+void Scene::restore_many(std::vector<Removed> removed) {
+    if (removed.empty()) {
+        return;
+    }
+    std::sort(removed.begin(), removed.end(),
+              [](const Removed& a, const Removed& b) { return a.index < b.index; });
+    // Indices are places in the list as it was before removal, so merging in
+    // ascending order lands each one exactly where it was.
+    std::vector<Entity> merged;
+    merged.reserve(m_entities.size() + removed.size());
+    usize next = 0;
+    for (Removed& r : removed) {
+        GIANT_ASSERT(!m_index.contains(r.entity.id), "entity id already in use");
+        while (merged.size() < r.index && next < m_entities.size()) {
+            merged.push_back(std::move(m_entities[next++]));
+        }
+        m_next_id = std::max(m_next_id, r.entity.id + 1);
+        merged.push_back(std::move(r.entity));
+    }
+    while (next < m_entities.size()) {
+        merged.push_back(std::move(m_entities[next++]));
+    }
+    m_entities = std::move(merged);
+    reindex(0);
 }
 
 Entity* Scene::find(EntityId id) {
@@ -185,19 +242,26 @@ public:
         return &*it;
     }
 
-    void number(const char* key, float& out, bool required = false) {
-        if (const Json* v = get(key, required)) {
+    // The same limits the editor commands enforce, so a loaded scene is one
+    // the editor could have made (and can save again).
+    void number(const char* key, float& out, double minimum, double maximum) {
+        if (const Json* v = get(key, false)) {
             if (!v->is_number() || !std::isfinite(v->get<double>())) {
                 fail(key, "must be a finite number");
                 return;
             }
-            out = v->get<float>();
+            const double d = v->get<double>();
+            if (d < minimum || d > maximum) {
+                fail(key, "must be from " + limit(minimum) + " to " + limit(maximum));
+                return;
+            }
+            out = static_cast<float>(d);
         }
     }
 
     template <typename V>
-    void vec3(const char* key, V& out, bool required = false) {
-        if (const Json* v = get(key, required)) {
+    void vec3(const char* key, V& out, double minimum, double maximum) {
+        if (const Json* v = get(key, false)) {
             if (!v->is_array() || v->size() != 3) {
                 fail(key, "must be an array of 3 numbers");
                 return;
@@ -209,6 +273,10 @@ public:
                     return;
                 }
                 xyz[i] = (*v)[i].get<double>();
+                if (xyz[i] < minimum || xyz[i] > maximum) {
+                    fail(key, "values must be from " + limit(minimum) + " to " + limit(maximum));
+                    return;
+                }
             }
             using T = decltype(out.x);
             out = {static_cast<T>(xyz[0]), static_cast<T>(xyz[1]), static_cast<T>(xyz[2])};
@@ -238,10 +306,14 @@ public:
         }
     }
 
-    void string(const char* key, std::string& out, bool required = false) {
+    void string(const char* key, std::string& out, bool required = false, usize max_bytes = 4096) {
         if (const Json* v = get(key, required)) {
             if (!v->is_string()) {
                 fail(key, "must be a string");
+                return;
+            }
+            if (v->get_ref<const std::string&>().size() > max_bytes) {
+                fail(key, "must be at most " + std::to_string(max_bytes) + " bytes");
                 return;
             }
             out = v->get<std::string>();
@@ -261,8 +333,9 @@ public:
     // A positive whole number.
     void id(const char* key, u64& out, bool required) {
         if (const Json* v = get(key, required)) {
-            if (!v->is_number_unsigned() || v->get<u64>() == 0) {
-                fail(key, "must be a whole number above 0");
+            if (!v->is_number_unsigned() || v->get<u64>() == 0 ||
+                v->get<u64>() > k_max_entity_id) {
+                fail(key, "must be a whole number from 1 to 2^53 - 1");
                 return;
             }
             out = v->get<u64>();
@@ -284,6 +357,12 @@ public:
 
     const std::string& path() const { return m_path; }
 
+    static std::string limit(double v) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%g", v);
+        return text;
+    }
+
 private:
     const Json& m_object;
     std::string m_path;
@@ -293,21 +372,21 @@ private:
 
 void read_lighting(const Json& json, Lighting& l, std::string& error) {
     Reader r(json, "lighting", error);
-    r.number("sun_elevation_degrees", l.sun_elevation_degrees);
-    r.number("sun_azimuth_degrees", l.sun_azimuth_degrees);
-    r.vec3("sun_color", l.sun_color);
-    r.number("sun_intensity", l.sun_intensity);
-    r.vec3("sky_color", l.sky_color);
-    r.vec3("ground_color", l.ground_color);
-    r.number("ambient_intensity", l.ambient_intensity);
-    r.number("exposure", l.exposure);
+    r.number("sun_elevation_degrees", l.sun_elevation_degrees, -90, 90);
+    r.number("sun_azimuth_degrees", l.sun_azimuth_degrees, -360, 360);
+    r.vec3("sun_color", l.sun_color, 0, 1);
+    r.number("sun_intensity", l.sun_intensity, 0, 100);
+    r.vec3("sky_color", l.sky_color, 0, 1);
+    r.vec3("ground_color", l.ground_color, 0, 1);
+    r.number("ambient_intensity", l.ambient_intensity, 0, 100);
+    r.number("exposure", l.exposure, 0.01, 100);
     r.finish();
 }
 
 void read_entity(const Json& json, const std::string& path, Entity& e, std::string& error) {
     Reader r(json, path, error);
     r.id("id", e.id, true);
-    r.string("name", e.name);
+    r.string("name", e.name, false, k_max_name_bytes);
     std::string shape = to_string(e.shape);
     r.string("shape", shape);
     if (r.ok()) {
@@ -318,15 +397,15 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         }
     }
     r.boolean("visible", e.visible);
-    r.vec3("position", e.transform.position);
+    r.vec3("position", e.transform.position, -1e8, 1e8);
     r.quat("rotation", e.transform.rotation);
-    r.vec3("scale", e.transform.scale);
+    r.vec3("scale", e.transform.scale, 0.0001, 1e6);
     if (const Json* material = r.get("material", false); material != nullptr && r.ok()) {
         Reader m(*material, path + ".material", error);
-        m.vec3("base_color", e.material.base_color);
-        m.number("roughness", e.material.roughness);
-        m.number("metallic", e.material.metallic);
-        m.vec3("emissive", e.material.emissive);
+        m.vec3("base_color", e.material.base_color, 0, 1);
+        m.number("roughness", e.material.roughness, 0, 1);
+        m.number("metallic", e.material.metallic, 0, 1);
+        m.vec3("emissive", e.material.emissive, 0, 1000);
         m.finish();
     }
     r.finish();

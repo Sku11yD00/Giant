@@ -50,6 +50,9 @@ struct AdapterInfo {
     u64 dedicated_video_memory = 0; // bytes
     bool mesh_shaders = false;
     bool shader_model_6_6 = false;
+    // D3D12: the runtime came from the D3D12 folder next to the exe (the
+    // pinned Agility SDK), not the older one built into Windows.
+    bool agility_sdk_runtime = false;
 
     // The engine's minimum spec (DirectX 12 Ultimate class). Ray tracing is
     // deliberately not required.
@@ -111,7 +114,9 @@ bool is_depth(Format format);
 
 enum class Memory {
     gpu,      // fastest for the GPU; filled through uploads or by shaders
-    upload,   // CPU writes (always mapped), GPU reads: per-frame data
+    upload,   // CPU writes (always mapped), GPU reads. The GPU may still be reading
+              // it up to k_frames_in_flight frames later: for per-frame data use
+              // CommandList::allocate, or keep one buffer per frame in flight.
     readback, // GPU writes (copies), CPU reads after a wait
 };
 
@@ -283,10 +288,12 @@ struct RenderPassDesc {
 // Per-frame scratch memory, written by the CPU and read by shaders during
 // this frame only (instance lists, constants, UI vertices). Shaders read it
 // as a ByteAddressBuffer through `descriptor`, starting at `offset`.
+constexpr u32 k_transient_alignment = 256;              // every allocation starts here
+constexpr u32 k_max_transient_allocation = 256u << 20; // bytes in one allocation
 struct TransientMemory {
     BufferHandle buffer;
     u32 descriptor = k_no_descriptor;
-    u32 offset = 0; // bytes, a multiple of 16
+    u32 offset = 0; // bytes, a multiple of k_transient_alignment
     u8* data = nullptr;
     u32 size = 0;
 };
@@ -338,8 +345,9 @@ public:
     virtual void copy_buffer(BufferHandle dst, u64 dst_offset, BufferHandle src, u64 src_offset,
                              u64 bytes) = 0;
 
-    // Scratch memory for this frame; see TransientMemory. Never fails short
-    // of running out of GPU memory (then data is null and the device lost).
+    // Scratch memory for this frame; see TransientMemory. 1 byte to
+    // k_max_transient_allocation. Fails (data null, logged) only when GPU
+    // memory or descriptors run out.
     virtual TransientMemory allocate(u32 bytes) = 0;
     TransientMemory upload(std::span<const u8> bytes);
     template <typename T>
@@ -389,7 +397,8 @@ public:
     // resource, so it is safe at any time, even mid-frame.
     virtual std::unique_ptr<SwapChain> create_swap_chain(const SwapChainDesc& desc) = 0;
     // `initial` (optional) fills the start of the buffer; it waits for the
-    // copy, so do it at load time, not per frame.
+    // copy, so do it at load time, not per frame. Allowed inside a frame
+    // (streaming): the copy runs before the frame's work.
     virtual BufferHandle create_buffer(const BufferDesc& desc, std::span<const u8> initial = {}) = 0;
     // `initial` (optional): width * height * bytes_per_pixel, rows top to
     // bottom. Waits like create_buffer.

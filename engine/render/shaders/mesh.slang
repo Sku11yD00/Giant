@@ -85,6 +85,13 @@ VsOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
 
 static const float k_pi = 3.14159265;
 
+// normalize() that returns `fallback` instead of NaN for a zero vector
+// (the camera on a surface, or looking straight into the sun).
+float3 safe_normalize(float3 v, float3 fallback) {
+    const float len2 = dot(v, v);
+    return len2 > 1e-12 ? v * rsqrt(len2) : fallback;
+}
+
 // GGX / Trowbridge-Reitz normal distribution.
 float d_ggx(float n_dot_h, float alpha) {
     const float a2 = alpha * alpha;
@@ -125,10 +132,10 @@ float3 tone_map(float3 color) {
 [shader("pixel")]
 float4 ps_main(VsOut i) : SV_Target {
     const FrameConstants f = load_frame();
-    const float3 n = normalize(i.normal);
-    const float3 v = normalize(-i.relative);
+    const float3 n = safe_normalize(i.normal, float3(0.0, 1.0, 0.0));
+    const float3 v = safe_normalize(-i.relative, n);
     const float3 l = f.sun_direction.xyz;
-    const float3 h = normalize(v + l);
+    const float3 h = safe_normalize(v + l, n);
 
     const float3 base = i.base_roughness.rgb;
     // Clamped so a mirror-smooth surface keeps a visible, stable highlight.

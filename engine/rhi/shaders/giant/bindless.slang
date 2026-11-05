@@ -11,6 +11,13 @@ ByteAddressBuffer read_buffer(uint descriptor) { return ResourceDescriptorHeap[d
 RWByteAddressBuffer write_buffer(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 Texture2D<float4> read_texture(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 RWTexture2D<float4> write_texture(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
+// Integer formats (r32_uint, rg32_uint: e.g. a visibility buffer) need
+// integer views; reading them through the float4 helpers is invalid.
+Texture2D<uint> read_texture_uint(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
+Texture2D<uint2> read_texture_uint2(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
+RWTexture2D<uint> write_texture_uint(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
+RWTexture2D<uint2> write_texture_uint2(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
+Texture2D<float> read_texture_float(uint descriptor) { return ResourceDescriptorHeap[descriptor]; } // depth, r32_float
 
 // Fixed samplers, matching rhi::Sampler.
 static const uint k_sampler_linear_clamp = 0;

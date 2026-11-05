@@ -138,6 +138,60 @@ GIANT_TEST("world: loading reports what is wrong and changes nothing") {
                 "rotation must not be all zeros");
 }
 
+GIANT_TEST("world: many entities are removed and restored in one pass") {
+    Scene scene;
+    for (int i = 0; i < 20'000; ++i) {
+        scene.add(named("tree"));
+    }
+    std::vector<EntityId> ids;
+    for (EntityId id = 1; id <= 20'000; id += 2) {
+        ids.push_back(id);
+    }
+    ids.push_back(3);      // listed twice
+    ids.push_back(99'999); // not in the scene: skipped
+    auto removed = scene.remove_many(ids);
+    GIANT_CHECK(removed.size() == 10'000 && scene.size() == 10'000);
+    GIANT_CHECK(scene.find(1) == nullptr && scene.find(2) != nullptr);
+    GIANT_CHECK(scene.entities()[0].id == 2 && scene.find(20'000) == &scene.entities().back());
+    scene.restore_many(std::move(removed));
+    GIANT_CHECK(scene.size() == 20'000);
+    bool in_order = true;
+    for (usize i = 0; i < scene.size(); ++i) {
+        in_order = in_order && scene.entities()[i].id == i + 1 && scene.find(i + 1) == &scene.entities()[i];
+    }
+    GIANT_CHECK(in_order);
+}
+
+GIANT_TEST("world: loading refuses values the editor could never make") {
+    const auto refuses = [](const char* entity, const char* expected) {
+        Scene scene;
+        const std::string text = std::string(R"({"format": "giant-scene", "version": 1, "entities": [)") +
+                                 entity + "]}";
+        const auto error = load_scene(text, scene);
+        GIANT_CHECK(error.has_value());
+        if (error.has_value() && !contains(error->message, expected)) {
+            std::fprintf(stderr, "    got: %s\n    want: %s\n", error->message.c_str(), expected);
+            GIANT_CHECK(false);
+        }
+    };
+    refuses(R"({"id": 1, "material": {"roughness": 1e300}})", "roughness must be from 0 to 1");
+    refuses(R"({"id": 1, "scale": [1, -1, 1]})", "scale values must be from");
+    refuses(R"({"id": 1, "scale": [1e300, 1, 1]})", "scale values must be from");
+    refuses(R"({"id": 1, "material": {"base_color": [-0.1, 0, 0]}})", "base_color values");
+    refuses(R"({"id": 1, "material": {"metallic": 2}})", "metallic must be from 0 to 1");
+    refuses(R"({"id": 9007199254740992})", "id must be a whole number from 1 to 2^53 - 1");
+    refuses(std::string(R"({"id": 1, "name": ")" + std::string(129, 'x') + R"("})").c_str(),
+            "name must be at most 128 bytes");
+    Scene scene;
+    GIANT_CHECK(load_scene(R"({"format": "giant-scene", "version": 1, "next_id": 18446744073709551615})",
+                           scene)
+                    .has_value());
+    GIANT_CHECK(!load_scene(R"({"format": "giant-scene", "version": 1,
+                                "lighting": {"exposure": 0.5, "sun_elevation_degrees": -10}})",
+                            scene)
+                     .has_value());
+}
+
 GIANT_TEST("world: a minimal scene file loads with defaults") {
     Scene scene;
     const auto error = load_scene(

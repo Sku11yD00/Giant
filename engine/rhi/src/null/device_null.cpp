@@ -304,6 +304,9 @@ public:
         if (m_swap_chain != nullptr) {
             NullTexture* back = m_textures.get(m_swap_chain->current_texture());
             GIANT_ASSERT(back != nullptr, "swap chain lost its back buffer");
+            if (back != nullptr && back->state != ResourceState::present) {
+                ++m_stats.barriers; // D3D12 records this transition too
+            }
             back->state = ResourceState::present;
         }
         m_swap_chain = nullptr;
@@ -564,9 +567,8 @@ void NullCommandList::check_draw() {
     ++m_device.stats().draws;
 }
 
-void NullCommandList::draw(u32 vertex_count, u32 instance_count, u32) {
+void NullCommandList::draw(u32, u32, u32) { // zero counts are a no-op, as in D3D12
     check_draw();
-    GIANT_ASSERT(vertex_count > 0 && instance_count > 0, "empty draw");
 }
 
 void NullCommandList::set_index_buffer(BufferHandle handle, u64 offset) {
@@ -582,9 +584,8 @@ void NullCommandList::set_index_buffer(BufferHandle handle, u64 offset) {
     m_index_offset = offset;
 }
 
-void NullCommandList::draw_indexed(u32 index_count, u32 instance_count, u32 first_index, i32) {
+void NullCommandList::draw_indexed(u32 index_count, u32, u32 first_index, i32) {
     check_draw();
-    GIANT_ASSERT(index_count > 0 && instance_count > 0, "empty draw");
     NullBuffer* b = m_device.buffer(m_index_buffer);
     GIANT_ASSERT(b != nullptr, "draw_indexed needs an index buffer");
     if (b != nullptr) {
@@ -597,8 +598,8 @@ void NullCommandList::dispatch(u32 x, u32 y, u32 z) {
     GIANT_ASSERT(!m_in_pass, "dispatch inside a render pass");
     NullPipeline* p = m_device.pipeline(m_pipeline);
     GIANT_ASSERT(p != nullptr && p->compute, "dispatch needs a live compute pipeline");
-    GIANT_ASSERT(x > 0 && y > 0 && z > 0 && x <= 65535 && y <= 65535 && z <= 65535,
-                 "dispatch group counts must be 1 to 65535");
+    // Zero groups is a legal no-op (an empty culling pass), as in D3D12.
+    GIANT_ASSERT(x <= 65535 && y <= 65535 && z <= 65535, "dispatch group counts are at most 65535");
     ++m_device.stats().dispatches;
 }
 
@@ -626,10 +627,14 @@ void NullCommandList::copy_buffer(BufferHandle dst, u64 dst_offset, BufferHandle
 }
 
 TransientMemory NullCommandList::allocate(u32 bytes) {
-    GIANT_ASSERT(bytes > 0, "empty transient allocation");
-    const u32 aligned = (bytes + 15u) & ~15u;
+    GIANT_ASSERT(bytes > 0 && bytes <= k_max_transient_allocation,
+                 "transient allocations are 1 byte to 256 MiB");
+    if (bytes == 0 || bytes > k_max_transient_allocation) {
+        return {};
+    }
+    const u32 aligned = (bytes + (k_transient_alignment - 1)) & ~(k_transient_alignment - 1);
     NullBuffer* current = m_device.buffer(m_transient);
-    if (current == nullptr || m_transient_used + aligned > current->desc.size) {
+    if (current == nullptr || u64{m_transient_used} + aligned > current->desc.size) {
         // A new, larger buffer; the old one lives until the frame ends in a
         // real backend, which the null one models by never moving memory.
         const u64 size = std::max<u64>(u64{1} << 20, u64{aligned} * 2);
@@ -667,6 +672,16 @@ void NullCommandList::draw_ui(TextureHandle target, const UiFrame& ui) {
     if (t == nullptr) {
         return;
     }
+    // As in D3D12: sampled textures become readable before the pass.
+    for (const UiDrawList& list : ui.lists) {
+        for (const UiDrawCommand& cmd : list.commands) {
+            const TextureHandle texture = texture_from_ui_id(cmd.texture);
+            NullTexture* tex = m_device.texture(texture);
+            if (tex != nullptr && has(tex->desc.usage, TextureUsage::sampled) && !(texture == target)) {
+                barrier(texture, ResourceState::shader_read);
+            }
+        }
+    }
     barrier(target, ResourceState::render_target);
     const float w = static_cast<float>(t->desc.width);
     const float h = static_cast<float>(t->desc.height);
@@ -678,8 +693,9 @@ void NullCommandList::draw_ui(TextureHandle target, const UiFrame& ui) {
                          "UI command reads past its indices");
             NullTexture* tex = m_device.texture(texture_from_ui_id(cmd.texture));
             GIANT_ASSERT(tex != nullptr && has(tex->desc.usage, TextureUsage::sampled) &&
-                             tex->desc.format == Format::rgba8_unorm,
-                         "UI command needs a live, sampled rgba8_unorm texture");
+                             tex->desc.format == Format::rgba8_unorm &&
+                             !(texture_from_ui_id(cmd.texture) == target),
+                         "UI command needs a live, sampled rgba8_unorm texture (not the target)");
             for (u32 i = 0; i < cmd.index_count && cmd.first_index + i < list.indices.size(); ++i) {
                 GIANT_ASSERT(static_cast<u64>(list.indices[cmd.first_index + i]) + cmd.vertex_offset <
                                  list.vertices.size(),

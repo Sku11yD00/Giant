@@ -11,6 +11,7 @@
 #include "giant/core/types.h"
 
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -18,8 +19,10 @@
 
 namespace giant::world {
 
-// Stable for the life of the scene and saved with it. 0 is "none".
+// Stable for the life of the scene and saved with it. 0 is "none". At most
+// k_max_entity_id, so ids survive JSON readers that use doubles.
 using EntityId = u64;
+constexpr EntityId k_max_entity_id = (u64{1} << 53) - 1;
 
 // Built-in shapes, until meshes are imported (N1 part 2). Each is about one
 // metre: a 1 m cube, a 1 m wide sphere, a 1 m square plane facing +Y.
@@ -81,6 +84,11 @@ public:
         usize index = 0;
     };
     std::optional<Removed> remove(EntityId id);
+    // Many at once, in one pass (a forest felled in one command). Ids that
+    // are not in the scene are skipped. The result is in list order.
+    std::vector<Removed> remove_many(std::span<const EntityId> ids);
+    // Puts back what remove_many returned, each at its old place.
+    void restore_many(std::vector<Removed> removed);
 
     Entity* find(EntityId id);
     const Entity* find(EntityId id) const;

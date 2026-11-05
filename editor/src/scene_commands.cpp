@@ -178,8 +178,15 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              const Entity e = new_entity(args, state.scene);
              const EntityId id = state.scene.add(e);
              Entity stored = *state.scene.find(id);
-             context.record({[&state, id] { state.scene.remove(id); },
-                             [&state, stored] { state.scene.add(stored); }});
+             // Undo and redo tolerate a scene that changed outside the history
+             // (a script's load_scene): they skip ids that are gone or taken.
+             context.record({[&state, id] {
+                                 state.scene.remove(id);
+                                 if (state.selected == id) state.selected = 0;
+                             },
+                             [&state, stored] {
+                                 if (state.scene.find(stored.id) == nullptr) state.scene.add(stored);
+                             }});
              return CommandResult::success(entity_json(stored));
          }});
 
@@ -207,14 +214,17 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  created->push_back(*state.scene.find(id));
                  ids.push_back(id);
              }
-             context.record({[&state, created] {
-                                 for (auto it = created->rbegin(); it != created->rend(); ++it) {
-                                     state.scene.remove(it->id);
-                                 }
+             auto created_ids = std::make_shared<std::vector<EntityId>>();
+             for (const Entity& e : *created) {
+                 created_ids->push_back(e.id);
+             }
+             context.record({[&state, created_ids] {
+                                 state.scene.remove_many(*created_ids);
+                                 state.selected = state.scene.find(state.selected) ? state.selected : 0;
                              },
                              [&state, created] {
                                  for (const Entity& e : *created) {
-                                     state.scene.add(e);
+                                     if (state.scene.find(e.id) == nullptr) state.scene.add(e);
                                  }
                              }});
              return CommandResult::success({{"ids", std::move(ids)}});
@@ -257,33 +267,30 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  "items": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}}}})"),
          false,
          [&state](const Json& args, CommandContext& context) {
-             auto removed = std::make_shared<std::vector<world::Scene::Removed>>();
+             // All or nothing: every id must exist (listing one twice is fine).
+             auto ids = std::make_shared<std::vector<EntityId>>();
              for (const Json& id_json : args["ids"]) {
                  const EntityId id = id_json.get<EntityId>();
-                 auto r = state.scene.remove(id);
-                 if (!r) {
-                     // Put back what this command removed so far: all or nothing.
-                     for (auto it = removed->rbegin(); it != removed->rend(); ++it) {
-                         state.scene.add(it->entity, it->index);
-                     }
+                 if (state.scene.find(id) == nullptr) {
                      return CommandResult::failure("no entity with id " + std::to_string(id));
                  }
-                 removed->push_back(std::move(*r));
+                 ids->push_back(id);
              }
-             if (std::any_of(removed->begin(), removed->end(), [&state](const auto& r) {
-                     return r.entity.id == state.selected;
-                 })) {
+             auto removed = std::make_shared<std::vector<world::Scene::Removed>>(
+                 state.scene.remove_many(*ids)); // one pass, even for a whole forest
+             if (state.scene.find(state.selected) == nullptr) {
                  state.selected = 0;
              }
              context.record({[&state, removed] {
-                                 for (auto it = removed->rbegin(); it != removed->rend(); ++it) {
-                                     state.scene.add(it->entity, it->index);
-                                 }
-                             },
-                             [&state, removed] {
+                                 std::vector<world::Scene::Removed> back;
                                  for (const auto& r : *removed) {
-                                     state.scene.remove(r.entity.id);
+                                     if (state.scene.find(r.entity.id) == nullptr) back.push_back(r);
                                  }
+                                 state.scene.restore_many(std::move(back));
+                             },
+                             [&state, ids] {
+                                 state.scene.remove_many(*ids);
+                                 if (state.scene.find(state.selected) == nullptr) state.selected = 0;
                              }});
              return CommandResult::success({{"deleted", removed->size()}});
          }});
@@ -407,8 +414,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
 
     add(registry,
         {"load_scene",
-         "Replaces the scene with one saved by save_scene. Undoable. Fails, changing nothing, "
-         "if the file is missing or not a valid scene (the error says where).",
+         "Replaces the scene with one saved by save_scene. Undoable. Entity ids are the ones "
+         "saved in the file, so ids from before the load may now name other entities. Fails, "
+         "changing nothing, if the file is missing or not a valid scene (the error says where).",
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["path"],
              "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 1024}}})"),
          false,
@@ -453,7 +461,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"fly_speed", number(0.1, 10000, "Metres per second when flying.")}}}},
          false,
          [&state](const Json& args, CommandContext&) {
-             EditorCamera& c = state.camera;
+             // Worked out on a copy: a failure leaves the camera untouched.
+             EditorCamera c = state.camera;
              if (args.contains("position")) c.position = dvec3_from(args["position"]);
              c.yaw_degrees = args.value("yaw", c.yaw_degrees);
              c.pitch_degrees = args.value("pitch", c.pitch_degrees);
@@ -469,6 +478,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  c.pitch_degrees = std::clamp(
                      radians_to_degrees(static_cast<float>(std::atan2(d.y, flat))), -89.0f, 89.0f);
              }
+             state.camera = c;
              return CommandResult::success(camera_json(c));
          }});
 }
