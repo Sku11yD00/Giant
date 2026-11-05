@@ -4,6 +4,10 @@
 
 #include "giant/core/assert.h"
 
+#include <algorithm>
+#include <cmath>
+#include <unordered_set>
+
 namespace giant::rhi {
 
 namespace {
@@ -51,6 +55,45 @@ public:
         GIANT_ASSERT(static_cast<NullSwapChain&>(swap_chain).in_frame, "clear outside a frame");
     }
 
+    void draw_ui(SwapChain& swap_chain, const UiFrame& ui) override {
+        GIANT_ASSERT(static_cast<NullSwapChain&>(swap_chain).in_frame, "draw_ui outside a frame");
+        m_ui_draw_calls = check_ui(ui);
+    }
+
+    TextureId create_ui_texture(u32 width, u32 height, std::span<const u8> pixels) override {
+        GIANT_ASSERT(!m_recording, "texture creation while a frame is recording");
+        GIANT_ASSERT(width > 0 && height > 0, "empty texture");
+        GIANT_ASSERT(pixels.size() == static_cast<usize>(width) * height * 4, "pixel count");
+        const TextureId id = m_next_texture++;
+        m_textures.insert(id);
+        return id;
+    }
+
+    void destroy_ui_texture(TextureId texture) override {
+        GIANT_ASSERT(!m_recording, "texture destruction while a frame is recording");
+        const usize erased = m_textures.erase(texture);
+        GIANT_ASSERT(erased == 1, "destroying a texture that does not exist");
+    }
+
+    std::vector<u8> render_ui_offscreen(const UiFrame& ui, u32 width, u32 height,
+                                        const Color& color) override {
+        GIANT_ASSERT(!m_recording, "offscreen work while a frame is recording");
+        m_ui_draw_calls = check_ui(ui);
+        const auto to_byte = [](float v) {
+            return static_cast<u8>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+        };
+        std::vector<u8> pixels(static_cast<usize>(width) * height * 4);
+        for (usize i = 0; i < pixels.size(); i += 4) {
+            pixels[i + 0] = to_byte(color.r);
+            pixels[i + 1] = to_byte(color.g);
+            pixels[i + 2] = to_byte(color.b);
+            pixels[i + 3] = to_byte(color.a);
+        }
+        return pixels;
+    }
+
+    u32 last_ui_draw_calls() const override { return m_ui_draw_calls; }
+
     void end_frame(SwapChain& swap_chain) override {
         auto& sc = static_cast<NullSwapChain&>(swap_chain);
         GIANT_ASSERT(sc.in_frame, "end_frame without begin_frame");
@@ -70,7 +113,37 @@ public:
     bool validation_enabled() const override { return false; }
 
 private:
+    // Checks everything a GPU would trip over, and counts the draws a real
+    // backend would submit.
+    u32 check_ui(const UiFrame& ui) const {
+        u32 draws = 0;
+        for (const UiDrawList& list : ui.lists) {
+            for (const UiDrawCommand& cmd : list.commands) {
+                GIANT_ASSERT(cmd.index_count % 3 == 0, "UI commands draw whole triangles");
+                GIANT_ASSERT(static_cast<u64>(cmd.first_index) + cmd.index_count <=
+                                 list.indices.size(),
+                             "UI command reads past its indices");
+                GIANT_ASSERT(m_textures.count(cmd.texture) == 1, "UI command uses a dead texture");
+                for (u32 i = 0; i < cmd.index_count && cmd.first_index + i < list.indices.size();
+                     ++i) {
+                    GIANT_ASSERT(static_cast<u64>(list.indices[cmd.first_index + i]) +
+                                         cmd.vertex_offset <
+                                     list.vertices.size(),
+                                 "UI index points past the vertices");
+                }
+                if (cmd.index_count > 0 && cmd.clip_max_x > cmd.clip_min_x &&
+                    cmd.clip_max_y > cmd.clip_min_y) {
+                    ++draws;
+                }
+            }
+        }
+        return draws;
+    }
+
     AdapterInfo m_info;
+    std::unordered_set<TextureId> m_textures;
+    TextureId m_next_texture = 1;
+    u32 m_ui_draw_calls = 0;
     u64 m_frames = 0;
     bool m_recording = false;
 };

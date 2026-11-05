@@ -13,7 +13,7 @@ giant_module(rhi
 
 if(WIN32)
   target_compile_definitions(giant_rhi PUBLIC GIANT_RHI_HAS_D3D12=1)
-  target_link_libraries(giant_rhi PRIVATE d3d12 dxgi dxguid)
+  target_link_libraries(giant_rhi PRIVATE d3d12 dxgi dxguid d3dcompiler)
 else()
   target_compile_definitions(giant_rhi PUBLIC GIANT_RHI_HAS_D3D12=0)
 endif()

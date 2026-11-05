@@ -12,7 +12,9 @@
 #include "giant/core/types.h"
 
 #include <memory>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace giant::rhi {
 
@@ -59,6 +61,40 @@ struct SwapChainDesc {
     bool vsync = true;
 };
 
+// --- 2D UI drawing (editor panels) ------------------------------------------
+//
+// Plain data, so the editor's UI library stays out of the graphics layer.
+// Positions are in pixels from the top-left. UI colours and textures are
+// gamma-space (as UI libraries and artists pick them) and are blended in
+// gamma space, so they show exactly as chosen.
+
+using TextureId = u64; // 0 = no texture
+
+struct UiVertex {
+    float x, y; // pixels
+    float u, v;
+    u32 color; // RGBA8, red in the lowest byte
+};
+
+struct UiDrawCommand {
+    u32 first_index = 0;  // into the list's indices
+    u32 index_count = 0;  // a multiple of 3 (triangles)
+    u32 vertex_offset = 0; // added to every index
+    // Pixels outside this rectangle are not drawn.
+    float clip_min_x = 0.0f, clip_min_y = 0.0f, clip_max_x = 0.0f, clip_max_y = 0.0f;
+    TextureId texture = 0; // must be a live texture
+};
+
+struct UiDrawList {
+    std::span<const UiVertex> vertices;
+    std::span<const u32> indices;
+    std::span<const UiDrawCommand> commands;
+};
+
+struct UiFrame {
+    std::span<const UiDrawList> lists; // drawn in order
+};
+
 // Destroy every swap chain before the device that created it.
 class SwapChain {
 public:
@@ -86,7 +122,29 @@ public:
     // Only one frame may be recording on a device at a time.
     virtual bool begin_frame(SwapChain& swap_chain) = 0;
     virtual void clear(SwapChain& swap_chain, const Color& color) = 0;
+    // Draws UI over what the frame holds so far.
+    virtual void draw_ui(SwapChain& swap_chain, const UiFrame& ui) = 0;
     virtual void end_frame(SwapChain& swap_chain) = 0;
+
+    // A gamma-space RGBA8 texture for UI drawing (e.g. a font atlas), with
+    // `width * height * 4` bytes of pixels, rows top to bottom. Returns 0
+    // (and logs why) on failure. Must not be called while a frame records.
+    virtual TextureId create_ui_texture(u32 width, u32 height, std::span<const u8> pixels) = 0;
+    // Waits until the GPU no longer uses it. Must not be called mid-frame.
+    virtual void destroy_ui_texture(TextureId texture) = 0;
+
+    // Draws `ui` over an offscreen image cleared to `color` and returns its
+    // RGBA8 pixels (`width * height * 4` bytes, rows top to bottom), or an
+    // empty vector on failure. The image is gamma-space like the UI: `color`
+    // is stored as given, without sRGB encoding. For tests and screenshots.
+    // The null backend returns the cleared image (it draws nothing). Not
+    // mid-frame.
+    virtual std::vector<u8> render_ui_offscreen(const UiFrame& ui, u32 width, u32 height,
+                                                const Color& color) = 0;
+
+    // UI draw commands submitted in the most recent draw_ui or
+    // render_ui_offscreen call (empty clip rectangles are skipped).
+    virtual u32 last_ui_draw_calls() const = 0;
 
     // Clears a small offscreen texture on the GPU and reads one pixel back.
     // Proves the device really renders; used by tests and startup checks.

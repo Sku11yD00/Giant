@@ -13,13 +13,18 @@
 #include <windows.h>
 
 #include <d3d12.h>
+#include <d3dcompiler.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace giant::rhi {
@@ -34,6 +39,37 @@ constexpr DXGI_FORMAT k_back_buffer_format = DXGI_FORMAT_R8G8B8A8_UNORM;
 // Flip-model swap chains cannot be created as sRGB, but their views can:
 // the renderer writes linear colour and the view encodes it for the screen.
 constexpr DXGI_FORMAT k_back_buffer_view_format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+// UI is gamma-space, so it draws through a plain UNORM view of the same buffer.
+constexpr DXGI_FORMAT k_ui_view_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+constexpr u32 k_max_ui_textures = 256;
+
+// The UI shader: textured, vertex-coloured triangles in pixel coordinates.
+constexpr const char* k_ui_shader = R"(
+cbuffer constants : register(b0) { float4x4 projection; };
+struct VsIn { float2 pos : POSITION; float2 uv : TEXCOORD0; float4 color : COLOR0; };
+struct PsIn { float4 pos : SV_POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; };
+PsIn vs_main(VsIn i) {
+    PsIn o;
+    o.pos = mul(projection, float4(i.pos, 0.0, 1.0));
+    o.color = i.color;
+    o.uv = i.uv;
+    return o;
+}
+SamplerState linear_clamp : register(s0);
+Texture2D ui_texture : register(t0);
+float4 ps_main(PsIn i) : SV_Target { return i.color * ui_texture.Sample(linear_clamp, i.uv); }
+)";
+
+// Upload-heap vertex and index buffers for UI, grown on demand. One set per
+// back buffer: the frame fence for that buffer guards reuse.
+struct UiBuffers {
+    ComPtr<ID3D12Resource> vertices;
+    ComPtr<ID3D12Resource> indices;
+    u64 vertex_capacity = 0; // bytes
+    u64 index_capacity = 0;
+    u8* vertex_data = nullptr; // persistently mapped
+    u8* index_data = nullptr;
+};
 
 bool check(HRESULT hr, const char* what) {
     if (SUCCEEDED(hr)) {
@@ -77,6 +113,7 @@ public:
     ComPtr<IDXGISwapChain3> swap_chain;
     ComPtr<ID3D12DescriptorHeap> rtv_heap;
     std::array<ComPtr<ID3D12Resource>, k_max_back_buffers> buffers;
+    std::array<UiBuffers, k_max_back_buffers> ui_buffers;
     u32 rtv_stride = 0;
     u32 buffer_count = 0;
     u32 current = 0; // back buffer being recorded
@@ -88,11 +125,14 @@ public:
     u32 m_height = 0;
 
     bool acquire_buffers();
+    // sRGB view (linear colour in) for the scene and clears.
     D3D12_CPU_DESCRIPTOR_HANDLE rtv(u32 index) const {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += static_cast<SIZE_T>(index) * rtv_stride;
         return handle;
     }
+    // UNORM view (gamma-space colour in) for UI.
+    D3D12_CPU_DESCRIPTOR_HANDLE ui_rtv(u32 index) const { return rtv(k_max_back_buffers + index); }
 };
 
 class D3D12Device final : public Device {
@@ -122,6 +162,13 @@ public:
     u32 validation_errors() const override;
     bool validation_enabled() const override { return m_info_queue != nullptr; }
 
+    void draw_ui(SwapChain& swap_chain, const UiFrame& ui) override;
+    TextureId create_ui_texture(u32 width, u32 height, std::span<const u8> pixels) override;
+    void destroy_ui_texture(TextureId texture) override;
+    std::vector<u8> render_ui_offscreen(const UiFrame& ui, u32 width, u32 height,
+                                        const Color& color) override;
+    u32 last_ui_draw_calls() const override { return m_ui_draw_calls; }
+
     ID3D12Device* device() const { return m_device.Get(); }
 
     // Checks an HRESULT; device removal is recorded once with its reason.
@@ -131,6 +178,18 @@ private:
     bool pick_adapter(bool software, ComPtr<IDXGIAdapter1>& out);
     u64 signal();
     void wait_for(u64 value);
+
+    bool init_ui();
+    // Starts and submits one-off work on the immediate allocator; submit
+    // waits until the GPU finished it.
+    void begin_immediate();
+    void submit_immediate();
+    ComPtr<ID3D12Resource> create_buffer(D3D12_HEAP_TYPE heap, u64 size,
+                                         D3D12_RESOURCE_STATES state, const char* what);
+    bool reserve_ui_buffers(UiBuffers& buffers, u64 vertex_bytes, u64 index_bytes);
+    // Records UI drawing into m_list. Returns the number of draws.
+    u32 record_ui(UiBuffers& buffers, D3D12_CPU_DESCRIPTOR_HANDLE target, u32 width, u32 height,
+                  const UiFrame& ui);
 
     AdapterInfo m_info;
     ComPtr<IDXGIFactory6> m_factory;
@@ -149,6 +208,20 @@ private:
     bool m_lost = false;
     mutable u32 m_validation_errors = 0; // running total, see validation_errors()
     ComPtr<ID3D12InfoQueue> m_info_queue; // set when the debug layer runs
+
+    struct UiTexture {
+        ComPtr<ID3D12Resource> resource;
+        u32 slot = 0; // in m_srv_heap
+    };
+    ComPtr<ID3D12RootSignature> m_ui_root;
+    ComPtr<ID3D12PipelineState> m_ui_pipeline;
+    ComPtr<ID3D12DescriptorHeap> m_srv_heap; // shader-visible, one slot per UI texture
+    u32 m_srv_stride = 0;
+    std::unordered_map<TextureId, UiTexture> m_ui_textures;
+    std::vector<u32> m_free_srv_slots;
+    TextureId m_next_texture = 1;
+    UiBuffers m_offscreen_ui; // only used between waits for idle
+    u32 m_ui_draw_calls = 0;
 
     friend class D3D12SwapChain;
 };
@@ -264,7 +337,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         log_error("rhi", "d3d12: CreateEvent failed");
         return false;
     }
-    return true;
+    return init_ui();
 }
 
 bool D3D12Device::check_gpu(HRESULT hr, const char* what) {
@@ -374,7 +447,7 @@ std::unique_ptr<SwapChain> D3D12Device::create_swap_chain(const SwapChainDesc& d
 
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    heap_desc.NumDescriptors = k_max_back_buffers;
+    heap_desc.NumDescriptors = 2 * k_max_back_buffers; // sRGB and UI views
     if (!check(m_device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&sc->rtv_heap)),
                "CreateDescriptorHeap")) {
         return nullptr;
@@ -407,6 +480,8 @@ bool D3D12SwapChain::acquire_buffers() {
         view.Format = k_back_buffer_view_format;
         view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
         device->device()->CreateRenderTargetView(buffers[i].Get(), &view, rtv(i));
+        view.Format = k_ui_view_format;
+        device->device()->CreateRenderTargetView(buffers[i].Get(), &view, ui_rtv(i));
     }
     return true;
 }
@@ -593,6 +668,501 @@ Color D3D12Device::clear_offscreen_and_read_back(const Color& color) {
     const D3D12_RANGE no_write{0, 0};
     readback->Unmap(0, &no_write);
     return result;
+}
+
+// --- UI drawing --------------------------------------------------------------
+
+bool D3D12Device::init_ui() {
+    // Root signature: the projection as root constants, one texture, one
+    // fixed linear-clamp sampler.
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 1;
+    range.BaseShaderRegister = 0;
+    range.OffsetInDescriptorsFromTableStart = 0;
+
+    D3D12_ROOT_PARAMETER params[2]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.ShaderRegister = 0;
+    params[0].Constants.Num32BitValues = 16;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &range;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC root_desc{};
+    root_desc.NumParameters = 2;
+    root_desc.pParameters = params;
+    root_desc.NumStaticSamplers = 1;
+    root_desc.pStaticSamplers = &sampler;
+    root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                      D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                      D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                      D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
+
+    ComPtr<ID3DBlob> blob;
+    ComPtr<ID3DBlob> errors;
+    if (FAILED(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob,
+                                           &errors))) {
+        log_error("rhi", std::string("d3d12: UI root signature: ") +
+                             (errors ? static_cast<const char*>(errors->GetBufferPointer()) : "?"));
+        return false;
+    }
+    if (!check(m_device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                             IID_PPV_ARGS(&m_ui_root)),
+               "CreateRootSignature(UI)")) {
+        return false;
+    }
+
+    // Shaders compile at start-up with the system's d3dcompiler_47.dll. The
+    // N1 renderer moves to Slang and precompiled shaders.
+    const auto compile = [](const char* entry, const char* target, ComPtr<ID3DBlob>& out) {
+        ComPtr<ID3DBlob> shader_errors;
+        const HRESULT hr = D3DCompile(k_ui_shader, std::strlen(k_ui_shader), "ui.hlsl", nullptr,
+                                      nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                                      &out, &shader_errors);
+        if (FAILED(hr)) {
+            log_error("rhi", std::string("d3d12: UI shader ") + entry + ": " +
+                                 (shader_errors ? static_cast<const char*>(
+                                                      shader_errors->GetBufferPointer())
+                                                : "compile failed"));
+            return false;
+        }
+        return true;
+    };
+    ComPtr<ID3DBlob> vs;
+    ComPtr<ID3DBlob> ps;
+    if (!compile("vs_main", "vs_5_0", vs) || !compile("ps_main", "ps_5_0", ps)) {
+        return false;
+    }
+
+    const D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+         0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+         0},
+        {"COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+         0},
+    };
+    static_assert(sizeof(UiVertex) == 20, "the input layout above matches UiVertex");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = m_ui_root.Get();
+    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    auto& blend = pso.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.RasterizerState.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.InputLayout = {layout, static_cast<UINT>(std::size(layout))};
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = k_ui_view_format;
+    pso.SampleDesc.Count = 1;
+    if (!check(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_ui_pipeline)),
+               "CreateGraphicsPipelineState(UI)")) {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.NumDescriptors = k_max_ui_textures;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (!check(m_device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&m_srv_heap)),
+               "CreateDescriptorHeap(UI textures)")) {
+        return false;
+    }
+    m_srv_stride = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    for (u32 slot = k_max_ui_textures; slot > 0; --slot) {
+        m_free_srv_slots.push_back(slot - 1); // hand out slot 0 first
+    }
+    return true;
+}
+
+void D3D12Device::begin_immediate() {
+    wait_idle(); // the immediate allocator and the list must be free
+    ID3D12CommandAllocator* allocator = m_allocators[k_max_back_buffers].Get();
+    allocator->Reset();
+    m_list->Reset(allocator, nullptr);
+}
+
+void D3D12Device::submit_immediate() {
+    m_list->Close();
+    ID3D12CommandList* lists[] = {m_list.Get()};
+    m_queue->ExecuteCommandLists(1, lists);
+    wait_idle();
+}
+
+ComPtr<ID3D12Resource> D3D12Device::create_buffer(D3D12_HEAP_TYPE heap_type, u64 size,
+                                                  D3D12_RESOURCE_STATES state, const char* what) {
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = heap_type;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> buffer;
+    if (!check_gpu(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                                     nullptr, IID_PPV_ARGS(&buffer)),
+                   what)) {
+        return nullptr;
+    }
+    return buffer;
+}
+
+bool D3D12Device::reserve_ui_buffers(UiBuffers& buffers, u64 vertex_bytes, u64 index_bytes) {
+    const auto grow = [this](ComPtr<ID3D12Resource>& buffer, u64& capacity, u8*& data, u64 needed,
+                             const char* what) {
+        if (needed <= capacity) {
+            return true;
+        }
+        u64 size = std::max<u64>(capacity, 64 * 1024);
+        while (size < needed) {
+            size *= 2;
+        }
+        // The caller made sure the GPU is done with the old buffer.
+        buffer = create_buffer(D3D12_HEAP_TYPE_UPLOAD, size, D3D12_RESOURCE_STATE_GENERIC_READ, what);
+        capacity = 0;
+        data = nullptr;
+        if (buffer == nullptr) {
+            return false;
+        }
+        const D3D12_RANGE no_read{0, 0};
+        void* mapped = nullptr;
+        if (!check(buffer->Map(0, &no_read, &mapped), "Map(UI buffer)")) {
+            buffer.Reset();
+            return false;
+        }
+        data = static_cast<u8*>(mapped);
+        capacity = size;
+        return true;
+    };
+    return grow(buffers.vertices, buffers.vertex_capacity, buffers.vertex_data, vertex_bytes,
+                "UI vertex buffer") &&
+           grow(buffers.indices, buffers.index_capacity, buffers.index_data, index_bytes,
+                "UI index buffer");
+}
+
+u32 D3D12Device::record_ui(UiBuffers& buffers, D3D12_CPU_DESCRIPTOR_HANDLE target, u32 width,
+                           u32 height, const UiFrame& ui) {
+    u64 vertex_count = 0;
+    u64 index_count = 0;
+    for (const UiDrawList& list : ui.lists) {
+        vertex_count += list.vertices.size();
+        index_count += list.indices.size();
+    }
+    if (vertex_count == 0 || index_count == 0 || width == 0 || height == 0) {
+        return 0;
+    }
+    if (!reserve_ui_buffers(buffers, vertex_count * sizeof(UiVertex), index_count * sizeof(u32))) {
+        return 0;
+    }
+    u64 vertex_at = 0;
+    u64 index_at = 0;
+    for (const UiDrawList& list : ui.lists) {
+        if (!list.vertices.empty()) {
+            std::memcpy(buffers.vertex_data + vertex_at * sizeof(UiVertex), list.vertices.data(),
+                        list.vertices.size_bytes());
+        }
+        if (!list.indices.empty()) {
+            std::memcpy(buffers.index_data + index_at * sizeof(u32), list.indices.data(),
+                        list.indices.size_bytes());
+        }
+        vertex_at += list.vertices.size();
+        index_at += list.indices.size();
+    }
+
+    const float w = static_cast<float>(width);
+    const float h = static_cast<float>(height);
+    // Pixels to clip space (column-major, as the shader's mul expects).
+    const float projection[16] = {2.0f / w, 0.0f,      0.0f, 0.0f, //
+                                  0.0f,     -2.0f / h, 0.0f, 0.0f, //
+                                  0.0f,     0.0f,      0.5f, 0.0f, //
+                                  -1.0f,    1.0f,      0.5f, 1.0f};
+
+    m_list->OMSetRenderTargets(1, &target, FALSE, nullptr);
+    const D3D12_VIEWPORT viewport{0.0f, 0.0f, w, h, 0.0f, 1.0f};
+    m_list->RSSetViewports(1, &viewport);
+    m_list->SetGraphicsRootSignature(m_ui_root.Get());
+    m_list->SetPipelineState(m_ui_pipeline.Get());
+    ID3D12DescriptorHeap* heaps[] = {m_srv_heap.Get()};
+    m_list->SetDescriptorHeaps(1, heaps);
+    m_list->SetGraphicsRoot32BitConstants(0, 16, projection, 0);
+    m_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D12_VERTEX_BUFFER_VIEW vbv{};
+    vbv.BufferLocation = buffers.vertices->GetGPUVirtualAddress();
+    vbv.SizeInBytes = static_cast<UINT>(vertex_count * sizeof(UiVertex));
+    vbv.StrideInBytes = sizeof(UiVertex);
+    m_list->IASetVertexBuffers(0, 1, &vbv);
+    D3D12_INDEX_BUFFER_VIEW ibv{};
+    ibv.BufferLocation = buffers.indices->GetGPUVirtualAddress();
+    ibv.SizeInBytes = static_cast<UINT>(index_count * sizeof(u32));
+    ibv.Format = DXGI_FORMAT_R32_UINT;
+    m_list->IASetIndexBuffer(&ibv);
+
+    u32 draws = 0;
+    u64 list_vertex_base = 0;
+    u64 list_index_base = 0;
+    for (const UiDrawList& list : ui.lists) {
+        for (const UiDrawCommand& cmd : list.commands) {
+            if (static_cast<u64>(cmd.first_index) + cmd.index_count > list.indices.size()) {
+                GIANT_ASSERT(false, "UI command reads past its indices");
+                continue;
+            }
+            const auto texture = m_ui_textures.find(cmd.texture);
+            if (texture == m_ui_textures.end()) {
+                GIANT_ASSERT(false, "UI command uses a dead texture");
+                continue;
+            }
+            const float x0 = std::max(cmd.clip_min_x, 0.0f);
+            const float y0 = std::max(cmd.clip_min_y, 0.0f);
+            const float x1 = std::min(cmd.clip_max_x, w);
+            const float y1 = std::min(cmd.clip_max_y, h);
+            if (cmd.index_count == 0 || x1 <= x0 || y1 <= y0) {
+                continue;
+            }
+            const D3D12_RECT scissor{static_cast<LONG>(x0), static_cast<LONG>(y0),
+                                     static_cast<LONG>(std::ceil(x1)),
+                                     static_cast<LONG>(std::ceil(y1))};
+            m_list->RSSetScissorRects(1, &scissor);
+            D3D12_GPU_DESCRIPTOR_HANDLE srv = m_srv_heap->GetGPUDescriptorHandleForHeapStart();
+            srv.ptr += static_cast<UINT64>(texture->second.slot) * m_srv_stride;
+            m_list->SetGraphicsRootDescriptorTable(1, srv);
+            m_list->DrawIndexedInstanced(cmd.index_count, 1,
+                                         static_cast<UINT>(list_index_base + cmd.first_index),
+                                         static_cast<INT>(list_vertex_base + cmd.vertex_offset), 0);
+            ++draws;
+        }
+        list_vertex_base += list.vertices.size();
+        list_index_base += list.indices.size();
+    }
+    return draws;
+}
+
+void D3D12Device::draw_ui(SwapChain& swap_chain, const UiFrame& ui) {
+    auto& sc = static_cast<D3D12SwapChain&>(swap_chain);
+    GIANT_ASSERT(sc.in_frame, "draw_ui outside a frame");
+    // begin_frame waited for this back buffer's fence, so its UI buffers are free.
+    m_ui_draw_calls = record_ui(sc.ui_buffers[sc.current], sc.ui_rtv(sc.current), sc.width(),
+                                sc.height(), ui);
+}
+
+TextureId D3D12Device::create_ui_texture(u32 width, u32 height, std::span<const u8> pixels) {
+    GIANT_ASSERT(!m_recording, "texture creation while a frame is recording");
+    if (width == 0 || height == 0 || pixels.size() != static_cast<usize>(width) * height * 4) {
+        log_error("rhi", "d3d12: create_ui_texture needs width * height * 4 bytes");
+        return 0;
+    }
+    if (m_lost || m_free_srv_slots.empty()) {
+        log_error("rhi", m_lost ? "d3d12: device lost" : "d3d12: too many UI textures");
+        return 0;
+    }
+
+    D3D12_RESOURCE_DESC tex_desc{};
+    tex_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    tex_desc.Width = width;
+    tex_desc.Height = height;
+    tex_desc.DepthOrArraySize = 1;
+    tex_desc.MipLevels = 1;
+    tex_desc.Format = k_ui_view_format;
+    tex_desc.SampleDesc.Count = 1;
+    tex_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    D3D12_HEAP_PROPERTIES default_heap{};
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    UiTexture texture;
+    if (!check_gpu(m_device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &tex_desc,
+                                                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                     IID_PPV_ARGS(&texture.resource)),
+                   "CreateCommittedResource(UI texture)")) {
+        return 0;
+    }
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 total_bytes = 0;
+    m_device->GetCopyableFootprints(&tex_desc, 0, 1, 0, &footprint, nullptr, nullptr, &total_bytes);
+    ComPtr<ID3D12Resource> upload = create_buffer(D3D12_HEAP_TYPE_UPLOAD, total_bytes,
+                                                  D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                  "UI texture upload");
+    if (upload == nullptr) {
+        return 0;
+    }
+    void* mapped = nullptr;
+    const D3D12_RANGE no_read{0, 0};
+    if (!check(upload->Map(0, &no_read, &mapped), "Map(UI texture upload)")) {
+        return 0;
+    }
+    const usize row_bytes = static_cast<usize>(width) * 4;
+    for (u32 y = 0; y < height; ++y) {
+        std::memcpy(static_cast<u8*>(mapped) + footprint.Offset +
+                        static_cast<usize>(y) * footprint.Footprint.RowPitch,
+                    pixels.data() + static_cast<usize>(y) * row_bytes, row_bytes);
+    }
+    upload->Unmap(0, nullptr);
+
+    begin_immediate();
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = texture.resource.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = upload.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = footprint;
+    m_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const auto barrier = transition(texture.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_list->ResourceBarrier(1, &barrier);
+    submit_immediate(); // the upload buffer may be released after this
+    if (m_lost) {
+        return 0;
+    }
+
+    texture.slot = m_free_srv_slots.back();
+    m_free_srv_slots.pop_back();
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = k_ui_view_format;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = m_srv_heap->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += static_cast<SIZE_T>(texture.slot) * m_srv_stride;
+    m_device->CreateShaderResourceView(texture.resource.Get(), &srv, handle);
+
+    const TextureId id = m_next_texture++;
+    m_ui_textures.emplace(id, std::move(texture));
+    return id;
+}
+
+void D3D12Device::destroy_ui_texture(TextureId texture) {
+    GIANT_ASSERT(!m_recording, "texture destruction while a frame is recording");
+    const auto it = m_ui_textures.find(texture);
+    if (it == m_ui_textures.end()) {
+        GIANT_ASSERT(false, "destroying a texture that does not exist");
+        return;
+    }
+    wait_idle(); // earlier frames may still sample it
+    m_free_srv_slots.push_back(it->second.slot);
+    m_ui_textures.erase(it);
+}
+
+std::vector<u8> D3D12Device::render_ui_offscreen(const UiFrame& ui, u32 width, u32 height,
+                                                 const Color& color) {
+    GIANT_ASSERT(!m_recording, "offscreen work while a frame is recording");
+    if (m_lost || width == 0 || height == 0) {
+        return {};
+    }
+    D3D12_RESOURCE_DESC tex_desc{};
+    tex_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    tex_desc.Width = width;
+    tex_desc.Height = height;
+    tex_desc.DepthOrArraySize = 1;
+    tex_desc.MipLevels = 1;
+    tex_desc.Format = k_ui_view_format;
+    tex_desc.SampleDesc.Count = 1;
+    tex_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    tex_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_HEAP_PROPERTIES default_heap{};
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_CLEAR_VALUE clear_value{};
+    clear_value.Format = k_ui_view_format;
+    clear_value.Color[0] = color.r;
+    clear_value.Color[1] = color.g;
+    clear_value.Color[2] = color.b;
+    clear_value.Color[3] = color.a;
+    ComPtr<ID3D12Resource> target;
+    if (!check_gpu(m_device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &tex_desc,
+                                                     D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                                     &clear_value, IID_PPV_ARGS(&target)),
+                   "CreateCommittedResource(UI offscreen)")) {
+        return {};
+    }
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 total_bytes = 0;
+    m_device->GetCopyableFootprints(&tex_desc, 0, 1, 0, &footprint, nullptr, nullptr, &total_bytes);
+    ComPtr<ID3D12Resource> readback = create_buffer(D3D12_HEAP_TYPE_READBACK, total_bytes,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST,
+                                                    "UI readback buffer");
+    if (readback == nullptr) {
+        return {};
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    heap_desc.NumDescriptors = 1;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    if (!check(m_device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&rtv_heap)),
+               "CreateDescriptorHeap(UI offscreen)")) {
+        return {};
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    m_device->CreateRenderTargetView(target.Get(), nullptr, rtv);
+
+    begin_immediate(); // waits for idle, so m_offscreen_ui is free too
+    const float rgba[4] = {color.r, color.g, color.b, color.a};
+    m_list->ClearRenderTargetView(rtv, rgba, 0, nullptr);
+    m_ui_draw_calls = record_ui(m_offscreen_ui, rtv, width, height, ui);
+    const auto barrier = transition(target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+    m_list->ResourceBarrier(1, &barrier);
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = footprint;
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = target.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    m_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    submit_immediate();
+    if (m_lost) {
+        return {};
+    }
+
+    void* mapped = nullptr;
+    const D3D12_RANGE read_range{0, static_cast<SIZE_T>(total_bytes)};
+    if (!check(readback->Map(0, &read_range, &mapped), "Map(UI readback)")) {
+        return {};
+    }
+    std::vector<u8> pixels(static_cast<usize>(width) * height * 4);
+    const usize row_bytes = static_cast<usize>(width) * 4;
+    for (u32 y = 0; y < height; ++y) {
+        std::memcpy(pixels.data() + static_cast<usize>(y) * row_bytes,
+                    static_cast<const u8*>(mapped) + footprint.Offset +
+                        static_cast<usize>(y) * footprint.Footprint.RowPitch,
+                    row_bytes);
+    }
+    const D3D12_RANGE no_write{0, 0};
+    readback->Unmap(0, &no_write);
+    return pixels;
 }
 
 } // namespace
