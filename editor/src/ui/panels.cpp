@@ -12,6 +12,7 @@
 #include <cstring>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace giant::editor {
 
@@ -227,7 +228,9 @@ void EditorPanels::draw_outliner() {
         const world::Entity* selected = m_state.scene.find(m_state.selected);
         ImGui::BeginDisabled(selected == nullptr || selected->shape == world::Shape::kit);
         if (ImGui::SmallButton("Selected to kit")) {
-            const std::string name = "kit " + std::to_string(m_state.scene.kits.size() + 1);
+            usize n = m_state.scene.kits.size() + 1;
+            while (m_state.scene.find_kit("kit " + std::to_string(n)) != nullptr) ++n;
+            const std::string name = "kit " + std::to_string(n);
             run("create_kit", {{"name", name}, {"from_entities", {m_state.selected}}, {"replace_entities", true}});
         }
         ImGui::EndDisabled();
@@ -275,13 +278,24 @@ void EditorPanels::draw_properties() {
     if (ImGui::InputText("Name", name.data(), name.size(), ImGuiInputTextFlags_EnterReturnsTrue)) {
         set("name", std::string(name.data()));
     }
-    int shape = static_cast<int>(e->shape);
-    const char* const shapes[] = {"cube", "sphere", "plane", "mesh", "kit", "decal"};
-    if (ImGui::Combo("Shape", &shape, shapes, IM_ARRAYSIZE(shapes))) {
-        if (shapes[shape] == std::string_view("kit") && e->kit.empty() && !m_state.scene.kits.empty()) {
-            run("set_entity", {{"id", id}, {"kit", m_state.scene.kits.front().name}}, edit_group());
+    // "kit" needs a kit to place: offered only when the scene has one.
+    const bool kits = !m_state.scene.kits.empty() || e->shape == world::Shape::kit;
+    std::vector<const char*> shapes = {"cube", "sphere", "plane", "mesh"};
+    if (kits) shapes.push_back("kit");
+    shapes.push_back("decal");
+    const char* current = world::to_string(e->shape);
+    int shape = 0;
+    for (usize i = 0; i < shapes.size(); ++i) {
+        if (std::string_view(shapes[i]) == current) shape = static_cast<int>(i);
+    }
+    if (ImGui::Combo("Shape", &shape, shapes.data(), static_cast<int>(shapes.size()))) {
+        const std::string_view chosen = shapes[static_cast<usize>(shape)];
+        if (chosen == "kit" && m_state.scene.find_kit(e->kit) == nullptr) {
+            if (!m_state.scene.kits.empty()) {
+                run("set_entity", {{"id", id}, {"kit", m_state.scene.kits.front().name}}, edit_group());
+            }
         } else {
-            set("shape", shapes[shape]);
+            set("shape", std::string(chosen));
         }
     }
     if (e->shape == world::Shape::kit) {
@@ -311,9 +325,10 @@ void EditorPanels::draw_properties() {
         if (ImGui::SliderFloat("Softness", &softness, 0.0f, 1.0f)) {
             set("decal", {{"softness", std::clamp(softness, 0.0f, 1.0f)}});
         }
-        int seed = static_cast<int>(std::min<u32>(e->decal.seed, 0x7FFF'FFFFu));
-        if (ImGui::InputInt("Seed", &seed)) {
-            set("decal", {{"seed", std::max(seed, 0)}});
+        u32 seed = e->decal.seed;
+        const u32 step = 1;
+        if (ImGui::InputScalar("Seed", ImGuiDataType_U32, &seed, &step)) {
+            set("decal", {{"seed", seed}});
         }
     }
     if (e->shape == world::Shape::mesh || !e->mesh.empty()) {

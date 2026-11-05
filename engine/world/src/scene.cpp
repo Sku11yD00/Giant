@@ -218,7 +218,10 @@ void write_look(Json& out, Shape shape, const std::string& mesh, const std::stri
     if (!kit.empty()) {
         out["kit"] = kit;
     }
-    if (shape == Shape::decal) {
+    // Kept when the shape changes (as mesh and kit are), so written whenever set.
+    const DecalSettings none;
+    if (shape == Shape::decal || d.shape != none.shape || d.opacity != none.opacity ||
+        d.softness != none.softness || d.seed != none.seed) {
         out["decal"] = {{"shape", to_string(d.shape)}, {"opacity", d.opacity}, {"softness", d.softness},
                         {"seed", d.seed}};
     }
@@ -477,7 +480,11 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
         r.fail("mesh", "is needed when the shape is mesh");
     }
     if (kit != nullptr) {
+        const bool given = r.get("kit", false) != nullptr;
         r.string("kit", *kit, false, k_max_name_bytes);
+        if (r.ok() && given && kit->empty()) {
+            r.fail("kit", "must not be empty");
+        }
         if (r.ok() && shape == Shape::kit && kit->empty()) {
             r.fail("kit", "is needed when the shape is kit");
         }
@@ -535,8 +542,8 @@ void read_kit(const Json& json, const std::string& path, Kit& k, std::string& er
         r.fail("name", "must not be empty");
     }
     if (const Json* pieces = r.get("pieces", true); pieces != nullptr && r.ok()) {
-        if (!pieces->is_array() || pieces->size() > k_max_kit_pieces) {
-            r.fail("pieces", "must be an array of at most " + std::to_string(k_max_kit_pieces) + " pieces");
+        if (!pieces->is_array() || pieces->empty() || pieces->size() > k_max_kit_pieces) {
+            r.fail("pieces", "must be an array of 1 to " + std::to_string(k_max_kit_pieces) + " pieces");
         } else {
             for (usize i = 0; i < pieces->size() && error.empty(); ++i) {
                 const std::string piece_path = path + ".pieces[" + std::to_string(i) + "]";

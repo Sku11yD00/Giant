@@ -116,7 +116,8 @@ float3 to_world(Instance i, float3 p) {
 
 // The normal matrix is the inverse transpose of the model's 3x3; its
 // cofactor matrix is that times the determinant, which normalising removes
-// (the sign is kept, so mirrored instances keep outward normals).
+// (the sign is kept, so mirrored instances keep outward normals). Returns a
+// unit vector, or zero.
 float3 to_world_normal(Instance i, float3 n) {
     const float3 c0 = float3(i.model[0].x, i.model[1].x, i.model[2].x);
     const float3 c1 = float3(i.model[0].y, i.model[1].y, i.model[2].y);
@@ -125,7 +126,12 @@ float3 to_world_normal(Instance i, float3 n) {
     const float3 k1 = cross(c2, c0);
     const float3 k2 = cross(c0, c1);
     const float det = dot(c0, k0);
-    return (k0 * n.x + k1 * n.y + k2 * n.z) * (det < 0.0 ? -1.0 : 1.0);
+    // Normalised here, relative to its own length: the cofactors grow with
+    // the square of the scale, so a millimetre-scale instance must not fall
+    // under an absolute threshold later.
+    const float3 r = (k0 * n.x + k1 * n.y + k2 * n.z) * (det < 0.0 ? -1.0 : 1.0);
+    const float len2 = dot(r, r);
+    return len2 > 0.0 ? r * rsqrt(len2) : r;
 }
 
 // --- Meshes ------------------------------------------------------------------------

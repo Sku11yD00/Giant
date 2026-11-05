@@ -111,7 +111,10 @@ void apply_decals(uint buffer, uint decal_offset, uint tile_offset, uint entry_o
         const float depth = saturate((0.5 - abs(p.y)) * 8.0);
         // One pixel, in q units (q = 2 * p.xz).
         const float aa = max(pixel_size * 2.0 * max(length(d.rows[0].xyz), length(d.rows[2].xyz)), 1e-5);
-        const float w = max(d.softness, aa);
+        // Cracks are thin (their distance peaks near 0.03): soften them in
+        // proportion, so the default softness still stamps them fully.
+        const float softness = d.shape == 4 ? d.softness * 0.1 : d.softness;
+        const float w = max(softness, aa);
         const float mask = saturate(decal_distance(d.shape, p.xz * 2.0, d.seed) / w + 0.5 * aa / w);
         const float a = d.color_opacity.a * mask * facing * depth;
         base = lerp(base, d.color_opacity.rgb, a);

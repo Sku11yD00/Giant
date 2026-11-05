@@ -301,3 +301,18 @@ GIANT_TEST("world: kits and decals save and load") {
     const auto nest_error = load_scene(nested, loaded);
     GIANT_CHECK(nest_error.has_value() && contains(nest_error->message, "kits do not nest"));
 }
+
+GIANT_TEST("world: decal settings are kept when the shape changes, and empty kits are refused") {
+    Scene scene;
+    Entity e = named("was a decal");
+    e.decal = {DecalShape::ring, 1.0f, 0.1f, 7};
+    scene.add(e);
+    const std::string text = save_scene(scene);
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.entities()[0].decal.shape == DecalShape::ring && loaded.entities()[0].decal.seed == 7);
+    const char* empty_kit = R"({"format": "giant-scene", "version": 1, "kits": [{"name": "k", "pieces": []}]})";
+    GIANT_CHECK(load_scene(empty_kit, loaded).has_value());
+    const char* empty_name = R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "kit": ""}]})";
+    GIANT_CHECK(load_scene(empty_name, loaded).has_value());
+}
