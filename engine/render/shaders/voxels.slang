@@ -119,9 +119,9 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const int n = int(push.bricks_per_axis);
     const uint slots = uint(n * n * n);
     const uint level_count = min(push.level_count, k_max_levels);
-    Level all[k_max_levels];
+    Level lv[k_max_levels];
     for (uint li = 0; li < k_max_levels; ++li) {
-        all[li] = load_level(levels, min(li, max(level_count, 1u) - 1u));
+        lv[li] = load_level(levels, min(li, max(level_count, 1u) - 1u));
     }
 
     float t = f.near_plane;
@@ -132,10 +132,10 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
         const float3 p = dir * t;
         // The finest level whose window holds the point.
         uint level = level_count;
-        Level l = all[0];
+        Level l = lv[0];
         int3 local = int3(0, 0, 0);
         for (uint i = first; i < level_count; ++i) {
-            const Level c = all[i];
+            const Level c = lv[i];
             const int3 b = int3(floor((p - c.origin) / c.brick_size));
             if (all(b >= int3(0, 0, 0)) && all(b < int3(n, n, n))) {
                 level = i;
@@ -173,7 +173,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
         if (index == k_unbuilt) {
             index = k_no_brick;
             for (uint j = level + 1; j < level_count; ++j) {
-                const Level c = all[j];
+                const Level c = lv[j];
                 const int3 b = int3(floor((p - c.origin) / c.brick_size));
                 if (any(b < int3(0, 0, 0)) || any(b >= int3(n, n, n))) {
                     break;
