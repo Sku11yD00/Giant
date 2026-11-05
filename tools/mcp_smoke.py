@@ -20,7 +20,7 @@ import threading
 
 from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
-TIMEOUT = 240  # seconds for the whole run (the N1 gate scene is large on the software renderer)
+TIMEOUT = 540  # seconds for the whole run (the N1 gate scene is large on the software renderer; slow CI runners take 2-3x the usual ~115 s)
 
 
 def decode_png(data):
@@ -290,6 +290,73 @@ def kit_gate(tool, call, check):
     tool("new_scene")
 
 
+def voxel_gate(tool, call, check):
+    """N2 part 2: the voxel copy of the scene builds around the camera, follows edits and
+    shows in the voxel view."""
+    tool("new_scene")
+    tool("create_entity", {"name": "Ground", "shape": "plane", "scale": [400, 1, 400],
+                           "base_color": [0.3, 0.3, 0.3], "roughness": 0.9})
+    block = tool("create_entity", {"name": "Block", "shape": "cube", "position": [0, 2, -10],
+                                   "scale": [4, 4, 4], "base_color": [0.9, 0.05, 0.05]})["id"]
+    tool("set_camera", {"position": [0, 3, 2], "look_at": [0, 2, -10]})
+    # Sanitizer builds build bricks some 30x slower: a bigger budget settles them in time.
+    # The voxel view is only shown for the screenshots: on the software GPU its ray march
+    # takes long, and the voxel world builds whatever the view.
+    tool("set_render_settings", {"voxel_ms_per_frame": 50})
+
+    def settle():
+        for _ in range(60):
+            for _ in range(10):
+                call("ping")
+            voxels = tool("get_render_settings")["last_frame"]["voxels"]
+            if voxels["pending"] == 0:
+                return voxels
+        return voxels
+
+    voxels = settle()
+    check(voxels["pending"] == 0 and voxels["bricks"] > 0 and not voxels["overflow"],
+          f"the voxel world is built, got {voxels}")
+    check(voxels["cpu_ms"] < 100, f"building keeps near its budget, got {voxels}")
+    built = voxels["bricks"]
+
+    def probe(position):  # the finest level holding the point
+        levels = tool("probe_voxels", {"position": position})["levels"]
+        return next((l["state"] for l in levels if l["state"] != "outside"), "outside")
+
+    # The block's +X face (x = 2) and the ground are solid voxels; inside the block is empty.
+    check(probe([2.05, 2.1, -10.1]) == "solid", "the block's side is in the voxel world")
+    check(probe([0.1, 0.05, 0.1]) == "solid", "the ground is in the voxel world")
+    check(probe([0.1, 2.1, -10.1]) == "empty", "the block is hollow (a shell of voxels)")
+
+    def centre():
+        tool("set_render_settings", {"debug_view": "voxels"})
+        call("ping")
+        shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 480}})
+        image = [c for c in shot["content"] if c["type"] == "image"][0]
+        width, height, pixels = decode_png(base64.b64decode(image["data"]))
+        x, y = width // 2, height // 2
+        tool("set_render_settings", {"debug_view": "lit"})
+        return pixels[(y * width + x) * 4:(y * width + x) * 4 + 3]
+
+    real = tool("get_engine_info")["backend"] != "null"
+    if real:
+        r, g, b = centre()
+        check(r > 120 and r - g > 50 and r - b > 50, f"the voxel view shows the red block, got {(r, g, b)}")
+    # Moving the block rebuilds only around it; the view follows.
+    tool("set_entity", {"id": block, "position": [30, 2, -10]})
+    voxels = settle()
+    check(voxels["pending"] == 0 and abs(voxels["bricks"] - built) <= built // 4,
+          f"the moved block is rebuilt where it went, got {voxels} (was {built} bricks)")
+    check(probe([2.05, 2.1, -10.1]) == "empty", "the block's old place is empty")
+    check(probe([32.05, 2.1, -10.1]) == "solid", "the block is in the voxel world where it went")
+    check(probe([0.1, 0.05, 0.1]) == "solid", "the ground stayed")
+    if real:
+        r, g, b = centre()
+        check(r - g < 30 and r - b < 30, f"the block's old place is no longer red, got {(r, g, b)}")
+    tool("set_render_settings", {"voxel_ms_per_frame": 1})
+    tool("new_scene")
+
+
 def n1_gate(tool, call, check):
     """N1 part 6, the N1 gate scene (tools/n1_gate.py measures its speed on a real GPU): a
     kit-built town and 10,000 trees in a fixed number of draws, with every bit of detail the
@@ -432,6 +499,7 @@ def main() -> int:
         build_scene(tool, call, check)
         lod_gate(tool, call, check)
         kit_gate(tool, call, check)
+        voxel_gate(tool, call, check)
         n1_gate(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")

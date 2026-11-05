@@ -107,6 +107,8 @@ struct EditorState {
     // Renders the editor as it looks now (viewport and panels) and returns
     // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.
     std::function<std::vector<u8>()> render_screenshot;
+    // What the voxel world holds at a point, per level (finest first). Set by main.
+    std::function<std::vector<render::VoxelProbeLevel>(const DVec3&)> probe_voxels;
 
     // C# scripts. Commands cannot run commands, so loading is requested here
     // and done by the main loop right after the command.

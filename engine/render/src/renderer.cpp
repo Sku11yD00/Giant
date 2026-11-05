@@ -8,6 +8,7 @@
 #include "render_shaders.h"
 #include "smaa.h"
 #include "streaming.h"
+#include "voxel_scene.h"
 
 #include <algorithm>
 #include <bit>
@@ -124,7 +125,7 @@ Renderer::~Renderer() {
     for (const rhi::PipelineHandle p :
          {m_raster_mesh, m_raster_vertex, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
-          m_smaa_blend}) {
+          m_smaa_blend, m_voxel_view}) {
         m_device.destroy(p);
     }
     m_device.destroy(m_smaa_area);
@@ -149,6 +150,10 @@ Renderer::~Renderer() {
 bool Renderer::init() {
     m_streamer = std::make_unique<GeometryStreamer>(m_device, m_desc.geometry_pool_bytes);
     if (!m_streamer->init()) {
+        return false;
+    }
+    m_voxels = std::make_unique<VoxelScene>(m_device, m_desc.voxel_clipmap, m_desc.voxel_bricks);
+    if (!m_voxels->init()) {
         return false;
     }
     GeometryStreamer::Budget budget;
@@ -207,9 +212,16 @@ bool Renderer::init() {
     smaa.color_formats[0] = rhi::Format::rgba8_srgb;
     smaa.name = "SMAA: blend";
     m_smaa_blend = m_device.create_pipeline(smaa);
+    rhi::GraphicsPipelineDesc voxels;
+    voxels.vertex = shaders::voxels_vs();
+    voxels.pixel = shaders::voxels_ps();
+    voxels.color_formats[0] = rhi::Format::rgba8_srgb;
+    voxels.cull = rhi::CullMode::none;
+    voxels.name = "voxel view";
+    m_voxel_view = m_device.create_pipeline(voxels);
     for (const rhi::PipelineHandle p :
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
-          m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend}) {
+          m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -331,6 +343,7 @@ MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
     mesh.data = std::move(data);
     mesh.live = true;
     m_meshes.push_back(std::move(mesh));
+    ++m_meshes_version;
     return static_cast<MeshId>(m_meshes.size() - 1);
 }
 
@@ -340,10 +353,19 @@ void Renderer::remove_mesh(MeshId id) {
     }
     destroy(m_meshes[id]); // the slot stays, empty: ids are never reused
     m_streamer->remove(id);
+    ++m_meshes_version;
 }
 
 const geometry::ClusterMesh* Renderer::mesh(MeshId id) const {
     return id < m_meshes.size() && m_meshes[id].live ? &m_meshes[id].data : nullptr;
+}
+
+std::vector<VoxelProbeLevel> Renderer::probe_voxels(const DVec3& position) const {
+    std::vector<VoxelProbeLevel> out;
+    for (u32 level = 0; level < m_voxels->levels(); ++level) {
+        out.push_back({level, m_voxels->clipmap().voxel_size(level), to_string(m_voxels->probe(level, position))});
+    }
+    return out;
 }
 
 MeshId Renderer::builtin(BuiltinMesh mesh) const { return m_builtin[static_cast<usize>(mesh)]; }
@@ -801,6 +823,14 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.begin_timing("streaming");
     m_streamer->update(cmd, frame_number);
     cmd.end_timing();
+    if (settings.voxel_world) {
+        cmd.begin_timing("voxels");
+        m_voxels->update(cmd, frame.view.position, frame.instances, frame.materials, m_meshes_version,
+                         [this](MeshId id) { return mesh(id); }, std::clamp(settings.voxel_ms_per_frame, 0.0f, 1000.0f));
+        cmd.end_timing();
+    } else {
+        m_voxels->idle();
+    }
 
     // Instances with a live mesh.
     m_valid.clear();
@@ -1033,6 +1063,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // SMAA then smooths into the target.
     const bool antialias = settings.antialiasing && settings.debug_view == DebugView::lit;
     const rhi::TextureHandle shaded = antialias ? m_color : target;
+    if (settings.debug_view == DebugView::voxels) {
+        draw_voxels(cmd, target, data, frame.view.position, light.background);
+        finish_stats(data);
+        return;
+    }
     cmd.begin_timing("shading");
     rhi::RenderPassDesc pass;
     const Vec3& bg = light.background;
@@ -1075,10 +1110,43 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         smaa(cmd, target, bg);
         cmd.end_timing();
     }
+    finish_stats(data);
+}
+
+void Renderer::finish_stats(const FrameData& data) {
     copy_streaming_stats();
     m_stats.materials = data.material_count;
     m_stats.decals = data.tile_columns != 0 ? static_cast<u32>(m_decal_bins->decals.size()) : 0;
     m_stats.decal_overflow = m_decal_bins->overflow;
+}
+
+void Renderer::draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
+                           const DVec3& camera, const Vec3& background) {
+    std::vector<gpu::VoxelLevel> levels(m_voxels->levels());
+    m_voxels->write_levels(levels.data(), camera);
+    const rhi::TransientMemory upload = cmd.upload(bytes_of(levels));
+    cmd.begin_timing("voxel view");
+    rhi::RenderPassDesc pass;
+    pass.colors[0] = {target, rhi::LoadOp::clear, {background.x, background.y, background.z, 1.0f}};
+    cmd.begin_render_pass(pass);
+    if (upload.data != nullptr) {
+        cmd.set_pipeline(m_voxel_view);
+        gpu::VoxelPush push{};
+        push.frame = data.frame.descriptor;
+        push.frame_offset = data.frame.offset;
+        push.pool = m_device.read_descriptor(m_voxels->pool());
+        push.table = m_device.read_descriptor(m_voxels->table());
+        push.levels = upload.descriptor;
+        push.levels_offset = upload.offset;
+        push.level_count = m_voxels->levels();
+        push.bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
+        set4(push.background, background, 1.0f);
+        cmd.push(push);
+        cmd.draw(3);
+        ++m_stats.draws;
+    }
+    cmd.end_render_pass();
+    cmd.end_timing();
 }
 
 void Renderer::smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3& background) {
@@ -1126,6 +1194,14 @@ void Renderer::copy_streaming_stats() {
     m_stats.streamed_in = s.loaded;
     m_stats.evicted = s.evicted;
     m_stats.waiting = s.waiting;
+    const VoxelStats& v = m_voxels->stats();
+    m_stats.voxel_bricks = v.bricks;
+    m_stats.voxel_capacity = v.capacity;
+    m_stats.voxel_pending = v.pending;
+    m_stats.voxel_built = v.built;
+    m_stats.voxel_missing = v.missing;
+    m_stats.voxel_overflow = v.overflow;
+    m_stats.voxel_cpu_ms = v.cpu_ms;
 }
 
 } // namespace giant::render

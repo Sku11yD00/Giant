@@ -262,13 +262,15 @@ const char* to_string(render::DebugView v) {
     case render::DebugView::clusters: return "clusters";
     case render::DebugView::lod_levels: return "lod_levels";
     case render::DebugView::triangles: return "triangles";
+    case render::DebugView::voxels: return "voxels";
     }
     return "lit";
 }
 
 render::DebugView debug_view_from(const std::string& name) {
     for (const auto v : {render::DebugView::lit, render::DebugView::clusters,
-                         render::DebugView::lod_levels, render::DebugView::triangles}) {
+                         render::DebugView::lod_levels, render::DebugView::triangles,
+                         render::DebugView::voxels}) {
         if (name == to_string(v)) return v;
     }
     return render::DebugView::lit;
@@ -283,6 +285,8 @@ Json render_settings_json(const EditorState& state) {
             {"mesh_shaders", state.render_settings.mesh_shaders},
             {"antialiasing", state.render_settings.antialiasing},
             {"specular_antialiasing", state.render_settings.specular_antialiasing},
+            {"voxel_world", state.render_settings.voxel_world},
+            {"voxel_ms_per_frame", state.render_settings.voxel_ms_per_frame},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
               {"clusters", s.clusters},
@@ -293,7 +297,11 @@ Json render_settings_json(const EditorState& state) {
               {"streaming",
                {{"pool_bytes", s.pool_bytes}, {"pool_used_bytes", s.pool_used_bytes},
                 {"resident_groups", s.resident_groups}, {"total_groups", s.total_groups},
-                {"streamed_in", s.streamed_in}, {"evicted", s.evicted}, {"waiting", s.waiting}}}}}};
+                {"streamed_in", s.streamed_in}, {"evicted", s.evicted}, {"waiting", s.waiting}}},
+              {"voxels",
+               {{"bricks", s.voxel_bricks}, {"capacity", s.voxel_capacity}, {"pending", s.voxel_pending},
+                {"built", s.voxel_built}, {"missing", s.voxel_missing}, {"overflow", s.voxel_overflow},
+                {"cpu_ms", s.voxel_cpu_ms}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -967,7 +975,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "from the GPU a frame or two late (from_gpu true); occluded_* count what the first "
          "occlusion pass hid; overflow means a GPU list was full and geometry was dropped. "
          "streaming: GPU memory for cluster geometry (pool) and how many cluster groups are "
-         "loaded; detail loads over a few frames as the camera moves (waiting > 0 meanwhile).",
+         "loaded; detail loads over a few frames as the camera moves (waiting > 0 meanwhile). "
+         "voxels: the voxel copy of the scene around the camera (bricks of 8x8x8 voxels in the "
+         "GPU pool, of capacity; pending counts work still to do, a little CPU time each frame; "
+         "missing bricks did not fit in the pool and overflow means it is full).",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              return CommandResult::success(render_settings_json(state));
@@ -978,22 +989,27 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "Changes how the viewport draws. lod_error_pixels: how much simplification may show "
          "(1 = under a pixel; lower is sharper and slower). debug_view: lit (normal), clusters "
          "(each cluster coloured), lod_levels (red = full detail, then yellow, green, cyan, "
-         "blue...) or triangles. gpu_culling: pick clusters on the GPU (default) or the CPU. "
+         "blue...), triangles, or voxels (the voxel copy of the scene: 0.25 m voxels near the "
+         "camera, doubling with each level out to about 8 km). gpu_culling: pick clusters on the GPU (default) or the CPU. "
          "occlusion_culling: skip what is hidden behind nearer geometry (GPU culling only). "
          "mesh_shaders: draw with mesh shaders when the GPU has them, else vertex shaders. "
          "antialiasing: smooth jagged edges (SMAA, no blur in motion; lit view only). "
          "specular_antialiasing: keep fine shiny detail from sparkling. "
+         "voxel_world: keep the voxel copy of the scene up to date (default on). "
+         "voxel_ms_per_frame: CPU time each frame may spend building it (default 1). "
          "View state: not undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
                {{"lod_error_pixels", number(0.1, 64, "Pixels of error allowed. Default 1.")},
-                {"debug_view", {{"enum", {"lit", "clusters", "lod_levels", "triangles"}}}},
+                {"debug_view", {{"enum", {"lit", "clusters", "lod_levels", "triangles", "voxels"}}}},
                 {"gpu_culling", {{"type", "boolean"}}},
                 {"occlusion_culling", {{"type", "boolean"}}},
                 {"mesh_shaders", {{"type", "boolean"}}},
                 {"antialiasing", {{"type", "boolean"}}},
-                {"specular_antialiasing", {{"type", "boolean"}}}}}},
+                {"specular_antialiasing", {{"type", "boolean"}}},
+                {"voxel_world", {{"type", "boolean"}}},
+                {"voxel_ms_per_frame", number(0, 100, "Milliseconds. Default 1.")}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -1006,7 +1022,31 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.mesh_shaders = args.value("mesh_shaders", r.mesh_shaders);
              r.antialiasing = args.value("antialiasing", r.antialiasing);
              r.specular_antialiasing = args.value("specular_antialiasing", r.specular_antialiasing);
+             r.voxel_world = args.value("voxel_world", r.voxel_world);
+             r.voxel_ms_per_frame = args.value("voxel_ms_per_frame", r.voxel_ms_per_frame);
              return CommandResult::success(render_settings_json(state));
+         }});
+
+    add(registry,
+        {"probe_voxels",
+         "What the voxel world holds at a world position, per clipmap level (finest first): "
+         "outside (beyond the level's window), building (not built yet; the next coarser level "
+         "stands in), empty or solid. Wait for last_frame.voxels.pending to reach 0 (see "
+         "get_render_settings) for settled answers.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"position"}},
+              {"properties", {{"position", triple(-1e8, 1e8, "Metres [x, y, z].")}}}},
+         true,
+         [&state](const Json& args, CommandContext&) {
+             if (!state.probe_voxels) {
+                 return CommandResult::failure("no voxel world in this editor");
+             }
+             Json levels = Json::array();
+             for (const render::VoxelProbeLevel& l : state.probe_voxels(dvec3_from(args["position"]))) {
+                 levels.push_back({{"level", l.level}, {"voxel_size", l.voxel_size}, {"state", l.state}});
+             }
+             return CommandResult::success({{"levels", std::move(levels)}});
          }});
 
     add(registry,

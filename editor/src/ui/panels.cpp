@@ -578,6 +578,12 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (stats.waiting > 0 || stats.streamed_in > 0) {
             ImGui::Text("Streaming: %u loaded, %u waiting", stats.streamed_in, stats.waiting);
         }
+        ImGui::Text("Voxel world: %u of %u bricks, %u waiting (%.2f ms CPU)", stats.voxel_bricks,
+                    stats.voxel_capacity, stats.voxel_pending, static_cast<double>(stats.voxel_cpu_ms));
+        if (stats.voxel_overflow) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Voxel brick pool full: %u bricks missing",
+                               stats.voxel_missing);
+        }
         ImGui::Text("Materials: %u shared, decals: %u in view", stats.materials, stats.decals);
         if (stats.decal_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many decals on screen: some not drawn");
@@ -588,8 +594,8 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::SeparatorText("Geometry");
         const render::RenderSettings& r = m_state.render_settings;
         int view = static_cast<int>(r.debug_view);
-        const char* const views[] = {"lit", "clusters", "lod_levels", "triangles"};
-        const char* const labels[] = {"Lit", "Clusters", "LOD levels", "Triangles"};
+        const char* const views[] = {"lit", "clusters", "lod_levels", "triangles", "voxels"};
+        const char* const labels[] = {"Lit", "Clusters", "LOD levels", "Triangles", "Voxels"};
         if (ImGui::Combo("View", &view, labels, IM_ARRAYSIZE(labels))) {
             run("set_render_settings", {{"debug_view", views[view]}});
         }
@@ -620,6 +626,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         bool specular = r.specular_antialiasing;
         if (ImGui::Checkbox("Specular anti-aliasing", &specular)) {
             run("set_render_settings", {{"specular_antialiasing", specular}});
+        }
+        bool voxels = r.voxel_world;
+        if (ImGui::Checkbox("Voxel world", &voxels)) {
+            run("set_render_settings", {{"voxel_world", voxels}});
         }
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {
