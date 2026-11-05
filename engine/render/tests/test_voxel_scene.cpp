@@ -423,3 +423,78 @@ GIANT_TEST("voxel scene: a rebuild started by a full backlog loses no changes") 
     GIANT_CHECK(b.voxels->stats().pending == 0);
     GIANT_CHECK(b.voxels->probe(1, {-9.45, -5.0, -9.0}) == VoxelProbe::solid); // its -X face, where it went
 }
+
+GIANT_TEST("voxel scene: missing bricks are retried even at a zero budget") {
+    Bench b(40);
+    GIANT_CHECK(b.voxels->init());
+    Instance ground;
+    ground.mesh = 0;
+    ground.scale = {6.0f, 0.1f, 6.0f}; // 40 bricks: just fits on its own
+    Instance tower;
+    tower.mesh = 0;
+    tower.position = {0.0, 6.0, 0.0};
+    tower.scale = {3.0f, 12.0f, 3.0f};
+    b.instances = {ground, tower};
+    b.step();
+    GIANT_CHECK(b.voxels->stats().missing > 0);
+    b.instances.pop_back(); // room frees up
+    for (int i = 0; i < 3000 && (b.voxels->stats().pending > 0 || b.voxels->stats().missing > 0); ++i) b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().missing == 0 && b.voxels->stats().pending == 0);
+}
+
+namespace {
+
+// 16 fixed cubes around the window plus 1,000 small ones that `change`
+// edits each frame, 200 frames at a zero budget: how many fixed cubes
+// still read "building" on level 1 (0 when no search is starved).
+template <typename Change>
+u32 still_building_under(const Change& change) {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    std::vector<DVec3> fixed;
+    for (int i = 0; i < 16; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        cube.scale = {0.5f, 0.5f, 0.5f};
+        cube.position = {static_cast<double>(i % 4) * 6.0 - 9.0 + 0.1, 1.1, static_cast<double>(i / 4) * 6.0 - 9.0 + 0.1};
+        fixed.push_back(cube.position);
+        b.instances.push_back(cube);
+    }
+    for (int i = 0; i < 1000; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        cube.scale = {0.05f, 0.05f, 0.05f};
+        cube.position = {static_cast<double>(i % 40) * 0.1 - 2.0, 1.1, static_cast<double>(i / 40) * 0.1 - 2.0};
+        b.instances.push_back(cube);
+    }
+    for (int f = 0; f < 200; ++f) {
+        change(b.instances, f);
+        b.step(0.0f);
+    }
+    u32 building = 0;
+    for (const DVec3& p : fixed) {
+        building += b.voxels->probe(1, p) == VoxelProbe::building ? 1u : 0u;
+    }
+    return building;
+}
+
+} // namespace
+
+GIANT_TEST("voxel scene: bulk changes with the count going up and down still build the whole view") {
+    GIANT_CHECK(still_building_under([](std::vector<Instance>& in, int f) {
+                    for (usize i = 16; i < in.size(); ++i) in[i].position.y = 1.1 + 0.01 * (f % 50);
+                    if (f % 2 != 0) {
+                        in.pop_back();
+                    } else {
+                        in.push_back(in.back());
+                    }
+                }) == 0);
+}
+
+GIANT_TEST("voxel scene: one removed every other frame still builds the whole view") {
+    // (Every frame at a zero budget only queues removals faster than one
+    // job a frame works them off: a throughput limit, not a stall.)
+    GIANT_CHECK(still_building_under([](std::vector<Instance>& in, int f) {
+                    if (f % 2 == 0) in.pop_back();
+                }) == 0);
+}

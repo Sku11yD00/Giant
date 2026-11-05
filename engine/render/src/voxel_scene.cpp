@@ -368,21 +368,15 @@ void VoxelScene::change(u32 index, const Instance& in, std::span<const Material>
 
 void VoxelScene::copy_all(std::span<const Instance> instances, std::span<const Material> materials,
                           const MeshLookup& meshes) {
-    const bool same_count = instances.size() == m_copies.size();
     m_copies.resize(instances.size());
     for (u32 i = 0; i < instances.size(); ++i) {
         set_copy(i, instances[i], materials, meshes);
     }
     grid_rebuild();
-    // With the same count every index still names the same instance: find
-    // jobs under way keep going (they read the current boxes, and the
-    // rebuild that follows covers the rest). Otherwise their lists are
-    // stale. Restarting them on every bulk change would starve them.
-    if (!same_count) {
-        for (Job& job : m_jobs) {
-            job.started = job.started && job.kind != JobKind::find;
-        }
-    }
+    // Find jobs under way keep going: they read the current boxes (and
+    // skip indices past the end), and the full rebuild that always follows
+    // covers whatever they miss. Restarting them on every bulk change
+    // would starve them.
     m_building.again = m_building.again || m_building.active; // so is the brick under way's
 }
 
@@ -407,8 +401,42 @@ void VoxelScene::remove_range(u32 first, u32 count) {
         }
     }
     m_changed_order = std::move(order);
+    // Find lists under way drop the removed run and shift the rest down,
+    // keeping their place (restarting them would starve them under
+    // constant removals).
+    const auto remap = [first, count](std::vector<u32>& found, u32& next, u64* cursor) {
+        u32 out = 0;
+        u32 new_next = 0;
+        bool dropped_current = false;
+        for (u32 k = 0; k < found.size(); ++k) {
+            const u32 i = found[k];
+            const bool gone = i >= first && i < first + count;
+            if (k == next && gone) {
+                dropped_current = true;
+            }
+            if (k < next && !gone) {
+                ++new_next;
+            }
+            if (!gone) {
+                found[out++] = i < first ? i : i - count;
+            }
+        }
+        if (next >= found.size()) {
+            new_next = out; // past the end (sweeping): stays there
+        }
+        found.resize(out);
+        next = new_next;
+        if (cursor != nullptr && dropped_current) {
+            *cursor = 0; // the instance it was part-way through is gone
+        }
+    };
     for (Job& job : m_jobs) {
-        job.started = job.started && job.kind != JobKind::find;
+        if (job.kind == JobKind::find && job.started) {
+            remap(job.found, job.next, &job.cursor);
+        }
+    }
+    if (m_building.active) {
+        remap(m_building.found, m_building.next, nullptr);
     }
     m_building.again = m_building.again || m_building.active;
 }
@@ -941,7 +969,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     if (!m_retry.empty() && !m_free.empty()) {
         usize room = m_free.size();
         u32 looks = 256;
-        for (auto it = m_retry.begin(); it != m_retry.end() && room > 0 && looks > 0 && elapsed() < budget * 0.25;
+        for (auto it = m_retry.begin(); it != m_retry.end() && room > 0 && looks > 0 && (looks == 256 || elapsed() < budget * 0.25);
              --looks) {
             const Key key = *it;
             if (!m_clipmap.contains(key.level, key.brick)) {
