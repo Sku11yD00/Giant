@@ -42,6 +42,14 @@ static const uint k_frame_bytes = 432;
 
 float4 load4(ByteAddressBuffer b, uint at) { return asfloat(b.Load4(at)); }
 
+// normalize() that returns `fallback` instead of NaN for a zero vector
+// (the camera on a surface, or looking straight into the sun).
+float3 safe_normalize(float3 v, float3 fallback) {
+    const float len2 = dot(v, v);
+    return len2 > 1e-12 ? v * rsqrt(len2) : fallback;
+}
+
+
 Frame load_frame(uint descriptor, uint offset) {
     ByteAddressBuffer b = read_buffer(descriptor);
     Frame f;
@@ -84,24 +92,20 @@ Frame load_frame(uint descriptor, uint offset) {
 // --- Instances (k_instance_bytes each) -----------------------------------------
 
 struct Instance {
-    float4 model[3];  // rows of the 3x4 mesh-to-camera-relative matrix
-    float4 normal[3]; // rows of the normal matrix (w unused)
-    float4 base_roughness;
-    float4 emissive_metallic;
+    float4 model[3]; // rows of the 3x4 mesh-to-camera-relative matrix
     uint mesh;
+    uint material;   // into the frame's material table
     float max_scale; // largest absolute axis scale: bounds and errors grow by it
 };
-static const uint k_instance_bytes = 144;
+static const uint k_instance_bytes = 64;
 
 Instance load_instance(ByteAddressBuffer b, uint at) {
     Instance i;
     [unroll] for (uint r = 0; r < 3; ++r) { i.model[r] = load4(b, at + r * 16); }
-    [unroll] for (uint r = 0; r < 3; ++r) { i.normal[r] = load4(b, at + 48 + r * 16); }
-    i.base_roughness = load4(b, at + 96);
-    i.emissive_metallic = load4(b, at + 112);
-    const uint2 tail = b.Load2(at + 128);
+    const uint3 tail = b.Load3(at + 48);
     i.mesh = tail.x;
-    i.max_scale = asfloat(tail.y);
+    i.material = tail.y;
+    i.max_scale = asfloat(tail.z);
     return i;
 }
 
@@ -110,8 +114,24 @@ float3 to_world(Instance i, float3 p) {
     return float3(dot(i.model[0], p1), dot(i.model[1], p1), dot(i.model[2], p1));
 }
 
+// The normal matrix is the inverse transpose of the model's 3x3; its
+// cofactor matrix is that times the determinant, which normalising removes
+// (the sign is kept, so mirrored instances keep outward normals). Returns a
+// unit vector, or zero.
 float3 to_world_normal(Instance i, float3 n) {
-    return float3(dot(i.normal[0].xyz, n), dot(i.normal[1].xyz, n), dot(i.normal[2].xyz, n));
+    const float3 c0 = float3(i.model[0].x, i.model[1].x, i.model[2].x);
+    const float3 c1 = float3(i.model[0].y, i.model[1].y, i.model[2].y);
+    const float3 c2 = float3(i.model[0].z, i.model[1].z, i.model[2].z);
+    const float3 k0 = cross(c1, c2);
+    const float3 k1 = cross(c2, c0);
+    const float3 k2 = cross(c0, c1);
+    const float det = dot(c0, k0);
+    // Normalised here, relative to its own length: the cofactors grow with
+    // the square of the scale, so a millimetre-scale instance must not fall
+    // under an absolute threshold later.
+    const float3 r = (k0 * n.x + k1 * n.y + k2 * n.z) * (det < 0.0 ? -1.0 : 1.0);
+    const float len2 = dot(r, r);
+    return len2 > 0.0 ? r * rsqrt(len2) : r;
 }
 
 // --- Meshes ------------------------------------------------------------------------

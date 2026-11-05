@@ -236,6 +236,53 @@ def lod_gate(tool, call, check):
     tool("new_scene")
 
 
+def kit_gate(tool, call, check):
+    """N1 part 5: a kit placed hundreds of times, and a decal, in a fixed number of draws."""
+    tool("new_scene")
+    tool("create_entity", {"name": "Ground", "shape": "plane", "scale": [400, 1, 400],
+                           "base_color": [0.3, 0.3, 0.3], "roughness": 0.9})
+    kit = tool("create_kit", {"name": "house", "pieces": [
+        {"name": "walls", "shape": "cube", "position": [0, 1.5, 0], "scale": [4, 3, 5],
+         "base_color": [0.8, 0.75, 0.6]},
+        {"name": "roof", "shape": "cube", "position": [0, 3.3, 0], "scale": [4.4, 0.6, 5.4],
+         "base_color": [0.5, 0.15, 0.1]},
+        {"name": "door", "shape": "cube", "position": [0, 1, 2.51], "scale": [1, 2, 0.05],
+         "base_color": [0.3, 0.2, 0.1]},
+        {"name": "dirt", "shape": "decal", "position": [0, 0, 3.5], "scale": [3, 1, 2],
+         "base_color": [0.1, 0.08, 0.05], "decal": {"shape": "splat", "seed": 3}},
+    ]})
+    check(kit["pieces"] == 4 and kit["placements"] == 0, f"kit made, got {kit}")
+    town = [{"kit": "house", "position": [x * 9.0 - 90, 0, -z * 9.0 - 10]} for x in range(20) for z in range(10)]
+    placed = tool("create_entities", {"entities": town})
+    check(len(placed["ids"]) == 200, "200 houses placed")
+    check(tool("list_kits")["kits"][0]["placements"] == 200, "the kit knows its placements")
+    tool("create_entity", {"name": "Glow", "shape": "decal", "position": [0, 0, -6], "scale": [8, 1, 8],
+                           "base_color": [0, 0, 0], "emissive": [1, 0, 0], "decal": {"shape": "disc"}})
+    tool("set_camera", {"position": [0, 6, 2], "look_at": [0, 0, -6]})
+    tool("set_render_settings", {"gpu_culling": False})
+    for _ in range(4):
+        call("ping")
+    frame = tool("get_render_settings")["last_frame"]
+    check(frame["draws"] == 2, f"600 cubes still take one raster and one shading pass, got {frame}")
+    check(frame["materials"] == 4, f"the town shares 4 materials, got {frame['materials']}")
+    check(frame["decals"] >= 2 and not frame["decal_overflow"], f"decals in view, got {frame}")
+    tool("set_render_settings", {"gpu_culling": True})
+    shot = call("tools/call", {"name": "capture_screenshot",
+                               "arguments": {"max_width": 800, "file_name": "mcp_kits"}})
+    check(not shot.get("isError"), "town screenshot taken")
+    if tool("get_engine_info")["backend"] != "null":
+        image = [c for c in shot["content"] if c["type"] == "image"][0]
+        width, height, pixels = decode_png(base64.b64decode(image["data"]))
+        # The glowing decal is where the camera looks (as the tower check).
+        x, y = width // 2, height // 2
+        r, g, b, _ = pixels[(y * width + x) * 4:(y * width + x) * 4 + 4]
+        # Red well above the rest (the tone mapper whitens bright highlights).
+        check(r > 150 and r - g > 60 and r - b > 60, f"the decal glows red on the ground, got {(r, g, b)}")
+    tool("undo")  # the decal
+    check(tool("list_entities")["count"] == 201, "undo removes the decal")
+    tool("new_scene")
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -323,6 +370,7 @@ def main() -> int:
 
         build_scene(tool, call, check)
         lod_gate(tool, call, check)
+        kit_gate(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
         if sample:

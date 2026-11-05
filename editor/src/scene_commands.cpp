@@ -46,6 +46,11 @@ std::string utf8_stem(const std::string& path) {
     return name.empty() ? std::string("mesh") : name;
 }
 
+Json decal_json(const world::DecalSettings& d) {
+    return {{"shape", world::to_string(d.shape)}, {"opacity", d.opacity}, {"softness", d.softness},
+            {"seed", d.seed}};
+}
+
 Json entity_json(const Entity& e) {
     const EulerDegrees r = euler_from_quat(e.transform.rotation);
     Json j = {{"id", e.id},
@@ -61,6 +66,14 @@ Json entity_json(const Entity& e) {
             {"visible", e.visible}};
     if (!e.mesh.empty()) {
         j["mesh"] = e.mesh;
+    }
+    if (!e.kit.empty()) {
+        j["kit"] = e.kit;
+    }
+    const world::DecalSettings none;
+    if (e.shape == world::Shape::decal || e.decal.shape != none.shape || e.decal.opacity != none.opacity ||
+        e.decal.softness != none.softness || e.decal.seed != none.seed) {
+        j["decal"] = decal_json(e.decal); // kept when the shape changes, as mesh and kit are
     }
     return j;
 }
@@ -94,9 +107,34 @@ Json entity_properties() {
     return {
         {"name", {{"type", "string"}, {"maxLength", 128}}},
         {"shape",
-         {{"enum", {"cube", "sphere", "plane", "mesh"}},
-          {"description", "cube (1 m), sphere (1 m wide), plane (1 m square facing up), or "
-                          "mesh (the file in `mesh`). Default cube."}}},
+         {{"enum", {"cube", "sphere", "plane", "mesh", "kit", "decal"}},
+          {"description", "cube (1 m), sphere (1 m wide), plane (1 m square facing up), mesh "
+                          "(the file in `mesh`), kit (every piece of the kit named in `kit`; "
+                          "create_kit makes kits), or decal (stamps its colour and roughness "
+                          "onto the surfaces inside its 1 m box, scaled, from above; see "
+                          "`decal`). Default cube."}}},
+        {"kit",
+         {{"type", "string"},
+          {"minLength", 1},
+          {"maxLength", world::k_max_name_bytes},
+          {"description", "The kit to place (list_kits shows them). Giving it sets shape to "
+                          "kit unless shape is given too. A kit entity's own material is "
+                          "unused: its pieces have theirs."}}},
+        {"decal",
+         {{"type", "object"},
+          {"additionalProperties", false},
+          {"properties",
+           {{"shape",
+             {{"enum", {"disc", "rectangle", "ring", "splat", "cracks"}},
+              {"description", "The stamp's mask. splat (mud, blood, scorch) and cracks "
+                              "(impacts, footfalls) vary with seed. Default disc."}}},
+            {"opacity", number(0, 1, "How much it covers the surface. Default 1.")},
+            {"softness", number(0, 1, "Edge fade, as a fraction of the stamp. Default 0.1.")},
+            {"seed", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4294967295.0},
+                      {"description", "Varies splat and cracks. Default 0."}}}}},
+          {"description", "Decal settings (shape decal). The box's scale is its size: x and z "
+                          "the stamp, y how deep it reaches. Rotate it to stamp walls. Uses "
+                          "base_color, roughness, metallic and emissive."}}},
         {"mesh",
          {{"type", "string"},
           {"minLength", 1},
@@ -132,6 +170,19 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         e.mesh = MeshLibrary::normalize(args["mesh"].get<std::string>());
         if (!args.contains("shape")) e.shape = world::Shape::mesh;
     }
+    if (args.contains("kit")) {
+        e.kit = args["kit"].get<std::string>();
+        if (!args.contains("shape")) e.shape = world::Shape::kit;
+    }
+    if (args.contains("decal")) {
+        const Json& d = args["decal"];
+        if (d.contains("shape")) {
+            e.decal.shape = world::decal_shape_from_string(d["shape"].get<std::string>()).value_or(e.decal.shape);
+        }
+        e.decal.opacity = d.value("opacity", e.decal.opacity);
+        e.decal.softness = d.value("softness", e.decal.softness);
+        e.decal.seed = d.value("seed", e.decal.seed);
+    }
     if (args.contains("position")) e.transform.position = dvec3_from(args["position"]);
     if (args.contains("rotation")) {
         // Fields left out keep their current value.
@@ -148,6 +199,14 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("metallic")) e.material.metallic = args["metallic"].get<float>();
     if (args.contains("emissive")) e.material.emissive = vec3_from(args["emissive"]);
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
+    if (e.shape == world::Shape::kit && (args.contains("shape") || args.contains("kit"))) {
+        if (e.kit.empty()) {
+            return "shape kit needs a kit: give kit, e.g. \"house\" (list_kits shows them)";
+        }
+        if (state.scene.find_kit(e.kit) == nullptr) {
+            return "no kit named \"" + e.kit + "\"; list_kits shows them, create_kit makes one";
+        }
+    }
     // Only a change of shape or file needs the file: an entity whose file
     // failed to load can still be moved, renamed or hidden.
     if (e.shape == world::Shape::mesh && (args.contains("shape") || args.contains("mesh"))) {
@@ -178,6 +237,8 @@ std::string new_entity(const Json& args, EditorState& state, Entity& out) {
         std::string base = world::to_string(out.shape);
         if (out.shape == world::Shape::mesh) {
             base = utf8_stem(out.mesh);
+        } else if (out.shape == world::Shape::kit) {
+            base = out.kit;
         }
         out.name = base + " " + std::to_string(state.scene.next_id());
     }
@@ -225,6 +286,7 @@ Json render_settings_json(const EditorState& state) {
               {"triangles", s.triangles}, {"from_gpu", s.from_gpu},
               {"occluded_instances", s.occluded_instances},
               {"occluded_clusters", s.occluded_clusters}, {"overflow", s.overflow},
+              {"materials", s.materials}, {"decals", s.decals}, {"decal_overflow", s.decal_overflow},
               {"streaming",
                {{"pool_bytes", s.pool_bytes}, {"pool_used_bytes", s.pool_used_bytes},
                 {"resident_groups", s.resident_groups}, {"total_groups", s.total_groups},
@@ -268,6 +330,237 @@ void swap_scene(EditorState& state, world::Scene next, CommandContext& context) 
 
 std::filesystem::path utf8_path(const std::string& path) {
     return std::filesystem::path(std::u8string(path.begin(), path.end()));
+}
+
+
+world::KitPiece piece_from(const Entity& e) {
+    world::KitPiece p;
+    p.name = e.name;
+    p.shape = e.shape;
+    p.mesh = e.shape == world::Shape::mesh ? e.mesh : std::string();
+    p.transform = e.transform;
+    p.material = e.material;
+    p.decal = e.decal;
+    return p;
+}
+
+Json piece_json(const world::KitPiece& p) {
+    Entity e;
+    e.name = p.name;
+    e.shape = p.shape;
+    e.mesh = p.mesh;
+    e.transform = p.transform;
+    e.material = p.material;
+    e.decal = p.decal;
+    Json j = entity_json(e);
+    j.erase("id");
+    j.erase("visible");
+    return j;
+}
+
+usize placements(const world::Scene& scene, const std::string& kit) {
+    usize n = 0;
+    for (const Entity& e : scene.entities()) {
+        if (e.shape == world::Shape::kit && e.kit == kit) ++n;
+    }
+    return n;
+}
+
+void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, const Json& entity_props) {
+    Json piece = entity_props;
+    piece.erase("kit");
+    piece.erase("visible");
+    piece["shape"]["enum"] = {"cube", "sphere", "plane", "mesh", "decal"};
+    piece["shape"]["description"] = "As for entities; kits do not nest.";
+    piece["position"]["description"] = "Relative to the kit's origin, metres.";
+
+    add(registry,
+        {"create_kit",
+         "Makes a kit: a reusable group of pieces (a modular wall, a house, a tree with its "
+         "rocks) that kit entities place any number of times, sharing its meshes and materials "
+         "(create_entities with {\"kit\": name} places it). Give the pieces, or take them "
+         "from_entities (their positions become relative to origin, by default the first "
+         "entity's). replace_entities swaps those entities for one placement of the new kit. "
+         "replace: true changes an existing kit, and so every placement. Undoable.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"name"}},
+              {"properties",
+               {{"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes}}},
+                {"pieces",
+                 {{"type", "array"},
+                  {"minItems", 1},
+                  {"maxItems", world::k_max_kit_pieces},
+                  {"items", {{"type", "object"}, {"additionalProperties", false}, {"properties", piece}}}}},
+                {"from_entities",
+                 {{"type", "array"},
+                  {"minItems", 1},
+                  {"maxItems", world::k_max_kit_pieces},
+                  {"items", {{"type", "integer"}, {"minimum", 1}, {"maximum", 9007199254740991.0}}}}},
+                {"origin", triple(-1e8, 1e8, "With from_entities: the kit's origin in the world.")},
+                {"replace_entities",
+                 {{"type", "boolean"},
+                  {"description", "With from_entities: delete them and place the kit where they were."}}},
+                {"replace", {{"type", "boolean"}, {"description", "Overwrite a kit of this name."}}}}}},
+         false,
+         [&state](const Json& args, CommandContext& context) {
+             const std::string name = args["name"].get<std::string>();
+             const bool replace = args.value("replace", false);
+             if (state.scene.find_kit(name) != nullptr && !replace) {
+                 return CommandResult::failure("a kit named \"" + name +
+                                               "\" exists; give replace: true to change it");
+             }
+             if (args.contains("pieces") == args.contains("from_entities")) {
+                 return CommandResult::failure("give either pieces or from_entities");
+             }
+             if (!args.contains("from_entities") &&
+                 (args.contains("origin") || args.contains("replace_entities"))) {
+                 return CommandResult::failure("origin and replace_entities go with from_entities");
+             }
+             world::Kit kit;
+             kit.name = name;
+             std::vector<EntityId> sources;
+             DVec3 origin{};
+             if (args.contains("pieces")) {
+                 usize index = 0;
+                 for (const Json& item : args["pieces"]) {
+                     Entity e;
+                     e.name = "";
+                     if (std::string error = apply_fields(item, e, state); !error.empty()) {
+                         return CommandResult::failure("pieces[" + std::to_string(index) + "]: " + error);
+                     }
+                     kit.pieces.push_back(piece_from(e));
+                     ++index;
+                 }
+             } else {
+                 for (const Json& id_json : args["from_entities"]) {
+                     const EntityId id = id_json.get<EntityId>();
+                     const Entity* e = state.scene.find(id);
+                     if (e == nullptr) {
+                         return CommandResult::failure("no entity with id " + std::to_string(id));
+                     }
+                     if (e->shape == world::Shape::kit) {
+                         return CommandResult::failure("entity " + std::to_string(id) +
+                                                       " is a kit placement; kits do not nest");
+                     }
+                     if (std::find(sources.begin(), sources.end(), id) == sources.end()) {
+                         sources.push_back(id);
+                     }
+                 }
+                 origin = args.contains("origin") ? dvec3_from(args["origin"])
+                                                  : state.scene.find(sources[0])->transform.position;
+                 for (const EntityId id : sources) {
+                     world::KitPiece p = piece_from(*state.scene.find(id));
+                     p.transform.position = p.transform.position - origin;
+                     kit.pieces.push_back(std::move(p));
+                 }
+             }
+             auto before = std::make_shared<std::vector<world::Kit>>(state.scene.kits);
+             if (world::Kit* existing = state.scene.find_kit(name)) {
+                 *existing = kit;
+             } else {
+                 state.scene.kits.push_back(kit);
+             }
+             auto after = std::make_shared<std::vector<world::Kit>>(state.scene.kits);
+             // Swap the source entities for one placement.
+             auto removed = std::make_shared<std::vector<world::Scene::Removed>>();
+             auto placed = std::make_shared<Entity>();
+             if (args.value("replace_entities", false)) {
+                 placed->name = name + " " + std::to_string(state.scene.next_id());
+                 placed->shape = world::Shape::kit;
+                 placed->kit = name;
+                 placed->transform.position = origin;
+                 const EntityId id = state.scene.add(*placed);
+                 if (id == 0) {
+                     state.scene.kits = *before;
+                     return CommandResult::failure(k_ids_exhausted);
+                 }
+                 *placed = *state.scene.find(id);
+                 *removed = state.scene.remove_many(sources);
+                 if (state.scene.find(state.selected) == nullptr) state.selected = 0;
+             }
+             context.record(scene_change(
+                 state,
+                 [&state, before, removed, placed] {
+                     if (placed->id != 0) {
+                         state.scene.remove(placed->id);
+                         std::vector<world::Scene::Removed> back;
+                         for (const auto& r : *removed) {
+                             if (state.scene.find(r.entity.id) == nullptr) back.push_back(r);
+                         }
+                         state.scene.restore_many(std::move(back));
+                         if (state.scene.find(state.selected) == nullptr) state.selected = 0;
+                     }
+                     state.scene.kits = *before;
+                 },
+                 [&state, after, removed, placed] {
+                     state.scene.kits = *after;
+                     if (placed->id != 0) {
+                         std::vector<EntityId> ids;
+                         for (const auto& r : *removed) ids.push_back(r.entity.id);
+                         state.scene.remove_many(ids);
+                         if (state.scene.find(placed->id) == nullptr) state.scene.add(*placed);
+                         if (state.scene.find(state.selected) == nullptr) state.selected = 0;
+                     }
+                 }));
+             Json result = {{"name", name}, {"pieces", kit.pieces.size()},
+                            {"placements", placements(state.scene, name)}};
+             if (placed->id != 0) result["placed"] = placed->id;
+             return CommandResult::success(std::move(result));
+         }});
+
+    add(registry,
+        {"delete_kit",
+         "Removes a kit. Refused while entities place it (delete those first). Undoable.",
+         Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["name"],
+             "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 128}}})"),
+         false,
+         [&state](const Json& args, CommandContext& context) {
+             const std::string name = args["name"].get<std::string>();
+             if (state.scene.find_kit(name) == nullptr) {
+                 return CommandResult::failure("no kit named \"" + name + "\"");
+             }
+             if (const usize n = placements(state.scene, name); n > 0) {
+                 return CommandResult::failure(std::to_string(n) + " entities place \"" + name +
+                                               "\"; delete them first");
+             }
+             auto before = std::make_shared<std::vector<world::Kit>>(state.scene.kits);
+             std::erase_if(state.scene.kits, [&](const world::Kit& k) { return k.name == name; });
+             auto after = std::make_shared<std::vector<world::Kit>>(state.scene.kits);
+             context.record(scene_change(
+                 state, [&state, before] { state.scene.kits = *before; },
+                 [&state, after] { state.scene.kits = *after; }));
+             return CommandResult::success({{"deleted", name}});
+         }});
+
+    add(registry,
+        {"list_kits", "Lists the scene's kits: name, piece count and how many entities place each.",
+         Json{{"type", "object"}, {"additionalProperties", false}}, true,
+         [&state](const Json&, CommandContext&) {
+             Json list = Json::array();
+             for (const world::Kit& k : state.scene.kits) {
+                 list.push_back({{"name", k.name}, {"pieces", k.pieces.size()},
+                                 {"placements", placements(state.scene, k.name)}});
+             }
+             return CommandResult::success({{"kits", std::move(list)}});
+         }});
+
+    add(registry,
+        {"get_kit", "Returns a kit's pieces, every field (positions relative to the kit's origin).",
+         Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["name"],
+             "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 128}}})"),
+         true,
+         [&state](const Json& args, CommandContext&) {
+             const std::string name = args["name"].get<std::string>();
+             const world::Kit* k = state.scene.find_kit(name);
+             if (k == nullptr) {
+                 return CommandResult::failure("no kit named \"" + name + "\"; list_kits shows them");
+             }
+             Json pieces = Json::array();
+             for (const world::KitPiece& p : k->pieces) pieces.push_back(piece_json(p));
+             return CommandResult::success({{"name", k->name}, {"pieces", std::move(pieces)},
+                                            {"placements", placements(state.scene, k->name)}});
+         }});
 }
 
 } // namespace
@@ -595,15 +888,27 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  Entity* e = loaded.find(id);
                  e->mesh = MeshLibrary::normalize(e->mesh);
              }
+             for (world::Kit& kit : loaded.kits) {
+                 for (world::KitPiece& p : kit.pieces) {
+                     if (!p.mesh.empty()) p.mesh = MeshLibrary::normalize(p.mesh);
+                 }
+             }
              if (state.meshes != nullptr) {
+                 const auto import = [&](const std::string& mesh_path) {
+                     if (state.meshes->find(mesh_path) != nullptr) return;
+                     const MeshLibrary::Loaded m = state.meshes->load(mesh_path);
+                     if (m.mesh == nullptr && mesh_errors.size() < 100) {
+                         bool listed = false;
+                         for (const Json& x : mesh_errors) listed = listed || x["path"] == mesh_path;
+                         if (!listed) mesh_errors.push_back({{"path", mesh_path}, {"error", m.error}});
+                     }
+                 };
                  for (const Entity& e : loaded.entities()) {
-                     if (e.shape == world::Shape::mesh && state.meshes->find(e.mesh) == nullptr) {
-                         const MeshLibrary::Loaded m = state.meshes->load(e.mesh);
-                         if (m.mesh == nullptr && mesh_errors.size() < 100) {
-                             bool listed = false;
-                             for (const Json& x : mesh_errors) listed = listed || x["path"] == e.mesh;
-                             if (!listed) mesh_errors.push_back({{"path", e.mesh}, {"error", m.error}});
-                         }
+                     if (e.shape == world::Shape::mesh) import(e.mesh);
+                 }
+                 for (const world::Kit& kit : loaded.kits) {
+                     for (const world::KitPiece& p : kit.pieces) {
+                         if (p.shape == world::Shape::mesh) import(p.mesh);
                      }
                  }
              }
@@ -739,6 +1044,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              state.camera = c;
              return CommandResult::success(camera_json(c));
          }});
+
+    register_kit_commands(registry, state, properties);
 }
 
 } // namespace giant::editor

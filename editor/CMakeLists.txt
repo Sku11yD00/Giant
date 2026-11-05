@@ -63,8 +63,8 @@ endif()
 
 # The editor's commands without a window or GPU.
 if(GIANT_BUILD_TESTS)
-  add_executable(giant_editor_tests tests/test_scene_commands.cpp src/scene_commands.cpp
-                 src/mesh_library.cpp)
+  add_executable(giant_editor_tests tests/test_scene_commands.cpp tests/test_kits.cpp src/scene_commands.cpp
+                 src/mesh_library.cpp src/scene_render.cpp)
   target_link_libraries(giant_editor_tests PRIVATE giant::core giant::platform giant::rhi giant::geometry
                         giant::render giant::world giant::ai giant::test_main)
   giant_apply_warnings(giant_editor_tests)

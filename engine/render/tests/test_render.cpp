@@ -301,18 +301,22 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     instances[0].mesh = renderer->builtin(BuiltinMesh::sphere);
     instances[0].position = camera + DVec3{0.0, 0.0, -3.0};
     instances[0].scale = {2.0f, 2.0f, 2.0f};
-    instances[0].base_color = {0.9f, 0.9f, 0.9f};
-    instances[0].roughness = 0.6f;
+    std::vector<Material> materials(2);
+    materials[0].base_color = {0.9f, 0.9f, 0.9f};
+    materials[0].roughness = 0.6f;
+    instances[0].material = 0;
     // A green emissive cube behind it, partly hidden: depth testing.
     instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
     instances[1].position = camera + DVec3{0.0, 0.0, -8.0};
     instances[1].scale = {20.0f, 0.5f, 1.0f};
-    instances[1].base_color = {0.0f, 0.0f, 0.0f};
-    instances[1].emissive = {0.0f, 0.6f, 0.0f};
+    materials[1].base_color = {0.0f, 0.0f, 0.0f};
+    materials[1].emissive = {0.0f, 0.6f, 0.0f};
+    instances[1].material = 1;
 
     FrameInput frame;
     frame.view.position = camera;
     frame.instances = instances;
+    frame.materials = materials;
     frame.lighting.sun_direction = {1.0f, 0.0f, 0.0f};
     frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
     frame.lighting.sky_light = {0.02f, 0.02f, 0.02f};
@@ -389,6 +393,25 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
         GIANT_CHECK(o.from_gpu && !o.overflow && o.draws == 3);
         GIANT_CHECK(o.clusters <= g.clusters && o.clusters > 0);
         GIANT_CHECK(differing(culled) <= pixels.size() / 200); // nothing visible lost
+    }
+    // A glowing red decal stamped on the sphere's front, facing the camera
+    // (its +Y turned to +Z), on the CPU and GPU paths alike.
+    std::vector<Decal> decals(1);
+    decals[0].position = camera + DVec3{0.0, 0.0, -2.0};
+    decals[0].rotation = Quat{0.70710678f, 0.0f, 0.0f, 0.70710678f};
+    decals[0].size = {0.6f, 1.0f, 0.6f};
+    decals[0].base_color = {0.0f, 0.0f, 0.0f};
+    decals[0].emissive = {1.0f, 0.0f, 0.0f};
+    frame.decals = decals;
+    for (const bool gpu : {false, true}) {
+        const auto stamped = draw(gpu, false, false);
+        GIANT_CHECK(renderer->last_stats().decals == 1 || gpu);
+        if (stamped.size() == k_w * k_h * 4) {
+            const usize centre = (static_cast<usize>(k_h / 2) * k_w + k_w / 2) * 4;
+            GIANT_CHECK(stamped[centre] > 150 && stamped[centre + 1] < 40);
+            const usize lit = (static_cast<usize>(k_h / 2) * k_w + k_w / 2 + 12) * 4;
+            GIANT_CHECK(std::abs(int{stamped[lit]} - int{pixels[lit]}) <= 2); // outside the stamp: unchanged
+        }
     }
     device->destroy(target);
     renderer.reset();
