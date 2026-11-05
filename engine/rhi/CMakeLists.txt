@@ -38,5 +38,7 @@ if(GIANT_BUILD_TESTS)
       tests/shaders/test_compute.slang:cs_ramp:compute:test_ramp_cs
       tests/shaders/test_draw.slang:vs_main:vertex:test_draw_vs
       tests/shaders/test_draw.slang:ps_main:pixel:test_draw_ps
+      tests/shaders/test_mesh.slang:ms_main:mesh:test_mesh_ms
+      tests/shaders/test_mesh.slang:ps_main:pixel:test_mesh_ps
   )
 endif()

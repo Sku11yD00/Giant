@@ -38,6 +38,7 @@ struct NullTexture {
 
 struct NullPipeline {
     bool compute = false;
+    bool mesh = false; // a mesh shader pipeline
     std::array<Format, k_max_color_targets> color_formats{};
     u32 color_count = 0;
     Format depth_format = Format::unknown;
@@ -129,6 +130,10 @@ public:
     void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                       i32 vertex_offset) override;
     void dispatch(u32 x, u32 y, u32 z) override;
+    void dispatch_mesh(u32 x, u32 y, u32 z) override;
+    void draw_indirect(BufferHandle args, u64 offset) override;
+    void dispatch_indirect(BufferHandle args, u64 offset) override;
+    void dispatch_mesh_indirect(BufferHandle args, u64 offset) override;
     void copy_buffer(BufferHandle dst, u64 dst_offset, BufferHandle src, u64 src_offset,
                      u64 bytes) override;
     TransientMemory allocate(u32 bytes) override;
@@ -138,7 +143,8 @@ public:
     void end();
 
 private:
-    void check_draw();
+    void check_draw(bool mesh);
+    void check_args(BufferHandle args, u64 offset, u64 bytes);
 
     NullDevice& m_device;
     bool m_in_pass = false;
@@ -159,7 +165,13 @@ private:
 
 class NullDevice final : public Device {
 public:
-    NullDevice() : m_list(*this) { m_info.name = "null device"; }
+    NullDevice() : m_list(*this) {
+        // Stands in for a minimum-spec GPU, so code paths that need one
+        // (mesh shaders) are recorded and checked too.
+        m_info.name = "null device";
+        m_info.mesh_shaders = true;
+        m_info.shader_model_6_6 = true;
+    }
 
     Backend backend() const override { return Backend::null; }
     const AdapterInfo& adapter() const override { return m_info; }
@@ -224,6 +236,7 @@ public:
                          "colour targets need colour formats");
         }
         NullPipeline pipeline;
+        pipeline.mesh = desc.geometry == GeometryStage::mesh;
         pipeline.color_formats = desc.color_formats;
         pipeline.color_count = desc.color_count;
         pipeline.depth_format = desc.depth_format;
@@ -551,13 +564,15 @@ void NullCommandList::set_scissor(u32 x, u32 y, u32 width, u32 height) {
                  "scissor outside the render targets");
 }
 
-void NullCommandList::check_draw() {
+void NullCommandList::check_draw(bool mesh) {
     GIANT_ASSERT(m_in_pass, "draw outside a render pass");
     NullPipeline* p = m_device.pipeline(m_pipeline);
     GIANT_ASSERT(p != nullptr && !p->compute, "draw needs a live graphics pipeline");
     if (p == nullptr) {
         return;
     }
+    GIANT_ASSERT(p->mesh == mesh, mesh ? "dispatch_mesh needs a mesh shader pipeline"
+                                       : "draws need a vertex shader pipeline (mesh pipelines use dispatch_mesh)");
     GIANT_ASSERT(p->color_count == m_pass_color_count && p->depth_format == m_pass_depth,
                  "pipeline targets do not match the render pass");
     for (u32 i = 0; i < p->color_count; ++i) {
@@ -568,7 +583,45 @@ void NullCommandList::check_draw() {
 }
 
 void NullCommandList::draw(u32, u32, u32) { // zero counts are a no-op, as in D3D12
-    check_draw();
+    check_draw(false);
+}
+
+void NullCommandList::check_args(BufferHandle args, u64 offset, u64 bytes) {
+    NullBuffer* b = m_device.buffer(args);
+    GIANT_ASSERT(b != nullptr, "indirect arguments: dead buffer");
+    if (b == nullptr) {
+        return;
+    }
+    GIANT_ASSERT(has(b->desc.usage, BufferUsage::indirect), "indirect arguments need BufferUsage::indirect");
+    GIANT_ASSERT(b->desc.memory == Memory::gpu, "indirect arguments live in gpu memory");
+    GIANT_ASSERT(b->state == ResourceState::indirect_argument,
+                 "barrier the arguments to indirect_argument first");
+    GIANT_ASSERT(offset % 4 == 0 && offset + bytes <= b->desc.size,
+                 "indirect arguments: offset unaligned or past the buffer");
+}
+
+void NullCommandList::dispatch_mesh(u32 x, u32 y, u32 z) {
+    check_draw(true);
+    GIANT_ASSERT(x <= 65535 && y <= 65535 && z <= 65535 && u64{x} * y * z <= (u64{1} << 22),
+                 "dispatch_mesh: at most 65535 groups per dimension and 2^22 in all");
+}
+
+void NullCommandList::draw_indirect(BufferHandle args, u64 offset) {
+    check_draw(false);
+    check_args(args, offset, 16);
+}
+
+void NullCommandList::dispatch_indirect(BufferHandle args, u64 offset) {
+    GIANT_ASSERT(!m_in_pass, "dispatch inside a render pass");
+    NullPipeline* p = m_device.pipeline(m_pipeline);
+    GIANT_ASSERT(p != nullptr && p->compute, "dispatch needs a live compute pipeline");
+    check_args(args, offset, 12);
+    ++m_device.stats().dispatches;
+}
+
+void NullCommandList::dispatch_mesh_indirect(BufferHandle args, u64 offset) {
+    check_draw(true);
+    check_args(args, offset, 12);
 }
 
 void NullCommandList::set_index_buffer(BufferHandle handle, u64 offset) {
@@ -585,7 +638,7 @@ void NullCommandList::set_index_buffer(BufferHandle handle, u64 offset) {
 }
 
 void NullCommandList::draw_indexed(u32 index_count, u32, u32 first_index, i32) {
-    check_draw();
+    check_draw(false);
     NullBuffer* b = m_device.buffer(m_index_buffer);
     GIANT_ASSERT(b != nullptr, "draw_indexed needs an index buffer");
     if (b != nullptr) {

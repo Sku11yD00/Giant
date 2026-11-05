@@ -234,6 +234,7 @@ struct DxTexture {
 struct DxPipeline {
     ComPtr<ID3D12PipelineState> state;
     bool compute = false;
+    bool mesh = false; // a mesh shader pipeline
     std::array<Format, k_max_color_targets> color_formats{};
     u32 color_count = 0;
     Format depth_format = Format::unknown;
@@ -302,6 +303,10 @@ public:
     void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                       i32 vertex_offset) override;
     void dispatch(u32 x, u32 y, u32 z) override;
+    void dispatch_mesh(u32 x, u32 y, u32 z) override;
+    void draw_indirect(BufferHandle args, u64 offset) override;
+    void dispatch_indirect(BufferHandle args, u64 offset) override;
+    void dispatch_mesh_indirect(BufferHandle args, u64 offset) override;
     void copy_buffer(BufferHandle dst, u64 dst_offset, BufferHandle src, u64 src_offset,
                      u64 bytes) override;
     TransientMemory allocate(u32 bytes) override;
@@ -314,15 +319,19 @@ public:
 
 private:
     void flush_push(bool compute);
+    void check_graphics(bool mesh) const;
+    ID3D12Resource* args_resource(BufferHandle args, u64 offset, u64 bytes);
 
     D3D12Device& m_device;
     ID3D12GraphicsCommandList* m_list = nullptr;
+    ComPtr<ID3D12GraphicsCommandList6> m_list6; // for DispatchMesh; null without mesh shaders
     Frame* m_frame = nullptr;
     bool m_in_pass = false;
     u32 m_pass_width = 0;
     u32 m_pass_height = 0;
     PipelineHandle m_pipeline;
     bool m_pipeline_compute = false;
+    bool m_pipeline_mesh = false;
     std::array<u32, k_push_dwords> m_push{};
     u32 m_push_dwords = 0;
 };
@@ -396,6 +405,9 @@ public:
     D3D12_CPU_DESCRIPTOR_HANDLE rtv(u32 slot) const { return m_rtv_heap.cpu(slot); }
     D3D12_CPU_DESCRIPTOR_HANDLE dsv(u32 slot) const { return m_dsv_heap.cpu(slot); }
     PipelineHandle ui_pipeline() const { return m_ui_pipeline; }
+    ID3D12CommandSignature* draw_signature() const { return m_draw_signature.Get(); }
+    ID3D12CommandSignature* dispatch_signature() const { return m_dispatch_signature.Get(); }
+    ID3D12CommandSignature* mesh_signature() const { return m_mesh_signature.Get(); }
     FrameStats& stats() { return m_stats; }
     bool recording() const { return m_recording; }
     bool check_gpu(HRESULT hr, const char* what);
@@ -435,6 +447,10 @@ private:
     bool m_lost = false;
 
     ComPtr<ID3D12RootSignature> m_root;
+    // ExecuteIndirect layouts: one draw, dispatch or mesh dispatch each.
+    ComPtr<ID3D12CommandSignature> m_draw_signature;
+    ComPtr<ID3D12CommandSignature> m_dispatch_signature;
+    ComPtr<ID3D12CommandSignature> m_mesh_signature; // null without mesh shaders
     DescriptorHeap m_shader_heap;  // CBV/SRV/UAV, shader-visible
     DescriptorHeap m_sampler_heap; // shader-visible, the fixed samplers
     DescriptorHeap m_rtv_heap;
@@ -668,6 +684,28 @@ bool D3D12Device::init_globals() {
     if (!check(m_device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                              IID_PPV_ARGS(&m_root)),
                "CreateRootSignature")) {
+        return false;
+    }
+
+    // Command signatures for the indirect calls. Plain draw and dispatch
+    // arguments change no root arguments, so they need no root signature.
+    const auto signature = [this](D3D12_INDIRECT_ARGUMENT_TYPE type, UINT stride,
+                                  ComPtr<ID3D12CommandSignature>& out) {
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = type;
+        D3D12_COMMAND_SIGNATURE_DESC sig{};
+        sig.ByteStride = stride;
+        sig.NumArgumentDescs = 1;
+        sig.pArgumentDescs = &arg;
+        return check(m_device->CreateCommandSignature(&sig, nullptr, IID_PPV_ARGS(&out)),
+                     "CreateCommandSignature");
+    };
+    if (!signature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(D3D12_DRAW_ARGUMENTS), m_draw_signature) ||
+        !signature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, sizeof(D3D12_DISPATCH_ARGUMENTS),
+                   m_dispatch_signature) ||
+        (m_info.mesh_shaders &&
+         !signature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, sizeof(D3D12_DISPATCH_MESH_ARGUMENTS),
+                    m_mesh_signature))) {
         return false;
     }
 
@@ -1186,13 +1224,48 @@ void D3D12Device::remove_swap_chain_texture(TextureHandle handle) {
 
 // --- Pipelines -----------------------------------------------------------------------
 
+namespace {
+
+// One subobject of a pipeline state stream, laid out as d3dx12's
+// CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT: the type, then the value, aligned
+// to a pointer.
+template <D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type, typename T>
+struct alignas(void*) StreamSubobject {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Type;
+    T value{};
+};
+
+// Mesh shader pipelines are only made through streams.
+struct MeshPipelineStream {
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, ID3D12RootSignature*> root;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, D3D12_SHADER_BYTECODE> ms;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, D3D12_SHADER_BYTECODE> ps;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, D3D12_BLEND_DESC> blend;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, UINT> sample_mask;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, D3D12_RASTERIZER_DESC> raster;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, D3D12_DEPTH_STENCIL_DESC> depth;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, D3D12_RT_FORMAT_ARRAY> targets;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, DXGI_FORMAT> depth_format;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, DXGI_SAMPLE_DESC> sample;
+    StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY, D3D12_PRIMITIVE_TOPOLOGY_TYPE> topology;
+};
+
+} // namespace
+
 PipelineHandle D3D12Device::create_pipeline(const GraphicsPipelineDesc& desc) {
     GIANT_ASSERT(desc.color_count <= k_max_color_targets, "too many colour targets");
     GIANT_ASSERT(desc.depth == DepthMode::none || is_depth(desc.depth_format),
                  "depth testing needs a depth format");
-    if (desc.vertex.empty() || desc.pixel.empty()) {
+    const bool mesh = desc.geometry == GeometryStage::mesh;
+    const ShaderCode geometry = mesh ? desc.mesh : desc.vertex;
+    if (geometry.empty() || desc.pixel.empty()) {
         log_error("rhi", std::string("d3d12: pipeline '") + desc.name +
                              "' has no shader code (built without GIANT_COMPILE_SHADERS?)");
+        return {};
+    }
+    if (mesh && !m_info.mesh_shaders) {
+        log_error("rhi", std::string("d3d12: pipeline '") + desc.name +
+                             "' needs mesh shaders, which this GPU lacks");
         return {};
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
@@ -1231,11 +1304,36 @@ PipelineHandle D3D12Device::create_pipeline(const GraphicsPipelineDesc& desc) {
     pso.NumRenderTargets = desc.color_count;
     pso.SampleDesc.Count = 1;
     DxPipeline p;
-    if (!check_gpu(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&p.state)),
-                   desc.name)) {
+    if (mesh) {
+        ComPtr<ID3D12Device2> device2;
+        if (!check(m_device.As(&device2), "ID3D12Device2")) {
+            return {};
+        }
+        MeshPipelineStream stream;
+        stream.root.value = m_root.Get();
+        stream.ms.value = {desc.mesh.data(), desc.mesh.size()};
+        stream.ps.value = pso.PS;
+        stream.blend.value = pso.BlendState;
+        stream.sample_mask.value = pso.SampleMask;
+        stream.raster.value = pso.RasterizerState;
+        stream.depth.value = pso.DepthStencilState;
+        stream.targets.value.NumRenderTargets = pso.NumRenderTargets;
+        for (u32 i = 0; i < 8; ++i) {
+            stream.targets.value.RTFormats[i] = pso.RTVFormats[i];
+        }
+        stream.depth_format.value = pso.DSVFormat;
+        stream.sample.value = pso.SampleDesc;
+        stream.topology.value = pso.PrimitiveTopologyType;
+        D3D12_PIPELINE_STATE_STREAM_DESC stream_desc{sizeof(stream), &stream};
+        if (!check_gpu(device2->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&p.state)), desc.name)) {
+            return {};
+        }
+    } else if (!check_gpu(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&p.state)),
+                          desc.name)) {
         return {};
     }
     p.state->SetName(widen(desc.name).c_str());
+    p.mesh = mesh;
     p.color_formats = desc.color_formats;
     p.color_count = desc.color_count;
     p.depth_format = desc.depth_format;
@@ -1530,6 +1628,10 @@ std::vector<u8> D3D12Device::read_buffer(BufferHandle handle) {
 
 void D3D12CommandList::begin(ID3D12GraphicsCommandList* list, Frame* frame) {
     m_list = list;
+    m_list6.Reset();
+    if (m_device.mesh_signature() != nullptr) {
+        list->QueryInterface(IID_PPV_ARGS(&m_list6));
+    }
     m_frame = frame;
     m_in_pass = false;
     m_pipeline = {};
@@ -1657,6 +1759,7 @@ void D3D12CommandList::set_pipeline(PipelineHandle handle) {
     m_list->SetPipelineState(p->state.Get());
     m_pipeline = handle;
     m_pipeline_compute = p->compute;
+    m_pipeline_mesh = p->mesh;
 }
 
 void D3D12CommandList::set_push_constants(const void* data, u32 bytes) {
@@ -1684,9 +1787,68 @@ void D3D12CommandList::set_scissor(u32 x, u32 y, u32 width, u32 height) {
     m_list->RSSetScissorRects(1, &rect);
 }
 
-void D3D12CommandList::draw(u32 vertex_count, u32 instance_count, u32 first_vertex) {
+void D3D12CommandList::check_graphics(bool mesh) const {
     GIANT_ASSERT(m_in_pass && m_pipeline.valid() && !m_pipeline_compute,
                  "draw needs a render pass and a graphics pipeline");
+    GIANT_ASSERT(m_pipeline_mesh == mesh, mesh ? "dispatch_mesh needs a mesh shader pipeline"
+                                               : "draws need a vertex shader pipeline");
+}
+
+ID3D12Resource* D3D12CommandList::args_resource(BufferHandle args, u64 offset, u64 bytes) {
+    DxBuffer* b = m_device.buffer(args);
+    GIANT_ASSERT(b != nullptr && has(b->desc.usage, BufferUsage::indirect) &&
+                     b->desc.memory == Memory::gpu,
+                 "indirect arguments need a live gpu buffer with BufferUsage::indirect");
+    if (b == nullptr) {
+        return nullptr;
+    }
+    GIANT_ASSERT(b->state == ResourceState::indirect_argument,
+                 "barrier the arguments to indirect_argument first");
+    GIANT_ASSERT(offset % 4 == 0 && offset + bytes <= b->desc.size,
+                 "indirect arguments: offset unaligned or past the buffer");
+    return offset % 4 == 0 && offset + bytes <= b->desc.size ? b->resource.Get() : nullptr;
+}
+
+void D3D12CommandList::dispatch_mesh(u32 x, u32 y, u32 z) {
+    check_graphics(true);
+    if (m_list6 == nullptr) {
+        return;
+    }
+    flush_push(false);
+    m_list6->DispatchMesh(x, y, z);
+    ++m_device.stats().draws;
+}
+
+void D3D12CommandList::draw_indirect(BufferHandle args, u64 offset) {
+    check_graphics(false);
+    if (ID3D12Resource* r = args_resource(args, offset, sizeof(D3D12_DRAW_ARGUMENTS))) {
+        flush_push(false);
+        m_list->ExecuteIndirect(m_device.draw_signature(), 1, r, offset, nullptr, 0);
+        ++m_device.stats().draws;
+    }
+}
+
+void D3D12CommandList::dispatch_indirect(BufferHandle args, u64 offset) {
+    GIANT_ASSERT(!m_in_pass && m_pipeline.valid() && m_pipeline_compute,
+                 "dispatch needs a compute pipeline, outside render passes");
+    if (ID3D12Resource* r = args_resource(args, offset, sizeof(D3D12_DISPATCH_ARGUMENTS))) {
+        flush_push(true);
+        m_list->ExecuteIndirect(m_device.dispatch_signature(), 1, r, offset, nullptr, 0);
+        ++m_device.stats().dispatches;
+    }
+}
+
+void D3D12CommandList::dispatch_mesh_indirect(BufferHandle args, u64 offset) {
+    check_graphics(true);
+    if (ID3D12Resource* r = args_resource(args, offset, sizeof(D3D12_DISPATCH_MESH_ARGUMENTS))) {
+        flush_push(false);
+        m_list->ExecuteIndirect(m_device.mesh_signature(), 1, r, offset, nullptr, 0);
+        ++m_device.stats().draws;
+    }
+}
+
+void D3D12CommandList::draw(u32 vertex_count, u32 instance_count, u32 first_vertex) {
+    check_graphics(false);
     flush_push(false);
     m_list->DrawInstanced(vertex_count, instance_count, first_vertex, 0);
     ++m_device.stats().draws;
@@ -1708,8 +1870,7 @@ void D3D12CommandList::set_index_buffer(BufferHandle handle, u64 offset) {
 
 void D3D12CommandList::draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                                     i32 vertex_offset) {
-    GIANT_ASSERT(m_in_pass && m_pipeline.valid() && !m_pipeline_compute,
-                 "draw needs a render pass and a graphics pipeline");
+    check_graphics(false);
     flush_push(false);
     m_list->DrawIndexedInstanced(index_count, instance_count, first_index, vertex_offset, 0);
     ++m_device.stats().draws;

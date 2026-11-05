@@ -200,8 +200,14 @@ enum class BlendMode {
 
 constexpr u32 k_max_color_targets = 4;
 
+// What feeds the rasterizer: a vertex shader (draw calls), or a mesh shader
+// (dispatch_mesh; needs AdapterInfo::mesh_shaders).
+enum class GeometryStage { vertex, mesh };
+
 struct GraphicsPipelineDesc {
-    ShaderCode vertex;
+    GeometryStage geometry = GeometryStage::vertex;
+    ShaderCode vertex; // for GeometryStage::vertex
+    ShaderCode mesh;   // for GeometryStage::mesh
     ShaderCode pixel;
     std::array<Format, k_max_color_targets> color_formats{};
     u32 color_count = 1;
@@ -301,7 +307,7 @@ struct TransientMemory {
 // Counts from the most recent frame (or offscreen submit); for tests, the
 // editor's stats and budgets.
 struct FrameStats {
-    u32 draws = 0;        // draw calls, including UI
+    u32 draws = 0;        // draw calls (direct, indirect, mesh), including UI
     u32 dispatches = 0;
     u32 ui_draws = 0;     // UI draw commands submitted (empty clips skipped)
     u32 barriers = 0;
@@ -341,6 +347,20 @@ public:
     virtual void draw_indexed(u32 index_count, u32 instance_count = 1, u32 first_index = 0,
                               i32 vertex_offset = 0) = 0;
     virtual void dispatch(u32 groups_x, u32 groups_y = 1, u32 groups_z = 1) = 0;
+
+    // Mesh shader pipelines: groups of the mesh shader, inside a render
+    // pass. At most 65535 groups per dimension (and 2^22 in all).
+    virtual void dispatch_mesh(u32 groups_x, u32 groups_y = 1, u32 groups_z = 1) = 0;
+
+    // GPU-written arguments: `args` is a gpu buffer with BufferUsage::indirect,
+    // barriered to indirect_argument; `offset` is a multiple of 4.
+    //   draw_indirect:          4 u32: vertex count, instance count, first vertex, first instance
+    //   dispatch_indirect:      3 u32: groups x, y, z
+    //   dispatch_mesh_indirect: 3 u32: groups x, y, z
+    // first instance does not offset SV_InstanceID (pass a base yourself).
+    virtual void draw_indirect(BufferHandle args, u64 offset = 0) = 0;
+    virtual void dispatch_indirect(BufferHandle args, u64 offset = 0) = 0;
+    virtual void dispatch_mesh_indirect(BufferHandle args, u64 offset = 0) = 0;
 
     virtual void copy_buffer(BufferHandle dst, u64 dst_offset, BufferHandle src, u64 src_offset,
                              u64 bytes) = 0;
