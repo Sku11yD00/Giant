@@ -366,3 +366,60 @@ GIANT_TEST("voxel scene: the renderer draws the voxel view in one pass") {
     device->end_frame();
     GIANT_CHECK(renderer->last_stats().voxel_bricks == s.voxel_bricks);
 }
+
+GIANT_TEST("voxel scene: constant bulk change still builds the whole view") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    for (int i = 0; i < 2000; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        cube.scale = {0.05f, 0.05f, 0.05f};
+        cube.position = {static_cast<double>(i % 40) * 0.1 - 2.0, 1.1, static_cast<double>(i / 40) * 0.1 - 2.0};
+        b.instances.push_back(cube);
+    }
+    std::vector<DVec3> fixed;
+    for (int i = 0; i < 16; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        cube.scale = {0.5f, 0.5f, 0.5f};
+        cube.position = {static_cast<double>(i % 4) * 6.0 - 9.0 + 0.1, 1.1, static_cast<double>(i / 4) * 6.0 - 9.0 + 0.1};
+        fixed.push_back(cube.position);
+        b.instances.push_back(cube);
+    }
+    // Every small cube moves every frame (a bulk change each frame).
+    for (int f = 0; f < 400; ++f) {
+        for (usize i = 0; i < 2000; ++i) b.instances[i].position.y = 1.1 + 0.01 * (f % 50);
+        b.step(0.0f);
+    }
+    u32 building = 0;
+    for (const DVec3& p : fixed) {
+        building += b.voxels->probe(1, p) == VoxelProbe::building ? 1u : 0u;
+    }
+    GIANT_CHECK(building == 0);
+}
+
+GIANT_TEST("voxel scene: a rebuild started by a full backlog loses no changes") {
+    Bench b(8192);
+    GIANT_CHECK(b.voxels->init());
+    for (int i = 0; i < 100; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        cube.scale = {0.05f, 0.05f, 0.05f};
+        cube.position = {0.5 + (i % 10) * 0.3, 0.5 + (i / 10) * 0.3, 0.5};
+        b.instances.push_back(cube);
+    }
+    for (int i = 0; i < 16800; ++i) {
+        Instance far;
+        far.mesh = 0;
+        far.scale = {0.05f, 0.05f, 0.05f};
+        far.position = {5000.0 + i, 0.0, 5000.0};
+        b.instances.push_back(far);
+    }
+    b.step(0.0f); // the coarse window's find job is part-way through
+    b.instances[0].position = {-9.0, -5.0, -9.0};
+    b.instances[0].scale = {1.0f, 1.0f, 1.0f};
+    for (usize i = 0; i < 2100; ++i) b.instances[100 + i].position.y += 1.0; // a backlog over the limit
+    for (int i = 0; i < 5000 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->probe(1, {-9.45, -5.0, -9.0}) == VoxelProbe::solid); // its -X face, where it went
+}

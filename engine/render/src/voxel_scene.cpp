@@ -368,13 +368,20 @@ void VoxelScene::change(u32 index, const Instance& in, std::span<const Material>
 
 void VoxelScene::copy_all(std::span<const Instance> instances, std::span<const Material> materials,
                           const MeshLookup& meshes) {
+    const bool same_count = instances.size() == m_copies.size();
     m_copies.resize(instances.size());
     for (u32 i = 0; i < instances.size(); ++i) {
         set_copy(i, instances[i], materials, meshes);
     }
     grid_rebuild();
-    for (Job& job : m_jobs) {
-        job.started = job.started && job.kind != JobKind::find; // its instance list is stale
+    // With the same count every index still names the same instance: find
+    // jobs under way keep going (they read the current boxes, and the
+    // rebuild that follows covers the rest). Otherwise their lists are
+    // stale. Restarting them on every bulk change would starve them.
+    if (!same_count) {
+        for (Job& job : m_jobs) {
+            job.started = job.started && job.kind != JobKind::find;
+        }
     }
     m_building.again = m_building.again || m_building.active; // so is the brick under way's
 }
@@ -501,11 +508,18 @@ void VoxelScene::push_rebuild() {
     const i32 n = m_clipmap.desc().bricks_per_axis;
     const u32 slots = m_clipmap.slots_per_level();
     for (u32 level = m_clipmap.levels(); level-- > 0;) {
-        if (m_unbuilt[level] == slots) {
-            continue; // the whole window just came into view: its own job finds everything
-        }
         const voxel::BrickCoord o = m_clipmap.origin(level);
         const voxel::BrickBox window{level, o, {o.x + n, o.y + n, o.z + n}};
+        // The whole window just came into view and its find job has not
+        // started: that job finds everything as it is now. (One under way
+        // may have passed instances that changed since.)
+        const bool covered = m_unbuilt[level] == slots &&
+                             std::any_of(m_jobs.begin(), m_jobs.end(), [&](const Job& j) {
+                                 return j.kind == JobKind::find && !j.started && same_box(j.box, window);
+                             });
+        if (covered) {
+            continue;
+        }
         Job present;
         present.box = window;
         present.kind = JobKind::present;
@@ -581,32 +595,34 @@ bool VoxelScene::pending(u32 level, const voxel::BrickCoord& brick) const {
 
 template <typename OutOfTime>
 bool VoxelScene::run_job(Job& job, const OutOfTime& out_of_time) {
-    // Only what is in the window now (it may have moved since the job was
-    // made); a move while under way starts it again.
+    // Walks the job's own box (fixed, so a window move never restarts it);
+    // bricks that left the window meanwhile are skipped (mark() ignores
+    // them, and their slots hold other bricks).
     const u32 level = job.box.level;
     const voxel::BrickCoord o = m_clipmap.origin(level);
     const i32 n = m_clipmap.desc().bricks_per_axis;
-    const voxel::BrickBox clip = voxel::intersect(job.box, {level, o, {o.x + n, o.y + n, o.z + n}});
-    if (clip.count() == 0) {
-        return true;
+    if (voxel::intersect(job.box, {level, o, {o.x + n, o.y + n, o.z + n}}).count() == 0) {
+        return true; // all of it left the window
     }
-    if (!job.started || !same_box(clip, job.clip)) {
+    const voxel::BrickBox& box = job.box;
+    if (!job.started) {
         job.started = true;
-        job.clip = clip;
         job.next = 0;
         job.cursor = 0;
         job.found.clear();
         if (job.kind == JobKind::find) {
-            find({m_clipmap.brick_min(level, clip.min), m_clipmap.brick_min(level, clip.max)});
+            find({m_clipmap.brick_min(level, box.min), m_clipmap.brick_min(level, box.max)});
             job.found = m_found;
         }
     }
     const u32 slots = m_clipmap.slots_per_level();
-    const u64 count = clip.count();
+    const u64 count = box.count();
     if (job.kind == JobKind::find) {
         while (job.next < job.found.size()) {
-            const Box& b = m_copies[job.found[job.next]].box;
-            const voxel::BrickBox under = voxel::intersect(m_clipmap.bricks_touching(level, b.min, b.max), clip);
+            const u32 i = job.found[job.next];
+            const Box& b = i < m_copies.size() ? m_copies[i].box : Box{};
+            const voxel::BrickBox under =
+                b.empty() ? voxel::BrickBox{} : voxel::intersect(m_clipmap.bricks_touching(level, b.min, b.max), box);
             const u64 bricks = under.count();
             while (job.cursor < bricks) {
                 mark(level, brick_of(under, job.cursor++));
@@ -622,7 +638,7 @@ bool VoxelScene::run_job(Job& job, const OutOfTime& out_of_time) {
         }
         // Unbuilt slots nothing is over: empty.
         while (job.cursor < count) {
-            const voxel::BrickCoord b = brick_of(clip, job.cursor++);
+            const voxel::BrickCoord b = brick_of(box, job.cursor++);
             const u32 slot = m_clipmap.slot(level, b);
             const u32 s = level * slots + slot;
             if (m_slots[s] == gpu::k_unbuilt && m_slot_bricks[s] == b && !pending(level, b) &&
@@ -637,7 +653,7 @@ bool VoxelScene::run_job(Job& job, const OutOfTime& out_of_time) {
     }
     const bool every = job.kind == JobKind::all;
     while (job.cursor < count) {
-        const voxel::BrickCoord b = brick_of(clip, job.cursor++);
+        const voxel::BrickCoord b = brick_of(box, job.cursor++);
         const u32 s = level * slots + m_clipmap.slot(level, b);
         if (every || (m_slots[s] < gpu::k_unbuilt && m_slot_bricks[s] == b)) {
             mark(level, b);
@@ -886,6 +902,24 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     for (usize i = entered.size(); i-- > 0;) {
         enter(entered[i]);
     }
+    // Bricks left behind still waiting to be built: dropped (finer levels'
+    // queues may not be reached for a while).
+    for (usize i = 0; i < entered.size(); ++i) {
+        const u32 level = entered[i].level;
+        if (i > 0 && entered[i - 1].level == level) {
+            continue; // once per level
+        }
+        std::deque<Key>& order = m_order[level];
+        std::deque<Key> kept;
+        for (const Key& key : order) {
+            if (m_clipmap.contains(level, key.brick)) {
+                kept.push_back(key);
+            } else {
+                m_pending.erase(key);
+            }
+        }
+        order = std::move(kept);
+    }
     see_changes(instances, materials, meshes_version, meshes);
     // Waiting changes become jobs while the queue is short.
     while (m_jobs.size() < k_max_jobs && (!m_old.empty() || !m_changed_order.empty())) {
@@ -907,7 +941,8 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     if (!m_retry.empty() && !m_free.empty()) {
         usize room = m_free.size();
         u32 looks = 256;
-        for (auto it = m_retry.begin(); it != m_retry.end() && room > 0 && looks > 0; --looks) {
+        for (auto it = m_retry.begin(); it != m_retry.end() && room > 0 && looks > 0 && elapsed() < budget * 0.25;
+             --looks) {
             const Key key = *it;
             if (!m_clipmap.contains(key.level, key.brick)) {
                 it = m_retry.erase(it); // left the view

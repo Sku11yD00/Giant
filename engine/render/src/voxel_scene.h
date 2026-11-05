@@ -164,8 +164,7 @@ private:
         JobKind kind = JobKind::find;
         bool rebuild = false;   // part of a full rebuild
         bool started = false;
-        voxel::BrickBox clip;   // box within the window when started (a move restarts it)
-        std::vector<u32> found; // find: instances over the clipped box
+        std::vector<u32> found; // find: instances over the box
         u32 next = 0;           // find: the next of found (found.size(): sweeping)
         u64 cursor = 0;         // bricks done of the current instance, sweep or box
     };

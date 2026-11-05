@@ -241,10 +241,11 @@ Done in N2 part 2:
   wait); bricks that do not fit wait for room (`missing`). `probe_voxels`
   reads a CPU copy of the occupancy. The gate scene (town and 10,000
   trees: 20,000 instances) takes about 7,600 bricks and some 1.5 s of CPU
-  time over about 1,500 frames; in release builds its frames stay under
-  about 2 ms of voxel work, even with every tree moving each frame, except
-  the first (copying the instances and opening every window, about 7 ms;
-  a teleport costs the same).
+  time over about 1,900 frames; in release builds its frames stay near the
+  1 ms budget, at worst a few ms (a search over a whole window, or the
+  start of a coarse brick, is not split), even with every tree moving each
+  frame, except the first (copying the instances and opening every
+  window, about 7 ms; a teleport costs the same).
 - Known costs left: comparing the instances is a pass over all of them each
   frame (about 0.2 ms for 20,000), and a full rebuild copies them all in one
   frame; world streaming (N3) will hand over changes instead.
