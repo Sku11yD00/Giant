@@ -260,7 +260,13 @@ void cs_traverse(uint3 id : SV_DispatchThreadID) {
     // Needed here. Not loaded: ask for it; the coarser clusters made from
     // it are drawn meanwhile. Loaded: mark it used, so it stays.
     if (group_offset(mesh, node.group) == k_not_resident) {
-        request_group(inst.mesh, node.group);
+        // Once per group and frame, however many instances need it: the
+        // usage word of a group that is not loaded marks the request.
+        uint previous;
+        write_buffer(push.usage).InterlockedExchange((mesh.group_base + node.group) * 4, f.frame_number, previous);
+        if (previous != f.frame_number) {
+            request_group(inst.mesh, node.group);
+        }
         return;
     }
     write_buffer(push.usage).Store((mesh.group_base + node.group) * 4, f.frame_number);

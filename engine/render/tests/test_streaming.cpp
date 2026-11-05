@@ -221,3 +221,52 @@ GIANT_TEST("streaming: a pool too small for the coarsest level leaves the mesh u
     GIANT_CHECK(!b.streamer->ready(0));
     GIANT_CHECK(b.closed(0));
 }
+
+GIANT_TEST("streaming: making room never evicts the parent of what loads") {
+    // Everything but the finest level loaded, filling the pool exactly, then
+    // left unused long enough to be evictable. Asking for one finest group
+    // must keep its (old) parents: culling went through them. Room is made
+    // from the other groups when they are enough; otherwise it waits.
+    Bench probe(64ull << 20);
+    GIANT_CHECK(probe.streamer->init() && probe.add(0));
+    probe.step();
+    std::vector<u32> coarse;
+    for (u32 g = 0; g < probe.mesh.groups.size(); ++g) {
+        if (probe.mesh.groups[g].depth >= 1) coarse.push_back(g);
+    }
+    probe.streamer->want(0, coarse);
+    probe.step();
+    const u64 coarse_bytes = probe.streamer->stats().used_bytes;
+
+    u32 loaded = 0;
+    for (u32 target = 0; target < 7; ++target) {
+        Bench b(coarse_bytes);
+        GIANT_CHECK(b.streamer->init() && b.add(0));
+        b.step();
+        b.streamer->want(0, coarse);
+        b.step();
+        for (u32 i = 0; i < GeometryStreamer::k_keep_frames + 10; ++i) b.step();
+        // The target-th finest group.
+        u32 seen = 0;
+        for (u32 g = 0; g < b.mesh.groups.size(); ++g) {
+            if (b.mesh.groups[g].depth != 0) continue;
+            if (seen++ != target * 3) continue;
+            const u32 one[] = {g};
+            for (int k = 0; k < 4; ++k) {
+                b.streamer->want(0, one);
+                b.step();
+                GIANT_CHECK(b.closed(0));
+                for (const u32 p : b.links.parents_of(g)) {
+                    GIANT_CHECK(b.streamer->resident(0)[p] != 0);
+                }
+            }
+            if (b.streamer->resident(0)[g] != 0) {
+                ++loaded;
+            } else {
+                GIANT_CHECK(b.streamer->stats().waiting == 1);
+            }
+            break;
+        }
+    }
+    GIANT_CHECK(loaded > 0); // room was made elsewhere at least once
+}

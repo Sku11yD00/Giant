@@ -732,7 +732,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_valid.clear();
     for (u32 i = 0; i < frame.instances.size(); ++i) {
         const MeshId id = frame.instances[i].mesh;
-        if (mesh(id) != nullptr && m_streamer->ready(id)) {
+        if (mesh(id) != nullptr && m_streamer->ready(id) && m_streamer->tables_current()) {
             m_valid.push_back(i);
         }
     }

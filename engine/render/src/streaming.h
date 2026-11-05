@@ -89,6 +89,7 @@ public:
     GeometryStreamer& operator=(const GeometryStreamer&) = delete;
 
     // Creates the pool and request buffers; false (logged) without memory.
+    // The pool is at most 4 GiB (residency offsets are 32-bit).
     bool init();
     void set_budget(const Budget& budget) { m_budget = budget; }
 
@@ -124,6 +125,10 @@ public:
     // marks) for reading back. `slot` is the frame's read-back slot.
     void after_cull(rhi::CommandList& cmd, u32 slot, u64 frame_index);
 
+    // False when this frame's residency tables could not be uploaded (out
+    // of memory): drawing would read stale places in the pool.
+    bool tables_current() const { return m_tables_current; }
+
     // This frame's numbers (update fills them).
     const StreamingStats& stats() const { return m_stats; }
 
@@ -141,7 +146,7 @@ private:
         std::vector<u64> pool_unit; // per loaded group: first unit in the pool
         std::vector<u32> last_used; // frame number
         std::vector<u32> loaded_children;
-        std::vector<u32> wanted_mark; // frame number + 1 when last wanted
+        std::vector<u32> wanted_mark; // update count when last wanted
         rhi::BufferHandle table;
         bool table_dirty = true;
     };
@@ -149,13 +154,20 @@ private:
         u32 mesh;
         u32 group;
     };
+    struct Candidate {
+        u32 age; // frames since last used
+        u32 mesh;
+        u32 group;
+    };
+    static bool candidate_order(const Candidate& a, const Candidate& b) { return a.age < b.age; } // oldest on top
 
     u64 units_of(const MeshState& m, u32 group) const;
     bool load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 group, u32 frame_number, bool& pool_writable);
     void evict(MeshState& m, u32 group);
     bool make_room(u64 units, u32 frame_number);
+    static bool evictable(const MeshState& m, u32 group, u32 frame_number);
     void read_usage();
-    bool ensure_usage(rhi::CommandList& cmd);
+    bool grow_usage(rhi::CommandList* cmd); // null: at init, nothing to copy
 
     rhi::Device& m_device;
     u64 m_pool_bytes = 0;
@@ -173,6 +185,12 @@ private:
     std::vector<MeshState> m_meshes;
     std::vector<Request> m_wanted;
     StreamingStats m_stats;
+    u32 m_culls_since_usage = 0;
+    u32 m_updates = 0;
+    std::vector<Candidate> m_candidates; // eviction heap, built once per update when needed
+    bool m_candidates_built = false;
+    bool m_tables_current = true;
+    bool m_usage_logged = false;
     bool m_full_logged = false;
     bool m_roots_logged = false;
 };

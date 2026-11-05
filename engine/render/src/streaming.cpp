@@ -92,8 +92,14 @@ bool later(u32 a, u32 b) { return static_cast<i32>(a - b) > 0; }
 
 } // namespace
 
+namespace {
+// Residency tables hold byte offsets as u32.
+constexpr u64 k_max_pool_bytes = (u64{1} << 32) - GeometryStreamer::k_unit;
+u64 pool_size(u64 bytes) { return std::min(bytes, k_max_pool_bytes) / GeometryStreamer::k_unit * GeometryStreamer::k_unit; }
+} // namespace
+
 GeometryStreamer::GeometryStreamer(rhi::Device& device, u64 pool_bytes)
-    : m_device(device), m_pool_bytes(pool_bytes / k_unit * k_unit), m_alloc(pool_bytes / k_unit) {}
+    : m_device(device), m_pool_bytes(pool_size(pool_bytes)), m_alloc(pool_size(pool_bytes) / k_unit) {}
 
 GeometryStreamer::~GeometryStreamer() {
     for (MeshState& m : m_meshes) {
@@ -131,7 +137,7 @@ bool GeometryStreamer::init() {
         }
     }
     m_stats.pool_bytes = m_pool_bytes;
-    return true;
+    return grow_usage(nullptr);
 }
 
 bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vector<gpu::Cluster>& clusters) {
@@ -301,6 +307,12 @@ bool GeometryStreamer::load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 g
     if (at == PoolAllocator::k_none) {
         return false;
     }
+    for (const u32 p : m.links.parents_of(group)) {
+        if (m.resident[p] == 0) { // never (parents were in use, so kept): stay whole regardless
+            m_alloc.free(at, units);
+            return false;
+        }
+    }
     const u64 bytes = units * k_unit;
     const rhi::TransientMemory upload =
         cmd.upload({m.blob.data() + m.blob_offsets[group], static_cast<usize>(bytes)});
@@ -339,44 +351,50 @@ void GeometryStreamer::evict(MeshState& m, u32 group) {
     ++m_stats.evicted;
 }
 
+bool GeometryStreamer::evictable(const MeshState& m, u32 g, u32 frame_number) {
+    return m.resident[g] != 0 && m.root[g] == 0 && m.loaded_children[g] == 0 &&
+           frame_number - m.last_used[g] > k_keep_frames && later(frame_number, m.last_used[g]);
+}
+
 bool GeometryStreamer::make_room(u64 units, u32 frame_number) {
     // Leaves of what is loaded (no loaded children), not terminal, and unused
     // for a while: oldest first. Evicting one can make its parents leaves.
-    struct Candidate {
-        u32 last_used;
-        u32 mesh;
-        u32 group;
-    };
-    const auto older = [frame_number](const Candidate& a, const Candidate& b) {
-        // Min-heap on age: the priority queue keeps the "largest" on top.
-        return (frame_number - a.last_used) < (frame_number - b.last_used);
-    };
-    std::priority_queue<Candidate, std::vector<Candidate>, decltype(older)> heap(older);
-    const auto evictable = [frame_number](const MeshState& m, u32 g) {
-        return m.resident[g] != 0 && m.root[g] == 0 && m.loaded_children[g] == 0 &&
-               frame_number - m.last_used[g] > k_keep_frames && later(frame_number, m.last_used[g]);
-    };
-    for (u32 mi = 0; mi < m_meshes.size(); ++mi) {
-        const MeshState& m = m_meshes[mi];
-        if (!m.live) continue;
-        for (u32 g = 0; g < m.resident.size(); ++g) {
-            if (evictable(m, g)) heap.push({m.last_used[g], mi, g});
+    // The candidates are gathered once per update (entries that stopped
+    // qualifying are skipped when they come up).
+    if (!m_candidates_built) {
+        m_candidates_built = true;
+        m_candidates.clear();
+        for (u32 mi = 0; mi < m_meshes.size(); ++mi) {
+            const MeshState& m = m_meshes[mi];
+            if (!m.live) continue;
+            for (u32 g = 0; g < m.resident.size(); ++g) {
+                if (evictable(m, g, frame_number)) m_candidates.push_back({frame_number - m.last_used[g], mi, g});
+            }
         }
+        std::make_heap(m_candidates.begin(), m_candidates.end(), candidate_order);
     }
-    while (m_alloc.largest_free() < units && !heap.empty()) {
-        const Candidate c = heap.top();
-        heap.pop();
+    // Free holes need not touch: give up after freeing a few times what was
+    // asked, rather than flush the pool for one load.
+    u64 freed = 0;
+    while (m_alloc.largest_free() < units && !m_candidates.empty() && freed < 4 * units + 4096) {
+        std::pop_heap(m_candidates.begin(), m_candidates.end(), candidate_order);
+        const Candidate c = m_candidates.back();
+        m_candidates.pop_back();
         MeshState& m = m_meshes[c.mesh];
-        if (!evictable(m, c.group)) continue;
+        if (!m.live || c.group >= m.resident.size() || !evictable(m, c.group, frame_number)) continue;
+        freed += units_of(m, c.group);
         evict(m, c.group);
         for (const u32 p : m.links.parents_of(c.group)) {
-            if (evictable(m, p)) heap.push({m.last_used[p], c.mesh, p});
+            if (evictable(m, p, frame_number)) {
+                m_candidates.push_back({frame_number - m.last_used[p], c.mesh, p});
+                std::push_heap(m_candidates.begin(), m_candidates.end(), candidate_order);
+            }
         }
     }
     return m_alloc.largest_free() >= units;
 }
 
-bool GeometryStreamer::ensure_usage(rhi::CommandList& cmd) {
+bool GeometryStreamer::grow_usage(rhi::CommandList* cmd) {
     if (m_total_groups <= m_usage_capacity && m_usage.valid()) {
         return true;
     }
@@ -396,10 +414,10 @@ bool GeometryStreamer::ensure_usage(rhi::CommandList& cmd) {
         m_device.destroy(readback);
         return false;
     }
-    if (m_usage.valid()) {
-        cmd.barrier(m_usage, rhi::ResourceState::copy_source);
-        cmd.barrier(grown, rhi::ResourceState::copy_dest);
-        cmd.copy_buffer(grown, 0, m_usage, 0, u64{m_usage_capacity} * 4);
+    if (m_usage.valid() && cmd != nullptr) {
+        cmd->barrier(m_usage, rhi::ResourceState::copy_source);
+        cmd->barrier(grown, rhi::ResourceState::copy_dest);
+        cmd->copy_buffer(grown, 0, m_usage, 0, u64{m_usage_capacity} * 4);
     }
     m_device.destroy(m_usage);
     m_device.destroy(m_usage_readback);
@@ -438,8 +456,11 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
     m_stats.loaded = 0;
     m_stats.evicted = 0;
     m_stats.waiting = 0;
+    m_tables_current = true;
+    m_candidates_built = false;
     read_usage();
-    if (!ensure_usage(cmd)) {
+    if (!grow_usage(&cmd) && !m_usage_logged) {
+        m_usage_logged = true; // the old buffer stays: new meshes' marks are dropped
         log_error("render", "could not grow the streaming usage buffer (out of GPU memory?)");
     }
     bool pool_writable = false;
@@ -466,7 +487,7 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
     // first), coarse before fine.
     std::vector<Request> todo;
     std::vector<Request> stack;
-    const u32 mark = frame_number + 1;
+    const u32 mark = ++m_updates; // per update, even if a frame number repeats
     for (const Request& r : m_wanted) {
         if (r.mesh >= m_meshes.size()) continue;
         MeshState& m = m_meshes[r.mesh];
@@ -475,9 +496,16 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         while (!stack.empty()) {
             const Request q = stack.back();
             stack.pop_back();
-            if (m.resident[q.group] != 0 || m.wanted_mark[q.group] == mark) continue;
+            if (m.wanted_mark[q.group] == mark) continue;
             m.wanted_mark[q.group] = mark;
-            todo.push_back(q);
+            // Culling went through the ancestors of what it asked for: they
+            // are in use, whatever the (later) usage marks say, so making
+            // room never evicts the parent of a group about to load.
+            if (m.resident[q.group] != 0) {
+                m.last_used[q.group] = frame_number;
+            } else {
+                todo.push_back(q);
+            }
             for (const u32 p : m.links.parents_of(q.group)) {
                 stack.push_back({q.mesh, p});
             }
@@ -530,7 +558,10 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         }
         const rhi::TransientMemory upload = cmd.upload_array(std::span<const u32>(table));
         if (upload.data == nullptr) {
-            continue; // retried next frame
+            // Out of memory (the device is as good as lost): the GPU's table
+            // no longer matches the pool, so nothing may draw this frame.
+            m_tables_current = false;
+            continue;
         }
         cmd.barrier(m.table, rhi::ResourceState::copy_dest);
         cmd.copy_buffer(m.table, 0, upload.buffer, upload.offset, table.size() * 4);
@@ -545,12 +576,15 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
 void GeometryStreamer::after_cull(rhi::CommandList& cmd, u32 slot, u64 frame_index) {
     cmd.barrier(m_requests, rhi::ResourceState::copy_source);
     cmd.copy_buffer(m_request_readback[slot % 3], 0, m_requests, 0, u64{k_request_capacity} * sizeof(gpu::Entry));
-    if (m_usage.valid() && m_usage_readback_frame == ~u64{0} && frame_index % k_usage_interval == 0 &&
-        m_total_groups > 0) {
+    ++m_culls_since_usage;
+    const u32 groups = std::min(m_total_groups, m_usage_capacity);
+    if (m_usage.valid() && m_usage_readback.valid() && m_usage_readback_frame == ~u64{0} &&
+        m_culls_since_usage >= k_usage_interval && groups > 0) {
         cmd.barrier(m_usage, rhi::ResourceState::copy_source);
-        cmd.copy_buffer(m_usage_readback, 0, m_usage, 0, u64{m_total_groups} * 4);
+        cmd.copy_buffer(m_usage_readback, 0, m_usage, 0, u64{groups} * 4);
         m_usage_readback_frame = frame_index;
-        m_usage_readback_groups = m_total_groups;
+        m_usage_readback_groups = groups;
+        m_culls_since_usage = 0;
     }
 }
 
