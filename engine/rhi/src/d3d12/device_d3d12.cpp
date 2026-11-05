@@ -735,6 +735,12 @@ bool D3D12Device::init(const DeviceDesc& desc) {
                 return false;
             }
         }
+    }
+    if (!init_globals()) {
+        return false;
+    }
+    // After init_globals: transient chunks need the descriptor heaps.
+    for (Frame& frame : m_frame_slots) {
         for (u32 i = 0; i < k_transient_chunks_at_init; ++i) {
             const BufferHandle buffer = create_transient_chunk(k_transient_chunk_bytes);
             if (!buffer.valid()) {
@@ -743,7 +749,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             frame.chunks.push_back({buffer, k_transient_chunk_bytes, 0});
         }
     }
-    return init_globals();
+    return true;
 }
 
 bool D3D12Device::init_timing() {
