@@ -210,8 +210,8 @@ Done in N2 part 2:
   occupancy bit per voxel, then colour and normal packed in one u32; 2112
   bytes, the GPU's layout too), a conservative triangle-box test to
   voxelize surfaces without holes, and the clipmap. Level 0 has 0.25 m
-  voxels; each of the 9 levels doubles them, so level 8 (64 m voxels)
-  reaches about 8 km out. Each level is a window of 32 bricks per axis,
+  voxels; each of the 11 levels doubles them, so level 10 (256 m voxels)
+  reaches about 30 km out. Each level is a window of 32 bricks per axis,
   moved in whole bricks once the camera is more than a brick from its
   centre; a brick's slot in its level's table is its coordinate modulo 32,
   so moving only fills the slabs that came into view.
@@ -240,8 +240,9 @@ Done in N2 part 2:
   u32 slot table per level (only the changed range is copied, with no CPU
   wait); bricks that do not fit wait for room (`missing`). `probe_voxels`
   reads a CPU copy of the occupancy. The gate scene (town and 10,000
-  trees: 20,000 instances) takes about 7,600 bricks and some 1.5 s of CPU
-  time over about 1,900 frames; in release builds its frames stay near the
+  trees: 20,000 instances) takes about 7,700 bricks and some 2.3 s of CPU
+  time over about 2,100 frames (the coarsest bricks lie under every
+  instance); in release builds its frames stay near the
   1 ms budget, at worst a few ms (a search over a whole window, or the
   start of a coarse brick, is not split), even with every tree moving each
   frame, except the first (copying the instances and opening every
@@ -253,8 +254,37 @@ Done in N2 part 2:
   skipping empty space with per-level bounds and empty occupancy words.
 - Not yet: `world` owning edits (destruction carving it, N4); building on
   worker threads (with cell streaming, N3); textures (colour is the
-  material's base colour); the far field, GI and reflections that read it
-  (parts 3 and 5).
+  material's base colour); GI and reflections that read it (part 5).
+
+Done in N2 part 3, the far field:
+
+- Past `RenderSettings::far_field_distance` (3 km by default) the voxel
+  world stands in for small instances: the CPU leaves out every instance
+  whose bounding sphere (radius at most `far_field_max_radius`, 50 m) lies
+  wholly beyond the distance and inside the coarsest level's window, so
+  they cost no culling, streaming or raster work at all. Larger instances
+  (terrain, mountains, big buildings) stay meshes at every distance,
+  cluster LOD keeping them cheap. `RenderStats::far_culled` counts the
+  ones left out.
+- The shading pass (`shaders/resolve.slang`) marches the voxels for every
+  pixel whose mesh hit (if any) is past the distance, from the distance
+  on, with the march the voxel view uses (`shaders/voxel_march.slang`). A
+  voxel counts only in front of the drawn mesh by more than 1.5 voxels, so
+  a mesh's own voxels (up to a voxel proud of it) never cover it. The
+  voxel's colour and normal are lit like a mesh (a rough dielectric).
+- Lit view only, and only while the voxel world is kept up to date (a
+  frozen one would show stale far geometry). The levels are written once a
+  frame for the far field and the voxel view.
+- How sharp it is: each level window is 256 voxels across, so wherever a
+  level takes over its voxels are about 7 to 14 pixels wide at 1080p
+  (60 degree view). A far tree reads as a blob of a voxel or two; finer
+  far detail needs more bricks per axis (`RendererDesc::voxel_clipmap`,
+  64 halves the voxel width for some four times the bricks) or the
+  proxies of part 5 and N3.
+- Not yet: a brick still building (a slab just come into view, an
+  instance just added far out) shows the next coarser level or nothing
+  until it is built (well within a second at 1 ms a frame); shadows on
+  far voxels (part 4); fading between mesh and voxels at the distance.
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 

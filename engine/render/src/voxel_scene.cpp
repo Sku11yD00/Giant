@@ -1111,6 +1111,14 @@ VoxelProbe VoxelScene::probe(u32 level, const DVec3& position) const {
     return (m_occupancy[m_slots[s]][i / 32] >> (i % 32) & 1u) != 0 ? VoxelProbe::solid : VoxelProbe::empty;
 }
 
+bool VoxelScene::covers(const DVec3& min, const DVec3& max) const {
+    if (!m_clipmap.placed()) {
+        return false;
+    }
+    const u32 top = m_clipmap.levels() - 1;
+    return m_clipmap.contains(top, m_clipmap.brick_at(top, min)) && m_clipmap.contains(top, m_clipmap.brick_at(top, max));
+}
+
 void VoxelScene::write_levels(gpu::VoxelLevel* out, const DVec3& camera) const {
     const i32 n = m_clipmap.desc().bricks_per_axis;
     for (u32 level = 0; level < m_clipmap.levels(); ++level) {

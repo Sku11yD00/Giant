@@ -107,6 +107,9 @@ struct Renderer::FrameData {
     rhi::TransientMemory entries;
     rhi::TransientMemory range;
     u32 entry_count = 0;
+    // The voxel world's levels (gpu::VoxelLevel each), for the voxel view
+    // and the far field; null when neither is on.
+    rhi::TransientMemory voxel_levels;
 };
 
 std::unique_ptr<Renderer> Renderer::create(rhi::Device& device, const RendererDesc& desc) {
@@ -832,13 +835,43 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_voxels->idle();
     }
 
-    // Instances with a live mesh.
+    // Instances with a live mesh, but for the small ones wholly past the
+    // far field's distance: the voxel world shows those (once its coarsest
+    // window holds them).
+    const bool far_field = settings.voxel_far_field && settings.voxel_world && settings.debug_view == DebugView::lit;
+    const double far_distance = std::max(static_cast<double>(settings.far_field_distance), 0.0);
+    const double far_radius = std::max(static_cast<double>(settings.far_field_max_radius), 0.0);
+    // The instance's bounding sphere is wholly past the distance, small
+    // enough, and inside the voxel world.
+    const auto left_to_voxels = [&](const Instance& in, const geometry::Sphere& bounds) {
+        const double scale = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
+        const double radius = static_cast<double>(bounds.radius) * scale;
+        if (!(radius <= far_radius)) {
+            return false;
+        }
+        const Vec3 c = rotate(in.rotation, Vec3{bounds.center.x * in.scale.x, bounds.center.y * in.scale.y,
+                                                bounds.center.z * in.scale.z});
+        const DVec3 center = in.position + DVec3{c.x, c.y, c.z};
+        if (!(length(center - frame.view.position) - radius > far_distance)) {
+            return false;
+        }
+        const DVec3 r{radius, radius, radius};
+        return m_voxels->covers(center - r, center + r);
+    };
+    m_far_field = far_field;
+    m_far_culled = 0;
     m_valid.clear();
     for (u32 i = 0; i < frame.instances.size(); ++i) {
-        const MeshId id = frame.instances[i].mesh;
-        if (mesh(id) != nullptr && m_streamer->ready(id) && m_streamer->tables_current()) {
-            m_valid.push_back(i);
+        const Instance& in = frame.instances[i];
+        const geometry::ClusterMesh* m = mesh(in.mesh);
+        if (m == nullptr || !m_streamer->ready(in.mesh) || !m_streamer->tables_current()) {
+            continue;
         }
+        if (far_field && left_to_voxels(in, m->bounds)) {
+            ++m_far_culled;
+            continue;
+        }
+        m_valid.push_back(i);
     }
     if (m_valid.size() > k_max_instances) {
         if (!m_instances_logged) {
@@ -1000,6 +1033,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             }
         }
     }
+    if (far_field || settings.debug_view == DebugView::voxels) {
+        m_voxel_levels.resize(m_voxels->levels());
+        m_voxels->write_levels(m_voxel_levels.data(), frame.view.position);
+        data.voxel_levels = cmd.upload(bytes_of(m_voxel_levels));
+    }
     if (data.frame.data == nullptr || data.meshes.data == nullptr || data.materials.data == nullptr) {
         return; // out of memory: the device is lost
     }
@@ -1064,7 +1102,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const bool antialias = settings.antialiasing && settings.debug_view == DebugView::lit;
     const rhi::TextureHandle shaded = antialias ? m_color : target;
     if (settings.debug_view == DebugView::voxels) {
-        draw_voxels(cmd, target, data, frame.view.position, light.background);
+        draw_voxels(cmd, target, data, light.background);
         finish_stats(data);
         return;
     }
@@ -1100,6 +1138,20 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     push.tile_columns = data.tile_columns;
     push.tile_rows = data.tile_rows;
     push.specular_aa = settings.specular_antialiasing ? 1u : 0u;
+    if (far_field && data.voxel_levels.data != nullptr) {
+        push.voxel_pool = m_device.read_descriptor(m_voxels->pool());
+        push.voxel_table = m_device.read_descriptor(m_voxels->table());
+        push.voxel_levels = data.voxel_levels.descriptor;
+        push.voxel_levels_offset = data.voxel_levels.offset;
+        push.voxel_level_count = m_voxels->levels();
+        push.voxel_bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
+        push.far_start = static_cast<float>(far_distance);
+    } else {
+        // Off: valid descriptors all the same (bindless reads are checked).
+        push.voxel_pool = data.frame.descriptor;
+        push.voxel_table = data.frame.descriptor;
+        push.voxel_levels = data.frame.descriptor;
+    }
     cmd.push(push);
     cmd.draw(3);
     ++m_stats.draws;
@@ -1121,23 +1173,20 @@ void Renderer::finish_stats(const FrameData& data) {
 }
 
 void Renderer::draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
-                           const DVec3& camera, const Vec3& background) {
-    std::vector<gpu::VoxelLevel> levels(m_voxels->levels());
-    m_voxels->write_levels(levels.data(), camera);
-    const rhi::TransientMemory upload = cmd.upload(bytes_of(levels));
+                           const Vec3& background) {
     cmd.begin_timing("voxel view");
     rhi::RenderPassDesc pass;
     pass.colors[0] = {target, rhi::LoadOp::clear, {background.x, background.y, background.z, 1.0f}};
     cmd.begin_render_pass(pass);
-    if (upload.data != nullptr) {
+    if (data.voxel_levels.data != nullptr) {
         cmd.set_pipeline(m_voxel_view);
         gpu::VoxelPush push{};
         push.frame = data.frame.descriptor;
         push.frame_offset = data.frame.offset;
         push.pool = m_device.read_descriptor(m_voxels->pool());
         push.table = m_device.read_descriptor(m_voxels->table());
-        push.levels = upload.descriptor;
-        push.levels_offset = upload.offset;
+        push.levels = data.voxel_levels.descriptor;
+        push.levels_offset = data.voxel_levels.offset;
         push.level_count = m_voxels->levels();
         push.bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
         set4(push.background, background, 1.0f);
@@ -1202,6 +1251,8 @@ void Renderer::copy_streaming_stats() {
     m_stats.voxel_missing = v.missing;
     m_stats.voxel_overflow = v.overflow;
     m_stats.voxel_cpu_ms = v.cpu_ms;
+    m_stats.far_field = m_far_field;
+    m_stats.far_culled = m_far_culled;
 }
 
 } // namespace giant::render

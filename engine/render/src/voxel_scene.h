@@ -104,6 +104,10 @@ public:
     rhi::BufferHandle table() const { return m_table; }
     const VoxelStats& stats() const { return m_stats; }
 
+    // Whether the world-space box [min, max] lies wholly in the coarsest
+    // level's window (so the voxel world has it, once built).
+    bool covers(const DVec3& min, const DVec3& max) const;
+
     // The pool index of a brick, or gpu::k_no_brick (none, or not built yet).
     u32 brick_index(u32 level, const voxel::BrickCoord& brick) const;
     // What level `level` holds at a world position (from a CPU copy of the

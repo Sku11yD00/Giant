@@ -584,6 +584,9 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Voxel brick pool full: %u bricks missing",
                                stats.voxel_missing);
         }
+        if (stats.far_field) {
+            ImGui::Text("Far field: %u instances left to the voxels", stats.far_culled);
+        }
         ImGui::Text("Materials: %u shared, decals: %u in view", stats.materials, stats.decals);
         if (stats.decal_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many decals on screen: some not drawn");
@@ -630,6 +633,14 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         bool voxels = r.voxel_world;
         if (ImGui::Checkbox("Voxel world", &voxels)) {
             run("set_render_settings", {{"voxel_world", voxels}});
+        }
+        bool far = r.voxel_far_field;
+        if (ImGui::Checkbox("Voxel far field", &far)) {
+            run("set_render_settings", {{"voxel_far_field", far}});
+        }
+        float far_distance = r.far_field_distance;
+        if (ImGui::DragFloat("Far field from (m)", &far_distance, 10.0f, 0.0f, 100000.0f, "%.0f")) {
+            run("set_render_settings", {{"far_field_distance", far_distance}});
         }
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {

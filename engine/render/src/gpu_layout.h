@@ -242,9 +242,17 @@ struct ResolvePush {
     u32 tile_columns; // 0: no decals
     u32 tile_rows;
     u32 specular_aa;
-    u32 pad;
+    // The far field (voxel_march.slang): beyond far_start the voxel world
+    // stands in for the meshes left out there. voxel_level_count 0: off.
+    u32 voxel_pool;
+    u32 voxel_table;
+    u32 voxel_levels; // VoxelLevel per level
+    u32 voxel_levels_offset;
+    u32 voxel_level_count;
+    u32 voxel_bricks_per_axis;
+    float far_start; // metres from the camera
 };
-static_assert(sizeof(ResolvePush) == 96);
+static_assert(sizeof(ResolvePush) == 120);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {

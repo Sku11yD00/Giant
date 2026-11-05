@@ -357,6 +357,54 @@ def voxel_gate(tool, call, check):
     tool("new_scene")
 
 
+def far_field_gate(tool, call, check):
+    """N2 part 3: past the far-field distance small instances are not drawn as meshes; the
+    voxel world shows them instead, lit like the meshes."""
+    tool("new_scene")
+    tool("set_camera", {"position": [0, 10, 0], "look_at": [0, 10, -600]})
+    tool("create_entity", {"name": "Far block", "shape": "cube", "position": [0, 10, -600],
+                           "scale": [30, 30, 30], "base_color": [0.9, 0.05, 0.05], "roughness": 0.9})
+    tool("set_render_settings", {"voxel_ms_per_frame": 50, "far_field_distance": 300})
+
+    def frame():
+        for _ in range(60):
+            for _ in range(10):
+                call("ping")
+            last = tool("get_render_settings")["last_frame"]
+            if last["voxels"]["pending"] == 0:
+                return last
+        return last
+
+    def centre():
+        call("ping")
+        shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 480}})
+        image = [c for c in shot["content"] if c["type"] == "image"][0]
+        width, height, pixels = decode_png(base64.b64decode(image["data"]))
+        x, y = width // 2, height // 2
+        return pixels[(y * width + x) * 4:(y * width + x) * 4 + 3]
+
+    real = tool("get_engine_info")["backend"] != "null"
+    last = frame()
+    check(last["voxels"]["pending"] == 0, f"the voxel world is built, got {last['voxels']}")
+    check(last["far_field"] == {"on": True, "culled": 1},
+          f"the far block is left to the voxel world, got {last['far_field']}")
+    if real:
+        r, g, b = centre()
+        check(r > 80 and r - g > 40 and r - b > 40, f"the far field shows the red block, got {(r, g, b)}")
+    # Pushed out past the block, the distance gives it back to the meshes.
+    tool("set_render_settings", {"far_field_distance": 3000})
+    last = frame()
+    check(last["far_field"] == {"on": True, "culled": 0}, f"the block is a mesh again, got {last['far_field']}")
+    tool("set_render_settings", {"far_field_distance": 300, "voxel_far_field": False})
+    last = frame()
+    check(last["far_field"] == {"on": False, "culled": 0}, f"the far field turns off, got {last['far_field']}")
+    if real:
+        r, g, b = centre()
+        check(r > 80 and r - g > 40 and r - b > 40, f"the mesh shows the red block, got {(r, g, b)}")
+    tool("set_render_settings", {"voxel_ms_per_frame": 1, "far_field_distance": 3000, "voxel_far_field": True})
+    tool("new_scene")
+
+
 def n1_gate(tool, call, check):
     """N1 part 6, the N1 gate scene (tools/n1_gate.py measures its speed on a real GPU): a
     kit-built town and 10,000 trees in a fixed number of draws, with every bit of detail the
@@ -500,6 +548,7 @@ def main() -> int:
         lod_gate(tool, call, check)
         kit_gate(tool, call, check)
         voxel_gate(tool, call, check)
+        far_field_gate(tool, call, check)
         n1_gate(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
