@@ -53,7 +53,8 @@ struct Entity {
     std::string name;
     Transform transform;
     Shape shape = Shape::cube;
-    // A glTF/GLB file (UTF-8 path, relative to the project folder), drawn
+    // A glTF/GLB file (UTF-8 path, relative to the editor's working folder,
+    // which is the project folder; not to the scene file), drawn
     // when shape is `mesh`. Kept when the shape changes, so it can change back.
     std::string mesh;
     Material material;

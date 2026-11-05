@@ -288,6 +288,13 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
 
     rhi::TransientMemory instance_memory;
     rhi::TransientMemory entry_memory;
+    if (static_cast<u64>(m_entries.size()) * sizeof(Entry) > rhi::k_max_transient_allocation ||
+        static_cast<u64>(m_drawn.size()) * sizeof(GpuInstance) > rhi::k_max_transient_allocation) {
+        log_error("render", "too many clusters in one frame; nothing drawn");
+        m_entries.clear();
+        m_drawn.clear();
+        m_stats.triangles = 0;
+    }
     if (!m_entries.empty()) {
         instance_memory = cmd.allocate(static_cast<u32>(m_drawn.size() * sizeof(GpuInstance)));
         entry_memory = cmd.allocate(static_cast<u32>(m_entries.size() * sizeof(Entry)));

@@ -39,13 +39,12 @@ std::string MeshLibrary::normalize(std::string_view path) {
 }
 
 const MeshLibrary::Mesh* MeshLibrary::find(std::string_view path) const {
-    const std::string key = normalize(path);
-    for (const auto& mesh : m_meshes) {
-        if (mesh->path == key) {
-            return mesh.get();
-        }
-    }
-    return nullptr;
+    return find_normalized(normalize(path));
+}
+
+const MeshLibrary::Mesh* MeshLibrary::find_normalized(const std::string& path) const {
+    const auto it = m_by_path.find(path);
+    return it == m_by_path.end() ? nullptr : it->second;
 }
 
 MeshLibrary::Loaded MeshLibrary::load(std::string_view path) {
@@ -109,6 +108,7 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
         return {replace, {}};
     }
     m_meshes.push_back(std::move(mesh));
+    m_by_path[m_meshes.back()->path] = m_meshes.back().get();
     return {m_meshes.back().get(), {}};
 }
 

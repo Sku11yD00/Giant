@@ -148,7 +148,9 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("metallic")) e.material.metallic = args["metallic"].get<float>();
     if (args.contains("emissive")) e.material.emissive = vec3_from(args["emissive"]);
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
-    if (e.shape == world::Shape::mesh) {
+    // Only a change of shape or file needs the file: an entity whose file
+    // failed to load can still be moved, renamed or hidden.
+    if (e.shape == world::Shape::mesh && (args.contains("shape") || args.contains("mesh"))) {
         if (e.mesh.empty()) {
             return "shape mesh needs a file: give mesh, e.g. \"assets/rock.glb\"";
         }
@@ -575,6 +577,15 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              // Meshes it uses are imported now; one that fails leaves its
              // entities invisible until it is fixed, but the scene loads.
              Json mesh_errors = Json::array();
+             // One spelling per file, as entities made in the editor have.
+             std::vector<EntityId> mesh_ids;
+             for (const Entity& e : loaded.entities()) {
+                 if (!e.mesh.empty()) mesh_ids.push_back(e.id);
+             }
+             for (const EntityId id : mesh_ids) {
+                 Entity* e = loaded.find(id);
+                 e->mesh = MeshLibrary::normalize(e->mesh);
+             }
              if (state.meshes != nullptr) {
                  for (const Entity& e : loaded.entities()) {
                      if (e.shape == world::Shape::mesh && state.meshes->find(e.mesh) == nullptr) {

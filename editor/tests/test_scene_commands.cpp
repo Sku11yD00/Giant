@@ -180,6 +180,14 @@ GIANT_TEST("editor: imported meshes are drawn by entities that name them") {
     GIANT_CHECK(loaded.ok && loaded.value["entities"] == 3);
     GIANT_CHECK(loaded.value.contains("mesh_errors") && loaded.value["mesh_errors"].size() == 1);
     GIANT_CHECK(g.meshes.find(glb) != nullptr);
+    // The entity whose file is missing can still be moved, renamed and hidden.
+    u64 broken_id = 0;
+    for (const world::Entity& e : g.state.scene.entities()) {
+        if (e.mesh == "gone/away.glb") broken_id = e.id;
+    }
+    GIANT_CHECK(broken_id != 0);
+    GIANT_CHECK(g.run("set_entity", {{"id", broken_id}, {"position", {1, 2, 3}}, {"visible", false}}).ok);
+    GIANT_CHECK(!g.run("set_entity", {{"id", broken_id}, {"shape", "mesh"}}).ok); // the file is still needed
     std::filesystem::remove_all(dir);
 }
 

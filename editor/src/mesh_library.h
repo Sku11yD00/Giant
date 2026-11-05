@@ -10,6 +10,7 @@
 #include "giant/render/renderer.h"
 
 #include <memory>
+#include <unordered_map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -46,6 +47,9 @@ public:
     // the new import fails.
     Loaded reload(std::string_view path);
     const Mesh* find(std::string_view path) const;
+    // For a path already normalised (as entities store it): a hash lookup,
+    // cheap enough to run per entity per frame.
+    const Mesh* find_normalized(const std::string& path) const;
     const std::vector<std::unique_ptr<Mesh>>& meshes() const { return m_meshes; }
 
     // "a/./b\\c.glb" -> "a/b/c.glb": one spelling per file, forward slashes.
@@ -56,6 +60,7 @@ private:
 
     render::Renderer* m_renderer;
     std::vector<std::unique_ptr<Mesh>> m_meshes; // stable addresses
+    std::unordered_map<std::string, Mesh*> m_by_path;
 };
 
 } // namespace giant::editor

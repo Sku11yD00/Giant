@@ -24,7 +24,7 @@ void scene_instances(const world::Scene& scene, const render::Renderer& renderer
         }
         render::MeshId mesh = render::k_no_mesh;
         if (e.shape == world::Shape::mesh) {
-            const MeshLibrary::Mesh* m = meshes.find(e.mesh);
+            const MeshLibrary::Mesh* m = meshes.find_normalized(e.mesh);
             if (m == nullptr || m->id == render::k_no_mesh) {
                 continue;
             }
