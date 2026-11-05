@@ -112,7 +112,7 @@ internal static class ArgumentJson
             case nuint n:
                 return JsonValue.Create((ulong)n);
             case JsonElement element:
-                return JsonNode.Parse(element.GetRawText());
+                return element.ValueKind == JsonValueKind.Undefined ? null : JsonNode.Parse(element.GetRawText());
             case float f:
                 return Finite(f) ? JsonValue.Create(f) : throw NotFinite();
             case double d:
@@ -181,8 +181,8 @@ internal static class ArgumentJson
         return obj;
     }
 
-    // .NET's own types other than vectors (System.Numerics) and tuples have
-    // no sensible member-by-member JSON form.
+    // .NET's own types other than vectors and matrices (System.Numerics),
+    // tuples and key/value pairs have no sensible member-by-member JSON form.
     private static bool IsOpaqueSystemType(Type type)
     {
         string ns = type.Namespace ?? "";
@@ -190,8 +190,15 @@ internal static class ArgumentJson
         {
             return false;
         }
-        bool tuple = type.IsGenericType && (type.Name.StartsWith("ValueTuple`", StringComparison.Ordinal) || type.Name.StartsWith("Tuple`", StringComparison.Ordinal));
-        return ns != "System.Numerics" && !tuple;
+        string name = type.Name;
+        bool plain =
+            (type.IsGenericType && (name.StartsWith("ValueTuple`", StringComparison.Ordinal) ||
+                                    name.StartsWith("Tuple`", StringComparison.Ordinal) ||
+                                    name.StartsWith("KeyValuePair`", StringComparison.Ordinal))) ||
+            (ns == "System.Numerics" && (name.StartsWith("Vector", StringComparison.Ordinal) ||
+                                         name.StartsWith("Matrix", StringComparison.Ordinal) ||
+                                         name == "Quaternion" || name == "Plane"));
+        return !plain;
     }
 
     private static bool Finite(double d) => !double.IsNaN(d) && !double.IsInfinity(d);

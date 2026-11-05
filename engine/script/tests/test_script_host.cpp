@@ -65,7 +65,7 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
                     "\"weather\":\"Storm\",\"gust\":{\"Strength\":2.5,\"Kind\":\"Clear\"},"
                     "\"list\":[1,2],\"map\":{\"k\":null},\"when\":\"2026-11-05T01:02:03.0000000Z\","
                     "\"span\":1.5,\"id\":\"00000000-0000-0000-0000-000000000000\","
-                    "\"v\":{\"X\":1,\"Y\":2,\"Z\":3}"));
+                    "\"v\":{\"X\":1,\"Y\":2,\"Z\":3},\"pair\":{\"Key\":\"a\",\"Value\":1}"));
     GIANT_CHECK(has("opaque refused"));
 
     set_console_logging(false);

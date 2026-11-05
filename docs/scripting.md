@@ -42,6 +42,9 @@ Rules the host enforces:
   thread you start yourself (or `Task.Run` code) must not call the engine;
   `Engine.Execute` there throws `InvalidOperationException`. Hand its result
   back with `await` instead.
+- Never block on async work (`task.Wait()`, `task.Result`) in a script: the
+  awaited code needs the main thread to finish, and the main thread is the
+  one waiting, so the editor would freeze. Use `await`.
 - Scripts cannot load or unload scripts while they run; `load_scripts` and
   `unload_scripts` called from a script are refused.
 - Arguments are numbers, strings, booleans, lists, dictionaries, vectors,

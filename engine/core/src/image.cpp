@@ -28,7 +28,7 @@ ImageRgba8 downscale_rgba(std::span<const u8> pixels, u32 width, u32 height, u32
             const u32 x1 = std::min(x0 + factor, width);
             const u32 count = (y1 - y0) * (x1 - x0);
             for (u32 c = 0; c < 4; ++c) {
-                u32 sum = 0;
+                u64 sum = 0; // up to factor^2 * 255; u32 could wrap for huge factors
                 for (u32 sy = y0; sy < y1; ++sy) {
                     for (u32 sx = x0; sx < x1; ++sx) {
                         sum += pixels[(static_cast<usize>(sy) * width + sx) * 4 + c];

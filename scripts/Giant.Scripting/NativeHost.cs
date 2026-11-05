@@ -221,11 +221,22 @@ public static unsafe class NativeHost
     private static WeakReference StopAndRelease(ScriptSet scripts)
     {
         WeakReference context = null!;
-        RunScripts(() => context = scripts.Stop());
-        // Awaits still pending belong to the old scripts; drop them so they
-        // neither run against the new scripts nor keep the old ones alive.
-        s_context?.Close();
-        s_context = null;
+        try
+        {
+            RunScripts(() =>
+            {
+                context = scripts.Stop();
+                s_context?.Drain(); // e.g. an async void OnStop's exception, so it is logged
+            });
+        }
+        finally
+        {
+            // Awaits still pending belong to the old scripts; drop them so
+            // they neither run against the new scripts nor keep the old ones
+            // alive.
+            s_context?.Close();
+            s_context = null;
+        }
         return context;
     }
 

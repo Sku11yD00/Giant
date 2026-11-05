@@ -120,6 +120,7 @@ public sealed class Shapes : Script
             span = TimeSpan.FromSeconds(1.5),
             id = Guid.Empty,
             v = new System.Numerics.Vector3(1, 2, 3),
+            pair = new System.Collections.Generic.KeyValuePair<string, int>("a", 1),
         });
         try
         {
