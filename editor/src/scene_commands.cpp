@@ -217,9 +217,14 @@ Json render_settings_json(const EditorState& state) {
     const render::RenderStats& s = state.scene_stats;
     return {{"lod_error_pixels", state.render_settings.lod_error_pixels},
             {"debug_view", to_string(state.render_settings.debug_view)},
+            {"gpu_culling", state.render_settings.gpu_culling},
+            {"occlusion_culling", state.render_settings.occlusion_culling},
+            {"mesh_shaders", state.render_settings.mesh_shaders},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"clusters", s.clusters},
-              {"triangles", s.triangles}}}};
+              {"triangles", s.triangles}, {"from_gpu", s.from_gpu},
+              {"occluded_instances", s.occluded_instances},
+              {"occluded_clusters", s.occluded_clusters}, {"overflow", s.overflow}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -645,8 +650,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
 
     add(registry,
         {"get_render_settings",
-         "Returns the LOD error (pixels) and debug view, plus last frame's counts of instances, "
-         "draws, clusters and triangles.",
+         "Returns the LOD error (pixels), debug view and culling switches, plus last frame's "
+         "counts of instances, draws, clusters and triangles. With gpu_culling the counts come "
+         "from the GPU a frame or two late (from_gpu true); occluded_* count what the first "
+         "occlusion pass hid; overflow means a GPU list was full and geometry was dropped.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              return CommandResult::success(render_settings_json(state));
@@ -657,12 +664,18 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "Changes how the viewport draws. lod_error_pixels: how much simplification may show "
          "(1 = under a pixel; lower is sharper and slower). debug_view: lit (normal), clusters "
          "(each cluster coloured), lod_levels (red = full detail, then yellow, green, cyan, "
-         "blue...) or triangles. View state: not undoable.",
+         "blue...) or triangles. gpu_culling: pick clusters on the GPU (default) or the CPU. "
+         "occlusion_culling: skip what is hidden behind nearer geometry (GPU culling only). "
+         "mesh_shaders: draw with mesh shaders when the GPU has them, else vertex shaders. "
+         "View state: not undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
                {{"lod_error_pixels", number(0.1, 64, "Pixels of error allowed. Default 1.")},
-                {"debug_view", {{"enum", {"lit", "clusters", "lod_levels", "triangles"}}}}}}},
+                {"debug_view", {{"enum", {"lit", "clusters", "lod_levels", "triangles"}}}},
+                {"gpu_culling", {{"type", "boolean"}}},
+                {"occlusion_culling", {{"type", "boolean"}}},
+                {"mesh_shaders", {{"type", "boolean"}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -670,6 +683,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              if (args.contains("debug_view")) {
                  r.debug_view = debug_view_from(args["debug_view"].get<std::string>());
              }
+             r.gpu_culling = args.value("gpu_culling", r.gpu_culling);
+             r.occlusion_culling = args.value("occlusion_culling", r.occlusion_culling);
+             r.mesh_shaders = args.value("mesh_shaders", r.mesh_shaders);
              return CommandResult::success(render_settings_json(state));
          }});
 

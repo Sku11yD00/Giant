@@ -9,6 +9,11 @@
 
 ByteAddressBuffer read_buffer(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 RWByteAddressBuffer write_buffer(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
+// For a descriptor that differs between threads of a wave (e.g. each pixel
+// reading the mesh it shows): the GPU must not assume it is uniform.
+ByteAddressBuffer read_buffer_nonuniform(uint descriptor) {
+    return ResourceDescriptorHeap[NonUniformResourceIndex(descriptor)];
+}
 Texture2D<float4> read_texture(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 RWTexture2D<float4> write_texture(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 // Integer formats (r32_uint, rg32_uint: e.g. a visibility buffer) need

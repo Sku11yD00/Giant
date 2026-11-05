@@ -5,6 +5,7 @@
 #include "rhi_test_shaders.h"
 
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -451,6 +452,101 @@ GIANT_TEST("rhi: empty draws and dispatches are no-ops, as in D3D12") {
     device->destroy(pipeline);
 }
 
+GIANT_TEST("rhi: the null device checks mesh shader and indirect calls") {
+    auto device = null_device();
+    if (device == nullptr) {
+        GIANT_CHECK(false);
+        return;
+    }
+    GIANT_CHECK(device->adapter().meets_minimum_spec()); // it stands in for one
+    TextureDesc target_desc;
+    target_desc.width = 8;
+    target_desc.height = 8;
+    target_desc.format = Format::rgba8_srgb;
+    target_desc.usage = TextureUsage::render_target;
+    const TextureHandle target = device->create_texture(target_desc);
+    GraphicsPipelineDesc mesh_desc;
+    mesh_desc.geometry = GeometryStage::mesh;
+    mesh_desc.mesh = shaders::test_mesh_ms();
+    mesh_desc.pixel = shaders::test_mesh_ps();
+    mesh_desc.color_formats[0] = Format::rgba8_srgb;
+    const PipelineHandle mesh = device->create_pipeline(mesh_desc);
+    GraphicsPipelineDesc vertex_desc;
+    vertex_desc.vertex = shaders::test_draw_vs();
+    vertex_desc.pixel = shaders::test_draw_ps();
+    vertex_desc.color_formats[0] = Format::rgba8_srgb;
+    const PipelineHandle vertex = device->create_pipeline(vertex_desc);
+    ComputePipelineDesc fill_desc;
+    fill_desc.compute = shaders::test_fill_cs();
+    const PipelineHandle fill = device->create_pipeline(fill_desc);
+    BufferDesc args_desc;
+    args_desc.size = 32;
+    args_desc.usage = BufferUsage::indirect | BufferUsage::shader_write;
+    const BufferHandle args = device->create_buffer(args_desc);
+    BufferDesc plain_desc;
+    plain_desc.size = 32;
+    const BufferHandle plain = device->create_buffer(plain_desc);
+
+    {
+        // Used right, nothing asserts, and each call is counted.
+        CountAsserts asserts;
+        CommandList* cmd = device->begin_frame(nullptr);
+        cmd->barrier(args, ResourceState::indirect_argument);
+        cmd->set_pipeline(fill);
+        cmd->dispatch_indirect(args, 4);
+        RenderPassDesc pass;
+        pass.colors[0] = {target, LoadOp::clear, {}};
+        cmd->begin_render_pass(pass);
+        cmd->set_pipeline(mesh);
+        cmd->dispatch_mesh(4);
+        cmd->dispatch_mesh_indirect(args, 0);
+        cmd->set_pipeline(vertex);
+        cmd->draw_indirect(args, 16);
+        cmd->end_render_pass();
+        device->end_frame();
+        GIANT_CHECK(asserts.count() == 0);
+        GIANT_CHECK(device->last_frame_stats().draws == 3);
+        GIANT_CHECK(device->last_frame_stats().dispatches == 1);
+    }
+    {
+        CountAsserts asserts;
+        CommandList* cmd = device->begin_frame(nullptr);
+        RenderPassDesc pass;
+        pass.colors[0] = {target, LoadOp::clear, {}};
+        cmd->begin_render_pass(pass);
+        cmd->set_pipeline(mesh);
+        cmd->draw(3); // a mesh pipeline is not drawn with draw()
+        GIANT_CHECK(asserts.count() == 1);
+        cmd->dispatch_mesh_indirect(args, 0); // not barriered to indirect_argument
+        GIANT_CHECK(asserts.count() == 2);
+        cmd->set_pipeline(vertex);
+        cmd->dispatch_mesh(1); // a vertex pipeline is not a mesh pipeline
+        GIANT_CHECK(asserts.count() == 3);
+        cmd->end_render_pass();
+        cmd->barrier(args, ResourceState::indirect_argument);
+        cmd->barrier(plain, ResourceState::shader_read);
+        cmd->set_pipeline(fill);
+        cmd->dispatch_indirect(plain, 0); // no BufferUsage::indirect, wrong state
+        GIANT_CHECK(asserts.count() == 5);
+        cmd->dispatch_indirect(args, 24); // 12 bytes from 24 run past 32
+        GIANT_CHECK(asserts.count() == 6);
+        cmd->dispatch_indirect(args, 2); // unaligned
+        GIANT_CHECK(asserts.count() == 7);
+        cmd->begin_render_pass(pass);
+        cmd->set_pipeline(mesh);
+        cmd->dispatch_mesh(65536); // past the per-dimension limit
+        GIANT_CHECK(asserts.count() == 8);
+        cmd->end_render_pass();
+        device->end_frame();
+    }
+    device->destroy(target);
+    device->destroy(mesh);
+    device->destroy(vertex);
+    device->destroy(fill);
+    device->destroy(args);
+    device->destroy(plain);
+}
+
 GIANT_TEST("rhi: UI can show a texture rendered earlier in the frame") {
     auto device = null_device();
     if (device == nullptr) {
@@ -806,6 +902,165 @@ GIANT_TEST("rhi: d3d12 draws pulled triangles with reverse-Z depth testing") {
 
     device->destroy(pipeline);
     device->destroy(indices);
+    device->destroy(color);
+    device->destroy(depth);
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
+GIANT_TEST("rhi: d3d12 runs GPU-written indirect dispatches and draws") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    ComputePipelineDesc fill_desc;
+    fill_desc.compute = shaders::test_fill_cs();
+    const PipelineHandle fill = device->create_pipeline(fill_desc);
+    GraphicsPipelineDesc draw_desc;
+    draw_desc.vertex = shaders::test_draw_vs();
+    draw_desc.pixel = shaders::test_draw_ps();
+    draw_desc.color_formats[0] = Format::rgba8_srgb;
+    draw_desc.cull = CullMode::none;
+    const PipelineHandle draw = device->create_pipeline(draw_desc);
+    GIANT_CHECK(fill.valid() && draw.valid());
+
+    // Arguments: one 64-thread group of the fill (of 128 values), then a
+    // draw of 3 vertices, 1 instance.
+    const std::array<u32, 8> arg_values{1, 1, 1, 0, 3, 1, 0, 0};
+    BufferDesc args_desc;
+    args_desc.size = sizeof(arg_values);
+    args_desc.usage = BufferUsage::indirect;
+    const BufferHandle args = device->create_buffer(
+        args_desc, {reinterpret_cast<const u8*>(arg_values.data()), sizeof(arg_values)});
+    BufferDesc out_desc;
+    out_desc.size = 128 * 4;
+    out_desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
+    const BufferHandle out = device->create_buffer(out_desc);
+    constexpr u32 k_size = 16;
+    TextureDesc color_desc;
+    color_desc.width = k_size;
+    color_desc.height = k_size;
+    color_desc.format = Format::rgba8_srgb;
+    color_desc.usage = TextureUsage::render_target;
+    const TextureHandle color = device->create_texture(color_desc);
+    // A triangle over the left half: (-1,-1), (0,-1)... as clip positions.
+    const std::array<float, 6> tri{-1, -1, 0, -1, -1, 3};
+
+    struct DrawPush {
+        float color[4];
+        u32 positions;
+        u32 position_base;
+        float depth;
+        u32 pad;
+    };
+    CommandList* cmd = device->begin_frame(nullptr);
+    if (cmd != nullptr) {
+        const TransientMemory tri_mem = cmd->upload_array(std::span<const float>(tri));
+        cmd->barrier(args, ResourceState::indirect_argument);
+        cmd->barrier(out, ResourceState::shader_write);
+        cmd->set_pipeline(fill);
+        cmd->push(std::array<u32, 4>{device->write_descriptor(out), 128, 7, 0});
+        cmd->dispatch_indirect(args, 0);
+        RenderPassDesc pass;
+        pass.colors[0] = {color, LoadOp::clear, {0.0f, 0.0f, 0.0f, 1.0f}};
+        cmd->begin_render_pass(pass);
+        cmd->set_pipeline(draw);
+        cmd->push(DrawPush{{0, 1, 0, 1}, tri_mem.descriptor, tri_mem.offset, 0.5f, 0});
+        cmd->draw_indirect(args, 16);
+        cmd->end_render_pass();
+        device->end_frame();
+    }
+    const auto values = as_u32(device->read_buffer(out));
+    GIANT_CHECK(values.size() == 128);
+    if (values.size() == 128) {
+        GIANT_CHECK(values[0] == 7 && values[63] == 7 + 126);
+        GIANT_CHECK(values[64] == 0 && values[127] == 0); // one group only
+    }
+    const auto pixels = device->read_texture(color);
+    GIANT_CHECK(pixels.size() == k_size * k_size * 4);
+    if (pixels.size() == k_size * k_size * 4) {
+        GIANT_CHECK(near(pixel(pixels, k_size, 2, 8), {0, 255, 0, 255}));
+        GIANT_CHECK(near(pixel(pixels, k_size, 13, 8), {0, 0, 0, 255}));
+    }
+    for (const PipelineHandle p : {fill, draw}) {
+        device->destroy(p);
+    }
+    device->destroy(args);
+    device->destroy(out);
+    device->destroy(color);
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
+GIANT_TEST("rhi: d3d12 mesh shaders draw directly and indirectly") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    if (!device->adapter().mesh_shaders) {
+        std::fprintf(stderr, "    skipped: %s has no mesh shaders\n", device->adapter().name.c_str());
+        return;
+    }
+    GraphicsPipelineDesc desc;
+    desc.geometry = GeometryStage::mesh;
+    desc.mesh = shaders::test_mesh_ms();
+    desc.pixel = shaders::test_mesh_ps();
+    desc.color_formats[0] = Format::rgba8_srgb;
+    desc.depth_format = Format::depth32_float;
+    desc.depth = DepthMode::test_write;
+    desc.cull = CullMode::back;
+    const PipelineHandle pipeline = device->create_pipeline(desc);
+    GIANT_CHECK(pipeline.valid());
+    constexpr u32 k_size = 16;
+    TextureDesc color_desc;
+    color_desc.width = k_size;
+    color_desc.height = k_size;
+    color_desc.format = Format::rgba8_srgb;
+    color_desc.usage = TextureUsage::render_target;
+    const TextureHandle color = device->create_texture(color_desc);
+    TextureDesc depth_desc = color_desc;
+    depth_desc.format = Format::depth32_float;
+    depth_desc.usage = TextureUsage::depth_target;
+    const TextureHandle depth = device->create_texture(depth_desc);
+    const std::array<u32, 3> arg_values{2, 1, 1}; // the top two of four strips
+    BufferDesc args_desc;
+    args_desc.size = 16;
+    args_desc.usage = BufferUsage::indirect;
+    const BufferHandle args = device->create_buffer(
+        args_desc, {reinterpret_cast<const u8*>(arg_values.data()), sizeof(arg_values)});
+
+    struct MeshPush {
+        float color[4];
+        u32 strips;
+        float depth;
+        u32 pad0;
+        u32 pad1;
+    };
+    CommandList* cmd = device->begin_frame(nullptr);
+    if (cmd != nullptr && pipeline.valid()) {
+        cmd->barrier(args, ResourceState::indirect_argument);
+        RenderPassDesc pass;
+        pass.colors[0] = {color, LoadOp::clear, {0.0f, 0.0f, 0.0f, 1.0f}};
+        pass.depth = {depth, LoadOp::clear, 0.0f};
+        cmd->begin_render_pass(pass);
+        cmd->set_pipeline(pipeline);
+        // All four strips green, then the top two red and nearer.
+        cmd->push(MeshPush{{0, 1, 0, 1}, 4, 0.25f, 0, 0});
+        cmd->dispatch_mesh(4);
+        cmd->push(MeshPush{{1, 0, 0, 1}, 4, 0.75f, 0, 0});
+        cmd->dispatch_mesh_indirect(args, 0);
+        cmd->end_render_pass();
+        device->end_frame();
+    }
+    const auto pixels = device->read_texture(color);
+    GIANT_CHECK(pixels.size() == k_size * k_size * 4);
+    if (pixels.size() == k_size * k_size * 4) {
+        GIANT_CHECK(near(pixel(pixels, k_size, 8, 2), {255, 0, 0, 255}));
+        GIANT_CHECK(near(pixel(pixels, k_size, 8, 13), {0, 255, 0, 255}));
+    }
+    GIANT_CHECK(device->last_frame_stats().draws == 2);
+    device->destroy(pipeline);
+    device->destroy(args);
     device->destroy(color);
     device->destroy(depth);
     GIANT_CHECK(!device->device_lost());

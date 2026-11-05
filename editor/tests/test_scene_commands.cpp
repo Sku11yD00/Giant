@@ -201,6 +201,14 @@ GIANT_TEST("editor: render settings are view state") {
     GIANT_CHECK(!f.run("set_render_settings", {{"lod_error_pixels", 0.0}}).ok); // below the minimum
     GIANT_CHECK(!f.run("set_render_settings", {{"debug_view", "wireframe"}}).ok);
     GIANT_CHECK(f.run("get_render_settings").value["lod_error_pixels"] == 4.0);
+    const auto culling = f.run("set_render_settings", {{"gpu_culling", false},
+                                                       {"occlusion_culling", false},
+                                                       {"mesh_shaders", false}});
+    GIANT_CHECK(culling.ok && culling.value["gpu_culling"] == false);
+    GIANT_CHECK(!f.state.render_settings.gpu_culling && !f.state.render_settings.occlusion_culling &&
+                !f.state.render_settings.mesh_shaders);
+    GIANT_CHECK(!f.run("set_render_settings", {{"gpu_culling", "yes"}}).ok);
+    GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("overflow"));
 }
 
 GIANT_TEST("editor: mesh paths have one spelling") {

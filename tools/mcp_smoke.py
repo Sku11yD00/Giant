@@ -85,11 +85,15 @@ def build_scene(tool, call, check):
     missing = call("tools/call", {"name": "set_entity", "arguments": {"id": 999999}})
     check(missing.get("isError") is True, "unknown id is a tool error")
 
+    # CPU culling gives exact counts on the frame itself (GPU counts arrive
+    # late, and the null backend runs no shaders).
+    tool("set_render_settings", {"gpu_culling": False})
     for _ in range(3):
         call("ping")  # let a frame render the scene
     info = tool("get_engine_info")
     check(info["last_frame"]["scene_instances"] == 3, f"3 instances drawn, got {info['last_frame']}")
-    check(info["last_frame"]["scene_draws"] == 3, "one draw per shape")
+    check(info["last_frame"]["scene_draws"] == 2, "one raster pass and one shading pass")
+    tool("set_render_settings", {"gpu_culling": True})
     shot = call("tools/call", {"name": "capture_screenshot",
                                "arguments": {"max_width": 800, "file_name": "mcp_scene"}})
     check(not shot.get("isError"), "scene screenshot taken")
@@ -186,12 +190,28 @@ def lod_gate(tool, call, check):
         rock = tool("create_entity", {"mesh": path, "scale": [10, 10, 10]})
         check(rock["shape"] == "mesh", "entity draws the mesh")
 
-        def triangles_from(distance):
+        def triangles_from(distance, frames=3):
             tool("set_camera", {"position": [0, 0, distance], "look_at": [0, 0, 0]})
-            for _ in range(3):
+            for _ in range(frames):
                 call("ping")  # let a frame render
             return tool("get_render_settings")["last_frame"]
 
+        backend = tool("get_engine_info")["backend"]
+        if backend != "null":
+            # GPU culling (the default): the same cut, counted on the GPU a
+            # few frames late. Occlusion off, so it matches the CPU's cut.
+            tool("set_render_settings", {"occlusion_culling": False})
+            gpu = triangles_from(9, frames=8)
+            tool("set_render_settings", {"gpu_culling": False})
+            cpu = triangles_from(9)
+            check(gpu["from_gpu"] and not gpu["overflow"], f"GPU counts arrive: {gpu}")
+            check(abs(gpu["triangles"] - cpu["triangles"]) <= cpu["triangles"] // 20,
+                  f"the GPU cut matches the CPU's: {gpu} vs {cpu}")
+            tool("set_render_settings", {"gpu_culling": True, "occlusion_culling": True})
+            occluded = triangles_from(9, frames=8)
+            check(0 < occluded["triangles"] <= gpu["triangles"],
+                  f"occlusion culling only removes: {occluded} vs {gpu}")
+        tool("set_render_settings", {"gpu_culling": False})  # exact counts, every backend
         near = triangles_from(9)
         mid = triangles_from(60)
         far = triangles_from(3000)
@@ -199,11 +219,12 @@ def lod_gate(tool, call, check):
               f"detail drops with distance: {near}, {mid}, {far}")
         check(near["triangles"] <= triangles, "never more than the file has")
         tool("set_camera", {"position": [0, 0, 60], "look_at": [0, 0, 0]})
-        tool("set_render_settings", {"debug_view": "lod_levels"})
+        tool("set_render_settings", {"debug_view": "lod_levels", "gpu_culling": True})
         shot = call("tools/call", {"name": "capture_screenshot",
                                    "arguments": {"max_width": 800, "file_name": "mcp_lod_levels"}})
         check(not shot.get("isError"), "LOD view screenshot taken")
-        tool("set_render_settings", {"debug_view": "lit", "lod_error_pixels": 1})
+        tool("set_render_settings", {"debug_view": "lit", "lod_error_pixels": 1,
+                                     "gpu_culling": True})
         scene_path = os.path.join(folder, "rock.scene.json")
         tool("save_scene", {"path": scene_path})
         tool("new_scene")

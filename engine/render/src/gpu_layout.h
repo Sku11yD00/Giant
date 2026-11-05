@@ -1,0 +1,211 @@
+// GPU data layouts shared with the shaders (shaders/common.slang and
+// shaders/cull.slang). Change both together; the static_asserts pin sizes.
+#pragma once
+
+#include "giant/core/types.h"
+
+namespace giant::render::gpu {
+
+// Frame constants: Frame in common.slang.
+struct FrameConstants {
+    float view_proj[16];      // column-major
+    float view_rows[12];      // 3 rows of float4
+    float prev_view_rows[12];
+    float planes[20];         // 5 planes
+    float camera_delta[4];    // xyz, w: last frame's HZB usable
+    float ray_x[4];
+    float ray_y[4];
+    float ray_z[4];
+    float sun_direction[4];
+    float sun_light[4];
+    float sky_light[4];
+    float ground_light[4];
+    float exposure;
+    u32 debug_view;
+    float threshold;
+    float pixels_per_unit;
+    float near_plane;
+    float width;
+    float height;
+    float p00;
+    float p11;
+    u32 hzb_width;
+    u32 hzb_height;
+    u32 hzb_mips;
+    u32 instance_count;
+    u32 occlusion;
+    u32 pad0;
+    u32 pad1;
+};
+static_assert(sizeof(FrameConstants) == 432);
+
+struct Instance {
+    float model[12];  // rows of the 3x4 model matrix (camera-relative)
+    float normal[12]; // rows of the normal matrix, w unused
+    float base_roughness[4];
+    float emissive_metallic[4];
+    u32 mesh;
+    float max_scale;
+    u32 pad[2];
+};
+static_assert(sizeof(Instance) == 144);
+
+struct MeshEntry {
+    u32 vertices;
+    u32 vertex_ids;
+    u32 triangles;
+    u32 clusters;
+    u32 groups;
+    u32 nodes;
+    u32 levels; // 0: removed
+    u32 pad;
+    float bounds[4];
+};
+static_assert(sizeof(MeshEntry) == 48);
+
+struct Cluster {
+    u32 first_vertex;
+    u32 vertex_count;
+    u32 first_triangle;
+    u32 triangle_count;
+    u32 group;
+    u32 refined; // k_no_group for original triangles
+    u32 level;
+    u32 pad;
+    float bounds[4];
+};
+static_assert(sizeof(Cluster) == 48);
+
+struct Group {
+    float bounds[4];
+    float error;
+    u32 first_cluster;
+    u32 cluster_count;
+    u32 depth;
+};
+static_assert(sizeof(Group) == 32);
+
+struct Node {
+    float bounds[4];
+    float error;
+    u32 group; // k_no_group for internal nodes
+    u32 child_offset;
+    u32 child_count;
+};
+static_assert(sizeof(Node) == 32);
+
+inline constexpr u32 k_no_group = 0xFFFF'FFFFu;
+
+// (instance, cluster) or (instance, node).
+struct Entry {
+    u32 instance;
+    u32 index;
+};
+static_assert(sizeof(Entry) == 8);
+
+// Counter slots (u32 each) in the counters buffer.
+inline constexpr u32 k_slot_zero = 0;
+inline constexpr u32 k_slot_visible = 1;
+inline constexpr u32 k_slot_visible_pass0 = 2;
+inline constexpr u32 k_slot_occluded_instances = 3;
+inline constexpr u32 k_slot_occluded_clusters = 4;
+inline constexpr u32 k_slot_overflow = 5;
+inline constexpr u32 k_slot_triangles = 6;
+inline constexpr u32 k_slot_instances = 7;
+// Items at tree level k of pass p: slot 8 + 25 p + k. A pass walks at most
+// k_max_tree_levels levels; the 25th slot takes the (empty) level below.
+inline constexpr u32 k_slot_levels = 8;
+inline constexpr u32 k_max_tree_levels = 24;
+inline constexpr u32 k_level_slots_per_pass = k_max_tree_levels + 1;
+inline constexpr u32 k_slot_range = 60; // base, count of the current raster pass
+inline constexpr u32 k_counter_slots = 64;
+inline constexpr u32 k_counter_bytes = k_counter_slots * 4;
+static_assert(k_slot_levels + 2 * k_level_slots_per_pass <= k_slot_range);
+
+inline constexpr u32 level_slot(u32 pass, u32 level) {
+    return k_slot_levels + pass * k_level_slots_per_pass + level;
+}
+
+inline constexpr u32 k_overflow_queue = 1;
+inline constexpr u32 k_overflow_visible = 2;
+inline constexpr u32 k_overflow_occluded_clusters = 4;
+inline constexpr u32 k_overflow_occluded_instances = 8;
+
+// Indirect argument offsets (bytes) in the args buffer.
+inline constexpr u32 k_args_traverse = 0;
+inline constexpr u32 k_args_instances = 16;
+inline constexpr u32 k_args_retest = 32;
+inline constexpr u32 k_args_raster = 48; // mesh dispatch (12 bytes), then a draw at +16
+inline constexpr u32 k_args_bytes = 96;
+
+struct CullPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 instances;
+    u32 instance_offset;
+    u32 meshes;
+    u32 mesh_offset;
+    u32 counters;
+    u32 queue_in;
+    u32 queue_out;
+    u32 visible;
+    u32 occluded_instances;
+    u32 occluded_clusters;
+    u32 hzb;
+    u32 args;
+    u32 pass;
+    u32 slot_in;
+    u32 slot_out;
+    u32 queue_capacity;
+    u32 visible_capacity;
+    u32 occluded_capacity;
+    u32 instance_capacity;
+    u32 mode;
+    u32 arg_offset;
+    u32 pad;
+};
+static_assert(sizeof(CullPush) == 96);
+
+struct HzbPush {
+    u32 depth;
+    u32 hzb;
+    u32 width;
+    u32 height;
+    u32 hzb_width;
+    u32 hzb_height;
+    u32 mip;
+    u32 pad;
+};
+static_assert(sizeof(HzbPush) == 32);
+
+struct RasterPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 instances;
+    u32 instance_offset;
+    u32 meshes;
+    u32 mesh_offset;
+    u32 visible;
+    u32 visible_offset;
+    u32 range;
+    u32 range_offset;
+    u32 pad[2];
+};
+static_assert(sizeof(RasterPush) == 48);
+
+struct ResolvePush {
+    float background[4];
+    u32 frame;
+    u32 frame_offset;
+    u32 instances;
+    u32 instance_offset;
+    u32 meshes;
+    u32 mesh_offset;
+    u32 visible;
+    u32 visible_offset;
+    u32 vis;
+    u32 pad[3];
+};
+static_assert(sizeof(ResolvePush) == 64);
+
+} // namespace giant::render::gpu

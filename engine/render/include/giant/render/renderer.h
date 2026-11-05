@@ -2,13 +2,16 @@
 // instances) into a lit image. It never sees the world or the editor, so it
 // can be swapped or tested on its own (docs/architecture.md).
 //
-// Every mesh is cluster LOD (geometry/clusters.h). Each frame the CPU picks,
-// per instance, the clusters whose detail is just under a pixel of error and
-// inside the view, and each mesh is one draw over its chosen clusters
-// (vertex pulling, 128 triangles per cluster), forward lit by a sun with
-// GGX specular and sky/ground ambient, then tone mapped. Part 3 moves the
-// choice to the GPU (culling, mesh shaders, a visibility buffer) behind the
-// same interface.
+// Every mesh is cluster LOD (geometry/clusters.h). Each frame the GPU picks,
+// per instance, the clusters whose detail is just under a pixel of error,
+// inside the view and not hidden behind what is already drawn (two-pass
+// occlusion culling against a depth pyramid), and draws them with mesh
+// shaders (or a vertex-shader fallback) into a visibility buffer: per pixel,
+// which triangle covers it. One full-screen pass then shades every pixel
+// once: a sun with GGX specular and sky/ground ambient, tone mapped.
+//
+// The CPU can pick the clusters instead (RenderSettings::gpu_culling off):
+// the same cut, for reference and tests, on any backend.
 #pragma once
 
 #include "giant/core/math.h"
@@ -21,6 +24,10 @@
 #include <vector>
 
 namespace giant::render {
+
+namespace gpu {
+struct MeshEntry; // src/gpu_layout.h
+}
 
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
@@ -73,6 +80,14 @@ struct RenderSettings {
     // covers at most this many pixels. Lower is sharper and slower.
     float lod_error_pixels = 1.0f;
     DebugView debug_view = DebugView::lit;
+    // Clusters are picked on the GPU (off: on the CPU, which also gives
+    // exact, same-frame stats; the GPU's arrive a frame or two later).
+    bool gpu_culling = true;
+    // GPU culling skips what is hidden behind nearer geometry.
+    bool occlusion_culling = true;
+    // Draw with mesh shaders where the GPU has them (off: the vertex
+    // shader fallback, as on GPUs without them).
+    bool mesh_shaders = true;
 };
 
 struct FrameInput {
@@ -83,10 +98,16 @@ struct FrameInput {
 };
 
 struct RenderStats {
-    u32 instances = 0; // with at least one cluster drawn this frame
-    u32 draws = 0;
+    u32 instances = 0; // with at least one cluster drawn (GPU culling: passing instance culling)
+    u32 draws = 0;     // draw calls this frame (raster passes and shading)
     u32 clusters = 0;
     u32 triangles = 0;
+    // GPU culling: the counts above come from the GPU, from a frame or two
+    // ago (they are read back once the GPU is done with that frame).
+    bool from_gpu = false;
+    u32 occluded_instances = 0; // hidden in the first pass (GPU, occlusion on)
+    u32 occluded_clusters = 0;
+    bool overflow = false; // a list was full: some geometry was dropped
 };
 
 class Renderer {
@@ -118,6 +139,9 @@ public:
     void render(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameInput& frame);
 
     const RenderStats& last_stats() const { return m_stats; }
+    // GPU culling: reads the newest GPU counts now. Only after
+    // Device::wait_idle (tests, screenshots), outside a frame.
+    void read_gpu_stats();
 
     // The matrix that takes camera-relative positions to clip space.
     static Mat4 view_projection(const View& view, float aspect);
@@ -127,34 +151,85 @@ public:
 
 private:
     struct Mesh {
-        geometry::ClusterMesh data; // the CPU copy picks the clusters
-        rhi::BufferHandle vertices; // 24-byte vertices
-        rhi::BufferHandle indices;  // u32, three per triangle, per cluster
-        rhi::BufferHandle clusters; // 16 bytes each: first index, triangles, level
+        geometry::ClusterMesh data; // the CPU copy (CPU culling, stats, editor)
+        rhi::BufferHandle vertices;   // 24-byte vertices
+        rhi::BufferHandle vertex_ids; // u32 per cluster vertex, into vertices
+        rhi::BufferHandle triangles;  // u32 per cluster triangle: 3 local indices
+        rhi::BufferHandle clusters;   // gpu::Cluster
+        rhi::BufferHandle groups;     // gpu::Group
+        rhi::BufferHandle nodes;      // gpu::Node
+        u32 tree_levels = 0;          // deepest node, plus one
         bool live = false;
     };
-    // One chosen cluster of one instance, as the shader reads it.
-    struct Entry {
-        u32 instance; // into this frame's instance list
-        u32 cluster;
+    // Buffers the GPU culling passes work in, made on first use.
+    struct CullBuffers {
+        rhi::BufferHandle counters;
+        rhi::BufferHandle args;
+        rhi::BufferHandle queues[2];
+        rhi::BufferHandle visible;
+        rhi::BufferHandle occluded_clusters;
+        rhi::BufferHandle occluded_instances;
+        u32 instance_capacity = 0;
+        // Counters copied back each frame, tagged with the device frame.
+        rhi::BufferHandle readback[3];
+        u64 readback_frame[3] = {~u64{0}, ~u64{0}, ~u64{0}};
     };
+    struct FrameData; // this frame's uploads and descriptors (renderer.cpp)
+
     bool init();
-    void ensure_depth(u32 width, u32 height);
+    bool ensure_targets(u32 width, u32 height);
+    bool ensure_cull_buffers(u32 instance_count);
     void destroy(Mesh& mesh);
+    void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height);
+    void cull_on_gpu(rhi::CommandList& cmd, const FrameData& data);
+    void raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bool gpu);
+    void build_hzb(rhi::CommandList& cmd);
+    void read_stats_slot(u32 slot);
 
     rhi::Device& m_device;
-    rhi::PipelineHandle m_pipeline;
+    // Pipelines.
+    rhi::PipelineHandle m_raster_mesh;   // invalid without mesh shaders
+    rhi::PipelineHandle m_raster_vertex;
+    rhi::PipelineHandle m_resolve;
+    rhi::PipelineHandle m_cull_reset;
+    rhi::PipelineHandle m_cull_prepare;
+    rhi::PipelineHandle m_cull_instances;
+    rhi::PipelineHandle m_cull_traverse;
+    rhi::PipelineHandle m_cull_retest;
+    rhi::PipelineHandle m_hzb_first;
+    rhi::PipelineHandle m_hzb_down;
+    // Targets, sized to the frame.
     rhi::TextureHandle m_depth;
-    u32 m_depth_width = 0;
-    u32 m_depth_height = 0;
+    rhi::TextureHandle m_vis; // visibility buffer (rg32_uint)
+    rhi::BufferHandle m_hzb;  // depth pyramid
+    u32 m_width = 0;
+    u32 m_height = 0;
+    u32 m_hzb_width = 0;
+    u32 m_hzb_height = 0;
+    u32 m_hzb_mips = 0;
+    // What last frame's HZB was built from, for the first occlusion pass.
+    bool m_hzb_valid = false;
+    DVec3 m_hzb_camera{};
+    float m_hzb_view_rows[12] = {};
+    float m_hzb_p00 = 0.0f;
+    float m_hzb_p11 = 0.0f;
+    float m_hzb_near = 0.0f;
+    CullBuffers m_cull;
+    bool m_overflow_logged = false;
+    bool m_cull_buffers_logged = false;
+    bool m_instances_logged = false;
+    bool m_cpu_clusters_logged = false;
+
     std::vector<Mesh> m_meshes;
     std::vector<MeshId> m_builtin; // by BuiltinMesh
     // Per-frame scratch, kept to avoid allocating every frame.
-    std::vector<u32> m_order;      // instances sorted by mesh
-    std::vector<u32> m_selected;   // clusters of one instance
-    std::vector<u32> m_drawn;      // instances (into frame.instances) with clusters
-    std::vector<Entry> m_entries;  // grouped by mesh
+    std::vector<u32> m_valid;    // instances (into frame.instances) with a live mesh
+    std::vector<u32> m_selected; // CPU culling: clusters of one instance
+    std::vector<u32> m_entries;  // CPU culling: (instance, cluster) pairs, flattened
+    std::vector<gpu::MeshEntry> m_table; // the mesh table
+    std::vector<bool> m_used;            // meshes drawn this frame
     RenderStats m_stats;
+    RenderStats m_gpu_stats; // newest read back
 };
 
 } // namespace giant::render

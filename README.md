@@ -40,6 +40,10 @@ Milestone **N1 Virtual geometry** (in progress):
   simplified level by level into a hierarchy, and drawn each frame at the
   detail that keeps the error under a pixel. Try it with the Scene panel's
   "+ Mesh" field, and the Engine panel's View menu (LOD levels) to see it work.
+- Part 3 (done): the detail choice moved to the GPU, with frustum and
+  two-pass occlusion culling (hidden geometry is skipped), mesh shaders
+  (with a vertex shader fallback) and a visibility buffer that shades each
+  pixel once. The Engine panel has switches for each and shows what was hidden.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
