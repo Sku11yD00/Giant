@@ -219,17 +219,37 @@ Done in N2 part 2:
   materials and cluster meshes: per brick, each instance over it adds the
   clusters of a LOD cut at half a voxel of error (so a dense mesh voxelizes
   from few triangles at coarse levels), skipping clusters whose bounds miss
-  the brick. It sees what changed by comparing instances with last frame's:
-  a few moved or added ones rebuild the bricks under where they were and
-  are; removals, material or mesh changes, or more than 32 changes rebuild
-  everything. Finding the bricks under a box and building them both run in
-  steps against `RenderSettings::voxel_ms_per_frame` (1 ms), coarse levels
-  first; until a brick is rebuilt the old one stays. Bricks live in a fixed
-  GPU pool (`RendererDesc::voxel_bricks`, 32768 = 66 MiB) with one u32 slot
-  table per level; changed bricks and tables are copied in the frame, with
-  no CPU wait. The gate scene (town and 10,000 trees) takes about 7,600
-  bricks and some 1.4 s of CPU time, spread over about 800 frames.
-- The voxels debug view marches each pixel's ray through the levels.
+  the brick. It keeps its own copy of the instances (bounds from the
+  meshes' cluster spheres, resolved colours) in a 32 m grid, and each frame
+  compares the frame's instances with it. A moved, changed, added or
+  removed instance (one contiguous run removed counts as removals) rebuilds
+  the bricks under where it was and is; a recoloured material or an added
+  or removed mesh counts as a change to the instances using it. More than
+  256 changes in a frame (or an eighth of the instances), a backlog of over
+  4,096, or any other removal rebuild every window, one rebuild at a time
+  (another waits for it rather than restarting it, so constant changes
+  still settle).
+- All the work is queues worked through under
+  `RenderSettings::voxel_ms_per_frame` (1 ms, at least one step and one
+  brick a frame): finding bricks in resumable steps (a time check every
+  256 marks), then building, coarse levels first, a few instances at a
+  time, so a coarse brick over thousands of instances spreads over frames.
+  Until a brick is rebuilt the old one stays; a slab that just came into
+  view reads "unbuilt" and the next coarser level stands in. Bricks live in
+  a fixed GPU pool (`RendererDesc::voxel_bricks`, 32768 = 66 MiB) with one
+  u32 slot table per level (only the changed range is copied, with no CPU
+  wait); bricks that do not fit wait for room (`missing`). `probe_voxels`
+  reads a CPU copy of the occupancy. The gate scene (town and 10,000
+  trees: 20,000 instances) takes about 7,600 bricks and some 1.5 s of CPU
+  time over about 1,500 frames; in release builds its frames stay under
+  about 2 ms of voxel work, even with every tree moving each frame, except
+  the first (copying the instances and opening every window, about 7 ms;
+  a teleport costs the same).
+- Known costs left: comparing the instances is a pass over all of them each
+  frame (about 0.2 ms for 20,000), and a full rebuild copies them all in one
+  frame; world streaming (N3) will hand over changes instead.
+- The voxels debug view marches each pixel's ray through the levels,
+  skipping empty space with per-level bounds and empty occupancy words.
 - Not yet: `world` owning edits (destruction carving it, N4); building on
   worker threads (with cell streaming, N3); textures (colour is the
   material's base colour); the far field, GI and reflections that read it

@@ -300,7 +300,8 @@ Json render_settings_json(const EditorState& state) {
                 {"streamed_in", s.streamed_in}, {"evicted", s.evicted}, {"waiting", s.waiting}}},
               {"voxels",
                {{"bricks", s.voxel_bricks}, {"capacity", s.voxel_capacity}, {"pending", s.voxel_pending},
-                {"built", s.voxel_built}, {"overflow", s.voxel_overflow}, {"cpu_ms", s.voxel_cpu_ms}}}}}};
+                {"built", s.voxel_built}, {"missing", s.voxel_missing}, {"overflow", s.voxel_overflow},
+                {"cpu_ms", s.voxel_cpu_ms}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -976,8 +977,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "streaming: GPU memory for cluster geometry (pool) and how many cluster groups are "
          "loaded; detail loads over a few frames as the camera moves (waiting > 0 meanwhile). "
          "voxels: the voxel copy of the scene around the camera (bricks of 8x8x8 voxels in the "
-         "GPU pool, of capacity; pending ones are still being built, a little CPU time each frame; "
-         "overflow means the pool is full).",
+         "GPU pool, of capacity; pending counts work still to do, a little CPU time each frame; "
+         "missing bricks did not fit in the pool and overflow means it is full).",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              return CommandResult::success(render_settings_json(state));
@@ -1024,6 +1025,28 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.voxel_world = args.value("voxel_world", r.voxel_world);
              r.voxel_ms_per_frame = args.value("voxel_ms_per_frame", r.voxel_ms_per_frame);
              return CommandResult::success(render_settings_json(state));
+         }});
+
+    add(registry,
+        {"probe_voxels",
+         "What the voxel world holds at a world position, per clipmap level (finest first): "
+         "outside (beyond the level's window), building (not built yet; the next coarser level "
+         "stands in), empty or solid. Wait for last_frame.voxels.pending to reach 0 (see "
+         "get_render_settings) for settled answers.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"position"}},
+              {"properties", {{"position", triple(-1e8, 1e8, "Metres [x, y, z].")}}}},
+         true,
+         [&state](const Json& args, CommandContext&) {
+             if (!state.probe_voxels) {
+                 return CommandResult::failure("no voxel world in this editor");
+             }
+             Json levels = Json::array();
+             for (const render::VoxelProbeLevel& l : state.probe_voxels(dvec3_from(args["position"]))) {
+                 levels.push_back({{"level", l.level}, {"voxel_size", l.voxel_size}, {"state", l.state}});
+             }
+             return CommandResult::success({{"levels", std::move(levels)}});
          }});
 
     add(registry,

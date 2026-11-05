@@ -50,8 +50,9 @@ public:
 
     // Moves every level's window to stay around `camera` and returns the
     // bricks that came into view (every window, the first time and after
-    // reset()). A window moves once the camera is more than a brick from
-    // its centre, so standing on a brick border does not refill slabs.
+    // reset()). On each axis a window moves once the camera's brick is two
+    // or more from where a centred window would put it, so standing on a
+    // brick border does not refill slabs.
     std::vector<BrickBox> recenter(const DVec3& camera);
     void reset() { m_placed = false; }
     bool placed() const { return m_placed; }

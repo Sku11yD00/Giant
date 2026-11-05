@@ -187,8 +187,18 @@ struct RenderStats {
     u32 voxel_capacity = 0;       // the pool's size, bricks
     u32 voxel_pending = 0;        // waiting to be built
     u32 voxel_built = 0;          // built this frame
-    bool voxel_overflow = false;  // the pool is full: some of it is missing
-    float voxel_cpu_ms = 0.0f;    // building bricks this frame
+    u32 voxel_missing = 0;        // bricks that did not fit in the pool (built as room frees up)
+    bool voxel_overflow = false;  // voxel_missing > 0: the pool is full
+    float voxel_cpu_ms = 0.0f;    // voxel work this frame
+};
+
+// What the voxel world holds at a point, on one clipmap level
+// (Renderer::probe_voxels): "outside" its window, "building" (not built
+// yet: the next coarser level stands in), "empty" or "solid".
+struct VoxelProbeLevel {
+    u32 level = 0;
+    double voxel_size = 0.0; // metres
+    const char* state = "outside";
 };
 
 struct RendererDesc {
@@ -232,6 +242,8 @@ public:
     void render(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameInput& frame);
 
     const RenderStats& last_stats() const { return m_stats; }
+    // The voxel world at a world position, finest level first.
+    std::vector<VoxelProbeLevel> probe_voxels(const DVec3& position) const;
     // GPU culling: reads the newest GPU counts now. Only after
     // Device::wait_idle (tests, screenshots), outside a frame.
     void read_gpu_stats();

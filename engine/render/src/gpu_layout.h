@@ -260,10 +260,14 @@ static_assert(sizeof(SmaaPush) == 48);
 
 // voxels.slang: one clipmap level, in the frame's levels upload.
 struct VoxelLevel {
-    float origin[4]; // xyz: the window's minimum corner, camera-relative; w: brick size (m)
-    i32 brick[4];    // xyz: the window's minimum brick (slots wrap on it); w: unused
+    float origin[4];   // xyz: the window's minimum corner, camera-relative; w: brick size (m)
+    i32 brick[4];      // xyz: the window's minimum brick (slots wrap on it); w: unused
+    // Bounds around every brick of the level (camera-relative; may be loose,
+    // never tight): rays that miss them skip the level. Empty: min > max.
+    float filled_min[4];
+    float filled_max[4];
 };
-static_assert(sizeof(VoxelLevel) == 32);
+static_assert(sizeof(VoxelLevel) == 64);
 
 // voxels.slang's VoxelPush (the voxel debug view).
 struct VoxelPush {
@@ -278,6 +282,7 @@ struct VoxelPush {
     float background[4];
 };
 static_assert(sizeof(VoxelPush) == 48);
-inline constexpr u32 k_no_brick = ~0u;
+inline constexpr u32 k_no_brick = ~0u;  // a slot with nothing in it
+inline constexpr u32 k_unbuilt = ~1u;   // a slot not built yet: use the next coarser level
 
 } // namespace giant::render::gpu

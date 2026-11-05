@@ -4,6 +4,7 @@
 #include "giant_test.h"
 
 #include <cmath>
+#include <limits>
 #include <set>
 #include <tuple>
 
@@ -11,6 +12,7 @@ using namespace giant;
 using namespace giant::voxel;
 
 namespace {
+const float k_nan = std::numeric_limits<float>::quiet_NaN();
 bool near(float a, float b, float eps) { return std::fabs(a - b) <= eps; }
 bool near(const Vec3& a, const Vec3& b, float eps) {
     return near(a.x, b.x, eps) && near(a.y, b.y, eps) && near(a.z, b.z, eps);
@@ -39,8 +41,11 @@ GIANT_TEST("voxel: colours and normals survive packing") {
     }
     // A zero (or NaN) normal packs as +Y; negative colours as black.
     GIANT_CHECK(near(unpack_normal(pack_voxel({}, {})), {0, 1, 0}, 1e-2f));
-    GIANT_CHECK(near(unpack_normal(pack_voxel({}, {NAN, 0, 0})), {0, 1, 0}, 1e-2f));
-    GIANT_CHECK(near(unpack_color(pack_voxel({-1, NAN, 2}, {0, 1, 0})), {0, 0, 1}, 1e-6f));
+    GIANT_CHECK(near(unpack_normal(pack_voxel({}, {k_nan, 0, 0})), {0, 1, 0}, 1e-2f));
+    GIANT_CHECK(near(unpack_color(pack_voxel({-1, k_nan, 2}, {0, 1, 0})), {0, 0, 1}, 1e-6f));
+    // A NaN in blue (the low bits) leaves the normal alone.
+    GIANT_CHECK(pack_voxel({1, 1, k_nan}, {0, 1, 0}) >> 16 == pack_voxel({1, 1, 0}, {0, 1, 0}) >> 16);
+    GIANT_CHECK(near(unpack_color(pack_voxel({1, 1, k_nan}, {0, 1, 0})), {1, 1, 0}, 1e-6f));
 }
 
 GIANT_TEST("voxel: the triangle-box test is exact on simple cases") {
@@ -93,7 +98,7 @@ GIANT_TEST("voxel: a triangle outside the brick, or with no area, adds nothing")
     GIANT_CHECK(b.add_triangle({10, 0, 0}, {11, 0, 0}, {10, 1, 0}, {1, 1, 1}) == 0);
     GIANT_CHECK(b.add_triangle({-3, 0, 0}, {-2, 0, 0}, {-3, 1, 0}, {1, 1, 1}) == 0);
     GIANT_CHECK(b.add_triangle({1, 1, 1}, {2, 2, 2}, {3, 3, 3}, {1, 1, 1}) == 0); // a line
-    GIANT_CHECK(b.add_triangle({NAN, 1, 1}, {2, 2, 2}, {3, 1, 3}, {1, 1, 1}) == 0);
+    GIANT_CHECK(b.add_triangle({k_nan, 1, 1}, {2, 2, 2}, {3, 1, 3}, {1, 1, 1}) == 0);
     GIANT_CHECK(b.empty() && b.build().empty());
 }
 
@@ -208,7 +213,7 @@ GIANT_TEST("voxel: moving the camera brings in exactly the new slabs") {
 
 GIANT_TEST("voxel: far and NaN positions do not overflow brick coordinates") {
     Clipmap clip;
-    const BrickCoord far = clip.brick_at(0, {1e300, -1e300, NAN});
+    const BrickCoord far = clip.brick_at(0, {1e300, -1e300, k_nan});
     GIANT_CHECK(far.x == 1 << 29 && far.y == -(1 << 29) && far.z == -(1 << 29));
     clip.recenter({1e300, 0, 0});
     GIANT_CHECK(clip.contains(0, clip.brick_at(0, {1e300, 0, 0})));

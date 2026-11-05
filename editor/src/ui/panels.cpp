@@ -581,7 +581,8 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::Text("Voxel world: %u of %u bricks, %u waiting (%.2f ms CPU)", stats.voxel_bricks,
                     stats.voxel_capacity, stats.voxel_pending, static_cast<double>(stats.voxel_cpu_ms));
         if (stats.voxel_overflow) {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Voxel brick pool full: some voxels missing");
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Voxel brick pool full: %u bricks missing",
+                               stats.voxel_missing);
         }
         ImGui::Text("Materials: %u shared, decals: %u in view", stats.materials, stats.decals);
         if (stats.decal_overflow) {

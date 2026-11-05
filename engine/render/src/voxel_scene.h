@@ -1,17 +1,32 @@
 // The voxel copy of the scene around the camera (the shared voxel world,
 // docs/architecture.md), kept on the GPU for far geometry and lighting.
 //
-// Each frame it moves the clipmap with the camera and works out which bricks
-// need building: those that came into view, and those under instances that
-// changed (moved, added, removed; materials or meshes changing rebuild
-// everything). A brick is built on the CPU from the meshes' clusters at a
-// detail matching its voxel size (a cut through the cluster LOD, so a
-// million-triangle mesh voxelizes from a few hundred triangles at 16 m
-// voxels), then copied into a fixed GPU pool. Building has a time budget per
-// frame, coarse levels first, so the whole view is covered roughly before
-// the near levels sharpen; until a brick is rebuilt, its old version stays.
+// It keeps its own copy of the instances it was built from (with their
+// bounds and resolved colours) in a coarse spatial grid, and each frame
+// compares the renderer's instances against it. What changed becomes work:
+// - the slabs the clipmap windows move into: their slots read "unbuilt"
+//   (the shaders fall back to the next coarser level there) until the
+//   instances over them are found and their bricks built;
+// - an instance that moved, changed, was added or removed: the bricks under
+//   where it was and where it is are built again;
+// - many changes at once (or a removal from the middle that is not one
+//   contiguous run) rebuild every window, never more than one at a time.
+// Everything is a queue worked through under a time budget per frame
+// (RenderSettings::voxel_ms_per_frame): finding bricks is split into
+// resumable steps, and bricks are built coarse levels first, so the view is
+// covered roughly before it sharpens; a coarse brick over thousands of
+// instances is built over several frames. Until a brick is rebuilt, its old
+// version stays.
 //
-// Built from plain renderer data: instances, materials and cluster meshes.
+// A brick is built on the CPU from the meshes' clusters at a detail matching
+// its voxel size (a cut through the cluster LOD, so a million-triangle mesh
+// voxelizes from a few hundred triangles at 16 m voxels), then copied into a
+// fixed GPU pool. When the pool is full, bricks that did not fit wait on a
+// retry list (VoxelStats::missing) and are built as room frees up.
+//
+// Known costs left: comparing the instances is a pass over all of them each
+// frame, and a full rebuild copies them all in one frame (fine for tens of
+// thousands; world streaming will hand over changes instead).
 #pragma once
 
 #include "giant/core/math.h"
@@ -22,10 +37,13 @@
 #include "giant/voxel/brick.h"
 #include "giant/voxel/clipmap.h"
 
+#include <array>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace giant::render {
@@ -37,16 +55,27 @@ struct VoxelLevel;
 struct VoxelStats {
     u32 bricks = 0;    // in the GPU pool
     u32 capacity = 0;  // the pool's size, bricks
-    u32 pending = 0;   // waiting to be built (bricks, plus regions not yet looked at)
+    u32 pending = 0;   // waiting: bricks to build, plus regions and changes not yet looked at
     u32 built = 0;     // built this frame (including ones that came out empty)
     u32 uploaded = 0;  // copied to the GPU this frame
-    bool overflow = false; // the pool is full: some bricks are missing
-    float cpu_ms = 0.0f;   // building this frame
+    u32 missing = 0;   // bricks that did not fit in the pool (waiting for room)
+    bool overflow = false; // missing > 0: the pool is full
+    float cpu_ms = 0.0f;   // voxel work this frame
 };
+
+// What the voxel world holds at a point, on one level.
+enum class VoxelProbe : u8 {
+    outside,  // not in the level's window
+    building, // in it, not built yet (the shaders use the next coarser level)
+    empty,    // the voxel there is empty
+    solid,    // the voxel there is filled
+};
+const char* to_string(VoxelProbe probe);
 
 class VoxelScene {
 public:
-    // A mesh by id, or null when it does not exist (any more).
+    // A mesh by id, or null when it does not exist (any more). Ids are never
+    // reused, and a mesh never changes once added.
     using MeshLookup = std::function<const geometry::ClusterMesh*(MeshId)>;
 
     VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity);
@@ -58,11 +87,14 @@ public:
     bool init();
 
     // Inside a frame, before anything reads the voxels. `meshes_version`
-    // changes whenever a mesh is added or removed. Builds for at most
-    // `budget_ms` (at least one brick, if any wait).
+    // changes whenever a mesh is added or removed. Works for about
+    // `budget_ms` (at least one step and one brick, if any wait).
     void update(rhi::CommandList& cmd, const DVec3& camera, std::span<const Instance> instances,
                 std::span<const Material> materials, u64 meshes_version, const MeshLookup& meshes,
                 float budget_ms);
+    // A frame without update() (the voxel world switched off): this
+    // frame's stats are zero, the bricks stay.
+    void idle();
 
     // Per level, for the shaders: `out` holds levels() entries.
     void write_levels(gpu::VoxelLevel* out, const DVec3& camera) const;
@@ -72,8 +104,11 @@ public:
     rhi::BufferHandle table() const { return m_table; }
     const VoxelStats& stats() const { return m_stats; }
 
-    // The pool index of a brick, or gpu::k_no_brick (tests, queries).
+    // The pool index of a brick, or gpu::k_no_brick (none, or not built yet).
     u32 brick_index(u32 level, const voxel::BrickCoord& brick) const;
+    // What level `level` holds at a world position (from a CPU copy of the
+    // occupancy; tests, the editor's probe_voxels).
+    VoxelProbe probe(u32 level, const DVec3& position) const;
 
     // The clusters of `mesh` whose error is at most `error` while their
     // group's is above it: one cut through its LOD covering the whole
@@ -81,9 +116,12 @@ public:
     static std::vector<u32> cut(const geometry::ClusterMesh& mesh, float error);
 
 private:
-    struct Box {
-        DVec3 min{};
-        DVec3 max{};
+    struct Box { // empty by default
+        DVec3 min{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(),
+                  std::numeric_limits<double>::infinity()};
+        DVec3 max{-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
+                  -std::numeric_limits<double>::infinity()};
+        bool empty() const { return !(min.x <= max.x && min.y <= max.y && min.z <= max.z); }
     };
     struct Key {
         u32 level = 0;
@@ -93,34 +131,87 @@ private:
     struct KeyHash {
         usize operator()(const Key& k) const;
     };
-    struct Pending {
-        std::vector<u32> instances; // into this frame's instances
-        u32 stamp = 0;              // the queue() call that last restarted the list
+    struct Cell {
+        i32 x = 0;
+        i32 y = 0;
+        i32 z = 0;
+        bool operator==(const Cell&) const = default;
+    };
+    struct CellHash {
+        usize operator()(const Cell& c) const;
+    };
+    // An instance as the bricks were (or are being) built from it.
+    struct Copy {
+        Instance instance;
+        Vec3 color{}; // its material's, resolved
+        Box box;      // world bounds (empty: no mesh)
+        bool large = false; // in m_large, not the grid
     };
     struct MeshCache {
-        const geometry::ClusterMesh* mesh = nullptr;
-        Vec3 min{}; // mesh-space bounds of its vertices
+        const geometry::ClusterMesh* mesh = nullptr; // null: missing
+        Vec3 min{}; // mesh-space bounds of its original clusters
         Vec3 max{};
         std::unordered_map<i32, std::vector<u32>> cuts; // by log2 of the error
     };
-
-    bool same_instance(const Instance& a, const Instance& b) const;
-    Box bounds_of(const Instance& in, const MeshLookup& meshes);
-    MeshCache* mesh_cache(MeshId id, const MeshLookup& meshes);
-    // A box whose bricks are to be found (queue()), a step at a time.
+    enum class JobKind : u8 {
+        find,    // mark the bricks under the instances over the box, then
+                 // empty the box's unbuilt slots nothing is over
+        present, // mark the box's bricks that are in the pool
+        all,     // mark every brick of the box
+    };
     struct Job {
         voxel::BrickBox box;
-        u32 next = 0;  // the next instance to look at
-        u32 stamp = 0; // marks the lists it restarted (0: not started)
+        JobKind kind = JobKind::find;
+        bool rebuild = false;   // part of a full rebuild
+        bool started = false;
+        voxel::BrickBox clip;   // box within the window when started (a move restarts it)
+        std::vector<u32> found; // find: instances over the clipped box
+        u32 next = 0;           // find: the next of found (found.size(): sweeping)
+        u64 cursor = 0;         // bricks done of the current instance, sweep or box
     };
-    // Finds the instances over each brick of the job's box, `count`
-    // instances at a time; true when done.
-    bool queue(Job& job, std::span<const Instance> instances, const MeshLookup& meshes, u32 count);
-    void add_job(const Box& box); // the bricks under a world box, every level
-    void evict_outside();
-    bool build(rhi::CommandList& cmd, const Key& key, const Pending& pending, std::span<const Instance> instances,
-               std::span<const Material> materials, const MeshLookup& meshes, bool& pool_writable);
-    void remove(u32 level, u32 slot);
+
+    MeshCache* mesh_cache(MeshId id, const MeshLookup& meshes);
+    Box bounds_of(const Instance& in, const MeshLookup& meshes);
+    Vec3 color_of(const Instance& in, std::span<const Material> materials) const;
+    bool differs(const Instance& in, std::span<const Material> materials, const Copy& copy) const;
+
+    // The grid of instance copies.
+    void grid_insert(u32 index);
+    void grid_erase(u32 index);
+    void grid_rebuild();
+    void find(const Box& box); // into m_found, each instance once
+
+    void see_changes(std::span<const Instance> instances, std::span<const Material> materials,
+                     u64 meshes_version, const MeshLookup& meshes);
+    void set_copy(u32 index, const Instance& in, std::span<const Material> materials, const MeshLookup& meshes);
+    void change(u32 index, const Instance& in, std::span<const Material> materials, const MeshLookup& meshes);
+    void copy_all(std::span<const Instance> instances, std::span<const Material> materials,
+                  const MeshLookup& meshes);
+    void remove_range(u32 first, u32 count);
+    void request_rebuild();
+    void push_rebuild();
+    void add_jobs(const Box& box, JobKind kind);
+    void enter(const voxel::BrickBox& box);
+
+    void mark(u32 level, const voxel::BrickCoord& brick);
+    bool pending(u32 level, const voxel::BrickCoord& brick) const;
+    // Works on the job until done (true) or out of time.
+    template <typename OutOfTime>
+    bool run_job(Job& job, const OutOfTime& out_of_time);
+    void job_done(const Job& job);
+
+    // Builds the brick under way (m_building), a few instances at a time
+    // until `out_of_time`: done (true), or more next frame (false).
+    template <typename OutOfTime>
+    bool build_step(const MeshLookup& meshes, const OutOfTime& out_of_time);
+    // Copies the finished brick to the pool; false if out of memory.
+    bool finish_build(rhi::CommandList& cmd, bool& pool_writable);
+    void touch_building(const Box& box); // a change there: the brick under way is built again after
+    void set_slot(u32 level, u32 slot, u32 value, const voxel::BrickCoord& brick);
+    void remove(u32 level, u32 slot, const voxel::BrickCoord& brick); // to k_no_brick, freeing its brick
+    void grow_filled(u32 level, const voxel::BrickCoord& brick);
+    void tighten_filled(u32 level);
+    void upload_tables(rhi::CommandList& cmd);
 
     rhi::Device& m_device;
     voxel::Clipmap m_clipmap;
@@ -128,29 +219,55 @@ private:
     rhi::BufferHandle m_pool;
     rhi::BufferHandle m_table;
 
-    // Per level and slot: the pool index there (or k_no_brick) and the
-    // brick it holds.
+    // Per level and slot: the pool index there (k_no_brick, k_unbuilt) and
+    // the brick it is for.
     std::vector<u32> m_slots;
     std::vector<voxel::BrickCoord> m_slot_bricks;
-    std::vector<bool> m_level_dirty;
-    std::vector<u32> m_free; // pool indices
+    std::vector<u32> m_dirty_lo; // per level: slots [lo, hi) to upload
+    std::vector<u32> m_dirty_hi;
+    std::vector<u32> m_unbuilt;  // per level: k_unbuilt slots
+    std::vector<voxel::BrickBox> m_filled; // per level: around its bricks
+    std::vector<bool> m_loose;   // per level: m_filled may be loose
+    std::vector<u32> m_free;     // pool indices
     u32 m_used = 0;
+    std::vector<std::array<u32, voxel::k_brick_voxels / 32>> m_occupancy; // per pool index (probe)
 
-    // Work: bricks to build, coarsest level first.
-    std::unordered_map<Key, Pending, KeyHash> m_pending;
-    std::vector<std::deque<Key>> m_order; // per level
-    // Boxes whose bricks are still to be found (queue()), oldest first.
+    // Work. Bricks to build, coarsest level first:
+    std::unordered_set<Key, KeyHash> m_pending;
+    std::vector<std::deque<Key>> m_order; // per level (may hold stale keys)
+    std::unordered_set<Key, KeyHash> m_retry; // did not fit in the pool
+    // Boxes whose bricks are still to be found or marked, oldest first:
     std::deque<Job> m_jobs;
-    u32 m_stamp = 0;
+    u32 m_rebuild_jobs = 0;    // of a full rebuild, still queued
+    bool m_rebuild_again = false;
+    // Changes not turned into jobs yet: where instances were (their bricks
+    // are built again) and which instances changed (the bricks where they
+    // are now are).
+    std::deque<Box> m_old;
+    std::unordered_set<u32> m_changed;
+    std::deque<u32> m_changed_order;
 
-    // What the bricks were built from, to see what changed.
-    std::vector<Instance> m_instances;
-    std::vector<Box> m_bounds;
-    u32 m_bounds_ready = 0; // m_bounds is worked out for instances below this
-    std::vector<Vec3> m_colors;
+    // What the bricks are built from.
+    std::vector<Copy> m_copies;
+    std::unordered_map<Cell, std::vector<u32>, CellHash> m_grid;
+    std::vector<u32> m_large; // instances spanning too many cells
+    std::vector<u32> m_seen;  // per copy: the find() that last saw it
+    u32 m_find_stamp = 0;
+    std::vector<u32> m_found;
     u64 m_meshes_version = ~u64{0};
     std::unordered_map<MeshId, MeshCache> m_meshes;
 
+    // The brick being built (a coarse one over thousands of instances
+    // takes several frames).
+    struct Building {
+        bool active = false;
+        Key key;
+        Box box;                // its world box
+        std::vector<u32> found; // instances over it when started
+        u32 next = 0;
+        bool again = false;     // something over it changed meanwhile
+    };
+    Building m_building;
     voxel::BrickBuilder m_builder;
     VoxelStats m_stats;
     bool m_overflow_logged = false;

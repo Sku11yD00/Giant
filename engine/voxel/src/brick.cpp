@@ -17,8 +17,9 @@ float sign_not_zero(float v) { return v < 0.0f ? -1.0f : 1.0f; }
 } // namespace
 
 u32 pack_voxel(const Vec3& color, const Vec3& normal) {
-    // NaN fails every comparison, so clamp it away through max first.
-    const auto root = [](float c) { return std::sqrt(std::max(c, 0.0f)); };
+    // std::max returns its first argument when a comparison fails, so a
+    // NaN colour comes out as 0.
+    const auto root = [](float c) { return std::sqrt(std::max(0.0f, c)); };
     const u32 rgb = to_bits(root(color.x), 31.0f) << 11 | to_bits(root(color.y), 63.0f) << 5 |
                     to_bits(root(color.z), 31.0f);
     Vec3 n = normalize_or_zero(normal);

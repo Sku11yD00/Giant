@@ -483,13 +483,13 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
         GIANT_CHECK(differing(culled) <= pixels.size() / 200); // nothing visible lost
         // The GPU timed each pass of the newest frame (read after the wait).
         const auto timings = device->gpu_timings();
-        GIANT_CHECK(timings.size() == 9); // streaming, 2 x (culling, raster, HZB), shading, AA
+        GIANT_CHECK(timings.size() == 10); // streaming, voxels, 2 x (culling, raster, HZB), shading, AA
         bool timed = true;
         for (const rhi::GpuTiming& t : timings) {
             timed = timed && t.ms >= 0.0f && t.ms <= device->gpu_frame_ms() + 1e-4f;
         }
         GIANT_CHECK(timed && device->gpu_frame_ms() > 0.0f);
-        GIANT_CHECK(timings.size() == 9 && timings[1].name == "culling" && timings[7].name == "shading");
+        GIANT_CHECK(timings.size() == 10 && timings[2].name == "culling" && timings[8].name == "shading");
     }
     // A glowing red decal stamped on the sphere's front, facing the camera
     // (its +Y turned to +Z), on the CPU and GPU paths alike.

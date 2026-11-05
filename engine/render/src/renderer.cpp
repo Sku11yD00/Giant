@@ -360,6 +360,14 @@ const geometry::ClusterMesh* Renderer::mesh(MeshId id) const {
     return id < m_meshes.size() && m_meshes[id].live ? &m_meshes[id].data : nullptr;
 }
 
+std::vector<VoxelProbeLevel> Renderer::probe_voxels(const DVec3& position) const {
+    std::vector<VoxelProbeLevel> out;
+    for (u32 level = 0; level < m_voxels->levels(); ++level) {
+        out.push_back({level, m_voxels->clipmap().voxel_size(level), to_string(m_voxels->probe(level, position))});
+    }
+    return out;
+}
+
 MeshId Renderer::builtin(BuiltinMesh mesh) const { return m_builtin[static_cast<usize>(mesh)]; }
 
 Mat4 Renderer::view_projection(const View& view, float aspect) {
@@ -820,6 +828,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_voxels->update(cmd, frame.view.position, frame.instances, frame.materials, m_meshes_version,
                          [this](MeshId id) { return mesh(id); }, std::clamp(settings.voxel_ms_per_frame, 0.0f, 1000.0f));
         cmd.end_timing();
+    } else {
+        m_voxels->idle();
     }
 
     // Instances with a live mesh.
@@ -1189,6 +1199,7 @@ void Renderer::copy_streaming_stats() {
     m_stats.voxel_capacity = v.capacity;
     m_stats.voxel_pending = v.pending;
     m_stats.voxel_built = v.built;
+    m_stats.voxel_missing = v.missing;
     m_stats.voxel_overflow = v.overflow;
     m_stats.voxel_cpu_ms = v.cpu_ms;
 }

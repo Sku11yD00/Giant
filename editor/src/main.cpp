@@ -280,6 +280,7 @@ int run(const Options& options) {
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
+    state.probe_voxels = [&renderer](const DVec3& p) { return renderer->probe_voxels(p); };
     ai::CommandRegistry commands;
     editor::register_editor_commands(commands, state);
 

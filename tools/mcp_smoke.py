@@ -300,7 +300,9 @@ def voxel_gate(tool, call, check):
                                    "scale": [4, 4, 4], "base_color": [0.9, 0.05, 0.05]})["id"]
     tool("set_camera", {"position": [0, 3, 2], "look_at": [0, 2, -10]})
     # Sanitizer builds build bricks some 30x slower: a bigger budget settles them in time.
-    tool("set_render_settings", {"debug_view": "voxels", "voxel_ms_per_frame": 50})
+    # The voxel view is only shown for the screenshots: on the software GPU its ray march
+    # takes long, and the voxel world builds whatever the view.
+    tool("set_render_settings", {"voxel_ms_per_frame": 50})
 
     def settle():
         for _ in range(60):
@@ -317,11 +319,23 @@ def voxel_gate(tool, call, check):
     check(voxels["cpu_ms"] < 100, f"building keeps near its budget, got {voxels}")
     built = voxels["bricks"]
 
+    def probe(position):  # the finest level holding the point
+        levels = tool("probe_voxels", {"position": position})["levels"]
+        return next((l["state"] for l in levels if l["state"] != "outside"), "outside")
+
+    # The block's +X face (x = 2) and the ground are solid voxels; inside the block is empty.
+    check(probe([2.05, 2.1, -10.1]) == "solid", "the block's side is in the voxel world")
+    check(probe([0.1, 0.05, 0.1]) == "solid", "the ground is in the voxel world")
+    check(probe([0.1, 2.1, -10.1]) == "empty", "the block is hollow (a shell of voxels)")
+
     def centre():
+        tool("set_render_settings", {"debug_view": "voxels"})
+        call("ping")
         shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 480}})
         image = [c for c in shot["content"] if c["type"] == "image"][0]
         width, height, pixels = decode_png(base64.b64decode(image["data"]))
         x, y = width // 2, height // 2
+        tool("set_render_settings", {"debug_view": "lit"})
         return pixels[(y * width + x) * 4:(y * width + x) * 4 + 3]
 
     real = tool("get_engine_info")["backend"] != "null"
@@ -333,10 +347,13 @@ def voxel_gate(tool, call, check):
     voxels = settle()
     check(voxels["pending"] == 0 and abs(voxels["bricks"] - built) <= built // 4,
           f"the moved block is rebuilt where it went, got {voxels} (was {built} bricks)")
+    check(probe([2.05, 2.1, -10.1]) == "empty", "the block's old place is empty")
+    check(probe([32.05, 2.1, -10.1]) == "solid", "the block is in the voxel world where it went")
+    check(probe([0.1, 0.05, 0.1]) == "solid", "the ground stayed")
     if real:
         r, g, b = centre()
         check(r - g < 30 and r - b < 30, f"the block's old place is no longer red, got {(r, g, b)}")
-    tool("set_render_settings", {"debug_view": "lit", "voxel_ms_per_frame": 1})
+    tool("set_render_settings", {"voxel_ms_per_frame": 1})
     tool("new_scene")
 
 

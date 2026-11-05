@@ -158,7 +158,7 @@ GIANT_TEST("voxel scene: moving, recolouring and removing rebuild what they touc
     GIANT_CHECK(!b.voxel_at({0.8, 1.0, 0.2}, packed));
     GIANT_CHECK(b.voxel_at({3.8, 1.0, 0.2}, packed));
     GIANT_CHECK(b.voxel_at({-2.5, 1.0, -3.0}, packed));
-    // A new material colour rebuilds everything.
+    // A new material colour rebuilds what uses it.
     b.materials = {Material{{0.1f, 0.1f, 0.9f}}};
     b.step();
     GIANT_CHECK(b.voxel_at({3.8, 1.0, 0.2}, packed));
@@ -179,27 +179,34 @@ GIANT_TEST("voxel scene: building keeps to its budget and coarse levels go first
         cube.position = {static_cast<double>(i) * 2.5 - 6.0, 1.1, 0.0};
         b.instances.push_back(cube);
     }
-    // A zero budget still looks at one level's window and builds one brick
-    // a frame (two levels: two frames until every brick is known).
+    // A zero budget still makes progress: one step of finding bricks and
+    // one brick a frame, coarse level first; the fine level reads
+    // "building" until its bricks are done (the coarse one stands in).
+    const DVec3 face{-5.5, 1.0, 0.0};
     b.step(0.0f);
     GIANT_CHECK(b.voxels->stats().built == 1);
-    b.step(0.0f);
-    GIANT_CHECK(b.voxels->stats().built == 1);
-    const u32 waiting = b.voxels->stats().pending;
-    GIANT_CHECK(waiting > 1);
-    b.step(0.0f);
-    GIANT_CHECK(b.voxels->stats().built == 1 && b.voxels->stats().pending == waiting - 1);
-    // The first bricks built are level 1's (coarse first).
+    GIANT_CHECK(b.voxels->stats().pending > 1);
+    GIANT_CHECK(b.voxels->probe(0, face) == VoxelProbe::building);
     const voxel::BrickCoord coarse = b.voxels->clipmap().brick_at(1, {-6.0, 1.1, 0.0});
     const voxel::BrickCoord fine = b.voxels->clipmap().brick_at(0, {-6.0, 1.1, 0.0});
     GIANT_CHECK(b.voxels->brick_index(0, fine) == gpu::k_no_brick);
-    (void)coarse;
-    while (b.voxels->stats().pending > 0) b.step(0.0f);
+    bool at_most_one = true;
+    int frames = 0;
+    while (b.voxels->stats().pending > 0 && frames < 2000) {
+        b.step(0.0f);
+        at_most_one = at_most_one && b.voxels->stats().built <= 1;
+        ++frames;
+    }
+    GIANT_CHECK(at_most_one);
+    GIANT_CHECK(b.voxels->stats().pending == 0);
     GIANT_CHECK(b.voxels->brick_index(0, fine) != gpu::k_no_brick);
     GIANT_CHECK(b.voxels->brick_index(1, coarse) != gpu::k_no_brick);
+    GIANT_CHECK(b.voxels->probe(0, face) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {-6.0, 1.1, 0.0}) == VoxelProbe::empty); // inside the cube
+    GIANT_CHECK(b.voxels->probe(0, {500.0, 1.0, 0.0}) == VoxelProbe::outside);
 }
 
-GIANT_TEST("voxel scene: a full pool says so and keeps what it has") {
+GIANT_TEST("voxel scene: a full pool says so, keeps what it has and fills as room frees up") {
     Bench b(3);
     GIANT_CHECK(b.voxels->init());
     Instance ground;
@@ -207,8 +214,91 @@ GIANT_TEST("voxel scene: a full pool says so and keeps what it has") {
     ground.scale = {40.0f, 0.1f, 40.0f};
     b.instances = {ground};
     b.step();
-    GIANT_CHECK(b.voxels->stats().overflow);
+    GIANT_CHECK(b.voxels->stats().overflow && b.voxels->stats().missing > 0);
     GIANT_CHECK(b.voxels->stats().bricks == 3 && b.voxels->stats().capacity == 3);
+    b.step();
+    GIANT_CHECK(b.voxels->stats().overflow); // lasts while bricks are missing
+    // The ground goes and a small cube comes (one brick on each level):
+    // room for it, nothing missing.
+    Instance cube;
+    cube.mesh = 0;
+    cube.position = {1.0, 1.1, 1.0};
+    b.instances = {cube};
+    for (int i = 0; i < 100 && (b.voxels->stats().pending > 0 || b.voxels->stats().missing > 0); ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(!b.voxels->stats().overflow && b.voxels->stats().missing == 0);
+    u32 packed = 0;
+    GIANT_CHECK(b.voxel_at({1.5, 1.0, 1.0}, packed));
+    GIANT_CHECK(b.voxels->stats().bricks == 2);
+}
+
+GIANT_TEST("voxel scene: instances moving every frame never stall the rest") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    Instance cube;
+    cube.mesh = 0;
+    cube.position = {0.3, 1.1, 0.2};
+    b.instances = {cube, cube};
+    b.instances[1].position = {-3.0, 1.1, -3.0};
+    b.step();
+    for (int i = 0; i < 60; ++i) {
+        b.instances[0].position.x = 0.3 + 0.05 * i;
+        b.step(0.2f);
+    }
+    for (int i = 0; i < 200 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    u32 packed = 0;
+    const double x = b.instances[0].position.x;
+    GIANT_CHECK(b.voxel_at({x + 0.5, 1.0, 0.2}, packed));  // where it ended up
+    GIANT_CHECK(!b.voxel_at({0.8, 1.0, 0.2}, packed));     // not where it started
+    GIANT_CHECK(b.voxel_at({-2.5, 1.0, -3.0}, packed));    // the other one, untouched
+}
+
+GIANT_TEST("voxel scene: many changes at once rebuild everything, and it settles") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    for (int i = 0; i < 400; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        cube.scale = {0.2f, 0.2f, 0.2f};
+        cube.position = {static_cast<double>(i % 20) * 0.7 - 7.0, 1.1, static_cast<double>(i / 20) * 0.7 - 7.0};
+        b.instances.push_back(cube);
+    }
+    b.step();
+    // Every one moves up, every frame for a while (a rebuild at a time).
+    for (int f = 0; f < 10; ++f) {
+        for (Instance& in : b.instances) in.position.y += 0.1;
+        b.step(0.5f);
+    }
+    for (int i = 0; i < 500 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    const double y = b.instances[0].position.y;
+    GIANT_CHECK(b.voxels->probe(0, {-7.0, y + 0.1, -7.0}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -7.0}) == VoxelProbe::empty);
+}
+
+GIANT_TEST("voxel scene: removing one from the middle keeps the rest") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    Instance cube;
+    cube.mesh = 0;
+    b.instances = {cube, cube, cube};
+    b.instances[0].position = {-3.0, 1.1, 0.0};
+    b.instances[1].position = {0.0, 1.1, 0.0};
+    b.instances[2].position = {3.0, 1.1, 0.0};
+    b.step();
+    b.instances.erase(b.instances.begin() + 1);
+    b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    u32 packed = 0;
+    GIANT_CHECK(b.voxel_at({-2.5, 1.0, 0.0}, packed));
+    GIANT_CHECK(!b.voxel_at({0.5, 1.0, 0.0}, packed));
+    GIANT_CHECK(b.voxel_at({3.5, 1.0, 0.0}, packed));
+    // Moving the last one now (its index shifted) still finds it.
+    b.instances[1].position = {3.0, 4.1, 0.0};
+    b.step();
+    GIANT_CHECK(!b.voxel_at({3.5, 1.0, 0.0}, packed));
+    GIANT_CHECK(b.voxel_at({3.5, 4.0, 0.0}, packed));
 }
 
 GIANT_TEST("voxel scene: bricks left behind by the camera are dropped, new ones built") {
@@ -225,7 +315,9 @@ GIANT_TEST("voxel scene: bricks left behind by the camera are dropped, new ones 
     const voxel::BrickCoord start = b.voxels->clipmap().brick_at(0, {-7.0, -0.05, 0.0});
     GIANT_CHECK(b.voxels->brick_index(0, start) != gpu::k_no_brick);
     b.camera = {40.0, 1.0, 0.0};
-    b.step();
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->probe(0, {40.0, -0.05, 0.0}) == VoxelProbe::building); // the coarse level stands in
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step(0.0f);
     GIANT_CHECK(b.voxels->stats().pending == 0);
     GIANT_CHECK(b.voxels->brick_index(0, start) == gpu::k_no_brick);
     GIANT_CHECK(b.voxels->brick_index(0, b.voxels->clipmap().brick_at(0, {40.0, -0.05, 0.0})) != gpu::k_no_brick);
