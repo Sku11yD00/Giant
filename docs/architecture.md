@@ -8,7 +8,7 @@ editor      panels, play-in-editor, undo; uses everything below
 ai          command layer, MCP server, rule checks
 sim world   giants, destruction, NPCs, animation | cells, streaming, landscape, scatter, weather
 render      virtual geometry, voxel world, GI, materials, hair, clouds
-rhi geometry thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only)
+rhi geometry voxel  thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only) | voxel bricks, clipmap
 platform    windows, input, files (SDL3 underneath)
 core        jobs, memory, double-precision math, logging, reflection, text formats
 ```
@@ -23,8 +23,9 @@ This table is the source of truth for `tools/check_architecture.py`.
 | platform | core |
 | rhi | core |
 | geometry | core |
-| render | core, rhi, geometry |
-| world | core |
+| voxel | core |
+| render | core, rhi, geometry, voxel |
+| world | core, voxel |
 | sim | core, world |
 | script | core, world, sim |
 | ai | core, platform, rhi, geometry, render, world, sim, script |
@@ -202,6 +203,37 @@ One sparse voxel copy of the world (brick map in camera-centred clipmaps) is
 used for far geometry, global illumination, rain and snow occlusion, NPC sight
 lines and far-ring destruction. It is owned by `world` (edits) and mirrored on
 the GPU by `render` (drawing and lighting).
+
+Done in N2 part 2:
+
+- `engine/voxel` holds the plain-data pieces: bricks of 8x8x8 voxels (an
+  occupancy bit per voxel, then colour and normal packed in one u32; 2112
+  bytes, the GPU's layout too), a conservative triangle-box test to
+  voxelize surfaces without holes, and the clipmap. Level 0 has 0.25 m
+  voxels; each of the 9 levels doubles them, so level 8 (64 m voxels)
+  reaches about 8 km out. Each level is a window of 32 bricks per axis,
+  moved in whole bricks once the camera is more than a brick from its
+  centre; a brick's slot in its level's table is its coordinate modulo 32,
+  so moving only fills the slabs that came into view.
+- `render` builds it (src/voxel_scene.h) from the frame's instances,
+  materials and cluster meshes: per brick, each instance over it adds the
+  clusters of a LOD cut at half a voxel of error (so a dense mesh voxelizes
+  from few triangles at coarse levels), skipping clusters whose bounds miss
+  the brick. It sees what changed by comparing instances with last frame's:
+  a few moved or added ones rebuild the bricks under where they were and
+  are; removals, material or mesh changes, or more than 32 changes rebuild
+  everything. Finding the bricks under a box and building them both run in
+  steps against `RenderSettings::voxel_ms_per_frame` (1 ms), coarse levels
+  first; until a brick is rebuilt the old one stays. Bricks live in a fixed
+  GPU pool (`RendererDesc::voxel_bricks`, 32768 = 66 MiB) with one u32 slot
+  table per level; changed bricks and tables are copied in the frame, with
+  no CPU wait. The gate scene (town and 10,000 trees) takes about 7,600
+  bricks and some 1.4 s of CPU time, spread over about 800 frames.
+- The voxels debug view marches each pixel's ray through the levels.
+- Not yet: `world` owning edits (destruction carving it, N4); building on
+  worker threads (with cell streaming, N3); textures (colour is the
+  material's base colour); the far field, GI and reflections that read it
+  (parts 3 and 5).
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 

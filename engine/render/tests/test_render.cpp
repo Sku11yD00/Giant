@@ -284,13 +284,13 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     };
     frame.settings.gpu_culling = false;
     s.draw(frame);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "raster", "shading", "anti-aliasing"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "raster", "shading", "anti-aliasing"}));
     frame.settings.gpu_culling = true;
     frame.settings.occlusion_culling = true;
     frame.settings.antialiasing = false;
     s.draw(frame);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "culling", "raster", "HZB", "culling", "raster",
-                                                     "HZB", "shading"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "culling", "raster", "HZB", "culling",
+                                                     "raster", "HZB", "shading"}));
 }
 
 GIANT_TEST("render: many meshes added in one frame draw once their coarsest levels are in") {

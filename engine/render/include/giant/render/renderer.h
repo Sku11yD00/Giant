@@ -25,6 +25,7 @@
 #include "giant/core/types.h"
 #include "giant/geometry/clusters.h"
 #include "giant/rhi/rhi.h"
+#include "giant/voxel/clipmap.h"
 
 #include <memory>
 #include <span>
@@ -37,6 +38,7 @@ struct MeshEntry; // src/gpu_layout.h
 struct Material;
 }
 class GeometryStreamer; // src/streaming.h
+class VoxelScene;       // src/voxel_scene.h
 struct DecalBins;       // src/decals.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
@@ -117,6 +119,7 @@ enum class DebugView : u32 {
     clusters,   // each cluster in its own colour
     lod_levels, // colour by level: 0 (original triangles) is red, then yellow, green, cyan...
     triangles,  // each triangle in its own colour
+    voxels,     // the voxel copy of the scene (RenderSettings::voxel_world), lit simply
 };
 
 struct RenderSettings {
@@ -138,6 +141,13 @@ struct RenderSettings {
     // Widens shiny highlights where the surface curves faster than a pixel
     // can show, so they do not sparkle or crawl.
     bool specular_antialiasing = true;
+    // Keeps the voxel copy of the scene around the camera up to date (the
+    // shared voxel world: far geometry and lighting build on it). Off, it
+    // stays as it is.
+    bool voxel_world = true;
+    // CPU time per frame for building voxel bricks (at least one is built
+    // when any wait); the rest wait for the next frame.
+    float voxel_ms_per_frame = 1.0f;
 };
 
 struct FrameInput {
@@ -172,6 +182,13 @@ struct RenderStats {
     u32 streamed_in = 0;     // groups loaded this frame
     u32 evicted = 0;         // groups dropped this frame to make room
     u32 waiting = 0;         // groups asked for but not loaded yet
+    // The voxel world (this frame, on the CPU).
+    u32 voxel_bricks = 0;         // in the GPU pool
+    u32 voxel_capacity = 0;       // the pool's size, bricks
+    u32 voxel_pending = 0;        // waiting to be built
+    u32 voxel_built = 0;          // built this frame
+    bool voxel_overflow = false;  // the pool is full: some of it is missing
+    float voxel_cpu_ms = 0.0f;    // building bricks this frame
 };
 
 struct RendererDesc {
@@ -180,6 +197,10 @@ struct RendererDesc {
     u64 geometry_pool_bytes = 256ull << 20;
     // At most this much is loaded per frame (the rest waits a frame).
     u64 stream_bytes_per_frame = 32ull << 20;
+    // The voxel world: its levels, and GPU memory for its bricks (2112
+    // bytes each; the default is 66 MiB).
+    voxel::ClipmapDesc voxel_clipmap{};
+    u32 voxel_bricks = 32768;
 };
 
 class Renderer {
@@ -249,18 +270,23 @@ private:
     bool ensure_targets(u32 width, u32 height);
     bool ensure_cull_buffers(u32 instance_count);
     void destroy(Mesh& mesh);
+    void draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data, const DVec3& camera,
+                     const Vec3& background); // the voxel debug view, in place of shading
     void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number);
     void cull_on_gpu(rhi::CommandList& cmd, const FrameData& data);
     void raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bool gpu);
     void build_hzb(rhi::CommandList& cmd);
     void smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3& background); // after shading, into target
     void read_stats_slot(u32 slot);
-    void copy_streaming_stats();
+    void copy_streaming_stats(); // and the voxel world's
+    void finish_stats(const FrameData& data);
 
     rhi::Device& m_device;
     RendererDesc m_desc;
     std::unique_ptr<GeometryStreamer> m_streamer;
     std::unique_ptr<DecalBins> m_decal_bins; // this frame's, reused
+    std::unique_ptr<VoxelScene> m_voxels;
+    u64 m_meshes_version = 0; // changes on every add_mesh and remove_mesh
     u32 m_request_count = 0; // GPU streaming requests in the slot read last
     u64 m_requests_taken = ~u64{0}; // the frame whose requests were taken last
     // Pipelines.
@@ -277,6 +303,7 @@ private:
     rhi::PipelineHandle m_smaa_edges;
     rhi::PipelineHandle m_smaa_weights;
     rhi::PipelineHandle m_smaa_blend;
+    rhi::PipelineHandle m_voxel_view;
     rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables
     rhi::TextureHandle m_smaa_search;
     // Targets, sized to the frame.

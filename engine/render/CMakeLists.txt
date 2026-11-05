@@ -4,7 +4,8 @@ giant_module(render
     src/decals.cpp
     src/streaming.cpp
     src/smaa.cpp
-  DEPENDS core rhi geometry
+    src/voxel_scene.cpp
+  DEPENDS core rhi geometry voxel
 )
 giant_shaders(render
   SHADERS
@@ -24,6 +25,8 @@ giant_shaders(render
     shaders/smaa.slang:ps_edges:pixel:smaa_edges_ps
     shaders/smaa.slang:ps_weights:pixel:smaa_weights_ps
     shaders/smaa.slang:ps_blend:pixel:smaa_blend_ps
+    shaders/voxels.slang:vs_main:vertex:voxels_vs
+    shaders/voxels.slang:ps_main:pixel:voxels_ps
 )
 # SMAA's precomputed area and search tables (headers only).
 target_link_libraries(giant_render PRIVATE third_party::smaa)
@@ -33,6 +36,7 @@ giant_module_tests(render
     tests/test_render.cpp
     tests/test_decals.cpp
     tests/test_streaming.cpp
+    tests/test_voxel_scene.cpp
 )
 if(GIANT_BUILD_TESTS)
   # The streaming tests check the module's own streamer directly.

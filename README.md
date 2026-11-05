@@ -79,6 +79,14 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   frame upload all of it. The GPU now times its own passes (streaming,
   culling, raster, depth pyramid, shading, anti-aliasing, UI); the Engine panel and
   `get_engine_info` show the times.
+- Part 2 (done): the voxel world. The scene is kept as a voxel copy around
+  the camera: 0.25 m voxels close up, doubling with each of 9 levels out to
+  64 m voxels about 8 km away, built from the meshes and kits (from coarse
+  versions of dense meshes far out) and moved with the camera a slab at a
+  time. Editing the scene rebuilds only what changed, and building takes
+  about 1 ms of CPU a frame, so it never causes a hitch. The Engine panel's
+  "Voxels" view (or `set_render_settings` `debug_view` `voxels`) shows it.
+  It is what the far view, lighting and weather of the next parts read.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
@@ -115,6 +123,7 @@ the modules it is allowed to (CI runs it on every push).
 | `engine/core` | Memory, threads, jobs, math (double precision), logging, reflection, file formats |
 | `engine/platform` | Windows, input and files, on SDL3 |
 | `engine/rhi` | Thin render layer, D3D12 backend first |
+| `engine/voxel` | Voxel bricks, voxelizing triangles, the camera-centred clipmap (plain data) |
 | `engine/render` | Virtual geometry, voxel world, GI, shadows, materials, hair, sky and clouds |
 | `engine/world` | Cells, streaming, landscape, scatter, weather simulation |
 | `engine/sim` | Physics glue (Jolt), destruction, giants, animation, NPC simulation, navigation |

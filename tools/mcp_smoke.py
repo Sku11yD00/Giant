@@ -290,6 +290,56 @@ def kit_gate(tool, call, check):
     tool("new_scene")
 
 
+def voxel_gate(tool, call, check):
+    """N2 part 2: the voxel copy of the scene builds around the camera, follows edits and
+    shows in the voxel view."""
+    tool("new_scene")
+    tool("create_entity", {"name": "Ground", "shape": "plane", "scale": [400, 1, 400],
+                           "base_color": [0.3, 0.3, 0.3], "roughness": 0.9})
+    block = tool("create_entity", {"name": "Block", "shape": "cube", "position": [0, 2, -10],
+                                   "scale": [4, 4, 4], "base_color": [0.9, 0.05, 0.05]})["id"]
+    tool("set_camera", {"position": [0, 3, 2], "look_at": [0, 2, -10]})
+    # Sanitizer builds build bricks some 30x slower: a bigger budget settles them in time.
+    tool("set_render_settings", {"debug_view": "voxels", "voxel_ms_per_frame": 50})
+
+    def settle():
+        for _ in range(60):
+            for _ in range(10):
+                call("ping")
+            voxels = tool("get_render_settings")["last_frame"]["voxels"]
+            if voxels["pending"] == 0:
+                return voxels
+        return voxels
+
+    voxels = settle()
+    check(voxels["pending"] == 0 and voxels["bricks"] > 0 and not voxels["overflow"],
+          f"the voxel world is built, got {voxels}")
+    check(voxels["cpu_ms"] < 100, f"building keeps near its budget, got {voxels}")
+    built = voxels["bricks"]
+
+    def centre():
+        shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 480}})
+        image = [c for c in shot["content"] if c["type"] == "image"][0]
+        width, height, pixels = decode_png(base64.b64decode(image["data"]))
+        x, y = width // 2, height // 2
+        return pixels[(y * width + x) * 4:(y * width + x) * 4 + 3]
+
+    real = tool("get_engine_info")["backend"] != "null"
+    if real:
+        r, g, b = centre()
+        check(r > 120 and r - g > 50 and r - b > 50, f"the voxel view shows the red block, got {(r, g, b)}")
+    # Moving the block rebuilds only around it; the view follows.
+    tool("set_entity", {"id": block, "position": [30, 2, -10]})
+    voxels = settle()
+    check(voxels["pending"] == 0 and abs(voxels["bricks"] - built) <= built // 4,
+          f"the moved block is rebuilt where it went, got {voxels} (was {built} bricks)")
+    if real:
+        r, g, b = centre()
+        check(r - g < 30 and r - b < 30, f"the block's old place is no longer red, got {(r, g, b)}")
+    tool("set_render_settings", {"debug_view": "lit", "voxel_ms_per_frame": 1})
+    tool("new_scene")
+
+
 def n1_gate(tool, call, check):
     """N1 part 6, the N1 gate scene (tools/n1_gate.py measures its speed on a real GPU): a
     kit-built town and 10,000 trees in a fixed number of draws, with every bit of detail the
@@ -432,6 +482,7 @@ def main() -> int:
         build_scene(tool, call, check)
         lod_gate(tool, call, check)
         kit_gate(tool, call, check)
+        voxel_gate(tool, call, check)
         n1_gate(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")

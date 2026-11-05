@@ -258,4 +258,26 @@ struct SmaaPush {
 };
 static_assert(sizeof(SmaaPush) == 48);
 
+// voxels.slang: one clipmap level, in the frame's levels upload.
+struct VoxelLevel {
+    float origin[4]; // xyz: the window's minimum corner, camera-relative; w: brick size (m)
+    i32 brick[4];    // xyz: the window's minimum brick (slots wrap on it); w: unused
+};
+static_assert(sizeof(VoxelLevel) == 32);
+
+// voxels.slang's VoxelPush (the voxel debug view).
+struct VoxelPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 pool;  // read descriptor of the brick pool (voxel::Brick each)
+    u32 table; // read descriptor of the slot tables (u32 brick per slot, level after level)
+    u32 levels; // VoxelLevel per level
+    u32 levels_offset;
+    u32 level_count;
+    u32 bricks_per_axis;
+    float background[4];
+};
+static_assert(sizeof(VoxelPush) == 48);
+inline constexpr u32 k_no_brick = ~0u;
+
 } // namespace giant::render::gpu
