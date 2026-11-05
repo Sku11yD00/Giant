@@ -467,6 +467,14 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         const render::RenderStats& stats = m_state.scene_stats;
         ImGui::Text("Scene: %u instances in %u draws", stats.instances, stats.draws);
         ImGui::Text("Clusters: %u, triangles: %u", stats.clusters, stats.triangles);
+        if (stats.from_gpu) {
+            ImGui::Text("Occluded: %u instances, %u clusters", stats.occluded_instances,
+                        stats.occluded_clusters);
+            if (stats.overflow) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
+                                   "GPU lists full: some geometry dropped");
+            }
+        }
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),
                     m_state.window->pixel_height());
@@ -482,6 +490,22 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::SliderFloat("LOD error (px)", &error, 0.1f, 16.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
             run("set_render_settings", {{"lod_error_pixels", std::clamp(error, 0.1f, 64.0f)}});
         }
+        bool gpu = r.gpu_culling;
+        if (ImGui::Checkbox("GPU culling", &gpu)) {
+            run("set_render_settings", {{"gpu_culling", gpu}});
+        }
+        ImGui::BeginDisabled(!r.gpu_culling);
+        bool occlusion = r.occlusion_culling;
+        if (ImGui::Checkbox("Occlusion culling", &occlusion)) {
+            run("set_render_settings", {{"occlusion_culling", occlusion}});
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(!adapter.mesh_shaders);
+        bool mesh = r.mesh_shaders;
+        if (ImGui::Checkbox("Mesh shaders", &mesh)) {
+            run("set_render_settings", {{"mesh_shaders", mesh}});
+        }
+        ImGui::EndDisabled();
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {
             ImGui::TextDisabled(m_state.dotnet_available ? "None loaded (load_scripts command)."

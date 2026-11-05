@@ -5,8 +5,18 @@ giant_module(render
 )
 giant_shaders(render
   SHADERS
-    shaders/clusters.slang:vs_main:vertex:clusters_vs
-    shaders/clusters.slang:ps_main:pixel:clusters_ps
+    shaders/cull.slang:cs_reset:compute:cull_reset_cs
+    shaders/cull.slang:cs_prepare:compute:cull_prepare_cs
+    shaders/cull.slang:cs_instances:compute:cull_instances_cs
+    shaders/cull.slang:cs_traverse:compute:cull_traverse_cs
+    shaders/cull.slang:cs_retest:compute:cull_retest_cs
+    shaders/hzb.slang:cs_first:compute:hzb_first_cs
+    shaders/hzb.slang:cs_down:compute:hzb_down_cs
+    shaders/raster.slang:ms_main:mesh:raster_ms
+    shaders/raster.slang:vs_main:vertex:raster_vs
+    shaders/raster.slang:ps_main:pixel:raster_ps
+    shaders/resolve.slang:vs_main:vertex:resolve_vs
+    shaders/resolve.slang:ps_main:pixel:resolve_ps
 )
 
 giant_module_tests(render

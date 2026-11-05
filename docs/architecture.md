@@ -78,9 +78,8 @@ follow without touching the renderer.
   CI job compiles them too, to catch errors there.
 
 The renderer (`render`) sits on top: plain per-frame data in (camera,
-lighting, instances), an image out. N1 part 1 is an instanced forward
-renderer; later parts replace its inside with clusters, GPU culling and a
-visibility buffer behind the same interface.
+lighting, instances), an image out. Since N1 part 3 it draws clusters
+chosen on the GPU into a visibility buffer, then shades it (see Geometry).
 
 ## Geometry
 
@@ -100,11 +99,33 @@ an offline cooker can use it without a device.
   precise enough. Locked borders mean neighbours from different levels meet
   without cracks, so detail changes cluster by cluster, with no popping of
   whole objects.
-- **Drawing (N1 part 2).** The renderer chooses the cut on the CPU per
-  instance (with frustum culling) and draws each mesh in one call: draw
-  instance i is chosen cluster i, its 384 vertices are 128 triangles pulled
-  from the cluster's index range, unused ones collapse to nothing. Part 3
-  moves the choice to the GPU (culling, mesh shaders, visibility buffer).
+- **GPU culling (N1 part 3, `shaders/cull.slang`).** The cut runs on the
+  GPU, per instance: instances are tested against the view and the depth of
+  the last frame, then the LOD trees are walked one level per dispatch
+  through queues of (instance, node) items, with dispatch sizes written on
+  the GPU (indirect arguments). Chosen clusters are tested against the view
+  and the depth too, and appended to the visible list.
+- **Two-pass occlusion.** Pass 0 tests against a depth pyramid (HZB, the
+  farthest depth per texel, `shaders/hzb.slang`) built from the last frame,
+  reprojected with the camera's movement. What it hides is kept aside and
+  tested again in pass 1 against the HZB of what pass 0 just drew, so
+  nothing visible is lost when the camera or objects move. The HZB of the
+  finished frame is kept for the next.
+- **Visibility buffer.** One raster pipeline draws every visible cluster:
+  mesh shaders (one group per cluster, 128 threads) where the GPU has them,
+  else a vertex shader that pulls 384 vertices per cluster instance. The
+  pixel shader writes only (visible-list index + 1, triangle) into an
+  rg32_uint target. A full-screen pass (`shaders/resolve.slang`) then
+  rebuilds each pixel's triangle, works out barycentrics against the camera
+  ray, and shades: one material evaluation per pixel, however dense the
+  geometry.
+- **Counters.** The GPU counts clusters, triangles and occluded work; the
+  counts are copied to a readback ring and reach `RenderStats` a frame or
+  two late (`from_gpu`). Full lists set an overflow flag (logged once).
+  Slots and layouts shared by C++ and shaders live in `src/gpu_layout.h`.
+- **CPU path.** `gpu_culling = false` chooses the cut on the CPU (frustum
+  only) and feeds the same raster and shading passes; tests use it for
+  exact counts.
 
 ## Window events (known limit)
 

@@ -42,7 +42,7 @@ GIANT_TEST("render: the camera projects reverse-Z with no far plane") {
     GIANT_CHECK_NEAR(left.z, 0.05, 1e-5);
 }
 
-GIANT_TEST("render: one draw per mesh on the null device") {
+GIANT_TEST("render: the scene is one raster draw and one shading pass on the null device") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::null;
     auto device = rhi::create_device(desc);
@@ -69,15 +69,17 @@ GIANT_TEST("render: one draw per mesh on the null device") {
     FrameInput frame;
     frame.instances = instances;
     frame.lighting.background = {0.5f, 0.0f, 0.0f};
+    frame.settings.gpu_culling = false; // exact stats on the CPU
 
-    for (int i = 0; i < 2; ++i) { // the second frame reuses the depth target
+    for (int i = 0; i < 2; ++i) { // the second frame reuses the targets
         rhi::CommandList* cmd = device->begin_frame(nullptr);
         renderer->render(*cmd, target, frame);
         device->end_frame();
     }
-    GIANT_CHECK(renderer->last_stats().draws == 2);
+    GIANT_CHECK(renderer->last_stats().draws == 2); // clusters, then shading
     GIANT_CHECK(renderer->last_stats().instances == 3);
     GIANT_CHECK(renderer->last_stats().clusters >= 3);
+    GIANT_CHECK(!renderer->last_stats().from_gpu);
     GIANT_CHECK(device->last_frame_stats().draws == 2);
     // The background is cleared as linear colour: 0.5 is sRGB byte 188.
     const auto pixels = device->read_texture(target);
@@ -128,6 +130,7 @@ GIANT_TEST("render: detail follows distance, the error setting and the view") {
     instances[0].scale = {10, 10, 10};
     FrameInput frame;
     frame.instances = instances;
+    frame.settings.gpu_culling = false; // the CPU cut, with same-frame stats
     const auto at = [&](double distance, float error = 1.0f) {
         instances[0].position = {0.0, 0.0, -distance};
         frame.settings.lod_error_pixels = error;
@@ -137,12 +140,12 @@ GIANT_TEST("render: detail follows distance, the error setting and the view") {
     const RenderStats mid = at(80.0);
     const RenderStats far = at(2000.0);
     GIANT_CHECK(near.triangles > mid.triangles && mid.triangles > far.triangles && far.triangles > 0);
-    GIANT_CHECK(near.draws == 1 && far.draws == 1 && near.instances == 1);
+    GIANT_CHECK(near.draws == 2 && far.draws == 2 && near.instances == 1);
     GIANT_CHECK(at(80.0, 8.0f).triangles < mid.triangles); // more error allowed: fewer triangles
-    // Behind the camera: nothing drawn.
+    // Behind the camera: nothing drawn (only the shading pass runs).
     instances[0].position = {0.0, 0.0, 50.0};
     const RenderStats behind = s.draw(frame);
-    GIANT_CHECK(behind.draws == 0 && behind.clusters == 0 && behind.triangles == 0);
+    GIANT_CHECK(behind.draws == 1 && behind.clusters == 0 && behind.triangles == 0);
     // Debug views draw the same clusters.
     instances[0].position = {0.0, 0.0, -80.0};
     frame.settings.lod_error_pixels = 1.0f;
@@ -163,15 +166,54 @@ GIANT_TEST("render: meshes can be added and removed") {
     instances[0].position = {0.0, 0.0, -5.0};
     FrameInput frame;
     frame.instances = instances;
-    GIANT_CHECK(s.draw(frame).draws == 1);
+    frame.settings.gpu_culling = false;
+    GIANT_CHECK(s.draw(frame).draws == 2);
     s.renderer->remove_mesh(id);
     GIANT_CHECK(s.renderer->mesh(id) == nullptr);
-    GIANT_CHECK(s.draw(frame).draws == 0); // a removed id draws nothing
+    GIANT_CHECK(s.draw(frame).draws == 1); // a removed id draws nothing; shading still runs
     const MeshId next = s.renderer->add_mesh(geometry::build_clusters(geometry::make_cube()));
     GIANT_CHECK(next != id); // never reused
     // Built-in meshes cannot be removed.
     s.renderer->remove_mesh(s.renderer->builtin(BuiltinMesh::cube));
     GIANT_CHECK(s.renderer->mesh(s.renderer->builtin(BuiltinMesh::cube)) != nullptr);
+}
+
+GIANT_TEST("render: GPU culling records valid work on the null device") {
+    // The null device checks every barrier, pipeline and argument buffer
+    // (an assert fails the test); it cannot run shaders, so counts are 0.
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(3);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+    instances[1].mesh = s.renderer->builtin(BuiltinMesh::cube);
+    instances[2].mesh = s.renderer->add_mesh(geometry::build_clusters(geometry::make_sphere(64, 32)));
+    for (usize i = 0; i < instances.size(); ++i) {
+        instances[i].position = {static_cast<double>(i) * 3.0 - 3.0, 0.0, -10.0};
+    }
+    FrameInput frame;
+    frame.instances = instances;
+    for (const bool occlusion : {true, false}) {
+        for (const bool mesh_shaders : {true, false}) {
+            frame.settings.occlusion_culling = occlusion;
+            frame.settings.mesh_shaders = mesh_shaders;
+            for (int f = 0; f < 2; ++f) { // the second frame tests against the first's HZB
+                const RenderStats stats = s.draw(frame);
+                GIANT_CHECK(stats.from_gpu);
+                // A raster pass per culling pass, then shading.
+                GIANT_CHECK(stats.draws == (occlusion ? 3u : 2u));
+                GIANT_CHECK(s.device->last_frame_stats().draws == stats.draws);
+                GIANT_CHECK(s.device->last_frame_stats().dispatches > 4);
+            }
+        }
+    }
+    // A removed mesh, an empty scene, and the GPU counts read after a wait.
+    s.renderer->remove_mesh(instances[2].mesh);
+    GIANT_CHECK(s.draw(frame).draws == 2); // occlusion is off after the loop
+    frame.instances = {};
+    GIANT_CHECK(s.draw(frame).draws == 1);
+    s.device->wait_idle();
+    s.renderer->read_gpu_stats();
+    GIANT_CHECK(s.renderer->last_stats().clusters == 0); // the null device ran no shaders
 }
 
 #if GIANT_RHI_HAS_D3D12
@@ -226,13 +268,27 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.lighting.ground_light = {0.02f, 0.02f, 0.02f};
     frame.lighting.background = {0.0f, 0.0f, 1.0f};
 
-    rhi::CommandList* cmd = device->begin_frame(nullptr);
-    GIANT_CHECK(cmd != nullptr);
-    if (cmd != nullptr) {
-        renderer->render(*cmd, target, frame);
-        device->end_frame();
-    }
-    const auto pixels = device->read_texture(target);
+    // Renders a few frames (occlusion uses the last frame's depth) and reads
+    // the image back, with the GPU's counts for the last frame.
+    const auto draw = [&](bool gpu, bool occlusion, bool mesh) {
+        frame.settings.gpu_culling = gpu;
+        frame.settings.occlusion_culling = occlusion;
+        frame.settings.mesh_shaders = mesh;
+        for (int i = 0; i < 3; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        renderer->read_gpu_stats();
+        return device->read_texture(target);
+    };
+    const auto pixels = draw(false, false, false);
+    const RenderStats cpu = renderer->last_stats();
+    GIANT_CHECK(cpu.draws == 2 && !cpu.from_gpu && cpu.instances == 2);
     GIANT_CHECK(pixels.size() == k_w * k_h * 4);
     if (pixels.size() == k_w * k_h * 4) {
         const auto at = [&pixels](u32 x, u32 y) {
@@ -249,7 +305,32 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
         const auto sky = at(2, 2);
         GIANT_CHECK(sky[0] == 0 && sky[1] == 0 && sky[2] == 255);
     }
-    GIANT_CHECK(renderer->last_stats().draws == 2);
+    // Every GPU path draws the same picture as the CPU path.
+    const auto differing = [&pixels](const std::vector<u8>& other) {
+        usize n = 0;
+        for (usize i = 0; i < pixels.size() && i < other.size(); ++i) {
+            n += std::abs(int{pixels[i]} - int{other[i]}) > 2 ? 1 : 0;
+        }
+        return other.size() == pixels.size() ? n : pixels.size();
+    };
+    const bool mesh_shaders = device->adapter().mesh_shaders;
+    for (const bool mesh : {false, true}) {
+        if (mesh && !mesh_shaders) {
+            continue; // WARP may lack mesh shaders: the vertex path stands in
+        }
+        const auto plain = draw(true, false, mesh);
+        const RenderStats g = renderer->last_stats();
+        GIANT_CHECK(g.from_gpu && !g.overflow);
+        GIANT_CHECK(g.instances == cpu.instances);
+        GIANT_CHECK(g.clusters == cpu.clusters && g.triangles == cpu.triangles); // same cut
+        GIANT_CHECK(g.draws == 2);
+        GIANT_CHECK(differing(plain) <= pixels.size() / 200);
+        const auto culled = draw(true, true, mesh);
+        const RenderStats o = renderer->last_stats();
+        GIANT_CHECK(o.from_gpu && !o.overflow && o.draws == 3);
+        GIANT_CHECK(o.clusters <= g.clusters && o.clusters > 0);
+        GIANT_CHECK(differing(culled) <= pixels.size() / 200); // nothing visible lost
+    }
     device->destroy(target);
     renderer.reset();
     device->wait_idle();
