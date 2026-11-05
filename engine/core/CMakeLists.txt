@@ -1,0 +1,16 @@
+giant_module(core
+  SOURCES
+    src/assert.cpp
+    src/jobs.cpp
+    src/log.cpp
+)
+
+find_package(Threads REQUIRED)
+target_link_libraries(giant_core PUBLIC Threads::Threads)
+
+giant_module_tests(core
+  SOURCES
+    tests/test_assert_log.cpp
+    tests/test_jobs.cpp
+    tests/test_math.cpp
+)

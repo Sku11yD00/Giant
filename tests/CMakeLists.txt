@@ -1,0 +1,5 @@
+add_library(giant_test_main STATIC giant_test_main.cpp)
+add_library(giant::test_main ALIAS giant_test_main)
+target_include_directories(giant_test_main PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+giant_apply_warnings(giant_test_main)
+giant_apply_sanitizers(giant_test_main)

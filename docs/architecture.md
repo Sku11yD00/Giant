@@ -1,0 +1,52 @@
+# Architecture
+
+Five layers. Each layer only uses the layers below it.
+
+```
+game        C# scripts, levels, materials, scatter graphs, weather presets
+editor      panels, play-in-editor, undo; uses everything below
+ai          command layer, MCP server, rule checks
+sim world   giants, destruction, NPCs, animation | cells, streaming, landscape, scatter, weather
+render      virtual geometry, voxel world, GI, materials, hair, clouds
+rhi         thin graphics layer (D3D12 first)
+core        jobs, memory, double-precision math, logging, reflection, text formats
+```
+
+## Allowed module dependencies
+
+This table is the source of truth for `tools/check_architecture.py`.
+
+| Module | May include |
+| --- | --- |
+| core | (nothing) |
+| rhi | core |
+| render | core, rhi |
+| world | core |
+| sim | core, world |
+| script | core, world, sim |
+| ai | core, rhi, render, world, sim, script |
+| editor | everything |
+
+`render` reads world state through plain data handed to it each frame (cells,
+instances, weather values, voxel edits); it never includes `world` or `sim`.
+This keeps the renderer replaceable.
+
+## The shared voxel world
+
+One sparse voxel copy of the world (brick map in camera-centred clipmaps) is
+used for far geometry, global illumination, rain and snow occlusion, NPC sight
+lines and far-ring destruction. It is owned by `world` (edits) and mirrored on
+the GPU by `render` (drawing and lighting).
+
+## Frame budget (1440p, 60 fps, reference GPU, High preset)
+
+| GPU work | Budget |
+| --- | --- |
+| Geometry: culling, clusters, visibility buffer | 3.0 ms |
+| Materials, decals, terrain | 3.0 ms |
+| Shadows | 2.0 ms |
+| GI and reflections | 3.5 ms |
+| Weather, clouds, particles | 1.5 ms |
+| Hair | 1.0 ms |
+| Post and UI | 1.0 ms |
+| Headroom for destruction spikes | 1.6 ms |
