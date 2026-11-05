@@ -55,6 +55,47 @@ target_compile_definitions(imgui_lib PUBLIC "ImDrawIdx=unsigned int")
 set_target_properties(imgui_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(third_party::imgui ALIAS imgui_lib)
 
+# meshoptimizer: cluster building and simplification for virtual geometry
+# (MIT licence), plus its clusterlod.h cluster-LOD builder from demo/, which
+# the author publishes for engines to use as is. Built here from its sources
+# (SOURCE_SUBDIR skips its own CMake project).
+FetchContent_Declare(meshoptimizer
+  GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+  # Shallow clone of the release tag (commit 9e1f07b159d3cb777f1c67ed31fc11fd117986f4).
+  GIT_TAG v1.3
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR no-cmake
+)
+FetchContent_MakeAvailable(meshoptimizer)
+file(GLOB meshoptimizer_sources ${meshoptimizer_SOURCE_DIR}/src/*.cpp)
+set(clusterlod_impl ${CMAKE_CURRENT_BINARY_DIR}/clusterlod_impl.cpp)
+file(WRITE ${clusterlod_impl}.in
+  "#include \"meshoptimizer.h\"\n#define CLUSTERLOD_IMPLEMENTATION\n#include \"clusterlod.h\"\n")
+configure_file(${clusterlod_impl}.in ${clusterlod_impl} COPYONLY)
+add_library(meshoptimizer_lib STATIC ${meshoptimizer_sources} ${clusterlod_impl})
+target_include_directories(meshoptimizer_lib SYSTEM PUBLIC
+  ${meshoptimizer_SOURCE_DIR}/src ${meshoptimizer_SOURCE_DIR}/demo)
+set_target_properties(meshoptimizer_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(third_party::meshoptimizer ALIAS meshoptimizer_lib)
+
+# cgltf: glTF 2.0 reader for mesh import (MIT licence), one header. The
+# implementation is compiled here, outside our warning flags.
+FetchContent_Declare(cgltf
+  GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+  # Shallow clone of the release tag (commit 360db1a95480fe102ae9c69b27c5d101167ff5ba).
+  GIT_TAG v1.15
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR no-cmake
+)
+FetchContent_MakeAvailable(cgltf)
+set(cgltf_impl ${CMAKE_CURRENT_BINARY_DIR}/cgltf_impl.c)
+file(WRITE ${cgltf_impl}.in "#define CGLTF_IMPLEMENTATION\n#include \"cgltf.h\"\n")
+configure_file(${cgltf_impl}.in ${cgltf_impl} COPYONLY)
+add_library(cgltf_lib STATIC ${cgltf_impl})
+target_include_directories(cgltf_lib SYSTEM PUBLIC ${cgltf_SOURCE_DIR})
+set_target_properties(cgltf_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(third_party::cgltf ALIAS cgltf_lib)
+
 # --- GPU toolchain -----------------------------------------------------------
 # NuGet packages are zip files; DOWNLOAD_NAME lets CMake unpack them.
 

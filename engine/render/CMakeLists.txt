@@ -1,13 +1,12 @@
 giant_module(render
   SOURCES
-    src/meshes.cpp
     src/renderer.cpp
-  DEPENDS core rhi
+  DEPENDS core rhi geometry
 )
 giant_shaders(render
   SHADERS
-    shaders/mesh.slang:vs_main:vertex:mesh_vs
-    shaders/mesh.slang:ps_main:pixel:mesh_ps
+    shaders/clusters.slang:vs_main:vertex:clusters_vs
+    shaders/clusters.slang:ps_main:pixel:clusters_ps
 )
 
 giant_module_tests(render

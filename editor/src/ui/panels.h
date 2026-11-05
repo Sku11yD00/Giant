@@ -17,8 +17,6 @@ namespace giant::editor {
 struct FrameInfo {
     float frame_ms = 0.0f;
     u32 ui_draw_calls = 0;
-    u32 scene_draws = 0;
-    u32 scene_instances = 0;
 };
 
 class EditorPanels {
@@ -33,6 +31,7 @@ private:
     void draw_menu_bar();
     void draw_scene_settings(); // the Scene panel: outliner, properties, lighting
     void draw_outliner();
+    void create_ahead(ai::Json args); // create_entity 5 m in front of the camera, selected
     void draw_properties();
     void draw_lighting();
     void draw_log();
@@ -61,6 +60,7 @@ private:
     u64 m_log_hidden_before = 0; // "Clear" hides lines up to this sequence
     std::array<char, 128> m_log_filter_buffer{}; // ImGui edits this in place
     std::string m_log_filter;
+    std::array<char, 1024> m_import_path{}; // the "Add mesh" field
 
     u32 m_edit_epoch = 1; // bumped whenever no widget is being edited
 };

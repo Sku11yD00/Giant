@@ -122,7 +122,7 @@ GIANT_TEST("world: loading reports what is wrong and changes nothing") {
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"name": "x"}]})",
                 "entities[0].id is missing");
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shape": "cone"}]})",
-                "entities[0].shape must be cube, sphere or plane");
+                "entities[0].shape must be cube, sphere, plane or mesh");
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1}, {"id": 1}]})",
                 "entities[1].id 1 is used twice");
     check_error(R"({"format": "giant-scene", "version": 1,
@@ -237,4 +237,29 @@ GIANT_TEST("world: values at every limit survive a save and load") {
     GIANT_CHECK(save_scene(loaded) == text);
     // A full id space loads, but adding another entity reports it.
     GIANT_CHECK(loaded.add(named("one more")) == 0);
+}
+
+GIANT_TEST("world: imported meshes are saved by path") {
+    Scene scene;
+    Entity rock = named("Rock");
+    rock.shape = Shape::mesh;
+    rock.mesh = "assets/rocks/boulder é.glb";
+    scene.add(rock);
+    Entity was = named("Was a mesh", Shape::cube);
+    was.mesh = "assets/tree.glb"; // kept so the shape can change back
+    scene.add(was);
+    const std::string text = save_scene(scene);
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->shape == Shape::mesh && loaded.find(1)->mesh == rock.mesh);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->shape == Shape::cube && loaded.find(2)->mesh == was.mesh);
+    GIANT_CHECK(save_scene(loaded) == text);
+    // A mesh entity needs its file.
+    const std::string bare = R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shape": "mesh"}]})";
+    Scene bad;
+    const auto error = load_scene(bare, bad);
+    GIANT_CHECK(error.has_value() && contains(error->message, "mesh"));
+    const std::string too_long = R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shape": "mesh", "mesh": ")" +
+                                 std::string(k_max_mesh_path_bytes + 1, 'a') + R"("}]})";
+    GIANT_CHECK(load_scene(too_long, bad).has_value());
 }

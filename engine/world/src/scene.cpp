@@ -26,12 +26,13 @@ const char* to_string(Shape shape) {
     case Shape::cube: return "cube";
     case Shape::sphere: return "sphere";
     case Shape::plane: return "plane";
+    case Shape::mesh: return "mesh";
     }
     return "cube";
 }
 
 std::optional<Shape> shape_from_string(std::string_view name) {
-    for (const Shape s : {Shape::cube, Shape::sphere, Shape::plane}) {
+    for (const Shape s : {Shape::cube, Shape::sphere, Shape::plane, Shape::mesh}) {
         if (name == to_string(s)) {
             return s;
         }
@@ -179,7 +180,7 @@ std::string save_scene(const Scene& scene) {
     Json entities = Json::array();
     for (const Entity& e : scene.entities()) {
         const Quat& q = e.transform.rotation;
-        entities.push_back({
+        Json entity = {
             {"id", e.id},
             {"name", e.name},
             {"shape", to_string(e.shape)},
@@ -194,7 +195,11 @@ std::string save_scene(const Scene& scene) {
                  {"metallic", e.material.metallic},
                  {"emissive", vec3_json(e.material.emissive)},
              }},
-        });
+        };
+        if (!e.mesh.empty()) {
+            entity["mesh"] = e.mesh;
+        }
+        entities.push_back(std::move(entity));
     }
     out["entities"] = std::move(entities);
     return out.dump(2) + "\n";
@@ -404,8 +409,12 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         if (const auto parsed = shape_from_string(shape)) {
             e.shape = *parsed;
         } else {
-            r.fail("shape", "must be cube, sphere or plane");
+            r.fail("shape", "must be cube, sphere, plane or mesh");
         }
+    }
+    r.string("mesh", e.mesh, false, k_max_mesh_path_bytes);
+    if (r.ok() && e.shape == Shape::mesh && e.mesh.empty()) {
+        r.fail("mesh", "is needed when the shape is mesh");
     }
     r.boolean("visible", e.visible);
     r.vec3("position", e.transform.position, -1e8, 1e8);

@@ -24,9 +24,12 @@ namespace giant::world {
 using EntityId = u64;
 constexpr EntityId k_max_entity_id = (u64{1} << 53) - 1;
 
-// Built-in shapes, until meshes are imported (N1 part 2). Each is about one
-// metre: a 1 m cube, a 1 m wide sphere, a 1 m square plane facing +Y.
-enum class Shape { cube, sphere, plane };
+// Built-in shapes are about one metre: a 1 m cube, a 1 m wide sphere, a 1 m
+// square plane facing +Y. `mesh` draws the imported file in Entity::mesh.
+enum class Shape { cube, sphere, plane, mesh };
+
+// Longest Entity::mesh path, in bytes of UTF-8.
+constexpr usize k_max_mesh_path_bytes = 1024;
 
 const char* to_string(Shape shape);
 std::optional<Shape> shape_from_string(std::string_view name);
@@ -50,6 +53,9 @@ struct Entity {
     std::string name;
     Transform transform;
     Shape shape = Shape::cube;
+    // A glTF/GLB file (UTF-8 path, relative to the project folder), drawn
+    // when shape is `mesh`. Kept when the shape changes, so it can change back.
+    std::string mesh;
     Material material;
     bool visible = true;
 };

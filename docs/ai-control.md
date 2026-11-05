@@ -37,14 +37,17 @@ like late afternoon"; Claude calls the tools, looks at the result with
 | --- | --- | --- |
 | `get_engine_info` | no | Version, graphics backend and GPU, validation layer, frames, window size |
 | `get_log` | no | Newest log lines, filtered by level |
-| `create_entity`, `create_entities` | yes, undoable | Adds shapes (cube, sphere, plane) with position, rotation, scale and material; many in one step |
+| `create_entity`, `create_entities` | yes, undoable | Adds shapes (cube, sphere, plane) or imported meshes (`mesh`: a glTF/GLB path) with position, rotation, scale and material; many in one step |
 | `set_entity` | yes, undoable | Changes any fields of one entity |
 | `delete_entities` | yes, undoable | Removes entities by id |
 | `get_entity`, `list_entities` | no | Reads entities (outliner order) |
 | `get_lighting`, `set_lighting` | `set` is undoable | Sun height and direction, sun, sky and ground light, exposure |
 | `get_clear_color`, `set_clear_color` | `set` is undoable | The sky colour, which is also the background |
 | `new_scene`, `load_scene` | yes, undoable | Empties the scene, or loads a `.scene.json` file |
-| `save_scene` | writes a file | Saves the scene as JSON text |
+| `save_scene` | writes a file | Saves the scene as JSON text (meshes by path) |
+| `import_mesh` | loads an asset, not undoable | Imports a `.gltf`/`.glb` and builds its cluster LOD; `reload` picks up changes |
+| `list_meshes` | no | Imported meshes with triangle, cluster and level counts |
+| `get_render_settings`, `set_render_settings` | view only, not undoable | LOD error in pixels, debug view (`lit`, `clusters`, `lod_levels`, `triangles`), last frame's cluster and triangle counts |
 | `get_camera`, `set_camera` | view only, not undoable | The viewport camera; `look_at` aims it |
 | `set_window_size` | view only, not undoable | Resizes the window (screen points) |
 | `undo`, `redo` | yes | Walks the change history |

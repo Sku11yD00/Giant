@@ -126,6 +126,95 @@ def build_scene(tool, call, check):
     tool("new_scene")  # leave the default empty scene for the checks after this
 
 
+def write_bumpy_sphere_glb(path, segments=256, rings=128):
+    """A 1 m wide sphere with bumps, about 65 000 triangles: dense enough for LOD."""
+    import math
+    positions, normals, indices = [], [], []
+    for r in range(rings + 1):
+        theta = math.pi * r / rings
+        for s in range(segments + 1):
+            phi = 2 * math.pi * s / segments
+            n = (math.sin(theta) * math.cos(phi), math.cos(theta), -math.sin(theta) * math.sin(phi))
+            bump = 0.5 + 0.02 * math.sin(phi * 12) * math.sin(theta * 9)
+            positions.append(tuple(c * bump for c in n))
+            normals.append(n)
+    row = segments + 1
+    for r in range(rings):
+        for s in range(segments):
+            a = r * row + s
+            b, c, d = a + row, a + row + 1, a + 1
+            if r != 0:
+                indices += [a, b, d]
+            if r != rings - 1:
+                indices += [d, b, c]
+    vertex_bytes = b"".join(struct.pack("<6f", *p, *n) for p, n in zip(positions, normals))
+    index_bytes = struct.pack(f"<{len(indices)}I", *indices)
+    gltf = {
+        "asset": {"version": "2.0"}, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": 2}]}],
+        "buffers": [{"byteLength": len(vertex_bytes) + len(index_bytes)}],
+        "bufferViews": [{"buffer": 0, "byteLength": len(vertex_bytes), "byteStride": 24},
+                        {"buffer": 0, "byteOffset": len(vertex_bytes), "byteLength": len(index_bytes)}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": len(positions), "type": "VEC3",
+             "min": [-0.52, -0.52, -0.52], "max": [0.52, 0.52, 0.52]},
+            {"bufferView": 0, "byteOffset": 12, "componentType": 5126, "count": len(positions),
+             "type": "VEC3"},
+            {"bufferView": 1, "componentType": 5125, "count": len(indices), "type": "SCALAR"}],
+    }
+    text = json.dumps(gltf).encode()
+    text += b" " * (-len(text) % 4)
+    binary = vertex_bytes + index_bytes
+    binary += b"\0" * (-len(binary) % 4)
+    with open(path, "wb") as out:
+        out.write(struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(text) + 8 + len(binary)))
+        out.write(struct.pack("<II", len(text), 0x4E4F534A) + text)
+        out.write(struct.pack("<II", len(binary), 0x004E4942) + binary)
+    return len(indices) // 3
+
+
+def lod_gate(tool, call, check):
+    """N1 part 2: import a dense mesh and see its detail follow distance."""
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "bumpy.glb").replace("\\", "/")
+        triangles = write_bumpy_sphere_glb(path)
+        mesh = tool("import_mesh", {"path": path})
+        check(mesh["triangles"] == triangles and mesh["levels"] >= 4,
+              f"mesh imported with a LOD hierarchy, got {mesh}")
+        check(mesh["coarsest_triangles"] < triangles // 50, "the coarsest level is small")
+        tool("new_scene")
+        rock = tool("create_entity", {"mesh": path, "scale": [10, 10, 10]})
+        check(rock["shape"] == "mesh", "entity draws the mesh")
+
+        def triangles_from(distance):
+            tool("set_camera", {"position": [0, 0, distance], "look_at": [0, 0, 0]})
+            for _ in range(3):
+                call("ping")  # let a frame render
+            return tool("get_render_settings")["last_frame"]
+
+        near = triangles_from(9)
+        mid = triangles_from(60)
+        far = triangles_from(3000)
+        check(near["triangles"] > mid["triangles"] > far["triangles"] > 0,
+              f"detail drops with distance: {near}, {mid}, {far}")
+        check(near["triangles"] <= triangles, "never more than the file has")
+        tool("set_camera", {"position": [0, 0, 60], "look_at": [0, 0, 0]})
+        tool("set_render_settings", {"debug_view": "lod_levels"})
+        shot = call("tools/call", {"name": "capture_screenshot",
+                                   "arguments": {"max_width": 800, "file_name": "mcp_lod_levels"}})
+        check(not shot.get("isError"), "LOD view screenshot taken")
+        tool("set_render_settings", {"debug_view": "lit", "lod_error_pixels": 1})
+        scene_path = os.path.join(folder, "rock.scene.json")
+        tool("save_scene", {"path": scene_path})
+        tool("new_scene")
+        check(tool("load_scene", {"path": scene_path})["entities"] == 1, "mesh scene loads")
+        check(tool("list_entities", {"full": True})["entities"][0]["mesh"] == path, "path kept")
+        missing = call("tools/call", {"name": "create_entity",
+                                      "arguments": {"mesh": os.path.join(folder, "nope.glb")}})
+        check(missing.get("isError") is True, "a missing file is a tool error")
+    tool("new_scene")
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -212,6 +301,7 @@ def main() -> int:
         check(os.path.isfile(info["saved_to"]), "screenshot saved")
 
         build_scene(tool, call, check)
+        lod_gate(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
         if sample:

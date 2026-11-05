@@ -8,7 +8,7 @@ editor      panels, play-in-editor, undo; uses everything below
 ai          command layer, MCP server, rule checks
 sim world   giants, destruction, NPCs, animation | cells, streaming, landscape, scatter, weather
 render      virtual geometry, voxel world, GI, materials, hair, clouds
-rhi         thin graphics layer (D3D12 first)
+rhi geometry thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only)
 platform    windows, input, files (SDL3 underneath)
 core        jobs, memory, double-precision math, logging, reflection, text formats
 ```
@@ -22,11 +22,12 @@ This table is the source of truth for `tools/check_architecture.py`.
 | core | (nothing) |
 | platform | core |
 | rhi | core |
-| render | core, rhi |
+| geometry | core |
+| render | core, rhi, geometry |
 | world | core |
 | sim | core, world |
 | script | core, world, sim |
-| ai | core, platform, rhi, render, world, sim, script |
+| ai | core, platform, rhi, geometry, render, world, sim, script |
 | editor | everything |
 
 `rhi` never includes `platform`: a swap chain takes the native window handle
@@ -80,6 +81,30 @@ The renderer (`render`) sits on top: plain per-frame data in (camera,
 lighting, instances), an image out. N1 part 1 is an instanced forward
 renderer; later parts replace its inside with clusters, GPU culling and a
 visibility buffer behind the same interface.
+
+## Geometry
+
+`geometry` holds meshes as plain data and everything done to them on the
+CPU: glTF/GLB import (cgltf), and cluster LOD (meshoptimizer and its
+`clusterlod.h`). It knows nothing about the GPU, so tools, tests and later
+an offline cooker can use it without a device.
+
+- **Clusters.** A mesh becomes clusters of up to 128 triangles and 128
+  vertices. Groups of about 16 clusters are simplified to half their
+  triangles with their outer border locked, then cut again; level by level
+  until one group is left. Each group stores the error (metres) and bounds
+  of its simplified replacement; errors only grow towards coarse levels.
+- **The cut.** A cluster is drawn when its group's replacement would show
+  more than `lod_error_pixels` of error and its own detail would not (or it
+  is original). A spatial tree per level skips whole regions that are
+  precise enough. Locked borders mean neighbours from different levels meet
+  without cracks, so detail changes cluster by cluster, with no popping of
+  whole objects.
+- **Drawing (N1 part 2).** The renderer chooses the cut on the CPU per
+  instance (with frustum culling) and draws each mesh in one call: draw
+  instance i is chosen cluster i, its 384 vertices are 128 triangles pulled
+  from the cluster's index range, unused ones collapse to nothing. Part 3
+  moves the choice to the GPU (culling, mesh shaders, visibility buffer).
 
 ## Window events (known limit)
 

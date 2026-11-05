@@ -1,4 +1,4 @@
-#include "giant/render/meshes.h"
+#include "giant/geometry/mesh.h"
 #include "giant/render/renderer.h"
 
 #include "giant_test.h"
@@ -12,52 +12,12 @@ using namespace giant::render;
 
 namespace {
 
-// Every triangle must wind counter-clockwise seen from outside, which is
-// what back-face culling keeps; `outward` gives the outside direction.
-template <typename Outward>
-void check_mesh(const MeshData& mesh, Outward outward) {
-    GIANT_CHECK(!mesh.indices.empty() && mesh.indices.size() % 3 == 0);
-    bool in_range = true;
-    bool winding = true;
-    for (usize i = 0; i + 2 < mesh.indices.size(); i += 3) {
-        const u32 a = mesh.indices[i], b = mesh.indices[i + 1], c = mesh.indices[i + 2];
-        if (a >= mesh.vertices.size() || b >= mesh.vertices.size() || c >= mesh.vertices.size()) {
-            in_range = false;
-            break;
-        }
-        const Vec3 pa = mesh.vertices[a].position;
-        const Vec3 face = cross(mesh.vertices[b].position - pa, mesh.vertices[c].position - pa);
-        const Vec3 centre = (pa + mesh.vertices[b].position + mesh.vertices[c].position) / 3.0f;
-        if (dot(face, outward(centre)) <= 0.0f) {
-            winding = false;
-        }
-    }
-    GIANT_CHECK(in_range);
-    GIANT_CHECK(winding);
-    bool unit = true;
-    for (const MeshVertex& v : mesh.vertices) {
-        unit = unit && std::fabs(length(v.normal) - 1.0f) < 1e-4f;
-    }
-    GIANT_CHECK(unit);
-}
-
 Vec3 project(const Mat4& m, const Vec3& p) {
     const Vec4 c = m * Vec4{p.x, p.y, p.z, 1.0f};
     return {c.x / c.w, c.y / c.w, c.z / c.w};
 }
 
 } // namespace
-
-GIANT_TEST("render: built-in meshes face outwards with unit normals") {
-    check_mesh(make_cube(), [](const Vec3& c) { return c; });
-    check_mesh(make_sphere(), [](const Vec3& c) { return c; });
-    check_mesh(make_sphere(3, 2), [](const Vec3& c) { return c; });
-    check_mesh(make_plane(), [](const Vec3&) { return Vec3{0, 1, 0}; });
-    for (const MeshVertex& v : make_sphere().vertices) {
-        GIANT_CHECK_NEAR(length(v.position), 0.5, 1e-5);
-    }
-    GIANT_CHECK(make_cube().indices.size() == 36);
-}
 
 GIANT_TEST("render: the camera projects reverse-Z with no far plane") {
     View view;
@@ -82,7 +42,7 @@ GIANT_TEST("render: the camera projects reverse-Z with no far plane") {
     GIANT_CHECK_NEAR(left.z, 0.05, 1e-5);
 }
 
-GIANT_TEST("render: one instanced draw per mesh on the null device") {
+GIANT_TEST("render: one draw per mesh on the null device") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::null;
     auto device = rhi::create_device(desc);
@@ -103,6 +63,9 @@ GIANT_TEST("render: one instanced draw per mesh on the null device") {
     instances[1].mesh = renderer->builtin(BuiltinMesh::sphere);
     instances[2].mesh = renderer->builtin(BuiltinMesh::cube);
     instances[3].mesh = 999; // unknown: skipped
+    for (usize i = 0; i < instances.size(); ++i) {
+        instances[i].position = {static_cast<double>(i) * 2.0 - 3.0, 0.0, -6.0}; // in view
+    }
     FrameInput frame;
     frame.instances = instances;
     frame.lighting.background = {0.5f, 0.0f, 0.0f};
@@ -114,6 +77,7 @@ GIANT_TEST("render: one instanced draw per mesh on the null device") {
     }
     GIANT_CHECK(renderer->last_stats().draws == 2);
     GIANT_CHECK(renderer->last_stats().instances == 3);
+    GIANT_CHECK(renderer->last_stats().clusters >= 3);
     GIANT_CHECK(device->last_frame_stats().draws == 2);
     // The background is cleared as linear colour: 0.5 is sRGB byte 188.
     const auto pixels = device->read_texture(target);
@@ -127,6 +91,87 @@ GIANT_TEST("render: one instanced draw per mesh on the null device") {
     renderer->render(*cmd, bigger, frame);
     device->end_frame();
     device->destroy(bigger);
+}
+
+namespace {
+struct NullScene {
+    std::unique_ptr<rhi::Device> device;
+    std::unique_ptr<Renderer> renderer;
+    rhi::TextureHandle target;
+    NullScene() {
+        rhi::DeviceDesc desc;
+        desc.backend = rhi::Backend::null;
+        device = rhi::create_device(desc);
+        renderer = Renderer::create(*device);
+        rhi::TextureDesc t;
+        t.width = 1920; // LOD depends on the pixel size
+        t.height = 1080;
+        t.format = rhi::Format::rgba8_srgb;
+        t.usage = rhi::TextureUsage::render_target;
+        target = device->create_texture(t);
+    }
+    RenderStats draw(const FrameInput& frame) {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        renderer->render(*cmd, target, frame);
+        device->end_frame();
+        return renderer->last_stats();
+    }
+};
+} // namespace
+
+GIANT_TEST("render: detail follows distance, the error setting and the view") {
+    NullScene s;
+    GIANT_CHECK(s.renderer != nullptr);
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+    instances[0].scale = {10, 10, 10};
+    FrameInput frame;
+    frame.instances = instances;
+    const auto at = [&](double distance, float error = 1.0f) {
+        instances[0].position = {0.0, 0.0, -distance};
+        frame.settings.lod_error_pixels = error;
+        return s.draw(frame);
+    };
+    const RenderStats near = at(8.0);
+    const RenderStats mid = at(80.0);
+    const RenderStats far = at(2000.0);
+    GIANT_CHECK(near.triangles > mid.triangles && mid.triangles > far.triangles && far.triangles > 0);
+    GIANT_CHECK(near.draws == 1 && far.draws == 1 && near.instances == 1);
+    GIANT_CHECK(at(80.0, 8.0f).triangles < mid.triangles); // more error allowed: fewer triangles
+    // Behind the camera: nothing drawn.
+    instances[0].position = {0.0, 0.0, 50.0};
+    const RenderStats behind = s.draw(frame);
+    GIANT_CHECK(behind.draws == 0 && behind.clusters == 0 && behind.triangles == 0);
+    // Debug views draw the same clusters.
+    instances[0].position = {0.0, 0.0, -80.0};
+    frame.settings.lod_error_pixels = 1.0f;
+    for (const DebugView v : {DebugView::clusters, DebugView::lod_levels, DebugView::triangles}) {
+        frame.settings.debug_view = v;
+        GIANT_CHECK(s.draw(frame).clusters == mid.clusters);
+    }
+}
+
+GIANT_TEST("render: meshes can be added and removed") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    GIANT_CHECK(s.renderer->add_mesh(geometry::ClusterMesh{}) == k_no_mesh);
+    const MeshId id = s.renderer->add_mesh(geometry::build_clusters(geometry::make_sphere(64, 32)));
+    GIANT_CHECK(id != k_no_mesh && s.renderer->mesh(id) != nullptr);
+    std::vector<Instance> instances(1);
+    instances[0].mesh = id;
+    instances[0].position = {0.0, 0.0, -5.0};
+    FrameInput frame;
+    frame.instances = instances;
+    GIANT_CHECK(s.draw(frame).draws == 1);
+    s.renderer->remove_mesh(id);
+    GIANT_CHECK(s.renderer->mesh(id) == nullptr);
+    GIANT_CHECK(s.draw(frame).draws == 0); // a removed id draws nothing
+    const MeshId next = s.renderer->add_mesh(geometry::build_clusters(geometry::make_cube()));
+    GIANT_CHECK(next != id); // never reused
+    // Built-in meshes cannot be removed.
+    s.renderer->remove_mesh(s.renderer->builtin(BuiltinMesh::cube));
+    GIANT_CHECK(s.renderer->mesh(s.renderer->builtin(BuiltinMesh::cube)) != nullptr);
 }
 
 #if GIANT_RHI_HAS_D3D12

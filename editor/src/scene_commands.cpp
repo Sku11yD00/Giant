@@ -2,6 +2,7 @@
 // the AI (over MCP) build and light a scene. Every scene change is undoable;
 // the camera is view state and is not.
 #include "editor_commands.h"
+#include "mesh_library.h"
 
 #include "giant/core/assert.h"
 #include "giant/core/text.h"
@@ -36,9 +37,18 @@ DVec3 dvec3_from(const Json& j) {
     return {j[0].get<double>(), j[1].get<double>(), j[2].get<double>()};
 }
 
+// "assets/big rock.glb" -> "big rock"
+std::string utf8_stem(const std::string& path) {
+    const usize slash = path.find_last_of('/');
+    std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    const usize dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) name.resize(dot);
+    return name.empty() ? std::string("mesh") : name;
+}
+
 Json entity_json(const Entity& e) {
     const EulerDegrees r = euler_from_quat(e.transform.rotation);
-    return {{"id", e.id},
+    Json j = {{"id", e.id},
             {"name", e.name},
             {"shape", world::to_string(e.shape)},
             {"position", dvec3_json(e.transform.position)},
@@ -49,6 +59,20 @@ Json entity_json(const Entity& e) {
             {"metallic", e.material.metallic},
             {"emissive", vec3_json(e.material.emissive)},
             {"visible", e.visible}};
+    if (!e.mesh.empty()) {
+        j["mesh"] = e.mesh;
+    }
+    return j;
+}
+
+Json mesh_json(const MeshLibrary::Mesh& m) {
+    return {{"path", m.path},
+            {"triangles", m.triangles},
+            {"clusters", m.clusters},
+            {"levels", m.levels},
+            {"coarsest_triangles", m.coarsest_triangles},
+            {"import_seconds", m.import_seconds},
+            {"warnings", m.warnings}};
 }
 
 // JSON Schema helpers.
@@ -70,9 +94,16 @@ Json entity_properties() {
     return {
         {"name", {{"type", "string"}, {"maxLength", 128}}},
         {"shape",
-         {{"enum", {"cube", "sphere", "plane"}},
-          {"description", "cube (1 m), sphere (1 m wide) or plane (1 m square facing up). "
-                          "Default cube."}}},
+         {{"enum", {"cube", "sphere", "plane", "mesh"}},
+          {"description", "cube (1 m), sphere (1 m wide), plane (1 m square facing up), or "
+                          "mesh (the file in `mesh`). Default cube."}}},
+        {"mesh",
+         {{"type", "string"},
+          {"minLength", 1},
+          {"maxLength", world::k_max_mesh_path_bytes},
+          {"description", "A glTF or GLB file to draw (path from the editor's working folder); "
+                          "imported on first use. Giving it sets shape to mesh unless shape is "
+                          "given too."}}},
         {"position", triple(-1e8, 1e8, "Centre in metres [x, y, z]; +Y up. Default origin.")},
         {"rotation",
          {{"type", "object"},
@@ -91,10 +122,15 @@ Json entity_properties() {
     };
 }
 
-void apply_fields(const Json& args, Entity& e) {
+// Returns what is wrong (and may have changed `e` partly), or "".
+std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("name")) e.name = args["name"].get<std::string>();
     if (args.contains("shape")) {
         e.shape = world::shape_from_string(args["shape"].get<std::string>()).value_or(e.shape);
+    }
+    if (args.contains("mesh")) {
+        e.mesh = MeshLibrary::normalize(args["mesh"].get<std::string>());
+        if (!args.contains("shape")) e.shape = world::Shape::mesh;
     }
     if (args.contains("position")) e.transform.position = dvec3_from(args["position"]);
     if (args.contains("rotation")) {
@@ -112,15 +148,38 @@ void apply_fields(const Json& args, Entity& e) {
     if (args.contains("metallic")) e.material.metallic = args["metallic"].get<float>();
     if (args.contains("emissive")) e.material.emissive = vec3_from(args["emissive"]);
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
+    if (e.shape == world::Shape::mesh) {
+        if (e.mesh.empty()) {
+            return "shape mesh needs a file: give mesh, e.g. \"assets/rock.glb\"";
+        }
+        if (e.mesh.size() > world::k_max_mesh_path_bytes) {
+            return "the mesh path is too long";
+        }
+        if (state.meshes == nullptr) {
+            return "meshes cannot be imported in this editor";
+        }
+        const MeshLibrary::Loaded loaded = state.meshes->load(e.mesh);
+        if (loaded.mesh == nullptr) {
+            return loaded.error;
+        }
+    }
+    return {};
 }
 
-Entity new_entity(const Json& args, const world::Scene& scene) {
-    Entity e;
-    apply_fields(args, e);
-    if (e.name.empty()) {
-        e.name = std::string(world::to_string(e.shape)) + " " + std::to_string(scene.next_id());
+// An entity from create arguments, or what is wrong with them.
+std::string new_entity(const Json& args, EditorState& state, Entity& out) {
+    out = Entity{};
+    if (std::string error = apply_fields(args, out, state); !error.empty()) {
+        return error;
     }
-    return e;
+    if (out.name.empty()) {
+        std::string base = world::to_string(out.shape);
+        if (out.shape == world::Shape::mesh) {
+            base = utf8_stem(out.mesh);
+        }
+        out.name = base + " " + std::to_string(state.scene.next_id());
+    }
+    return {};
 }
 
 Json lighting_json(const world::Lighting& l) {
@@ -132,6 +191,33 @@ Json lighting_json(const world::Lighting& l) {
             {"ground_color", vec3_json(l.ground_color)},
             {"ambient_intensity", l.ambient_intensity},
             {"exposure", l.exposure}};
+}
+
+const char* to_string(render::DebugView v) {
+    switch (v) {
+    case render::DebugView::lit: return "lit";
+    case render::DebugView::clusters: return "clusters";
+    case render::DebugView::lod_levels: return "lod_levels";
+    case render::DebugView::triangles: return "triangles";
+    }
+    return "lit";
+}
+
+render::DebugView debug_view_from(const std::string& name) {
+    for (const auto v : {render::DebugView::lit, render::DebugView::clusters,
+                         render::DebugView::lod_levels, render::DebugView::triangles}) {
+        if (name == to_string(v)) return v;
+    }
+    return render::DebugView::lit;
+}
+
+Json render_settings_json(const EditorState& state) {
+    const render::RenderStats& s = state.scene_stats;
+    return {{"lod_error_pixels", state.render_settings.lod_error_pixels},
+            {"debug_view", to_string(state.render_settings.debug_view)},
+            {"last_frame",
+             {{"instances", s.instances}, {"draws", s.draws}, {"clusters", s.clusters},
+              {"triangles", s.triangles}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -197,7 +283,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", properties}},
          false,
          [&state](const Json& args, CommandContext& context) {
-             const Entity e = new_entity(args, state.scene);
+             Entity e;
+             if (std::string error = new_entity(args, state, e); !error.empty()) {
+                 return CommandResult::failure(error);
+             }
              const EntityId id = state.scene.add(e);
              if (id == 0) {
                  return CommandResult::failure(k_ids_exhausted);
@@ -234,12 +323,23 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          [&state](const Json& args, CommandContext& context) {
              auto created = std::make_shared<std::vector<Entity>>();
              Json ids = Json::array();
+             const auto undo_added = [&state, &created] {
+                 std::vector<EntityId> added;
+                 for (const Entity& e : *created) added.push_back(e.id);
+                 state.scene.remove_many(added); // all or nothing
+             };
+             usize item_index = 0;
              for (const Json& item : args["entities"]) {
-                 const EntityId id = state.scene.add(new_entity(item, state.scene));
+                 Entity e;
+                 if (std::string error = new_entity(item, state, e); !error.empty()) {
+                     undo_added();
+                     return CommandResult::failure("entities[" + std::to_string(item_index) +
+                                                   "]: " + error);
+                 }
+                 ++item_index;
+                 const EntityId id = state.scene.add(std::move(e));
                  if (id == 0) {
-                     std::vector<EntityId> added;
-                     for (const Entity& e : *created) added.push_back(e.id);
-                     state.scene.remove_many(added); // all or nothing
+                     undo_added();
                      return CommandResult::failure(k_ids_exhausted);
                  }
                  created->push_back(*state.scene.find(id));
@@ -282,8 +382,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                                "; list_entities shows them");
              }
              const Entity before = *e;
-             apply_fields(args, *e);
-             const Entity after = *e;
+             Entity after = before; // a refused change leaves the entity alone
+             if (std::string error = apply_fields(args, after, state); !error.empty()) {
+                 return CommandResult::failure(error);
+             }
+             *e = after;
              const auto set = [&state](const Entity& value) {
                  if (Entity* target = state.scene.find(value.id)) {
                      *target = value;
@@ -469,9 +572,94 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              if (const auto error = world::load_scene(text.str(), loaded)) {
                  return CommandResult::failure(path_to_utf8(path) + ": " + error->message);
              }
+             // Meshes it uses are imported now; one that fails leaves its
+             // entities invisible until it is fixed, but the scene loads.
+             Json mesh_errors = Json::array();
+             if (state.meshes != nullptr) {
+                 for (const Entity& e : loaded.entities()) {
+                     if (e.shape == world::Shape::mesh && state.meshes->find(e.mesh) == nullptr) {
+                         const MeshLibrary::Loaded m = state.meshes->load(e.mesh);
+                         if (m.mesh == nullptr && mesh_errors.size() < 100) {
+                             bool listed = false;
+                             for (const Json& x : mesh_errors) listed = listed || x["path"] == e.mesh;
+                             if (!listed) mesh_errors.push_back({{"path", e.mesh}, {"error", m.error}});
+                         }
+                     }
+                 }
+             }
              const usize count = loaded.size();
              swap_scene(state, std::move(loaded), context);
-             return CommandResult::success({{"entities", count}});
+             Json result = {{"entities", count}};
+             if (!mesh_errors.empty()) result["mesh_errors"] = std::move(mesh_errors);
+             return CommandResult::success(std::move(result));
+         }});
+
+    add(registry,
+        {"import_mesh",
+         "Imports a glTF (.gltf with its buffers) or .glb file and builds its cluster LOD, so "
+         "entities can draw it (create_entity with mesh). Returns its triangle and cluster "
+         "counts. Already-imported files return at once unless reload is true (to pick up "
+         "changes). Large files take a few seconds. Materials and textures are not imported "
+         "yet. Not undoable: it loads an asset and changes no entity.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"path"}},
+              {"properties",
+               {{"path", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_mesh_path_bytes}}},
+                {"reload", {{"type", "boolean"}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.meshes == nullptr) {
+                 return CommandResult::failure("meshes cannot be imported in this editor");
+             }
+             const std::string path = args["path"].get<std::string>();
+             const MeshLibrary::Loaded m = args.value("reload", false) ? state.meshes->reload(path)
+                                                                        : state.meshes->load(path);
+             if (m.mesh == nullptr) {
+                 return CommandResult::failure(m.error);
+             }
+             return CommandResult::success(mesh_json(*m.mesh));
+         }});
+
+    add(registry,
+        {"list_meshes", "Lists the imported meshes with their triangle and cluster counts.",
+         Json{{"type", "object"}, {"additionalProperties", false}}, true,
+         [&state](const Json&, CommandContext&) {
+             Json list = Json::array();
+             if (state.meshes != nullptr) {
+                 for (const auto& m : state.meshes->meshes()) list.push_back(mesh_json(*m));
+             }
+             return CommandResult::success({{"meshes", std::move(list)}});
+         }});
+
+    add(registry,
+        {"get_render_settings",
+         "Returns the LOD error (pixels) and debug view, plus last frame's counts of instances, "
+         "draws, clusters and triangles.",
+         Json{{"type", "object"}, {"additionalProperties", false}}, true,
+         [&state](const Json&, CommandContext&) {
+             return CommandResult::success(render_settings_json(state));
+         }});
+
+    add(registry,
+        {"set_render_settings",
+         "Changes how the viewport draws. lod_error_pixels: how much simplification may show "
+         "(1 = under a pixel; lower is sharper and slower). debug_view: lit (normal), clusters "
+         "(each cluster coloured), lod_levels (red = full detail, then yellow, green, cyan, "
+         "blue...) or triangles. View state: not undoable.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"properties",
+               {{"lod_error_pixels", number(0.1, 64, "Pixels of error allowed. Default 1.")},
+                {"debug_view", {{"enum", {"lit", "clusters", "lod_levels", "triangles"}}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             render::RenderSettings& r = state.render_settings;
+             r.lod_error_pixels = args.value("lod_error_pixels", r.lod_error_pixels);
+             if (args.contains("debug_view")) {
+                 r.debug_view = debug_view_from(args["debug_view"].get<std::string>());
+             }
+             return CommandResult::success(render_settings_json(state));
          }});
 
     add(registry,

@@ -2,7 +2,7 @@
 
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
-#include "giant/render/meshes.h"
+#include "giant/geometry/mesh.h"
 #include "render_shaders.h"
 
 #include <algorithm>
@@ -13,7 +13,7 @@ namespace giant::render {
 
 namespace {
 
-// Matches FrameConstants in shaders/mesh.slang.
+// Matches FrameConstants in shaders/clusters.slang.
 struct FrameConstants {
     float view_proj[16];
     float sun_direction[4];
@@ -24,7 +24,7 @@ struct FrameConstants {
 };
 static_assert(sizeof(FrameConstants) == 144);
 
-// Matches the 128-byte instance layout in shaders/mesh.slang.
+// Matches the 128-byte instance layout in shaders/clusters.slang.
 struct GpuInstance {
     float model[12];  // rows of the 3x4 model matrix (camera-relative)
     float normal[12]; // rows of the normal matrix, w unused
@@ -33,15 +33,35 @@ struct GpuInstance {
 };
 static_assert(sizeof(GpuInstance) == 128);
 
-struct MeshPush {
+struct ClusterPush {
     u32 frame;
     u32 frame_offset;
     u32 instances;
     u32 instance_offset;
+    u32 entries;
+    u32 entry_offset;
     u32 vertices;
+    u32 indices;
+    u32 clusters;
     u32 pad[3];
 };
-static_assert(sizeof(MeshPush) == 32);
+static_assert(sizeof(ClusterPush) == 48);
+
+// Matches k_cluster_bytes in shaders/clusters.slang.
+struct GpuCluster {
+    u32 first_index;
+    u32 triangle_count;
+    u32 level;
+    u32 pad;
+};
+static_assert(sizeof(GpuCluster) == 16);
+
+constexpr u32 k_vertices_per_cluster = geometry::k_cluster_max_triangles * 3;
+
+template <typename T>
+std::span<const u8> bytes_of(const std::vector<T>& v) {
+    return {reinterpret_cast<const u8*>(v.data()), v.size() * sizeof(T)};
+}
 
 void set4(float* out, const Vec3& v, float w) {
     out[0] = v.x;
@@ -91,57 +111,88 @@ Renderer::Renderer(ConstructKey, rhi::Device& device) : m_device(device) {}
 Renderer::~Renderer() {
     // Deferred by the device until the GPU is done with them.
     m_device.destroy(m_pipeline);
-    m_device.destroy(m_vertices);
-    m_device.destroy(m_indices);
+    for (Mesh& mesh : m_meshes) {
+        destroy(mesh);
+    }
     m_device.destroy(m_depth);
 }
 
 bool Renderer::init() {
     rhi::GraphicsPipelineDesc desc;
-    desc.vertex = shaders::mesh_vs();
-    desc.pixel = shaders::mesh_ps();
+    desc.vertex = shaders::clusters_vs();
+    desc.pixel = shaders::clusters_ps();
     desc.color_formats[0] = rhi::Format::rgba8_srgb;
     desc.depth_format = rhi::Format::depth32_float;
     desc.depth = rhi::DepthMode::test_write;
     desc.cull = rhi::CullMode::back;
-    desc.name = "mesh (forward)";
+    desc.name = "clusters (forward)";
     m_pipeline = m_device.create_pipeline(desc);
     if (!m_pipeline.valid()) {
-        log_error("render", "could not create the mesh pipeline");
+        log_error("render", "could not create the cluster pipeline");
         return false;
     }
-
-    // All built-in meshes share one vertex and one index buffer.
-    std::vector<MeshVertex> vertices;
-    std::vector<u32> indices;
-    const MeshData shapes[] = {make_cube(), make_sphere(), make_plane()};
-    for (const MeshData& data : shapes) {
-        Mesh mesh;
-        mesh.first_index = static_cast<u32>(indices.size());
-        mesh.index_count = static_cast<u32>(data.indices.size());
-        mesh.base_vertex = static_cast<i32>(vertices.size());
-        vertices.insert(vertices.end(), data.vertices.begin(), data.vertices.end());
-        indices.insert(indices.end(), data.indices.begin(), data.indices.end());
-        m_builtin.push_back(static_cast<MeshId>(m_meshes.size()));
-        m_meshes.push_back(mesh);
-    }
-    rhi::BufferDesc vb;
-    vb.size = vertices.size() * sizeof(MeshVertex);
-    vb.usage = rhi::BufferUsage::shader_read;
-    vb.name = "mesh vertices";
-    m_vertices = m_device.create_buffer(
-        vb, {reinterpret_cast<const u8*>(vertices.data()), static_cast<usize>(vb.size)});
-    rhi::BufferDesc ib;
-    ib.size = indices.size() * sizeof(u32);
-    ib.usage = rhi::BufferUsage::index;
-    ib.name = "mesh indices";
-    m_indices = m_device.create_buffer(
-        ib, {reinterpret_cast<const u8*>(indices.data()), static_cast<usize>(ib.size)});
-    if (!m_vertices.valid() || !m_indices.valid()) {
-        log_error("render", "could not create the mesh buffers");
-        return false;
+    // A finely cut sphere, so its LOD has room to work.
+    const geometry::TriangleMesh shapes[] = {geometry::make_cube(), geometry::make_sphere(128, 64),
+                                             geometry::make_plane()};
+    for (const geometry::TriangleMesh& shape : shapes) {
+        const MeshId id = add_mesh(geometry::build_clusters(shape));
+        if (id == k_no_mesh) {
+            log_error("render", "could not create the built-in meshes");
+            return false;
+        }
+        m_builtin.push_back(id);
     }
     return true;
+}
+
+void Renderer::destroy(Mesh& mesh) {
+    m_device.destroy(mesh.vertices);
+    m_device.destroy(mesh.indices);
+    m_device.destroy(mesh.clusters);
+    mesh = {};
+}
+
+MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
+    if (data.empty() || m_meshes.size() >= k_no_mesh) {
+        return k_no_mesh;
+    }
+    std::vector<GpuCluster> table;
+    table.reserve(data.clusters.size());
+    for (const geometry::Cluster& c : data.clusters) {
+        table.push_back({c.first_index, c.triangle_count, data.groups[c.group].depth, 0});
+    }
+    Mesh mesh;
+    rhi::BufferDesc desc;
+    desc.usage = rhi::BufferUsage::shader_read;
+    desc.size = data.vertices.size() * sizeof(geometry::Vertex);
+    desc.name = "mesh vertices";
+    mesh.vertices = m_device.create_buffer(desc, bytes_of(data.vertices));
+    desc.size = data.indices.size() * sizeof(u32);
+    desc.name = "mesh cluster triangles";
+    mesh.indices = m_device.create_buffer(desc, bytes_of(data.indices));
+    desc.size = table.size() * sizeof(GpuCluster);
+    desc.name = "mesh clusters";
+    mesh.clusters = m_device.create_buffer(desc, bytes_of(table));
+    if (!mesh.vertices.valid() || !mesh.indices.valid() || !mesh.clusters.valid()) {
+        destroy(mesh);
+        log_error("render", "could not upload a mesh (out of GPU memory?)");
+        return k_no_mesh;
+    }
+    mesh.data = std::move(data);
+    mesh.live = true;
+    m_meshes.push_back(std::move(mesh));
+    return static_cast<MeshId>(m_meshes.size() - 1);
+}
+
+void Renderer::remove_mesh(MeshId id) {
+    if (id >= m_meshes.size() || std::find(m_builtin.begin(), m_builtin.end(), id) != m_builtin.end()) {
+        return;
+    }
+    destroy(m_meshes[id]); // the slot stays, empty: ids are never reused
+}
+
+const geometry::ClusterMesh* Renderer::mesh(MeshId id) const {
+    return id < m_meshes.size() && m_meshes[id].live ? &m_meshes[id].data : nullptr;
 }
 
 MeshId Renderer::builtin(BuiltinMesh mesh) const { return m_builtin[static_cast<usize>(mesh)]; }
@@ -191,63 +242,115 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     set4(constants.sky_light, light.sky_light, 0.0f);
     set4(constants.ground_light, light.ground_light, 0.0f);
     constants.params[0] = light.exposure;
+    constants.params[1] = static_cast<float>(static_cast<u32>(frame.settings.debug_view));
     const rhi::TransientMemory frame_memory =
         cmd.upload({reinterpret_cast<const u8*>(&constants), sizeof(constants)});
 
-    // Instances, sorted by mesh so each mesh is one instanced draw.
+    // Instances by mesh, so each mesh is one draw over all its chosen clusters.
     m_order.clear();
     for (u32 i = 0; i < frame.instances.size(); ++i) {
-        if (frame.instances[i].mesh < m_meshes.size()) {
+        if (mesh(frame.instances[i].mesh) != nullptr) {
             m_order.push_back(i);
         }
     }
     std::stable_sort(m_order.begin(), m_order.end(), [&frame](u32 a, u32 b) {
         return frame.instances[a].mesh < frame.instances[b].mesh;
     });
-    rhi::TransientMemory instance_memory;
-    if (!m_order.empty()) {
-        instance_memory = cmd.allocate(static_cast<u32>(m_order.size() * sizeof(GpuInstance)));
-        if (instance_memory.data == nullptr) {
-            m_order.clear(); // out of memory: the device is lost; draw nothing
+
+    // Choose each instance's clusters: about a pixel of error, in view.
+    const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
+    const geometry::Frustum frustum = geometry::frustum_from_view_projection(view_proj);
+    geometry::LodView lod;
+    lod.pixels_per_unit = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(height);
+    lod.near_plane = std::max(frame.view.near_plane, 1e-4f);
+    lod.threshold_pixels = std::clamp(frame.settings.lod_error_pixels, 0.01f, 1000.0f);
+    lod.frustum = &frustum;
+    m_drawn.clear();
+    m_entries.clear();
+    for (const u32 i : m_order) {
+        const Instance& in = frame.instances[i];
+        const geometry::ClusterMesh& data = m_meshes[in.mesh].data;
+        lod.position = to_camera_relative(in.position, frame.view.position);
+        lod.rotation = in.rotation;
+        lod.scale = in.scale;
+        m_selected.clear();
+        geometry::select_clusters(data, lod, m_selected);
+        if (m_selected.empty()) {
+            continue;
         }
-        for (usize i = 0; i < m_order.size(); ++i) {
-            const GpuInstance gpu = to_gpu(frame.instances[m_order[i]], frame.view.position);
-            std::memcpy(instance_memory.data + i * sizeof(GpuInstance), &gpu, sizeof(gpu));
+        const u32 slot = static_cast<u32>(m_drawn.size());
+        m_drawn.push_back(i);
+        for (const u32 c : m_selected) {
+            m_entries.push_back({slot, c});
+            m_stats.triangles += data.clusters[c].triangle_count;
         }
     }
 
-    cmd.barrier(m_indices, rhi::ResourceState::index_buffer);
-    cmd.barrier(m_vertices, rhi::ResourceState::shader_read);
+    rhi::TransientMemory instance_memory;
+    rhi::TransientMemory entry_memory;
+    if (!m_entries.empty()) {
+        instance_memory = cmd.allocate(static_cast<u32>(m_drawn.size() * sizeof(GpuInstance)));
+        entry_memory = cmd.allocate(static_cast<u32>(m_entries.size() * sizeof(Entry)));
+        if (instance_memory.data == nullptr || entry_memory.data == nullptr) {
+            m_entries.clear(); // out of memory: the device is lost; draw nothing
+        } else {
+            for (usize i = 0; i < m_drawn.size(); ++i) {
+                const GpuInstance gpu = to_gpu(frame.instances[m_drawn[i]], frame.view.position);
+                std::memcpy(instance_memory.data + i * sizeof(GpuInstance), &gpu, sizeof(gpu));
+            }
+            std::memcpy(entry_memory.data, m_entries.data(), m_entries.size() * sizeof(Entry));
+        }
+    }
+
+    // Draws: runs of entries whose instances share a mesh (entries follow
+    // m_drawn, which follows mesh order).
+    struct Draw {
+        MeshId mesh;
+        u32 first_entry;
+        u32 entry_count;
+    };
+    std::vector<Draw> draws;
+    for (u32 e = 0; e < m_entries.size(); ++e) {
+        const MeshId id = frame.instances[m_drawn[m_entries[e].instance]].mesh;
+        if (draws.empty() || draws.back().mesh != id) {
+            draws.push_back({id, e, 0});
+        }
+        ++draws.back().entry_count;
+    }
+    for (const Draw& d : draws) {
+        const Mesh& mesh = m_meshes[d.mesh];
+        cmd.barrier(mesh.vertices, rhi::ResourceState::shader_read);
+        cmd.barrier(mesh.indices, rhi::ResourceState::shader_read);
+        cmd.barrier(mesh.clusters, rhi::ResourceState::shader_read);
+    }
+
     rhi::RenderPassDesc pass;
     const Vec3& bg = light.background;
     pass.colors[0] = {target, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
     pass.depth = {m_depth, rhi::LoadOp::clear, 0.0f};
     cmd.begin_render_pass(pass);
-    if (!m_order.empty()) {
+    if (!draws.empty()) {
         cmd.set_pipeline(m_pipeline);
-        cmd.set_index_buffer(m_indices);
-        usize begin = 0;
-        while (begin < m_order.size()) {
-            const MeshId mesh_id = frame.instances[m_order[begin]].mesh;
-            usize end = begin;
-            while (end < m_order.size() && frame.instances[m_order[end]].mesh == mesh_id) {
-                ++end;
-            }
-            const Mesh& mesh = m_meshes[mesh_id];
-            MeshPush push{};
+        for (const Draw& d : draws) {
+            const Mesh& mesh = m_meshes[d.mesh];
+            ClusterPush push{};
             push.frame = frame_memory.descriptor;
             push.frame_offset = frame_memory.offset;
             push.instances = instance_memory.descriptor;
-            push.instance_offset =
-                instance_memory.offset + static_cast<u32>(begin * sizeof(GpuInstance));
-            push.vertices = m_device.read_descriptor(m_vertices);
+            push.instance_offset = instance_memory.offset;
+            push.entries = entry_memory.descriptor;
+            push.entry_offset = entry_memory.offset + d.first_entry * static_cast<u32>(sizeof(Entry));
+            push.vertices = m_device.read_descriptor(mesh.vertices);
+            push.indices = m_device.read_descriptor(mesh.indices);
+            push.clusters = m_device.read_descriptor(mesh.clusters);
             cmd.push(push);
-            cmd.draw_indexed(mesh.index_count, static_cast<u32>(end - begin), mesh.first_index,
-                             mesh.base_vertex);
+            cmd.draw(k_vertices_per_cluster, d.entry_count);
             ++m_stats.draws;
-            begin = end;
         }
-        m_stats.instances = static_cast<u32>(m_order.size());
+        m_stats.instances = static_cast<u32>(m_drawn.size());
+        m_stats.clusters = static_cast<u32>(m_entries.size());
+    } else {
+        m_stats.triangles = 0;
     }
     cmd.end_render_pass();
 }

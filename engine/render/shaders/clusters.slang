@@ -1,4 +1,10 @@
-// Forward-lit meshes: vertex pulling, instanced, camera-relative.
+// Forward-lit cluster meshes: vertex pulling, camera-relative.
+//
+// Each draw covers one mesh. Instance i of the draw is entry i of the
+// frame's chosen clusters (an instance and a cluster); vertex v of it is
+// corner v % 3 of the cluster's triangle v / 3. Clusters have at most 128
+// triangles, so draws use 384 vertices and clusters with fewer triangles
+// collapse the rest to a point, which the rasterizer drops.
 //
 // Lighting: one sun (GGX specular, Lambert diffuse) plus sky/ground ambient,
 // then exposure and the Khronos PBR Neutral tone mapper, which keeps base
@@ -12,7 +18,7 @@ struct FrameConstants {
     float4 sun_light;
     float4 sky_light;
     float4 ground_light;
-    float4 params; // x: exposure
+    float4 params; // x: exposure, y: debug view (0 lit, 1 clusters, 2 levels, 3 triangles)
 };
 static const uint k_frame_bytes = 144;
 
@@ -20,18 +26,24 @@ static const uint k_frame_bytes = 144;
 // base colour + roughness, emissive + metallic.
 static const uint k_instance_bytes = 128;
 static const uint k_vertex_bytes = 24;
+static const uint k_entry_bytes = 8;    // instance, cluster
+static const uint k_cluster_bytes = 16; // first index, triangle count, level, unused
 
-struct MeshPush {
+struct ClusterPush {
     uint frame;           // descriptor of the frame constants
     uint frame_offset;
-    uint instances;       // descriptor of this draw's instances
-    uint instance_offset; // byte offset of its first instance
-    uint vertices;        // descriptor of the shared vertex buffer
+    uint instances;       // descriptor of the frame's instances
+    uint instance_offset; // byte offset of instance 0
+    uint entries;         // descriptor of the frame's chosen clusters
+    uint entry_offset;    // byte offset of this draw's first entry
+    uint vertices;        // this mesh's vertices
+    uint indices;         // this mesh's cluster triangles
+    uint clusters;        // this mesh's cluster table
     uint pad0;
     uint pad1;
     uint pad2;
 };
-ConstantBuffer<MeshPush> push : register(b0);
+ConstantBuffer<ClusterPush> push : register(b0);
 
 float4 load4(ByteAddressBuffer b, uint at) { return asfloat(b.Load4(at)); }
 
@@ -56,16 +68,32 @@ struct VsOut {
     float3 normal : NORMAL0;
     nointerpolation float4 base_roughness : COLOR0;
     nointerpolation float4 emissive_metallic : COLOR1;
+    nointerpolation uint3 debug : TEXCOORD0; // cluster, level, triangle
 };
 
 [shader("vertex")]
-VsOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+VsOut vs_main(uint vertex_id : SV_VertexID, uint entry_id : SV_InstanceID) {
+    VsOut o;
+    const uint2 entry = read_buffer(push.entries).Load2(push.entry_offset + entry_id * k_entry_bytes);
+    const uint4 cluster = read_buffer(push.clusters).Load4(entry.y * k_cluster_bytes);
+    const uint triangle = vertex_id / 3;
+    if (triangle >= cluster.y) {
+        // All three corners meet at one point: no area, nothing drawn.
+        o.position = float4(0.0, 0.0, 0.0, 1.0);
+        o.relative = float3(0.0, 0.0, 0.0);
+        o.normal = float3(0.0, 1.0, 0.0);
+        o.base_roughness = float4(0.0, 0.0, 0.0, 0.0);
+        o.emissive_metallic = float4(0.0, 0.0, 0.0, 0.0);
+        o.debug = uint3(0, 0, 0);
+        return o;
+    }
+    const uint index = read_buffer(push.indices).Load((cluster.x + vertex_id) * 4);
     ByteAddressBuffer vb = read_buffer(push.vertices);
-    const float3 p = asfloat(vb.Load3(vertex_id * k_vertex_bytes));
-    const float3 n = asfloat(vb.Load3(vertex_id * k_vertex_bytes + 12));
+    const float3 p = asfloat(vb.Load3(index * k_vertex_bytes));
+    const float3 n = asfloat(vb.Load3(index * k_vertex_bytes + 12));
 
     ByteAddressBuffer ib = read_buffer(push.instances);
-    const uint at = push.instance_offset + instance_id * k_instance_bytes;
+    const uint at = push.instance_offset + entry.x * k_instance_bytes;
     const float4 p1 = float4(p, 1.0);
     const float3 world = float3(dot(load4(ib, at), p1), dot(load4(ib, at + 16), p1),
                                 dot(load4(ib, at + 32), p1));
@@ -73,13 +101,13 @@ VsOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
                                  dot(load4(ib, at + 80).xyz, n));
 
     const FrameConstants f = load_frame();
-    VsOut o;
     o.position = transform(f.view_proj[0], f.view_proj[1], f.view_proj[2], f.view_proj[3],
                            float4(world, 1.0));
     o.relative = world;
     o.normal = normal;
     o.base_roughness = load4(ib, at + 96);
     o.emissive_metallic = load4(ib, at + 112);
+    o.debug = uint3(entry.y, cluster.z, triangle);
     return o;
 }
 
@@ -129,10 +157,39 @@ float3 tone_map(float3 color) {
     return lerp(color, float3(new_peak, new_peak, new_peak), g);
 }
 
+// A well-mixed hash (PCG) for debug colours.
+uint hash(uint v) {
+    const uint state = v * 747796405u + 2891336453u;
+    const uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float3 hash_color(uint v) {
+    const uint h = hash(v);
+    return float3(h & 255u, (h >> 8) & 255u, (h >> 16) & 255u) / 255.0 * 0.8 + 0.2;
+}
+
+float3 level_color(uint level) {
+    static const float3 k_levels[8] = {
+        float3(1.0, 0.15, 0.1), float3(1.0, 0.85, 0.1), float3(0.3, 0.9, 0.2), float3(0.1, 0.85, 0.9),
+        float3(0.2, 0.35, 1.0), float3(0.75, 0.3, 1.0), float3(1.0, 0.4, 0.75), float3(0.9, 0.9, 0.9),
+    };
+    return k_levels[min(level, 7u)];
+}
+
 [shader("pixel")]
 float4 ps_main(VsOut i) : SV_Target {
     const FrameConstants f = load_frame();
     const float3 n = safe_normalize(i.normal, float3(0.0, 1.0, 0.0));
+    const uint debug_view = (uint)f.params.y;
+    if (debug_view != 0) {
+        // Flat colour shaded just enough to read the shape.
+        const float3 c = debug_view == 1 ? hash_color(i.debug.x)
+                       : debug_view == 2 ? level_color(i.debug.y)
+                                         : hash_color(i.debug.x * 131u + i.debug.z);
+        const float shade = 0.35 + 0.65 * saturate(dot(n, f.sun_direction.xyz) * 0.5 + 0.5);
+        return float4(c * shade, 1.0);
+    }
     const float3 v = safe_normalize(-i.relative, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);

@@ -1,5 +1,7 @@
 #include "panels.h"
 
+#include "../mesh_library.h"
+
 #include "giant/core/log.h"
 
 #include <imgui.h>
@@ -161,23 +163,27 @@ void EditorPanels::draw_scene_settings() {
     ImGui::End();
 }
 
+void EditorPanels::create_ahead(ai::Json args) {
+    // In front of the camera, so it shows up where the person looks.
+    const EditorCamera& c = m_state.camera;
+    const Quat q = quat_from_euler({c.pitch_degrees, c.yaw_degrees, 0.0f});
+    const Vec3 ahead = rotate(q, {0.0f, 0.0f, -5.0f});
+    const DVec3 at = c.position + DVec3{ahead.x, ahead.y, ahead.z};
+    args["position"] = {at.x, at.y, at.z};
+    const ai::CommandResult result = m_commands.execute("create_entity", args, {});
+    if (result.ok) {
+        m_state.selected = result.value["id"].get<world::EntityId>();
+    } else {
+        log_warning("editor", "create_entity: " + result.error);
+    }
+}
+
 void EditorPanels::draw_outliner() {
     ImGui::SeparatorText("Entities");
     for (const auto& [label, shape] : {std::pair{"+ Cube", "cube"}, std::pair{"+ Sphere", "sphere"},
                                        std::pair{"+ Plane", "plane"}}) {
         if (ImGui::SmallButton(label)) {
-            // In front of the camera, so it shows up where the person looks.
-            const EditorCamera& c = m_state.camera;
-            const Quat q = quat_from_euler({c.pitch_degrees, c.yaw_degrees, 0.0f});
-            const Vec3 ahead = rotate(q, {0.0f, 0.0f, -5.0f});
-            const DVec3 at = c.position + DVec3{ahead.x, ahead.y, ahead.z};
-            const ai::CommandResult result = m_commands.execute(
-                "create_entity", {{"shape", shape}, {"position", {at.x, at.y, at.z}}}, {});
-            if (result.ok) {
-                m_state.selected = result.value["id"].get<world::EntityId>();
-            } else {
-                log_warning("editor", "create_entity: " + result.error);
-            }
+            create_ahead({{"shape", shape}});
         }
         ImGui::SameLine();
     }
@@ -186,6 +192,14 @@ void EditorPanels::draw_outliner() {
         run("delete_entities", {{"ids", {m_state.selected}}});
     }
     ImGui::EndDisabled();
+    // An imported mesh: a glTF or GLB path from the working folder.
+    ImGui::SetNextItemWidth(-ImGui::CalcTextSize("+ Mesh").x - ImGui::GetStyle().FramePadding.x * 4);
+    const bool entered = ImGui::InputTextWithHint("##mesh_path", "assets/model.glb", m_import_path.data(),
+                                                  m_import_path.size(), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if ((ImGui::SmallButton("+ Mesh") || entered) && m_import_path[0] != '\0') {
+        create_ahead({{"mesh", std::string(m_import_path.data())}});
+    }
 
     const auto& entities = m_state.scene.entities();
     if (ImGui::BeginChild("outliner", ImVec2(0, 160), ImGuiChildFlags_Borders)) {
@@ -230,9 +244,24 @@ void EditorPanels::draw_properties() {
         set("name", std::string(name.data()));
     }
     int shape = static_cast<int>(e->shape);
-    const char* const shapes[] = {"cube", "sphere", "plane"};
+    const char* const shapes[] = {"cube", "sphere", "plane", "mesh"};
     if (ImGui::Combo("Shape", &shape, shapes, IM_ARRAYSIZE(shapes))) {
         set("shape", shapes[shape]);
+    }
+    if (e->shape == world::Shape::mesh || !e->mesh.empty()) {
+        ImGui::TextWrapped("Mesh: %s", e->mesh.empty() ? "(none)" : e->mesh.c_str());
+        if (m_state.meshes != nullptr && !e->mesh.empty()) {
+            if (const MeshLibrary::Mesh* m = m_state.meshes->find(e->mesh)) {
+                ImGui::TextDisabled("%u triangles, %u clusters, %u levels", m->triangles, m->clusters,
+                                    m->levels);
+            } else {
+                ImGui::TextDisabled("not loaded (see the log)");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reload")) {
+                run("import_mesh", {{"path", e->mesh}, {"reload", true}});
+            }
+        }
     }
     double position[3] = {e->transform.position.x, e->transform.position.y,
                           e->transform.position.z};
@@ -435,10 +464,24 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::Text("Validation layer: %s", m_state.device->validation_enabled() ? "on" : "off");
         ImGui::SeparatorText("Frame");
         ImGui::Text("Frame time: %.2f ms", static_cast<double>(frame.frame_ms));
-        ImGui::Text("Scene: %u instances in %u draws", frame.scene_instances, frame.scene_draws);
+        const render::RenderStats& stats = m_state.scene_stats;
+        ImGui::Text("Scene: %u instances in %u draws", stats.instances, stats.draws);
+        ImGui::Text("Clusters: %u, triangles: %u", stats.clusters, stats.triangles);
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),
                     m_state.window->pixel_height());
+        ImGui::SeparatorText("Geometry");
+        const render::RenderSettings& r = m_state.render_settings;
+        int view = static_cast<int>(r.debug_view);
+        const char* const views[] = {"lit", "clusters", "lod_levels", "triangles"};
+        const char* const labels[] = {"Lit", "Clusters", "LOD levels", "Triangles"};
+        if (ImGui::Combo("View", &view, labels, IM_ARRAYSIZE(labels))) {
+            run("set_render_settings", {{"debug_view", views[view]}});
+        }
+        float error = r.lod_error_pixels;
+        if (ImGui::SliderFloat("LOD error (px)", &error, 0.1f, 16.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
+            run("set_render_settings", {{"lod_error_pixels", std::clamp(error, 0.1f, 64.0f)}});
+        }
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {
             ImGui::TextDisabled(m_state.dotnet_available ? "None loaded (load_scripts command)."

@@ -44,7 +44,10 @@ const char* mcp_instructions() {
            "`get_history` lists them. Read state with the get_* tools before changing it. "
            "Build scenes with create_entities (many at once) or create_entity, change them with "
            "set_entity and set_lighting, frame them with set_camera (look_at is easiest) and "
-           "check the result with capture_screenshot. Units are metres and degrees; +Y is up, "
+           "check the result with capture_screenshot. Imported models: create_entity with mesh "
+           "(a .glb or .gltf path; imported on first use, or import_mesh first to see its "
+           "size); set_render_settings shows how LOD works (debug_view lod_levels). Units are "
+           "metres and degrees; +Y is up, "
            "-Z is north. Colours are linear (not sRGB), each channel 0 to 1. Check `get_log` "
            "after a change for warnings and errors.";
 }
@@ -66,8 +69,10 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                   {"meets_minimum_spec", adapter.meets_minimum_spec()},
                   {"validation_enabled", state.device->validation_enabled()},
                   {"frames_completed", state.device->frames_completed()},
-                  {"last_frame", {{"scene_draws", state.scene_draws},
-                                  {"scene_instances", state.scene_instances},
+                  {"last_frame", {{"scene_draws", state.scene_stats.draws},
+                                  {"scene_instances", state.scene_stats.instances},
+                                  {"scene_clusters", state.scene_stats.clusters},
+                                  {"scene_triangles", state.scene_stats.triangles},
                                   {"gpu_draws", state.device->last_frame_stats().draws}}},
                   {"window", {{"pixel_width", state.window->pixel_width()},
                               {"pixel_height", state.window->pixel_height()},

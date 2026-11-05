@@ -2,14 +2,18 @@
 // instances) into a lit image. It never sees the world or the editor, so it
 // can be swapped or tested on its own (docs/architecture.md).
 //
-// N1 part 1 is a forward renderer: each mesh is one instanced draw with
-// vertex pulling, lit by a sun with GGX specular and sky/ground ambient,
-// then tone mapped. Later parts replace the inside (clusters, GPU culling,
-// a visibility buffer) behind the same interface.
+// Every mesh is cluster LOD (geometry/clusters.h). Each frame the CPU picks,
+// per instance, the clusters whose detail is just under a pixel of error and
+// inside the view, and each mesh is one draw over its chosen clusters
+// (vertex pulling, 128 triangles per cluster), forward lit by a sun with
+// GGX specular and sky/ground ambient, then tone mapped. Part 3 moves the
+// choice to the GPU (culling, mesh shaders, a visibility buffer) behind the
+// same interface.
 #pragma once
 
 #include "giant/core/math.h"
 #include "giant/core/types.h"
+#include "giant/geometry/clusters.h"
 #include "giant/rhi/rhi.h"
 
 #include <memory>
@@ -18,9 +22,10 @@
 
 namespace giant::render {
 
-// A mesh loaded into the renderer. Built-in shapes for now; imported
-// meshes arrive with N1 part 2.
+// A mesh loaded into the renderer: a built-in shape or one added with
+// add_mesh.
 using MeshId = u32;
+inline constexpr MeshId k_no_mesh = ~0u;
 
 enum class BuiltinMesh {
     cube,   // 1 m, centred
@@ -55,15 +60,33 @@ struct View {
     float near_plane = 0.1f; // metres; there is no far plane (reverse-Z)
 };
 
+// What the image shows: the lit scene, or how the geometry is built.
+enum class DebugView : u32 {
+    lit,
+    clusters,   // each cluster in its own colour
+    lod_levels, // colour by level: 0 (original triangles) is red, then yellow, green, cyan...
+    triangles,  // each triangle in its own colour
+};
+
+struct RenderSettings {
+    // How much simplification may show: a cluster is used once its error
+    // covers at most this many pixels. Lower is sharper and slower.
+    float lod_error_pixels = 1.0f;
+    DebugView debug_view = DebugView::lit;
+};
+
 struct FrameInput {
     View view;
     Lighting lighting;
+    RenderSettings settings;
     std::span<const Instance> instances;
 };
 
 struct RenderStats {
-    u32 instances = 0; // drawn this frame
+    u32 instances = 0; // with at least one cluster drawn this frame
     u32 draws = 0;
+    u32 clusters = 0;
+    u32 triangles = 0;
 };
 
 class Renderer {
@@ -80,6 +103,15 @@ public:
 
     MeshId builtin(BuiltinMesh mesh) const;
 
+    // Uploads a mesh; k_no_mesh if it is empty or the GPU is out of memory.
+    // Ids are not reused, so a removed id stops drawing instead of drawing
+    // whatever comes next. Safe mid-frame.
+    MeshId add_mesh(geometry::ClusterMesh mesh);
+    // Built-in meshes stay. Unknown ids are ignored.
+    void remove_mesh(MeshId mesh);
+    // Null for an unknown or removed id.
+    const geometry::ClusterMesh* mesh(MeshId mesh) const;
+
     // Records the frame into `target`: an rgba8_srgb render target (the
     // swap chain's back buffer or an offscreen image). Clears it to the
     // background first. Instances with an unknown mesh are skipped.
@@ -95,23 +127,33 @@ public:
 
 private:
     struct Mesh {
-        u32 first_index = 0;
-        u32 index_count = 0;
-        i32 base_vertex = 0;
+        geometry::ClusterMesh data; // the CPU copy picks the clusters
+        rhi::BufferHandle vertices; // 24-byte vertices
+        rhi::BufferHandle indices;  // u32, three per triangle, per cluster
+        rhi::BufferHandle clusters; // 16 bytes each: first index, triangles, level
+        bool live = false;
+    };
+    // One chosen cluster of one instance, as the shader reads it.
+    struct Entry {
+        u32 instance; // into this frame's instance list
+        u32 cluster;
     };
     bool init();
     void ensure_depth(u32 width, u32 height);
+    void destroy(Mesh& mesh);
 
     rhi::Device& m_device;
     rhi::PipelineHandle m_pipeline;
-    rhi::BufferHandle m_vertices; // every mesh's vertices, pulled by the shader
-    rhi::BufferHandle m_indices;
     rhi::TextureHandle m_depth;
     u32 m_depth_width = 0;
     u32 m_depth_height = 0;
     std::vector<Mesh> m_meshes;
     std::vector<MeshId> m_builtin; // by BuiltinMesh
-    std::vector<u32> m_order;      // per-frame scratch: instances sorted by mesh
+    // Per-frame scratch, kept to avoid allocating every frame.
+    std::vector<u32> m_order;      // instances sorted by mesh
+    std::vector<u32> m_selected;   // clusters of one instance
+    std::vector<u32> m_drawn;      // instances (into frame.instances) with clusters
+    std::vector<Entry> m_entries;  // grouped by mesh
     RenderStats m_stats;
 };
 

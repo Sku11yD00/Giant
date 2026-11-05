@@ -5,6 +5,7 @@
 #include "giant/ai/commands.h"
 #include "giant/core/log_history.h"
 #include "giant/platform/window.h"
+#include "giant/render/renderer.h"
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
 
@@ -23,6 +24,8 @@ struct EditorCamera {
     float speed = 8.0f; // metres per second when flying
 };
 
+class MeshLibrary;
+
 // What the commands read and change. Owned by main; outlives the registry.
 struct EditorState {
     platform::Window* window = nullptr;
@@ -38,9 +41,13 @@ struct EditorState {
     u64 next_scene_generation = 2;
     EditorCamera camera;
     world::EntityId selected = 0; // in the outliner; view state
+    // Imported meshes; set by main (and tests). Entities with shape mesh
+    // name a file in it.
+    MeshLibrary* meshes = nullptr;
+    // LOD error and debug view: view state, not undoable.
+    render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
-    u32 scene_draws = 0;
-    u32 scene_instances = 0;
+    render::RenderStats scene_stats;
     bool quit_requested = false;
     // Renders the editor as it looks now (viewport and panels) and returns
     // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.
@@ -55,12 +62,12 @@ struct EditorState {
     bool dotnet_available = true;    // false once starting .NET failed
 };
 
-// Registers every editor command. Asserts on a bad registration (a bug).
 // A change to the current scene: its undo and redo only run while the scene
 // is still the one they were recorded against (see scene_generation).
 ai::Change scene_change(EditorState& state, std::function<void()> undo,
                         std::function<void()> redo);
 
+// Registers every editor command. Asserts on a bad registration (a bug).
 void register_editor_commands(ai::CommandRegistry& registry, EditorState& state);
 // The scene, lighting and camera commands (scene_commands.cpp).
 void register_scene_commands(ai::CommandRegistry& registry, EditorState& state);

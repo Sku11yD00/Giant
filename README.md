@@ -35,6 +35,11 @@ Milestone **N1 Virtual geometry** (in progress):
   lighting, save and load), a lit forward renderer and a 3D viewport with a
   fly camera (hold the right mouse button, then W A S D). Claude can build,
   light and photograph a scene over MCP alone, which closes N0's gate.
+- Part 2 (done): mesh import (glTF 2.0 and GLB) and cluster LOD, the
+  Nanite method: every mesh is cut into clusters of up to 128 triangles,
+  simplified level by level into a hierarchy, and drawn each frame at the
+  detail that keeps the error under a pixel. Try it with the Scene panel's
+  "+ Mesh" field, and the Engine panel's View menu (LOD levels) to see it work.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

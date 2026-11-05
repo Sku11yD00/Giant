@@ -11,6 +11,7 @@
 // --mcp speaks MCP over stdin/stdout (logs go to stderr); the editor closes
 // when the client disconnects. --scripts loads C# scripts at start-up.
 #include "editor_commands.h"
+#include "mesh_library.h"
 #include "scene_render.h"
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
@@ -273,7 +274,9 @@ int run(const Options& options) {
         return 1;
     }
 
+    editor::MeshLibrary meshes(renderer.get()); // after the renderer: released first
     editor::EditorState state;
+    state.meshes = &meshes;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -309,12 +312,14 @@ int run(const Options& options) {
     std::vector<render::Instance> instances; // reused every frame
     // Records the scene and the panels into `target` (an sRGB image).
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
-        editor::scene_instances(state.scene, *renderer, instances);
+        editor::scene_instances(state.scene, *renderer, meshes, instances);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::scene_lighting(state.scene.lighting);
+        input.settings = state.render_settings;
         input.instances = instances;
         renderer->render(cmd, target, input);
+        state.scene_stats = renderer->last_stats();
         cmd.draw_ui(target, ui->frame());
     };
     state.render_screenshot = [&]() -> std::vector<u8> {
@@ -410,10 +415,6 @@ int run(const Options& options) {
         record_frame(*cmd, swap_chain->current_texture());
         device->end_frame();
         frame_info.ui_draw_calls = device->last_frame_stats().ui_draws;
-        frame_info.scene_draws = renderer->last_stats().draws;
-        frame_info.scene_instances = renderer->last_stats().instances;
-        state.scene_draws = frame_info.scene_draws;
-        state.scene_instances = frame_info.scene_instances;
         skipped_in_a_row = 0;
         if (pace_null) {
             window->wait_events(16);
