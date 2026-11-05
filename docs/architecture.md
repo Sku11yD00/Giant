@@ -283,7 +283,8 @@ Done in N2 part 3, the far field:
   a mesh (straddling the distance, moving, or not in the voxel world yet)
   the march ignores the voxels within two voxels of its bounding sphere,
   so its own voxels never cover it while others in front of it still
-  show.
+  show (other than ones that close to it: a far tree just before a moving
+  car shows the car there).
 - Lit view only, and only while the voxel world is kept up to date (a
   frozen one would show stale far geometry). The levels are written once a
   frame for the far field and the voxel view.
