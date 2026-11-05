@@ -7,6 +7,9 @@
 #include "giant/platform/window.h"
 #include "giant/rhi/rhi.h"
 
+#include <functional>
+#include <vector>
+
 namespace giant::editor {
 
 // What the commands read and change. Owned by main; outlives the registry.
@@ -18,6 +21,9 @@ struct EditorState {
     // the back buffer view encodes it to sRGB for the screen.
     rhi::Color clear_color{0.15f, 0.34f, 0.71f, 1.0f};
     bool quit_requested = false;
+    // Renders the editor as it looks now (viewport and panels) and returns
+    // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.
+    std::function<std::vector<u8>()> render_screenshot;
 };
 
 // Registers every editor command. Asserts on a bad registration (a bug).

@@ -18,10 +18,18 @@
 
 namespace giant::ai {
 
+// A picture a command returns (for example a screenshot), so the AI can see
+// it. MCP clients show it as image content.
+struct CommandImage {
+    std::string mime_type; // "image/png"
+    std::string data;      // the encoded file (raw bytes, not base64)
+};
+
 struct [[nodiscard]] CommandResult {
     bool ok = true;
     Json value = Json::object(); // the answer, on success
     std::string error;           // what went wrong, on failure
+    std::vector<CommandImage> images;
 
     static CommandResult success(Json value = Json::object());
     static CommandResult failure(std::string error);

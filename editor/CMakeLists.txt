@@ -1,5 +1,11 @@
-add_executable(giant_editor src/main.cpp src/editor_commands.cpp)
-target_link_libraries(giant_editor PRIVATE giant::core giant::platform giant::rhi giant::ai)
+add_executable(giant_editor
+  src/main.cpp
+  src/editor_commands.cpp
+  src/ui/imgui_layer.cpp
+  src/ui/panels.cpp
+)
+target_link_libraries(giant_editor PRIVATE giant::core giant::platform giant::rhi giant::ai
+                      third_party::imgui)
 giant_apply_warnings(giant_editor)
 giant_apply_sanitizers(giant_editor)
 

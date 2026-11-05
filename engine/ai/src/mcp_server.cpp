@@ -21,6 +21,34 @@ Json result_reply(const Json& id, Json result) {
 }
 
 // MCP request ids are strings or numbers.
+std::string base64(const std::string& bytes) {
+    static constexpr char k_alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((bytes.size() + 2) / 3 * 4);
+    usize i = 0;
+    for (; i + 2 < bytes.size(); i += 3) {
+        const u32 n = (static_cast<u32>(static_cast<u8>(bytes[i])) << 16) |
+                      (static_cast<u32>(static_cast<u8>(bytes[i + 1])) << 8) |
+                      static_cast<u32>(static_cast<u8>(bytes[i + 2]));
+        out += k_alphabet[(n >> 18) & 63];
+        out += k_alphabet[(n >> 12) & 63];
+        out += k_alphabet[(n >> 6) & 63];
+        out += k_alphabet[n & 63];
+    }
+    if (i < bytes.size()) {
+        u32 n = static_cast<u32>(static_cast<u8>(bytes[i])) << 16;
+        if (i + 1 < bytes.size()) {
+            n |= static_cast<u32>(static_cast<u8>(bytes[i + 1])) << 8;
+        }
+        out += k_alphabet[(n >> 18) & 63];
+        out += k_alphabet[(n >> 12) & 63];
+        out += i + 1 < bytes.size() ? k_alphabet[(n >> 6) & 63] : '=';
+        out += '=';
+    }
+    return out;
+}
+
 bool valid_id(const Json& id) { return id.is_string() || id.is_number(); }
 
 } // namespace
@@ -118,8 +146,13 @@ Json McpServer::handle_request(const std::string& method, const Json& params, co
             return result_reply(id, {{"content", {{{"type", "text"}, {"text", outcome.error}}}},
                                      {"isError", true}});
         }
-        Json result = {{"content", {{{"type", "text"}, {"text", to_json_text(outcome.value, 2)}}}},
-                       {"isError", false}};
+        Json content = Json::array();
+        content.push_back({{"type", "text"}, {"text", to_json_text(outcome.value, 2)}});
+        for (const CommandImage& image : outcome.images) {
+            content.push_back(
+                {{"type", "image"}, {"data", base64(image.data)}, {"mimeType", image.mime_type}});
+        }
+        Json result = {{"content", std::move(content)}, {"isError", false}};
         if (outcome.value.is_object()) {
             result["structuredContent"] = outcome.value;
         }

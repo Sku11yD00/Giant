@@ -1,6 +1,12 @@
 #include "editor_commands.h"
 
 #include "giant/core/assert.h"
+#include "giant/core/log.h"
+#include "giant/core/png.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 
 #include <string>
 
@@ -19,6 +25,39 @@ Json color_to_json(const rhi::Color& c) { return {{"r", c.r}, {"g", c.g}, {"b", 
 void add(ai::CommandRegistry& registry, ai::CommandDesc desc) {
     const bool added = registry.add(std::move(desc));
     GIANT_ASSERT(added, "editor command could not be registered");
+}
+
+// Box-filters an RGBA8 image down so it is at most `max_width` wide.
+std::vector<u8> scale_down(const std::vector<u8>& pixels, u32 width, u32 height, u32 max_width,
+                           u32& out_w, u32& out_h) {
+    if (width <= max_width) {
+        out_w = width;
+        out_h = height;
+        return pixels;
+    }
+    const u32 factor = (width + max_width - 1) / max_width;
+    out_w = width / factor;
+    out_h = std::max<u32>(height / factor, 1);
+    std::vector<u8> out(static_cast<usize>(out_w) * out_h * 4);
+    for (u32 y = 0; y < out_h; ++y) {
+        for (u32 x = 0; x < out_w; ++x) {
+            for (u32 c = 0; c < 4; ++c) {
+                u32 sum = 0;
+                for (u32 dy = 0; dy < factor; ++dy) {
+                    for (u32 dx = 0; dx < factor; ++dx) {
+                        const usize i = ((static_cast<usize>(y) * factor + dy) * width +
+                                         static_cast<usize>(x) * factor + dx) *
+                                            4 +
+                                        c;
+                        sum += pixels[i];
+                    }
+                }
+                out[(static_cast<usize>(y) * out_w + x) * 4 + c] =
+                    static_cast<u8>(sum / (factor * factor));
+            }
+        }
+    }
+    return out;
 }
 
 LogLevel parse_level(const std::string& name) {
@@ -126,6 +165,58 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
              const u32 h = args["height"].get<u32>();
              state.window->request_size(w, h);
              return CommandResult::success({{"requested", {{"width", w}, {"height", h}}}});
+         }});
+
+    add(registry,
+        {"capture_screenshot",
+         "Takes a screenshot of the editor as it looks now (viewport and panels) and returns it "
+         "as a PNG image you can look at. Use it to check what a change looks like. Optionally "
+         "also saves it as screenshots/<file_name>.png next to the editor.",
+         Json::parse(R"({"type": "object", "additionalProperties": false, "properties": {
+             "max_width": {"type": "integer", "minimum": 64, "maximum": 3840,
+                           "description": "Scale down to at most this many pixels wide (default 1024)."},
+             "file_name": {"type": "string", "minLength": 1, "maxLength": 64,
+                           "description": "Letters, digits, - and _ only."}}})"),
+         true,
+         [&state](const Json& args, CommandContext&) {
+             if (!state.render_screenshot) {
+                 return CommandResult::failure("screenshots are not available");
+             }
+             const u32 width = state.window->pixel_width();
+             const u32 height = state.window->pixel_height();
+             const std::vector<u8> pixels = state.render_screenshot();
+             if (pixels.size() != static_cast<usize>(width) * height * 4) {
+                 return CommandResult::failure("the screenshot could not be rendered");
+             }
+             u32 w = 0;
+             u32 h = 0;
+             const auto small =
+                 scale_down(pixels, width, height, args.value("max_width", 1024u), w, h);
+             std::string png = encode_png_rgba(w, h, small);
+             Json value = {{"width", w}, {"height", h}};
+             if (args.contains("file_name")) {
+                 const std::string name = args["file_name"].get<std::string>();
+                 const bool safe = std::all_of(name.begin(), name.end(), [](char c) {
+                     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                            (c >= '0' && c <= '9') || c == '-' || c == '_';
+                 });
+                 if (!safe) {
+                     return CommandResult::failure("file_name may only use letters, digits, - and _");
+                 }
+                 std::error_code error;
+                 std::filesystem::create_directories("screenshots", error);
+                 const std::filesystem::path path =
+                     std::filesystem::path("screenshots") / (name + ".png");
+                 std::ofstream file(path, std::ios::binary);
+                 file.write(png.data(), static_cast<std::streamsize>(png.size()));
+                 if (!file) {
+                     return CommandResult::failure("could not write " + path.string());
+                 }
+                 value["saved_to"] = std::filesystem::absolute(path, error).string();
+             }
+             CommandResult result = CommandResult::success(std::move(value));
+             result.images.push_back({"image/png", std::move(png)});
+             return result;
          }});
 
     add(registry,

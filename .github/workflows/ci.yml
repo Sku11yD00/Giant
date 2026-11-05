@@ -52,6 +52,13 @@ jobs:
       - run: cmake --preset msvc -DGIANT_REQUIRE_VALIDATION=ON
       - run: cmake --build --preset msvc
       - run: ctest --preset msvc
+      - name: Keep the editor screenshot from the MCP test
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-screenshot
+          path: build/msvc/editor/screenshots/
+          if-no-files-found: warn
       - run: cmake --preset msvc-release -DGIANT_REQUIRE_VALIDATION=ON
       - run: cmake --build --preset msvc-release
       - run: ctest --preset msvc-release

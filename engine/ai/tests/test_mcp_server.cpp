@@ -12,6 +12,14 @@ struct Fixture {
     double brightness = 1.0;
 
     Fixture() {
+        GIANT_CHECK(registry.add({"snapshot", "Returns a tiny picture.", Json{{"type", "object"}},
+                                  true, [](const Json&, CommandContext&) {
+                                      CommandResult result = CommandResult::success({{"w", 1}});
+                                      result.images.push_back({"image/png", "Man"});
+                                      result.images.push_back({"image/png", "Ma"});
+                                      result.images.push_back({"image/png", "M"});
+                                      return result;
+                                  }}));
         GIANT_CHECK(registry.add(
             {"set_brightness", "Sets the brightness.",
              Json::parse(R"({"type": "object", "required": ["value"], "additionalProperties": false,
@@ -132,4 +140,17 @@ GIANT_TEST("mcp: protocol errors use JSON-RPC error codes") {
     GIANT_CHECK(f.call(deep)["error"]["code"] == -32700);
     const Json ping = f.call(R"({"jsonrpc": "2.0", "id": 9, "method": "ping"})");
     GIANT_CHECK(ping["id"] == 9 && ping["result"].is_object());
+}
+
+GIANT_TEST("mcp: images come back as base64 image content") {
+    Fixture f;
+    const Json reply = f.call(R"({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "snapshot"}})");
+    const Json& content = reply["result"]["content"];
+    GIANT_CHECK(content.size() == 4);
+    GIANT_CHECK(content[1]["type"] == "image");
+    GIANT_CHECK(content[1]["data"] == "TWFu"); // base64 of "Man"
+    GIANT_CHECK(content[1]["mimeType"] == "image/png");
+    GIANT_CHECK(content[2]["data"] == "TWE=");
+    GIANT_CHECK(content[3]["data"] == "TQ==");
 }

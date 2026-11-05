@@ -9,12 +9,39 @@ closes the connection, which must close the editor too, and once more as a
 client that crashes with requests in flight. Fails (exit 1) on any
 wrong answer, or if the editor does not exit cleanly.
 """
+import base64
 import json
+import os
+import struct
 import subprocess
 import sys
 import threading
 
 TIMEOUT = 60  # seconds for the whole run
+
+
+def decode_png(data):
+    """Decodes the editor's PNGs (8-bit RGBA, filter 0) to (width, height, bytes)."""
+    import zlib
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise RuntimeError("not a PNG")
+    at, idat, width, height = 8, b"", 0, 0
+    while at < len(data):
+        length, kind = struct.unpack(">I4s", data[at:at + 8])
+        body = data[at + 8:at + 8 + length]
+        if zlib.crc32(kind + body) != struct.unpack(">I", data[at + 8 + length:at + 12 + length])[0]:
+            raise RuntimeError(f"bad CRC in {kind}")
+        if kind == b"IHDR":
+            width, height = struct.unpack(">II", body[:8])
+        elif kind == b"IDAT":
+            idat += body
+        at += 12 + length
+    raw = zlib.decompress(idat)
+    row = width * 4
+    if len(raw) != (row + 1) * height:
+        raise RuntimeError("PNG data has the wrong size")
+    pixels = b"".join(raw[y * (row + 1) + 1:(y + 1) * (row + 1)] for y in range(height))
+    return width, height, pixels
 
 
 def main() -> int:
@@ -84,6 +111,23 @@ def main() -> int:
 
         log = tool("get_log", {"count": 200})
         check(any("MCP server" in line["text"] for line in log["lines"]), "log readable")
+
+        shot = call("tools/call", {"name": "capture_screenshot",
+                                   "arguments": {"max_width": 1600,
+                                                 "file_name": "mcp_smoke"}})
+        check(not shot.get("isError"), "screenshot taken")
+        images = [c for c in shot["content"] if c["type"] == "image"]
+        check(len(images) == 1 and images[0]["mimeType"] == "image/png", "one PNG image")
+        width, height, pixels = decode_png(base64.b64decode(images[0]["data"]))
+        info = shot["structuredContent"]
+        check((width, height) == (info["width"], info["height"]), "PNG size matches")
+        # The viewport (centre of the default layout) shows the background
+        # colour, sRGB-encoded: linear (0.15, 0.34, 0.71) is about (108, 157, 219).
+        x, y = int(width * 0.47), int(height * 0.3)
+        r, g, b, _ = pixels[(y * width + x) * 4:(y * width + x) * 4 + 4]
+        check(abs(r - 108) <= 3 and abs(g - 157) <= 3 and abs(b - 219) <= 3,
+              f"viewport pixel is the background colour, got {(r, g, b)}")
+        check(os.path.isfile(info["saved_to"]), "screenshot saved")
 
         tool("quit_editor")
         code = editor.wait(timeout=TIMEOUT)

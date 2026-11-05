@@ -10,6 +10,8 @@
 // --mcp speaks MCP over stdin/stdout (logs go to stderr); the editor closes
 // when the client disconnects.
 #include "editor_commands.h"
+#include "ui/imgui_layer.h"
+#include "ui/panels.h"
 
 #include "giant/ai/mcp_server.h"
 #include "giant/core/log.h"
@@ -18,7 +20,9 @@
 #include "giant/platform/window.h"
 #include "giant/rhi/rhi.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -164,6 +168,28 @@ int run(const Options& options) {
             commands, ai::McpServerInfo{"giant-editor", "0.1.0", editor::mcp_instructions()});
         log_info("editor", "MCP server listening on stdin/stdout");
     }
+    // Hidden runs (tests, CI) keep the panel layout in memory only.
+    auto ui = editor::ImGuiLayer::create(*window, *device,
+                                         options.hidden ? nullptr : "giant_editor_layout.ini");
+    if (ui == nullptr) {
+        return 1;
+    }
+    editor::EditorPanels panels(commands, state, log_history);
+    state.render_screenshot = [&] {
+        // Offscreen images store colour as given; the viewport colour is
+        // linear, so encode it to sRGB like the swap chain view does.
+        const auto encode = [](float c) {
+            c = std::clamp(c, 0.0f, 1.0f);
+            return c <= 0.0031308f ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+        };
+        const rhi::Color background{encode(state.clear_color.r), encode(state.clear_color.g),
+                                    encode(state.clear_color.b), 1.0f};
+        return device->render_ui_offscreen(ui->frame(), window->pixel_width(),
+                                           window->pixel_height(), background);
+    };
+    editor::FrameInfo frame_info;
+    auto last_frame = std::chrono::steady_clock::now();
+
     // The null backend has no display to wait for, so pace it like vsync
     // instead of spinning a CPU core.
     const bool pace_null = device->backend() == rhi::Backend::null && options.vsync;
@@ -188,11 +214,22 @@ int run(const Options& options) {
                 break;
             }
         }
+        const auto input = window->take_input_events();
         if (window->minimized()) {
             // Nothing to show: idle instead of spinning a CPU core.
             window->wait_events(100);
+            last_frame = std::chrono::steady_clock::now();
             continue;
         }
+        const auto frame_start = std::chrono::steady_clock::now();
+        const float delta = std::chrono::duration<float>(frame_start - last_frame).count();
+        last_frame = frame_start;
+        frame_info.frame_ms = 1000.0f * delta;
+
+        // Build the UI first: what it changes shows in this frame.
+        ui->begin_frame(delta, input);
+        panels.draw(frame_info);
+        ui->end_frame();
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }
@@ -212,6 +249,8 @@ int run(const Options& options) {
             continue;
         }
         device->clear(*swap_chain, state.clear_color);
+        device->draw_ui(*swap_chain, ui->frame());
+        frame_info.ui_draw_calls = device->last_ui_draw_calls();
         device->end_frame(*swap_chain);
         skipped_in_a_row = 0;
         if (pace_null) {
