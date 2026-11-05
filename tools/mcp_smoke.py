@@ -148,6 +148,24 @@ def main() -> int:
             tool("unload_scripts")
             call("ping")
             check(tool("get_scripts")["loaded"] == "", "scripts unloaded")
+
+            # Load then unload sent together (usually handled in one frame):
+            # the latest request wins, so nothing stays loaded.
+            ids = []
+            for name, arguments in (("load_scripts", {"path": sample}), ("unload_scripts", {})):
+                next_id += 1
+                ids.append(next_id)
+                editor.stdin.write(json.dumps({"jsonrpc": "2.0", "id": next_id,
+                                               "method": "tools/call",
+                                               "params": {"name": name, "arguments": arguments}}) + "\n")
+            editor.stdin.flush()
+            replies = [json.loads(editor.stdout.readline()) for _ in ids]
+            check([r.get("id") for r in replies] == ids, "replies to both requests, in order")
+            for _ in range(30):
+                call("ping")  # let the requests apply
+            state = tool("get_scripts")
+            check(state["loaded"] == "" and state["running"] == 0,
+                  f"load then unload leaves nothing loaded, got {state}")
         else:
             print("mcp_smoke: C# scripts skipped (GIANT_SAMPLE_SCRIPTS not set)")
 

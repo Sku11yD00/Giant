@@ -93,3 +93,61 @@ public sealed class ThreadProbe : Script
         Engine.Execute("record", new { what = "thread", result = _result });
     }
 }
+
+public enum Weather
+{
+    Clear,
+    Storm,
+}
+
+public sealed record Gust(float Strength, Weather Kind);
+
+/// <summary>Sends many kinds of argument values; the C++ test checks the JSON.</summary>
+public sealed class Shapes : Script
+{
+    public override void OnStart()
+    {
+        Engine.Execute("record", new
+        {
+            what = "shapes",
+            f = 0.25f,
+            big = long.MaxValue,
+            weather = Weather.Storm,
+            gust = new Gust(2.5f, Weather.Clear),
+            list = new System.Collections.Generic.List<int> { 1, 2 },
+            map = new System.Collections.Generic.Dictionary<string, object?> { ["k"] = null },
+            when = new DateTime(2026, 11, 5, 1, 2, 3, DateTimeKind.Utc),
+            span = TimeSpan.FromSeconds(1.5),
+            id = Guid.Empty,
+            v = new System.Numerics.Vector3(1, 2, 3),
+        });
+        try
+        {
+            Engine.Execute("record", new { bad = typeof(string) });
+        }
+        catch (ArgumentException)
+        {
+            Engine.Execute("record", new { what = "opaque refused" });
+        }
+    }
+}
+
+/// <summary>Code after an await runs on the main thread, so it may call the engine.</summary>
+public sealed class Awaiter : Script
+{
+    private bool _started;
+
+    public override async void OnUpdate(float deltaSeconds)
+    {
+        if (_started)
+        {
+            return;
+        }
+        _started = true;
+        await System.Threading.Tasks.Task.Yield();
+        Engine.Execute("record", new { what = "after yield" });
+        int answer = await System.Threading.Tasks.Task.Run(() => 6 * 7);
+        Engine.Execute("record", new { what = "after task", answer });
+        throw new InvalidOperationException("async throw on purpose");
+    }
+}

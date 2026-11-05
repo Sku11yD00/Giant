@@ -2,6 +2,7 @@
 
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
+#include "giant/core/text.h"
 
 #include <algorithm>
 #include <atomic>
@@ -29,13 +30,6 @@
 namespace giant::script {
 
 namespace {
-
-// A path as UTF-8 text for logs. path::string() throws on Windows when a
-// name does not fit the ANSI code page (e.g. a user folder in Chinese).
-std::string utf8(const std::filesystem::path& path) {
-    const std::u8string text = path.u8string();
-    return {text.begin(), text.end()};
-}
 
 // --- The .NET hosting API (hostfxr), declared here so no SDK headers are
 // needed to build the engine. See dotnet/runtime docs/design/features/
@@ -160,7 +154,7 @@ std::filesystem::path find_hostfxr(const std::filesystem::path& root) {
     std::filesystem::path best;
     std::vector<int> best_version;
     for (const auto& entry : std::filesystem::directory_iterator(root / "host" / "fxr", error)) {
-        const auto version = version_parts(utf8(entry.path().filename()));
+        const auto version = version_parts(path_to_utf8(entry.path().filename()));
         const auto candidate = entry.path() / k_hostfxr_name;
         if (!version.empty() && version > best_version &&
             std::filesystem::exists(candidate, error)) {
@@ -272,7 +266,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
     }
     void* library = open_library(hostfxr);
     if (library == nullptr) {
-        log_error("script", "could not load " + utf8(hostfxr));
+        log_error("script", "could not load " + path_to_utf8(hostfxr));
         return nullptr;
     }
     // The library stays loaded for the life of the process: .NET cannot be
@@ -291,7 +285,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
     const std::filesystem::path assembly = desc.managed_dir / "Giant.Scripting.dll";
     std::error_code error;
     if (!std::filesystem::exists(config, error) || !std::filesystem::exists(assembly, error)) {
-        log_error("script", "the engine's C# API is missing from " + utf8(desc.managed_dir));
+        log_error("script", "the engine's C# API is missing from " + path_to_utf8(desc.managed_dir));
         return nullptr;
     }
 
@@ -358,7 +352,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
     }
     auto host = std::make_unique<ScriptHost>(ConstructKey{}, std::move(api));
     g_commands = &host->m_api->commands;
-    log_info("script", ".NET started from " + utf8(root));
+    log_info("script", ".NET started from " + path_to_utf8(root));
     return host;
 }
 
@@ -368,9 +362,7 @@ ScriptHost::~ScriptHost() {
 }
 
 bool ScriptHost::load_scripts(const std::filesystem::path& assembly) {
-    const std::u8string u8 = assembly.u8string();
-    const std::string utf8(u8.begin(), u8.end());
-    return m_api->load_scripts(utf8.c_str()) == 0;
+    return m_api->load_scripts(path_to_utf8(assembly).c_str()) == 0;
 }
 
 void ScriptHost::update(float delta_seconds) { m_api->update(delta_seconds); }

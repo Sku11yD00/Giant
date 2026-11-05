@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text;
+using System.Threading;
 
 namespace Giant;
 
@@ -36,6 +37,9 @@ public static unsafe class NativeHost
     private static int s_mainThread;
     // True while script code runs; scripts cannot load or unload scripts.
     private static bool s_busy;
+    // Where `await` in a script resumes: queued, then run on the main thread
+    // at the start of the next update. One per load, closed on unload.
+    private static MainThreadContext? s_context;
 
     /// <summary>Receives the engine's functions; 0 on success.</summary>
     [UnmanagedCallersOnly]
@@ -64,6 +68,7 @@ public static unsafe class NativeHost
             UnloadCurrent();
             string path = Marshal.PtrToStringUTF8((IntPtr)pathUtf8) ?? "";
             s_scripts = ScriptSet.Load(path);
+            s_context = new MainThreadContext();
             RunScripts(s_scripts.Start);
             return 0;
         }
@@ -86,7 +91,11 @@ public static unsafe class NativeHost
         try
         {
             ScriptSet scripts = s_scripts;
-            RunScripts(() => scripts.Update(deltaSeconds));
+            RunScripts(() =>
+            {
+                s_context?.Drain(); // continuations of earlier awaits first
+                scripts.Update(deltaSeconds);
+            });
             return 0;
         }
         catch (Exception e)
@@ -155,6 +164,8 @@ public static unsafe class NativeHost
 
     private static void RunScripts(Action action)
     {
+        SynchronizationContext? previous = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(s_context);
         s_busy = true;
         try
         {
@@ -163,6 +174,7 @@ public static unsafe class NativeHost
         finally
         {
             s_busy = false;
+            SynchronizationContext.SetSynchronizationContext(previous);
         }
     }
 
@@ -208,16 +220,12 @@ public static unsafe class NativeHost
     [MethodImpl(MethodImplOptions.NoInlining)] // no references left in the caller's frame
     private static WeakReference StopAndRelease(ScriptSet scripts)
     {
-        WeakReference context;
-        s_busy = true;
-        try
-        {
-            context = scripts.Stop();
-        }
-        finally
-        {
-            s_busy = false;
-        }
+        WeakReference context = null!;
+        RunScripts(() => context = scripts.Stop());
+        // Awaits still pending belong to the old scripts; drop them so they
+        // neither run against the new scripts nor keep the old ones alive.
+        s_context?.Close();
+        s_context = null;
         return context;
     }
 
@@ -327,5 +335,70 @@ internal sealed class ScriptLoadContext : AssemblyLoadContext
         }
         string? path = _resolver.ResolveAssemblyToPath(name);
         return path != null ? LoadFromAssemblyPath(path) : null;
+    }
+}
+
+/// <summary>
+/// Makes <c>await</c> in scripts come back to the engine's main thread: work
+/// posted from any thread is queued and run at the start of the next update,
+/// so code after an await may call the engine. An exception thrown there (or
+/// by an <c>async void</c> method) is logged, not fatal.
+/// </summary>
+internal sealed class MainThreadContext : SynchronizationContext
+{
+    private readonly object _lock = new();
+    private Queue<(SendOrPostCallback Callback, object? State)> _queue = new(); // guarded by _lock
+    private bool _closed; // guarded by _lock
+
+    public override void Post(SendOrPostCallback d, object? state)
+    {
+        lock (_lock)
+        {
+            if (!_closed)
+            {
+                _queue.Enqueue((d, state));
+            }
+        }
+    }
+
+    public override void Send(SendOrPostCallback d, object? state) =>
+        throw new NotSupportedException("scripts cannot wait synchronously on the main thread");
+
+    public override SynchronizationContext CreateCopy() => this;
+
+    // Runs what was queued before this call; work queued meanwhile waits for
+    // the next update, so a script that keeps re-posting cannot hang a frame.
+    public void Drain()
+    {
+        Queue<(SendOrPostCallback Callback, object? State)> work;
+        lock (_lock)
+        {
+            if (_queue.Count == 0)
+            {
+                return;
+            }
+            work = _queue;
+            _queue = new();
+        }
+        foreach ((SendOrPostCallback callback, object? state) in work)
+        {
+            try
+            {
+                callback(state);
+            }
+            catch (Exception e)
+            {
+                NativeHost.Log(3, "a script's async code threw: " + e);
+            }
+        }
+    }
+
+    public void Close()
+    {
+        lock (_lock)
+        {
+            _closed = true;
+            _queue.Clear();
+        }
     }
 }

@@ -4,6 +4,7 @@ giant_module(core
     src/jobs.cpp
     src/log.cpp
     src/log_history.cpp
+    src/image.cpp
     src/png.cpp
 )
 
@@ -13,6 +14,7 @@ target_link_libraries(giant_core PUBLIC Threads::Threads)
 giant_module_tests(core
   SOURCES
     tests/test_assert_log.cpp
+    tests/test_image.cpp
     tests/test_jobs.cpp
     tests/test_log_history.cpp
     tests/test_math.cpp

@@ -5,7 +5,9 @@
 
 #include "giant_test.h"
 
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace giant;
@@ -44,7 +46,7 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     }
     live_host = host.get();
     GIANT_CHECK(host->load_scripts(scripts));
-    GIANT_CHECK(host->running_scripts() == 4); // all but the abstract one
+    GIANT_CHECK(host->running_scripts() == 6); // all but the abstract one
 
     const auto has = [&calls](const std::string& needle) {
         for (const auto& call : calls) {
@@ -59,27 +61,45 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(has("\"what\":\"failed\",\"error\":\"no such command\"")); // failures throw
     GIANT_CHECK(has("\"what\":\"thread\",\"result\":\"refused\"")); // main thread only
     GIANT_CHECK(!has("from another thread"));
+    GIANT_CHECK(has("\"what\":\"shapes\",\"f\":0.25,\"big\":9223372036854775807,"
+                    "\"weather\":\"Storm\",\"gust\":{\"Strength\":2.5,\"Kind\":\"Clear\"},"
+                    "\"list\":[1,2],\"map\":{\"k\":null},\"when\":\"2026-11-05T01:02:03.0000000Z\","
+                    "\"span\":1.5,\"id\":\"00000000-0000-0000-0000-000000000000\","
+                    "\"v\":{\"X\":1,\"Y\":2,\"Z\":3}"));
+    GIANT_CHECK(has("opaque refused"));
 
     set_console_logging(false);
     for (int i = 0; i < 3; ++i) {
         host->update(0.016f);
     }
+    // The Awaiter's Task.Run finishes on a worker; its continuation runs in
+    // a later update on this thread.
+    for (int i = 0; i < 200 && !has("after task"); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        host->update(0.016f);
+    }
+    host->update(0.016f); // an async void method's exception is posted, so runs one update later
     set_console_logging(true);
+    GIANT_CHECK(has("after yield"));
+    GIANT_CHECK(has("\"what\":\"after task\",\"answer\":42"));
     GIANT_CHECK(has("\"frame\":3"));
     GIANT_CHECK(reentry_refused);              // and the scripts kept running
-    GIANT_CHECK(host->running_scripts() == 3); // Crasher stopped itself on frame 2
+    GIANT_CHECK(host->running_scripts() == 5); // Crasher stopped itself on frame 2
     bool logged_crash = false;
+    bool logged_async = false;
     for (const auto& record : log.recent(100, LogLevel::error)) {
         logged_crash = logged_crash || record.text.find("crasher crashed on purpose") != std::string::npos;
+        logged_async = logged_async || record.text.find("async throw on purpose") != std::string::npos;
     }
     GIANT_CHECK(logged_crash);
+    GIANT_CHECK(logged_async); // logged, not fatal
 
     // Reloading runs OnStop, unloads, and starts fresh scripts.
     calls.clear();
     GIANT_CHECK(host->load_scripts(scripts));
     GIANT_CHECK(has("\"what\":\"stop\""));
     GIANT_CHECK(has("\"what\":\"start\""));
-    GIANT_CHECK(host->running_scripts() == 4);
+    GIANT_CHECK(host->running_scripts() == 6);
 
     host->unload_scripts();
     GIANT_CHECK(host->running_scripts() == 0);

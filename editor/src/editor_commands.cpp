@@ -1,8 +1,10 @@
 #include "editor_commands.h"
 
 #include "giant/core/assert.h"
+#include "giant/core/image.h"
 #include "giant/core/log.h"
 #include "giant/core/png.h"
+#include "giant/core/text.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -25,50 +27,6 @@ Json color_to_json(const rhi::Color& c) { return {{"r", c.r}, {"g", c.g}, {"b", 
 void add(ai::CommandRegistry& registry, ai::CommandDesc desc) {
     const bool added = registry.add(std::move(desc));
     GIANT_ASSERT(added, "editor command could not be registered");
-}
-
-// A path as UTF-8 text (path::string() throws on Windows outside the ANSI
-// code page).
-std::string utf8_text(const std::filesystem::path& path) {
-    const std::u8string text = path.u8string();
-    return {text.begin(), text.end()};
-}
-
-// Box-filters an RGBA8 image down so it is at most `max_width` wide. Each
-// output pixel averages the source pixels it covers; the last row and column
-// of boxes may be cut short by the image edge.
-std::vector<u8> scale_down(const std::vector<u8>& pixels, u32 width, u32 height, u32 max_width,
-                           u32& out_w, u32& out_h) {
-    GIANT_ASSERT(width > 0 && height > 0 && max_width > 0, "empty screenshot");
-    GIANT_ASSERT(pixels.size() == static_cast<usize>(width) * height * 4, "pixel count");
-    if (width <= max_width) {
-        out_w = width;
-        out_h = height;
-        return pixels;
-    }
-    const u32 factor = (width + max_width - 1) / max_width;
-    out_w = (width + factor - 1) / factor;
-    out_h = (height + factor - 1) / factor;
-    std::vector<u8> out(static_cast<usize>(out_w) * out_h * 4);
-    for (u32 y = 0; y < out_h; ++y) {
-        const u32 y0 = y * factor;
-        const u32 y1 = std::min(y0 + factor, height);
-        for (u32 x = 0; x < out_w; ++x) {
-            const u32 x0 = x * factor;
-            const u32 x1 = std::min(x0 + factor, width);
-            const u32 count = (y1 - y0) * (x1 - x0);
-            for (u32 c = 0; c < 4; ++c) {
-                u32 sum = 0;
-                for (u32 sy = y0; sy < y1; ++sy) {
-                    for (u32 sx = x0; sx < x1; ++sx) {
-                        sum += pixels[(static_cast<usize>(sy) * width + sx) * 4 + c];
-                    }
-                }
-                out[(static_cast<usize>(y) * out_w + x) * 4 + c] = static_cast<u8>(sum / count);
-            }
-        }
-    }
-    return out;
 }
 
 LogLevel parse_level(const std::string& name) {
@@ -202,11 +160,11 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
              if (pixels.size() != static_cast<usize>(width) * height * 4) {
                  return CommandResult::failure("the screenshot could not be rendered");
              }
-             u32 w = 0;
-             u32 h = 0;
-             const auto small =
-                 scale_down(pixels, width, height, args.value("max_width", 1024u), w, h);
-             std::string png = encode_png_rgba(w, h, small);
+             const ImageRgba8 small =
+                 downscale_rgba(pixels, width, height, args.value("max_width", 1024u));
+             const u32 w = small.width;
+             const u32 h = small.height;
+             std::string png = encode_png_rgba(w, h, small.pixels);
              if (png.empty()) {
                  return CommandResult::failure("the screenshot could not be encoded");
              }
@@ -227,9 +185,9 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                  std::ofstream file(path, std::ios::binary);
                  file.write(png.data(), static_cast<std::streamsize>(png.size()));
                  if (!file) {
-                     return CommandResult::failure("could not write " + utf8_text(path));
+                     return CommandResult::failure("could not write " + path_to_utf8(path));
                  }
-                 value["saved_to"] = utf8_text(std::filesystem::absolute(path, error));
+                 value["saved_to"] = path_to_utf8(std::filesystem::absolute(path, error));
              }
              CommandResult result = CommandResult::success(std::move(value));
              result.images.push_back({"image/png", std::move(png)});

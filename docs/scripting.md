@@ -35,15 +35,21 @@ game logic, so they are not added to the editor's undo history.
 
 Rules the host enforces:
 
-- Call the engine from `OnStart`, `OnUpdate` and `OnStop` only. Engine state
-  belongs to the main thread, so `Engine.Execute` from another thread (a
-  worker, or code after an `await`) throws `InvalidOperationException`. Do
-  background work on your own thread and pick up its result in `OnUpdate`.
+- Call the engine from the main thread: `OnStart`, `OnUpdate`, `OnStop`, or
+  code after an `await` in them. Awaits come back to the main thread at the
+  start of the next update, so `async void OnUpdate` with `await` works, and
+  an exception after an await is logged instead of ending the editor. A
+  thread you start yourself (or `Task.Run` code) must not call the engine;
+  `Engine.Execute` there throws `InvalidOperationException`. Hand its result
+  back with `await` instead.
 - Scripts cannot load or unload scripts while they run; `load_scripts` and
   `unload_scripts` called from a script are refused.
-- Arguments are plain values, arrays, dictionaries or objects (anonymous
-  objects, records, classes; their public properties and fields). NaN and
-  infinity are rejected, since JSON has no such numbers.
+- Arguments are numbers, strings, booleans, lists, dictionaries, vectors,
+  tuples or your own objects (anonymous objects, records, classes; their
+  public properties and fields), nested freely. Enums are sent by name
+  (`"Storm"`), `DateTime` as ISO 8601 text, `TimeSpan` as seconds, `Guid` as
+  text. Other .NET types, and NaN or infinity, are refused with an
+  `ArgumentException`.
 
 The full sample is `scripts/samples/HelloGiant`. The build puts it in
 `build/<preset>/managed/samples/HelloGiant/HelloGiant.dll`.

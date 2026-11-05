@@ -4,6 +4,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Giant;
@@ -95,7 +96,23 @@ internal static class ArgumentJson
             case char c:
                 return JsonValue.Create(c.ToString());
             case Enum e:
-                return JsonValue.Create(e.ToString());
+                return JsonValue.Create(e.ToString()); // by name: "Night", or "A, B" for flags
+            case DateTime time:
+                return JsonValue.Create(time.ToString("O", CultureInfo.InvariantCulture));
+            case DateTimeOffset time:
+                return JsonValue.Create(time.ToString("O", CultureInfo.InvariantCulture));
+            case TimeSpan span:
+                return JsonValue.Create(span.TotalSeconds); // seconds, like the engine's times
+            case Guid guid:
+                return JsonValue.Create(guid.ToString());
+            case Half half:
+                return ToNode((float)half, depth);
+            case nint n:
+                return JsonValue.Create((long)n);
+            case nuint n:
+                return JsonValue.Create((ulong)n);
+            case JsonElement element:
+                return JsonNode.Parse(element.GetRawText());
             case float f:
                 return Finite(f) ? JsonValue.Create(f) : throw NotFinite();
             case double d:
@@ -106,6 +123,15 @@ internal static class ArgumentJson
                 return JsonValue.Create(Convert.ToInt64(value, CultureInfo.InvariantCulture));
             case ulong u:
                 return JsonValue.Create(u);
+            case IEnumerable<KeyValuePair<string, object?>> pairs: // ExpandoObject and friends
+            {
+                var obj = new JsonObject();
+                foreach (KeyValuePair<string, object?> pair in pairs)
+                {
+                    obj[pair.Key] = ToNode(pair.Value, depth + 1);
+                }
+                return obj;
+            }
             case IDictionary dictionary:
             {
                 var obj = new JsonObject();
@@ -135,6 +161,12 @@ internal static class ArgumentJson
     {
         var obj = new JsonObject();
         Type type = value.GetType();
+        if (IsOpaqueSystemType(type))
+        {
+            // A .NET type with no JSON form above: its properties would be
+            // noise (or endless), so say so instead of guessing.
+            throw new ArgumentException($"command arguments cannot hold a {type.FullName}; pass its value as a number or string");
+        }
         foreach (PropertyInfo property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
             if (property.CanRead && property.GetIndexParameters().Length == 0)
@@ -147,6 +179,19 @@ internal static class ArgumentJson
             obj[field.Name] = ToNode(field.GetValue(value), depth + 1);
         }
         return obj;
+    }
+
+    // .NET's own types other than vectors (System.Numerics) and tuples have
+    // no sensible member-by-member JSON form.
+    private static bool IsOpaqueSystemType(Type type)
+    {
+        string ns = type.Namespace ?? "";
+        if (ns != "System" && !ns.StartsWith("System.", StringComparison.Ordinal))
+        {
+            return false;
+        }
+        bool tuple = type.IsGenericType && (type.Name.StartsWith("ValueTuple`", StringComparison.Ordinal) || type.Name.StartsWith("Tuple`", StringComparison.Ordinal));
+        return ns != "System.Numerics" && !tuple;
     }
 
     private static bool Finite(double d) => !double.IsNaN(d) && !double.IsInfinity(d);
