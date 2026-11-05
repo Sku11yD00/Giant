@@ -278,6 +278,17 @@ struct VoxelLevel {
 };
 static_assert(sizeof(VoxelLevel) == 64);
 
+// A sun shadow level (shadow_pages.h): its window of 16 x 16 pages in
+// light space. Light-space x and y are the shadow basis's axes.
+struct ShadowLevel {
+    float origin[2];  // the window's minimum corner, light space, relative to the camera
+    float page_size;  // metres
+    float texel_size;
+    i32 page[2];      // the window's minimum page (slots wrap on it)
+    i32 pad[2];
+};
+static_assert(sizeof(ShadowLevel) == 32);
+
 // voxels.slang's VoxelPush (the voxel debug view).
 struct VoxelPush {
     u32 frame;

@@ -1,0 +1,349 @@
+// The sun's shadow pages on their own (src/shadow_pages.h): windows, page
+// requests, the pool, what gets dirtied and what gets drawn first.
+#include "giant/geometry/clusters.h"
+#include "giant/geometry/mesh.h"
+#include "giant_test.h"
+#include "gpu_layout.h"
+#include "shadow_pages.h"
+
+#include <cmath>
+#include <vector>
+
+using namespace giant;
+using namespace giant::render;
+
+namespace {
+
+const Vec3 k_up_sun{0.0f, 1.0f, 0.0f};
+
+struct Requests {
+    std::vector<u32> bits;
+    explicit Requests(const ShadowPages& s) : bits(s.levels() * (ShadowPages::k_slots / 32), 0u) {}
+    // Asks for the page holding a world position on a level.
+    void ask(const ShadowPages& s, u32 level, const DVec3& world) {
+        const DVec3 l = s.to_light(world);
+        const double size = s.page_size(level);
+        const u32 slot = s.slot_of(i32(std::floor(l.x / size)), i32(std::floor(l.y / size)));
+        bits[level * 8 + slot / 32] |= 1u << (slot % 32);
+    }
+};
+
+bool has(u32 entry, u32 bit) { return entry != ShadowPages::k_no_page && (entry & bit) != 0u; }
+
+} // namespace
+
+GIANT_TEST("shadow pages: the light basis is orthonormal and looks away from the sun") {
+    const Vec3 suns[] = {{0.0f, 1.0f, 0.0f}, {0.3f, 0.8f, -0.52f}, {1.0f, 0.0f, 0.0f}, {0.0f, -1.0f, 0.0f}};
+    for (const Vec3& sun : suns) {
+        const ShadowPages::Basis b = ShadowPages::basis_for(sun);
+        GIANT_CHECK_NEAR(length(b.x), 1.0, 1e-9);
+        GIANT_CHECK_NEAR(length(b.y), 1.0, 1e-9);
+        GIANT_CHECK_NEAR(length(b.z), 1.0, 1e-9);
+        GIANT_CHECK_NEAR(dot(b.x, b.y), 0.0, 1e-9);
+        GIANT_CHECK_NEAR(dot(b.x, b.z), 0.0, 1e-9);
+        GIANT_CHECK_NEAR(dot(b.y, b.z), 0.0, 1e-9);
+        const DVec3 s = normalize_or_zero(DVec3{sun.x, sun.y, sun.z});
+        GIANT_CHECK_NEAR(dot(b.z, s), -1.0, 1e-6);
+    }
+    // No direction at all: straight down, still a basis.
+    const ShadowPages::Basis none = ShadowPages::basis_for(Vec3{});
+    GIANT_CHECK_NEAR(none.z.y, -1.0, 1e-9);
+    GIANT_CHECK_NEAR(length(none.x), 1.0, 1e-9);
+}
+
+GIANT_TEST("shadow pages: sizes double per level and the pool is a square atlas") {
+    ShadowPages s;
+    GIANT_CHECK(s.levels() == 12);
+    GIANT_CHECK_NEAR(s.page_size(0), 1.0, 1e-12);
+    GIANT_CHECK_NEAR(s.page_size(11), 2048.0, 1e-9);
+    GIANT_CHECK_NEAR(s.texel_size(0), 1.0 / 128.0, 1e-12);
+    GIANT_CHECK(s.atlas_pages_per_axis() == 32);
+    ShadowDesc odd;
+    odd.pool_pages = 1000;
+    odd.levels = 40;
+    ShadowPages t(odd);
+    GIANT_CHECK(t.atlas_pages_per_axis() == 32);
+    GIANT_CHECK(t.levels() == 16);
+    GIANT_CHECK(t.stats().capacity == 1000);
+}
+
+GIANT_TEST("shadow pages: a page asked for gets room, is drawn once, then stays") {
+    ShadowPages s;
+    const DVec3 camera{100.0, 5.0, -40.0};
+    s.begin_frame(camera, k_up_sun);
+    const DVec3 spot = camera + DVec3{0.5, -5.0, 0.5};
+    GIANT_CHECK(s.entry_at(0, spot) == ShadowPages::k_no_page); // never asked for
+    Requests r(s);
+    r.ask(s, 0, spot);
+    r.ask(s, 3, spot);
+    s.request(r.bits);
+    GIANT_CHECK(s.stats().resident == 2);
+    const u32 waiting = s.entry_at(0, spot);
+    GIANT_CHECK(waiting != ShadowPages::k_no_page);
+    GIANT_CHECK(!has(waiting, ShadowPages::k_drawn_bit)); // reads as missing until drawn
+
+    const std::vector<ShadowPages::Draw> draws = s.plan(16);
+    GIANT_CHECK(draws.size() == 2);
+    GIANT_CHECK(draws[0].level == 3); // coarse first
+    GIANT_CHECK(draws[1].level == 0);
+    GIANT_CHECK(draws[0].physical != draws[1].physical);
+    const u32 drawn = s.entry_at(0, spot);
+    GIANT_CHECK(has(drawn, ShadowPages::k_drawn_bit) && has(drawn, ShadowPages::k_draw_bit));
+    GIANT_CHECK((drawn & ShadowPages::k_page_mask) == draws[1].physical);
+    // The page's own coordinate holds the spot.
+    const DVec3 l = s.to_light(spot);
+    GIANT_CHECK(draws[1].page_x == i32(std::floor(l.x / s.page_size(0))));
+    GIANT_CHECK(draws[1].page_y == i32(std::floor(l.y / s.page_size(0))));
+
+    // The next frame: cached, nothing to draw, the draw bit gone.
+    s.begin_frame(camera, k_up_sun);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16).empty());
+    const u32 cached = s.entry_at(0, spot);
+    GIANT_CHECK(has(cached, ShadowPages::k_drawn_bit) && !has(cached, ShadowPages::k_draw_bit));
+    GIANT_CHECK(s.stats().resident == 2);
+
+    // The table says the same.
+    std::vector<u32> table(s.levels() * ShadowPages::k_slots);
+    s.write_table(table);
+    u32 listed = 0;
+    for (const u32 e : table) listed += e != ShadowPages::k_no_page ? 1u : 0u;
+    GIANT_CHECK(listed == 2);
+}
+
+GIANT_TEST("shadow pages: windows follow the camera and pages that leave are freed") {
+    ShadowPages s;
+    DVec3 camera{0.0, 0.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    const DVec3 spot{0.25, 0.0, 0.25};
+    Requests r(s);
+    r.ask(s, 0, spot);
+    r.ask(s, 5, spot);
+    s.request(r.bits);
+    s.plan(16);
+    GIANT_CHECK(s.stats().resident == 2);
+    // Every window holds the camera, the camera near its middle.
+    for (u32 level = 0; level < s.levels(); ++level) {
+        const DVec3 l = s.to_light(camera);
+        const double pages = l.x / s.page_size(level) - double(s.window_x(level));
+        GIANT_CHECK(pages >= 7.5 && pages < 8.5);
+    }
+    // 20 m on: level 0 (16 m across) has left the spot, level 5 (512 m) has not.
+    camera = {20.0, 0.0, 20.0};
+    s.begin_frame(camera, k_up_sun);
+    GIANT_CHECK(s.entry_at(0, spot) == ShadowPages::k_no_page);
+    GIANT_CHECK(has(s.entry_at(5, spot), ShadowPages::k_drawn_bit));
+    GIANT_CHECK(s.stats().resident == 1);
+    // Coming back finds the page gone: asked for again, drawn again.
+    camera = {0.0, 0.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    s.request(r.bits);
+    GIANT_CHECK(!has(s.entry_at(0, spot), ShadowPages::k_drawn_bit));
+    GIANT_CHECK(s.plan(16).size() == 1);
+
+    // Write_levels: the window's corner relative to the camera, small numbers far from the origin.
+    camera = {30000.0, 0.0, -25000.0};
+    s.begin_frame(camera, k_up_sun);
+    std::vector<gpu::ShadowLevel> levels(s.levels());
+    s.write_levels(levels.data(), camera);
+    for (u32 level = 0; level < s.levels(); ++level) {
+        const double size = s.page_size(level);
+        GIANT_CHECK(levels[level].origin[0] <= -7.5 * size + 1e-3 && levels[level].origin[0] > -8.5 * size);
+        GIANT_CHECK(levels[level].origin[1] <= -7.5 * size + 1e-3 && levels[level].origin[1] > -8.5 * size);
+        GIANT_CHECK(levels[level].page[0] == s.window_x(level));
+        GIANT_CHECK_NEAR(levels[level].page_size, size, 1e-6 * size);
+    }
+}
+
+GIANT_TEST("shadow pages: a change dirties the pages under it, on every level") {
+    ShadowPages s;
+    const DVec3 camera{0.0, 2.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    const DVec3 a{-3.5, 0.0, -3.5};
+    const DVec3 b{3.5, 0.0, 3.5};
+    Requests r(s);
+    r.ask(s, 0, a);
+    r.ask(s, 0, b);
+    r.ask(s, 6, a);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16).size() == 3);
+    s.begin_frame(camera, k_up_sun);
+    // A box over `a` only (tall: the sun is straight up, height does not matter).
+    s.invalidate(a - DVec3{0.1, 50.0, 0.1}, a + DVec3{0.1, 50.0, 0.1});
+    s.request(r.bits);
+    const std::vector<ShadowPages::Draw> draws = s.plan(16);
+    GIANT_CHECK(draws.size() == 2); // a's level 0 page and the level 6 page
+    GIANT_CHECK(draws[0].level == 6 && draws[1].level == 0);
+    GIANT_CHECK(has(s.entry_at(0, b), ShadowPages::k_drawn_bit) && !has(s.entry_at(0, b), ShadowPages::k_draw_bit));
+    // A dirty page keeps reading as drawn (old content) until redrawn.
+    s.begin_frame(camera, k_up_sun);
+    s.invalidate_all();
+    GIANT_CHECK(has(s.entry_at(0, a), ShadowPages::k_drawn_bit));
+    GIANT_CHECK(s.plan(1).size() == 1);
+    GIANT_CHECK(s.stats().waiting == 2);
+    // Empty and NaN boxes dirty nothing.
+    s.begin_frame(camera, k_up_sun);
+    s.plan(16);
+    s.begin_frame(camera, k_up_sun);
+    s.invalidate(DVec3{1.0, 1.0, 1.0}, DVec3{0.0, 0.0, 0.0});
+    s.invalidate(DVec3{std::nan(""), 0.0, 0.0}, DVec3{1.0, 1.0, 1.0});
+    GIANT_CHECK(s.plan(16).empty());
+}
+
+GIANT_TEST("shadow pages: a new sun direction dirties everything") {
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    Requests r(s);
+    for (u32 level = 0; level < 4; ++level) r.ask(s, level, camera);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(64).size() == 4);
+    s.begin_frame(camera, Vec3{0.3f, 0.9f, 0.1f});
+    GIANT_CHECK(s.plan(64).size() == 4);
+    s.begin_frame(camera, Vec3{0.3f, 0.9f, 0.1f});
+    GIANT_CHECK(s.plan(64).empty());
+}
+
+GIANT_TEST("shadow pages: a full pool gives the page used longest ago") {
+    ShadowDesc desc;
+    desc.pool_pages = 3;
+    ShadowPages s(desc);
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const DVec3 spots[] = {{-6.5, 0.0, -6.5}, {-4.5, 0.0, -6.5}, {-2.5, 0.0, -6.5}, {0.5, 0.0, -6.5}};
+    for (u32 i = 0; i < 3; ++i) {
+        s.begin_frame(camera, k_up_sun);
+        Requests r(s);
+        r.ask(s, 0, spots[i]);
+        if (i == 2) r.ask(s, 0, spots[0]); // spots[0] used again: spots[1] is now the oldest
+        s.request(r.bits);
+        s.plan(16);
+    }
+    GIANT_CHECK(s.stats().resident == 3);
+    s.begin_frame(camera, k_up_sun);
+    Requests r(s);
+    r.ask(s, 0, spots[3]);
+    s.request(r.bits);
+    GIANT_CHECK(s.entry_at(0, spots[1]) == ShadowPages::k_no_page);
+    GIANT_CHECK(s.entry_at(0, spots[0]) != ShadowPages::k_no_page);
+    GIANT_CHECK(s.entry_at(0, spots[3]) != ShadowPages::k_no_page);
+    GIANT_CHECK(s.stats().missing == 0);
+    // All in use at once: one has to go without.
+    s.begin_frame(camera, k_up_sun);
+    Requests all(s);
+    for (const DVec3& p : spots) all.ask(s, 0, p);
+    s.request(all.bits);
+    GIANT_CHECK(s.stats().resident == 3);
+    GIANT_CHECK(s.stats().missing == 1);
+}
+
+GIANT_TEST("shadow pages: budgets draw new pages first, then coarse levels, at least one") {
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    Requests first(s);
+    first.ask(s, 0, camera);
+    s.request(first.bits);
+    s.plan(16);
+    s.begin_frame(camera, k_up_sun);
+    s.invalidate_all(); // level 0 dirty, drawn before
+    Requests more(s);
+    more.ask(s, 0, camera);
+    more.ask(s, 1, camera);
+    more.ask(s, 4, camera);
+    s.request(more.bits);
+    std::vector<ShadowPages::Draw> d = s.plan(0); // 0 still draws one
+    GIANT_CHECK(d.size() == 1 && d[0].level == 4);
+    GIANT_CHECK(s.stats().waiting == 2);
+    s.begin_frame(camera, k_up_sun);
+    d = s.plan(1);
+    GIANT_CHECK(d.size() == 1 && d[0].level == 1); // never drawn beats dirty
+    s.begin_frame(camera, k_up_sun);
+    d = s.plan(1);
+    GIANT_CHECK(d.size() == 1 && d[0].level == 0);
+    GIANT_CHECK(s.stats().waiting == 0);
+}
+
+GIANT_TEST("shadow pages: tracking casters dirties where they were and where they are") {
+    const geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
+    const ShadowPages::MeshLookup meshes = [&](MeshId id) { return id == 1 ? &cube : nullptr; };
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const DVec3 a{-5.5, 0.0, -5.5};
+    const DVec3 b{5.5, 0.0, 5.5};
+    const DVec3 c{-5.5, 0.0, 5.5};
+    std::vector<Instance> instances(1);
+    instances[0].position = a;
+    instances[0].mesh = 1;
+    s.begin_frame(camera, k_up_sun);
+    s.track(instances, 1, meshes);
+    Requests r(s);
+    r.ask(s, 0, a);
+    r.ask(s, 0, b);
+    r.ask(s, 0, c);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16).size() == 3);
+    const auto settle = [&] {
+        s.begin_frame(camera, k_up_sun);
+        s.track(instances, 1, meshes);
+        s.request(r.bits);
+        return s.plan(16);
+    };
+    GIANT_CHECK(settle().empty());
+    // A new material changes no shadow.
+    instances[0].material = 3;
+    GIANT_CHECK(settle().empty());
+    // Moved from a to b: both redrawn, c not.
+    instances[0].position = b;
+    std::vector<ShadowPages::Draw> d = settle();
+    GIANT_CHECK(d.size() == 2);
+    GIANT_CHECK(has(s.entry_at(0, a), ShadowPages::k_draw_bit) && has(s.entry_at(0, b), ShadowPages::k_draw_bit));
+    GIANT_CHECK(!has(s.entry_at(0, c), ShadowPages::k_draw_bit));
+    // An unknown mesh casts nothing: only where it was (b) is redrawn.
+    instances[0].mesh = 7;
+    d = settle();
+    GIANT_CHECK(d.size() == 1 && has(s.entry_at(0, b), ShadowPages::k_draw_bit));
+    // Added at c, then removed.
+    instances[0].mesh = 1;
+    settle();
+    instances.push_back(instances[0]);
+    instances[1].position = c;
+    d = settle();
+    GIANT_CHECK(d.size() == 1 && has(s.entry_at(0, c), ShadowPages::k_draw_bit));
+    instances.pop_back();
+    d = settle();
+    GIANT_CHECK(d.size() == 1 && has(s.entry_at(0, c), ShadowPages::k_draw_bit));
+    GIANT_CHECK(settle().empty());
+    // A new mesh table that leaves the bounds alone dirties nothing.
+    s.begin_frame(camera, k_up_sun);
+    s.track(instances, 2, meshes);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16).empty());
+}
+
+GIANT_TEST("shadow pages: many changes at once dirty everything") {
+    const geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
+    const ShadowPages::MeshLookup meshes = [&](MeshId) { return &cube; };
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    std::vector<Instance> instances(300);
+    for (u32 i = 0; i < instances.size(); ++i) {
+        instances[i].position = {5000.0 + i * 3.0, 0.0, 5000.0}; // far from every page asked for
+        instances[i].mesh = 1;
+    }
+    s.begin_frame(camera, k_up_sun);
+    s.track(instances, 1, meshes);
+    Requests r(s);
+    r.ask(s, 0, camera);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16).size() == 1);
+    // A few moving far away: the page near the camera is left alone.
+    for (u32 i = 0; i < 10; ++i) instances[i].position.y += 1.0;
+    s.begin_frame(camera, k_up_sun);
+    s.track(instances, 1, meshes);
+    GIANT_CHECK(s.plan(16).empty());
+    // All of them: too many to list, so everything is redrawn.
+    for (Instance& in : instances) in.position.y += 1.0;
+    s.begin_frame(camera, k_up_sun);
+    s.track(instances, 1, meshes);
+    GIANT_CHECK(s.plan(16).size() == 1);
+}
