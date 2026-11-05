@@ -35,8 +35,8 @@ struct Frame {
     uint hzb_mips;
     uint instance_count;
     uint occlusion;       // 1: test against the HZB
-    uint pad0;
-    uint pad1;
+    uint pool;            // read descriptor of the geometry pool (streamed cluster data)
+    uint frame_number;    // marks the groups a frame used (streaming)
 };
 static const uint k_frame_bytes = 432;
 
@@ -76,8 +76,8 @@ Frame load_frame(uint descriptor, uint offset) {
     f.hzb_mips = asuint(p2.w);
     f.instance_count = p3.x;
     f.occlusion = p3.y;
-    f.pad0 = p3.z;
-    f.pad1 = p3.w;
+    f.pool = p3.z;
+    f.frame_number = p3.w;
     return f;
 }
 
@@ -117,22 +117,28 @@ float3 to_world_normal(Instance i, float3 n) {
 // --- Meshes ------------------------------------------------------------------------
 //
 // The mesh table (k_mesh_bytes per mesh id) holds each mesh's descriptors:
-//   vertices:   24 bytes each (position, normal)
-//   vertex_ids: u32 per cluster vertex, into vertices
-//   triangles:  u32 per cluster triangle: three cluster-local vertex indices (8 bits each)
-//   clusters:   k_cluster_bytes each
-//   groups:     k_group_bytes each
-//   nodes:      k_node_bytes each (the LOD tree; roots are nodes 0 to levels - 1)
+//   residency: u32 per group: byte offset of its geometry in the pool, or
+//              k_not_resident while it is not loaded (streaming)
+//   clusters:  k_cluster_bytes each
+//   groups:    k_group_bytes each
+//   nodes:     k_node_bytes each (the LOD tree; roots are nodes 0 to levels - 1)
+// group_base numbers the mesh's groups across all meshes (requests, usage).
+//
+// A loaded group's geometry, in the pool: per cluster, its vertices (24
+// bytes each: position, normal) at vertex_offset, and its triangles (u32
+// each: three cluster-local indices, 8 bits apart) at triangle_offset.
+
+static const uint k_not_resident = 0xFFFFFFFFu;
 
 struct MeshEntry {
-    uint vertices;
-    uint vertex_ids;
-    uint triangles;
+    uint residency;
+    uint group_base;
+    uint pad0;
     uint clusters;
     uint groups;
     uint nodes;
     uint levels; // 0: no mesh (removed); nothing is drawn
-    uint pad;
+    uint pad1;
     float4 bounds; // whole mesh: centre, radius
 };
 static const uint k_mesh_bytes = 48;
@@ -141,22 +147,27 @@ MeshEntry load_mesh(ByteAddressBuffer b, uint at) {
     MeshEntry m;
     const uint4 a = b.Load4(at);
     const uint4 c = b.Load4(at + 16);
-    m.vertices = a.x;
-    m.vertex_ids = a.y;
-    m.triangles = a.z;
+    m.residency = a.x;
+    m.group_base = a.y;
+    m.pad0 = a.z;
     m.clusters = a.w;
     m.groups = c.x;
     m.nodes = c.y;
     m.levels = c.z;
-    m.pad = c.w;
+    m.pad1 = c.w;
     m.bounds = load4(b, at + 32);
     return m;
 }
 
+// Where a group's geometry is in the pool, or k_not_resident.
+uint group_offset(MeshEntry m, uint group) {
+    return read_buffer_nonuniform(m.residency).Load(group * 4);
+}
+
 struct Cluster {
-    uint first_vertex;   // into vertex_ids
+    uint vertex_offset;   // bytes, from its group's geometry
     uint vertex_count;
-    uint first_triangle; // into triangles
+    uint triangle_offset; // bytes, from its group's geometry
     uint triangle_count;
     uint group;
     uint refined;        // the group it was simplified from; ~0 for original triangles
@@ -172,9 +183,9 @@ Cluster load_cluster(ByteAddressBuffer b, uint index) {
     Cluster c;
     const uint4 a = b.Load4(at);
     const uint4 d = b.Load4(at + 16);
-    c.first_vertex = a.x;
+    c.vertex_offset = a.x;
     c.vertex_count = a.y;
-    c.first_triangle = a.z;
+    c.triangle_offset = a.z;
     c.triangle_count = a.w;
     c.group = d.x;
     c.refined = d.y;
@@ -182,6 +193,14 @@ Cluster load_cluster(ByteAddressBuffer b, uint index) {
     c.pad = d.w;
     c.bounds = load4(b, at + 32);
     return c;
+}
+
+// A cluster's geometry, from its group's place in the pool (`base`).
+float3 cluster_position(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
+    return asfloat(pool.Load3(base + c.vertex_offset + local_vertex * 24));
+}
+float3 cluster_normal(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
+    return asfloat(pool.Load3(base + c.vertex_offset + local_vertex * 24 + 12));
 }
 
 struct Group {
@@ -228,6 +247,10 @@ Node load_node(ByteAddressBuffer b, uint index) {
 
 uint3 unpack_triangle(uint packed) {
     return uint3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
+}
+
+uint3 cluster_triangle(ByteAddressBuffer pool, uint base, Cluster c, uint triangle) {
+    return unpack_triangle(pool.Load(base + c.triangle_offset + triangle * 4));
 }
 
 // --- LOD and culling (as geometry::projected_error and select_clusters) -------------

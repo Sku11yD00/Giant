@@ -28,6 +28,7 @@ struct Drawn {
     Instance inst;
     MeshEntry mesh;
     Cluster cluster;
+    uint base;  // its group's geometry in the pool
     uint entry; // into the visible list
     bool valid; // false past the end of the pass's range
 };
@@ -46,6 +47,9 @@ Drawn drawn_cluster_flat(uint id) {
     d.inst = load_instance(read_buffer(push.instances), push.instance_offset + e.x * k_instance_bytes);
     d.mesh = load_mesh(read_buffer(push.meshes), push.mesh_offset + d.inst.mesh * k_mesh_bytes);
     d.cluster = load_cluster(read_buffer_nonuniform(d.mesh.clusters), e.y);
+    d.base = group_offset(d.mesh, d.cluster.group);
+    // Never not resident (culling checks it); combined without a branch.
+    d.valid = (uint(d.valid) & uint(d.base != k_not_resident)) != 0;
     return d;
 }
 
@@ -62,12 +66,13 @@ Drawn drawn_cluster(uint id) {
     d.inst = load_instance(read_buffer(push.instances), push.instance_offset + e.x * k_instance_bytes);
     d.mesh = load_mesh(read_buffer(push.meshes), push.mesh_offset + d.inst.mesh * k_mesh_bytes);
     d.cluster = load_cluster(read_buffer_nonuniform(d.mesh.clusters), e.y);
+    d.base = group_offset(d.mesh, d.cluster.group);
+    d.valid = d.base != k_not_resident; // never false, as culling checks it
     return d;
 }
 
 float4 clip_position(Frame f, Drawn d, uint local_vertex) {
-    const uint vertex = read_buffer_nonuniform(d.mesh.vertex_ids).Load((d.cluster.first_vertex + local_vertex) * 4);
-    const float3 p = asfloat(read_buffer_nonuniform(d.mesh.vertices).Load3(vertex * 24));
+    const float3 p = cluster_position(read_buffer(f.pool), d.base, d.cluster, local_vertex);
     return transform(f.view_proj[0], f.view_proj[1], f.view_proj[2], f.view_proj[3],
                      float4(to_world(d.inst, p), 1.0));
 }
@@ -96,7 +101,7 @@ void ms_main(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID,
         verts[tid] = v;
     }
     if (tid < triangle_count) {
-        tris[tid] = unpack_triangle(read_buffer_nonuniform(d.mesh.triangles).Load((d.cluster.first_triangle + tid) * 4));
+        tris[tid] = cluster_triangle(read_buffer(f.pool), d.base, d.cluster, tid);
         MsPrimitive p;
         p.vis = uint2(d.entry + 1, tid);
         prims[tid] = p;
@@ -118,10 +123,10 @@ VsOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
     if (!d.valid || triangle >= d.cluster.triangle_count) {
         return o; // all three corners at one point: nothing drawn
     }
-    const uint3 corners = unpack_triangle(read_buffer_nonuniform(d.mesh.triangles).Load((d.cluster.first_triangle + triangle) * 4));
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const uint3 corners = cluster_triangle(read_buffer(f.pool), d.base, d.cluster, triangle);
     const uint corner = vertex_id % 3;
     const uint local = corner == 0 ? corners.x : corner == 1 ? corners.y : corners.z;
-    const Frame f = load_frame(push.frame, push.frame_offset);
     o.position = clip_position(f, d, local);
     o.vis = uint2(d.entry + 1, triangle);
     return o;

@@ -123,6 +123,18 @@ an offline cooker can use it without a device.
   counts are copied to a readback ring and reach `RenderStats` a frame or
   two late (`from_gpu`). Full lists set an overflow flag (logged once).
   Slots and layouts shared by C++ and shaders live in `src/gpu_layout.h`.
+- **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
+  groups, LOD tree) stays on the GPU for every mesh, but the geometry
+  (vertices, triangles) lives group by group in one fixed GPU pool
+  (`RendererDesc::geometry_pool_bytes`, 256 MiB by default). A per-mesh
+  residency table says where each group is, or that it is not loaded.
+  Culling treats a missing group as precise enough, so the coarser clusters
+  made from it draw instead, and asks for it; it also marks the loaded groups
+  it used. The CPU loads what was asked for within a per-frame budget,
+  parents before children (so the cut stays whole), and makes room by
+  evicting the least recently used groups that have no loaded children. The
+  coarsest level of every mesh is always loaded. Geometry comes from a CPU
+  copy for now; world streaming (cells, from disk) will feed the same path.
 - **CPU path.** `gpu_culling = false` chooses the cut on the CPU (frustum
   only) and feeds the same raster and shading passes; tests use it for
   exact counts.

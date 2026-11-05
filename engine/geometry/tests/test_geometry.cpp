@@ -5,6 +5,7 @@
 #include "giant_test.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -574,4 +575,94 @@ GIANT_TEST("geometry: tiny and empty meshes") {
     for (usize i = 0; i < 6; ++i) messy.indices.push_back(static_cast<u32>(n + i % 2));
     const ClusterMesh cube = build_clusters(messy);
     GIANT_CHECK(!cube.empty());
+}
+
+namespace {
+
+// What the cut over partly loaded groups must be, cluster by cluster: in a
+// loaded group whose replacement is too coarse, and either original, or its
+// finer version not loaded, or that version precise enough.
+std::vector<u32> brute_force_cut(const ClusterMesh& mesh, const LodView& view, const std::vector<u8>& resident) {
+    std::vector<u32> out;
+    for (u32 i = 0; i < mesh.clusters.size(); ++i) {
+        const Cluster& c = mesh.clusters[i];
+        if (resident[c.group] == 0 ||
+            projected_error(mesh.groups[c.group].simplified, view) <= view.threshold_pixels) {
+            continue;
+        }
+        if (c.refined < 0 || resident[static_cast<usize>(c.refined)] == 0 ||
+            projected_error(mesh.groups[static_cast<usize>(c.refined)].simplified, view) <= view.threshold_pixels) {
+            out.push_back(i);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+GIANT_TEST("geometry: group links run from the original triangles to the roots") {
+    const ClusterMesh m = build_clusters(make_sphere(96, 48));
+    const GroupLinks links = link_groups(m);
+    GIANT_CHECK(links.parent_offsets.size() == m.groups.size() + 1);
+    bool ok = true;
+    for (u32 g = 0; g < m.groups.size(); ++g) {
+        const bool root = is_root_group(m.groups[g]);
+        ok = ok && root == links.parents_of(g).empty();
+        for (const u32 p : links.parents_of(g)) {
+            ok = ok && m.groups[p].depth > m.groups[g].depth;
+            const auto back = links.children_of(p);
+            ok = ok && std::find(back.begin(), back.end(), g) != back.end();
+        }
+    }
+    GIANT_CHECK(ok);
+}
+
+GIANT_TEST("geometry: a cut over partly loaded groups stays whole") {
+    const ClusterMesh m = build_clusters(make_sphere(96, 48));
+    const GroupLinks links = link_groups(m);
+    const LodView view = view_from({0, 0, 0.9f}, 0.5f);
+    std::vector<u32> full;
+    select_clusters(m, view, full);
+    // Load the roots, then random groups whose parents are all loaded.
+    std::vector<u8> resident(m.groups.size(), 0);
+    for (u32 g = 0; g < m.groups.size(); ++g) resident[g] = is_root_group(m.groups[g]) ? 1 : 0;
+    u32 seed = 12345;
+    bool whole = true;
+    bool wanted_ok = true;
+    for (int round = 0; round < 12; ++round) {
+        std::vector<u32> cut, wanted, used;
+        const LodResidency residency{&resident, &wanted, &used};
+        select_clusters(m, view, cut, &residency);
+        std::sort(cut.begin(), cut.end());
+        whole = whole && cut == brute_force_cut(m, view, resident);
+        for (const u32 g : wanted) wanted_ok = wanted_ok && resident[g] == 0;
+        for (const u32 g : used) wanted_ok = wanted_ok && resident[g] != 0;
+        // Load half of what was wanted, when its parents are in.
+        for (const u32 g : wanted) {
+            seed = seed * 1664525u + 1013904223u;
+            bool parents_in = true;
+            for (const u32 p : links.parents_of(g)) parents_in = parents_in && resident[p] != 0;
+            if (parents_in && (seed >> 16) % 2 == 0) resident[g] = 1;
+        }
+    }
+    GIANT_CHECK(whole);
+    GIANT_CHECK(wanted_ok);
+    // Loading everything wanted converges on the full cut.
+    for (int round = 0; round < 64; ++round) {
+        std::vector<u32> cut, wanted;
+        const LodResidency residency{&resident, &wanted, nullptr};
+        select_clusters(m, view, cut, &residency);
+        if (wanted.empty()) break;
+        for (const u32 g : wanted) {
+            bool parents_in = true;
+            for (const u32 p : links.parents_of(g)) parents_in = parents_in && resident[p] != 0;
+            if (parents_in) resident[g] = 1;
+        }
+    }
+    std::vector<u32> converged;
+    const LodResidency final_residency{&resident, nullptr, nullptr};
+    select_clusters(m, view, converged, &final_residency);
+    std::sort(converged.begin(), converged.end());
+    std::sort(full.begin(), full.end());
+    GIANT_CHECK(converged == full);
 }

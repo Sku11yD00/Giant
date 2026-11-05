@@ -224,7 +224,11 @@ Json render_settings_json(const EditorState& state) {
              {{"instances", s.instances}, {"draws", s.draws}, {"clusters", s.clusters},
               {"triangles", s.triangles}, {"from_gpu", s.from_gpu},
               {"occluded_instances", s.occluded_instances},
-              {"occluded_clusters", s.occluded_clusters}, {"overflow", s.overflow}}}};
+              {"occluded_clusters", s.occluded_clusters}, {"overflow", s.overflow},
+              {"streaming",
+               {{"pool_bytes", s.pool_bytes}, {"pool_used_bytes", s.pool_used_bytes},
+                {"resident_groups", s.resident_groups}, {"total_groups", s.total_groups},
+                {"streamed_in", s.streamed_in}, {"evicted", s.evicted}, {"waiting", s.waiting}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -653,7 +657,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "Returns the LOD error (pixels), debug view and culling switches, plus last frame's "
          "counts of instances, draws, clusters and triangles. With gpu_culling the counts come "
          "from the GPU a frame or two late (from_gpu true); occluded_* count what the first "
-         "occlusion pass hid; overflow means a GPU list was full and geometry was dropped.",
+         "occlusion pass hid; overflow means a GPU list was full and geometry was dropped. "
+         "streaming: GPU memory for cluster geometry (pool) and how many cluster groups are "
+         "loaded; detail loads over a few frames as the camera moves (waiting > 0 meanwhile).",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              return CommandResult::success(render_settings_json(state));

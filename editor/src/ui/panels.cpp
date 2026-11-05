@@ -475,6 +475,13 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
                                    "GPU lists full: some geometry dropped");
             }
         }
+        ImGui::Text("Geometry pool: %.0f / %.0f MiB, %u of %u groups",
+                    static_cast<double>(stats.pool_used_bytes) / (1024.0 * 1024.0),
+                    static_cast<double>(stats.pool_bytes) / (1024.0 * 1024.0), stats.resident_groups,
+                    stats.total_groups);
+        if (stats.waiting > 0 || stats.streamed_in > 0) {
+            ImGui::Text("Streaming: %u loaded, %u waiting", stats.streamed_in, stats.waiting);
+        }
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),
                     m_state.window->pixel_height());

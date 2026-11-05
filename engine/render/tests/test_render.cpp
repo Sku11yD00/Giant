@@ -118,6 +118,15 @@ struct NullScene {
         device->end_frame();
         return renderer->last_stats();
     }
+    // Draws until streaming has loaded what the view asks for (CPU culling:
+    // requests load the next frame).
+    RenderStats settle(const FrameInput& frame) {
+        RenderStats s = draw(frame);
+        for (int i = 0; i < 16 && (s.streamed_in > 0 || s.waiting > 0); ++i) {
+            s = draw(frame);
+        }
+        return draw(frame);
+    }
 };
 } // namespace
 
@@ -134,7 +143,7 @@ GIANT_TEST("render: detail follows distance, the error setting and the view") {
     const auto at = [&](double distance, float error = 1.0f) {
         instances[0].position = {0.0, 0.0, -distance};
         frame.settings.lod_error_pixels = error;
-        return s.draw(frame);
+        return s.settle(frame);
     };
     const RenderStats near = at(8.0);
     const RenderStats mid = at(80.0);
@@ -153,6 +162,43 @@ GIANT_TEST("render: detail follows distance, the error setting and the view") {
         frame.settings.debug_view = v;
         GIANT_CHECK(s.draw(frame).clusters == mid.clusters);
     }
+}
+
+GIANT_TEST("render: detail streams in as the camera nears") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    const geometry::ClusterMesh* sphere = s.renderer->mesh(s.renderer->builtin(BuiltinMesh::sphere));
+    GIANT_CHECK(sphere != nullptr);
+    if (sphere == nullptr) return;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+    instances[0].scale = {10, 10, 10};
+    instances[0].position = {0.0, 0.0, -2000.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.settings.gpu_culling = false;
+    const RenderStats far = s.settle(frame);
+    GIANT_CHECK(far.resident_groups < far.total_groups); // far away, little is loaded
+    GIANT_CHECK(far.pool_used_bytes > 0 && far.pool_used_bytes <= far.pool_bytes);
+    // Close up: the first frame draws what is loaded, coarse but whole...
+    instances[0].position = {0.0, 0.0, -8.0};
+    const RenderStats first = s.draw(frame);
+    GIANT_CHECK(first.clusters > 0 && first.waiting == 0);
+    // ...then the detail arrives, matching the cut with everything loaded.
+    const RenderStats near = s.settle(frame);
+    GIANT_CHECK(near.triangles > first.triangles && near.resident_groups > far.resident_groups);
+    geometry::LodView lod;
+    lod.position = {0.0f, 0.0f, -8.0f};
+    lod.scale = {10, 10, 10};
+    lod.pixels_per_unit = 0.5f / std::tan(degrees_to_radians(frame.view.vertical_fov_degrees) * 0.5f) * 1080.0f;
+    lod.near_plane = std::max(frame.view.near_plane, 1e-4f);
+    lod.threshold_pixels = 1.0f;
+    const Mat4 vp = Renderer::view_projection(frame.view, 1920.0f / 1080.0f);
+    const geometry::Frustum frustum = geometry::frustum_from_view_projection(vp);
+    lod.frustum = &frustum;
+    std::vector<u32> reference;
+    geometry::select_clusters(*sphere, lod, reference);
+    GIANT_CHECK(near.clusters == reference.size());
 }
 
 GIANT_TEST("render: meshes can be added and removed") {
@@ -273,19 +319,25 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.lighting.ground_light = {0.02f, 0.02f, 0.02f};
     frame.lighting.background = {0.0f, 0.0f, 1.0f};
 
-    // Renders a few frames (occlusion uses the last frame's depth) and reads
+    // Renders frames until streaming settles (occlusion uses the last frame's depth) and reads
     // the image back, with the GPU's counts for the last frame.
     const auto draw = [&](bool gpu, bool occlusion, bool mesh) {
         frame.settings.gpu_culling = gpu;
         frame.settings.occlusion_culling = occlusion;
         frame.settings.mesh_shaders = mesh;
-        for (int i = 0; i < 3; ++i) {
+        // Enough frames for streaming to load what the view asks for: GPU
+        // requests reach the CPU two frames late. Done once nothing has
+        // loaded or waited for a few frames in a row.
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
             rhi::CommandList* cmd = device->begin_frame(nullptr);
             GIANT_CHECK(cmd != nullptr);
             if (cmd != nullptr) {
                 renderer->render(*cmd, target, frame);
                 device->end_frame();
             }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
         }
         device->wait_idle();
         renderer->read_gpu_stats();

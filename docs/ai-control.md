@@ -47,7 +47,7 @@ like late afternoon"; Claude calls the tools, looks at the result with
 | `save_scene` | writes a file | Saves the scene as JSON text (meshes by path) |
 | `import_mesh` | loads an asset, not undoable | Imports a `.gltf`/`.glb` and builds its cluster LOD; `reload` picks up changes |
 | `list_meshes` | no | Imported meshes with triangle, cluster and level counts |
-| `get_render_settings`, `set_render_settings` | view only, not undoable | LOD error in pixels, debug view (`lit`, `clusters`, `lod_levels`, `triangles`), `gpu_culling`, `occlusion_culling`, `mesh_shaders`; last frame's cluster and triangle counts (from the GPU a frame or two late when `from_gpu`), occluded counts and `overflow` |
+| `get_render_settings`, `set_render_settings` | view only, not undoable | LOD error in pixels, debug view (`lit`, `clusters`, `lod_levels`, `triangles`), `gpu_culling`, `occlusion_culling`, `mesh_shaders`; last frame's cluster and triangle counts (from the GPU a frame or two late when `from_gpu`), occluded counts, `overflow`, and `streaming` (pool size and use, groups loaded, loaded and waiting this frame) |
 | `get_camera`, `set_camera` | view only, not undoable | The viewport camera; `look_at` aims it |
 | `set_window_size` | view only, not undoable | Resizes the window (screen points) |
 | `undo`, `redo` | yes | Walks the change history |

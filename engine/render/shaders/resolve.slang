@@ -115,21 +115,21 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const Instance inst = load_instance(read_buffer(push.instances), push.instance_offset + entry.x * k_instance_bytes);
     const MeshEntry mesh = load_mesh(read_buffer(push.meshes), push.mesh_offset + inst.mesh * k_mesh_bytes);
     const Cluster cluster = load_cluster(read_buffer_nonuniform(mesh.clusters), entry.y);
-    const uint3 corners = unpack_triangle(read_buffer_nonuniform(mesh.triangles).Load((cluster.first_triangle + vis.y) * 4));
-    ByteAddressBuffer ids = read_buffer_nonuniform(mesh.vertex_ids);
-    ByteAddressBuffer vb = read_buffer_nonuniform(mesh.vertices);
-    const uint i0 = ids.Load((cluster.first_vertex + corners.x) * 4);
-    const uint i1 = ids.Load((cluster.first_vertex + corners.y) * 4);
-    const uint i2 = ids.Load((cluster.first_vertex + corners.z) * 4);
-    const float3 a = to_world(inst, asfloat(vb.Load3(i0 * 24)));
-    const float3 b = to_world(inst, asfloat(vb.Load3(i1 * 24)));
-    const float3 c = to_world(inst, asfloat(vb.Load3(i2 * 24)));
+    // Drawn this frame, so its group is loaded (residency only changes
+    // between frames).
+    ByteAddressBuffer pool = read_buffer(f.pool);
+    const uint geometry = group_offset(mesh, cluster.group);
+    const uint3 corners = cluster_triangle(pool, geometry, cluster, vis.y);
+    const float3 a = to_world(inst, cluster_position(pool, geometry, cluster, corners.x));
+    const float3 b = to_world(inst, cluster_position(pool, geometry, cluster, corners.y));
+    const float3 c = to_world(inst, cluster_position(pool, geometry, cluster, corners.z));
 
     const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
     const float3 dir = f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz;
     const float3 w = barycentrics(dir, a, b, c);
-    const float3 object_normal = asfloat(vb.Load3(i0 * 24 + 12)) * w.x + asfloat(vb.Load3(i1 * 24 + 12)) * w.y +
-                                 asfloat(vb.Load3(i2 * 24 + 12)) * w.z;
+    const float3 object_normal = cluster_normal(pool, geometry, cluster, corners.x) * w.x +
+                                 cluster_normal(pool, geometry, cluster, corners.y) * w.y +
+                                 cluster_normal(pool, geometry, cluster, corners.z) * w.z;
     const float3 n = safe_normalize(to_world_normal(inst, object_normal), float3(0.0, 1.0, 0.0));
     const float3 world = a * w.x + b * w.y + c * w.z;
 

@@ -34,8 +34,8 @@ struct FrameConstants {
     u32 hzb_mips;
     u32 instance_count;
     u32 occlusion;
-    u32 pad0;
-    u32 pad1;
+    u32 pool;         // read descriptor of the geometry pool
+    u32 frame_number; // marks the groups a frame used
 };
 static_assert(sizeof(FrameConstants) == 432);
 
@@ -51,22 +51,27 @@ struct Instance {
 static_assert(sizeof(Instance) == 144);
 
 struct MeshEntry {
-    u32 vertices;
-    u32 vertex_ids;
-    u32 triangles;
+    u32 residency;  // u32 per group: its geometry's byte offset in the pool, or k_not_resident
+    u32 group_base; // first of its groups in the global numbering (usage)
+    u32 pad0;
     u32 clusters;
     u32 groups;
     u32 nodes;
     u32 levels; // 0: removed
-    u32 pad;
+    u32 pad1;
     float bounds[4];
 };
+inline constexpr u32 k_not_resident = 0xFFFF'FFFFu;
 static_assert(sizeof(MeshEntry) == 48);
 
+// A loaded group's geometry, in the pool: per cluster, its vertices (24
+// bytes: position, normal) at vertex_offset, then its triangles (u32: three
+// local indices, 8 bits apart) at triangle_offset; offsets are bytes from
+// the group's start.
 struct Cluster {
-    u32 first_vertex;
+    u32 vertex_offset;
     u32 vertex_count;
-    u32 first_triangle;
+    u32 triangle_offset;
     u32 triangle_count;
     u32 group;
     u32 refined; // k_no_group for original triangles
@@ -118,6 +123,7 @@ inline constexpr u32 k_slot_levels = 8;
 inline constexpr u32 k_max_tree_levels = 24;
 inline constexpr u32 k_level_slots_per_pass = k_max_tree_levels + 1;
 inline constexpr u32 k_slot_range = 60; // base, count of the current raster pass
+inline constexpr u32 k_slot_requests = 62; // streaming requests this frame
 inline constexpr u32 k_counter_slots = 64;
 inline constexpr u32 k_counter_bytes = k_counter_slots * 4;
 static_assert(k_slot_levels + 2 * k_level_slots_per_pass <= k_slot_range);
@@ -162,9 +168,12 @@ struct CullPush {
     u32 instance_capacity;
     u32 mode;
     u32 arg_offset;
-    u32 pad;
+    u32 requests;
+    u32 request_capacity;
+    u32 usage;
+    u32 pad[2];
 };
-static_assert(sizeof(CullPush) == 96);
+static_assert(sizeof(CullPush) == 112);
 
 struct HzbPush {
     u32 depth;

@@ -1,6 +1,7 @@
 giant_module(render
   SOURCES
     src/renderer.cpp
+    src/streaming.cpp
   DEPENDS core rhi geometry
 )
 giant_shaders(render
@@ -22,7 +23,12 @@ giant_shaders(render
 giant_module_tests(render
   SOURCES
     tests/test_render.cpp
+    tests/test_streaming.cpp
 )
+if(GIANT_BUILD_TESTS)
+  # The streaming tests check the module's own streamer directly.
+  target_include_directories(giant_render_tests PRIVATE src)
+endif()
 if(GIANT_BUILD_TESTS AND GIANT_REQUIRE_VALIDATION)
   target_compile_definitions(giant_render_tests PRIVATE GIANT_REQUIRE_VALIDATION=1)
 endif()
