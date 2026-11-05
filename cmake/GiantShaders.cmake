@@ -49,7 +49,7 @@ function(giant_shaders module)
         OUTPUT ${compiled}
         COMMAND ${GIANT_SLANGC} ${src} -target ${slang_target} -profile sm_6_6
                 -entry ${entry} -stage ${stage} -O3 -warnings-as-errors all
-                -I ${PROJECT_SOURCE_DIR}/engine/shaders
+                -I ${PROJECT_SOURCE_DIR}/engine/rhi/shaders
                 -o ${compiled} -depfile ${compiled}.d
         DEPFILE ${compiled}.d
         DEPENDS ${src}

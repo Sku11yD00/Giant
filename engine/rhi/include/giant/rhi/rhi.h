@@ -213,7 +213,7 @@ struct ComputePipelineDesc {
 };
 
 // Push constants: up to this many bytes per draw or dispatch, read in
-// shaders from register b0 (see engine/shaders/giant/bindless.slang).
+// shaders from register b0 (see engine/rhi/shaders/giant/bindless.slang).
 constexpr u32 k_max_push_constant_bytes = 128;
 
 // --- 2D UI drawing (editor panels) ------------------------------------------
