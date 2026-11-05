@@ -295,14 +295,15 @@ internal sealed class ScriptSet
         NativeHost.Log(1, $"loaded {_scripts.Count} script(s) from {Path.GetFileName(full)}");
     }
 
-    public void Start() => Each("OnStart", s => s.OnStart());
+    public void Start() => Each("OnStart", static (s, _) => s.OnStart(), 0f);
 
-    public void Update(float deltaSeconds) => Each("OnUpdate", s => s.OnUpdate(deltaSeconds));
+    // Static lambdas with the state passed in: nothing allocates per frame.
+    public void Update(float deltaSeconds) => Each("OnUpdate", static (s, delta) => s.OnUpdate(delta), deltaSeconds);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     public WeakReference Stop()
     {
-        Each("OnStop", s => s.OnStop());
+        Each("OnStop", static (s, _) => s.OnStop(), 0f);
         _scripts.Clear();
         _stopped.Clear();
         var weak = new WeakReference(_context);
@@ -311,7 +312,7 @@ internal sealed class ScriptSet
         return weak;
     }
 
-    private void Each(string what, Action<Script> action)
+    private void Each(string what, Action<Script, float> action, float value)
     {
         foreach (Script script in _scripts)
         {
@@ -321,7 +322,7 @@ internal sealed class ScriptSet
             }
             try
             {
-                action(script);
+                action(script, value);
             }
             catch (Exception e)
             {

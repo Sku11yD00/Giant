@@ -39,6 +39,8 @@ MAX_HITCHES = 1
 
 def frame_stats(times):
     """Average, median, 99th percentile, worst and hitches of frame times (ms)."""
+    if not times:
+        raise RuntimeError("no frames were timed (was the editor window minimised?)")
     ordered = sorted(times)
 
     def rank(fraction):

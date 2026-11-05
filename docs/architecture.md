@@ -195,8 +195,8 @@ over the target frame time). Where it stands:
   initial data wait for the GPU (`submit_immediate`), which happens mid-frame
   when the streamer grows its group table or a mesh is added; terminal
   cluster groups load regardless of the per-frame budget; the 32 MiB per
-  frame streaming budget itself is untimed; mesh import reads files on the
-  main thread (editor only today).
+  frame streaming budget itself is untimed; mesh import reads and clusters
+  files on the main thread (editor only today).
 
 | GPU work | Budget |
 | --- | --- |
