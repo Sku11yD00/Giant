@@ -53,3 +53,43 @@ public sealed class Crasher : Script
 public abstract class NotAScript : Script
 {
 }
+
+/// <summary>Asks the engine to reload scripts from inside a script; must be refused, not crash.</summary>
+public sealed class Reentrant : Script
+{
+    private bool _done;
+
+    public override void OnUpdate(float deltaSeconds)
+    {
+        if (!_done)
+        {
+            _done = true;
+            Engine.Execute("reenter");
+        }
+    }
+}
+
+/// <summary>Calls the engine from another thread; must get an exception, reported on the main thread.</summary>
+public sealed class ThreadProbe : Script
+{
+    private string? _result;
+
+    public override void OnStart()
+    {
+        var thread = new System.Threading.Thread(() =>
+        {
+            try
+            {
+                Engine.Execute("record", new { what = "from another thread" });
+                _result = "allowed";
+            }
+            catch (InvalidOperationException)
+            {
+                _result = "refused";
+            }
+        });
+        thread.Start();
+        thread.Join();
+        Engine.Execute("record", new { what = "thread", result = _result });
+    }
+}

@@ -33,6 +33,18 @@ public sealed class SunsetFade : Script
 throws `CommandFailedException` when it fails. Changes made by scripts are
 game logic, so they are not added to the editor's undo history.
 
+Rules the host enforces:
+
+- Call the engine from `OnStart`, `OnUpdate` and `OnStop` only. Engine state
+  belongs to the main thread, so `Engine.Execute` from another thread (a
+  worker, or code after an `await`) throws `InvalidOperationException`. Do
+  background work on your own thread and pick up its result in `OnUpdate`.
+- Scripts cannot load or unload scripts while they run; `load_scripts` and
+  `unload_scripts` called from a script are refused.
+- Arguments are plain values, arrays, dictionaries or objects (anonymous
+  objects, records, classes; their public properties and fields). NaN and
+  infinity are rejected, since JSON has no such numbers.
+
 The full sample is `scripts/samples/HelloGiant`. The build puts it in
 `build/<preset>/managed/samples/HelloGiant/HelloGiant.dll`.
 
@@ -46,7 +58,10 @@ The full sample is `scripts/samples/HelloGiant`. The build puts it in
 
 Reloading: rebuild the assembly (`dotnet build`) and load it again. The old
 scripts get `OnStop`, their load context is unloaded, and the new ones start.
-The file is read into memory, so it can be rebuilt while it runs.
+The file is read into memory, so it can be rebuilt while it runs. If
+something still holds on to the old scripts (a static field in another
+assembly, an event handler, a running thread), the log warns that they could
+not be unloaded; their memory stays in use until that reference goes.
 
 A script that throws is logged with its stack trace and stopped; the other
 scripts and the editor keep running.

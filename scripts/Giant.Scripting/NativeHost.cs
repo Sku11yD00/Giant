@@ -26,13 +26,16 @@ internal unsafe struct NativeApi
 
 /// <summary>
 /// The entry points the native script host calls (engine use only; scripts
-/// never call these). Everything runs on the
-/// engine's main thread.
+/// never call these). Everything runs on the engine's main thread, and
+/// no exception may leave an entry point (that would end the process).
 /// </summary>
 public static unsafe class NativeHost
 {
     private static NativeApi s_api;
     private static ScriptSet? s_scripts;
+    private static int s_mainThread;
+    // True while script code runs; scripts cannot load or unload scripts.
+    private static bool s_busy;
 
     /// <summary>Receives the engine's functions; 0 on success.</summary>
     [UnmanagedCallersOnly]
@@ -43,6 +46,7 @@ public static unsafe class NativeHost
             return 1; // engine and API built from different sources
         }
         s_api = *(NativeApi*)api;
+        s_mainThread = Environment.CurrentManagedThreadId;
         return 0;
     }
 
@@ -50,18 +54,23 @@ public static unsafe class NativeHost
     [UnmanagedCallersOnly]
     public static int LoadScripts(byte* pathUtf8)
     {
+        if (s_busy)
+        {
+            Log(3, "scripts cannot load scripts while they run");
+            return 1;
+        }
         try
         {
             UnloadCurrent();
             string path = Marshal.PtrToStringUTF8((IntPtr)pathUtf8) ?? "";
             s_scripts = ScriptSet.Load(path);
-            s_scripts.Start();
+            RunScripts(s_scripts.Start);
             return 0;
         }
         catch (Exception e)
         {
             Log(3, "could not load scripts: " + e);
-            UnloadCurrent();
+            TryUnloadCurrent();
             return 1;
         }
     }
@@ -70,16 +79,33 @@ public static unsafe class NativeHost
     [UnmanagedCallersOnly]
     public static int Update(float deltaSeconds)
     {
-        s_scripts?.Update(deltaSeconds);
-        return 0;
+        if (s_busy || s_scripts == null)
+        {
+            return 0;
+        }
+        try
+        {
+            ScriptSet scripts = s_scripts;
+            RunScripts(() => scripts.Update(deltaSeconds));
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Log(3, "script update failed: " + e);
+            return 1;
+        }
     }
 
     /// <summary>Stops and unloads the loaded scripts.</summary>
     [UnmanagedCallersOnly]
     public static int UnloadScripts()
     {
-        UnloadCurrent();
-        return 0;
+        if (s_busy)
+        {
+            Log(3, "scripts cannot unload scripts while they run");
+            return 1;
+        }
+        return TryUnloadCurrent() ? 0 : 1;
     }
 
     /// <summary>Scripts currently running (not stopped by an error).</summary>
@@ -91,6 +117,13 @@ public static unsafe class NativeHost
         if (s_api.Execute == null)
         {
             return (false, "the script host is not initialised");
+        }
+        if (Environment.CurrentManagedThreadId != s_mainThread)
+        {
+            // Engine state belongs to the main thread; an awaited task or a
+            // worker thread must hand its result back to OnUpdate instead.
+            throw new InvalidOperationException(
+                "Engine.Execute must be called from the engine's main thread (OnStart, OnUpdate or OnStop)");
         }
         byte* reply = null;
         int status;
@@ -120,20 +153,72 @@ public static unsafe class NativeHost
         }
     }
 
+    private static void RunScripts(Action action)
+    {
+        s_busy = true;
+        try
+        {
+            action();
+        }
+        finally
+        {
+            s_busy = false;
+        }
+    }
+
+    private static bool TryUnloadCurrent()
+    {
+        try
+        {
+            UnloadCurrent();
+            return true;
+        }
+        catch (Exception e)
+        {
+            Log(3, "could not unload scripts: " + e);
+            s_scripts = null;
+            return false;
+        }
+    }
+
     private static void UnloadCurrent()
     {
-        if (s_scripts == null)
+        ScriptSet? scripts = s_scripts;
+        s_scripts = null; // first, so nothing reaches a half-stopped set
+        if (scripts == null)
         {
             return;
         }
-        WeakReference context = s_scripts.Stop();
-        s_scripts = null;
+        WeakReference context = StopAndRelease(scripts);
+        scripts = null;
         // Let the collectible context go, so a rebuilt assembly can load.
         for (int i = 0; i < 10 && context.IsAlive; i++)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
         }
+        if (context.IsAlive)
+        {
+            // Something (a static, an event handler, a thread) still holds
+            // the old scripts; their memory stays until that lets go.
+            Log(2, "the previous scripts are still referenced and could not be unloaded");
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)] // no references left in the caller's frame
+    private static WeakReference StopAndRelease(ScriptSet scripts)
+    {
+        WeakReference context;
+        s_busy = true;
+        try
+        {
+            context = scripts.Stop();
+        }
+        finally
+        {
+            s_busy = false;
+        }
+        return context;
     }
 
     private static byte[] Utf8(string text)

@@ -34,9 +34,19 @@
 #include <string>
 #include <string_view>
 
+#include <vector>
+
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <shellapi.h>
+#include <windows.h>
 #endif
 
 namespace {
@@ -55,11 +65,41 @@ struct Options {
     std::string scripts; // C# script assembly to load at start-up
 };
 
-bool parse_options(int argc, char** argv, Options& out) {
-    for (int i = 1; i < argc; ++i) {
+// The command line as UTF-8. On Windows, main's argv is in the ANSI code
+// page, which garbles paths outside it; the wide command line does not.
+std::vector<std::string> utf8_args(int argc, char** argv) {
+    std::vector<std::string> args;
+#if defined(_WIN32)
+    (void)argc;
+    (void)argv;
+    int count = 0;
+    LPWSTR* wide = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (wide != nullptr) {
+        for (int i = 0; i < count; ++i) {
+            const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, nullptr, 0, nullptr, nullptr);
+            std::string text(bytes > 0 ? static_cast<usize>(bytes) : 0, '\0');
+            if (bytes > 0) {
+                WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, text.data(), bytes, nullptr, nullptr);
+                text.pop_back(); // the terminator
+            }
+            args.push_back(std::move(text));
+        }
+        LocalFree(wide);
+        return args;
+    }
+#endif
+    for (int i = 0; i < argc; ++i) {
+        args.emplace_back(argv[i]);
+    }
+    return args;
+}
+
+bool parse_options(const std::vector<std::string>& argv, Options& out) {
+    const usize argc = argv.size();
+    for (usize i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--frames" && i + 1 < argc) {
-            out.max_frames = std::strtoull(argv[++i], nullptr, 10);
+            out.max_frames = std::strtoull(argv[++i].c_str(), nullptr, 10);
         } else if (arg == "--backend" && i + 1 < argc) {
             const std::string_view name = argv[++i];
             if (name == "null") {
@@ -370,7 +410,7 @@ int run(const Options& options) {
 
 int main(int argc, char** argv) {
     Options options;
-    if (!parse_options(argc, argv, options)) {
+    if (!parse_options(utf8_args(argc, argv), options)) {
         return 2;
     }
     return run(options);

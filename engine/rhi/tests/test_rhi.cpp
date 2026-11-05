@@ -120,6 +120,11 @@ GIANT_TEST("rhi: the null device checks and counts UI draws") {
     UiDrawCommand hidden = quad.commands[0];
     hidden.clip_max_x = 0.0f;
     quad.commands.push_back(hidden);
+    // So is one wholly outside the 64x64 target (D3D12 clamps the same way).
+    UiDrawCommand outside = quad.commands[0];
+    outside.clip_min_x = 100.0f;
+    outside.clip_max_x = 200.0f;
+    quad.commands.push_back(outside);
     quad.lists = {{quad.vertices, quad.indices, quad.commands}};
 
     SwapChainDesc sc_desc;

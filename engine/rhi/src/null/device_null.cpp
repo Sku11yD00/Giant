@@ -57,7 +57,7 @@ public:
 
     void draw_ui(SwapChain& swap_chain, const UiFrame& ui) override {
         GIANT_ASSERT(static_cast<NullSwapChain&>(swap_chain).in_frame, "draw_ui outside a frame");
-        m_ui_draw_calls = check_ui(ui);
+        m_ui_draw_calls = check_ui(ui, swap_chain.width(), swap_chain.height());
     }
 
     TextureId create_ui_texture(u32 width, u32 height, std::span<const u8> pixels) override {
@@ -78,7 +78,7 @@ public:
     std::vector<u8> render_ui_offscreen(const UiFrame& ui, u32 width, u32 height,
                                         const Color& color) override {
         GIANT_ASSERT(!m_recording, "offscreen work while a frame is recording");
-        m_ui_draw_calls = check_ui(ui);
+        m_ui_draw_calls = check_ui(ui, width, height);
         const auto to_byte = [](float v) {
             return static_cast<u8>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
         };
@@ -114,8 +114,11 @@ public:
 
 private:
     // Checks everything a GPU would trip over, and counts the draws a real
-    // backend would submit.
-    u32 check_ui(const UiFrame& ui) const {
+    // backend would submit (clip rectangles clamped to the target, as D3D12
+    // does, so both backends count the same).
+    u32 check_ui(const UiFrame& ui, u32 target_width, u32 target_height) const {
+        const float w = static_cast<float>(target_width);
+        const float h = static_cast<float>(target_height);
         u32 draws = 0;
         for (const UiDrawList& list : ui.lists) {
             for (const UiDrawCommand& cmd : list.commands) {
@@ -131,8 +134,11 @@ private:
                                      list.vertices.size(),
                                  "UI index points past the vertices");
                 }
-                if (cmd.index_count > 0 && cmd.clip_max_x > cmd.clip_min_x &&
-                    cmd.clip_max_y > cmd.clip_min_y) {
+                const float x0 = std::max(cmd.clip_min_x, 0.0f);
+                const float y0 = std::max(cmd.clip_min_y, 0.0f);
+                const float x1 = std::min(cmd.clip_max_x, w);
+                const float y1 = std::min(cmd.clip_max_y, h);
+                if (cmd.index_count > 0 && x1 > x0 && y1 > y0) {
                     ++draws;
                 }
             }

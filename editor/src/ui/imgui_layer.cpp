@@ -163,7 +163,9 @@ void ImGuiLayer::begin_frame(float delta_seconds, const std::vector<InputEvent>&
             io.AddMousePosEvent(e.x, e.y);
             io.AddMouseButtonEvent(to_imgui(e.button), e.down);
             break;
-        case InputEvent::Type::mouse_wheel: io.AddMouseWheelEvent(e.x, e.y); break;
+        case InputEvent::Type::mouse_wheel:
+            io.AddMouseWheelEvent(-e.x, e.y); // ImGui: +x scrolls left, ours scrolls right
+            break;
         case InputEvent::Type::key: {
             using platform::modifier::alt;
             using platform::modifier::ctrl;

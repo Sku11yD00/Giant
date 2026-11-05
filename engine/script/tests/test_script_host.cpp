@@ -15,10 +15,19 @@ using namespace giant::script;
 #if defined(GIANT_TEST_MANAGED_DIR) && !defined(GIANT_SKIP_DOTNET_RUNTIME_TESTS)
 GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     std::vector<std::string> calls; // command names and arguments, in order
+    ScriptHost* live_host = nullptr;
+    const std::string scripts = std::string(GIANT_TEST_MANAGED_DIR) + "/tests/ScriptTests/ScriptTests.dll";
+    bool reentry_refused = false;
     ScriptHostDesc desc;
     desc.managed_dir = GIANT_TEST_MANAGED_DIR;
-    desc.commands = [&calls](std::string_view name, std::string_view args) -> CommandReply {
+    desc.commands = [&](std::string_view name, std::string_view args) -> CommandReply {
         calls.push_back(std::string(name) + " " + std::string(args));
+        if (name == "reenter") {
+            // A script asking to reload or unload scripts mid-update.
+            reentry_refused = !live_host->load_scripts(scripts);
+            live_host->unload_scripts();
+            return {true, "{}"};
+        }
         if (name == "echo") {
             return {true, std::string(args)};
         }
@@ -33,9 +42,9 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     if (host == nullptr) {
         return;
     }
-    const std::string scripts = std::string(GIANT_TEST_MANAGED_DIR) + "/tests/ScriptTests/ScriptTests.dll";
+    live_host = host.get();
     GIANT_CHECK(host->load_scripts(scripts));
-    GIANT_CHECK(host->running_scripts() == 2); // Talker and Crasher, not the abstract one
+    GIANT_CHECK(host->running_scripts() == 4); // all but the abstract one
 
     const auto has = [&calls](const std::string& needle) {
         for (const auto& call : calls) {
@@ -48,6 +57,8 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(has("echo {\"value\":41}"));
     GIANT_CHECK(has("\"echoed\":42"));                     // read the reply
     GIANT_CHECK(has("\"what\":\"failed\",\"error\":\"no such command\"")); // failures throw
+    GIANT_CHECK(has("\"what\":\"thread\",\"result\":\"refused\"")); // main thread only
+    GIANT_CHECK(!has("from another thread"));
 
     set_console_logging(false);
     for (int i = 0; i < 3; ++i) {
@@ -55,7 +66,8 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     }
     set_console_logging(true);
     GIANT_CHECK(has("\"frame\":3"));
-    GIANT_CHECK(host->running_scripts() == 1); // Crasher stopped itself on frame 2
+    GIANT_CHECK(reentry_refused);              // and the scripts kept running
+    GIANT_CHECK(host->running_scripts() == 3); // Crasher stopped itself on frame 2
     bool logged_crash = false;
     for (const auto& record : log.recent(100, LogLevel::error)) {
         logged_crash = logged_crash || record.text.find("crasher crashed on purpose") != std::string::npos;
@@ -67,10 +79,16 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(host->load_scripts(scripts));
     GIANT_CHECK(has("\"what\":\"stop\""));
     GIANT_CHECK(has("\"what\":\"start\""));
-    GIANT_CHECK(host->running_scripts() == 2);
+    GIANT_CHECK(host->running_scripts() == 4);
 
     host->unload_scripts();
     GIANT_CHECK(host->running_scripts() == 0);
+    // Old assemblies were really unloaded (nothing kept them alive).
+    bool still_referenced = false;
+    for (const auto& record : log.recent(100, LogLevel::warning)) {
+        still_referenced = still_referenced || record.text.find("still referenced") != std::string::npos;
+    }
+    GIANT_CHECK(!still_referenced);
     set_console_logging(false);
     GIANT_CHECK(!host->load_scripts("does/not/exist.dll"));
     set_console_logging(true);

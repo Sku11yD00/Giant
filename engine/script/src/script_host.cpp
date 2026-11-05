@@ -30,6 +30,13 @@ namespace giant::script {
 
 namespace {
 
+// A path as UTF-8 text for logs. path::string() throws on Windows when a
+// name does not fit the ANSI code page (e.g. a user folder in Chinese).
+std::string utf8(const std::filesystem::path& path) {
+    const std::u8string text = path.u8string();
+    return {text.begin(), text.end()};
+}
+
 // --- The .NET hosting API (hostfxr), declared here so no SDK headers are
 // needed to build the engine. See dotnet/runtime docs/design/features/
 // native-hosting.md. -----------------------------------------------------
@@ -65,7 +72,7 @@ using LoadAssemblyAndGetFunctionPointer = int(GIANT_CORECLR_CALL*)(
     const char_t* assembly_path, const char_t* type_name, const char_t* method_name,
     const char_t* delegate_type_name, void* reserved, void** delegate);
 constexpr std::int32_t k_hdt_load_assembly_and_get_function_pointer = 5;
-const char_t* const k_unmanaged_callers_only = reinterpret_cast<const char_t*>(-1);
+const char_t* const k_unmanaged_callers_only = reinterpret_cast<const char_t*>(static_cast<std::intptr_t>(-1));
 
 // --- What the managed side calls back into (NativeApi in NativeHost.cs). ---
 struct NativeApi {
@@ -130,6 +137,9 @@ std::vector<int> version_parts(const std::string& name) {
     bool any = false;
     for (const char c : name) {
         if (c >= '0' && c <= '9') {
+            if (current > 100'000'000) {
+                break; // not a version folder; avoid int overflow
+            }
             current = current * 10 + (c - '0');
             any = true;
         } else if (c == '.') {
@@ -150,7 +160,7 @@ std::filesystem::path find_hostfxr(const std::filesystem::path& root) {
     std::filesystem::path best;
     std::vector<int> best_version;
     for (const auto& entry : std::filesystem::directory_iterator(root / "host" / "fxr", error)) {
-        const auto version = version_parts(entry.path().filename().string());
+        const auto version = version_parts(utf8(entry.path().filename()));
         const auto candidate = entry.path() / k_hostfxr_name;
         if (!version.empty() && version > best_version &&
             std::filesystem::exists(candidate, error)) {
@@ -262,7 +272,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
     }
     void* library = open_library(hostfxr);
     if (library == nullptr) {
-        log_error("script", "could not load " + hostfxr.string());
+        log_error("script", "could not load " + utf8(hostfxr));
         return nullptr;
     }
     // The library stays loaded for the life of the process: .NET cannot be
@@ -281,7 +291,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
     const std::filesystem::path assembly = desc.managed_dir / "Giant.Scripting.dll";
     std::error_code error;
     if (!std::filesystem::exists(config, error) || !std::filesystem::exists(assembly, error)) {
-        log_error("script", "the engine's C# API is missing from " + desc.managed_dir.string());
+        log_error("script", "the engine's C# API is missing from " + utf8(desc.managed_dir));
         return nullptr;
     }
 
@@ -348,7 +358,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
     }
     auto host = std::make_unique<ScriptHost>(ConstructKey{}, std::move(api));
     g_commands = &host->m_api->commands;
-    log_info("script", ".NET started from " + root.string());
+    log_info("script", ".NET started from " + utf8(root));
     return host;
 }
 
