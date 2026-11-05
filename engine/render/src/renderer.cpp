@@ -6,6 +6,7 @@
 #include "decals.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
+#include "smaa.h"
 #include "streaming.h"
 
 #include <algorithm>
@@ -122,15 +123,21 @@ Renderer::~Renderer() {
     // Deferred by the device until the GPU is done with them.
     for (const rhi::PipelineHandle p :
          {m_raster_mesh, m_raster_vertex, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
-          m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down}) {
+          m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
+          m_smaa_blend}) {
         m_device.destroy(p);
     }
+    m_device.destroy(m_smaa_area);
+    m_device.destroy(m_smaa_search);
     for (Mesh& mesh : m_meshes) {
         destroy(mesh);
     }
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
     m_device.destroy(m_hzb);
+    m_device.destroy(m_color);
+    m_device.destroy(m_edges);
+    m_device.destroy(m_weights);
     for (const rhi::BufferHandle b :
          {m_cull.counters, m_cull.args, m_cull.queues[0], m_cull.queues[1], m_cull.visible,
           m_cull.occluded_clusters, m_cull.occluded_instances, m_cull.readback[0],
@@ -186,13 +193,35 @@ bool Renderer::init() {
     resolve.cull = rhi::CullMode::none;
     resolve.name = "shade visibility";
     m_resolve = m_device.create_pipeline(resolve);
-    for (const rhi::PipelineHandle p : {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse,
-                                        m_cull_retest, m_hzb_first, m_hzb_down, m_raster_vertex, m_resolve}) {
+    rhi::GraphicsPipelineDesc smaa;
+    smaa.vertex = shaders::smaa_vs();
+    smaa.cull = rhi::CullMode::none;
+    smaa.pixel = shaders::smaa_edges_ps();
+    smaa.color_formats[0] = rhi::Format::rgba8_unorm;
+    smaa.name = "SMAA: edges";
+    m_smaa_edges = m_device.create_pipeline(smaa);
+    smaa.pixel = shaders::smaa_weights_ps();
+    smaa.name = "SMAA: blend weights";
+    m_smaa_weights = m_device.create_pipeline(smaa);
+    smaa.pixel = shaders::smaa_blend_ps();
+    smaa.color_formats[0] = rhi::Format::rgba8_srgb;
+    smaa.name = "SMAA: blend";
+    m_smaa_blend = m_device.create_pipeline(smaa);
+    for (const rhi::PipelineHandle p :
+         {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
+          m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
         }
     }
+    SmaaTextures tables;
+    if (!create_smaa_textures(m_device, tables)) {
+        log_error("render", "could not create SMAA's lookup textures");
+        return false;
+    }
+    m_smaa_area = tables.area;
+    m_smaa_search = tables.search;
     // A finely cut sphere, so its LOD has room to work.
     const geometry::TriangleMesh shapes[] = {geometry::make_cube(), geometry::make_sphere(128, 64),
                                              geometry::make_plane()};
@@ -326,12 +355,16 @@ Mat4 Renderer::view_projection(const View& view, float aspect) {
 }
 
 bool Renderer::ensure_targets(u32 width, u32 height) {
-    if (m_depth.valid() && m_vis.valid() && m_hzb.valid() && m_width == width && m_height == height) {
+    if (m_depth.valid() && m_vis.valid() && m_hzb.valid() && m_color.valid() && m_edges.valid() &&
+        m_weights.valid() && m_width == width && m_height == height) {
         return true;
     }
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
     m_device.destroy(m_hzb);
+    m_device.destroy(m_color);
+    m_device.destroy(m_edges);
+    m_device.destroy(m_weights);
     rhi::TextureDesc desc;
     desc.width = width;
     desc.height = height;
@@ -343,6 +376,15 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     desc.usage = rhi::TextureUsage::render_target | rhi::TextureUsage::sampled;
     desc.name = "visibility buffer";
     m_vis = m_device.create_texture(desc);
+    // Anti-aliasing: the shaded image, then SMAA's two working images.
+    desc.format = rhi::Format::rgba8_srgb;
+    desc.name = "shaded image";
+    m_color = m_device.create_texture(desc);
+    desc.format = rhi::Format::rgba8_unorm;
+    desc.name = "SMAA edges";
+    m_edges = m_device.create_texture(desc);
+    desc.name = "SMAA blend weights";
+    m_weights = m_device.create_texture(desc);
     // The HZB: mip 0 the largest power of two not above the viewport.
     m_hzb_width = std::bit_floor(width);
     m_hzb_height = std::bit_floor(height);
@@ -359,7 +401,11 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_hzb_valid = false;
     m_width = width;
     m_height = height;
-    if (!m_depth.valid() || !m_vis.valid() || !m_hzb.valid()) {
+    if (!m_depth.valid() || !m_vis.valid() || !m_hzb.valid() || !m_color.valid() || !m_edges.valid() ||
+        !m_weights.valid()) {
+        // Half-made targets are not reused: the next frame tries again.
+        m_width = 0;
+        m_height = 0;
         log_error("render", "could not create the frame's targets (out of GPU memory?)");
         return false;
     }
@@ -966,9 +1012,13 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (gpu && m_cull.visible.valid()) {
         cmd.barrier(m_cull.visible, rhi::ResourceState::shader_read);
     }
+    // With anti-aliasing the shading goes to an image of its own, which
+    // SMAA then smooths into the target.
+    const bool antialias = settings.antialiasing && settings.debug_view == DebugView::lit;
+    const rhi::TextureHandle shaded = antialias ? m_color : target;
     rhi::RenderPassDesc pass;
     const Vec3& bg = light.background;
-    pass.colors[0] = {target, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
+    pass.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
     cmd.begin_render_pass(pass);
     cmd.set_pipeline(m_resolve);
     gpu::ResolvePush push{};
@@ -996,14 +1046,52 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     push.entry_offset = data.entry_offset;
     push.tile_columns = data.tile_columns;
     push.tile_rows = data.tile_rows;
+    push.specular_aa = settings.specular_antialiasing ? 1u : 0u;
     cmd.push(push);
     cmd.draw(3);
     ++m_stats.draws;
     cmd.end_render_pass();
+    if (antialias) {
+        smaa(cmd, target, bg);
+    }
     copy_streaming_stats();
     m_stats.materials = data.material_count;
     m_stats.decals = data.tile_columns != 0 ? static_cast<u32>(m_decal_bins->decals.size()) : 0;
     m_stats.decal_overflow = m_decal_bins->overflow;
+}
+
+void Renderer::smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3& background) {
+    gpu::SmaaPush push{};
+    push.metrics[0] = 1.0f / static_cast<float>(m_width);
+    push.metrics[1] = 1.0f / static_cast<float>(m_height);
+    push.metrics[2] = static_cast<float>(m_width);
+    push.metrics[3] = static_cast<float>(m_height);
+    push.color = m_device.read_descriptor(m_color);
+    push.edges = m_device.read_descriptor(m_edges);
+    push.weights = m_device.read_descriptor(m_weights);
+    push.area = m_device.read_descriptor(m_smaa_area);
+    push.search = m_device.read_descriptor(m_smaa_search);
+    // Each pass reads the one before. The first two clear to zero: the
+    // edges pass skips pixels without an edge, and zero means "none".
+    const auto pass = [&](rhi::PipelineHandle pipeline, rhi::TextureHandle out, rhi::Color clear) {
+        rhi::RenderPassDesc desc;
+        desc.colors[0] = {out, rhi::LoadOp::clear, clear};
+        cmd.begin_render_pass(desc);
+        cmd.set_pipeline(pipeline);
+        cmd.push(push);
+        cmd.draw(3);
+        cmd.end_render_pass();
+        ++m_stats.post_draws;
+    };
+    cmd.barrier(m_color, rhi::ResourceState::shader_read);
+    const rhi::Color zero{0.0f, 0.0f, 0.0f, 0.0f};
+    pass(m_smaa_edges, m_edges, zero);
+    cmd.barrier(m_edges, rhi::ResourceState::shader_read);
+    pass(m_smaa_weights, m_weights, zero);
+    cmd.barrier(m_weights, rhi::ResourceState::shader_read);
+    // Every pixel is written; the clear (cheap) keeps the target's contents
+    // defined where no draw is recorded, as on the null device.
+    pass(m_smaa_blend, target, {background.x, background.y, background.z, 1.0f});
 }
 
 void Renderer::copy_streaming_stats() {

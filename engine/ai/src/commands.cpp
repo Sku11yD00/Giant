@@ -270,6 +270,22 @@ std::vector<HistoryEntry> CommandRegistry::undo_history() const {
     return out;
 }
 
+std::vector<std::string> CommandRegistry::undo_names() const {
+    std::vector<std::string> out;
+    for (const auto& entry : m_undo) {
+        out.push_back(entry.what.command);
+    }
+    return out;
+}
+
+std::vector<std::string> CommandRegistry::redo_names() const {
+    std::vector<std::string> out;
+    for (auto it = m_redo.rbegin(); it != m_redo.rend(); ++it) {
+        out.push_back(it->what.command);
+    }
+    return out;
+}
+
 std::vector<HistoryEntry> CommandRegistry::redo_history() const {
     std::vector<HistoryEntry> out;
     for (auto it = m_redo.rbegin(); it != m_redo.rend(); ++it) {

@@ -10,6 +10,7 @@ pinned to an exact version and listed here before it is used.
 | [Dear ImGui](https://github.com/ocornut/imgui) (docking) | 1.92.9b (`b48d1af`) | MIT | editor (panels) | N0 part 3 |
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) (with `demo/clusterlod.h`) | 1.3 (`9e1f07b`) | MIT | geometry (clusters, simplification, cluster LOD) | N1 part 2 |
 | [cgltf](https://github.com/jkuhlmann/cgltf) | 1.15 (`360db1a`) | MIT | geometry (glTF 2.0 import) | N1 part 2 |
+| [SMAA](https://github.com/iryoku/smaa) area and search textures | `71c806a` | MIT | render (edge anti-aliasing; the shader is our own port) | N1 part 6 |
 | [Slang](https://github.com/shader-slang/slang) compiler | 2026.19 (release binaries, SHA-256 pinned) | Apache 2.0 with LLVM exception | build time: compiles shaders | N1 part 1 |
 | [DXC](https://github.com/microsoft/DirectXShaderCompiler) | 1.9.2609.5 (NuGet, SHA-256 pinned) | University of Illinois/NCSA (BSD-style) | build time: Slang's DXIL back end, Windows | N1 part 1 |
 

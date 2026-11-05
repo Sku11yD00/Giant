@@ -281,8 +281,11 @@ Json render_settings_json(const EditorState& state) {
             {"gpu_culling", state.render_settings.gpu_culling},
             {"occlusion_culling", state.render_settings.occlusion_culling},
             {"mesh_shaders", state.render_settings.mesh_shaders},
+            {"antialiasing", state.render_settings.antialiasing},
+            {"specular_antialiasing", state.render_settings.specular_antialiasing},
             {"last_frame",
-             {{"instances", s.instances}, {"draws", s.draws}, {"clusters", s.clusters},
+             {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
+              {"clusters", s.clusters},
               {"triangles", s.triangles}, {"from_gpu", s.from_gpu},
               {"occluded_instances", s.occluded_instances},
               {"occluded_clusters", s.occluded_clusters}, {"overflow", s.overflow},
@@ -978,6 +981,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "blue...) or triangles. gpu_culling: pick clusters on the GPU (default) or the CPU. "
          "occlusion_culling: skip what is hidden behind nearer geometry (GPU culling only). "
          "mesh_shaders: draw with mesh shaders when the GPU has them, else vertex shaders. "
+         "antialiasing: smooth jagged edges (SMAA, no blur in motion; lit view only). "
+         "specular_antialiasing: keep fine shiny detail from sparkling. "
          "View state: not undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
@@ -986,7 +991,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"debug_view", {{"enum", {"lit", "clusters", "lod_levels", "triangles"}}}},
                 {"gpu_culling", {{"type", "boolean"}}},
                 {"occlusion_culling", {{"type", "boolean"}}},
-                {"mesh_shaders", {{"type", "boolean"}}}}}},
+                {"mesh_shaders", {{"type", "boolean"}}},
+                {"antialiasing", {{"type", "boolean"}}},
+                {"specular_antialiasing", {{"type", "boolean"}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -997,6 +1004,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.gpu_culling = args.value("gpu_culling", r.gpu_culling);
              r.occlusion_culling = args.value("occlusion_culling", r.occlusion_culling);
              r.mesh_shaders = args.value("mesh_shaders", r.mesh_shaders);
+             r.antialiasing = args.value("antialiasing", r.antialiasing);
+             r.specular_antialiasing = args.value("specular_antialiasing", r.specular_antialiasing);
              return CommandResult::success(render_settings_json(state));
          }});
 

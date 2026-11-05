@@ -164,6 +164,8 @@ GIANT_TEST("commands: history is capped and listed oldest first") {
     const auto redo = f.registry.redo_history();
     GIANT_CHECK(redo.size() == 2);
     GIANT_CHECK(redo.front().args["value"] == static_cast<int>(CommandRegistry::k_max_history) + 9);
+    GIANT_CHECK(f.registry.undo_names().size() == history.size() - 2);
+    GIANT_CHECK((f.registry.redo_names() == std::vector<std::string>{"set_value", "set_value"}));
     const CommandResult listed = f.registry.execute("get_history");
     GIANT_CHECK(listed.ok && listed.value["redo"].size() == 2);
 }

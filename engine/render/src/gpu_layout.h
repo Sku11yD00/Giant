@@ -241,8 +241,21 @@ struct ResolvePush {
     u32 entry_offset;
     u32 tile_columns; // 0: no decals
     u32 tile_rows;
-    u32 pad[2];
+    u32 specular_aa;
+    u32 pad;
 };
 static_assert(sizeof(ResolvePush) == 96);
+
+// smaa.slang's SmaaPush (all three passes).
+struct SmaaPush {
+    float metrics[4]; // 1 / width, 1 / height, width, height
+    u32 color;
+    u32 edges;
+    u32 weights;
+    u32 area;
+    u32 search;
+    u32 pad[3];
+};
+static_assert(sizeof(SmaaPush) == 48);
 
 } // namespace giant::render::gpu

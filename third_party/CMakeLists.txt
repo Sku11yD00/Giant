@@ -160,3 +160,14 @@ if(GIANT_COMPILE_SHADERS)
     set(GIANT_SLANGC ${slang_SOURCE_DIR}/bin/slangc CACHE INTERNAL "")
   endif()
 endif()
+
+# SMAA's precomputed area and search textures (MIT licence), as C arrays.
+# The shader is our own port (engine/render/shaders/smaa.slang).
+FetchContent_Declare(smaa
+  GIT_REPOSITORY https://github.com/iryoku/smaa.git
+  GIT_TAG 71c806a838bdd7d517df19192a20f0c61b3ca29d
+)
+FetchContent_MakeAvailable(smaa) # no CMake project of its own: sources only
+add_library(smaa_textures INTERFACE)
+target_include_directories(smaa_textures SYSTEM INTERFACE ${smaa_SOURCE_DIR}/Textures)
+add_library(third_party::smaa ALIAS smaa_textures)

@@ -9,6 +9,8 @@
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
 
+#include <algorithm>
+#include <array>
 #include <functional>
 #include <vector>
 
@@ -25,6 +27,26 @@ struct EditorCamera {
 };
 
 class MeshLibrary;
+
+// The last few seconds of frame times, for get_engine_info (performance
+// checks such as the N1 gate run over MCP).
+struct FrameTimes {
+    static constexpr usize k_frames = 240;
+    std::array<float, k_frames> ms{};
+    usize count = 0; // frames recorded, ever
+    void add(float frame_ms) { ms[count++ % k_frames] = frame_ms; }
+    usize size() const { return std::min(count, k_frames); }
+    float average() const {
+        float sum = 0.0f;
+        for (usize i = 0; i < size(); ++i) sum += ms[i];
+        return size() > 0 ? sum / static_cast<float>(size()) : 0.0f;
+    }
+    float worst() const {
+        float w = 0.0f;
+        for (usize i = 0; i < size(); ++i) w = std::max(w, ms[i]);
+        return w;
+    }
+};
 
 // What the commands read and change. Owned by main; outlives the registry.
 struct EditorState {
@@ -48,6 +70,7 @@ struct EditorState {
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
     render::RenderStats scene_stats;
+    FrameTimes frame_times; // updated by the main loop
     bool quit_requested = false;
     // Renders the editor as it looks now (viewport and panels) and returns
     // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.

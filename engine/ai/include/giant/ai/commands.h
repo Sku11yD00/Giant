@@ -119,6 +119,10 @@ public:
     std::vector<HistoryEntry> undo_history() const;
     // Next first: the first entry is the next one `redo` repeats.
     std::vector<HistoryEntry> redo_history() const;
+    // The same, names only: cheap enough for every frame (arguments can be
+    // large, e.g. a batch of 10,000 entities).
+    std::vector<std::string> undo_names() const;
+    std::vector<std::string> redo_names() const;
 
     static constexpr usize k_max_history = 256;
 

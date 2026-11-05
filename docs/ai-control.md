@@ -35,7 +35,7 @@ like late afternoon"; Claude calls the tools, looks at the result with
 
 | Command | Changes things | What it does |
 | --- | --- | --- |
-| `get_engine_info` | no | Version, graphics backend and GPU, validation layer, frames, window size |
+| `get_engine_info` | no | Version, graphics backend and GPU, validation layer, frames, frame times over the last 240 frames (average and worst, wall clock), window size |
 | `get_log` | no | Newest log lines, filtered by level |
 | `create_entity`, `create_entities` | yes, undoable | Adds shapes (cube, sphere, plane), imported meshes (`mesh`: a glTF/GLB path), kit placements (`kit`: a kit's name) or decals (`shape: decal` with `decal` settings: stamp shape `disc`, `rectangle`, `ring`, `splat` or `cracks`, opacity, softness, seed) with position, rotation, scale and material; many in one step |
 | `create_kit` | yes, undoable | Makes a kit, a reusable group of pieces, from `pieces` or `from_entities` (`replace_entities` swaps those for one placement); `replace` changes an existing kit and every placement |
@@ -50,7 +50,7 @@ like late afternoon"; Claude calls the tools, looks at the result with
 | `save_scene` | writes a file | Saves the scene as JSON text (meshes by path) |
 | `import_mesh` | loads an asset, not undoable | Imports a `.gltf`/`.glb` and builds its cluster LOD; `reload` picks up changes |
 | `list_meshes` | no | Imported meshes with triangle, cluster and level counts |
-| `get_render_settings`, `set_render_settings` | view only, not undoable | LOD error in pixels, debug view (`lit`, `clusters`, `lod_levels`, `triangles`), `gpu_culling`, `occlusion_culling`, `mesh_shaders`; last frame's cluster and triangle counts (from the GPU a frame or two late when `from_gpu`), occluded counts, `overflow`, `materials` (shared table size), `decals` (in view) and `decal_overflow`, and `streaming` (pool size and use, groups loaded, loaded and waiting this frame) |
+| `get_render_settings`, `set_render_settings` | view only, not undoable | LOD error in pixels, debug view (`lit`, `clusters`, `lod_levels`, `triangles`), `gpu_culling`, `occlusion_culling`, `mesh_shaders`, `antialiasing` (SMAA edges), `specular_antialiasing`; last frame's `draws` and `post_draws` (full-screen anti-aliasing passes), cluster and triangle counts (from the GPU a frame or two late when `from_gpu`), occluded counts, `overflow`, `materials` (shared table size), `decals` (in view) and `decal_overflow`, and `streaming` (pool size and use, groups loaded, loaded and waiting this frame) |
 | `get_camera`, `set_camera` | view only, not undoable | The viewport camera; `look_at` aims it |
 | `set_window_size` | view only, not undoable | Resizes the window (screen points) |
 | `undo`, `redo` | yes | Walks the change history |

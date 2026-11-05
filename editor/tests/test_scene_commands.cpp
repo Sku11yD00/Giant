@@ -208,6 +208,11 @@ GIANT_TEST("editor: render settings are view state") {
     GIANT_CHECK(!f.state.render_settings.gpu_culling && !f.state.render_settings.occlusion_culling &&
                 !f.state.render_settings.mesh_shaders);
     GIANT_CHECK(!f.run("set_render_settings", {{"gpu_culling", "yes"}}).ok);
+    GIANT_CHECK(f.state.render_settings.antialiasing && f.state.render_settings.specular_antialiasing);
+    const auto aa = f.run("set_render_settings", {{"antialiasing", false}, {"specular_antialiasing", false}});
+    GIANT_CHECK(aa.ok && aa.value["antialiasing"] == false && aa.value["specular_antialiasing"] == false);
+    GIANT_CHECK(!f.state.render_settings.antialiasing && !f.state.render_settings.specular_antialiasing);
+    GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("post_draws"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("overflow"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["streaming"].contains("pool_bytes"));
 }

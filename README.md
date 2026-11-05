@@ -57,6 +57,15 @@ Milestone **N1 Virtual geometry** (in progress):
   under them (mud, scorch marks, cracked ground from a giant's footfall),
   with five shapes for now. Try "+ Decal" and "Selected to kit" in the
   Scene panel.
+- Part 6 (done, N1 complete): sharp anti-aliasing and the N1 gate. Jagged
+  edges are smoothed from the finished image alone (SMAA), so nothing smears
+  or ghosts when the camera moves, and shiny highlights are widened where a
+  surface curves faster than a pixel can show, so they do not sparkle. Both
+  have switches in the Engine panel. The gate scene, a kit-built town and
+  10,000 trees, still draws in the same few passes; `tools/n1_gate.py` flies
+  through it and reports whether your GPU holds 60 fps:
+
+      python tools/n1_gate.py giant_editor.exe
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
