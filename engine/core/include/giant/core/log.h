@@ -22,6 +22,8 @@ using LogSink = std::function<void(const LogRecord&)>;
 using LogSinkId = int;
 
 // Adds a sink that receives every record at or above `min_level`.
+// Sinks must not call add_log_sink, remove_log_sink or set_console_logging
+// (that asserts and is ignored); logging from inside a sink goes to stderr.
 LogSinkId add_log_sink(LogSink sink, LogLevel min_level = LogLevel::trace);
 void remove_log_sink(LogSinkId id);
 

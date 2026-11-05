@@ -24,7 +24,7 @@ ENGINE = ROOT / "engine"
 EDITOR = ROOT / "editor"
 ARCH_DOC = ROOT / "docs" / "architecture.md"
 
-GIANT_INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]giant/([A-Za-z0-9_]+)/', re.MULTILINE)
+GIANT_INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]giant/([^/>"]+)/', re.MULTILINE)
 ANY_INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 IMPORT_RE = re.compile(r"^\s*(?:export\s+)?import\s+giant\.([A-Za-z0-9_]+)", re.MULTILINE)
 CMAKE_MODULE_RE = re.compile(r"giant_module\(\s*([A-Za-z0-9_]+)(.*?)\)", re.DOTALL)
@@ -126,6 +126,8 @@ def check_sources(module: str, folder: Path, allowed: dict[str, set[str]], error
                         f"{where(match.start())}: relative include '{target}' leaves "
                         f"'{module}'; include <giant/<module>/...> instead"
                     )
+            elif target.startswith(("engine/", "editor/")):
+                errors.append(f"{where(match.start())}: '{target}' uses a repo path; include <giant/<module>/...> instead")
             elif "/src/" in f"/{target}":
                 errors.append(f"{where(match.start())}: '{target}' reaches into a private src/ folder")
 
@@ -135,15 +137,29 @@ def check_sources(module: str, folder: Path, allowed: dict[str, set[str]], error
                 errors.append(f"{where(match.start())}: '{module}' may not import '{used}'")
 
 
+LINK_RE = re.compile(r"target_link_libraries\(\s*giant_([A-Za-z0-9_]+)(.*?)\)", re.DOTALL)
+
+
 def check_cmake(allowed: dict[str, set[str]], errors: list[str]) -> None:
     for cmake in sorted(list(ENGINE.rglob("CMakeLists.txt")) + list(EDITOR.rglob("CMakeLists.txt"))):
-        text = cmake.read_text(encoding="utf-8")
+        text = re.sub(r"#[^\n]*", "", cmake.read_text(encoding="utf-8"))
+        for match in LINK_RE.finditer(text):
+            name = match.group(1)
+            if name.endswith("_tests") or name not in allowed:
+                continue
+            for dep in re.findall(r"giant::([A-Za-z0-9_]+)", match.group(2)):
+                if dep != "test_main" and not permits(allowed, name, dep):
+                    errors.append(f"{cmake.relative_to(ROOT)}: giant_{name} may not link giant::{dep}")
+            if "${" in match.group(2) and "giant" in match.group(2):
+                errors.append(f"{cmake.relative_to(ROOT)}: link giant modules by name, not through variables")
         for match in CMAKE_MODULE_RE.finditer(text):
             name, body = match.group(1), match.group(2)
             if name not in allowed:
                 errors.append(f"{cmake.relative_to(ROOT)}: giant_module '{name}' is not in the table")
                 continue
             depends = re.search(r"DEPENDS((?:\s+[A-Za-z0-9_]+)+)", body)
+            if "${" in body:
+                errors.append(f"{cmake.relative_to(ROOT)}: giant_module '{name}' must list DEPENDS literally")
             for dep in depends.group(1).split() if depends else []:
                 if dep in {"SOURCES"}:
                     break

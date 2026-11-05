@@ -52,7 +52,11 @@ const char* to_string(LogLevel level) {
 }
 
 LogSinkId add_log_sink(LogSink sink, LogLevel min_level) {
-    GIANT_ASSERT(!t_in_sink, "sinks must not add sinks");
+    if (t_in_sink) {
+        // Locking here would deadlock on the mutex the sink already holds.
+        GIANT_ASSERT(false, "sinks must not add sinks");
+        return 0;
+    }
     LogState& s = state();
     std::lock_guard lock(s.mutex);
     const LogSinkId id = s.next_id++;
@@ -61,13 +65,20 @@ LogSinkId add_log_sink(LogSink sink, LogLevel min_level) {
 }
 
 void remove_log_sink(LogSinkId id) {
-    GIANT_ASSERT(!t_in_sink, "sinks must not remove sinks");
+    if (t_in_sink) {
+        GIANT_ASSERT(false, "sinks must not remove sinks");
+        return;
+    }
     LogState& s = state();
     std::lock_guard lock(s.mutex);
     std::erase_if(s.sinks, [id](const SinkEntry& e) { return e.id == id; });
 }
 
 void set_console_logging(bool enabled) {
+    if (t_in_sink) {
+        GIANT_ASSERT(false, "sinks must not change console logging");
+        return;
+    }
     LogState& s = state();
     std::lock_guard lock(s.mutex);
     s.console = enabled;
