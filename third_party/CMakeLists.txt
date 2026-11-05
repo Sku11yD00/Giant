@@ -171,10 +171,10 @@ foreach(pair "AreaTex.h=1933bf43ce86ba71f7ed5f0fa94b148610c634dc3395b9bc67a817d5
   string(REPLACE "=" ";" pair "${pair}")
   list(GET pair 0 smaa_file)
   list(GET pair 1 smaa_hash)
-  if(NOT EXISTS ${smaa_dir}/${smaa_file})
-    file(DOWNLOAD https://raw.githubusercontent.com/iryoku/smaa/${smaa_commit}/Textures/${smaa_file}
-         ${smaa_dir}/${smaa_file} EXPECTED_HASH SHA256=${smaa_hash} TLS_VERIFY ON)
-  endif()
+  # Always checked against the hash: a file that already matches is kept
+  # (no download, works offline); a bad or partial one is fetched again.
+  file(DOWNLOAD https://raw.githubusercontent.com/iryoku/smaa/${smaa_commit}/Textures/${smaa_file}
+       ${smaa_dir}/${smaa_file} EXPECTED_HASH SHA256=${smaa_hash} TLS_VERIFY ON)
 endforeach()
 add_library(smaa_textures INTERFACE)
 target_include_directories(smaa_textures SYSTEM INTERFACE ${smaa_dir})

@@ -509,11 +509,15 @@ void Renderer::read_gpu_stats() {
     }
     if (newest < 3 && m_cull.readback[newest].valid()) {
         read_stats_slot(newest);
-        const u32 draws = m_stats.draws;
-        const u32 post_draws = m_stats.post_draws;
+        // The GPU's counts replace the CPU's guesses; what the CPU knows
+        // exactly (draws, materials, decals) stays.
+        const RenderStats cpu = m_stats;
         m_stats = m_gpu_stats;
-        m_stats.draws = draws;
-        m_stats.post_draws = post_draws;
+        m_stats.draws = cpu.draws;
+        m_stats.post_draws = cpu.post_draws;
+        m_stats.materials = cpu.materials;
+        m_stats.decals = cpu.decals;
+        m_stats.decal_overflow = cpu.decal_overflow;
         copy_streaming_stats();
     }
 }

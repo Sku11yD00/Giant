@@ -406,7 +406,7 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.decals = decals;
     for (const bool gpu : {false, true}) {
         const auto stamped = draw(gpu, false, false);
-        GIANT_CHECK(renderer->last_stats().decals == 1 || gpu);
+        GIANT_CHECK(renderer->last_stats().decals == 1);
         if (stamped.size() == k_w * k_h * 4) {
             const usize centre = (static_cast<usize>(k_h / 2) * k_w + k_w / 2) * 4;
             GIANT_CHECK(stamped[centre] > 150 && stamped[centre + 1] < 40);
@@ -460,7 +460,8 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.settings.specular_antialiasing = true;
     GIANT_CHECK(differing(unfiltered) <= pixels.size() / 50);
     // A small, mirror-like sphere a few pixels wide: its normals turn fast
-    // across each pixel, so the filter must widen (dim) its highlight.
+    // across each pixel, so the filter must widen its highlight (here it
+    // lights pixels whose centres the sharp highlight missed).
     std::vector<Instance> shiny(1);
     shiny[0].mesh = renderer->builtin(BuiltinMesh::sphere);
     shiny[0].position = camera + DVec3{0.0, 0.0, -12.0};

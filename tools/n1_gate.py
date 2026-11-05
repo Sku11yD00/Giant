@@ -139,9 +139,16 @@ def main() -> int:
         path = flight_path(600)
         for position, look_at in path[:30]:  # warm up: streaming fills the pool
             tool("set_camera", {"position": position, "look_at": look_at})
-        # The editor keeps the last 240 frame times: read them every 100
-        # stops (200 frames), so the whole flight is timed.
+        # Hover first so the editor's 240 recorded frame times hold none of
+        # the scene build (the 10,000-tree batch is one long frame).
+        tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
+        for _ in range(240):
+            call("ping")
+        # Then read the last 240 frame times every 110 stops (two commands a
+        # stop, a frame each, plus the read: about 221 frames), so the
+        # windows cover the whole flight.
         windows = []
+        last_frame_number = tool("get_engine_info")["frames_completed"]
         for stop, (position, look_at) in enumerate(path):
             tool("set_camera", {"position": position, "look_at": look_at})
             frame = tool("get_render_settings")["last_frame"]
@@ -150,8 +157,13 @@ def main() -> int:
             # GPU culling with occlusion: two raster passes and shading.
             if frame["draws"] != 3 or frame["post_draws"] != 3:
                 bad_draws.append((stop, frame["draws"], frame["post_draws"]))
-            if stop % 100 == 99:
-                windows.append(tool("get_engine_info")["frame_times"])
+            if stop % 110 == 109 or stop == len(path) - 1:
+                info_now = tool("get_engine_info")
+                frames = info_now["frames_completed"] - last_frame_number
+                last_frame_number = info_now["frames_completed"]
+                if frames > 240:
+                    failures.append(f"{frames} frames passed between samples: only the last 240 were timed")
+                windows.append({**info_now["frame_times"], "frames": min(frames, 240)})
         times = {"frames": sum(w["frames"] for w in windows),
                  "average_ms": sum(w["average_ms"] for w in windows) / len(windows),
                  "worst_ms": max(w["worst_ms"] for w in windows)}
