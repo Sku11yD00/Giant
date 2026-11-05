@@ -40,7 +40,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     w.stand_ins = 0u; // every voxel
     float t;
     uint packed;
-    if (march_voxels(w, dir, f.near_plane, 3.0e38, t, packed)) {
+    if (march_voxels(w, dir, f.near_plane, 3.0e38, float4(0.0, 0.0, 0.0, -1.0), t, packed)) {
         const float3 normal = unpack_normal(packed);
         const float3 albedo = unpack_color(packed);
         const float3 sun = f.sun_light.xyz * max(dot(normal, f.sun_direction.xyz), 0.0);

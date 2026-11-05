@@ -72,6 +72,10 @@ enum class VoxelProbe : u8 {
 };
 const char* to_string(VoxelProbe probe);
 
+// An instance's bounding radius as the far field judges it: the mesh's
+// sphere times the largest |scale|, in float (as the GPU computes it).
+float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale);
+
 class VoxelScene {
 public:
     // A mesh by id, or null when it does not exist (any more). Ids are never
@@ -255,7 +259,8 @@ private:
     u32 m_rebuild_jobs = 0;    // of a full rebuild, still queued
     bool m_rebuild_again = false;
     std::vector<voxel::BrickBox> m_job_bounds; // per level: around its queued jobs (count 0: none), for holds()
-    double m_stand_in_radius = 0.0;
+    std::vector<std::vector<voxel::BrickBox>> m_job_boxes; // per level: the queued jobs' boxes
+    float m_stand_in_radius = 0.0f;
     // Changes not turned into jobs yet: where instances were (their bricks
     // are built again) and which instances changed (the bricks where they
     // are now are).

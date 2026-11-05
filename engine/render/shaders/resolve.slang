@@ -127,7 +127,8 @@ struct Hit {
     uint material;
     uint cluster;  // the visible list's cluster index
     uint level;
-    float radius;  // the instance's bounding radius
+    float3 center; // the instance's bounding sphere, camera-relative
+    float radius;
 };
 
 Hit no_hit() {
@@ -138,6 +139,7 @@ Hit no_hit() {
     h.material = 0;
     h.cluster = 0;
     h.level = 0;
+    h.center = float3(0.0, 0.0, 0.0);
     h.radius = 0.0;
     return h;
 }
@@ -169,6 +171,7 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     h.material = inst.material;
     h.cluster = entry.y;
     h.level = cluster.level;
+    h.center = to_world(inst, mesh.bounds.xyz);
     h.radius = mesh.bounds.w * inst.max_scale;
     return h;
 }
@@ -256,10 +259,11 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     // of whatever mesh is drawn there (lit view only).
     if (f.debug_view == 0 && push.voxel_level_count != 0) {
         const float mesh_t = hit ? length(s.world) : 3.0e38;
-        // A stand-in drawn as a mesh (straddling the distance, or not in
-        // the voxel world yet) would be covered by its own voxels: left be.
-        const bool stand_in_mesh = hit && s.radius <= push.far_radius;
-        if (mesh_t > push.far_start && !stand_in_mesh) {
+        // A stand-in drawn as a mesh (straddling the distance, moving, or
+        // not in the voxel world yet): its own voxels must not cover it.
+        const float4 skip = hit && s.radius <= push.far_radius ? float4(s.center, s.radius)
+                                                               : float4(0.0, 0.0, 0.0, -1.0);
+        if (mesh_t > push.far_start) {
             const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
             const float3 dir = normalize(f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz);
             VoxelWorld w;
@@ -272,7 +276,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
             w.stand_ins = 1u; // only what the CPU left out (meshes drawn keep their own look)
             float t;
             uint packed;
-            if (march_voxels(w, dir, push.far_start, mesh_t, t, packed)) {
+            if (march_voxels(w, dir, push.far_start, mesh_t, skip, t, packed)) {
                 const float3 world = dir * t;
                 const float3 color = shade(f, world, unpack_normal(packed), unpack_color(packed), k_far_roughness,
                                            0.0, float3(0.0, 0.0, 0.0), 0.0);

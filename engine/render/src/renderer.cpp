@@ -844,9 +844,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const double far_radius = std::max(static_cast<double>(settings.far_field_max_radius), 0.0);
     // The instance's bounding sphere is wholly past the distance, it is
     // small enough, and the voxel world shows it as it is now.
-    const auto left_to_voxels = [&](u32 index, const Instance& in, const geometry::Sphere& bounds) {
-        const double scale = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
-        const double radius = static_cast<double>(bounds.radius) * scale;
+    const auto left_to_voxels = [&](u32 index, const Instance& in, const geometry::ClusterMesh* m) {
+        const geometry::Sphere& bounds = m->bounds;
+        const double radius = stand_in_radius_of(*m, in.scale);
         if (!(radius <= far_radius)) {
             return false;
         }
@@ -867,7 +867,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         if (m == nullptr || !m_streamer->ready(in.mesh) || !m_streamer->tables_current()) {
             continue;
         }
-        if (far_field && left_to_voxels(i, in, m->bounds)) {
+        if (far_field && left_to_voxels(i, in, m)) {
             ++m_far_culled;
             continue;
         }

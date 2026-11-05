@@ -219,14 +219,17 @@ void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Materia
     c.box = bounds_of(in, meshes);
     c.large = false;
     const MeshCache* m = c.box.empty() ? nullptr : mesh_cache(in.mesh, meshes);
-    const double scale = std::max({std::fabs(static_cast<double>(in.scale.x)), std::fabs(static_cast<double>(in.scale.y)),
-                                   std::fabs(static_cast<double>(in.scale.z))});
-    c.stand_in = m != nullptr && m->mesh != nullptr &&
-                 static_cast<double>(m->mesh->bounds.radius) * scale <= m_stand_in_radius;
+    c.stand_in = m != nullptr && m->mesh != nullptr && stand_in_radius_of(*m->mesh, in.scale) <= m_stand_in_radius;
+}
+
+float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale) {
+    // In float, as the GPU works it out (resolve.slang): the two agree exactly.
+    const float s = std::max({std::fabs(scale.x), std::fabs(scale.y), std::fabs(scale.z)});
+    return mesh.bounds.radius * s;
 }
 
 void VoxelScene::set_stand_in_radius(float radius) {
-    const double r = radius > 0.0f ? static_cast<double>(radius) : 0.0; // NaN: none
+    const float r = radius > 0.0f ? radius : 0.0f; // NaN: none
     if (r == m_stand_in_radius) {
         return;
     }
@@ -236,10 +239,7 @@ void VoxelScene::set_stand_in_radius(float radius) {
         // The same rule as set_copy, from the copy's own instance.
         const auto it = m_meshes.find(c.instance.mesh);
         const geometry::ClusterMesh* mesh = it != m_meshes.end() ? it->second.mesh : nullptr;
-        const Vec3& sc = c.instance.scale;
-        const double scale = std::max({std::fabs(static_cast<double>(sc.x)), std::fabs(static_cast<double>(sc.y)),
-                                       std::fabs(static_cast<double>(sc.z))});
-        const bool stand_in = !c.box.empty() && mesh != nullptr && static_cast<double>(mesh->bounds.radius) * scale <= r;
+        const bool stand_in = !c.box.empty() && mesh != nullptr && stand_in_radius_of(*mesh, c.instance.scale) <= r;
         any = any || stand_in != c.stand_in;
         c.stand_in = stand_in;
     }
@@ -1091,12 +1091,17 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     }
     upload_tables(cmd);
 
-    // Around each level's queued jobs, for holds() (one box a level, so it
-    // costs nothing per job).
+    // Each level's queued jobs and a box around them, for holds() (most
+    // instances miss the box, so they cost nothing per job).
     m_job_bounds.assign(m_clipmap.levels(), voxel::BrickBox{});
+    m_job_boxes.resize(m_clipmap.levels());
+    for (std::vector<voxel::BrickBox>& boxes : m_job_boxes) {
+        boxes.clear();
+    }
     std::vector<bool> any(m_clipmap.levels(), false);
     for (const Job& job : m_jobs) {
         const u32 l = job.box.level;
+        m_job_boxes[l].push_back(job.box);
         voxel::BrickBox& b = m_job_bounds[l];
         b.level = l;
         if (!any[l]) {
@@ -1180,7 +1185,11 @@ bool VoxelScene::holds(u32 index) const {
             return false;
         }
         if (level < m_job_bounds.size() && voxel::intersect(m_job_bounds[level], box).count() > 0) {
-            return false; // bricks there may still be found or marked
+            for (const voxel::BrickBox& job : m_job_boxes[level]) {
+                if (voxel::intersect(job, box).count() > 0) {
+                    return false; // bricks there still to be found or marked
+                }
+            }
         }
         for (i32 z = box.min.z; z < box.max.z; ++z) {
             for (i32 y = box.min.y; y < box.max.y; ++y) {

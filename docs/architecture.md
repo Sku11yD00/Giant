@@ -279,9 +279,11 @@ Done in N2 part 3, the far field:
   by their own voxels, and small things left out show on top of them. The
   voxel's colour and normal are lit like a mesh (a rough dielectric). A
   stand-in voxel is up to a voxel larger than its object, so it can poke
-  out in front of a mesh just before it. Pixels showing a stand-in that is
-  still drawn as a mesh (straddling the distance, or not in the voxel
-  world yet) are left as they are, so its own voxels never cover it.
+  out in front of a mesh just before it. Where a stand-in is still drawn as
+  a mesh (straddling the distance, moving, or not in the voxel world yet)
+  the march ignores the voxels within two voxels of its bounding sphere,
+  so its own voxels never cover it while others in front of it still
+  show.
 - Lit view only, and only while the voxel world is kept up to date (a
   frozen one would show stale far geometry). The levels are written once a
   frame for the far field and the voxel view.
@@ -298,7 +300,12 @@ Done in N2 part 3, the far field:
   just come into view or a full pool keep meshes, never holes. Checking
   costs a few lookups per far instance and frame.
 - Not yet: shadows on far voxels (part 4); fading between mesh and voxels
-  at the distance (the switch can show).
+  at the distance (the switch can show). A stand-in still drawn as a mesh
+  also has its voxels around it (a halo up to a voxel wide against what
+  is behind), and one that moves leaves them behind for a few frames until
+  rebuilt; something far that changes every frame (a vehicle) is never
+  left out and shows both. Stand-ins could drop their bit while they keep
+  changing.
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 

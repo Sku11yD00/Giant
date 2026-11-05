@@ -106,8 +106,12 @@ uint slot_of(int3 brick, int n) {
 // the camera) from distance `t_start` up to `t_limit` (a mesh drawn there,
 // or 3e38). With w.stand_ins only stand-in voxels count, so meshes still
 // drawn are never covered by their own voxels. Out: the distance to the
-// voxel and its packed colour and normal.
-bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, out float hit_t, out uint packed) {
+// voxel and its packed colour and normal. `skip` (xyz: camera-relative
+// centre, w: radius; negative: none) is a stand-in still drawn as a mesh
+// at t_limit: its own voxels, within two voxels of its bounding sphere,
+// do not count (they would cover it), others in front of it do.
+bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4 skip, out float hit_t,
+                  out uint packed) {
     hit_t = 0.0;
     packed = 0u;
     // No division by zero: axis-parallel rays get a tiny slope.
@@ -203,7 +207,7 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, out fl
         const uint i = uint(v.x + 8 * (v.y + 8 * v.z));
         const uint base = index * k_brick_bytes;
         const uint word = pool.Load(base + (w.stand_ins != 0u ? k_stand_in_offset : 0u) + (i >> 5) * 4);
-        if (((word >> (i & 31u)) & 1u) != 0u) {
+        if (((word >> (i & 31u)) & 1u) != 0u && !(skip.w >= 0.0 && length(p - skip.xyz) < skip.w + 2.0 * voxel)) {
             hit_t = t;
             packed = pool.Load(base + 64 + i * 4);
             return true;

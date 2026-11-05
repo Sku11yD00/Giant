@@ -251,7 +251,7 @@ struct ResolvePush {
     u32 voxel_level_count;
     u32 voxel_bricks_per_axis;
     float far_start; // metres from the camera
-    float far_radius; // instances this small are stand-ins: a pixel showing one is left be
+    float far_radius; // instances this small are stand-ins: one still drawn ignores its own voxels
 };
 static_assert(sizeof(ResolvePush) == 124);
 
