@@ -50,6 +50,13 @@ the real layer before any rendering code depends on its shape:
 - Swap chains track their device in debug builds so destroying the device
   first is caught.
 
+## Window events (known limit)
+
+`Window::poll_events` drains SDL's single, process-wide event queue and drops
+events for other windows. That is fine while the editor has one window. Before
+a second OS window exists (floating panels, a game preview), events move to one
+central pump in `platform` that hands each window its own events.
+
 ## The shared voxel world
 
 One sparse voxel copy of the world (brick map in camera-centred clipmaps) is

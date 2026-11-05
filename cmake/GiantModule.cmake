@@ -54,4 +54,6 @@ function(giant_module_tests name)
   giant_apply_warnings(${target})
   giant_apply_sanitizers(${target})
   add_test(NAME ${name} COMMAND ${target})
+  # A hung test fails instead of stalling CI for hours.
+  set_tests_properties(${name} PROPERTIES TIMEOUT 120)
 endfunction()

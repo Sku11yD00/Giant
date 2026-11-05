@@ -52,7 +52,7 @@ jobs:
       - run: cmake --preset msvc -DGIANT_REQUIRE_VALIDATION=ON
       - run: cmake --build --preset msvc
       - run: ctest --preset msvc
-      - run: cmake --preset msvc-release
+      - run: cmake --preset msvc-release -DGIANT_REQUIRE_VALIDATION=ON
       - run: cmake --build --preset msvc-release
       - run: ctest --preset msvc-release
       - name: Package the editor

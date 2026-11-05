@@ -19,6 +19,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,7 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr u32 k_max_back_buffers = 3;
+constexpr DWORD k_gpu_wait_timeout_ms = 10'000;
 constexpr DXGI_FORMAT k_back_buffer_format = DXGI_FORMAT_R8G8B8A8_UNORM;
 // Flip-model swap chains cannot be created as sRGB, but their views can:
 // the renderer writes linear colour and the view encodes it for the screen.
@@ -146,6 +148,7 @@ private:
     bool m_tearing_supported = false;
     bool m_recording = false; // a frame is between begin_frame and end_frame
     bool m_lost = false;
+    mutable u32 m_validation_errors = 0; // running total, see validation_errors()
     ComPtr<ID3D12InfoQueue> m_info_queue; // set when the debug layer runs
 
     friend class D3D12SwapChain;
@@ -209,8 +212,14 @@ bool D3D12Device::init(const DeviceDesc& desc) {
 
     if ((factory_flags & DXGI_CREATE_FACTORY_DEBUG) != 0 &&
         SUCCEEDED(m_device.As(&m_info_queue))) {
-        // Keep every error so validation_errors() can count them.
-        m_info_queue->SetMessageCountLimit(UINT64_MAX);
+        // Store only errors: warnings and info would pile up forever. Stored
+        // errors are counted and cleared by validation_errors().
+        D3D12_MESSAGE_SEVERITY severities[] = {D3D12_MESSAGE_SEVERITY_CORRUPTION,
+                                               D3D12_MESSAGE_SEVERITY_ERROR};
+        D3D12_INFO_QUEUE_FILTER filter{};
+        filter.AllowList.NumSeverities = static_cast<UINT>(std::size(severities));
+        filter.AllowList.pSeverityList = severities;
+        m_info_queue->PushStorageFilter(&filter);
         log_info("rhi", "d3d12: GPU validation layer enabled");
     }
 
@@ -282,7 +291,6 @@ u32 D3D12Device::validation_errors() const {
     if (m_info_queue == nullptr) {
         return 0;
     }
-    u32 errors = 0;
     const UINT64 count = m_info_queue->GetNumStoredMessages();
     for (UINT64 i = 0; i < count; ++i) {
         SIZE_T size = 0;
@@ -294,15 +302,19 @@ u32 D3D12Device::validation_errors() const {
             (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
              message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION)) {
             log_error("rhi", std::string("d3d12 validation: ") + message->pDescription);
-            ++errors;
+            ++m_validation_errors;
         }
     }
-    return errors;
+    // Each message is logged and counted once; the total keeps growing.
+    m_info_queue->ClearStoredMessages();
+    return m_validation_errors;
 }
 
 u64 D3D12Device::signal() {
     const u64 value = m_next_fence_value++;
-    check_gpu(m_queue->Signal(m_fence.Get(), value), "Signal");
+    if (!check_gpu(m_queue->Signal(m_fence.Get(), value), "Signal")) {
+        return 0; // never signalled: waiting on it would block forever
+    }
     return value;
 }
 
@@ -310,8 +322,14 @@ void D3D12Device::wait_for(u64 value) {
     if (value == 0 || m_fence->GetCompletedValue() >= value) {
         return;
     }
-    if (check(m_fence->SetEventOnCompletion(value, m_fence_event), "SetEventOnCompletion")) {
-        WaitForSingleObject(m_fence_event, INFINITE);
+    if (!check(m_fence->SetEventOnCompletion(value, m_fence_event), "SetEventOnCompletion")) {
+        return;
+    }
+    // A healthy GPU finishes a frame in milliseconds. A hung one is treated
+    // as lost so the editor can close instead of freezing.
+    if (WaitForSingleObject(m_fence_event, k_gpu_wait_timeout_ms) != WAIT_OBJECT_0) {
+        log_error("rhi", "d3d12: the GPU did not finish its work in time; treating it as lost");
+        m_lost = true;
     }
 }
 
@@ -393,7 +411,8 @@ bool D3D12SwapChain::acquire_buffers() {
 
 void D3D12SwapChain::resize(u32 width, u32 height) {
     GIANT_ASSERT(!in_frame, "resize inside a frame");
-    if (width == 0 || height == 0 || (width == m_width && height == m_height)) {
+    // Same size is a no-op, unless the last resize failed: then retry.
+    if (width == 0 || height == 0 || (valid && width == m_width && height == m_height)) {
         return;
     }
     device->wait_idle();
@@ -417,12 +436,15 @@ bool D3D12Device::begin_frame(SwapChain& swap_chain) {
     if (m_lost || !sc.valid) {
         return false;
     }
-    sc.in_frame = true;
-    m_recording = true;
     sc.current = sc.swap_chain->GetCurrentBackBufferIndex();
 
     // The allocator for this back buffer may still be in use by the GPU.
     wait_for(m_frame_fence[sc.current]);
+    if (m_lost) {
+        return false;
+    }
+    sc.in_frame = true;
+    m_recording = true;
     ID3D12CommandAllocator* allocator = m_allocators[sc.current].Get();
     allocator->Reset();
     m_list->Reset(allocator, nullptr);

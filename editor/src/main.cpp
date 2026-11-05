@@ -103,8 +103,16 @@ int run(const Options& options) {
     using clock = std::chrono::steady_clock;
     auto report_start = clock::now();
     u64 report_frames = 0;
+    // With --frames, give up if frames keep being skipped, so a broken swap
+    // chain fails the run instead of hanging it.
+    const u64 max_loops = options.max_frames == 0 ? 0 : options.max_frames + 1000;
+    u64 loops = 0;
 
     while (window->poll_events()) {
+        if (max_loops != 0 && ++loops > max_loops) {
+            log_error("editor", "--frames: too many frames were skipped; giving up");
+            return 1;
+        }
         if (window->minimized()) {
             // Nothing to show: idle instead of spinning a CPU core.
             window->wait_events(100);
@@ -118,7 +126,10 @@ int run(const Options& options) {
                 log_error("editor", "the GPU device was lost; closing");
                 return 1;
             }
-            window->wait_events(16); // swap chain unusable until the next resize
+            // The swap chain is unusable after a failed resize: try again at
+            // the current size, and wait a little so a lasting failure idles.
+            window->wait_events(16);
+            swap_chain->resize(window->pixel_width(), window->pixel_height());
             continue;
         }
         device->clear(*swap_chain, sky);

@@ -137,7 +137,7 @@ def check_sources(module: str, folder: Path, allowed: dict[str, set[str]], error
                 errors.append(f"{where(match.start())}: '{module}' may not import '{used}'")
 
 
-LINK_RE = re.compile(r"target_link_libraries\(\s*giant_([A-Za-z0-9_]+)(.*?)\)", re.DOTALL)
+LINK_RE = re.compile(r"target_link_libraries\(\s*(\S+)(.*?)\)", re.DOTALL | re.IGNORECASE)
 
 
 def check_cmake(allowed: dict[str, set[str]], errors: list[str]) -> None:
@@ -145,12 +145,21 @@ def check_cmake(allowed: dict[str, set[str]], errors: list[str]) -> None:
         text = re.sub(r"#[^\n]*", "", cmake.read_text(encoding="utf-8"))
         rel = cmake.relative_to(ROOT)
         for match in LINK_RE.finditer(text):
-            name = match.group(1)
-            if name.endswith("_tests") or name not in allowed:
-                continue
-            body = match.group(2)
+            target, body = match.group(1), match.group(2)
             linked = set(re.findall(r"giant::([A-Za-z0-9_]+)", body))
             linked |= set(re.findall(r"\bgiant_([A-Za-z0-9_]+)\b", body))
+            if not re.fullmatch(r"giant_[A-Za-z0-9_]+", target):
+                if linked or "$" in body:
+                    errors.append(f"{rel}: link giant modules on a target named giant_<module>, not '{target}'")
+                continue
+            name = target[len("giant_"):]
+            if name.endswith("_tests"):
+                # A module's tests may use what the module itself may use.
+                name = name[: -len("_tests")]
+                linked -= {name}
+            if name not in allowed:
+                errors.append(f"{rel}: '{target}' links giant modules but '{name}' is not in the table")
+                continue
             for dep in sorted(linked - {"test_main"}):
                 if not permits(allowed, name, dep):
                     errors.append(f"{rel}: giant_{name} may not link {dep}")
