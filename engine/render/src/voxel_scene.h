@@ -104,9 +104,13 @@ public:
     rhi::BufferHandle table() const { return m_table; }
     const VoxelStats& stats() const { return m_stats; }
 
-    // Whether the world-space box [min, max] lies wholly in the coarsest
-    // level's window (so the voxel world has it, once built).
-    bool covers(const DVec3& min, const DVec3& max) const;
+    // Whether the voxel world shows instance `index` (of the last update's
+    // instances) as it is now: inside the coarsest window, with every brick
+    // under it on every level built from it, none waiting to be found,
+    // built again or for room in the pool. Until then (just added or
+    // moved, a slab just come into view, a rebuild, a full pool) it must
+    // stay a mesh, or it would vanish.
+    bool holds(u32 index) const;
 
     // The pool index of a brick, or gpu::k_no_brick (none, or not built yet).
     u32 brick_index(u32 level, const voxel::BrickCoord& brick) const;

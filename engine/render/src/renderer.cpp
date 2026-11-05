@@ -836,14 +836,14 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     }
 
     // Instances with a live mesh, but for the small ones wholly past the
-    // far field's distance: the voxel world shows those (once its coarsest
-    // window holds them).
+    // far field's distance: the voxel world shows those (once it holds
+    // them as they are now).
     const bool far_field = settings.voxel_far_field && settings.voxel_world && settings.debug_view == DebugView::lit;
     const double far_distance = std::max(static_cast<double>(settings.far_field_distance), 0.0);
     const double far_radius = std::max(static_cast<double>(settings.far_field_max_radius), 0.0);
-    // The instance's bounding sphere is wholly past the distance, small
-    // enough, and inside the voxel world.
-    const auto left_to_voxels = [&](const Instance& in, const geometry::Sphere& bounds) {
+    // The instance's bounding sphere is wholly past the distance, it is
+    // small enough, and the voxel world shows it as it is now.
+    const auto left_to_voxels = [&](u32 index, const Instance& in, const geometry::Sphere& bounds) {
         const double scale = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
         const double radius = static_cast<double>(bounds.radius) * scale;
         if (!(radius <= far_radius)) {
@@ -855,8 +855,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         if (!(length(center - frame.view.position) - radius > far_distance)) {
             return false;
         }
-        const DVec3 r{radius, radius, radius};
-        return m_voxels->covers(center - r, center + r);
+        return m_voxels->holds(index);
     };
     m_far_field = far_field;
     m_far_culled = 0;
@@ -867,7 +866,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         if (m == nullptr || !m_streamer->ready(in.mesh) || !m_streamer->tables_current()) {
             continue;
         }
-        if (far_field && left_to_voxels(in, m->bounds)) {
+        if (far_field && left_to_voxels(i, in, m->bounds)) {
             ++m_far_culled;
             continue;
         }

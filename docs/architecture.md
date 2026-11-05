@@ -261,7 +261,7 @@ Done in N2 part 3, the far field:
 - Past `RenderSettings::far_field_distance` (3 km by default) the voxel
   world stands in for small instances: the CPU leaves out every instance
   whose bounding sphere (radius at most `far_field_max_radius`, 50 m) lies
-  wholly beyond the distance and inside the coarsest level's window, so
+  wholly beyond the distance and that the voxel world already holds, so
   they cost no culling, streaming or raster work at all. Larger instances
   (terrain, mountains, big buildings) stay meshes at every distance,
   cluster LOD keeping them cheap. `RenderStats::far_culled` counts the
@@ -269,9 +269,12 @@ Done in N2 part 3, the far field:
 - The shading pass (`shaders/resolve.slang`) marches the voxels for every
   pixel whose mesh hit (if any) is past the distance, from the distance
   on, with the march the voxel view uses (`shaders/voxel_march.slang`). A
-  voxel counts only in front of the drawn mesh by more than 1.5 voxels, so
-  a mesh's own voxels (up to a voxel proud of it) never cover it. The
+  voxel counts only before the drawn mesh along the ray and in front of
+  its plane there by more than 1.5 voxels, so a mesh's own voxels (up to a
+  voxel proud of it) never cover it, even for rays grazing far ground. The
   voxel's colour and normal are lit like a mesh (a rough dielectric).
+  Conservative voxels make a far mesh's silhouette up to a voxel fatter
+  where only voxels stand behind it (a ridge against the sky).
 - Lit view only, and only while the voxel world is kept up to date (a
   frozen one would show stale far geometry). The levels are written once a
   frame for the far field and the voxel view.
@@ -281,10 +284,14 @@ Done in N2 part 3, the far field:
   far detail needs more bricks per axis (`RendererDesc::voxel_clipmap`,
   64 halves the voxel width for some four times the bricks) or the
   proxies of part 5 and N3.
-- Not yet: a brick still building (a slab just come into view, an
-  instance just added far out) shows the next coarser level or nothing
-  until it is built (well within a second at 1 ms a frame); shadows on
-  far voxels (part 4); fading between mesh and voxels at the distance.
+- An instance is left out only once the voxel world holds it as it is
+  (`VoxelScene::holds`): every brick under it, on every level, built from
+  it, none waiting to be found, rebuilt or for room in a full pool. So a
+  scene still building, an instance just added or moved far out, a slab
+  just come into view or a full pool keep meshes, never holes. Checking
+  costs a few lookups per far instance and frame.
+- Not yet: shadows on far voxels (part 4); fading between mesh and voxels
+  at the distance (the switch can show).
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 

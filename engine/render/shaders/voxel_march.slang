@@ -100,12 +100,16 @@ uint slot_of(int3 brick, int n) {
 }
 
 // The first filled voxel along the camera-relative ray `dir` (unit, from
-// the camera) from distance `t_start` on. A voxel counts only while it
-// lies in front of `t_limit` by more than 1.5 of its own size (a mesh
-// drawn there: its own voxels, which sit up to a voxel proud of it, must
-// not cover it); the march stops there. Out: the distance to the voxel
-// and its packed colour and normal.
-bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, out float hit_t, out uint packed) {
+// the camera) from distance `t_start` up to `t_limit` (a mesh drawn
+// there). `surface` is that mesh's plane where the ray meets it (xyz: unit
+// normal facing the camera, w: its offset, dot(normal, hit point)); a
+// voxel counts only if it lies in front of that plane by more than 1.5 of
+// its own size, so the mesh's own voxels (up to a voxel proud of it) never
+// cover it, however grazing the ray. No mesh: a zero normal and an offset
+// of -3e38 accept every voxel. Out: the distance to the voxel and its
+// packed colour and normal.
+bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4 surface, out float hit_t,
+                  out uint packed) {
     hit_t = 0.0;
     packed = 0u;
     // No division by zero: axis-parallel rays get a tiny slope.
@@ -201,10 +205,8 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, out fl
         const uint i = uint(v.x + 8 * (v.y + 8 * v.z));
         const uint base = index * k_brick_bytes;
         const uint word = pool.Load(base + (i >> 5) * 4);
-        if (((word >> (i & 31u)) & 1u) != 0u) {
-            if (t + 1.5 * voxel >= t_limit) {
-                break; // the mesh there is in front (or this is its own voxel)
-            }
+        // Filled, and not the drawn mesh's own voxel layer.
+        if (((word >> (i & 31u)) & 1u) != 0u && dot(surface.xyz, p) - surface.w > 1.5 * voxel) {
             hit_t = t;
             packed = pool.Load(base + 64 + i * 4);
             return true;

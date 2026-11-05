@@ -262,9 +262,15 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
             w.levels_offset = push.voxel_levels_offset;
             w.level_count = push.voxel_level_count;
             w.bricks_per_axis = push.voxel_bricks_per_axis;
+            // The drawn mesh's plane, facing the camera (none: every voxel counts).
+            float4 surface = float4(0.0, 0.0, 0.0, -3.0e38);
+            if (hit) {
+                const float3 facing = dot(s.n, dir) > 0.0 ? -s.n : s.n;
+                surface = float4(facing, dot(facing, s.world));
+            }
             float t;
             uint packed;
-            if (march_voxels(w, dir, push.far_start, mesh_t, t, packed)) {
+            if (march_voxels(w, dir, push.far_start, mesh_t, surface, t, packed)) {
                 const float3 world = dir * t;
                 const float3 color = shade(f, world, unpack_normal(packed), unpack_color(packed), k_far_roughness,
                                            0.0, float3(0.0, 0.0, 0.0), 0.0);

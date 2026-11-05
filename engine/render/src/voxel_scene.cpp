@@ -1111,12 +1111,48 @@ VoxelProbe VoxelScene::probe(u32 level, const DVec3& position) const {
     return (m_occupancy[m_slots[s]][i / 32] >> (i % 32) & 1u) != 0 ? VoxelProbe::solid : VoxelProbe::empty;
 }
 
-bool VoxelScene::covers(const DVec3& min, const DVec3& max) const {
-    if (!m_clipmap.placed()) {
+bool VoxelScene::holds(u32 index) const {
+    if (!m_clipmap.placed() || index >= m_copies.size() || m_rebuild_again || m_changed.count(index) != 0) {
         return false;
     }
+    const Box& b = m_copies[index].box;
     const u32 top = m_clipmap.levels() - 1;
-    return m_clipmap.contains(top, m_clipmap.brick_at(top, min)) && m_clipmap.contains(top, m_clipmap.brick_at(top, max));
+    if (b.empty() || !m_clipmap.contains(top, m_clipmap.brick_at(top, b.min)) ||
+        !m_clipmap.contains(top, m_clipmap.brick_at(top, b.max))) {
+        return false;
+    }
+    constexpr u64 k_most_bricks = 512; // more under one instance on a level: not worth checking
+    for (u32 level = 0; level <= top; ++level) {
+        const voxel::BrickBox box = m_clipmap.bricks_touching(level, b.min, b.max);
+        if (box.count() == 0) {
+            continue;
+        }
+        if (box.count() > k_most_bricks) {
+            return false;
+        }
+        for (const Job& job : m_jobs) {
+            if (job.box.level == level && voxel::intersect(job.box, box).count() > 0) {
+                return false; // bricks there still to be found or marked
+            }
+        }
+        for (i32 z = box.min.z; z < box.max.z; ++z) {
+            for (i32 y = box.min.y; y < box.max.y; ++y) {
+                for (i32 x = box.min.x; x < box.max.x; ++x) {
+                    const voxel::BrickCoord brick{x, y, z};
+                    const Key key{level, brick};
+                    const u32 s = level * m_clipmap.slots_per_level() + m_clipmap.slot(level, brick);
+                    const u32 value = m_slots[s];
+                    if (value == gpu::k_unbuilt || (value != gpu::k_no_brick && !(m_slot_bricks[s] == brick)) ||
+                        (!m_pending.empty() && m_pending.count(key) != 0) ||
+                        (!m_retry.empty() && m_retry.count(key) != 0) ||
+                        (m_building.active && m_building.key == key)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
 }
 
 void VoxelScene::write_levels(gpu::VoxelLevel* out, const DVec3& camera) const {
