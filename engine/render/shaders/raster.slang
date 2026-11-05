@@ -32,6 +32,23 @@ struct Drawn {
     bool valid; // false past the end of the pass's range
 };
 
+// The id-th cluster of this pass, for mesh shaders.
+// Branch-free: groups past the end (the last row of a 2D dispatch) load the
+// last cluster and draw nothing. Mesh shaders need this: DXIL allows one
+// SetMeshOutputCounts call, and the optimizer would copy it into both arms
+// of a branch on validity.
+Drawn drawn_cluster_flat(uint id) {
+    Drawn d = {};
+    const uint2 range = read_buffer(push.range).Load2(push.range_offset);
+    d.valid = id < range.y;
+    d.entry = range.x + min(id, max(range.y, 1u) - 1);
+    const uint2 e = read_buffer(push.visible).Load2(push.visible_offset + d.entry * 8);
+    d.inst = load_instance(read_buffer(push.instances), push.instance_offset + e.x * k_instance_bytes);
+    d.mesh = load_mesh(read_buffer(push.meshes), push.mesh_offset + d.inst.mesh * k_mesh_bytes);
+    d.cluster = load_cluster(read_buffer_nonuniform(d.mesh.clusters), e.y);
+    return d;
+}
+
 // The id-th cluster of this pass.
 Drawn drawn_cluster(uint id) {
     Drawn d = {};
@@ -68,19 +85,17 @@ struct MsPrimitive {
 void ms_main(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID,
              OutputVertices<MsVertex, 128> verts, OutputIndices<uint3, 128> tris,
              OutputPrimitives<MsPrimitive, 128> prims) {
-    const Drawn d = drawn_cluster(gid.y * 65535 + gid.x);
-    // Called once, on every path (DXIL allows one call per shader).
-    SetMeshOutputCounts(d.valid ? d.cluster.vertex_count : 0, d.valid ? d.cluster.triangle_count : 0);
-    if (!d.valid) {
-        return;
-    }
+    const Drawn d = drawn_cluster_flat(gid.y * 65535 + gid.x);
+    const uint vertex_count = d.cluster.vertex_count * uint(d.valid);
+    const uint triangle_count = d.cluster.triangle_count * uint(d.valid);
+    SetMeshOutputCounts(vertex_count, triangle_count);
     const Frame f = load_frame(push.frame, push.frame_offset);
-    if (tid < d.cluster.vertex_count) {
+    if (tid < vertex_count) {
         MsVertex v;
         v.position = clip_position(f, d, tid);
         verts[tid] = v;
     }
-    if (tid < d.cluster.triangle_count) {
+    if (tid < triangle_count) {
         tris[tid] = unpack_triangle(read_buffer_nonuniform(d.mesh.triangles).Load((d.cluster.first_triangle + tid) * 4));
         MsPrimitive p;
         p.vis = uint2(d.entry + 1, tid);
