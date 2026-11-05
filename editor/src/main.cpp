@@ -85,18 +85,31 @@ int run(const Options& options) {
         return 1;
     }
 
-    // A clear day-sky blue until the renderer draws something.
-    const rhi::Color sky{0.42f, 0.62f, 0.86f, 1.0f};
+    // A clear day-sky blue until the renderer draws something. Linear colour:
+    // the back buffer view encodes it to sRGB for the screen.
+    const rhi::Color sky{0.15f, 0.34f, 0.71f, 1.0f};
 
     using clock = std::chrono::steady_clock;
     auto report_start = clock::now();
     u64 report_frames = 0;
 
     while (window->poll_events()) {
+        if (window->minimized()) {
+            // Nothing to show: idle instead of spinning a CPU core.
+            window->wait_events(100);
+            continue;
+        }
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }
-        device->begin_frame(*swap_chain);
+        if (!device->begin_frame(*swap_chain)) {
+            if (device->device_lost()) {
+                log_error("editor", "the GPU device was lost; closing");
+                return 1;
+            }
+            window->wait_events(16); // swap chain unusable until the next resize
+            continue;
+        }
         device->clear(*swap_chain, sky);
         device->end_frame(*swap_chain);
 
@@ -116,7 +129,12 @@ int run(const Options& options) {
 
     device->wait_idle();
     log_info("editor", "rendered " + std::to_string(device->frames_presented()) + " frames");
+    const u32 validation_errors = device->validation_errors();
     swap_chain.reset(); // swap chains go before their device
+    if (validation_errors > 0) {
+        log_error("editor", std::to_string(validation_errors) + " GPU validation errors");
+        return 1;
+    }
     return 0;
 }
 

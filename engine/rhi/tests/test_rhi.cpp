@@ -35,11 +35,12 @@ GIANT_TEST("rhi: the null device renders frames in order") {
         return;
     }
     for (int i = 0; i < 3; ++i) {
-        device->begin_frame(*swap_chain);
+        GIANT_CHECK(device->begin_frame(*swap_chain));
         device->clear(*swap_chain, {0.2f, 0.4f, 0.6f, 1.0f});
         device->end_frame(*swap_chain);
     }
     GIANT_CHECK(device->frames_presented() == 3);
+    GIANT_CHECK(!device->device_lost());
 
     swap_chain->resize(0, 0); // minimised: ignored
     GIANT_CHECK(swap_chain->width() == 640);
@@ -78,6 +79,9 @@ GIANT_TEST("rhi: d3d12 clears and reads back on the software adapter") {
     // A second run reuses the immediate allocator.
     check_color_near(device->clear_offscreen_and_read_back({1.0f, 0.0f, 0.0f, 1.0f}),
                      {1.0f, 0.0f, 0.0f, 1.0f});
+    GIANT_CHECK(!device->device_lost());
+    // When the validation layer runs, it must have nothing to complain about.
+    GIANT_CHECK(device->validation_errors() == 0);
 }
 
 GIANT_TEST("rhi: d3d12 refuses a swap chain without a window") {

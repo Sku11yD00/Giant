@@ -3,7 +3,10 @@
 //
 // N0 scope: create a device, check the GPU against the minimum spec, open a
 // swap chain on a window, clear and present. Command lists, buffers,
-// textures, pipelines and bindless resources arrive with N1.
+// textures, pipelines and bindless resources arrive with N1, which will also
+// move frames in flight onto the device (a ring of per-frame allocators per
+// recording thread) so several swap chains and headless frames work; see
+// docs/architecture.md, "Graphics layer plan".
 #pragma once
 
 #include "giant/core/types.h"
@@ -78,12 +81,16 @@ public:
     virtual std::unique_ptr<SwapChain> create_swap_chain(const SwapChainDesc& desc) = 0;
 
     // One frame: begin_frame, any number of clears, end_frame presents.
-    virtual void begin_frame(SwapChain& swap_chain) = 0;
+    // begin_frame returns false when the frame must be skipped (device lost,
+    // or the swap chain could not be resized); do not call clear/end_frame then.
+    // Only one frame may be recording on a device at a time.
+    virtual bool begin_frame(SwapChain& swap_chain) = 0;
     virtual void clear(SwapChain& swap_chain, const Color& color) = 0;
     virtual void end_frame(SwapChain& swap_chain) = 0;
 
     // Clears a small offscreen texture on the GPU and reads one pixel back.
     // Proves the device really renders; used by tests and startup checks.
+    // Must not be called while a frame is recording.
     virtual Color clear_offscreen_and_read_back(const Color& color) = 0;
 
     // Blocks until the GPU has finished all submitted work.
@@ -91,6 +98,16 @@ public:
 
     // Frames presented since the device was created.
     virtual u64 frames_presented() const = 0;
+
+    // True once the GPU was removed or reset (driver crash, update, TDR).
+    // The device cannot recover; the caller must recreate it.
+    virtual bool device_lost() const = 0;
+
+    // Errors reported by the GPU validation layer since the device was
+    // created. Always 0 when the debug layer is off or unavailable.
+    virtual u32 validation_errors() const = 0;
+    // Whether the validation layer is really running.
+    virtual bool validation_enabled() const = 0;
 };
 
 // Returns null (and logs why) if the backend is unavailable or fails.

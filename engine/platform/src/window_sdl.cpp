@@ -56,20 +56,42 @@ Window::~Window() {
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
+namespace {
+bool is_ours(const SDL_Event& event, SDL_Window* window) {
+    return event.window.windowID == SDL_GetWindowID(window);
+}
+} // namespace
+
+bool Window::wait_events(i32 timeout_ms) {
+    SDL_WaitEventTimeout(nullptr, timeout_ms); // wakes on any event, leaves it queued
+    return poll_events();
+}
+
 bool Window::poll_events() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
+        case SDL_EVENT_WINDOW_MINIMIZED:
+            if (is_ours(event, m_impl->window)) {
+                m_minimized = true;
+            }
+            break;
+        case SDL_EVENT_WINDOW_RESTORED:
+        case SDL_EVENT_WINDOW_MAXIMIZED:
+            if (is_ours(event, m_impl->window)) {
+                m_minimized = false;
+            }
+            break;
         case SDL_EVENT_QUIT:
             m_close_requested = true;
             break;
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            if (event.window.windowID == SDL_GetWindowID(m_impl->window)) {
+            if (is_ours(event, m_impl->window)) {
                 m_close_requested = true;
             }
             break;
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-            if (event.window.windowID == SDL_GetWindowID(m_impl->window)) {
+            if (is_ours(event, m_impl->window)) {
                 const u32 w = static_cast<u32>(event.window.data1 > 0 ? event.window.data1 : 0);
                 const u32 h = static_cast<u32>(event.window.data2 > 0 ? event.window.data2 : 0);
                 if (w != m_width || h != m_height) {

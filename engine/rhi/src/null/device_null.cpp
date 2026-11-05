@@ -39,10 +39,12 @@ public:
         return std::make_unique<NullSwapChain>(desc.width, desc.height);
     }
 
-    void begin_frame(SwapChain& swap_chain) override {
+    bool begin_frame(SwapChain& swap_chain) override {
         auto& sc = static_cast<NullSwapChain&>(swap_chain);
-        GIANT_ASSERT(!sc.in_frame, "begin_frame called twice");
+        GIANT_ASSERT(!m_recording, "begin_frame while another frame is recording");
         sc.in_frame = true;
+        m_recording = true;
+        return true;
     }
 
     void clear(SwapChain& swap_chain, const Color&) override {
@@ -53,16 +55,24 @@ public:
         auto& sc = static_cast<NullSwapChain&>(swap_chain);
         GIANT_ASSERT(sc.in_frame, "end_frame without begin_frame");
         sc.in_frame = false;
+        m_recording = false;
         ++m_frames;
     }
 
-    Color clear_offscreen_and_read_back(const Color& color) override { return color; }
+    Color clear_offscreen_and_read_back(const Color& color) override {
+        GIANT_ASSERT(!m_recording, "offscreen work while a frame is recording");
+        return color;
+    }
     void wait_idle() override {}
     u64 frames_presented() const override { return m_frames; }
+    bool device_lost() const override { return false; }
+    u32 validation_errors() const override { return 0; }
+    bool validation_enabled() const override { return false; }
 
 private:
     AdapterInfo m_info;
     u64 m_frames = 0;
+    bool m_recording = false;
 };
 
 } // namespace

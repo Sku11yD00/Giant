@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace giant::rhi {
 
@@ -29,6 +30,9 @@ using Microsoft::WRL::ComPtr;
 
 constexpr u32 k_max_back_buffers = 3;
 constexpr DXGI_FORMAT k_back_buffer_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+// Flip-model swap chains cannot be created as sRGB, but their views can:
+// the renderer writes linear colour and the view encodes it for the screen.
+constexpr DXGI_FORMAT k_back_buffer_view_format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 
 bool check(HRESULT hr, const char* what) {
     if (SUCCEEDED(hr)) {
@@ -78,6 +82,7 @@ public:
     bool vsync = true;
     bool allow_tearing = false;
     bool in_frame = false;
+    bool valid = false; // false after a failed resize: frames are skipped
     u32 m_width = 0;
     u32 m_height = 0;
 
@@ -106,14 +111,20 @@ public:
     const AdapterInfo& adapter() const override { return m_info; }
 
     std::unique_ptr<SwapChain> create_swap_chain(const SwapChainDesc& desc) override;
-    void begin_frame(SwapChain& swap_chain) override;
+    bool begin_frame(SwapChain& swap_chain) override;
     void clear(SwapChain& swap_chain, const Color& color) override;
     void end_frame(SwapChain& swap_chain) override;
     Color clear_offscreen_and_read_back(const Color& color) override;
     void wait_idle() override;
     u64 frames_presented() const override { return m_frames; }
+    bool device_lost() const override { return m_lost; }
+    u32 validation_errors() const override;
+    bool validation_enabled() const override { return m_info_queue != nullptr; }
 
     ID3D12Device* device() const { return m_device.Get(); }
+
+    // Checks an HRESULT; device removal is recorded once with its reason.
+    bool check_gpu(HRESULT hr, const char* what);
 
 private:
     bool pick_adapter(bool software, ComPtr<IDXGIAdapter1>& out);
@@ -133,6 +144,9 @@ private:
     u64 m_next_fence_value = 1;
     u64 m_frames = 0;
     bool m_tearing_supported = false;
+    bool m_recording = false; // a frame is between begin_frame and end_frame
+    bool m_lost = false;
+    ComPtr<ID3D12InfoQueue> m_info_queue; // set when the debug layer runs
 
     friend class D3D12SwapChain;
 };
@@ -143,10 +157,9 @@ bool D3D12Device::pick_adapter(bool software, ComPtr<IDXGIAdapter1>& out) {
     }
     for (UINT i = 0;; ++i) {
         ComPtr<IDXGIAdapter1> candidate;
-        if (m_factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-                                                  IID_PPV_ARGS(&candidate)) ==
-            DXGI_ERROR_NOT_FOUND) {
-            break;
+        if (FAILED(m_factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                                         IID_PPV_ARGS(&candidate)))) {
+            break; // DXGI_ERROR_NOT_FOUND ends the list; anything else is fatal
         }
         DXGI_ADAPTER_DESC1 desc{};
         candidate->GetDesc1(&desc);
@@ -171,8 +184,8 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             debug->EnableDebugLayer();
             factory_flags |= DXGI_CREATE_FACTORY_DEBUG;
         } else {
-            log_warning("rhi", "d3d12: debug layer not installed (Windows optional feature "
-                               "\"Graphics Tools\"); continuing without it");
+            log_warning("rhi", "d3d12: GPU validation layer NOT enabled: install the Windows "
+                               "optional feature \"Graphics Tools\"; continuing without it");
         }
     }
     if (!check(CreateDXGIFactory2(factory_flags, IID_PPV_ARGS(&m_factory)), "CreateDXGIFactory2")) {
@@ -192,6 +205,13 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     if (!check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&m_device)),
                "D3D12CreateDevice")) {
         return false;
+    }
+
+    if ((factory_flags & DXGI_CREATE_FACTORY_DEBUG) != 0 &&
+        SUCCEEDED(m_device.As(&m_info_queue))) {
+        // Keep every error so validation_errors() can count them.
+        m_info_queue->SetMessageCountLimit(UINT64_MAX);
+        log_info("rhi", "d3d12: GPU validation layer enabled");
     }
 
     DXGI_ADAPTER_DESC1 adapter_desc{};
@@ -243,9 +263,46 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     return true;
 }
 
+bool D3D12Device::check_gpu(HRESULT hr, const char* what) {
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        if (!m_lost) {
+            m_lost = true;
+            char reason[16];
+            std::snprintf(reason, sizeof(reason), "0x%08lX",
+                          static_cast<unsigned long>(m_device->GetDeviceRemovedReason()));
+            log_error("rhi", std::string("d3d12: GPU device lost during ") + what +
+                                 " (reason " + reason + ")");
+        }
+        return false;
+    }
+    return check(hr, what);
+}
+
+u32 D3D12Device::validation_errors() const {
+    if (m_info_queue == nullptr) {
+        return 0;
+    }
+    u32 errors = 0;
+    const UINT64 count = m_info_queue->GetNumStoredMessages();
+    for (UINT64 i = 0; i < count; ++i) {
+        SIZE_T size = 0;
+        m_info_queue->GetMessage(i, nullptr, &size);
+        // u64 storage keeps the D3D12_MESSAGE header correctly aligned.
+        std::vector<u64> storage((size + sizeof(u64) - 1) / sizeof(u64));
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        if (SUCCEEDED(m_info_queue->GetMessage(i, message, &size)) &&
+            (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+             message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION)) {
+            log_error("rhi", std::string("d3d12 validation: ") + message->pDescription);
+            ++errors;
+        }
+    }
+    return errors;
+}
+
 u64 D3D12Device::signal() {
     const u64 value = m_next_fence_value++;
-    check(m_queue->Signal(m_fence.Get(), value), "Signal");
+    check_gpu(m_queue->Signal(m_fence.Get(), value), "Signal");
     return value;
 }
 
@@ -306,6 +363,7 @@ std::unique_ptr<SwapChain> D3D12Device::create_swap_chain(const SwapChainDesc& d
     if (!sc->acquire_buffers()) {
         return nullptr;
     }
+    sc->valid = true;
     return sc;
 }
 
@@ -325,7 +383,10 @@ bool D3D12SwapChain::acquire_buffers() {
         if (!check(swap_chain->GetBuffer(i, IID_PPV_ARGS(&buffers[i])), "GetBuffer")) {
             return false;
         }
-        device->device()->CreateRenderTargetView(buffers[i].Get(), nullptr, rtv(i));
+        D3D12_RENDER_TARGET_VIEW_DESC view{};
+        view.Format = k_back_buffer_view_format;
+        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        device->device()->CreateRenderTargetView(buffers[i].Get(), &view, rtv(i));
     }
     return true;
 }
@@ -340,16 +401,24 @@ void D3D12SwapChain::resize(u32 width, u32 height) {
         buffer.Reset();
     }
     const UINT flags = allow_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-    if (check(swap_chain->ResizeBuffers(buffer_count, width, height, DXGI_FORMAT_UNKNOWN, flags),
-              "ResizeBuffers")) {
-        acquire_buffers();
+    valid = device->check_gpu(
+                swap_chain->ResizeBuffers(buffer_count, width, height, DXGI_FORMAT_UNKNOWN, flags),
+                "ResizeBuffers") &&
+            acquire_buffers();
+    if (!valid) {
+        log_error("rhi", "d3d12: swap chain resize failed; frames are skipped until the next "
+                         "successful resize");
     }
 }
 
-void D3D12Device::begin_frame(SwapChain& swap_chain) {
+bool D3D12Device::begin_frame(SwapChain& swap_chain) {
     auto& sc = static_cast<D3D12SwapChain&>(swap_chain);
-    GIANT_ASSERT(!sc.in_frame, "begin_frame called twice");
+    GIANT_ASSERT(!m_recording, "begin_frame while another frame is recording");
+    if (m_lost || !sc.valid) {
+        return false;
+    }
     sc.in_frame = true;
+    m_recording = true;
     sc.current = sc.swap_chain->GetCurrentBackBufferIndex();
 
     // The allocator for this back buffer may still be in use by the GPU.
@@ -361,6 +430,7 @@ void D3D12Device::begin_frame(SwapChain& swap_chain) {
     const auto barrier = transition(sc.buffers[sc.current].Get(), D3D12_RESOURCE_STATE_PRESENT,
                                     D3D12_RESOURCE_STATE_RENDER_TARGET);
     m_list->ResourceBarrier(1, &barrier);
+    return true;
 }
 
 void D3D12Device::clear(SwapChain& swap_chain, const Color& color) {
@@ -374,6 +444,7 @@ void D3D12Device::end_frame(SwapChain& swap_chain) {
     auto& sc = static_cast<D3D12SwapChain&>(swap_chain);
     GIANT_ASSERT(sc.in_frame, "end_frame without begin_frame");
     sc.in_frame = false;
+    m_recording = false;
 
     const auto barrier = transition(sc.buffers[sc.current].Get(),
                                     D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -385,12 +456,16 @@ void D3D12Device::end_frame(SwapChain& swap_chain) {
 
     const UINT interval = sc.vsync ? 1 : 0;
     const UINT flags = sc.allow_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
-    check(sc.swap_chain->Present(interval, flags), "Present");
+    check_gpu(sc.swap_chain->Present(interval, flags), "Present");
     m_frame_fence[sc.current] = signal();
     ++m_frames;
 }
 
 Color D3D12Device::clear_offscreen_and_read_back(const Color& color) {
+    GIANT_ASSERT(!m_recording, "offscreen work while a frame is recording");
+    if (m_lost) {
+        return {-1.0f, -1.0f, -1.0f, -1.0f};
+    }
     wait_idle(); // the immediate allocator and list must be free
 
     D3D12_RESOURCE_DESC tex_desc{};

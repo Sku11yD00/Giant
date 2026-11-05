@@ -36,6 +36,20 @@ as plain data, so the graphics layer works headless and in tests.
 instances, weather values, voxel edits); it never includes `world` or `sim`.
 This keeps the renderer replaceable.
 
+## Graphics layer plan
+
+N0's `rhi` is deliberately small: one device, swap chains, clear, present,
+and an offscreen read-back used to prove the device renders. N1 grows it into
+the real layer before any rendering code depends on its shape:
+
+- Frames in flight move onto the device: a ring of per-frame command
+  allocators per recording thread, so several swap chains (editor viewports)
+  and headless frames work. Swap chains only acquire and present.
+- Recording moves into command lists; clears become command-list calls.
+- Buffers, textures, pipelines and bindless descriptors (shader model 6.6).
+- Swap chains track their device in debug builds so destroying the device
+  first is caught.
+
 ## The shared voxel world
 
 One sparse voxel copy of the world (brick map in camera-centred clipmaps) is

@@ -43,6 +43,13 @@ public:
     // True once after the drawable size changed; the swap chain should resize.
     bool take_resized();
 
+    // Minimised (or zero-sized): skip rendering and call wait_events instead.
+    bool minimized() const { return m_minimized || m_width == 0 || m_height == 0; }
+
+    // Sleeps until an event arrives or the timeout passes, then processes
+    // events like poll_events. Use while minimised so the editor idles.
+    bool wait_events(i32 timeout_ms);
+
     NativeWindow native() const;
 
 private:
@@ -53,6 +60,7 @@ private:
     u32 m_width = 0;
     u32 m_height = 0;
     bool m_resized = false;
+    bool m_minimized = false;
     bool m_close_requested = false;
 };
 
