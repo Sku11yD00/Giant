@@ -25,6 +25,10 @@
 
 namespace giant::render {
 
+namespace gpu {
+struct MeshEntry; // src/gpu_layout.h
+}
+
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
 using MeshId = u32;
@@ -209,8 +213,12 @@ private:
     float m_hzb_view_rows[12] = {};
     float m_hzb_p00 = 0.0f;
     float m_hzb_p11 = 0.0f;
+    float m_hzb_near = 0.0f;
     CullBuffers m_cull;
     bool m_overflow_logged = false;
+    bool m_cull_buffers_logged = false;
+    bool m_instances_logged = false;
+    bool m_cpu_clusters_logged = false;
 
     std::vector<Mesh> m_meshes;
     std::vector<MeshId> m_builtin; // by BuiltinMesh
@@ -218,6 +226,8 @@ private:
     std::vector<u32> m_valid;    // instances (into frame.instances) with a live mesh
     std::vector<u32> m_selected; // CPU culling: clusters of one instance
     std::vector<u32> m_entries;  // CPU culling: (instance, cluster) pairs, flattened
+    std::vector<gpu::MeshEntry> m_table; // the mesh table
+    std::vector<bool> m_used;            // meshes drawn this frame
     RenderStats m_stats;
     RenderStats m_gpu_stats; // newest read back
 };

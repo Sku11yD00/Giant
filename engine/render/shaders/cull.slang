@@ -165,14 +165,16 @@ void cs_instances(uint3 id : SV_DispatchThreadID) {
         return;
     }
     if (occluded(f, read_buffer(push.hzb), c, r, push.pass == 0)) {
-        if (push.pass == 0) {
-            const uint at = reserve(k_slot_occluded_instances, 1, push.instance_capacity,
-                                    k_overflow_occluded_instances);
-            if (at < push.instance_capacity) {
-                write_buffer(push.occluded_instances).Store(at * 4, index);
-            }
+        if (push.pass == 1) {
+            return;
         }
-        return;
+        const uint at = reserve(k_slot_occluded_instances, 1, push.instance_capacity,
+                                k_overflow_occluded_instances);
+        if (at < push.instance_capacity) {
+            write_buffer(push.occluded_instances).Store(at * 4, index);
+            return;
+        }
+        // No room to retest it in pass 1: walk it now, as if visible.
     }
     uint ignored;
     counters().InterlockedAdd(k_slot_instances * 4, 1, ignored);
@@ -195,14 +197,16 @@ void test_cluster(Frame f, uint instance, Instance inst, MeshEntry mesh, uint in
         return;
     }
     if (occluded(f, read_buffer(push.hzb), centre, radius, push.pass == 0)) {
-        if (push.pass == 0) {
-            const uint at = reserve(k_slot_occluded_clusters, 1, push.occluded_capacity,
-                                    k_overflow_occluded_clusters);
-            if (at < push.occluded_capacity) {
-                write_buffer(push.occluded_clusters).Store2(at * k_entry_bytes, uint2(instance, index));
-            }
+        if (push.pass == 1) {
+            return;
         }
-        return;
+        const uint at = reserve(k_slot_occluded_clusters, 1, push.occluded_capacity,
+                                k_overflow_occluded_clusters);
+        if (at < push.occluded_capacity) {
+            write_buffer(push.occluded_clusters).Store2(at * k_entry_bytes, uint2(instance, index));
+            return;
+        }
+        // No room to retest it in pass 1: draw it now (costs time, not detail).
     }
     append_visible(instance, index, c.triangle_count);
 }

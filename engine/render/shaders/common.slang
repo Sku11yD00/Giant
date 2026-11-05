@@ -310,19 +310,24 @@ bool occluded(Frame f, ByteAddressBuffer hzb, float3 c, float r, bool previous) 
     const float w = (aabb.z - aabb.x) * float(f.hzb_width);
     const float h = (aabb.w - aabb.y) * float(f.hzb_height);
     uint mip = uint(clamp(ceil(log2(max(max(w, h), 1.0))), 0.0, float(f.hzb_mips - 1)));
-    // At most 2x2 texels at the chosen mip; one step coarser if rounding
-    // leaves the rectangle across three.
+    // At most 2x2 texels at the chosen mip; a step or two coarser if
+    // rounding leaves the rectangle across three. Not occluded if it still
+    // does not fit (never guess).
     uint2 lo = uint2(0, 0);
     uint2 hi = uint2(0, 0);
     uint2 size = uint2(1, 1);
-    for (uint step = 0; step < 2; ++step) {
+    bool fits = false;
+    for (uint attempt = 0; attempt < 3 && !fits; ++attempt) {
+        if (attempt > 0) {
+            mip = min(mip + 1, f.hzb_mips - 1);
+        }
         size = uint2(max(f.hzb_width >> mip, 1u), max(f.hzb_height >> mip, 1u));
         lo = min(uint2(aabb.xy * float2(size)), size - 1);
         hi = min(uint2(aabb.zw * float2(size)), size - 1);
-        if (hi.x - lo.x <= 1 && hi.y - lo.y <= 1) {
-            break;
-        }
-        mip = min(mip + 1, f.hzb_mips - 1);
+        fits = hi.x - lo.x <= 1 && hi.y - lo.y <= 1;
+    }
+    if (!fits) {
+        return false;
     }
     const uint base = hzb_mip_offset(f.hzb_width, f.hzb_height, mip);
     float farthest = 1.0;

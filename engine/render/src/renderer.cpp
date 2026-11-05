@@ -26,6 +26,7 @@ constexpr u32 k_max_instances =
     std::min<u32>(65535u * 64u, rhi::k_max_transient_allocation / sizeof(gpu::Instance));
 constexpr u32 k_vertices_per_cluster = geometry::k_cluster_max_triangles * 3;
 constexpr u32 k_max_mesh_groups = 65535; // per dimension of a mesh dispatch
+constexpr u32 k_max_cpu_clusters = 1u << 22; // mesh groups in one dispatch, in all
 
 template <typename T>
 std::span<const u8> bytes_of(const std::vector<T>& v) {
@@ -382,7 +383,20 @@ bool Renderer::ensure_cull_buffers(u32 instance_count) {
         return m_device.create_buffer(desc);
     };
     const auto rw = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
-    if (!c.counters.valid()) {
+    const bool complete = c.counters.valid() && c.args.valid() && c.queues[0].valid() &&
+                          c.queues[1].valid() && c.visible.valid() && c.occluded_clusters.valid() &&
+                          c.readback[0].valid() && c.readback[1].valid() && c.readback[2].valid();
+    if (!complete) {
+        // All or nothing: a partial set from a failed attempt is made again.
+        for (rhi::BufferHandle* b : {&c.counters, &c.args, &c.queues[0], &c.queues[1], &c.visible,
+                                     &c.occluded_clusters, &c.readback[0], &c.readback[1],
+                                     &c.readback[2]}) {
+            m_device.destroy(*b);
+            *b = {};
+        }
+        for (u64& tag : c.readback_frame) {
+            tag = ~u64{0};
+        }
         c.counters = make(gpu::k_counter_bytes, rw, rhi::Memory::gpu, "cull counters");
         c.args = make(gpu::k_args_bytes, rhi::BufferUsage::shader_write | rhi::BufferUsage::indirect,
                       rhi::Memory::gpu, "cull indirect arguments");
@@ -408,7 +422,10 @@ bool Renderer::ensure_cull_buffers(u32 instance_count) {
          {c.counters, c.args, c.queues[0], c.queues[1], c.visible, c.occluded_clusters,
           c.occluded_instances, c.readback[0], c.readback[1], c.readback[2]}) {
         if (!b.valid()) {
-            log_error("render", "could not create the GPU culling buffers (out of GPU memory?)");
+            if (!m_cull_buffers_logged) {
+                m_cull_buffers_logged = true;
+                log_error("render", "could not create the GPU culling buffers (out of GPU memory?)");
+            }
             return false;
         }
     }
@@ -710,8 +727,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
     }
     if (m_valid.size() > k_max_instances) {
-        log_error("render", "more than " + std::to_string(k_max_instances) +
-                                " instances in one frame; the rest are not drawn");
+        if (!m_instances_logged) {
+            m_instances_logged = true;
+            log_error("render", "more than " + std::to_string(k_max_instances) +
+                                    " instances in one frame; the rest are not drawn");
+        }
         m_valid.resize(k_max_instances);
     }
     if (gpu && !ensure_cull_buffers(static_cast<u32>(m_valid.size()))) {
@@ -747,7 +767,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     }
     const bool occlusion = gpu && settings.occlusion_culling;
     // Last frame's HZB is usable if it saw this projection at this size.
-    const bool hzb_usable = occlusion && m_hzb_valid && m_hzb_p00 == focal / aspect && m_hzb_p11 == focal;
+    const bool hzb_usable = occlusion && m_hzb_valid && m_hzb_p00 == focal / aspect &&
+                            m_hzb_p11 == focal && m_hzb_near == near_plane;
     set4(k.camera_delta, to_camera_relative(frame.view.position, m_hzb_camera), hzb_usable ? 1.0f : 0.0f);
     const float tan_y = std::tan(fov * 0.5f);
     set4(k.ray_x, rotate(frame.view.orientation, {1, 0, 0}) * (tan_y * aspect), 0.0f);
@@ -779,8 +800,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     data.use_mesh_shaders = settings.mesh_shaders && m_raster_mesh.valid();
 
     // Instances and the mesh table.
-    std::vector<gpu::MeshEntry> table(m_meshes.size());
-    std::vector<bool> used(m_meshes.size(), false);
+    std::vector<gpu::MeshEntry>& table = m_table;
+    std::vector<bool>& used = m_used;
+    table.assign(m_meshes.size(), gpu::MeshEntry{});
+    used.assign(m_meshes.size(), false);
     for (const u32 i : m_valid) {
         used[frame.instances[i].mesh] = true;
     }
@@ -829,12 +852,26 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_stats.draws = draws;
         m_stats.from_gpu = true;
     } else {
+        // No GPU counts are made this frame: forget older ones, so turning
+        // GPU culling back on (or filling an empty scene) never shows them.
+        for (u64& tag : m_cull.readback_frame) {
+            tag = ~u64{0};
+        }
+        m_gpu_stats = {};
         if (!gpu) {
             select_on_cpu(frame, view_proj, height);
-            if (static_cast<u64>(m_entries.size()) * 4 > rhi::k_max_transient_allocation) {
-                log_error("render", "too many clusters in one frame; nothing drawn");
-                m_entries.clear();
-                m_stats = {};
+            // One mesh dispatch takes at most 2^22 groups (32 MiB of entries,
+            // well inside one transient allocation).
+            static_assert(u64{k_max_cpu_clusters} * 8 <= rhi::k_max_transient_allocation);
+            if (m_entries.size() / 2 > k_max_cpu_clusters) {
+                if (!m_cpu_clusters_logged) {
+                    m_cpu_clusters_logged = true;
+                    log_warning("render", "more than " + std::to_string(k_max_cpu_clusters) +
+                                              " clusters chosen on the CPU; the rest are not drawn");
+                }
+                m_entries.resize(usize{k_max_cpu_clusters} * 2);
+                m_stats.clusters = k_max_cpu_clusters;
+                m_stats.overflow = true;
             }
             data.entry_count = static_cast<u32>(m_entries.size() / 2);
             if (data.entry_count > 0) {
@@ -858,6 +895,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         std::memcpy(m_hzb_view_rows, view_rows, sizeof(view_rows));
         m_hzb_p00 = k.p00;
         m_hzb_p11 = k.p11;
+        m_hzb_near = near_plane;
     } else {
         m_hzb_valid = false;
     }

@@ -1817,6 +1817,8 @@ ID3D12Resource* D3D12CommandList::args_resource(BufferHandle args, u64 offset, u
 }
 
 void D3D12CommandList::dispatch_mesh(u32 x, u32 y, u32 z) {
+    GIANT_ASSERT(x <= 65535 && y <= 65535 && z <= 65535 && u64{x} * y * z <= (u64{1} << 22),
+                 "dispatch_mesh: at most 65535 groups per dimension and 2^22 in all");
     check_graphics(true);
     if (m_list6 == nullptr) {
         return;

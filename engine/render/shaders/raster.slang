@@ -69,11 +69,11 @@ void ms_main(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID,
              OutputVertices<MsVertex, 128> verts, OutputIndices<uint3, 128> tris,
              OutputPrimitives<MsPrimitive, 128> prims) {
     const Drawn d = drawn_cluster(gid.y * 65535 + gid.x);
+    // Called once, on every path (DXIL allows one call per shader).
+    SetMeshOutputCounts(d.valid ? d.cluster.vertex_count : 0, d.valid ? d.cluster.triangle_count : 0);
     if (!d.valid) {
-        SetMeshOutputCounts(0, 0);
         return;
     }
-    SetMeshOutputCounts(d.cluster.vertex_count, d.cluster.triangle_count);
     const Frame f = load_frame(push.frame, push.frame_offset);
     if (tid < d.cluster.vertex_count) {
         MsVertex v;
