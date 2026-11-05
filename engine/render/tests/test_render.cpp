@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cmath>
+#include <string>
 #include <vector>
 
 using namespace giant;
@@ -268,6 +269,92 @@ GIANT_TEST("render: GPU culling records valid work on the null device") {
     GIANT_CHECK(s.renderer->last_stats().clusters == 0); // the null device ran no shaders
 }
 
+GIANT_TEST("render: passes are timed on the GPU, in order") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+    instances[0].position = {0.0, 0.0, -5.0};
+    FrameInput frame;
+    frame.instances = instances;
+    const auto names = [&s] {
+        std::vector<std::string> out;
+        for (const rhi::GpuTiming& t : s.device->gpu_timings()) out.push_back(t.name);
+        return out;
+    };
+    frame.settings.gpu_culling = false;
+    s.draw(frame);
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "raster", "shading", "anti-aliasing"}));
+    frame.settings.gpu_culling = true;
+    frame.settings.occlusion_culling = true;
+    frame.settings.antialiasing = false;
+    s.draw(frame);
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "culling", "raster", "HZB", "culling", "raster",
+                                                     "HZB", "shading"}));
+}
+
+GIANT_TEST("render: many meshes added in one frame draw once their coarsest levels are in") {
+    // A per-frame budget of a few meshes: the rest wait, undrawn, on both
+    // culling paths, and every mesh draws a few frames later.
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    RendererDesc renderer_desc;
+    renderer_desc.stream_bytes_per_frame = 8 * 1024;
+    auto renderer = Renderer::create(*device, renderer_desc);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    rhi::TextureDesc t;
+    t.width = 320;
+    t.height = 180;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(t);
+    const auto draw = [&](const FrameInput& frame) {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        renderer->render(*cmd, target, frame);
+        device->end_frame();
+        return renderer->last_stats();
+    };
+    FrameInput frame;
+    frame.settings.gpu_culling = false; // exact counts on the CPU
+    draw(frame); // the built-in meshes' coarsest levels
+
+    constexpr u32 k_meshes = 48;
+    std::vector<Instance> instances(k_meshes);
+    rhi::CommandList* cmd = device->begin_frame(nullptr);
+    for (u32 i = 0; i < k_meshes; ++i) { // added inside a frame: the staged, unwaited path
+        instances[i].mesh = renderer->add_mesh(geometry::build_clusters(geometry::make_sphere(96, 48)));
+        GIANT_CHECK(instances[i].mesh != k_no_mesh);
+        instances[i].position = {static_cast<double>(i % 8) * 2.5 - 9.0, static_cast<double>(i / 8) * 2.5 - 6.0,
+                                 -30.0};
+    }
+    renderer->render(*cmd, target, frame);
+    device->end_frame();
+    GIANT_CHECK(device->last_frame_stats().upload_bytes > 0); // the meshes' metadata, staged
+    frame.instances = instances;
+
+    u32 drawn = 0;
+    u32 frames = 0;
+    bool within = true;
+    while (frames < 200) {
+        const RenderStats stats = draw(frame);
+        ++frames;
+        GIANT_CHECK(stats.instances >= drawn); // never back
+        drawn = stats.instances;
+        within = within && device->last_frame_stats().transient_bytes < 8u << 20;
+        if (drawn == k_meshes && stats.waiting == 0) break;
+    }
+    GIANT_CHECK(within);
+    GIANT_CHECK(drawn == k_meshes);
+    GIANT_CHECK(frames > 3); // spread over frames, not all at once
+    // The GPU path draws only meshes that are in, too (the null device
+    // checks what it records).
+    frame.settings.gpu_culling = true;
+    GIANT_CHECK(draw(frame).from_gpu);
+    device->destroy(target);
+}
+
 #if GIANT_RHI_HAS_D3D12
 GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     rhi::DeviceDesc desc;
@@ -394,6 +481,15 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
         GIANT_CHECK(o.from_gpu && !o.overflow && o.draws == 3);
         GIANT_CHECK(o.clusters <= g.clusters && o.clusters > 0);
         GIANT_CHECK(differing(culled) <= pixels.size() / 200); // nothing visible lost
+        // The GPU timed each pass of the newest frame (read after the wait).
+        const auto timings = device->gpu_timings();
+        GIANT_CHECK(timings.size() == 9); // streaming, 2 x (culling, raster, HZB), shading, AA
+        bool timed = true;
+        for (const rhi::GpuTiming& t : timings) {
+            timed = timed && t.ms >= 0.0f && t.ms <= device->gpu_frame_ms() + 1e-4f;
+        }
+        GIANT_CHECK(timed && device->gpu_frame_ms() > 0.0f);
+        GIANT_CHECK(timings.size() == 9 && timings[1].name == "culling" && timings[7].name == "shading");
     }
     // A glowing red decal stamped on the sphere's front, facing the camera
     // (its +Y turned to +Z), on the CPU and GPU paths alike.

@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
+#include <string>
 #include <vector>
 
 using namespace giant;
@@ -643,6 +645,99 @@ GIANT_TEST("rhi: the null device catches misuse a GPU would crash on") {
     device->destroy(dst);
 }
 
+GIANT_TEST("rhi: resources made inside a frame hold their data and count as uploads") {
+    auto device = null_device();
+    if (device == nullptr) {
+        GIANT_CHECK(false);
+        return;
+    }
+    BufferDesc readback_desc;
+    readback_desc.size = 16;
+    readback_desc.usage = BufferUsage::none;
+    readback_desc.memory = Memory::readback;
+    const BufferHandle readback = device->create_buffer(readback_desc);
+    const std::array<u32, 4> values{5, 6, 7, 8};
+    const std::span<const u8> bytes{reinterpret_cast<const u8*>(values.data()), 16};
+
+    CommandList* cmd = device->begin_frame(nullptr);
+    BufferDesc desc;
+    desc.size = 16;
+    const BufferHandle streamed = device->create_buffer(desc, bytes); // used this frame
+    TextureDesc tex_desc;
+    tex_desc.width = 2;
+    tex_desc.height = 2;
+    tex_desc.format = Format::rgba8_unorm;
+    const TextureHandle texture = device->create_texture(tex_desc, bytes);
+    cmd->barrier(streamed, ResourceState::copy_source);
+    cmd->copy_buffer(readback, 0, streamed, 0, 16);
+    device->end_frame();
+    GIANT_CHECK(device->last_frame_stats().upload_bytes == 32);
+    GIANT_CHECK(as_u32(device->read_buffer(readback)) == (std::vector<u32>{5, 6, 7, 8}));
+    GIANT_CHECK(as_u32(device->read_texture(texture)) == (std::vector<u32>{5, 6, 7, 8}));
+
+    // Outside a frame (load time) it is no frame's upload.
+    const BufferHandle loaded = device->create_buffer(desc, bytes);
+    device->begin_frame(nullptr);
+    device->end_frame();
+    GIANT_CHECK(device->last_frame_stats().upload_bytes == 0);
+
+    for (const BufferHandle b : {readback, streamed, loaded}) {
+        device->destroy(b);
+    }
+    device->destroy(texture);
+}
+
+GIANT_TEST("rhi: timing scopes are reported in the order begun, nested and capped") {
+    auto device = null_device();
+    if (device == nullptr) {
+        GIANT_CHECK(false);
+        return;
+    }
+    GIANT_CHECK(device->gpu_timings().empty()); // nothing timed yet
+    CommandList* cmd = device->begin_frame(nullptr);
+    cmd->begin_timing("culling");
+    cmd->begin_timing("raster"); // nested
+    cmd->end_timing();
+    cmd->end_timing();
+    const std::string shading = "shading"; // the name is copied
+    cmd->begin_timing(shading.c_str());
+    cmd->end_timing();
+    device->end_frame();
+    const auto timings = device->gpu_timings();
+    GIANT_CHECK(timings.size() == 3);
+    if (timings.size() == 3) {
+        GIANT_CHECK(timings[0].name == "culling" && timings[1].name == "raster" &&
+                    timings[2].name == "shading");
+        GIANT_CHECK(timings[0].ms == 0.0f && timings[2].ms == 0.0f); // no GPU
+    }
+    GIANT_CHECK(device->gpu_frame_ms() == 0.0f);
+
+    // Past the cap, scopes are not timed but still pair up.
+    cmd = device->begin_frame(nullptr);
+    for (u32 i = 0; i < k_max_gpu_timings + 8; ++i) {
+        cmd->begin_timing("many");
+        cmd->end_timing();
+    }
+    cmd->begin_timing("outer");
+    cmd->end_timing();
+    device->end_frame();
+    GIANT_CHECK(device->gpu_timings().size() == k_max_gpu_timings);
+
+    // An untimed frame reports nothing; misuse is caught.
+    device->begin_frame(nullptr);
+    device->end_frame();
+    GIANT_CHECK(device->gpu_timings().empty());
+    {
+        CountAsserts asserts;
+        cmd = device->begin_frame(nullptr);
+        cmd->end_timing(); // nothing open
+        GIANT_CHECK(asserts.count() == 1);
+        cmd->begin_timing("left open");
+        device->end_frame();
+        GIANT_CHECK(asserts.count() == 2);
+    }
+}
+
 // --- D3D12 on WARP --------------------------------------------------------------
 //
 // Runs on every Windows CI build, which has no GPU: WARP is Microsoft's
@@ -1119,8 +1214,8 @@ GIANT_TEST("rhi: d3d12 keeps a resource used this frame alive past a mid-frame u
         cmd->push(std::array<u32, 4>{device->write_descriptor(used), 64, frame, 0});
         cmd->dispatch(1);
         // Streaming: destroy what this frame uses, then upload something new.
-        // The upload's own submit must not free `used` (or reuse its
-        // descriptor) before this frame finishes.
+        // The upload must not free `used` (or reuse its descriptor) before
+        // this frame finishes.
         const u32 used_slots[2] = {device->read_descriptor(used), device->write_descriptor(used)};
         device->destroy(used);
         const std::vector<u8> data(256, 7);
@@ -1191,6 +1286,165 @@ GIANT_TEST("rhi: d3d12 UI samples a texture rendered earlier in the frame") {
     }
     device->destroy(thumbnail);
     device->destroy(target);
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
+GIANT_TEST("rhi: d3d12 uploads initial data inside a frame, used in that frame, without waiting") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    constexpr u32 k_count = 256;
+    constexpr u32 k_frames = 5; // more than the slots: each slot's staging is reused
+    BufferDesc readback_desc;
+    readback_desc.size = k_count * 4;
+    readback_desc.usage = BufferUsage::none;
+    readback_desc.memory = Memory::readback;
+    std::vector<BufferHandle> readbacks;
+    for (u32 i = 0; i < k_frames; ++i) {
+        readbacks.push_back(device->create_buffer(readback_desc));
+    }
+    TextureDesc target_desc;
+    target_desc.width = 16;
+    target_desc.height = 8;
+    target_desc.format = Format::rgba8_unorm;
+    target_desc.usage = TextureUsage::render_target;
+    const TextureHandle target = device->create_texture(target_desc);
+    BufferHandle big; // over a staging chunk: split across chunks, one copy each
+    constexpr u64 k_big_bytes = 9ull << 20;
+    TextureHandle ramp;
+
+    for (u32 frame = 0; frame < k_frames; ++frame) {
+        CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd == nullptr) {
+            break;
+        }
+        std::vector<u32> values(k_count);
+        for (u32 i = 0; i < k_count; ++i) {
+            values[i] = frame * 1000 + i;
+        }
+        BufferDesc desc;
+        desc.size = k_count * 4;
+        desc.usage = BufferUsage::shader_read;
+        desc.name = "streamed in a frame";
+        const BufferHandle streamed = device->create_buffer(
+            desc, {reinterpret_cast<const u8*>(values.data()), values.size() * 4});
+        GIANT_CHECK(streamed.valid());
+        cmd->barrier(streamed, ResourceState::copy_source);
+        cmd->copy_buffer(readbacks[frame], 0, streamed, 0, k_count * 4);
+        device->destroy(streamed); // destroyed in the frame that uploads and uses it
+        u64 expected = u64{k_count} * 4;
+        if (frame == 1) {
+            // A texture made in the frame and sampled by its UI.
+            TextureDesc ramp_desc;
+            ramp_desc.width = 2;
+            ramp_desc.height = 1;
+            ramp_desc.format = Format::rgba8_unorm;
+            ramp_desc.usage = TextureUsage::sampled;
+            const std::vector<u8> pixels = {0, 0, 0, 255, 255, 255, 255, 255};
+            ramp = device->create_texture(ramp_desc, pixels);
+            GIANT_CHECK(ramp.valid());
+            RenderPassDesc pass;
+            pass.colors[0] = {target, LoadOp::clear, {1.0f, 0.0f, 0.0f, 1.0f}};
+            cmd->begin_render_pass(pass);
+            cmd->end_render_pass();
+            const UiQuad quad(0, 0, 16, 8, rgba(255, 255, 255, 255), ui_texture_id(ramp));
+            cmd->draw_ui(target, quad.frame());
+            std::vector<u8> big_data(k_big_bytes);
+            for (usize i = 0; i < big_data.size(); ++i) {
+                big_data[i] = static_cast<u8>(i * 7);
+            }
+            BufferDesc big_desc;
+            big_desc.size = k_big_bytes;
+            big_desc.name = "large upload in a frame";
+            big = device->create_buffer(big_desc, big_data);
+            GIANT_CHECK(big.valid());
+            expected += pixels.size() + k_big_bytes;
+        }
+        device->end_frame();
+        GIANT_CHECK(device->last_frame_stats().upload_bytes == expected);
+    }
+    device->wait_idle();
+    for (u32 frame = 0; frame < k_frames; ++frame) {
+        const auto values = as_u32(device->read_buffer(readbacks[frame]));
+        GIANT_CHECK(values.size() == k_count);
+        if (values.size() == k_count) {
+            GIANT_CHECK(values[0] == frame * 1000 && values[k_count - 1] == frame * 1000 + k_count - 1);
+        }
+        device->destroy(readbacks[frame]);
+    }
+    const auto image = device->read_texture(target);
+    GIANT_CHECK(image.size() == 16 * 8 * 4);
+    if (image.size() == 16 * 8 * 4) {
+        GIANT_CHECK(pixel(image, 16, 1, 4)[0] < 40);   // the black texel
+        GIANT_CHECK(pixel(image, 16, 14, 4)[1] > 215); // the white one
+    }
+    const auto big_back = device->read_buffer(big);
+    GIANT_CHECK(big_back.size() == k_big_bytes);
+    if (big_back.size() == k_big_bytes) {
+        GIANT_CHECK(big_back[1] == 7 && big_back[k_big_bytes - 1] == static_cast<u8>((k_big_bytes - 1) * 7));
+    }
+    device->destroy(big);
+    device->destroy(ramp);
+    device->destroy(target);
+    device->wait_idle();
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
+GIANT_TEST("rhi: d3d12 times scopes with GPU timestamps, read without waiting") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    ComputePipelineDesc desc;
+    desc.compute = shaders::test_fill_cs();
+    const PipelineHandle fill = device->create_pipeline(desc);
+    constexpr u32 k_count = 1u << 16;
+    BufferDesc out_desc;
+    out_desc.size = k_count * 4;
+    out_desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
+    const BufferHandle out = device->create_buffer(out_desc);
+    BufferDesc readback_desc = out_desc;
+    readback_desc.usage = BufferUsage::none;
+    readback_desc.memory = Memory::readback;
+    const BufferHandle readback = device->create_buffer(readback_desc);
+    for (u32 frame = 0; frame < 4; ++frame) {
+        CommandList* cmd = device->begin_frame(nullptr);
+        if (cmd == nullptr) {
+            break;
+        }
+        // The last frame names its scopes apart: the newest finished frame wins.
+        const bool last = frame == 3;
+        cmd->begin_timing(last ? "fill (last)" : "fill");
+        cmd->barrier(out, ResourceState::shader_write);
+        cmd->set_pipeline(fill);
+        cmd->push(std::array<u32, 4>{device->write_descriptor(out), k_count, frame, 0});
+        cmd->dispatch(k_count / 64);
+        cmd->end_timing();
+        cmd->begin_timing("copy");
+        cmd->barrier(out, ResourceState::copy_source);
+        cmd->copy_buffer(readback, 0, out, 0, k_count * 4);
+        cmd->end_timing();
+        device->end_frame();
+    }
+    device->wait_idle(); // every frame finished: the newest one's times
+    const auto timings = device->gpu_timings();
+    GIANT_CHECK(timings.size() == 2);
+    if (timings.size() == 2) {
+        GIANT_CHECK(timings[0].name == "fill (last)" && timings[1].name == "copy");
+        const float total = device->gpu_frame_ms();
+        for (const GpuTiming& t : timings) {
+            GIANT_CHECK(t.ms >= 0.0f);
+            GIANT_CHECK(total + 1e-4f >= t.ms);
+        }
+        GIANT_CHECK(total + 1e-4f >= timings[0].ms + timings[1].ms); // one after the other
+    }
+    device->destroy(fill);
+    device->destroy(out);
+    device->destroy(readback);
+    GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
 }
 

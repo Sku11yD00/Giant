@@ -150,7 +150,7 @@ GIANT_TEST("streaming: the per-frame budget spreads loading over frames") {
     budget.groups_per_frame = 3;
     b.streamer->set_budget(budget);
     GIANT_CHECK(b.add(0));
-    b.step(); // roots, whatever the budget
+    b.step(); // roots first, within the budget too
     const u32 total = static_cast<u32>(b.mesh.groups.size());
     u32 frames = 0;
     bool within = true;
@@ -269,4 +269,57 @@ GIANT_TEST("streaming: making room never evicts the parent of what loads") {
         }
     }
     GIANT_CHECK(loaded > 0); // room was made elsewhere at least once
+}
+
+GIANT_TEST("streaming: many meshes added in one frame load their coarsest levels within the budget") {
+    Bench probe(64ull << 20);
+    GIANT_CHECK(probe.streamer->init() && probe.add(0));
+    probe.step();
+    const u64 roots_bytes = probe.streamer->stats().used_bytes;
+    const u32 roots = probe.streamer->stats().loaded;
+    GIANT_CHECK(roots_bytes > 0 && roots > 0);
+
+    // 64 meshes at once, with a budget of about two and a half meshes'
+    // coarsest levels per frame.
+    constexpr u32 k_meshes = 64;
+    Bench b(64ull << 20);
+    GIANT_CHECK(b.streamer->init());
+    GeometryStreamer::Budget budget;
+    budget.bytes_per_frame = roots_bytes * 5 / 2;
+    b.streamer->set_budget(budget);
+    for (u32 i = 0; i < k_meshes; ++i) GIANT_CHECK(b.add(i));
+    u32 frames = 0;
+    bool within = true;
+    bool whole = true;   // a ready mesh has every terminal group in
+    bool ordered = true; // meshes become ready in the order they were added
+    u64 used = 0;
+    u32 ready = 0;
+    while (ready < k_meshes && frames < 200) {
+        // Culling asks for detail of the ready meshes too: it must wait its turn.
+        for (u32 i = 0; i < ready; ++i) b.streamer->want(i, b.all_groups());
+        b.step();
+        ++frames;
+        const StreamingStats& s = b.streamer->stats();
+        within = within && s.used_bytes - used <= budget.bytes_per_frame && s.evicted == 0;
+        within = within && b.device->last_frame_stats().transient_bytes <=
+                               budget.bytes_per_frame + k_meshes * 4096; // plus residency tables
+        used = s.used_bytes;
+        u32 now = 0;
+        for (u32 i = 0; i < k_meshes; ++i) {
+            if (!b.streamer->ready(i)) continue;
+            ++now;
+            ordered = ordered && (i == 0 || b.streamer->ready(i - 1));
+            u32 in = 0;
+            for (u32 g = 0; g < b.mesh.groups.size(); ++g) {
+                in += geometry::is_root_group(b.mesh.groups[g]) && b.streamer->resident(i)[g] != 0 ? 1u : 0u;
+            }
+            whole = whole && in == roots;
+        }
+        GIANT_CHECK(now >= ready); // forward progress, never back
+        ready = now;
+    }
+    GIANT_CHECK(within && whole && ordered);
+    GIANT_CHECK(ready == k_meshes);
+    // At most about 2.5 meshes a frame: the 64 took many frames.
+    GIANT_CHECK(frames >= k_meshes * 2 / 5);
 }

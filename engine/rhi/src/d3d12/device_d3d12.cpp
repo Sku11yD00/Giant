@@ -51,6 +51,29 @@ constexpr u32 k_max_dsvs = 256;
 constexpr u32 k_sampler_count = 4;
 constexpr u32 k_push_dwords = k_max_push_constant_bytes / 4;
 constexpr u32 k_transient_chunk_bytes = 4u << 20;
+// Transient chunks (cmd.upload, push data) made at init per frame slot:
+// 32 MiB, the default streaming budget's worth, so a streaming burst does
+// not create upload buffers mid-frame.
+constexpr u32 k_transient_chunks_at_init = 8;
+// Staging for initial data of resources created inside a frame (mesh
+// metadata, small tables): made at init (k_staging_chunks per frame slot,
+// 32 MiB), so steady state nothing is allocated mid-frame. Chunks grown
+// past those stay until unused for k_staging_trim_frames frames.
+constexpr u64 k_staging_chunk_bytes = 8ull << 20;
+constexpr u32 k_staging_chunks = 4;
+constexpr u64 k_staging_trim_frames = 120;
+constexpr u64 k_staging_alignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT; // 512
+// A buffer's data is split over chunks in pieces of at least this (or what
+// is left), so a large buffer never needs a chunk of its own.
+constexpr u64 k_staging_min_piece = 64u << 10;
+// Timestamp queries per frame slot: the frame list's start and end, the
+// upload list's start, then a start and end per timing scope.
+constexpr u32 k_query_frame_begin = 0;
+constexpr u32 k_query_frame_end = 1;
+constexpr u32 k_query_upload_begin = 2;
+constexpr u32 k_query_first_scope = 3;
+constexpr u32 k_query_count = k_query_first_scope + 2 * k_max_gpu_timings;
+constexpr u32 k_untimed = ~0u; // an open scope past the cap
 // Flip-model swap chains cannot be created as sRGB, but their views can:
 // the renderer writes linear colour and the view encodes it for the screen.
 constexpr DXGI_FORMAT k_swap_chain_format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -256,10 +279,30 @@ struct TransientChunk {
     u32 used = 0;
 };
 
+// Persistent, mapped UPLOAD-heap memory for the initial data of resources
+// created inside a frame, bump-allocated and reused once the frame finished.
+struct StagingChunk {
+    ComPtr<ID3D12Resource> resource;
+    u8* mapped = nullptr;
+    u64 size = 0;
+    u64 used = 0;
+    u64 last_used = 0;  // frames begun when last staged into
+    bool kept = false;  // made at init: never trimmed
+};
+
 struct Frame {
     ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12CommandAllocator> upload_allocator; // the frame's upload list
     u64 fence = 0; // signalled when the GPU finished this frame's work
     std::vector<TransientChunk> chunks;
+    std::vector<StagingChunk> staging;
+    // GPU timing (null without timestamp support).
+    ComPtr<ID3D12QueryHeap> queries;
+    ComPtr<ID3D12Resource> timing_readback; // k_query_count u64 ticks
+    const u64* ticks = nullptr;             // timing_readback, mapped
+    std::vector<GpuTiming> timings;         // this slot's scopes (names; ms once read)
+    u64 timed_frame = 0;                    // frames begun when it was recorded; 0: nothing pending
+    bool upload_timed = false;              // the upload list wrote k_query_upload_begin
 };
 
 class D3D12Device;
@@ -311,6 +354,8 @@ public:
                      u64 bytes) override;
     TransientMemory allocate(u32 bytes) override;
     void draw_ui(TextureHandle target, const UiFrame& ui) override;
+    void begin_timing(const char* name) override;
+    void end_timing() override;
 
     // Starts recording into `list` (already reset) for frame `frame`.
     void begin(ID3D12GraphicsCommandList* list, Frame* frame);
@@ -334,6 +379,8 @@ private:
     bool m_pipeline_mesh = false;
     std::array<u32, k_push_dwords> m_push{};
     u32 m_push_dwords = 0;
+    std::vector<u32> m_open_timings; // scope indices; k_untimed past the cap
+    bool m_timings_logged = false;
 };
 
 class D3D12Device final : public Device {
@@ -389,6 +436,8 @@ public:
     CommandList* begin_frame(SwapChain* swap_chain) override;
     void end_frame() override;
     const FrameStats& last_frame_stats() const override { return m_last_stats; }
+    std::span<const GpuTiming> gpu_timings() const override { return m_gpu_timings; }
+    float gpu_frame_ms() const override { return m_gpu_frame_ms; }
     std::vector<u8> read_texture(TextureHandle texture) override;
     std::vector<u8> read_buffer(BufferHandle buffer) override;
     void wait_idle() override;
@@ -418,8 +467,34 @@ public:
     // Buffers decay to COMMON when the list that used them finishes (D3D12's
     // implicit state rules), so the tracked state follows after each submit.
     void track_decay(BufferHandle buffer) { m_decaying.push_back(buffer); }
+    bool timing() const { return m_timestamp_frequency != 0; }
 
 private:
+    // Inside a frame: `bytes` of this frame slot's staging memory, or a null
+    // resource (logged) when out of memory.
+    struct Staging {
+        ID3D12Resource* resource = nullptr;
+        u64 offset = 0; // a multiple of k_staging_alignment
+        u8* data = nullptr;
+    };
+    Staging stage(u64 bytes);
+    // Like stage, but may give fewer bytes (at least k_staging_min_piece, or
+    // all of `bytes` when less): `size` says how many. For buffers, whose
+    // data can be copied in pieces.
+    struct StagingPiece {
+        Staging staging;
+        u64 size = 0;
+    };
+    StagingPiece stage_piece(u64 bytes);
+    // A new mapped chunk in `frame`'s staging; null (logged) on failure.
+    StagingChunk* add_staging_chunk(Frame& frame, u64 size, bool kept);
+    // Inside a frame: the frame's upload list, opened on first use; null
+    // when the device is lost. Runs before the frame's own list.
+    ID3D12GraphicsCommandList* upload_list();
+    Frame& recording_frame() { return m_frame_slots[m_frame_index % k_frames]; }
+    // Reads the timings of the newest finished frame, if newer than the last read.
+    void collect_timings();
+    bool init_timing();
     void decay_buffer_states();
     bool pick_adapter(bool software, ComPtr<IDXGIAdapter1>& out);
     bool init_globals();
@@ -427,7 +502,8 @@ private:
     void wait_for(u64 value);
     void retire(Retired retired);
     void free_retired();
-    // One-off work on its own list; submit waits until the GPU finished it.
+    // One-off work on its own list, outside frames only; submit waits until
+    // the GPU finished it.
     ID3D12GraphicsCommandList* begin_immediate();
     bool submit_immediate();
     ComPtr<ID3D12Resource> create_committed_buffer(D3D12_HEAP_TYPE heap, u64 size,
@@ -461,7 +537,7 @@ private:
     Pool<DxPipeline, PipelineTag> m_pipelines;
     std::deque<Retired> m_retired; // in fence order
     // Destroyed while a frame records: stamped with that frame's fence in
-    // end_frame (an immediate submit mid-frame signals an earlier value).
+    // end_frame (the frame and its upload list may still use them).
     std::vector<Retired> m_retired_this_frame;
 
     std::array<Frame, k_frames> m_frame_slots;
@@ -476,6 +552,15 @@ private:
 
     ComPtr<ID3D12CommandAllocator> m_immediate_allocator;
     ComPtr<ID3D12GraphicsCommandList> m_immediate_list;
+    // Copies of initial data for resources created inside the frame being
+    // recorded (open while m_upload_open), on the slot's upload allocator.
+    ComPtr<ID3D12GraphicsCommandList> m_upload_list;
+    bool m_upload_open = false;
+
+    u64 m_timestamp_frequency = 0; // ticks per second; 0: no GPU timing
+    std::vector<GpuTiming> m_gpu_timings; // of the newest finished frame
+    float m_gpu_frame_ms = 0.0f;
+    u64 m_timings_frame = 0; // the frame (frames begun) they came from
 
     PipelineHandle m_ui_pipeline;
     std::vector<BufferHandle> m_decaying; // gpu buffers moved out of COMMON
@@ -597,7 +682,10 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     for (Frame& frame : m_frame_slots) {
         if (!check(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                     IID_PPV_ARGS(&frame.allocator)),
-                   "CreateCommandAllocator")) {
+                   "CreateCommandAllocator") ||
+            !check(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                    IID_PPV_ARGS(&frame.upload_allocator)),
+                   "CreateCommandAllocator(upload)")) {
             return false;
         }
     }
@@ -611,11 +699,17 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         !check(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                            m_immediate_allocator.Get(), nullptr,
                                            IID_PPV_ARGS(&m_immediate_list)),
-               "CreateCommandList")) {
+               "CreateCommandList") ||
+        !check(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           m_frame_slots[0].upload_allocator.Get(), nullptr,
+                                           IID_PPV_ARGS(&m_upload_list)),
+               "CreateCommandList(upload)")) {
         return false;
     }
     m_list->Close();
     m_immediate_list->Close();
+    m_upload_list->Close();
+    m_upload_list->SetName(L"frame uploads");
     if (!check(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)),
                "CreateFence")) {
         return false;
@@ -625,7 +719,67 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         log_error("rhi", "d3d12: CreateEvent failed");
         return false;
     }
-    return init_globals();
+    if (!init_timing()) {
+        // Not fatal: frames run untimed.
+        log_warning("rhi", "d3d12: GPU timestamps unavailable; GPU timings stay empty");
+        m_timestamp_frequency = 0;
+        for (Frame& frame : m_frame_slots) {
+            frame.queries.Reset();
+            frame.timing_readback.Reset();
+            frame.ticks = nullptr;
+        }
+    }
+    for (Frame& frame : m_frame_slots) {
+        for (u32 i = 0; i < k_staging_chunks; ++i) {
+            if (add_staging_chunk(frame, k_staging_chunk_bytes, true) == nullptr) {
+                return false;
+            }
+        }
+    }
+    if (!init_globals()) {
+        return false;
+    }
+    // After init_globals: transient chunks need the descriptor heaps.
+    for (Frame& frame : m_frame_slots) {
+        for (u32 i = 0; i < k_transient_chunks_at_init; ++i) {
+            const BufferHandle buffer = create_transient_chunk(k_transient_chunk_bytes);
+            if (!buffer.valid()) {
+                return false;
+            }
+            frame.chunks.push_back({buffer, k_transient_chunk_bytes, 0});
+        }
+    }
+    return true;
+}
+
+bool D3D12Device::init_timing() {
+    UINT64 frequency = 0;
+    if (FAILED(m_queue->GetTimestampFrequency(&frequency)) || frequency == 0) {
+        return false;
+    }
+    D3D12_QUERY_HEAP_DESC desc{};
+    desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    desc.Count = k_query_count;
+    desc.NodeMask = 0;
+    for (Frame& frame : m_frame_slots) {
+        if (!check(m_device->CreateQueryHeap(&desc, IID_PPV_ARGS(&frame.queries)),
+                   "CreateQueryHeap(timestamps)")) {
+            return false;
+        }
+        frame.timing_readback = create_committed_buffer(
+            D3D12_HEAP_TYPE_READBACK, u64{k_query_count} * sizeof(u64),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, "gpu timings (read back)");
+        void* mapped = nullptr;
+        if (frame.timing_readback == nullptr ||
+            !check(frame.timing_readback->Map(0, nullptr, &mapped), "Map(gpu timings)")) {
+            return false;
+        }
+        frame.ticks = static_cast<const u64*>(mapped);
+        frame.timings.reserve(k_max_gpu_timings);
+    }
+    m_gpu_timings.reserve(k_max_gpu_timings);
+    m_timestamp_frequency = frequency;
+    return true;
 }
 
 bool D3D12Device::init_globals() {
@@ -724,6 +878,16 @@ bool D3D12Device::init_globals() {
 D3D12Device::~D3D12Device() {
     if (m_queue != nullptr && m_fence != nullptr) {
         wait_idle();
+        // Marked lost by a failed call while the GPU itself still runs (it
+        // was not removed): wait, bounded, for the work already submitted
+        // before releasing memory it may still read.
+        const u64 last = m_next_fence_value - 1;
+        if (m_lost && m_device != nullptr && m_fence_event != nullptr &&
+            m_device->GetDeviceRemovedReason() == S_OK && last > 0 &&
+            m_fence->GetCompletedValue() < last &&
+            SUCCEEDED(m_fence->SetEventOnCompletion(last, m_fence_event))) {
+            WaitForSingleObject(m_fence_event, k_gpu_wait_timeout_ms);
+        }
     }
     // Everything is idle: release in any order.
     for (Frame& frame : m_frame_slots) {
@@ -797,6 +961,9 @@ void D3D12Device::wait_for(u64 value) {
         return;
     }
     if (!check(m_fence->SetEventOnCompletion(value, m_fence_event), "SetEventOnCompletion")) {
+        // Without the wait, memory the GPU may still read would be reused.
+        log_error("rhi", "d3d12: cannot wait for the GPU; treating the device as lost");
+        m_lost = true;
         return;
     }
     // A healthy GPU finishes a frame in milliseconds. A hung one is treated
@@ -811,6 +978,7 @@ void D3D12Device::wait_idle() {
     GIANT_ASSERT(!m_recording, "wait_idle inside a frame");
     wait_for(signal());
     free_retired();
+    collect_timings();
 }
 
 void D3D12Device::retire(Retired retired) {
@@ -842,6 +1010,9 @@ void D3D12Device::free_retired() {
 }
 
 ID3D12GraphicsCommandList* D3D12Device::begin_immediate() {
+    // Only outside a frame (load time, read-backs): inside one, uploads go
+    // to the frame's upload list and nothing waits for the GPU.
+    GIANT_ASSERT(!m_recording, "an immediate submit inside a frame would wait for the GPU");
     m_immediate_allocator->Reset();
     m_immediate_list->Reset(m_immediate_allocator.Get(), nullptr);
     bind_globals(m_immediate_list.Get());
@@ -864,12 +1035,129 @@ bool D3D12Device::submit_immediate() {
     ID3D12CommandList* lists[] = {m_immediate_list.Get()};
     m_queue->ExecuteCommandLists(1, lists);
     wait_for(signal());
-    // The GPU just caught up: free what it is done with, so streaming many
-    // uploads in one frame does not hold every old resource until the next.
-    // A resource destroyed in the frame being recorded is not in m_retired
-    // yet, so it stays alive (the WARP streaming test checks this).
     free_retired();
     return !m_lost;
+}
+
+StagingChunk* D3D12Device::add_staging_chunk(Frame& frame, u64 size, bool kept) {
+    StagingChunk chunk;
+    chunk.size = (size + k_staging_alignment - 1) / k_staging_alignment * k_staging_alignment;
+    chunk.kept = kept;
+    chunk.last_used = m_frame_index;
+    chunk.resource = create_committed_buffer(D3D12_HEAP_TYPE_UPLOAD, chunk.size,
+                                             D3D12_RESOURCE_STATE_GENERIC_READ,
+                                             D3D12_RESOURCE_FLAG_NONE, "frame upload staging");
+    void* mapped = nullptr;
+    const D3D12_RANGE no_read{0, 0};
+    if (chunk.resource == nullptr ||
+        !check(chunk.resource->Map(0, &no_read, &mapped), "Map(frame upload staging)")) {
+        return nullptr;
+    }
+    chunk.mapped = static_cast<u8*>(mapped);
+    frame.staging.push_back(std::move(chunk));
+    return &frame.staging.back();
+}
+
+D3D12Device::Staging D3D12Device::stage(u64 bytes) {
+    GIANT_ASSERT(m_recording, "frame staging outside a frame");
+    Frame& frame = recording_frame();
+    for (StagingChunk& chunk : frame.staging) {
+        const u64 at = (chunk.used + k_staging_alignment - 1) / k_staging_alignment * k_staging_alignment;
+        if (at + bytes <= chunk.size) {
+            chunk.used = at + bytes;
+            chunk.last_used = m_frame_index;
+            return {chunk.resource.Get(), at, chunk.mapped + at};
+        }
+    }
+    // Over what the chunks hold this frame (a burst, or a texture larger than
+    // a chunk): a chunk more, kept for reuse until long unused.
+    StagingChunk* added = add_staging_chunk(frame, std::max(k_staging_chunk_bytes, bytes), false);
+    if (added == nullptr) {
+        return {};
+    }
+    added->used = bytes;
+    return {added->resource.Get(), 0, added->mapped};
+}
+
+D3D12Device::StagingPiece D3D12Device::stage_piece(u64 bytes) {
+    GIANT_ASSERT(m_recording, "frame staging outside a frame");
+    Frame& frame = recording_frame();
+    const u64 least = std::min(bytes, k_staging_min_piece);
+    for (StagingChunk& chunk : frame.staging) {
+        const u64 at = (chunk.used + k_staging_alignment - 1) / k_staging_alignment * k_staging_alignment;
+        if (at + least <= chunk.size) {
+            const u64 size = std::min(bytes, chunk.size - at);
+            chunk.used = at + size;
+            chunk.last_used = m_frame_index;
+            return {{chunk.resource.Get(), at, chunk.mapped + at}, size};
+        }
+    }
+    StagingChunk* added = add_staging_chunk(frame, k_staging_chunk_bytes, false);
+    if (added == nullptr) {
+        return {};
+    }
+    const u64 size = std::min(bytes, added->size);
+    added->used = size;
+    return {{added->resource.Get(), 0, added->mapped}, size};
+}
+
+ID3D12GraphicsCommandList* D3D12Device::upload_list() {
+    GIANT_ASSERT(m_recording, "the upload list belongs to a frame");
+    if (m_upload_open) {
+        return m_upload_list.Get();
+    }
+    Frame& frame = recording_frame();
+    // The slot's upload allocator was reset in begin_frame, after its fence.
+    if (!check_gpu(m_upload_list->Reset(frame.upload_allocator.Get(), nullptr), "Reset(upload)")) {
+        return nullptr;
+    }
+    m_upload_open = true;
+    if (timing()) {
+        m_upload_list->EndQuery(frame.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                k_query_upload_begin);
+        frame.upload_timed = true;
+    }
+    return m_upload_list.Get();
+}
+
+void D3D12Device::collect_timings() {
+    if (!timing() || m_lost) {
+        return;
+    }
+    const u64 done = m_fence->GetCompletedValue();
+    Frame* newest = nullptr;
+    for (Frame& frame : m_frame_slots) {
+        if (frame.timed_frame != 0 && frame.fence != 0 && frame.fence <= done &&
+            (newest == nullptr || frame.timed_frame > newest->timed_frame)) {
+            newest = &frame;
+        }
+    }
+    if (newest == nullptr || newest->timed_frame <= m_timings_frame) {
+        return;
+    }
+    const u64* ticks = newest->ticks;
+    const double ms_per_tick = 1000.0 / static_cast<double>(m_timestamp_frequency);
+    const auto span_ms = [ms_per_tick](u64 begin, u64 end) {
+        return end > begin ? static_cast<float>(static_cast<double>(end - begin) * ms_per_tick) : 0.0f;
+    };
+    u64 start = ticks[k_query_frame_begin];
+    if (newest->upload_timed) {
+        start = std::min(start, ticks[k_query_upload_begin]); // the uploads ran first
+    }
+    m_gpu_frame_ms = span_ms(start, ticks[k_query_frame_end]);
+    m_gpu_timings.resize(newest->timings.size());
+    for (usize i = 0; i < newest->timings.size(); ++i) {
+        const usize query = k_query_first_scope + 2 * i;
+        m_gpu_timings[i].name = newest->timings[i].name;
+        m_gpu_timings[i].ms = span_ms(ticks[query], ticks[query + 1]);
+    }
+    m_timings_frame = newest->timed_frame;
+    // Older finished frames are superseded.
+    for (Frame& frame : m_frame_slots) {
+        if (frame.timed_frame != 0 && frame.fence != 0 && frame.fence <= done) {
+            frame.timed_frame = 0;
+        }
+    }
 }
 
 void D3D12Device::bind_globals(ID3D12GraphicsCommandList* list) {
@@ -944,59 +1232,90 @@ BufferHandle D3D12Device::create_buffer(const BufferDesc& desc, std::span<const 
         b.mapped = static_cast<u8*>(mapped);
     }
 
-    if (!initial.empty()) {
+    // Views first: once a copy into the buffer is recorded, a failure must
+    // retire it (destroy) rather than drop it under the GPU.
+    bool ok = true;
+    if (has(desc.usage, BufferUsage::shader_read)) {
+        b.read = m_shader_heap.allocate();
+        ok = b.read != k_no_descriptor;
+        if (ok) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = DXGI_FORMAT_R32_TYPELESS;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Buffer.NumElements = static_cast<UINT>(desc.size / 4);
+            srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            m_device->CreateShaderResourceView(b.resource.Get(), &srv, m_shader_heap.cpu(b.read));
+        }
+    }
+    if (ok && has(desc.usage, BufferUsage::shader_write)) {
+        b.write = m_shader_heap.allocate();
+        ok = b.write != k_no_descriptor;
+        if (ok) {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+            uav.Format = DXGI_FORMAT_R32_TYPELESS;
+            uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            uav.Buffer.NumElements = static_cast<UINT>(desc.size / 4);
+            uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            m_device->CreateUnorderedAccessView(b.resource.Get(), nullptr, &uav,
+                                                m_shader_heap.cpu(b.write));
+        }
+    }
+
+    if (ok && !initial.empty()) {
         if (b.mapped != nullptr) {
             std::memcpy(b.mapped, initial.data(), initial.size());
+        } else if (m_recording) {
+            // Inside a frame: staged in the frame's memory and copied by its
+            // upload list, which runs before the frame's own list. Nothing
+            // waits. COMMON promotes to COPY_DEST for the copy and decays back
+            // when the upload list's own submission ends, so the tracked
+            // state (common) holds for the frame's list.
+            // Large data goes in pieces, one copy each, so it fits the
+            // chunks already there.
+            ID3D12GraphicsCommandList* list = upload_list();
+            ok = list != nullptr;
+            u64 done = 0;
+            while (ok && done < initial.size()) {
+                const StagingPiece piece = stage_piece(initial.size() - done);
+                ok = piece.staging.data != nullptr && piece.size > 0;
+                if (ok) {
+                    std::memcpy(piece.staging.data, initial.data() + done,
+                                static_cast<usize>(piece.size));
+                    list->CopyBufferRegion(b.resource.Get(), done, piece.staging.resource,
+                                           piece.staging.offset, piece.size);
+                    done += piece.size;
+                }
+            }
+            if (ok) {
+                m_stats.upload_bytes += initial.size();
+            }
         } else {
+            // Load time: a staging buffer of its own, and wait for the copy.
             ComPtr<ID3D12Resource> staging =
                 create_committed_buffer(D3D12_HEAP_TYPE_UPLOAD, initial.size(),
                                         D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE,
                                         "staging");
             void* mapped = nullptr;
             const D3D12_RANGE no_read{0, 0};
-            if (staging == nullptr || !check(staging->Map(0, &no_read, &mapped), "Map(staging)")) {
-                return {};
+            ok = staging != nullptr && check(staging->Map(0, &no_read, &mapped), "Map(staging)");
+            if (ok) {
+                std::memcpy(mapped, initial.data(), initial.size());
+                staging->Unmap(0, nullptr);
+                ID3D12GraphicsCommandList* list = begin_immediate();
+                // Buffers start in COMMON, which decays to COPY_DEST for a copy.
+                list->CopyBufferRegion(b.resource.Get(), 0, staging.Get(), 0, initial.size());
+                // Back in COMMON after the queue finished: that is our state.
+                ok = submit_immediate();
             }
-            std::memcpy(mapped, initial.data(), initial.size());
-            staging->Unmap(0, nullptr);
-            ID3D12GraphicsCommandList* list = begin_immediate();
-            // Buffers start in COMMON, which decays to COPY_DEST for a copy.
-            list->CopyBufferRegion(b.resource.Get(), 0, staging.Get(), 0, initial.size());
-            if (!submit_immediate()) {
-                return {};
-            }
-            // Back in COMMON after the queue finished: that is our state.
         }
     }
-
-    if (has(desc.usage, BufferUsage::shader_read)) {
-        b.read = m_shader_heap.allocate();
-        if (b.read == k_no_descriptor) {
-            return {};
-        }
-        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-        srv.Format = DXGI_FORMAT_R32_TYPELESS;
-        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv.Buffer.NumElements = static_cast<UINT>(desc.size / 4);
-        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-        m_device->CreateShaderResourceView(b.resource.Get(), &srv, m_shader_heap.cpu(b.read));
+    const BufferHandle handle = m_buffers.add(std::move(b));
+    if (!ok) {
+        destroy(handle);
+        return {};
     }
-    if (has(desc.usage, BufferUsage::shader_write)) {
-        b.write = m_shader_heap.allocate();
-        if (b.write == k_no_descriptor) {
-            m_shader_heap.free(b.read);
-            return {};
-        }
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-        uav.Format = DXGI_FORMAT_R32_TYPELESS;
-        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        uav.Buffer.NumElements = static_cast<UINT>(desc.size / 4);
-        uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-        m_device->CreateUnorderedAccessView(b.resource.Get(), nullptr, &uav,
-                                            m_shader_heap.cpu(b.write));
-    }
-    return m_buffers.add(std::move(b));
+    return handle;
 }
 
 void D3D12Device::destroy(BufferHandle handle) {
@@ -1074,22 +1393,46 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
         UINT64 total = 0;
         m_device->GetCopyableFootprints(&rd, 0, 1, 0, &footprint, nullptr, nullptr, &total);
-        ComPtr<ID3D12Resource> staging = create_committed_buffer(
-            D3D12_HEAP_TYPE_UPLOAD, total, D3D12_RESOURCE_STATE_GENERIC_READ,
-            D3D12_RESOURCE_FLAG_NONE, "texture staging");
-        void* mapped = nullptr;
-        const D3D12_RANGE no_read{0, 0};
-        if (staging == nullptr || !check(staging->Map(0, &no_read, &mapped), "Map(staging)")) {
-            return {};
+        // Inside a frame: the frame's staging memory and upload list, no
+        // wait. Outside: a staging buffer of its own, waited for.
+        ComPtr<ID3D12Resource> own_staging;
+        ID3D12Resource* staging = nullptr;
+        u64 staging_offset = 0;
+        u8* data = nullptr; // at staging_offset
+        ID3D12GraphicsCommandList* list = nullptr;
+        if (m_recording) {
+            const Staging staged = stage(total);
+            list = staged.data != nullptr ? upload_list() : nullptr;
+            if (list == nullptr) {
+                return {}; // nothing recorded yet: the texture can go at once
+            }
+            staging = staged.resource;
+            staging_offset = staged.offset; // a multiple of 512, as placement needs
+            data = staged.data;
+            m_stats.upload_bytes += initial.size();
+        } else {
+            own_staging = create_committed_buffer(D3D12_HEAP_TYPE_UPLOAD, total,
+                                                  D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                  D3D12_RESOURCE_FLAG_NONE, "texture staging");
+            void* mapped = nullptr;
+            const D3D12_RANGE no_read{0, 0};
+            if (own_staging == nullptr ||
+                !check(own_staging->Map(0, &no_read, &mapped), "Map(staging)")) {
+                return {};
+            }
+            staging = own_staging.Get();
+            data = static_cast<u8*>(mapped);
         }
         const usize row = static_cast<usize>(desc.width) * pixel_bytes;
         for (u32 y = 0; y < desc.height; ++y) {
-            std::memcpy(static_cast<u8*>(mapped) + footprint.Offset +
-                            static_cast<usize>(y) * footprint.Footprint.RowPitch,
+            std::memcpy(data + footprint.Offset + static_cast<usize>(y) * footprint.Footprint.RowPitch,
                         initial.data() + static_cast<usize>(y) * row, row);
         }
-        staging->Unmap(0, nullptr);
-        ID3D12GraphicsCommandList* list = begin_immediate();
+        if (own_staging != nullptr) {
+            own_staging->Unmap(0, nullptr);
+            list = begin_immediate();
+        }
+        // Textures do not decay: back to COMMON explicitly, as tracked.
         const auto to_copy = transition(t.resource.Get(), D3D12_RESOURCE_STATE_COMMON,
                                         D3D12_RESOURCE_STATE_COPY_DEST);
         list->ResourceBarrier(1, &to_copy);
@@ -1097,14 +1440,15 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
         dst.pResource = t.resource.Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         D3D12_TEXTURE_COPY_LOCATION src{};
-        src.pResource = staging.Get();
+        src.pResource = staging;
         src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         src.PlacedFootprint = footprint;
+        src.PlacedFootprint.Offset += staging_offset;
         list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         const auto back = transition(t.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                      D3D12_RESOURCE_STATE_COMMON);
         list->ResourceBarrier(1, &back);
-        if (!submit_immediate()) {
+        if (own_staging != nullptr && !submit_immediate()) {
             return {};
         }
     }
@@ -1484,12 +1828,29 @@ CommandList* D3D12Device::begin_frame(SwapChain* swap_chain) {
         return nullptr;
     }
     free_retired();
+    collect_timings(); // this slot's, if no newer frame finished
     for (TransientChunk& chunk : frame.chunks) {
         chunk.used = 0;
     }
+    for (StagingChunk& chunk : frame.staging) {
+        chunk.used = 0;
+    }
+    // Chunks grown past the ones made at init stay for reuse; only those
+    // unused for a long while go (rarely: after a burst, not per frame).
+    const u64 now = m_frame_index;
+    std::erase_if(frame.staging, [now](const StagingChunk& chunk) {
+        return !chunk.kept && now - chunk.last_used > k_staging_trim_frames;
+    });
+    frame.timed_frame = 0;
+    frame.upload_timed = false;
+    frame.timings.clear();
+    frame.upload_allocator->Reset();
     frame.allocator->Reset();
     m_list->Reset(frame.allocator.Get(), nullptr);
     bind_globals(m_list.Get());
+    if (timing()) {
+        m_list->EndQuery(frame.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, k_query_frame_begin);
+    }
     if (sc != nullptr) {
         sc->current = sc->swap_chain->GetCurrentBackBufferIndex();
     }
@@ -1505,11 +1866,46 @@ void D3D12Device::end_frame() {
     if (m_swap_chain != nullptr) {
         m_commands.barrier(m_swap_chain->current_texture(), ResourceState::present);
     }
-    m_commands.end();
+    m_commands.end(); // ends any timing scope left open
+    Frame& frame = recording_frame();
+    if (timing()) {
+        m_list->EndQuery(frame.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, k_query_frame_end);
+        m_list->ResolveQueryData(frame.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                 k_query_frame_begin, 2, frame.timing_readback.Get(),
+                                 u64{k_query_frame_begin} * sizeof(u64));
+        const UINT scopes = static_cast<UINT>(frame.timings.size()) * 2;
+        if (scopes > 0) {
+            m_list->ResolveQueryData(frame.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                     k_query_first_scope, scopes, frame.timing_readback.Get(),
+                                     u64{k_query_first_scope} * sizeof(u64));
+        }
+    }
     m_recording = false;
-    Frame& frame = m_frame_slots[m_frame_index % k_frames];
     ++m_frame_index;
-    if (check_gpu(m_list->Close(), "Close")) {
+    // The frame's uploads first, in a submission of their own: the buffers
+    // they copied into decay back to COMMON when it ends, before the frame's
+    // list runs, as the tracked states say. Same queue, so in order; no wait.
+    if (m_upload_open) {
+        m_upload_open = false;
+        if (frame.upload_timed) {
+            m_upload_list->ResolveQueryData(frame.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                            k_query_upload_begin, 1, frame.timing_readback.Get(),
+                                            u64{k_query_upload_begin} * sizeof(u64));
+        }
+        if (check_gpu(m_upload_list->Close(), "Close(upload)")) {
+            ID3D12CommandList* uploads[] = {m_upload_list.Get()};
+            m_queue->ExecuteCommandLists(1, uploads);
+        } else {
+            // The frame's list would read resources never filled, and the
+            // upload's start time was never written: stop using the device.
+            frame.upload_timed = false;
+            if (!m_lost) {
+                log_error("rhi", "d3d12: the frame's upload list failed; treating the device as lost");
+                m_lost = true;
+            }
+        }
+    }
+    if (check_gpu(m_list->Close(), "Close") && !m_lost) {
         ID3D12CommandList* lists[] = {m_list.Get()};
         m_queue->ExecuteCommandLists(1, lists);
     }
@@ -1520,6 +1916,9 @@ void D3D12Device::end_frame() {
         check_gpu(m_swap_chain->swap_chain->Present(interval, flags), "Present");
     }
     frame.fence = signal();
+    if (frame.fence != 0 && timing()) {
+        frame.timed_frame = m_frame_index; // read once the fence is reached
+    }
     for (Retired& r : m_retired_this_frame) {
         // A failed signal (0, device lost) keeps them until destruction.
         r.fence = frame.fence != 0 ? frame.fence : ~u64{0};
@@ -1643,12 +2042,52 @@ void D3D12CommandList::begin(ID3D12GraphicsCommandList* list, Frame* frame) {
     m_in_pass = false;
     m_pipeline = {};
     m_push_dwords = 0;
+    m_open_timings.clear();
 }
 
 void D3D12CommandList::end() {
     GIANT_ASSERT(!m_in_pass, "end_frame inside a render pass");
+    GIANT_ASSERT(m_open_timings.empty(), "end_frame with a timing scope still open");
+    while (!m_open_timings.empty()) {
+        end_timing(); // so every resolved query was written
+    }
     m_list = nullptr;
     m_frame = nullptr;
+}
+
+void D3D12CommandList::begin_timing(const char* name) {
+    GIANT_ASSERT(name != nullptr, "a timing scope needs a name");
+    if (!m_device.timing()) {
+        m_open_timings.push_back(k_untimed);
+        return;
+    }
+    if (m_frame->timings.size() >= k_max_gpu_timings) {
+        if (!m_timings_logged) {
+            m_timings_logged = true;
+            log_warning("rhi", "more than " + std::to_string(k_max_gpu_timings) +
+                                   " GPU timing scopes in a frame; the rest are not timed");
+        }
+        m_open_timings.push_back(k_untimed);
+        return;
+    }
+    const u32 index = static_cast<u32>(m_frame->timings.size());
+    m_frame->timings.push_back({name != nullptr ? name : "?", 0.0f});
+    m_list->EndQuery(m_frame->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                     k_query_first_scope + 2 * index);
+    m_open_timings.push_back(index);
+}
+
+void D3D12CommandList::end_timing() {
+    GIANT_ASSERT(!m_open_timings.empty(), "end_timing without begin_timing");
+    if (m_open_timings.empty()) {
+        return;
+    }
+    const u32 index = m_open_timings.back();
+    m_open_timings.pop_back();
+    if (index != k_untimed) {
+        m_list->EndQuery(m_frame->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                         k_query_first_scope + 2 * index + 1);
+    }
 }
 
 void D3D12CommandList::barrier(BufferHandle handle, ResourceState state) {

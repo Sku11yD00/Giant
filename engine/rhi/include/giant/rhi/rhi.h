@@ -312,7 +312,17 @@ struct FrameStats {
     u32 ui_draws = 0;     // UI draw commands submitted (empty clips skipped)
     u32 barriers = 0;
     u64 transient_bytes = 0;
+    u64 upload_bytes = 0; // initial data of resources created inside the frame
 };
+
+// GPU time of one CommandList::begin_timing scope.
+struct GpuTiming {
+    std::string name;
+    float ms = 0.0f;
+};
+
+// Timed scopes per frame; more are not timed (logged once).
+constexpr u32 k_max_gpu_timings = 32;
 
 class CommandList {
 public:
@@ -378,6 +388,14 @@ public:
     // Draws UI over `target` (an rgba8 render target; the swap chain's is
     // fine). Uses its own pass: call it outside begin/end_render_pass.
     virtual void draw_ui(TextureHandle target, const UiFrame& ui) = 0;
+
+    // Times the GPU work recorded until the matching end_timing, under
+    // `name` (copied). Scopes may nest; each is reported on its own, in the
+    // order begun, by Device::gpu_timings a frame or two later. At most
+    // k_max_gpu_timings per frame; the rest are not timed. Every scope ends
+    // before end_frame.
+    virtual void begin_timing(const char* name) = 0;
+    virtual void end_timing() = 0;
 };
 
 struct SwapChainDesc {
@@ -416,12 +434,15 @@ public:
     // handle. Destroying is deferred until the GPU no longer uses the
     // resource, so it is safe at any time, even mid-frame.
     virtual std::unique_ptr<SwapChain> create_swap_chain(const SwapChainDesc& desc) = 0;
-    // `initial` (optional) fills the start of the buffer; it waits for the
-    // copy, so do it at load time, not per frame. Allowed inside a frame
-    // (streaming): the copy runs before the frame's work.
+    // `initial` (optional) fills the start of the buffer. Outside a frame
+    // (load time) the copy is waited for. Inside a frame (streaming) nothing
+    // waits: the data is staged in per-frame memory and copied on the GPU
+    // before the frame's work, so the buffer is ready for anything the frame
+    // records. Uploads inside a frame are counted in FrameStats::upload_bytes;
+    // the caller keeps them within its per-frame budget.
     virtual BufferHandle create_buffer(const BufferDesc& desc, std::span<const u8> initial = {}) = 0;
     // `initial` (optional): width * height * bytes_per_pixel, rows top to
-    // bottom. Waits like create_buffer.
+    // bottom. Copied like create_buffer's (waited for only outside a frame).
     virtual TextureHandle create_texture(const TextureDesc& desc,
                                          std::span<const u8> initial = {}) = 0;
     virtual PipelineHandle create_pipeline(const GraphicsPipelineDesc& desc) = 0;
@@ -449,6 +470,14 @@ public:
     virtual CommandList* begin_frame(SwapChain* swap_chain) = 0;
     virtual void end_frame() = 0;
     virtual const FrameStats& last_frame_stats() const = 0;
+
+    // GPU times of the newest frame the GPU has finished (usually two
+    // frames back; never waited for): each begin_timing scope in the order
+    // begun, and the whole frame's GPU time (its uploads included). Empty and
+    // 0 until a timed frame finished. The null backend reports the scopes of
+    // the last frame ended, at 0 ms.
+    virtual std::span<const GpuTiming> gpu_timings() const = 0;
+    virtual float gpu_frame_ms() const = 0;
 
     // Waits for the GPU, then returns the texture's pixels (width * height *
     // bytes_per_pixel, rows top to bottom), or empty on failure. For tests

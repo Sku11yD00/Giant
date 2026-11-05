@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 namespace giant::rhi {
 
@@ -138,9 +139,13 @@ public:
                      u64 bytes) override;
     TransientMemory allocate(u32 bytes) override;
     void draw_ui(TextureHandle target, const UiFrame& ui) override;
+    void begin_timing(const char* name) override;
+    void end_timing() override;
 
     void begin(); // a new frame
     void end();
+    // This frame's timing scopes (all 0 ms: there is no GPU), once ended.
+    std::vector<GpuTiming>& timings() { return m_timings; }
 
 private:
     void check_draw(bool mesh);
@@ -161,6 +166,10 @@ private:
     BufferHandle m_transient;
     u32 m_transient_used = 0;
     std::vector<BufferHandle> m_retired; // full transient buffers of this frame
+    std::vector<GpuTiming> m_timings;
+    std::vector<u32> m_open_timings; // indices into m_timings; k_untimed past the cap
+    bool m_timings_logged = false;
+    static constexpr u32 k_untimed = ~0u;
 };
 
 class NullDevice final : public Device {
@@ -191,6 +200,9 @@ public:
         buffer.desc = desc;
         buffer.memory.assign(desc.size, 0);
         std::copy(initial.begin(), initial.end(), buffer.memory.begin());
+        if (m_recording && desc.memory == Memory::gpu) {
+            m_stats.upload_bytes += initial.size(); // staged and copied, as on a GPU
+        }
         if (has(desc.usage, BufferUsage::shader_read)) {
             buffer.read = allocate_descriptor();
         }
@@ -216,6 +228,9 @@ public:
         texture.desc = desc;
         texture.pixels.assign(size, 0);
         std::copy(initial.begin(), initial.end(), texture.pixels.begin());
+        if (m_recording) {
+            m_stats.upload_bytes += initial.size();
+        }
         if (has(desc.usage, TextureUsage::sampled)) {
             texture.read = allocate_descriptor();
         }
@@ -311,6 +326,8 @@ public:
     void end_frame() override {
         GIANT_ASSERT(m_recording, "end_frame without begin_frame");
         m_list.end();
+        // No GPU: the frame is "finished" at once.
+        m_timings.swap(m_list.timings());
         // As in D3D12: buffers decay to common once the frame's work is done,
         // so each frame barriers them again before use.
         m_buffers.for_each([](BufferHandle, NullBuffer& b) { b.state = ResourceState::common; });
@@ -329,6 +346,8 @@ public:
     }
 
     const FrameStats& last_frame_stats() const override { return m_last_stats; }
+    std::span<const GpuTiming> gpu_timings() const override { return m_timings; }
+    float gpu_frame_ms() const override { return 0.0f; }
 
     std::vector<u8> read_texture(TextureHandle h) override {
         GIANT_ASSERT(!m_recording, "read_texture inside a frame");
@@ -392,6 +411,7 @@ private:
     bool m_recording = false;
     FrameStats m_stats;
     FrameStats m_last_stats;
+    std::vector<GpuTiming> m_timings; // of the last frame ended
     u64 m_frames = 0;
 };
 
@@ -433,10 +453,13 @@ void NullCommandList::begin() {
     m_have_push = false;
     m_index_buffer = {};
     m_transient_used = 0;
+    m_timings.clear();
+    m_open_timings.clear();
 }
 
 void NullCommandList::end() {
     GIANT_ASSERT(!m_in_pass, "end_frame inside a render pass");
+    GIANT_ASSERT(m_open_timings.empty(), "end_frame with a timing scope still open");
     // Transient memory is per frame: retire this frame's buffer.
     m_device.destroy(m_transient);
     m_transient = {};
@@ -772,6 +795,28 @@ void NullCommandList::draw_ui(TextureHandle target, const UiFrame& ui) {
     }
     m_device.stats().ui_draws += draws;
     m_device.stats().draws += draws;
+}
+
+void NullCommandList::begin_timing(const char* name) {
+    GIANT_ASSERT(name != nullptr, "a timing scope needs a name");
+    if (m_timings.size() >= k_max_gpu_timings) {
+        if (!m_timings_logged) {
+            m_timings_logged = true;
+            log_warning("rhi", "more than " + std::to_string(k_max_gpu_timings) +
+                                   " GPU timing scopes in a frame; the rest are not timed");
+        }
+        m_open_timings.push_back(k_untimed);
+        return;
+    }
+    m_open_timings.push_back(static_cast<u32>(m_timings.size()));
+    m_timings.push_back({name != nullptr ? name : "?", 0.0f});
+}
+
+void NullCommandList::end_timing() {
+    GIANT_ASSERT(!m_open_timings.empty(), "end_timing without begin_timing");
+    if (!m_open_timings.empty()) {
+        m_open_timings.pop_back();
+    }
 }
 
 } // namespace

@@ -194,6 +194,10 @@ def main() -> int:
         for _ in range(30):  # hovering at the end: what the view wants loads
             call("ping")
         left_waiting = tool("get_render_settings")["last_frame"]["streaming"]["waiting"]
+        gpu = tool("get_engine_info").get("gpu", {})  # GPU-culled frame, timestamped
+        if gpu.get("passes"):
+            passes = ", ".join(f"{p['name']} {p['ms']:.2f}" for p in gpu["passes"])
+            print(f"n1_gate: GPU time at the end {gpu['frame_ms']:.2f} ms ({passes} ms)")
         tool("set_render_settings", {"gpu_culling": False})
         for _ in range(3):
             call("ping")
