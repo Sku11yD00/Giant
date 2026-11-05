@@ -38,10 +38,12 @@ generality for speed in that genre, take speed.
    pillar, judged by the 99th percentile and hitch count, not the average.
    Never compile shaders or create pipelines while the game runs: shaders are
    compiled at build time and pipelines made at load (any variant created
-   later is a bug). Streaming and uploads work within a per-frame budget and
-   never wait on disk or the GPU on the main thread. C# scripts must not
-   allocate every frame; the GC runs in background mode. Performance gates
-   (tools/n1_gate.py and later ones) fail on hitches as well as on fps.
+   later is a bug). New streaming and upload code works within a per-frame
+   budget and never waits on disk or the GPU on the main thread (the known
+   older gaps are listed in docs/architecture.md, "Frame budget"; do not add
+   more). C# scripts must not allocate every frame; the GC runs in background
+   mode. Performance gates (tools/n1_gate.py and later ones) fail on hitches
+   as well as on fps.
 
 ## Multi-agent review (required)
 

@@ -52,9 +52,10 @@ public static unsafe class NativeHost
         }
         s_api = *(NativeApi*)api;
         s_mainThread = Environment.CurrentManagedThreadId;
-        // No stutter from the garbage collector: background collections
-        // only, no blocking full collections while the game runs (scripts
-        // should still avoid allocating every frame).
+        // Fewer garbage collector pauses: full collections run in the
+        // background instead of blocking (unless memory runs short). Young
+        // collections still pause, which is why scripts must not allocate
+        // every frame.
         GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
         return 0;
     }
@@ -95,12 +96,12 @@ public static unsafe class NativeHost
         }
         try
         {
-            ScriptSet scripts = s_scripts;
-            RunScripts(() =>
+            // A static lambda with its state passed in: no allocation per frame.
+            RunScripts(static (scripts, delta) =>
             {
                 s_context?.Drain(); // continuations of earlier awaits first
-                scripts.Update(deltaSeconds);
-            });
+                scripts.Update(delta);
+            }, s_scripts, deltaSeconds);
             return 0;
         }
         catch (Exception e)
@@ -167,14 +168,16 @@ public static unsafe class NativeHost
         }
     }
 
-    private static void RunScripts(Action action)
+    private static void RunScripts(Action action) => RunScripts(static (a, _) => a(), action, 0);
+
+    private static void RunScripts<T>(Action<T, float> action, T state, float value)
     {
         SynchronizationContext? previous = SynchronizationContext.Current;
         SynchronizationContext.SetSynchronizationContext(s_context);
         s_busy = true;
         try
         {
-            action();
+            action(state, value);
         }
         finally
         {

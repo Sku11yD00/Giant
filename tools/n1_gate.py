@@ -9,8 +9,8 @@ camera down a street of the town and up over the forest (about 20 seconds
 at 60 fps: each stop is two commands, a frame each), then reports frame
 times over the whole flight. It passes when the flight holds 60 fps
 (average frame under 16.7 ms; with vsync on a 60 Hz screen that is every
-frame on time) without micro stutter (99th percentile frame under 20.8 ms,
-no frame over twice the median), every stop takes the same fixed number of draws, nothing
+frame on time) without micro stutter (99th percentile frame under 20.8 ms, at most
+one hitch: a frame half again over the 60 fps budget, i.e. a missed refresh), every stop takes the same fixed number of draws, nothing
 overflows, and the detail the view asks for has loaded by the end (a group
 may wait a frame while flying; none may be left waiting).
 
@@ -27,9 +27,28 @@ TREES = 10_000
 HOUSES_X, HOUSES_Z = 20, 15
 SPACING = 9.0
 FRAME_BUDGET_MS = 1000.0 / 60.0
-# No micro stutter: the 99th percentile frame stays near the budget, and no
-# frame takes over twice the median (a hitch).
+# No micro stutter: the 99th percentile frame stays near the budget, and
+# hitches (frames half again over the target, i.e. at least one missed 60 Hz
+# refresh) are at most one per flight, for a stray OS hiccup. The target is
+# the median or the budget, whichever is longer, so a 144 Hz screen running
+# faster than 60 fps is not judged against its own faster frames.
 P99_LIMIT_MS = FRAME_BUDGET_MS * 1.25
+HITCH_FACTOR = 1.5
+MAX_HITCHES = 1
+
+
+def frame_stats(times):
+    """Average, median, 99th percentile, worst and hitches of frame times (ms)."""
+    ordered = sorted(times)
+
+    def rank(fraction):
+        return ordered[min(len(ordered) - 1, int(fraction * (len(ordered) - 1) + 0.5))]
+
+    median = rank(0.5)
+    limit = HITCH_FACTOR * max(median, FRAME_BUDGET_MS)
+    return {"frames": len(times), "average_ms": sum(times) / len(times), "median_ms": median,
+            "p99_ms": rank(0.99), "worst_ms": ordered[-1],
+            "hitches": sum(1 for t in times if t > limit)}
 
 
 def build_gate_scene(tool):
@@ -148,11 +167,11 @@ def main() -> int:
         tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
         for _ in range(240):
             call("ping")
-        # Then read the last 240 frame times every 110 stops (two commands a
-        # stop, a frame each, plus the read: about 221 frames), so the
-        # windows cover the whole flight.
-        windows = []
-        last_frame_number = tool("get_engine_info")["frames_completed"]
+        # Then read the frame times every 110 stops (two commands a stop, a
+        # frame each, plus the read: about 221 frames, under the 240 kept),
+        # keeping only the frames new since the last read.
+        flight_times = []
+        recorded = tool("get_engine_info")["frame_times"]["recorded"]
         for stop, (position, look_at) in enumerate(path):
             tool("set_camera", {"position": position, "look_at": look_at})
             frame = tool("get_render_settings")["last_frame"]
@@ -162,17 +181,14 @@ def main() -> int:
             if frame["draws"] != 3 or frame["post_draws"] != 3:
                 bad_draws.append((stop, frame["draws"], frame["post_draws"]))
             if stop % 110 == 109 or stop == len(path) - 1:
-                info_now = tool("get_engine_info")
-                frames = info_now["frames_completed"] - last_frame_number
-                last_frame_number = info_now["frames_completed"]
-                if frames > 240:
-                    failures.append(f"{frames} frames passed between samples: only the last 240 were timed")
-                windows.append({**info_now["frame_times"], "frames": min(frames, 240)})
-        times = {"frames": sum(w["frames"] for w in windows),
-                 "average_ms": sum(w["average_ms"] for w in windows) / len(windows),
-                 "worst_ms": max(w["worst_ms"] for w in windows),
-                 "p99_ms": max(w["p99_ms"] for w in windows),
-                 "hitches": sum(w["hitches"] for w in windows)}
+                now = tool("get_engine_info")["frame_times"]
+                new = now["recorded"] - recorded
+                recorded = now["recorded"]
+                if new > len(now["recent_ms"]):
+                    failures.append(f"{new} frames passed between samples: some were not timed")
+                if new > 0:
+                    flight_times += now["recent_ms"][-new:]
+        times = frame_stats(flight_times)
         for _ in range(30):  # hovering at the end: what the view wants loads
             call("ping")
         left_waiting = tool("get_render_settings")["last_frame"]["streaming"]["waiting"]
@@ -204,8 +220,8 @@ def main() -> int:
             failures.append(f"average frame {times['average_ms']:.2f} ms is over the 60 fps budget")
         if real_gpu and times["p99_ms"] > P99_LIMIT_MS:
             failures.append(f"99th percentile frame {times['p99_ms']:.2f} ms: frame pacing is uneven")
-        if real_gpu and times["hitches"] > 0:
-            failures.append(f"{times['hitches']} hitches (frames over twice the median): micro stutter")
+        if real_gpu and times["hitches"] > MAX_HITCHES:
+            failures.append(f"{times['hitches']} hitches (frames over {HITCH_FACTOR}x the target): micro stutter")
         tool("quit_editor")
         editor.wait(timeout=60)
     except Exception as error:

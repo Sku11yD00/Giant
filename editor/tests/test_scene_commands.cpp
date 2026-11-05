@@ -236,4 +236,15 @@ GIANT_TEST("editor: frame times report consistency, not just the average") {
     t.add(40.0f);
     t.add(40.0f);
     GIANT_CHECK(t.percentile(0.99f) == 40.0f && t.hitches() == 4);
+    const std::vector<float> order = t.in_order();
+    GIANT_CHECK(order.size() == FrameTimes::k_frames && order.back() == 40.0f);
+    GIANT_CHECK(order[order.size() - 4] == 16.0f); // the oldest of the last four is steady
+    FrameTimes few;
+    few.add(16.7f);
+    few.add(33.4f); // one missed refresh at 60 Hz
+    few.add(16.7f);
+    GIANT_CHECK(few.hitches() == 1 && few.in_order().front() == 16.7f);
+    FrameTimes fast; // 144 Hz: 7 ms frames, a 7.5 ms one is noise, not a hitch
+    for (int i = 0; i < 10; ++i) fast.add(i == 5 ? 7.5f : 7.0f);
+    GIANT_CHECK(fast.hitches() == 0);
 }

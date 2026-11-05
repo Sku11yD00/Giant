@@ -36,6 +36,14 @@ struct FrameTimes {
     usize count = 0; // frames recorded, ever
     void add(float frame_ms) { ms[count++ % k_frames] = frame_ms; }
     usize size() const { return std::min(count, k_frames); }
+    // The recorded times, oldest first.
+    std::vector<float> in_order() const {
+        std::vector<float> out;
+        out.reserve(size());
+        const usize start = count > k_frames ? count % k_frames : 0;
+        for (usize i = 0; i < size(); ++i) out.push_back(ms[(start + i) % k_frames]);
+        return out;
+    }
     float average() const {
         float sum = 0.0f;
         for (usize i = 0; i < size(); ++i) sum += ms[i];
@@ -56,9 +64,11 @@ struct FrameTimes {
         const auto rank = static_cast<usize>(fraction * static_cast<float>(size() - 1) + 0.5f);
         return sorted[std::min(rank, size() - 1)];
     }
-    // Stutters: frames over twice the median (a felt hitch at any frame rate).
+    // Stutters: frames half again over the median (at least one missed
+    // display refresh) and over it by more than 2 ms (not timer noise).
     usize hitches() const {
-        const float limit = 2.0f * percentile(0.5f);
+        const float median = percentile(0.5f);
+        const float limit = std::max(1.5f * median, median + 2.0f);
         usize n = 0;
         for (usize i = 0; i < size(); ++i) n += ms[i] > limit ? usize{1} : usize{0};
         return n;
