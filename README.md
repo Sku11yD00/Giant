@@ -26,7 +26,8 @@ The earlier Godot-based work is archived on the branches
 
 ## Build
 
-Needs CMake 3.25+, Ninja, and a C++20 compiler (MSVC 2022, Clang 16+ or GCC 13+).
+Needs CMake 3.25+, Ninja, Git, and a C++20 compiler (MSVC 2022, Clang 16+ or GCC 13+).
+On Linux, SDL3 also needs the X11 headers (`sudo apt install libx11-dev libxext-dev`).
 
 ```sh
 cmake --preset dev          # debug build with sanitizers (Linux)
