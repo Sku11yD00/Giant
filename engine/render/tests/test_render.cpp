@@ -459,6 +459,28 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     const auto unfiltered = draw(false, false, false);
     frame.settings.specular_antialiasing = true;
     GIANT_CHECK(differing(unfiltered) <= pixels.size() / 50);
+    // A small, mirror-like sphere a few pixels wide: its normals turn fast
+    // across each pixel, so the filter must widen (dim) its highlight.
+    std::vector<Instance> shiny(1);
+    shiny[0].mesh = renderer->builtin(BuiltinMesh::sphere);
+    shiny[0].position = camera + DVec3{0.0, 0.0, -12.0};
+    shiny[0].scale = {0.8f, 0.8f, 0.8f};
+    std::vector<Material> mirror(1);
+    mirror[0].base_color = {0.05f, 0.05f, 0.05f};
+    mirror[0].roughness = 0.05f;
+    mirror[0].metallic = 1.0f;
+    frame.instances = shiny;
+    frame.materials = mirror;
+    frame.lighting.sun_direction = {0.0f, 0.0f, 1.0f}; // behind the camera: the highlight faces it
+    frame.settings.specular_antialiasing = false;
+    const auto sharp = draw(false, false, false);
+    frame.settings.specular_antialiasing = true;
+    const auto filtered = draw(false, false, false);
+    usize widened = 0;
+    for (usize i = 0; i < sharp.size() && i < filtered.size(); ++i) {
+        widened += std::abs(int{sharp[i]} - int{filtered[i]}) > 2 ? 1 : 0;
+    }
+    GIANT_CHECK(widened > 0);
     device->destroy(target);
     renderer.reset();
     device->wait_idle();

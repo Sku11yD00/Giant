@@ -163,11 +163,19 @@ endif()
 
 # SMAA's precomputed area and search textures (MIT licence), as C arrays.
 # The shader is our own port (engine/render/shaders/smaa.slang).
-FetchContent_Declare(smaa
-  GIT_REPOSITORY https://github.com/iryoku/smaa.git
-  GIT_TAG 71c806a838bdd7d517df19192a20f0c61b3ca29d
-)
-FetchContent_MakeAvailable(smaa) # no CMake project of its own: sources only
+# Only the two headers are downloaded, pinned by commit and hash.
+set(smaa_commit 71c806a838bdd7d517df19192a20f0c61b3ca29d)
+set(smaa_dir ${CMAKE_BINARY_DIR}/_deps/smaa-${smaa_commit})
+foreach(pair "AreaTex.h=1933bf43ce86ba71f7ed5f0fa94b148610c634dc3395b9bc67a817d51ee73af2"
+             "SearchTex.h=1fac315ab5f87b60083c9b8387af17f056204d3d1bf21500f2acc5b3e8c1a37a")
+  string(REPLACE "=" ";" pair "${pair}")
+  list(GET pair 0 smaa_file)
+  list(GET pair 1 smaa_hash)
+  if(NOT EXISTS ${smaa_dir}/${smaa_file})
+    file(DOWNLOAD https://raw.githubusercontent.com/iryoku/smaa/${smaa_commit}/Textures/${smaa_file}
+         ${smaa_dir}/${smaa_file} EXPECTED_HASH SHA256=${smaa_hash} TLS_VERIFY ON)
+  endif()
+endforeach()
 add_library(smaa_textures INTERFACE)
-target_include_directories(smaa_textures SYSTEM INTERFACE ${smaa_SOURCE_DIR}/Textures)
+target_include_directories(smaa_textures SYSTEM INTERFACE ${smaa_dir})
 add_library(third_party::smaa ALIAS smaa_textures)

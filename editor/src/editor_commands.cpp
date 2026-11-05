@@ -58,7 +58,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
         {"get_engine_info",
          "Describes the running editor: version, graphics backend and adapter, whether the GPU "
          "validation layer runs, frames completed, the last frame's draw counts, frame times over the last 240 frames (wall clock, so vsync and "
-         "MCP waits count) and the window size in pixels.",
+         "time spent running commands count) and the window size in pixels.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              const auto& adapter = state.device->adapter();

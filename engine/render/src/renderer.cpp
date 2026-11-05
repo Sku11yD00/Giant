@@ -510,8 +510,10 @@ void Renderer::read_gpu_stats() {
     if (newest < 3 && m_cull.readback[newest].valid()) {
         read_stats_slot(newest);
         const u32 draws = m_stats.draws;
+        const u32 post_draws = m_stats.post_draws;
         m_stats = m_gpu_stats;
         m_stats.draws = draws;
+        m_stats.post_draws = post_draws;
         copy_streaming_stats();
     }
 }
@@ -1084,6 +1086,8 @@ void Renderer::smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3
         ++m_stats.post_draws;
     };
     cmd.barrier(m_color, rhi::ResourceState::shader_read);
+    cmd.barrier(m_smaa_area, rhi::ResourceState::shader_read); // no-ops once there
+    cmd.barrier(m_smaa_search, rhi::ResourceState::shader_read);
     const rhi::Color zero{0.0f, 0.0f, 0.0f, 0.0f};
     pass(m_smaa_edges, m_edges, zero);
     cmd.barrier(m_edges, rhi::ResourceState::shader_read);

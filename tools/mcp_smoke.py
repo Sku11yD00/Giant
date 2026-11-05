@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 
-from n1_gate import build_gate_scene, flight_path
+from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
 TIMEOUT = 240  # seconds for the whole run (the N1 gate scene is large on the software renderer)
 
@@ -290,7 +290,8 @@ def n1_gate(tool, call, check):
     kit-built town and 10,000 trees in a fixed number of draws, with every bit of detail the
     view asks for loaded, and anti-aliasing that only touches edges."""
     materials = build_gate_scene(tool)
-    check(tool("list_entities")["count"] > 10_000, "the town and forest are placed")
+    count = tool("list_entities")["count"]
+    check(count == ENTITIES, f"the town and 10,000 trees are placed, got {count} entities")
     tool("set_render_settings", {"gpu_culling": False})
 
     def settle():  # CPU culling: what a frame asks for loads by the next
@@ -314,12 +315,14 @@ def n1_gate(tool, call, check):
     check(tool("get_render_settings")["last_frame"]["post_draws"] == 0, "anti-aliasing turns off")
     tool("set_render_settings", {"antialiasing": True, "gpu_culling": True})
     if tool("get_engine_info")["backend"] != "null":
-        # Popping: small steps down the street change the image a little each time, evenly;
-        # a level of detail switching visibly would stand out as a jump.
+        # Popping: small steps down the street change the image a little each time, evenly.
+        # This only catches large jumps (detail switching across much of the view, e.g. a
+        # whole level or the pool being flushed); the error bound (under a pixel) and the
+        # "nothing left waiting" checks above cover the fine scale.
         changes, previous = [], None
         for step in range(5):
             z = -20.0 - step * 0.2
-            tool("set_camera", {"position": [2.0, 1.8, z], "look_at": [2.0, 1.6, z - 30]})
+            tool("set_camera", {"position": [STREET_X, 1.8, z], "look_at": [STREET_X, 1.6, z - 30]})
             for _ in range(6):
                 call("ping")
             shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 480}})
