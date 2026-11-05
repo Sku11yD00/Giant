@@ -189,6 +189,7 @@ private:
     u32 m_updates = 0;
     std::vector<Candidate> m_candidates; // eviction heap, built once per update when needed
     bool m_candidates_built = false;
+    bool m_room_capped = false; // the last make_room stopped at its cap, candidates left
     bool m_tables_current = true;
     bool m_usage_logged = false;
     bool m_full_logged = false;

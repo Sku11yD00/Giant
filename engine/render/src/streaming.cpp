@@ -300,6 +300,7 @@ bool GeometryStreamer::load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 g
     if (units == 0) {
         return false; // a group always holds a cluster, so never
     }
+    m_room_capped = false;
     u64 at = m_alloc.allocate(units);
     if (at == PoolAllocator::k_none && make_room(units, frame_number)) {
         at = m_alloc.allocate(units);
@@ -376,6 +377,7 @@ bool GeometryStreamer::make_room(u64 units, u32 frame_number) {
     // Free holes need not touch: give up after freeing a few times what was
     // asked, rather than flush the pool for one load.
     u64 freed = 0;
+    m_room_capped = false;
     while (m_alloc.largest_free() < units && !m_candidates.empty() && freed < 4 * units + 4096) {
         std::pop_heap(m_candidates.begin(), m_candidates.end(), candidate_order);
         const Candidate c = m_candidates.back();
@@ -391,7 +393,9 @@ bool GeometryStreamer::make_room(u64 units, u32 frame_number) {
             }
         }
     }
-    return m_alloc.largest_free() >= units;
+    const bool room = m_alloc.largest_free() >= units;
+    m_room_capped = !room && !m_candidates.empty(); // more could go next frame
+    return room;
 }
 
 bool GeometryStreamer::grow_usage(rhi::CommandList* cmd) {
@@ -465,33 +469,16 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
     }
     bool pool_writable = false;
 
-    // Terminal groups first, whatever the budget: without them nothing draws.
-    for (u32 mi = 0; mi < m_meshes.size(); ++mi) {
-        MeshState& m = m_meshes[mi];
-        if (!m.live || m.roots_loaded) continue;
-        bool all = true;
-        for (u32 g = 0; g < m.root.size(); ++g) {
-            if (m.root[g] != 0 && m.resident[g] == 0) {
-                all = load(cmd, m, mi, g, frame_number, pool_writable) && all;
-            }
-        }
-        m.roots_loaded = all;
-        if (!all && !m_roots_logged) {
-            m_roots_logged = true;
-            log_error("render", "the geometry pool cannot hold a mesh's coarsest level; it is not drawn "
-                                "(raise the pool size)");
-        }
-    }
-
     // What culling asked for, with any missing parents (which must load
-    // first), coarse before fine.
+    // first), coarse before fine. Gathered before the terminal groups load,
+    // so the ancestors are marked in use before anything makes room.
     std::vector<Request> todo;
     std::vector<Request> stack;
     const u32 mark = ++m_updates; // per update, even if a frame number repeats
     for (const Request& r : m_wanted) {
         if (r.mesh >= m_meshes.size()) continue;
         MeshState& m = m_meshes[r.mesh];
-        if (!m.live || !m.roots_loaded || r.group >= m.resident.size()) continue;
+        if (!m.live || r.group >= m.resident.size()) continue;
         stack.push_back(r);
         while (!stack.empty()) {
             const Request q = stack.back();
@@ -512,6 +499,24 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         }
     }
     m_wanted.clear();
+    // Terminal groups first, whatever the budget: without them nothing draws.
+    for (u32 mi = 0; mi < m_meshes.size(); ++mi) {
+        MeshState& m = m_meshes[mi];
+        if (!m.live || m.roots_loaded) continue;
+        bool all = true;
+        for (u32 g = 0; g < m.root.size(); ++g) {
+            if (m.root[g] != 0 && m.resident[g] == 0) {
+                all = load(cmd, m, mi, g, frame_number, pool_writable) && all;
+            }
+        }
+        m.roots_loaded = all;
+        if (!all && !m_room_capped && !m_roots_logged) {
+            m_roots_logged = true;
+            log_error("render", "the geometry pool cannot hold a mesh's coarsest level; it is not drawn "
+                                "(raise the pool size)");
+        }
+    }
+
     std::sort(todo.begin(), todo.end(), [this](const Request& a, const Request& b) {
         const u32 da = m_meshes[a.mesh].depth[a.group];
         const u32 db = m_meshes[b.mesh].depth[b.group];
@@ -522,12 +527,13 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
     bool full = false;
     for (const Request& r : todo) {
         MeshState& m = m_meshes[r.mesh];
+        if (m.resident[r.group] != 0) continue; // a terminal group the loop above loaded
         const u64 size = units_of(m, r.group) * k_unit;
         bool parents_in = true;
         for (const u32 p : m.links.parents_of(r.group)) {
             parents_in = parents_in && m.resident[p] != 0;
         }
-        if (full || !parents_in || groups >= m_budget.groups_per_frame ||
+        if (full || !m.roots_loaded || !parents_in || groups >= m_budget.groups_per_frame ||
             (bytes > 0 && bytes + size > m_budget.bytes_per_frame)) {
             ++m_stats.waiting;
             continue;
@@ -535,6 +541,8 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         if (load(cmd, m, r.mesh, r.group, frame_number, pool_writable)) {
             bytes += size;
             ++groups;
+        } else if (m_room_capped) {
+            ++m_stats.waiting; // made what room one load may this frame; smaller ones may fit
         } else {
             ++m_stats.waiting;
             full = true; // nothing old enough to evict: try again next frame
