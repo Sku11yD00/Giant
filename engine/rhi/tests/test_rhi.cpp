@@ -1310,7 +1310,7 @@ GIANT_TEST("rhi: d3d12 uploads initial data inside a frame, used in that frame, 
     target_desc.format = Format::rgba8_unorm;
     target_desc.usage = TextureUsage::render_target;
     const TextureHandle target = device->create_texture(target_desc);
-    BufferHandle big; // over a staging chunk: one of its own
+    BufferHandle big; // over a staging chunk: split across chunks, one copy each
     constexpr u64 k_big_bytes = 9ull << 20;
     TextureHandle ramp;
 

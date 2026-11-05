@@ -11,7 +11,8 @@
 // guarantees (parents load first, and a group is only evicted once none of
 // its children are loaded). The terminal groups (the coarsest) load before
 // anything else and are never evicted; a mesh is drawn once all of its are
-// in (ready), so every mesh added can be drawn a frame or a few later.
+// in (ready), so every mesh added can be drawn a frame or a few later, if
+// the pool can hold it.
 //
 // Each frame culling asks for groups it needed but found missing, and marks
 // the loaded ones it used. The requests come back to the CPU a couple of
@@ -19,7 +20,10 @@
 // before fine, making room by evicting groups no frame has used for a while
 // (least recently used first). Everything a frame loads, terminal groups
 // included, fits the per-frame budget, so adding many meshes at once spreads
-// over frames instead of making one frame upload them all (rule 9). Geometry
+// over frames instead of making one frame upload them all (rule 9). New
+// meshes' terminal groups load in the order the meshes were added (except
+// that a mesh the pool cannot hold yet does not block the rest), and detail
+// waits while any of them waits for the budget. Geometry
 // comes from a CPU copy for now; the world's streaming (cells, from disk)
 // will feed the same path.
 //
@@ -72,7 +76,7 @@ struct StreamingStats {
     u32 total_groups = 0;
     u32 loaded = 0;  // this frame
     u32 evicted = 0; // this frame
-    u32 waiting = 0; // asked for but not loaded this frame (budget, or the pool is full)
+    u32 waiting = 0; // asked for, or a new mesh's terminal groups, not loaded this frame (budget, or the pool is full)
 };
 
 class GeometryStreamer {

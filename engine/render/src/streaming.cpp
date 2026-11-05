@@ -510,7 +510,9 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
     // Terminal groups first: without them a mesh is not drawn (ready() stays
     // false, so neither culling path sees its instances). Many meshes added
     // at once take several frames, in the order they were added: once one
-    // does not fit, the rest wait (a mesh part loaded continues next frame).
+    // does not fit the budget, the rest wait (a mesh part loaded continues
+    // next frame). A mesh the pool cannot hold yet does not block the rest.
+    // While any terminal group waits for the budget, detail waits too.
     bool roots_full = false;
     for (u32 mi = 0; mi < m_meshes.size(); ++mi) {
         MeshState& m = m_meshes[mi];
@@ -548,7 +550,7 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         const u32 db = m_meshes[b.mesh].depth[b.group];
         return da != db ? da > db : (a.mesh != b.mesh ? a.mesh < b.mesh : a.group < b.group);
     });
-    bool full = false;
+    bool full = roots_full;
     for (const Request& r : todo) {
         MeshState& m = m_meshes[r.mesh];
         if (m.resident[r.group] != 0) continue; // a terminal group the loop above loaded

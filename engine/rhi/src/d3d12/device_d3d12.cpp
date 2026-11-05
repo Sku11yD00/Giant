@@ -51,9 +51,17 @@ constexpr u32 k_max_dsvs = 256;
 constexpr u32 k_sampler_count = 4;
 constexpr u32 k_push_dwords = k_max_push_constant_bytes / 4;
 constexpr u32 k_transient_chunk_bytes = 4u << 20;
-// Staging for initial data of resources created inside a frame.
+// Staging for initial data of resources created inside a frame: made at
+// init (k_staging_chunks per frame slot, 32 MiB, the default streaming
+// budget's worth), so steady state nothing is allocated mid-frame. Chunks
+// grown past those stay until unused for k_staging_trim_frames frames.
 constexpr u64 k_staging_chunk_bytes = 8ull << 20;
+constexpr u32 k_staging_chunks = 4;
+constexpr u64 k_staging_trim_frames = 120;
 constexpr u64 k_staging_alignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT; // 512
+// A buffer's data is split over chunks in pieces of at least this (or what
+// is left), so a large buffer never needs a chunk of its own.
+constexpr u64 k_staging_min_piece = 64u << 10;
 // Timestamp queries per frame slot: the frame list's start and end, the
 // upload list's start, then a start and end per timing scope.
 constexpr u32 k_query_frame_begin = 0;
@@ -274,6 +282,8 @@ struct StagingChunk {
     u8* mapped = nullptr;
     u64 size = 0;
     u64 used = 0;
+    u64 last_used = 0;  // frames begun when last staged into
+    bool kept = false;  // made at init: never trimmed
 };
 
 struct Frame {
@@ -464,6 +474,16 @@ private:
         u8* data = nullptr;
     };
     Staging stage(u64 bytes);
+    // Like stage, but may give fewer bytes (at least k_staging_min_piece, or
+    // all of `bytes` when less): `size` says how many. For buffers, whose
+    // data can be copied in pieces.
+    struct StagingPiece {
+        Staging staging;
+        u64 size = 0;
+    };
+    StagingPiece stage_piece(u64 bytes);
+    // A new mapped chunk in `frame`'s staging; null resource (logged) on failure.
+    StagingChunk* add_staging_chunk(Frame& frame, u64 size, bool kept);
     // Inside a frame: the frame's upload list, opened on first use; null
     // when the device is lost. Runs before the frame's own list.
     ID3D12GraphicsCommandList* upload_list();
@@ -705,6 +725,13 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             frame.ticks = nullptr;
         }
     }
+    for (Frame& frame : m_frame_slots) {
+        for (u32 i = 0; i < k_staging_chunks; ++i) {
+            if (add_staging_chunk(frame, k_staging_chunk_bytes, true) == nullptr) {
+                return false;
+            }
+        }
+    }
     return init_globals();
 }
 
@@ -907,6 +934,9 @@ void D3D12Device::wait_for(u64 value) {
         return;
     }
     if (!check(m_fence->SetEventOnCompletion(value, m_fence_event), "SetEventOnCompletion")) {
+        // Without the wait, memory the GPU may still read would be reused.
+        log_error("rhi", "d3d12: cannot wait for the GPU; treating the device as lost");
+        m_lost = true;
         return;
     }
     // A healthy GPU finishes a frame in milliseconds. A hung one is treated
@@ -982,21 +1012,11 @@ bool D3D12Device::submit_immediate() {
     return !m_lost;
 }
 
-D3D12Device::Staging D3D12Device::stage(u64 bytes) {
-    GIANT_ASSERT(m_recording, "frame staging outside a frame");
-    Frame& frame = recording_frame();
-    for (StagingChunk& chunk : frame.staging) {
-        const u64 at = (chunk.used + k_staging_alignment - 1) / k_staging_alignment * k_staging_alignment;
-        if (at + bytes <= chunk.size) {
-            chunk.used = at + bytes;
-            return {chunk.resource.Get(), at, chunk.mapped + at};
-        }
-    }
-    // A new chunk; a larger upload gets one of its own. Steady state, the
-    // chunks made earlier are enough and nothing is allocated.
+StagingChunk* D3D12Device::add_staging_chunk(Frame& frame, u64 size, bool kept) {
     StagingChunk chunk;
-    chunk.size = std::max(k_staging_chunk_bytes,
-                          (bytes + k_staging_alignment - 1) / k_staging_alignment * k_staging_alignment);
+    chunk.size = (size + k_staging_alignment - 1) / k_staging_alignment * k_staging_alignment;
+    chunk.kept = kept;
+    chunk.last_used = m_frame_index;
     chunk.resource = create_committed_buffer(D3D12_HEAP_TYPE_UPLOAD, chunk.size,
                                              D3D12_RESOURCE_STATE_GENERIC_READ,
                                              D3D12_RESOURCE_FLAG_NONE, "frame upload staging");
@@ -1004,13 +1024,54 @@ D3D12Device::Staging D3D12Device::stage(u64 bytes) {
     const D3D12_RANGE no_read{0, 0};
     if (chunk.resource == nullptr ||
         !check(chunk.resource->Map(0, &no_read, &mapped), "Map(frame upload staging)")) {
-        return {};
+        return nullptr;
     }
     chunk.mapped = static_cast<u8*>(mapped);
-    chunk.used = bytes;
     frame.staging.push_back(std::move(chunk));
-    const StagingChunk& added = frame.staging.back();
-    return {added.resource.Get(), 0, added.mapped};
+    return &frame.staging.back();
+}
+
+D3D12Device::Staging D3D12Device::stage(u64 bytes) {
+    GIANT_ASSERT(m_recording, "frame staging outside a frame");
+    Frame& frame = recording_frame();
+    for (StagingChunk& chunk : frame.staging) {
+        const u64 at = (chunk.used + k_staging_alignment - 1) / k_staging_alignment * k_staging_alignment;
+        if (at + bytes <= chunk.size) {
+            chunk.used = at + bytes;
+            chunk.last_used = m_frame_index;
+            return {chunk.resource.Get(), at, chunk.mapped + at};
+        }
+    }
+    // Over what the chunks hold this frame (a burst, or a texture larger than
+    // a chunk): a chunk more, kept for reuse until long unused.
+    StagingChunk* added = add_staging_chunk(frame, std::max(k_staging_chunk_bytes, bytes), false);
+    if (added == nullptr) {
+        return {};
+    }
+    added->used = bytes;
+    return {added->resource.Get(), 0, added->mapped};
+}
+
+D3D12Device::StagingPiece D3D12Device::stage_piece(u64 bytes) {
+    GIANT_ASSERT(m_recording, "frame staging outside a frame");
+    Frame& frame = recording_frame();
+    const u64 least = std::min(bytes, k_staging_min_piece);
+    for (StagingChunk& chunk : frame.staging) {
+        const u64 at = (chunk.used + k_staging_alignment - 1) / k_staging_alignment * k_staging_alignment;
+        if (at + least <= chunk.size) {
+            const u64 size = std::min(bytes, chunk.size - at);
+            chunk.used = at + size;
+            chunk.last_used = m_frame_index;
+            return {{chunk.resource.Get(), at, chunk.mapped + at}, size};
+        }
+    }
+    StagingChunk* added = add_staging_chunk(frame, k_staging_chunk_bytes, false);
+    if (added == nullptr) {
+        return {};
+    }
+    const u64 size = std::min(bytes, added->size);
+    added->used = size;
+    return {{added->resource.Get(), 0, added->mapped}, size};
 }
 
 ID3D12GraphicsCommandList* D3D12Device::upload_list() {
@@ -1183,13 +1244,23 @@ BufferHandle D3D12Device::create_buffer(const BufferDesc& desc, std::span<const 
             // waits. COMMON promotes to COPY_DEST for the copy and decays back
             // when the upload list's own submission ends, so the tracked
             // state (common) holds for the frame's list.
-            const Staging staging = stage(initial.size());
-            ID3D12GraphicsCommandList* list = staging.data != nullptr ? upload_list() : nullptr;
+            // Large data goes in pieces, one copy each, so it fits the
+            // chunks already there.
+            ID3D12GraphicsCommandList* list = upload_list();
             ok = list != nullptr;
+            u64 done = 0;
+            while (ok && done < initial.size()) {
+                const StagingPiece piece = stage_piece(initial.size() - done);
+                ok = piece.staging.data != nullptr && piece.size > 0;
+                if (ok) {
+                    std::memcpy(piece.staging.data, initial.data() + done,
+                                static_cast<usize>(piece.size));
+                    list->CopyBufferRegion(b.resource.Get(), done, piece.staging.resource,
+                                           piece.staging.offset, piece.size);
+                    done += piece.size;
+                }
+            }
             if (ok) {
-                std::memcpy(staging.data, initial.data(), initial.size());
-                list->CopyBufferRegion(b.resource.Get(), 0, staging.resource, staging.offset,
-                                       initial.size());
                 m_stats.upload_bytes += initial.size();
             }
         } else {
@@ -1737,9 +1808,12 @@ CommandList* D3D12Device::begin_frame(SwapChain* swap_chain) {
     for (StagingChunk& chunk : frame.staging) {
         chunk.used = 0;
     }
-    // A one-off large upload's own chunk goes; the standard ones stay.
-    std::erase_if(frame.staging,
-                  [](const StagingChunk& chunk) { return chunk.size > k_staging_chunk_bytes; });
+    // Chunks grown past the ones made at init stay for reuse; only those
+    // unused for a long while go (rarely: after a burst, not per frame).
+    const u64 now = m_frame_index;
+    std::erase_if(frame.staging, [now](const StagingChunk& chunk) {
+        return !chunk.kept && now - chunk.last_used > k_staging_trim_frames;
+    });
     frame.timed_frame = 0;
     frame.upload_timed = false;
     frame.timings.clear();
@@ -1794,9 +1868,17 @@ void D3D12Device::end_frame() {
         if (check_gpu(m_upload_list->Close(), "Close(upload)")) {
             ID3D12CommandList* uploads[] = {m_upload_list.Get()};
             m_queue->ExecuteCommandLists(1, uploads);
+        } else {
+            // The frame's list would read resources never filled, and the
+            // upload's start time was never written: stop using the device.
+            frame.upload_timed = false;
+            if (!m_lost) {
+                log_error("rhi", "d3d12: the frame's upload list failed; treating the device as lost");
+                m_lost = true;
+            }
         }
     }
-    if (check_gpu(m_list->Close(), "Close")) {
+    if (check_gpu(m_list->Close(), "Close") && !m_lost) {
         ID3D12CommandList* lists[] = {m_list.Get()};
         m_queue->ExecuteCommandLists(1, lists);
     }

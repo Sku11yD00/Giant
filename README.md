@@ -69,13 +69,15 @@ Milestone **N1 Virtual geometry** (in progress):
 
 Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays sharp while moving, GI and reflections under 4 ms, no hitches):
 
-- Part 1 (done): stutter-free uploads and GPU timing. Meshes and textures
-  made while the game runs no longer stop the CPU to wait for the GPU: their
-  data is copied on the GPU ahead of the frame that uses them. Streaming
+- Part 1 (done): stutter-free uploads and GPU timing. Buffers and textures
+  made inside a frame (streaming's own tables, meshes added mid-frame) no
+  longer stop the CPU to wait for the GPU: their data is copied on the GPU
+  ahead of the frame that uses them. (The editor's mesh import still runs
+  between frames and waits; it moves into the frame with N3.) Streaming
   spreads even the coarsest levels of many newly added meshes over frames
   within its per-frame budget, so adding a forest at once never makes one
-  frame upload all of it. The GPU now times its own passes (culling, raster,
-  depth pyramid, shading, anti-aliasing, UI); the Engine panel and
+  frame upload all of it. The GPU now times its own passes (streaming,
+  culling, raster, depth pyramid, shading, anti-aliasing, UI); the Engine panel and
   `get_engine_info` show the times.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).

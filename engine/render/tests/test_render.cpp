@@ -323,7 +323,7 @@ GIANT_TEST("render: many meshes added in one frame draw once their coarsest leve
     constexpr u32 k_meshes = 48;
     std::vector<Instance> instances(k_meshes);
     rhi::CommandList* cmd = device->begin_frame(nullptr);
-    for (u32 i = 0; i < k_meshes; ++i) { // added mid-frame, as streaming does
+    for (u32 i = 0; i < k_meshes; ++i) { // added inside a frame: the staged, unwaited path
         instances[i].mesh = renderer->add_mesh(geometry::build_clusters(geometry::make_sphere(96, 48)));
         GIANT_CHECK(instances[i].mesh != k_no_mesh);
         instances[i].position = {static_cast<double>(i % 8) * 2.5 - 9.0, static_cast<double>(i / 8) * 2.5 - 6.0,

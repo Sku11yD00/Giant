@@ -63,8 +63,10 @@ follow without touching the renderer.
 - **Uploads (N2 part 1).** A buffer or texture created with initial data
   inside a frame never waits for the GPU: the data goes into the frame
   slot's staging memory (persistent, mapped upload-heap chunks of 8 MiB,
-  bump-allocated and reused once that slot's fence is reached; a larger
-  upload gets a chunk of its own) and is copied by the frame's upload list,
+  four per slot made at init, bump-allocated and reused once that slot's
+  fence is reached; a burst past them adds chunks, kept until unused for
+  120 frames; buffer data is split across chunks, so only a texture larger
+  than a chunk needs one of its own) and is copied by the frame's upload list,
   submitted on its own just before the frame's list on the same queue.
   Outside a frame (load time) the copy is still waited for.
   `FrameStats::upload_bytes` counts what a frame staged; the caller keeps
@@ -149,8 +151,9 @@ an offline cooker can use it without a device.
   parents before children (so the cut stays whole), and makes room by
   evicting the least recently used groups that have no loaded children. The
   coarsest level of every mesh loads first (within the same budget, meshes
-  in the order added) and is never evicted; a mesh draws once all of it is
-  in. Geometry comes from a CPU
+  in the order added, except that a mesh the pool cannot hold yet does not
+  block the rest; detail waits while any of it waits) and is never evicted;
+  a mesh draws once all of it is in. Geometry comes from a CPU
   copy for now; world streaming (cells, from disk) will feed the same path.
 - **Kits and shared materials (N1 part 5).** A kit is a named group of
   pieces (meshes, shapes, decals) kept in the scene; kit entities place it
@@ -209,19 +212,23 @@ over the target frame time). Where it stands:
   The C# GC runs in background, sustained low latency mode, and the script
   host does not allocate per frame.
 - Done in N2 part 1: resources created with initial data inside a frame
-  (the streamer growing its usage table, `Renderer::add_mesh`) are staged
-  and copied on the GPU before the frame, with no CPU wait; terminal
+  (the streamer growing its usage table, meshes added with
+  `Renderer::add_mesh` mid-frame) are staged and copied on the GPU before
+  the frame, with no CPU wait; terminal
   cluster groups load within the streamer's per-frame budget like
   everything else (a mesh draws once all of its are in, a few frames after
   many are added at once); the GPU times its passes, so budgets can be
   checked against measurements (`get_engine_info`, the Engine panel).
 - Known gaps: the 32 MiB per frame streaming budget is set by hand, not yet
-  tuned from those GPU timings; what callers create in one frame
-  (`Renderer::add_mesh` with many meshes at once) is not budgeted by the
-  device, so adding a big batch of meshes still uploads their metadata in
-  that one frame (the world's cell streaming spreads it, N3); mesh import
-  reads and clusters files on the main thread (editor only today; moves to
-  jobs with cell streaming, N3).
+  tuned from those GPU timings; what callers create in one frame is not
+  budgeted by the device, so a big batch of meshes added mid-frame uploads
+  all their metadata (clusters, groups, LOD tree) in that frame (the
+  world's cell streaming spreads it, N3); the streamer's zero-filled usage
+  table, when it grows, is uploaded outside the streaming budget (rare: on
+  doubling, and small); the editor's mesh import runs between frames, so
+  its `add_mesh` still takes the load-time path that waits for the GPU, and
+  it reads and clusters files on the main thread (editor only today; both
+  move into the frame and onto jobs with cell streaming, N3).
 
 | GPU work | Budget |
 | --- | --- |
