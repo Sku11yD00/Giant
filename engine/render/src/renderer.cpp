@@ -26,7 +26,8 @@ constexpr u32 k_max_instances =
     std::min<u32>(65535u * 64u, rhi::k_max_transient_allocation / sizeof(gpu::Instance));
 constexpr u32 k_vertices_per_cluster = geometry::k_cluster_max_triangles * 3;
 constexpr u32 k_max_mesh_groups = 65535; // per dimension of a mesh dispatch
-constexpr u32 k_max_cpu_clusters = 1u << 22; // mesh groups in one dispatch, in all
+// Mesh groups in one dispatch: whole rows of 65535 under the 2^22 total.
+constexpr u32 k_max_cpu_clusters = 64u * k_max_mesh_groups;
 
 template <typename T>
 std::span<const u8> bytes_of(const std::vector<T>& v) {
@@ -446,7 +447,9 @@ void Renderer::read_stats_slot(u32 slot) {
     s.instances = counters[gpu::k_slot_instances];
     s.occluded_instances = counters[gpu::k_slot_occluded_instances];
     s.occluded_clusters = counters[gpu::k_slot_occluded_clusters];
-    s.overflow = counters[gpu::k_slot_overflow] != 0;
+    // A full retest list costs time only (the geometry is drawn at once);
+    // a full queue or visible list drops geometry.
+    s.overflow = (counters[gpu::k_slot_overflow] & (gpu::k_overflow_queue | gpu::k_overflow_visible)) != 0;
     if (s.overflow && !m_overflow_logged) {
         m_overflow_logged = true;
         log_warning("render", "GPU culling lists overflowed (flags " +
@@ -489,10 +492,14 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
         lod.scale = in.scale;
         m_selected.clear();
         geometry::select_clusters(data, lod, m_selected);
-        if (!m_selected.empty()) {
+        if (!m_selected.empty() && m_entries.size() / 2 < k_max_cpu_clusters) {
             ++m_stats.instances;
         }
         for (const u32 c : m_selected) {
+            if (m_entries.size() / 2 >= k_max_cpu_clusters) {
+                m_stats.overflow = true; // one mesh dispatch takes no more
+                break;
+            }
             m_entries.push_back(slot);
             m_entries.push_back(c);
             m_stats.triangles += data.clusters[c].triangle_count;
@@ -860,18 +867,13 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_gpu_stats = {};
         if (!gpu) {
             select_on_cpu(frame, view_proj, height);
-            // One mesh dispatch takes at most 2^22 groups (32 MiB of entries,
-            // well inside one transient allocation).
+            // select_on_cpu stops at what one mesh dispatch takes (16 MiB of
+            // entries, well inside one transient allocation).
             static_assert(u64{k_max_cpu_clusters} * 8 <= rhi::k_max_transient_allocation);
-            if (m_entries.size() / 2 > k_max_cpu_clusters) {
-                if (!m_cpu_clusters_logged) {
-                    m_cpu_clusters_logged = true;
-                    log_warning("render", "more than " + std::to_string(k_max_cpu_clusters) +
-                                              " clusters chosen on the CPU; the rest are not drawn");
-                }
-                m_entries.resize(usize{k_max_cpu_clusters} * 2);
-                m_stats.clusters = k_max_cpu_clusters;
-                m_stats.overflow = true;
+            if (m_stats.overflow && !m_cpu_clusters_logged) {
+                m_cpu_clusters_logged = true;
+                log_warning("render", "more than " + std::to_string(k_max_cpu_clusters) +
+                                          " clusters chosen on the CPU; the rest are not drawn");
             }
             data.entry_count = static_cast<u32>(m_entries.size() / 2);
             if (data.entry_count > 0) {

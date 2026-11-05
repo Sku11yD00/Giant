@@ -107,7 +107,7 @@ struct RenderStats {
     bool from_gpu = false;
     u32 occluded_instances = 0; // hidden in the first pass (GPU, occlusion on)
     u32 occluded_clusters = 0;
-    bool overflow = false; // a GPU list was full: some geometry was dropped
+    bool overflow = false; // a list was full: some geometry was dropped
 };
 
 class Renderer {
