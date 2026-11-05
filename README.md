@@ -49,6 +49,14 @@ Milestone **N1 Virtual geometry** (in progress):
   a few frames as the camera moves (coarser clusters stand in until then),
   and detail nobody has looked at for a while makes room. The Engine panel
   shows how full the pool is.
+- Part 5 (done): kits and decals. A kit is a reusable group of pieces (a
+  modular wall, a house, a tree with its rocks) placed any number of times;
+  editing the kit updates every placement, and every placement shares its
+  meshes and materials, so a town of a thousand houses is drawn in the same
+  few passes as one. Decals stamp colour and roughness onto whatever is
+  under them (mud, scorch marks, cracked ground from a giant's footfall),
+  with five shapes for now. Try "+ Decal" and "Selected to kit" in the
+  Scene panel.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

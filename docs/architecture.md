@@ -135,6 +135,24 @@ an offline cooker can use it without a device.
   evicting the least recently used groups that have no loaded children. The
   coarsest level of every mesh is always loaded. Geometry comes from a CPU
   copy for now; world streaming (cells, from disk) will feed the same path.
+- **Kits and shared materials (N1 part 5).** A kit is a named group of
+  pieces (meshes, shapes, decals) kept in the scene; kit entities place it
+  any number of times, and changing the kit changes every placement. The
+  editor expands placements into instances each frame and gives equal
+  materials one entry in a per-frame material table, which instances
+  reference by index. An instance is 64 bytes (its 3x4 matrix, mesh,
+  material and largest scale; the normal matrix is worked out in the
+  shader). Draw calls do not grow with instances, meshes or materials:
+  everything goes through the same raster and shading passes.
+- **Decals (N1 part 5, `src/decals.h`, `shaders/decals.slang`).** A decal
+  is a box that stamps a material onto whatever lies inside it, from its
+  local +Y. The CPU projects each box to the screen and lists it in every
+  16-pixel tile it covers; the shading pass tests only its tile's decals,
+  in order, and blends their colour, roughness, metallic and emissive over
+  the surface before lighting. Masks are shapes for now (disc, rectangle,
+  ring, seeded splat and cracks), anti-aliased to the pixel's footprint;
+  image stamps arrive with textures. Surfaces facing away from the stamp
+  take none of it, and the box's top and bottom fade out.
 - **CPU path.** `gpu_culling = false` chooses the cut on the CPU (frustum
   only) and feeds the same raster and shading passes; tests use it for
   exact counts.

@@ -6,6 +6,7 @@
 // then exposure and the Khronos PBR Neutral tone mapper, which keeps base
 // colours true until highlights roll off. Written to an sRGB target.
 #include "common.slang"
+#include "decals.slang"
 
 struct ResolvePush {
     float4 background; // linear; where nothing was drawn
@@ -18,9 +19,17 @@ struct ResolvePush {
     uint visible;      // read descriptor of the visible list
     uint visible_offset;
     uint vis;          // read descriptor of the visibility buffer (rg32_uint)
+    uint materials;    // the frame's material table, the default last
+    uint material_offset;
+    uint material_count;
+    uint decals;       // decals, tiles and entries (src/decals.h)
+    uint decal_offset;
+    uint tile_offset;
+    uint entry_offset;
+    uint tile_columns; // 0: no decals
+    uint tile_rows;
     uint pad0;
     uint pad1;
-    uint pad2;
 };
 ConstantBuffer<ResolvePush> push : register(b0);
 
@@ -32,13 +41,6 @@ float4 vs_main(uint vertex_id : SV_VertexID) : SV_Position {
 }
 
 static const float k_pi = 3.14159265;
-
-// normalize() that returns `fallback` instead of NaN for a zero vector
-// (the camera on a surface, or looking straight into the sun).
-float3 safe_normalize(float3 v, float3 fallback) {
-    const float len2 = dot(v, v);
-    return len2 > 1e-12 ? v * rsqrt(len2) : fallback;
-}
 
 // GGX / Trowbridge-Reitz normal distribution.
 float d_ggx(float n_dot_h, float alpha) {
@@ -145,11 +147,23 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
 
-    const float3 base = inst.base_roughness.rgb;
+    // The instance's material (the CPU keeps the index in range), then
+    // the decals over this pixel.
+    ByteAddressBuffer materials = read_buffer(push.materials);
+    const uint material_at = push.material_offset + min(inst.material, push.material_count) * 32;
+    const float4 base_roughness = load4(materials, material_at);
+    const float4 emissive_metallic = load4(materials, material_at + 16);
+    float3 base = base_roughness.rgb;
+    float rough = base_roughness.a;
+    float metal = emissive_metallic.a;
+    float3 emissive = emissive_metallic.rgb;
+    const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
+    apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
+                 push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
     // Clamped so a mirror-smooth surface keeps a visible, stable highlight.
-    const float roughness = clamp(inst.base_roughness.a, 0.045, 1.0);
+    const float roughness = clamp(rough, 0.045, 1.0);
     const float alpha = roughness * roughness;
-    const float metallic = saturate(inst.emissive_metallic.a);
+    const float metallic = saturate(metal);
     const float3 f0 = lerp(float3(0.04, 0.04, 0.04), base, metallic);
     const float3 diffuse_color = base * (1.0 - metallic);
 
@@ -171,6 +185,6 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float3 env_fresnel = f0 + (max(1.0 - roughness, f0) - f0) * pow(1.0 - n_dot_v, 5.0);
     color += diffuse_color * ambient_diffuse + env_fresnel * ambient_specular * (1.0 - 0.7 * roughness);
 
-    color += inst.emissive_metallic.rgb;
+    color += emissive;
     return float4(tone_map(color * f.exposure), 1.0);
 }

@@ -17,7 +17,6 @@ using Json = nlohmann::ordered_json;
 
 constexpr const char* k_format = "giant-scene";
 constexpr int k_version = 1;
-constexpr usize k_max_name_bytes = 128;
 
 } // namespace
 
@@ -27,17 +26,53 @@ const char* to_string(Shape shape) {
     case Shape::sphere: return "sphere";
     case Shape::plane: return "plane";
     case Shape::mesh: return "mesh";
+    case Shape::kit: return "kit";
+    case Shape::decal: return "decal";
     }
     return "cube";
 }
 
 std::optional<Shape> shape_from_string(std::string_view name) {
-    for (const Shape s : {Shape::cube, Shape::sphere, Shape::plane, Shape::mesh}) {
+    for (const Shape s : {Shape::cube, Shape::sphere, Shape::plane, Shape::mesh, Shape::kit, Shape::decal}) {
         if (name == to_string(s)) {
             return s;
         }
     }
     return std::nullopt;
+}
+
+const char* to_string(DecalShape shape) {
+    switch (shape) {
+    case DecalShape::disc: return "disc";
+    case DecalShape::rectangle: return "rectangle";
+    case DecalShape::ring: return "ring";
+    case DecalShape::splat: return "splat";
+    case DecalShape::cracks: return "cracks";
+    }
+    return "disc";
+}
+
+std::optional<DecalShape> decal_shape_from_string(std::string_view name) {
+    for (const DecalShape s : {DecalShape::disc, DecalShape::rectangle, DecalShape::ring, DecalShape::splat,
+                               DecalShape::cracks}) {
+        if (name == to_string(s)) {
+            return s;
+        }
+    }
+    return std::nullopt;
+}
+
+const Kit* Scene::find_kit(std::string_view name) const {
+    for (const Kit& k : kits) {
+        if (k.name == name) {
+            return &k;
+        }
+    }
+    return nullptr;
+}
+
+Kit* Scene::find_kit(std::string_view name) {
+    return const_cast<Kit*>(static_cast<const Scene*>(this)->find_kit(name));
 }
 
 Vec3 sun_direction(const Lighting& lighting) {
@@ -161,6 +196,36 @@ Json dvec3_json(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
 
 } // namespace
 
+namespace {
+
+// What entities and kit pieces share: shape, files, transform, material.
+void write_look(Json& out, Shape shape, const std::string& mesh, const std::string& kit,
+                const Transform& t, const Material& m, const DecalSettings& d) {
+    const Quat& q = t.rotation;
+    out["shape"] = to_string(shape);
+    out["position"] = dvec3_json(t.position);
+    out["rotation"] = Json::array({q.x, q.y, q.z, q.w});
+    out["scale"] = vec3_json(t.scale);
+    out["material"] = {
+        {"base_color", vec3_json(m.base_color)},
+        {"roughness", m.roughness},
+        {"metallic", m.metallic},
+        {"emissive", vec3_json(m.emissive)},
+    };
+    if (!mesh.empty()) {
+        out["mesh"] = mesh;
+    }
+    if (!kit.empty()) {
+        out["kit"] = kit;
+    }
+    if (shape == Shape::decal) {
+        out["decal"] = {{"shape", to_string(d.shape)}, {"opacity", d.opacity}, {"softness", d.softness},
+                        {"seed", d.seed}};
+    }
+}
+
+} // namespace
+
 std::string save_scene(const Scene& scene) {
     const Lighting& l = scene.lighting;
     Json out;
@@ -177,28 +242,23 @@ std::string save_scene(const Scene& scene) {
         {"ambient_intensity", l.ambient_intensity},
         {"exposure", l.exposure},
     };
+    Json kits = Json::array();
+    for (const Kit& k : scene.kits) {
+        Json pieces = Json::array();
+        for (const KitPiece& p : k.pieces) {
+            Json piece = {{"name", p.name}};
+            write_look(piece, p.shape, p.mesh, {}, p.transform, p.material, p.decal);
+            pieces.push_back(std::move(piece));
+        }
+        kits.push_back({{"name", k.name}, {"pieces", std::move(pieces)}});
+    }
+    if (!kits.empty()) {
+        out["kits"] = std::move(kits);
+    }
     Json entities = Json::array();
     for (const Entity& e : scene.entities()) {
-        const Quat& q = e.transform.rotation;
-        Json entity = {
-            {"id", e.id},
-            {"name", e.name},
-            {"shape", to_string(e.shape)},
-            {"visible", e.visible},
-            {"position", dvec3_json(e.transform.position)},
-            {"rotation", Json::array({q.x, q.y, q.z, q.w})},
-            {"scale", vec3_json(e.transform.scale)},
-            {"material",
-             {
-                 {"base_color", vec3_json(e.material.base_color)},
-                 {"roughness", e.material.roughness},
-                 {"metallic", e.material.metallic},
-                 {"emissive", vec3_json(e.material.emissive)},
-             }},
-        };
-        if (!e.mesh.empty()) {
-            entity["mesh"] = e.mesh;
-        }
+        Json entity = {{"id", e.id}, {"name", e.name}, {"visible", e.visible}};
+        write_look(entity, e.shape, e.mesh, e.kit, e.transform, e.material, e.decal);
         entities.push_back(std::move(entity));
     }
     out["entities"] = std::move(entities);
@@ -399,34 +459,95 @@ void read_lighting(const Json& json, Lighting& l, std::string& error) {
     r.finish();
 }
 
+// Shape, files, transform, material and decal of an entity or kit piece.
+void read_look(Reader& r, const std::string& path, Shape& shape, std::string& mesh, std::string* kit,
+               Transform& t, Material& material, DecalSettings& decal, std::string& error) {
+    std::string name = to_string(shape);
+    r.string("shape", name);
+    if (r.ok()) {
+        if (const auto parsed = shape_from_string(name); parsed && (kit != nullptr || *parsed != Shape::kit)) {
+            shape = *parsed;
+        } else {
+            r.fail("shape", kit != nullptr ? "must be cube, sphere, plane, mesh, kit or decal"
+                                           : "must be cube, sphere, plane, mesh or decal (kits do not nest)");
+        }
+    }
+    r.string("mesh", mesh, false, k_max_mesh_path_bytes);
+    if (r.ok() && shape == Shape::mesh && mesh.empty()) {
+        r.fail("mesh", "is needed when the shape is mesh");
+    }
+    if (kit != nullptr) {
+        r.string("kit", *kit, false, k_max_name_bytes);
+        if (r.ok() && shape == Shape::kit && kit->empty()) {
+            r.fail("kit", "is needed when the shape is kit");
+        }
+    }
+    r.vec3("position", t.position, -1e8, 1e8);
+    r.quat("rotation", t.rotation);
+    r.vec3("scale", t.scale, 0.0001, 1e6);
+    if (const Json* m = r.get("material", false); m != nullptr && r.ok()) {
+        Reader mr(*m, path + ".material", error);
+        mr.vec3("base_color", material.base_color, 0, 1);
+        mr.number("roughness", material.roughness, 0, 1);
+        mr.number("metallic", material.metallic, 0, 1);
+        mr.vec3("emissive", material.emissive, 0, 1000);
+        mr.finish();
+    }
+    if (const Json* d = r.get("decal", false); d != nullptr && r.ok()) {
+        Reader dr(*d, path + ".decal", error);
+        std::string mask = to_string(decal.shape);
+        dr.string("shape", mask);
+        if (dr.ok()) {
+            if (const auto parsed = decal_shape_from_string(mask)) {
+                decal.shape = *parsed;
+            } else {
+                dr.fail("shape", "must be disc, rectangle, ring, splat or cracks");
+            }
+        }
+        dr.number("opacity", decal.opacity, 0, 1);
+        dr.number("softness", decal.softness, 0, 1);
+        u64 seed = u64{decal.seed} + 1; // id() wants 1 or more
+        if (const Json* v = dr.get("seed", false); v != nullptr && dr.ok()) {
+            if (!v->is_number_unsigned() || v->get<u64>() > 0xFFFF'FFFFull) {
+                dr.fail("seed", "must be a whole number from 0 to 4294967295");
+            } else {
+                seed = v->get<u64>() + 1;
+            }
+        }
+        decal.seed = static_cast<u32>(seed - 1);
+        dr.finish();
+    }
+}
+
 void read_entity(const Json& json, const std::string& path, Entity& e, std::string& error) {
     Reader r(json, path, error);
     r.id("id", e.id, true);
     r.string("name", e.name, false, k_max_name_bytes);
-    std::string shape = to_string(e.shape);
-    r.string("shape", shape);
-    if (r.ok()) {
-        if (const auto parsed = shape_from_string(shape)) {
-            e.shape = *parsed;
-        } else {
-            r.fail("shape", "must be cube, sphere, plane or mesh");
-        }
-    }
-    r.string("mesh", e.mesh, false, k_max_mesh_path_bytes);
-    if (r.ok() && e.shape == Shape::mesh && e.mesh.empty()) {
-        r.fail("mesh", "is needed when the shape is mesh");
-    }
     r.boolean("visible", e.visible);
-    r.vec3("position", e.transform.position, -1e8, 1e8);
-    r.quat("rotation", e.transform.rotation);
-    r.vec3("scale", e.transform.scale, 0.0001, 1e6);
-    if (const Json* material = r.get("material", false); material != nullptr && r.ok()) {
-        Reader m(*material, path + ".material", error);
-        m.vec3("base_color", e.material.base_color, 0, 1);
-        m.number("roughness", e.material.roughness, 0, 1);
-        m.number("metallic", e.material.metallic, 0, 1);
-        m.vec3("emissive", e.material.emissive, 0, 1000);
-        m.finish();
+    read_look(r, path, e.shape, e.mesh, &e.kit, e.transform, e.material, e.decal, error);
+    r.finish();
+}
+
+void read_kit(const Json& json, const std::string& path, Kit& k, std::string& error) {
+    Reader r(json, path, error);
+    r.string("name", k.name, true, k_max_name_bytes);
+    if (r.ok() && k.name.empty()) {
+        r.fail("name", "must not be empty");
+    }
+    if (const Json* pieces = r.get("pieces", true); pieces != nullptr && r.ok()) {
+        if (!pieces->is_array() || pieces->size() > k_max_kit_pieces) {
+            r.fail("pieces", "must be an array of at most " + std::to_string(k_max_kit_pieces) + " pieces");
+        } else {
+            for (usize i = 0; i < pieces->size() && error.empty(); ++i) {
+                const std::string piece_path = path + ".pieces[" + std::to_string(i) + "]";
+                KitPiece p;
+                Reader pr((*pieces)[i], piece_path, error);
+                pr.string("name", p.name, false, k_max_name_bytes);
+                read_look(pr, piece_path, p.shape, p.mesh, nullptr, p.transform, p.material, p.decal, error);
+                pr.finish();
+                k.pieces.push_back(std::move(p));
+            }
+        }
     }
     r.finish();
 }
@@ -459,6 +580,23 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     if (const Json* lighting = root.get("lighting", false); lighting != nullptr && root.ok()) {
         read_lighting(*lighting, scene.lighting, error);
     }
+    if (const Json* kits = root.get("kits", false); kits != nullptr && root.ok()) {
+        if (!kits->is_array()) {
+            root.fail("kits", "must be an array");
+        } else {
+            for (usize i = 0; i < kits->size() && error.empty(); ++i) {
+                const std::string path = "kits[" + std::to_string(i) + "]";
+                Kit kit;
+                read_kit((*kits)[i], path, kit, error);
+                if (error.empty() && scene.find_kit(kit.name) != nullptr) {
+                    error = path + ".name \"" + kit.name + "\" is used twice";
+                }
+                if (error.empty()) {
+                    scene.kits.push_back(std::move(kit));
+                }
+            }
+        }
+    }
     if (const Json* entities = root.get("entities", false); entities != nullptr && root.ok()) {
         if (!entities->is_array()) {
             root.fail("entities", "must be an array");
@@ -469,6 +607,9 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
                 read_entity((*entities)[i], path, entity, error);
                 if (error.empty() && scene.find(entity.id) != nullptr) {
                     error = path + ".id " + std::to_string(entity.id) + " is used twice";
+                }
+                if (error.empty() && entity.shape == Shape::kit && scene.find_kit(entity.kit) == nullptr) {
+                    error = path + ".kit \"" + entity.kit + "\" is not one of the scene's kits";
                 }
                 if (error.empty()) {
                     scene.add(std::move(entity));

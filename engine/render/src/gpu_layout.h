@@ -39,16 +39,35 @@ struct FrameConstants {
 };
 static_assert(sizeof(FrameConstants) == 432);
 
+// 64 bytes, so 10,000 trees are 640 KB a frame. The normal matrix is
+// worked out in the shader (the cofactors of the model's 3x3).
 struct Instance {
-    float model[12];  // rows of the 3x4 model matrix (camera-relative)
-    float normal[12]; // rows of the normal matrix, w unused
+    float model[12]; // rows of the 3x4 model matrix (camera-relative)
+    u32 mesh;
+    u32 material; // into the frame's material table (checked on the CPU)
+    float max_scale;
+    u32 pad;
+};
+static_assert(sizeof(Instance) == 64);
+
+struct Material {
     float base_roughness[4];
     float emissive_metallic[4];
-    u32 mesh;
-    float max_scale;
-    u32 pad[2];
 };
-static_assert(sizeof(Instance) == 144);
+static_assert(sizeof(Material) == 32);
+
+// A decal: camera-relative positions to its unit box ([-0.5, 0.5] on each
+// axis; it stamps from +Y).
+struct Decal {
+    float rows[12];
+    float color_opacity[4];
+    float emissive_roughness[4];
+    float metallic;
+    float softness;
+    u32 shape;
+    u32 seed;
+};
+static_assert(sizeof(Decal) == 96);
 
 struct MeshEntry {
     u32 residency;  // u32 per group: its geometry's byte offset in the pool, or k_not_resident
@@ -213,8 +232,17 @@ struct ResolvePush {
     u32 visible;
     u32 visible_offset;
     u32 vis;
-    u32 pad[3];
+    u32 materials;
+    u32 material_offset;
+    u32 material_count;
+    u32 decals; // decals, tiles and entries share one upload
+    u32 decal_offset;
+    u32 tile_offset;
+    u32 entry_offset;
+    u32 tile_columns; // 0: no decals
+    u32 tile_rows;
+    u32 pad[2];
 };
-static_assert(sizeof(ResolvePush) == 64);
+static_assert(sizeof(ResolvePush) == 96);
 
 } // namespace giant::render::gpu

@@ -1,6 +1,7 @@
 giant_module(render
   SOURCES
     src/renderer.cpp
+    src/decals.cpp
     src/streaming.cpp
   DEPENDS core rhi geometry
 )
@@ -23,6 +24,7 @@ giant_shaders(render
 giant_module_tests(render
   SOURCES
     tests/test_render.cpp
+    tests/test_decals.cpp
     tests/test_streaming.cpp
 )
 if(GIANT_BUILD_TESTS)

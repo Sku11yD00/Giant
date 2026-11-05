@@ -309,15 +309,17 @@ int run(const Options& options) {
     // After the registry, so scripts' OnStop can still run commands.
     ScriptRunner scripts(commands, state);
     state.scripts_to_load = options.scripts;
-    std::vector<render::Instance> instances; // reused every frame
+    editor::SceneFrame scene_frame; // reused every frame
     // Records the scene and the panels into `target` (an sRGB image).
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
-        editor::scene_instances(state.scene, *renderer, meshes, instances);
+        editor::scene_frame(state.scene, *renderer, meshes, scene_frame);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::scene_lighting(state.scene.lighting);
         input.settings = state.render_settings;
-        input.instances = instances;
+        input.instances = scene_frame.instances;
+        input.materials = scene_frame.materials;
+        input.decals = scene_frame.decals;
         renderer->render(cmd, target, input);
         state.scene_stats = renderer->last_stats();
         cmd.draw_ui(target, ui->frame());

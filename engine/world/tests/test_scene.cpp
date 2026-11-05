@@ -122,7 +122,7 @@ GIANT_TEST("world: loading reports what is wrong and changes nothing") {
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"name": "x"}]})",
                 "entities[0].id is missing");
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shape": "cone"}]})",
-                "entities[0].shape must be cube, sphere, plane or mesh");
+                "entities[0].shape must be cube, sphere, plane, mesh, kit or decal");
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1}, {"id": 1}]})",
                 "entities[1].id 1 is used twice");
     check_error(R"({"format": "giant-scene", "version": 1,
@@ -262,4 +262,42 @@ GIANT_TEST("world: imported meshes are saved by path") {
     const std::string too_long = R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shape": "mesh", "mesh": ")" +
                                  std::string(k_max_mesh_path_bytes + 1, 'a') + R"("}]})";
     GIANT_CHECK(load_scene(too_long, bad).has_value());
+}
+
+GIANT_TEST("world: kits and decals save and load") {
+    Scene scene;
+    Kit kit;
+    kit.name = "lamp";
+    KitPiece pole;
+    pole.name = "pole";
+    pole.transform.scale = {0.1f, 3.0f, 0.1f};
+    KitPiece mark;
+    mark.shape = Shape::decal;
+    mark.decal = {DecalShape::cracks, 0.5f, 0.25f, 77};
+    kit.pieces = {pole, mark};
+    scene.kits.push_back(kit);
+    Entity placed = named("lamp 1", Shape::kit);
+    placed.kit = "lamp";
+    scene.add(placed);
+    Entity stamp = named("scorch", Shape::decal);
+    stamp.decal.shape = DecalShape::splat;
+    stamp.decal.seed = 4294967295u;
+    scene.add(stamp);
+    const std::string text = save_scene(scene);
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(save_scene(loaded) == text);
+    GIANT_CHECK(loaded.find_kit("lamp") != nullptr && loaded.find_kit("lamp")->pieces[1].decal.seed == 77);
+    GIANT_CHECK(loaded.entities()[1].decal.shape == DecalShape::splat);
+    GIANT_CHECK(loaded.entities()[1].decal.seed == 4294967295u);
+
+    // A placement of a kit the file does not have, and nested kits, are refused.
+    std::string missing = text;
+    missing.replace(missing.find("\"kit\": \"lamp\""), 13, "\"kit\": \"lump\"");
+    const auto error = load_scene(missing, loaded);
+    GIANT_CHECK(error.has_value() && contains(error->message, "not one of the scene's kits"));
+    std::string nested = text;
+    nested.replace(nested.find("\"shape\": \"cube\""), 15, "\"shape\": \"kit\"");
+    const auto nest_error = load_scene(nested, loaded);
+    GIANT_CHECK(nest_error.has_value() && contains(nest_error->message, "kits do not nest"));
 }

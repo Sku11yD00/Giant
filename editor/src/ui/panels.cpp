@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <string_view>
 #include <utility>
 
 namespace giant::editor {
@@ -187,6 +188,15 @@ void EditorPanels::draw_outliner() {
         }
         ImGui::SameLine();
     }
+    if (ImGui::SmallButton("+ Decal")) {
+        // A dark 2 m splat reaching half a metre up and down.
+        create_ahead({{"shape", "decal"},
+                      {"scale", {2.0, 1.0, 2.0}},
+                      {"base_color", {0.05, 0.04, 0.03}},
+                      {"roughness", 0.9},
+                      {"decal", {{"shape", "splat"}}}});
+    }
+    ImGui::SameLine();
     ImGui::BeginDisabled(m_state.scene.find(m_state.selected) == nullptr);
     if (ImGui::SmallButton("Delete")) {
         run("delete_entities", {{"ids", {m_state.selected}}});
@@ -199,6 +209,28 @@ void EditorPanels::draw_outliner() {
     ImGui::SameLine();
     if ((ImGui::SmallButton("+ Mesh") || entered) && m_import_path[0] != '\0') {
         create_ahead({{"mesh", std::string(m_import_path.data())}});
+    }
+
+    // Kits: place one ahead of the camera, or turn the selection into one.
+    if (!m_state.scene.kits.empty()) {
+        ImGui::TextDisabled("Kits:");
+        for (const world::Kit& kit : m_state.scene.kits) {
+            ImGui::SameLine();
+            ImGui::PushID(kit.name.c_str());
+            if (ImGui::SmallButton(("+ " + kit.name).c_str())) {
+                create_ahead({{"kit", kit.name}});
+            }
+            ImGui::PopID();
+        }
+    }
+    {
+        const world::Entity* selected = m_state.scene.find(m_state.selected);
+        ImGui::BeginDisabled(selected == nullptr || selected->shape == world::Shape::kit);
+        if (ImGui::SmallButton("Selected to kit")) {
+            const std::string name = "kit " + std::to_string(m_state.scene.kits.size() + 1);
+            run("create_kit", {{"name", name}, {"from_entities", {m_state.selected}}, {"replace_entities", true}});
+        }
+        ImGui::EndDisabled();
     }
 
     const auto& entities = m_state.scene.entities();
@@ -244,9 +276,45 @@ void EditorPanels::draw_properties() {
         set("name", std::string(name.data()));
     }
     int shape = static_cast<int>(e->shape);
-    const char* const shapes[] = {"cube", "sphere", "plane", "mesh"};
+    const char* const shapes[] = {"cube", "sphere", "plane", "mesh", "kit", "decal"};
     if (ImGui::Combo("Shape", &shape, shapes, IM_ARRAYSIZE(shapes))) {
-        set("shape", shapes[shape]);
+        if (shapes[shape] == std::string_view("kit") && e->kit.empty() && !m_state.scene.kits.empty()) {
+            run("set_entity", {{"id", id}, {"kit", m_state.scene.kits.front().name}}, edit_group());
+        } else {
+            set("shape", shapes[shape]);
+        }
+    }
+    if (e->shape == world::Shape::kit) {
+        if (ImGui::BeginCombo("Kit", e->kit.c_str())) {
+            for (const world::Kit& kit : m_state.scene.kits) {
+                if (ImGui::Selectable(kit.name.c_str(), kit.name == e->kit)) {
+                    set("kit", kit.name);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (const world::Kit* kit = m_state.scene.find_kit(e->kit)) {
+            ImGui::TextDisabled("%zu pieces (their own materials)", kit->pieces.size());
+        }
+    }
+    if (e->shape == world::Shape::decal) {
+        int mask = static_cast<int>(e->decal.shape);
+        const char* const masks[] = {"disc", "rectangle", "ring", "splat", "cracks"};
+        if (ImGui::Combo("Stamp", &mask, masks, IM_ARRAYSIZE(masks))) {
+            set("decal", {{"shape", masks[mask]}});
+        }
+        float opacity = e->decal.opacity;
+        if (ImGui::SliderFloat("Opacity", &opacity, 0.0f, 1.0f)) {
+            set("decal", {{"opacity", std::clamp(opacity, 0.0f, 1.0f)}});
+        }
+        float softness = e->decal.softness;
+        if (ImGui::SliderFloat("Softness", &softness, 0.0f, 1.0f)) {
+            set("decal", {{"softness", std::clamp(softness, 0.0f, 1.0f)}});
+        }
+        int seed = static_cast<int>(std::min<u32>(e->decal.seed, 0x7FFF'FFFFu));
+        if (ImGui::InputInt("Seed", &seed)) {
+            set("decal", {{"seed", std::max(seed, 0)}});
+        }
     }
     if (e->shape == world::Shape::mesh || !e->mesh.empty()) {
         ImGui::TextWrapped("Mesh: %s", e->mesh.empty() ? "(none)" : e->mesh.c_str());
@@ -481,6 +549,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
                     stats.total_groups);
         if (stats.waiting > 0 || stats.streamed_in > 0) {
             ImGui::Text("Streaming: %u loaded, %u waiting", stats.streamed_in, stats.waiting);
+        }
+        ImGui::Text("Materials: %u shared, decals: %u in view", stats.materials, stats.decals);
+        if (stats.decal_overflow) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many decals on screen: some not drawn");
         }
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),

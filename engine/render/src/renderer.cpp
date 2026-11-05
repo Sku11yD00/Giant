@@ -3,6 +3,7 @@
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
 #include "giant/geometry/mesh.h"
+#include "decals.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
 #include "streaming.h"
@@ -26,6 +27,7 @@ constexpr u32 k_occluded_capacity = 1u << 18; // clusters retested in the second
 constexpr u32 k_max_instances =
     std::min<u32>(65535u * 64u, rhi::k_max_transient_allocation / sizeof(gpu::Instance));
 constexpr u32 k_vertices_per_cluster = geometry::k_cluster_max_triangles * 3;
+constexpr u32 k_max_materials = 1u << 20; // per frame (32 MiB)
 constexpr u32 k_max_mesh_groups = 65535; // per dimension of a mesh dispatch
 // Mesh groups in one dispatch: whole rows of 65535 under the 2^22 total.
 constexpr u32 k_max_cpu_clusters = 64u * k_max_mesh_groups;
@@ -49,11 +51,10 @@ void set4(float* out, const Vec3& v, float w) {
 
 u32 groups_of(u32 items, u32 per_group) { return (items + per_group - 1) / per_group; }
 
-gpu::Instance to_gpu(const Instance& in, const DVec3& camera) {
+gpu::Instance to_gpu(const Instance& in, const DVec3& camera, u32 material_count) {
     gpu::Instance out{};
     const Vec3 t = to_camera_relative(in.position, camera);
-    // Columns of R * S are the rotated axes scaled; the normal matrix is the
-    // inverse transpose, R * S^-1, so the same axes divided by the scale.
+    // Columns of R * S are the rotated axes, scaled.
     const Vec3 axes[3] = {rotate(in.rotation, {1, 0, 0}), rotate(in.rotation, {0, 1, 0}),
                           rotate(in.rotation, {0, 0, 1})};
     const float scale[3] = {in.scale.x, in.scale.y, in.scale.z};
@@ -63,17 +64,19 @@ gpu::Instance to_gpu(const Instance& in, const DVec3& camera) {
             const Vec3& a = axes[col];
             const float component = row == 0 ? a.x : row == 1 ? a.y : a.z;
             out.model[row * 4 + col] = component * scale[col];
-            // A zero scale flattens the mesh; keep its normals finite.
-            const float s = std::fabs(scale[col]) < 1e-12f ? 1e-12f : scale[col];
-            out.normal[row * 4 + col] = component / s;
         }
         out.model[row * 4 + 3] = translation[row];
-        out.normal[row * 4 + 3] = 0.0f;
     }
-    set4(out.base_roughness, in.base_color, in.roughness);
-    set4(out.emissive_metallic, in.emissive, in.metallic);
     out.mesh = in.mesh;
+    out.material = in.material < material_count ? in.material : material_count; // the default, last
     out.max_scale = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
+    return out;
+}
+
+gpu::Material to_gpu(const Material& m) {
+    gpu::Material out{};
+    set4(out.base_roughness, m.base_color, m.roughness);
+    set4(out.emissive_metallic, m.emissive, m.metallic);
     return out;
 }
 
@@ -84,6 +87,14 @@ void set_bounds(float* out, const Vec3& center, float radius) { set4(out, center
 // This frame's uploads, shared by the passes.
 struct Renderer::FrameData {
     rhi::TransientMemory frame;
+    rhi::TransientMemory materials; // the frame's, then the default
+    u32 material_count = 0;         // the frame's
+    rhi::TransientMemory decals;    // decals, tiles, entries (DecalBins)
+    u32 decal_offset = 0;
+    u32 tile_offset = 0;
+    u32 entry_offset = 0;
+    u32 tile_columns = 0; // 0: no decals this frame
+    u32 tile_rows = 0;
     rhi::TransientMemory instances;
     rhi::TransientMemory meshes;
     u32 instance_count = 0;
@@ -105,7 +116,7 @@ std::unique_ptr<Renderer> Renderer::create(rhi::Device& device, const RendererDe
 }
 
 Renderer::Renderer(ConstructKey, rhi::Device& device, const RendererDesc& desc)
-    : m_device(device), m_desc(desc) {}
+    : m_device(device), m_desc(desc), m_decal_bins(std::make_unique<DecalBins>()) {}
 
 Renderer::~Renderer() {
     // Deferred by the device until the GPU is done with them.
@@ -811,6 +822,50 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     data.occlusion = occlusion;
     data.use_mesh_shaders = settings.mesh_shaders && m_raster_mesh.valid();
 
+    // The material table, with the default appended (out-of-range indices).
+    const usize material_limit = std::min<usize>(frame.materials.size(), k_max_materials);
+    if (frame.materials.size() > material_limit && !m_materials_logged) {
+        m_materials_logged = true;
+        log_error("render", "more than " + std::to_string(k_max_materials) +
+                                " materials in one frame; instances using the rest draw the default");
+    }
+    m_gpu_materials.clear();
+    for (usize i = 0; i < material_limit; ++i) {
+        m_gpu_materials.push_back(to_gpu(frame.materials[i]));
+    }
+    m_gpu_materials.push_back(to_gpu(Material{}));
+    data.material_count = static_cast<u32>(material_limit);
+    data.materials = cmd.upload(bytes_of(m_gpu_materials));
+
+    // Decals in view, binned into screen tiles (lit view only).
+    if (!frame.decals.empty() && settings.debug_view == DebugView::lit) {
+        bin_decals(frame.decals, frame.view.position, view_proj, frustum, width, height, *m_decal_bins);
+    } else {
+        m_decal_bins->decals.clear();
+        m_decal_bins->overflow = false;
+    }
+    if (!m_decal_bins->decals.empty()) {
+        const DecalBins& bins = *m_decal_bins;
+        const usize decal_bytes = bins.decals.size() * sizeof(gpu::Decal);
+        const usize tile_bytes = bins.tiles.size() * 4;
+        const usize total = decal_bytes + tile_bytes + std::max<usize>(bins.entries.size(), 1) * 4;
+        data.decals = cmd.allocate(static_cast<u32>(total));
+        if (data.decals.data != nullptr) {
+            std::memcpy(data.decals.data, bins.decals.data(), decal_bytes);
+            std::memcpy(data.decals.data + decal_bytes, bins.tiles.data(), tile_bytes);
+            std::memcpy(data.decals.data + decal_bytes + tile_bytes, bins.entries.data(), bins.entries.size() * 4);
+            data.decal_offset = data.decals.offset;
+            data.tile_offset = data.decals.offset + static_cast<u32>(decal_bytes);
+            data.entry_offset = data.tile_offset + static_cast<u32>(tile_bytes);
+            data.tile_columns = bins.columns;
+            data.tile_rows = bins.rows;
+        }
+    }
+    if (m_decal_bins->overflow && !m_decals_logged) {
+        m_decals_logged = true;
+        log_warning("render", "too many decals on screen; some are not drawn");
+    }
+
     // Instances and the mesh table.
     std::vector<gpu::MeshEntry>& table = m_table;
     std::vector<bool>& used = m_used;
@@ -847,12 +902,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             data.instance_count = 0;
         } else {
             for (usize i = 0; i < m_valid.size(); ++i) {
-                const gpu::Instance g = to_gpu(frame.instances[m_valid[i]], frame.view.position);
+                const gpu::Instance g = to_gpu(frame.instances[m_valid[i]], frame.view.position, data.material_count);
                 std::memcpy(data.instances.data + i * sizeof(g), &g, sizeof(g));
             }
         }
     }
-    if (data.frame.data == nullptr || data.meshes.data == nullptr) {
+    if (data.frame.data == nullptr || data.meshes.data == nullptr || data.materials.data == nullptr) {
         return; // out of memory: the device is lost
     }
 
@@ -932,11 +987,23 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         push.visible_offset = data.entries.offset;
     }
     push.vis = m_device.read_descriptor(m_vis);
+    push.materials = data.materials.descriptor;
+    push.material_offset = data.materials.offset;
+    push.material_count = data.material_count;
+    push.decals = data.decals.data != nullptr ? data.decals.descriptor : data.frame.descriptor;
+    push.decal_offset = data.decal_offset;
+    push.tile_offset = data.tile_offset;
+    push.entry_offset = data.entry_offset;
+    push.tile_columns = data.tile_columns;
+    push.tile_rows = data.tile_rows;
     cmd.push(push);
     cmd.draw(3);
     ++m_stats.draws;
     cmd.end_render_pass();
     copy_streaming_stats();
+    m_stats.materials = data.material_count;
+    m_stats.decals = data.tile_columns != 0 ? static_cast<u32>(m_decal_bins->decals.size()) : 0;
+    m_stats.decal_overflow = m_decal_bins->overflow;
 }
 
 void Renderer::copy_streaming_stats() {

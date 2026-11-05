@@ -8,7 +8,10 @@
 // occlusion culling against a depth pyramid), and draws them with mesh
 // shaders (or a vertex-shader fallback) into a visibility buffer: per pixel,
 // which triangle covers it. One full-screen pass then shades every pixel
-// once: a sun with GGX specular and sky/ground ambient, tone mapped.
+// once: decals stamped on (binned into screen tiles on the CPU), then a sun
+// with GGX specular and sky/ground ambient, tone mapped. Draw calls do not
+// grow with instances, meshes or materials: every instance of every mesh
+// goes through the same few passes.
 //
 // The CPU can pick the clusters instead (RenderSettings::gpu_culling off):
 // the same cut, for reference and tests, on any backend.
@@ -31,8 +34,10 @@ namespace giant::render {
 
 namespace gpu {
 struct MeshEntry; // src/gpu_layout.h
+struct Material;
 }
 class GeometryStreamer; // src/streaming.h
+struct DecalBins;       // src/decals.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
@@ -45,15 +50,49 @@ enum class BuiltinMesh {
     plane,  // 1 m square at y = 0, facing +Y
 };
 
+// How a surface looks (metal/roughness PBR). Instances share them by index
+// into FrameInput::materials, so a kit used a thousand times sends its few
+// materials once.
+struct Material {
+    Vec3 base_color{0.8f, 0.8f, 0.8f}; // linear
+    float roughness = 0.5f;
+    float metallic = 0.0f;
+    Vec3 emissive{}; // linear
+};
+
 struct Instance {
     DVec3 position{};
     Quat rotation{};
     Vec3 scale{1.0f, 1.0f, 1.0f};
     MeshId mesh = 0;
-    Vec3 base_color{0.8f, 0.8f, 0.8f}; // linear
-    float roughness = 0.5f;
+    // Into FrameInput::materials; out of range draws the default Material.
+    u32 material = 0;
+};
+
+// The mask a decal stamps (shapes for now; image stamps arrive with textures).
+enum class DecalShape : u32 {
+    disc,      // round, soft-edged
+    rectangle, // the whole box face
+    ring,
+    splat,     // an irregular blot (seeded): mud, blood, scorch
+    cracks,    // cracked ground (seeded): impacts, giant footfalls
+};
+
+// A box that stamps a material onto whatever surfaces lie inside it, seen
+// from its local +Y (it projects downwards, along -Y). Later decals in the
+// list draw over earlier ones.
+struct Decal {
+    DVec3 position{};
+    Quat rotation{};
+    Vec3 size{1.0f, 1.0f, 1.0f}; // the box, metres: x and z the stamp, y its depth
+    Vec3 base_color{0.1f, 0.1f, 0.1f};
+    float opacity = 1.0f;
+    float roughness = 0.8f;
     float metallic = 0.0f;
-    Vec3 emissive{}; // linear
+    Vec3 emissive{};
+    DecalShape shape = DecalShape::disc;
+    float softness = 0.1f; // edge fade, as a fraction of the stamp
+    u32 seed = 0;          // varies splat and cracks
 };
 
 struct Lighting {
@@ -100,6 +139,8 @@ struct FrameInput {
     Lighting lighting;
     RenderSettings settings;
     std::span<const Instance> instances;
+    std::span<const Material> materials;
+    std::span<const Decal> decals;
 };
 
 struct RenderStats {
@@ -113,6 +154,9 @@ struct RenderStats {
     u32 occluded_instances = 0; // hidden in the first pass (GPU, occlusion on)
     u32 occluded_clusters = 0;
     bool overflow = false; // a list was full: some geometry was dropped
+    u32 materials = 0;     // in the frame's material table
+    u32 decals = 0;        // in view this frame (on the CPU: never late)
+    bool decal_overflow = false; // too many decals on screen: some were not drawn
     // Streaming (this frame, on the CPU: never late).
     u64 pool_bytes = 0;      // GPU memory for cluster geometry
     u64 pool_used_bytes = 0;
@@ -208,6 +252,7 @@ private:
     rhi::Device& m_device;
     RendererDesc m_desc;
     std::unique_ptr<GeometryStreamer> m_streamer;
+    std::unique_ptr<DecalBins> m_decal_bins; // this frame's, reused
     u32 m_request_count = 0; // GPU streaming requests in the slot read last
     u64 m_requests_taken = ~u64{0}; // the frame whose requests were taken last
     // Pipelines.
@@ -242,6 +287,8 @@ private:
     bool m_cull_buffers_logged = false;
     bool m_instances_logged = false;
     bool m_cpu_clusters_logged = false;
+    bool m_materials_logged = false;
+    bool m_decals_logged = false;
 
     std::vector<Mesh> m_meshes;
     std::vector<MeshId> m_builtin; // by BuiltinMesh
@@ -252,6 +299,7 @@ private:
     std::vector<u32> m_wanted;   // CPU culling: groups of one instance not loaded
     std::vector<u32> m_touched;  // CPU culling: loaded groups it used
     std::vector<gpu::MeshEntry> m_table; // the mesh table
+    std::vector<gpu::Material> m_gpu_materials;
     std::vector<bool> m_used;            // meshes drawn this frame
     RenderStats m_stats;
     RenderStats m_gpu_stats; // newest read back

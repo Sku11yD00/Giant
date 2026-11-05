@@ -26,13 +26,30 @@ constexpr EntityId k_max_entity_id = (u64{1} << 53) - 1;
 
 // Built-in shapes are about one metre: a 1 m cube, a 1 m wide sphere, a 1 m
 // square plane facing +Y. `mesh` draws the imported file in Entity::mesh.
-enum class Shape { cube, sphere, plane, mesh };
+// `kit` places every piece of the kit named in Entity::kit. `decal` stamps
+// its material onto the surfaces inside its box (1 m, scaled), from above.
+enum class Shape { cube, sphere, plane, mesh, kit, decal };
 
 // Longest Entity::mesh path, in bytes of UTF-8.
 constexpr usize k_max_mesh_path_bytes = 1024;
+// Longest entity, kit or piece name, in bytes of UTF-8.
+constexpr usize k_max_name_bytes = 128;
+constexpr usize k_max_kit_pieces = 4096;
 
 const char* to_string(Shape shape);
 std::optional<Shape> shape_from_string(std::string_view name);
+
+// What a decal stamps (render::DecalShape, by name in scenes).
+enum class DecalShape { disc, rectangle, ring, splat, cracks };
+const char* to_string(DecalShape shape);
+std::optional<DecalShape> decal_shape_from_string(std::string_view name);
+
+struct DecalSettings {
+    DecalShape shape = DecalShape::disc;
+    float opacity = 1.0f;  // 0 to 1
+    float softness = 0.1f; // edge fade, 0 (crisp) to 1, a fraction of the stamp
+    u32 seed = 0;          // varies splat and cracks
+};
 
 struct Transform {
     DVec3 position{};  // metres; doubles so a 20 km world keeps millimetres
@@ -57,8 +74,29 @@ struct Entity {
     // which is the project folder; not to the scene file), drawn
     // when shape is `mesh`. Kept when the shape changes, so it can change back.
     std::string mesh;
-    Material material;
+    // The kit drawn when shape is `kit` (kept when the shape changes).
+    std::string kit;
+    Material material; // unused by kits (their pieces have their own)
+    DecalSettings decal; // used when shape is `decal`
     bool visible = true;
+};
+
+// One part of a kit, placed relative to the kit entity's transform.
+struct KitPiece {
+    std::string name;
+    Shape shape = Shape::cube; // not `kit`: kits do not nest
+    std::string mesh;
+    Transform transform;
+    Material material;
+    DecalSettings decal;
+};
+
+// A reusable assembly of pieces (a modular wall, a house, a tree with its
+// rocks): placed any number of times by kit entities, which all share its
+// meshes and materials. Changing a kit changes every placement.
+struct Kit {
+    std::string name; // unique in the scene
+    std::vector<KitPiece> pieces;
 };
 
 // One sun plus sky and ground ambient light (a hemisphere): enough for a
@@ -103,9 +141,14 @@ public:
     // In creation order (the outliner's order).
     const std::vector<Entity>& entities() const { return m_entities; }
     usize size() const { return m_entities.size(); }
-    void clear(); // entities only; lighting is kept
+    void clear(); // entities only; lighting and kits are kept
 
     Lighting lighting;
+    // By name, in creation order. Names are unique (the commands and
+    // load_scene keep them so).
+    std::vector<Kit> kits;
+    const Kit* find_kit(std::string_view name) const;
+    Kit* find_kit(std::string_view name);
 
     // The id the next new entity gets.
     EntityId next_id() const { return m_next_id; }
