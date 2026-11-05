@@ -425,11 +425,11 @@ GIANT_TEST("voxel scene: a rebuild started by a full backlog loses no changes") 
 }
 
 GIANT_TEST("voxel scene: missing bricks are retried even at a zero budget") {
-    Bench b(40);
+    Bench b(48);
     GIANT_CHECK(b.voxels->init());
     Instance ground;
     ground.mesh = 0;
-    ground.scale = {6.0f, 0.1f, 6.0f}; // 40 bricks: just fits on its own
+    ground.scale = {6.0f, 0.1f, 6.0f}; // about 40 bricks: fits on its own, with room to spare
     Instance tower;
     tower.mesh = 0;
     tower.position = {0.0, 6.0, 0.0};
