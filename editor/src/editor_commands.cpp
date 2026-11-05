@@ -38,6 +38,20 @@ LogLevel parse_level(const std::string& name) {
 
 } // namespace
 
+std::vector<rhi::GpuTiming> gpu_passes(const rhi::Device& device) {
+    std::vector<rhi::GpuTiming> passes;
+    for (const rhi::GpuTiming& t : device.gpu_timings()) {
+        const auto same = std::find_if(passes.begin(), passes.end(),
+                                       [&t](const rhi::GpuTiming& p) { return p.name == t.name; });
+        if (same != passes.end()) {
+            same->ms += t.ms;
+        } else {
+            passes.push_back(t);
+        }
+    }
+    return passes;
+}
+
 const char* mcp_instructions() {
     return "This is the Giant Engine editor. Every tool is an editor command; changes made "
            "through tools can be reverted with `undo` and repeated with `redo`, and "
@@ -58,10 +72,16 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
         {"get_engine_info",
          "Describes the running editor: version, graphics backend and adapter, whether the GPU "
          "validation layer runs, frames completed, the last frame's draw counts, frame times over the last 240 frames (average, median, 99th percentile, worst, hitches: frames 1.5x the median and 2 ms over it, and the times themselves, oldest first; wall clock, so vsync and "
-         "time spent running commands count) and the window size in pixels.",
+         "time spent running commands count), the GPU's own time for the newest finished frame "
+         "and each of its passes (gpu: frame_ms and passes, from GPU timestamps; 0 ms on the "
+         "null backend) and the window size in pixels.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              const auto& adapter = state.device->adapter();
+             Json passes = Json::array();
+             for (const rhi::GpuTiming& pass : gpu_passes(*state.device)) {
+                 passes.push_back({{"name", pass.name}, {"ms", pass.ms}});
+             }
              return CommandResult::success(
                  {{"editor_version", k_version},
                   {"backend", rhi::to_string(state.device->backend())},
@@ -83,6 +103,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                                    {"hitches", state.frame_times.hitches()},
                                    {"recorded", state.frame_times.count},
                                    {"recent_ms", state.frame_times.in_order()}}},
+                  {"gpu", {{"frame_ms", state.device->gpu_frame_ms()}, {"passes", std::move(passes)}}},
                   {"window", {{"pixel_width", state.window->pixel_width()},
                               {"pixel_height", state.window->pixel_height()},
                               {"point_width", state.window->point_width()},

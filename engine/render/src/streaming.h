@@ -9,15 +9,19 @@
 // coarser clusters made from it are drawn instead; that keeps the cut whole
 // as long as a loaded group's parents are loaded too, which the streamer
 // guarantees (parents load first, and a group is only evicted once none of
-// its children are loaded). The terminal groups (the coarsest) are always
-// loaded, so every mesh can always be drawn.
+// its children are loaded). The terminal groups (the coarsest) load before
+// anything else and are never evicted; a mesh is drawn once all of its are
+// in (ready), so every mesh added can be drawn a frame or a few later.
 //
 // Each frame culling asks for groups it needed but found missing, and marks
 // the loaded ones it used. The requests come back to the CPU a couple of
 // frames later; the streamer loads them within a per-frame budget, coarse
 // before fine, making room by evicting groups no frame has used for a while
-// (least recently used first). Geometry comes from a CPU copy for now; the
-// world's streaming (cells, from disk) will feed the same path.
+// (least recently used first). Everything a frame loads, terminal groups
+// included, fits the per-frame budget, so adding many meshes at once spreads
+// over frames instead of making one frame upload them all (rule 9). Geometry
+// comes from a CPU copy for now; the world's streaming (cells, from disk)
+// will feed the same path.
 //
 // Pool and residency writes are copies recorded at the start of a frame, on
 // the one queue: the GPU finishes earlier frames (which read the old state)
@@ -78,6 +82,8 @@ public:
     static constexpr u32 k_usage_interval = 8;   // frames between usage read-backs
     static constexpr u32 k_keep_frames = 30;     // unused this long before eviction
 
+    // What one update may load (terminal groups and detail together). The
+    // first group of an update always loads, so nothing waits forever.
     struct Budget {
         u64 bytes_per_frame = 32ull << 20;
         u32 groups_per_frame = 4096;
@@ -95,7 +101,8 @@ public:
 
     // Lays out `data`'s geometry for streaming, writing each cluster's
     // vertex and triangle offsets into `clusters` (one per data.clusters).
-    // Its terminal groups load on the next update. False (logged) when a
+    // Its terminal groups load from the next update on, within the per-frame
+    // budget; it draws once they are all in (ready). False (logged) when a
     // cluster is over the limits or the GPU is out of memory.
     bool add(u32 mesh, const geometry::ClusterMesh& data, std::vector<gpu::Cluster>& clusters);
     void remove(u32 mesh);

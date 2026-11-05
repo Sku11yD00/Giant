@@ -566,6 +566,7 @@ void Renderer::raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bo
         cmd.barrier(m_cull.counters, rhi::ResourceState::shader_read);
         cmd.barrier(m_cull.visible, rhi::ResourceState::shader_read);
     }
+    cmd.begin_timing("raster");
     rhi::RenderPassDesc desc;
     const rhi::LoadOp load = pass == 0 ? rhi::LoadOp::clear : rhi::LoadOp::load;
     desc.colors[0] = {m_vis, load, {0.0f, 0.0f, 0.0f, 0.0f}};
@@ -606,9 +607,11 @@ void Renderer::raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bo
         ++m_stats.draws;
     }
     cmd.end_render_pass();
+    cmd.end_timing();
 }
 
 void Renderer::build_hzb(rhi::CommandList& cmd) {
+    cmd.begin_timing("HZB");
     cmd.barrier(m_depth, rhi::ResourceState::shader_read);
     cmd.barrier(m_hzb, rhi::ResourceState::shader_write);
     gpu::HzbPush push{};
@@ -630,6 +633,7 @@ void Renderer::build_hzb(rhi::CommandList& cmd) {
                      groups_of(std::max(m_hzb_height >> mip, 1u), 8));
     }
     cmd.barrier(m_hzb, rhi::ResourceState::shader_read);
+    cmd.end_timing();
 }
 
 void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
@@ -695,6 +699,8 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
         }
     };
 
+    // Timed apart from the raster passes and HZB builds between them.
+    cmd.begin_timing("culling");
     cmd.barrier(m_hzb, rhi::ResourceState::shader_read);
     rw(true);
     cmd.set_pipeline(m_cull_reset);
@@ -714,11 +720,13 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
     }
     walk_trees(0);
     prepare(0, 1, 0, k_visible_capacity, gpu::k_args_raster);
+    cmd.end_timing();
     raster(cmd, data, 0, true);
 
     if (data.occlusion) {
         // Pass 1: what pass 0 found hidden, against the HZB of what it drew.
         build_hzb(cmd);
+        cmd.begin_timing("culling");
         prepare(1, 0, gpu::k_slot_occluded_instances, c.instance_capacity, gpu::k_args_instances);
         prepare(1, 0, gpu::k_slot_occluded_clusters, k_occluded_capacity, gpu::k_args_retest);
         rw(false);
@@ -736,6 +744,7 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
         cmd.dispatch_indirect(c.args, gpu::k_args_retest);
         walk_trees(1);
         prepare(1, 1, 0, k_visible_capacity, gpu::k_args_raster);
+        cmd.end_timing();
         raster(cmd, data, 1, true);
         // For the next frame's first pass.
         build_hzb(cmd);
@@ -789,7 +798,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // Load what culling asked for (and the coarsest levels of new meshes)
     // before anything reads the geometry.
     const u32 frame_number = static_cast<u32>(m_device.frames_completed() + 1); // 0 means never
+    cmd.begin_timing("streaming");
     m_streamer->update(cmd, frame_number);
+    cmd.end_timing();
 
     // Instances with a live mesh.
     m_valid.clear();
@@ -1022,6 +1033,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // SMAA then smooths into the target.
     const bool antialias = settings.antialiasing && settings.debug_view == DebugView::lit;
     const rhi::TextureHandle shaded = antialias ? m_color : target;
+    cmd.begin_timing("shading");
     rhi::RenderPassDesc pass;
     const Vec3& bg = light.background;
     pass.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
@@ -1057,8 +1069,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.draw(3);
     ++m_stats.draws;
     cmd.end_render_pass();
+    cmd.end_timing();
     if (antialias) {
+        cmd.begin_timing("anti-aliasing");
         smaa(cmd, target, bg);
+        cmd.end_timing();
     }
     copy_streaming_stats();
     m_stats.materials = data.material_count;

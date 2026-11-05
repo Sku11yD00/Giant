@@ -67,9 +67,22 @@ Milestone **N1 Virtual geometry** (in progress):
 
       python tools/n1_gate.py giant_editor.exe
 
+Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays sharp while moving, GI and reflections under 4 ms, no hitches):
+
+- Part 1 (done): stutter-free uploads and GPU timing. Meshes and textures
+  made while the game runs no longer stop the CPU to wait for the GPU: their
+  data is copied on the GPU ahead of the frame that uses them. Streaming
+  spreads even the coarsest levels of many newly added meshes over frames
+  within its per-frame budget, so adding a forest at once never makes one
+  frame upload all of it. The GPU now times its own passes (culling, raster,
+  depth pyramid, shading, anti-aliasing, UI); the Engine panel and
+  `get_engine_info` show the times.
+
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
-close the window to exit. Keep the `D3D12` folder next to the exe. C# scripts need the .NET 10 runtime
+close the window to exit. Keep the `D3D12` folder next to the exe. The N1
+performance gate comes with it: in that folder, run
+`python n1_gate.py giant_editor.exe` (Python 3). C# scripts need the .NET 10 runtime
 (https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
 The earlier Godot-based work is archived on the branches

@@ -499,18 +499,44 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         }
     }
     m_wanted.clear();
-    // Terminal groups first, whatever the budget: without them nothing draws.
+    // This frame's loads, terminal groups and detail alike, stay within the
+    // budget; the first load of a frame always goes, so a group larger than
+    // the budget still loads (alone).
+    u64 bytes = 0;
+    u32 groups = 0;
+    const auto fits = [&](u64 size) {
+        return groups == 0 || (groups < m_budget.groups_per_frame && bytes + size <= m_budget.bytes_per_frame);
+    };
+    // Terminal groups first: without them a mesh is not drawn (ready() stays
+    // false, so neither culling path sees its instances). Many meshes added
+    // at once take several frames, in the order they were added: once one
+    // does not fit, the rest wait (a mesh part loaded continues next frame).
+    bool roots_full = false;
     for (u32 mi = 0; mi < m_meshes.size(); ++mi) {
         MeshState& m = m_meshes[mi];
         if (!m.live || m.roots_loaded) continue;
         bool all = true;
+        bool no_room = false;
         for (u32 g = 0; g < m.root.size(); ++g) {
-            if (m.root[g] != 0 && m.resident[g] == 0) {
-                all = load(cmd, m, mi, g, frame_number, pool_writable) && all;
+            if (m.root[g] == 0 || m.resident[g] != 0) continue;
+            const u64 size = units_of(m, g) * k_unit;
+            if (roots_full || !fits(size)) {
+                roots_full = true;
+                all = false;
+                ++m_stats.waiting;
+                continue;
+            }
+            if (load(cmd, m, mi, g, frame_number, pool_writable)) {
+                bytes += size;
+                ++groups;
+            } else {
+                all = false;
+                ++m_stats.waiting;
+                no_room = no_room || !m_room_capped;
             }
         }
         m.roots_loaded = all;
-        if (!all && !m_room_capped && !m_roots_logged) {
+        if (no_room && !m_roots_logged) {
             m_roots_logged = true;
             log_error("render", "the geometry pool cannot hold a mesh's coarsest level; it is not drawn "
                                 "(raise the pool size)");
@@ -522,8 +548,6 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         const u32 db = m_meshes[b.mesh].depth[b.group];
         return da != db ? da > db : (a.mesh != b.mesh ? a.mesh < b.mesh : a.group < b.group);
     });
-    u64 bytes = 0;
-    u32 groups = 0;
     bool full = false;
     for (const Request& r : todo) {
         MeshState& m = m_meshes[r.mesh];
@@ -533,8 +557,7 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         for (const u32 p : m.links.parents_of(r.group)) {
             parents_in = parents_in && m.resident[p] != 0;
         }
-        if (full || !m.roots_loaded || !parents_in || groups >= m_budget.groups_per_frame ||
-            (bytes > 0 && bytes + size > m_budget.bytes_per_frame)) {
+        if (full || !m.roots_loaded || !parents_in || !fits(size)) {
             ++m_stats.waiting;
             continue;
         }

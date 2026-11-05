@@ -95,6 +95,11 @@ def build_scene(tool, call, check):
     info = tool("get_engine_info")
     check(info["last_frame"]["scene_instances"] == 3, f"3 instances drawn, got {info['last_frame']}")
     check(info["last_frame"]["scene_draws"] == 2, "one raster pass and one shading pass")
+    gpu_passes = [p["name"] for p in info["gpu"]["passes"]]
+    check(all(name in gpu_passes for name in ("raster", "shading", "UI")),
+          f"GPU passes timed, got {info['gpu']}")
+    check(info["gpu"]["frame_ms"] >= 0 and all(p["ms"] >= 0 for p in info["gpu"]["passes"]),
+          "GPU times are not negative")
     tool("set_render_settings", {"gpu_culling": True})
     shot = call("tools/call", {"name": "capture_screenshot",
                                "arguments": {"max_width": 800, "file_name": "mcp_scene"}})

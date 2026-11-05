@@ -547,6 +547,18 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::Text("Validation layer: %s", m_state.device->validation_enabled() ? "on" : "off");
         ImGui::SeparatorText("Frame");
         ImGui::Text("Frame time: %.2f ms", static_cast<double>(frame.frame_ms));
+        // GPU timestamps of the newest finished frame (a frame or two back).
+        ImGui::Text("GPU time: %.2f ms", static_cast<double>(m_state.device->gpu_frame_ms()));
+        if (ImGui::BeginTable("gpu passes", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+            for (const rhi::GpuTiming& pass : editor::gpu_passes(*m_state.device)) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(pass.name.c_str());
+                ImGui::TableNextColumn();
+                ImGui::Text("%.3f ms", static_cast<double>(pass.ms));
+            }
+            ImGui::EndTable();
+        }
         const render::RenderStats& stats = m_state.scene_stats;
         ImGui::Text("Scene: %u instances in %u draws (+%u full-screen)", stats.instances, stats.draws,
                     stats.post_draws);

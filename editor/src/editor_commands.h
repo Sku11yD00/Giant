@@ -75,6 +75,11 @@ struct FrameTimes {
     }
 };
 
+// The newest finished frame's GPU time per pass (Device::gpu_timings), with
+// repeats of a name (the two culling passes, say) added up, in the order
+// first seen.
+std::vector<rhi::GpuTiming> gpu_passes(const rhi::Device& device);
+
 // What the commands read and change. Owned by main; outlives the registry.
 struct EditorState {
     platform::Window* window = nullptr;

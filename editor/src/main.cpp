@@ -322,7 +322,9 @@ int run(const Options& options) {
         input.decals = scene_frame.decals;
         renderer->render(cmd, target, input);
         state.scene_stats = renderer->last_stats();
+        cmd.begin_timing("UI");
         cmd.draw_ui(target, ui->frame());
+        cmd.end_timing();
     };
     state.render_screenshot = [&]() -> std::vector<u8> {
         // The same frame, offscreen: what the screen shows, sRGB-encoded.
