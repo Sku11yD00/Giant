@@ -866,10 +866,21 @@ GIANT_TEST("rhi: d3d12 keeps a resource used this frame alive past a mid-frame u
         // Streaming: destroy what this frame uses, then upload something new.
         // The upload's own submit must not free `used` (or reuse its
         // descriptor) before this frame finishes.
+        const u32 used_slots[2] = {device->read_descriptor(used), device->write_descriptor(used)};
         device->destroy(used);
         const std::vector<u8> data(256, 7);
         const BufferHandle streamed = device->create_buffer(out_desc, data);
         GIANT_CHECK(streamed.valid());
+        // Descriptor slots are reused newest first, so a slot freed by the
+        // upload would go to the next buffer created. It must not: this
+        // frame's dispatch above still writes through it.
+        const BufferHandle probe = device->create_buffer(out_desc);
+        for (const BufferHandle b : {streamed, probe}) {
+            for (const u32 slot : {device->read_descriptor(b), device->write_descriptor(b)}) {
+                GIANT_CHECK(slot != used_slots[0] && slot != used_slots[1]);
+            }
+        }
+        device->destroy(probe);
         cmd->barrier(streamed, ResourceState::shader_write);
         cmd->push(std::array<u32, 4>{device->write_descriptor(streamed), 64, 100 + frame, 0});
         cmd->dispatch(1);

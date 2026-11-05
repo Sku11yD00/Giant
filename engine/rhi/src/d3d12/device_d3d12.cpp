@@ -826,6 +826,11 @@ bool D3D12Device::submit_immediate() {
     ID3D12CommandList* lists[] = {m_immediate_list.Get()};
     m_queue->ExecuteCommandLists(1, lists);
     wait_for(signal());
+    // The GPU just caught up: free what it is done with, so streaming many
+    // uploads in one frame does not hold every old resource until the next.
+    // A resource destroyed in the frame being recorded is not in m_retired
+    // yet, so it stays alive (the WARP streaming test checks this).
+    free_retired();
     return !m_lost;
 }
 
