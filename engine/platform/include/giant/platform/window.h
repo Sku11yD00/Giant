@@ -52,10 +52,25 @@ public:
 
     NativeWindow native() const;
 
-private:
-    struct Impl;
-    explicit Window(std::unique_ptr<Impl> impl);
+    // Asks the OS to resize or minimise the window. The change arrives as an
+    // event in the next poll_events (used by tests and the editor's layouts).
+    void request_size(u32 width, u32 height);
+    void request_minimize();
+    void request_restore();
 
+    // The SDL window ID; tests use it to post synthetic OS events.
+    u32 sdl_window_id_for_tests() const;
+
+    struct Impl;
+    struct ConstructKey {
+    private:
+        friend class Window;
+        ConstructKey() = default;
+    };
+    // Use Window::create; the key keeps this constructor private in practice.
+    Window(ConstructKey, std::unique_ptr<Impl> impl);
+
+private:
     std::unique_ptr<Impl> m_impl;
     u32 m_width = 0;
     u32 m_height = 0;

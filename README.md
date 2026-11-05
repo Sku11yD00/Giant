@@ -17,9 +17,17 @@ version:
 
 ## Status
 
-Milestone **N0 Foundation**, part 1: new layout, build system, rule book, the
-core library (logging, asserts, double-precision world math, job system) with
-tests, and CI on Linux and Windows.
+Milestone **N0 Foundation**:
+
+- Part 1 (done): layout, build system, rule book, core library (logging,
+  asserts, double-precision world math, job system), architecture checker, CI.
+- Part 2 (done): SDL3 window, the graphics layer with a Direct3D 12 backend,
+  and the editor app that opens a window and renders every frame.
+- Part 3 (next): editor panels, the C# script host, and the AI command layer.
+
+The Windows editor download is attached to each CI run (`giant-editor-windows`).
+It is a console app for now so its log is visible; run `giant_editor.exe` and
+close the window to exit.
 
 The earlier Godot-based work is archived on the branches
 `giant/m0-foundation` and `giant/m1-giant-prototype`.

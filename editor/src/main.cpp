@@ -3,7 +3,10 @@
 // this loop in the next steps.
 //
 //   giant_editor [--frames N] [--backend null|d3d12] [--software] [--hidden]
-//                [--debug-layer] [--no-vsync]
+//                [--debug-layer] [--require-validation] [--no-vsync]
+//
+// --require-validation fails the run if the GPU validation layer is not
+// actually running (CI uses it so "no validation errors" means something).
 #include "giant/core/log.h"
 #include "giant/platform/window.h"
 #include "giant/rhi/rhi.h"
@@ -23,6 +26,7 @@ struct Options {
     bool software = false;
     bool hidden = false;
     bool debug_layer = false;
+    bool require_validation = false;
     bool vsync = true;
 };
 
@@ -47,6 +51,9 @@ bool parse_options(int argc, char** argv, Options& out) {
             out.hidden = true;
         } else if (arg == "--debug-layer") {
             out.debug_layer = true;
+        } else if (arg == "--require-validation") {
+            out.debug_layer = true;
+            out.require_validation = true;
         } else if (arg == "--no-vsync") {
             out.vsync = false;
         } else {
@@ -72,6 +79,10 @@ int run(const Options& options) {
     device_desc.debug_layer = options.debug_layer;
     auto device = rhi::create_device(device_desc);
     if (device == nullptr) {
+        return 1;
+    }
+    if (options.require_validation && !device->validation_enabled()) {
+        log_error("editor", "--require-validation: the GPU validation layer is not running");
         return 1;
     }
 

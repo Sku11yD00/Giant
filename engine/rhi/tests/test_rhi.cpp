@@ -73,6 +73,9 @@ GIANT_TEST("rhi: d3d12 clears and reads back on the software adapter") {
         return;
     }
     GIANT_CHECK(device->adapter().software);
+#if defined(GIANT_REQUIRE_VALIDATION)
+    GIANT_CHECK(device->validation_enabled());
+#endif
     GIANT_CHECK(!device->adapter().name.empty());
     check_color_near(device->clear_offscreen_and_read_back({0.25f, 0.5f, 0.75f, 1.0f}),
                      {0.25f, 0.5f, 0.75f, 1.0f});

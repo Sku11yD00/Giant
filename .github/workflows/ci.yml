@@ -46,7 +46,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
-      - run: cmake --preset msvc
+      - name: Install the D3D12 validation layer (Graphics Tools)
+        shell: pwsh
+        run: Add-WindowsCapability -Online -Name "Tools.Graphics.DirectX~~~~0.0.1.0"
+      - run: cmake --preset msvc -DGIANT_REQUIRE_VALIDATION=ON
       - run: cmake --build --preset msvc
       - run: ctest --preset msvc
       - run: cmake --preset msvc-release

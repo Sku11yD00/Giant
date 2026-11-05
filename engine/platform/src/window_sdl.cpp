@@ -12,7 +12,7 @@ struct Window::Impl {
     SDL_Window* window = nullptr;
 };
 
-Window::Window(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {}
+Window::Window(ConstructKey, std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {}
 
 std::unique_ptr<Window> Window::create(const WindowDesc& desc) {
     // Reference-counted by SDL, released in ~Window.
@@ -38,7 +38,7 @@ std::unique_ptr<Window> Window::create(const WindowDesc& desc) {
         return nullptr;
     }
 
-    std::unique_ptr<Window> window(new Window(std::move(impl)));
+    auto window = std::make_unique<Window>(ConstructKey{}, std::move(impl));
     int w = 0;
     int h = 0;
     SDL_GetWindowSizeInPixels(window->m_impl->window, &w, &h);
@@ -54,6 +54,26 @@ Window::~Window() {
         SDL_DestroyWindow(m_impl->window);
     }
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    if (SDL_WasInit(0) == 0) {
+        SDL_Quit(); // last user gone: release SDL's global state too
+    }
+}
+
+void Window::request_size(u32 width, u32 height) {
+    SDL_SetWindowSize(m_impl->window, static_cast<int>(width), static_cast<int>(height));
+    SDL_SyncWindow(m_impl->window);
+}
+
+u32 Window::sdl_window_id_for_tests() const { return SDL_GetWindowID(m_impl->window); }
+
+void Window::request_minimize() {
+    SDL_MinimizeWindow(m_impl->window);
+    SDL_SyncWindow(m_impl->window);
+}
+
+void Window::request_restore() {
+    SDL_RestoreWindow(m_impl->window);
+    SDL_SyncWindow(m_impl->window);
 }
 
 namespace {

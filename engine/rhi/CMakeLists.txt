@@ -22,3 +22,6 @@ giant_module_tests(rhi
   SOURCES
     tests/test_rhi.cpp
 )
+if(GIANT_BUILD_TESTS AND GIANT_REQUIRE_VALIDATION)
+  target_compile_definitions(giant_rhi_tests PRIVATE GIANT_REQUIRE_VALIDATION=1)
+endif()

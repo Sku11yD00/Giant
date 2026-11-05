@@ -143,29 +143,37 @@ LINK_RE = re.compile(r"target_link_libraries\(\s*giant_([A-Za-z0-9_]+)(.*?)\)", 
 def check_cmake(allowed: dict[str, set[str]], errors: list[str]) -> None:
     for cmake in sorted(list(ENGINE.rglob("CMakeLists.txt")) + list(EDITOR.rglob("CMakeLists.txt"))):
         text = re.sub(r"#[^\n]*", "", cmake.read_text(encoding="utf-8"))
+        rel = cmake.relative_to(ROOT)
         for match in LINK_RE.finditer(text):
             name = match.group(1)
             if name.endswith("_tests") or name not in allowed:
                 continue
-            for dep in re.findall(r"giant::([A-Za-z0-9_]+)", match.group(2)):
-                if dep != "test_main" and not permits(allowed, name, dep):
-                    errors.append(f"{cmake.relative_to(ROOT)}: giant_{name} may not link giant::{dep}")
-            if "${" in match.group(2) and "giant" in match.group(2):
-                errors.append(f"{cmake.relative_to(ROOT)}: link giant modules by name, not through variables")
+            body = match.group(2)
+            linked = set(re.findall(r"giant::([A-Za-z0-9_]+)", body))
+            linked |= set(re.findall(r"\bgiant_([A-Za-z0-9_]+)\b", body))
+            for dep in sorted(linked - {"test_main"}):
+                if not permits(allowed, name, dep):
+                    errors.append(f"{rel}: giant_{name} may not link {dep}")
+            if "$" in body and "giant" in body:
+                errors.append(f"{rel}: link giant modules by name, not through variables")
         for match in CMAKE_MODULE_RE.finditer(text):
             name, body = match.group(1), match.group(2)
             if name not in allowed:
-                errors.append(f"{cmake.relative_to(ROOT)}: giant_module '{name}' is not in the table")
+                errors.append(f"{rel}: giant_module '{name}' is not in the table")
                 continue
-            depends = re.search(r"DEPENDS((?:\s+[A-Za-z0-9_]+)+)", body)
-            if depends_clause := re.search(r"DEPENDS([^)]*)", body):
-                if "${" in depends_clause.group(1):
-                    errors.append(f"{cmake.relative_to(ROOT)}: giant_module '{name}' must list DEPENDS literally")
-            for dep in depends.group(1).split() if depends else []:
-                if dep in {"SOURCES"}:
-                    break
-                if not permits(allowed, name, dep):
-                    errors.append(f"{cmake.relative_to(ROOT)}: '{name}' may not DEPEND on '{dep}'")
+            # Walk the arguments the way cmake_parse_arguments does: every
+            # DEPENDS group counts, and each dependency must be a plain name.
+            mode = None
+            for token in body.split():
+                if token in ("SOURCES", "DEPENDS"):
+                    mode = token
+                    continue
+                if mode != "DEPENDS":
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9_]+", token):
+                    errors.append(f"{rel}: giant_module '{name}' must list DEPENDS by plain name, not '{token}'")
+                elif not permits(allowed, name, token):
+                    errors.append(f"{rel}: '{name}' may not DEPEND on '{token}'")
 
 
 def main() -> int:
