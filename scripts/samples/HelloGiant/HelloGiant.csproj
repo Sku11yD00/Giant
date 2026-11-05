@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A sample game script. Load it in the editor with
+       giant_editor with the scripts option and build/managed/samples/HelloGiant/HelloGiant.dll -->
+  <ItemGroup>
+    <!-- Private=false: scripts use the engine's copy of the API. -->
+    <ProjectReference Include="../../Giant.Scripting/Giant.Scripting.csproj" Private="false" />
+  </ItemGroup>
+</Project>

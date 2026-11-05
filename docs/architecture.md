@@ -1,0 +1,134 @@
+# Architecture
+
+Five layers. Each layer only uses the layers below it.
+
+```
+game        C# scripts, levels, materials, scatter graphs, weather presets
+editor      panels, play-in-editor, undo; uses everything below
+ai          command layer, MCP server, rule checks
+sim world   giants, destruction, NPCs, animation | cells, streaming, landscape, scatter, weather
+render      virtual geometry, voxel world, GI, materials, hair, clouds
+rhi geometry thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only)
+platform    windows, input, files (SDL3 underneath)
+core        jobs, memory, double-precision math, logging, reflection, text formats
+```
+
+## Allowed module dependencies
+
+This table is the source of truth for `tools/check_architecture.py`.
+
+| Module | May include |
+| --- | --- |
+| core | (nothing) |
+| platform | core |
+| rhi | core |
+| geometry | core |
+| render | core, rhi, geometry |
+| world | core |
+| sim | core, world |
+| script | core, world, sim |
+| ai | core, platform, rhi, geometry, render, world, sim, script |
+| editor | everything |
+
+`rhi` never includes `platform`: a swap chain takes the native window handle
+as plain data, so the graphics layer works headless and in tests.
+
+`render` reads world state through plain data handed to it each frame (cells,
+instances, weather values, voxel edits); it never includes `world` or `sim`.
+This keeps the renderer replaceable.
+
+## Graphics layer
+
+`rhi` (engine/rhi/include/giant/rhi/rhi.h) is a thin, bindless layer. The
+rest of the engine reaches the GPU only through it, so a Vulkan backend can
+follow without touching the renderer.
+
+- **Handles.** Buffers, textures and pipelines are `Handle<Tag>{index,
+  generation}` into device pools. A destroyed slot bumps its generation, so
+  a stale handle stops resolving instead of reaching whatever is created
+  there next. Zero is "none".
+- **Bindless.** Shader model 6.6: every shader-visible resource has a
+  descriptor index in one heap (`ResourceDescriptorHeap` in shaders), and
+  draws pass indices in up to 128 bytes of push constants (register b0).
+  One global root signature, so pipelines need no binding setup. Four fixed
+  samplers. Shaders include `giant/bindless.slang` (engine/rhi/shaders) and
+  never touch the heaps directly.
+- **Vertex pulling.** No vertex buffers or input layouts: vertex shaders read
+  what they need from buffers by `SV_VertexID`. Index buffers stay (32-bit).
+- **Frames.** `begin_frame(swap_chain or null)` returns the frame's command
+  list; `end_frame` submits (and presents). Two frames in flight live on the
+  device. Destroying anything is deferred until the GPU is done with it, so it
+  is safe mid-frame. Per-frame transient memory (`allocate`, `upload`) holds
+  constants, instance lists and UI geometry.
+- **States.** Each resource's state is tracked; `barrier()` moves it to what
+  the next use needs, and render passes move their own targets. Buffers fall
+  back to `common` after each frame, as D3D12 decays them.
+- **Conventions.** Reverse-Z depth (1 near, 0 at infinity, GREATER passes),
+  counter-clockwise front faces, back faces culled. Colour targets are sRGB
+  (`rgba8_srgb`); UI draws through a UNORM view so its gamma-space colours
+  show as picked.
+- **Backends.** D3D12 on the DirectX 12 Agility SDK (shipped in a `D3D12`
+  folder next to the exe), and a null backend that validates every call the
+  way the debug layer would (plus stale handles and pass/pipeline mismatches)
+  and emulates memory, clears and copies, so tests read results back without
+  a GPU. Windows CI runs every GPU test on WARP with the validation layer and
+  fails on any validation error.
+- **Shaders** are Slang, compiled at build time by `giant_shaders()`
+  (cmake/GiantShaders.cmake) to DXIL and embedded in the module; one Linux
+  CI job compiles them too, to catch errors there.
+
+The renderer (`render`) sits on top: plain per-frame data in (camera,
+lighting, instances), an image out. N1 part 1 is an instanced forward
+renderer; later parts replace its inside with clusters, GPU culling and a
+visibility buffer behind the same interface.
+
+## Geometry
+
+`geometry` holds meshes as plain data and everything done to them on the
+CPU: glTF/GLB import (cgltf), and cluster LOD (meshoptimizer and its
+`clusterlod.h`). It knows nothing about the GPU, so tools, tests and later
+an offline cooker can use it without a device.
+
+- **Clusters.** A mesh becomes clusters of up to 128 triangles and 128
+  vertices. Groups of about 16 clusters are simplified to half their
+  triangles with their outer border locked, then cut again; level by level
+  until one group is left. Each group stores the error (metres) and bounds
+  of its simplified replacement; errors only grow towards coarse levels.
+- **The cut.** A cluster is drawn when its group's replacement would show
+  more than `lod_error_pixels` of error and its own detail would not (or it
+  is original). A spatial tree per level skips whole regions that are
+  precise enough. Locked borders mean neighbours from different levels meet
+  without cracks, so detail changes cluster by cluster, with no popping of
+  whole objects.
+- **Drawing (N1 part 2).** The renderer chooses the cut on the CPU per
+  instance (with frustum culling) and draws each mesh in one call: draw
+  instance i is chosen cluster i, its 384 vertices are 128 triangles pulled
+  from the cluster's index range, unused ones collapse to nothing. Part 3
+  moves the choice to the GPU (culling, mesh shaders, visibility buffer).
+
+## Window events (known limit)
+
+`Window::poll_events` drains SDL's single, process-wide event queue and drops
+events for other windows. That is fine while the editor has one window. Before
+a second OS window exists (floating panels, a game preview), events move to one
+central pump in `platform` that hands each window its own events.
+
+## The shared voxel world
+
+One sparse voxel copy of the world (brick map in camera-centred clipmaps) is
+used for far geometry, global illumination, rain and snow occlusion, NPC sight
+lines and far-ring destruction. It is owned by `world` (edits) and mirrored on
+the GPU by `render` (drawing and lighting).
+
+## Frame budget (1440p, 60 fps, reference GPU, High preset)
+
+| GPU work | Budget |
+| --- | --- |
+| Geometry: culling, clusters, visibility buffer | 3.0 ms |
+| Materials, decals, terrain | 3.0 ms |
+| Shadows | 2.0 ms |
+| GI and reflections | 3.5 ms |
+| Weather, clouds, particles | 1.5 ms |
+| Hair | 1.0 ms |
+| Post and UI | 1.0 ms |
+| Headroom for destruction spikes | 1.6 ms |

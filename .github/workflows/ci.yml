@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  architecture:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/check_architecture.py
+
+  linux:
+    name: linux-${{ matrix.compiler }}-${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        preset: [dev, tsan, release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev libx11-dev libxext-dev
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Pick compiler
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then
+            echo "CC=clang-18" >> "$GITHUB_ENV"
+            echo "CXX=clang++-18" >> "$GITHUB_ENV"
+          else
+            echo "CC=gcc" >> "$GITHUB_ENV"
+            echo "CXX=g++" >> "$GITHUB_ENV"
+          fi
+      # One job also compiles every shader with Slang (to HLSL, as a check),
+      # so shader errors show on Linux too.
+      - run: >
+          cmake --preset ${{ matrix.preset }} -DGIANT_REQUIRE_DOTNET=ON
+          ${{ matrix.compiler == 'gcc' && matrix.preset == 'dev' && '-DGIANT_COMPILE_SHADERS=ON' || '' }}
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --preset ${{ matrix.preset }}
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Install the D3D12 validation layer (Graphics Tools)
+        shell: pwsh
+        run: Add-WindowsCapability -Online -Name "Tools.Graphics.DirectX~~~~0.0.1.0"
+      - run: cmake --preset msvc -DGIANT_REQUIRE_VALIDATION=ON -DGIANT_REQUIRE_DOTNET=ON
+      - run: cmake --build --preset msvc
+      - run: ctest --preset msvc
+      - name: Keep the editor screenshot from the MCP test
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-screenshot
+          path: build/msvc/editor/screenshots/
+          if-no-files-found: warn
+      - run: cmake --preset msvc-release -DGIANT_REQUIRE_VALIDATION=ON -DGIANT_REQUIRE_DOTNET=ON
+      - run: cmake --build --preset msvc-release
+      - run: ctest --preset msvc-release
+      - name: Package the editor
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force giant-editor-windows | Out-Null
+          Copy-Item build/msvc-release/editor/giant_editor.exe giant-editor-windows/
+          # The DirectX 12 Agility SDK runtime (D3D12 folder) and WARP for --software.
+          Copy-Item -Recurse build/msvc-release/editor/D3D12 giant-editor-windows/D3D12
+          Copy-Item build/msvc-release/editor/d3d10warp.dll giant-editor-windows/
+          # The C# API and the sample script, next to the editor.
+          Copy-Item -Recurse build/msvc-release/managed giant-editor-windows/managed
+          Remove-Item -Recurse -Force giant-editor-windows/managed/tests
+          Copy-Item README.md giant-editor-windows/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: giant-editor-windows
+          path: giant-editor-windows

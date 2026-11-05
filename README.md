@@ -1,76 +1,89 @@
-# Godot Engine
+# Giant Engine
 
-<p align="center">
-  <a href="https://godotengine.org">
-    <img src="misc/logo/logo_outlined.svg" width="400" alt="Godot Engine logo">
-  </a>
-</p>
+A custom game engine for one kind of game: a huge, photoreal open world that a
+growing giantess can wreck, cities and forests included, with a sharp image
+(no TAA smear, no motion blur) and an AI that can do every job in the editor.
 
-## 2D and 3D cross-platform game engine
+The full design is in the plan doc (v2 tab, "Custom engine plan"). The short
+version:
 
-**[Godot Engine](https://godotengine.org) is a feature-packed, cross-platform
-game engine to create 2D and 3D games from a unified interface.** It provides a
-comprehensive set of [common tools](https://godotengine.org/features), so that
-users can focus on making games without having to reinvent the wheel. Games can
-be exported with one click to a number of platforms, including the major desktop
-platforms (Linux, macOS, Windows), mobile platforms (Android, iOS), as well as
-Web-based platforms and [consoles](https://godotengine.org/consoles).
+| Part | Choice |
+| --- | --- |
+| Engine core | C++20, strict house subset (see `docs/coding-rules.md`) |
+| Game scripts | C# on .NET 10 (from milestone N0 part 3) |
+| Shaders | Slang |
+| Graphics | Direct3D 12 first, behind a thin layer so Vulkan can follow |
+| First platform | Windows; Linux builds the core and runs all tests |
 
-## Free, open source and community-driven
+## Status
 
-Godot is completely free and open source under the very permissive [MIT license](https://godotengine.org/license).
-No strings attached, no royalties, nothing. The users' games are theirs, down
-to the last line of engine code. Godot's development is fully independent and
-community-driven, empowering users to help shape their engine to match their
-expectations. It is supported by the [Godot Foundation](https://godot.foundation/)
-not-for-profit.
+Milestone **N0 Foundation**:
 
-Before being open sourced in [February 2014](https://github.com/godotengine/godot/commit/0b806ee0fc9097fa7bda7ac0109191c9c5e0a1ac),
-Godot had been developed by [Juan Linietsky](https://github.com/reduz) and
-[Ariel Manzur](https://github.com/punto-) for several years as an in-house
-engine, used to publish several work-for-hire titles.
+- Part 1 (done): layout, build system, rule book, core library (logging,
+  asserts, double-precision world math, job system), architecture checker, CI.
+- Part 2 (done): SDL3 window, the graphics layer with a Direct3D 12 backend,
+  and the editor app that opens a window and renders every frame.
+- Part 3 (done): the AI command layer and MCP server (Claude Code can
+  drive the editor and take screenshots, see `docs/ai-control.md`), editor
+  panels (Dear ImGui, docked), and C# scripting on .NET 10 with reload
+  (see `docs/scripting.md`).
 
-![Screenshot of a 3D scene in the Godot Engine editor](https://raw.githubusercontent.com/godotengine/godot-design/master/screenshots/editor_tps_demo_1920x1080.jpg)
+Milestone **N1 Virtual geometry** (in progress):
 
-## Getting the engine
+- Part 1 (done): the real graphics layer (bindless, shader model 6.6,
+  frames in flight, Slang shaders, Agility SDK), the scene (entities,
+  lighting, save and load), a lit forward renderer and a 3D viewport with a
+  fly camera (hold the right mouse button, then W A S D). Claude can build,
+  light and photograph a scene over MCP alone, which closes N0's gate.
+- Part 2 (done): mesh import (glTF 2.0 and GLB) and cluster LOD, the
+  Nanite method: every mesh is cut into clusters of up to 128 triangles,
+  simplified level by level into a hierarchy, and drawn each frame at the
+  detail that keeps the error under a pixel. Try it with the Scene panel's
+  "+ Mesh" field, and the Engine panel's View menu (LOD levels) to see it work.
 
-### Binary downloads
+The Windows editor download is attached to each CI run (`giant-editor-windows`).
+It is a console app for now so its log is visible; run `giant_editor.exe` and
+close the window to exit. Keep the `D3D12` folder next to the exe. C# scripts need the .NET 10 runtime
+(https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
-Official binaries for the Godot editor and the export templates can be found
-[on the Godot website](https://godotengine.org/download).
+The earlier Godot-based work is archived on the branches
+`giant/m0-foundation` and `giant/m1-giant-prototype`.
 
-### Compiling from source
+## Build
 
-[See the official docs](https://docs.godotengine.org/en/latest/engine_details/development/compiling)
-for compilation instructions for every supported platform.
+Needs CMake 3.25+, Ninja, Git, a C++20 compiler (MSVC 2022, Clang 16+ or GCC 13+),
+and the .NET 10 SDK for C# scripting (optional; without it scripting is skipped).
+On Linux, SDL3 also needs the X11 headers (`sudo apt install libx11-dev libxext-dev`).
 
-## Community and contributing
+```sh
+cmake --preset dev          # debug build with sanitizers (Linux)
+cmake --build --preset dev
+ctest --preset dev
+```
 
-Godot is not only an engine but an ever-growing community of users and engine
-developers. The main community channels are listed [on the homepage](https://godotengine.org/community).
+On Windows, open a "x64 Native Tools" prompt and use the `msvc` preset, or open
+the folder in Visual Studio.
 
-The best way to get in touch with the core engine developers is to join the
-[Godot Contributors Chat](https://chat.godotengine.org).
+`python3 tools/check_architecture.py` checks that every module only includes
+the modules it is allowed to (CI runs it on every push).
 
-To get started contributing to the project, see the [contributing guide](CONTRIBUTING.md).
-This document also includes guidelines for reporting bugs.
+## Layout
 
-## Documentation and demos
+| Folder | Holds |
+| --- | --- |
+| `engine/core` | Memory, threads, jobs, math (double precision), logging, reflection, file formats |
+| `engine/platform` | Windows, input and files, on SDL3 |
+| `engine/rhi` | Thin render layer, D3D12 backend first |
+| `engine/render` | Virtual geometry, voxel world, GI, shadows, materials, hair, sky and clouds |
+| `engine/world` | Cells, streaming, landscape, scatter, weather simulation |
+| `engine/sim` | Physics glue (Jolt), destruction, giants, animation, NPC simulation, navigation |
+| `engine/script` | .NET host, C# game framework |
+| `engine/ai` | Command layer, MCP server, rule checks |
+| `editor` | Editor app |
+| `game` | The game project (C# scripts, content) |
+| `shaders` | Slang shader library and material types |
+| `third_party` | Pinned open-source libraries |
+| `tests` | Shared test harness; unit tests live next to each module |
+| `docs` | Architecture and rules |
 
-The official documentation is hosted on [Read the Docs](https://docs.godotengine.org).
-It is maintained by the Godot community in its own [GitHub repository](https://github.com/godotengine/godot-docs).
-
-The [class reference](https://docs.godotengine.org/en/latest/classes/)
-is also accessible from the Godot editor.
-
-We also maintain official demos in their own [GitHub repository](https://github.com/godotengine/godot-demo-projects)
-as well as the [Asset Store](https://store.godotengine.org/).
-
-There are also a number of other
-[learning resources](https://docs.godotengine.org/en/latest/community/tutorials.html)
-provided by the community, such as text and video tutorials, demos, etc.
-Consult the [community channels](https://godotengine.org/community)
-for more information.
-
-[![Code Triagers Badge](https://www.codetriage.com/godotengine/godot/badges/users.svg)](https://www.codetriage.com/godotengine/godot)
-[![Translate on Weblate](https://hosted.weblate.org/widgets/godot-engine/-/godot/svg-badge.svg)](https://hosted.weblate.org/engage/godot-engine/?utm_source=widget)
+AI agents: read `AGENTS.md` first.
