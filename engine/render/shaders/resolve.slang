@@ -118,18 +118,18 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     // Drawn this frame, so its group is loaded (residency only changes
     // between frames).
     ByteAddressBuffer pool = read_buffer(f.pool);
-    const uint base = group_offset(mesh, cluster.group);
-    const uint3 corners = cluster_triangle(pool, base, cluster, vis.y);
-    const float3 a = to_world(inst, cluster_position(pool, base, cluster, corners.x));
-    const float3 b = to_world(inst, cluster_position(pool, base, cluster, corners.y));
-    const float3 c = to_world(inst, cluster_position(pool, base, cluster, corners.z));
+    const uint geometry = group_offset(mesh, cluster.group);
+    const uint3 corners = cluster_triangle(pool, geometry, cluster, vis.y);
+    const float3 a = to_world(inst, cluster_position(pool, geometry, cluster, corners.x));
+    const float3 b = to_world(inst, cluster_position(pool, geometry, cluster, corners.y));
+    const float3 c = to_world(inst, cluster_position(pool, geometry, cluster, corners.z));
 
     const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
     const float3 dir = f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz;
     const float3 w = barycentrics(dir, a, b, c);
-    const float3 object_normal = cluster_normal(pool, base, cluster, corners.x) * w.x +
-                                 cluster_normal(pool, base, cluster, corners.y) * w.y +
-                                 cluster_normal(pool, base, cluster, corners.z) * w.z;
+    const float3 object_normal = cluster_normal(pool, geometry, cluster, corners.x) * w.x +
+                                 cluster_normal(pool, geometry, cluster, corners.y) * w.y +
+                                 cluster_normal(pool, geometry, cluster, corners.z) * w.z;
     const float3 n = safe_normalize(to_world_normal(inst, object_normal), float3(0.0, 1.0, 0.0));
     const float3 world = a * w.x + b * w.y + c * w.z;
 
