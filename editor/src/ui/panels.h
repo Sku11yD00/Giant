@@ -9,6 +9,7 @@
 #include "giant/ai/commands.h"
 #include "giant/core/log_history.h"
 
+#include <array>
 #include <string>
 
 namespace giant::editor {
@@ -53,6 +54,7 @@ private:
     int m_log_level = 1; // index into trace, info, warning, error
     bool m_log_follow = true;
     u64 m_log_hidden_before = 0; // "Clear" hides lines up to this sequence
+    std::array<char, 128> m_log_filter_buffer{}; // ImGui edits this in place
     std::string m_log_filter;
 
     u32 m_edit_epoch = 1; // bumped whenever no widget is being edited

@@ -167,12 +167,10 @@ void EditorPanels::draw_log() {
         ImGui::SetNextItemWidth(110.0f);
         ImGui::Combo("##level", &m_log_level, k_levels, IM_ARRAYSIZE(k_levels));
         ImGui::SameLine();
-        char filter[128];
-        std::strncpy(filter, m_log_filter.c_str(), sizeof(filter) - 1);
-        filter[sizeof(filter) - 1] = '\0';
         ImGui::SetNextItemWidth(220.0f);
-        if (ImGui::InputTextWithHint("##filter", "filter", filter, sizeof(filter))) {
-            m_log_filter = filter;
+        if (ImGui::InputTextWithHint("##filter", "filter", m_log_filter_buffer.data(),
+                                     m_log_filter_buffer.size())) {
+            m_log_filter = m_log_filter_buffer.data();
         }
         ImGui::SameLine();
         ImGui::Checkbox("Follow", &m_log_follow);
