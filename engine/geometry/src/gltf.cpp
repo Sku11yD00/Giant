@@ -175,13 +175,14 @@ private:
     }
 
     // A vec3 accessor as floats, read once per node (primitives often share
-    // one), with the vertices counted against the file's budget.
-    const std::vector<Vec3>* unpack(const cgltf_accessor* accessor) {
+    // one). Positions are counted against the file's vertex budget; normals
+    // match them in count, so they are not counted again.
+    const std::vector<Vec3>* unpack(const cgltf_accessor* accessor, bool count_vertices) {
         if (const auto it = m_unpacked.find(accessor); it != m_unpacked.end()) {
             return &it->second;
         }
         const cgltf_size count = accessor->count;
-        m_vertices_read += count;
+        m_vertices_read += count_vertices ? count : 0;
         if (m_vertices_read > k_max_import_vertices) {
             fail("the file has more than 48 million vertices");
             return nullptr;
@@ -229,7 +230,8 @@ private:
         }
         // Accessors without a bufferView are zeros and cost nothing in the
         // file, so positions and indices must have real data: that keeps
-        // the work bounded by the file's size.
+        // the work bounded by the file's size. (This also refuses sparse
+        // positions over a zero base, which no common exporter writes.)
         if (positions->buffer_view == nullptr || (prim.indices != nullptr && prim.indices->buffer_view == nullptr)) {
             return fail("a mesh has positions or indices without data");
         }
@@ -241,11 +243,11 @@ private:
                 return fail("sparse accessors on interleaved buffers are not supported");
             }
         }
-        const std::vector<Vec3>* p = unpack(positions);
+        const std::vector<Vec3>* p = unpack(positions, true);
         if (p == nullptr) {
             return false;
         }
-        const std::vector<Vec3>* n = normals != nullptr ? unpack(normals) : nullptr;
+        const std::vector<Vec3>* n = normals != nullptr ? unpack(normals, false) : nullptr;
         if (normals != nullptr && n == nullptr) {
             return false;
         }
