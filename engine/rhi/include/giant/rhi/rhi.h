@@ -104,7 +104,8 @@ public:
     virtual bool device_lost() const = 0;
 
     // Errors reported by the GPU validation layer since the device was
-    // created. Always 0 when the debug layer is off or unavailable.
+    // created. New ones are logged on each call. Always 0 when the debug
+    // layer is off or unavailable.
     virtual u32 validation_errors() const = 0;
     // Whether the validation layer is really running.
     virtual bool validation_enabled() const = 0;

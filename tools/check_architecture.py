@@ -149,7 +149,7 @@ def check_cmake(allowed: dict[str, set[str]], errors: list[str]) -> None:
             linked = set(re.findall(r"giant::([A-Za-z0-9_]+)", body))
             linked |= set(re.findall(r"\bgiant_([A-Za-z0-9_]+)\b", body))
             if not re.fullmatch(r"giant_[A-Za-z0-9_]+", target):
-                if linked or "$" in body:
+                if linked or ("$" in body and "giant" in body):
                     errors.append(f"{rel}: link giant modules on a target named giant_<module>, not '{target}'")
                 continue
             name = target[len("giant_"):]

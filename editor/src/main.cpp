@@ -103,16 +103,13 @@ int run(const Options& options) {
     using clock = std::chrono::steady_clock;
     auto report_start = clock::now();
     u64 report_frames = 0;
-    // With --frames, give up if frames keep being skipped, so a broken swap
-    // chain fails the run instead of hanging it.
-    const u64 max_loops = options.max_frames == 0 ? 0 : options.max_frames + 1000;
-    u64 loops = 0;
+    // With --frames, give up after this many frames in a row could not be
+    // drawn, so a broken swap chain fails the run instead of hanging it.
+    // Minimised time does not count.
+    constexpr u64 k_max_skipped_frames = 1000;
+    u64 skipped_in_a_row = 0;
 
     while (window->poll_events()) {
-        if (max_loops != 0 && ++loops > max_loops) {
-            log_error("editor", "--frames: too many frames were skipped; giving up");
-            return 1;
-        }
         if (window->minimized()) {
             // Nothing to show: idle instead of spinning a CPU core.
             window->wait_events(100);
@@ -126,6 +123,10 @@ int run(const Options& options) {
                 log_error("editor", "the GPU device was lost; closing");
                 return 1;
             }
+            if (options.max_frames != 0 && ++skipped_in_a_row > k_max_skipped_frames) {
+                log_error("editor", "--frames: frames keep failing to draw; giving up");
+                return 1;
+            }
             // The swap chain is unusable after a failed resize: try again at
             // the current size, and wait a little so a lasting failure idles.
             window->wait_events(16);
@@ -134,6 +135,7 @@ int run(const Options& options) {
         }
         device->clear(*swap_chain, sky);
         device->end_frame(*swap_chain);
+        skipped_in_a_row = 0;
 
         ++report_frames;
         const auto now = clock::now();
@@ -141,6 +143,7 @@ int run(const Options& options) {
         if (seconds >= 5.0) {
             const double ms = 1000.0 * seconds / static_cast<double>(report_frames);
             log_info("editor", "frame time " + std::to_string(ms) + " ms");
+            device->validation_errors(); // logs new ones now and empties the queue
             report_start = now;
             report_frames = 0;
         }

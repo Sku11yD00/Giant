@@ -19,7 +19,6 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -212,14 +211,10 @@ bool D3D12Device::init(const DeviceDesc& desc) {
 
     if ((factory_flags & DXGI_CREATE_FACTORY_DEBUG) != 0 &&
         SUCCEEDED(m_device.As(&m_info_queue))) {
-        // Store only errors: warnings and info would pile up forever. Stored
-        // errors are counted and cleared by validation_errors().
-        D3D12_MESSAGE_SEVERITY severities[] = {D3D12_MESSAGE_SEVERITY_CORRUPTION,
-                                               D3D12_MESSAGE_SEVERITY_ERROR};
-        D3D12_INFO_QUEUE_FILTER filter{};
-        filter.AllowList.NumSeverities = static_cast<UINT>(std::size(severities));
-        filter.AllowList.pSeverityList = severities;
-        m_info_queue->PushStorageFilter(&filter);
+        // No storage filter, so warnings still reach the debugger output.
+        // validation_errors() counts the errors and clears the queue; the
+        // editor calls it regularly so stored messages never pile up.
+        m_info_queue->SetMessageCountLimit(UINT64_MAX);
         log_info("rhi", "d3d12: GPU validation layer enabled");
     }
 
@@ -313,13 +308,20 @@ u32 D3D12Device::validation_errors() const {
 u64 D3D12Device::signal() {
     const u64 value = m_next_fence_value++;
     if (!check_gpu(m_queue->Signal(m_fence.Get(), value), "Signal")) {
-        return 0; // never signalled: waiting on it would block forever
+        // Fence tracking is broken from here on: waits could no longer tell
+        // when the GPU is done with memory, so stop using the device.
+        if (!m_lost) {
+            log_error("rhi", "d3d12: Signal failed; treating the device as lost");
+            m_lost = true;
+        }
+        return 0;
     }
     return value;
 }
 
 void D3D12Device::wait_for(u64 value) {
-    if (value == 0 || m_fence->GetCompletedValue() >= value) {
+    // Once lost, waiting again would only add more timeouts at shutdown.
+    if (m_lost || value == 0 || m_fence->GetCompletedValue() >= value) {
         return;
     }
     if (!check(m_fence->SetEventOnCompletion(value, m_fence_event), "SetEventOnCompletion")) {
@@ -416,6 +418,10 @@ void D3D12SwapChain::resize(u32 width, u32 height) {
         return;
     }
     device->wait_idle();
+    if (device->device_lost()) {
+        valid = false; // the GPU may still hold the buffers: leave them alone
+        return;
+    }
     for (auto& buffer : buffers) {
         buffer.Reset();
     }
