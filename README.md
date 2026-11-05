@@ -23,20 +23,23 @@ Milestone **N0 Foundation**:
   asserts, double-precision world math, job system), architecture checker, CI.
 - Part 2 (done): SDL3 window, the graphics layer with a Direct3D 12 backend,
   and the editor app that opens a window and renders every frame.
-- Part 3 (in progress): the AI command layer and MCP server are in, so
-  Claude Code can drive the editor (see `docs/ai-control.md`). Next: editor
-  panels and the C# script host.
+- Part 3 (done): the AI command layer and MCP server (Claude Code can
+  drive the editor and take screenshots, see `docs/ai-control.md`), editor
+  panels (Dear ImGui, docked), and C# scripting on .NET 10 with reload
+  (see `docs/scripting.md`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
-close the window to exit.
+close the window to exit. C# scripts need the .NET 10 runtime
+(https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
 The earlier Godot-based work is archived on the branches
 `giant/m0-foundation` and `giant/m1-giant-prototype`.
 
 ## Build
 
-Needs CMake 3.25+, Ninja, Git, and a C++20 compiler (MSVC 2022, Clang 16+ or GCC 13+).
+Needs CMake 3.25+, Ninja, Git, a C++20 compiler (MSVC 2022, Clang 16+ or GCC 13+),
+and the .NET 10 SDK for C# scripting (optional; without it scripting is skipped).
 On Linux, SDL3 also needs the X11 headers (`sudo apt install libx11-dev libxext-dev`).
 
 ```sh

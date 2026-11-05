@@ -1,7 +1,7 @@
 # Driving the editor with AI
 
 Everything the editor can do is a command (AGENTS.md rule 7). The same
-commands are available to people (menus and panels, from part 3b), to the
+commands are available to people (menus and panels), to C# scripts, to the
 built-in assistant (later), and to outside AI tools through MCP.
 
 ## Connect Claude Code
@@ -40,6 +40,9 @@ GPU is the editor using?"; Claude calls the tools and can undo what it did.
 | `set_window_size` | view only, not undoable | Resizes the window (screen points) |
 | `undo`, `redo` | yes | Walks the change history |
 | `get_history` | no | What can be undone and redone |
+| `capture_screenshot` | no | A PNG of the editor as it looks now, so the AI can see it |
+| `load_scripts`, `unload_scripts` | runtime only | Loads, reloads or stops C# scripts (`docs/scripting.md`) |
+| `get_scripts` | no | The loaded script assembly and how many scripts run |
 | `quit_editor` | closes | Closes the editor |
 
 ## Adding a command

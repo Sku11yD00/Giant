@@ -129,6 +129,28 @@ def main() -> int:
               f"viewport pixel is the background colour, got {(r, g, b)}")
         check(os.path.isfile(info["saved_to"]), "screenshot saved")
 
+        sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
+        if sample:
+            # C# scripts: the sample fades the background through commands.
+            history_before = len(tool("get_history")["undo"])
+            tool("load_scripts", {"path": sample})
+            for _ in range(200):
+                if tool("get_scripts")["running"] == 1:
+                    break
+            check(tool("get_scripts")["running"] == 1, "the sample script runs")
+            for _ in range(60):
+                call("ping")  # let a few frames pass
+            lines = tool("get_log", {"count": 200})["lines"]
+            check(any("Hello from C#" in line["text"] for line in lines), "the script logged")
+            check(tool("get_clear_color") != before, "the script changed the background")
+            check(len(tool("get_history")["undo"]) == history_before,
+                  "script changes stay out of the undo history")
+            tool("unload_scripts")
+            call("ping")
+            check(tool("get_scripts")["loaded"] == "", "scripts unloaded")
+        else:
+            print("mcp_smoke: C# scripts skipped (GIANT_SAMPLE_SCRIPTS not set)")
+
         tool("quit_editor")
         code = editor.wait(timeout=TIMEOUT)
         check(code == 0, f"editor exit code {code}")

@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Scripts the native script host tests load. -->
+  <ItemGroup>
+    <ProjectReference Include="../../../../../scripts/Giant.Scripting/Giant.Scripting.csproj" Private="false" />
+  </ItemGroup>
+</Project>

@@ -28,6 +28,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev libx11-dev libxext-dev
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
       - name: Pick compiler
         run: |
           if [ "${{ matrix.compiler }}" = clang ]; then
@@ -37,7 +40,7 @@ jobs:
             echo "CC=gcc" >> "$GITHUB_ENV"
             echo "CXX=g++" >> "$GITHUB_ENV"
           fi
-      - run: cmake --preset ${{ matrix.preset }}
+      - run: cmake --preset ${{ matrix.preset }} -DGIANT_REQUIRE_DOTNET=ON
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --preset ${{ matrix.preset }}
 
@@ -46,10 +49,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
       - name: Install the D3D12 validation layer (Graphics Tools)
         shell: pwsh
         run: Add-WindowsCapability -Online -Name "Tools.Graphics.DirectX~~~~0.0.1.0"
-      - run: cmake --preset msvc -DGIANT_REQUIRE_VALIDATION=ON
+      - run: cmake --preset msvc -DGIANT_REQUIRE_VALIDATION=ON -DGIANT_REQUIRE_DOTNET=ON
       - run: cmake --build --preset msvc
       - run: ctest --preset msvc
       - name: Keep the editor screenshot from the MCP test
@@ -59,7 +65,7 @@ jobs:
           name: editor-screenshot
           path: build/msvc/editor/screenshots/
           if-no-files-found: warn
-      - run: cmake --preset msvc-release -DGIANT_REQUIRE_VALIDATION=ON
+      - run: cmake --preset msvc-release -DGIANT_REQUIRE_VALIDATION=ON -DGIANT_REQUIRE_DOTNET=ON
       - run: cmake --build --preset msvc-release
       - run: ctest --preset msvc-release
       - name: Package the editor
@@ -67,6 +73,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force giant-editor-windows | Out-Null
           Copy-Item build/msvc-release/editor/giant_editor.exe giant-editor-windows/
+          # The C# API and the sample script, next to the editor.
+          Copy-Item -Recurse build/msvc-release/managed giant-editor-windows/managed
+          Remove-Item -Recurse -Force giant-editor-windows/managed/tests
           Copy-Item README.md giant-editor-windows/
       - uses: actions/upload-artifact@v4
         with:

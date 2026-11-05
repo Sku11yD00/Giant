@@ -220,7 +220,7 @@ GIANT_TEST("commands: runs in one merge group become one undo step") {
     Fixture f;
     GIANT_CHECK(f.registry.execute("set_value", {{"value", 1}}).ok);
     for (int v = 2; v <= 5; ++v) {
-        GIANT_CHECK(f.registry.execute("set_value", {{"value", v}}, 77).ok);
+        GIANT_CHECK(f.registry.execute("set_value", {{"value", v}}, {77, true}).ok);
     }
     GIANT_CHECK(f.registry.undo_history().size() == 2);
     GIANT_CHECK(f.registry.undo_history().back().args["value"] == 5);
@@ -229,6 +229,14 @@ GIANT_TEST("commands: runs in one merge group become one undo step") {
     GIANT_CHECK(f.registry.redo());
     GIANT_CHECK(f.value == 5);
     // A new group starts a new step.
-    GIANT_CHECK(f.registry.execute("set_value", {{"value", 6}}, 78).ok);
+    GIANT_CHECK(f.registry.execute("set_value", {{"value", 6}}, {78, true}).ok);
     GIANT_CHECK(f.registry.undo_history().size() == 3);
+}
+
+GIANT_TEST("commands: game logic can change things without touching the undo history") {
+    Fixture f;
+    GIANT_CHECK(f.registry.execute("set_value", {{"value", 1}}).ok);
+    GIANT_CHECK(f.registry.execute("set_value", {{"value", 9}}, {0, false}).ok);
+    GIANT_CHECK(f.value == 9);
+    GIANT_CHECK(f.registry.undo_history().size() == 1);
 }

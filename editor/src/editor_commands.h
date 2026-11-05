@@ -24,6 +24,14 @@ struct EditorState {
     // Renders the editor as it looks now (viewport and panels) and returns
     // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.
     std::function<std::vector<u8>()> render_screenshot;
+
+    // C# scripts. Commands cannot run commands, so loading is requested here
+    // and done by the main loop right after the command.
+    std::string scripts_loaded;      // path of the loaded assembly, empty if none
+    std::string scripts_to_load;     // set by load_scripts
+    bool scripts_unload_requested = false;
+    u32 scripts_running = 0;         // updated by the main loop
+    bool dotnet_available = true;    // false once starting .NET failed
 };
 
 // Registers every editor command. Asserts on a bad registration (a bug).

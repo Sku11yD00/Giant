@@ -15,6 +15,19 @@ struct Window::Impl {
     std::array<SDL_Cursor*, SDL_SYSTEM_CURSOR_COUNT> cursors{};
 };
 
+std::filesystem::path executable_dir() {
+    const char* base = SDL_GetBasePath(); // owned by SDL, cached
+    if (base == nullptr) {
+        return std::filesystem::current_path();
+    }
+    const std::string utf8 = base;
+    std::filesystem::path dir(std::u8string(utf8.begin(), utf8.end()));
+    if (!dir.has_filename()) {
+        dir = dir.parent_path(); // SDL ends the path with a separator
+    }
+    return dir;
+}
+
 Window::Window(ConstructKey, std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {}
 
 std::unique_ptr<Window> Window::create(const WindowDesc& desc) {

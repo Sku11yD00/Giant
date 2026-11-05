@@ -5,11 +5,15 @@
 #include "giant/core/types.h"
 #include "giant/platform/input.h"
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace giant::platform {
+
+// The folder holding the running program (for files shipped next to it).
+std::filesystem::path executable_dir();
 
 struct WindowDesc {
     std::string title = "Giant";

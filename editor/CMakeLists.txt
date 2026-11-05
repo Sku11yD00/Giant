@@ -4,8 +4,11 @@ add_executable(giant_editor
   src/ui/imgui_layer.cpp
   src/ui/panels.cpp
 )
-target_link_libraries(giant_editor PRIVATE giant::core giant::platform giant::rhi giant::ai
-                      third_party::imgui)
+target_link_libraries(giant_editor PRIVATE giant::core giant::platform giant::rhi giant::script
+                      giant::ai third_party::imgui)
+if(GIANT_DOTNET)
+  add_dependencies(giant_editor giant_managed) # the C# API ships next to the editor
+endif()
 giant_apply_warnings(giant_editor)
 giant_apply_sanitizers(giant_editor)
 
@@ -36,10 +39,18 @@ if(GIANT_BUILD_TESTS)
     add_test(NAME editor_mcp
       COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/mcp_smoke.py
               $<TARGET_FILE:giant_editor> --hidden ${mcp_backend})
-    set_tests_properties(editor_mcp PROPERTIES TIMEOUT 120)
+    set(mcp_env "")
     if(NOT WIN32)
-      set_tests_properties(editor_mcp PROPERTIES ENVIRONMENT "SDL_VIDEO_DRIVER=dummy")
+      list(APPEND mcp_env "SDL_VIDEO_DRIVER=dummy")
     endif()
+    # The C# sample runs too, except under ThreadSanitizer (which cannot
+    # follow .NET's threads). .NET handles its own segfaults under ASan.
+    if(GIANT_DOTNET AND NOT GIANT_SANITIZE_THREAD)
+      list(APPEND mcp_env
+        "GIANT_SAMPLE_SCRIPTS=${CMAKE_BINARY_DIR}/managed/samples/HelloGiant/HelloGiant.dll"
+        "ASAN_OPTIONS=handle_segv=0:allow_user_segv_handler=1:detect_leaks=0:use_sigaltstack=0")
+    endif()
+    set_tests_properties(editor_mcp PROPERTIES TIMEOUT 120 ENVIRONMENT "${mcp_env}")
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")
   endif()

@@ -163,7 +163,8 @@ const CommandDesc* CommandRegistry::find(std::string_view name) const {
 }
 
 CommandResult CommandRegistry::execute(std::string_view name, const Json& args_in,
-                                       u64 merge_group) {
+                                       ExecuteOptions options) {
+    const u64 merge_group = options.merge_group;
     GIANT_ASSERT(!m_running, "commands may not run other commands");
     if (m_running) {
         return CommandResult::failure("commands may not run other commands");
@@ -208,7 +209,7 @@ CommandResult CommandRegistry::execute(std::string_view name, const Json& args_i
         roll_back();
         return result;
     }
-    if (!context.changes().empty()) {
+    if (!context.changes().empty() && options.record_history) {
         if (merge_group != 0 && !m_undo.empty() && m_redo.empty() &&
             m_undo.back().merge_group == merge_group && m_undo.back().what.command == command_name) {
             // Same drag: extend the step. Undo runs every change newest first,

@@ -14,6 +14,17 @@ option(GIANT_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitize
 option(GIANT_SANITIZE_THREAD "Build with ThreadSanitizer" OFF)
 option(GIANT_BUILD_TESTS "Build unit tests" ON)
 option(GIANT_REQUIRE_VALIDATION "Tests fail if the D3D12 validation layer is unavailable" OFF)
+option(GIANT_REQUIRE_DOTNET "Fail the configure if the .NET SDK is missing (CI)" OFF)
+
+# The .NET SDK builds the C# API and scripts. Without it the engine still
+# builds, but C# scripting is unavailable and its tests are skipped.
+find_program(GIANT_DOTNET dotnet)
+if(NOT GIANT_DOTNET)
+  if(GIANT_REQUIRE_DOTNET)
+    message(FATAL_ERROR "GIANT_REQUIRE_DOTNET is on but the .NET SDK (dotnet) was not found")
+  endif()
+  message(WARNING "The .NET 10 SDK was not found: C# scripting will not be built")
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(GiantModule)
@@ -27,5 +38,6 @@ add_subdirectory(third_party)
 add_subdirectory(engine/core)
 add_subdirectory(engine/platform)
 add_subdirectory(engine/rhi)
+add_subdirectory(engine/script)
 add_subdirectory(engine/ai)
 add_subdirectory(editor)

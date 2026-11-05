@@ -220,6 +220,50 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
          }});
 
     add(registry,
+        {"load_scripts",
+         "Loads a compiled C# script assembly (.dll built against Giant.Scripting) and starts its "
+         "scripts; replaces any loaded scripts (they get OnStop first). Rebuild the .dll and call "
+         "this again to reload. Scripts change the scene through commands, but as game logic: "
+         "their changes are not added to the undo history. Check get_log afterwards for script "
+         "errors.",
+         Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["path"],
+             "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 1024,
+                                     "description": "Path to the script .dll."}}})"),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (!state.dotnet_available) {
+                 return CommandResult::failure(".NET could not be started; see get_log");
+             }
+             const std::string path = args["path"].get<std::string>();
+             std::error_code error;
+             const std::filesystem::path file(std::u8string(path.begin(), path.end()));
+             if (!std::filesystem::is_regular_file(file, error)) {
+                 return CommandResult::failure("no such file: " + path);
+             }
+             state.scripts_to_load = path;
+             return CommandResult::success({{"loading", path}, {"note", "starts after this frame"}});
+         }});
+
+    add(registry,
+        {"unload_scripts", "Stops (OnStop) and unloads the loaded C# scripts.",
+         Json{{"type", "object"}, {"additionalProperties", false}}, false,
+         [&state](const Json&, CommandContext&) {
+             state.scripts_unload_requested = true;
+             return CommandResult::success({{"unloading", !state.scripts_loaded.empty()}});
+         }});
+
+    add(registry,
+        {"get_scripts",
+         "Reports the loaded C# script assembly and how many of its scripts are running (a "
+         "script that throws is stopped and logged).",
+         Json{{"type", "object"}, {"additionalProperties", false}}, true,
+         [&state](const Json&, CommandContext&) {
+             return CommandResult::success({{"loaded", state.scripts_loaded},
+                                            {"running", state.scripts_running},
+                                            {"dotnet_available", state.dotnet_available}});
+         }});
+
+    add(registry,
         {"quit_editor",
          "Closes the editor after this frame. Not undoable; the MCP connection ends with it.",
          Json{{"type", "object"}, {"additionalProperties", false}}, false,

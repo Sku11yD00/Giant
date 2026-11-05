@@ -73,6 +73,16 @@ struct CommandDesc {
     std::function<CommandResult(const Json& args, CommandContext& context)> run;
 };
 
+struct ExecuteOptions {
+    // Consecutive runs of the same command with the same non-zero group
+    // become one undo step. UI drags use it (one group per drag), so dragging
+    // a colour picker is undone in one go.
+    u64 merge_group = 0;
+    // False for game logic (C# scripts): changes are made but not added to
+    // the editor's undo history.
+    bool record_history = true;
+};
+
 struct HistoryEntry {
     std::string command;
     Json args;
@@ -94,13 +104,9 @@ public:
 
     // Checks the arguments and runs the command. A missing or null `args`
     // means no arguments. A successful command that recorded changes goes on
-    // the undo history and clears the redo history.
-    //
-    // `merge_group`: consecutive runs of the same command with the same
-    // non-zero group become one undo step. UI drags use it (one group per
-    // drag), so dragging a colour picker is undone in one go.
+    // the undo history and clears the redo history (see ExecuteOptions).
     CommandResult execute(std::string_view name, const Json& args = Json::object(),
-                          u64 merge_group = 0);
+                          ExecuteOptions options = {});
 
     bool can_undo() const { return !m_undo.empty(); }
     bool can_redo() const { return !m_redo.empty(); }

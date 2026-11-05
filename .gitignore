@@ -6,3 +6,7 @@
 *.user
 compile_commands.json
 __pycache__/
+bin/
+obj/
+/screenshots/
+giant_editor_layout.ini

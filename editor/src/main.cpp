@@ -4,11 +4,12 @@
 //
 //   giant_editor [--frames N] [--backend null|d3d12] [--software] [--hidden]
 //                [--debug-layer] [--require-validation] [--no-vsync] [--mcp]
+//                [--scripts path/to/Scripts.dll]
 //
 // --require-validation fails the run if the GPU validation layer is not
 // actually running (CI uses it so "no validation errors" means something).
 // --mcp speaks MCP over stdin/stdout (logs go to stderr); the editor closes
-// when the client disconnects.
+// when the client disconnects. --scripts loads C# scripts at start-up.
 #include "editor_commands.h"
 #include "ui/imgui_layer.h"
 #include "ui/panels.h"
@@ -19,6 +20,7 @@
 #include "giant/platform/line_reader.h"
 #include "giant/platform/window.h"
 #include "giant/rhi/rhi.h"
+#include "giant/script/script_host.h"
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +28,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -49,6 +52,7 @@ struct Options {
     bool require_validation = false;
     bool vsync = true;
     bool mcp = false;
+    std::string scripts; // C# script assembly to load at start-up
 };
 
 bool parse_options(int argc, char** argv, Options& out) {
@@ -79,6 +83,8 @@ bool parse_options(int argc, char** argv, Options& out) {
             out.vsync = false;
         } else if (arg == "--mcp") {
             out.mcp = true;
+        } else if (arg == "--scripts" && i + 1 < argc) {
+            out.scripts = argv[++i];
         } else {
             log_error("editor", "unknown option: " + std::string(arg));
             return false;
@@ -109,6 +115,78 @@ bool pump_mcp(platform::LineReader& reader, ai::McpServer& server, const bool& q
     std::cout.flush();
     return static_cast<bool>(std::cout);
 }
+
+// Where Giant.Scripting.dll is: next to the editor in a download, one level
+// up in a build tree.
+std::filesystem::path find_managed_dir() {
+    const std::filesystem::path exe = platform::executable_dir();
+    std::error_code error;
+    for (const auto& dir : {exe / "managed", exe.parent_path() / "managed"}) {
+        if (std::filesystem::exists(dir / "Giant.Scripting.dll", error)) {
+            return dir;
+        }
+    }
+    return exe / "managed";
+}
+
+// C# scripts: starts .NET when first needed, applies load/unload requests
+// from commands, and runs a frame of the scripts.
+class ScriptRunner {
+public:
+    ScriptRunner(ai::CommandRegistry& commands, editor::EditorState& state)
+        : m_commands(commands), m_state(state) {}
+
+    void update(float delta_seconds) {
+        if (m_state.scripts_unload_requested) {
+            m_state.scripts_unload_requested = false;
+            if (m_host != nullptr) {
+                m_host->unload_scripts();
+            }
+            m_state.scripts_loaded.clear();
+        }
+        if (!m_state.scripts_to_load.empty()) {
+            const std::string path = std::move(m_state.scripts_to_load);
+            m_state.scripts_to_load.clear();
+            if (start()) {
+                const std::filesystem::path file(std::u8string(path.begin(), path.end()));
+                m_state.scripts_loaded = m_host->load_scripts(file) ? path : std::string();
+            }
+        }
+        if (m_host != nullptr && !m_state.scripts_loaded.empty()) {
+            m_host->update(delta_seconds);
+        }
+        m_state.scripts_running = m_host != nullptr ? m_host->running_scripts() : 0;
+    }
+
+private:
+    bool start() {
+        if (m_host != nullptr) {
+            return true;
+        }
+        if (!m_state.dotnet_available) {
+            return false;
+        }
+        script::ScriptHostDesc desc;
+        desc.managed_dir = find_managed_dir();
+        // Scripts are game logic: their changes skip the editor's undo history.
+        desc.commands = [this](std::string_view name, std::string_view args) {
+            const auto parsed = ai::parse_json(args);
+            if (!parsed) {
+                return script::CommandReply{false, "arguments are not valid JSON"};
+            }
+            const ai::CommandResult result = m_commands.execute(name, *parsed, {0, false});
+            return result.ok ? script::CommandReply{true, ai::to_json_text(result.value)}
+                             : script::CommandReply{false, result.error};
+        };
+        m_host = script::ScriptHost::create(desc);
+        m_state.dotnet_available = m_host != nullptr;
+        return m_host != nullptr;
+    }
+
+    ai::CommandRegistry& m_commands;
+    editor::EditorState& m_state;
+    std::unique_ptr<script::ScriptHost> m_host;
+};
 
 int run(const Options& options) {
     // Before anything logs, so the AI can read start-up messages too.
@@ -175,6 +253,9 @@ int run(const Options& options) {
         return 1;
     }
     editor::EditorPanels panels(commands, state, log_history);
+    // After the registry, so scripts' OnStop can still run commands.
+    ScriptRunner scripts(commands, state);
+    state.scripts_to_load = options.scripts;
     state.render_screenshot = [&] {
         // Offscreen images store colour as given; the viewport colour is
         // linear, so encode it to sRGB like the swap chain view does.
@@ -225,6 +306,8 @@ int run(const Options& options) {
         const float delta = std::chrono::duration<float>(frame_start - last_frame).count();
         last_frame = frame_start;
         frame_info.frame_ms = 1000.0f * delta;
+
+        scripts.update(delta);
 
         // Build the UI first: what it changes shows in this frame.
         ui->begin_frame(delta, input);

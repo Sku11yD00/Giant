@@ -1,0 +1,246 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Loader;
+using System.Text;
+
+namespace Giant;
+
+/// <summary>Functions the native engine hands to the managed side.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativeApi
+{
+    // Runs a command. Writes a malloc'd UTF-8 string (result JSON or error)
+    // to *reply; returns 0 on success, 1 on failure.
+    public delegate* unmanaged<byte*, byte*, byte**, int> Execute;
+
+    // Writes a log line: level 0 trace, 1 info, 2 warning, 3 error.
+    public delegate* unmanaged<int, byte*, void> Log;
+
+    // Frees a string from Execute.
+    public delegate* unmanaged<byte*, void> FreeString;
+}
+
+/// <summary>
+/// The entry points the native script host calls (engine use only; scripts
+/// never call these). Everything runs on the
+/// engine's main thread.
+/// </summary>
+public static unsafe class NativeHost
+{
+    private static NativeApi s_api;
+    private static ScriptSet? s_scripts;
+
+    /// <summary>Receives the engine's functions; 0 on success.</summary>
+    [UnmanagedCallersOnly]
+    public static int Initialize(void* api, int size)
+    {
+        if (size != sizeof(NativeApi))
+        {
+            return 1; // engine and API built from different sources
+        }
+        s_api = *(NativeApi*)api;
+        return 0;
+    }
+
+    /// <summary>Loads a script assembly; 0 on success, otherwise logged.</summary>
+    [UnmanagedCallersOnly]
+    public static int LoadScripts(byte* pathUtf8)
+    {
+        try
+        {
+            UnloadCurrent();
+            string path = Marshal.PtrToStringUTF8((IntPtr)pathUtf8) ?? "";
+            s_scripts = ScriptSet.Load(path);
+            s_scripts.Start();
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Log(3, "could not load scripts: " + e);
+            UnloadCurrent();
+            return 1;
+        }
+    }
+
+    /// <summary>Calls OnUpdate on every running script.</summary>
+    [UnmanagedCallersOnly]
+    public static int Update(float deltaSeconds)
+    {
+        s_scripts?.Update(deltaSeconds);
+        return 0;
+    }
+
+    /// <summary>Stops and unloads the loaded scripts.</summary>
+    [UnmanagedCallersOnly]
+    public static int UnloadScripts()
+    {
+        UnloadCurrent();
+        return 0;
+    }
+
+    /// <summary>Scripts currently running (not stopped by an error).</summary>
+    [UnmanagedCallersOnly]
+    public static int RunningScriptCount() => s_scripts?.RunningCount ?? 0;
+
+    internal static (bool Ok, string Reply) Execute(string command, string argsJson)
+    {
+        if (s_api.Execute == null)
+        {
+            return (false, "the script host is not initialised");
+        }
+        byte* reply = null;
+        int status;
+        fixed (byte* name = Utf8(command))
+        fixed (byte* args = Utf8(argsJson))
+        {
+            status = s_api.Execute(name, args, &reply);
+        }
+        string text = reply != null ? Marshal.PtrToStringUTF8((IntPtr)reply) ?? "" : "";
+        if (reply != null)
+        {
+            s_api.FreeString(reply);
+        }
+        return (status == 0, text);
+    }
+
+    internal static void Log(int level, string text)
+    {
+        if (s_api.Log == null)
+        {
+            Console.Error.WriteLine(text);
+            return;
+        }
+        fixed (byte* bytes = Utf8(text))
+        {
+            s_api.Log(level, bytes);
+        }
+    }
+
+    private static void UnloadCurrent()
+    {
+        if (s_scripts == null)
+        {
+            return;
+        }
+        WeakReference context = s_scripts.Stop();
+        s_scripts = null;
+        // Let the collectible context go, so a rebuilt assembly can load.
+        for (int i = 0; i < 10 && context.IsAlive; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+    }
+
+    private static byte[] Utf8(string text)
+    {
+        int length = Encoding.UTF8.GetByteCount(text);
+        byte[] bytes = new byte[length + 1]; // zero-terminated
+        Encoding.UTF8.GetBytes(text, 0, text.Length, bytes, 0);
+        return bytes;
+    }
+}
+
+/// <summary>
+/// One loaded script assembly, in its own collectible load context so it can
+/// be unloaded and reloaded while the engine runs.
+/// </summary>
+internal sealed class ScriptSet
+{
+    private readonly List<Script> _scripts = new();
+    private readonly HashSet<Script> _stopped = new();
+    private ScriptLoadContext? _context;
+
+    public int RunningCount => _scripts.Count - _stopped.Count;
+
+    public static ScriptSet Load(string path)
+    {
+        var set = new ScriptSet();
+        set.LoadInto(path);
+        return set;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)] // keeps context references out of the caller
+    private void LoadInto(string path)
+    {
+        string full = Path.GetFullPath(path);
+        _context = new ScriptLoadContext(full);
+        // From bytes, so the file stays free to be rebuilt while it runs.
+        using var stream = new MemoryStream(File.ReadAllBytes(full));
+        Assembly assembly = _context.LoadFromStream(stream);
+        foreach (Type type in assembly.GetTypes())
+        {
+            if (type.IsSubclassOf(typeof(Script)) && !type.IsAbstract &&
+                type.GetConstructor(Type.EmptyTypes) != null)
+            {
+                _scripts.Add((Script)Activator.CreateInstance(type)!);
+            }
+        }
+        NativeHost.Log(1, $"loaded {_scripts.Count} script(s) from {Path.GetFileName(full)}");
+    }
+
+    public void Start() => Each("OnStart", s => s.OnStart());
+
+    public void Update(float deltaSeconds) => Each("OnUpdate", s => s.OnUpdate(deltaSeconds));
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public WeakReference Stop()
+    {
+        Each("OnStop", s => s.OnStop());
+        _scripts.Clear();
+        _stopped.Clear();
+        var weak = new WeakReference(_context);
+        _context?.Unload();
+        _context = null;
+        return weak;
+    }
+
+    private void Each(string what, Action<Script> action)
+    {
+        foreach (Script script in _scripts)
+        {
+            if (_stopped.Contains(script))
+            {
+                continue;
+            }
+            try
+            {
+                action(script);
+            }
+            catch (Exception e)
+            {
+                // One broken script must not take the others (or the editor) down.
+                _stopped.Add(script);
+                NativeHost.Log(3, $"{script.GetType().FullName}.{what} threw, script stopped: {e}");
+            }
+        }
+    }
+}
+
+internal sealed class ScriptLoadContext : AssemblyLoadContext
+{
+    private readonly AssemblyDependencyResolver _resolver;
+
+    public ScriptLoadContext(string mainAssemblyPath)
+        : base(isCollectible: true)
+    {
+        _resolver = new AssemblyDependencyResolver(mainAssemblyPath);
+    }
+
+    protected override Assembly? Load(AssemblyName name)
+    {
+        // Scripts must share the engine API the host loaded (in its own load
+        // context), or their Script subclasses would not be the host's type.
+        Assembly api = typeof(Script).Assembly;
+        if (name.Name == api.GetName().Name)
+        {
+            return api;
+        }
+        string? path = _resolver.ResolveAssemblyToPath(name);
+        return path != null ? LoadFromAssemblyPath(path) : null;
+    }
+}

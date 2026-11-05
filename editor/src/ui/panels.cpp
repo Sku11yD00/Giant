@@ -49,7 +49,7 @@ EditorPanels::EditorPanels(ai::CommandRegistry& commands, EditorState& state, co
     : m_commands(commands), m_state(state), m_log(log) {}
 
 void EditorPanels::run(const char* command, const ai::Json& args, u64 merge_group) {
-    const ai::CommandResult result = m_commands.execute(command, args, merge_group);
+    const ai::CommandResult result = m_commands.execute(command, args, {merge_group, true});
     if (!result.ok) {
         log_warning("editor", std::string(command) + ": " + result.error);
     }
@@ -273,6 +273,21 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),
                     m_state.window->pixel_height());
+        ImGui::SeparatorText("C# scripts");
+        if (m_state.scripts_loaded.empty()) {
+            ImGui::TextDisabled(m_state.dotnet_available ? "None loaded (load_scripts command)."
+                                                         : ".NET 10 not found: see the log.");
+        } else {
+            ImGui::TextWrapped("%s", m_state.scripts_loaded.c_str());
+            ImGui::Text("Running: %u", m_state.scripts_running);
+            if (ImGui::Button("Reload")) {
+                run("load_scripts", {{"path", m_state.scripts_loaded}});
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Unload")) {
+                run("unload_scripts");
+            }
+        }
     }
     ImGui::End();
 }
