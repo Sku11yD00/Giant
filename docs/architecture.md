@@ -9,6 +9,7 @@ ai          command layer, MCP server, rule checks
 sim world   giants, destruction, NPCs, animation | cells, streaming, landscape, scatter, weather
 render      virtual geometry, voxel world, GI, materials, hair, clouds
 rhi         thin graphics layer (D3D12 first)
+platform    windows, input, files (SDL3 underneath)
 core        jobs, memory, double-precision math, logging, reflection, text formats
 ```
 
@@ -19,13 +20,17 @@ This table is the source of truth for `tools/check_architecture.py`.
 | Module | May include |
 | --- | --- |
 | core | (nothing) |
+| platform | core |
 | rhi | core |
 | render | core, rhi |
 | world | core |
 | sim | core, world |
 | script | core, world, sim |
-| ai | core, rhi, render, world, sim, script |
+| ai | core, platform, rhi, render, world, sim, script |
 | editor | everything |
+
+`rhi` never includes `platform`: a swap chain takes the native window handle
+as plain data, so the graphics layer works headless and in tests.
 
 `render` reads world state through plain data handed to it each frame (cells,
 instances, weather values, voxel edits); it never includes `world` or `sim`.

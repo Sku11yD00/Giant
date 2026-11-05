@@ -158,8 +158,9 @@ def check_cmake(allowed: dict[str, set[str]], errors: list[str]) -> None:
                 errors.append(f"{cmake.relative_to(ROOT)}: giant_module '{name}' is not in the table")
                 continue
             depends = re.search(r"DEPENDS((?:\s+[A-Za-z0-9_]+)+)", body)
-            if "${" in body:
-                errors.append(f"{cmake.relative_to(ROOT)}: giant_module '{name}' must list DEPENDS literally")
+            if depends_clause := re.search(r"DEPENDS([^)]*)", body):
+                if "${" in depends_clause.group(1):
+                    errors.append(f"{cmake.relative_to(ROOT)}: giant_module '{name}' must list DEPENDS literally")
             for dep in depends.group(1).split() if depends else []:
                 if dep in {"SOURCES"}:
                     break

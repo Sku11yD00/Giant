@@ -31,8 +31,10 @@ jobs:
       - name: Pick compiler
         run: |
           if [ "${{ matrix.compiler }}" = clang ]; then
+            echo "CC=clang-18" >> "$GITHUB_ENV"
             echo "CXX=clang++-18" >> "$GITHUB_ENV"
           else
+            echo "CC=gcc" >> "$GITHUB_ENV"
             echo "CXX=g++" >> "$GITHUB_ENV"
           fi
       - run: cmake --preset ${{ matrix.preset }}
@@ -47,3 +49,16 @@ jobs:
       - run: cmake --preset msvc
       - run: cmake --build --preset msvc
       - run: ctest --preset msvc
+      - run: cmake --preset msvc-release
+      - run: cmake --build --preset msvc-release
+      - run: ctest --preset msvc-release
+      - name: Package the editor
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force giant-editor-windows | Out-Null
+          Copy-Item build/msvc-release/editor/giant_editor.exe giant-editor-windows/
+          Copy-Item README.md giant-editor-windows/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: giant-editor-windows
+          path: giant-editor-windows

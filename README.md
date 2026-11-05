@@ -45,6 +45,7 @@ the modules it is allowed to (CI runs it on every push).
 | Folder | Holds |
 | --- | --- |
 | `engine/core` | Memory, threads, jobs, math (double precision), logging, reflection, file formats |
+| `engine/platform` | Windows, input and files, on SDL3 |
 | `engine/rhi` | Thin render layer, D3D12 backend first |
 | `engine/render` | Virtual geometry, voxel world, GI, shadows, materials, hair, sky and clouds |
 | `engine/world` | Cells, streaming, landscape, scatter, weather simulation |
