@@ -339,37 +339,77 @@ GIANT_TEST("geometry: a .gltf file reads its buffer from next to it") {
     const ImportResult escaped = import_gltf_file(dir / "outside.gltf");
     GIANT_CHECK(!escaped.ok() && escaped.error.find("outside") != std::string::npos);
     std::filesystem::remove(dir.parent_path() / "giant_outside.bin");
+
+    // A URI naming the folder itself is "not found", not a size error.
+    TriangleFile dot = triangle_file(true, "");
+    dot.json.replace(dot.json.find(from), from.size(), R"("buffers":[{"uri":".","byteLength":)");
+    std::ofstream(dir / "dot.gltf", std::ios::binary) << dot.json;
+    const ImportResult folder_uri = import_gltf_file(dir / "dot.gltf");
+    GIANT_CHECK(!folder_uri.ok() && folder_uri.error.find("not found") != std::string::npos);
+
+    // "link/../tri.gltf" through a symlinked folder is the file the OS
+    // opens, and its buffer is found next to it. Not on Windows, which
+    // removes ".." from the text before following links.
+    {
+        std::ofstream bin(dir / "tri data.bin", std::ios::binary | std::ios::trunc);
+        bin.write(reinterpret_cast<const char*>(f.bin.data()), static_cast<std::streamsize>(f.bin.size()));
+    }
+    std::filesystem::create_directories(dir / "real" / "deep");
+    std::filesystem::rename(dir / "tri.gltf", dir / "real" / "tri.gltf");
+    std::filesystem::rename(dir / "tri data.bin", dir / "real" / "tri data.bin");
+    std::error_code ec;
+#ifndef _WIN32
+    std::filesystem::create_directory_symlink(dir / "real" / "deep", dir / "link", ec);
+#else
+    ec = std::make_error_code(std::errc::not_supported);
+#endif
+    if (!ec) {
+        const ImportResult linked = import_gltf_file(dir / "link" / ".." / "tri.gltf");
+        GIANT_CHECK(linked.ok());
+        if (!linked.ok()) std::fprintf(stderr, "    %s\n", linked.error.c_str());
+    }
     std::filesystem::remove_all(dir);
 }
 
-GIANT_TEST("geometry: vertex counts are bounded and unused vertices dropped") {
-    // Accessors without a bufferView are zeros and cost nothing in the file,
-    // so a tiny file can claim millions of vertices.
-    const auto file = [](u64 vertex_count, int nodes) {
+GIANT_TEST("geometry: vertex data is bounded and unused vertices dropped") {
+    // One POSITION/NORMAL pair shared by many primitives (as exporters write
+    // multi-material meshes) and many nodes: read once per node, and only
+    // the vertices triangles use are kept.
+    const auto file = [](u32 vertex_count, int primitives, int nodes, bool with_data) {
         std::vector<u8> bin;
+        append(bin, std::vector<float>(usize{vertex_count} * 6, 0.5f));
+        const usize index_at = bin.size();
         append(bin, std::vector<u32>{0, 1, 2});
-        std::string node_list, node_defs;
+        std::string node_list, node_defs, prims;
         for (int i = 0; i < nodes; ++i) {
             node_list += (i ? "," : "") + std::to_string(i);
             node_defs += std::string(i ? "," : "") + R"({"mesh":0,"translation":[)" + std::to_string(i) + ",0,0]}";
         }
+        for (int i = 0; i < primitives; ++i) {
+            prims += std::string(i ? "," : "") + R"({"attributes":{"POSITION":0,"NORMAL":1},"indices":2})";
+        }
         const std::string count = std::to_string(vertex_count);
+        const std::string view = with_data ? R"("bufferView":0,)" : "";
         const std::string json =
             R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[)" + node_list + "]}]," +
-            R"("nodes":[)" + node_defs + "]," +
-            R"("meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]}],)" +
-            R"("buffers":[{"byteLength":12}],"bufferViews":[{"buffer":0,"byteLength":12}],)" +
-            R"("accessors":[{"componentType":5126,"count":)" + count + R"(,"type":"VEC3"},)" +
-            R"({"componentType":5126,"count":)" + count + R"(,"type":"VEC3"},)" +
-            R"({"bufferView":0,"componentType":5125,"count":3,"type":"SCALAR"}]})";
+            R"("nodes":[)" + node_defs + "]," + R"("meshes":[{"primitives":[)" + prims + "]}]," +
+            R"("buffers":[{"byteLength":)" + std::to_string(bin.size()) + "}]," +
+            R"("bufferViews":[{"buffer":0,"byteLength":)" + std::to_string(index_at) +
+            R"(,"byteStride":24},{"buffer":0,"byteOffset":)" + std::to_string(index_at) +
+            R"(,"byteLength":12}],)" +
+            R"("accessors":[{)" + view + R"("componentType":5126,"count":)" + count + R"(,"type":"VEC3"},)" +
+            R"({"bufferView":0,"byteOffset":12,"componentType":5126,"count":)" + count + R"(,"type":"VEC3"},)" +
+            R"({"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"}]})";
         return make_glb(json, bin);
     };
-    const ImportResult shared = import_gltf_memory(file(100'000, 8));
+    const ImportResult shared = import_gltf_memory(file(100'000, 20, 8, true));
     GIANT_CHECK(shared.ok());
-    GIANT_CHECK(shared.mesh.indices.size() == 24);
-    GIANT_CHECK(shared.mesh.vertices.size() <= 24); // not 800,000
-    const ImportResult huge = import_gltf_memory(file(k_max_import_vertices + 1, 1));
-    GIANT_CHECK(!huge.ok() && huge.error.find("vertices") != std::string::npos);
+    if (!shared.ok()) std::fprintf(stderr, "    %s\n", shared.error.c_str());
+    GIANT_CHECK(shared.mesh.indices.size() == 3 * 20 * 8);
+    GIANT_CHECK(shared.mesh.vertices.size() <= 3 * 20 * 8); // not 16 million
+    // Positions without data would let a tiny file claim millions.
+    const ImportResult empty = import_gltf_memory(file(3, 1, 1, false));
+    GIANT_CHECK(!empty.ok() && empty.error.find("without data") != std::string::npos);
 }
 
 GIANT_TEST("geometry: sparse data on an interleaved buffer is refused") {

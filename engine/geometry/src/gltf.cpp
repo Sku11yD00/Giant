@@ -9,6 +9,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string_view>
+#include <unordered_map>
 
 namespace giant::geometry {
 
@@ -30,12 +31,18 @@ cgltf_result read_file(const cgltf_memory_options*, const cgltf_file_options* op
         return cgltf_result_file_not_found;
     }
     const std::string_view utf8(path);
-    const std::filesystem::path file_path =
-        std::filesystem::path(std::u8string(utf8.begin(), utf8.end())).lexically_normal();
-    // A buffer URI may not reach outside the file's folder ("../", absolute).
-    const std::filesystem::path relative = file_path.lexically_relative(context->folder);
+    const std::filesystem::path file_path(std::u8string(utf8.begin(), utf8.end()));
+    // A buffer URI may not reach outside the file's folder ("../"). The
+    // check is on the normalised text; the file is opened as written, so
+    // a symlinked folder still resolves the way the OS sees it.
+    const std::filesystem::path relative =
+        file_path.lexically_normal().lexically_relative(context->folder);
     if (relative.empty() || *relative.begin() == "..") {
         context->refusal = "a buffer file it refers to is outside the file's folder";
+        return cgltf_result_file_not_found;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(file_path, ec)) {
         return cgltf_result_file_not_found;
     }
     std::ifstream file(file_path, std::ios::binary | std::ios::ate);
@@ -145,6 +152,7 @@ public:
             warn_once(m_warned_skin, "skins are not imported yet: meshes are placed in their bind pose");
         }
         const NodeTransform transform = node_transform(node);
+        m_unpacked.clear();
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
             if (!primitive(node->mesh->primitives[i], transform)) {
                 return false;
@@ -164,6 +172,27 @@ private:
     bool fail(std::string text) {
         m_result.error = std::move(text);
         return false;
+    }
+
+    // A vec3 accessor as floats, read once per node (primitives often share
+    // one), with the vertices counted against the file's budget.
+    const std::vector<Vec3>* unpack(const cgltf_accessor* accessor) {
+        if (const auto it = m_unpacked.find(accessor); it != m_unpacked.end()) {
+            return &it->second;
+        }
+        const cgltf_size count = accessor->count;
+        m_vertices_read += count;
+        if (m_vertices_read > k_max_import_vertices) {
+            fail("the file has more than 48 million vertices");
+            return nullptr;
+        }
+        std::vector<Vec3>& out = m_unpacked[accessor];
+        out.resize(count);
+        if (count > 0 && cgltf_accessor_unpack_floats(accessor, &out[0].x, count * 3) != count * 3) {
+            fail("could not read vertex data");
+            return nullptr;
+        }
+        return &out;
     }
 
     bool primitive(const cgltf_primitive& prim, const NodeTransform& transform) {
@@ -198,9 +227,11 @@ private:
         if (index_count > k_max_import_triangles * 3) {
             return fail("the mesh has more than 16 million triangles");
         }
-        m_vertices_read += vertex_count;
-        if (vertex_count > k_max_import_vertices || m_vertices_read > k_max_import_vertices) {
-            return fail("the file has more than 48 million vertices");
+        // Accessors without a bufferView are zeros and cost nothing in the
+        // file, so positions and indices must have real data: that keeps
+        // the work bounded by the file's size.
+        if (positions->buffer_view == nullptr || (prim.indices != nullptr && prim.indices->buffer_view == nullptr)) {
+            return fail("a mesh has positions or indices without data");
         }
         // cgltf 1.15 reads sparse values with the base view's stride, but
         // the spec packs them tightly: refuse rather than read wrong data.
@@ -210,19 +241,13 @@ private:
                 return fail("sparse accessors on interleaved buffers are not supported");
             }
         }
-
-        std::vector<Vec3> p(vertex_count);
-        if (vertex_count > 0 &&
-            cgltf_accessor_unpack_floats(positions, &p[0].x, vertex_count * 3) != vertex_count * 3) {
-            return fail("could not read vertex positions");
+        const std::vector<Vec3>* p = unpack(positions);
+        if (p == nullptr) {
+            return false;
         }
-        std::vector<Vec3> n;
-        if (normals != nullptr) {
-            n.resize(vertex_count);
-            if (vertex_count > 0 &&
-                cgltf_accessor_unpack_floats(normals, &n[0].x, vertex_count * 3) != vertex_count * 3) {
-                return fail("could not read vertex normals");
-            }
+        const std::vector<Vec3>* n = normals != nullptr ? unpack(normals) : nullptr;
+        if (normals != nullptr && n == nullptr) {
+            return false;
         }
         std::vector<u32> indices(index_count);
         if (prim.indices != nullptr) {
@@ -247,32 +272,37 @@ private:
         if ((mesh.indices.size() + triangles.size()) / 3 > k_max_import_triangles) {
             return fail("the mesh has more than 16 million triangles");
         }
-        for (Vec3& v : p) {
-            v = transform.point(v);
-            if (!finite(v)) {
-                return fail("a vertex position is not a finite number");
+        // Only the vertices that triangles use are kept, so the mesh stays
+        // bounded by its triangle count.
+        constexpr u32 unused = ~u32{0};
+        m_remap.assign(vertex_count, unused);
+        m_points.resize(vertex_count);
+        for (const u32 i : triangles) {
+            if (m_remap[i] == unused) {
+                m_points[i] = transform.point((*p)[i]);
+                if (!finite(m_points[i])) {
+                    return fail("a vertex position is not a finite number");
+                }
+                m_remap[i] = 0;
             }
         }
-        if (normals != nullptr) {
-            // Only the vertices that triangles use, so the mesh stays
-            // bounded by its triangle count.
-            constexpr u32 unused = ~u32{0};
-            std::vector<u32> remap(vertex_count, unused);
+        if (n != nullptr) {
             for (const u32 i : triangles) {
-                if (remap[i] == unused) {
-                    remap[i] = static_cast<u32>(mesh.vertices.size());
-                    Vec3 d = transform.direction(n[i]);
+                if (m_remap[i] == 0) {
+                    m_remap[i] = static_cast<u32>(mesh.vertices.size()) + 1;
+                    Vec3 d = transform.direction((*n)[i]);
                     if (!finite(d) || length_squared(d) == 0.0f) {
                         d = {0, 1, 0};
                     }
-                    mesh.vertices.push_back({p[i], d});
+                    mesh.vertices.push_back({m_points[i], d});
                 }
-                mesh.indices.push_back(remap[i]);
+                mesh.indices.push_back(m_remap[i] - 1);
             }
         } else {
             // glTF: without normals, a mesh is flat shaded.
             for (usize t = 0; t + 2 < triangles.size(); t += 3) {
-                const Vec3 a = p[triangles[t]], b = p[triangles[t + 1]], c = p[triangles[t + 2]];
+                const Vec3 a = m_points[triangles[t]], b = m_points[triangles[t + 1]],
+                           c = m_points[triangles[t + 2]];
                 Vec3 face = normalize_or_zero(cross(b - a, c - a));
                 if (length_squared(face) == 0.0f) {
                     face = {0, 1, 0};
@@ -324,7 +354,10 @@ private:
     bool m_warned_morph = false;
     bool m_warned_positions = false;
     bool m_warned_normals = false;
-    u64 m_vertices_read = 0;
+    u64 m_vertices_read = 0; // over the whole file
+    std::unordered_map<const cgltf_accessor*, std::vector<Vec3>> m_unpacked; // this node's
+    std::vector<u32> m_remap;  // per primitive: 0 used, else output index + 1
+    std::vector<Vec3> m_points; // per primitive: transformed positions
 };
 
 ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, bool allow_files) {
@@ -444,7 +477,7 @@ ImportResult import_gltf_file(const std::filesystem::path& path) {
     if (ec) {
         full = path;
     }
-    const std::u8string utf8 = full.lexically_normal().u8string();
+    const std::u8string utf8 = full.u8string();
     return import(bytes, std::string(utf8.begin(), utf8.end()), true);
 }
 
