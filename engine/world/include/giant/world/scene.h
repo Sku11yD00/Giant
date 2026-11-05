@@ -74,7 +74,8 @@ Vec3 sun_direction(const Lighting& lighting);
 
 class Scene {
 public:
-    // Adds `entity` and returns its id. Id 0 gets a new id; a non-zero id
+    // Adds `entity` and returns its id (0, adding nothing, once all 2^53 - 1
+    // ids have been handed out). Id 0 gets a new id; a non-zero id
     // (restoring a deleted entity, loading) must be unused. `at` is its
     // place in the entity list (default: the end).
     EntityId add(Entity entity, std::optional<usize> at = std::nullopt);

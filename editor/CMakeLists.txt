@@ -59,3 +59,14 @@ if(GIANT_BUILD_TESTS)
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")
   endif()
 endif()
+
+# The editor's commands without a window or GPU.
+if(GIANT_BUILD_TESTS)
+  add_executable(giant_editor_tests tests/test_scene_commands.cpp src/scene_commands.cpp)
+  target_link_libraries(giant_editor_tests PRIVATE giant::core giant::platform giant::rhi giant::world
+                        giant::ai giant::test_main)
+  giant_apply_warnings(giant_editor_tests)
+  giant_apply_sanitizers(giant_editor_tests)
+  add_test(NAME editor_commands COMMAND giant_editor_tests)
+  set_tests_properties(editor_commands PROPERTIES TIMEOUT 60)
+endif()

@@ -30,6 +30,12 @@ struct EditorState {
     const LogHistory* log = nullptr;
     // The scene being edited; its sky colour is the viewport background.
     world::Scene scene;
+    // Changes when the whole scene is replaced (new_scene, load_scene). Undo
+    // steps capture it and do nothing if it no longer matches, so an undo
+    // never touches a different scene that reuses the same entity ids (a
+    // script can replace the scene without recording history).
+    u64 scene_generation = 1;
+    u64 next_scene_generation = 2;
     EditorCamera camera;
     world::EntityId selected = 0; // in the outliner; view state
     // Last frame's renderer counts, updated by the main loop.
@@ -50,6 +56,11 @@ struct EditorState {
 };
 
 // Registers every editor command. Asserts on a bad registration (a bug).
+// A change to the current scene: its undo and redo only run while the scene
+// is still the one they were recorded against (see scene_generation).
+ai::Change scene_change(EditorState& state, std::function<void()> undo,
+                        std::function<void()> redo);
+
 void register_editor_commands(ai::CommandRegistry& registry, EditorState& state);
 // The scene, lighting and camera commands (scene_commands.cpp).
 void register_scene_commands(ai::CommandRegistry& registry, EditorState& state);

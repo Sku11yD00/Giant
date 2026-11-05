@@ -50,6 +50,9 @@ Vec3 sun_direction(const Lighting& lighting) {
 
 EntityId Scene::add(Entity entity, std::optional<usize> at) {
     if (entity.id == 0) {
+        if (m_next_id > k_max_entity_id) {
+            return 0; // every id has been used; callers report it
+        }
         entity.id = m_next_id;
     }
     GIANT_ASSERT(entity.id <= k_max_entity_id, "entity ids are at most 2^53 - 1");
@@ -251,7 +254,9 @@ public:
                 return;
             }
             const double d = v->get<double>();
-            if (d < minimum || d > maximum) {
+            // Compared as stored (float), so a saved limit like 0.0001
+            // (float 9.99999975e-05) loads again.
+            if (!within(d, minimum, maximum)) {
                 fail(key, "must be from " + limit(minimum) + " to " + limit(maximum));
                 return;
             }
@@ -273,7 +278,7 @@ public:
                     return;
                 }
                 xyz[i] = (*v)[i].get<double>();
-                if (xyz[i] < minimum || xyz[i] > maximum) {
+                if (!within(xyz[i], minimum, maximum)) {
                     fail(key, "values must be from " + limit(minimum) + " to " + limit(maximum));
                     return;
                 }
@@ -331,11 +336,12 @@ public:
     }
 
     // A positive whole number.
-    void id(const char* key, u64& out, bool required) {
+    void id(const char* key, u64& out, bool required, u64 maximum = k_max_entity_id) {
         if (const Json* v = get(key, required)) {
             if (!v->is_number_unsigned() || v->get<u64>() == 0 ||
-                v->get<u64>() > k_max_entity_id) {
-                fail(key, "must be a whole number from 1 to 2^53 - 1");
+                v->get<u64>() > maximum) {
+                fail(key, "must be a whole number from 1 to " +
+                              std::string(maximum == k_max_entity_id ? "2^53 - 1" : "2^53"));
                 return;
             }
             out = v->get<u64>();
@@ -356,6 +362,11 @@ public:
     }
 
     const std::string& path() const { return m_path; }
+
+    static bool within(double v, double minimum, double maximum) {
+        const float f = static_cast<float>(v);
+        return f >= static_cast<float>(minimum) && f <= static_cast<float>(maximum);
+    }
 
     static std::string limit(double v) {
         char text[32];
@@ -433,7 +444,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
         }
     }
     u64 next_id = 1;
-    root.id("next_id", next_id, false);
+    root.id("next_id", next_id, false, k_max_entity_id + 1); // one past the last id
 
     Scene scene;
     if (const Json* lighting = root.get("lighting", false); lighting != nullptr && root.ok()) {

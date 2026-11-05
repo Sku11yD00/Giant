@@ -850,6 +850,9 @@ GIANT_TEST("rhi: d3d12 keeps a resource used this frame alive past a mid-frame u
     BufferDesc out_desc;
     out_desc.size = 256;
     out_desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
+    // No read_buffer between frames: a readback waits for the GPU, which
+    // would hide a resource freed too early. All are checked at the end.
+    std::vector<BufferHandle> kept;
     for (u32 frame = 0; frame < 6; ++frame) {
         const BufferHandle used = device->create_buffer(out_desc);
         CommandList* cmd = device->begin_frame(nullptr);
@@ -871,8 +874,15 @@ GIANT_TEST("rhi: d3d12 keeps a resource used this frame alive past a mid-frame u
         cmd->push(std::array<u32, 4>{device->write_descriptor(streamed), 64, 100 + frame, 0});
         cmd->dispatch(1);
         device->end_frame();
-        GIANT_CHECK(as_u32(device->read_buffer(streamed))[1] == 102 + frame);
-        device->destroy(streamed);
+        kept.push_back(streamed);
+    }
+    for (u32 frame = 0; frame < kept.size(); ++frame) {
+        // Each buffer holds its own frame's values: no write to a freed
+        // buffer landed in a later one that reused its memory or descriptor.
+        const std::vector<u8> bytes = device->read_buffer(kept[frame]);
+        GIANT_CHECK(as_u32(bytes)[1] == 100 + frame + 2);
+        GIANT_CHECK(as_u32(bytes)[63] == 100 + frame + 126);
+        device->destroy(kept[frame]);
     }
     device->destroy(fill);
     device->wait_idle();

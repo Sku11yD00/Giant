@@ -124,8 +124,9 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
              const Vec3 after{args["r"].get<float>(), args["g"].get<float>(),
                               args["b"].get<float>()};
              state.scene.lighting.sky_color = after;
-             context.record({[&state, before] { state.scene.lighting.sky_color = before; },
-                             [&state, after] { state.scene.lighting.sky_color = after; }});
+             context.record(
+                 scene_change(state, [&state, before] { state.scene.lighting.sky_color = before; },
+                              [&state, after] { state.scene.lighting.sky_color = after; }));
              return CommandResult::success(color_to_json(after));
          }});
 

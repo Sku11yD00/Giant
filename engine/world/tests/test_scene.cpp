@@ -202,3 +202,39 @@ GIANT_TEST("world: a minimal scene file loads with defaults") {
     // next_id below the largest id is corrected, so new ids stay unique.
     GIANT_CHECK(scene.add(named("new")) == 8);
 }
+
+GIANT_TEST("world: values at every limit survive a save and load") {
+    Scene scene;
+    Lighting& l = scene.lighting;
+    l.sun_elevation_degrees = -90.0f;
+    l.sun_azimuth_degrees = 360.0f;
+    l.sun_intensity = 100.0f;
+    l.ambient_intensity = 100.0f;
+    l.exposure = 0.01f; // not exact in float: compared as stored
+    l.sun_color = {1.0f, 0.0f, 1.0f};
+    Entity tiny = named("tiny");
+    tiny.transform.scale = {0.0001f, 1e6f, 0.0001f};
+    tiny.transform.position = {-1e8, 1e8, 0.0};
+    tiny.material.emissive = {1000.0f, 0.0f, 0.0f};
+    tiny.material.roughness = 1.0f;
+    scene.add(tiny);
+    Entity last = named("last");
+    last.id = k_max_entity_id;
+    scene.add(last);
+
+    const std::string text = save_scene(scene);
+    Scene loaded;
+    const auto error = load_scene(text, loaded);
+    GIANT_CHECK(!error.has_value());
+    if (error) {
+        std::fprintf(stderr, "    %s\n", error->message.c_str());
+        return;
+    }
+    GIANT_CHECK(loaded.find(k_max_entity_id) != nullptr);
+    GIANT_CHECK(loaded.next_id() == k_max_entity_id + 1);
+    GIANT_CHECK(loaded.lighting.exposure == 0.01f);
+    GIANT_CHECK(loaded.find(1)->transform.scale.x == 0.0001f);
+    GIANT_CHECK(save_scene(loaded) == text);
+    // A full id space loads, but adding another entity reports it.
+    GIANT_CHECK(loaded.add(named("one more")) == 0);
+}

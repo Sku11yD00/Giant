@@ -142,18 +142,29 @@ Json camera_json(const EditorCamera& c) {
             {"fly_speed", c.speed}};
 }
 
+const char* const k_ids_exhausted =
+    "every entity id has been used (the scene's next id is at the limit, 2^53 - 1); no more "
+    "entities can be added";
+
 // Replaces the whole scene, undoably (new_scene, load_scene).
 void swap_scene(EditorState& state, world::Scene next, CommandContext& context) {
     auto before = std::make_shared<world::Scene>(state.scene);
     auto after = std::make_shared<world::Scene>(std::move(next));
+    const u64 before_generation = state.scene_generation;
+    const u64 after_generation = state.next_scene_generation++;
     state.scene = *after;
+    state.scene_generation = after_generation;
     state.selected = 0;
-    context.record({[&state, before] {
+    // Not guarded: a swap replaces whatever scene is there, and restores the
+    // generation its neighbours in the history were recorded against.
+    context.record({[&state, before, before_generation] {
                         state.scene = *before;
+                        state.scene_generation = before_generation;
                         state.selected = 0;
                     },
-                    [&state, after] {
+                    [&state, after, after_generation] {
                         state.scene = *after;
+                        state.scene_generation = after_generation;
                         state.selected = 0;
                     }});
 }
@@ -163,6 +174,17 @@ std::filesystem::path utf8_path(const std::string& path) {
 }
 
 } // namespace
+
+ai::Change scene_change(EditorState& state, std::function<void()> undo,
+                        std::function<void()> redo) {
+    const u64 generation = state.scene_generation;
+    return {[&state, generation, undo = std::move(undo)] {
+                if (state.scene_generation == generation) undo();
+            },
+            [&state, generation, redo = std::move(redo)] {
+                if (state.scene_generation == generation) redo();
+            }};
+}
 
 void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) {
     const Json properties = entity_properties();
@@ -177,16 +199,19 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          [&state](const Json& args, CommandContext& context) {
              const Entity e = new_entity(args, state.scene);
              const EntityId id = state.scene.add(e);
+             if (id == 0) {
+                 return CommandResult::failure(k_ids_exhausted);
+             }
              Entity stored = *state.scene.find(id);
-             // Undo and redo tolerate a scene that changed outside the history
-             // (a script's load_scene): they skip ids that are gone or taken.
-             context.record({[&state, id] {
-                                 state.scene.remove(id);
-                                 if (state.selected == id) state.selected = 0;
-                             },
-                             [&state, stored] {
-                                 if (state.scene.find(stored.id) == nullptr) state.scene.add(stored);
-                             }});
+             context.record(scene_change(
+                 state,
+                 [&state, id] {
+                     state.scene.remove(id);
+                     if (state.selected == id) state.selected = 0;
+                 },
+                 [&state, stored] {
+                     if (state.scene.find(stored.id) == nullptr) state.scene.add(stored);
+                 }));
              return CommandResult::success(entity_json(stored));
          }});
 
@@ -211,6 +236,12 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              Json ids = Json::array();
              for (const Json& item : args["entities"]) {
                  const EntityId id = state.scene.add(new_entity(item, state.scene));
+                 if (id == 0) {
+                     std::vector<EntityId> added;
+                     for (const Entity& e : *created) added.push_back(e.id);
+                     state.scene.remove_many(added); // all or nothing
+                     return CommandResult::failure(k_ids_exhausted);
+                 }
                  created->push_back(*state.scene.find(id));
                  ids.push_back(id);
              }
@@ -218,15 +249,17 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              for (const Entity& e : *created) {
                  created_ids->push_back(e.id);
              }
-             context.record({[&state, created_ids] {
-                                 state.scene.remove_many(*created_ids);
-                                 state.selected = state.scene.find(state.selected) ? state.selected : 0;
-                             },
-                             [&state, created] {
-                                 for (const Entity& e : *created) {
-                                     if (state.scene.find(e.id) == nullptr) state.scene.add(e);
-                                 }
-                             }});
+             context.record(scene_change(
+                 state,
+                 [&state, created_ids] {
+                     state.scene.remove_many(*created_ids);
+                     state.selected = state.scene.find(state.selected) ? state.selected : 0;
+                 },
+                 [&state, created] {
+                     for (const Entity& e : *created) {
+                         if (state.scene.find(e.id) == nullptr) state.scene.add(e);
+                     }
+                 }));
              return CommandResult::success({{"ids", std::move(ids)}});
          }});
 
@@ -256,7 +289,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                      *target = value;
                  }
              };
-             context.record({[set, before] { set(before); }, [set, after] { set(after); }});
+             context.record(
+                 scene_change(state, [set, before] { set(before); }, [set, after] { set(after); }));
              return CommandResult::success(entity_json(after));
          }});
 
@@ -281,17 +315,19 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              if (state.scene.find(state.selected) == nullptr) {
                  state.selected = 0;
              }
-             context.record({[&state, removed] {
-                                 std::vector<world::Scene::Removed> back;
-                                 for (const auto& r : *removed) {
-                                     if (state.scene.find(r.entity.id) == nullptr) back.push_back(r);
-                                 }
-                                 state.scene.restore_many(std::move(back));
-                             },
-                             [&state, ids] {
-                                 state.scene.remove_many(*ids);
-                                 if (state.scene.find(state.selected) == nullptr) state.selected = 0;
-                             }});
+             context.record(scene_change(
+                 state,
+                 [&state, removed] {
+                     std::vector<world::Scene::Removed> back;
+                     for (const auto& r : *removed) {
+                         if (state.scene.find(r.entity.id) == nullptr) back.push_back(r);
+                     }
+                     state.scene.restore_many(std::move(back));
+                 },
+                 [&state, ids] {
+                     state.scene.remove_many(*ids);
+                     if (state.scene.find(state.selected) == nullptr) state.selected = 0;
+                 }));
              return CommandResult::success({{"deleted", removed->size()}});
          }});
 
@@ -372,8 +408,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              l.ambient_intensity = args.value("ambient_intensity", l.ambient_intensity);
              l.exposure = args.value("exposure", l.exposure);
              const world::Lighting after = l;
-             context.record({[&state, before] { state.scene.lighting = before; },
-                             [&state, after] { state.scene.lighting = after; }});
+             context.record(
+                 scene_change(state, [&state, before] { state.scene.lighting = before; },
+                              [&state, after] { state.scene.lighting = after; }));
              return CommandResult::success(lighting_json(after));
          }});
 

@@ -669,8 +669,14 @@ void NullCommandList::draw_ui(TextureHandle target, const UiFrame& ui) {
     GIANT_ASSERT(t != nullptr && has(t->desc.usage, TextureUsage::render_target) &&
                      (t->desc.format == Format::rgba8_unorm || t->desc.format == Format::rgba8_srgb),
                  "draw_ui needs a live rgba8 render target");
-    if (t == nullptr) {
-        return;
+    u64 index_total = 0;
+    u64 vertex_total = 0;
+    for (const UiDrawList& list : ui.lists) {
+        index_total += list.indices.size();
+        vertex_total += list.vertices.size();
+    }
+    if (t == nullptr || index_total == 0 || vertex_total == 0) {
+        return; // nothing to draw: no barriers either, as in D3D12
     }
     // As in D3D12: sampled textures become readable before the pass.
     for (const UiDrawList& list : ui.lists) {

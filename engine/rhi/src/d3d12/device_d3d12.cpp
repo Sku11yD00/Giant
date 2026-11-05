@@ -538,9 +538,10 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
         const std::filesystem::path core_file(core_path);
         const std::filesystem::path exe_file(exe_path);
+        std::error_code error; // equivalent() ignores case, 8.3 names and ".\"
         m_info.agility_sdk_runtime =
-            core_file.parent_path().filename() == L"D3D12" &&
-            core_file.parent_path().parent_path() == exe_file.parent_path();
+            std::filesystem::equivalent(core_file.parent_path(),
+                                        exe_file.parent_path() / L"D3D12", error);
     }
     if (!m_info.agility_sdk_runtime) {
         log_warning("rhi", "d3d12: using the Windows D3D12 runtime, not the bundled Agility SDK "
