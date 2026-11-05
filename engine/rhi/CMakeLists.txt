@@ -10,10 +10,16 @@ giant_module(rhi
   SOURCES ${GIANT_RHI_SOURCES}
   DEPENDS core
 )
+giant_shaders(rhi
+  SHADERS
+    shaders/ui.slang:vs_main:vertex:ui_vs
+    shaders/ui.slang:ps_main:pixel:ui_ps
+)
 
 if(WIN32)
   target_compile_definitions(giant_rhi PUBLIC GIANT_RHI_HAS_D3D12=1)
-  target_link_libraries(giant_rhi PRIVATE d3d12 dxgi dxguid d3dcompiler)
+  # Agility SDK headers first, so d3d12.h is the version we ship.
+  target_link_libraries(giant_rhi PRIVATE third_party::d3d12_headers d3d12 dxgi dxguid)
 else()
   target_compile_definitions(giant_rhi PUBLIC GIANT_RHI_HAS_D3D12=0)
 endif()
@@ -24,4 +30,13 @@ giant_module_tests(rhi
 )
 if(GIANT_BUILD_TESTS AND GIANT_REQUIRE_VALIDATION)
   target_compile_definitions(giant_rhi_tests PRIVATE GIANT_REQUIRE_VALIDATION=1)
+endif()
+if(GIANT_BUILD_TESTS)
+  giant_shaders(rhi_test TARGET giant_rhi_tests
+    SHADERS
+      tests/shaders/test_compute.slang:cs_fill:compute:test_fill_cs
+      tests/shaders/test_compute.slang:cs_ramp:compute:test_ramp_cs
+      tests/shaders/test_draw.slang:vs_main:vertex:test_draw_vs
+      tests/shaders/test_draw.slang:ps_main:pixel:test_draw_ps
+  )
 endif()

@@ -61,7 +61,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                   {"software_adapter", adapter.software},
                   {"meets_minimum_spec", adapter.meets_minimum_spec()},
                   {"validation_enabled", state.device->validation_enabled()},
-                  {"frames_presented", state.device->frames_presented()},
+                  {"frames_completed", state.device->frames_completed()},
                   {"window", {{"pixel_width", state.window->pixel_width()},
                               {"pixel_height", state.window->pixel_height()},
                               {"point_width", state.window->point_width()},

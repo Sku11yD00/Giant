@@ -307,8 +307,8 @@ int run(const Options& options) {
         };
         const rhi::Color background{encode(state.clear_color.r), encode(state.clear_color.g),
                                     encode(state.clear_color.b), 1.0f};
-        return device->render_ui_offscreen(ui->frame(), window->pixel_width(),
-                                           window->pixel_height(), background);
+        return rhi::render_ui_offscreen(*device, ui->frame(), window->pixel_width(),
+                                        window->pixel_height(), background);
     };
     editor::FrameInfo frame_info;
     auto last_frame = std::chrono::steady_clock::now();
@@ -358,7 +358,8 @@ int run(const Options& options) {
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }
-        if (!device->begin_frame(*swap_chain)) {
+        rhi::CommandList* cmd = device->begin_frame(swap_chain.get());
+        if (cmd == nullptr) {
             if (device->device_lost()) {
                 log_error("editor", "the GPU device was lost; closing");
                 return 1;
@@ -373,10 +374,13 @@ int run(const Options& options) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
             continue;
         }
-        device->clear(*swap_chain, state.clear_color);
-        device->draw_ui(*swap_chain, ui->frame());
-        frame_info.ui_draw_calls = device->last_ui_draw_calls();
-        device->end_frame(*swap_chain);
+        rhi::RenderPassDesc pass;
+        pass.colors[0] = {swap_chain->current_texture(), rhi::LoadOp::clear, state.clear_color};
+        cmd->begin_render_pass(pass);
+        cmd->end_render_pass();
+        cmd->draw_ui(swap_chain->current_texture(), ui->frame());
+        device->end_frame();
+        frame_info.ui_draw_calls = device->last_frame_stats().ui_draws;
         skipped_in_a_row = 0;
         if (pace_null) {
             window->wait_events(16);
@@ -392,13 +396,13 @@ int run(const Options& options) {
             report_start = now;
             report_frames = 0;
         }
-        if (options.max_frames != 0 && device->frames_presented() >= options.max_frames) {
+        if (options.max_frames != 0 && device->frames_completed() >= options.max_frames) {
             break;
         }
     }
 
     device->wait_idle();
-    log_info("editor", "rendered " + std::to_string(device->frames_presented()) + " frames");
+    log_info("editor", "rendered " + std::to_string(device->frames_completed()) + " frames");
     const u32 validation_errors = device->validation_errors();
     swap_chain.reset(); // swap chains go before their device
     if (validation_errors > 0) {

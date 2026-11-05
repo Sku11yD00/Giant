@@ -4,6 +4,7 @@ giant_module(core
     src/jobs.cpp
     src/log.cpp
     src/log_history.cpp
+    src/math.cpp
     src/image.cpp
     src/png.cpp
 )

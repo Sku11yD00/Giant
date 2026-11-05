@@ -14,6 +14,16 @@ option(GIANT_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitize
 option(GIANT_SANITIZE_THREAD "Build with ThreadSanitizer" OFF)
 option(GIANT_BUILD_TESTS "Build unit tests" ON)
 option(GIANT_REQUIRE_VALIDATION "Tests fail if the D3D12 validation layer is unavailable" OFF)
+# Shaders compile with the prebuilt Slang compiler, downloaded at configure
+# time. Windows needs them (the GPU runs them); elsewhere they are only
+# checked, on CI. Without them, shader blobs are empty and only the null
+# backend works.
+if(WIN32)
+  set(giant_shaders_default ON)
+else()
+  set(giant_shaders_default OFF)
+endif()
+option(GIANT_COMPILE_SHADERS "Compile shaders with Slang (needed for the D3D12 backend)" ${giant_shaders_default})
 option(GIANT_REQUIRE_DOTNET "Fail the configure if the .NET SDK is missing (CI)" OFF)
 
 # The .NET SDK builds the C# API and scripts. Without it the engine still
@@ -28,6 +38,7 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(GiantModule)
+include(GiantShaders)
 
 if(GIANT_BUILD_TESTS)
   enable_testing()
@@ -38,6 +49,8 @@ add_subdirectory(third_party)
 add_subdirectory(engine/core)
 add_subdirectory(engine/platform)
 add_subdirectory(engine/rhi)
+# add_subdirectory(engine/world)
+# add_subdirectory(engine/render)
 add_subdirectory(engine/script)
 add_subdirectory(engine/ai)
 add_subdirectory(editor)

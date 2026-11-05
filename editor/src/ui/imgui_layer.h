@@ -48,7 +48,7 @@ private:
     platform::Window& m_window;
     rhi::Device& m_device;
     ImGuiContext* m_context = nullptr;
-    rhi::TextureId m_font_texture = 0;
+    rhi::TextureHandle m_font_texture;
 
     // Converted draw data; m_lists views into the other three.
     std::vector<rhi::UiVertex> m_vertices;

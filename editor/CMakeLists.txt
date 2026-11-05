@@ -11,6 +11,7 @@ if(GIANT_DOTNET)
 endif()
 giant_apply_warnings(giant_editor)
 giant_apply_sanitizers(giant_editor)
+giant_d3d12_app(giant_editor) # Agility SDK runtime and WARP next to the exe
 
 # Smoke test: open a hidden window, render 30 frames, exit cleanly.
 if(GIANT_BUILD_TESTS)

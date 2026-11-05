@@ -122,14 +122,18 @@ std::unique_ptr<ImGuiLayer> ImGuiLayer::create(platform::Window& window, rhi::De
     int height = 0;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     const usize bytes = static_cast<usize>(width) * static_cast<usize>(height) * 4;
-    layer->m_font_texture = device.create_ui_texture(static_cast<u32>(width),
-                                                     static_cast<u32>(height),
-                                                     std::span<const u8>(pixels, bytes));
-    if (layer->m_font_texture == 0) {
+    rhi::TextureDesc font_desc;
+    font_desc.width = static_cast<u32>(width);
+    font_desc.height = static_cast<u32>(height);
+    font_desc.format = rhi::Format::rgba8_unorm; // UI colours are gamma-space
+    font_desc.usage = rhi::TextureUsage::sampled;
+    font_desc.name = "UI font atlas";
+    layer->m_font_texture = device.create_texture(font_desc, std::span<const u8>(pixels, bytes));
+    if (!layer->m_font_texture.valid()) {
         log_error("editor", "could not create the UI font texture");
         return nullptr;
     }
-    io.Fonts->SetTexID(static_cast<ImTextureID>(layer->m_font_texture));
+    io.Fonts->SetTexID(static_cast<ImTextureID>(rhi::ui_texture_id(layer->m_font_texture)));
     return layer;
 }
 
@@ -137,9 +141,7 @@ ImGuiLayer::~ImGuiLayer() {
     if (m_context != nullptr) {
         ImGui::DestroyContext(m_context);
     }
-    if (m_font_texture != 0) {
-        m_device.destroy_ui_texture(m_font_texture);
-    }
+    m_device.destroy(m_font_texture); // deferred until the GPU is done with it
 }
 
 void ImGuiLayer::begin_frame(float delta_seconds, const std::vector<InputEvent>& input) {

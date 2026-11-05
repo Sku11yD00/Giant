@@ -41,6 +41,27 @@ function(giant_module name)
   giant_apply_sanitizers(${target})
 endfunction()
 
+# giant_d3d12_app(<executable>)
+# On Windows: the executable uses the DirectX 12 Agility SDK runtime, copied
+# into a D3D12 folder next to it, and the pinned WARP software GPU.
+function(giant_d3d12_app target)
+  if(NOT WIN32)
+    return()
+  endif()
+  target_sources(${target} PRIVATE ${PROJECT_SOURCE_DIR}/cmake/d3d12_agility_exports.cpp)
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/cmake/d3d12_agility_exports.cpp
+    TARGET_DIRECTORY ${target}
+    PROPERTIES COMPILE_DEFINITIONS GIANT_D3D12_SDK_VERSION=${GIANT_D3D12_SDK_VERSION})
+  set(agility ${GIANT_D3D12_AGILITY_DIR}/build/native/bin/x64)
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${target}>/D3D12
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${agility}/D3D12Core.dll ${agility}/d3d12SDKLayers.dll
+            $<TARGET_FILE_DIR:${target}>/D3D12
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${GIANT_D3D12_WARP_DIR}/build/native/bin/x64/d3d10warp.dll $<TARGET_FILE_DIR:${target}>
+    VERBATIM)
+endfunction()
+
 # giant_module_tests(<name> SOURCES ...)
 # Builds one test executable per module and registers it with CTest.
 function(giant_module_tests name)
@@ -53,6 +74,7 @@ function(giant_module_tests name)
   target_link_libraries(${target} PRIVATE giant::${name} giant::test_main)
   giant_apply_warnings(${target})
   giant_apply_sanitizers(${target})
+  giant_d3d12_app(${target}) # any test may open a GPU device
   add_test(NAME ${name} COMMAND ${target})
   # A hung test fails instead of stalling CI for hours.
   set_tests_properties(${name} PROPERTIES TIMEOUT 120)

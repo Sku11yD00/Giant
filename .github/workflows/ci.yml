@@ -40,7 +40,11 @@ jobs:
             echo "CC=gcc" >> "$GITHUB_ENV"
             echo "CXX=g++" >> "$GITHUB_ENV"
           fi
-      - run: cmake --preset ${{ matrix.preset }} -DGIANT_REQUIRE_DOTNET=ON
+      # One job also compiles every shader with Slang (to HLSL, as a check),
+      # so shader errors show on Linux too.
+      - run: >
+          cmake --preset ${{ matrix.preset }} -DGIANT_REQUIRE_DOTNET=ON
+          ${{ matrix.compiler == 'gcc' && matrix.preset == 'dev' && '-DGIANT_COMPILE_SHADERS=ON' || '' }}
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --preset ${{ matrix.preset }}
 
@@ -73,6 +77,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force giant-editor-windows | Out-Null
           Copy-Item build/msvc-release/editor/giant_editor.exe giant-editor-windows/
+          # The DirectX 12 Agility SDK runtime (D3D12 folder) and WARP for --software.
+          Copy-Item -Recurse build/msvc-release/editor/D3D12 giant-editor-windows/D3D12
+          Copy-Item build/msvc-release/editor/d3d10warp.dll giant-editor-windows/
           # The C# API and the sample script, next to the editor.
           Copy-Item -Recurse build/msvc-release/managed giant-editor-windows/managed
           Remove-Item -Recurse -Force giant-editor-windows/managed/tests

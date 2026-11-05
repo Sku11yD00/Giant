@@ -96,7 +96,7 @@ def main() -> int:
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")
-        check(info["frames_presented"] >= 0, "engine info")
+        check(info["frames_completed"] >= 0, "engine info")
 
         before = tool("get_clear_color")
         tool("set_clear_color", {"r": 0.5, "g": 0.25, "b": 1.0})
