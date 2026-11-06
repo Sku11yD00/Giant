@@ -285,6 +285,10 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
         if (flying == m_wanted.end() && !cut && (placed == m_cells.end() ? key == 0 : placed->second.key == key)) {
             continue;
         }
+        // Left out, and no room it could take now: it waits for room to free.
+        if (flying == m_wanted.end() && !cut && placed == m_cells.end() && key != 0 && m_cut_short.contains(cell)) {
+            continue;
+        }
         if (key == 0 || !any) {
             // Nothing to place: gone now (and whatever is in flight is not wanted).
             if (flying != m_wanted.end()) m_wanted.erase(flying);
