@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_set>
+#include <utility>
 
 namespace giant::editor {
 
@@ -69,7 +70,7 @@ TileStates snapshot(const Terrain& t, const std::vector<CellCoord>& cells) {
 // terrain's (streaming gives an empty terrain its world's spacing outside
 // the history) take theirs back when the terrain is empty, and are skipped
 // otherwise (logged), never asserted on.
-void apply(Terrain& t, const TileStates& states) {
+void put_back(Terrain& t, const TileStates& states) {
     for (const auto& [cell, heights, version] : states) {
         if (!heights) t.remove(cell);
     }
@@ -111,14 +112,14 @@ void record(EditorState& state, CommandContext& context, std::shared_ptr<const T
     context.record(scene_change(
         state,
         [&state, before, samples_before] {
-            apply(state.scene.terrain, *before);
+            put_back(state.scene.terrain, *before);
             if (state.scene.terrain.empty()) state.scene.terrain.set_samples(samples_before);
         },
         [&state, after, samples_after] {
             // Spacing first: it can change only while there are no tiles,
             // which is how the change was made.
             state.scene.terrain.set_samples(samples_after);
-            apply(state.scene.terrain, *after);
+            put_back(state.scene.terrain, *after);
         }));
 }
 
@@ -210,9 +211,23 @@ Json height_range(const Terrain& t, const std::vector<CellCoord>& cells) {
     return {{"lowest", lo}, {"highest", hi}};
 }
 
-// Samples a sculpt command may change (its stroke's reach), so a stroke
-// is a small hitch at most.
+// A sculpt command's limits: the cells its stroke reaches, its dabs, and
+// the samples its dabs reach in all (each dab's square), so one call is a
+// bounded hitch (the brush tool keeps its radius to 128 samples, so a
+// frame's dab is well under a millisecond's work at 64 samples a tile).
 constexpr usize k_max_stroke_cells = 4096;
+constexpr usize k_max_stroke_dabs = 65536;
+constexpr double k_max_stroke_samples = static_cast<double>(k_max_samples_per_command);
+
+// One undo step of strokes (a drag, its calls merged): the tiles as they
+// were before its first change, and as they were when it was undone (for
+// redo), so a long drag holds one copy per tile it touched, not one a call.
+struct SculptStroke {
+    u64 group = 0; // its merge group
+    TileStates before;
+    std::unordered_set<CellCoord, world::CellCoordHash> cells;
+    TileStates after;
+};
 
 world::BrushOp brush_op(const std::string& name) {
     if (name == "lower") return world::BrushOp::lower;
@@ -445,7 +460,8 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
          "neighbours) or flatten (towards `height`; strength 0 to 1 is how far a dab goes). The "
          "brush fades out over the outer `falloff` part of its radius, and dabs are made at least "
          "every quarter radius along the stroke. Only existing tiles change (create_terrain makes "
-         "ground). The editor's brush tool sends one call a frame while dragging, as one undo step. "
+         "ground; ground of an open world not loaded yet is left as it is: cells_not_loaded). At "
+         "most 4096 cells, 65536 dabs and 16.7 million heights reached (dabs x square) a call. The editor's brush tool sends one call a frame while dragging, as one undo step. "
          "Undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
@@ -463,7 +479,9 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                                {"description", "The first point is the last call's last dab (a drag going on): "
                                                "not dabbed again. Default false."}}}}}},
          false,
-         [&state](const Json& args, CommandContext& context) {
+         [&state, current = std::make_shared<std::shared_ptr<SculptStroke>>()](const Json& args,
+                                                                            CommandContext& context) {
+             std::shared_ptr<SculptStroke>& stroke = *current; // the newest step's
              Terrain& t = state.scene.terrain;
              world::Brush brush;
              brush.op = brush_op(args["op"].get<std::string>());
@@ -475,8 +493,18 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              brush.height = args.value("height", 0.0f);
              std::vector<world::GroundPoint> points;
              for (const Json& p : args["points"]) points.push_back({p[0].get<double>(), p[1].get<double>()});
-             std::vector<world::GroundPoint> dabs = world::brush_dabs(brush, points);
+             std::vector<world::GroundPoint> dabs = world::brush_dabs(brush, points, k_max_stroke_dabs);
+             if (dabs.size() > k_max_stroke_dabs) {
+                 return CommandResult::failure("the stroke makes over " + std::to_string(k_max_stroke_dabs) +
+                                               " dabs (one every quarter radius): a shorter stroke a call");
+             }
              if (args.value("continues", false) && dabs.size() > 1) dabs.erase(dabs.begin());
+             const double side = 2.0 * brush.radius / t.spacing() + 1.0;
+             if (static_cast<double>(dabs.size()) * side * side > k_max_stroke_samples) {
+                 return CommandResult::failure("the stroke's dabs reach over " +
+                                               std::to_string(k_max_samples_per_command) +
+                                               " heights in all: a smaller radius or fewer points a call");
+             }
              // The cells the stroke reaches.
              std::unordered_set<CellCoord, world::CellCoordHash> reach;
              for (const world::GroundPoint& d : dabs) {
@@ -493,30 +521,60 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                      }
                  }
              }
-             std::vector<CellCoord> cells(reach.begin(), reach.end());
-             if (auto refused = ground_not_loaded(state, cells)) return CommandResult::failure(*refused);
-             std::erase_if(cells, [&](CellCoord c) { return t.find(c) == nullptr; });
-             auto before = std::make_shared<const TileStates>(snapshot(t, cells));
+             // Ground saved in an open world but not loaded has no tile here,
+             // so the brush leaves it as it is (the stroke goes on over the
+             // ground that is loaded).
+             usize not_loaded = 0;
+             if (state.world != nullptr && state.world->active(state.scene_generation)) {
+                 for (const CellCoord c : reach) not_loaded += state.world->ground_on_disk(c) ? usize{1} : usize{0};
+             }
+             // One copy per tile a step: a run joining a stroke's step adds
+             // only tiles it had not changed yet.
+             const bool joins =
+                 context.merging() && stroke != nullptr && stroke->group == context.merge_group();
+             if (!joins) {
+                 stroke = std::make_shared<SculptStroke>();
+                 stroke->group = context.merge_group();
+             }
+             std::vector<CellCoord> fresh;
+             for (const CellCoord c : reach) {
+                 if (t.find(c) != nullptr && !stroke->cells.contains(c)) fresh.push_back(c);
+             }
+             TileStates before = snapshot(t, fresh);
              std::vector<CellCoord> changed;
              for (const world::GroundPoint& d : dabs) world::apply_brush(t, brush, d.x, d.z, changed);
              std::sort(changed.begin(), changed.end(), [](CellCoord a, CellCoord b) {
                  return a.z != b.z ? a.z < b.z : a.x < b.x;
              });
              changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
-             if (!changed.empty()) {
-                 // Only the tiles changed are kept for undo.
-                 auto kept = std::make_shared<TileStates>();
-                 for (const TileState& s : *before) {
-                     if (std::binary_search(changed.begin(), changed.end(), s.cell, [](CellCoord a, CellCoord b) {
-                             return a.z != b.z ? a.z < b.z : a.x < b.x;
-                         })) {
-                         kept->push_back(s);
-                     }
+             const usize steps_before = stroke->before.size();
+             for (TileState& s : before) {
+                 if (std::binary_search(changed.begin(), changed.end(), s.cell, [](CellCoord a, CellCoord b) {
+                         return a.z != b.z ? a.z < b.z : a.x < b.x;
+                     })) {
+                     stroke->cells.insert(s.cell);
+                     stroke->before.push_back(std::move(s));
                  }
-                 auto after = std::make_shared<const TileStates>(snapshot(t, changed));
-                 record(state, context, std::move(kept), std::move(after), t.samples(), t.samples());
+             }
+             if (!joins && steps_before == 0 && !stroke->before.empty()) {
+                 // The step's one change: undo keeps the tiles as they are
+                 // then for redo (undo runs only on the state after the step).
+                 std::shared_ptr<SculptStroke> step = stroke;
+                 context.record(scene_change(
+                     state,
+                     [&state, step] {
+                         std::vector<CellCoord> cells;
+                         cells.reserve(step->before.size());
+                         for (const TileState& s : step->before) cells.push_back(s.cell);
+                         step->after = snapshot(state.scene.terrain, cells);
+                         put_back(state.scene.terrain, step->before);
+                     },
+                     [&state, step] { put_back(state.scene.terrain, step->after); }));
+             } else if (!joins) {
+                 stroke.reset(); // nothing changed: no step
              }
              Json out = {{"dabs", dabs.size()}, {"tiles_changed", changed.size()}};
+             if (not_loaded > 0) out["cells_not_loaded"] = not_loaded;
              out["heights"] = height_range(t, changed);
              return CommandResult::success(std::move(out));
          }});
@@ -557,7 +615,20 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              if (fx == tx || fz == tz) return CommandResult::failure("from and to must differ on x and on z");
              const float low = args.value("low", 0.0f);
              const float high = args.value("high", 100.0f);
-             const std::vector<CellCoord> cells = cells_in(*area);
+             std::vector<CellCoord> cells = cells_in(*area);
+             {
+                 // A `to` on a cell's edge puts the image's last row or column
+                 // on the next cell's first samples: a tile there takes them
+                 // (no step at the edge); none, and no tile is made for them.
+                 const CellCoord end = world::cell_of({std::max(fx, tx), 0.0, std::max(fz, tz)});
+                 for (i32 z = area->first.z; z <= end.z; ++z) {
+                     for (i32 x = area->first.x; x <= end.x; ++x) {
+                         if ((x > area->last.x || z > area->last.z) && t.find({x, z}) != nullptr) {
+                             cells.push_back({x, z});
+                         }
+                     }
+                 }
+             }
              const usize n = t.samples();
              usize added = 0;
              for (const CellCoord c : cells) added += t.find(c) == nullptr ? usize{1} : usize{0};

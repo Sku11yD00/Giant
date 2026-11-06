@@ -6,6 +6,7 @@
 #include "giant/core/types.h"
 #include "giant/world/terrain.h"
 
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -35,13 +36,17 @@ struct Brush {
 float brush_weight(const Brush& brush, double distance);
 
 // One dab of the brush at (x, z): changes the heights of the tiles within
-// its radius, adds the cells changed to `changed` (each once a dab).
+// its radius, adds the cells changed to `changed` (each once a dab; a tile
+// whose heights all stay as they were is not touched).
 // Heights stay within k_max_terrain_height. Smooth averages each sample
 // with its 8 neighbours (across tiles) as they were before the dab.
 void apply_brush(Terrain& terrain, const Brush& brush, double x, double z, std::vector<CellCoord>& changed);
 
 // The dabs a stroke through `points` makes: the points, with more between
 // them so dabs are at most a quarter radius apart (a fast drag leaves no gaps).
-std::vector<GroundPoint> brush_dabs(const Brush& brush, std::span<const GroundPoint> points);
+// A stroke that would make more than `max_dabs` gives max_dabs + 1 (cut
+// short): the caller refuses it.
+std::vector<GroundPoint> brush_dabs(const Brush& brush, std::span<const GroundPoint> points,
+                                    usize max_dabs = std::numeric_limits<usize>::max());
 
 } // namespace giant::world

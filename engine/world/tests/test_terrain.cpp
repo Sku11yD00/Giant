@@ -3,6 +3,7 @@
 
 #include "giant_test.h"
 
+#include <chrono>
 #include <cmath>
 #include <string>
 
@@ -412,6 +413,48 @@ GIANT_TEST("terrain brush: a stroke has a dab at least every quarter radius") {
         GIANT_CHECK(std::hypot(dabs[k].x - dabs[k - 1].x, dabs[k].z - dabs[k - 1].z) <= 1.0 + 1e-9);
     }
     GIANT_CHECK(dabs.back().x == 10.0);
+    // Over a limit, the stroke is cut short past it (refused by the caller).
+    GIANT_CHECK(brush_dabs(b, points, 5).size() == 6);
+    GIANT_CHECK(brush_dabs(b, points, 12).size() == 12);
+}
+
+GIANT_TEST("terrain brush: a dab that changes no height leaves its tiles as they were") {
+    Terrain t;
+    t.set_samples(16);
+    t.set({0, 0}, Terrain::Heights(256, 2.0f));
+    const u64 version = t.version({0, 0});
+    std::vector<CellCoord> changed;
+    Brush b;
+    b.strength = 0.0f; // raise by nothing
+    apply_brush(t, b, 30.0, 30.0, changed);
+    b.op = BrushOp::smooth; // flat already
+    b.strength = 1.0f;
+    apply_brush(t, b, 30.0, 30.0, changed);
+    b.op = BrushOp::flatten;
+    b.height = 2.0f;
+    apply_brush(t, b, 30.0, 30.0, changed);
+    GIANT_CHECK(changed.empty() && t.version({0, 0}) == version);
+    b.height = 3.0f;
+    apply_brush(t, b, 30.0, 30.0, changed);
+    GIANT_CHECK(changed.size() == 1 && t.version({0, 0}) != version);
+}
+
+GIANT_TEST("terrain brush: a large smooth reads only the tiles there are") {
+    Terrain t;
+    t.set_samples(16);
+    Terrain::Heights spike(256, 0.0f);
+    spike[8 * 16 + 8] = 9.0f;
+    t.set({0, 0}, spike);
+    Brush b;
+    b.op = BrushOp::smooth;
+    b.radius = 1500.0; // over 2 million samples of square, one tile of ground
+    b.falloff = 0.0f;
+    std::vector<CellCoord> changed;
+    const auto start = std::chrono::steady_clock::now();
+    apply_brush(t, b, 32.0, 32.0, changed);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    GIANT_CHECK(changed.size() == 1 && t.find({0, 0})->at(8 * 16 + 8) == 1.0f);
+    GIANT_CHECK(seconds < 1.0); // was ~3.6 s (debug) reading every sample of the square
 }
 
 GIANT_TEST("height maps: 16-bit RAW and PGM read as 0 to 1, bilinear between samples") {
@@ -437,5 +480,11 @@ GIANT_TEST("height maps: 16-bit RAW and PGM read as 0 to 1, bilinear between sam
     const std::string big = "P2 2 1 10\n0 11\n";
     GIANT_CHECK(read_height_map({reinterpret_cast<const u8*>(big.data()), big.size()}, ".pgm", untouched).has_value());
     GIANT_CHECK(read_height_map(raw, ".png", untouched).has_value());
+    // Numbers are separated, and at most 10 digits.
+    for (const std::string bad : {"P22 1 10\n0 1\n", "P2 2 1 10\n0000000000005 1\n", "P2 2 1 10\n0 1x\n",
+                                  "P2 2 1 10\n01\n"}) {
+        GIANT_CHECK(read_height_map({reinterpret_cast<const u8*>(bad.data()), bad.size()}, ".pgm", untouched)
+                        .has_value());
+    }
     GIANT_CHECK(untouched.width == 0);
 }

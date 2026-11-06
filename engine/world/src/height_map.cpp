@@ -39,16 +39,21 @@ struct Cursor {
             }
         }
     }
+    bool space(usize k) const { return bytes[k] == '#' || std::isspace(bytes[k]) != 0; }
+    // A number: after whitespace (or a comment), and ending at whitespace,
+    // a comment or the end; at most 10 digits.
     std::optional<u32> number() {
+        const usize start = at;
         skip();
+        if (at == start) return std::nullopt;
         u64 v = 0;
         usize digits = 0;
-        while (at < bytes.size() && bytes[at] >= '0' && bytes[at] <= '9' && digits < 10) {
+        while (at < bytes.size() && bytes[at] >= '0' && bytes[at] <= '9') {
+            if (++digits > 10) return std::nullopt;
             v = v * 10 + (bytes[at] - '0');
             ++at;
-            ++digits;
         }
-        if (digits == 0 || v > 0xFFFFFFFFull) return std::nullopt;
+        if (digits == 0 || v > 0xFFFFFFFFull || (at < bytes.size() && !space(at))) return std::nullopt;
         return static_cast<u32>(v);
     }
 };

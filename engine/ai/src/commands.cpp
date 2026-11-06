@@ -181,6 +181,9 @@ CommandResult CommandRegistry::execute(std::string_view name, const Json& args_i
     const bool read_only = command->read_only;
     const std::string command_name = command->name;
     CommandContext context;
+    context.m_merge_group = merge_group;
+    context.m_merging = merge_group != 0 && options.record_history && !m_undo.empty() && m_redo.empty() &&
+                        m_undo.back().merge_group == merge_group && m_undo.back().what.command == command_name;
     CommandResult result;
     {
         const RunningFlag running(m_running);

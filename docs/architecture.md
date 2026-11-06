@@ -453,18 +453,30 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   from a copy taken before the dab, across tile edges), both by up to the
   strength (0 to 1). Each sample belongs to one tile, so a dab over a tile
   edge changes both tiles' own samples and their meshes stay joined. Only
-  tiles that exist change. `sculpt_terrain` keeps the tiles a call changed
-  (before and after) for undo; a stroke reaches at most 4096 cells a call.
-  The viewport brush (`editor/src/terrain_brush_tool.h`) casts a ray from
-  the camera through the pointer, marches it over the ground at half the
-  sample spacing and refines the hit, and sends one `sculpt_terrain` a
-  frame while the left button is held (only when it moved a quarter
-  radius, or 30 times a second held still, so the frame rate does not set
-  the speed), in one merge group: the stroke is one undo step (holding
-  every call's copies until undone). Height maps
+  tiles that exist change, and a tile no height of changes is left as it
+  is (no new version, no undo step). Smooth copies only the tiles there
+  are. `sculpt_terrain` refuses a call over 4096 cells, 65536 dabs or 16.7
+  million heights reached (dabs times each one's square), so one call is a
+  bounded hitch; ground saved in an open world but not loaded is left as it
+  is (`cells_not_loaded`). One undo step of a drag (its calls merged:
+  `CommandContext::merging`) holds each tile once: as it was before the
+  drag first changed it, and, taken when undone, as it was after (for
+  redo). The viewport brush (`editor/src/terrain_brush_tool.h`) casts a ray
+  from the camera through the pointer, marches it over the ground (half
+  the sample spacing near, steps growing a 500th of the distance) and
+  refines the hit, and sends one `sculpt_terrain` a frame while the left
+  button is held (only when it moved a quarter radius, or 30 times a second
+  held still, so the frame rate does not set the speed; no ray is cast
+  until the pointer or camera moves or a dab is due), in one merge group:
+  the stroke is one undo step. A jump over 4 radii (the pointer over a
+  ridge, the camera flown) starts the line again where it lands. The panel
+  keeps the radius to 128 samples (`BrushSettings::max_radius`), and
+  flatten goes to the ground where the stroke began unless a height is
+  given. Far ground (past the loaded tiles) cannot be sculpted. Height maps
   (`engine/world/include/giant/world/height_map.h`): 16-bit RAW (.r16,
   .raw; square, little-endian) and PGM (P5 or P2, 8 or 16 bit), up to
-  16384 a side, sampled bilinearly into tiles at the terrain's spacing.
+  16384 a side, sampled bilinearly into tiles at the terrain's spacing; a
+  `to` on a cell's edge also sets the first samples of a tile past it.
 
 ## Window events (known limit)
 

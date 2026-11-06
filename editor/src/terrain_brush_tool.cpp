@@ -30,12 +30,15 @@ std::optional<DVec3> terrain_ray_hit(const world::Terrain& terrain, const DVec3&
         if (!h || std::isnan(*h)) return std::nullopt;
         return p.y - *h;
     };
-    const double step = std::max(terrain.spacing() * 0.5, 0.05);
-    const double limit = std::min(max_distance, step * 200000.0);
+    // Half a sample apart near the camera, growing with the distance (a
+    // 500th of it, under a pixel's worth of slope error), so a ray to the
+    // horizon is a few thousand steps, not tens of thousands.
+    const double near_step = std::max(terrain.spacing() * 0.5, 0.05);
+    const auto step_at = [&](double s) { return std::max(near_step, s * 0.002); };
     std::optional<double> prev = above(0.0);
     if (prev && *prev <= 0.0) return at(0.0); // starts under the ground
     double prev_s = 0.0;
-    for (double s = step; s <= limit; s += step) {
+    for (double s = step_at(0.0); s <= max_distance; s += step_at(s)) {
         const std::optional<double> now = above(s);
         if (now && prev && *now <= 0.0) {
             double a = prev_s;
@@ -81,21 +84,38 @@ void TerrainBrushTool::update(const std::vector<platform::InputEvent>& events, b
     }
     if (!state.brush.enabled) m_down = false;
     if (!m_down) return;
+    const BrushSettings& b = state.brush;
+    // The ray is cast only when a dab may follow: the pointer or camera
+    // moved, or it is time for the next dab held still.
+    const bool due = !m_last || m_since_dab >= 1.0f / k_dabs_per_second;
+    const bool camera_moved = state.camera.position.x != m_camera.x || state.camera.position.y != m_camera.y ||
+                              state.camera.position.z != m_camera.z || state.camera.yaw_degrees != m_yaw ||
+                              state.camera.pitch_degrees != m_pitch;
+    if (!due && !camera_moved && m_x == m_cast_x && m_y == m_cast_y) return;
+    m_camera = state.camera.position;
+    m_yaw = state.camera.yaw_degrees;
+    m_pitch = state.camera.pitch_degrees;
+    m_cast_x = m_x;
+    m_cast_y = m_y;
     const Vec3 ray = camera_ray(state.camera, m_x, m_y, window_width, window_height);
     const auto hit = terrain_ray_hit(state.scene.terrain, state.camera.position, ray, 20000.0);
     if (!hit) return;
-    const BrushSettings& b = state.brush;
     // Held still, it dabs k_dabs_per_second (whatever the frame rate); moved,
-    // a dab every quarter radius along the way.
-    const bool moved = m_last && std::hypot(hit->x - m_last->x, hit->z - m_last->z) >= b.radius * 0.25;
-    if (m_last && !moved && m_since_dab < 1.0f / k_dabs_per_second) return;
+    // a dab every quarter radius along the way. A jump (the pointer over a
+    // ridge, the camera flown) starts the stroke again where it lands, so
+    // no line is drawn over ground the pointer never went over.
+    const double gone = m_last ? std::hypot(hit->x - m_last->x, hit->z - m_last->z) : 0.0;
+    const bool jumped = m_last && gone > b.radius * 4.0;
+    const bool moved = m_last && !jumped && gone >= b.radius * 0.25;
+    if (m_last && !moved && !jumped && !due) return;
+    if (!m_last) m_start_height = static_cast<float>(hit->y);
     m_since_dab = 0.0f;
     ai::Json points = ai::Json::array();
     if (moved) points.push_back({m_last->x, m_last->z}); // the stroke goes on from the last dab
     points.push_back({hit->x, hit->z});
     ai::Json args = {{"op", b.op}, {"points", std::move(points)}, {"radius", b.radius}, {"strength", b.strength},
                      {"falloff", b.falloff}, {"continues", moved}};
-    if (b.op == "flatten") args["height"] = b.height;
+    if (b.op == "flatten") args["height"] = b.flatten_to_start ? m_start_height : b.height;
     const ai::CommandResult result = commands.execute("sculpt_terrain", args, {m_stroke, true});
     if (!result.ok) {
         log_warning("editor", "sculpt_terrain: " + result.error);

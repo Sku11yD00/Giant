@@ -36,6 +36,10 @@ struct BrushSettings {
     float strength = 0.5f;
     float falloff = 0.5f;
     float height = 0.0f; // flatten
+    // The largest radius the panel offers, in metres for a sample spacing:
+    // 128 samples, so a frame's dab is a small part of it.
+    static double max_radius(double spacing) { return 128.0 * spacing; }
+    bool flatten_to_start = true; // flatten to the ground where the stroke began, not `height`
 };
 
 class MeshLibrary;

@@ -179,15 +179,21 @@ void EditorPanels::draw_terrain_brush() {
         if (k > 0) ImGui::SameLine();
         if (ImGui::RadioButton(k_ops[k], op == k)) b.op = k_ops[k];
     }
+    // Up to 128 samples (a dab stays a small part of a frame); larger
+    // shapes come from import_height_map or sculpt_terrain over MCP.
+    const double spacing = m_state.scene.terrain.empty() ? 1.0 : m_state.scene.terrain.spacing();
+    const auto most = static_cast<float>(std::max(1.0, BrushSettings::max_radius(spacing)));
+    b.radius = std::min(b.radius, static_cast<double>(most));
     float radius = static_cast<float>(b.radius);
-    if (ImGui::SliderFloat("Radius (m)", &radius, 0.5f, 500.0f, "%.1f", ImGuiSliderFlags_Logarithmic)) {
-        b.radius = radius;
+    if (ImGui::SliderFloat("Radius (m)", &radius, 0.5f, most, "%.1f", ImGuiSliderFlags_Logarithmic)) {
+        b.radius = std::clamp(static_cast<double>(radius), 0.5, static_cast<double>(most));
     }
     const bool metres = b.op == "raise" || b.op == "lower";
     ImGui::SliderFloat(metres ? "Strength (m a dab)" : "Strength", &b.strength, 0.0f, metres ? 10.0f : 1.0f, "%.2f");
     ImGui::SliderFloat("Falloff", &b.falloff, 0.0f, 1.0f, "%.2f");
     if (b.op == "flatten") {
-        ImGui::DragFloat("Height (m)", &b.height, 0.1f, -10000.0f, 10000.0f, "%.1f");
+        ImGui::Checkbox("To the ground where the stroke starts", &b.flatten_to_start);
+        if (!b.flatten_to_start) ImGui::DragFloat("Height (m)", &b.height, 0.1f, -10000.0f, 10000.0f, "%.1f");
     }
 }
 

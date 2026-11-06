@@ -471,6 +471,62 @@ GIANT_TEST("terrain commands: sculpt a stroke, undone in one step; a drag's call
     GIANT_CHECK(!f.run("sculpt_terrain", {{"op", "raise"}, {"points", {{0, 0}, {100000, 0}}}, {"radius", 100}}).ok);
 }
 
+GIANT_TEST("terrain commands: a long drag keeps one copy per tile; undone mid-drag, it starts a new step") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    const Terrain& t = f.state.scene.terrain;
+    const usize steps = f.commands.undo_history().size();
+    Json dab = {{"op", "raise"}, {"points", {{30, 30}}}, {"radius", 6}, {"strength", 1}, {"falloff", 0}};
+    for (int k = 0; k < 200; ++k) GIANT_CHECK(f.commands.execute("sculpt_terrain", dab, {91, true}).ok);
+    dab["points"] = {{90, 30}};
+    for (int k = 0; k < 50; ++k) GIANT_CHECK(f.commands.execute("sculpt_terrain", dab, {91, true}).ok);
+    GIANT_CHECK(f.commands.undo_history().size() == steps + 1);
+    GIANT_CHECK(t.height_at(30, 30).value() == 200.0 && t.height_at(90, 30).value() == 50.0);
+    const Terrain::Heights end0 = *t.find({0, 0});
+    const Terrain::Heights end1 = *t.find({1, 0});
+    const u64 version0 = t.version({0, 0});
+    GIANT_CHECK(f.run("undo").ok && t.height_at(30, 30).value() == 0.0 && t.height_at(90, 30).value() == 0.0);
+    GIANT_CHECK(f.run("redo").ok && *t.find({0, 0}) == end0 && *t.find({1, 0}) == end1);
+    GIANT_CHECK(t.version({0, 0}) == version0);
+    // Undone in the middle of a drag: the drag's next calls are a new step.
+    GIANT_CHECK(f.run("undo").ok);
+    dab["points"] = {{30, 30}};
+    GIANT_CHECK(f.commands.execute("sculpt_terrain", dab, {91, true}).ok);
+    GIANT_CHECK(f.commands.execute("sculpt_terrain", dab, {91, true}).ok);
+    GIANT_CHECK(t.height_at(30, 30).value() == 2.0 && f.commands.undo_history().size() == steps + 1);
+    GIANT_CHECK(f.run("undo").ok && t.height_at(30, 30).value() == 0.0);
+    GIANT_CHECK(f.commands.undo_history().size() == steps);
+    // A dab that changes nothing makes no step; a stroke's work is capped.
+    dab["strength"] = 0;
+    GIANT_CHECK(f.run("sculpt_terrain", dab).value["tiles_changed"] == 0 && f.commands.undo_history().size() == steps);
+    Json zigzag = {{"op", "raise"}, {"radius", 0.5}, {"points", Json::array()}};
+    for (int k = 0; k < 4096; ++k) zigzag["points"].push_back({k % 2 == 0 ? 1.0 : 60.0, 30.0});
+    GIANT_CHECK(!f.run("sculpt_terrain", zigzag).ok); // ~1.9 million dabs
+    GIANT_CHECK(!f.run("sculpt_terrain", {{"op", "smooth"}, {"points", {{30, 30}, {3000, 30}}}, {"radius", 2000}}).ok);
+}
+
+GIANT_TEST("terrain commands: a height map ending on a cell's edge meets the tile past it") {
+    Fixture f;
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("giant_height_edge_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".r16");
+    {
+        std::ofstream out(file, std::ios::binary);
+        const char bytes[] = {'\xFF', '\xFF', '\xFF', '\xFF', '\xFF', '\xFF', '\xFF', '\xFF'}; // all white
+        out.write(bytes, sizeof(bytes));
+    }
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 7}}).ok);
+    ai::CommandResult r = f.run("import_height_map", {{"file", file.generic_string()}, {"from", {0, 0}},
+                                                      {"to", {64, 64}}, {"low", 0}, {"high", 20}});
+    GIANT_CHECK(r.ok && r.value["tiles"] == 2); // cell (0, 0) and the column x = 64 of cell (1, 0)
+    const Terrain& t = f.state.scene.terrain;
+    GIANT_CHECK(t.height_at(63.9, 10).value() > 19.9 && t.height_at(64.0, 10).value() == 20.0);
+    GIANT_CHECK(t.height_at(68.0, 10).value() == 7.0); // past `to`: as it was
+    GIANT_CHECK(t.find({0, 1}) == nullptr && t.find({1, 1}) == nullptr); // no tiles made past the edge
+    GIANT_CHECK(f.run("undo").ok && t.height_at(64.0, 10).value() == 7.0 && t.size() == 2);
+    std::filesystem::remove(file);
+}
+
 GIANT_TEST("terrain commands: a height map makes ground over an area, black at low and white at high") {
     Fixture f;
     const std::filesystem::path file =
@@ -548,4 +604,42 @@ GIANT_TEST("terrain brush tool: a drag in the viewport sculpts under the pointer
     f.state.brush.enabled = false;
     tool.update({press}, false, 800.0f, 600.0f, 0.05f, f.state, f.commands);
     GIANT_CHECK(!tool.stroking() && t.height_at(32.0, 32.0).value() == 0.0);
+}
+
+GIANT_TEST("terrain brush tool: a jump of the pointer starts the stroke again; flatten holds the start's height") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {255, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    f.state.camera.position = {32.0, 40.0, 32.0};
+    f.state.camera.pitch_degrees = -89.0f;
+    f.state.brush = {true, "raise", 4.0, 1.0f, 0.0f, 0.0f};
+    TerrainBrushTool tool;
+    platform::InputEvent press;
+    press.type = platform::InputEvent::Type::mouse_button;
+    press.button = platform::MouseButton::left;
+    press.down = true;
+    press.x = 400.0f;
+    press.y = 300.0f;
+    tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    // The camera flies 160 m with the button held: no ridge between.
+    f.state.camera.position.x += 160.0;
+    tool.update({}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    const Terrain& t = f.state.scene.terrain;
+    GIANT_CHECK(t.height_at(32.0, 32.0).value() > 0.9 && t.height_at(192.0, 32.0).value() > 0.9);
+    GIANT_CHECK(t.height_at(36.0, 32.0).value() == 0.0);
+    GIANT_CHECK(t.height_at(112.0, 32.0).value() == 0.0);
+    platform::InputEvent release = press;
+    release.down = false;
+    tool.update({release}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    // Flatten: to the ground where the stroke starts (1 m up), not to `height`
+    // (the sample 4 m on was not raised).
+    f.state.camera.position = {32.0, 40.0, 32.0};
+    f.state.brush = {true, "flatten", 8.0, 1.0f, 0.0f, -50.0f};
+    tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    const double start = t.height_at(32.0, 32.0).value();
+    GIANT_CHECK(start > 0.9 && std::fabs(t.height_at(36.0, 32.0).value() - start) < 1e-3);
+    tool.update({release}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    // The ray reaches far ground in a few thousand steps.
+    const auto far_hit = terrain_ray_hit(t, {-15000.0, 100.0, 32.0}, normalize_or_zero(Vec3{1.0f, -0.00662f, 0.0f}),
+                                         20000.0);
+    GIANT_CHECK(far_hit.has_value() && far_hit->x > 0.0 && far_hit->x < 256.0);
 }
