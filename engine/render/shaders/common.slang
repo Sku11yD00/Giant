@@ -37,8 +37,9 @@ struct Frame {
     uint occlusion;       // 1: test against the HZB
     uint pool;            // read descriptor of the geometry pool (streamed cluster data)
     uint frame_number;    // marks the groups a frame used (streaming)
+    uint skip_offset;     // byte offset, in the instance buffer, of the bits of instances not drawn this frame
 };
-static const uint k_frame_bytes = 432;
+static const uint k_frame_bytes = 448;
 
 float4 load4(ByteAddressBuffer b, uint at) { return asfloat(b.Load4(at)); }
 
@@ -69,7 +70,8 @@ Frame load_frame(uint descriptor, uint offset) {
     const float4 p0 = load4(b, at); at += 16;
     const float4 p1 = load4(b, at); at += 16;
     const float4 p2 = load4(b, at); at += 16;
-    const uint4 p3 = b.Load4(at);
+    const uint4 p3 = b.Load4(at); at += 16;
+    const uint4 p4 = b.Load4(at);
     f.exposure = p0.x;
     f.debug_view = asuint(p0.y);
     f.threshold = p0.z;
@@ -86,13 +88,17 @@ Frame load_frame(uint descriptor, uint offset) {
     f.occlusion = p3.y;
     f.pool = p3.z;
     f.frame_number = p3.w;
+    f.skip_offset = p4.x;
     return f;
 }
 
 // --- Instances (k_instance_bytes each) -----------------------------------------
 
+// Kept from frame to frame, by world cell: the translation is from the
+// instance's cell anchor, whose camera-relative position (rewritten each
+// frame) sits in the same buffer at byte offset `anchor`.
 struct Instance {
-    float4 model[3]; // rows of the 3x4 mesh-to-camera-relative matrix
+    float4 model[3]; // rows of the 3x4 mesh-to-camera-relative matrix (once loaded)
     uint mesh;
     uint material;   // into the frame's material table
     float max_scale; // largest absolute axis scale: bounds and errors grow by it
@@ -102,11 +108,21 @@ static const uint k_instance_bytes = 64;
 Instance load_instance(ByteAddressBuffer b, uint at) {
     Instance i;
     [unroll] for (uint r = 0; r < 3; ++r) { i.model[r] = load4(b, at + r * 16); }
-    const uint3 tail = b.Load3(at + 48);
+    const uint4 tail = b.Load4(at + 48);
     i.mesh = tail.x;
     i.material = tail.y;
     i.max_scale = asfloat(tail.z);
+    const float3 anchor = asfloat(b.Load3(tail.w));
+    i.model[0].w += anchor.x;
+    i.model[1].w += anchor.y;
+    i.model[2].w += anchor.z;
     return i;
+}
+
+// False for instances not drawn this frame (their mesh is not ready, or
+// the voxel world stands in for them): a bit each, after the instances.
+bool instance_drawn(Frame f, ByteAddressBuffer b, uint index) {
+    return (b.Load(f.skip_offset + (index >> 5) * 4) & (1u << (index & 31u))) == 0u;
 }
 
 float3 to_world(Instance i, float3 p) {

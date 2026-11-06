@@ -5,6 +5,7 @@
 #include "giant/geometry/mesh.h"
 #include "cells.h"
 #include "decals.h"
+#include "instance_store.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
 #include "shadow_pages.h"
@@ -56,28 +57,6 @@ void set4(float* out, const Vec3& v, float w) {
 }
 
 u32 groups_of(u32 items, u32 per_group) { return (items + per_group - 1) / per_group; }
-
-gpu::Instance to_gpu(const Instance& in, const DVec3& camera, u32 material_count) {
-    gpu::Instance out{};
-    const Vec3 t = to_camera_relative(in.position, camera);
-    // Columns of R * S are the rotated axes, scaled.
-    const Vec3 axes[3] = {rotate(in.rotation, {1, 0, 0}), rotate(in.rotation, {0, 1, 0}),
-                          rotate(in.rotation, {0, 0, 1})};
-    const float scale[3] = {in.scale.x, in.scale.y, in.scale.z};
-    const float translation[3] = {t.x, t.y, t.z};
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            const Vec3& a = axes[col];
-            const float component = row == 0 ? a.x : row == 1 ? a.y : a.z;
-            out.model[row * 4 + col] = component * scale[col];
-        }
-        out.model[row * 4 + 3] = translation[row];
-    }
-    out.mesh = in.mesh;
-    out.material = in.material < material_count ? in.material : material_count; // the default, last
-    out.max_scale = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
-    return out;
-}
 
 gpu::Material to_gpu(const Material& m) {
     gpu::Material out{};
@@ -173,6 +152,7 @@ bool Renderer::init() {
         return false;
     }
     m_voxels = std::make_unique<VoxelScene>(m_device, m_desc.voxel_clipmap, m_desc.voxel_bricks);
+    m_store = std::make_unique<InstanceStore>(m_device);
     if (!m_voxels->init()) {
         return false;
     }
@@ -648,7 +628,7 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
                 m_stats.overflow = true; // one mesh dispatch takes no more
                 break;
             }
-            m_entries.push_back(slot);
+            m_entries.push_back(m_valid[slot]); // instances are addressed by their place in the frame
             m_entries.push_back(c);
             m_stats.triangles += data.clusters[c].triangle_count;
         }
@@ -1250,6 +1230,21 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     plan_shadows(frame, settings.shadows && gpu && lit_view &&
                             ensure_shadow_buffers(static_cast<u32>(m_valid.size())));
 
+    // The instances, kept on the GPU by cell (before the frame constants:
+    // the store may grow, which moves its not-drawn bits).
+    const u32 instance_count = static_cast<u32>(std::min<usize>(frame.instances.size(), k_max_instances));
+    const u32 material_count = static_cast<u32>(std::min<usize>(frame.materials.size(), k_max_materials));
+    bool stored = false;
+    if (!m_valid.empty()) {
+        stored = m_store->update(cmd, frame.instances.first(instance_count),
+                                 instance_count == frame.instances.size() ? frame.cells
+                                                                          : std::span<const CellRange>{},
+                                 material_count, frame.view.position, m_valid);
+        if (!stored) {
+            m_valid.clear(); // out of memory: draw nothing
+        }
+    }
+
     // Frame constants.
     const Lighting& light = frame.lighting;
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
@@ -1302,14 +1297,21 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     k.hzb_width = m_hzb_width;
     k.hzb_height = m_hzb_height;
     k.hzb_mips = m_hzb_mips;
-    k.instance_count = static_cast<u32>(m_valid.size());
+    // Culling walks every instance, skipping those not drawn (InstanceStore).
+    k.instance_count = stored ? instance_count : 0;
+    k.skip_offset = m_store->skip_offset();
     k.occlusion = occlusion ? 1u : 0u;
     k.pool = m_device.read_descriptor(m_streamer->pool());
     k.frame_number = frame_number;
 
     FrameData data;
     data.frame = cmd.upload(bytes_of_one(k));
-    data.instance_count = static_cast<u32>(m_valid.size());
+    data.instance_count = k.instance_count;
+    if (stored) {
+        data.instances.buffer = m_store->buffer();
+        data.instances.descriptor = m_device.read_descriptor(m_store->buffer());
+        data.instances.offset = 0;
+    }
     data.occlusion = occlusion;
     data.use_mesh_shaders = settings.mesh_shaders && m_raster_mesh.valid();
 
@@ -1386,18 +1388,6 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
     }
     data.meshes = cmd.upload(bytes_of(table));
-    if (!m_valid.empty()) {
-        data.instances = cmd.allocate(static_cast<u32>(m_valid.size() * sizeof(gpu::Instance)));
-        if (data.instances.data == nullptr) {
-            m_valid.clear(); // out of memory: the device is lost; draw nothing
-            data.instance_count = 0;
-        } else {
-            for (usize i = 0; i < m_valid.size(); ++i) {
-                const gpu::Instance g = to_gpu(frame.instances[m_valid[i]], frame.view.position, data.material_count);
-                std::memcpy(data.instances.data + i * sizeof(g), &g, sizeof(g));
-            }
-        }
-    }
     if (far_field || m_gi_on || settings.debug_view == DebugView::voxels) {
         m_voxel_levels.resize(m_voxels->levels());
         m_voxels->write_levels(m_voxel_levels.data(), frame.view.position);
@@ -1512,7 +1502,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     set4(push.background, bg, 1.0f);
     push.frame = data.frame.descriptor;
     push.frame_offset = data.frame.offset;
-    push.instances = data.instances.data != nullptr ? data.instances.descriptor : data.frame.descriptor;
+    push.instances = data.instances.descriptor != rhi::k_no_descriptor ? data.instances.descriptor
+                                                                       : data.frame.descriptor;
     push.instance_offset = data.instances.offset;
     push.meshes = data.meshes.descriptor;
     push.mesh_offset = data.meshes.offset;

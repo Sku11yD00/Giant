@@ -150,7 +150,7 @@ void cs_instances(uint3 id : SV_DispatchThreadID) {
     const Frame f = load_frame(push.frame, push.frame_offset);
     uint index = id.x;
     if (push.pass == 0) {
-        if (index >= f.instance_count) {
+        if (index >= f.instance_count || !instance_drawn(f, read_buffer(push.instances), index)) {
             return;
         }
     } else {

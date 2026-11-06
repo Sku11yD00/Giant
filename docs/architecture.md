@@ -217,12 +217,23 @@ cell's work, not the world's:
   whose version differs (`src/cells.h`). Otherwise (no cells, a cell
   added, removed or resized) they compare everything, as before.
   `RenderStats::cells` and `cells_changed` count them.
-- **Known limits, next parts.** The renderer still walks and uploads every
-  instance each frame (the far-field test, the instance list for GPU
-  culling, which casts shadows): part 2 keeps instances on the GPU by cell
-  and culls whole cells first. Part 3 streams cells from disk around the
-  camera. Decals overlapping across a cell border draw in cell order, not
-  the outliner's.
+- **Instances stay on the GPU (N3 part 2, `src/instance_store.h`).** One
+  buffer keeps every instance, in frame order, from frame to frame; a frame
+  uploads only the cells that changed (all of them for a new layout or
+  material table size, or without cells). Translations are kept from each
+  cell's anchor (its first instance when uploaded), which keeps them
+  precise in float however big the world; each frame writes the anchors
+  relative to the camera (16 bytes a cell) and a bit per instance saying
+  whether it is drawn (its mesh ready, not left to the far field), and
+  `load_instance` adds the instance's anchor back. Culling walks every
+  instance and skips the unset ones; instances are addressed by their
+  place in the frame everywhere. Per frame that is a bit per instance
+  instead of 64 bytes.
+- **Known limits, next parts.** The CPU still looks at every instance each
+  frame to decide which are drawn (mesh ready, far field) and which cast
+  shadows: cheap per instance, but whole-cell tests come next. Part 3
+  streams cells from disk around the camera. Decals overlapping across a
+  cell border draw in cell order, not the outliner's.
 
 ## Window events (known limit)
 

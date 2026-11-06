@@ -137,9 +137,13 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   and renderer keep their work by square: moving, recolouring or deleting
   something redoes only its square, not the whole world, which is what
   lets a world grow to millions of objects. (`last_frame.cells` shows how
-  many squares there are and how many changed.) Keeping the objects
-  themselves on the GPU by square, and loading squares from disk around
-  the camera, are the next parts.
+  many squares there are and how many changed.)
+- Part 2: objects stay on the GPU. The GPU keeps every object from frame to
+  frame, and a frame sends only the squares that changed, plus a few bytes
+  a square, instead of every object every frame. Positions are kept
+  relative to their square, so they stay exact to well under a millimetre
+  anywhere in a huge world. Loading squares from disk around the camera
+  comes next.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

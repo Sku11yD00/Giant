@@ -36,17 +36,20 @@ struct FrameConstants {
     u32 occlusion;
     u32 pool;         // read descriptor of the geometry pool
     u32 frame_number; // marks the groups a frame used
+    u32 skip_offset;  // instance buffer byte offset of the not-drawn bits (InstanceStore)
+    u32 frame_pad[3];
 };
-static_assert(sizeof(FrameConstants) == 432);
+static_assert(sizeof(FrameConstants) == 448);
 
-// 64 bytes, so 10,000 trees are 640 KB a frame. The normal matrix is
-// worked out in the shader (the cofactors of the model's 3x3).
+// 64 bytes, kept on the GPU from frame to frame (InstanceStore). The
+// normal matrix is worked out in the shader (the cofactors of the model's
+// 3x3).
 struct Instance {
-    float model[12]; // rows of the 3x4 model matrix (camera-relative)
+    float model[12]; // rows of the 3x4 model matrix, translation from the cell anchor
     u32 mesh;
     u32 material; // into the frame's material table (checked on the CPU)
     float max_scale;
-    u32 pad;
+    u32 anchor; // byte offset in the same buffer of the anchor's camera-relative xyz
 };
 static_assert(sizeof(Instance) == 64);
 
