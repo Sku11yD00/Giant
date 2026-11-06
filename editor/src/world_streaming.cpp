@@ -149,10 +149,12 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
 }
 
 void WorldStreaming::close() {
+    ++m_session;
     ++m_epoch; // reads still in flight are dropped when they finish
     m_count = {};
     m_loaded.clear();
     m_wanted.clear();
+    m_touched.clear();
     m_folder.clear();
     m_generation = 0;
     m_index = {};
@@ -184,20 +186,48 @@ void WorldStreaming::forget(CellCoord coord) {
     }
 }
 
-void WorldStreaming::follow(const world::Scene& scene) {
+bool WorldStreaming::follows(const world::Scene& scene) {
     if (scene.identity() == m_scene) {
-        return;
+        return true;
     }
-    // Another copy of the world's scene (an undo or redo of new_scene,
-    // load_scene or open_world): what it holds of each cell is unknown, so
-    // every loaded cell is read again, the scene's entities winning.
+    // Replaced, not by an undo or redo that put back its bookkeeping with
+    // it (a script, say): what it holds of each cell is unknown, so
+    // streaming stops rather than guess (open_world again to go on).
+    log_warning("world", "the world's scene was replaced: streaming stopped (open the world again)");
+    m_generation = 0;
+    return false;
+}
+
+std::shared_ptr<const WorldStreaming::Memo> WorldStreaming::memo() const {
+    auto out = std::make_shared<Memo>();
+    out->session = m_session;
+    out->cells = m_cells;
+    out->origin = m_origin;
+    return out;
+}
+
+void WorldStreaming::restore(const Memo& memo, world::Scene& scene) {
+    if (!is_open() || memo.session != m_session) {
+        return; // another world (or none) since: that scene is no longer streamed
+    }
+    ++m_epoch; // reads in flight were for the bookkeeping replaced here
+    m_ready.clear();
+    m_touched.clear();
+    m_cells = memo.cells;
+    m_origin = memo.origin;
+    m_count = {};
+    m_loaded.clear();
+    for (auto& [coord, cell] : m_cells) {
+        if (cell.state == State::reading || cell.state == State::ready) {
+            cell.state = State::on_disk;
+        }
+        ++m_count[static_cast<usize>(cell.state)];
+        if (cell.state == State::loaded) m_loaded.insert(coord);
+    }
+    m_wanted_stale = true;
+    // Ids saved since that scene was current must not be handed out again.
+    scene.reserve_ids_below(m_index.next_id);
     m_scene = scene.identity();
-    const std::vector<CellCoord> loaded(m_loaded.begin(), m_loaded.end());
-    for (const CellCoord coord : loaded) {
-        Cell& cell = m_cells[coord];
-        set_state(coord, cell, State::on_disk);
-        cell.saved = {};
-    }
 }
 
 void WorldStreaming::start_read(CellCoord cell) {
@@ -328,10 +358,11 @@ void WorldStreaming::unload(world::Scene& scene, const DVec3& camera, const Scen
     // Cells on disk that the scene already has entities in (moved there, or
     // put back by an undo): loaded first, whatever the distance, so their
     // file's other entities join them and a save keeps everything.
+    m_touched.clear();
     for (const auto& [coord, built] : frame.grid) {
         const auto it = m_cells.find(coord);
         if (it != m_cells.end() && it->second.state == State::on_disk && has_entities(scene, built, coord)) {
-            m_wanted.push_back(coord); // the back is read first
+            m_touched.push_back(coord);
         }
     }
 }
@@ -369,19 +400,15 @@ void WorldStreaming::start_reads(const DVec3& camera) {
             return a.first != b.first ? a.first > b.first
                                       : (a.second.z != b.second.z ? a.second.z > b.second.z : a.second.x > b.second.x);
         });
-        std::vector<CellCoord> touched;
-        for (const CellCoord c : m_wanted) {
-            if (m_cells.contains(c) && m_cells[c].state == State::on_disk && ground_distance(camera, c) > r) {
-                touched.push_back(c); // asked for whatever the distance (see unload)
-            }
-        }
         m_wanted.clear();
         for (const auto& [d, c] : near) m_wanted.push_back(c);
-        m_wanted.insert(m_wanted.end(), touched.begin(), touched.end());
     }
-    while (!m_wanted.empty() && m_count[static_cast<usize>(State::reading)] < settings.reads_in_flight) {
-        const CellCoord c = m_wanted.back();
-        m_wanted.pop_back();
+    // Cells asked for whatever the distance (see unload) go first.
+    while ((!m_touched.empty() || !m_wanted.empty()) &&
+           m_count[static_cast<usize>(State::reading)] < settings.reads_in_flight) {
+        std::vector<CellCoord>& from = m_touched.empty() ? m_wanted : m_touched;
+        const CellCoord c = from.back();
+        from.pop_back();
         const auto it = m_cells.find(c);
         if (it != m_cells.end() && it->second.state == State::on_disk) {
             start_read(c);
@@ -393,7 +420,9 @@ void WorldStreaming::update(world::Scene& scene, u64 generation, const DVec3& ca
     if (!active(generation)) {
         return;
     }
-    follow(scene);
+    if (!follows(scene)) {
+        return;
+    }
     take_reads();
     // The frame must be of this scene, or its cell lists mean nothing.
     const bool frame_current = frame.scene_identity == scene.identity();
@@ -435,7 +464,9 @@ WorldStreaming::Saved WorldStreaming::save(const world::Scene& scene, std::vecto
     if (!is_open()) {
         return {"no world is open"};
     }
-    follow(scene);
+    if (!follows(scene)) {
+        return {"the world's scene was replaced outside undo; streaming stopped: open the world again"};
+    }
     finish_reads();
     return write(scene, std::move(meshes));
 }
@@ -568,8 +599,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
 
 bool WorldStreaming::all_loaded() const { return m_loaded.size() == m_cells.size(); }
 
-u32 WorldStreaming::unsaved_cells(const world::Scene& scene) {
-    follow(scene);
+u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
     std::unordered_map<CellCoord, std::vector<const Entity*>, world::CellCoordHash> members;
     for (const Entity& e : scene.entities()) {
         members[world::cell_of(e.transform.position)].push_back(&e);

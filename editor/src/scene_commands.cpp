@@ -336,27 +336,35 @@ const char* const k_ids_exhausted =
     "every entity id has been used (the scene's next id is at the limit, 2^53 - 1); no more "
     "entities can be added";
 
-// Replaces the whole scene, undoably (new_scene, load_scene).
-void swap_scene(EditorState& state, world::Scene next, CommandContext& context) {
+// Replaces the whole scene, undoably (new_scene, load_scene, open_world).
+// A streamed world's bookkeeping is kept with each side (`after_memo`:
+// the next scene's, when it is a world's), so putting a scene back puts
+// back what streaming knew of it.
+void swap_scene(EditorState& state, world::Scene next, CommandContext& context,
+                std::shared_ptr<const WorldStreaming::Memo> after_memo = nullptr) {
+    WorldStreaming* world = state.world;
+    std::shared_ptr<const WorldStreaming::Memo> before_memo;
+    if (world != nullptr && world->active(state.scene_generation)) {
+        before_memo = world->memo();
+    }
     auto before = std::make_shared<world::Scene>(state.scene);
     auto after = std::make_shared<world::Scene>(std::move(next));
     const u64 before_generation = state.scene_generation;
     const u64 after_generation = state.next_scene_generation++;
-    state.scene = *after;
-    state.scene_generation = after_generation;
-    state.selected = 0;
+    const auto put = [&state, world](const world::Scene& scene, u64 generation,
+                                     const std::shared_ptr<const WorldStreaming::Memo>& memo) {
+        state.scene = scene;
+        state.scene_generation = generation;
+        state.selected = 0;
+        if (memo != nullptr) {
+            world->restore(*memo, state.scene);
+        }
+    };
+    put(*after, after_generation, after_memo);
     // Not guarded: a swap replaces whatever scene is there, and restores the
     // generation its neighbours in the history were recorded against.
-    context.record({[&state, before, before_generation] {
-                        state.scene = *before;
-                        state.scene_generation = before_generation;
-                        state.selected = 0;
-                    },
-                    [&state, after, after_generation] {
-                        state.scene = *after;
-                        state.scene_generation = after_generation;
-                        state.selected = 0;
-                    }});
+    context.record({[put, before, before_generation, before_memo] { put(*before, before_generation, before_memo); },
+                    [put, after, after_generation, after_memo] { put(*after, after_generation, after_memo); }});
 }
 
 // One spelling per file, as entities made in the editor have.
@@ -997,11 +1005,18 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure("worlds are not available in this editor");
              }
              WorldStreaming& w = *state.world;
-             if (w.active(state.scene_generation) && !args.value("discard_unsaved", false)) {
-                 if (const u32 n = w.unsaved_cells(state.scene); n > 0) {
+             if (!args.value("discard_unsaved", false)) {
+                 if (w.active(state.scene_generation)) {
+                     if (const u32 n = w.unsaved_cells(state.scene); n > 0) {
+                         return CommandResult::failure(
+                             "the open world has " + std::to_string(n) +
+                             " cells with unsaved edits: save_world first, or pass discard_unsaved: true");
+                     }
+                 } else if (w.is_open()) {
                      return CommandResult::failure(
-                         "the open world has " + std::to_string(n) +
-                         " cells with unsaved edits: save_world first, or pass discard_unsaved: true");
+                         "the world in " + path_to_utf8(w.folder()) +
+                         " is open, its scene replaced (undo brings it back): save it, close_world, or pass "
+                         "discard_unsaved: true");
                  }
              }
              const std::filesystem::path folder = utf8_path(args["folder"].get<std::string>());
@@ -1011,7 +1026,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure(*error);
              }
              // swap_scene takes the next generation: the one open() was given.
-             swap_scene(state, std::move(next), context);
+             swap_scene(state, std::move(next), context, w.memo());
              Json mesh_errors = import_meshes(state, state.world->index().meshes);
              std::error_code error;
              Json result = {{"folder", path_to_utf8(std::filesystem::absolute(folder, error))},

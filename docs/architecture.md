@@ -254,9 +254,13 @@ cell's work, not the world's:
   (two files share it, or a new entity took it): the file's entity gets a
   new id, so neither is lost. Streaming runs only while the scene is the
   world's (`new_scene`, `load_scene` or undoing `open_world` pause it;
-  undoing them resumes it), and when an undo or redo puts back a copy of
-  the world's scene (`Scene::identity` differs), every loaded cell is
-  read again, the scene's entities winning. The main thread does no work
+  undoing them resumes it). What streaming knows of the world's scene is
+  kept with each copy of it an undo step holds (`WorldStreaming::memo`),
+  so an undo or redo that puts a copy back puts back the bookkeeping that
+  matches it, and the ids saved since are never handed out again; a
+  scene replaced any other way stops streaming. Opening another world is
+  refused while the open one has unsaved edits, or its scene is replaced
+  (it may be in the undo history), unless they are given up. The main thread does no work
   per frame that grows with the world: the cells to read are worked out
   again only when the camera enters another cell or a cell goes back on
   disk, and counts and the loaded cells are kept as they change. Loaded
@@ -277,8 +281,8 @@ cell's work, not the world's:
   `Scene::remove_many`, a pass over the scene's entities, and the unload
   look walks the loaded cells. Undoing an edit to a cell that was saved
   and unloaded since does nothing; undoing back to a copy of the world's
-  scene reads its cells again, so a deletion not saved before then comes
-  back. A world cannot yet be saved to another folder, and its kits cannot
+  scene made before a save puts back that scene as it was (saving it then
+  writes it). A world cannot yet be saved to another folder, and its kits cannot
   be deleted while some cells are not loaded. Decals overlapping across a cell border draw in cell
   order, not the outliner's.
 

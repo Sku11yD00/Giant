@@ -16,6 +16,7 @@
 
 #include <array>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -94,7 +95,15 @@ public:
 
     // Cells whose contents differ from their file, or that have no file
     // yet. Walks the whole scene.
-    u32 unsaved_cells(const world::Scene& scene);
+    u32 unsaved_cells(const world::Scene& scene) const;
+
+    // What streaming knows of the scene now, to keep with a copy of it that
+    // an undo or redo may put back (swap_scene): restore() then makes the
+    // bookkeeping match that copy again. A memo from another world (or one
+    // closed since) is ignored.
+    struct Memo;
+    std::shared_ptr<const Memo> memo() const;
+    void restore(const Memo& memo, world::Scene& scene);
     // Every cell with a file is in the scene (so the scene sees every kit
     // placement, say).
     bool all_loaded() const;
@@ -120,10 +129,18 @@ private:
         std::string error;
         bool missing = false; // the file is not there
     };
+public:
+    struct Memo {
+        u64 session = 0;
+        std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> cells;
+        std::unordered_map<world::EntityId, world::CellCoord> origin;
+    };
+
+private:
     // Whether `now` (any order) is exactly `saved`.
     static bool matches(std::vector<const world::Entity*>& now, const std::vector<world::Entity>& saved);
 
-    void follow(const world::Scene& scene);
+    bool follows(const world::Scene& scene); // false: replaced, streaming stops
     void start_read(world::CellCoord cell);
     void take_reads();
     void insert(world::Scene& scene);
@@ -136,9 +153,9 @@ private:
 
     std::filesystem::path m_folder;
     u64 m_generation = 0;
-    // The scene object the bookkeeping matches (world::Scene::identity):
-    // another one (an undo or redo put back a copy) is followed again.
+    // The scene object the bookkeeping matches (world::Scene::identity).
     u64 m_scene = 0;
+    u64 m_session = 0; // new on each open, create and close
     // Which cell's file each entity in the scene was read from or last
     // saved to: an id met again in that cell's file is the same entity
     // (maybe moved since); met in another cell's file, it is a clash.
@@ -149,7 +166,8 @@ private:
     std::vector<Read> m_ready;  // parsed, in the order they finished
     std::array<u32, 5> m_count{}; // cells per State
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_loaded;
-    std::vector<world::CellCoord> m_wanted; // to read, the next at the back
+    std::vector<world::CellCoord> m_wanted;  // near cells to read, the next at the back
+    std::vector<world::CellCoord> m_touched; // cells to read whatever the distance
     world::CellCoord m_wanted_at{};
     double m_wanted_radius = -1.0;
     bool m_wanted_stale = true;
