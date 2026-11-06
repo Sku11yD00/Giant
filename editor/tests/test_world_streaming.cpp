@@ -10,8 +10,10 @@
 #include "giant/rhi/rhi.h"
 
 #include <atomic>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 
 using namespace giant;
 using namespace giant::editor;
@@ -563,9 +565,13 @@ usize in_files(const std::filesystem::path& folder, const char* name) {
             std::ifstream in(f.path(), std::ios::binary);
             text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
-        const std::string stem = f.path().filename().string();
-        int x = 0, z = 0;
-        if (std::sscanf(stem.c_str(), "%d_%d.cell.json", &x, &z) != 2) continue;
+        const std::string stem = f.path().filename().string(); // "<x>_<z>.cell.json"
+        i32 x = 0, z = 0;
+        const char* end = stem.data() + stem.size();
+        const auto [after_x, x_error] = std::from_chars(stem.data(), end, x);
+        if (x_error != std::errc{} || after_x == end || *after_x != '_') continue;
+        const auto [after_z, z_error] = std::from_chars(after_x + 1, end, z);
+        if (z_error != std::errc{} || std::string_view(after_z, end) != ".cell.json") continue;
         std::vector<world::Entity> entities;
         if (world::load_cell(text, {x, z}, entities).has_value()) continue;
         for (const world::Entity& e : entities) n += e.name == name ? usize{1} : usize{0};
@@ -690,4 +696,52 @@ GIANT_TEST("world streaming: a save cut short keeps the bookkeeping true to the 
         GIANT_CHECK(count_named(e.state.scene, "x") == 1);
         std::filesystem::remove_all(stuck);
     }
+}
+
+GIANT_TEST("world streaming: a cell an entity left, emptied by a save mid-read, stays gone") {
+    for (const bool missing : {false, true}) {
+        Editor e;
+        if (e.w.renderer == nullptr) return;
+        GIANT_CHECK(e.run("create_entity", {{"name", "a"}, {"position", {10, 0, 10}}}));
+        GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+        GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+        e.settle(10.0, 10.0);
+        const ai::CommandResult made = e.commands.execute("create_entity", {{"name", "X"}, {"position", {20, 0, 10}}});
+        GIANT_CHECK(made.ok && e.run("save_world"));
+        GIANT_CHECK(e.run("set_entity", {{"id", made.value["id"]}, {"position", {110, 0, 10}}})); // cell (1, 0)
+        GIANT_CHECK(e.run("save_world"));
+        e.settle(9000.0, 10.0);
+        GIANT_CHECK(e.commands.undo() && e.commands.undo() && e.commands.redo()); // X back in (0, 0)
+        if (missing) {
+            // Its old cell's file removed by hand: taken as empty, not a reason to refuse.
+            std::filesystem::remove(e.w.folder / "cells" / "1_0.cell.json");
+        } else {
+            // One frame starts reading both cells; the save finds (1, 0) parsed.
+            scene_frame(e.state.scene, *e.w.renderer, *e.w.meshes, e.w.frame);
+            e.w.streaming.update(e.state.scene, e.state.scene_generation, {110.0, 10.0, 10.0}, e.w.frame);
+        }
+        const ai::CommandResult saved = e.commands.execute("save_world");
+        GIANT_CHECK(saved.ok);
+        GIANT_CHECK(!std::filesystem::exists(e.w.folder / "cells" / "1_0.cell.json"));
+        e.settle(110.0, 10.0);
+        GIANT_CHECK(count_named(e.state.scene, "X") == 1 && e.w.streaming.stats().ids_changed == 0);
+        GIANT_CHECK(e.w.streaming.stats().cells == 1 && e.w.streaming.stats().loaded == 1);
+        GIANT_CHECK(e.run("save_world") && in_files(e.w.folder, "X") == 1);
+    }
+}
+
+GIANT_TEST("world streaming: ids seen in one world do not carry into the next") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    ai::Json many = ai::Json::array();
+    for (int i = 0; i < 40; ++i) many.push_back({{"position", {10.0 + i, 0.0, 10.0}}});
+    GIANT_CHECK(e.run("create_entities", {{"entities", many}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world"));
+    World other; // a second world folder, one entity
+    other.add(10.0, 10.0, "b");
+    GIANT_CHECK(other.streaming.create(other.folder, other.scene, other.generation, {}).error.empty());
+    other.streaming.close();
+    GIANT_CHECK(e.run("open_world", {{"folder", other.folder.generic_string()}}));
+    GIANT_CHECK(e.state.scene.next_id() == 2);
 }

@@ -161,6 +161,7 @@ void WorldStreaming::close() {
     m_cells.clear();
     m_ready.clear();
     m_origin.clear();
+    m_ids_seen = 1;
     m_scene = 0;
     m_totals = {};
     m_frames = 0;
@@ -184,6 +185,7 @@ void WorldStreaming::forget(CellCoord coord) {
         m_loaded.erase(coord);
         m_cells.erase(it);
     }
+    std::erase_if(m_ready, [&](const Read& r) { return r.cell == coord; });
 }
 
 bool WorldStreaming::follows(const world::Scene& scene) {
@@ -282,7 +284,11 @@ void WorldStreaming::take_reads() {
             forget(r.cell);
             continue;
         }
-        Cell& cell = m_cells[r.cell];
+        const auto found = m_cells.find(r.cell);
+        if (found == m_cells.end()) {
+            continue; // its file was removed since the read began
+        }
+        Cell& cell = found->second;
         if (!r.error.empty()) {
             log_error("world", r.error);
             set_state(r.cell, cell, State::failed); // not read again until the world is opened again
@@ -306,7 +312,11 @@ void WorldStreaming::insert(world::Scene& scene) {
         if (taken > 0 && added + r.entities.size() > settings.entities_per_frame) {
             break;
         }
-        Cell& cell = m_cells[r.cell];
+        const auto found = m_cells.find(r.cell);
+        if (found == m_cells.end()) {
+            continue; // its file was removed since (never happens: forget drops its read)
+        }
+        Cell& cell = found->second;
         set_state(r.cell, cell, State::loaded);
         cell.saved = std::move(r.entities);
         for (const Entity& e : cell.saved) {
@@ -496,7 +506,11 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         const auto origin = m_origin.find(e.id);
         if (origin == m_origin.end() || origin->second == world::cell_of(e.transform.position)) continue;
         const auto cell = m_cells.find(origin->second);
-        if (cell != m_cells.end() && cell->second.state != State::loaded) members[origin->second];
+        // A file that could not be read is left as it is (it blocks only
+        // saving into its own cell).
+        if (cell != m_cells.end() && cell->second.state != State::loaded && cell->second.state != State::failed) {
+            members[origin->second];
+        }
     }
     for (const auto& [coord, cell] : m_cells) {
         if (cell.state == State::failed && members.contains(coord)) {
@@ -533,6 +547,10 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
             if (const auto bad = world::load_cell(*text, coord, from_file)) {
                 return {path_to_utf8(cell_path(coord)) + ": " + bad->message};
             }
+        } else if (std::error_code error; !std::filesystem::exists(cell_path(coord), error) && !error) {
+            // Listed but gone (a save cut short, or removed by hand): an
+            // empty cell, as streaming takes it.
+            log_warning("world", "could not open " + path_to_utf8(cell_path(coord)) + "; the cell is taken as empty");
         } else {
             return {"could not open " + path_to_utf8(cell_path(coord))};
         }
