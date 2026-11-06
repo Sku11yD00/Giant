@@ -129,3 +129,16 @@ GIANT_TEST("scene cells: a new scene starts over") {
     c.build();
     GIANT_CHECK(c.frame.instances.size() == 1 && c.frame.instances[0].position.x == 500.0);
 }
+
+GIANT_TEST("scene cells: a new cell with only decals is laid out") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    c.add(10.0, 10.0);
+    c.build();
+    world::Entity stamp;
+    stamp.shape = world::Shape::decal;
+    stamp.transform.position = {200.0, 0.0, 200.0};
+    c.scene.add(stamp);
+    c.build();
+    GIANT_CHECK(c.frame.decals.size() == 1 && c.frame.cells.size() == 2 && c.frame.cells[1].count == 0);
+}

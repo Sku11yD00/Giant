@@ -1,6 +1,7 @@
 #include "scene_render.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 namespace giant::editor {
@@ -121,7 +122,10 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
                  cell);
         }
     }
-    cell.version = out.next_version++;
+    // Unique in the process: a renderer handed cells by another SceneFrame
+    // never takes one version for another.
+    static std::atomic<u64> next_version{1};
+    cell.version = next_version.fetch_add(1, std::memory_order_relaxed);
     cell.dirty = false;
     ++out.cells_rebuilt;
     for (const u32 m : before) {
@@ -265,8 +269,9 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         SceneFrame::Cell& cell = it->second;
         if (cell.dirty) {
             const usize count = cell.instances.size();
+            const bool fresh = cell.version == 0; // not laid out yet, even with no instances
             compact = !rebuild(scene, renderer, meshes, out, cell) || compact;
-            layout = layout || cell.instances.size() != count;
+            layout = layout || fresh || cell.instances.size() != count;
         }
         if (cell.ids.empty()) {
             layout = true;
@@ -277,6 +282,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     }
     if (compact) {
         start_over(scene, out);
+        out.cells_rebuilt = 0; // counted once, by the full rebuild
         for (auto& [coord, cell] : out.grid) {
             rebuild(scene, renderer, meshes, out, cell);
         }

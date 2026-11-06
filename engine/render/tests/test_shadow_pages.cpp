@@ -479,3 +479,39 @@ GIANT_TEST("shadow pages: depths come from an anchor; tiny sun moves are not tak
     const std::vector<ShadowPages::Draw> again = s.plan(16);
     GIANT_CHECK(!again.empty() && has(s.entry_at(11, far), ShadowPages::k_drawn_bit));
 }
+
+GIANT_TEST("shadow pages: with cells, only cells whose version changed are compared") {
+    const geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
+    const ShadowPages::MeshLookup meshes = [&](MeshId id) { return id == 1 ? &cube : nullptr; };
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const DVec3 a{-5.5, 0.0, -5.5};
+    const DVec3 b{5.5, 0.0, 5.5};
+    std::vector<Instance> instances(2);
+    instances[0].position = a;
+    instances[1].position = b;
+    instances[0].mesh = instances[1].mesh = 1;
+    std::vector<CellRange> cells{{0, 1, 1}, {1, 1, 2}};
+    Requests r(s);
+    r.ask(s, 0, a);
+    r.ask(s, 0, b);
+    const auto settle = [&] {
+        s.begin_frame(camera, k_up_sun);
+        s.track(instances, cells, {}, 1, meshes);
+        s.request(r.bits);
+        return s.plan(16);
+    };
+    GIANT_CHECK(settle().size() == 2);
+    GIANT_CHECK(settle().empty());
+    // Moved without a new version: the cell promises nothing changed.
+    instances[1].position = a;
+    GIANT_CHECK(settle().empty());
+    // A new version: compared, both places redrawn.
+    cells[1].version = 3;
+    GIANT_CHECK(settle().size() == 2);
+    // Another layout: everything compared.
+    instances[1].position = b;
+    cells = {{0, 2, 4}};
+    GIANT_CHECK(settle().size() == 2);
+    GIANT_CHECK(settle().empty());
+}

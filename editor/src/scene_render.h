@@ -43,7 +43,7 @@ struct SceneFrame {
         std::vector<world::EntityId> ids; // the entities in it
         std::vector<render::Instance> instances;
         std::vector<render::Decal> decals;
-        u64 version = 0; // new each rebuild (unique across cells)
+        u64 version = 0; // new each rebuild, unique in the process (0: never built)
         bool dirty = true;
     };
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> grid;
@@ -52,7 +52,6 @@ struct SceneFrame {
     std::vector<world::Kit> kits;                                 // as last built
     u64 scene_identity = 0;
     u64 meshes_version = ~u64{0};
-    u64 next_version = 1;
 };
 
 // The scene's visible entities, with kits expanded into their pieces. Mesh

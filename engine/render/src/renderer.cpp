@@ -12,7 +12,6 @@
 #include "streaming.h"
 #include "voxel_light.h"
 #include "voxel_scene.h"
-#include "cells.h"
 
 #include <algorithm>
 #include <bit>
