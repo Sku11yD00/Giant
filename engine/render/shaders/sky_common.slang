@@ -609,7 +609,7 @@ float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
         // bounded (1.5, half the radius): the cells never fold across the
         // columns (their step per column stays above a quarter).
         const float lean = across_wind * min(wind * 0.8 / fall, 1.5);
-        const float sheared = clamp(p.y, -0.5 * radius, 0.5 * radius);
+        const float sheared = 0.5 * radius * tanh(p.y / (0.5 * radius)); // smooth: no bend in the streaks
         // Where this point was in the falling frame (cells), the height
         // taken within the hash's vertical period.
         const float period_v = fall_cells * cell_v;
