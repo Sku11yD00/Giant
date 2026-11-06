@@ -198,7 +198,8 @@ bool WorldStreaming::follows(const world::Scene& scene) {
     return false;
 }
 
-std::shared_ptr<const WorldStreaming::Memo> WorldStreaming::memo() const {
+std::shared_ptr<const WorldStreaming::Memo> WorldStreaming::memo(const world::Scene& scene) const {
+    m_ids_seen = std::max(m_ids_seen, scene.next_id());
     auto out = std::make_shared<Memo>();
     out->session = m_session;
     out->cells = m_cells;
@@ -233,8 +234,10 @@ void WorldStreaming::restore(const Memo& memo, world::Scene& scene) {
         if (cell.state == State::loaded) m_loaded.insert(coord);
     }
     m_wanted_stale = true;
-    // Ids saved since that scene was current must not be handed out again.
-    scene.reserve_ids_below(m_index.next_id);
+    // Ids saved, or handed out by another side, since that scene was
+    // current must not be handed out again.
+    scene.reserve_ids_below(std::max(m_index.next_id, m_ids_seen));
+    m_ids_seen = std::max(m_ids_seen, scene.next_id());
     m_scene = scene.identity();
 }
 
@@ -430,6 +433,7 @@ void WorldStreaming::update(world::Scene& scene, u64 generation, const DVec3& ca
     if (!follows(scene)) {
         return;
     }
+    m_ids_seen = std::max(m_ids_seen, scene.next_id());
     take_reads();
     // The frame must be of this scene, or its cell lists mean nothing.
     const bool frame_current = frame.scene_identity == scene.identity();
@@ -485,6 +489,15 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     for (const Entity& e : scene.entities()) {
         members[world::cell_of(e.transform.position)].push_back(e);
     }
+    // Cells on disk that an entity of the scene was read from or saved to,
+    // and has left since (moved, or put back elsewhere by an undo): their
+    // file is written again without it, so it is in one file only.
+    for (const Entity& e : scene.entities()) {
+        const auto origin = m_origin.find(e.id);
+        if (origin == m_origin.end() || origin->second == world::cell_of(e.transform.position)) continue;
+        const auto cell = m_cells.find(origin->second);
+        if (cell != m_cells.end() && cell->second.state != State::loaded) members[origin->second];
+    }
     for (const auto& [coord, cell] : m_cells) {
         if (cell.state == State::failed && members.contains(coord)) {
             return {"cell [" + std::to_string(coord.x) + ", " + std::to_string(coord.z) +
@@ -496,7 +509,8 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     // and every cell about to have a file, so a save cut short never hands
     // out ids on disk nor loses track of a file (a listed file that is
     // missing loads as an empty cell).
-    m_index.next_id = std::max(m_index.next_id, scene.next_id());
+    m_ids_seen = std::max(m_ids_seen, scene.next_id());
+    m_index.next_id = std::max(m_index.next_id, m_ids_seen);
     for (const auto& [coord, list] : members) {
         if (!m_cells.contains(coord)) m_index.cells.push_back(coord);
     }
@@ -527,14 +541,12 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         }
     }
     // Write what differs from its file. Every loaded cell is looked at,
-    // whether or not it still has entities.
-    std::vector<std::pair<CellCoord, std::vector<Entity>>> kept; // as now on disk
-    std::vector<CellCoord> written;
+    // whether or not it still has entities. The bookkeeping follows each
+    // file as it is written, so a save cut short leaves it true.
     const auto put = [&](CellCoord coord, std::vector<Entity>& list) -> bool {
         const auto it = m_cells.find(coord);
-        const bool had_file = it != m_cells.end();
         if (list.empty()) {
-            if (had_file) {
+            if (it != m_cells.end()) {
                 std::error_code error;
                 std::filesystem::remove(cell_path(coord), error);
                 if (error) {
@@ -542,23 +554,42 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
                     return false;
                 }
                 ++saved.cells_removed;
+                forget(coord);
             }
             return true;
         }
         std::sort(list.begin(), list.end(), by_id);
-        if (!had_file || it->second.state != State::loaded || list != it->second.saved) {
+        const bool same = it != m_cells.end() && it->second.state == State::loaded && list == it->second.saved;
+        if (!same) {
             if (!write_text(cell_path(coord), world::save_cell(coord, list))) {
                 saved.error = "could not write " + path_to_utf8(cell_path(coord));
                 return false;
             }
             ++saved.cells_written;
-            written.push_back(coord);
         }
-        kept.push_back({coord, std::move(list)});
+        for (const Entity& e : list) m_origin[e.id] = coord;
+        if (it == m_cells.end()) {
+            Cell& cell = m_cells[coord]; // new: all of it is in the scene
+            ++m_count[static_cast<usize>(State::on_disk)];
+            set_state(coord, cell, State::loaded);
+            cell.saved = std::move(list);
+            cell.written = ++m_writes;
+            return true;
+        }
+        Cell& cell = it->second;
+        if (!same) cell.written = ++m_writes;
+        if (cell.state == State::loaded) {
+            cell.saved = std::move(list);
+        } else {
+            // On disk with some entities in the scene: stays on disk, and
+            // is read in full next (the scene's entities win at insert).
+            set_state(coord, cell, State::on_disk);
+            cell.saved = {};
+            std::erase_if(m_ready, [&](const Read& r) { return r.cell == coord; });
+        }
         return true;
     };
     for (auto& [coord, list] : members) {
-        for (const Entity& e : list) m_origin[e.id] = coord;
         if (!put(coord, list)) return saved;
     }
     std::vector<CellCoord> emptied;
@@ -568,27 +599,6 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     for (const CellCoord coord : emptied) {
         std::vector<Entity> none;
         if (!put(coord, none)) return saved;
-        forget(coord);
-    }
-    // The bookkeeping follows the files.
-    for (auto& [coord, list] : kept) {
-        const auto it = m_cells.find(coord);
-        if (it == m_cells.end()) {
-            Cell& cell = m_cells[coord]; // new: all of it is in the scene
-            ++m_count[static_cast<usize>(State::on_disk)];
-            set_state(coord, cell, State::loaded);
-            cell.saved = std::move(list);
-        } else if (it->second.state == State::loaded) {
-            it->second.saved = std::move(list);
-        } else {
-            // On disk with some entities in the scene: stays on disk, and
-            // is read in full next (the scene's entities win at insert).
-            set_state(coord, it->second, State::on_disk);
-            std::erase_if(m_ready, [&](const Read& r) { return r.cell == coord; });
-        }
-    }
-    for (const CellCoord coord : written) {
-        m_cells[coord].written = ++m_writes;
     }
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;

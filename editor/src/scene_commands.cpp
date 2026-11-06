@@ -354,7 +354,7 @@ void swap_scene(EditorState& state, world::Scene next, CommandContext& context,
     // (outside the history) is not this side's.
     const auto leave = [&state, world](Side& side) {
         if (state.scene_generation != side.generation) return;
-        side.memo = world != nullptr && world->active(state.scene_generation) ? world->memo() : nullptr;
+        side.memo = world != nullptr && world->active(state.scene_generation) ? world->memo(state.scene) : nullptr;
         side.scene = state.scene;
         side.generation = state.scene_generation;
     };
@@ -1042,7 +1042,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure(*error);
              }
              // swap_scene takes the next generation: the one open() was given.
-             swap_scene(state, std::move(next), context, w.memo());
+             auto memo = w.memo(next);
+             swap_scene(state, std::move(next), context, std::move(memo));
              Json mesh_errors = import_meshes(state, state.world->index().meshes);
              std::error_code error;
              Json result = {{"folder", path_to_utf8(std::filesystem::absolute(folder, error))},

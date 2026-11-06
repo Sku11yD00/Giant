@@ -101,8 +101,10 @@ public:
     // an undo or redo may put back (swap_scene): restore() then makes the
     // bookkeeping match that copy again. A memo from another world (or one
     // closed since) is ignored.
+    // `scene` is the world's scene now: every id it has handed out is
+    // never handed out again by a scene restore() puts back.
     struct Memo;
-    std::shared_ptr<const Memo> memo() const;
+    std::shared_ptr<const Memo> memo(const world::Scene& scene) const;
     void restore(const Memo& memo, world::Scene& scene);
     // Every cell with a file is in the scene (so the scene sees every kit
     // placement, say).
@@ -161,6 +163,9 @@ private:
     // same entity (maybe moved, or put back by a redo, since); met in
     // another cell's file, it is a clash.
     std::unordered_map<world::EntityId, world::CellCoord> m_origin;
+    // Past every id any of the world's scenes has handed out (an undo side
+    // put back may be behind ones another side has since).
+    mutable world::EntityId m_ids_seen = 1;
     u64 m_writes = 0; // cell files written since open (Cell::written)
     u64 m_epoch = 0; // reads from an older epoch (a closed world) are dropped
     world::WorldIndex m_index;

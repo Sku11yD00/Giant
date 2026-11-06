@@ -264,7 +264,11 @@ cell's work, not the world's:
   handed out again. An entity's cell of origin is kept when its cell
   unloads, so an entity a redo puts back is never copied from the file it
   was saved to since (this costs about 40 bytes per entity met since the
-  world opened: a later part bounds it); a
+  world opened: a later part bounds it), and a save writes again, without
+  it, the file on disk of a cell an entity has left. Ids any of the
+  world's scenes has handed out are never handed out again by another
+  undo side. A save keeps the bookkeeping true to each file as it writes
+  it, so one cut short by an error loses nothing either; a
   scene replaced any other way stops streaming. Opening another world is
   refused while the open one has unsaved edits, or its scene is replaced
   (it may be in the undo history), unless they are given up. The main thread does no work
