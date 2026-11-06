@@ -506,11 +506,9 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         const auto origin = m_origin.find(e.id);
         if (origin == m_origin.end() || origin->second == world::cell_of(e.transform.position)) continue;
         const auto cell = m_cells.find(origin->second);
-        // A file that could not be read is left as it is (it blocks only
-        // saving into its own cell).
-        if (cell != m_cells.end() && cell->second.state != State::loaded && cell->second.state != State::failed) {
-            members[origin->second];
-        }
+        // One that could not be read refuses the save (below): written
+        // around, it would keep a second copy for when it is fixed.
+        if (cell != m_cells.end() && cell->second.state != State::loaded) members[origin->second];
     }
     for (const auto& [coord, cell] : m_cells) {
         if (cell.state == State::failed && members.contains(coord)) {
