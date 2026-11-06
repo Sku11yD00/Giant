@@ -739,3 +739,50 @@ GIANT_TEST("terrain brush tool: the pointer over a ridge starts the line again b
     GIANT_CHECK(front < 100.0 && back > 420.0 && t.height_at(front, 32.0).value() > 0.5 && raised_past(420.0));
     for (double x = 120.0; x < 400.0; x += 4.0) GIANT_CHECK(t.height_at(x, 32.0).value() == 0.0);
 }
+
+GIANT_TEST("terrain brush tool: a fast drag over a low crest at a grazing angle does not bridge the valley") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {2047, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    // A crest 9 m high 48 m out, seen from 10 m up: the valley behind it is hidden.
+    Terrain& t = f.state.scene.terrain;
+    Terrain::Heights* crest = t.modify({0, 0});
+    for (usize j = 0; j < 16; ++j) {
+        (*crest)[j * 16 + 11] = 4.5f; // x = 44
+        (*crest)[j * 16 + 12] = 9.0f; // x = 48
+        (*crest)[j * 16 + 13] = 4.5f; // x = 52
+    }
+    f.state.camera.position = {0.0, 10.0, 32.0};
+    f.state.camera.yaw_degrees = -90.0f;
+    f.state.camera.pitch_degrees = -2.0f;
+    f.state.brush = {true, "lower", 4.0, 1.0f, 0.0f, 0.0f}; // (raising would hide the valley more)
+    const auto hit_x = [&](float y) {
+        const auto h = terrain_ray_hit(t, f.state.camera.position,
+                                       camera_ray(f.state.camera, 400.0f, y, 800.0f, 600.0f), 5000.0);
+        return h ? h->x : -1.0;
+    };
+    float on = 600.0f;
+    while (on > 0.0f && hit_x(on - 1.0f) < 49.0) on -= 1.0f; // last row hitting the crest's front
+    for (const float speed : {6.0f, 20.0f, 40.0f}) { // pixels a frame, ending just over the crest
+        const double from = hit_x(on + speed - 2.0f);
+        const double to = hit_x(on - 2.0f);
+        GIANT_CHECK(from > 0.0 && from < 49.0 && to > 150.0);
+        TerrainBrushTool tool;
+        platform::InputEvent press;
+        press.type = platform::InputEvent::Type::mouse_button;
+        press.button = platform::MouseButton::left;
+        press.down = true;
+        press.x = 400.0f;
+        press.y = on + speed - 2.0f;
+        tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+        platform::InputEvent move = press;
+        move.type = platform::InputEvent::Type::mouse_move;
+        move.y = on - 2.0f;
+        tool.update({move}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+        platform::InputEvent release = move;
+        release.type = platform::InputEvent::Type::mouse_button;
+        release.down = false;
+        tool.update({release}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+        for (double x = 64.0; x < std::min(to - 10.0, 140.0); x += 4.0) GIANT_CHECK(t.height_at(x, 32.0).value() == 0.0);
+        GIANT_CHECK(f.run("undo").ok);
+    }
+}

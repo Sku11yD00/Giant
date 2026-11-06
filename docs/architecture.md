@@ -470,11 +470,13 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   held still, so the frame rate does not set the speed; no ray is cast
   until the pointer or camera moves or a dab is due), in one merge group:
   the stroke is one undo step. A move of over 4 radii is bisected along
-  the pointer's path (up to 6 more rays, keeping the larger half): over
-  smooth ground the gap shrinks, however many metres a pixel covers, so a
-  fast drag over far ground stays one line; if a gap of over 4 radii and
-  half the move stays (the pointer over a ridge), or the camera moved, the
-  line starts again where it lands. The panel
+  the pointer's path (up to 6 more rays), keeping the half least like
+  smooth ground: its gap against the pixels between times the ground a
+  pixel covers at its ends (distance x pixel angle / cosine to the ground;
+  their geometric mean is exact for flat ground at a grazing angle). A
+  fast drag over far ground stays one line; a gap of over 4 radii and 4
+  times what smooth ground would give (the pointer over a ridge), or a
+  jump since the camera moved, starts the line again where it lands. The panel
   keeps the radius to 128 samples (`BrushSettings::max_radius`), and
   flatten goes to the ground where the stroke began unless a height is
   given. Far ground (past the loaded tiles) cannot be sculpted. Height maps
