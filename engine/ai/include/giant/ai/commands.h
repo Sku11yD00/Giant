@@ -53,8 +53,19 @@ public:
 
     std::vector<Change>& changes() { return m_changes; }
 
+    // The run's merge group (ExecuteOptions::merge_group; 0 for none).
+    u64 merge_group() const { return m_merge_group; }
+    // Whether what this run records joins the newest undo step (the same
+    // command and merge group, recorded in the history, nothing to redo).
+    // A command may then keep one copy of its state per step (a stroke)
+    // instead of one per run.
+    bool merging() const { return m_merging; }
+
 private:
+    friend class CommandRegistry;
     std::vector<Change> m_changes;
+    u64 m_merge_group = 0;
+    bool m_merging = false;
 };
 
 struct CommandDesc {

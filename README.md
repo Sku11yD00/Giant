@@ -171,6 +171,12 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   4 km pieces out to about 32 km), so it reaches the horizon for little
   memory. Near the camera the full ground takes over piece by piece, with
   no cracks where the two meet.
+- Part 5: terrain editor. Sculpt the ground with a brush (raise, lower,
+  smooth, flatten): turn on "Sculpt" in the Scene panel's Terrain brush
+  section and hold the left mouse button over the viewport (a whole drag
+  is one undo). `sculpt_terrain` does the same over MCP, and
+  `import_height_map` makes ground from a 16-bit RAW (.r16) or PGM height
+  map from tools like World Machine or Gaea.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

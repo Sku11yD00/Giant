@@ -16,6 +16,7 @@
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
 #include "far_ground.h"
+#include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
 #include "world_streaming.h"
 #include "ui/panels.h"
@@ -321,6 +322,7 @@ int run(const Options& options) {
     ScriptRunner scripts(commands, state);
     state.scripts_to_load = options.scripts;
     editor::SceneFrame scene_frame; // reused every frame
+    editor::TerrainBrushTool terrain_brush;
     // Records the scene and the panels into `target` (an sRGB image).
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         terrain_meshes.update(state.scene.terrain);
@@ -410,6 +412,8 @@ int run(const Options& options) {
         // Build the UI first: what it changes shows in this frame.
         ui->begin_frame(delta, input);
         viewport_camera.handle_input(input, ui->wants_mouse());
+        terrain_brush.update(input, ui->wants_mouse(), static_cast<float>(window->point_width()),
+                             static_cast<float>(window->point_height()), delta, state, commands);
         viewport_camera.update(state.camera, delta);
         panels.draw(frame_info);
         ui->end_frame();

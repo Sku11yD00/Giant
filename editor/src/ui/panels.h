@@ -34,6 +34,7 @@ private:
     void create_ahead(ai::Json args); // create_entity 5 m in front of the camera, selected
     void draw_properties();
     void draw_lighting();
+    void draw_terrain_brush(); // the viewport brush's settings (EditorState::brush)
     void draw_log();
     void draw_commands();
     void draw_engine(const FrameInfo& frame);

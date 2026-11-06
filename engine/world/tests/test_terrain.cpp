@@ -3,6 +3,7 @@
 
 #include "giant_test.h"
 
+#include <chrono>
 #include <cmath>
 #include <string>
 
@@ -331,4 +332,159 @@ GIANT_TEST("terrain: bigger tiles, with holes, for the far ground") {
     GIANT_CHECK(!t.height_at(-10.0, 40.0).has_value());
     const Terrain copy = t;
     GIANT_CHECK(copy.tile_size() == 512.0 && copy.find({1, 0}) != nullptr);
+}
+
+// --- Brushes and height maps ------------------------------------------------------
+
+#include "giant/world/height_map.h"
+#include "giant/world/terrain_brush.h"
+
+GIANT_TEST("terrain brush: full inside, easing to nothing at the rim") {
+    Brush b;
+    b.radius = 10.0;
+    b.falloff = 0.5f;
+    GIANT_CHECK(brush_weight(b, 0.0) == 1.0f && brush_weight(b, 5.0) == 1.0f);
+    GIANT_CHECK(brush_weight(b, 7.5) == 0.5f && brush_weight(b, 10.0) == 0.0f && brush_weight(b, 11.0) == 0.0f);
+    GIANT_CHECK(brush_weight(b, 6.0) > brush_weight(b, 9.0));
+    b.falloff = 0.0f;
+    GIANT_CHECK(brush_weight(b, 9.99) == 1.0f);
+}
+
+GIANT_TEST("terrain brush: raise, lower and flatten change only what the brush reaches, across tiles") {
+    Terrain t;
+    t.set_samples(16); // 4 m apart
+    t.set({0, 0}, Terrain::Heights(256, 1.0f));
+    t.set({1, 0}, Terrain::Heights(256, 1.0f));
+    Brush b;
+    b.radius = 10.0;
+    b.strength = 2.0f;
+    b.falloff = 0.0f;
+    std::vector<CellCoord> changed;
+    apply_brush(t, b, 64.0, 8.0, changed); // on the border of the two tiles
+    GIANT_CHECK(changed.size() == 2);
+    GIANT_CHECK(t.height_at(64.0, 8.0).value() == 3.0 && t.height_at(56.0, 8.0).value() == 3.0);
+    GIANT_CHECK(t.height_at(76.0, 8.0).value() == 1.0); // 12 m away: out of reach
+    GIANT_CHECK(t.find({0, 0})->at(0) == 1.0f);
+    b.op = BrushOp::lower;
+    b.strength = 0.5f;
+    changed.clear();
+    apply_brush(t, b, 64.0, 8.0, changed);
+    GIANT_CHECK(t.height_at(64.0, 8.0).value() == 2.5);
+    b.op = BrushOp::flatten;
+    b.strength = 1.0f;
+    b.height = -4.0f;
+    apply_brush(t, b, 64.0, 8.0, changed);
+    GIANT_CHECK(t.height_at(64.0, 8.0).value() == -4.0 && t.height_at(76.0, 8.0).value() == 1.0);
+    // No tile, no change; never past the height limit.
+    changed.clear();
+    apply_brush(t, b, 500.0, 500.0, changed);
+    GIANT_CHECK(changed.empty());
+    b.op = BrushOp::raise;
+    b.strength = 1e6f;
+    apply_brush(t, b, 20.0, 20.0, changed);
+    GIANT_CHECK(t.height_at(20.0, 20.0).value() == k_max_terrain_height);
+}
+
+GIANT_TEST("terrain brush: smooth evens out a spike, using its neighbours across a tile edge") {
+    Terrain t;
+    t.set_samples(16);
+    t.set({0, 0}, Terrain::Heights(256, 0.0f));
+    t.set({1, 0}, Terrain::Heights(256, 0.0f));
+    (*t.modify({1, 0}))[0] = 9.0f; // sample (16, 0): on the tile edge
+    Brush b;
+    b.op = BrushOp::smooth;
+    b.radius = 2.0;
+    b.strength = 1.0f;
+    b.falloff = 0.0f;
+    std::vector<CellCoord> changed;
+    apply_brush(t, b, 64.0, 0.0, changed); // reaches only that sample (4 m spacing)
+    // Its 3 x 3 has 6 samples (row -1 has none): 9 / 6.
+    GIANT_CHECK(std::fabs(t.find({1, 0})->at(0) - 1.5f) < 1e-5f);
+    GIANT_CHECK(t.find({0, 0})->at(15) == 0.0f); // the neighbours themselves untouched (outside the radius)
+}
+
+GIANT_TEST("terrain brush: a stroke has a dab at least every quarter radius") {
+    Brush b;
+    b.radius = 4.0;
+    const GroundPoint points[] = {{0.0, 0.0}, {10.0, 0.0}, {10.0, 0.0}};
+    const std::vector<GroundPoint> dabs = brush_dabs(b, points);
+    GIANT_CHECK(dabs.size() == 1 + 10 + 1);
+    for (usize k = 1; k < dabs.size(); ++k) {
+        GIANT_CHECK(std::hypot(dabs[k].x - dabs[k - 1].x, dabs[k].z - dabs[k - 1].z) <= 1.0 + 1e-9);
+    }
+    GIANT_CHECK(dabs.back().x == 10.0);
+    // Over a limit, the stroke is cut short past it (refused by the caller).
+    GIANT_CHECK(brush_dabs(b, points, 5).size() == 6);
+    GIANT_CHECK(brush_dabs(b, points, 12).size() == 12);
+}
+
+GIANT_TEST("terrain brush: a dab that changes no height leaves its tiles as they were") {
+    Terrain t;
+    t.set_samples(16);
+    t.set({0, 0}, Terrain::Heights(256, 2.0f));
+    const u64 version = t.version({0, 0});
+    std::vector<CellCoord> changed;
+    Brush b;
+    b.strength = 0.0f; // raise by nothing
+    apply_brush(t, b, 30.0, 30.0, changed);
+    b.op = BrushOp::smooth; // flat already
+    b.strength = 1.0f;
+    apply_brush(t, b, 30.0, 30.0, changed);
+    b.op = BrushOp::flatten;
+    b.height = 2.0f;
+    apply_brush(t, b, 30.0, 30.0, changed);
+    GIANT_CHECK(changed.empty() && t.version({0, 0}) == version);
+    b.height = 3.0f;
+    apply_brush(t, b, 30.0, 30.0, changed);
+    GIANT_CHECK(changed.size() == 1 && t.version({0, 0}) != version);
+}
+
+GIANT_TEST("terrain brush: a large smooth reads only the tiles there are") {
+    Terrain t;
+    t.set_samples(16);
+    Terrain::Heights spike(256, 0.0f);
+    spike[8 * 16 + 8] = 9.0f;
+    t.set({0, 0}, spike);
+    Brush b;
+    b.op = BrushOp::smooth;
+    b.radius = 1500.0; // over 2 million samples of square, one tile of ground
+    b.falloff = 0.0f;
+    std::vector<CellCoord> changed;
+    const auto start = std::chrono::steady_clock::now();
+    apply_brush(t, b, 32.0, 32.0, changed);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    GIANT_CHECK(changed.size() == 1 && t.find({0, 0})->at(8 * 16 + 8) == 1.0f);
+    GIANT_CHECK(seconds < 1.0); // was ~3.6 s (debug) reading every sample of the square
+}
+
+GIANT_TEST("height maps: 16-bit RAW and PGM read as 0 to 1, bilinear between samples") {
+    std::vector<u8> raw = {0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x80}; // 2 x 2: 0, 1, ~0.5, ~0.5
+    HeightMap m;
+    GIANT_CHECK(!read_height_map(raw, ".R16", m).has_value());
+    GIANT_CHECK(m.width == 2 && m.height == 2 && m.values[0] == 0.0f && m.values[1] == 1.0f);
+    GIANT_CHECK(std::fabs(m.at(0.5, 0.0) - 0.5f) < 1e-6f && m.at(-1.0, 2.0) == m.values[2]);
+    const std::string p2 = "P2\n# made by hand\n3 2\n10\n0 5 10\n10 5 0\n";
+    GIANT_CHECK(!read_height_map({reinterpret_cast<const u8*>(p2.data()), p2.size()}, ".pgm", m).has_value());
+    GIANT_CHECK(m.width == 3 && m.height == 2 && m.values[1] == 0.5f && m.values[3] == 1.0f);
+    std::string p5 = "P5 2 2 65535\n";
+    for (const int b : {0x00, 0x00, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x01}) p5.push_back(static_cast<char>(b));
+    GIANT_CHECK(!read_height_map({reinterpret_cast<const u8*>(p5.data()), p5.size()}, ".pgm", m).has_value());
+    GIANT_CHECK(m.values[1] == 1.0f && m.values[3] == 1.0f / 65535.0f);
+
+    HeightMap untouched;
+    std::vector<u8> odd(6, 0);
+    GIANT_CHECK(read_height_map(odd, ".raw", untouched).has_value()); // 3 samples: not square
+    const std::string short_p5 = "P5 4 4 255\n\x01\x02";
+    GIANT_CHECK(read_height_map({reinterpret_cast<const u8*>(short_p5.data()), short_p5.size()}, ".pgm", untouched)
+                    .has_value());
+    const std::string big = "P2 2 1 10\n0 11\n";
+    GIANT_CHECK(read_height_map({reinterpret_cast<const u8*>(big.data()), big.size()}, ".pgm", untouched).has_value());
+    GIANT_CHECK(read_height_map(raw, ".png", untouched).has_value());
+    // Numbers are separated, and at most 10 digits.
+    for (const std::string bad : {"P22 1 10\n0 1\n", "P2 2 1 10\n0000000000005 1\n", "P2 2 1 10\n0 1x\n",
+                                  "P2 2 1 10\n01\n"}) {
+        GIANT_CHECK(read_height_map({reinterpret_cast<const u8*>(bad.data()), bad.size()}, ".pgm", untouched)
+                        .has_value());
+    }
+    GIANT_CHECK(untouched.width == 0);
 }

@@ -481,6 +481,27 @@ def terrain_gate(tool, call, check):
           f"every tile's mesh is built, got {info['meshes']}")
     height = tool("get_terrain", {"points": [[0, 0], [500, 500]]})["heights"]
     check(height[1] is None and abs(height[0]) <= 6, f"the ground's height is sampled, got {height}")
+    # N3 part 5: a brush stroke raises the ground and is undone in one step.
+    sculpted = tool("sculpt_terrain", {"op": "raise", "points": [[-20, 0], [20, 0]], "radius": 10,
+                                       "strength": 3, "falloff": 0})
+    raised = tool("get_terrain", {"points": [[0, 0]]})["heights"][0]
+    # On the line between two rows of tiles: all four change; the middle gets every dab in reach.
+    check(sculpted["tiles_changed"] == 4 and raised > height[0] + 3,
+          f"the stroke raises the ground, got {sculpted} and {raised}")
+    tool("undo")
+    check(tool("get_terrain", {"points": [[0, 0]]})["heights"][0] == height[0], "undo puts the ground back")
+    # A height map (16-bit RAW, 2 x 2: black then white rows) makes ground; undone too.
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "hills.r16")
+        with open(path, "wb") as f:
+            f.write(bytes([0, 0, 0, 0, 255, 255, 255, 255]))
+        imported = tool("import_height_map", {"file": path, "from": [2000, 2000], "to": [2100, 2100],
+                                              "low": 0, "high": 50})
+    ramp = tool("get_terrain", {"points": [[2000, 2000], [2000, 2100]]})["heights"]
+    check(imported["tiles"] == 4 and ramp[0] == 0 and abs(ramp[1] - 50) < 1e-3,
+          f"the height map makes ground, got {imported} and {ramp}")
+    tool("undo")
+    check(tool("get_terrain")["tiles"] == 5, "undo takes the imported ground away")
     last = None
     for _ in range(60):
         for _ in range(10):
