@@ -105,12 +105,12 @@ GIANT_TEST("scatter placer: cells with ground are placed as the rules say, again
     GIANT_CHECK(p.stats().cells == 0 && p.stats().points == 0);
 }
 
-GIANT_TEST("scatter placer: a frame swaps in a budget of points, a whole cell at a time") {
+GIANT_TEST("scatter placer: a frame swaps in a budget of instances, a whole cell at a time") {
     world::Scene scene;
     flat(scene.terrain, 0, 0, 3, 0);
     scene.scatter.push_back(stones(1.0f)); // 4096 points a cell
     ScatterPlacer p;
-    p.points_per_frame = 5000;
+    p.instances_per_frame = 5000;
     p.cells_in_flight = 4;
     world::TerrainChanges changes = scene.terrain.take_changes();
     p.update(scene, changes);
@@ -124,8 +124,63 @@ GIANT_TEST("scatter placer: a frame swaps in a budget of points, a whole cell at
         ++frames;
     }
     GIANT_CHECK(p.stats().cells == 4 && p.stats().points == 4 * 4096);
-    // At most one cell a frame came in (5000 points a frame is one cell of 4096).
+    // At most one cell a frame came in (5000 instances a frame is one cell of 4096).
     for (usize k = 1; k < cells_seen.size(); ++k) GIANT_CHECK(cells_seen[k] - cells_seen[k - 1] <= 1);
+}
+
+GIANT_TEST("scatter placer: near the camera only, nearest first, within a budget; a new scene drops the old at once") {
+    world::Scene scene;
+    flat(scene.terrain, 0, 0, 9, 0); // ten cells in a row
+    scene.scatter.push_back(stones(4.0f)); // 256 points a cell
+    ScatterPlacer p;
+    p.camera = {32.0, 0.0, 32.0};
+    p.radius = 200.0; // cells 0 to 3 (centres 32 to 224 m)
+    place(p, scene);
+    GIANT_CHECK(p.stats().cells == 4 && p.find({3, 0}) != nullptr && p.find({4, 0}) == nullptr);
+    // The camera moves: the cells now near come, the far go.
+    p.camera = {600.0, 0.0, 32.0};
+    place(p, scene);
+    GIANT_CHECK(p.find({0, 0}) == nullptr && p.find({9, 0}) != nullptr && p.find({6, 0}) != nullptr);
+    // Nearest first: with a budget of 3 cells and room for more, the nearest fill it.
+    p.max_instances = 3 * 256 + 100;
+    p.radius = 10000.0;
+    p.camera = {32.0, 0.0, 32.0};
+    ScatterPlacer q;
+    q.camera = p.camera;
+    q.radius = p.radius;
+    q.max_instances = p.max_instances;
+    q.cells_in_flight = 1; // one at a time, in the queue's order
+    q.update(scene, scene.terrain.take_changes());
+    for (int frames = 0; frames < 20000 && q.stats().building > 0; ++frames) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        q.update(scene, {});
+    }
+    GIANT_CHECK(q.instances() <= q.max_instances);
+    GIANT_CHECK(points_in(q, {0, 0}) == 256 && points_in(q, {1, 0}) == 256 && points_in(q, {2, 0}) == 256);
+    GIANT_CHECK(points_in(q, {3, 0}) == 100 && q.find({4, 0}) == nullptr && q.stats().cut_short >= 1);
+    // A kit item counts its pieces.
+    world::Kit kit;
+    kit.name = "pair";
+    kit.pieces.resize(2);
+    scene.kits.push_back(kit);
+    world::ScatterItem item;
+    item.shape = world::Shape::kit;
+    item.kit = "pair";
+    scene.scatter[0].items = {item};
+    ScatterPlacer k;
+    k.camera = {32.0, 0.0, 32.0};
+    k.radius = 40.0; // cell 0 only
+    place(k, scene);
+    GIANT_CHECK(points_in(k, {0, 0}) == 256 && k.instances() == 512);
+    // Another scene (another terrain): the old placements go in the same frame.
+    world::Scene other;
+    flat(other.terrain, 0, 0, 0, 0);
+    other.scatter = scene.scatter;
+    other.kits = scene.kits;
+    k.update(other, other.terrain.take_changes());
+    GIANT_CHECK(k.find({0, 0}) == nullptr && k.instances() == 0);
+    place(k, other);
+    GIANT_CHECK(points_in(k, {0, 0}) == 256);
 }
 
 GIANT_TEST("scatter: placements draw with their cell, as their items, and follow the placer") {
@@ -227,6 +282,14 @@ GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable"
     GIANT_CHECK(f.run("create_kit", {{"name", "oak"}, {"pieces", {{{"shape", "cube"}}}}}).ok);
     GIANT_CHECK(f.run("add_scatter_layer", {{"name", "trees"}, {"items", {{{"kit", "oak"}}}}, {"spacing", 16}}).ok);
     GIANT_CHECK(f.state.scene.scatter[1].items[0].shape == world::Shape::kit);
+    GIANT_CHECK(!f.run("delete_kit", {{"name", "oak"}}).ok); // the layer places it
+    GIANT_CHECK(f.state.scene.find_kit("oak") != nullptr);
+    // A shape that disagrees with its kit or mesh, and clumps too small.
+    GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "x"}, {"items", {{{"kit", "oak"}, {"shape", "cube"}}}}}).ok);
+    GIANT_CHECK(!f.run("set_scatter_layer", {{"name", "trees"}, {"clump_size", 1e-30}, {"clumping", 1}}).ok);
+    GIANT_CHECK(!f.run("set_scatter_layer", {{"name", "trees"}, {"clump_size", 0.5}}).ok);
+    GIANT_CHECK(f.run("set_scatter_layer", {{"name", "trees"}, {"clump_size", 1}}).ok);
+    GIANT_CHECK(f.run("undo").ok);
     // Saved with the scene.
     world::Scene loaded;
     GIANT_CHECK(!world::load_scene(world::save_scene(f.state.scene), loaded).has_value());

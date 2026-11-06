@@ -60,7 +60,7 @@ like late afternoon"; Claude calls the tools, looks at the result with
 | `add_scatter_layer` | yes, undoable | A layer of things strewn over the ground by rules: `items` (shape, `mesh` or `kit`; `weight`, `scale` [min, max], `align` 0 upright to 1 along the slope, `sink`, material), points about `spacing` metres apart (a jittered grid; `jitter`), kept by `density`, clumps (`clump_size`, `clumping`), `area` {from, to}, `height_min`/`max` and `slope_min`/`max` (degrees); `seed`, `visible`. Placed on a worker, cell by cell, again where the ground or the layer changes (not saved: worked out from the rules) |
 | `set_scatter_layer` | yes, undoable | Changes a layer by `name`: only the fields given (`items` replaces the list, `area` null for everywhere, `new_name`) |
 | `remove_scatter_layer` | yes, undoable | Removes a layer by `name`, and what it placed |
-| `get_scatter` | read-only | The layers (every field, `points` each) and `cells`, `points`, `building` (0 when all are placed), `cells_cut_short` |
+| `get_scatter` | read-only | The layers (every field, `points` each) and `cells`, `points`, `instances` (what they draw), `building` (0 when all are placed), `cells_cut_short` |
 | `set_terrain_material` | yes, undoable | The ground's `base_color` and `roughness` |
 | `get_terrain` | no | Tiles, `samples`, `spacing`, the cells covered, the material, `meshes` (`tiles` drawn, `building`, `built`, `triangles`); `points` gives the ground's height at each [x, z] (null off the terrain); `cell` gives a tile's heights |
 | `import_mesh` | loads an asset, not undoable | Imports a `.gltf`/`.glb` and builds its cluster LOD; `reload` picks up changes |

@@ -1,9 +1,12 @@
 // The scene's scatter layers (world/scatter.h) placed over its ground,
-// cell by cell, on a worker thread (AGENTS.md rule 9): a cell is placed
+// cell by cell, on worker threads (AGENTS.md rule 9): a cell is placed
 // again when its tile or a neighbour's changes (the placements read the
 // ground a little past the cell) or the layers change, and its new
 // placements swap in whole, so a frame never waits and a cell never shows
-// half its points. scene_frame draws them with the cell's entities.
+// half its points. Only cells within `radius` of the camera are placed,
+// nearest first, and all of them together hold at most max_instances
+// instances (a kit item counts its pieces): the farthest are cut short.
+// scene_frame draws them with the cell's entities.
 #pragma once
 
 #include "giant/core/jobs.h"
@@ -22,8 +25,9 @@ namespace giant::editor {
 struct ScatterStats {
     u32 cells = 0;      // with placements
     u64 points = 0;     // placements in all
+    u64 instances = 0;  // what they draw (a kit item's pieces each)
     u32 building = 0;   // cells waiting to be placed, or being placed
-    u32 cut_short = 0;  // cells with more than k_max_points_per_cell (the rest left out)
+    u32 cut_short = 0;  // cells past k_max_instances_per_cell or max_instances (the rest left out)
     u64 placed = 0;     // cells placed, ever
 };
 
@@ -34,8 +38,10 @@ public:
     struct Cell {
         std::shared_ptr<const Layers> layers;
         std::vector<world::ScatterPoint> points;
+        u64 instances = 0; // what they draw
     };
-    static constexpr usize k_max_points_per_cell = 1u << 18;
+    // A cell's instances at most (a layer at 0.25 m spacing fills one).
+    static constexpr usize k_max_instances_per_cell = 1u << 16;
 
     ScatterPlacer();
     ~ScatterPlacer();
@@ -43,10 +49,11 @@ public:
     ScatterPlacer& operator=(const ScatterPlacer&) = delete;
 
     // Once a frame, after the terrain's changes were taken (`changes`, from
-    // TerrainMeshes::last_changes): looks at the layers (compared with the
-    // last frame's) and the cells to place again (at most looks_per_frame),
-    // starts placements (cells_in_flight at once), and swaps in finished
-    // ones (at most points_per_frame points, and one cell at least).
+    // TerrainMeshes::last_changes) and `camera` was set: looks at the
+    // layers (compared with the last frame's) and the cells to place again
+    // (at most looks_per_frame), starts placements (cells_in_flight at
+    // once), and swaps in finished ones (at most instances_per_frame
+    // instances, and one cell at least).
     void update(const world::Scene& scene, const world::TerrainChanges& changes);
     // The cell's placements drawn now (none: no points).
     const Cell* find(world::CellCoord cell) const;
@@ -59,9 +66,13 @@ public:
     void finish(const world::Scene& scene, const world::TerrainChanges& changes);
 
     ScatterStats stats() const;
+    u64 instances() const { return m_instances; } // what the cells draw now
+    DVec3 camera{};        // where the camera is (set before update)
+    double radius = 2048.0; // metres from the camera to a cell's centre, at most, for it to be placed
+    u64 max_instances = 1u << 20;
     u32 looks_per_frame = 256;
     u32 cells_in_flight = 4;
-    usize points_per_frame = 65536;
+    usize instances_per_frame = 16384;
 
 private:
     struct Placed {
@@ -73,18 +84,26 @@ private:
         u64 serial = 0;
         u64 key = 0;
         Cell placed;
+        std::vector<u32> weights; // instances a point of each item draws (by first[layer] + item)
+        std::vector<u32> first;
         bool cut_short = false;
     };
 
     void want(world::CellCoord cell);
     void want_around(world::CellCoord cell);
     u64 key_of(const world::Terrain& terrain, world::CellCoord cell) const;
+    bool in_range(world::CellCoord cell) const;
+    double distance2(world::CellCoord cell) const;
+    void drop_all();
 
     std::shared_ptr<const Layers> m_layers = std::make_shared<const Layers>();
     u64 m_layers_serial = 1;
     u64 m_terrain = 0; // the terrain's identity, as last seen
     u64 m_serial = 0;
     u64 m_placed_count = 0;
+    u64 m_instances = 0; // in m_cells
+    world::CellCoord m_camera_cell{0, 0};
+    double m_radius = -1.0; // as last seen
     std::unordered_map<world::CellCoord, Placed, world::CellCoordHash> m_cells;
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_cut_short;
     std::deque<world::CellCoord> m_queue;
@@ -101,7 +120,7 @@ private:
     std::mutex m_mutex; // protects m_done
     std::vector<Result> m_done;
     WaitGroup m_jobs_done;
-    JobSystem m_jobs{1}; // last: destroyed (finishing its jobs) first
+    JobSystem m_jobs{2}; // last: destroyed (finishing its jobs) first
 };
 
 } // namespace giant::editor

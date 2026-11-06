@@ -145,6 +145,20 @@ GIANT_TEST("scatter: density, clumps, area, height and slope choose where") {
     }
 }
 
+GIANT_TEST("scatter: the ground's slope holds at its edge") {
+    Terrain hill;
+    hill.set_samples(16);
+    Terrain::Heights h(256);
+    for (usize j = 0; j < 16; ++j) {
+        for (usize i = 0; i < 16; ++i) h[j * 16 + i] = static_cast<float>(i) * 4.0f;
+    }
+    hill.set({0, 0}, h);
+    for (const double x : {0.5, 2.0, 30.0}) { // x - 4 off the ground for the first two
+        const std::optional<Vec3> n = ground_normal(hill, x, 30.0, 4.0);
+        GIANT_CHECK(n.has_value() && std::fabs(n->y - std::sqrt(0.5f)) < 1e-4f);
+    }
+}
+
 GIANT_TEST("scatter: items stand upright or along the ground, sunk by their scale") {
     Terrain hill;
     hill.set_samples(16);
@@ -193,6 +207,14 @@ GIANT_TEST("scatter: layers are checked, and saved with scenes and worlds") {
     bad = l;
     bad.items.clear();
     GIANT_CHECK(check_scatter_layer(bad).has_value());
+    bad = l;
+    bad.clump_size = 1e-30f; // a lattice too fine to count
+    GIANT_CHECK(check_scatter_layer(bad).has_value());
+    bad.clump_size = 1.0f;
+    GIANT_CHECK(!check_scatter_layer(bad).has_value());
+    bad = l;
+    bad.items[0].mesh = "assets/rock.glb"; // a sphere with a mesh
+    GIANT_CHECK(check_scatter_layer(bad).has_value());
 
     Scene scene;
     l.area = ScatterArea{-5.5, 2.0, 100.0, 200.25};
@@ -213,11 +235,16 @@ GIANT_TEST("scatter: layers are checked, and saved with scenes and worlds") {
     grass.items[0].shape = Shape::kit;
     grass.items[0].kit = "tuft";
     grass.visible = false;
+    Kit tuft;
+    tuft.name = "tuft";
+    tuft.pieces.push_back({});
+    scene.kits.push_back(tuft);
     scene.scatter.push_back(grass);
     Scene loaded;
     GIANT_CHECK(!load_scene(save_scene(scene), loaded).has_value());
     GIANT_CHECK(loaded.scatter == scene.scatter);
     WorldIndex world;
+    world.kits = scene.kits;
     world.scatter = scene.scatter;
     WorldIndex back;
     GIANT_CHECK(!load_world_index(save_world_index(world), back).has_value());
@@ -230,5 +257,8 @@ GIANT_TEST("scatter: layers are checked, and saved with scenes and worlds") {
     std::string slow = text;
     slow.replace(slow.find("\"spacing\": 0.5"), 14, "\"spacing\": 0.1");
     GIANT_CHECK(load_scene(slow, loaded).has_value());
+    std::string no_kit = text;
+    no_kit.replace(no_kit.find("\"tuft\""), 6, "\"nokit\"");
+    GIANT_CHECK(load_scene(no_kit, loaded).has_value()); // a kit item names one of the scene's kits
     GIANT_CHECK(loaded.scatter == scene.scatter); // unchanged by a failed load
 }

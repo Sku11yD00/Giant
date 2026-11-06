@@ -965,7 +965,9 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
         l.area = area;
     }
     if (const Json* items = r.get("items", true); items != nullptr && r.ok()) {
-        if (!items->is_array()) r.fail("items", "must be an array");
+        if (!items->is_array() || items->size() > k_max_scatter_items) {
+            r.fail("items", "must be an array of 1 to " + std::to_string(k_max_scatter_items) + " items");
+        }
         for (usize k = 0; r.ok() && error.empty() && k < items->size(); ++k) {
             const std::string at = path + ".items[" + std::to_string(k) + "]";
             Reader ir((*items)[k], at, error);
@@ -1012,7 +1014,8 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
     }
 }
 
-void read_scatter(Reader& root, std::vector<ScatterLayer>& out, std::string& error) {
+// After read_kits: a kit item names one of `kits`.
+void read_scatter(Reader& root, const std::vector<Kit>& kits, std::vector<ScatterLayer>& out, std::string& error) {
     const Json* layers = root.get("scatter", false);
     if (layers == nullptr || !root.ok()) return;
     if (!layers->is_array() || layers->size() > k_max_scatter_layers) {
@@ -1026,6 +1029,13 @@ void read_scatter(Reader& root, std::vector<ScatterLayer>& out, std::string& err
         if (error.empty() &&
             std::any_of(out.begin(), out.end(), [&](const ScatterLayer& l) { return l.name == layer.name; })) {
             error = path + ".name \"" + layer.name + "\" is used twice";
+        }
+        for (usize k = 0; error.empty() && k < layer.items.size(); ++k) {
+            const ScatterItem& item = layer.items[k];
+            if (item.shape == Shape::kit &&
+                std::none_of(kits.begin(), kits.end(), [&](const Kit& kit) { return kit.name == item.kit; })) {
+                error = path + ".items[" + std::to_string(k) + "].kit \"" + item.kit + "\" is not one of the kits";
+            }
         }
         if (error.empty()) out.push_back(std::move(layer));
     }
@@ -1071,7 +1081,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
         read_lighting(*lighting, scene.lighting, error);
     }
     read_kits(root, scene.kits, error);
-    read_scatter(root, scene.scatter, error);
+    read_scatter(root, scene.kits, scene.scatter, error);
     if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
         read_terrain(*terrain, scene.terrain, error);
     }
@@ -1175,7 +1185,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
         read_lighting(*lighting, world.lighting, error);
     }
     read_kits(root, world.kits, error);
-    read_scatter(root, world.scatter, error);
+    read_scatter(root, world.kits, world.scatter, error);
     if (const Json* meshes = root.get("meshes", false); meshes != nullptr && root.ok()) {
         if (!meshes->is_array()) {
             root.fail("meshes", "must be an array of paths");

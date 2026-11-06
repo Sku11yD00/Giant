@@ -331,6 +331,7 @@ int run(const Options& options) {
         terrain_meshes.update(state.scene.terrain);
         far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes,
                           state.scene.terrain);
+        scatter.camera = state.camera.position;
         scatter.update(state.scene, terrain_meshes.last_changes());
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter);
         render::FrameInput input;

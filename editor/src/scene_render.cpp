@@ -103,11 +103,27 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
 // once a cell (a forest cell is thousands of the same few things).
 void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, const render::Renderer& renderer,
                   const MeshLibrary& meshes, SceneFrame& out, SceneFrame::Cell& cell) {
+    struct Piece {
+        const world::KitPiece* piece = nullptr;
+        render::MeshId mesh = render::k_no_mesh; // k_no_mesh: a decal (emitted as one), or nothing
+        u32 material = 0;
+    };
     struct Look {
         bool known = false;
         render::MeshId mesh = render::k_no_mesh; // k_no_mesh: draws nothing (or a kit)
         u32 material = 0;
         const world::Kit* kit = nullptr;
+        std::vector<Piece> pieces; // a kit's, looked up once
+    };
+    const auto put = [&](const world::Transform& t, render::MeshId mesh, u32 material) {
+        render::Instance i;
+        i.position = t.position;
+        i.rotation = t.rotation;
+        i.scale = t.scale;
+        i.mesh = mesh;
+        i.material = material;
+        ++out.users[material];
+        cell.instances.push_back(i);
     };
     const ScatterPlacer::Layers& layers = *placed.layers;
     std::vector<usize> first(layers.size() + 1, 0);
@@ -120,6 +136,22 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
             look.known = true;
             if (item.shape == world::Shape::kit) {
                 look.kit = scene.find_kit(item.kit);
+                if (look.kit != nullptr) {
+                    for (const world::KitPiece& piece : look.kit->pieces) {
+                        Piece& lp = look.pieces.emplace_back();
+                        lp.piece = &piece;
+                        if (piece.shape == world::Shape::mesh) {
+                            const MeshLibrary::Mesh* found = meshes.find_normalized(piece.mesh);
+                            if (found != nullptr) lp.mesh = found->id;
+                        } else if (piece.shape != world::Shape::decal) {
+                            lp.mesh = renderer.builtin(builtin(piece.shape));
+                        }
+                        if (lp.mesh != render::k_no_mesh) {
+                            lp.material = material_index(piece.material, out);
+                            --out.users[lp.material]; // counted per instance below
+                        }
+                    }
+                }
             } else if (item.shape == world::Shape::mesh) {
                 const MeshLibrary::Mesh* found = meshes.find_normalized(item.mesh);
                 if (found != nullptr) look.mesh = found->id;
@@ -132,21 +164,18 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
             }
         }
         if (look.kit != nullptr) {
-            for (const world::KitPiece& piece : look.kit->pieces) {
-                emit(piece.shape, piece.mesh, place(p.transform, piece.transform), piece.material, piece.decal,
-                     renderer, meshes, out, cell);
+            for (const Piece& lp : look.pieces) {
+                const world::Transform t = place(p.transform, lp.piece->transform);
+                if (lp.mesh != render::k_no_mesh) {
+                    put(t, lp.mesh, lp.material);
+                } else if (lp.piece->shape == world::Shape::decal) {
+                    emit(lp.piece->shape, lp.piece->mesh, t, lp.piece->material, lp.piece->decal, renderer, meshes,
+                         out, cell);
+                }
             }
             continue;
         }
-        if (look.mesh == render::k_no_mesh) continue;
-        render::Instance i;
-        i.position = p.transform.position;
-        i.rotation = p.transform.rotation;
-        i.scale = p.transform.scale;
-        i.mesh = look.mesh;
-        i.material = look.material;
-        ++out.users[look.material];
-        cell.instances.push_back(i);
+        if (look.mesh != render::k_no_mesh) put(p.transform, look.mesh, look.material);
     }
 }
 
@@ -457,13 +486,24 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         if (scatter != nullptr) {
             for (const world::CellCoord c : scatter->take_changed()) out.grid[c].dirty = true;
         }
-        // Kits changed: the cells placing them (and every scattered cell:
-        // an item may be one).
+        // Kits changed: the cells placing them (entities or scatter items).
         const std::vector<std::string> kits = changed_kits(out.kits, scene.kits);
         if (!kits.empty()) {
             out.kits = scene.kits;
+            const auto scatters = [&](world::CellCoord coord) {
+                const ScatterPlacer::Cell* placed = scatter == nullptr ? nullptr : scatter->find(coord);
+                if (placed == nullptr) return false;
+                for (const world::ScatterLayer& l : *placed->layers) {
+                    for (const world::ScatterItem& i : l.items) {
+                        if (i.shape == world::Shape::kit && std::find(kits.begin(), kits.end(), i.kit) != kits.end()) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
             for (auto& [coord, cell] : out.grid) {
-                cell.dirty = cell.dirty || cell.scattered;
+                cell.dirty = cell.dirty || (cell.scattered && scatters(coord));
                 for (usize i = 0; i < cell.ids.size() && !cell.dirty; ++i) {
                     const world::Entity* e = scene.find(cell.ids[i]);
                     cell.dirty = e != nullptr && e->shape == world::Shape::kit &&
@@ -471,6 +511,12 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                 }
             }
         }
+    }
+    // Room ahead for scatter (it holds up to max_instances): growing the
+    // list doubling as cells come in would copy it all in one frame.
+    if (scatter != nullptr && scatter->instances() > 0 &&
+        out.instances.capacity() < out.instances.size() + scatter->max_instances / 8) {
+        out.instances.reserve(out.instances.size() + scatter->max_instances);
     }
     // Rebuild what changed.
     bool layout = out.order.empty();

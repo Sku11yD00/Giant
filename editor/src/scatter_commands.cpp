@@ -78,7 +78,7 @@ Json layer_properties() {
         {"density", number(0, 1, "The share of points kept. Default 1.")},
         {"jitter", number(0, 1, "0 an even grid, 1 anywhere in its square; no two points closer than "
                                 "spacing x (1 - jitter). Default 0.9.")},
-        {"clump_size", number(0, 100000, "Metres across the clumps of a noise that thins the points (0: none). Default 0.")},
+        {"clump_size", number(0, 100000, "Metres across the clumps of a noise that thins the points: 0 (none, the default) or 1 to 100000.")},
         {"clumping", number(0, 1, "How far the clumps thin: 1 keeps only their high parts. Default 0.")},
         {"height_min", number(-10000, 10000, "The lowest ground (metres) it goes on.")},
         {"height_max", number(-10000, 10000, "The highest ground it goes on.")},
@@ -329,6 +329,7 @@ void register_scatter_commands(ai::CommandRegistry& registry, EditorState& state
                  const ScatterStats s = state.scatter->stats();
                  out["cells"] = s.cells;
                  out["points"] = s.points;
+                 out["instances"] = s.instances;
                  out["building"] = s.building;
                  out["cells_cut_short"] = s.cut_short;
              }

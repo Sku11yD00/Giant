@@ -56,9 +56,15 @@ Span squares(i32 cell, double spacing) {
 std::optional<Vec3> ground_normal(const Terrain& terrain, double x, double z, double step) {
     const std::optional<double> centre = terrain.height_at(x, z);
     if (!centre) return std::nullopt;
-    const auto h = [&](double u, double v) { return terrain.height_at(u, v).value_or(*centre); };
-    const double sx = (h(x + step, z) - h(x - step, z)) / (2.0 * step);
-    const double sz = (h(x, z + step) - h(x, z - step)) / (2.0 * step);
+    // A central difference; one-sided where the ground stops on one side.
+    const auto slope = [&](std::optional<double> lo, std::optional<double> hi) {
+        if (lo && hi) return (*hi - *lo) / (2.0 * step);
+        if (hi) return (*hi - *centre) / step;
+        if (lo) return (*centre - *lo) / step;
+        return 0.0;
+    };
+    const double sx = slope(terrain.height_at(x - step, z), terrain.height_at(x + step, z));
+    const double sz = slope(terrain.height_at(x, z - step), terrain.height_at(x, z + step));
     const double length = std::sqrt(sx * sx + 1.0 + sz * sz);
     return Vec3{static_cast<float>(-sx / length), static_cast<float>(1.0 / length), static_cast<float>(-sz / length)};
 }
@@ -82,8 +88,10 @@ void scatter_cell(const ScatterLayer& layer, u32 layer_index, const Terrain& ter
     const double min_cos = std::cos(static_cast<double>(layer.slope_max) * k_pi / 180.0) - 1e-9;
     const double max_cos = std::cos(static_cast<double>(layer.slope_min) * k_pi / 180.0) + 1e-9;
     const Span xs = squares(cell.x, s), zs = squares(cell.z, s);
-    for (i64 gz = zs.first; gz <= zs.last; ++gz) {
-        for (i64 gx = xs.first; gx <= xs.last; ++gx) {
+    // One square more each side: a point on a square's edge can round into
+    // the next cell (cell_of below keeps only this cell's).
+    for (i64 gz = zs.first - 1; gz <= zs.last + 1; ++gz) {
+        for (i64 gx = xs.first - 1; gx <= xs.last + 1; ++gx) {
             const u64 h0 = point_hash(layer.seed, gx, gz, 0);
             const u64 h1 = mix(h0);
             const u64 h2 = mix(h1);
@@ -146,7 +154,9 @@ std::optional<std::string> check_scatter_layer(const ScatterLayer& l) {
     if (!range(l.density, 0.0f, 1.0f) || !range(l.jitter, 0.0f, 1.0f) || !range(l.clumping, 0.0f, 1.0f)) {
         return "density, jitter and clumping are 0 to 1";
     }
-    if (!range(l.clump_size, 0.0f, 100000.0f)) return "clump_size is 0 to 100000 metres";
+    if (!(l.clump_size == 0.0f || range(l.clump_size, 1.0f, 100000.0f))) {
+        return "clump_size is 0 (no clumps) or 1 to 100000 metres";
+    }
     if (!range(l.height_min, -k_max_terrain_height, k_max_terrain_height) ||
         !range(l.height_max, -k_max_terrain_height, k_max_terrain_height) || l.height_min > l.height_max) {
         return "height_min and height_max are -10000 to 10000 metres, min first";
@@ -168,6 +178,9 @@ std::optional<std::string> check_scatter_layer(const ScatterLayer& l) {
         }
         if (i.shape == Shape::kit && (i.kit.empty() || i.kit.size() > k_max_name_bytes)) {
             return "a kit item names its kit (at most 128 bytes)";
+        }
+        if ((i.shape != Shape::mesh && !i.mesh.empty()) || (i.shape != Shape::kit && !i.kit.empty())) {
+            return "only a mesh item names a mesh, and only a kit item a kit";
         }
         if (!range(i.weight, 1e-6f, 1e6f)) return "an item's weight is above 0, at most 1000000";
         if (!range(i.scale_min, 0.0001f, 10000.0f) || !range(i.scale_max, 0.0001f, 10000.0f) ||

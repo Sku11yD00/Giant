@@ -654,7 +654,7 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
 
     add(registry,
         {"delete_kit",
-         "Removes a kit. Refused while entities place it (delete those first). Undoable.",
+         "Removes a kit. Refused while entities or scatter layers place it (delete or change those first). Undoable.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["name"],
              "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 128}}})"),
          false,
@@ -666,6 +666,14 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
              if (const usize n = placements(state.scene, name); n > 0) {
                  return CommandResult::failure(std::to_string(n) + " entities place \"" + name +
                                                "\"; delete them first");
+             }
+             for (const world::ScatterLayer& l : state.scene.scatter) {
+                 for (const world::ScatterItem& i : l.items) {
+                     if (i.shape == world::Shape::kit && i.kit == name) {
+                         return CommandResult::failure("scatter layer \"" + l.name + "\" places \"" + name +
+                                                       "\"; change or remove it first");
+                     }
+                 }
              }
              if (state.world != nullptr && state.world->active(state.scene_generation) &&
                  !state.world->all_loaded()) {

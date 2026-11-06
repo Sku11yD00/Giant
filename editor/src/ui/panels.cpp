@@ -182,7 +182,7 @@ void EditorPanels::draw_scatter() {
         bool visible = l.visible;
         if (ImGui::Checkbox(name.c_str(), &visible)) set("visible", visible);
         float spacing = l.spacing;
-        if (ImGui::SliderFloat("Spacing (m)", &spacing, world::k_min_scatter_spacing, 64.0f, "%.2f",
+        if (ImGui::SliderFloat("Spacing (m)", &spacing, 1.0f, 64.0f, "%.2f",
                                ImGuiSliderFlags_Logarithmic)) {
             set("spacing", std::clamp(spacing, world::k_min_scatter_spacing, world::k_max_scatter_spacing));
         }
