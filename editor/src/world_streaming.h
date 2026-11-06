@@ -5,8 +5,9 @@
 // never waits on disk (AGENTS.md rule 9).
 //
 // Edits are never lost by streaming: a cell is unloaded only when what the
-// scene holds of it is exactly what its file holds. A cell with unsaved
-// edits stays loaded however far the camera goes, until save().
+// scene holds of it (its entities and its terrain tile) is exactly what its
+// file holds. A cell with unsaved edits stays loaded however far the camera
+// goes, until save().
 #pragma once
 
 #include "scene_render.h"
@@ -51,6 +52,9 @@ struct StreamingStats {
     u64 entities_loaded = 0;   // ever, since open
     u64 entities_unloaded = 0; // ever, since open
     u64 ids_changed = 0;       // entities given a new id: their id was taken (see the log)
+    u32 ground = 0;            // cells whose file holds a terrain tile
+    u64 tiles_loaded = 0;      // terrain tiles, ever, since open
+    u64 tiles_unloaded = 0;
 };
 
 class WorldStreaming {
@@ -87,6 +91,9 @@ public:
     bool active(u64 generation) const { return is_open() && generation == m_generation; }
     const std::filesystem::path& folder() const { return m_folder; }
     const world::WorldIndex& index() const { return m_index; }
+    // The samples a side of the terrain tiles in the world's files, while
+    // any file holds one (the scene's terrain must use the same).
+    std::optional<u32> ground_samples() const;
 
     // Once a frame, after `frame` was built from `scene`: adds what is ready,
     // starts reads near the camera, and now and then unloads far cells that
@@ -123,12 +130,16 @@ private:
         // Loaded: what its file holds, sorted by id (what the scene must
         // match, entity for entity, for the cell to be clean).
         std::vector<world::Entity> saved;
+        // Loaded: its file's terrain tile (none: the file holds none).
+        // Shared, so undo memos do not copy it.
+        std::shared_ptr<const world::Terrain::Heights> saved_heights;
         u64 written = 0; // when this editor last wrote its file (0: not since open)
     };
     struct Read {
         world::CellCoord cell;
         u64 epoch = 0;
         std::vector<world::Entity> entities; // sorted by id
+        std::optional<world::Terrain::Heights> heights;
         std::string error;
         bool missing = false; // the file is not there
     };
@@ -141,6 +152,8 @@ public:
 private:
     // Whether `now` (any order) is exactly `saved`.
     static bool matches(std::vector<const world::Entity*>& now, const std::vector<world::Entity>& saved);
+    // Whether the scene's tile (null: none) is exactly the file's.
+    static bool same_heights(const world::Terrain::Heights* now, const world::Terrain::Heights* saved);
 
     bool follows(const world::Scene& scene); // false: replaced, streaming stops
     void start_read(world::CellCoord cell);
@@ -170,6 +183,7 @@ private:
     u64 m_epoch = 0; // reads from an older epoch (a closed world) are dropped
     world::WorldIndex m_index;
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> m_cells; // cells with a file
+    std::unordered_set<world::CellCoord, world::CellCoordHash> m_ground;     // whose file holds a tile
     std::vector<Read> m_ready;  // parsed, in the order they finished
     std::array<u32, 5> m_count{}; // cells per State
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_loaded;

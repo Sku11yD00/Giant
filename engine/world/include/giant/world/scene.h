@@ -226,6 +226,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out);
 // its cells use, which cells have a file) and cells/<x>_<z>.cell.json, one
 // per cell with entities. Each is text like a scene; the editor loads
 // cells around the camera and unloads far ones (editor/src/world_streaming.h).
+// A cell's file also holds its terrain tile, if it has one.
 
 struct WorldIndex {
     EntityId next_id = 1; // one past the last id any cell holds
@@ -233,6 +234,11 @@ struct WorldIndex {
     std::vector<Kit> kits;
     std::vector<std::string> meshes; // imported when the world opens
     std::vector<CellCoord> cells;    // cells that have a file
+    // The ground: one sample spacing and material for every tile, and the
+    // cells whose file holds a tile (all listed in `cells`).
+    u32 terrain_samples = k_default_terrain_samples;
+    TerrainMaterial terrain_material;
+    std::vector<CellCoord> terrain_cells;
 };
 
 // "<x>_<z>.cell.json", in the world's cells folder.
@@ -243,11 +249,19 @@ std::string save_world_index(const WorldIndex& world);
 // Replaces `out` only on success; strict, like load_scene.
 std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out);
 
-// One cell's entities, sorted by id, so an unchanged cell saves the same text.
-std::string save_cell(CellCoord cell, std::span<const Entity> entities);
-// Replaces `out` only on success. Every entity must be in `cell` (by
-// position) and ids unique in the file. Kits are not checked (the world's
-// index holds them): an entity naming a missing kit just draws nothing.
+// One cell's entities, sorted by id, so an unchanged cell saves the same
+// text, and its terrain tile if it has one ("heights", rows of text as in
+// a scene; samples x samples of them).
+std::string save_cell(CellCoord cell, std::span<const Entity> entities,
+                      const Terrain::Heights* heights = nullptr);
+// Replaces `out` and `heights` only on success (`heights` empty when the
+// file holds no tile). Every entity must be in `cell` (by position) and
+// ids unique in the file; a tile must be `terrain_samples` a side (the
+// world's; 0: none may be there). Kits are not checked (the world's index holds them): an
+// entity naming a missing kit just draws nothing.
+std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 terrain_samples,
+                                   std::vector<Entity>& out, std::optional<Terrain::Heights>& heights);
+// The same for a cell that must hold no terrain (terrain_samples 0).
 std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::vector<Entity>& out);
 
 } // namespace giant::world

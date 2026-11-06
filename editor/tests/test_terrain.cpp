@@ -58,13 +58,6 @@ struct Fixture {
     }
 };
 
-std::filesystem::path temp_folder(const char* name) {
-    const std::filesystem::path p = std::filesystem::temp_directory_path() / name;
-    std::error_code e;
-    std::filesystem::remove_all(p, e);
-    return p;
-}
-
 } // namespace
 
 GIANT_TEST("terrain meshes: a tile's surface meets its neighbours' exactly") {
@@ -396,13 +389,9 @@ GIANT_TEST("terrain commands: work a command and a terrain may hold is capped") 
                 world::hills_height(h, 7 * 64.0 + 77 * 0.5, 3 * 64.0 + 5 * 0.5));
 }
 
-GIANT_TEST("terrain commands: saved with the scene; not yet in streamed worlds") {
+GIANT_TEST("terrain commands: saved with the scene") {
     Fixture f;
     GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {100, 10}}, {"hills", Json::object()}}).ok);
-    const std::filesystem::path folder = temp_folder("giant_terrain_world");
-    const ai::CommandResult w = f.run("save_world", {{"folder", folder.string()}});
-    GIANT_CHECK(!w.ok && w.error.find("terrain") != std::string::npos);
-    GIANT_CHECK(!std::filesystem::exists(folder / "world.json"));
 
     const std::filesystem::path file = std::filesystem::temp_directory_path() / "giant_terrain.scene.json";
     GIANT_CHECK(f.run("save_scene", {{"path", file.string()}}).ok);

@@ -388,6 +388,47 @@ GIANT_TEST("world: a world's index and cells save and load as text") {
     GIANT_CHECK(save_cell({1, -1}, loaded) == cell);
 }
 
+GIANT_TEST("world: a world's terrain settings and a cell's tile save and load as text") {
+    WorldIndex world;
+    world.cells = {{0, 0}, {5, -2}, {1, 0}};
+    GIANT_CHECK(save_world_index(world).find("terrain") == std::string::npos); // none, default: not written
+    world.terrain_samples = 16;
+    world.terrain_material.roughness = 0.25f;
+    world.terrain_cells = {{5, -2}, {0, 0}};
+    WorldIndex back;
+    const std::string text = save_world_index(world);
+    GIANT_CHECK(!load_world_index(text, back).has_value());
+    GIANT_CHECK(back.terrain_samples == 16 && back.terrain_material.roughness == 0.25f);
+    GIANT_CHECK(back.terrain_cells.size() == 2 && back.terrain_cells[0] == (CellCoord{5, -2}));
+    GIANT_CHECK(save_world_index(back) == text);
+    GIANT_CHECK(contains(load_world_index(R"({"format": "giant-world", "version": 1, "cells": [[0, 0]],
+        "terrain": {"samples": 16, "cells": [[1, 0]]}})", back)->message,
+                         "terrain.cells[0] is not in the world's cells"));
+    GIANT_CHECK(contains(load_world_index(R"({"format": "giant-world", "version": 1, "cells": [],
+        "terrain": {"samples": 12}})", back)->message,
+                         "terrain.samples must be 8, 16, 32, 64 or 128"));
+
+    Terrain::Heights tile(64);
+    for (usize k = 0; k < tile.size(); ++k) tile[k] = 0.1f * static_cast<float>(k) - 3.0f;
+    Entity a = named("a");
+    a.id = 2;
+    const std::string cell = save_cell({0, 0}, std::vector<Entity>{a}, &tile);
+    std::vector<Entity> entities;
+    std::optional<Terrain::Heights> heights;
+    GIANT_CHECK(!load_cell(cell, {0, 0}, 8, entities, heights).has_value());
+    GIANT_CHECK(entities.size() == 1 && heights && *heights == tile); // exact
+    GIANT_CHECK(save_cell({0, 0}, entities, &*heights) == cell);
+    // Another spacing, and the reader with no terrain, refuse it.
+    std::optional<Terrain::Heights> kept = Terrain::Heights{1.0f};
+    const auto wrong = load_cell(cell, {0, 0}, 16, entities, kept);
+    GIANT_CHECK(wrong && contains(wrong->message, "heights must be 16 rows"));
+    GIANT_CHECK(kept && kept->size() == 1); // unchanged on failure
+    GIANT_CHECK(contains(load_cell(cell, {0, 0}, entities)->message, "read without terrain"));
+    // A file without heights has no tile.
+    GIANT_CHECK(!load_cell(save_cell({0, 0}, std::vector<Entity>{a}), {0, 0}, 8, entities, heights).has_value());
+    GIANT_CHECK(!heights);
+}
+
 GIANT_TEST("world: bad world and cell files say what is wrong") {
     WorldIndex world;
     GIANT_CHECK(contains(load_world_index(R"({"format": "giant-world", "version": 1})", world)->message,

@@ -3,6 +3,7 @@
 // (TerrainMeshes), so get_terrain says when they are all drawn.
 #include "editor_commands.h"
 #include "terrain_meshes.h"
+#include "world_streaming.h"
 
 #include "giant/core/assert.h"
 
@@ -194,7 +195,17 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              const std::optional<Area> area = area_of(args["from"], args["to"], error);
              if (!area) return CommandResult::failure(error);
              const u32 samples_before = t.samples();
-             u32 samples = args.value("samples", samples_before);
+             // In a streamed world whose files hold tiles, the spacing is theirs.
+             // (0: the world has none, or none is open; a plain u32 keeps GCC's
+             // maybe-uninitialized check quiet.)
+             const u32 ground = state.world != nullptr && state.world->active(state.scene_generation)
+                                    ? state.world->ground_samples().value_or(0u)
+                                    : 0u;
+             u32 samples = args.value("samples", ground != 0 ? ground : samples_before);
+             if (ground != 0 && samples != ground) {
+                 return CommandResult::failure("the open world's terrain tiles are " + std::to_string(ground) +
+                                               " samples a side; its terrain cannot take another");
+             }
              if (samples != samples_before && !t.empty()) {
                  return CommandResult::failure("samples is " + std::to_string(samples_before) +
                                                " and can change only while there is no terrain "
@@ -226,7 +237,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              if ((t.size() + added) * n * n > k_max_terrain_samples) {
                  return CommandResult::failure("the terrain would hold " + std::to_string(t.size() + added) +
                                                " tiles; at most " + std::to_string(k_max_terrain_samples / (n * n)) +
-                                               " of " + std::to_string(n) + " samples until terrain streams");
+                                               " of " + std::to_string(n) + " samples loaded at once");
              }
              auto before = std::make_shared<const TileStates>(snapshot(t, cells));
              t.set_samples(samples);

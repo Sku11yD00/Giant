@@ -246,8 +246,9 @@ cell's work, not the world's:
 - **Worlds stream by cell (N3 part 3, `editor/src/world_streaming.h`).** A
   world is a folder: `world.json` (`world::WorldIndex`: lighting, kits,
   the meshes its cells use, which cells have a file, the next id) and
-  `cells/<x>_<z>.cell.json`, one per cell with entities (`world::save_cell`:
-  sorted by id, so an unchanged cell saves the same text). Cells with any
+  `cells/<x>_<z>.cell.json`, one per cell with entities or a terrain tile
+  (`world::save_cell`: sorted by id, so an unchanged cell saves the same
+  text; terrain in streamed worlds is under Terrain, below). Cells with any
   part within `load_radius` of the camera are read and parsed on a worker
   thread, nearest first, a few at a time; the main thread adds whole
   parsed cells to the scene up to `entities_per_frame` a frame and never
@@ -318,9 +319,10 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   while there are no tiles), the first at its cell's corner. The surface's
   last row and column come from the neighbours; `Terrain::sample(i, j)`
   takes a height by whole-world sample number, from its tile or, when that
-  tile is missing, from the sample before it on x, z or both. It depends
-  on (i, j) alone, so every tile meeting at a point sees the same height
-  and normal there. `height_at(x, z)` is the surface exactly as the finest
+  tile is missing, from the sample before it on x, z or both. Tiles
+  sharing an edge always see the same heights and normals along it; a
+  tile touching another only at a corner, with neither tile between them,
+  keeps its own corner (no spike, and no edge to crack along). `height_at(x, z)` is the surface exactly as the finest
   mesh draws it (two triangles a square, split on the (0, 0)-(1, 1)
   diagonal).
 - **Changes.** The terrain logs the tiles set, changed (`modify`) and
@@ -357,21 +359,36 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
 - **Saved as text** with the scene (`"terrain"`: `samples`, `material`,
   `tiles` of `cell` and `heights`, one string of numbers per row in the
   shortest form that reads back exactly).
-- **Known limits, next parts.** Streamed worlds do not hold terrain yet
-  (`save_world` refuses a scene with terrain; terrain streaming is next,
-  with a coarse copy of far tiles so the whole world's ground need not be
-  in memory). Every tile is a full mesh in memory (CPU copy and cluster
-  data: about 0.4 MB a 1 m tile, 1.2 MB at 128 samples), so a terrain may
-  hold at most 67M heights (16,384 tiles of 64 samples, 4,096 of 128)
-  until then, and a command makes at most 16.7M. Locked tile edges keep
+- **In streamed worlds (N3 part 4b).** A cell's file holds its tile too
+  (`"heights"`, rows of text as in a scene), so a tile loads and unloads
+  with its cell: a cell is let go only when its entities and its tile are
+  exactly what its file holds (the file's tile is kept, shared, while the
+  cell is loaded). `world.json` holds the terrain's `samples` and
+  `material` and which cells' files hold a tile (`terrain.cells`; for the
+  far ground later). A tile made or put back by an undo in a cell still on
+  disk makes the cell load at once, and the scene's tile wins over the
+  file's; saving such a cell keeps the file's entities (and its tile, if
+  the scene has none there). All tiles are one spacing: while any file
+  holds a tile, `create_terrain` takes the world's spacing and refuses
+  another, streaming gives an empty terrain the world's spacing back (an
+  undo can take it away), a file whose tile is another spacing fails to
+  load alone, and a save that would mix spacings is refused.
+- **Known limits, next parts.** Tiles stream with the cells around the
+  camera (`load_radius`, 1.5 km by default) and nothing stands in for the
+  ground past them yet: a coarse copy of far tiles is next. Every loaded
+  tile is a full mesh in memory (CPU copy and cluster data: about 0.4 MB
+  a 1 m tile, 1.2 MB at 128 samples; the default radius loads about 1,800
+  cells), and a command may make at most 16.7M heights, the terrain hold
+  67M (16,384 tiles of 64 samples, 4,096 of 128). Locked tile edges keep
   every level's edge, so a tile never drops below about 4 x samples
   triangles (256 at 64 samples) however far: with always_mesh, thousands
   of tiles in view cost a million triangles or more until far tiles get a
-  coarser copy (with terrain streaming). An undo step holds copies of the
-  tiles a command changed (before and after), and a scene swap's undo
-  side the whole terrain. One material for all of it (changing it
-  rebuilds every cell with ground, once); painted layers, sculpt brushes,
-  erosion and height map import come with the terrain editor.
+  coarser copy. An undo step holds copies of the tiles a command changed
+  (before and after), and a scene swap's undo side the whole terrain. One
+  material for all of it (changing it rebuilds every cell with ground,
+  once); painted layers, sculpt brushes, erosion and height map import
+  come with the terrain editor. Like lighting, a changed terrain material
+  does not count as an unsaved cell.
 
 ## Window events (known limit)
 

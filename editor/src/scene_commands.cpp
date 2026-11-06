@@ -1054,7 +1054,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
 
     add(registry,
         {"save_world",
-         "Saves the open world: world.json and each 64 m cell whose entities changed (only "
+         "Saves the open world: world.json and each 64 m cell whose entities or terrain tile changed (only "
          "those files are written; a cell left empty loses its file). With a folder and no "
          "world open, makes a new world there from the scene and opens it (the folder must "
          "not hold one). Cells with unsaved edits never unload, so nothing is lost by "
@@ -1068,11 +1068,6 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure("worlds are not available in this editor");
              }
              WorldStreaming& w = *state.world;
-             if (!state.scene.terrain.empty()) {
-                 return CommandResult::failure(
-                     "the scene has terrain, which streamed worlds do not hold yet (it arrives with "
-                     "terrain streaming); save_scene keeps it");
-             }
              const bool active = w.active(state.scene_generation);
              WorldStreaming::Saved saved;
              if (args.contains("folder")) {
@@ -1122,7 +1117,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
     add(registry,
         {"get_world",
          "The open world's streaming: cells with a file, loaded, being read, parsed and waiting, "
-         "failed (see the log), cells with unsaved edits, entities in the scene, and the "
+         "failed (see the log), cells with unsaved edits, entities in the scene, cells whose file "
+         "holds terrain (ground) and tiles loaded and unloaded, and the "
          "streaming settings.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
@@ -1146,6 +1142,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                   {"entities_loaded", s.entities_loaded},
                   {"entities_unloaded", s.entities_unloaded},
                   {"ids_changed", s.ids_changed},
+                  {"ground", s.ground},
+                  {"tiles_loaded", s.tiles_loaded},
+                  {"tiles_unloaded", s.tiles_unloaded},
                   {"streaming", streaming_json(k)}});
          }});
 
