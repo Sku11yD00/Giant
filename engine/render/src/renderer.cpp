@@ -1588,7 +1588,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.barrier(m_depth, rhi::ResourceState::shader_read);
     }
     rhi::RenderPassDesc finish;
-    finish.colors[0] = {shaded, rhi::LoadOp::discard, {}};
+    // Cleared all the same: defined where no draw is recorded (the null device).
+    finish.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
     cmd.begin_render_pass(finish);
     cmd.set_pipeline(m_reflect);
     gpu::ReflectPush reflect{};

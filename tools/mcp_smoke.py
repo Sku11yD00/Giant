@@ -492,7 +492,7 @@ def gi_gate(tool, call, check):
     last = settle()
     check(last["gi"]["on"] and last["gi"]["waiting"] == 0 and last["gi"]["lit"] > 0,
           f"the voxel world is lit, new bricks first, then in turn, got {last['gi']}")
-    # N2 part 5b: reflections, from the lit voxels and from last frame's image.
+    # N2 part 5b: reflections, from the lit voxels and from the image itself.
     check(last["reflections"]["voxel"] and last["reflections"]["screen"],
           f"glossy surfaces reflect the voxel world and the screen, got {last['reflections']}")
     tool("set_render_settings", {"screen_space_reflections": False})

@@ -460,7 +460,9 @@ Output ps_main(float4 position : SV_Position) {
         if (cone_weight > 0.0) {
             const float roughness = clamp(rough, 0.045, 1.0);
             const float3 r = reflect(-safe_normalize(-world, n), n);
-            cone = trace_reflection(w, write_buffer(extras.gi_light), f, world, n, r,
+            VoxelWorld all_voxels = w;
+            all_voxels.stand_ins = 0u; // everything reflects, not only the far field's stand-ins
+            cone = trace_reflection(all_voxels, write_buffer(extras.gi_light), f, world, n, r,
                                     clamp(roughness * roughness, 0.03, 0.577));
         }
     }
