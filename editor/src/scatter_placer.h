@@ -5,7 +5,8 @@
 // placements swap in whole, so a frame never waits and a cell never shows
 // half its points. Only cells within `radius` of the camera are placed,
 // nearest first, and all of them together hold at most max_instances
-// instances (a kit item counts its pieces): the farthest are cut short.
+// instances (a kit item counts its pieces): a cell arriving over it takes
+// room from farther cells, and cells cut short try again when room frees.
 // scene_frame draws them with the cell's entities.
 #pragma once
 
@@ -27,7 +28,7 @@ struct ScatterStats {
     u64 points = 0;     // placements in all
     u64 instances = 0;  // what they draw (a kit item's pieces each)
     u32 building = 0;   // cells waiting to be placed, or being placed
-    u32 cut_short = 0;  // cells past k_max_instances_per_cell or max_instances (the rest left out)
+    u32 cut_short = 0;  // cells cut short or left out (k_max_instances_per_cell, max_instances)
     u64 placed = 0;     // cells placed, ever
 };
 
@@ -40,8 +41,9 @@ public:
         std::vector<world::ScatterPoint> points;
         u64 instances = 0; // what they draw
     };
-    // A cell's instances at most (a layer at 0.25 m spacing fills one).
-    static constexpr usize k_max_instances_per_cell = 1u << 16;
+    // A cell's instances at most (one swaps in whole, in a frame: about
+    // 1.5 ms; a layer at 0.5 m spacing fills one).
+    static constexpr usize k_max_instances_per_cell = 1u << 14;
 
     ScatterPlacer();
     ~ScatterPlacer();
@@ -69,7 +71,7 @@ public:
     u64 instances() const { return m_instances; } // what the cells draw now
     DVec3 camera{};        // where the camera is (set before update)
     double radius = 2048.0; // metres from the camera to a cell's centre, at most, for it to be placed
-    u64 max_instances = 1u << 20;
+    u64 max_instances = 1u << 19;
     u32 looks_per_frame = 256;
     u32 cells_in_flight = 4;
     usize instances_per_frame = 16384;
@@ -95,6 +97,7 @@ private:
     bool in_range(world::CellCoord cell) const;
     double distance2(world::CellCoord cell) const;
     void drop_all();
+    void remove(world::CellCoord cell);
 
     std::shared_ptr<const Layers> m_layers = std::make_shared<const Layers>();
     u64 m_layers_serial = 1;
@@ -104,6 +107,8 @@ private:
     u64 m_instances = 0; // in m_cells
     world::CellCoord m_camera_cell{0, 0};
     double m_radius = -1.0; // as last seen
+    u64 m_kits = 0;         // the piece counts of the kits items name, as last seen
+    bool m_freed = false;   // room freed this frame
     std::unordered_map<world::CellCoord, Placed, world::CellCoordHash> m_cells;
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_cut_short;
     std::deque<world::CellCoord> m_queue;

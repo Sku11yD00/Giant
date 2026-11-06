@@ -512,11 +512,12 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             }
         }
     }
-    // Room ahead for scatter (it holds up to max_instances): growing the
-    // list doubling as cells come in would copy it all in one frame.
-    if (scatter != nullptr && scatter->instances() > 0 &&
-        out.instances.capacity() < out.instances.size() + scatter->max_instances / 8) {
-        out.instances.reserve(out.instances.size() + scatter->max_instances);
+    // Room ahead for scatter (it holds up to max_instances), reserved once
+    // when the first placements come: growing the list doubling as cells
+    // come in would copy it all in one frame, again and again.
+    if (scatter != nullptr && scatter->instances() > 0 && out.scatter_room == 0) {
+        out.scatter_room = out.instances.size() + scatter->max_instances + scatter->max_instances / 4;
+        out.instances.reserve(out.scatter_room);
     }
     // Rebuild what changed.
     bool layout = out.order.empty();

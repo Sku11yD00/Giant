@@ -84,6 +84,16 @@ void ScatterPlacer::drop_all() {
     m_instances = 0;
 }
 
+// Takes a cell's placements away (room freed for cells cut short).
+void ScatterPlacer::remove(world::CellCoord cell) {
+    const auto it = m_cells.find(cell);
+    if (it == m_cells.end()) return;
+    m_instances -= it->second.cell.instances;
+    m_cells.erase(it);
+    m_changed.push_back(cell);
+    m_freed = true;
+}
+
 void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChanges& changes) {
     const world::Terrain& terrain = scene.terrain;
     bool all = changes.all;
@@ -92,8 +102,19 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
         drop_all();
         all = true;
     }
-    if (!(scene.scatter == *m_layers)) {
+    // The kits items name, by piece count (what a point draws): a change
+    // places every cell again, as a layer change does.
+    u64 kits = 0x6B17u;
+    for (const world::ScatterLayer& l : scene.scatter) {
+        for (const world::ScatterItem& i : l.items) {
+            if (i.shape != world::Shape::kit) continue;
+            const world::Kit* kit = scene.find_kit(i.kit);
+            kits = mix(kits, kit == nullptr ? 0 : kit->pieces.size() + 1);
+        }
+    }
+    if (!(scene.scatter == *m_layers) || kits != m_kits) {
         m_layers = std::make_shared<const Layers>(scene.scatter);
+        m_kits = kits;
         ++m_layers_serial;
         all = true;
     }
@@ -101,6 +122,16 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
     const bool moved = !(camera_cell == m_camera_cell) || radius != m_radius;
     m_camera_cell = camera_cell;
     m_radius = radius;
+    if (moved) {
+        // Cells out of range go now, before nearer ones arrive wanting room.
+        std::vector<world::CellCoord> gone;
+        for (const auto& [cell, placed] : m_cells) {
+            if (!in_range(cell)) gone.push_back(cell);
+        }
+        for (const world::CellCoord c : gone) remove(c);
+        std::erase_if(m_cut_short, [&](world::CellCoord c) { return !in_range(c); });
+        std::erase_if(m_wanted, [&](const auto& w) { return !in_range(w.first); }); // their results are not wanted
+    }
     if (all || moved) {
         // Cells come in or go out of range (or all change): nearest first.
         for (const auto& [cell, heights] : terrain.tiles()) {
@@ -134,10 +165,33 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
         const auto w = m_wanted.find(r.cell);
         if (w != m_wanted.end() && w->second.serial == r.serial) {
             m_wanted.erase(w);
-            const auto old = m_cells.find(r.cell);
-            const u64 others = m_instances - (old == m_cells.end() ? 0 : old->second.cell.instances);
+            const u64 was = [&] {
+                const auto it = m_cells.find(r.cell);
+                return it == m_cells.end() ? u64{0} : it->second.cell.instances;
+            }();
+            u64 others = m_instances - was;
             if (others + r.placed.instances > max_instances) {
-                // Over the whole budget: keep what fits (nearer cells came first).
+                // Over the whole budget: farther cells make room (they are
+                // left out, to come back when there is room), then what
+                // still does not fit is cut.
+                const double d = distance2(r.cell);
+                std::vector<std::pair<double, world::CellCoord>> farther;
+                for (const auto& [cell, placed] : m_cells) {
+                    const double e = distance2(cell);
+                    if (e > d) farther.emplace_back(e, cell);
+                }
+                std::sort(farther.begin(), farther.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                for (const auto& [e, cell] : farther) {
+                    if (others + r.placed.instances <= max_instances) break;
+                    const auto it = m_cells.find(cell);
+                    others -= it->second.cell.instances;
+                    m_instances -= it->second.cell.instances;
+                    m_cells.erase(it);
+                    m_changed.push_back(cell);
+                    m_cut_short.insert(cell);
+                }
+            }
+            if (others + r.placed.instances > max_instances) {
                 const u64 room = max_instances > others ? max_instances - others : 0;
                 u64 kept = 0;
                 usize n = 0;
@@ -158,20 +212,25 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
             } else {
                 m_cut_short.erase(r.cell);
             }
-            if (old != m_cells.end()) m_instances -= old->second.cell.instances;
             if (r.placed.points.empty()) {
-                if (old != m_cells.end()) {
-                    m_cells.erase(old);
-                    m_changed.push_back(r.cell);
-                }
+                remove(r.cell);
             } else {
-                m_instances += r.placed.instances;
+                m_freed = m_freed || r.placed.instances < was;
+                m_instances = m_instances - was + r.placed.instances;
                 m_cells[r.cell] = {std::move(r.placed), r.key};
                 m_changed.push_back(r.cell);
             }
         }
         m_arrived.pop_front();
     }
+    // Room freed: the cells cut short (or left out) try again, nearest first.
+    if (m_freed && !m_cut_short.empty()) {
+        std::vector<world::CellCoord> retry(m_cut_short.begin(), m_cut_short.end());
+        std::sort(retry.begin(), retry.end(),
+                  [&](world::CellCoord a, world::CellCoord b) { return distance2(a) < distance2(b); });
+        for (const world::CellCoord c : retry) want(c);
+    }
+    m_freed = false;
 
     // Look at the cells wanted: start a placement where the key changed.
     bool any = false;
@@ -184,16 +243,15 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
         const auto placed = m_cells.find(cell);
         const auto flying = m_wanted.find(cell);
         if (flying != m_wanted.end() && flying->second.key == key) continue; // on its way
-        if (flying == m_wanted.end() && (placed == m_cells.end() ? key == 0 : placed->second.key == key)) continue;
+        const bool cut = m_cut_short.contains(cell); // tries again whatever its key
+        if (flying == m_wanted.end() && !cut && (placed == m_cells.end() ? key == 0 : placed->second.key == key)) {
+            continue;
+        }
         if (key == 0 || !any) {
             // Nothing to place: gone now (and whatever is in flight is not wanted).
             if (flying != m_wanted.end()) m_wanted.erase(flying);
             m_cut_short.erase(cell);
-            if (placed != m_cells.end()) {
-                m_instances -= placed->second.cell.instances;
-                m_cells.erase(placed);
-                m_changed.push_back(cell);
-            }
+            remove(cell);
             continue;
         }
         // A copy of the ground it reads (the tile and its neighbours').

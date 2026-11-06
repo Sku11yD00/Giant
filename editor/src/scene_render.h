@@ -35,6 +35,7 @@ struct SceneFrame {
     std::vector<render::Material> materials;
     std::vector<render::Decal> decals;
     u32 cells_rebuilt = 0; // by the last scene_frame
+    usize scatter_room = 0; // instances reserved once for scatter to grow into (0: not yet)
 
     struct MaterialKey {
         u32 bits[8];

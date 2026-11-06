@@ -500,10 +500,13 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   tiles to a worker job (2 workers) and swaps a cell's points in whole
   (within `instances_per_frame`, one cell at least). Only cells within
   `radius` (2048 m) of the camera are placed, nearest first; a cell draws
-  at most 65536 instances and all cells together `max_instances` (about a
-  million; a kit item counts its pieces), the farthest cut short, and the
-  scene's instance list reserves room for them ahead so it never doubles
-  in a frame. A cell is placed again when its
+  at most 16384 instances (a frame swaps in one whole, about 1.5 ms) and
+  all cells together `max_instances` (524288; a kit item counts its
+  pieces, and a kit's piece count is part of every cell's key). A cell
+  arriving over the budget takes room from farther cells, cells out of
+  range go before any arrive, and cells cut short try again when room
+  frees. The scene's instance list reserves room for scatter once, so it
+  never doubles in a frame. A cell is placed again when its
   tile or a neighbour's changes (TerrainMeshes::last_changes) or the layers
   change (compared each frame), and keyed by the layers and those 9 tile
   versions, so an unchanged cell is never placed twice. Placements are not

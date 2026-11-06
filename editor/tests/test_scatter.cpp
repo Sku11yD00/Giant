@@ -158,6 +158,24 @@ GIANT_TEST("scatter placer: near the camera only, nearest first, within a budget
     GIANT_CHECK(q.instances() <= q.max_instances);
     GIANT_CHECK(points_in(q, {0, 0}) == 256 && points_in(q, {1, 0}) == 256 && points_in(q, {2, 0}) == 256);
     GIANT_CHECK(points_in(q, {3, 0}) == 100 && q.find({4, 0}) == nullptr && q.stats().cut_short >= 1);
+    // Full, the camera moves: the cells left behind make room for the new.
+    q.camera = {600.0, 0.0, 32.0};
+    q.radius = 200.0; // cells 6 to 9
+    q.update(scene, {});
+    for (int frames = 0; frames < 20000 && q.stats().building > 0; ++frames) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        q.update(scene, {});
+    }
+    GIANT_CHECK(q.find({0, 0}) == nullptr && q.instances() == q.max_instances);
+    GIANT_CHECK(points_in(q, {7, 0}) == 256 && points_in(q, {8, 0}) == 256 && q.stats().building == 0);
+    // All at once (more in flight than one, any order): nearer cells win room from farther ones.
+    ScatterPlacer n;
+    n.camera = {32.0, 0.0, 32.0};
+    n.radius = 10000.0;
+    n.max_instances = 3 * 256 + 100;
+    place(n, scene);
+    GIANT_CHECK(n.instances() <= n.max_instances);
+    GIANT_CHECK(points_in(n, {0, 0}) == 256 && points_in(n, {1, 0}) == 256 && points_in(n, {2, 0}) == 256);
     // A kit item counts its pieces.
     world::Kit kit;
     kit.name = "pair";
@@ -172,6 +190,10 @@ GIANT_TEST("scatter placer: near the camera only, nearest first, within a budget
     k.radius = 40.0; // cell 0 only
     place(k, scene);
     GIANT_CHECK(points_in(k, {0, 0}) == 256 && k.instances() == 512);
+    // The kit grows: the cell is placed again and counts the new pieces.
+    scene.kits[0].pieces.resize(3);
+    place(k, scene);
+    GIANT_CHECK(points_in(k, {0, 0}) == 256 && k.instances() == 768);
     // Another scene (another terrain): the old placements go in the same frame.
     world::Scene other;
     flat(other.terrain, 0, 0, 0, 0);
