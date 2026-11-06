@@ -195,6 +195,11 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
         // Forward scattering (the silver lining) with some back.
         const float phase = lerp(hg_phase(mu, 0.8), hg_phase(mu, -0.25), 0.3);
         const float sigma_scale = s.cloud_density * k_cloud_extinction;
+        // Under a broad deck the light from all round is the deck's own (the
+        // sun's, scattered through it many times): grey, not the blue sky's.
+        const float3 lum = float3(0.2126, 0.7152, 0.0722);
+        const float deck = dot(s.sky_light, lum) + dot(s.sun_light, lum) * 0.15 * saturate(s.sun_direction.y * 2.0);
+        const float3 deck_light = float3(deck, deck, deck);
         float t = enter + ds * dither(id.xy);
         for (uint i = 0; i < steps && transmittance > 0.01; ++i) {
             const float3 p = dir * t;
@@ -206,7 +211,8 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
                 const float sigma = shape * sigma_scale;
                 const float h = saturate((height_at(s.cam_alt, p) - s.cloud_base) /
                                          max(s.cloud_top - s.cloud_base, 1.0));
-                const float3 ambient = lerp(s.ground_light * 0.5 + s.sky_light * 0.3, s.sky_light, h);
+                const float3 ambient = lerp(lerp(s.ground_light * 0.5 + s.sky_light * 0.3, s.sky_light, h),
+                                            deck_light, s.cloud_cover);
                 // The sky's light from all round, scattered evenly (a third reaches the eye).
                 const float2 sun = sun_through_clouds(s, p);
                 const float3 in_light = s.sun_light * (sun.x * phase + sun.y * 0.2) + ambient * 0.33;
