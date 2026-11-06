@@ -2,7 +2,10 @@
 
 #include "giant_test.h"
 
+#include <cmath>
+#include <limits>
 #include <string>
+#include <vector>
 
 using namespace giant;
 using namespace giant::world;
@@ -315,4 +318,41 @@ GIANT_TEST("world: decal settings are kept when the shape changes, and empty kit
     GIANT_CHECK(load_scene(empty_kit, loaded).has_value());
     const char* empty_name = R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "kit": ""}]})";
     GIANT_CHECK(load_scene(empty_name, loaded).has_value());
+}
+
+GIANT_TEST("world: cells and what changed") {
+    using world::cell_of;
+    GIANT_CHECK((cell_of({0.0, 5.0, 63.9}) == world::CellCoord{0, 0}));
+    GIANT_CHECK((cell_of({-0.1, 0.0, 64.0}) == world::CellCoord{-1, 1}));
+    GIANT_CHECK((cell_of({1e300, 0.0, -1e300}) ==
+                 world::CellCoord{std::numeric_limits<i32>::max(), std::numeric_limits<i32>::min()}));
+    GIANT_CHECK(cell_of({std::nan(""), 0.0, 0.0}).x == std::numeric_limits<i32>::min());
+
+    world::Scene scene;
+    GIANT_CHECK(scene.take_changes().all); // a new scene: everything
+    const world::EntityId a = scene.add({});
+    const world::EntityId b = scene.add({});
+    world::SceneChanges c = scene.take_changes();
+    GIANT_CHECK(!c.all && (c.ids == std::vector<world::EntityId>{a, b}));
+    GIANT_CHECK(scene.take_changes().ids.empty());
+    const world::Scene& read = scene;
+    GIANT_CHECK(read.find(a) != nullptr && scene.take_changes().ids.empty()); // looking changes nothing
+    scene.modify(b)->name = "b";
+    scene.remove(a);
+    c = scene.take_changes();
+    GIANT_CHECK((c.ids == std::vector<world::EntityId>{b, a}));
+    std::vector<world::Scene::Removed> gone = scene.remove_many(std::vector<world::EntityId>{b});
+    scene.restore_many(std::move(gone));
+    GIANT_CHECK((scene.take_changes().ids == std::vector<world::EntityId>{b, b}));
+    scene.clear();
+    GIANT_CHECK(scene.take_changes().all);
+    // Copies are new scenes.
+    world::Scene copy = scene;
+    GIANT_CHECK(copy.identity() != scene.identity() && copy.take_changes().all);
+    // Nobody taking them: the list stops growing.
+    for (int i = 0; i < 6000; ++i) {
+        scene.modify(scene.add({}));
+    }
+    c = scene.take_changes();
+    GIANT_CHECK(c.all && c.ids.empty());
 }

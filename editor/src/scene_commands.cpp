@@ -304,6 +304,7 @@ Json render_settings_json(const EditorState& state) {
               {"occluded_instances", s.occluded_instances},
               {"occluded_clusters", s.occluded_clusters}, {"overflow", s.overflow},
               {"materials", s.materials}, {"decals", s.decals}, {"decal_overflow", s.decal_overflow},
+              {"cells", {{"count", s.cells}, {"changed", s.cells_changed}}},
               {"streaming",
                {{"pool_bytes", s.pool_bytes}, {"pool_used_bytes", s.pool_used_bytes},
                 {"resident_groups", s.resident_groups}, {"total_groups", s.total_groups},
@@ -709,19 +710,19 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          false,
          [&state](const Json& args, CommandContext& context) {
              const EntityId id = args["id"].get<EntityId>();
-             Entity* e = state.scene.find(id);
-             if (e == nullptr) {
+             const Entity* found = state.scene.find(id);
+             if (found == nullptr) {
                  return CommandResult::failure("no entity with id " + std::to_string(id) +
                                                "; list_entities shows them");
              }
-             const Entity before = *e;
+             const Entity before = *found;
              Entity after = before; // a refused change leaves the entity alone
              if (std::string error = apply_fields(args, after, state); !error.empty()) {
                  return CommandResult::failure(error);
              }
-             *e = after;
+             *state.scene.modify(id) = after;
              const auto set = [&state](const Entity& value) {
-                 if (Entity* target = state.scene.find(value.id)) {
+                 if (Entity* target = state.scene.modify(value.id)) {
                      *target = value;
                  }
              };
@@ -914,7 +915,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  if (!e.mesh.empty()) mesh_ids.push_back(e.id);
              }
              for (const EntityId id : mesh_ids) {
-                 Entity* e = loaded.find(id);
+                 Entity* e = loaded.modify(id);
                  e->mesh = MeshLibrary::normalize(e->mesh);
              }
              for (world::Kit& kit : loaded.kits) {

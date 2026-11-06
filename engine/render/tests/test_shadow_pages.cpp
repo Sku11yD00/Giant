@@ -278,7 +278,7 @@ GIANT_TEST("shadow pages: tracking casters dirties where they were and where the
     instances[0].position = a;
     instances[0].mesh = 1;
     s.begin_frame(camera, k_up_sun);
-    s.track(instances, {}, 1, meshes);
+    s.track(instances, {}, {}, 1, meshes);
     Requests r(s);
     r.ask(s, 0, a);
     r.ask(s, 0, b);
@@ -287,7 +287,7 @@ GIANT_TEST("shadow pages: tracking casters dirties where they were and where the
     GIANT_CHECK(s.plan(16).size() == 3);
     const auto settle = [&] {
         s.begin_frame(camera, k_up_sun);
-        s.track(instances, {}, 1, meshes);
+        s.track(instances, {}, {}, 1, meshes);
         s.request(r.bits);
         return s.plan(16);
     };
@@ -318,7 +318,7 @@ GIANT_TEST("shadow pages: tracking casters dirties where they were and where the
     GIANT_CHECK(settle().empty());
     // A new mesh table that leaves the bounds alone dirties nothing.
     s.begin_frame(camera, k_up_sun);
-    s.track(instances, {}, 2, meshes);
+    s.track(instances, {}, {}, 2, meshes);
     s.request(r.bits);
     GIANT_CHECK(s.plan(16).empty());
 }
@@ -334,7 +334,7 @@ GIANT_TEST("shadow pages: many changes at once dirty everything") {
         instances[i].mesh = 1;
     }
     s.begin_frame(camera, k_up_sun);
-    s.track(instances, {}, 1, meshes);
+    s.track(instances, {}, {}, 1, meshes);
     Requests r(s);
     r.ask(s, 0, camera);
     s.request(r.bits);
@@ -342,12 +342,12 @@ GIANT_TEST("shadow pages: many changes at once dirty everything") {
     // A few moving far away: the page near the camera is left alone.
     for (u32 i = 0; i < 10; ++i) instances[i].position.y += 1.0;
     s.begin_frame(camera, k_up_sun);
-    s.track(instances, {}, 1, meshes);
+    s.track(instances, {}, {}, 1, meshes);
     GIANT_CHECK(s.plan(16).empty());
     // All of them: too many to list, so everything is redrawn.
     for (Instance& in : instances) in.position.y += 1.0;
     s.begin_frame(camera, k_up_sun);
-    s.track(instances, {}, 1, meshes);
+    s.track(instances, {}, {}, 1, meshes);
     GIANT_CHECK(s.plan(16).size() == 1);
 }
 
@@ -361,7 +361,7 @@ GIANT_TEST("shadow pages: a caster that starts or stops being drawn dirties its 
     instances[1].position = {5.5, 0.0, 5.5};
     std::vector<u8> casts{1, 1};
     s.begin_frame(camera, k_up_sun);
-    s.track(instances, casts, 1, meshes);
+    s.track(instances, {}, casts, 1, meshes);
     Requests r(s);
     r.ask(s, 0, instances[0].position);
     r.ask(s, 0, instances[1].position);
@@ -369,7 +369,7 @@ GIANT_TEST("shadow pages: a caster that starts or stops being drawn dirties its 
     GIANT_CHECK(s.plan(16).size() == 2);
     const auto frame = [&] {
         s.begin_frame(camera, k_up_sun);
-        s.track(instances, casts, 1, meshes);
+        s.track(instances, {}, casts, 1, meshes);
         return s.plan(16);
     };
     GIANT_CHECK(frame().empty());

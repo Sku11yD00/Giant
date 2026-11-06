@@ -105,10 +105,12 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
             m_renderer->remove_mesh(replace->id);
         }
         *replace = std::move(*mesh);
+        ++m_version;
         return {replace, {}};
     }
     m_meshes.push_back(std::move(mesh));
     m_by_path[m_meshes.back()->path] = m_meshes.back().get();
+    ++m_version;
     return {m_meshes.back().get(), {}};
 }
 

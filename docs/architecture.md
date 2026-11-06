@@ -191,6 +191,39 @@ an offline cooker can use it without a device.
   only) and feeds the same raster and shading passes; tests use it for
   exact counts.
 
+## World cells (N3 part 1)
+
+The world is cut into square cells on the ground, 64 m a side
+(`world::k_cell_size`, `world::cell_of`); an entity belongs to the cell its
+position is in. Work goes by cell, so a change to one entity costs its
+cell's work, not the world's:
+
+- **The scene says what changed.** `world::Scene` hands out entities to
+  change only through `modify` (reading is `find`, const), and logs the ids
+  added, removed and modified; `take_changes` hands the log over. A new,
+  copied or assigned scene, `clear`, or a log grown past the scene's size
+  says "all". Kits and lighting are not logged (compared instead).
+- **The editor keeps the frame by cell** (`editor/src/scene_render.h`).
+  Each cell keeps its instances and decals; a frame rebuilds only the
+  cells whose entities changed, or that place a kit that changed, and
+  copies them into place. A new scene, an imported mesh, or a material
+  losing its last user (the table is made again, so it holds only what is
+  drawn) rebuild everything. Instances go cell after cell (by z, then x;
+  within a cell by id), and `FrameInput::cells` says where each cell starts
+  and its version (new on every rebuild).
+- **The renderer looks only at cells that changed.** The voxel world and
+  sun shadows each keep a copy of the instances to find what moved; with
+  cells laid out as when they last looked, they compare only the cells
+  whose version differs (`src/cells.h`). Otherwise (no cells, a cell
+  added, removed or resized) they compare everything, as before.
+  `RenderStats::cells` and `cells_changed` count them.
+- **Known limits, next parts.** The renderer still walks and uploads every
+  instance each frame (the far-field test, the instance list for GPU
+  culling, which casts shadows): part 2 keeps instances on the GPU by cell
+  and culls whole cells first. Part 3 streams cells from disk around the
+  camera. Decals overlapping across a cell border draw in cell order, not
+  the outliner's.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

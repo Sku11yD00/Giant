@@ -3,6 +3,7 @@
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
 #include "giant/geometry/mesh.h"
+#include "cells.h"
 #include "decals.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
@@ -11,6 +12,7 @@
 #include "streaming.h"
 #include "voxel_light.h"
 #include "voxel_scene.h"
+#include "cells.h"
 
 #include <algorithm>
 #include <bit>
@@ -931,7 +933,7 @@ void Renderer::plan_shadows(const FrameInput& frame, bool on) {
     for (const u32 i : m_valid) {
         m_casts[i] = 1;
     }
-    m_shadows->track(frame.instances, m_casts, m_meshes_version, [this](MeshId id) { return mesh(id); });
+    m_shadows->track(frame.instances, frame.cells, m_casts, m_meshes_version, [this](MeshId id) { return mesh(id); });
     // The newest requests the GPU is done with, taken once.
     const u64 now = m_device.frames_completed();
     u32 best = 3;
@@ -1141,6 +1143,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     }
     const RenderSettings& settings = frame.settings;
     bool gpu = settings.gpu_culling;
+    // The cells (for the stats: the voxel world and shadows keep their own).
+    m_cells_count = static_cast<u32>(frame.cells.size());
+    m_cells_changed = changed_cells(frame.cells, frame.instances.size(), m_seen_cells, m_changed_cells)
+                          ? static_cast<u32>(m_changed_cells.size())
+                          : m_cells_count;
 
     // Newest GPU counts the GPU is done with (frames in flight: two back).
     if (gpu) {
@@ -1171,7 +1178,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (settings.voxel_world) {
         cmd.begin_timing("voxels");
         m_voxels->set_stand_in_radius(settings.far_field_max_radius);
-        m_voxels->update(cmd, frame.view.position, frame.instances, frame.materials, m_meshes_version,
+        m_voxels->update(cmd, frame.view.position, frame.instances, frame.cells, frame.materials, m_meshes_version,
                          [this](MeshId id) { return mesh(id); }, std::clamp(settings.voxel_ms_per_frame, 0.0f, 1000.0f));
         cmd.end_timing();
     } else {
@@ -1640,6 +1647,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
 void Renderer::finish_stats(const FrameData& data) {
     copy_streaming_stats();
     m_stats.materials = data.material_count;
+    m_stats.cells = m_cells_count;
+    m_stats.cells_changed = m_cells_changed;
     m_stats.decals = data.tile_columns != 0 ? static_cast<u32>(m_decal_bins->decals.size()) : 0;
     m_stats.decal_overflow = m_decal_bins->overflow;
 }

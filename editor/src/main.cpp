@@ -319,6 +319,7 @@ int run(const Options& options) {
         input.lighting = editor::scene_lighting(state.scene.lighting);
         input.settings = state.render_settings;
         input.instances = scene_frame.instances;
+        input.cells = scene_frame.cells;
         input.materials = scene_frame.materials;
         input.decals = scene_frame.decals;
         renderer->render(cmd, target, input);
