@@ -1299,7 +1299,20 @@ GIANT_TEST("render: d3d12 draws a blue sky, grey under overcast clouds that shad
     frame.sky.fog_density = 0.05f;
     frame.sky.fog_falloff = 1.0f / 100.0f;
     const auto fog = draw();
+    // Thin ground fog seen from 8 km up, looking down: a finite, misty
+    // ground (the fog's two exponents once made 0 * inf, NaN, black).
+    frame.sky.fog_density = 0.02f;
+    frame.sky.fog_falloff = std::log(2.0f) / 60.0f;
+    frame.view.position = {1000.0, 8000.0, -500.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(-60.0f));
+    const auto high = draw();
     const usize size = usize{k_w} * k_h * 4;
+    GIANT_CHECK(high.size() == size);
+    if (high.size() == size) {
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + k_w / 2) * 4;
+        std::printf("sky high fog: ground %d %d %d\n", high[i], high[i + 1], high[i + 2]);
+        GIANT_CHECK(high[i] + high[i + 1] + high[i + 2] > 60);
+    }
     GIANT_CHECK(clear.size() == size && overcast.size() == size && fog.size() == size);
     if (clear.size() == size && overcast.size() == size && fog.size() == size) {
         const auto px = [](const std::vector<u8>& p, u32 x, u32 y) {

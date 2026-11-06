@@ -417,7 +417,6 @@ int run(const Options& options) {
         state.frame_times.add(frame_info.frame_ms);
 
         scripts.update(delta);
-        weather.update(state.scene.weather, delta);
 
         // Build the UI first: what it changes shows in this frame.
         ui->begin_frame(delta, input);
@@ -427,6 +426,7 @@ int run(const Options& options) {
         viewport_camera.update(state.camera, delta);
         panels.draw(frame_info);
         ui->end_frame();
+        weather.update(state.scene.weather, delta, state.camera.position); // after the panels' changes
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }

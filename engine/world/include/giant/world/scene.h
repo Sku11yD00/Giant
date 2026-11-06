@@ -95,6 +95,7 @@ struct KitPiece {
     Transform transform;
     Material material;
     DecalSettings decal;
+    bool operator==(const KitPiece&) const = default;
 };
 
 // A reusable assembly of pieces (a modular wall, a house, a tree with its
@@ -103,6 +104,7 @@ struct KitPiece {
 struct Kit {
     std::string name; // unique in the scene
     std::vector<KitPiece> pieces;
+    bool operator==(const Kit&) const = default;
 };
 
 // Scatter layers (rules for strewing things over the ground; see
@@ -169,6 +171,7 @@ struct Lighting {
     Vec3 ground_color{0.22f, 0.2f, 0.18f};  // light bounced from below
     float ambient_intensity = 0.6f;         // multiplies sky and ground light
     float exposure = 1.0f;                  // camera brightness, before tone mapping
+    bool operator==(const Lighting&) const = default;
 };
 
 // A unit vector pointing towards the sun.

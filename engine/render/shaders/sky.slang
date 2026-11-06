@@ -170,8 +170,10 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
     const Frame f = load_frame(push.frame, push.frame_offset);
     // The full-resolution pixel this texel stands for: its ray and depth.
     const uint2 full = min(id.xy * 2u, uint2(s.full_size) - 1u);
-    const float2 ndc = float2(((float(full.x) + 0.5) / f.width) * 2.0 - 1.0,
-                              1.0 - ((float(full.y) + 0.5) / f.height) * 2.0);
+    // The ray through the texel's centre (the corner its 2x2 pixels share,
+    // where the upsample in clouds_at puts it).
+    const float2 centre = min(float2(id.xy * 2u) + 1.0, s.full_size);
+    const float2 ndc = float2((centre.x / f.width) * 2.0 - 1.0, 1.0 - (centre.y / f.height) * 2.0);
     const float3 ray = f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz;
     const float ray_length = length(ray);
     const float3 dir = ray / ray_length;
@@ -224,5 +226,8 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
         }
     }
     write_texture(push.target)[id.xy] = float4(min(light, float3(60000.0, 60000.0, 60000.0)), transmittance);
-    write_texture(push.target_b)[id.xy] = float4(first, scene_km, 0.0, 0.0);
+    // .z: where the march ended (km), so a pixel nearer than that (the far
+    // field's voxels, not in depth) takes only the clouds in front of it.
+    const float end_km = leave > enter ? min(leave * 0.001, k_no_cloud_km) : k_no_cloud_km;
+    write_texture(push.target_b)[id.xy] = float4(first, scene_km, end_km, 0.0);
 }

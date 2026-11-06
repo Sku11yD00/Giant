@@ -18,7 +18,15 @@ double WeatherState::progress() const {
     return m_duration > 0.0 ? std::clamp(m_elapsed / m_duration, 0.0, 1.0) : 1.0;
 }
 
-void WeatherState::update(const std::optional<world::Weather>& target, double seconds) {
+double WeatherState::remaining() const {
+    return m_from && m_duration > 0.0 ? std::max(m_duration - m_elapsed, 0.0) : 0.0;
+}
+
+double cloud_tile_metres(const world::Weather& weather) {
+    return 32000.0 * std::max(static_cast<double>(weather.cloud_scale), 0.03125);
+}
+
+void WeatherState::update(const std::optional<world::Weather>& target, double seconds, const DVec3& camera) {
     seconds = std::isfinite(seconds) ? std::clamp(seconds, 0.0, 1.0) : 0.0; // a stall does not jump the weather
     // A change, or a command asking again (the same weather at once ends a blend).
     if (!(target == m_target) || m_requested) {
@@ -39,6 +47,7 @@ void WeatherState::update(const std::optional<world::Weather>& target, double se
         m_shown.reset();
         m_from.reset();
         m_duration = 0.0;
+        m_tile = 0.0;
         return;
     }
     if (m_from && m_duration > 0.0) {
@@ -54,11 +63,16 @@ void WeatherState::update(const std::optional<world::Weather>& target, double se
     } else {
         m_shown = m_target;
     }
+    // The pattern under the camera is at (camera - offset) / tile: a new
+    // tile rescales the offset about the camera so that stays where it is.
+    const double tile = cloud_tile_metres(*m_shown);
+    if (m_tile > 0.0 && tile != m_tile) {
+        const double r = tile / m_tile;
+        m_offset = {camera.x - (camera.x - m_offset.x) * r, 0.0, camera.z - (camera.z - m_offset.z) * r};
+    }
+    m_tile = tile;
     const Vec3 wind = world::wind_velocity(*m_shown);
-    m_offset = m_offset + DVec3{wind.x, 0.0, wind.z} * seconds;
-    // Kept small: the pattern repeats long before this.
-    const auto wrap = [](double v) { return std::fmod(v, 1.0e9); };
-    m_offset = {wrap(m_offset.x), 0.0, wrap(m_offset.z)};
+    m_offset = m_offset + DVec3{wind.x, 0.0, wind.z} * seconds; // doubles: exact for centuries of wind
 }
 
 render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather) {
@@ -87,7 +101,7 @@ render::Sky weather_sky(const world::Lighting& lighting, const std::optional<wor
     sky.cloud_density = w.cloud_density;
     sky.cloud_base = w.cloud_base;
     sky.cloud_top = w.cloud_base + w.cloud_thickness;
-    sky.cloud_tile = 32000.0f * w.cloud_scale;
+    sky.cloud_tile = static_cast<float>(cloud_tile_metres(w));
     sky.cloud_offset = cloud_offset;
     // fog_density 1: things 150 m away mostly hidden (a few optical depths).
     sky.fog_density = w.fog_density * 0.02f;

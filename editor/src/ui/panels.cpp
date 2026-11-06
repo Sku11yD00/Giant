@@ -1,6 +1,7 @@
 #include "panels.h"
 
 #include "../mesh_library.h"
+#include "../weather_state.h"
 
 #include "giant/core/log.h"
 #include "giant/world/weather.h"
@@ -522,7 +523,12 @@ void EditorPanels::draw_weather() {
         return;
     }
     const auto set = [this](const char* field, float value) {
-        run("set_weather", {{field, value}}, edit_group());
+        ai::Json args = {{field, value}};
+        // During a preset's blend, a slider keeps blending (over what is left).
+        if (m_state.weather != nullptr && m_state.weather->remaining() > 0.0) {
+            args["over_seconds"] = m_state.weather->remaining();
+        }
+        run("set_weather", args, edit_group());
     };
     const auto slider = [&set](const char* label, const char* field, float value, float lo, float hi,
                                const char* format = "%.2f", ImGuiSliderFlags flags = 0) {

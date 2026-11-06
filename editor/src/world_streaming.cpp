@@ -1069,6 +1069,11 @@ u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
     return unsaved;
 }
 
+bool WorldStreaming::unsaved_settings(const world::Scene& scene) const {
+    return !(scene.lighting == m_index.lighting) || !(scene.kits == m_index.kits) ||
+           !(scene.scatter == m_index.scatter) || !(scene.weather == m_index.weather);
+}
+
 StreamingStats WorldStreaming::stats() const {
     StreamingStats s = m_totals;
     s.cells = static_cast<u32>(m_cells.size());

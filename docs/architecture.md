@@ -529,13 +529,13 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   `FrameInput` and runs, before shading (`sky.slang`, `sky_common.slang`):
   a 192x108 sky-view table of single scattering (Rayleigh and Mie, round
   earth), a 512^2 tiling cloud pattern made once, a 256^2 cloud shadow map
-  over 32 km on the camera (snapped to texels), and half-resolution
+  over 32 km about where the sun's rays from the ground near the camera meet the cloud base (snapped to texels; past it, the clouds' mean shade), and half-resolution
   volumetric clouds (a shell between base and top, a fixed dither, no
   temporal history: rule 2) written as light and transmittance plus the
   distances to the first cloud and to the scene. The resolve upsamples the
   clouds by nearest depth, composites them over sky and scene, adds height
   fog (exponential in height, capped at 30 km) and darkens the sun by the
-  cloud shadow. Settings `clouds`, `cloud_steps` (48) and `cloud_shadows`.
+  cloud shadow (screen reflections are added scaled by what of the pixel comes through). A change of cloud size rescales the wind offset about the camera, so the clouds overhead stay put. Settings `clouds`, `cloud_steps` (48) and `cloud_shadows`.
   Not yet: rain and snow (part 8), lightning, clouds parting round giants.
 
 ## Window events (known limit)

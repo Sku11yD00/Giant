@@ -116,3 +116,31 @@ GIANT_TEST("weather: the renderer's sky and light follow it, and stay flat witho
     GIANT_CHECK(under.sun_light.z < flat.sun_light.z); // through the air
     GIANT_CHECK(std::fabs(under.sky_light.z - under.sky_light.x) < std::fabs(flat.sky_light.z - flat.sky_light.x));
 }
+
+GIANT_TEST("weather state: a change of cloud size keeps the clouds over the camera where they are") {
+    Fixture f;
+    const DVec3 camera{50000.0, 300.0, -20000.0};
+    GIANT_CHECK(f.run("set_weather", {{"preset", "fair"}, {"wind_speed", 0}, {"cloud_scale", 1}}).ok);
+    f.weather.update(f.state.scene.weather, 0.1, camera);
+    const auto phase = [&] {
+        const double tile = cloud_tile_metres(*f.weather.shown());
+        const DVec3 o = f.weather.cloud_offset();
+        return DVec3{(camera.x - o.x) / tile, 0.0, (camera.z - o.z) / tile};
+    };
+    const DVec3 start = phase();
+    GIANT_CHECK(f.run("set_weather", {{"cloud_scale", 2}, {"over_seconds", 5}}).ok);
+    for (int i = 0; i < 30; ++i) {
+        f.weather.update(f.state.scene.weather, 0.25, camera);
+        const DVec3 now = phase();
+        GIANT_CHECK(std::fabs(now.x - start.x) < 1e-9 && std::fabs(now.z - start.z) < 1e-9);
+        if (i == 4) GIANT_CHECK(f.weather.remaining() > 3.0 && f.weather.remaining() < 4.0);
+    }
+    GIANT_CHECK(f.weather.shown()->cloud_scale == 2.0f && f.weather.remaining() == 0.0);
+    // A slider during a blend keeps blending over what is left.
+    GIANT_CHECK(f.run("set_weather", {{"preset", "storm"}, {"over_seconds", 10}}).ok);
+    f.weather.update(f.state.scene.weather, 0.5, camera);
+    const double left = f.weather.remaining();
+    GIANT_CHECK(f.run("set_weather", {{"fog_density", 0.5}, {"over_seconds", left}}).ok);
+    f.weather.update(f.state.scene.weather, 0.5, camera);
+    GIANT_CHECK(f.weather.progress() < 0.2 && f.weather.remaining() > 8.0);
+}

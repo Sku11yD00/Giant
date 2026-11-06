@@ -16,7 +16,9 @@ class WeatherState {
 public:
     // Once a frame, `seconds` after the last: follows the scene's weather
     // (blending when a transition was asked for) and moves the clouds.
-    void update(const std::optional<world::Weather>& target, double seconds);
+    // `camera`: a change of cloud size scales the pattern about it (the
+    // clouds overhead stay put).
+    void update(const std::optional<world::Weather>& target, double seconds, const DVec3& camera = {});
     // The scene's weather (changed or not) is reached over `seconds` from
     // the next update (0: at once), from what shows then.
     void transition(double seconds);
@@ -24,6 +26,8 @@ public:
     const std::optional<world::Weather>& shown() const { return m_shown; }
     // 1: not blending.
     double progress() const;
+    // Seconds left of a blend under way (0: none).
+    double remaining() const;
     DVec3 cloud_offset() const { return m_offset; }
 
 private:
@@ -35,7 +39,11 @@ private:
     double m_duration = 0.0;
     double m_elapsed = 0.0;
     DVec3 m_offset{};
+    double m_tile = 0.0; // the cloud tile m_offset was last used with (0: none)
 };
+
+// Metres the cloud pattern repeats over.
+double cloud_tile_metres(const world::Weather& weather);
 
 // The renderer's lighting for a scene: its own, or under its weather (the
 // sun through the air, the sky's light greyed by clouds).

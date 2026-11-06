@@ -519,6 +519,10 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
         log_error("render", "could not create the frame's targets (out of GPU memory?)");
         return false;
     }
+    // The sky's textures with the frame's (rule 9: no allocation on the
+    // first frame with weather); a failure is tried again on the next resize.
+    m_sky_failed = false;
+    ensure_sky_targets();
     return true;
 }
 
@@ -1942,8 +1946,19 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     // map's texels in the world (so it does not crawl as the camera moves).
     const double size = k_cloud_shadow_metres;
     const double texel = size / k_cloud_shadow_size;
-    const double min_x = std::floor((cam.x - size * 0.5) / texel) * texel;
-    const double min_z = std::floor((cam.z - size * 0.5) / texel) * texel;
+    // Centred where the ground about the camera meets the sun's ray up to
+    // the clouds' base (the shadows it is asked for), at most 40% of the
+    // map off the camera.
+    double shift_x = 0.0;
+    double shift_z = 0.0;
+    if (sun.y > 0.0) {
+        const double rise = std::max(static_cast<double>(p.cloud_base) - cam.y, 0.0);
+        const double along = rise / std::max(static_cast<double>(sun.y), 0.05);
+        shift_x = std::clamp(sun.x * along, -0.4 * size, 0.4 * size);
+        shift_z = std::clamp(sun.z * along, -0.4 * size, 0.4 * size);
+    }
+    const double min_x = std::floor((cam.x + shift_x - size * 0.5) / texel) * texel;
+    const double min_z = std::floor((cam.z + shift_z - size * 0.5) / texel) * texel;
     p.shadow_origin[0] = static_cast<float>(min_x - cam.x);
     p.shadow_origin[1] = static_cast<float>(min_z - cam.z);
     p.shadow_size = static_cast<float>(size);

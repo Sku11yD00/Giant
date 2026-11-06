@@ -55,7 +55,7 @@ struct Sky {
     uint cloud_map;
     uint cloud_shadow;
     uint clouds_a;        // radiance (rgb) and transmittance (a) of the clouds before each pixel
-    uint clouds_b;        // x: km to the first cloud (k_no_cloud_km: none); y: km to what the pixel shows
+    uint clouds_b;        // x: km to the first cloud (k_no_cloud_km: none); y: km to what the pixel shows z: km where the march ended
     uint depth;
     uint pad0;
     uint pad1;
@@ -315,10 +315,16 @@ float cloud_shadow(Sky s, float3 p) {
     const float rise = s.cloud_base - (s.cam_alt + p.y);
     const float2 q = p.xz + sun.xz / up * max(rise, 0.0);
     const float2 uv = (q - s.shadow_origin) / s.shadow_size;
-    if (any(uv < 0.0) || any(uv > 1.0)) {
-        return 1.0;
+    // Past the map (far off, or a low sun's long shadows), the clouds' mean
+    // shade, faded into over the map's outer tenth: no hard edge.
+    const float mean = 1.0 - 0.65 * s.cloud_cover * s.cloud_density;
+    const float2 edge = min(uv, 1.0 - uv);
+    const float inside = saturate(min(edge.x, edge.y) * 10.0);
+    if (inside <= 0.0) {
+        return mean;
     }
-    return read_texture(s.cloud_shadow).SampleLevel(get_sampler(k_sampler_linear_clamp), uv, 0.0).r;
+    const float map = read_texture(s.cloud_shadow).SampleLevel(get_sampler(k_sampler_linear_clamp), uv, 0.0).r;
+    return lerp(mean, map, inside);
 }
 
 // Height fog along a ray from the camera to `distance`: what is left of
@@ -327,11 +333,29 @@ float fog_transmittance(Sky s, float3 dir, float distance) {
     if (s.fog_density <= 0.0) {
         return 1.0;
     }
+    // Optical depth of density * exp(-b h) along the ray, from h0 to h1,
+    // in one difference of exponents each clamped (a high camera looking
+    // down must neither underflow the camera's term nor overflow the far one).
     const float b = s.fog_falloff;
-    const float at_camera = s.fog_density * exp(-b * max(s.cam_alt, -1000.0));
-    const float k = b * dir.y * distance;
-    const float along = abs(k) > 1e-4 ? (1.0 - exp(-k)) / k : 1.0 - 0.5 * k;
-    return exp(-at_camera * distance * along);
+    const float h0 = max(s.cam_alt, -1000.0);
+    const float h1 = max(h0 + dir.y * distance, -1000.0);
+    const float e0 = exp(clamp(-b * h0, -80.0, 80.0));
+    const float k = b * (h1 - h0);
+    float depth;
+    if (abs(k) > 1e-4) {
+        const float e1 = exp(clamp(-b * h1, -80.0, 80.0));
+        depth = s.fog_density * distance * (e0 - e1) / k;
+    } else {
+        depth = s.fog_density * distance * e0 * (1.0 - 0.5 * k);
+    }
+    return isfinite(depth) ? exp(-max(depth, 0.0)) : 0.0;
+}
+
+// The colour fog fades towards, looking along `dir`: the horizon's.
+float3 fog_color(Sky s, float3 dir) {
+    const float3 level = normalize(float3(dir.x, max(dir.y, 0.03), dir.z));
+    return sample_sky(s, level) * 0.6 + s.sky_light * 0.4 +
+           s.sun_light * (hg_phase(dot(dir, s.sun_direction), 0.6) * 0.15);
 }
 
 // Fog over what a pixel shows `distance` away: it fades into the horizon's colour.
@@ -340,18 +364,18 @@ float3 apply_fog(Sky s, float3 color, float3 dir, float distance) {
     if (t >= 0.9999) {
         return color;
     }
-    const float3 level = normalize(float3(dir.x, max(dir.y, 0.03), dir.z));
-    const float3 fog = sample_sky(s, level) * 0.6 + s.sky_light * 0.4 +
-                       s.sun_light * (hg_phase(dot(dir, s.sun_direction), 0.6) * 0.15);
-    return color * t + fog * (1.0 - t);
+    return color * t + fog_color(s, dir) * (1.0 - t);
 }
 
 // The clouds in front of a full-resolution pixel `distance` metres away,
 // from the half-resolution cloud targets: the texel of the four nearest
 // whose own distance matches best (so the clouds keep to silhouettes).
-float3 apply_clouds(Sky s, float3 color, uint2 pixel, float distance) {
+// Returns their light (rgb) and transmittance (a), and in `first` the
+// distance to the first of them (metres).
+float4 clouds_at(Sky s, uint2 pixel, float distance, out float first) {
+    first = 3.0e38;
     if ((s.flags & 1u) == 0u) {
-        return color;
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
     const int2 hsize = int2(s.half_size);
     const float2 at = (float2(pixel) + 0.5) * 0.5 - 0.5;
@@ -371,9 +395,17 @@ float3 apply_clouds(Sky s, float3 color, uint2 pixel, float distance) {
         }
     }
     const float4 b = tb.Load(int3(pick, 0));
-    if (distance < b.x * 1000.0) {
-        return color; // the pixel is in front of the clouds
+    first = b.x * 1000.0;
+    if (distance < first) {
+        return float4(0.0, 0.0, 0.0, 1.0); // the pixel is in front of the clouds
     }
-    const float4 a = ta.Load(int3(pick, 0));
-    return color * a.a + a.rgb;
+    float4 a = ta.Load(int3(pick, 0));
+    // Nearer than where the march ended (the far field's voxels are not in
+    // depth): only the share of the clouds in front of it, by distance.
+    const float end = b.z * 1000.0;
+    if (distance < end) {
+        const float share = saturate((distance - first) / max(end - first, 1.0));
+        a = float4(a.rgb * share, lerp(1.0, a.a, share));
+    }
+    return a;
 }

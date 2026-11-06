@@ -542,7 +542,7 @@ private:
     rhi::TextureHandle m_clouds_a;     // rgba16_float, half resolution: the clouds' light and transmittance
     rhi::TextureHandle m_clouds_b;     // rgba16_float, half resolution: their distance and the scene's
     bool m_cloud_map_made = false;
-    bool m_sky_failed = false; // its textures could not be made: not tried again
+    bool m_sky_failed = false; // its textures could not be made: tried again when the frame's targets are remade
     bool m_overflow_logged = false;
     bool m_cull_buffers_logged = false;
     bool m_instances_logged = false;

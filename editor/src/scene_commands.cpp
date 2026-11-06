@@ -1073,6 +1073,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                              "the open world has " + std::to_string(n) +
                              " cells with unsaved edits: save_world first, or pass discard_unsaved: true");
                      }
+                     if (w.unsaved_settings(state.scene)) {
+                         return CommandResult::failure(
+                             "the open world's lighting, kits, scatter or weather have unsaved changes: "
+                             "save_world first, or pass discard_unsaved: true");
+                     }
                  } else if (w.is_open()) {
                      return CommandResult::failure(
                          "the world in " + path_to_utf8(w.folder()) +
@@ -1188,6 +1193,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                   {"waiting", s.waiting},
                   {"failed", s.failed},
                   {"unsaved_cells", w.active(state.scene_generation) ? w.unsaved_cells(state.scene) : 0},
+                  {"unsaved_settings", w.active(state.scene_generation) && w.unsaved_settings(state.scene)},
                   {"entities", state.scene.size()},
                   {"entities_loaded", s.entities_loaded},
                   {"entities_unloaded", s.entities_unloaded},

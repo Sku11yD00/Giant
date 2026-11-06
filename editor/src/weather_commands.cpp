@@ -57,8 +57,8 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
          "Sets the scene's weather: an atmosphere the sun shines through (redder low in the sky and in "
          "haze), a layer of clouds that drifts on the wind and shades the ground, and height fog. Starts "
          "from `preset` if given, else the weather now (or the defaults), then sets the fields given. "
-         "over_seconds blends the view from what shows now to the new weather (default 0: at once; the "
-         "scene saves the new weather either way). A scene without weather keeps the flat sky colours of "
+         "over_seconds blends the view from what shows now to the new weather (default 0: at once, and at "
+         "once from no weather; the scene saves the new weather either way). A scene without weather keeps the flat sky colours of "
          "set_lighting. Undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},

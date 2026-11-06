@@ -370,9 +370,22 @@ Output lit_output(float3 color) {
 
 // The clouds in front of what a pixel shows `distance` metres away, then
 // the fog over it all (as far as 30 km: the sky's own air does the rest).
-float3 under_sky(Sky s, float3 color, float3 dir, float distance, uint2 pixel) {
-    color = apply_clouds(s, color, pixel, distance);
-    return apply_fog(s, color, dir, min(distance, 30000.0));
+float3 under_sky(Sky s, float3 color, float3 dir, float distance, uint2 pixel, out float through) {
+    // The scene fogged over its whole distance, then the clouds over it,
+    // themselves fogged only over the distance to the first of them.
+    // `through`: how much of the scene's own light comes through.
+    const float t = fog_transmittance(s, dir, min(distance, 30000.0));
+    const float3 fog = fog_color(s, dir);
+    color = color * t + fog * (1.0 - t);
+    through = t;
+    float first;
+    const float4 cloud = clouds_at(s, pixel, distance, first);
+    if (cloud.a >= 0.9999) {
+        return color;
+    }
+    through = t * cloud.a;
+    const float near_t = fog_transmittance(s, dir, min(first, 30000.0));
+    return color * cloud.a + cloud.rgb * near_t + fog * ((1.0 - near_t) * (1.0 - cloud.a));
 }
 
 Output shade_pixel(float4 position) {
@@ -440,7 +453,8 @@ Output shade_pixel(float4 position) {
                 float3 color = shade(f, world, vn, albedo, k_far_roughness, 0.0, float3(0.0, 0.0, 0.0), 0.0,
                                      sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, spec_weight, spec_light);
                 if (sky_on) {
-                    color = under_sky(sky, color, dir, t, pixel);
+                    float through;
+                    color = under_sky(sky, color, dir, t, pixel, through);
                 }
                 return lit_output(color);
             }
@@ -448,7 +462,8 @@ Output shade_pixel(float4 position) {
     }
     if (!hit) {
         if (sky_on) {
-            return lit_output(under_sky(sky, sky_background(sky, view_dir), view_dir, 3.0e38, pixel));
+            float through;
+            return lit_output(under_sky(sky, sky_background(sky, view_dir), view_dir, 3.0e38, pixel, through));
         }
         return plain_output(push.background.rgb);
     }
@@ -509,13 +524,14 @@ Output shade_pixel(float4 position) {
     float3 spec_light;
     float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
                          spec_weight, spec_light);
+    float through = 1.0; // of the reflection, which reflect.slang adds over the fog and clouds
     if (sky_on) {
-        color = under_sky(sky, color, view_dir, length(world), pixel);
+        color = under_sky(sky, color, view_dir, length(world), pixel, through);
     }
     Output o = lit_output(color);
     const float screen_weight =
         (extras.reflect_on & 2u) != 0u ? saturate((k_screen_reflection_rough - rough) / k_reflection_fade) : 0.0;
-    const uint3 q = uint3(round(saturate(spec_weight * screen_weight) * 1023.0));
+    const uint3 q = uint3(round(saturate(spec_weight * (screen_weight * through)) * 1023.0));
     o.gloss = uint2(q.x | (q.y << 10) | (q.z << 20), pack_octahedral(n));
     o.reflected = float4(min(spec_light, float3(60000.0, 60000.0, 60000.0)), 0.0);
     return o;
