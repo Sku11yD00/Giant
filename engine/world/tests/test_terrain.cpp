@@ -74,7 +74,9 @@ GIANT_TEST("terrain: the surface is the mesh's, and continues into neighbours") 
         }
     }
     GIANT_CHECK(!t.height_at(-0.5, 10.0).has_value()); // cell (-1, 0): no tile
-    GIANT_CHECK(!t.height_at(10.0, 64.0).has_value()); // cell (0, 1)
+    GIANT_CHECK(!t.height_at(10.0, 64.5).has_value()); // cell (0, 1)
+    // On the far edge with no neighbour there: the tile's edge, as drawn.
+    GIANT_CHECK(std::fabs(*t.height_at(10.0, 64.0) - *t.height_at(10.0, 63.0)) < 1e-6);
 
     // ...and without the neighbour, the tile's own edge stands in for it.
     t.remove(b);
@@ -100,6 +102,17 @@ GIANT_TEST("terrain: the surface is the mesh's, and continues into neighbours") 
     GIANT_CHECK(!one.sample(9, 1).has_value());    // two samples into a missing cell
     GIANT_CHECK(!one.sample(-1, 1).has_value());   // before the tile: nothing to repeat
     GIANT_CHECK(!one.sample(-8LL * 1000000000LL, 1).has_value()); // past what i32 cells hold
+    // A tile touching only at a corner does not pull the other's corner to it.
+    Terrain corner;
+    corner.set_samples(8);
+    corner.set({0, 0}, Terrain::Heights(64, 0.0f));
+    corner.set({1, 1}, Terrain::Heights(64, 100.0f));
+    const CellCoord home{0, 0};
+    GIANT_CHECK(corner.sample(8, 8) == 100.0f && corner.sample(8, 8, &home) == 0.0f);
+    GIANT_CHECK(std::fabs(*corner.height_at(63.9, 63.9)) < 1e-6);
+    GIANT_CHECK(std::fabs(*corner.height_at(64.0, 64.0) - 100.0) < 1e-6); // tile (1, 1)'s own corner
+    corner.set({1, 0}, Terrain::Heights(64, 50.0f)); // now they share edges through (1, 0)
+    GIANT_CHECK(corner.sample(8, 8, &home) == 100.0f);
     // The same point seen from either side of a corner, whichever tiles are there.
     one.set({1, 0}, Terrain::Heights(64, 3.0f));
     GIANT_CHECK(one.sample(8, 8) == 3.0f); // (1, 1) missing; (8, 7) is in (1, 0)

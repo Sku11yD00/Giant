@@ -78,16 +78,20 @@ public:
 
     // The surface at a point on the ground (x, z), exactly as the finest
     // mesh draws it (each square of samples is two triangles, split from
-    // its lowest to its highest corner), or none where there is no tile.
+    // its lowest to its highest corner), or none where there is no tile
+    // (a tile's far edge, where no neighbour is, counts as the tile's).
     std::optional<double> height_at(double x, double z) const;
     // The surface's height at whole-number sample coordinates from the world
     // origin (sample (i, j) of cell (x, z) is (x * samples() + i,
     // z * samples() + j)): from the tile it is in, or, when there is none,
     // from the sample before it on x, on z, or on both, if that one's tile
     // exists (so a tile with no neighbour repeats its last row and column).
-    // None where neither is. It depends on (i, j) only, so every tile
-    // meeting at a point sees the same height there.
-    std::optional<float> sample(i64 i, i64 j) const;
+    // None where neither is. As seen from `home`'s mesh, a tile that touches
+    // home only at a corner, with neither tile between them there, does not
+    // count (each keeps its own corner: they share no edge to crack along).
+    // Otherwise it depends on (i, j) only, so every tile meeting at a point
+    // sees the same height there.
+    std::optional<float> sample(i64 i, i64 j, const CellCoord* home = nullptr) const;
 
     // Hands over what changed since the last call. A terrain made, copied
     // or assigned starts as "all changed".

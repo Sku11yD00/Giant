@@ -22,8 +22,14 @@ using ai::Json;
 using world::CellCoord;
 using world::Terrain;
 
-// Tiles one command may make or remove (64 x 64 cells: 4 km a side).
+// Tiles one command may make or remove (64 x 64 cells: 4 km a side), and
+// heights it may make (4096 tiles of 64 x 64; 1024 of 128 x 128): a
+// command runs between frames, so this bounds its hitch.
 constexpr usize k_max_tiles_per_command = 4096;
+constexpr usize k_max_samples_per_command = 4096 * 64 * 64;
+// Heights the whole terrain may hold (256 MB; the meshes take about as
+// much again) until terrain streams with the world.
+constexpr usize k_max_terrain_samples = 4 * k_max_samples_per_command;
 constexpr usize k_max_points = 4096;
 
 void add(ai::CommandRegistry& registry, ai::CommandDesc desc) {
@@ -207,13 +213,32 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              }
              const float flat = args.value("height", 0.0f);
              const std::vector<CellCoord> cells = cells_in(*area);
+             const usize n = samples;
+             usize added = 0;
+             for (const CellCoord c : cells) added += t.find(c) == nullptr ? usize{1} : usize{0};
+             if (cells.size() * n * n > k_max_samples_per_command) {
+                 return CommandResult::failure(
+                     "the area needs " + std::to_string(cells.size() * n * n) + " heights; at most " +
+                     std::to_string(k_max_samples_per_command) + " a command (" +
+                     std::to_string(k_max_samples_per_command / (n * n)) + " tiles of " + std::to_string(n) +
+                     " samples): split it");
+             }
+             if ((t.size() + added) * n * n > k_max_terrain_samples) {
+                 return CommandResult::failure("the terrain would hold " + std::to_string(t.size() + added) +
+                                               " tiles; at most " + std::to_string(k_max_terrain_samples / (n * n)) +
+                                               " of " + std::to_string(n) + " samples until terrain streams");
+             }
              auto before = std::make_shared<const TileStates>(snapshot(t, cells));
              t.set_samples(samples);
-             const usize n = t.samples();
              const double spacing = t.spacing();
-             for (const CellCoord c : cells) {
-                 Terrain::Heights heights(n * n, flat);
-                 if (hills) {
+             // Made in parallel (on the terrain's workers and this thread), set in order.
+             std::vector<Terrain::Heights> made(cells.size());
+             const auto make = [&](usize begin, usize end) {
+                 for (usize k = begin; k < end; ++k) {
+                     const CellCoord c = cells[k];
+                     Terrain::Heights& heights = made[k];
+                     heights.assign(n * n, flat);
+                     if (!hills) continue;
                      for (usize j = 0; j < n; ++j) {
                          for (usize i = 0; i < n; ++i) {
                              const double x = c.x * world::k_cell_size + static_cast<double>(i) * spacing;
@@ -222,8 +247,13 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                          }
                      }
                  }
-                 t.set(c, std::move(heights));
+             };
+             if (state.terrain_meshes != nullptr && hills) {
+                 state.terrain_meshes->jobs().parallel_for(cells.size(), 16, make);
+             } else {
+                 make(0, cells.size());
              }
+             for (usize k = 0; k < cells.size(); ++k) t.set(cells[k], std::move(made[k]));
              auto after = std::make_shared<const TileStates>(snapshot(t, cells));
              record(state, context, std::move(before), std::move(after), samples_before, t.samples());
              Json out = {{"tiles", cells.size()},
@@ -298,6 +328,10 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                  return CommandResult::failure("heights must hold " + std::to_string(n * n) + " numbers (" +
                                                std::to_string(n) + " samples a side), not " +
                                                std::to_string(values.size()));
+             }
+             if (t.find(cell) == nullptr && (t.size() + 1) * n * n > k_max_terrain_samples) {
+                 return CommandResult::failure("the terrain holds the most tiles it may (" + std::to_string(t.size()) +
+                                               ") until terrain streams");
              }
              Terrain::Heights heights(n * n);
              for (usize i = 0; i < n * n; ++i) heights[i] = values[i].get<float>();

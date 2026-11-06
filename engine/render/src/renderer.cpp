@@ -364,7 +364,9 @@ MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
         desc.name = name;
         return m_device.create_buffer(desc, bytes);
     };
-    const u32 id = static_cast<u32>(m_meshes.size());
+    // A removed mesh's slot first, so meshes coming and going (terrain
+    // tiles rebuilt) do not grow the mesh table every frame walks.
+    const u32 id = m_free_meshes.empty() ? static_cast<u32>(m_meshes.size()) : m_free_meshes.back();
     if (!m_streamer->add(id, data, clusters)) {
         return k_no_mesh;
     }
@@ -382,18 +384,32 @@ MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
     mesh.tree_levels = tree_levels;
     mesh.data = std::move(data);
     mesh.live = true;
-    m_meshes.push_back(std::move(mesh));
+    if (id == m_meshes.size()) {
+        m_meshes.push_back(std::move(mesh));
+    } else {
+        m_free_meshes.pop_back();
+        m_meshes[id] = std::move(mesh);
+    }
     ++m_meshes_version;
-    return static_cast<MeshId>(m_meshes.size() - 1);
+    return id;
 }
 
 void Renderer::remove_mesh(MeshId id) {
     if (id >= m_meshes.size() || std::find(m_builtin.begin(), m_builtin.end(), id) != m_builtin.end()) {
         return;
     }
-    destroy(m_meshes[id]); // the slot stays, empty: ids are never reused
+    if (!m_meshes[id].live) {
+        return; // removed already
+    }
+    destroy(m_meshes[id]); // the slot stays, empty, until a new mesh takes it
     m_streamer->remove(id);
+    m_voxels->forget_mesh(id);
+    m_free_meshes.push_back(id);
     ++m_meshes_version;
+}
+
+bool Renderer::mesh_ready(MeshId id) const {
+    return id < m_meshes.size() && m_meshes[id].live && m_streamer->ready(id);
 }
 
 const geometry::ClusterMesh* Renderer::mesh(MeshId id) const {

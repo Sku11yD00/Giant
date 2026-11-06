@@ -365,7 +365,8 @@ GIANT_TEST("render: meshes can be added and removed") {
     GIANT_CHECK(s.renderer->mesh(id) == nullptr);
     GIANT_CHECK(s.draw(frame).draws == 1); // a removed id draws nothing; shading still runs
     const MeshId next = s.renderer->add_mesh(geometry::build_clusters(geometry::make_cube()));
-    GIANT_CHECK(next != id); // never reused
+    GIANT_CHECK(next == id && s.renderer->mesh(next) != nullptr); // the slot is reused
+    GIANT_CHECK(s.draw(frame).draws == 2);                       // so the old instance draws the new mesh
     // Built-in meshes cannot be removed.
     s.renderer->remove_mesh(s.renderer->builtin(BuiltinMesh::cube));
     GIANT_CHECK(s.renderer->mesh(s.renderer->builtin(BuiltinMesh::cube)) != nullptr);

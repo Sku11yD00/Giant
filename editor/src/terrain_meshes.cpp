@@ -15,11 +15,22 @@ TileHeights tile_heights(const world::Terrain& terrain, world::CellCoord cell) {
     out.heights.resize(static_cast<usize>(side * side));
     const i64 i0 = i64{cell.x} * n;
     const i64 j0 = i64{cell.z} * n;
+    const world::Terrain::Heights* own = terrain.find(cell);
     for (i64 j = -1; j <= n + 1; ++j) {
+        float* row = out.heights.data() + (j + 1) * side;
+        if (own != nullptr && j >= 0 && j < n) {
+            // The tile's own samples straight from its row; only the ring
+            // around it is looked up.
+            std::copy_n(own->data() + j * n, n, row + 1);
+            for (const i64 i : {i64{-1}, n, n + 1}) {
+                const std::optional<float> h = terrain.sample(i0 + i, j0 + j, &cell);
+                row[i + 1] = h ? *h : std::numeric_limits<float>::quiet_NaN();
+            }
+            continue;
+        }
         for (i64 i = -1; i <= n + 1; ++i) {
-            const std::optional<float> h = terrain.sample(i0 + i, j0 + j);
-            out.heights[static_cast<usize>((j + 1) * side + (i + 1))] =
-                h ? *h : std::numeric_limits<float>::quiet_NaN();
+            const std::optional<float> h = terrain.sample(i0 + i, j0 + j, &cell);
+            row[i + 1] = h ? *h : std::numeric_limits<float>::quiet_NaN();
         }
     }
     return out;
@@ -74,6 +85,20 @@ TileSurface tile_surface(const TileHeights& in) {
     return out;
 }
 
+namespace {
+
+// Tells apart the heights two builds were made from (FNV-1a over the bytes).
+u64 hash_of(const TileHeights& h) {
+    u64 x = 1469598103934665603ull ^ h.samples;
+    const auto* bytes = reinterpret_cast<const u8*>(h.heights.data());
+    for (usize i = 0; i < h.heights.size() * sizeof(float); ++i) {
+        x = (x ^ bytes[i]) * 1099511628211ull;
+    }
+    return x == 0 ? 1 : x; // 0 means "none"
+}
+
+} // namespace
+
 TerrainMeshes::TerrainMeshes(render::Renderer* renderer) : m_renderer(renderer) {}
 
 TerrainMeshes::~TerrainMeshes() {
@@ -81,6 +106,7 @@ TerrainMeshes::~TerrainMeshes() {
     if (m_renderer != nullptr) {
         for (const auto& [cell, tile] : m_tiles) {
             if (tile.mesh != render::k_no_mesh) m_renderer->remove_mesh(tile.mesh);
+            if (tile.pending != render::k_no_mesh) m_renderer->remove_mesh(tile.pending);
         }
     }
 }
@@ -103,8 +129,9 @@ void TerrainMeshes::want(world::CellCoord cell) {
 }
 
 void TerrainMeshes::drop(world::CellCoord cell, Tile& tile) {
-    if (m_renderer != nullptr && tile.mesh != render::k_no_mesh) {
-        m_renderer->remove_mesh(tile.mesh);
+    if (m_renderer != nullptr) {
+        if (tile.mesh != render::k_no_mesh) m_renderer->remove_mesh(tile.mesh);
+        if (tile.pending != render::k_no_mesh) m_renderer->remove_mesh(tile.pending);
     }
     if (tile.drawn) {
         m_changed.push_back(cell);
@@ -112,14 +139,16 @@ void TerrainMeshes::drop(world::CellCoord cell, Tile& tile) {
     m_tiles.erase(cell);
 }
 
-void TerrainMeshes::start(const world::Terrain& terrain, world::CellCoord cell, Tile& tile) {
+void TerrainMeshes::start(world::CellCoord cell, Tile& tile, TileHeights heights, u64 hash) {
     tile.wanted = ++m_serial;
     tile.in_flight = true;
-    m_jobs.submit(m_builds, [this, cell, serial = tile.wanted, heights = tile_heights(terrain, cell)] {
+    ++m_in_flight;
+    m_jobs.submit(m_builds, [this, cell, serial = tile.wanted, hash, heights = std::move(heights)] {
         TileSurface surface = tile_surface(heights);
         Result r;
         r.cell = cell;
         r.serial = serial;
+        r.hash = hash;
         r.triangles = static_cast<u32>(surface.mesh.indices.size() / 3);
         r.mesh = geometry::build_clusters(surface.mesh, surface.edge);
         const std::lock_guard lock(m_mutex);
@@ -127,8 +156,20 @@ void TerrainMeshes::start(const world::Terrain& terrain, world::CellCoord cell, 
     });
 }
 
+void TerrainMeshes::commit(world::CellCoord cell, Tile& tile) {
+    if (m_renderer != nullptr && tile.mesh != render::k_no_mesh) m_renderer->remove_mesh(tile.mesh);
+    tile.mesh = tile.pending;
+    tile.pending = render::k_no_mesh;
+    tile.triangles = tile.pending_triangles;
+    tile.hash = tile.pending_hash;
+    tile.drawn = true;
+    tile.waiting = false;
+    m_changed.push_back(cell);
+}
+
 void TerrainMeshes::update(world::Terrain& terrain) {
-    // What changed: a changed tile's mesh and its neighbours' (they reach into it).
+    // What changed: a changed tile's mesh and its neighbours' (they reach
+    // into it; one whose heights snapshot comes out the same is not built).
     world::TerrainChanges changes = terrain.take_changes();
     if (terrain.identity() != m_identity) {
         m_identity = terrain.identity();
@@ -155,55 +196,92 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         }
     }
 
-    // Finished builds: the newest of each tile replaces what it drew.
+    // Finished builds: uploaded (a few a frame), then drawn once loaded.
     {
-        const std::lock_guard lock(m_mutex);
-        u32 taken = 0;
-        auto it = m_done.begin();
-        for (; it != m_done.end() && taken < uploads_per_frame; ++it) {
-            const auto t = m_tiles.find(it->cell);
-            if (t == m_tiles.end()) continue; // dropped since
-            Tile& tile = t->second;
-            tile.in_flight = false;
-            if (it->serial != tile.wanted) continue; // made from heights since replaced
-            ++taken;
-            ++m_built;
-            render::MeshId id = render::k_no_mesh;
-            if (m_renderer != nullptr) {
-                id = m_renderer->add_mesh(std::move(it->mesh));
-                if (tile.mesh != render::k_no_mesh) m_renderer->remove_mesh(tile.mesh);
-            }
-            tile.mesh = id;
-            tile.drawn = true;
-            tile.triangles = it->triangles;
-            tile.wanted = 0;
-            m_changed.push_back(it->cell);
+        std::vector<Result> done;
+        {
+            const std::lock_guard lock(m_mutex);
+            done.swap(m_done);
         }
-        m_done.erase(m_done.begin(), it);
+        for (Result& r : done) m_arrived.push_back(std::move(r));
+    }
+    u32 taken = 0;
+    while (!m_arrived.empty() && taken < uploads_per_frame) {
+        Result r = std::move(m_arrived.front());
+        m_arrived.pop_front();
+        --m_in_flight;
+        const auto t = m_tiles.find(r.cell);
+        if (t == m_tiles.end()) continue; // never: a building tile is not dropped
+        Tile& tile = t->second;
+        tile.in_flight = false;
+        if (r.serial != tile.wanted) continue; // made from heights since replaced
+        tile.wanted = 0;
+        ++taken;
+        ++m_built;
+        render::MeshId id = render::k_no_mesh;
+        if (m_renderer != nullptr) {
+            id = m_renderer->add_mesh(std::move(r.mesh));
+            if (id == render::k_no_mesh) {
+                tile.hash = 0; // not drawn as made: build it again when it next changes
+                continue;
+            }
+        }
+        if (tile.pending != render::k_no_mesh && m_renderer != nullptr) m_renderer->remove_mesh(tile.pending);
+        tile.pending = id;
+        tile.pending_triangles = r.triangles;
+        tile.pending_hash = r.hash;
+        if (!tile.waiting) {
+            tile.waiting = true;
+            m_waiting.push_back(r.cell);
+        }
+    }
+    // Uploaded meshes replace the old ones once they can draw, so a tile
+    // never blinks out while its new mesh streams in.
+    for (usize k = 0; k < m_waiting.size();) {
+        const auto t = m_tiles.find(m_waiting[k]);
+        const bool gone = t == m_tiles.end() || !t->second.waiting;
+        if (!gone && (m_renderer == nullptr || m_renderer->mesh_ready(t->second.pending))) {
+            commit(t->first, t->second);
+        } else if (!gone) {
+            ++k;
+            continue;
+        }
+        m_waiting[k] = m_waiting.back();
+        m_waiting.pop_back();
     }
 
-    // Start builds, oldest wish first; a tile already building waits its turn.
-    u32 in_flight = 0;
-    for (const auto& [cell, tile] : m_tiles) in_flight += tile.in_flight ? 1u : 0u;
+    // Start builds, oldest wish first; a tile already building waits its
+    // turn. Each look takes a heights snapshot (cheap); one that matches
+    // what is drawn needs no build.
     u32 started = 0;
-    for (usize looked = 0, n = m_queue.size(); looked < n && started < builds_per_frame; ++looked) {
+    u32 looks = 0;
+    const u32 max_looks = builds_per_frame > std::numeric_limits<u32>::max() / 8 ? builds_per_frame
+                                                                                 : builds_per_frame * 8;
+    for (usize looked = 0, n = m_queue.size(); looked < n; ++looked) {
+        if (started >= builds_per_frame || looks >= max_looks || m_in_flight >= builds_in_flight) break;
         const world::CellCoord cell = m_queue.front();
         m_queue.pop_front();
         const auto t = m_tiles.find(cell);
         if (terrain.find(cell) == nullptr) {
+            if (t != m_tiles.end() && t->second.in_flight) {
+                m_queue.push_back(cell); // dropped once its build is back
+                continue;
+            }
             m_queued.erase(cell);
-            if (t != m_tiles.end() && !t->second.in_flight) drop(cell, t->second);
-            else if (t != m_tiles.end()) { m_queue.push_back(cell); m_queued.insert(cell); }
+            if (t != m_tiles.end()) drop(cell, t->second);
             continue;
         }
         Tile& tile = t != m_tiles.end() ? t->second : m_tiles[cell];
-        if (tile.in_flight || in_flight >= builds_in_flight) {
-            m_queue.push_back(cell); // still wanted
+        if (tile.in_flight) {
+            m_queue.push_back(cell); // still wanted: built again after this one
             continue;
         }
         m_queued.erase(cell);
-        start(terrain, cell, tile);
-        ++in_flight;
+        ++looks;
+        TileHeights heights = tile_heights(terrain, cell);
+        const u64 hash = hash_of(heights);
+        if (hash == (tile.waiting ? tile.pending_hash : tile.hash)) continue; // as drawn (or about to be)
+        start(cell, tile, std::move(heights), hash);
         ++started;
     }
 }
@@ -213,9 +291,13 @@ void TerrainMeshes::finish(world::Terrain& terrain) {
     builds_per_frame = uploads_per_frame = builds_in_flight = std::numeric_limits<u32>::max();
     for (;;) {
         update(terrain);
-        bool busy = !m_queue.empty();
-        for (const auto& [cell, tile] : m_tiles) busy = busy || tile.in_flight;
-        if (!busy) break;
+        // Not drawn yet: with no frames to stream them in, swapped in now.
+        for (const world::CellCoord c : m_waiting) {
+            const auto t = m_tiles.find(c);
+            if (t != m_tiles.end() && t->second.waiting) commit(c, t->second);
+        }
+        m_waiting.clear();
+        if (m_queue.empty() && m_in_flight == 0 && m_arrived.empty()) break;
         m_jobs.wait(m_builds);
     }
     builds_per_frame = budgets[0];
@@ -227,11 +309,12 @@ TerrainMeshStats TerrainMeshes::stats() const {
     TerrainMeshStats s;
     for (const auto& [cell, tile] : m_tiles) {
         s.tiles += tile.drawn ? 1u : 0u;
-        s.building += tile.in_flight && !m_queued.contains(cell) ? 1u : 0u;
+        s.building += (tile.in_flight || tile.waiting) && !m_queued.contains(cell) ? 1u : 0u;
         s.triangles += tile.drawn ? tile.triangles : 0u;
     }
     s.building += static_cast<u32>(m_queue.size());
     s.built = m_built;
+    s.in_flight = m_in_flight;
     return s;
 }
 

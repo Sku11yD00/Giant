@@ -327,16 +327,25 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   removed, as the scene logs entities (`take_changes`; a new, copied or
   assigned terrain is "all").
 - **Meshes** (`editor/src/terrain_meshes.h`). Each frame `TerrainMeshes`
-  takes the changes, queues the changed tiles and their eight neighbours
-  (a tile's mesh reaches one sample into them), and builds a few a frame
-  on two worker threads: a snapshot of the heights is taken on the main
-  thread, the job makes the triangles and normals and runs
-  `geometry::build_clusters` with the tile's edge vertices locked
-  (`meshopt_SimplifyVertex_Lock`), so every level of detail keeps the
-  edge and tiles drawn at different detail meet without cracks. Finished
-  meshes are swapped in a few a frame (`add_mesh`; the old one keeps
-  drawing until then). A tile changed while it builds is built again with
-  the newest heights.
+  takes the changes and queues the changed tiles and their eight
+  neighbours (a tile's mesh reaches one sample into them). It looks at a
+  few queued tiles a frame (8 x `builds_per_frame`): a snapshot of the
+  heights the mesh is made from (the tile's rows copied, the ring around
+  them looked up), hashed; a tile whose snapshot matches what it draws
+  (a neighbour whose shared edge did not change, or a whole terrain
+  copied by an undo) is not built. The rest are built on two worker
+  threads (`builds_per_frame` started, `builds_in_flight` at once): the
+  job makes the triangles and normals and runs `geometry::build_clusters`
+  with the tile's edge vertices locked (`meshopt_SimplifyVertex_Lock`),
+  so every level of detail keeps the edge and tiles drawn at different
+  detail meet without cracks. Finished meshes are uploaded a few a frame
+  (`uploads_per_frame`) and replace the old one only once
+  `Renderer::mesh_ready` says they can draw, so a tile never blinks out.
+  A tile changed while it builds is built again with the newest heights.
+  The renderer hands a removed mesh's id (and its streaming group
+  numbers) to the next mesh added, so rebuilt tiles do not grow the mesh
+  table every frame walks; callers stop drawing an id when they remove
+  it.
 - **Drawing.** `scene_frame` puts each built tile first in its cell, at
   the cell's corner, with the terrain's material and
   `render::Instance::always_mesh`: the far field never stands in for it
@@ -352,9 +361,17 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   (`save_world` refuses a scene with terrain; terrain streaming is next,
   with a coarse copy of far tiles so the whole world's ground need not be
   in memory). Every tile is a full mesh in memory (CPU copy and cluster
-  data: about 0.4 MB a 1 m tile), so terrain is sized for a few thousand
-  tiles until then. One material for all of it; painted layers, sculpt
-  brushes, erosion and height map import come with the terrain editor.
+  data: about 0.4 MB a 1 m tile, 1.2 MB at 128 samples), so a terrain may
+  hold at most 67M heights (16,384 tiles of 64 samples, 4,096 of 128)
+  until then, and a command makes at most 16.7M. Locked tile edges keep
+  every level's edge, so a tile never drops below about 4 x samples
+  triangles (256 at 64 samples) however far: with always_mesh, thousands
+  of tiles in view cost a million triangles or more until far tiles get a
+  coarser copy (with terrain streaming). An undo step holds copies of the
+  tiles a command changed (before and after), and a scene swap's undo
+  side the whole terrain. One material for all of it (changing it
+  rebuilds every cell with ground, once); painted layers, sculpt brushes,
+  erosion and height map import come with the terrain editor.
 
 ## Window events (known limit)
 
@@ -712,6 +729,11 @@ over the target frame time). Where it stands:
   cell joining or leaving relays out the instance list (see "World
   cells"). `save_world` and `open_world` are commands, not frames: they
   wait for reads in flight and read or write files on the main thread.
+  Terrain (N3 part 4): `create_terrain` makes its heights between frames
+  (spread over the terrain's workers; about half a second for 4096
+  hilly tiles of 64 samples, the most a command may make), and a mesh
+  that arrives for a cell with nothing else in it re-sorts the cell order
+  (every frame of a first build).
 
 | GPU work | Budget |
 | --- | --- |

@@ -235,6 +235,11 @@ float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale) {
     return mesh.bounds.radius * s;
 }
 
+void VoxelScene::forget_mesh(MeshId mesh) {
+    m_meshes.erase(mesh);
+    m_forgotten.push_back(mesh);
+}
+
 void VoxelScene::set_stand_in_radius(float radius) {
     const float r = radius > 0.0f ? radius : 0.0f; // NaN: none
     if (r == m_stand_in_radius) {
@@ -484,7 +489,8 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
     std::vector<u32> forced;
     if (meshes_version != m_meshes_version) {
         m_meshes_version = meshes_version;
-        std::unordered_set<MeshId> stale;
+        std::unordered_set<MeshId> stale(m_forgotten.begin(), m_forgotten.end());
+        m_forgotten.clear();
         for (auto it = m_meshes.begin(); it != m_meshes.end();) {
             const geometry::ClusterMesh* now = meshes ? meshes(it->first) : nullptr;
             if (now != nullptr && now->empty()) {

@@ -76,6 +76,9 @@ Terrain::Heights* Terrain::modify(CellCoord cell) {
 
 void Terrain::set(CellCoord cell, Heights heights) {
     GIANT_ASSERT(heights.size() == usize{m_samples} * m_samples, "a terrain tile has samples() squared heights");
+    GIANT_ASSERT(std::all_of(heights.begin(), heights.end(),
+                             [](float h) { return std::isfinite(h) && std::fabs(h) <= k_max_terrain_height; }),
+                 "terrain heights are finite and within k_max_terrain_height");
     m_tiles[cell] = std::move(heights);
     changed(cell);
 }
@@ -129,28 +132,54 @@ constexpr i64 k_i32_max = std::numeric_limits<i32>::max();
 
 } // namespace
 
-std::optional<float> Terrain::sample(i64 i, i64 j) const {
+std::optional<float> Terrain::sample(i64 i, i64 j, const CellCoord* home) const {
     const i64 n = m_samples;
-    const auto real = [&](i64 si, i64 sj) -> const float* {
+    const auto tile_of = [&](i64 si, i64 sj, CellCoord& c) {
         const i64 cx = floor_div(si, n);
         const i64 cz = floor_div(sj, n);
-        if (cx < k_i32_min || cx > k_i32_max || cz < k_i32_min || cz > k_i32_max) return nullptr;
-        const Heights* t = find({static_cast<i32>(cx), static_cast<i32>(cz)});
-        return t != nullptr ? &(*t)[static_cast<usize>((sj - cz * n) * n + (si - cx * n))] : nullptr;
+        if (cx < k_i32_min || cx > k_i32_max || cz < k_i32_min || cz > k_i32_max) return false;
+        c = {static_cast<i32>(cx), static_cast<i32>(cz)};
+        return true;
     };
     for (const auto& [di, dj] : {std::pair<i64, i64>{0, 0}, {1, 0}, {0, 1}, {1, 1}}) {
-        if (const float* h = real(i - di, j - dj)) return *h;
+        const i64 si = i - di;
+        const i64 sj = j - dj;
+        CellCoord c;
+        if (!tile_of(si, sj, c)) continue;
+        const Heights* t = find(c);
+        if (t == nullptr) continue;
+        // A tile touching home only at a corner, with no tile between them:
+        // its corner is not home's (each keeps its own height there).
+        if (home != nullptr && c.x != home->x && c.z != home->z && find({c.x, home->z}) == nullptr &&
+            find({home->x, c.z}) == nullptr) {
+            continue;
+        }
+        return (*t)[static_cast<usize>((sj - i64{c.z} * n) * n + (si - i64{c.x} * n))];
     }
     return std::nullopt;
 }
 
 std::optional<double> Terrain::height_at(double x, double z) const {
-    const CellCoord home = cell_of({x, 0.0, z});
+    // The tile the point is in, or the one it is the far edge of.
+    CellCoord home = cell_of({x, 0.0, z});
     if (find(home) == nullptr) {
-        return std::nullopt;
+        const bool on_x = x == home.x * k_cell_size && home.x > std::numeric_limits<i32>::min();
+        const bool on_z = z == home.z * k_cell_size && home.z > std::numeric_limits<i32>::min();
+        const CellCoord before[3] = {{home.x - (on_x ? 1 : 0), home.z},
+                                     {home.x, home.z - (on_z ? 1 : 0)},
+                                     {home.x - (on_x ? 1 : 0), home.z - (on_z ? 1 : 0)}};
+        bool found = false;
+        for (const CellCoord c : before) {
+            if (!(c == home) && find(c) != nullptr) {
+                home = c;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return std::nullopt;
     }
     const double s = spacing();
-    // In samples from the cell's corner: [0, samples()).
+    // In samples from the cell's corner: [0, samples()].
     const double u = std::clamp((x - home.x * k_cell_size) / s, 0.0, static_cast<double>(m_samples));
     const double v = std::clamp((z - home.z * k_cell_size) / s, 0.0, static_cast<double>(m_samples));
     const double fu = std::min(std::floor(u), static_cast<double>(m_samples - 1));
@@ -159,11 +188,11 @@ std::optional<double> Terrain::height_at(double x, double z) const {
     const i64 j = i64{home.z} * m_samples + static_cast<i64>(fv);
     const double a = u - fu; // along x, 0 to 1
     const double b = v - fv; // along z
-    // Corners of a square of the home tile: always there.
-    const double h00 = *sample(i, j);
-    const double h10 = *sample(i + 1, j);
-    const double h01 = *sample(i, j + 1);
-    const double h11 = *sample(i + 1, j + 1);
+    // Corners of a square of the home tile, as its mesh has them: always there.
+    const double h00 = *sample(i, j, &home);
+    const double h10 = *sample(i + 1, j, &home);
+    const double h01 = *sample(i, j + 1, &home);
+    const double h11 = *sample(i + 1, j + 1, &home);
     // The square's two triangles meet on its (0, 0)-(1, 1) diagonal.
     if (b >= a) {
         return h00 + a * (h11 - h01) + b * (h01 - h00);

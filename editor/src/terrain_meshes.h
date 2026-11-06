@@ -46,6 +46,7 @@ TileSurface tile_surface(const TileHeights& heights);
 struct TerrainMeshStats {
     u32 tiles = 0;     // with a mesh drawn
     u32 building = 0;  // waiting for or being built (newer heights than drawn)
+    u32 in_flight = 0; // being built on the workers now
     u64 built = 0;     // ever
     u64 triangles = 0; // in the drawn meshes, at full detail
 };
@@ -59,8 +60,11 @@ public:
     TerrainMeshes& operator=(const TerrainMeshes&) = delete;
 
     // Once a frame, before the scene's frame is built: takes the terrain's
-    // changes, starts builds (at most builds_per_frame) and swaps in
-    // finished meshes (at most uploads_per_frame).
+    // changes, looks at queued tiles (a heights snapshot each, at most
+    // 8 * builds_per_frame; one as drawn needs no build), starts builds (at
+    // most builds_per_frame, builds_in_flight at once), uploads finished
+    // meshes (at most uploads_per_frame) and swaps each in once the
+    // renderer can draw it.
     void update(world::Terrain& terrain);
     // The tile's mesh drawn now (k_no_mesh: none yet, or no renderer).
     render::MeshId mesh(world::CellCoord cell) const;
@@ -71,27 +75,37 @@ public:
     void finish(world::Terrain& terrain);
 
     TerrainMeshStats stats() const;
+    // Its workers, for other terrain work (making heights) between frames.
+    JobSystem& jobs() { return m_jobs; }
     u32 builds_per_frame = 8;
     u32 uploads_per_frame = 8;
     u32 builds_in_flight = 8;
 
 private:
     struct Tile {
-        render::MeshId mesh = render::k_no_mesh;
+        render::MeshId mesh = render::k_no_mesh; // drawn
         bool drawn = false;    // has a mesh (with no renderer: counted as one)
         u32 triangles = 0;     // of the drawn mesh
-        u64 wanted = 0;        // the newest build asked for (0: none waiting)
+        u64 hash = 0;          // of the heights it was made from (0: none)
+        u64 wanted = 0;        // the build in flight (0: none wanted)
         bool in_flight = false;
+        // Uploaded, waiting to be loaded before it replaces `mesh`.
+        bool waiting = false;
+        render::MeshId pending = render::k_no_mesh;
+        u32 pending_triangles = 0;
+        u64 pending_hash = 0;
     };
     struct Result {
         world::CellCoord cell;
         u64 serial = 0;
+        u64 hash = 0;
         geometry::ClusterMesh mesh;
         u32 triangles = 0;
     };
 
     void want(world::CellCoord cell);
-    void start(const world::Terrain& terrain, world::CellCoord cell, Tile& tile);
+    void start(world::CellCoord cell, Tile& tile, TileHeights heights, u64 hash);
+    void commit(world::CellCoord cell, Tile& tile);
     void drop(world::CellCoord cell, Tile& tile);
 
     render::Renderer* m_renderer;
@@ -102,6 +116,9 @@ private:
     std::deque<world::CellCoord> m_queue; // waiting to start, oldest first
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_queued;
     std::vector<world::CellCoord> m_changed;
+    std::deque<Result> m_arrived;            // finished builds waiting for the upload budget
+    std::vector<world::CellCoord> m_waiting; // tiles with an uploaded mesh not loaded yet
+    u32 m_in_flight = 0;                     // builds started and not taken back
 
     std::mutex m_mutex; // protects m_done
     std::vector<Result> m_done;

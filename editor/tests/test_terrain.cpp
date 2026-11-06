@@ -12,7 +12,9 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <chrono>
 #include <set>
+#include <thread>
 
 using namespace giant;
 using namespace giant::editor;
@@ -164,35 +166,83 @@ GIANT_TEST("terrain meshes: built off the main thread, a change rebuilds its nei
     GIANT_CHECK(m.stats().triangles == 9u * 8u * 8u * 2u);
     GIANT_CHECK(m.take_changed().size() == 9 && m.take_changed().empty());
 
-    // A corner tile changes: it and its 3 neighbours.
+    // A sample inside a tile: only that tile's mesh reads it.
     t.modify({0, 0})->at(0) = 4.0f;
     m.finish(t);
-    GIANT_CHECK(m.stats().built == 13);
-    const std::vector<CellCoord> changed = m.take_changed();
+    GIANT_CHECK(m.stats().built == 10);
+    GIANT_CHECK((m.take_changed() == std::vector<CellCoord>{CellCoord{0, 0}}));
+    // Its far corner sample: the three tiles around that corner read it too.
+    t.modify({0, 0})->at(63) = 4.0f;
+    m.finish(t);
+    GIANT_CHECK(m.stats().built == 14);
+    std::vector<CellCoord> changed = m.take_changed();
     GIANT_CHECK(changed.size() == 4);
     GIANT_CHECK(std::find(changed.begin(), changed.end(), CellCoord{1, 1}) != changed.end());
     GIANT_CHECK(std::find(changed.begin(), changed.end(), CellCoord{2, 0}) == changed.end());
 
-    // Removed: its mesh goes, its neighbours rebuild without it.
+    // Removed: its mesh goes, and neighbours that read it rebuild.
     t.remove({1, 1});
     m.finish(t);
-    GIANT_CHECK(m.stats().tiles == 8 && m.stats().built == 21);
-    GIANT_CHECK(m.take_changed().size() == 9);
+    GIANT_CHECK(m.stats().tiles == 8 && m.stats().building == 0 && m.stats().built > 14);
+    changed = m.take_changed();
+    GIANT_CHECK(std::find(changed.begin(), changed.end(), CellCoord{1, 1}) != changed.end());
 
-    // Builds per frame are budgeted; the rest wait for later frames.
-    m.builds_per_frame = 2;
-    Terrain fresh = t; // a new terrain: everything again
+    // A copy (a scene put back by undo, say) with the same heights builds nothing.
+    const u64 built = m.stats().built;
+    Terrain fresh = t;
     m.update(fresh);
-    GIANT_CHECK(m.stats().building == 8);
+    GIANT_CHECK(m.stats().building == 0 && m.stats().in_flight == 0);
     m.finish(fresh);
-    GIANT_CHECK(m.stats().built == 29 && m.stats().building == 0);
+    GIANT_CHECK(m.stats().built == built && m.take_changed().empty());
 
-    // A tile changed while building is built again with the newest heights.
-    fresh.modify({2, 2})->at(0) = 9.0f;
-    m.update(fresh); // starts it (and 2 neighbours, under the budget of 2: 2 of them)
-    fresh.modify({2, 2})->at(1) = 9.0f;
-    m.finish(fresh);
-    GIANT_CHECK(m.stats().building == 0 && m.stats().tiles == 8);
+    // Builds are budgeted per frame and in flight; uploads per frame.
+    for (auto& [c, h] : fresh.tiles()) fresh.modify(c)->at(9) = 2.0f;
+    m.builds_per_frame = 2;
+    m.update(fresh);
+    GIANT_CHECK(m.stats().in_flight == 2 && m.stats().building == 8);
+    m.builds_per_frame = 8;
+    m.builds_in_flight = 3;
+    m.update(fresh);
+    GIANT_CHECK(m.stats().in_flight <= 3);
+    m.builds_in_flight = 8;
+    m.uploads_per_frame = 1;
+    for (int frame = 0; frame < 20000 && m.stats().building > 0; ++frame) {
+        const u64 before = m.stats().built;
+        m.update(fresh);
+        GIANT_CHECK(m.stats().built - before <= 1);
+        std::this_thread::sleep_for(std::chrono::microseconds(500)); // a frame's worth of time for the workers
+    }
+    GIANT_CHECK(m.stats().building == 0 && m.stats().built == built + 8);
+}
+
+GIANT_TEST("terrain meshes: a tile changed while it builds is drawn with its newest heights") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    if (renderer == nullptr) return;
+    Terrain t;
+    t.set_samples(8);
+    t.set({0, 0}, Terrain::Heights(64, 0.0f));
+    TerrainMeshes m(renderer.get());
+    m.finish(t);
+    const render::MeshId first = m.mesh({0, 0});
+    GIANT_CHECK(first != render::k_no_mesh);
+    t.modify({0, 0})->at(9) = 5.0f;
+    m.update(t); // builds with 5
+    t.modify({0, 0})->at(9) = 7.0f;
+    m.finish(t);
+    const geometry::ClusterMesh* drawn = renderer->mesh(m.mesh({0, 0}));
+    GIANT_CHECK(drawn != nullptr);
+    float highest = 0.0f;
+    for (const geometry::Vertex& v : drawn->vertices) highest = std::max(highest, v.position.y);
+    GIANT_CHECK(highest == 7.0f);
+    // Old meshes are removed, and their ids reused: rebuilding does not grow the renderer's table.
+    for (int k = 0; k < 20; ++k) {
+        t.modify({0, 0})->at(9) = static_cast<float>(k);
+        m.finish(t);
+    }
+    GIANT_CHECK(m.mesh({0, 0}) <= first + 2);
 }
 
 GIANT_TEST("terrain: tiles draw in their cells, as meshes at every distance") {
@@ -328,6 +378,22 @@ GIANT_TEST("terrain commands: create, shape, sample, remove, all undoable") {
     GIANT_CHECK(f.state.scene.terrain.size() == 8);
     GIANT_CHECK(f.commands.redo() && f.commands.redo());
     GIANT_CHECK(f.state.scene.terrain.samples() == 16 && f.state.scene.terrain.size() == 1);
+}
+
+GIANT_TEST("terrain commands: work a command and a terrain may hold is capped") {
+    Fixture f;
+    // 40 x 40 tiles of 128 samples: 26M heights, over the 16.7M a command may make.
+    ai::CommandResult r = f.run("create_terrain", {{"from", {0, 0}}, {"to", {2560, 2560}}, {"samples", 128}});
+    GIANT_CHECK(!r.ok && r.error.find("split it") != std::string::npos && f.state.scene.terrain.empty());
+    GIANT_CHECK(f.state.scene.terrain.samples() == 64); // refused: nothing changed
+    // Under it: fine, and made in parallel the same as one by one.
+    r = f.run("create_terrain", {{"from", {0, 0}}, {"to", {639, 639}}, {"samples", 128},
+                                 {"hills", {{"seed", 9}}}});
+    GIANT_CHECK(r.ok && r.value["tiles"] == 100);
+    world::HillsSettings h;
+    h.seed = 9;
+    GIANT_CHECK(f.state.scene.terrain.find({7, 3})->at(5 * 128 + 77) ==
+                world::hills_height(h, 7 * 64.0 + 77 * 0.5, 3 * 64.0 + 5 * 0.5));
 }
 
 GIANT_TEST("terrain commands: saved with the scene; not yet in streamed worlds") {

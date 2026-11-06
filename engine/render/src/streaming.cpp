@@ -215,8 +215,7 @@ bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vec
         log_error("render", "could not create a mesh's residency table (out of GPU memory?)");
         return false;
     }
-    m.group_base = m_total_groups;
-    m_total_groups += static_cast<u32>(groups);
+    m.group_base = take_groups(static_cast<u32>(groups));
     m_stats.total_groups += static_cast<u32>(groups);
     m.live = true;
     m.table_dirty = false; // made all "not loaded"
@@ -226,6 +225,42 @@ bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vec
     m_device.destroy(m_meshes[mesh].table);
     m_meshes[mesh] = std::move(m);
     return true;
+}
+
+u32 GeometryStreamer::take_groups(u32 count) {
+    for (auto it = m_free_groups.begin(); it != m_free_groups.end(); ++it) {
+        if (it->second < count) continue;
+        const u32 base = it->first;
+        const u32 rest = it->second - count;
+        m_free_groups.erase(it);
+        if (rest > 0) m_free_groups[base + count] = rest;
+        return base;
+    }
+    const u32 base = m_total_groups;
+    m_total_groups += count;
+    return base;
+}
+
+void GeometryStreamer::give_groups(u32 base, u32 count) {
+    if (count == 0) return;
+    auto next = m_free_groups.lower_bound(base);
+    if (next != m_free_groups.end() && next->first == base + count) {
+        count += next->second;
+        next = m_free_groups.erase(next);
+    }
+    if (next != m_free_groups.begin()) {
+        const auto before = std::prev(next);
+        if (before->first + before->second == base) {
+            base = before->first;
+            count += before->second;
+            m_free_groups.erase(before);
+        }
+    }
+    if (base + count == m_total_groups) {
+        m_total_groups = base; // the last range: hand the numbers back
+    } else {
+        m_free_groups[base] = count;
+    }
 }
 
 void GeometryStreamer::remove(u32 mesh) {
@@ -240,6 +275,7 @@ void GeometryStreamer::remove(u32 mesh) {
         }
     }
     m_stats.total_groups -= static_cast<u32>(m.resident.size());
+    give_groups(m.group_base, static_cast<u32>(m.resident.size()));
     m_stats.used_bytes = m_alloc.used() * k_unit;
     m_device.destroy(m.table); // deferred by the device past frames in flight
     m = {};
