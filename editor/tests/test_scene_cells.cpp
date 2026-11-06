@@ -289,3 +289,28 @@ GIANT_TEST("scene cells: a hole is sent once, and stays as it is while holes bes
     GIANT_CHECK(rest.count == 3 && rest.version != kept.version);
     GIANT_CHECK(c.frame.instances.size() == 20 && c.live().size() == 17);
 }
+
+GIANT_TEST("scene cells: a small cell taking part of a big hole re-sends at most a piece of it") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    std::vector<world::EntityId> big;
+    for (int k = 0; k < 3000; ++k) big.push_back(c.add(10.0 + 0.01 * k, 10.0));
+    c.add(100.0, 10.0);
+    c.build();
+    c.scene.remove_many(big);
+    c.build();
+    const std::vector<render::CellRange> before = c.frame.cells;
+    for (int k = 0; k < 40; ++k) c.add(10.0 + k, 600.0);
+    c.build();
+    // Instances in ranges not exactly as before: what the renderer looks at.
+    u32 looked = 0;
+    for (const render::CellRange& r : c.frame.cells) {
+        bool same = false;
+        for (const render::CellRange& b : before) {
+            same = same || (b.first == r.first && b.count == r.count && b.version == r.version);
+        }
+        if (!same) looked += r.count;
+    }
+    GIANT_CHECK(looked > 0 && looked <= 1024);
+    GIANT_CHECK(c.live().size() == 41);
+}

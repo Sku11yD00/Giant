@@ -161,14 +161,17 @@ void start_over(const world::Scene& scene, SceneFrame& out) {
 const render::Instance k_hole{{}, {}, {1.0f, 1.0f, 1.0f}, render::k_no_mesh, 0};
 
 // Makes [first, first + count) a hole. For finding room it joins the
-// holes beside it; it is sent as a piece of its own, which keeps its
-// place and version until a cell takes it, so the renderer looks at a
-// hole once, when it is made (pieces are never larger than the cell that
-// left them).
+// holes beside it; it is sent as pieces of their own (k_piece at most),
+// which keep their place and version until a cell takes them, so the
+// renderer looks at a hole once, when it is made, and a cell taking part
+// of one re-sends at most a piece.
+constexpr u32 k_piece = 1024;
 void release(SceneFrame& out, u32 first, u32 count) {
     if (count == 0) return;
     std::fill_n(out.instances.begin() + first, count, k_hole);
-    out.pieces[first] = {count, new_version()};
+    for (u32 at = 0; at < count; at += k_piece) {
+        out.pieces[first + at] = {std::min(k_piece, count - at), new_version()};
+    }
     auto next = out.free.lower_bound(first);
     if (next != out.free.end() && next->first == first + count) {
         count += next->second.count;
@@ -407,7 +410,9 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         usize holes = 0;
         for (const auto& [first, block] : out.free) holes += block.count;
         all = holes > std::max(out.holes_allowed, out.instances.size() / 2) ||
-              (holes > 0 && out.instances.size() > render::k_max_instances); // holes must not push cells past it
+              // holes push cells past what is drawn, and without them none would be
+              (out.instances.size() > render::k_max_instances &&
+               out.instances.size() - holes <= render::k_max_instances);
     }
     if (all) {
         out.instances.clear();

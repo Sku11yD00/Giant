@@ -211,13 +211,15 @@ cell's work, not the world's:
   drawn) rebuild everything. Each cell keeps its place in the instance
   list from frame to frame (N3 part 3b): a cell that goes leaves a hole
   (instances with no mesh, which nothing draws, sent as a cell of its
-  own that keeps its place and version until a cell takes it, so the
-  renderer looks at it once; joined with the holes beside it to find
+  own, in pieces of at most 1024, each keeping its place and version
+  until a cell takes it, so the renderer looks at it once; joined with
+  the holes beside it to find
   room), a new cell takes the first hole it fits or the end (an empty
   cell sits at 0), and a cell that outgrows its place moves, with a
   quarter more room. So cells coming and going (streaming) leave the
   others where they are. When holes no cell has pass half the list (and
-  4096), or would push the list past `render::k_max_instances`, and on a new scene, the list is laid out afresh, end to end, by
+  4096), or push the list past `render::k_max_instances` when laying it
+  out again would not, and on a new scene, the list is laid out afresh, end to end, by
   z then x (within a cell by id). `FrameInput::cells` covers the list
   end to end: each cell's (and hole's) place, size and version (new on
   every rebuild).
@@ -233,8 +235,8 @@ cell's work, not the world's:
   uploads only the cells not as before (all of them for a fresh layout,
   a new material table size, or without cells). Translations are kept from each
   cell's anchor (its first instance when uploaded; each cell keeps its
-  anchor slot while it stays as it is, and new ones take free slots), which keeps them
-  precise in float however big the world; each frame writes the anchors
+  anchor slot while it stays as it is, and new ones take free slots),
+  which keeps them precise in float however big the world; each frame writes the anchors
   relative to the camera (16 bytes a cell) and a bit per instance saying
   whether it is drawn (its mesh ready, not left to the far field), and
   `load_instance` adds the instance's anchor back. Culling walks every
