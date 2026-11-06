@@ -184,6 +184,13 @@ struct RenderSettings {
     // frames. Off: the flat sky and ground colours.
     bool gi = true;
     u32 gi_bricks_per_frame = 256;
+    // Reflections on glossy surfaces (lit views): a cone through the lit
+    // voxel world along the mirror direction, as wide as the highlight
+    // (needs gi), and, where what it meets is on screen, a sharp one from
+    // last frame's image (screen_space_reflections). Off: the sky and
+    // ground colours, dimmed where global illumination finds them hidden.
+    bool reflections = true;
+    bool screen_space_reflections = true;
 };
 
 struct FrameInput {
@@ -242,6 +249,9 @@ struct RenderStats {
     u32 gi_lit = 0;       // voxel bricks lit this frame
     u32 gi_cleared = 0;   // bricks new in the pool, cleared to wait for their light
     u32 gi_waiting = 0;   // new or rebuilt bricks not lit yet
+    // Reflections (this frame).
+    bool reflections = false;        // voxel cones traced
+    bool screen_reflections = false; // screen-space rays traced (last frame's image was usable)
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -402,6 +412,17 @@ private:
     rhi::TextureHandle m_color;   // shaded image before anti-aliasing (rgba8_srgb)
     rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
     rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)
+    // Shading's radiance before exposure (rgba16_float; a: distance), this
+    // frame's and last frame's in turn: screen-space reflections read the
+    // last one.
+    rhi::TextureHandle m_radiance[2];
+    u32 m_radiance_index = 0; // written this frame
+    bool m_history_valid = false; // the other one holds the last frame, shaded to the end
+    DebugView m_history_view = DebugView::lit;
+    DVec3 m_history_camera{};
+    float m_history_rows[12] = {};
+    float m_history_p00 = 0.0f;
+    float m_history_p11 = 0.0f;
     u32 m_width = 0;
     u32 m_height = 0;
     u32 m_hzb_width = 0;

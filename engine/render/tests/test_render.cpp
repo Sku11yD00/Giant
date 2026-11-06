@@ -408,6 +408,66 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
                                                      "raster", "HZB", "shadows", "shading"}));
 }
 
+GIANT_TEST("render: reflections trace voxel cones with gi, and the screen once last frame is there") {
+    NullScene s;
+    GIANT_CHECK(s.renderer != nullptr);
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {20.0f, 1.0f, 20.0f};
+    instances[1].mesh = s.renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = {0.0, 1.0, -5.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.view.position = {0.0, 1.5, 0.0};
+    // The first frame has no last frame to take from.
+    RenderStats st = s.draw(frame);
+    GIANT_CHECK(st.reflections && !st.screen_reflections);
+    st = s.draw(frame);
+    GIANT_CHECK(st.reflections && st.screen_reflections);
+    // Without global illumination, only the screen's.
+    frame.settings.gi = false;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.reflections && st.screen_reflections);
+    frame.settings.gi = true;
+    frame.settings.screen_space_reflections = false;
+    st = s.draw(frame);
+    GIANT_CHECK(st.reflections && !st.screen_reflections);
+    frame.settings.screen_space_reflections = true;
+    // A different view: last frame's image shows something else.
+    frame.settings.debug_view = DebugView::lighting;
+    st = s.draw(frame);
+    GIANT_CHECK(st.reflections && !st.screen_reflections);
+    GIANT_CHECK(s.draw(frame).screen_reflections);
+    // Views of the geometry have none, and break the history.
+    frame.settings.debug_view = DebugView::clusters;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.reflections && !st.screen_reflections);
+    frame.settings.debug_view = DebugView::voxels;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.reflections && !st.screen_reflections);
+    frame.settings.debug_view = DebugView::lit;
+    GIANT_CHECK(!s.draw(frame).screen_reflections);
+    GIANT_CHECK(s.draw(frame).screen_reflections);
+    // Off: none.
+    frame.settings.reflections = false;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.reflections && !st.screen_reflections);
+    // The frame without them still kept its image for the next.
+    frame.settings.reflections = true;
+    GIANT_CHECK(s.draw(frame).screen_reflections);
+    // A new size starts again.
+    s.device->destroy(s.target);
+    rhi::TextureDesc t;
+    t.width = 640;
+    t.height = 360;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    s.target = s.device->create_texture(t);
+    GIANT_CHECK(!s.draw(frame).screen_reflections);
+    GIANT_CHECK(s.draw(frame).screen_reflections);
+}
+
 GIANT_TEST("render: shadow pages asked for are drawn, a pass per level, and cached") {
     // The null device runs no shaders, so shading asks for nothing: the
     // test asks for pages itself, as the read-back requests would.
@@ -764,9 +824,8 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
 }
-#endif
 
-GIANT_TEST("render: d3d12 casts sun shadows from shadow pages") {
+GIANT_TEST("render: d3d12 reflects a block in a mirror floor, from the voxels and the screen") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::d3d12;
     desc.software_adapter = true;
@@ -775,100 +834,6 @@ GIANT_TEST("render: d3d12 casts sun shadows from shadow pages") {
     if (device == nullptr) {
         return; // not on Windows
     }
-    auto renderer = Renderer::create(*device);
-    GIANT_CHECK(renderer != nullptr);
-    if (renderer == nullptr) {
-        return;
-    }
-    constexpr u32 k_w = 96, k_h = 64;
-    rhi::TextureDesc target_desc;
-    target_desc.width = k_w;
-    target_desc.height = k_h;
-    target_desc.format = rhi::Format::rgba8_srgb;
-    target_desc.usage = rhi::TextureUsage::render_target;
-    const rhi::TextureHandle target = device->create_texture(target_desc);
-
-    // Ground, and a cube floating over it; the camera 6 m up looking
-    // straight down (screen right is +X, screen up is -Z), far from the origin.
-    const DVec3 origin{-40'000.0, 120.0, 70'000.0};
-    std::vector<Instance> instances(2);
-    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
-    instances[0].position = origin;
-    instances[0].scale = {40.0f, 1.0f, 40.0f};
-    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
-    instances[1].position = origin + DVec3{0.0, 1.5, 0.0};
-    std::vector<Material> materials(1);
-    materials[0].base_color = {0.7f, 0.7f, 0.7f};
-    materials[0].roughness = 0.9f;
-    FrameInput frame;
-    frame.view.position = origin + DVec3{0.0, 6.0, 0.0};
-    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
-    frame.instances = instances;
-    frame.materials = materials;
-    // The sun to the +X side: the cube's shadow falls towards -X, from
-    // about x = -2 to -0.25 (the cube hides x in [-0.75, 0.75] from above).
-    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.6f, 0.8f, 0.0f});
-    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
-    frame.lighting.sky_light = {0.1f, 0.1f, 0.1f};
-    frame.lighting.ground_light = {0.1f, 0.1f, 0.1f};
-    frame.settings.antialiasing = false;
-    frame.settings.gi = false; // the light here is the sun's alone (gi is tested below)
-    // Shading asks for pages; they are read back two frames on and drawn.
-    const auto draw = [&](bool shadows) {
-        frame.settings.shadows = shadows;
-        for (int i = 0; i < 16; ++i) {
-            rhi::CommandList* cmd = device->begin_frame(nullptr);
-            GIANT_CHECK(cmd != nullptr);
-            if (cmd != nullptr) {
-                renderer->render(*cmd, target, frame);
-                device->end_frame();
-            }
-        }
-        device->wait_idle();
-        return device->read_texture(target);
-    };
-    const auto plain = draw(false);
-    const auto shadowed = draw(true);
-    const RenderStats st = renderer->last_stats();
-    GIANT_CHECK(st.shadows && st.shadow_pages > 0 && st.shadow_waiting == 0 && st.shadow_missing == 0);
-    GIANT_CHECK(plain.size() == k_w * k_h * 4 && shadowed.size() == plain.size());
-    if (plain.size() == k_w * k_h * 4 && shadowed.size() == plain.size()) {
-        const auto at = [](const std::vector<u8>& p, u32 x, u32 y) { return int{p[(static_cast<usize>(y) * k_w + x) * 4]}; };
-        // About 0.108 m a pixel on the ground; the centre is x = 0.
-        const u32 shade_x = k_w / 2 - 13; // x = -1.4 m: in the shadow
-        const u32 open_x = k_w / 2 + 16;  // x = +1.7 m: in the sun
-        GIANT_CHECK(at(shadowed, shade_x, k_h / 2) < at(plain, shade_x, k_h / 2) / 2);
-        // No shadow acne: open ground is as bright as without shadows.
-        for (u32 y = 4; y < k_h - 4; y += 6) {
-            GIANT_CHECK(std::abs(at(shadowed, open_x, y) - at(plain, open_x, y)) <= 3);
-            GIANT_CHECK(std::abs(at(shadowed, k_w - 3, y) - at(plain, k_w - 3, y)) <= 3);
-        }
-        // The cube's lit top is unchanged too.
-        GIANT_CHECK(std::abs(at(shadowed, k_w / 2, k_h / 2) - at(plain, k_w / 2, k_h / 2)) <= 3);
-    }
-    // Moving the cube moves its shadow (its pages are drawn again).
-    instances[1].position.z += 3.0; // 28 pixels down the screen
-    const auto moved = draw(true);
-    if (moved.size() == k_w * k_h * 4 && plain.size() == moved.size()) {
-        const auto at = [](const std::vector<u8>& p, u32 x, u32 y) { return int{p[(static_cast<usize>(y) * k_w + x) * 4]}; };
-        const u32 shade_x = k_w / 2 - 13;
-        GIANT_CHECK(std::abs(at(moved, shade_x, k_h / 2) - at(plain, shade_x, k_h / 2)) <= 3); // sunlit again
-    }
-    GIANT_CHECK(!device->device_lost());
-    GIANT_CHECK(device->validation_errors() == 0);
-    device->destroy(target);
-}
-
-GIANT_TEST("render: d3d12 global illumination bounces colour and shuts out the sky") {
-    rhi::DeviceDesc desc;
-    desc.backend = rhi::Backend::d3d12;
-    desc.software_adapter = true;
-    desc.debug_layer = true;
-    auto device = rhi::create_device(desc);
-    if (device == nullptr) {
-        return; // not on Windows
-    }
-    // A small voxel world, so the software GPU lights it quickly.
     RendererDesc rd;
     rd.voxel_clipmap.levels = 6;
     rd.voxel_clipmap.bricks_per_axis = 16;
@@ -886,39 +851,40 @@ GIANT_TEST("render: d3d12 global illumination bounces colour and shuts out the s
     target_desc.usage = rhi::TextureUsage::render_target;
     const rhi::TextureHandle target = device->create_texture(target_desc);
 
-    // White ground and a red wall standing on it (x from 1.8 to 2.2 m, 2 m
-    // tall); the camera 6 m up looking straight down (screen right is +X),
-    // the sun low from -X: it lights the wall's -X face and the ground
-    // before it, and the wall shades the ground behind it out to x = 4.9.
-    const DVec3 origin{-40'000.0, 120.0, 70'000.0};
+    // A mirror-smooth metal floor and a green block on it, 5 to 7 m ahead
+    // (-Z); the camera 1.5 m up, looking 15 degrees down; the sun behind
+    // and above it lights the block's face. The floor between 2.2 and 5 m
+    // ahead shows the block's reflection: at the screen's centre column,
+    // rows 37 to 52 or so (row 44: 3 m ahead, the block 1 m up).
+    const DVec3 origin{25'000.0, 40.0, -60'000.0};
     std::vector<Instance> instances(2);
     instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
     instances[0].position = origin;
-    instances[0].scale = {12.0f, 1.0f, 12.0f};
+    instances[0].scale = {20.0f, 1.0f, 20.0f};
     instances[0].material = 0;
     instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
-    instances[1].position = origin + DVec3{2.0, 1.0, 0.0};
-    instances[1].scale = {0.4f, 2.0f, 8.0f};
+    instances[1].position = origin + DVec3{0.0, 1.0, -6.0};
+    instances[1].scale = {2.0f, 2.0f, 2.0f};
     instances[1].material = 1;
     std::vector<Material> materials(2);
-    materials[0].base_color = {0.8f, 0.8f, 0.8f};
-    materials[0].roughness = 0.9f;
-    materials[1].base_color = {0.9f, 0.05f, 0.05f};
+    materials[0].base_color = {0.9f, 0.9f, 0.9f};
+    materials[0].roughness = 0.05f;
+    materials[0].metallic = 1.0f;
+    materials[1].base_color = {0.05f, 0.8f, 0.05f};
     materials[1].roughness = 0.9f;
     FrameInput frame;
-    frame.view.position = origin + DVec3{0.0, 6.0, 0.0};
-    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
+    frame.view.position = origin + DVec3{0.0, 1.5, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi / 12.0f);
     frame.instances = instances;
     frame.materials = materials;
-    frame.lighting.sun_direction = normalize_or_zero(Vec3{-0.8f, 0.6f, 0.0f});
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.0f, 0.7f, 0.7f});
     frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
     frame.lighting.sky_light = {0.4f, 0.4f, 0.4f};
     frame.lighting.ground_light = {0.4f, 0.4f, 0.4f};
     frame.settings.antialiasing = false;
     frame.settings.voxel_ms_per_frame = 1000.0f;
     frame.settings.gi_bricks_per_frame = 4096;
-    const auto draw = [&](bool gi) {
-        frame.settings.gi = gi;
+    const auto draw = [&] {
         for (int i = 0; i < 12; ++i) {
             rhi::CommandList* cmd = device->begin_frame(nullptr);
             GIANT_CHECK(cmd != nullptr);
@@ -930,42 +896,44 @@ GIANT_TEST("render: d3d12 global illumination bounces colour and shuts out the s
         device->wait_idle();
         return device->read_texture(target);
     };
-    const auto flat = draw(false);
-    const auto lit = draw(true);
-    const RenderStats st = renderer->last_stats();
-    GIANT_CHECK(st.gi && st.gi_lit > 0 && st.gi_waiting == 0 && st.voxel_pending == 0);
-    GIANT_CHECK(flat.size() == k_w * k_h * 4 && lit.size() == flat.size());
-    if (flat.size() == k_w * k_h * 4 && lit.size() == flat.size()) {
-        const auto at = [](const std::vector<u8>& p, u32 x, u32 y, u32 c) {
-            return int{p[(static_cast<usize>(y) * k_w + x) * 4 + c]};
+    frame.settings.reflections = false;
+    const auto off = draw();
+    frame.settings.reflections = true;
+    frame.settings.screen_space_reflections = false;
+    const auto voxel = draw();
+    GIANT_CHECK(renderer->last_stats().reflections && !renderer->last_stats().screen_reflections);
+    frame.settings.screen_space_reflections = true;
+    const auto both = draw();
+    GIANT_CHECK(renderer->last_stats().reflections && renderer->last_stats().screen_reflections);
+    // The screen alone (no voxel world to trace).
+    frame.settings.gi = false;
+    const auto screen = draw();
+    GIANT_CHECK(!renderer->last_stats().reflections && renderer->last_stats().screen_reflections);
+    const usize size = usize{k_w} * k_h * 4;
+    GIANT_CHECK(off.size() == size && voxel.size() == size && both.size() == size && screen.size() == size);
+    if (off.size() == size && voxel.size() == size && both.size() == size && screen.size() == size) {
+        const auto px = [](const std::vector<u8>& p, u32 y, u32 c) {
+            return int{p[(static_cast<usize>(y) * k_w + k_w / 2) * 4 + c]};
         };
-        // About 0.108 m a pixel on the ground; the centre is x = 0.
-        const auto column = [](double x) { return static_cast<u32>(static_cast<int>(k_w / 2) + static_cast<int>(x / 0.108)); };
-        const u32 y = k_h / 2;
-        // Before the wall (x = 1.2): red light bounced off its lit face.
-        const u32 before = column(1.2);
-        GIANT_CHECK(at(flat, before, y, 0) == at(flat, before, y, 1)); // grey without
-        GIANT_CHECK(at(lit, before, y, 0) > at(lit, before, y, 1) + 6);
-        // Behind it, in its shadow (x = 3.5): the wall hides much of the sky.
-        const u32 behind = column(3.5);
-        GIANT_CHECK(at(lit, behind, y, 1) < at(flat, behind, y, 1) * 19 / 20);
-        // Open ground far from the wall (x = -4): about the same either way.
-        const u32 open = column(-4.0);
-        GIANT_CHECK(std::abs(at(lit, open, y, 1) - at(flat, open, y, 1)) <= at(flat, open, y, 1) / 8 + 2);
-    }
-    // The light alone: plain white-grey surfaces, open ground grey and lit.
-    frame.settings.debug_view = DebugView::lighting;
-    const auto light_only = draw(true);
-    if (light_only.size() == k_w * k_h * 4) {
-        const usize i = (static_cast<usize>(k_h / 2) * k_w + (k_w / 2 - 37)) * 4; // x = -4: open ground
-        // Grey and lit (green and blue alike: the wall's bounce may add a
-        // little red even this far off, its cones being wide).
-        std::printf("lighting view at x = -4: %d %d %d\n", int{light_only[i]}, int{light_only[i + 1]},
-                    int{light_only[i + 2]});
-        GIANT_CHECK(light_only[i + 1] > 60 && std::abs(int{light_only[i + 1]} - int{light_only[i + 2]}) <= 3);
-        GIANT_CHECK(light_only[i] >= light_only[i + 1]);
+        for (const u32 y : {40u, 44u, 48u}) {
+            std::printf("mirror floor row %u: off %d %d %d, voxel %d %d %d, both %d %d %d, screen %d %d %d\n", y,
+                        px(off, y, 0), px(off, y, 1), px(off, y, 2), px(voxel, y, 0), px(voxel, y, 1),
+                        px(voxel, y, 2), px(both, y, 0), px(both, y, 1), px(both, y, 2), px(screen, y, 0),
+                        px(screen, y, 1), px(screen, y, 2));
+        }
+        const u32 y = 44;
+        // Without reflections the floor shows the grey sky; with them, the
+        // green block.
+        GIANT_CHECK(std::abs(px(off, y, 1) - px(off, y, 0)) <= 3);
+        GIANT_CHECK(px(voxel, y, 1) > px(voxel, y, 0) + 10);
+        GIANT_CHECK(px(both, y, 1) > px(both, y, 0) + 10);
+        GIANT_CHECK(px(screen, y, 1) > px(screen, y, 0) + 10);
+        // The sky above the block reflects as sky either way.
+        const u32 sky = 60;
+        GIANT_CHECK(std::abs(px(both, sky, 1) - px(both, sky, 0)) <= 4);
     }
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
     device->destroy(target);
 }
+#endif

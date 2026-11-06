@@ -492,6 +492,18 @@ def gi_gate(tool, call, check):
     last = settle()
     check(last["gi"]["on"] and last["gi"]["waiting"] == 0 and last["gi"]["lit"] > 0,
           f"the voxel world is lit, new bricks first, then in turn, got {last['gi']}")
+    # N2 part 5b: reflections, from the lit voxels and from last frame's image.
+    check(last["reflections"]["voxel"] and last["reflections"]["screen"],
+          f"glossy surfaces reflect the voxel world and the screen, got {last['reflections']}")
+    tool("set_render_settings", {"screen_space_reflections": False})
+    last = settle()
+    check(last["reflections"]["voxel"] and not last["reflections"]["screen"],
+          f"screen-space reflections turn off on their own, got {last['reflections']}")
+    tool("set_render_settings", {"reflections": False, "screen_space_reflections": True})
+    last = settle()
+    check(not last["reflections"]["voxel"] and not last["reflections"]["screen"],
+          f"reflections turn off, got {last['reflections']}")
+    tool("set_render_settings", {"reflections": True})
     tool("set_render_settings", {"debug_view": "lighting"})
     check(tool("get_render_settings")["debug_view"] == "lighting", "the lighting view can be picked")
     last = settle()
@@ -646,6 +658,8 @@ def main() -> int:
 
         settings = tool("get_render_settings")
         check(settings["gi"] is True and settings["gi_bricks_per_frame"] == 256, "global illumination is on by default")
+        check(settings["reflections"] is True and settings["screen_space_reflections"] is True,
+              "reflections are on by default")
         # Lighting the voxel world is heavy on the software GPU CI runs on:
         # off for the other gates (the renderer's own d3d12 test checks the
         # light itself), on in gi_gate.

@@ -112,7 +112,15 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   up, so there is no noise and nothing smeared over frames. The "Lighting
   only" view shows the light alone. "Global illumination" in the Engine
   panel (or `set_render_settings` `gi`) turns it off; `last_frame.gi` shows
-  the work. Part 5b adds reflections.
+  the work.
+- Part 5b (done): reflections. Glossy surfaces (wet streets, metal, glass,
+  polished floors) reflect what is around them: sharply, from the image
+  itself, where what they reflect is on screen, and from the lit voxel
+  world everywhere else (blurrier the rougher the surface), with the sky
+  past it. Nothing is smeared over frames. "Reflections" and
+  "Screen-space reflections" in the Engine panel (or `set_render_settings`
+  `reflections`, `screen_space_reflections`) turn them off;
+  `last_frame.reflections` shows which were traced.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

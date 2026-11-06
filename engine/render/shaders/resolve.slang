@@ -17,6 +17,13 @@
 // up in the lit voxel world (voxel_gi.slang), in place of the flat sky
 // and ground colours; it also shuts the sky out of reflections where the
 // sky is hidden.
+//
+// Reflections, on glossy surfaces: sharp ones from the screen, where what
+// the mirror direction meets is in view (a ray against the depth buffer,
+// the colour taken from last frame's image, where that point was), and a
+// cone through the lit voxel world elsewhere and for the rougher ones
+// (voxel_gi.slang), the sky past it. The second target keeps this frame's
+// radiance, before exposure, for the next frame's reflections.
 #include "common.slang"
 #include "decals.slang"
 #include "voxel_march.slang"
@@ -65,6 +72,13 @@ struct Extras {
     uint far_on;      // 1: the far field marches
     uint gi_on;       // 1: global illumination from the voxel light
     uint gi_light;    // write descriptor of the voxel light pool
+    uint depth;       // read descriptor of the scene depth
+    uint reflect_on;  // bit 0: voxel cone reflections; bit 1: screen-space ones
+    uint history;     // read descriptor of last frame's radiance (a: distance, 0: nothing)
+    float prev_p00;   // last frame's projection
+    float prev_p11;
+    float3 prev_rows[3]; // last frame's camera-relative world to view
+    float3 prev_delta;   // this camera minus last frame's
 };
 
 Extras load_extras() {
@@ -103,6 +117,16 @@ Extras load_extras() {
     o.far_on = g.x;
     o.gi_on = g.y;
     o.gi_light = g.z;
+    o.depth = g.w;
+    const uint4 h = b.Load4(at + 128);
+    o.reflect_on = h.x;
+    o.history = h.y;
+    o.prev_p00 = asfloat(h.z);
+    o.prev_p11 = asfloat(h.w);
+    o.prev_rows[0] = asfloat(b.Load3(at + 144));
+    o.prev_rows[1] = asfloat(b.Load3(at + 160));
+    o.prev_rows[2] = asfloat(b.Load3(at + 176));
+    o.prev_delta = asfloat(b.Load3(at + 192));
     return o;
 }
 
@@ -265,9 +289,11 @@ float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 // ambient light, before exposure and tone mapping. `variance`: the
 // normal's change across the pixel (specular AA); `sun`: how much of the
 // sun reaches it (shadows); `bounce`: global illumination's light there
-// (rgb) and how far to trust it (a; 0: the flat sky and ground colours).
+// (rgb) and how far to trust it (a; 0: the flat sky and ground colours);
+// `reflection`: the light traced along the mirror direction (rgb) and how
+// much of the ambient reflection it replaces (a).
 float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
-             float sun, float4 bounce) {
+             float sun, float4 bounce, float4 reflection) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
@@ -305,6 +331,7 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
         ambient_specular *= saturate(luminance(gi) / max(luminance(ambient_diffuse), 1e-4));
         ambient_diffuse = gi;
     }
+    ambient_specular = lerp(ambient_specular, reflection.rgb, reflection.a);
     const float3 env_fresnel = f0 + (max(1.0 - roughness, f0) - f0) * pow(1.0 - n_dot_v, 5.0);
     color += diffuse_color * ambient_diffuse + env_fresnel * ambient_specular * (1.0 - 0.7 * roughness);
     return color + emissive;
@@ -316,8 +343,169 @@ static const float k_far_roughness = 0.8;
 static const float3 k_lighting_albedo = float3(0.75, 0.75, 0.75);
 static const uint k_view_lighting = 5;
 
+// --- Reflections -----------------------------------------------------------
+
+// Rougher than this, the voxel cone's reflection fades out (the hemisphere
+// colours, dimmed by global illumination, stay); the screen's, sharp as a
+// mirror, fade out sooner.
+static const float k_voxel_reflection_rough = 0.6;
+static const float k_screen_reflection_rough = 0.4;
+static const float k_reflection_fade = 0.15;
+static const uint k_ssr_steps = 32;
+static const uint k_ssr_refine = 6;
+static const float k_ssr_distance = 200.0; // metres, at most
+
+float2 ndc_to_uv(float2 ndc) { return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5); }
+
+// How far a screen position is from leaving the screen, faded over a
+// tenth of it (0 at the edge, 1 well inside).
+float edge_fade(float2 uv) {
+    const float2 e = min(uv, 1.0 - uv);
+    return saturate(min(e.x, e.y) * 10.0);
+}
+
+// How thick what the depth buffer holds is taken to be (metres at a
+// distance): a ray this far behind a surface still hits it.
+float ssr_thickness(float z) { return 0.3 + 0.02 * z; }
+
+// A sharp reflection from the screen: the ray from `p` (camera-relative,
+// already off the surface) along `r` (unit) against the depth buffer, and
+// where it hits, that point's light in last frame's image. rgb: the light,
+// a: how much to trust it (0: missed, off screen, or not seen last frame).
+float4 screen_reflection(Frame f, Extras e, float3 p, float3 r) {
+    Texture2D<float> depth = read_texture_float(e.depth);
+    const float3 vo = float3(dot(f.view_rows[0].xyz, p), dot(f.view_rows[1].xyz, p), dot(f.view_rows[2].xyz, p));
+    const float3 vr = float3(dot(f.view_rows[0].xyz, r), dot(f.view_rows[1].xyz, r), dot(f.view_rows[2].xyz, r));
+    // Rays coming back at the camera meet what is behind it: faded out.
+    const float towards = saturate((0.6 - vr.z) * 2.5);
+    if (towards <= 0.0 || -vo.z <= f.near_plane) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    float len = k_ssr_distance;
+    if (vr.z > 0.0) {
+        len = min(len, (-vo.z - f.near_plane * 1.5) / vr.z); // stays in front of the camera
+    }
+    if (len <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    const float2 size = float2(f.width, f.height);
+    float before = 0.0;
+    float t_hit = -1.0;
+    [loop]
+    for (uint i = 0; i < k_ssr_steps; ++i) {
+        const float k = float(i + 1) / float(k_ssr_steps);
+        const float t = len * k * k; // finer near the surface
+        const float3 q = vo + vr * t;
+        const float z = -q.z;
+        const float2 uv = ndc_to_uv(float2(f.p00 * q.x, f.p11 * q.y) / z);
+        if (any(uv < 0.0) || any(uv >= 1.0)) {
+            break; // left the screen
+        }
+        const float d = depth.Load(int3(int2(uv * size), 0));
+        const float zs = d > 0.0 ? f.near_plane / d : 3.0e38;
+        if (z > zs) {
+            // Behind what the screen shows: find where it went in.
+            float lo = before;
+            float hi = t;
+            [loop]
+            for (uint j = 0; j < k_ssr_refine; ++j) {
+                const float mid = 0.5 * (lo + hi);
+                const float3 m = vo + vr * mid;
+                const float2 muv = ndc_to_uv(float2(f.p00 * m.x, f.p11 * m.y) / -m.z);
+                const float md = depth.Load(int3(int2(saturate(muv) * (size - 1.0)), 0));
+                const float mzs = md > 0.0 ? f.near_plane / md : 3.0e38;
+                if (-m.z > mzs) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            const float3 m = vo + vr * hi;
+            const float2 muv = ndc_to_uv(float2(f.p00 * m.x, f.p11 * m.y) / -m.z);
+            const float md = depth.Load(int3(int2(saturate(muv) * (size - 1.0)), 0));
+            const float mzs = md > 0.0 ? f.near_plane / md : 3.0e38;
+            if (-m.z - mzs < ssr_thickness(mzs)) {
+                t_hit = hi;
+                break;
+            }
+            // Passed behind something thin: go on.
+        }
+        before = t;
+    }
+    if (t_hit < 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    // Where the point was last frame, and what the image showed there.
+    const float3 hit = p + r * t_hit;
+    const float3 was = hit + e.prev_delta;
+    const float3 pv = float3(dot(e.prev_rows[0], was), dot(e.prev_rows[1], was), dot(e.prev_rows[2], was));
+    if (-pv.z <= f.near_plane) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    const float2 puv = ndc_to_uv(float2(e.prev_p00 * pv.x, e.prev_p11 * pv.y) / -pv.z);
+    if (any(puv < 0.0) || any(puv > 1.0)) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    const float4 seen = read_texture(e.history).SampleLevel(get_sampler(k_sampler_point_clamp), puv, 0.0);
+    // Something else was there last frame (it was hidden, or has moved).
+    const float dist = length(was);
+    if (seen.a <= 0.0 || abs(seen.a - dist) > ssr_thickness(dist)) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    const float3 hv = vo + vr * t_hit;
+    const float2 huv = ndc_to_uv(float2(f.p00 * hv.x, f.p11 * hv.y) / -hv.z);
+    return float4(seen.rgb, towards * edge_fade(huv) * edge_fade(puv));
+}
+
+// The light reflected along the mirror direction at a surface point, and
+// how much of the ambient reflection it replaces.
+float4 trace_reflections(Frame f, Extras e, VoxelWorld w, float3 world, float3 n, float rough, float pixel_size) {
+    const float voxel_weight =
+        (e.reflect_on & 1u) != 0u ? saturate((k_voxel_reflection_rough - rough) / k_reflection_fade) : 0.0;
+    const float screen_weight =
+        (e.reflect_on & 2u) != 0u ? saturate((k_screen_reflection_rough - rough) / k_reflection_fade) : 0.0;
+    if (voxel_weight <= 0.0 && screen_weight <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    const float3 v = safe_normalize(-world, n);
+    const float3 r = reflect(-v, n);
+    float3 color = float3(0.0, 0.0, 0.0);
+    float weight = 0.0;
+    if (voxel_weight > 0.0) {
+        const float roughness = clamp(rough, 0.045, 1.0);
+        const float cone_tan = clamp(roughness * roughness, 0.03, 0.577);
+        VoxelWorld all_voxels = w;
+        all_voxels.stand_ins = 0u; // everything reflects
+        color = trace_reflection(all_voxels, write_buffer(e.gi_light), f, world, n, r, cone_tan).rgb;
+        weight = voxel_weight;
+    }
+    if (screen_weight > 0.0) {
+        // Off the surface by a couple of pixels, so it does not hit itself.
+        const float4 s = screen_reflection(f, e, world + n * (2.0 * pixel_size), r);
+        const float use = s.a * screen_weight;
+        if (use > 0.0) {
+            // Where the voxels gave nothing, the screen alone.
+            color = weight > 0.0 ? lerp(color, s.rgb, use) : s.rgb;
+            weight = weight > 0.0 ? lerp(weight, 1.0, use) : use;
+        }
+    }
+    return float4(color, weight);
+}
+
+struct Output {
+    float4 color : SV_Target0;    // tone mapped, for the screen
+    float4 radiance : SV_Target1; // before exposure; a: the distance (0: nothing drawn)
+};
+
+Output finish(float3 color, Frame f, float dist) {
+    Output o;
+    o.color = float4(tone_map(color * f.exposure), 1.0);
+    o.radiance = float4(min(color, float3(60000.0, 60000.0, 60000.0)), dist);
+    return o;
+}
+
 [shader("pixel")]
-float4 ps_main(float4 position : SV_Position) : SV_Target {
+Output ps_main(float4 position : SV_Position) {
     const uint2 pixel = uint2(position.xy);
     const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
     const Frame f = load_frame(push.frame, push.frame_offset);
@@ -368,13 +556,16 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
                 }
                 const float3 albedo = lighting_view ? k_lighting_albedo : unpack_color(packed);
                 const float3 color = shade(f, world, vn, albedo, k_far_roughness, 0.0, float3(0.0, 0.0, 0.0), 0.0,
-                                           sun, bounce);
-                return float4(tone_map(color * f.exposure), 1.0);
+                                           sun, bounce, float4(0.0, 0.0, 0.0, 0.0));
+                return finish(color, f, t);
             }
         }
     }
     if (!hit) {
-        return float4(push.background.rgb, 1.0);
+        Output o;
+        o.color = float4(push.background.rgb, 1.0);
+        o.radiance = float4(0.0, 0.0, 0.0, 0.0);
+        return o;
     }
     const float3 n = s.n;
     const float3 world = s.world;
@@ -385,7 +576,10 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
                          : f.debug_view == 2 ? level_color(s.level)
                                              : hash_color(s.cluster * 131u + vis.y);
         const float shade_amount = 0.35 + 0.65 * saturate(dot(n, f.sun_direction.xyz) * 0.5 + 0.5);
-        return float4(col * shade_amount, 1.0);
+        Output o;
+        o.color = float4(col * shade_amount, 1.0);
+        o.radiance = float4(0.0, 0.0, 0.0, 0.0);
+        return o;
     }
 
     // The instance's material (the CPU keeps the index in range), then
@@ -411,6 +605,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     if (extras.gi_on != 0) {
         bounce = voxel_bounce(w, write_buffer(extras.gi_light), world, n);
     }
-    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce);
-    return float4(tone_map(color * f.exposure), 1.0);
+    const float4 reflection = trace_reflections(f, extras, w, world, n, rough, pixel_size);
+    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce, reflection);
+    return finish(color, f, length(world));
 }

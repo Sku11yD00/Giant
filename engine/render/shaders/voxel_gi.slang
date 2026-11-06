@@ -290,3 +290,65 @@ float4 voxel_bounce(VoxelWorld w, RWByteAddressBuffer light, float3 p, float3 n)
     }
     return float4(color, trust);
 }
+
+// --- Reflections ----------------------------------------------------------
+
+static const uint k_reflection_steps = 48;
+
+// The light reflected towards a glossy surface point (camera-relative,
+// normal `n`): a cone through the lit voxel world along the mirror
+// direction `dir`, as wide as the highlight (`cone_tan`, from roughness).
+// Samples are at least a sixth of their distance wide, so steps grow by an
+// eighth or more and 48 reach a hundred metres and more; sharper detail
+// comes from the screen (resolve.slang). The surface's own voxels (centres
+// within a voxel above it) are left out. Whatever gets through comes from
+// the sky. rgb: the light; a: how much of it the voxels gave (0: all sky).
+float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 p, float3 n, float3 dir,
+                        float cone_tan) {
+    ByteAddressBuffer levels = read_buffer(w.levels);
+    ByteAddressBuffer pool = read_buffer(w.pool);
+    ByteAddressBuffer table = read_buffer(w.table);
+    const int n_axis = int(w.bricks_per_axis);
+    const uint count = min(w.level_count, k_max_levels);
+    uint first = count;
+    for (uint i = 0; i < count; ++i) {
+        if (inside_window(load_level(levels, w.levels_offset, i), p, n_axis) >= 0.0) {
+            first = i;
+            break;
+        }
+    }
+    if (first == count || n_axis <= 0) {
+        return float4(sky_radiance(f, dir), 0.0);
+    }
+    const float voxel0 = load_level(levels, w.levels_offset, 0).brick_size / 8.0;
+    const float own = load_level(levels, w.levels_offset, first).brick_size / 8.0;
+    const float4 ground = float4(n, dot(n, p) + 0.5 * own);
+    float3 color = float3(0.0, 0.0, 0.0);
+    float a = 0.0;
+    float t = 1.5 * own;
+    for (uint s = 0; s < k_reflection_steps && a < 0.95; ++s) {
+        const float wanted_size = max(t * cone_tan, t / 6.0);
+        const float wanted = ceil(log2(max(wanted_size / voxel0, 1.0)));
+        const uint level = min(max(uint(wanted), first), count - 1u);
+        uint used;
+        bool filled;
+        uint index;
+        uint voxel;
+        float3 centre;
+        if (!voxel_at(w, levels, pool, table, p + dir * t, level, used, filled, index, voxel, centre)) {
+            break; // past the coarsest window
+        }
+        const float size = load_level(levels, w.levels_offset, used).brick_size / 8.0;
+        if (filled) {
+            filled = dot(ground.xyz, centre) - ground.w >= 0.5 * size;
+        }
+        if (filled) {
+            const uint packed = pool.Load(index * k_brick_bytes + 64 + voxel * 4);
+            const uint lw = light.Load((index * k_brick_voxels + voxel) * 4);
+            color += (1.0 - a) * k_cone_alpha * voxel_radiance(f, packed, lw);
+            a += (1.0 - a) * k_cone_alpha;
+        }
+        t += max(t * cone_tan, size * 0.75);
+    }
+    return float4(color + (1.0 - a) * sky_radiance(f, dir), a);
+}

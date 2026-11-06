@@ -450,7 +450,7 @@ as standing still.
   brick before a window's edge it blends with the next level up, so the
   windows moving show no seams. The light replaces the flat sky and ground
   colours for diffuse, and dims the sky in reflections as much as the sky
-  is hidden (until part 5b's reflections). With nothing lit around (a
+  is hidden (for surfaces too rough for traced reflections). With nothing lit around (a
   brick just built, things the voxel world does not hold) it falls back to
   the flat colours. Far voxels use their own light word.
 - Lit views (and the voxel view, which then shows voxels with their own
@@ -465,6 +465,42 @@ as standing still.
   coarse voxels are fuller than what they hold, so cones far out see a
   little too much blocked; emissive surfaces do not light the voxels yet;
   light lags changes by up to a round of the pool.
+
+## Reflections
+
+Glossy surfaces reflect along the mirror direction, traced in shading
+(`resolve.slang`, `voxel_gi.slang`); nothing is accumulated over frames,
+so reflections are as sharp moving as standing still.
+
+- Voxel cones (`trace_reflection`, with `gi` on): a cone through the lit
+  voxel world along the mirror direction, as wide as the highlight (tan
+  of the half angle from roughness squared, 0.03 to 0.577). Samples are at
+  least a sixth of their distance wide and steps an eighth of it or more,
+  so 48 samples reach a hundred metres and more; what they meet shines
+  with its light word (as GI's cones do), whatever gets through is the
+  sky. The surface's own voxels are left out (a plane half a voxel above
+  it). Full weight up to roughness 0.45, none past 0.6; rougher surfaces
+  keep the hemisphere colours dimmed by GI.
+- Screen space (`screen_reflection`, `screen_space_reflections`): a ray
+  against this frame's depth buffer (32 steps, closer together near the
+  surface, out to 200 m, then 6 halvings), surfaces taken to be
+  0.3 m + 2% of their distance thick. Where it hits, the point is
+  reprojected into last frame's radiance, the second target shading
+  writes (rgba16 float before exposure, alpha the distance from that
+  frame's camera): if the distance there matches, that is the reflected
+  light. It fades out at the screen's edges, for rays coming back at the
+  camera, and from roughness 0.25 to 0.4 (mirror sharp: no blur yet); the
+  voxel cone fills the rest. Last frame's image counts only if it was the
+  same view at the same size, shaded to the end.
+- Two radiance targets (8 bytes a pixel each), this frame's and last
+  frame's in turn. `RenderStats::reflections` and `screen_reflections`
+  (`last_frame.reflections.voxel` and `.screen` over MCP) say which were
+  traced.
+- Known limits: screen reflections lag a frame (moving things show a
+  frame late in mirrors) and are mirror sharp up to their roughness
+  limit; voxel reflections are only as fine as the voxels they meet
+  (coarse further out), miss emissive light and leak through thin walls;
+  far voxels (the far field) do not reflect.
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 

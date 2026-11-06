@@ -598,6 +598,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (stats.gi) {
             ImGui::Text("GI: %u bricks lit, %u waiting", stats.gi_lit, stats.gi_waiting);
         }
+        if (stats.reflections || stats.screen_reflections) {
+            ImGui::Text("Reflections: %s%s", stats.reflections ? "voxel cones" : "",
+                        stats.screen_reflections ? (stats.reflections ? " + screen" : "screen") : "");
+        }
         ImGui::Text("Materials: %u shared, decals: %u in view", stats.materials, stats.decals);
         if (stats.decal_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many decals on screen: some not drawn");
@@ -671,6 +675,16 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         int gi_bricks = static_cast<int>(r.gi_bricks_per_frame);
         if (ImGui::SliderInt("GI bricks a frame", &gi_bricks, 1, 4096, "%d", ImGuiSliderFlags_Logarithmic)) {
             run("set_render_settings", {{"gi_bricks_per_frame", std::clamp(gi_bricks, 1, 4096)}});
+        }
+        ImGui::EndDisabled();
+        bool reflections = r.reflections;
+        if (ImGui::Checkbox("Reflections", &reflections)) {
+            run("set_render_settings", {{"reflections", reflections}});
+        }
+        ImGui::BeginDisabled(!r.reflections);
+        bool ssr = r.screen_space_reflections;
+        if (ImGui::Checkbox("Screen-space reflections", &ssr)) {
+            run("set_render_settings", {{"screen_space_reflections", ssr}});
         }
         ImGui::EndDisabled();
         ImGui::SeparatorText("C# scripts");
