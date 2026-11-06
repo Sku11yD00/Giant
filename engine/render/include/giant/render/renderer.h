@@ -49,6 +49,7 @@ struct CullPush;
 class GeometryStreamer; // src/streaming.h
 class VoxelScene;       // src/voxel_scene.h
 class ShadowPages;      // src/shadow_pages.h
+struct ShadowWindows;
 struct DecalBins;       // src/decals.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
@@ -402,6 +403,7 @@ private:
     rhi::BufferHandle m_shadow_requests; // a bit per page slot, written by shading
     rhi::BufferHandle m_shadow_readback[3];
     u64 m_shadow_readback_frame[3] = {~u64{0}, ~u64{0}, ~u64{0}};
+    std::unique_ptr<ShadowWindows[]> m_shadow_readback_windows; // the windows each slot's requests were made in
     u64 m_shadow_requests_taken = ~u64{0};
     bool m_shadows_on = false; // this frame
     bool m_shadows_were_on = false;

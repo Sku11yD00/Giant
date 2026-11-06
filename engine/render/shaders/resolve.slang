@@ -89,6 +89,7 @@ Extras load_extras() {
     o.shadows.depth_scale = x.w;
     o.shadows.y = y.xyz;
     o.shadows.z = z.xyz;
+    o.shadows.depth_offset = z.w;
     return o;
 }
 

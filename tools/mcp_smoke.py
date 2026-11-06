@@ -419,13 +419,16 @@ def shadow_gate(tool, call, check):
     tool("set_camera", {"position": [0, 12, 6], "look_at": [0, 0, 0]})
 
     def settle():
-        last = None
+        # Requests take a few frames to come back: quiet three samples in a row.
+        last, quiet = None, 0
         for _ in range(60):
             for _ in range(10):
                 call("ping")
             last = tool("get_render_settings")["last_frame"]
             shadows = last["shadows"]
-            if not real or (shadows["pages"] > 0 and shadows["waiting"] == 0 and shadows["drawn"] == 0):
+            still = not shadows["on"] or (shadows["pages"] > 0 and shadows["waiting"] == 0 and shadows["drawn"] == 0)
+            quiet = quiet + 1 if still else 0
+            if not real or quiet >= 3:
                 return last
         return last
 

@@ -234,6 +234,9 @@ GIANT_TEST("shadow pages: a full pool gives the page used longest ago") {
     s.request(all.bits);
     GIANT_CHECK(s.stats().resident == 3);
     GIANT_CHECK(s.stats().missing == 1);
+    // The pages already there and asked for keep their room: the new one goes without.
+    GIANT_CHECK(s.entry_at(0, spots[1]) == ShadowPages::k_no_page);
+    GIANT_CHECK(has(s.entry_at(0, spots[2]), ShadowPages::k_drawn_bit));
 }
 
 GIANT_TEST("shadow pages: budgets draw new pages first, then coarse levels, at least one") {
@@ -380,4 +383,89 @@ GIANT_TEST("shadow pages: a caster that starts or stops being drawn dirties its 
     casts[1] = 1;
     d = frame();
     GIANT_CHECK(d.size() == 1 && has(s.entry_at(0, instances[1].position), ShadowPages::k_draw_bit));
+}
+
+GIANT_TEST("shadow pages: every level gets its turn however often things change") {
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    Requests r(s);
+    for (u32 level = 0; level < 6; ++level) r.ask(s, level, camera);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(64).size() == 6);
+    // Everything changes every frame (a giant walking through), one page a frame.
+    std::vector<u32> drawn(6, 0);
+    for (int f = 0; f < 6; ++f) {
+        s.begin_frame(camera, k_up_sun);
+        s.invalidate_all();
+        s.request(r.bits);
+        for (const ShadowPages::Draw& d : s.plan(1)) ++drawn[d.level];
+    }
+    for (u32 level = 0; level < 6; ++level) GIANT_CHECK(drawn[level] == 1);
+}
+
+GIANT_TEST("shadow pages: pages not asked for lately wait; old requests for moved windows are dropped") {
+    ShadowPages s;
+    DVec3 camera{0.0, 0.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    Requests r(s);
+    r.ask(s, 0, camera);
+    s.request(r.bits);
+    s.plan(16);
+    for (int f = 0; f < 40; ++f) s.begin_frame(camera, k_up_sun); // not asked for since
+    s.invalidate_all();
+    GIANT_CHECK(s.plan(16).empty() && s.stats().waiting == 0);
+    s.request(r.bits); // asked for again: drawn
+    GIANT_CHECK(s.plan(16).size() == 1);
+    // Requests made while the window was elsewhere: the slot holds another page now.
+    const ShadowPages::Windows before = s.windows();
+    Requests here(s);
+    here.ask(s, 0, camera + DVec3{0.0, 0.0, 6.5}); // light x = -6.5: near the window's low edge
+    camera = {0.0, 0.0, -9.0};                     // light x +9: the window moves by 9 pages
+    s.begin_frame(camera, k_up_sun);
+    const u32 before_resident = s.stats().resident;
+    s.request(here.bits, &before);
+    GIANT_CHECK(s.stats().resident == before_resident); // dropped, not taken for the page now in that slot
+    const ShadowPages::Windows now = s.windows();
+    Requests fresh(s);
+    fresh.ask(s, 0, camera);
+    s.request(fresh.bits, &now);
+    GIANT_CHECK(s.stats().resident == before_resident + 1);
+}
+
+GIANT_TEST("shadow pages: depths come from an anchor; tiny sun moves are not taken up") {
+    ShadowPages s;
+    const Vec3 sun = normalize_or_zero(Vec3{0.0f, 0.7f, 0.7f});
+    DVec3 camera{0.0, 0.0, 0.0};
+    s.begin_frame(camera, sun);
+    GIANT_CHECK_NEAR(s.depth_offset(camera), 0.0, 1e-12);
+    Requests r(s);
+    r.ask(s, 0, camera);
+    s.request(r.bits);
+    s.plan(16);
+    // Walking towards the sun: depths keep their anchor, cached pages stay.
+    camera = camera + DVec3{sun.x, sun.y, sun.z} * 3.0;
+    s.begin_frame(camera, sun);
+    GIANT_CHECK_NEAR(s.depth_offset(camera), 3.0 / 40000.0, 1e-7); // 3 m nearer the sun
+    // A tenth of a degree: kept as it was.
+    const float a = 0.1f * k_pi / 180.0f;
+    s.begin_frame(camera, normalize_or_zero(Vec3{0.0f, std::cos(0.785398f + a), std::sin(0.785398f + a)}));
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16).empty());
+    // Half a degree: every page reads as missing until drawn again.
+    const float b = 0.5f * k_pi / 180.0f;
+    s.begin_frame(camera, normalize_or_zero(Vec3{0.0f, std::cos(0.785398f + b), std::sin(0.785398f + b)}));
+    s.request(r.bits);
+    GIANT_CHECK(!has(s.entry_at(0, camera), ShadowPages::k_drawn_bit));
+    GIANT_CHECK(!s.plan(16).empty());
+    // Past a quarter of the depth range from the anchor: a new anchor, pages drawn again.
+    for (int f = 0; f < 3; ++f) {
+        s.begin_frame(camera, normalize_or_zero(Vec3{0.0f, std::cos(0.785398f + b), std::sin(0.785398f + b)}));
+        s.request(r.bits);
+        s.plan(16);
+    }
+    const ShadowPages::Basis& basis = s.basis();
+    const DVec3 far = camera - basis.z * 10001.0;
+    s.begin_frame(far, normalize_or_zero(Vec3{0.0f, std::cos(0.785398f + b), std::sin(0.785398f + b)}));
+    GIANT_CHECK_NEAR(s.depth_offset(far), 0.0, 1e-12);
 }

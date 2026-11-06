@@ -7,7 +7,8 @@
 // page, and where the page is not drawn yet falls back to coarser levels
 // (asking for each) until one is. Nothing drawn: lit.
 //
-// Depths: 0.5 - (light z) / depth range, larger nearer the sun; 0 is
+// Depths: 0.5 - (light z - anchor) / depth range, larger nearer the sun,
+// from a fixed anchor (cached pages stay right as the camera moves); 0 is
 // nothing (lit). Layouts: ShadowLevel and ResolveExtras in src/gpu_layout.h.
 #pragma once
 #include "common.slang"
@@ -31,6 +32,7 @@ struct Shadows {
     float3 y;
     float3 z;
     float depth_scale; // 1 / depth range
+    float depth_offset; // depths are 0.5 - z * depth_scale + depth_offset (from the CPU's anchor)
 };
 
 struct ShadowLevel {
@@ -65,6 +67,11 @@ uint shadow_slot(ShadowLevel l, int2 texel) {
 // Asks the CPU for a page (read back a few frames later). Most pixels ask
 // for a page already asked for: a plain read first spares the atomic.
 void shadow_request(Shadows s, uint level, uint slot) {
+    // Most of a wave asks for the same page: one lane asks for all.
+    const uint key = level * 256 + slot;
+    if (WaveActiveAllEqual(key) && !WaveIsFirstLane()) {
+        return;
+    }
     RWByteAddressBuffer r = write_buffer(s.requests);
     const uint at = (level * 8 + slot / 32) * 4;
     const uint bit = 1u << (slot % 32);
@@ -126,7 +133,11 @@ float sun_visibility(Shadows s, float3 world, float3 n, float3 l, float pixel_si
         if (entry == k_shadow_no_page || (entry & k_shadow_drawn_bit) == 0u) {
             continue; // not drawn yet: a coarser level stands in
         }
-        const float depth = 0.5 - dot(p, s.z) * s.depth_scale + lv.texel_size * (1.0 + 2.0 * tangent) * s.depth_scale;
+        // Past the far end of the depth range nothing is stored (0): kept
+        // at 0 there, so empty texels never shadow it.
+        const float depth = max(0.5 - dot(p, s.z) * s.depth_scale + s.depth_offset +
+                                    lv.texel_size * (1.0 + 2.0 * tangent) * s.depth_scale,
+                                0.0);
         // 3 x 3 texels with bilinear weights (16 taps): soft by a texel,
         // without the blocks of nearest-texel tests.
         const float2 start = uv - 0.5;

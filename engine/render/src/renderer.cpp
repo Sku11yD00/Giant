@@ -191,6 +191,7 @@ bool Renderer::init() {
     ShadowDesc shadow_desc;
     shadow_desc.pool_pages = m_desc.shadow_pages;
     m_shadows = std::make_unique<ShadowPages>(shadow_desc);
+    m_shadow_readback_windows = std::make_unique<ShadowWindows[]>(3);
 
     rhi::GraphicsPipelineDesc raster;
     raster.vertex = shaders::raster_vs();
@@ -874,6 +875,10 @@ void Renderer::plan_shadows(const FrameInput& frame, bool on) {
     m_shadows_on = on;
     if (!on) {
         m_shadows_were_on = false;
+        // Requests from before are not taken when shadows come back.
+        for (u64& tag : m_shadow_readback_frame) {
+            tag = ~u64{0};
+        }
         return;
     }
     m_shadows->begin_frame(frame.view.position, frame.lighting.sun_direction);
@@ -905,7 +910,7 @@ void Renderer::plan_shadows(const FrameInput& frame, bool on) {
         if (bytes != nullptr) {
             m_shadow_requests_cpu.resize(size_t{m_shadows->levels()} * (ShadowPages::k_slots / 32));
             std::memcpy(m_shadow_requests_cpu.data(), bytes, m_shadow_requests_cpu.size() * 4);
-            m_shadows->request(m_shadow_requests_cpu);
+            m_shadows->request(m_shadow_requests_cpu, &m_shadow_readback_windows[best]);
         }
     }
 }
@@ -964,6 +969,7 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
     const ShadowPages::Basis& b = m_shadows->basis();
     const double range = m_shadows->desc().depth_range;
     const DVec3 camera_light = m_shadows->to_light(frame.view.position);
+    const double depth_offset = m_shadows->depth_offset(frame.view.position);
     for (u32 level = 0; level < m_shadows->levels() && data.instance_count > 0; ++level) {
         i32 x0 = std::numeric_limits<i32>::max(), y0 = x0;
         i32 x1 = std::numeric_limits<i32>::min(), y1 = x1;
@@ -988,7 +994,9 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
         const double oy = double(wy) * page - camera_light.y;
         gpu::FrameConstants k = base;
         // Camera-relative world to the window's clip space: x right, y
-        // down the texel rows, depth 0.5 - z / range (larger: nearer the sun).
+        // down the texel rows, depth 0.5 - (z - anchor) / range (larger:
+        // nearer the sun; from a fixed anchor, so cached pages stay right
+        // as the camera moves).
         Mat4 m;
         const double sx = 2.0 / width;
         m.at(0, 0) = float(b.x.x * sx);
@@ -1002,14 +1010,14 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
         m.at(2, 0) = float(-b.z.x / range);
         m.at(2, 1) = float(-b.z.y / range);
         m.at(2, 2) = float(-b.z.z / range);
-        m.at(2, 3) = 0.5f;
+        m.at(2, 3) = float(0.5 + depth_offset);
         m.at(3, 0) = 0.0f;
         m.at(3, 1) = 0.0f;
         m.at(3, 2) = 0.0f;
         m.at(3, 3) = 1.0f;
         std::memcpy(k.view_proj, m.m, sizeof(k.view_proj));
         // Culling: the pages' rectangle across the light, and nothing
-        // nearer the sun than half the depth range.
+        // nearer the sun than half the depth range from the anchor (depth 1).
         const double lx0 = ox + double(x0 - wx) * page;
         const double lx1 = ox + double(x1 + 1 - wx) * page;
         const double ly0 = oy + double(y0 - wy) * page;
@@ -1024,7 +1032,7 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
         plane(1, -b.x, lx1);
         plane(2, b.y, -ly0);
         plane(3, -b.y, ly1);
-        plane(4, b.z, range * 0.5);
+        plane(4, b.z, range * (0.5 + depth_offset));
         // LOD by the texel: the error over a distance that never wins.
         constexpr float k_far = 1.0e7f;
         k.near_plane = k_far;
@@ -1486,7 +1494,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         };
         axis(extras.shadow_x, b.x, 1.0 / m_shadows->desc().depth_range);
         axis(extras.shadow_y, b.y, 0.0);
-        axis(extras.shadow_z, b.z, 0.0);
+        axis(extras.shadow_z, b.z, m_shadows->depth_offset(frame.view.position));
     }
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
@@ -1509,6 +1517,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.copy_buffer(m_shadow_readback[slot], 0, m_shadow_requests, 0,
                         u64{m_shadows->levels()} * (ShadowPages::k_slots / 8));
         m_shadow_readback_frame[slot] = frame_index;
+        m_shadow_readback_windows[slot] = m_shadows->windows();
     }
     if (antialias) {
         cmd.begin_timing("anti-aliasing");
@@ -1608,7 +1617,7 @@ void Renderer::copy_streaming_stats() {
     m_stats.far_culled = m_far_culled;
     const ShadowStats& sh = m_shadows->stats();
     m_stats.shadows = m_shadows_on;
-    m_stats.shadow_pages = sh.resident;
+    m_stats.shadow_pages = m_shadows_on ? sh.resident : 0u;
     m_stats.shadow_capacity = sh.capacity;
     m_stats.shadow_drawn = m_shadows_on ? sh.drawn : 0u;
     m_stats.shadow_waiting = m_shadows_on ? sh.waiting : 0u;

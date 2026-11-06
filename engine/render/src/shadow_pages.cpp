@@ -35,8 +35,8 @@ ShadowPages::ShadowPages(const ShadowDesc& desc) : m_desc(desc) {
     if (!(m_desc.depth_range > 0.0f) || !std::isfinite(m_desc.depth_range)) {
         m_desc.depth_range = ShadowDesc{}.depth_range;
     }
-    // The atlas is at most 128 x 128 pages (16384 texels a side).
-    m_desc.pool_pages = std::clamp<u32>(m_desc.pool_pages, 1u, 128u * 128u);
+    // At most 8192 pages (a 512 MiB atlas: 2^27 words, D3D12's largest raw view).
+    m_desc.pool_pages = std::clamp<u32>(m_desc.pool_pages, 1u, 8192u);
     m_atlas_pages = 1;
     while (m_atlas_pages * m_atlas_pages < m_desc.pool_pages) {
         ++m_atlas_pages;
@@ -67,6 +67,10 @@ ShadowPages::Basis ShadowPages::basis_for(const Vec3& sun_direction) {
     return {x, y, z};
 }
 
+double ShadowPages::depth_offset(const DVec3& camera) const {
+    return -(to_light(camera).z - m_anchor) / double(m_desc.depth_range);
+}
+
 DVec3 ShadowPages::to_light(const DVec3& world) const {
     return {dot(world, m_basis.x), dot(world, m_basis.y), dot(world, m_basis.z)};
 }
@@ -91,24 +95,60 @@ void ShadowPages::free_page(Page& p) {
 void ShadowPages::begin_frame(const DVec3& camera, const Vec3& sun_direction) {
     ++m_frame;
     m_stats.drawn = 0;
-    m_stats.missing = 0;
     for (Page& p : m_pages) {
         p.draw = false;
     }
-    if (!m_placed || !(sun_direction == m_sun)) {
+    // The sun is taken in steps of k_sun_step: a sun moving slowly (time of
+    // day) redraws the pages now and then, not every frame.
+    const DVec3 now = normalize_or_zero(to_d(sun_direction));
+    const DVec3 was = normalize_or_zero(to_d(m_sun));
+    if (!m_placed || !(dot(now, was) >= std::cos(k_sun_step))) {
         m_sun = sun_direction;
         m_basis = basis_for(sun_direction);
         if (m_placed) {
-            invalidate_all(); // every page sees the world from a new angle
+            // Every page sees the world from a new angle: its old content
+            // is of no use (light space turns about the world's origin), so
+            // it reads as missing until drawn again, coarse levels first.
+            for (Page& p : m_pages) {
+                if (p.physical != k_no_page) {
+                    p.drawn = false;
+                    mark_dirty(p);
+                }
+            }
         }
+        m_anchor_placed = false;
     }
     const DVec3 light = to_light(camera);
+    // Depths are measured from a fixed point along the light (not the
+    // camera, which moves while drawn pages stay), moved only when the
+    // camera has gone a quarter of the depth range from it.
+    if (!m_anchor_placed || std::fabs(light.z - m_anchor) > double(m_desc.depth_range) * 0.25) {
+        if (m_anchor_placed) {
+            for (Page& p : m_pages) {
+                if (p.physical != k_no_page) {
+                    p.drawn = false; // depths from the old anchor
+                    mark_dirty(p);
+                }
+            }
+        }
+        m_anchor = light.z;
+        m_anchor_placed = true;
+    }
     for (u32 level = 0; level < m_desc.levels; ++level) {
         const double size = page_size(level);
-        // The camera's page in the middle: at least 7.5 pages on every side.
+        Window& old = m_window[level];
+        // Kept while the camera stays within a page of the middle (at least
+        // 7 pages on every side), so a camera bobbing across a page edge
+        // does not move it back and forth.
+        const double cx = light.x / size - double(old.x);
+        const double cy = light.y / size - double(old.y);
+        const double half = double(k_pages_per_axis / 2);
+        if (m_placed && cx >= half - 1.0 && cx < half + 1.0 && cy >= half - 1.0 && cy < half + 1.0) {
+            continue;
+        }
+        // Moved: the camera's page in the middle (7.5 pages on every side).
         const Window w{page_floor(light.x / size + 0.5) - i32(k_pages_per_axis / 2),
                        page_floor(light.y / size + 0.5) - i32(k_pages_per_axis / 2)};
-        Window& old = m_window[level];
         if (m_placed && w.x == old.x && w.y == old.y) {
             continue;
         }
@@ -124,16 +164,28 @@ void ShadowPages::begin_frame(const DVec3& camera, const Vec3& sun_direction) {
     m_stats.resident = m_desc.pool_pages - u32(m_free.size());
 }
 
-void ShadowPages::request(std::span<const u32> bits) {
+ShadowPages::Windows ShadowPages::windows() const {
+    Windows w;
+    for (u32 level = 0; level < m_desc.levels; ++level) {
+        w.x[level] = m_window[level].x;
+        w.y[level] = m_window[level].y;
+    }
+    return w;
+}
+
+void ShadowPages::request(std::span<const u32> bits, const Windows* asked_in) {
     if (!m_placed) {
         return;
     }
-    // Pages that may make room, longest unused first (worked out when the
-    // pool first runs dry).
-    std::vector<u32> victims;
-    bool listed = false;
-    size_t next_victim = 0;
+    m_stats.missing = 0;
     const size_t words = std::min(bits.size(), size_t(m_desc.levels) * (k_slots / 32));
+    const i32 n = i32(k_pages_per_axis);
+    // The page a slot holds in a window.
+    const auto page_in = [n](i32 window, u32 slot_axis) { return window + wrap(i32(slot_axis) - window, n); };
+    // The requests asked for, as the windows are now: a slot whose page
+    // has changed since (the window moved) is dropped, not taken for the
+    // page now in its place.
+    m_asked.clear();
     for (size_t wi = 0; wi < words; ++wi) {
         u32 word = bits[wi];
         while (word != 0u) {
@@ -141,46 +193,70 @@ void ShadowPages::request(std::span<const u32> bits) {
             word &= word - 1u;
             const u32 level = u32(wi / (k_slots / 32));
             const u32 slot = u32(wi % (k_slots / 32)) * 32u + bit;
-            Page& p = page(level, slot);
-            if (p.physical != k_no_page) {
-                p.used = m_frame;
-                continue;
-            }
-            if (m_free.empty()) {
-                if (!listed) {
-                    listed = true;
-                    for (u32 i = 0; i < m_pages.size(); ++i) {
-                        if (m_pages[i].physical != k_no_page && m_pages[i].used < m_frame) {
-                            victims.push_back(i);
-                        }
-                    }
-                    std::sort(victims.begin(), victims.end(),
-                              [this](u32 a, u32 b) { return m_pages[a].used < m_pages[b].used; });
-                }
-                // A page asked for this time round is in use: skipped.
-                while (next_victim < victims.size() && m_pages[victims[next_victim]].used >= m_frame) {
-                    ++next_victim;
-                }
-                if (next_victim == victims.size()) {
-                    ++m_stats.missing;
+            if (asked_in != nullptr) {
+                const u32 sx = slot % k_pages_per_axis;
+                const u32 sy = slot / k_pages_per_axis;
+                if (page_in(asked_in->x[level], sx) != page_in(m_window[level].x, sx) ||
+                    page_in(asked_in->y[level], sy) != page_in(m_window[level].y, sy)) {
                     continue;
                 }
-                free_page(m_pages[victims[next_victim++]]);
             }
-            // The page the slot holds in the window as it is now.
-            const Window& w = m_window[level];
-            const i32 n = i32(k_pages_per_axis);
-            p.physical = m_free.back();
-            m_free.pop_back();
-            p.x = w.x + wrap(i32(slot % k_pages_per_axis) - w.x, n);
-            p.y = w.y + wrap(i32(slot / k_pages_per_axis) - w.y, n);
-            p.drawn = false;
-            p.dirty = true;
-            p.draw = false;
-            p.used = m_frame;
+            m_asked.push_back(level * k_slots + slot);
         }
     }
+    // First every resident page asked for is marked in use, so none of
+    // them is given up to make room for another.
+    for (const u32 i : m_asked) {
+        if (m_pages[i].physical != k_no_page) {
+            m_pages[i].used = m_frame;
+        }
+    }
+    // Pages that may make room, longest unused first (worked out when the
+    // pool first runs dry).
+    m_victims.clear();
+    bool listed = false;
+    size_t next_victim = 0;
+    for (const u32 i : m_asked) {
+        Page& p = m_pages[i];
+        if (p.physical != k_no_page) {
+            continue;
+        }
+        if (m_free.empty()) {
+            if (!listed) {
+                listed = true;
+                for (u32 j = 0; j < m_pages.size(); ++j) {
+                    if (m_pages[j].physical != k_no_page && m_pages[j].used < m_frame) {
+                        m_victims.push_back(j);
+                    }
+                }
+                std::sort(m_victims.begin(), m_victims.end(),
+                          [this](u32 x, u32 y) { return m_pages[x].used < m_pages[y].used; });
+            }
+            if (next_victim == m_victims.size()) {
+                ++m_stats.missing;
+                continue;
+            }
+            free_page(m_pages[m_victims[next_victim++]]);
+        }
+        const u32 level = i / k_slots;
+        const u32 slot = i % k_slots;
+        p.physical = m_free.back();
+        m_free.pop_back();
+        p.x = page_in(m_window[level].x, slot % k_pages_per_axis);
+        p.y = page_in(m_window[level].y, slot / k_pages_per_axis);
+        p.drawn = false;
+        p.draw = false;
+        p.used = m_frame;
+        mark_dirty(p);
+    }
     m_stats.resident = m_desc.pool_pages - u32(m_free.size());
+}
+
+void ShadowPages::mark_dirty(Page& p) {
+    if (!p.dirty) {
+        p.dirty = true;
+        p.dirty_since = m_frame;
+    }
 }
 
 void ShadowPages::invalidate(const DVec3& min, const DVec3& max) {
@@ -214,7 +290,7 @@ void ShadowPages::invalidate(const DVec3& min, const DVec3& max) {
             for (i32 x = x0; x <= x1; ++x) {
                 Page& p = page(level, slot_of(x, y));
                 if (p.physical != k_no_page) {
-                    p.dirty = true;
+                    mark_dirty(p);
                 }
             }
         }
@@ -224,42 +300,52 @@ void ShadowPages::invalidate(const DVec3& min, const DVec3& max) {
 void ShadowPages::invalidate_all() {
     for (Page& p : m_pages) {
         if (p.physical != k_no_page) {
-            p.dirty = true;
+            mark_dirty(p);
         }
     }
 }
 
 std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget) {
-    std::vector<u32> waiting;
+    // Only pages shading asked for lately: the rest stay dirty, and are
+    // drawn once asked for again (their content is not looked at).
+    m_waiting.clear();
     for (u32 i = 0; i < m_pages.size(); ++i) {
-        if (m_pages[i].physical != k_no_page && m_pages[i].dirty) {
-            waiting.push_back(i);
+        const Page& p = m_pages[i];
+        if (p.physical != k_no_page && p.dirty && p.used + k_recent_frames >= m_frame) {
+            m_waiting.push_back(i);
         }
     }
-    // Pages never drawn first (they read as missing), then coarse levels
-    // (they cover the most), then the ones used most recently.
+    // Pages never drawn first (they read as missing), coarse levels first
+    // among them (they cover the most); then the pages dirty longest, so
+    // every level gets its turn however often things change.
     const auto order = [this](u32 a, u32 b) {
         const Page& pa = m_pages[a];
         const Page& pb = m_pages[b];
         if (pa.drawn != pb.drawn) {
             return !pa.drawn;
         }
+        if (!pa.drawn) {
+            const u32 la = a / k_slots;
+            const u32 lb = b / k_slots;
+            if (la != lb) {
+                return la > lb;
+            }
+        } else if (pa.dirty_since != pb.dirty_since) {
+            return pa.dirty_since < pb.dirty_since;
+        }
         const u32 la = a / k_slots;
         const u32 lb = b / k_slots;
         if (la != lb) {
             return la > lb;
         }
-        if (pa.used != pb.used) {
-            return pa.used > pb.used;
-        }
         return a < b;
     };
-    const size_t count = std::min<size_t>(waiting.size(), std::max<u32>(budget, 1u));
-    std::partial_sort(waiting.begin(), waiting.begin() + std::ptrdiff_t(count), waiting.end(), order);
+    const size_t count = std::min<size_t>(m_waiting.size(), std::max<u32>(budget, 1u));
+    std::partial_sort(m_waiting.begin(), m_waiting.begin() + std::ptrdiff_t(count), m_waiting.end(), order);
     std::vector<Draw> out;
     out.reserve(count);
     for (size_t k = 0; k < count; ++k) {
-        const u32 i = waiting[k];
+        const u32 i = m_waiting[k];
         Page& p = m_pages[i];
         p.dirty = false;
         p.drawn = true;
@@ -267,7 +353,7 @@ std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget) {
         out.push_back({i / k_slots, i % k_slots, p.physical, p.x, p.y});
     }
     m_stats.drawn = u32(count);
-    m_stats.waiting = u32(waiting.size() - count);
+    m_stats.waiting = u32(m_waiting.size() - count);
     return out;
 }
 
@@ -346,7 +432,8 @@ void ShadowPages::track(std::span<const Instance> instances, std::span<const u8>
     m_meshes_version = meshes_version;
     const size_t limit = std::max<size_t>(256, std::max(instances.size(), m_casters.size()) / 8);
     // Boxes to dirty; past the limit, everything is.
-    std::vector<std::pair<DVec3, DVec3>> boxes;
+    std::vector<std::pair<DVec3, DVec3>>& boxes = m_boxes;
+    boxes.clear();
     bool all = false;
     const auto dirty = [&](const Caster& c) {
         if (!c.live || !c.casts || all) {

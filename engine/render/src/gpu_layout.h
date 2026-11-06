@@ -288,7 +288,7 @@ struct ResolveExtras {
     float shadow_texel;  // level 0's texel, metres
     float shadow_x[4];   // the light's axes (camera-relative dot products); x.w: 1 / depth range
     float shadow_y[4];
-    float shadow_z[4];
+    float shadow_z[4];   // z.w: the depth offset (depths from the CPU's anchor, ShadowPages::depth_offset)
 };
 static_assert(sizeof(ResolveExtras) == 112);
 

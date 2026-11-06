@@ -14,9 +14,10 @@
 // room in the pool and drawn. A drawn page stays as it is (cached) until
 // what casts onto it changes: a caster added, moved, changed or removed
 // dirties the pages under where it was and where it is; a new sun
-// direction dirties all of them. Drawing is budgeted: at most
-// `pages_per_frame` pages a frame, pages never drawn first, then coarse
-// levels first. A page not drawn yet reads as missing (the shader falls
+// direction (in steps of a quarter of a degree) dirties all of them and
+// they read as missing until drawn again. Drawing is budgeted: at most
+// `pages_per_frame` pages a frame, pages never drawn first (coarse levels
+// first), then those dirty longest; only pages asked for lately. A page not drawn yet reads as missing (the shader falls
 // back to a coarser level); a dirty one keeps its old content until it is
 // drawn again. When the pool is full, the page used longest ago makes room.
 //
@@ -30,6 +31,7 @@
 #include "giant/render/renderer.h"
 
 #include <functional>
+#include <utility>
 #include <span>
 #include <vector>
 
@@ -42,7 +44,7 @@ struct ShadowLevel;
 struct ShadowDesc {
     u32 levels = 12;            // 1 to 16
     float extent = 16.0f;       // level 0's width, metres (level 11: about 33 km)
-    u32 pool_pages = 1024;      // physical pages of 128 x 128 (the default: a 4096 x 4096 r32 atlas, 64 MiB)
+    u32 pool_pages = 1024;      // physical pages of 128 x 128 (the default: 64 MiB of depths; at most 8192)
     float depth_range = 40000.0f; // metres along the sun, centred on the camera
 };
 
@@ -52,6 +54,12 @@ struct ShadowStats {
     u32 drawn = 0;       // pages drawn this frame
     u32 waiting = 0;     // pages asked for or dirty, not drawn yet
     u32 missing = 0;     // pages asked for that found no room (pool full of pages in use)
+};
+
+// Each level's window (its minimum page).
+struct ShadowWindows {
+    i32 x[16] = {};
+    i32 y[16] = {};
 };
 
 class ShadowPages {
@@ -83,13 +91,24 @@ public:
     static Basis basis_for(const Vec3& sun_direction);
     const Basis& basis() const { return m_basis; }
     DVec3 to_light(const DVec3& world) const;
+    // Depths are 0.5 - (light z - anchor) / depth range (larger: nearer
+    // the sun), the anchor a fixed light z near the camera. For a point
+    // relative to the camera: 0.5 - z_rel / depth range + depth_offset.
+    double depth_offset(const DVec3& camera) const;
+    // Sun directions closer than this to the one in use are not taken up.
+    static constexpr double k_sun_step = 0.25 * 3.14159265358979323846 / 180.0;
 
     // Starts a frame: moves the windows with the camera (pages that leave
     // are freed) and, if the sun moved, dirties every page.
     void begin_frame(const DVec3& camera, const Vec3& sun_direction);
+    // The windows as they are now, to go with requests asked against them.
+    using Windows = ShadowWindows;
+    Windows windows() const;
     // The GPU's requests, a bit per slot, level after level (levels() * 8
-    // words), from a recent frame: read against the windows as they are now.
-    void request(std::span<const u32> bits);
+    // words), from a recent frame. With `asked_in` (the windows then),
+    // slots whose page has changed since are dropped; without, they are
+    // read against the windows as they are now.
+    void request(std::span<const u32> bits, const Windows* asked_in = nullptr);
     // Something casting shadows changed inside this world box: the pages
     // under it (on every level) are drawn again.
     void invalidate(const DVec3& min, const DVec3& max);
@@ -138,6 +157,7 @@ private:
         bool dirty = false; // to be drawn (again)
         bool draw = false;  // drawn this frame
         u64 used = 0;       // the frame it was last asked for
+        u64 dirty_since = 0; // the frame it became dirty
     };
     struct Window {
         i32 x = 0;
@@ -154,6 +174,9 @@ private:
     Page& page(u32 level, u32 slot) { return m_pages[level * k_slots + slot]; }
     const Page& page(u32 level, u32 slot) const { return m_pages[level * k_slots + slot]; }
     void free_page(Page& p);
+    void mark_dirty(Page& p);
+    // Dirty pages not asked for within this many frames wait to be asked again.
+    static constexpr u64 k_recent_frames = 30;
     bool in_window(u32 level, i32 x, i32 y) const;
     Caster caster_of(const Instance& in, const MeshLookup& meshes) const;
 
@@ -161,6 +184,8 @@ private:
     u32 m_atlas_pages = 0;
     Basis m_basis;
     Vec3 m_sun{};
+    double m_anchor = 0.0; // light z depths are measured from
+    bool m_anchor_placed = false;
     bool m_placed = false;
     u64 m_frame = 0;
     std::vector<Window> m_window;
@@ -169,6 +194,11 @@ private:
     std::vector<Caster> m_casters;
     u64 m_meshes_version = ~u64{0};
     ShadowStats m_stats;
+    // Scratch, kept to avoid allocating every frame.
+    std::vector<u32> m_asked;
+    std::vector<u32> m_victims;
+    std::vector<u32> m_waiting;
+    std::vector<std::pair<DVec3, DVec3>> m_boxes;
 };
 
 } // namespace giant::render
