@@ -102,6 +102,7 @@ struct Instance {
     uint mesh;
     uint material;   // into the frame's material table
     float max_scale; // largest absolute axis scale: bounds and errors grow by it
+    bool always_mesh; // never left to the far field (terrain tiles)
 };
 static const uint k_instance_bytes = 64;
 
@@ -110,7 +111,8 @@ Instance load_instance(ByteAddressBuffer b, uint at) {
     [unroll] for (uint r = 0; r < 3; ++r) { i.model[r] = load4(b, at + r * 16); }
     const uint4 tail = b.Load4(at + 48);
     i.mesh = tail.x;
-    i.material = tail.y;
+    i.material = tail.y & 0x7FFFFFFFu; // the top bit is always_mesh (gpu::k_always_mesh_bit)
+    i.always_mesh = (tail.y & 0x80000000u) != 0u;
     i.max_scale = asfloat(tail.z);
     const float3 anchor = asfloat(b.Load3(tail.w));
     i.model[0].w += anchor.x;

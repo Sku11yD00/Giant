@@ -168,6 +168,36 @@ GIANT_TEST("render: detail follows distance, the error setting and the view") {
     }
 }
 
+GIANT_TEST("render: an always-mesh instance is never left to the far field") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+    instances[0].scale = {10, 10, 10};
+    instances[0].position = {0.0, 0.0, -1000.0};
+    instances[1] = instances[0];
+    instances[1].position = {20.0, 0.0, -1000.0};
+    instances[1].always_mesh = true; // a terrain tile, say
+    FrameInput frame;
+    frame.instances = instances;
+    frame.settings.gpu_culling = false;
+    frame.settings.far_field_distance = 500.0f;
+    frame.settings.voxel_ms_per_frame = 50.0f;
+    RenderStats st = s.settle(frame);
+    for (int i = 0; i < 200 && st.voxel_pending > 0; ++i) st = s.draw(frame);
+    st = s.draw(frame);
+    // Both are in the voxel world; only the ordinary one is left to it.
+    GIANT_CHECK(st.far_field && st.far_culled == 1 && st.instances == 1);
+    bool solid = false;
+    for (const VoxelProbeLevel& l : s.renderer->probe_voxels({20.0, 0.0, -1000.0})) {
+        solid = solid || std::string(l.state) == "solid";
+    }
+    GIANT_CHECK(solid);
+    instances[0].always_mesh = true;
+    st = s.draw(frame);
+    GIANT_CHECK(st.far_culled == 0 && st.instances == 2);
+}
+
 GIANT_TEST("render: small instances past the far-field distance are left to the voxel world") {
     NullScene s;
     if (s.renderer == nullptr) return;
@@ -335,7 +365,8 @@ GIANT_TEST("render: meshes can be added and removed") {
     GIANT_CHECK(s.renderer->mesh(id) == nullptr);
     GIANT_CHECK(s.draw(frame).draws == 1); // a removed id draws nothing; shading still runs
     const MeshId next = s.renderer->add_mesh(geometry::build_clusters(geometry::make_cube()));
-    GIANT_CHECK(next != id); // never reused
+    GIANT_CHECK(next == id && s.renderer->mesh(next) != nullptr); // the slot is reused
+    GIANT_CHECK(s.draw(frame).draws == 2);                       // so the old instance draws the new mesh
     // Built-in meshes cannot be removed.
     s.renderer->remove_mesh(s.renderer->builtin(BuiltinMesh::cube));
     GIANT_CHECK(s.renderer->mesh(s.renderer->builtin(BuiltinMesh::cube)) != nullptr);

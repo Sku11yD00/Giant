@@ -17,10 +17,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
-TIMEOUT = 1500  # seconds for the whole run (the N1 gate scene and GI are heavy on the software renderer with GPU validation: 400-840 s on Windows CI runners, whose speed varies 2x)
+TIMEOUT = 2400  # seconds for the whole run (the gates are heavy on the software renderer with GPU validation: 1300-1500 s on Windows CI runners by N3 part 4, whose speed varies 2x; each gate prints its time)
 
 
 def decode_png(data):
@@ -433,6 +434,55 @@ def far_field_gate(tool, call, check):
     tool("new_scene")
 
 
+def terrain_gate(tool, call, check):
+    """N3 part 4: terrain tiles are made by command, built off the main thread, drawn as
+    meshes at every distance (never left to the far field) and undone in one step."""
+    tool("new_scene")
+    made = tool("create_terrain", {"from": [-64, -64], "to": [63, 63], "samples": 16,
+                                   "hills": {"amplitude": 6, "size": 80, "seed": 2}})
+    check(made["tiles"] == 4 and made["spacing"] == 4.0, f"four tiles made, got {made}")
+    # A lone tile far out, past the far-field distance, beside a small block there.
+    tool("create_terrain", {"from": [0, -1000], "to": [10, -990], "height": 0})
+    tool("create_entity", {"name": "Far block", "shape": "cube", "position": [100, 5, -1000],
+                           "scale": [10, 10, 10]})
+    tool("set_terrain_material", {"base_color": [0.1, 0.6, 0.1], "roughness": 0.9})
+    tool("set_render_settings", {"voxel_ms_per_frame": 50, "far_field_distance": 300})
+    tool("set_camera", {"position": [0, 60, 40], "look_at": [0, 0, -40]})
+    info = None
+    for _ in range(200):
+        call("ping")
+        info = tool("get_terrain")
+        if info["meshes"]["building"] == 0:
+            break
+    check(info["meshes"] == {"tiles": 5, "building": 0, "built": 5, "triangles": 5 * 16 * 16 * 2},
+          f"every tile's mesh is built, got {info['meshes']}")
+    height = tool("get_terrain", {"points": [[0, 0], [500, 500]]})["heights"]
+    check(height[1] is None and abs(height[0]) <= 6, f"the ground's height is sampled, got {height}")
+    last = None
+    for _ in range(60):
+        for _ in range(10):
+            call("ping")
+        last = tool("get_render_settings")["last_frame"]
+        if last["voxels"]["pending"] == 0:
+            break
+    check(last["far_field"] == {"on": True, "culled": 1},
+          f"the far block is left to the voxels, the far tile is not, got {last['far_field']}")
+    if tool("get_engine_info")["backend"] != "null":
+        call("ping")
+        shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 480}})
+        image = [c for c in shot["content"] if c["type"] == "image"][0]
+        width, height_px, pixels = decode_png(base64.b64decode(image["data"]))
+        x, y = width // 2, height_px // 2
+        r, g, b = pixels[(y * width + x) * 4:(y * width + x) * 4 + 3]
+        check(g > r + 20 and g > b + 20, f"the green ground fills the view, got {(r, g, b)}")
+    tool("undo")  # the material
+    tool("undo")  # the block
+    tool("undo")  # the far tile
+    check(tool("get_terrain")["tiles"] == 4, "undo takes the far tile away")
+    tool("set_render_settings", {"voxel_ms_per_frame": 1, "far_field_distance": 3000})
+    tool("new_scene")
+
+
 def shadow_gate(tool, call, check):
     """N2 part 4: sun shadows from virtual shadow pages. The pages shading asks for are drawn
     a few frames later, cast where the sun says, and stay cached until something moves."""
@@ -692,15 +742,15 @@ def main() -> int:
         # on the software GPU CI runs on: off for the other gates (the
         # renderer's own d3d12 tests check them), on in gi_gate.
         tool("set_render_settings", {"gi": False, "screen_space_reflections": False})
-        build_scene(tool, call, check)
-        world_gate(tool, call, check)
-        lod_gate(tool, call, check)
-        kit_gate(tool, call, check)
-        voxel_gate(tool, call, check)
-        far_field_gate(tool, call, check)
-        shadow_gate(tool, call, check)
-        gi_gate(tool, call, check)
-        n1_gate(tool, call, check)
+        for gate in (build_scene, world_gate, lod_gate, kit_gate, voxel_gate, far_field_gate,
+                     terrain_gate, shadow_gate, gi_gate, n1_gate):
+            # Each gate's time, so a run near the timeout shows which one grew.
+            started = time.monotonic()
+            frames = tool("get_engine_info")["frames_completed"]
+            gate(tool, call, check)
+            frames = tool("get_engine_info")["frames_completed"] - frames
+            print(f"mcp_smoke: {gate.__name__} took {time.monotonic() - started:.1f} s, "
+                  f"{frames} frames", flush=True)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
         if sample:

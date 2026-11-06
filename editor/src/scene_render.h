@@ -3,6 +3,7 @@
 #pragma once
 
 #include "mesh_library.h"
+#include "terrain_meshes.h"
 
 #include "giant/render/renderer.h"
 #include "giant/world/scene.h"
@@ -52,6 +53,7 @@ struct SceneFrame {
         std::vector<render::Decal> decals;
         u64 version = 0; // new each rebuild, unique in the process (0: never built)
         bool dirty = true;
+        bool ground = false; // it draws a terrain tile (so it stays without entities)
         // Its place in `instances`: capacity instances from first, the
         // ones past its own holes. placed: it has one (maybe of none).
         u32 first = 0;
@@ -78,15 +80,18 @@ struct SceneFrame {
     std::vector<world::Kit> kits;                                 // as last built
     u64 scene_identity = 0;
     u64 meshes_version = ~u64{0};
+    world::TerrainMaterial terrain_material; // as last built
 };
 
-// The scene's visible entities, with kits expanded into their pieces. Mesh
-// entities and pieces whose file is not imported are left out, as are kit
-// entities whose kit is missing. Takes the scene's changes. Within a cell,
-// instances and decals go in id (creation) order; decals of cells go by z,
-// then x.
+// The scene's visible entities, with kits expanded into their pieces, and
+// the terrain's tiles whose meshes `terrain` has built (each first in its
+// cell, render::Instance::always_mesh). Mesh entities and pieces whose file
+// is not imported are left out, as are kit entities whose kit is missing.
+// Takes the scene's changes (and `terrain`'s changed cells: call
+// TerrainMeshes::update first). Within a cell, instances and decals go in
+// id (creation) order; decals of cells go by z, then x.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
-                 SceneFrame& out);
+                 SceneFrame& out, TerrainMeshes* terrain = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

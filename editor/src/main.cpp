@@ -15,6 +15,7 @@
 #include "scene_render.h"
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
+#include "terrain_meshes.h"
 #include "world_streaming.h"
 #include "ui/panels.h"
 
@@ -280,6 +281,8 @@ int run(const Options& options) {
     state.meshes = &meshes;
     editor::WorldStreaming world_streaming;
     state.world = &world_streaming;
+    editor::TerrainMeshes terrain_meshes(renderer.get()); // after the renderer: released first
+    state.terrain_meshes = &terrain_meshes;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -316,7 +319,8 @@ int run(const Options& options) {
     editor::SceneFrame scene_frame; // reused every frame
     // Records the scene and the panels into `target` (an sRGB image).
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
-        editor::scene_frame(state.scene, *renderer, meshes, scene_frame);
+        terrain_meshes.update(state.scene.terrain);
+        editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::scene_lighting(state.scene.lighting);

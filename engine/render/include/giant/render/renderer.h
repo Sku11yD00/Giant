@@ -82,6 +82,10 @@ struct Instance {
     MeshId mesh = 0;
     // Into FrameInput::materials; out of range draws the default Material.
     u32 material = 0;
+    // Drawn as a mesh at every distance: the far field never stands in for
+    // it, however small (terrain tiles: each is small, together they are
+    // the ground and the skyline). It is still in the voxel world.
+    bool always_mesh = false;
 };
 
 // The mask a decal stamps (shapes for now; image stamps arrive with textures).
@@ -314,11 +318,15 @@ public:
     MeshId builtin(BuiltinMesh mesh) const;
 
     // Uploads a mesh; k_no_mesh if it is empty or the GPU is out of memory.
-    // Ids are not reused, so a removed id stops drawing instead of drawing
-    // whatever comes next. Safe mid-frame.
+    // A removed mesh's id is handed out again, so callers must stop drawing
+    // an id once they remove it (an instance left with it would draw
+    // whatever mesh comes next). Safe mid-frame.
     MeshId add_mesh(geometry::ClusterMesh mesh);
-    // Built-in meshes stay. Unknown ids are ignored.
+    // Built-in meshes stay. Unknown or removed ids are ignored.
     void remove_mesh(MeshId mesh);
+    // Its coarsest level is loaded, so instances of it draw (a mesh added
+    // this frame may take a frame or more under a busy streaming budget).
+    bool mesh_ready(MeshId mesh) const;
     // Null for an unknown or removed id.
     const geometry::ClusterMesh* mesh(MeshId mesh) const;
 
@@ -496,6 +504,7 @@ private:
     bool m_decals_logged = false;
 
     std::vector<Mesh> m_meshes;
+    std::vector<u32> m_free_meshes; // removed slots, reused by add_mesh
     std::vector<MeshId> m_builtin; // by BuiltinMesh
     // Per-frame scratch, kept to avoid allocating every frame.
     std::vector<u32> m_valid;    // instances (into frame.instances) with a live mesh, drawn as meshes

@@ -47,11 +47,13 @@ static_assert(sizeof(FrameConstants) == 448);
 struct Instance {
     float model[12]; // rows of the 3x4 model matrix, translation from the cell anchor
     u32 mesh;
-    u32 material; // into the frame's material table (checked on the CPU)
+    u32 material; // into the frame's material table (checked on the CPU); top bit: k_always_mesh_bit
     float max_scale;
     u32 anchor; // byte offset in the same buffer of the anchor's camera-relative xyz
 };
 static_assert(sizeof(Instance) == 64);
+// In Instance::material: render::Instance::always_mesh.
+inline constexpr u32 k_always_mesh_bit = 0x8000'0000u;
 
 struct Material {
     float base_roughness[4];

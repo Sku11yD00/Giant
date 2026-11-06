@@ -30,7 +30,7 @@ Vec3 to_view(const LodView& view, const Vec3& p) {
 
 } // namespace
 
-ClusterMesh build_clusters(const TriangleMesh& source) {
+ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locked) {
     ClusterMesh out;
     if (source.indices.size() < 3 || source.vertices.empty()) {
         return out;
@@ -53,6 +53,15 @@ ClusterMesh build_clusters(const TriangleMesh& source) {
     std::vector<u32> indices(index_count);
     meshopt_remapIndexBuffer(indices.data(), source.indices.data(), index_count, remap.data());
 
+    GIANT_ASSERT(locked.empty() || locked.size() == source.vertices.size(), "one lock flag per vertex");
+    std::vector<unsigned char> locks;
+    if (!locked.empty()) {
+        locks.assign(unique, 0);
+        for (usize i = 0; i < locked.size(); ++i) {
+            if (locked[i] != 0 && remap[i] != ~0u) locks[remap[i]] = meshopt_SimplifyVertex_Lock;
+        }
+    }
+
     clodConfig config = clodDefaultConfig(k_cluster_max_triangles);
     config.max_vertices = k_cluster_max_vertices;
     config.optimize_bounds = true; // tight culling spheres
@@ -65,6 +74,7 @@ ClusterMesh build_clusters(const TriangleMesh& source) {
     mesh.vertex_count = out.vertices.size();
     mesh.vertex_positions = &out.vertices[0].position.x;
     mesh.vertex_positions_stride = sizeof(Vertex);
+    mesh.vertex_lock = locks.empty() ? nullptr : locks.data();
     mesh.vertex_attributes = &out.vertices[0].normal.x;
     mesh.vertex_attributes_stride = sizeof(Vertex);
     mesh.attribute_weights = normal_weights;

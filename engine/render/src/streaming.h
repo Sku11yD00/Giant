@@ -182,6 +182,10 @@ private:
 
     rhi::Device& m_device;
     u64 m_pool_bytes = 0;
+    // Global group numbers for a mesh's groups (u32 each in the usage buffer).
+    u32 take_groups(u32 count);
+    void give_groups(u32 base, u32 count);
+
     Budget m_budget;
     PoolAllocator m_alloc;
     rhi::BufferHandle m_pool;
@@ -192,7 +196,11 @@ private:
     rhi::BufferHandle m_usage_readback;
     u32 m_usage_readback_groups = 0;
     u64 m_usage_readback_frame = ~u64{0}; // pending copy, tagged; ~0 when none
-    u32 m_total_groups = 0;
+    u32 m_total_groups = 0; // global group numbers handed out: the end of the last range
+    // Ranges of global group numbers removed meshes left (first -> count),
+    // joined, reused first-fit, so meshes coming and going do not grow the
+    // usage buffer.
+    std::map<u32, u32> m_free_groups;
     std::vector<MeshState> m_meshes;
     std::vector<Request> m_wanted;
     StreamingStats m_stats;

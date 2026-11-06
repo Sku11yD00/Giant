@@ -104,6 +104,9 @@ public:
     // ones stay meshes, whose own voxels it must not draw over them).
     // A change rebuilds the voxel world. Default 0: none.
     void set_stand_in_radius(float radius);
+    // A mesh was removed (its id may come back as another mesh): its cached
+    // cuts go, and instances that used it are looked at again.
+    void forget_mesh(MeshId mesh);
     // A frame without update() (the voxel world switched off): this
     // frame's stats are zero, the bricks stay.
     void idle();
@@ -304,6 +307,7 @@ private:
     std::vector<u32> m_found;
     u64 m_meshes_version = ~u64{0};
     std::unordered_map<MeshId, MeshCache> m_meshes;
+    std::vector<MeshId> m_forgotten; // by forget_mesh, for the next see_changes
 
     // The brick being built (a coarse one over thousands of instances
     // takes several frames).

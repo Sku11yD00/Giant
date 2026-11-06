@@ -666,3 +666,46 @@ GIANT_TEST("geometry: a cut over partly loaded groups stays whole") {
     std::sort(full.begin(), full.end());
     GIANT_CHECK(converged == full);
 }
+
+GIANT_TEST("geometry: locked vertices keep their place at every level") {
+    // A bumpy 64 x 64 grid: plenty to simplify, with its border locked.
+    const u32 n = 64;
+    TriangleMesh mesh;
+    std::vector<u8> locked;
+    for (u32 j = 0; j <= n; ++j) {
+        for (u32 i = 0; i <= n; ++i) {
+            const float x = static_cast<float>(i);
+            const float z = static_cast<float>(j);
+            mesh.vertices.push_back({{x, 2.0f * std::sin(x * 0.3f) * std::cos(z * 0.2f), z}, {0.0f, 1.0f, 0.0f}});
+            locked.push_back(i == 0 || j == 0 || i == n || j == n ? 1 : 0);
+        }
+    }
+    for (u32 j = 0; j < n; ++j) {
+        for (u32 i = 0; i < n; ++i) {
+            const u32 a = j * (n + 1) + i;
+            mesh.indices.insert(mesh.indices.end(), {a, a + n + 1, a + n + 2, a, a + n + 2, a + 1});
+        }
+    }
+    compute_normals(mesh);
+    const ClusterMesh m = build_clusters(mesh, locked);
+    GIANT_CHECK(m.levels >= 3);
+    std::set<std::pair<float, float>> border;
+    for (usize v = 0; v < mesh.vertices.size(); ++v) {
+        if (locked[v] != 0) border.insert({mesh.vertices[v].position.x, mesh.vertices[v].position.z});
+    }
+    for (u32 depth = 0; depth < m.levels; ++depth) {
+        std::set<std::pair<float, float>> seen;
+        for (const Cluster& c : m.clusters) {
+            if (m.groups[c.group].depth != depth) continue;
+            for (u32 k = 0; k < c.triangle_count * 3; ++k) {
+                const Vec3 p = m.vertices[m.indices[c.first_index + k]].position;
+                if (border.contains({p.x, p.z})) seen.insert({p.x, p.z});
+            }
+        }
+        GIANT_CHECK(seen.size() == border.size());
+    }
+    // No locks: the same mesh as before the parameter existed.
+    const ClusterMesh plain = build_clusters(mesh);
+    const ClusterMesh empty_locks = build_clusters(mesh, {});
+    GIANT_CHECK(plain.clusters.size() == empty_locks.clusters.size() && plain.indices == empty_locks.indices);
+}
