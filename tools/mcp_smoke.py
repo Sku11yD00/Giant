@@ -150,6 +150,9 @@ def world_gate(tool, call, check):
         tool("create_terrain", {"from": [6000, 0], "to": [6010, 10], "height": 2})
         made = tool("save_world", {"folder": world})
         check(made["cells_written"] == 3 and made["cells"] == 3, f"world saved, got {made}")
+        # The far ground: a level-1 chunk over each tile, and the level-2 chunk at the origin
+        # (the far tile is not at one of level 2's sample points, 128 m apart).
+        check(made["chunks_written"] == 3, f"far ground chunks written, got {made}")
         check(tool("get_world")["ground"] == 2, "two cells' files hold ground")
         tool("set_camera", {"position": [10, 5, 30], "look_at": [10, 0, 0]})
         opened = tool("open_world", {"folder": world})
@@ -163,6 +166,14 @@ def world_gate(tool, call, check):
         ground = tool("get_terrain", {"points": [[5, 5], [6005, 5]]})
         check(ground["tiles"] == 1 and ground["samples"] == 8 and ground["heights"] == [1, None],
               f"the near tile loads with its cell, got {ground}")
+        far = {}
+        for _ in range(300):
+            far = tool("get_world")["far_ground"]
+            if far["levels"][0]["drawn"] == 1:
+                break
+        check(far["levels"][0]["files"] == 2 and far["levels"][0]["loaded"] == 2 and far["levels"][1]["files"] == 1
+              and far["levels"][0]["drawn"] == 1 and far["failed"] == 0,
+              f"the far tile's chunk draws as far ground, the near one as its full tile, got {far}")
         tool("set_camera", {"position": [6000, 5, 30], "look_at": [6000, 0, 0]})
         for _ in range(200):
             info = tool("get_world")
@@ -465,7 +476,8 @@ def terrain_gate(tool, call, check):
         if info["meshes"]["building"] == 0:
             break
     meshes = {k: v for k, v in info["meshes"].items() if k != "built"}  # built: ever, other gates too
-    check(meshes == {"tiles": 5, "building": 0, "triangles": 5 * 16 * 16 * 2},
+    # Two triangles a square, and the edge walls: 4 edges of 16 quads, seen from both sides.
+    check(meshes == {"tiles": 5, "building": 0, "triangles": 5 * (16 * 16 * 2 + 4 * 16 * 4)},
           f"every tile's mesh is built, got {info['meshes']}")
     height = tool("get_terrain", {"points": [[0, 0], [500, 500]]})["heights"]
     check(height[1] is None and abs(height[0]) <= 6, f"the ground's height is sampled, got {height}")

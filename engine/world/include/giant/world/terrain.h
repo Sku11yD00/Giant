@@ -50,6 +50,10 @@ public:
     using Heights = std::vector<float>;
 
     Terrain() = default;
+    // Tiles `tile_size` metres a side instead of one world cell (the far
+    // ground's coarse levels, giant/world/far_ground.h). Positive. With
+    // `holes`, a height may be NaN: no ground there.
+    explicit Terrain(double tile_size, bool holes = false);
     // A copy or a moved-to terrain is a new one: all changed, new identity.
     Terrain(const Terrain& other);
     Terrain(Terrain&& other) noexcept;
@@ -58,7 +62,10 @@ public:
     ~Terrain() = default;
 
     u32 samples() const { return m_samples; }
-    double spacing() const { return k_cell_size / static_cast<double>(m_samples); }
+    double tile_size() const { return m_tile_size; }
+    double spacing() const { return m_tile_size / static_cast<double>(m_samples); }
+    // The tile a point on the ground (x, z) is in.
+    CellCoord tile_of(double x, double z) const;
     // Only while there are no tiles; false (changing nothing) otherwise or
     // when `samples` is not valid_terrain_samples.
     bool set_samples(u32 samples);
@@ -121,6 +128,8 @@ private:
         u64 value = 0;
     };
 
+    double m_tile_size = k_cell_size;
+    bool m_holes = false;
     u32 m_samples = k_default_terrain_samples;
     std::unordered_map<CellCoord, Heights, CellCoordHash> m_tiles;
     std::unordered_map<CellCoord, u64, CellCoordHash> m_versions; // the same cells

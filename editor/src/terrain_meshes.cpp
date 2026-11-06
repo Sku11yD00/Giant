@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace giant::editor {
@@ -58,14 +59,16 @@ TileSurface tile_surface(const TileHeights& in) {
     const u32 row = n + 1; // vertices a row
     const float s = static_cast<float>(in.spacing);
     const auto h = [&](u32 i, u32 j) { return in.heights[usize{j} * side + i]; }; // i, j from -1, shifted by one
+    const auto ground = [&](u32 i, u32 j) { return !std::isnan(h(i + 1, j + 1)); }; // vertex (i, j)
     out.mesh.vertices.resize(usize{row} * row);
     out.edge.resize(usize{row} * row);
     for (u32 j = 0; j <= n; ++j) {
         for (u32 i = 0; i <= n; ++i) {
             const usize v = usize{j} * row + i;
-            const float dx = slope(h(i, j + 1), h(i + 1, j + 1), h(i + 2, j + 1), s);
-            const float dz = slope(h(i + 1, j), h(i + 1, j + 1), h(i + 1, j + 2), s);
-            out.mesh.vertices[v].position = {static_cast<float>(i) * s, h(i + 1, j + 1), static_cast<float>(j) * s};
+            const float y = ground(i, j) ? h(i + 1, j + 1) : 0.0f; // no ground: no triangle uses it
+            const float dx = slope(h(i, j + 1), y, h(i + 2, j + 1), s);
+            const float dz = slope(h(i + 1, j), y, h(i + 1, j + 2), s);
+            out.mesh.vertices[v].position = {static_cast<float>(i) * s, y, static_cast<float>(j) * s};
             out.mesh.vertices[v].normal = normalize_or_zero(Vec3{-dx, 1.0f, -dz}); // y is 1: never zero
             out.edge[v] = (i == 0 || j == 0 || i == n || j == n) ? 1 : 0;
         }
@@ -78,9 +81,51 @@ TileSurface tile_surface(const TileHeights& in) {
             const u32 v01 = v00 + row;
             const u32 v11 = v01 + 1;
             // Split on the (0, 0)-(1, 1) diagonal, as world::Terrain::height_at;
-            // counter-clockwise seen from above.
-            out.mesh.indices.insert(out.mesh.indices.end(), {v00, v01, v11, v00, v11, v10});
+            // counter-clockwise seen from above. A triangle with a corner
+            // where there is no ground is left out.
+            const bool g00 = ground(i, j);
+            const bool g11 = ground(i + 1, j + 1);
+            if (g00 && g11 && ground(i, j + 1)) out.mesh.indices.insert(out.mesh.indices.end(), {v00, v01, v11});
+            if (g00 && g11 && ground(i + 1, j)) out.mesh.indices.insert(out.mesh.indices.end(), {v00, v11, v10});
         }
+    }
+    if (in.skirt > 0.0f) {
+        // A wall hanging from each edge, seen from both sides, to fill the
+        // gaps where a coarser or finer tile meets this one.
+        const auto add = [&](u32 i, u32 j) {
+            const usize v = usize{j} * row + i;
+            geometry::Vertex bottom = out.mesh.vertices[v];
+            bottom.position.y -= in.skirt;
+            out.mesh.vertices.push_back(bottom);
+            out.edge.push_back(1);
+            return static_cast<u32>(out.mesh.vertices.size() - 1);
+        };
+        const auto edge = [&](u32 i0, u32 j0, u32 di, u32 dj) {
+            u32 prev_top = 0;
+            u32 prev_bottom = 0;
+            bool prev = false;
+            for (u32 k = 0; k <= n; ++k) {
+                const u32 i = i0 + k * di;
+                const u32 j = j0 + k * dj;
+                if (!ground(i, j)) {
+                    prev = false;
+                    continue;
+                }
+                const u32 top = j * row + i;
+                const u32 bottom = add(i, j);
+                if (prev) {
+                    out.mesh.indices.insert(out.mesh.indices.end(), {prev_top, prev_bottom, bottom, prev_top, bottom, top,
+                                                                     prev_top, bottom, prev_bottom, prev_top, top, bottom});
+                }
+                prev_top = top;
+                prev_bottom = bottom;
+                prev = true;
+            }
+        };
+        edge(0, 0, 1, 0); // z = 0
+        edge(0, n, 1, 0); // z = far
+        edge(0, 0, 0, 1); // x = 0
+        edge(n, 0, 0, 1); // x = far
     }
     return out;
 }
@@ -90,6 +135,9 @@ namespace {
 // Tells apart the heights two builds were made from (FNV-1a over the bytes).
 u64 hash_of(const TileHeights& h) {
     u64 x = 1469598103934665603ull ^ h.samples;
+    u32 skirt = 0;
+    std::memcpy(&skirt, &h.skirt, sizeof(skirt));
+    x = (x ^ skirt) * 1099511628211ull;
     const auto* bytes = reinterpret_cast<const u8*>(h.heights.data());
     for (usize i = 0; i < h.heights.size() * sizeof(float); ++i) {
         x = (x ^ bytes[i]) * 1099511628211ull;
@@ -114,6 +162,11 @@ TerrainMeshes::~TerrainMeshes() {
 render::MeshId TerrainMeshes::mesh(world::CellCoord cell) const {
     const auto it = m_tiles.find(cell);
     return it == m_tiles.end() ? render::k_no_mesh : it->second.mesh;
+}
+
+bool TerrainMeshes::drawn(world::CellCoord cell) const {
+    const auto it = m_tiles.find(cell);
+    return it != m_tiles.end() && it->second.drawn;
 }
 
 std::vector<world::CellCoord> TerrainMeshes::take_changed() {
@@ -303,6 +356,7 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         m_queued.erase(cell);
         ++looks;
         TileHeights heights = tile_heights(terrain, cell);
+        heights.skirt = skirt_depth;
         const u64 hash = hash_of(heights);
         if (hash == (tile.waiting ? tile.pending_hash : tile.hash)) continue; // as drawn (or about to be)
         start(cell, tile, std::move(heights), hash);

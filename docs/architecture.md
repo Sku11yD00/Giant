@@ -376,8 +376,7 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   edge of the loaded area is still built again when the next row arrives
   and when a neighbour unloads (its edge reaches into them): about 2.8
   builds per tile. `world.json` holds the terrain's `samples` and
-  `material` and which cells' files hold a tile (`terrain.cells`; for the
-  far ground later). A tile made or put back by an undo in a cell still on
+  `material` and which cells' files hold a tile (`terrain.cells`). A tile made or put back by an undo in a cell still on
   disk makes the cell load at once, and the scene's tile wins over the
   file's; saving such a cell keeps the file's entities (and its tile, if
   the scene has none there). All tiles are one spacing: while any file
@@ -385,17 +384,63 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   another, streaming gives an empty terrain the world's spacing back (an
   undo can take it away), a file whose tile is another spacing fails to
   load alone, and a save that would mix spacings is refused.
-- **Known limits, next parts.** Tiles stream with the cells around the
-  camera (`load_radius`, 1.5 km by default) and nothing stands in for the
-  ground past them yet: a coarse copy of far tiles is next. Every loaded
+- **Far ground (N3 part 4c).** Past the loaded cells the ground is drawn
+  from coarse copies of the terrain (`engine/world/include/giant/world/far_ground.h`,
+  `editor/src/far_ground.h`), a quadtree of branching 8: level 1 chunks
+  are 512 m (8 x 8 cells) with 32 x 32 heights 16 m apart, level 2 chunks
+  4096 m (8 x 8 level-1 chunks) with heights 128 m apart. A chunk's heights
+  are the finer level's at its own sample points (no averaging, so levels
+  agree where they share a point); NaN where there is no ground (a cell
+  with a tile has all 16 of its samples, one without none). Each level is
+  a `world::Terrain` of 512 m or 4096 m tiles that may hold NaN, with its
+  own `TerrainMeshes`, so chunks mesh like tiles (triangles with a corner
+  where there is no ground are left out). Files: `ground/1/<x>_<z>.ground.json`
+  and `ground/2/...` (format `giant-ground`, 32 rows of numbers, `-` for
+  none), written by `save_world` after the cell files over every cell whose
+  tile changed: the chunk's old heights where nothing changed, the tiles
+  (the scene's, or read from their cells' files when the chunk had no file
+  yet) elsewhere; a chunk left with no ground loses its file, and the save
+  hands what it wrote to the far ground at once. The editor reads chunks
+  on a worker within `far_radius_1` (8192 m) and `far_radius_2` (32768 m)
+  of the camera, adds `chunks_per_frame` (16) a level a frame and lets go
+  of ones past the radius plus a margin (512 m, 4096 m). What draws:
+  a level-2 chunk draws its mesh unless every level-1 chunk in it can
+  stand in (its mesh is drawn, every cell of it with ground has its full
+  tile drawn, or it has no file); a level-1 chunk under no drawing parent
+  draws its cells' full tiles when all of them are drawn, else its mesh,
+  else what tiles it has; a full tile draws only where its level-1 chunk
+  says so. The choice is worked out only for chunks whose inputs changed
+  that frame (a tile's or chunk's mesh came, went or was replaced; a
+  chunk was added or let go). Chunks draw from the cell at their corner
+  (always_mesh, the terrain's material). Every tile and chunk hangs a wall
+  from its edges (`TerrainMeshes::skirt_depth`: 8 m full tiles, 64 m level
+  1, 256 m level 2, seen from both sides) that fills the gaps where tiles
+  of different spacing meet. Cells with ground load and unload by their
+  level-1 chunk's distance, so a chunk near the camera has all of its
+  tiles; a chunk with an unsaved tile keeps all of its tiles loaded, so
+  near edits always draw in full (the chunk files are the saved ground).
+- **Known limits, next parts.** The far ground shows edits only once
+  saved (a chunk far enough to draw coarse shows its file). Level 2 takes
+  only every other cell's corner, so ground narrower than 128 m (a lone
+  tile) may not show at all at that distance, and a level-2 chunk whose
+  points make no square draws nothing (its children do as they can).
+  `far_radius_1` is taken as at least `load_radius` + 5800 m (a level-2
+  chunk's diagonal), so a level-2 chunk never draws over the full tiles
+  by the camera. A chunk file that cannot be read stands in for nothing
+  (its full tiles draw where loaded), and a cell whose file failed is not
+  waited for. The coarse ground stops one of its own samples short (16 m,
+  128 m) at the edge of the ground, where the tiles' walls hang. A save
+  cut short owes its chunks to the next save, kept in `world.json`
+  (`terrain.far_owed`, `far_owed_2`: written before the cells, cleared by
+  the save that writes them), so a crash or reopen does not lose them. Every tile gets the 8 m edge walls, streamed world or not.
+  A world saved before part 4c has no chunks until its tiles
+  are saved again. Every loaded
   tile is a full mesh in memory (CPU copy and cluster data: about 0.4 MB
   a 1 m tile, 1.2 MB at 128 samples; the default radius loads about 1,800
-  cells), and a command may make at most 16.7M heights, the terrain hold
+  cells, more now that ground loads by whole 512 m chunks), and a command may make at most 16.7M heights, the terrain hold
   67M (16,384 tiles of 64 samples, 4,096 of 128). Locked tile edges keep
   every level's edge, so a tile never drops below about 4 x samples
-  triangles (256 at 64 samples) however far: with always_mesh, thousands
-  of tiles in view cost a million triangles or more until far tiles get a
-  coarser copy. An undo step holds copies of the tiles a command changed
+  triangles (256 at 64 samples) however far. An undo step holds copies of the tiles a command changed
   (before and after), and a scene swap's undo side the whole terrain. One
   material for all of it (changing it rebuilds every cell with ground,
   once); painted layers, sculpt brushes, erosion and height map import
@@ -767,8 +812,12 @@ over the target frame time). Where it stands:
   the budgets above, and the two mesh workers build about 115 tiles of 64
   samples a second: on opening a world at the default radius the ground
   is all drawn after some 16 s, and flying faster than about 50 m/s at
-  that radius outruns them (late ground, not stutter) until far tiles get
-  a coarse copy.
+  that radius outruns them (late full tiles, not stutter: the far ground
+  draws until they are in). Far ground (N3 part 4c): about 800 level-1
+  and 200 level-2 chunks at the default radii (4 KB of heights each),
+  read on a worker and meshed on each level's two workers; what draws is
+  worked out for changed chunks only (a level-2 chunk looks at its 64
+  children, a level-1 chunk at its 64 cells: hash lookups).
 
 | GPU work | Budget |
 | --- | --- |

@@ -15,6 +15,7 @@
 #include "scene_render.h"
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
+#include "far_ground.h"
 #include "terrain_meshes.h"
 #include "world_streaming.h"
 #include "ui/panels.h"
@@ -283,6 +284,9 @@ int run(const Options& options) {
     state.world = &world_streaming;
     editor::TerrainMeshes terrain_meshes(renderer.get()); // after the renderer: released first
     state.terrain_meshes = &terrain_meshes;
+    terrain_meshes.skirt_depth = 8.0f; // hides the gaps where the far ground's chunks meet the tiles
+    editor::FarGround far_ground(renderer.get()); // after the renderer: released first
+    state.far_ground = &far_ground;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -320,7 +324,9 @@ int run(const Options& options) {
     // Records the scene and the panels into `target` (an sRGB image).
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         terrain_meshes.update(state.scene.terrain);
-        editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes);
+        far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes,
+                          state.scene.terrain);
+        editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::scene_lighting(state.scene.lighting);

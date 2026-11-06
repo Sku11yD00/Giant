@@ -14,6 +14,8 @@
 
 namespace giant::editor {
 
+class FarGround;
+
 // What the renderer draws of a scene, kept from frame to frame by world
 // cell (world::k_cell_size): a frame rebuilds only the cells whose
 // entities changed (world::Scene::take_changes), and those of a kit that
@@ -89,9 +91,11 @@ struct SceneFrame {
 // is not imported are left out, as are kit entities whose kit is missing.
 // Takes the scene's changes (and `terrain`'s changed cells: call
 // TerrainMeshes::update first). Within a cell, instances and decals go in
-// id (creation) order; decals of cells go by z, then x.
+// id (creation) order; decals of cells go by z, then x. With `far` (updated
+// first, and taking `terrain`'s changed cells itself), a tile draws only
+// where the far ground says, and its chunks are drawn from their corner cells.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
-                 SceneFrame& out, TerrainMeshes* terrain = nullptr);
+                 SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

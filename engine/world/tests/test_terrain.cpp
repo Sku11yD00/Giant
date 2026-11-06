@@ -247,3 +247,88 @@ GIANT_TEST("terrain: hills are smooth, bounded and the same every time") {
     other.seed = 8;
     GIANT_CHECK(hills_height(h, 500.0, 500.0) != hills_height(other, 500.0, 500.0));
 }
+
+// --- Far ground ---------------------------------------------------------------
+
+#include "giant/world/far_ground.h"
+
+#include <limits>
+
+GIANT_TEST("far ground: chunk sizes, and the chunk of a cell, below zero too") {
+    GIANT_CHECK(far_tile_size(0) == 64.0 && far_tile_size(1) == 512.0 && far_tile_size(2) == 4096.0);
+    GIANT_CHECK(far_spacing(1) == 16.0 && far_spacing(2) == 128.0);
+    GIANT_CHECK((far_chunk_of_cell({7, 8}, 1) == CellCoord{0, 1}));
+    GIANT_CHECK((far_chunk_of_cell({-1, -8}, 1) == CellCoord{-1, -1}));
+    GIANT_CHECK((far_chunk_of_cell({-9, 63}, 1) == CellCoord{-2, 7}));
+    GIANT_CHECK((far_chunk_of_cell({-1, 64}, 2) == CellCoord{-1, 1}));
+    GIANT_CHECK((far_parent({-1, 8}) == CellCoord{-1, 1}));
+    GIANT_CHECK(far_chunk_file_name({-3, 12}) == "-3_12.ground.json");
+}
+
+GIANT_TEST("far ground: a chunk takes the finer tile's heights at its own sample points") {
+    const usize n = k_far_samples;
+    Terrain::Heights chunk(n * n, 7.0f);
+    Terrain::Heights tile(16 * 16);
+    for (usize k = 0; k < tile.size(); ++k) tile[k] = static_cast<float>(k);
+    // Cell (9, -6) is (1, 2) in chunk (1, -1): its 4 x 4 block starts at sample (4, 8).
+    far_fill(1, {1, -1}, {9, -6}, &tile, 16, chunk);
+    for (usize b = 0; b < 4; ++b) {
+        for (usize a = 0; a < 4; ++a) {
+            GIANT_CHECK(chunk[(8 + b) * n + 4 + a] == tile[b * 4 * 16 + a * 4]); // every 4th: 16 m apart
+        }
+    }
+    GIANT_CHECK(chunk[0] == 7.0f && chunk[8 * n + 3] == 7.0f && chunk[12 * n + 4] == 7.0f); // the rest untouched
+    far_fill(1, {1, -1}, {9, -6}, nullptr, 32, chunk);
+    GIANT_CHECK(std::isnan(chunk[8 * n + 4]) && std::isnan(chunk[11 * n + 7]) && chunk[8 * n + 8] == 7.0f);
+    // Level 2 from a level-1 chunk: every 8th of its samples (128 m).
+    Terrain::Heights l1(n * n);
+    for (usize k = 0; k < l1.size(); ++k) l1[k] = static_cast<float>(k) * 0.5f;
+    Terrain::Heights l2(n * n, 0.0f);
+    far_fill(2, {0, 0}, {7, 7}, &l1, k_far_samples, l2);
+    GIANT_CHECK(l2[28 * n + 28] == l1[0] && l2[31 * n + 29] == l1[24 * n + 8]);
+}
+
+GIANT_TEST("far ground: chunks as text, exact, with holes, read strictly") {
+    const usize n = k_far_samples;
+    Terrain::Heights h(n * n);
+    for (usize k = 0; k < h.size(); ++k) h[k] = 0.1f * static_cast<float>(k) - 37.3f;
+    h[5] = std::numeric_limits<float>::quiet_NaN();
+    h[n * n - 1] = -k_max_terrain_height;
+    const std::string text = save_far_chunk(2, {-4, 9}, h);
+    GIANT_CHECK(contains(text, "\"giant-ground\"") && contains(text, " - "));
+    Terrain::Heights back;
+    GIANT_CHECK(!load_far_chunk(text, 2, {-4, 9}, back).has_value());
+    GIANT_CHECK(back.size() == h.size() && std::isnan(back[5]));
+    bool same = true;
+    for (usize k = 0; k < h.size(); ++k) same = same && (k == 5 || back[k] == h[k]); // bit for bit
+    GIANT_CHECK(same);
+
+    Terrain::Heights untouched{1.0f};
+    const auto wrong_level = load_far_chunk(text, 1, {-4, 9}, untouched);
+    GIANT_CHECK(wrong_level.has_value() && contains(wrong_level->message, "level"));
+    const auto wrong_chunk = load_far_chunk(text, 2, {-4, 8}, untouched);
+    GIANT_CHECK(wrong_chunk.has_value() && contains(wrong_chunk->message, "chunk"));
+    std::string short_row = text;
+    short_row.replace(short_row.find(" - "), 3, " ");
+    GIANT_CHECK(load_far_chunk(short_row, 2, {-4, 9}, untouched).has_value());
+    std::string too_high = text;
+    too_high.replace(too_high.find(" - "), 3, " 10001 ");
+    GIANT_CHECK(load_far_chunk(too_high, 2, {-4, 9}, untouched).has_value());
+    std::string junk = text;
+    junk.replace(junk.find(" - "), 3, " -x ");
+    GIANT_CHECK(load_far_chunk(junk, 2, {-4, 9}, untouched).has_value());
+    GIANT_CHECK(untouched.size() == 1 && untouched[0] == 1.0f); // left alone on failure
+}
+
+GIANT_TEST("terrain: bigger tiles, with holes, for the far ground") {
+    Terrain t(512.0, true);
+    GIANT_CHECK(t.set_samples(32) && t.tile_size() == 512.0 && t.spacing() == 16.0);
+    GIANT_CHECK((t.tile_of(-1.0, 1023.0) == CellCoord{-1, 1}));
+    Terrain::Heights h(32 * 32, 5.0f);
+    h[0] = std::numeric_limits<float>::quiet_NaN();
+    t.set({1, 0}, h);
+    GIANT_CHECK(t.height_at(512.0 + 40.0, 40.0).value() == 5.0);
+    GIANT_CHECK(!t.height_at(-10.0, 40.0).has_value());
+    const Terrain copy = t;
+    GIANT_CHECK(copy.tile_size() == 512.0 && copy.find({1, 0}) != nullptr);
+}

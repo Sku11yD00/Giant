@@ -453,3 +453,16 @@ GIANT_TEST("world: bad world and cell files say what is wrong") {
         {"id": 1}, {"id": 1}]})";
     GIANT_CHECK(contains(load_cell(twice, {0, 0}, out)->message, "entities[1].id 1 is used twice"));
 }
+
+GIANT_TEST("world index: the far ground a save still owes reads back") {
+    WorldIndex index;
+    index.cells = {{0, 0}};
+    index.far_owed = {{3, -2}, {0, 0}};
+    index.far_owed_2 = {{-1, 4}};
+    WorldIndex back;
+    GIANT_CHECK(!load_world_index(save_world_index(index), back).has_value());
+    GIANT_CHECK(back.far_owed.size() == 2 && back.far_owed_2.size() == 1 && (back.far_owed_2[0] == CellCoord{-1, 4}));
+    std::string text = save_world_index(index);
+    text.replace(text.find("\"far_owed_2\""), 12, "\"far_owed_2\": 3, \"x\"");
+    GIANT_CHECK(load_world_index(text, back).has_value());
+}

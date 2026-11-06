@@ -30,13 +30,15 @@ struct TileHeights {
     u32 samples = 0;      // the terrain's samples per tile side
     double spacing = 1.0; // metres between samples
     std::vector<float> heights; // (samples + 3)^2, row by row along +z
+    float skirt = 0.0f;         // metres the edge walls hang down (0: none)
 };
 TileHeights tile_heights(const world::Terrain& terrain, world::CellCoord cell);
 
 // The tile's surface, in metres from its cell's corner: (samples + 1)^2
 // vertices with normals from the heights around them, two triangles a
-// square (split as world::Terrain::height_at), and which vertices are on
-// the edge (to lock).
+// square (split as world::Terrain::height_at; none with a corner where
+// there is no ground), a wall ("skirt") down from each edge if
+// heights.skirt, and which vertices are on the edge (to lock).
 struct TileSurface {
     geometry::TriangleMesh mesh;
     std::vector<u8> edge;
@@ -69,6 +71,8 @@ public:
     void update(world::Terrain& terrain);
     // The tile's mesh drawn now (k_no_mesh: none yet, or no renderer).
     render::MeshId mesh(world::CellCoord cell) const;
+    // Whether the tile has a mesh drawn (without a renderer: one built).
+    bool drawn(world::CellCoord cell) const;
     // Cells whose mesh changed (came, went or was replaced) since the last call.
     std::vector<world::CellCoord> take_changed();
     // Blocks until every build started is done and swapped in, starting
@@ -87,6 +91,9 @@ public:
     // in) build once, not again as each neighbour arrives. Changes to tiles
     // already there (sculpting) do not wait.
     u32 settle_frames = 6;
+    // Edge walls on every tile (TileHeights::skirt): hide the gaps where
+    // tiles of different spacing meet (the far ground, editor/src/far_ground.h).
+    float skirt_depth = 0.0f;
 
 private:
     struct Tile {

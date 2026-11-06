@@ -166,6 +166,11 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
 - Part 4b: terrain in streamed worlds. Each square's file holds its piece
   of ground, which loads and unloads with the square; a piece you have
   changed stays until saved, like everything else.
+- Part 4c: far ground. Past the loaded squares, the ground is drawn from
+  coarse copies saved with the world (512 m pieces out to about 8 km,
+  4 km pieces out to about 32 km), so it reaches the horizon for little
+  memory. Near the camera the full ground takes over piece by piece, with
+  no cracks where the two meet.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

@@ -239,6 +239,11 @@ struct WorldIndex {
     u32 terrain_samples = k_default_terrain_samples;
     TerrainMaterial terrain_material;
     std::vector<CellCoord> terrain_cells;
+    // The far ground still owed by a save cut short (world/far_ground.h):
+    // cells whose level-1 chunk is not written over their tile yet, and
+    // level-1 chunks whose level-2 chunk is not. Empty after a full save.
+    std::vector<CellCoord> far_owed;
+    std::vector<CellCoord> far_owed_2;
 };
 
 // "<x>_<z>.cell.json", in the world's cells folder.
