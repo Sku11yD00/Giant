@@ -559,9 +559,9 @@ void weather_surface(Sky s, float3 p, inout float3 base, inout float rough, inou
 // each a cell's worth of falling streaks or flakes from a hash, moving
 // with the time and the wind. None where it is sheltered (the cover map).
 // Each cylinder's cells are one size (about 18 pixels at its radius), a
-// whole number round it (no seam) and a whole number fallen and blown
-// every 64 s, with the hash repeating to match: the time wraps without a
-// jump, and the numbers stay small.
+// whole number round it (no seam) and a whole number fallen every 64 s,
+// with the hash repeating to match: the time wraps without a jump, and the
+// numbers stay small. The wind leans the drops.
 static const float k_fall_cycle = 64.0; // seconds
 float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
     if ((s.weather_flags & 1u) == 0u) {
@@ -576,10 +576,10 @@ float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
     const float2 dh = flat > 1e-4 ? dir.xz / flat : float2(0.0, -1.0);
     const float turn = atan2(dh.x, -dh.y) * (0.5 / k_pi_sky) + 0.5; // 0 to 1 round the camera
     const float2 tangent = float2(-dh.y, dh.x);
-    const float speed = lerp(8.0, 1.2, snowy);     // metres a second down
+    const bool flakes = snowy > 0.5; // one look or the other, so a blend never steps the cells
+    const float speed = flakes ? 1.2 : 8.0;         // metres a second down
     const float drift = dot(s.wind, tangent) * 0.8; // along the cylinder
     const float cycle = fmod(s.time, k_fall_cycle);
-    const float cycles = floor(s.time / k_fall_cycle); // whole cycles gone (the drift's whole cells)
     const float3 lit = s.sky_light * 0.7 + s.sun_light * (0.08 + 0.25 * snowy) * saturate(s.sun_direction.y * 2.0 + 0.2);
     float3 c = color;
     // Far to near, so nearer drops are over farther ones.
@@ -597,21 +597,18 @@ float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
         // Cells: a whole number round the cylinder; tall for streaks.
         const float around = max(floor(2.0 * k_pi_sky * radius / max(px * 18.0, 0.05)), 8.0);
         const float cell_u = 2.0 * k_pi_sky * radius / around;
-        const float cell_v = cell_u * lerp(4.0, 1.0, snowy);
-        // Fall and drift rounded to whole cells a cycle.
+        const float cell_v = cell_u * (flakes ? 1.0 : 4.0);
+        // The fall rounded to whole cells a cycle. The wind leans the drops
+        // (a slant with height) rather than carrying them round: a carry
+        // would differ by view direction and split the cells column by column.
         const float fall_cells = max(round(speed * k_fall_cycle / cell_v), 1.0);
-        const float drift_cells = round(drift * k_fall_cycle / cell_u);
         const float fall = fall_cells * cell_v / k_fall_cycle;
-        const float blow = drift_cells * cell_u / k_fall_cycle;
+        const float lean = clamp(drift / fall, -3.0, 3.0); // metres along for each metre down
         // Where this point was in the falling frame (cells), the height
         // taken within the hash's vertical period.
         const float period_v = fall_cells * cell_v;
         const float height = fmod(fmod(s.cam_alt, period_v) + period_v, period_v) + p.y;
-        // Round the cylinder the hash repeats with the cells, so the drift
-        // is carried on over whole cycles (a jump only when the time wraps,
-        // once an hour).
-        const float carried = fmod(drift_cells * cycles, around);
-        const float2 g = float2((turn * 2.0 * k_pi_sky * radius - blow * cycle) / cell_u - carried,
+        const float2 g = float2((turn * 2.0 * k_pi_sky * radius + lean * p.y) / cell_u,
                                 (height + fall * cycle) / cell_v);
         const float2 gi = floor(g);
         const int2 cell = int2(gi);
@@ -622,17 +619,17 @@ float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
             continue; // no drop in this cell
         }
         float2 centre = float2(weather_unit(key + uint3(0u, 0u, 1u)), weather_unit(key + uint3(0u, 0u, 2u)));
-        if (snowy > 0.5) {
+        if (flakes) {
             centre.x += sin(cycle * (2.0 * k_pi_sky / k_fall_cycle) * 5.0 + weather_unit(key + uint3(0u, 0u, 3u)) * 6.28) * 0.15;
         }
         const float2 d = (g - gi - centre) * float2(cell_u, cell_v); // metres from the drop's centre
         float alpha;
-        if (snowy > 0.5) {
+        if (flakes) {
             const float r = max(px * 0.9, 0.006);
             alpha = 0.85 * saturate(1.0 - length(d) / r);
         } else {
             // A streak along its motion (down, with the drift), about 0.3 m long.
-            const float2 v = normalize(float2(blow, -fall));
+            const float2 v = normalize(float2(lean, -1.0));
             const float along = dot(d, v);
             const float across = abs(d.x * v.y - d.y * v.x);
             alpha = 0.3 * saturate(1.0 - across / max(px * 0.7, 0.0015)) * saturate(1.0 - abs(along) / 0.15);

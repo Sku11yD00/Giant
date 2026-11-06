@@ -119,9 +119,11 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
                  // The ground's start values given: the ground is there now
                  // (a preset's alone only say how a new scene starts).
                  // Only the values given: the other stays where the
-                 // weather has taken it.
+                 // weather has taken it (or, with no ground yet, starts at
+                 // the new weather's start value).
                  if (args.contains("wetness") || args.contains("snow_cover")) {
-                     world::Ground g = state.weather->ground();
+                     world::Ground g = state.weather->ground_on() ? state.weather->ground()
+                                                                  : world::Ground{w.wetness, w.snow_cover};
                      if (args.contains("wetness")) g.wetness = w.wetness;
                      if (args.contains("snow_cover")) g.snow_cover = w.snow_cover;
                      state.weather->set_ground(g);

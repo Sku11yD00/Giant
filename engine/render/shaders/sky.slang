@@ -241,25 +241,9 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
 
 // --- Cover from above (rain and snow) ------------------------------------------
 
-// Metres a voxel spans on the finest level whose window holds camera-relative
-// `p` (the level a march finds things on there; the coarsest past them all).
-float voxel_size_at(ByteAddressBuffer levels, VoxelWorld w, float3 p) {
-    const float n = float(w.bricks_per_axis);
-    float size = 1.0;
-    for (uint i = 0; i < w.level_count; ++i) {
-        const Level c = load_level(levels, w.levels_offset, i);
-        size = c.brick_size / 8.0; // 8 voxels a brick side
-        const float3 local = (p - c.origin) / (n * c.brick_size);
-        if (all(local >= 0.0) && all(local < 1.0)) {
-            break;
-        }
-    }
-    return size;
-}
-
 // What is on top over each metre round the camera: the camera-relative
 // height where a ray straight down first meets the voxel world (-1e9:
-// nothing), less a voxel of the level it met there (the surface is
+// nothing), less the voxel it met (the surface is
 // somewhere in that voxel: so what is on top is never judged under
 // itself). Rain and snow reach only what is at that height; what is under
 // a roof, a bridge or a tree stays dry. Marched in two parts: from the top
@@ -308,23 +292,22 @@ void cs_weather_cover(uint3 id : SV_DispatchThreadID) {
         float hit_t;
         uint packed;
         uint hit_at;
+        float hit_voxel;
         float3 hit = float3(0.0, 0.0, 0.0);
         bool found = false;
         if (fine < w.level_count) {
-            if (fine_top < top && march_voxels_from(w, float3(xz.x, top, xz.y), down, 0u, 0.0, top - fine_top, no_skip,
-                                                    no_ground, hit_t, packed, hit_at)) {
+            if (fine_top < top && march_voxels_sized(w, float3(xz.x, top, xz.y), down, 0u, 0.0, top - fine_top, no_skip,
+                                                     no_ground, hit_t, packed, hit_at, hit_voxel)) {
                 hit = float3(xz.x, top - hit_t, xz.y);
                 found = true;
-            } else if (march_voxels_from(w, float3(xz.x, fine_top, xz.y), down, fine, 0.0, 4000.0, no_skip, no_ground,
-                                         hit_t, packed, hit_at)) {
+            } else if (march_voxels_sized(w, float3(xz.x, fine_top, xz.y), down, fine, 0.0, 4000.0, no_skip, no_ground,
+                                          hit_t, packed, hit_at, hit_voxel)) {
                 hit = float3(xz.x, fine_top - hit_t, xz.y);
                 found = true;
             }
         }
         if (found) {
-            // Half a voxel into what it met: the level that holds it.
-            const float v = voxel_size_at(levels, w, hit - float3(0.0, 0.01, 0.0));
-            height = hit.y - v;
+            height = hit.y - hit_voxel; // the voxel it met, whichever level
         }
     }
     write_texture_float(push.target)[id.xy] = height;

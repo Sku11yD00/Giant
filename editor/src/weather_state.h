@@ -37,6 +37,9 @@ public:
     // replaced, then wetted, dried, covered and thawed as time passes
     // (another weather goes on from the ground as it is).
     world::Ground ground() const { return m_ground; }
+    // Whether the ground follows a weather yet (else the next update starts
+    // it from the target's start values).
+    bool ground_on() const { return m_ground_on; }
     // Puts the ground there now (set_weather given wetness or snow_cover).
     void set_ground(const world::Ground& ground);
     // Seconds the weather has been shown (what falls moves with it).

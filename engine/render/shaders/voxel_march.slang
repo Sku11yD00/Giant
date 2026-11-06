@@ -118,8 +118,12 @@ uint slot_of(int3 brick, int n) {
 // plane) leaves out voxels whose centre is less than half a voxel above
 // it: a ray leaving a surface does not meet that surface's own voxels,
 // however coarse the level it goes on in (zero normal: none left out).
-bool march_voxels_from(VoxelWorld w, float3 origin, float3 dir, uint first_level, float t_start, float t_limit,
-                       float4 skip, float4 ground, out float hit_t, out uint packed, out uint hit_at) {
+// `hit_voxel`: metres the voxel it met spans (whichever level, or stand-in
+// brick, it was found on).
+bool march_voxels_sized(VoxelWorld w, float3 origin, float3 dir, uint first_level, float t_start, float t_limit,
+                        float4 skip, float4 ground, out float hit_t, out uint packed, out uint hit_at,
+                        out float hit_voxel) {
+    hit_voxel = 0.0;
     hit_at = 0u;
     hit_t = 0.0;
     packed = 0u;
@@ -236,6 +240,7 @@ bool march_voxels_from(VoxelWorld w, float3 origin, float3 dir, uint first_level
             hit_t = t;
             packed = pool.Load(base + 64 + i * 4);
             hit_at = index * 512u + i;
+            hit_voxel = voxel;
             return true;
         }
         float step_to;
@@ -249,6 +254,13 @@ bool march_voxels_from(VoxelWorld w, float3 origin, float3 dir, uint first_level
         t += min(step_to, brick_exit) + l.brick_size / 8.0 * 1e-4;
     }
     return false;
+}
+
+bool march_voxels_from(VoxelWorld w, float3 origin, float3 dir, uint first_level, float t_start, float t_limit,
+                       float4 skip, float4 ground, out float hit_t, out uint packed, out uint hit_at) {
+    float hit_voxel;
+    return march_voxels_sized(w, origin, dir, first_level, t_start, t_limit, skip, ground, hit_t, packed, hit_at,
+                              hit_voxel);
 }
 
 // From the camera: the view ray through a pixel.

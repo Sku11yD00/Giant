@@ -549,7 +549,8 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   texel round the camera, r32) marches the voxel world straight down per
   column (from 800 m above, or the coarsest window's top, to the finest
   window holding it, then down that window) and stores the height of what
-  is on top, less the size of the voxel it hit.
+  is on top, less the size of the voxel it hit (the march reports it,
+  whichever level or stand-in brick it was found on).
   `weather_surface` (sky_common.slang) then wets surfaces open to the sky
   (darker by porosity, rougher surfaces most; glossier; puddles from a
   noise that repeats every 4096 m in the hollows of flat ground) and lays
@@ -558,9 +559,10 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   follow the dry roughness, so rain does not put a cone on every open
   pixel (the wet gloss shows in screen and sky reflections). `apply_falling`
   draws rain streaks or snowflakes on five cylinders round the camera (1.5
-  to 24 m), a hash per cell of a fixed size per cylinder, falling and
-  drifting whole cells per 64 s cycle so time never jumps, none where
-  sheltered: no particles, no history. Settings `precipitation`, `wet_surfaces`,
+  to 24 m), a hash per cell of a fixed size per cylinder, falling whole
+  cells per 64 s cycle so the time wraps without a jump, leaning with the
+  wind (not carried round: a carry would differ by view direction), none
+  where sheltered: no particles, no history. Settings `precipitation`, `wet_surfaces`,
   `weather_cover`. Not yet: ripples, splashes, drips, wet voxel colours for
   GI, snow depth (it is a coat, not a volume).
 

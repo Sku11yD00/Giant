@@ -198,6 +198,12 @@ GIANT_TEST("weather state: the ground wets in rain, snows over in the cold, and 
     GIANT_CHECK(f.run("clear_weather").ok);
     f.weather.update(f.state.scene.weather, 0.1, {}, 99);
     GIANT_CHECK(f.weather.ground() == world::Ground{});
+    // From no weather, one value given: the other is the preset's start value.
+    GIANT_CHECK(f.run("set_weather", {{"preset", "snow"}, {"wetness", 0.2}}).ok);
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
+    GIANT_CHECK(f.weather.ground().snow_cover > 0.99f && std::fabs(f.weather.ground().wetness - 0.2f) < 0.01f);
+    GIANT_CHECK(f.run("clear_weather").ok);
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
     // Out of range is refused.
     GIANT_CHECK(!f.run("set_weather", {{"temperature", 99}}).ok);
 }
