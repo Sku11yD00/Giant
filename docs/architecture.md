@@ -458,7 +458,8 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   are. `sculpt_terrain` refuses a call over 4096 cells, 65536 dabs or 16.7
   million heights reached (dabs times each one's square), so one call is a
   bounded hitch; ground saved in an open world but not loaded is left as it
-  is (`cells_not_loaded`). One undo step of a drag (its calls merged:
+  is (`cells_not_loaded`; the loaded tile's edge can then meet it in a
+  slope, as smooth reads no heights there). One undo step of a drag (its calls merged:
   `CommandContext::merging`) holds each tile once: as it was before the
   drag first changed it, and, taken when undone, as it was after (for
   redo). The viewport brush (`editor/src/terrain_brush_tool.h`) casts a ray
@@ -468,8 +469,11 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   button is held (only when it moved a quarter radius, or 30 times a second
   held still, so the frame rate does not set the speed; no ray is cast
   until the pointer or camera moves or a dab is due), in one merge group:
-  the stroke is one undo step. A jump over 4 radii (the pointer over a
-  ridge, the camera flown) starts the line again where it lands. The panel
+  the stroke is one undo step. A move of over 4 radii is cast again every
+  4 pixels between (up to 16 a frame), so a fast drag over far ground,
+  where a pixel is metres, stays one line; a gap over 4 radii that is 4
+  times its neighbours' (the pointer over a ridge), or a jump since the
+  camera moved, starts the line again where it lands. The panel
   keeps the radius to 128 samples (`BrushSettings::max_radius`), and
   flatten goes to the ground where the stroke began unless a height is
   given. Far ground (past the loaded tiles) cannot be sculpted. Height maps

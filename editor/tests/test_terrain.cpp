@@ -643,3 +643,39 @@ GIANT_TEST("terrain brush tool: a jump of the pointer starts the stroke again; f
                                          20000.0);
     GIANT_CHECK(far_hit.has_value() && far_hit->x > 0.0 && far_hit->x < 256.0);
 }
+
+GIANT_TEST("terrain brush tool: a fast drag over far ground leaves no gaps") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {511, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    // Low over the ground, looking along x at a grazing angle: a pixel is
+    // metres of ground there.
+    f.state.camera.position = {0.0, 10.0, 32.0};
+    f.state.camera.yaw_degrees = -90.0f; // along +x
+    f.state.camera.pitch_degrees = -2.0f;
+    f.state.brush = {true, "raise", 4.0, 1.0f, 0.0f, 0.0f};
+    const Terrain& t = f.state.scene.terrain;
+    // Where the pointer starts and ends, on the ground before it is raised.
+    const auto near_hit =
+        terrain_ray_hit(t, f.state.camera.position,
+                        camera_ray(f.state.camera, 400.0f, 368.0f, 800.0f, 600.0f), 1000.0);
+    const auto far_hit =
+        terrain_ray_hit(t, f.state.camera.position,
+                        camera_ray(f.state.camera, 400.0f, 316.0f, 800.0f, 600.0f), 1000.0);
+    TerrainBrushTool tool;
+    platform::InputEvent press;
+    press.type = platform::InputEvent::Type::mouse_button;
+    press.button = platform::MouseButton::left;
+    press.down = true;
+    press.x = 400.0f;
+    press.y = 368.0f; // ~60 m away
+    const Vec3 forward = camera_ray(f.state.camera, 400.0f, 300.0f, 800.0f, 600.0f);
+    tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    platform::InputEvent move = press;
+    move.type = platform::InputEvent::Type::mouse_move;
+    move.y = 316.0f; // 52 pixels up in a frame: ~150 m away
+    tool.update({move}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    GIANT_CHECK(forward.x > 0.9f && near_hit && far_hit && far_hit->x - near_hit->x > 50.0);
+    for (double x = near_hit->x; x <= far_hit->x; x += 2.0) {
+        GIANT_CHECK(t.height_at(x, 32.0).value() > 0.5);
+    }
+}

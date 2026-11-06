@@ -97,32 +97,88 @@ void TerrainBrushTool::update(const std::vector<platform::InputEvent>& events, b
     m_pitch = state.camera.pitch_degrees;
     m_cast_x = m_x;
     m_cast_y = m_y;
-    const Vec3 ray = camera_ray(state.camera, m_x, m_y, window_width, window_height);
-    const auto hit = terrain_ray_hit(state.scene.terrain, state.camera.position, ray, 20000.0);
+    const auto cast = [&](float px, float py) {
+        return terrain_ray_hit(state.scene.terrain, state.camera.position,
+                               camera_ray(state.camera, px, py, window_width, window_height),
+                               20000.0);
+    };
+    const auto hit = cast(m_x, m_y);
     if (!hit) return;
     // Held still, it dabs k_dabs_per_second (whatever the frame rate); moved,
-    // a dab every quarter radius along the way. A jump (the pointer over a
-    // ridge, the camera flown) starts the stroke again where it lands, so
-    // no line is drawn over ground the pointer never went over.
+    // a dab every quarter radius along the way.
     const double gone = m_last ? std::hypot(hit->x - m_last->x, hit->z - m_last->z) : 0.0;
-    const bool jumped = m_last && gone > b.radius * 4.0;
-    const bool moved = m_last && !jumped && gone >= b.radius * 0.25;
-    if (m_last && !moved && !jumped && !due) return;
+    const bool moved = m_last && gone >= b.radius * 0.25;
+    if (m_last && !moved && !due) return;
     if (!m_last) m_start_height = static_cast<float>(hit->y);
     m_since_dab = 0.0f;
-    ai::Json points = ai::Json::array();
-    if (moved) points.push_back({m_last->x, m_last->z}); // the stroke goes on from the last dab
-    points.push_back({hit->x, hit->z});
-    ai::Json args = {{"op", b.op}, {"points", std::move(points)}, {"radius", b.radius}, {"strength", b.strength},
-                     {"falloff", b.falloff}, {"continues", moved}};
-    if (b.op == "flatten") args["height"] = b.flatten_to_start ? m_start_height : b.height;
-    const ai::CommandResult result = commands.execute("sculpt_terrain", args, {m_stroke, true});
-    if (!result.ok) {
-        log_warning("editor", "sculpt_terrain: " + result.error);
-        m_down = false;
-        return;
+    // The line from the last dab follows the ground the pointer went over:
+    // a far move is cast again at points between (in the window), and a
+    // jump over 4 radii between two of them (the pointer over a ridge) or
+    // since the camera moved (flown) starts the line again where it lands.
+    std::vector<std::vector<DVec3>> lines(1);
+    if (moved) {
+        const bool camera_same = state.camera.position.x == m_dab_camera.x &&
+                                 state.camera.position.y == m_dab_camera.y &&
+                                 state.camera.position.z == m_dab_camera.z &&
+                                 state.camera.yaw_degrees == m_dab_yaw &&
+                                 state.camera.pitch_degrees == m_dab_pitch;
+        const double jump = b.radius * 4.0;
+        if (camera_same && gone > jump) {
+            // The pointer's path, cast every few pixels: a gap over 4 radii
+            // that is also 4 times its neighbours' is a ridge passed over
+            // (a smooth drag's gaps change slowly, even seen at a grazing
+            // angle).
+            std::vector<DVec3> path{*m_last};
+            const float pixels = std::hypot(m_x - m_dab_x, m_y - m_dab_y);
+            const int parts =
+                std::clamp(static_cast<int>(std::ceil(pixels / 4.0f)), 1, k_max_casts_per_frame);
+            for (int k = 1; k < parts; ++k) {
+                const float f = static_cast<float>(k) / static_cast<float>(parts);
+                if (const auto between =
+                        cast(m_dab_x + (m_x - m_dab_x) * f, m_dab_y + (m_y - m_dab_y) * f)) {
+                    path.push_back(*between);
+                }
+            }
+            path.push_back(*hit);
+            const auto gap = [&](usize k) { // from path[k - 1] to path[k]; 0 off the ends
+                if (k == 0 || k >= path.size()) return 0.0;
+                return std::hypot(path[k].x - path[k - 1].x, path[k].z - path[k - 1].z);
+            };
+            lines.back().push_back(path[0]);
+            for (usize k = 1; k < path.size(); ++k) {
+                const double g = gap(k);
+                const bool ridge = g > jump && g > 4.0 * std::max(gap(k - 1), gap(k + 1));
+                if (ridge) lines.emplace_back();
+                if (k + 1 < path.size()) lines.back().push_back(path[k]);
+            }
+        } else {
+            lines.back().push_back(*m_last);
+            if (gone > jump) lines.emplace_back();
+        }
+    }
+    lines.back().push_back(*hit);
+    for (usize k = 0; k < lines.size(); ++k) {
+        const bool continues = k == 0 && moved;
+        ai::Json points = ai::Json::array();
+        for (const DVec3& p : lines[k]) points.push_back({p.x, p.z});
+        if (continues && points.size() == 1) continue; // only the last dab: nothing new
+        ai::Json args = {{"op", b.op},           {"points", std::move(points)},
+                         {"radius", b.radius},   {"strength", b.strength},
+                         {"falloff", b.falloff}, {"continues", continues}};
+        if (b.op == "flatten") args["height"] = b.flatten_to_start ? m_start_height : b.height;
+        const ai::CommandResult result = commands.execute("sculpt_terrain", args, {m_stroke, true});
+        if (!result.ok) {
+            log_warning("editor", "sculpt_terrain: " + result.error);
+            m_down = false;
+            return;
+        }
     }
     m_last = hit;
+    m_dab_x = m_x;
+    m_dab_y = m_y;
+    m_dab_camera = state.camera.position;
+    m_dab_yaw = state.camera.yaw_degrees;
+    m_dab_pitch = state.camera.pitch_degrees;
 }
 
 } // namespace giant::editor
