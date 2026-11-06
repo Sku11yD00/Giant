@@ -168,43 +168,54 @@ Falling falling(const Weather& w) {
     return {p * (1.0f - snow_share), p * snow_share};
 }
 
-Ground weather_ground(Ground ground, const Weather& w, double seconds) {
-    if (!std::isfinite(seconds) || seconds <= 0.0) return ground;
+namespace {
+
+// One step of weather_ground, short enough that the coupling between
+// melting and wetting stays close to the continuous one.
+Ground ground_step(Ground ground, const Weather& w, double seconds) {
     const Falling f = falling(w);
     const double t = std::isfinite(w.temperature) ? w.temperature : 10.0;
     const double warm = std::clamp((t + 5.0) / 30.0, 0.0, 1.0);
     const double wind = std::isfinite(w.wind_speed) ? std::clamp(static_cast<double>(w.wind_speed), 0.0, 200.0) : 0.0;
-    const double cloud = std::clamp(static_cast<double>(w.cloud_cover), 0.0, 1.0);
-    // Rates a second. Each is applied as a steady approach to its end
-    // (exponential), so many small steps and one big one agree.
-    const double wet_rate = f.rain / 300.0;                                         // wetting: 5 min at full rain
+    const double cloud = std::isfinite(w.cloud_cover) ? std::clamp(static_cast<double>(w.cloud_cover), 0.0, 1.0) : 0.0;
+    // Rates a second, each applied as a steady approach to its end
+    // (exponential within the step).
+    const double wet_rate = f.rain / 300.0; // wetting: 5 minutes at full rain
     const double dry_rate = (0.3 + 0.7 * warm) * (1.0 + wind / 10.0) * (1.0 - 0.5 * cloud) / 2400.0;
-    const double snow_rate = f.snow / 1200.0;                                       // 20 min to cover
-    const double melt_rate = t > 0.0 ? t / 6000.0 : 0.0;                            // 10 min at 10 degrees
+    const double snow_rate = f.snow / 1200.0;                // 20 minutes to cover
+    const double melt_rate = t > 0.0 ? t / 6000.0 : 0.0;     // 10 minutes at 10 degrees
     double wet = std::clamp(static_cast<double>(ground.wetness), 0.0, 1.0);
     double snow = std::clamp(static_cast<double>(ground.snow_cover), 0.0, 1.0);
-    // Snow: towards 1 while it falls and melts away when warm.
-    const double snow_in = snow_rate;
-    const double snow_out = melt_rate;
-    const double snow_sum = snow_in + snow_out;
+    // Snow: towards 1 while it falls, melting away when warm.
     const double snow_before = snow;
-    if (snow_sum > 0.0) {
-        const double target = snow_in / snow_sum;
-        snow = target + (snow - target) * std::exp(-snow_sum * seconds);
+    if (const double sum = snow_rate + melt_rate; sum > 0.0) {
+        const double target = snow_rate / sum;
+        snow = target + (snow - target) * std::exp(-sum * seconds);
     }
-    // Melting wets the ground (what melted, twice over: slush is wet).
+    // Melt water wets the ground (twice what melted: slush is wet).
     const double melted = std::max(snow_before - snow, 0.0);
-    // Wetness: towards 1 in rain (and sleet), towards 0 when dry; snow
-    // lying keeps what is under it as it was.
-    const double wet_in = wet_rate;
-    const double wet_out = f.rain > 0.0f ? 0.0 : dry_rate * (1.0 - snow);
-    const double wet_sum = wet_in + wet_out;
-    if (wet_sum > 0.0) {
-        const double target = wet_in / wet_sum;
-        wet = target + (wet - target) * std::exp(-wet_sum * seconds);
-    }
     wet = std::min(wet + 2.0 * melted, 1.0);
+    // Wetness: towards rain's share of rain and drying (a drizzle on a warm
+    // day stays damp, not soaked); lying snow keeps what is under it.
+    const double wet_out = dry_rate * (1.0 - snow) * (1.0 - f.rain);
+    if (const double sum = wet_rate + wet_out; sum > 0.0) {
+        const double target = wet_rate / sum;
+        wet = target + (wet - target) * std::exp(-sum * seconds);
+    }
     return {static_cast<float>(std::clamp(wet, 0.0, 1.0)), static_cast<float>(std::clamp(snow, 0.0, 1.0))};
+}
+
+} // namespace
+
+Ground weather_ground(Ground ground, const Weather& w, double seconds) {
+    if (!std::isfinite(seconds) || seconds <= 0.0) return ground;
+    // Steps of at most 10 s (a minute's worth of steps for long ones past
+    // a day), so any step size the caller takes gives about the same.
+    const double longest = std::max(10.0, seconds / 8640.0);
+    const int steps = static_cast<int>(std::ceil(seconds / longest));
+    const double step = seconds / steps;
+    for (int i = 0; i < steps; ++i) ground = ground_step(ground, w, step);
+    return ground;
 }
 
 Vec3 air_transmittance(float sun_elevation_degrees, float haze) {

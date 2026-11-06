@@ -19,7 +19,9 @@ public:
     // (blending when a transition was asked for) and moves the clouds.
     // `camera`: a change of cloud size scales the pattern about it (the
     // clouds overhead stay put).
-    void update(const std::optional<world::Weather>& target, double seconds, const DVec3& camera = {});
+    // `scene`: the scene's generation (a new one starts the ground again).
+    void update(const std::optional<world::Weather>& target, double seconds, const DVec3& camera = {},
+                u64 scene = 0);
     // The scene's weather (changed or not) is reached over `seconds` from
     // the next update (0: at once), from what shows then.
     void transition(double seconds);
@@ -31,9 +33,12 @@ public:
     double remaining() const;
     DVec3 cloud_offset() const { return m_offset; }
     // The ground under the shown weather (wet, snow-covered): from the
-    // scene's start values, then wetted, dried, covered and thawed as time
-    // passes. Jumps to the scene's start values when those change.
+    // scene's start values when weather first shows or the scene is
+    // replaced, then wetted, dried, covered and thawed as time passes
+    // (another weather goes on from the ground as it is).
     world::Ground ground() const { return m_ground; }
+    // Puts the ground there now (set_weather given wetness or snow_cover).
+    void set_ground(const world::Ground& ground);
     // Seconds the weather has been shown (what falls moves with it).
     double time() const { return m_time; }
 
@@ -48,7 +53,8 @@ private:
     DVec3 m_offset{};
     double m_tile = 0.0; // the cloud tile m_offset was last used with (0: none)
     world::Ground m_ground;
-    std::optional<world::Ground> m_ground_start; // the scene's start values, as last seen
+    bool m_ground_on = false; // m_ground follows a weather (else it starts at the next update)
+    u64 m_scene = 0;          // the scene generation last seen
     double m_time = 0.0;
 };
 

@@ -551,7 +551,7 @@ void EditorPanels::draw_weather() {
     slider("Snow lying", "snow_cover", w->snow_cover, 0.0f, 1.0f);
     if (m_state.weather != nullptr) {
         const world::Ground g = m_state.weather->ground();
-        const world::Falling f = world::falling(*w);
+        const world::Falling f = world::falling(m_state.weather->shown() ? *m_state.weather->shown() : *w);
         ImGui::TextDisabled("Now: ground %.0f%% wet, %.0f%% snow; falling: rain %.2f, snow %.2f", g.wetness * 100.0f,
                             g.snow_cover * 100.0f, f.rain, f.snow);
     }

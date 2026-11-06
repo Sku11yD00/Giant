@@ -160,9 +160,22 @@ GIANT_TEST("weather state: the ground wets in rain, snows over in the cold, and 
     GIANT_CHECK(f.run("set_weather", {{"wetness", 0.1}, {"precipitation", 0}}).ok);
     f.weather.update(f.state.scene.weather, 0.1);
     GIANT_CHECK(std::fabs(f.weather.ground().wetness - 0.1f) < 1e-3f);
-    // Snow: the preset starts covered; it stays in the cold.
-    GIANT_CHECK(f.run("set_weather", {{"preset", "snow"}}).ok);
+    // Another weather goes on from the ground as it is (a preset's start
+    // values only start a new scene), blending in or at once.
+    GIANT_CHECK(f.run("set_weather", {{"preset", "clear"}, {"over_seconds", 30}}).ok);
     f.weather.update(f.state.scene.weather, 0.1);
+    GIANT_CHECK(std::fabs(f.weather.ground().wetness - 0.1f) < 1e-3f);
+    GIANT_CHECK(f.run("set_weather", {{"preset", "storm"}}).ok);
+    f.weather.update(f.state.scene.weather, 0.1);
+    GIANT_CHECK(f.weather.ground().wetness < 0.2f);
+    // A new scene starts the ground from its own start values.
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
+    GIANT_CHECK(f.weather.ground().wetness == 1.0f);
+    // Snow: from no weather the preset starts covered; it stays in the cold.
+    GIANT_CHECK(f.run("clear_weather").ok);
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
+    GIANT_CHECK(f.run("set_weather", {{"preset", "snow"}}).ok);
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
     GIANT_CHECK(f.weather.ground().snow_cover == 1.0f);
     const Json got = f.run("get_weather").value;
     GIANT_CHECK(got["falling"]["snow"].get<float>() > 0.0f && got["falling"]["rain"].get<float>() == 0.0f);
@@ -174,7 +187,7 @@ GIANT_TEST("weather state: the ground wets in rain, snows over in the cold, and 
     GIANT_CHECK(sky.wind.x > 0.0f); // the preset's wind blows east
     // No weather: no ground.
     GIANT_CHECK(f.run("clear_weather").ok);
-    f.weather.update(f.state.scene.weather, 0.1);
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
     GIANT_CHECK(f.weather.ground() == world::Ground{});
     // Out of range is refused.
     GIANT_CHECK(!f.run("set_weather", {{"temperature", 99}}).ok);

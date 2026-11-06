@@ -540,9 +540,11 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
 - **Rain, snow and wet ground (N3 part 8).** `world::falling` splits the
   weather's precipitation into rain and snow by temperature;
   `world::weather_ground` steps the ground's wetness and snow cover
-  (exponential approaches, so any step size agrees) from the scene's start
-  values, which the editor's `WeatherState` carries on each frame (view
-  state, like the blend). The renderer's `Sky` takes what falls, the wind,
+  (exponential approaches in steps of at most 10 s, so any step size
+  agrees) from the scene's start values when weather first shows or the
+  scene is replaced; the editor's `WeatherState` carries it on each frame
+  under the shown weather (view state, like the blend), and set_weather's
+  `wetness`/`snow_cover` put it somewhere at once. The renderer's `Sky` takes what falls, the wind,
   the ground and a time. In the sky passes a cover map (256^2, a metre a
   texel round the camera, r32) marches the voxel world straight down per
   column (from 800 m above to the finest window holding it, then down that

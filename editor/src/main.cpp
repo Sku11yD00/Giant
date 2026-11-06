@@ -427,7 +427,7 @@ int run(const Options& options) {
         viewport_camera.update(state.camera, delta);
         panels.draw(frame_info);
         ui->end_frame();
-        weather.update(state.scene.weather, delta, state.camera.position); // after the panels' changes
+        weather.update(state.scene.weather, delta, state.camera.position, state.scene_generation); // after the panels' changes
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }

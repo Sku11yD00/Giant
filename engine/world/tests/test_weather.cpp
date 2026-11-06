@@ -140,6 +140,18 @@ GIANT_TEST("weather: rain or snow by temperature; the ground wets, dries, is cov
     thaw.temperature = 10.0f;
     const Ground melted = weather_ground(s, thaw, 1200.0);
     GIANT_CHECK(melted.snow_cover < 0.2f * s.snow_cover && melted.wetness > 0.5f);
+    // Thawing too: one big step and many small ones agree.
+    Ground thaw_steps = s;
+    for (int i = 0; i < 3600; ++i) thaw_steps = weather_ground(thaw_steps, thaw, 1.0);
+    const Ground thaw_once = weather_ground(s, thaw, 3600.0);
+    GIANT_CHECK(std::fabs(thaw_steps.wetness - thaw_once.wetness) < 0.01f &&
+                std::fabs(thaw_steps.snow_cover - thaw_once.snow_cover) < 0.01f);
+    // A drizzle on a warm day keeps the ground damp, not soaked.
+    Weather drizzle = sun;
+    drizzle.temperature = 20.0f;
+    drizzle.precipitation = 0.01f;
+    const Ground damp = weather_ground({0.3f, 0.0f}, drizzle, 6.0 * 3600.0);
+    GIANT_CHECK(damp.wetness < 0.3f);
     // Nothing for no time or a bad step.
     GIANT_CHECK(weather_ground(s, thaw, 0.0) == s && weather_ground(s, thaw, std::nan("")) == s);
     // The new fields are checked and saved.

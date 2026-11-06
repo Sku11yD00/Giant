@@ -61,7 +61,7 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
          "haze), a layer of clouds that drifts on the wind and shades the ground, height fog, and rain or "
          "snow (by temperature) that wets the ground (darker, glossier, puddles) or covers what faces up, "
          "except where something above shelters it; the ground then wets, dries, snows over and thaws as "
-         "time passes, from the wetness and snow_cover given. Starts "
+         "time passes (wetness and snow_cover put it there; a preset's only start a new scene). Starts "
          "from `preset` if given, else the weather now (or the defaults), then sets the fields given. "
          "over_seconds blends the view from what shows now to the new weather (default 0: at once, and at "
          "once from no weather; the scene saves the new weather either way). A scene without weather keeps the flat sky colours of "
@@ -83,9 +83,9 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
                 {"precipitation", number(0, 1, "How hard it rains or snows.")},
                 {"temperature", number(-50, 50, "Degrees Celsius: snow at -1 and below, rain at 2 and above, "
                                                 "sleet between; warm melts lying snow. Default 10.")},
-                {"wetness", number(0, 1, "How wet the ground is as the scene starts (then it wets and dries "
+                {"wetness", number(0, 1, "How wet the ground is, now and as the scene starts (then it wets and dries "
                                          "with the weather).")},
-                {"snow_cover", number(0, 1, "How much snow lies as the scene starts (then it falls and "
+                {"snow_cover", number(0, 1, "How much snow lies, now and as the scene starts (then it falls and "
                                             "melts with the weather).")},
                 {"over_seconds", number(0, 3600, "Blend the view into it over this long. Default 0.")}}}},
          false,
@@ -114,7 +114,14 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
              if (const auto bad = world::check_weather(w)) return CommandResult::failure(*bad);
              const std::optional<Weather> before = state.scene.weather;
              state.scene.weather = w;
-             if (state.weather != nullptr) state.weather->transition(args.value("over_seconds", 0.0));
+             if (state.weather != nullptr) {
+                 state.weather->transition(args.value("over_seconds", 0.0));
+                 // The ground's start values given: the ground is there now
+                 // (a preset's alone only say how a new scene starts).
+                 if (args.contains("wetness") || args.contains("snow_cover")) {
+                     state.weather->set_ground({w.wetness, w.snow_cover});
+                 }
+             }
              record(state, context, before, w);
              return CommandResult::success({{"weather", weather_json(w)}});
          }});
@@ -144,8 +151,10 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
              Json presets_out = Json::array();
              for (const std::string_view name : world::weather_preset_names()) presets_out.push_back(std::string(name));
              out["presets"] = std::move(presets_out);
-             if (state.scene.weather) {
-                 const world::Falling f = world::falling(*state.scene.weather);
+             const std::optional<Weather>& now =
+                 state.weather != nullptr && state.weather->shown() ? state.weather->shown() : state.scene.weather;
+             if (now) {
+                 const world::Falling f = world::falling(*now);
                  out["falling"] = {{"rain", f.rain}, {"snow", f.snow}};
              }
              if (state.weather != nullptr) {
