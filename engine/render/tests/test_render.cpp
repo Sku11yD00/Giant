@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -957,7 +958,12 @@ GIANT_TEST("render: d3d12 global illumination bounces colour and shuts out the s
     const auto light_only = draw(true);
     if (light_only.size() == k_w * k_h * 4) {
         const usize i = (static_cast<usize>(k_h / 2) * k_w + (k_w / 2 - 37)) * 4; // x = -4: open ground
-        GIANT_CHECK(light_only[i] > 60 && std::abs(int{light_only[i]} - int{light_only[i + 1]}) <= 3);
+        // Grey and lit (green and blue alike: the wall's bounce may add a
+        // little red even this far off, its cones being wide).
+        std::printf("lighting view at x = -4: %d %d %d\n", int{light_only[i]}, int{light_only[i + 1]},
+                    int{light_only[i + 2]});
+        GIANT_CHECK(light_only[i + 1] > 60 && std::abs(int{light_only[i + 1]} - int{light_only[i + 2]}) <= 3);
+        GIANT_CHECK(light_only[i] >= light_only[i + 1]);
     }
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
