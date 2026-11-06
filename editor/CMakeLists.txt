@@ -5,6 +5,7 @@ add_executable(giant_editor
   src/scene_commands.cpp
   src/scene_render.cpp
   src/viewport_camera.cpp
+  src/world_streaming.cpp
   src/ui/imgui_layer.cpp
   src/ui/panels.cpp
 )
@@ -77,8 +78,9 @@ endif()
 # The editor's commands without a window or GPU.
 if(GIANT_BUILD_TESTS)
   add_executable(giant_editor_tests tests/test_scene_commands.cpp tests/test_kits.cpp tests/test_scene_cells.cpp
+                 tests/test_world_streaming.cpp
                  src/scene_commands.cpp
-                 src/mesh_library.cpp src/scene_render.cpp)
+                 src/mesh_library.cpp src/scene_render.cpp src/world_streaming.cpp)
   target_link_libraries(giant_editor_tests PRIVATE giant::core giant::platform giant::rhi giant::geometry
                         giant::render giant::world giant::ai giant::test_main)
   giant_apply_warnings(giant_editor_tests)

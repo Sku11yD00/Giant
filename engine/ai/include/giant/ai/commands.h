@@ -53,8 +53,14 @@ public:
 
     std::vector<Change>& changes() { return m_changes; }
 
+    // The undo history no longer applies (a file was opened): if the
+    // command succeeds, every undo and redo step is forgotten.
+    void forget_history() { m_forget_history = true; }
+    bool forgets_history() const { return m_forget_history; }
+
 private:
     std::vector<Change> m_changes;
+    bool m_forget_history = false;
 };
 
 struct CommandDesc {

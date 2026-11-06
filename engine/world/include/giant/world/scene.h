@@ -49,12 +49,14 @@ struct DecalSettings {
     float opacity = 1.0f;  // 0 to 1
     float softness = 0.1f; // edge fade, 0 (crisp) to 1, a fraction of the stamp
     u32 seed = 0;          // varies splat and cracks
+    bool operator==(const DecalSettings&) const = default;
 };
 
 struct Transform {
     DVec3 position{};  // metres; doubles so a 20 km world keeps millimetres
     Quat rotation{};   // unit quaternion
     Vec3 scale{1.0f, 1.0f, 1.0f};
+    bool operator==(const Transform&) const = default;
 };
 
 // A physically based material (metal/roughness, as artists know it).
@@ -63,6 +65,7 @@ struct Material {
     float roughness = 0.5f;             // 0 mirror to 1 matte
     float metallic = 0.0f;              // 0 or 1 for real materials
     Vec3 emissive{};                    // linear, added light; may exceed 1
+    bool operator==(const Material&) const = default;
 };
 
 struct Entity {
@@ -79,6 +82,7 @@ struct Entity {
     Material material; // unused by kits (their pieces have their own)
     DecalSettings decal; // used when shape is `decal`
     bool visible = true;
+    bool operator==(const Entity&) const = default;
 };
 
 // One part of a kit, placed relative to the kit entity's transform.
@@ -229,5 +233,35 @@ struct LoadError {
 // Replaces `out` only on success. Unknown keys are errors (typos must not
 // silently drop data); missing optional keys take their defaults.
 std::optional<LoadError> load_scene(std::string_view text, Scene& out);
+
+// --- Worlds streamed by cell ----------------------------------------------------
+//
+// A world is a folder: world.json (WorldIndex: lighting, kits, the meshes
+// its cells use, which cells have a file) and cells/<x>_<z>.cell.json, one
+// per cell with entities. Each is text like a scene; the editor loads
+// cells around the camera and unloads far ones (editor/src/world_streaming.h).
+
+struct WorldIndex {
+    EntityId next_id = 1; // one past the last id any cell holds
+    Lighting lighting;
+    std::vector<Kit> kits;
+    std::vector<std::string> meshes; // imported when the world opens
+    std::vector<CellCoord> cells;    // cells that have a file
+};
+
+// "<x>_<z>.cell.json", in the world's cells folder.
+std::string cell_file_name(CellCoord cell);
+
+// JSON text, stable order (meshes sorted, cells by z then x), trailing newline.
+std::string save_world_index(const WorldIndex& world);
+// Replaces `out` only on success; strict, like load_scene.
+std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out);
+
+// One cell's entities, sorted by id, so an unchanged cell saves the same text.
+std::string save_cell(CellCoord cell, std::span<const Entity> entities);
+// Replaces `out` only on success. Every entity must be in `cell` (by
+// position) and ids unique in the file. Kits are not checked (the world's
+// index holds them): an entity naming a missing kit just draws nothing.
+std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::vector<Entity>& out);
 
 } // namespace giant::world

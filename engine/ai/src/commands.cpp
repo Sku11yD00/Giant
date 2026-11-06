@@ -209,6 +209,11 @@ CommandResult CommandRegistry::execute(std::string_view name, const Json& args_i
         roll_back();
         return result;
     }
+    if (context.forgets_history()) {
+        m_undo.clear();
+        m_redo.clear();
+        return result;
+    }
     if (!context.changes().empty() && options.record_history) {
         if (merge_group != 0 && !m_undo.empty() && m_redo.empty() &&
             m_undo.back().merge_group == merge_group && m_undo.back().what.command == command_name) {

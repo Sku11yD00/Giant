@@ -15,6 +15,7 @@
 #include "scene_render.h"
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
+#include "world_streaming.h"
 #include "ui/panels.h"
 
 #include "giant/ai/mcp_server.h"
@@ -277,6 +278,8 @@ int run(const Options& options) {
     editor::MeshLibrary meshes(renderer.get()); // after the renderer: released first
     editor::EditorState state;
     state.meshes = &meshes;
+    editor::WorldStreaming world_streaming;
+    state.world = &world_streaming;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -421,6 +424,12 @@ int run(const Options& options) {
         }
         record_frame(*cmd, swap_chain->current_texture());
         device->end_frame();
+        // After the frame's cells were built from the scene: loads and
+        // unloads world cells (what joins the scene draws next frame).
+        world_streaming.update(state.scene, state.scene_generation, state.camera.position, scene_frame);
+        if (state.selected != 0 && state.scene.find(state.selected) == nullptr) {
+            state.selected = 0;
+        }
         frame_info.ui_draw_calls = device->last_frame_stats().ui_draws;
         skipped_in_a_row = 0;
         if (pace_null) {

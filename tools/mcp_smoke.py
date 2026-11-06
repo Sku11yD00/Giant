@@ -137,6 +137,35 @@ def build_scene(tool, call, check):
     tool("new_scene")  # leave the default empty scene for the checks after this
 
 
+def world_gate(tool, call, check):
+    """A world streamed by cell: saved, opened, loaded around the camera, let go far off."""
+    with tempfile.TemporaryDirectory() as folder:
+        world = os.path.join(folder, "valley")
+        tool("create_entities", {"entities": [{"name": "near", "position": [5, 0.5, 5]},
+                                              {"name": "near", "position": [70, 0.5, 5]},
+                                              {"name": "far", "position": [6000, 0.5, 5]}]})
+        made = tool("save_world", {"folder": world})
+        check(made["cells_written"] == 3 and made["cells"] == 3, f"world saved, got {made}")
+        tool("set_camera", {"position": [10, 5, 30], "look_at": [10, 0, 0]})
+        opened = tool("open_world", {"folder": world})
+        check(opened["cells"] == 3 and tool("list_entities")["count"] == 0, "world opened, nothing loaded yet")
+        check(not tool("get_history")["undo"], "opening a world clears the history")
+        info = {}
+        for _ in range(200):
+            info = tool("get_world")
+            if info["loaded"] == 2 and info["reading"] == 0 and info["waiting"] == 0:
+                break
+        check(info["loaded"] == 2 and info["entities"] == 2, f"the near cells load, got {info}")
+        tool("set_camera", {"position": [6000, 5, 30], "look_at": [6000, 0, 0]})
+        for _ in range(200):
+            info = tool("get_world")
+            if info["loaded"] == 1 and info["entities"] == 1:
+                break
+        check(info["loaded"] == 1 and info["entities"] == 1 and info["unsaved_cells"] == 0,
+              f"far off, the far cell loads and the near ones go, got {info}")
+    tool("new_scene")
+
+
 def write_bumpy_sphere_glb(path, segments=256, rings=128):
     """A 1 m wide sphere with bumps, about 65 000 triangles: dense enough for LOD."""
     import math
@@ -665,6 +694,7 @@ def main() -> int:
         # renderer's own d3d12 tests check them), on in gi_gate.
         tool("set_render_settings", {"gi": False, "screen_space_reflections": False})
         build_scene(tool, call, check)
+        world_gate(tool, call, check)
         lod_gate(tool, call, check)
         kit_gate(tool, call, check)
         voxel_gate(tool, call, check)

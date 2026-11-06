@@ -356,3 +356,59 @@ GIANT_TEST("world: cells and what changed") {
     c = scene.take_changes();
     GIANT_CHECK(c.all && c.ids.empty());
 }
+
+GIANT_TEST("world: a world's index and cells save and load as text") {
+    WorldIndex world;
+    world.next_id = 42;
+    world.lighting.exposure = 2.0f;
+    world.kits.push_back({"house", {KitPiece{"wall", Shape::cube, {}, {}, {}, {}}}});
+    world.meshes = {"b.glb", "a.glb", "b.glb"};
+    world.cells = {{3, 1}, {-2, 0}, {0, 1}};
+    WorldIndex back;
+    const std::string text = save_world_index(world);
+    GIANT_CHECK(!load_world_index(text, back).has_value());
+    GIANT_CHECK(back.next_id == 42 && back.lighting.exposure == 2.0f && back.kits.size() == 1);
+    GIANT_CHECK(back.meshes.size() == 2 && back.meshes[0] == "a.glb");
+    GIANT_CHECK(back.cells.size() == 3 && back.cells[0] == (CellCoord{-2, 0}) && back.cells[2] == (CellCoord{3, 1}));
+    GIANT_CHECK(save_world_index(back) == text);
+    GIANT_CHECK(cell_file_name({-3, 12}) == "-3_12.cell.json");
+
+    Entity a = named("a");
+    a.id = 9;
+    a.transform.position = {70.0, 5.0, -1.0}; // cell (1, -1)
+    Entity b = named("b", Shape::sphere);
+    b.id = 4;
+    b.transform.position = {127.5, 0.0, -63.0};
+    const std::vector<Entity> both{a, b};
+    const std::string cell = save_cell({1, -1}, both);
+    GIANT_CHECK(cell.find("\"id\": 4") < cell.find("\"id\": 9")); // sorted by id
+    std::vector<Entity> loaded;
+    GIANT_CHECK(!load_cell(cell, {1, -1}, loaded).has_value());
+    GIANT_CHECK(loaded.size() == 2 && loaded[0].id == 4 && loaded[1].name == "a");
+    GIANT_CHECK(save_cell({1, -1}, loaded) == cell);
+}
+
+GIANT_TEST("world: bad world and cell files say what is wrong") {
+    WorldIndex world;
+    GIANT_CHECK(contains(load_world_index(R"({"format": "giant-world", "version": 1})", world)->message,
+                         "cells is missing"));
+    GIANT_CHECK(contains(load_world_index(R"({"format": "giant-world", "version": 1, "cells": [[0, 0], [0, 0]]})",
+                                          world)->message,
+                         "cells[1] is listed twice"));
+    GIANT_CHECK(contains(load_world_index(R"({"format": "giant-scene", "version": 1, "cells": []})", world)->message,
+                         "format must be \"giant-world\""));
+    Entity far = named("far");
+    far.id = 1;
+    far.transform.position = {200.0, 0.0, 0.0}; // cell (3, 0)
+    const std::string text = save_cell({3, 0}, std::vector<Entity>{far});
+    std::vector<Entity> out{named("kept")};
+    const auto wrong = load_cell(text, {2, 0}, out);
+    GIANT_CHECK(wrong && contains(wrong->message, "cell must be [2, 0]"));
+    GIANT_CHECK(out.size() == 1 && out[0].name == "kept");
+    const std::string moved = R"({"format": "giant-cell", "version": 1, "cell": [2, 0], "entities": [
+        {"id": 1, "position": [200, 0, 0]}]})";
+    GIANT_CHECK(contains(load_cell(moved, {2, 0}, out)->message, "entities[0].position is not in cell [2, 0]"));
+    const std::string twice = R"({"format": "giant-cell", "version": 1, "cell": [0, 0], "entities": [
+        {"id": 1}, {"id": 1}]})";
+    GIANT_CHECK(contains(load_cell(twice, {0, 0}, out)->message, "entities[1].id 1 is used twice"));
+}

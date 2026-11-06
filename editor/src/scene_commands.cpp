@@ -3,6 +3,7 @@
 // the camera is view state and is not.
 #include "editor_commands.h"
 #include "mesh_library.h"
+#include "world_streaming.h"
 
 #include "giant/core/assert.h"
 #include "giant/core/text.h"
@@ -356,6 +357,55 @@ void swap_scene(EditorState& state, world::Scene next, CommandContext& context) 
                         state.scene_generation = after_generation;
                         state.selected = 0;
                     }});
+}
+
+// One spelling per file, as entities made in the editor have.
+void normalize_meshes(world::Scene& scene) {
+    std::vector<EntityId> mesh_ids;
+    for (const Entity& e : scene.entities()) {
+        if (!e.mesh.empty()) mesh_ids.push_back(e.id);
+    }
+    for (const EntityId id : mesh_ids) {
+        Entity* e = scene.modify(id);
+        e->mesh = MeshLibrary::normalize(e->mesh);
+    }
+    for (world::Kit& kit : scene.kits) {
+        for (world::KitPiece& p : kit.pieces) {
+            if (!p.mesh.empty()) p.mesh = MeshLibrary::normalize(p.mesh);
+        }
+    }
+}
+
+// The mesh files the scene's entities and kits draw (normalized, once each).
+std::vector<std::string> meshes_used(const world::Scene& scene) {
+    std::vector<std::string> out;
+    for (const Entity& e : scene.entities()) {
+        if (e.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(e.mesh));
+    }
+    for (const world::Kit& kit : scene.kits) {
+        for (const world::KitPiece& p : kit.pieces) {
+            if (p.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(p.mesh));
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+// Imports each file not imported yet; returns the ones that failed (at most 100).
+Json import_meshes(EditorState& state, const std::vector<std::string>& paths) {
+    Json errors = Json::array();
+    if (state.meshes == nullptr) {
+        return errors;
+    }
+    for (const std::string& path : paths) {
+        if (state.meshes->find(path) != nullptr) continue;
+        const MeshLibrary::Loaded m = state.meshes->load(path);
+        if (m.mesh == nullptr && errors.size() < 100) {
+            errors.push_back({{"path", path}, {"error", m.error}});
+        }
+    }
+    return errors;
 }
 
 std::filesystem::path utf8_path(const std::string& path) {
@@ -906,47 +956,150 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              if (const auto error = world::load_scene(text.str(), loaded)) {
                  return CommandResult::failure(path_to_utf8(path) + ": " + error->message);
              }
+             normalize_meshes(loaded);
              // Meshes it uses are imported now; one that fails leaves its
              // entities invisible until it is fixed, but the scene loads.
-             Json mesh_errors = Json::array();
-             // One spelling per file, as entities made in the editor have.
-             std::vector<EntityId> mesh_ids;
-             for (const Entity& e : loaded.entities()) {
-                 if (!e.mesh.empty()) mesh_ids.push_back(e.id);
-             }
-             for (const EntityId id : mesh_ids) {
-                 Entity* e = loaded.modify(id);
-                 e->mesh = MeshLibrary::normalize(e->mesh);
-             }
-             for (world::Kit& kit : loaded.kits) {
-                 for (world::KitPiece& p : kit.pieces) {
-                     if (!p.mesh.empty()) p.mesh = MeshLibrary::normalize(p.mesh);
-                 }
-             }
-             if (state.meshes != nullptr) {
-                 const auto import = [&](const std::string& mesh_path) {
-                     if (state.meshes->find(mesh_path) != nullptr) return;
-                     const MeshLibrary::Loaded m = state.meshes->load(mesh_path);
-                     if (m.mesh == nullptr && mesh_errors.size() < 100) {
-                         bool listed = false;
-                         for (const Json& x : mesh_errors) listed = listed || x["path"] == mesh_path;
-                         if (!listed) mesh_errors.push_back({{"path", mesh_path}, {"error", m.error}});
-                     }
-                 };
-                 for (const Entity& e : loaded.entities()) {
-                     if (e.shape == world::Shape::mesh) import(e.mesh);
-                 }
-                 for (const world::Kit& kit : loaded.kits) {
-                     for (const world::KitPiece& p : kit.pieces) {
-                         if (p.shape == world::Shape::mesh) import(p.mesh);
-                     }
-                 }
-             }
+             Json mesh_errors = import_meshes(state, meshes_used(loaded));
              const usize count = loaded.size();
              swap_scene(state, std::move(loaded), context);
              Json result = {{"entities", count}};
              if (!mesh_errors.empty()) result["mesh_errors"] = std::move(mesh_errors);
              return CommandResult::success(std::move(result));
+         }});
+
+    const Json folder_schema = Json::parse(R"({"type": "object", "additionalProperties": false,
+        "required": ["folder"],
+        "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024}}})");
+    add(registry,
+        {"open_world",
+         "Opens a world saved by save_world (a folder with world.json and a file per 64 m cell). "
+         "The scene becomes the world: cells near the camera load in the background and far "
+         "ones unload (get_world shows progress; set_world_streaming sets the radius). Clears "
+         "the undo history, like opening a file. Imports the meshes the world lists.",
+         folder_schema, false,
+         [&state](const Json& args, CommandContext& context) {
+             if (state.world == nullptr) {
+                 return CommandResult::failure("worlds are not available in this editor");
+             }
+             const std::filesystem::path folder = utf8_path(args["folder"].get<std::string>());
+             world::Scene next;
+             const u64 generation = state.next_scene_generation;
+             if (const auto error = state.world->open(folder, next, generation)) {
+                 return CommandResult::failure(*error);
+             }
+             ++state.next_scene_generation;
+             state.scene = std::move(next);
+             state.scene_generation = generation;
+             state.selected = 0;
+             context.forget_history();
+             Json mesh_errors = import_meshes(state, state.world->index().meshes);
+             std::error_code error;
+             Json result = {{"folder", path_to_utf8(std::filesystem::absolute(folder, error))},
+                            {"cells", state.world->index().cells.size()}};
+             if (!mesh_errors.empty()) result["mesh_errors"] = std::move(mesh_errors);
+             return CommandResult::success(std::move(result));
+         }});
+
+    add(registry,
+        {"save_world",
+         "Saves the open world: world.json and each 64 m cell whose entities changed (only "
+         "those files are written; a cell left empty loses its file). With a folder and no "
+         "world open, makes a new world there from the scene and opens it (the folder must "
+         "not hold one). Cells with unsaved edits never unload, so nothing is lost by "
+         "flying away; saving lets them go.",
+         Json::parse(R"({"type": "object", "additionalProperties": false,
+             "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024}}})"),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.world == nullptr) {
+                 return CommandResult::failure("worlds are not available in this editor");
+             }
+             WorldStreaming& w = *state.world;
+             const bool active = w.active(state.scene_generation);
+             WorldStreaming::Saved saved;
+             if (args.contains("folder")) {
+                 const std::filesystem::path folder = utf8_path(args["folder"].get<std::string>());
+                 std::error_code a;
+                 if (active && std::filesystem::equivalent(folder, w.folder(), a) && !a) {
+                     saved = w.save(state.scene, meshes_used(state.scene));
+                 } else if (active) {
+                     return CommandResult::failure(
+                         "the open world is saved in " + path_to_utf8(w.folder()) +
+                         "; saving it to another folder is not supported yet (copy the folder)");
+                 } else {
+                     saved = w.create(folder, state.scene, state.scene_generation, meshes_used(state.scene));
+                 }
+             } else if (active) {
+                 saved = w.save(state.scene, meshes_used(state.scene));
+             } else {
+                 return CommandResult::failure(
+                     w.is_open() ? "the scene is no longer the open world's (new_scene or load_scene "
+                                   "replaced it; undo brings it back); give a folder to make a new world"
+                                 : "no world is open: give a folder to make one from the scene");
+             }
+             if (!saved.error.empty()) {
+                 return CommandResult::failure(saved.error);
+             }
+             std::error_code error;
+             return CommandResult::success({{"folder", path_to_utf8(std::filesystem::absolute(w.folder(), error))},
+                                            {"cells_written", saved.cells_written},
+                                            {"cells_removed", saved.cells_removed},
+                                            {"cells", saved.cells}});
+         }});
+
+    add(registry,
+        {"get_world",
+         "The open world's streaming: cells with a file, loaded, being read, parsed and waiting, "
+         "failed (see the log), cells with unsaved edits, entities in the scene, and the "
+         "streaming settings.",
+         Json{{"type", "object"}, {"additionalProperties", false}}, true,
+         [&state](const Json&, CommandContext&) {
+             if (state.world == nullptr || !state.world->is_open()) {
+                 return CommandResult::success({{"open", false}});
+             }
+             const WorldStreaming& w = *state.world;
+             const StreamingStats s = w.stats();
+             const StreamingSettings& k = w.settings;
+             return CommandResult::success(
+                 {{"open", true},
+                  {"active", w.active(state.scene_generation)},
+                  {"folder", path_to_utf8(w.folder())},
+                  {"cells", s.cells},
+                  {"loaded", s.loaded},
+                  {"reading", s.reading},
+                  {"waiting", s.waiting},
+                  {"failed", s.failed},
+                  {"unsaved_cells", w.active(state.scene_generation) ? w.unsaved_cells(state.scene) : 0},
+                  {"entities", state.scene.size()},
+                  {"entities_loaded", s.entities_loaded},
+                  {"entities_unloaded", s.entities_unloaded},
+                  {"load_radius", k.load_radius},
+                  {"unload_margin", k.unload_margin},
+                  {"entities_per_frame", k.entities_per_frame}});
+         }});
+
+    add(registry,
+        {"set_world_streaming",
+         "Sets how far around the camera world cells load (load_radius, metres on the ground), "
+         "how much further they unload (unload_margin) and how many entities join the scene per "
+         "frame (entities_per_frame; more loads faster, fewer keeps frames even). Not undoable: "
+         "a view setting.",
+         Json::parse(R"({"type": "object", "additionalProperties": false, "properties": {
+             "load_radius": {"type": "number", "minimum": 64, "maximum": 100000},
+             "unload_margin": {"type": "number", "minimum": 0, "maximum": 10000},
+             "entities_per_frame": {"type": "integer", "minimum": 1, "maximum": 1000000}}})"),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.world == nullptr) {
+                 return CommandResult::failure("worlds are not available in this editor");
+             }
+             StreamingSettings& k = state.world->settings;
+             k.load_radius = args.value("load_radius", k.load_radius);
+             k.unload_margin = args.value("unload_margin", k.unload_margin);
+             k.entities_per_frame = args.value("entities_per_frame", k.entities_per_frame);
+             return CommandResult::success({{"load_radius", k.load_radius},
+                                            {"unload_margin", k.unload_margin},
+                                            {"entities_per_frame", k.entities_per_frame}});
          }});
 
     add(registry,
