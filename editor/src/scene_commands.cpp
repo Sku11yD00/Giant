@@ -399,6 +399,11 @@ void normalize_meshes(world::Scene& scene) {
             if (!p.mesh.empty()) p.mesh = MeshLibrary::normalize(p.mesh);
         }
     }
+    for (world::ScatterLayer& layer : scene.scatter) {
+        for (world::ScatterItem& i : layer.items) {
+            if (!i.mesh.empty()) i.mesh = MeshLibrary::normalize(i.mesh);
+        }
+    }
 }
 
 // The mesh files the scene's entities and kits draw (normalized, once each).
@@ -410,6 +415,11 @@ std::vector<std::string> meshes_used(const world::Scene& scene) {
     for (const world::Kit& kit : scene.kits) {
         for (const world::KitPiece& p : kit.pieces) {
             if (p.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(p.mesh));
+        }
+    }
+    for (const world::ScatterLayer& layer : scene.scatter) {
+        for (const world::ScatterItem& i : layer.items) {
+            if (i.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(i.mesh));
         }
     }
     std::sort(out.begin(), out.end());

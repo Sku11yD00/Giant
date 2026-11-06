@@ -105,6 +105,57 @@ struct Kit {
     std::vector<KitPiece> pieces;
 };
 
+// Scatter layers (rules for strewing things over the ground; see
+// giant/world/scatter.h for how they place).
+// One kind of thing a layer places.
+struct ScatterItem {
+    Shape shape = Shape::cube; // not decal
+    std::string mesh;          // shape mesh: a glTF file, as Entity::mesh
+    std::string kit;           // shape kit: one of the scene's kits
+    Material material;         // built-in shapes and meshes
+    float weight = 1.0f;       // how often it is picked, against the layer's others (> 0)
+    float scale_min = 1.0f;    // uniform scale, picked evenly between
+    float scale_max = 1.0f;
+    float align = 0.0f; // 0: upright; 1: along the ground's normal (rocks)
+    float sink = 0.0f;  // metres into the ground, at scale 1 (roots on a slope)
+    bool operator==(const ScatterItem&) const = default;
+};
+
+// Where a layer places, on the ground (x, z metres; from <= to).
+struct ScatterArea {
+    double from_x = 0.0;
+    double from_z = 0.0;
+    double to_x = 0.0;
+    double to_z = 0.0;
+    bool operator==(const ScatterArea&) const = default;
+};
+
+constexpr float k_min_scatter_spacing = 0.25f; // metres
+constexpr float k_max_scatter_spacing = 1000.0f;
+constexpr usize k_max_scatter_items = 64;
+constexpr usize k_max_scatter_layers = 64;
+
+struct ScatterLayer {
+    std::string name; // unique in the scene
+    std::vector<ScatterItem> items;
+    float spacing = 4.0f; // metres between points, about
+    float density = 1.0f; // the share of points kept (0 to 1)
+    float jitter = 0.9f;  // 0: an even grid; 1: anywhere in its square
+    // Clumps: a noise this many metres across (0: none) thins the points,
+    // `clumping` (0 to 1) of the way to keeping only its high parts.
+    float clump_size = 0.0f;
+    float clumping = 0.0f;
+    // The ground it may go on: height (metres) and slope (degrees from flat).
+    float height_min = -k_max_terrain_height;
+    float height_max = k_max_terrain_height;
+    float slope_min = 0.0f;
+    float slope_max = 90.0f;
+    std::optional<ScatterArea> area; // none: wherever there is ground
+    u32 seed = 1;
+    bool visible = true;
+    bool operator==(const ScatterLayer&) const = default;
+};
+
 // One sun plus sky and ground ambient light (a hemisphere): enough for a
 // readable lit scene until the voxel GI arrives.
 struct Lighting {
@@ -167,7 +218,7 @@ public:
     // In creation order (the outliner's order).
     const std::vector<Entity>& entities() const { return m_entities; }
     usize size() const { return m_entities.size(); }
-    void clear(); // entities only; lighting, kits and terrain are kept
+    void clear(); // entities only; lighting, kits, terrain and scatter are kept
 
     // Hands over what changed since the last call (kits, lighting and the
     // meshes entities name are not tracked: compare those). A scene
@@ -185,6 +236,9 @@ public:
     Kit* find_kit(std::string_view name);
     // The ground (terrain.h): it tracks its own changes (Terrain::take_changes).
     Terrain terrain;
+    // What is strewn over the ground (scatter.h), by name, in order (not
+    // tracked: compare).
+    std::vector<ScatterLayer> scatter;
 
     // The id the next new entity gets.
     EntityId next_id() const { return m_next_id; }
@@ -232,6 +286,7 @@ struct WorldIndex {
     EntityId next_id = 1; // one past the last id any cell holds
     Lighting lighting;
     std::vector<Kit> kits;
+    std::vector<ScatterLayer> scatter;
     std::vector<std::string> meshes; // imported when the world opens
     std::vector<CellCoord> cells;    // cells that have a file
     // The ground: one sample spacing and material for every tile, and the

@@ -233,6 +233,7 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         changes.all = true;
         for (auto& [cell, tile] : m_tiles) tile.wanted = 0; // builds from the old terrain are not wanted
     }
+    m_last_changes = changes;
     if (changes.all) {
         for (const auto& [cell, heights] : terrain.tiles()) want(cell);
         for (const auto& [cell, tile] : m_tiles) want(cell);
@@ -368,8 +369,11 @@ void TerrainMeshes::finish(world::Terrain& terrain) {
     const u32 budgets[4] = {builds_per_frame, uploads_per_frame, builds_in_flight, drops_per_frame};
     builds_per_frame = uploads_per_frame = builds_in_flight = drops_per_frame = std::numeric_limits<u32>::max();
     m_finishing = true;
+    world::TerrainChanges taken; // every update's, as last_changes
     for (;;) {
         update(terrain);
+        taken.all = taken.all || m_last_changes.all;
+        taken.tiles.insert(taken.tiles.end(), m_last_changes.tiles.begin(), m_last_changes.tiles.end());
         // Not drawn yet: with no frames to stream them in, swapped in now.
         for (const world::CellCoord c : m_waiting) {
             const auto t = m_tiles.find(c);
@@ -380,6 +384,7 @@ void TerrainMeshes::finish(world::Terrain& terrain) {
         m_jobs.wait(m_builds);
     }
     m_finishing = false;
+    m_last_changes = std::move(taken);
     builds_per_frame = budgets[0];
     uploads_per_frame = budgets[1];
     builds_in_flight = budgets[2];

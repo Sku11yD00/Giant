@@ -1,6 +1,7 @@
 #include "scene_render.h"
 
 #include "far_ground.h"
+#include "scatter_placer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -98,6 +99,57 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     cell.instances.push_back(i);
 }
 
+// A cell's scatter placements: each item's mesh and material looked up
+// once a cell (a forest cell is thousands of the same few things).
+void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, const render::Renderer& renderer,
+                  const MeshLibrary& meshes, SceneFrame& out, SceneFrame::Cell& cell) {
+    struct Look {
+        bool known = false;
+        render::MeshId mesh = render::k_no_mesh; // k_no_mesh: draws nothing (or a kit)
+        u32 material = 0;
+        const world::Kit* kit = nullptr;
+    };
+    const ScatterPlacer::Layers& layers = *placed.layers;
+    std::vector<usize> first(layers.size() + 1, 0);
+    for (usize k = 0; k < layers.size(); ++k) first[k + 1] = first[k] + layers[k].items.size();
+    std::vector<Look> looks(first.back());
+    for (const world::ScatterPoint& p : placed.points) {
+        const world::ScatterItem& item = layers[p.layer].items[p.item];
+        Look& look = looks[first[p.layer] + p.item];
+        if (!look.known) {
+            look.known = true;
+            if (item.shape == world::Shape::kit) {
+                look.kit = scene.find_kit(item.kit);
+            } else if (item.shape == world::Shape::mesh) {
+                const MeshLibrary::Mesh* found = meshes.find_normalized(item.mesh);
+                if (found != nullptr) look.mesh = found->id;
+            } else if (item.shape != world::Shape::decal) {
+                look.mesh = renderer.builtin(builtin(item.shape));
+            }
+            if (look.mesh != render::k_no_mesh) {
+                look.material = material_index(item.material, out);
+                --out.users[look.material]; // counted per instance below
+            }
+        }
+        if (look.kit != nullptr) {
+            for (const world::KitPiece& piece : look.kit->pieces) {
+                emit(piece.shape, piece.mesh, place(p.transform, piece.transform), piece.material, piece.decal,
+                     renderer, meshes, out, cell);
+            }
+            continue;
+        }
+        if (look.mesh == render::k_no_mesh) continue;
+        render::Instance i;
+        i.position = p.transform.position;
+        i.rotation = p.transform.rotation;
+        i.scale = p.transform.scale;
+        i.mesh = look.mesh;
+        i.material = look.material;
+        ++out.users[look.material];
+        cell.instances.push_back(i);
+    }
+}
+
 // The cell's terrain tile, if its mesh is built (and the far ground draws
 // it), and the far ground's chunks drawn from the cell.
 void emit_ground(const world::Scene& scene, const TerrainMeshes* terrain, const FarGround* far,
@@ -134,8 +186,8 @@ void emit_ground(const world::Scene& scene, const TerrainMeshes* terrain, const 
 // terrain tile). False if a material lost its last user (the table should
 // be compacted).
 bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
-             const TerrainMeshes* terrain, const FarGround* far, world::CellCoord coord, SceneFrame& out,
-             SceneFrame::Cell& cell) {
+             const TerrainMeshes* terrain, const FarGround* far, const ScatterPlacer* scatter, world::CellCoord coord,
+             SceneFrame& out, SceneFrame::Cell& cell) {
     std::vector<u32>& before = out.scratch;
     before.clear();
     for (const render::Instance& i : cell.instances) {
@@ -166,6 +218,13 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
                  cell);
         }
     }
+    cell.scattered = false;
+    if (scatter != nullptr) {
+        if (const ScatterPlacer::Cell* placed = scatter->find(coord)) {
+            cell.scattered = true;
+            emit_scatter(scene, *placed, renderer, meshes, out, cell);
+        }
+    }
     cell.version = new_version();
     cell.dirty = false;
     ++out.cells_rebuilt;
@@ -179,7 +238,8 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
 
 // Every entity (and built terrain tile) into its cell, all of them to be
 // built; an empty material table.
-void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const FarGround* far, SceneFrame& out) {
+void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const FarGround* far,
+                const ScatterPlacer* scatter, SceneFrame& out) {
     out.grid.clear();
     out.where.clear();
     out.lookup.clear();
@@ -202,6 +262,9 @@ void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const F
         if (far != nullptr) {
             for (const world::CellCoord c : far->piece_cells()) out.grid[c];
         }
+    }
+    if (scatter != nullptr) {
+        for (const world::CellCoord c : scatter->cells()) out.grid[c];
     }
 }
 
@@ -347,7 +410,7 @@ world::Transform place(const world::Transform& parent, const world::Transform& c
 }
 
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
-                 SceneFrame& out, TerrainMeshes* terrain, FarGround* far) {
+                 SceneFrame& out, TerrainMeshes* terrain, FarGround* far, ScatterPlacer* scatter) {
     out.cells_rebuilt = 0;
     world::SceneChanges changes = scene.take_changes();
     const std::vector<world::CellCoord> ground = far != nullptr       ? far->take_changed()
@@ -357,7 +420,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         out.scene_identity = scene.identity();
         out.meshes_version = meshes.version();
         out.kits = scene.kits;
-        start_over(scene, terrain, far, out);
+        start_over(scene, terrain, far, scatter, out);
+        if (scatter != nullptr) scatter->take_changed(); // all built anyway
     } else {
         // Terrain tiles whose mesh came, went or changed; all of them for a new look.
         for (const world::CellCoord c : ground) {
@@ -389,11 +453,17 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                 out.where[id] = c;
             }
         }
-        // Kits changed: the cells placing them.
+        // Scatter placements changed.
+        if (scatter != nullptr) {
+            for (const world::CellCoord c : scatter->take_changed()) out.grid[c].dirty = true;
+        }
+        // Kits changed: the cells placing them (and every scattered cell:
+        // an item may be one).
         const std::vector<std::string> kits = changed_kits(out.kits, scene.kits);
         if (!kits.empty()) {
             out.kits = scene.kits;
             for (auto& [coord, cell] : out.grid) {
+                cell.dirty = cell.dirty || cell.scattered;
                 for (usize i = 0; i < cell.ids.size() && !cell.dirty; ++i) {
                     const world::Entity* e = scene.find(cell.ids[i]);
                     cell.dirty = e != nullptr && e->shape == world::Shape::kit &&
@@ -411,11 +481,11 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         SceneFrame::Cell& cell = it->second;
         if (cell.dirty) {
             const bool fresh = cell.version == 0; // not laid out yet, even with no instances
-            compact = !rebuild(scene, renderer, meshes, terrain, far, it->first, out, cell) || compact;
+            compact = !rebuild(scene, renderer, meshes, terrain, far, scatter, it->first, out, cell) || compact;
             layout = layout || fresh;
             rebuilt.push_back(it->first);
         }
-        if (cell.ids.empty() && !cell.ground) {
+        if (cell.ids.empty() && !cell.ground && !cell.scattered) {
             layout = true;
             if (cell.placed) release(out, cell.first, cell.capacity);
             it = out.grid.erase(it);
@@ -432,11 +502,11 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         compact = unused > out.compact_unused_over && unused > out.users.size() - unused;
     }
     if (compact) {
-        start_over(scene, terrain, far, out);
+        start_over(scene, terrain, far, scatter, out);
         out.cells_rebuilt = 0; // counted once, by the full rebuild
         for (auto it = out.grid.begin(); it != out.grid.end();) {
-            rebuild(scene, renderer, meshes, terrain, far, it->first, out, it->second);
-            if (it->second.ids.empty() && !it->second.ground) {
+            rebuild(scene, renderer, meshes, terrain, far, scatter, it->first, out, it->second);
+            if (it->second.ids.empty() && !it->second.ground && !it->second.scattered) {
                 it = out.grid.erase(it); // a tile gone since its mesh was built
             } else {
                 ++it;

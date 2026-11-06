@@ -1,0 +1,238 @@
+// Scatter in the editor: layers placed over the ground on a worker, drawn
+// with their cells, changed by undoable commands.
+#include "../src/editor_commands.h"
+#include "../src/mesh_library.h"
+#include "../src/scatter_placer.h"
+#include "../src/scene_render.h"
+#include "../src/terrain_meshes.h"
+#include "../src/world_streaming.h"
+
+#include "giant_test.h"
+
+#include "giant/rhi/rhi.h"
+
+#include <algorithm>
+#include <chrono>
+#include <thread>
+
+using namespace giant;
+using namespace giant::editor;
+using ai::Json;
+using world::CellCoord;
+using world::Terrain;
+
+namespace {
+
+void flat(Terrain& t, i32 x0, i32 z0, i32 x1, i32 z1, float height = 0.0f) {
+    t.set_samples(16);
+    for (i32 z = z0; z <= z1; ++z) {
+        for (i32 x = x0; x <= x1; ++x) t.set({x, z}, Terrain::Heights(256, height));
+    }
+}
+
+world::ScatterLayer stones(float spacing = 8.0f) {
+    world::ScatterLayer l;
+    l.name = "stones";
+    l.spacing = spacing;
+    world::ScatterItem i;
+    i.shape = world::Shape::sphere;
+    l.items = {i};
+    return l;
+}
+
+// Places what the scene needs, as a frame would after the terrain's changes.
+void place(ScatterPlacer& p, world::Scene& scene) { p.finish(scene, scene.terrain.take_changes()); }
+
+u64 points_in(const ScatterPlacer& p, CellCoord c) {
+    const ScatterPlacer::Cell* cell = p.find(c);
+    return cell == nullptr ? 0 : cell->points.size();
+}
+
+struct Fixture {
+    ai::CommandRegistry commands;
+    MeshLibrary meshes{nullptr};
+    TerrainMeshes terrain{nullptr};
+    ScatterPlacer scatter;
+    WorldStreaming world;
+    EditorState state;
+    Fixture() {
+        state.meshes = &meshes;
+        state.terrain_meshes = &terrain;
+        state.scatter = &scatter;
+        state.world = &world;
+        register_scene_commands(commands, state);
+        register_terrain_commands(commands, state);
+        register_scatter_commands(commands, state);
+    }
+    ai::CommandResult run(const char* name, const Json& args = Json::object()) {
+        return commands.execute(name, args, {});
+    }
+};
+
+} // namespace
+
+GIANT_TEST("scatter placer: cells with ground are placed as the rules say, again only where things changed") {
+    world::Scene scene;
+    flat(scene.terrain, 0, 0, 3, 3);
+    scene.scatter.push_back(stones());
+    ScatterPlacer p;
+    place(p, scene);
+    const ScatterStats s = p.stats();
+    GIANT_CHECK(s.cells == 16 && s.points == 16 * 64 && s.building == 0 && s.placed == 16);
+    std::vector<world::ScatterPoint> expected;
+    world::scatter_cell(scene.scatter[0], 0, scene.terrain, {2, 1}, expected);
+    const ScatterPlacer::Cell* cell = p.find({2, 1});
+    GIANT_CHECK(cell != nullptr && cell->points.size() == expected.size());
+    GIANT_CHECK(cell->points[5].transform == expected[5].transform);
+    GIANT_CHECK(p.take_changed().size() == 16);
+    // A tile changed: it and its neighbours are placed again (the others not).
+    scene.terrain.modify({0, 0})->at(0) = 2.0f;
+    place(p, scene);
+    GIANT_CHECK(p.stats().placed == 16 + 4);
+    std::vector<CellCoord> changed = p.take_changed();
+    std::sort(changed.begin(), changed.end(), [](CellCoord a, CellCoord b) { return a.z != b.z ? a.z < b.z : a.x < b.x; });
+    GIANT_CHECK(changed.size() == 4 && changed[0] == (CellCoord{0, 0}) && changed[3] == (CellCoord{1, 1}));
+    // A tile gone: its cell's points go.
+    scene.terrain.remove({3, 3});
+    place(p, scene);
+    GIANT_CHECK(p.find({3, 3}) == nullptr && p.stats().cells == 15);
+    // The layers changed: every cell again; none left: nothing placed.
+    scene.scatter[0].density = 0.5f;
+    place(p, scene);
+    GIANT_CHECK(p.stats().points < 15 * 64 && p.stats().points > 15 * 16);
+    scene.scatter[0].visible = false;
+    place(p, scene);
+    GIANT_CHECK(p.stats().cells == 0 && p.stats().points == 0);
+}
+
+GIANT_TEST("scatter placer: a frame swaps in a budget of points, a whole cell at a time") {
+    world::Scene scene;
+    flat(scene.terrain, 0, 0, 3, 0);
+    scene.scatter.push_back(stones(1.0f)); // 4096 points a cell
+    ScatterPlacer p;
+    p.points_per_frame = 5000;
+    p.cells_in_flight = 4;
+    world::TerrainChanges changes = scene.terrain.take_changes();
+    p.update(scene, changes);
+    usize frames = 0;
+    std::vector<u32> cells_seen;
+    while (p.stats().cells < 4 && frames < 20000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1)); // the worker's time
+        p.update(scene, {});
+        cells_seen.push_back(p.stats().cells);
+        for (const CellCoord c : p.take_changed()) GIANT_CHECK(points_in(p, c) == 4096); // whole cells only
+        ++frames;
+    }
+    GIANT_CHECK(p.stats().cells == 4 && p.stats().points == 4 * 4096);
+    // At most one cell a frame came in (5000 points a frame is one cell of 4096).
+    for (usize k = 1; k < cells_seen.size(); ++k) GIANT_CHECK(cells_seen[k] - cells_seen[k - 1] <= 1);
+}
+
+GIANT_TEST("scatter: placements draw with their cell, as their items, and follow the placer") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    if (renderer == nullptr) return;
+    MeshLibrary meshes(renderer.get());
+    world::Scene scene;
+    flat(scene.terrain, 0, 0, 1, 0, 3.0f);
+    world::ScatterLayer l = stones();
+    l.items[0].material.base_color = {0.1f, 0.2f, 0.3f};
+    // A kit item too: each placement draws its two pieces.
+    world::Kit tree;
+    tree.name = "tree";
+    tree.pieces.resize(2);
+    tree.pieces[0].shape = world::Shape::cube;
+    tree.pieces[1].shape = world::Shape::sphere;
+    tree.pieces[1].transform.position = {0.0, 3.0, 0.0};
+    scene.kits.push_back(tree);
+    world::ScatterItem kit;
+    kit.shape = world::Shape::kit;
+    kit.kit = "tree";
+    l.items.push_back(kit);
+    scene.scatter.push_back(l);
+    ScatterPlacer p;
+    place(p, scene);
+    SceneFrame frame;
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
+    usize spheres = 0, kits = 0;
+    for (const CellCoord c : p.cells()) {
+        for (const world::ScatterPoint& pt : p.find(c)->points) (pt.item == 0 ? spheres : kits) += 1;
+    }
+    usize live = 0;
+    for (const render::Instance& i : frame.instances) live += i.mesh != render::k_no_mesh ? 1 : 0;
+    GIANT_CHECK(spheres > 0 && kits > 0 && live == spheres + 2 * kits);
+    GIANT_CHECK(frame.cells.size() == 2);
+    // One material for the stones, two for the kit's pieces (both default grey: one).
+    GIANT_CHECK(frame.materials.size() == 2);
+    // Nothing changed: nothing rebuilt; the layer changed: the cells again.
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
+    GIANT_CHECK(frame.cells_rebuilt == 0);
+    scene.scatter[0].items.pop_back();
+    place(p, scene);
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
+    live = 0;
+    for (const render::Instance& i : frame.instances) live += i.mesh != render::k_no_mesh ? 1 : 0;
+    GIANT_CHECK(frame.cells_rebuilt == 2 && live == p.stats().points);
+    // A kit changed: scattered cells rebuild.
+    scene.scatter[0].items.push_back(kit);
+    place(p, scene);
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
+    scene.kits[0].pieces.pop_back();
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
+    GIANT_CHECK(frame.cells_rebuilt == 2);
+    // Everything gone: the cells go.
+    scene.scatter.clear();
+    place(p, scene);
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
+    live = 0;
+    for (const render::Instance& i : frame.instances) live += i.mesh != render::k_no_mesh ? 1 : 0;
+    GIANT_CHECK(live == 0);
+}
+
+GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 1}}).ok);
+    ai::CommandResult r = f.run("add_scatter_layer", {{"name", "rocks"},
+                                                     {"items", {{{"shape", "sphere"}, {"scale", {0.5, 2}}},
+                                                                {{"shape", "cube"}, {"weight", 2}, {"align", 1}}}},
+                                                     {"spacing", 4},
+                                                     {"slope_max", 30},
+                                                     {"area", {{"from", {100, 50}}, {"to", {0, 0}}}}});
+    GIANT_CHECK(r.ok && r.value["area"]["from"][0] == 0.0 && r.value["area"]["to"][0] == 100.0);
+    GIANT_CHECK(f.state.scene.scatter.size() == 1 && f.state.scene.scatter[0].items[1].weight == 2.0f);
+    f.scatter.finish(f.state.scene, f.state.scene.terrain.take_changes());
+    r = f.run("get_scatter");
+    GIANT_CHECK(r.ok && r.value["layers"].size() == 1 && r.value["building"] == 0 && r.value["cells"] == 2);
+    const u64 points = r.value["points"].get<u64>();
+    GIANT_CHECK(points > 200 && r.value["layers"][0]["points"] == points);
+    // Change: only what is given.
+    r = f.run("set_scatter_layer", {{"name", "rocks"}, {"density", 0.5}, {"area", nullptr}, {"new_name", "stones"}});
+    GIANT_CHECK(r.ok && r.value["name"] == "stones" && r.value["area"].is_null() && r.value["spacing"] == 4.0);
+    GIANT_CHECK(f.state.scene.scatter[0].items.size() == 2 && !f.state.scene.scatter[0].area);
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.scatter[0].name == "rocks" && f.state.scene.scatter[0].area);
+    GIANT_CHECK(f.run("redo").ok && f.state.scene.scatter[0].name == "stones");
+    // Errors change nothing.
+    GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "stones"}, {"items", {{{"shape", "cube"}}}}}).ok);
+    GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "trees"}, {"items", {{{"kit", "oak"}}}}}).ok);
+    GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "x"}, {"items", {{{"shape", "decal"}}}}}).ok);
+    GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "x"}, {"items", Json::array()}}).ok);
+    GIANT_CHECK(!f.run("set_scatter_layer", {{"name", "stones"}, {"slope_min", 60}, {"slope_max", 10}}).ok);
+    GIANT_CHECK(!f.run("set_scatter_layer", {{"name", "stones"}, {"area", "everywhere"}}).ok);
+    GIANT_CHECK(!f.run("set_scatter_layer", {{"name", "nope"}, {"density", 1}}).ok);
+    GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "x"}, {"items", {{{"mesh", "no/such/file.glb"}}}}}).ok);
+    GIANT_CHECK(f.state.scene.scatter.size() == 1 && f.state.scene.scatter[0].density == 0.5f);
+    // A kit item.
+    GIANT_CHECK(f.run("create_kit", {{"name", "oak"}, {"pieces", {{{"shape", "cube"}}}}}).ok);
+    GIANT_CHECK(f.run("add_scatter_layer", {{"name", "trees"}, {"items", {{{"kit", "oak"}}}}, {"spacing", 16}}).ok);
+    GIANT_CHECK(f.state.scene.scatter[1].items[0].shape == world::Shape::kit);
+    // Saved with the scene.
+    world::Scene loaded;
+    GIANT_CHECK(!world::load_scene(world::save_scene(f.state.scene), loaded).has_value());
+    GIANT_CHECK(loaded.scatter == f.state.scene.scatter);
+    // Removed, and back.
+    GIANT_CHECK(f.run("remove_scatter_layer", {{"name", "stones"}}).ok && f.state.scene.scatter.size() == 1);
+    GIANT_CHECK(!f.run("remove_scatter_layer", {{"name", "stones"}}).ok);
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.scatter.size() == 2 && f.state.scene.scatter[0].name == "stones");
+}

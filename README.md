@@ -177,6 +177,14 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   is one undo). `sculpt_terrain` does the same over MCP, and
   `import_height_map` makes ground from a 16-bit RAW (.r16) or PGM height
   map from tools like World Machine or Gaea.
+- Part 6: scatter. Strew trees, rocks, bushes or grass over the ground by
+  rules, like Unreal's PCG: `add_scatter_layer` says what to place (shapes,
+  meshes or kits, picked by weight, scaled and turned at random, upright or
+  along the slope) and where (spacing, density, clumps, an area, the
+  ground's height and slope). The placements are worked out from the rules
+  and the ground on a worker thread, cell by cell, and follow every sculpt
+  and every change to the layer; the Scene panel's Scatter section has the
+  main settings.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

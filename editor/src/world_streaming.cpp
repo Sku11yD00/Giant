@@ -214,10 +214,16 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
             if (!p.mesh.empty()) p.mesh = MeshLibrary::normalize(p.mesh);
         }
     }
+    for (world::ScatterLayer& layer : index.scatter) {
+        for (world::ScatterItem& i : layer.items) {
+            if (!i.mesh.empty()) i.mesh = MeshLibrary::normalize(i.mesh);
+        }
+    }
     close();
     world::Scene base;
     base.lighting = index.lighting;
     base.kits = index.kits;
+    base.scatter = index.scatter;
     base.reserve_ids_below(index.next_id);
     base.terrain.set_samples(index.terrain_samples);
     base.terrain.material = index.terrain_material;
@@ -652,6 +658,7 @@ WorldStreaming::Saved WorldStreaming::create(const std::filesystem::path& folder
     m_scene = scene.identity();
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;
+    m_index.scatter = scene.scatter;
     m_index.terrain_samples = scene.terrain.samples();
     m_index.terrain_material = scene.terrain.material;
     Saved saved = write(scene, std::move(meshes));
@@ -881,6 +888,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     if (!write_far(scene, kept_heights, saved)) return saved;
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;
+    m_index.scatter = scene.scatter;
     m_index.terrain_cells.assign(m_ground.begin(), m_ground.end());
     m_index.terrain_samples = samples;
     m_index.far_owed.assign(m_far_owed.begin(), m_far_owed.end()); // empty, unless chunks failed

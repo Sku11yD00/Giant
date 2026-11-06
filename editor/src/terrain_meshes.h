@@ -75,6 +75,9 @@ public:
     bool drawn(world::CellCoord cell) const;
     // Cells whose mesh changed (came, went or was replaced) since the last call.
     std::vector<world::CellCoord> take_changed();
+    // The terrain's changes the last update took (all: a new terrain), for
+    // others following the heights (the scatter, scatter_placer.h).
+    const world::TerrainChanges& last_changes() const { return m_last_changes; }
     // Blocks until every build started is done and swapped in, starting
     // the rest (tests and tools; never in a frame).
     void finish(world::Terrain& terrain);
@@ -133,6 +136,7 @@ private:
     u64 m_frame = 0;
     bool m_finishing = false; // finish(): nothing waits to settle
     std::vector<world::CellCoord> m_changed;
+    world::TerrainChanges m_last_changes;
     std::deque<Result> m_arrived;            // finished builds waiting for the upload budget
     std::vector<world::CellCoord> m_waiting; // tiles with an uploaded mesh not loaded yet
     u32 m_in_flight = 0;                     // builds started and not taken back

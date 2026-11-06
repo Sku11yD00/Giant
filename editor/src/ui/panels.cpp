@@ -162,8 +162,38 @@ void EditorPanels::draw_scene_settings() {
         draw_properties();
         draw_lighting();
         draw_terrain_brush();
+        draw_scatter();
     }
     ImGui::End();
+}
+
+void EditorPanels::draw_scatter() {
+    ImGui::SeparatorText("Scatter");
+    if (m_state.scene.scatter.empty()) {
+        ImGui::TextDisabled("No layers (add_scatter_layer adds one).");
+        return;
+    }
+    for (const world::ScatterLayer& l : m_state.scene.scatter) {
+        ImGui::PushID(l.name.c_str());
+        const std::string name = l.name; // set_scatter_layer replaces the layer (the list keeps its size)
+        const auto set = [&](const char* field, ai::Json value) {
+            run("set_scatter_layer", {{"name", name}, {field, std::move(value)}}, edit_group());
+        };
+        bool visible = l.visible;
+        if (ImGui::Checkbox(name.c_str(), &visible)) set("visible", visible);
+        float spacing = l.spacing;
+        if (ImGui::SliderFloat("Spacing (m)", &spacing, world::k_min_scatter_spacing, 64.0f, "%.2f",
+                               ImGuiSliderFlags_Logarithmic)) {
+            set("spacing", std::clamp(spacing, world::k_min_scatter_spacing, world::k_max_scatter_spacing));
+        }
+        float density = l.density;
+        if (ImGui::SliderFloat("Density", &density, 0.0f, 1.0f, "%.2f")) set("density", std::clamp(density, 0.0f, 1.0f));
+        float slope = l.slope_max;
+        if (ImGui::SliderFloat("Steepest (deg)", &slope, l.slope_min, 90.0f, "%.0f")) {
+            set("slope_max", std::clamp(slope, l.slope_min, 90.0f));
+        }
+        ImGui::PopID();
+    }
 }
 
 void EditorPanels::draw_terrain_brush() {

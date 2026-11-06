@@ -100,6 +100,10 @@ std::string validate(const Json& schema, const Json& value, const std::string& p
                                                   ? "an " + type
                                                   : "a " + type);
         }
+    } else if (it != schema.end() && it->is_array()) { // one of several types
+        bool any = false;
+        for (const Json& type : *it) any = any || (type.is_string() && has_type(value, type.get<std::string>()));
+        if (!any) return at(path) + ": must be one of the types " + to_json_text(*it);
     }
     if (auto it = schema.find("enum"); it != schema.end() && it->is_array()) {
         bool found = false;
