@@ -2,6 +2,9 @@
 // cluster (its index in the visible list, plus one; 0 is nothing) and which
 // of its triangles. Materials are shaded afterwards (resolve.slang).
 //
+// The same geometry stages draw sun shadow pages (ps_shadow): seen from the
+// sun, over one level's window of pages, into the page atlas.
+//
 // Mesh shader path: one group per cluster, a thread per vertex and per
 // triangle. Fallback for GPUs without mesh shaders: a draw of 384 vertices
 // per cluster (instance i is cluster base + i); unused triangles collapse
@@ -19,8 +22,13 @@ struct RasterPush {
     uint visible_offset;
     uint range;          // read descriptor of (first entry, count) to draw
     uint range_offset;
-    uint pad0;
-    uint pad1;
+    // Shadow pages (ps_shadow) only.
+    uint shadow_atlas;        // write descriptor: u32 depths, page after page of 128 x 128
+    uint shadow_table;        // read descriptor of the level's page table
+    uint shadow_table_offset; // its first entry
+    int shadow_page_x;        // the level window's minimum page
+    int shadow_page_y;
+    uint pad;
 };
 ConstantBuffer<RasterPush> push : register(b0);
 
@@ -140,4 +148,36 @@ struct PsIn {
 [shader("pixel")]
 uint2 ps_main(PsIn i) : SV_Target {
     return i.vis;
+}
+
+// Sun shadow pages: the pass covers one level's window (16 x 16 pages of
+// 128 x 128 texels; no targets). Each texel keeps the depth nearest the sun
+// (larger is nearer), in the physical page its virtual page has, if that
+// page is drawn this frame; the others keep what they hold.
+static const uint k_shadow_page_texels = 128;
+static const uint k_shadow_no_page = 0xFFFFFFFFu;
+static const uint k_shadow_draw_bit = 1u << 29;
+
+int shadow_wrap(int v) {
+    const int m = v % 16;
+    return m < 0 ? m + 16 : m;
+}
+
+[shader("pixel")]
+void ps_shadow(PsIn i) {
+    if (i.vis.x == 0u) {
+        return; // never (drawn triangles carry their entry plus one); keeps the input linked
+    }
+    const uint2 texel = uint2(i.position.xy);
+    const int2 page = int2(push.shadow_page_x, push.shadow_page_y) + int2(texel / k_shadow_page_texels);
+    const uint slot = uint(shadow_wrap(page.x) + 16 * shadow_wrap(page.y));
+    const uint entry = read_buffer(push.shadow_table).Load(push.shadow_table_offset + slot * 4);
+    if (entry == k_shadow_no_page || (entry & k_shadow_draw_bit) == 0u) {
+        return;
+    }
+    const uint2 local = texel % k_shadow_page_texels;
+    const uint index = (entry & 0xFFFFu) * (k_shadow_page_texels * k_shadow_page_texels) +
+                       local.y * k_shadow_page_texels + local.x;
+    uint ignored;
+    write_buffer(push.shadow_atlas).InterlockedMax(index * 4, asuint(saturate(i.position.z)), ignored);
 }

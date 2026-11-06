@@ -13,6 +13,11 @@
 // grow with instances, meshes or materials: every instance of every mesh
 // goes through the same few passes.
 //
+// Sun shadows are virtual shadow maps (src/shadow_pages.h): a clipmap of
+// pages seen from the sun, drawn from the same clusters with the same
+// culling, only where shading asked for them, cached until what casts onto
+// them changes, a budgeted number of pages a frame.
+//
 // The CPU can pick the clusters instead (RenderSettings::gpu_culling off):
 // the same cut, for reference and tests, on any backend.
 //
@@ -37,9 +42,14 @@ namespace gpu {
 struct MeshEntry; // src/gpu_layout.h
 struct Material;
 struct VoxelLevel;
+struct ShadowLevel;
+struct FrameConstants;
+struct CullPush;
 }
 class GeometryStreamer; // src/streaming.h
 class VoxelScene;       // src/voxel_scene.h
+class ShadowPages;      // src/shadow_pages.h
+struct ShadowWindows;
 struct DecalBins;       // src/decals.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
@@ -158,6 +168,12 @@ struct RenderSettings {
     bool voxel_far_field = true;
     float far_field_distance = 3000.0f;
     float far_field_max_radius = 50.0f;
+    // Sun shadows (lit view, GPU culling only). Pages are drawn when shading
+    // first asks for them and again when what casts onto them changes; at
+    // most shadow_pages_per_frame a frame (at least one when any wait),
+    // the rest keep their old content (or fall back to coarser pages).
+    bool shadows = true;
+    u32 shadow_pages_per_frame = 64;
 };
 
 struct FrameInput {
@@ -203,6 +219,14 @@ struct RenderStats {
     // The far field (this frame, on the CPU).
     bool far_field = false; // on this frame
     u32 far_culled = 0;     // instances left to the voxel world
+    // Sun shadows (this frame, on the CPU; requests are a few frames old).
+    bool shadows = false;     // on this frame
+    u32 shadow_pages = 0;     // pages with room in the pool
+    u32 shadow_capacity = 0;  // the pool, pages
+    u32 shadow_drawn = 0;     // pages drawn this frame
+    u32 shadow_waiting = 0;   // pages asked for or changed, not drawn yet
+    u32 shadow_missing = 0;   // pages asked for that found no room
+    u32 shadow_draws = 0;     // raster passes for them (one per level with pages to draw)
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -224,6 +248,9 @@ struct RendererDesc {
     // bytes each; the default is 68 MiB).
     voxel::ClipmapDesc voxel_clipmap{};
     u32 voxel_bricks = 32768;
+    // Sun shadow pages of 128 x 128 depths (64 KiB each; the default is
+    // 64 MiB), made on the first frame with shadows.
+    u32 shadow_pages = 1024;
 };
 
 class Renderer {
@@ -257,6 +284,8 @@ public:
     const RenderStats& last_stats() const { return m_stats; }
     // The voxel world at a world position, finest level first.
     std::vector<VoxelProbeLevel> probe_voxels(const DVec3& position) const;
+    // The sun's shadow pages (src/shadow_pages.h; tests and tools).
+    ShadowPages& shadow_pages() { return *m_shadows; }
     // GPU culling: reads the newest GPU counts now. Only after
     // Device::wait_idle (tests, screenshots), outside a frame.
     void read_gpu_stats();
@@ -293,12 +322,28 @@ private:
 
     bool init();
     bool ensure_targets(u32 width, u32 height);
-    bool ensure_cull_buffers(u32 instance_count);
+    bool ensure_cull_buffers(CullBuffers& c, u32 instance_count);
     void destroy(Mesh& mesh);
     void draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
                      const Vec3& background); // the voxel debug view, in place of shading
     void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number);
     void cull_on_gpu(rhi::CommandList& cmd, const FrameData& data);
+    // GPU culling's steps, into `c` (the view's lists, or the shadow pages').
+    gpu::CullPush cull_push(const CullBuffers& c, const FrameData& data, const rhi::TransientMemory& frame,
+                            bool streaming_requests);
+    // Reset, the instances, the trees and the raster arguments of pass 0.
+    void cull_first_pass(rhi::CommandList& cmd, CullBuffers& c, const FrameData& data, const gpu::CullPush& base);
+    void cull_barriers(rhi::CommandList& cmd, const CullBuffers& c, bool with_args);
+    void cull_prepare(rhi::CommandList& cmd, const CullBuffers& c, const gpu::CullPush& base, u32 pass, u32 mode,
+                      u32 slot_in, u32 capacity, u32 arg_offset);
+    void cull_walk(rhi::CommandList& cmd, const CullBuffers& c, const gpu::CullPush& base, const FrameData& data,
+                   u32 pass);
+    bool ensure_shadow_buffers(u32 instance_count);
+    // Sun shadows: which pages this frame, then drawing them.
+    void plan_shadows(const FrameInput& frame, bool on);
+    // Uploads the page table and levels into `data` (shading reads them).
+    void draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame,
+                      const gpu::FrameConstants& base);
     void raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bool gpu);
     void build_hzb(rhi::CommandList& cmd);
     void smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3& background); // after shading, into target
@@ -351,6 +396,27 @@ private:
     float m_hzb_p11 = 0.0f;
     float m_hzb_near = 0.0f;
     CullBuffers m_cull;
+    // Sun shadows.
+    std::unique_ptr<ShadowPages> m_shadows;
+    CullBuffers m_shadow_cull; // its own lists: pages are drawn after the view's raster
+    rhi::BufferHandle m_shadow_atlas;    // u32 depths, page after page
+    rhi::BufferHandle m_shadow_requests; // a bit per page slot, written by shading
+    rhi::BufferHandle m_shadow_readback[3];
+    u64 m_shadow_readback_frame[3] = {~u64{0}, ~u64{0}, ~u64{0}};
+    std::unique_ptr<ShadowWindows[]> m_shadow_readback_windows; // the windows each slot's requests were made in
+    u64 m_shadow_requests_taken = ~u64{0};
+    bool m_shadows_on = false; // this frame
+    bool m_shadows_were_on = false;
+    bool m_shadow_buffers_logged = false;
+    u32 m_shadow_draws = 0; // this frame
+    rhi::PipelineHandle m_shadow_mesh; // invalid without mesh shaders
+    rhi::PipelineHandle m_shadow_vertex;
+    rhi::PipelineHandle m_shadow_clear_pages;
+    rhi::PipelineHandle m_shadow_clear_words;
+    std::vector<u8> m_casts; // per frame instance: drawn as a mesh, so it casts
+    std::vector<u32> m_shadow_requests_cpu;
+    std::vector<u32> m_shadow_table;
+    std::vector<gpu::ShadowLevel> m_shadow_levels;
     bool m_overflow_logged = false;
     bool m_cull_buffers_logged = false;
     bool m_instances_logged = false;

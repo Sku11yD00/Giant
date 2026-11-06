@@ -645,6 +645,56 @@ GIANT_TEST("rhi: the null device catches misuse a GPU would crash on") {
     device->destroy(dst);
 }
 
+GIANT_TEST("rhi: the null device takes passes without targets, sized by the pass") {
+    auto device = null_device();
+    if (device == nullptr) {
+        GIANT_CHECK(false);
+        return;
+    }
+    GraphicsPipelineDesc none_desc;
+    none_desc.color_count = 0; // writes buffers only
+    const PipelineHandle none = device->create_pipeline(none_desc);
+    GIANT_CHECK(none.valid());
+    TextureDesc target_desc;
+    target_desc.width = 8;
+    target_desc.height = 8;
+    target_desc.format = Format::rgba8_srgb;
+    target_desc.usage = TextureUsage::render_target;
+    const TextureHandle target = device->create_texture(target_desc);
+    {
+        CountAsserts asserts;
+        CommandList* cmd = device->begin_frame(nullptr);
+        RenderPassDesc pass;
+        pass.color_count = 0;
+        pass.width = 2048;
+        pass.height = 1024;
+        cmd->begin_render_pass(pass);
+        cmd->set_pipeline(none);
+        cmd->set_scissor(1024, 512, 1024, 512); // inside the pass's own size
+        cmd->draw(3);
+        GIANT_CHECK(asserts.count() == 0);
+        cmd->set_scissor(0, 0, 4096, 16); // outside it
+        GIANT_CHECK(asserts.count() == 1);
+        cmd->end_render_pass();
+        RenderPassDesc unsized;
+        unsized.color_count = 0;
+        cmd->begin_render_pass(unsized); // no targets and no size
+        GIANT_CHECK(asserts.count() == 2);
+        cmd->end_render_pass();
+        RenderPassDesc with_target;
+        with_target.colors[0] = {target, LoadOp::clear, {}};
+        cmd->begin_render_pass(with_target);
+        cmd->set_pipeline(none);
+        cmd->draw(3); // the pipeline has no targets, the pass has one
+        GIANT_CHECK(asserts.count() == 3);
+        cmd->end_render_pass();
+        device->end_frame();
+    }
+    GIANT_CHECK(device->last_frame_stats().draws == 2);
+    device->destroy(none);
+    device->destroy(target);
+}
+
 GIANT_TEST("rhi: resources made inside a frame hold their data and count as uploads") {
     auto device = null_device();
     if (device == nullptr) {
@@ -999,6 +1049,70 @@ GIANT_TEST("rhi: d3d12 draws pulled triangles with reverse-Z depth testing") {
     device->destroy(indices);
     device->destroy(color);
     device->destroy(depth);
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
+GIANT_TEST("rhi: d3d12 draws a pass without targets that writes a buffer") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    GraphicsPipelineDesc desc;
+    desc.vertex = shaders::test_draw_vs();
+    desc.pixel = shaders::test_draw_write_ps();
+    desc.color_count = 0;
+    desc.cull = CullMode::none;
+    const PipelineHandle pipeline = device->create_pipeline(desc);
+    GIANT_CHECK(pipeline.valid());
+    BufferDesc out_desc;
+    out_desc.size = 8 * 4 * 4;
+    out_desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
+    const BufferHandle out = device->create_buffer(out_desc, std::vector<u8>(8 * 4 * 4, 0));
+    struct DrawPush {
+        float color[4];
+        u32 positions;
+        u32 position_base;
+        float depth;
+        u32 target;
+    };
+    const std::array<float, 6> quad{-1, -1, 3, -1, -1, 3};
+    CommandList* cmd = device->begin_frame(nullptr);
+    if (cmd != nullptr) {
+        const TransientMemory quad_mem = cmd->upload_array(std::span<const float>(quad));
+        cmd->barrier(out, ResourceState::shader_write);
+        RenderPassDesc pass;
+        pass.color_count = 0;
+        pass.width = 8;
+        pass.height = 4;
+        cmd->begin_render_pass(pass);
+        cmd->set_pipeline(pipeline);
+        const u32 target = device->write_descriptor(out);
+        cmd->push(DrawPush{{}, quad_mem.descriptor, quad_mem.offset, 0.75f, target});
+        cmd->draw(3);
+        cmd->push(DrawPush{{}, quad_mem.descriptor, quad_mem.offset, 0.25f, target});
+        cmd->draw(3);
+        cmd->set_scissor(0, 0, 4, 4); // the left half only
+        cmd->push(DrawPush{{}, quad_mem.descriptor, quad_mem.offset, 0.9f, target});
+        cmd->draw(3);
+        cmd->end_render_pass();
+        device->end_frame();
+    }
+    const std::vector<u8> bytes = device->read_buffer(out);
+    GIANT_CHECK(bytes.size() == 8 * 4 * 4);
+    if (bytes.size() == 8 * 4 * 4) {
+        const auto at = [&](u32 x, u32 y) {
+            float d = 0.0f;
+            std::memcpy(&d, bytes.data() + (y * 8 + x) * 4, 4);
+            return d;
+        };
+        GIANT_CHECK_NEAR(at(1, 2), 0.9, 1e-6);
+        GIANT_CHECK_NEAR(at(3, 0), 0.9, 1e-6);
+        GIANT_CHECK_NEAR(at(4, 1), 0.75, 1e-6);
+        GIANT_CHECK_NEAR(at(7, 3), 0.75, 1e-6);
+    }
+    device->destroy(pipeline);
+    device->destroy(out);
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
 }

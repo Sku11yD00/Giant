@@ -97,6 +97,14 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   out. Far voxels are coarse (a far tree is a blob of a voxel or two);
   sharper far detail comes with later parts. `last_frame.far_field.culled`
   counts the objects left to the voxels.
+- Part 4 (done): sun shadows. Every mesh casts a sharp sun shadow, from
+  8 mm detail at your feet to the horizon, drawn from the same detail
+  system as the meshes. Shadows are cached: only the patches something on
+  screen needs are drawn, and only again when something that casts onto
+  them moves, a few dozen patches a frame at most, so a static scene costs
+  next to nothing. Far voxels are shadowed too. "Sun shadows" in the Engine
+  panel (or `set_render_settings` `shadows`) turns them off;
+  `last_frame.shadows` shows the work.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

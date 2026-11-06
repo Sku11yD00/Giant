@@ -587,6 +587,14 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (stats.far_field) {
             ImGui::Text("Far field: %u instances left to the voxels", stats.far_culled);
         }
+        if (stats.shadows) {
+            ImGui::Text("Shadow pages: %u of %u, %u drawn, %u waiting", stats.shadow_pages, stats.shadow_capacity,
+                        stats.shadow_drawn, stats.shadow_waiting);
+            if (stats.shadow_missing > 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Shadow page pool full: %u pages missing",
+                                   stats.shadow_missing);
+            }
+        }
         ImGui::Text("Materials: %u shared, decals: %u in view", stats.materials, stats.decals);
         if (stats.decal_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many decals on screen: some not drawn");
@@ -642,6 +650,16 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::DragFloat("Far field from (m)", &far_distance, 10.0f, 0.0f, 100000.0f, "%.0f")) {
             run("set_render_settings", {{"far_field_distance", far_distance}});
         }
+        ImGui::BeginDisabled(!r.gpu_culling);
+        bool shadows = r.shadows;
+        if (ImGui::Checkbox("Sun shadows", &shadows)) {
+            run("set_render_settings", {{"shadows", shadows}});
+        }
+        int pages = static_cast<int>(r.shadow_pages_per_frame);
+        if (ImGui::SliderInt("Shadow pages a frame", &pages, 1, 512, "%d", ImGuiSliderFlags_Logarithmic)) {
+            run("set_render_settings", {{"shadow_pages_per_frame", std::clamp(pages, 1, 4096)}});
+        }
+        ImGui::EndDisabled();
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {
             ImGui::TextDisabled(m_state.dotnet_available ? "None loaded (load_scripts command)."

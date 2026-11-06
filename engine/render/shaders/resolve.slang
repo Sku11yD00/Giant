@@ -9,9 +9,13 @@
 // The far field: pixels past RenderSettings::far_field_distance (with
 // nothing drawn, or a mesh drawn farther) march the voxel world from there
 // and light the voxel they meet the same way.
+//
+// Sun shadows: virtual shadow pages (shadow_pages.slang), for meshes and
+// far voxels alike.
 #include "common.slang"
 #include "decals.slang"
 #include "voxel_march.slang"
+#include "shadow_pages.slang"
 
 struct ResolvePush {
     float4 background; // linear; where nothing was drawn
@@ -34,6 +38,13 @@ struct ResolvePush {
     uint tile_columns; // 0: no decals
     uint tile_rows;
     uint specular_aa;  // 1: widen highlights where normals change quickly
+    uint extras;       // read descriptor of the Extras below (push constants hold 128 bytes)
+    uint extras_offset;
+};
+ConstantBuffer<ResolvePush> push : register(b0);
+
+// gpu::ResolveExtras.
+struct Extras {
     // The far field: beyond far_start the voxel world stands in for the
     // meshes left out there (voxel_level_count 0: off).
     uint voxel_pool;
@@ -42,10 +53,45 @@ struct ResolvePush {
     uint voxel_levels_offset;
     uint voxel_level_count;
     uint voxel_bricks_per_axis;
-    float far_start;   // metres from the camera
-    float far_radius;  // instances this small are stand-ins (RenderSettings::far_field_max_radius)
+    float far_start;  // metres from the camera
+    float far_radius; // instances this small are stand-ins (RenderSettings::far_field_max_radius)
+    Shadows shadows;
 };
-ConstantBuffer<ResolvePush> push : register(b0);
+
+Extras load_extras() {
+    ByteAddressBuffer b = read_buffer(push.extras);
+    const uint at = push.extras_offset;
+    const uint4 a = b.Load4(at);
+    const uint4 c = b.Load4(at + 16);
+    const uint4 d = b.Load4(at + 32);
+    const uint4 e = b.Load4(at + 48);
+    const float4 x = asfloat(b.Load4(at + 64));
+    const float4 y = asfloat(b.Load4(at + 80));
+    const float4 z = asfloat(b.Load4(at + 96));
+    Extras o;
+    o.voxel_pool = a.x;
+    o.voxel_table = a.y;
+    o.voxel_levels = a.z;
+    o.voxel_levels_offset = a.w;
+    o.voxel_level_count = c.x;
+    o.voxel_bricks_per_axis = c.y;
+    o.far_start = asfloat(c.z);
+    o.far_radius = asfloat(c.w);
+    o.shadows.atlas = d.x;
+    o.shadows.table = d.y;
+    o.shadows.table_offset = d.z;
+    o.shadows.levels = d.w;
+    o.shadows.levels_offset = e.x;
+    o.shadows.level_count = e.y;
+    o.shadows.requests = e.z;
+    o.shadows.texel = asfloat(e.w);
+    o.shadows.x = x.xyz;
+    o.shadows.depth_scale = x.w;
+    o.shadows.y = y.xyz;
+    o.shadows.z = z.xyz;
+    o.shadows.depth_offset = z.w;
+    return o;
+}
 
 // A triangle covering the screen.
 [shader("vertex")]
@@ -202,8 +248,10 @@ float normal_variance(float3 n, uint instance) {
 
 // Lights a surface: one sun (GGX specular, Lambert diffuse) plus the
 // hemisphere ambient, before exposure and tone mapping. `variance`: the
-// normal's change across the pixel (specular AA).
-float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance) {
+// normal's change across the pixel (specular AA); `sun`: how much of the
+// sun reaches it (shadows).
+float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
+             float sun) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
@@ -226,7 +274,7 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
     const float3 fresnel = f_schlick(f0, v_dot_h);
     const float3 specular = d_ggx(n_dot_h, alpha) * v_smith(n_dot_v, n_dot_l, alpha) * fresnel;
     const float3 diffuse = (1.0 - fresnel) * diffuse_color / k_pi;
-    float3 color = (diffuse + specular) * f.sun_light.rgb * n_dot_l;
+    float3 color = (diffuse + specular) * f.sun_light.rgb * (n_dot_l * sun);
 
     // Hemisphere ambient: sky above, ground below, for diffuse along the
     // normal and for specular along the reflection.
@@ -257,29 +305,33 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     // The far field: past far_start the meshes are left out (the CPU drops
     // instances wholly beyond it) and the voxel world stands in, in front
     // of whatever mesh is drawn there (lit view only).
-    if (f.debug_view == 0 && push.voxel_level_count != 0) {
+    const Extras extras = load_extras();
+    if (f.debug_view == 0 && extras.voxel_level_count != 0) {
         const float mesh_t = hit ? length(s.world) : 3.0e38;
         // A stand-in drawn as a mesh (straddling the distance, moving, or
         // not in the voxel world yet): its own voxels must not cover it.
-        const float4 skip = hit && s.radius <= push.far_radius ? float4(s.center, s.radius)
-                                                               : float4(0.0, 0.0, 0.0, -1.0);
-        if (mesh_t > push.far_start) {
+        const float4 skip = hit && s.radius <= extras.far_radius ? float4(s.center, s.radius)
+                                                            : float4(0.0, 0.0, 0.0, -1.0);
+        if (mesh_t > extras.far_start) {
             const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
             const float3 dir = normalize(f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz);
             VoxelWorld w;
-            w.pool = push.voxel_pool;
-            w.table = push.voxel_table;
-            w.levels = push.voxel_levels;
-            w.levels_offset = push.voxel_levels_offset;
-            w.level_count = push.voxel_level_count;
-            w.bricks_per_axis = push.voxel_bricks_per_axis;
+            w.pool = extras.voxel_pool;
+            w.table = extras.voxel_table;
+            w.levels = extras.voxel_levels;
+            w.levels_offset = extras.voxel_levels_offset;
+            w.level_count = extras.voxel_level_count;
+            w.bricks_per_axis = extras.voxel_bricks_per_axis;
             w.stand_ins = 1u; // only what the CPU left out (meshes drawn keep their own look)
             float t;
             uint packed;
-            if (march_voxels(w, dir, push.far_start, mesh_t, skip, t, packed)) {
+            if (march_voxels(w, dir, extras.far_start, mesh_t, skip, t, packed)) {
                 const float3 world = dir * t;
-                const float3 color = shade(f, world, unpack_normal(packed), unpack_color(packed), k_far_roughness,
-                                           0.0, float3(0.0, 0.0, 0.0), 0.0);
+                const float3 vn = unpack_normal(packed);
+                const float far_pixel = t * 2.0 / max(f.p11 * f.height, 1e-6);
+                const float sun = sun_visibility(extras.shadows, world, vn, f.sun_direction.xyz, far_pixel);
+                const float3 color = shade(f, world, vn, unpack_color(packed), k_far_roughness, 0.0,
+                                           float3(0.0, 0.0, 0.0), 0.0, sun);
                 return float4(tone_map(color * f.exposure), 1.0);
             }
         }
@@ -312,6 +364,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
                  push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
-    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance);
+    const float sun = sun_visibility(extras.shadows, world, n, f.sun_direction.xyz, pixel_size);
+    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun);
     return float4(tone_map(color * f.exposure), 1.0);
 }

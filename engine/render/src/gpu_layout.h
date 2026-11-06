@@ -217,9 +217,27 @@ struct RasterPush {
     u32 visible_offset;
     u32 range;
     u32 range_offset;
-    u32 pad[2];
+    // Shadow pages only (raster.slang's ps_shadow): the atlas (write
+    // descriptor; u32 depths, page after page of 128 x 128), the level's
+    // page table (its first entry) and its window's minimum page.
+    u32 shadow_atlas;
+    u32 shadow_table;
+    u32 shadow_table_offset;
+    i32 shadow_page_x;
+    i32 shadow_page_y;
+    u32 pad;
 };
-static_assert(sizeof(RasterPush) == 48);
+static_assert(sizeof(RasterPush) == 64);
+
+// shadow_clear.slang's ClearPush: zeroes shadow pages (a list of physical
+// pages) or a run of words.
+struct ShadowClearPush {
+    u32 target; // write descriptor
+    u32 list;   // read descriptor of the physical pages (u32 each)
+    u32 list_offset;
+    u32 count;  // pages, or words
+};
+static_assert(sizeof(ShadowClearPush) == 16);
 
 struct ResolvePush {
     float background[4];
@@ -242,6 +260,13 @@ struct ResolvePush {
     u32 tile_columns; // 0: no decals
     u32 tile_rows;
     u32 specular_aa;
+    u32 extras; // read descriptor of the ResolveExtras (push constants hold 128 bytes)
+    u32 extras_offset;
+};
+static_assert(sizeof(ResolvePush) == 100);
+
+// The rest of what shading needs, in the frame's transient memory.
+struct ResolveExtras {
     // The far field (voxel_march.slang): beyond far_start the voxel world
     // stands in for the meshes left out there. voxel_level_count 0: off.
     u32 voxel_pool;
@@ -250,10 +275,22 @@ struct ResolvePush {
     u32 voxel_levels_offset;
     u32 voxel_level_count;
     u32 voxel_bricks_per_axis;
-    float far_start; // metres from the camera
+    float far_start;  // metres from the camera
     float far_radius; // instances this small are stand-ins: one still drawn ignores its own voxels
+    // Sun shadows (shadow_pages.slang). shadow_level_count 0: off, all lit.
+    u32 shadow_atlas;  // read descriptor: u32 depths, page after page
+    u32 shadow_table;  // read descriptor: u32 entry per page slot, level after level
+    u32 shadow_table_offset;
+    u32 shadow_levels; // ShadowLevel per level
+    u32 shadow_levels_offset;
+    u32 shadow_level_count;
+    u32 shadow_requests; // write descriptor: a bit per page slot, level after level
+    float shadow_texel;  // level 0's texel, metres
+    float shadow_x[4];   // the light's axes (camera-relative dot products); x.w: 1 / depth range
+    float shadow_y[4];
+    float shadow_z[4];   // z.w: the depth offset (depths from the CPU's anchor, ShadowPages::depth_offset)
 };
-static_assert(sizeof(ResolvePush) == 124);
+static_assert(sizeof(ResolveExtras) == 112);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {
@@ -277,6 +314,17 @@ struct VoxelLevel {
     float filled_max[4];
 };
 static_assert(sizeof(VoxelLevel) == 64);
+
+// A sun shadow level (shadow_pages.h): its window of 16 x 16 pages in
+// light space. Light-space x and y are the shadow basis's axes.
+struct ShadowLevel {
+    float origin[2];  // the window's minimum corner, light space, relative to the camera
+    float page_size;  // metres
+    float texel_size;
+    i32 page[2];      // the window's minimum page (slots wrap on it)
+    i32 pad[2];
+};
+static_assert(sizeof(ShadowLevel) == 32);
 
 // voxels.slang's VoxelPush (the voxel debug view).
 struct VoxelPush {

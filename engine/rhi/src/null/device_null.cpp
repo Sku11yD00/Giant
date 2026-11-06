@@ -242,8 +242,6 @@ public:
 
     PipelineHandle create_pipeline(const GraphicsPipelineDesc& desc) override {
         GIANT_ASSERT(desc.color_count <= k_max_color_targets, "too many colour targets");
-        GIANT_ASSERT(desc.color_count > 0 || desc.depth_format != Format::unknown,
-                     "a pipeline needs a colour or depth target");
         GIANT_ASSERT(desc.depth == DepthMode::none || is_depth(desc.depth_format),
                      "depth testing needs a depth format");
         for (u32 i = 0; i < desc.color_count; ++i) {
@@ -516,7 +514,9 @@ void NullCommandList::barrier(TextureHandle handle, ResourceState state) {
 void NullCommandList::begin_render_pass(const RenderPassDesc& desc) {
     GIANT_ASSERT(!m_in_pass, "render passes do not nest");
     GIANT_ASSERT(desc.color_count <= k_max_color_targets, "too many colour targets");
-    GIANT_ASSERT(desc.color_count > 0 || desc.depth.texture.valid(), "an empty render pass");
+    const bool targetless = desc.color_count == 0 && !desc.depth.texture.valid();
+    GIANT_ASSERT(!targetless || (desc.width > 0 && desc.height > 0 && desc.width <= 16384 && desc.height <= 16384),
+                 "a render pass without targets needs a size (at most 16384)");
     m_pass_width = 0;
     m_pass_height = 0;
     const auto size_check = [this](const TextureDesc& d) {
@@ -557,6 +557,10 @@ void NullCommandList::begin_render_pass(const RenderPassDesc& desc) {
                 fill(t->pixels, encode_clear(t->desc.format, {}, desc.depth.clear_depth));
             }
         }
+    }
+    if (targetless) {
+        m_pass_width = desc.width;
+        m_pass_height = desc.height;
     }
     m_in_pass = true;
 }

@@ -21,3 +21,11 @@ float4 vs_main(uint vertex_id : SV_VertexID) : SV_Position {
 float4 ps_main() : SV_Target {
     return push.color;
 }
+
+// A pass without targets: each pixel keeps the nearest depth drawn over it
+// in a buffer of floats, 8 a row (push.pad: its write descriptor).
+[shader("pixel")]
+void ps_write(float4 position : SV_Position) {
+    uint ignored;
+    write_buffer(push.pad).InterlockedMax((uint(position.y) * 8 + uint(position.x)) * 4, asuint(position.z), ignored);
+}

@@ -6,6 +6,7 @@
 #include "decals.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
+#include "shadow_pages.h"
 #include "smaa.h"
 #include "streaming.h"
 #include "voxel_scene.h"
@@ -14,6 +15,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace giant::render {
 
@@ -110,6 +112,9 @@ struct Renderer::FrameData {
     // The voxel world's levels (gpu::VoxelLevel each), for the voxel view
     // and the far field; null when neither is on.
     rhi::TransientMemory voxel_levels;
+    // Sun shadows: the page table and levels (null when off).
+    rhi::TransientMemory shadow_table;
+    rhi::TransientMemory shadow_levels;
 };
 
 std::unique_ptr<Renderer> Renderer::create(rhi::Device& device, const RendererDesc& desc) {
@@ -128,7 +133,8 @@ Renderer::~Renderer() {
     for (const rhi::PipelineHandle p :
          {m_raster_mesh, m_raster_vertex, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
-          m_smaa_blend, m_voxel_view}) {
+          m_smaa_blend, m_voxel_view, m_shadow_mesh, m_shadow_vertex, m_shadow_clear_pages,
+          m_shadow_clear_words}) {
         m_device.destroy(p);
     }
     m_device.destroy(m_smaa_area);
@@ -142,10 +148,15 @@ Renderer::~Renderer() {
     m_device.destroy(m_color);
     m_device.destroy(m_edges);
     m_device.destroy(m_weights);
-    for (const rhi::BufferHandle b :
-         {m_cull.counters, m_cull.args, m_cull.queues[0], m_cull.queues[1], m_cull.visible,
-          m_cull.occluded_clusters, m_cull.occluded_instances, m_cull.readback[0],
-          m_cull.readback[1], m_cull.readback[2]}) {
+    for (const CullBuffers* c : {&m_cull, &m_shadow_cull}) {
+        for (const rhi::BufferHandle b : {c->counters, c->args, c->queues[0], c->queues[1], c->visible,
+                                          c->occluded_clusters, c->occluded_instances, c->readback[0],
+                                          c->readback[1], c->readback[2]}) {
+            m_device.destroy(b);
+        }
+    }
+    for (const rhi::BufferHandle b : {m_shadow_atlas, m_shadow_requests, m_shadow_readback[0], m_shadow_readback[1],
+                                      m_shadow_readback[2]}) {
         m_device.destroy(b);
     }
 }
@@ -175,6 +186,12 @@ bool Renderer::init() {
     m_cull_retest = compute(shaders::cull_retest_cs(), "cull: retest hidden clusters");
     m_hzb_first = compute(shaders::hzb_first_cs(), "HZB: from depth");
     m_hzb_down = compute(shaders::hzb_down_cs(), "HZB: down");
+    m_shadow_clear_pages = compute(shaders::shadow_clear_pages_cs(), "shadows: clear pages");
+    m_shadow_clear_words = compute(shaders::shadow_clear_words_cs(), "shadows: clear requests");
+    ShadowDesc shadow_desc;
+    shadow_desc.pool_pages = m_desc.shadow_pages;
+    m_shadows = std::make_unique<ShadowPages>(shadow_desc);
+    m_shadow_readback_windows = std::make_unique<ShadowWindows[]>(3);
 
     rhi::GraphicsPipelineDesc raster;
     raster.vertex = shaders::raster_vs();
@@ -193,6 +210,21 @@ bool Renderer::init() {
         if (!m_raster_mesh.valid()) {
             log_warning("render", "mesh shader pipeline failed; drawing with vertex shaders");
         }
+    }
+    // Shadow pages: the same geometry stages, no targets (the pixel shader
+    // writes the atlas), both faces (thin and open meshes cast too).
+    rhi::GraphicsPipelineDesc shadow;
+    shadow.vertex = shaders::raster_vs();
+    shadow.pixel = shaders::raster_shadow_ps();
+    shadow.color_count = 0;
+    shadow.cull = rhi::CullMode::none;
+    shadow.name = "clusters to shadow pages (vertex)";
+    m_shadow_vertex = m_device.create_pipeline(shadow);
+    if (m_raster_mesh.valid()) {
+        shadow.geometry = rhi::GeometryStage::mesh;
+        shadow.mesh = shaders::raster_ms();
+        shadow.name = "clusters to shadow pages (mesh)";
+        m_shadow_mesh = m_device.create_pipeline(shadow);
     }
     rhi::GraphicsPipelineDesc resolve;
     resolve.vertex = shaders::resolve_vs();
@@ -224,7 +256,8 @@ bool Renderer::init() {
     m_voxel_view = m_device.create_pipeline(voxels);
     for (const rhi::PipelineHandle p :
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
-          m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view}) {
+          m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
+          m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -437,8 +470,7 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     return true;
 }
 
-bool Renderer::ensure_cull_buffers(u32 instance_count) {
-    CullBuffers& c = m_cull;
+bool Renderer::ensure_cull_buffers(CullBuffers& c, u32 instance_count) {
     const auto make = [this](u64 size, rhi::BufferUsage usage, rhi::Memory memory, const char* name) {
         rhi::BufferDesc desc;
         desc.size = size;
@@ -661,22 +693,23 @@ void Renderer::build_hzb(rhi::CommandList& cmd) {
     cmd.end_timing();
 }
 
-void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
-    CullBuffers& c = m_cull;
-    const auto rw = [this, &cmd, &c](bool with_args) {
-        // Every list the culling shaders write, ready for (more) writes; a
-        // repeat is a UAV barrier, so the previous dispatch's writes land.
-        for (const rhi::BufferHandle b : {c.counters, c.queues[0], c.queues[1], c.visible, c.occluded_clusters,
-                                          c.occluded_instances, m_streamer->requests(), m_streamer->usage()}) {
-            cmd.barrier(b, rhi::ResourceState::shader_write);
-        }
-        if (with_args) {
-            cmd.barrier(c.args, rhi::ResourceState::shader_write);
-        }
-    };
+void Renderer::cull_barriers(rhi::CommandList& cmd, const CullBuffers& c, bool with_args) {
+    // Every list the culling shaders write, ready for (more) writes; a
+    // repeat is a UAV barrier, so the previous dispatch's writes land.
+    for (const rhi::BufferHandle b : {c.counters, c.queues[0], c.queues[1], c.visible, c.occluded_clusters,
+                                      c.occluded_instances, m_streamer->requests(), m_streamer->usage()}) {
+        cmd.barrier(b, rhi::ResourceState::shader_write);
+    }
+    if (with_args) {
+        cmd.barrier(c.args, rhi::ResourceState::shader_write);
+    }
+}
+
+gpu::CullPush Renderer::cull_push(const CullBuffers& c, const FrameData& data, const rhi::TransientMemory& frame,
+                                  bool streaming_requests) {
     gpu::CullPush base{};
-    base.frame = data.frame.descriptor;
-    base.frame_offset = data.frame.offset;
+    base.frame = frame.descriptor;
+    base.frame_offset = frame.offset;
     base.instances = data.instances.descriptor;
     base.instance_offset = data.instances.offset;
     base.meshes = data.meshes.descriptor;
@@ -692,48 +725,23 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
     base.occluded_capacity = k_occluded_capacity;
     base.instance_capacity = c.instance_capacity;
     base.requests = m_device.write_descriptor(m_streamer->requests());
-    base.request_capacity = GeometryStreamer::k_request_capacity;
+    // Without requests (shadow pages): what is loaded is drawn. The usage
+    // marks still keep the groups they use loaded.
+    base.request_capacity = streaming_requests ? GeometryStreamer::k_request_capacity : 0u;
     base.usage = m_device.write_descriptor(m_streamer->usage());
+    return base;
+}
 
-    const auto prepare = [&](u32 pass, u32 mode, u32 slot_in, u32 capacity, u32 arg_offset) {
-        rw(true);
-        gpu::CullPush p = base;
-        p.pass = pass;
-        p.mode = mode;
-        p.slot_in = slot_in;
-        p.queue_capacity = capacity;
-        p.arg_offset = arg_offset;
-        cmd.set_pipeline(m_cull_prepare);
-        cmd.push(p);
-        cmd.dispatch(1);
-    };
-    const auto walk_trees = [&](u32 pass) {
-        for (u32 level = 0; level < data.tree_levels; ++level) {
-            prepare(pass, 0, gpu::level_slot(pass, level), k_queue_capacity, gpu::k_args_traverse);
-            rw(false);
-            cmd.barrier(c.args, rhi::ResourceState::indirect_argument);
-            gpu::CullPush p = base;
-            p.pass = pass;
-            p.queue_in = m_device.write_descriptor(c.queues[level % 2]);
-            p.queue_out = m_device.write_descriptor(c.queues[(level + 1) % 2]);
-            p.slot_in = gpu::level_slot(pass, level);
-            p.slot_out = gpu::level_slot(pass, level + 1);
-            cmd.set_pipeline(m_cull_traverse);
-            cmd.push(p);
-            cmd.dispatch_indirect(c.args, gpu::k_args_traverse);
-        }
-    };
-
-    // Timed apart from the raster passes and HZB builds between them.
-    cmd.begin_timing("culling");
+void Renderer::cull_first_pass(rhi::CommandList& cmd, CullBuffers& c, const FrameData& data,
+                               const gpu::CullPush& base) {
     cmd.barrier(m_hzb, rhi::ResourceState::shader_read);
-    rw(true);
+    cull_barriers(cmd, c, true);
     cmd.set_pipeline(m_cull_reset);
     cmd.push(base);
     cmd.dispatch(1);
 
-    // Pass 0: against last frame's HZB (when there is one).
-    rw(false);
+    // Pass 0: against last frame's HZB (when there is one, and occlusion is on).
+    cull_barriers(cmd, c, false);
     {
         gpu::CullPush p = base;
         p.pass = 0;
@@ -743,8 +751,48 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
         cmd.push(p);
         cmd.dispatch(groups_of(data.instance_count, 64));
     }
-    walk_trees(0);
-    prepare(0, 1, 0, k_visible_capacity, gpu::k_args_raster);
+    cull_walk(cmd, c, base, data, 0);
+    cull_prepare(cmd, c, base, 0, 1, 0, k_visible_capacity, gpu::k_args_raster);
+}
+
+void Renderer::cull_prepare(rhi::CommandList& cmd, const CullBuffers& c, const gpu::CullPush& base, u32 pass,
+                            u32 mode, u32 slot_in, u32 capacity, u32 arg_offset) {
+    cull_barriers(cmd, c, true);
+    gpu::CullPush p = base;
+    p.pass = pass;
+    p.mode = mode;
+    p.slot_in = slot_in;
+    p.queue_capacity = capacity;
+    p.arg_offset = arg_offset;
+    cmd.set_pipeline(m_cull_prepare);
+    cmd.push(p);
+    cmd.dispatch(1);
+}
+
+void Renderer::cull_walk(rhi::CommandList& cmd, const CullBuffers& c, const gpu::CullPush& base,
+                         const FrameData& data, u32 pass) {
+    for (u32 level = 0; level < data.tree_levels; ++level) {
+        cull_prepare(cmd, c, base, pass, 0, gpu::level_slot(pass, level), k_queue_capacity, gpu::k_args_traverse);
+        cull_barriers(cmd, c, false);
+        cmd.barrier(c.args, rhi::ResourceState::indirect_argument);
+        gpu::CullPush p = base;
+        p.pass = pass;
+        p.queue_in = m_device.write_descriptor(c.queues[level % 2]);
+        p.queue_out = m_device.write_descriptor(c.queues[(level + 1) % 2]);
+        p.slot_in = gpu::level_slot(pass, level);
+        p.slot_out = gpu::level_slot(pass, level + 1);
+        cmd.set_pipeline(m_cull_traverse);
+        cmd.push(p);
+        cmd.dispatch_indirect(c.args, gpu::k_args_traverse);
+    }
+}
+
+void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
+    CullBuffers& c = m_cull;
+    // Timed apart from the raster passes and HZB builds between them.
+    cmd.begin_timing("culling");
+    const gpu::CullPush base = cull_push(c, data, data.frame, true);
+    cull_first_pass(cmd, c, data, base);
     cmd.end_timing();
     raster(cmd, data, 0, true);
 
@@ -752,9 +800,9 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
         // Pass 1: what pass 0 found hidden, against the HZB of what it drew.
         build_hzb(cmd);
         cmd.begin_timing("culling");
-        prepare(1, 0, gpu::k_slot_occluded_instances, c.instance_capacity, gpu::k_args_instances);
-        prepare(1, 0, gpu::k_slot_occluded_clusters, k_occluded_capacity, gpu::k_args_retest);
-        rw(false);
+        cull_prepare(cmd, c, base, 1, 0, gpu::k_slot_occluded_instances, c.instance_capacity, gpu::k_args_instances);
+        cull_prepare(cmd, c, base, 1, 0, gpu::k_slot_occluded_clusters, k_occluded_capacity, gpu::k_args_retest);
+        cull_barriers(cmd, c, false);
         cmd.barrier(c.args, rhi::ResourceState::indirect_argument);
         gpu::CullPush p = base;
         p.pass = 1;
@@ -763,12 +811,12 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
         cmd.set_pipeline(m_cull_instances);
         cmd.push(p);
         cmd.dispatch_indirect(c.args, gpu::k_args_instances);
-        rw(false);
+        cull_barriers(cmd, c, false);
         cmd.set_pipeline(m_cull_retest);
         cmd.push(p);
         cmd.dispatch_indirect(c.args, gpu::k_args_retest);
-        walk_trees(1);
-        prepare(1, 1, 0, k_visible_capacity, gpu::k_args_raster);
+        cull_walk(cmd, c, base, data, 1);
+        cull_prepare(cmd, c, base, 1, 1, 0, k_visible_capacity, gpu::k_args_raster);
         cmd.end_timing();
         raster(cmd, data, 1, true);
         // For the next frame's first pass.
@@ -784,8 +832,264 @@ void Renderer::cull_on_gpu(rhi::CommandList& cmd, const FrameData& data) {
     m_streamer->after_cull(cmd, slot, frame_index);
 }
 
+bool Renderer::ensure_shadow_buffers(u32 instance_count) {
+    if (!ensure_cull_buffers(m_shadow_cull, instance_count)) {
+        return false;
+    }
+    const auto make = [this](u64 size, rhi::BufferUsage usage, rhi::Memory memory, const char* name) {
+        rhi::BufferDesc desc;
+        desc.size = size;
+        desc.usage = usage;
+        desc.memory = memory;
+        desc.name = name;
+        return m_device.create_buffer(desc);
+    };
+    const auto rw = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
+    const u64 request_bytes = u64{m_shadows->levels()} * (ShadowPages::k_slots / 8);
+    if (!m_shadow_atlas.valid()) {
+        // Zeroed: nothing there (lit) until a page is drawn.
+        m_shadow_atlas = make(u64{m_shadows->desc().pool_pages} * ShadowPages::k_page_texels *
+                                  ShadowPages::k_page_texels * 4,
+                              rw, rhi::Memory::gpu, "shadow page atlas");
+    }
+    if (!m_shadow_requests.valid()) {
+        m_shadow_requests = make(request_bytes, rw, rhi::Memory::gpu, "shadow page requests");
+    }
+    for (u32 i = 0; i < 3; ++i) {
+        if (!m_shadow_readback[i].valid()) {
+            m_shadow_readback[i] = make(request_bytes, rhi::BufferUsage::none, rhi::Memory::readback,
+                                        "shadow page requests (read back)");
+            m_shadow_readback_frame[i] = ~u64{0};
+        }
+    }
+    const bool ok = m_shadow_atlas.valid() && m_shadow_requests.valid() && m_shadow_readback[0].valid() &&
+                    m_shadow_readback[1].valid() && m_shadow_readback[2].valid();
+    if (!ok && !m_shadow_buffers_logged) {
+        m_shadow_buffers_logged = true;
+        log_error("render", "could not create the shadow page buffers (out of GPU memory?); no sun shadows");
+    }
+    return ok;
+}
+
+void Renderer::plan_shadows(const FrameInput& frame, bool on) {
+    m_shadows_on = on;
+    if (!on) {
+        m_shadows_were_on = false;
+        // Requests from before are not taken when shadows come back.
+        for (u64& tag : m_shadow_readback_frame) {
+            tag = ~u64{0};
+        }
+        return;
+    }
+    m_shadows->begin_frame(frame.view.position, frame.lighting.sun_direction);
+    if (!m_shadows_were_on) {
+        // Casters may have changed while shadows were off.
+        m_shadows->invalidate_all();
+        m_shadows_were_on = true;
+    }
+    // Only what is drawn as a mesh casts (not the instances left to the
+    // voxel world, nor those whose mesh is not ready).
+    m_casts.assign(frame.instances.size(), 0);
+    for (const u32 i : m_valid) {
+        m_casts[i] = 1;
+    }
+    m_shadows->track(frame.instances, m_casts, m_meshes_version, [this](MeshId id) { return mesh(id); });
+    // The newest requests the GPU is done with, taken once.
+    const u64 now = m_device.frames_completed();
+    u32 best = 3;
+    for (u32 i = 0; i < 3; ++i) {
+        const u64 tag = m_shadow_readback_frame[i];
+        if (tag != ~u64{0} && tag + rhi::Device::k_frames_in_flight <= now &&
+            (best == 3 || tag > m_shadow_readback_frame[best])) {
+            best = i;
+        }
+    }
+    if (best < 3 && m_shadow_readback_frame[best] != m_shadow_requests_taken) {
+        m_shadow_requests_taken = m_shadow_readback_frame[best];
+        const u8* bytes = m_device.mapped(m_shadow_readback[best]);
+        if (bytes != nullptr) {
+            m_shadow_requests_cpu.resize(size_t{m_shadows->levels()} * (ShadowPages::k_slots / 32));
+            std::memcpy(m_shadow_requests_cpu.data(), bytes, m_shadow_requests_cpu.size() * 4);
+            m_shadows->request(m_shadow_requests_cpu, &m_shadow_readback_windows[best]);
+        }
+    }
+}
+
+void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame,
+                            const gpu::FrameConstants& base) {
+    const u32 budget = std::clamp<u32>(frame.settings.shadow_pages_per_frame, 1u, 4096u);
+    const std::vector<ShadowPages::Draw> draws = m_shadows->plan(budget);
+    // The table and levels as they are now, drawn pages marked: shading and
+    // the page raster read them.
+    m_shadow_table.resize(size_t{m_shadows->levels()} * ShadowPages::k_slots);
+    m_shadows->write_table(m_shadow_table);
+    m_shadow_levels.resize(m_shadows->levels());
+    m_shadows->write_levels(m_shadow_levels.data(), frame.view.position);
+    data.shadow_table = cmd.upload(bytes_of(m_shadow_table));
+    data.shadow_levels = cmd.upload(bytes_of(m_shadow_levels));
+    if (data.shadow_table.data == nullptr || data.shadow_levels.data == nullptr) {
+        return;
+    }
+    cmd.begin_timing("shadows");
+    // This frame's requests start empty.
+    cmd.barrier(m_shadow_requests, rhi::ResourceState::shader_write);
+    {
+        gpu::ShadowClearPush push{};
+        push.target = m_device.write_descriptor(m_shadow_requests);
+        push.list = data.frame.descriptor;
+        push.count = m_shadows->levels() * (ShadowPages::k_slots / 32);
+        cmd.set_pipeline(m_shadow_clear_words);
+        cmd.push(push);
+        cmd.dispatch(groups_of(push.count, 64));
+    }
+    if (!draws.empty()) {
+        // Pages drawn again start empty.
+        std::vector<u32> pages;
+        pages.reserve(draws.size());
+        for (const ShadowPages::Draw& d : draws) {
+            pages.push_back(d.physical);
+        }
+        const rhi::TransientMemory list = cmd.upload(bytes_of(pages));
+        if (list.data != nullptr) {
+            cmd.barrier(m_shadow_atlas, rhi::ResourceState::shader_write);
+            gpu::ShadowClearPush push{};
+            push.target = m_device.write_descriptor(m_shadow_atlas);
+            push.list = list.descriptor;
+            push.list_offset = list.offset;
+            push.count = static_cast<u32>(pages.size());
+            cmd.set_pipeline(m_shadow_clear_pages);
+            cmd.push(push);
+            constexpr u32 page_words = ShadowPages::k_page_texels * ShadowPages::k_page_texels;
+            cmd.dispatch(page_words / 4 / 64, push.count);
+            cmd.barrier(m_shadow_atlas, rhi::ResourceState::shader_write); // cleared before drawn
+        }
+    }
+    // Per level with pages to draw: cull and draw what casts onto them,
+    // seen from the sun over the level's window, kept to those pages.
+    const ShadowPages::Basis& b = m_shadows->basis();
+    const double range = m_shadows->desc().depth_range;
+    const DVec3 camera_light = m_shadows->to_light(frame.view.position);
+    const double depth_offset = m_shadows->depth_offset(frame.view.position);
+    for (u32 level = 0; level < m_shadows->levels() && data.instance_count > 0; ++level) {
+        i32 x0 = std::numeric_limits<i32>::max(), y0 = x0;
+        i32 x1 = std::numeric_limits<i32>::min(), y1 = x1;
+        for (const ShadowPages::Draw& d : draws) {
+            if (d.level == level) {
+                x0 = std::min(x0, d.page_x);
+                y0 = std::min(y0, d.page_y);
+                x1 = std::max(x1, d.page_x);
+                y1 = std::max(y1, d.page_y);
+            }
+        }
+        if (x0 > x1) {
+            continue;
+        }
+        const double page = m_shadows->page_size(level);
+        const double texel = m_shadows->texel_size(level);
+        const double width = page * ShadowPages::k_pages_per_axis;
+        const i32 wx = m_shadows->window_x(level);
+        const i32 wy = m_shadows->window_y(level);
+        // The window's corner, light space, relative to the camera.
+        const double ox = double(wx) * page - camera_light.x;
+        const double oy = double(wy) * page - camera_light.y;
+        gpu::FrameConstants k = base;
+        // Camera-relative world to the window's clip space: x right, y
+        // down the texel rows, depth 0.5 - (z - anchor) / range (larger:
+        // nearer the sun; from a fixed anchor, so cached pages stay right
+        // as the camera moves).
+        Mat4 m;
+        const double sx = 2.0 / width;
+        m.at(0, 0) = float(b.x.x * sx);
+        m.at(0, 1) = float(b.x.y * sx);
+        m.at(0, 2) = float(b.x.z * sx);
+        m.at(0, 3) = float(-ox * sx - 1.0);
+        m.at(1, 0) = float(-b.y.x * sx);
+        m.at(1, 1) = float(-b.y.y * sx);
+        m.at(1, 2) = float(-b.y.z * sx);
+        m.at(1, 3) = float(oy * sx + 1.0);
+        m.at(2, 0) = float(-b.z.x / range);
+        m.at(2, 1) = float(-b.z.y / range);
+        m.at(2, 2) = float(-b.z.z / range);
+        m.at(2, 3) = float(0.5 + depth_offset);
+        m.at(3, 0) = 0.0f;
+        m.at(3, 1) = 0.0f;
+        m.at(3, 2) = 0.0f;
+        m.at(3, 3) = 1.0f;
+        std::memcpy(k.view_proj, m.m, sizeof(k.view_proj));
+        // Culling: the pages' rectangle across the light, and nothing
+        // nearer the sun than half the depth range from the anchor (depth 1).
+        const double lx0 = ox + double(x0 - wx) * page;
+        const double lx1 = ox + double(x1 + 1 - wx) * page;
+        const double ly0 = oy + double(y0 - wy) * page;
+        const double ly1 = oy + double(y1 + 1 - wy) * page;
+        const auto plane = [&k](u32 i, const DVec3& n, double w) {
+            k.planes[i * 4 + 0] = float(n.x);
+            k.planes[i * 4 + 1] = float(n.y);
+            k.planes[i * 4 + 2] = float(n.z);
+            k.planes[i * 4 + 3] = float(w);
+        };
+        plane(0, b.x, -lx0);
+        plane(1, -b.x, lx1);
+        plane(2, b.y, -ly0);
+        plane(3, -b.y, ly1);
+        plane(4, b.z, range * (0.5 - depth_offset)); // depth 1 is z_rel = range * (offset - 0.5)
+        // LOD by the texel: the error over a distance that never wins.
+        constexpr float k_far = 1.0e7f;
+        k.near_plane = k_far;
+        k.pixels_per_unit = float(double(k_far) / texel);
+        k.occlusion = 0;
+        k.camera_delta[3] = 0.0f;
+        const rhi::TransientMemory frame_k = cmd.upload(bytes_of_one(k));
+        if (frame_k.data == nullptr) {
+            break;
+        }
+        CullBuffers& c = m_shadow_cull;
+        const gpu::CullPush push = cull_push(c, data, frame_k, false);
+        cull_first_pass(cmd, c, data, push);
+        cmd.barrier(c.args, rhi::ResourceState::indirect_argument);
+        cmd.barrier(c.counters, rhi::ResourceState::shader_read);
+        cmd.barrier(c.visible, rhi::ResourceState::shader_read);
+        cmd.barrier(m_shadow_atlas, rhi::ResourceState::shader_write);
+        rhi::RenderPassDesc pass;
+        pass.color_count = 0;
+        pass.width = ShadowPages::k_pages_per_axis * ShadowPages::k_page_texels;
+        pass.height = pass.width;
+        cmd.begin_render_pass(pass);
+        const u32 t = ShadowPages::k_page_texels;
+        cmd.set_scissor(u32(x0 - wx) * t, u32(y0 - wy) * t, u32(x1 - x0 + 1) * t, u32(y1 - y0 + 1) * t);
+        cmd.set_pipeline(data.use_mesh_shaders && m_shadow_mesh.valid() ? m_shadow_mesh : m_shadow_vertex);
+        gpu::RasterPush r{};
+        r.frame = frame_k.descriptor;
+        r.frame_offset = frame_k.offset;
+        r.instances = data.instances.descriptor;
+        r.instance_offset = data.instances.offset;
+        r.meshes = data.meshes.descriptor;
+        r.mesh_offset = data.meshes.offset;
+        r.visible = m_device.read_descriptor(c.visible);
+        r.visible_offset = 0;
+        r.range = m_device.read_descriptor(c.counters);
+        r.range_offset = gpu::k_slot_range * 4;
+        r.shadow_atlas = m_device.write_descriptor(m_shadow_atlas);
+        r.shadow_table = data.shadow_table.descriptor;
+        r.shadow_table_offset = data.shadow_table.offset + level * ShadowPages::k_slots * 4;
+        r.shadow_page_x = wx;
+        r.shadow_page_y = wy;
+        cmd.push(r);
+        if (data.use_mesh_shaders && m_shadow_mesh.valid()) {
+            cmd.dispatch_mesh_indirect(c.args, gpu::k_args_raster);
+        } else {
+            cmd.draw_indirect(c.args, gpu::k_args_raster + 16);
+        }
+        cmd.end_render_pass();
+        ++m_shadow_draws;
+    }
+    cmd.barrier(m_shadow_atlas, rhi::ResourceState::shader_read);
+    cmd.end_timing();
+}
+
 void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameInput& frame) {
     m_stats = {};
+    m_shadow_draws = 0;
     const rhi::TextureDesc* target_desc = m_device.describe(target);
     GIANT_ASSERT(target_desc != nullptr && target_desc->format == rhi::Format::rgba8_srgb,
                  "the renderer draws into a live rgba8_srgb render target");
@@ -881,9 +1185,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         m_valid.resize(k_max_instances);
     }
-    if (gpu && !ensure_cull_buffers(static_cast<u32>(m_valid.size()))) {
+    if (gpu && !ensure_cull_buffers(m_cull, static_cast<u32>(m_valid.size()))) {
         m_valid.clear(); // out of memory: draw nothing
     }
+    // Sun shadows: the lit view, with GPU culling (pages are drawn with it).
+    plan_shadows(frame, settings.shadows && gpu && settings.debug_view == DebugView::lit &&
+                            ensure_shadow_buffers(static_cast<u32>(m_valid.size())));
 
     // Frame constants.
     const Lighting& light = frame.lighting;
@@ -1081,6 +1388,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         raster(cmd, data, 0, false); // clears the visibility buffer, draws CPU picks
     }
+    if (m_shadows_on) {
+        draw_shadows(cmd, data, frame, k); // after the view's culling: its streaming requests go first
+    }
     if (data.occlusion && !m_valid.empty()) {
         m_hzb_valid = true;
         m_hzb_camera = frame.view.position;
@@ -1105,6 +1415,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         draw_voxels(cmd, target, data, light.background);
         finish_stats(data);
         return;
+    }
+    if (m_shadows_on) {
+        cmd.barrier(m_shadow_atlas, rhi::ResourceState::shader_read);
+        cmd.barrier(m_shadow_requests, rhi::ResourceState::shader_write);
     }
     cmd.begin_timing("shading");
     rhi::RenderPassDesc pass;
@@ -1138,30 +1452,73 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     push.tile_columns = data.tile_columns;
     push.tile_rows = data.tile_rows;
     push.specular_aa = settings.specular_antialiasing ? 1u : 0u;
+    gpu::ResolveExtras extras{};
     // Nothing the far field could show (no level has stand-ins): no march.
     const bool far_march = far_field && data.voxel_levels.data != nullptr &&
                            std::any_of(m_voxel_levels.begin(), m_voxel_levels.end(),
                                        [](const gpu::VoxelLevel& l) { return l.brick[3] != 0; });
+    // Off: valid descriptors all the same (bindless reads are checked).
+    extras.voxel_pool = data.frame.descriptor;
+    extras.voxel_table = data.frame.descriptor;
+    extras.voxel_levels = data.frame.descriptor;
+    extras.shadow_atlas = data.frame.descriptor;
+    extras.shadow_table = data.frame.descriptor;
+    extras.shadow_levels = data.frame.descriptor;
+    extras.shadow_requests = data.frame.descriptor;
     if (far_march) {
-        push.voxel_pool = m_device.read_descriptor(m_voxels->pool());
-        push.voxel_table = m_device.read_descriptor(m_voxels->table());
-        push.voxel_levels = data.voxel_levels.descriptor;
-        push.voxel_levels_offset = data.voxel_levels.offset;
-        push.voxel_level_count = m_voxels->levels();
-        push.voxel_bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
-        push.far_start = static_cast<float>(far_distance);
-        push.far_radius = static_cast<float>(far_radius);
-    } else {
-        // Off: valid descriptors all the same (bindless reads are checked).
-        push.voxel_pool = data.frame.descriptor;
-        push.voxel_table = data.frame.descriptor;
-        push.voxel_levels = data.frame.descriptor;
+        extras.voxel_pool = m_device.read_descriptor(m_voxels->pool());
+        extras.voxel_table = m_device.read_descriptor(m_voxels->table());
+        extras.voxel_levels = data.voxel_levels.descriptor;
+        extras.voxel_levels_offset = data.voxel_levels.offset;
+        extras.voxel_level_count = m_voxels->levels();
+        extras.voxel_bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
+        extras.far_start = static_cast<float>(far_distance);
+        extras.far_radius = static_cast<float>(far_radius);
+    }
+    const bool shadows = m_shadows_on && data.shadow_table.data != nullptr && data.shadow_levels.data != nullptr;
+    if (shadows) {
+        extras.shadow_atlas = m_device.read_descriptor(m_shadow_atlas);
+        extras.shadow_table = data.shadow_table.descriptor;
+        extras.shadow_table_offset = data.shadow_table.offset;
+        extras.shadow_levels = data.shadow_levels.descriptor;
+        extras.shadow_levels_offset = data.shadow_levels.offset;
+        extras.shadow_level_count = m_shadows->levels();
+        extras.shadow_requests = m_device.write_descriptor(m_shadow_requests);
+        extras.shadow_texel = static_cast<float>(m_shadows->texel_size(0));
+        const ShadowPages::Basis& b = m_shadows->basis();
+        const auto axis = [](float* out, const DVec3& v, double w) {
+            out[0] = static_cast<float>(v.x);
+            out[1] = static_cast<float>(v.y);
+            out[2] = static_cast<float>(v.z);
+            out[3] = static_cast<float>(w);
+        };
+        axis(extras.shadow_x, b.x, 1.0 / m_shadows->desc().depth_range);
+        axis(extras.shadow_y, b.y, 0.0);
+        axis(extras.shadow_z, b.z, m_shadows->depth_offset(frame.view.position));
+    }
+    const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
+    push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
+    push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;
+    if (extras_memory.data == nullptr) {
+        cmd.end_render_pass();
+        cmd.end_timing();
+        return; // out of memory: the device is lost
     }
     cmd.push(push);
     cmd.draw(3);
     ++m_stats.draws;
     cmd.end_render_pass();
     cmd.end_timing();
+    if (shadows) {
+        // What shading asked for, read back once the GPU is done with it.
+        const u64 frame_index = m_device.frames_completed();
+        const u32 slot = static_cast<u32>(frame_index % 3);
+        cmd.barrier(m_shadow_requests, rhi::ResourceState::copy_source);
+        cmd.copy_buffer(m_shadow_readback[slot], 0, m_shadow_requests, 0,
+                        u64{m_shadows->levels()} * (ShadowPages::k_slots / 8));
+        m_shadow_readback_frame[slot] = frame_index;
+        m_shadow_readback_windows[slot] = m_shadows->windows();
+    }
     if (antialias) {
         cmd.begin_timing("anti-aliasing");
         smaa(cmd, target, bg);
@@ -1258,6 +1615,14 @@ void Renderer::copy_streaming_stats() {
     m_stats.voxel_cpu_ms = v.cpu_ms;
     m_stats.far_field = m_far_field;
     m_stats.far_culled = m_far_culled;
+    const ShadowStats& sh = m_shadows->stats();
+    m_stats.shadows = m_shadows_on;
+    m_stats.shadow_pages = m_shadows_on ? sh.resident : 0u;
+    m_stats.shadow_capacity = sh.capacity;
+    m_stats.shadow_drawn = m_shadows_on ? sh.drawn : 0u;
+    m_stats.shadow_waiting = m_shadows_on ? sh.waiting : 0u;
+    m_stats.shadow_missing = m_shadows_on ? sh.missing : 0u;
+    m_stats.shadow_draws = m_shadow_draws;
 }
 
 } // namespace giant::render

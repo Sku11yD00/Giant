@@ -289,6 +289,11 @@ struct RenderPassDesc {
     std::array<ColorTarget, k_max_color_targets> colors{};
     u32 color_count = 1;
     DepthTarget depth{};
+    // A pass with no targets (color_count 0, no depth) draws only for what
+    // its shaders write (buffers): this is its size, pixels. Ignored when
+    // there are targets (the pass takes their size).
+    u32 width = 0;
+    u32 height = 0;
 };
 
 // Per-frame scratch memory, written by the CPU and read by shaders during

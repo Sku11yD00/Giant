@@ -2,6 +2,7 @@
 #include "giant/render/renderer.h"
 
 #include "giant_test.h"
+#include "shadow_pages.h"
 
 #include <array>
 #include <cmath>
@@ -403,7 +404,70 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     frame.settings.antialiasing = false;
     s.draw(frame);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shading"}));
+                                                     "raster", "HZB", "shadows", "shading"}));
+}
+
+GIANT_TEST("render: shadow pages asked for are drawn, a pass per level, and cached") {
+    // The null device runs no shaders, so shading asks for nothing: the
+    // test asks for pages itself, as the read-back requests would.
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {40.0f, 1.0f, 40.0f};
+    instances[1].mesh = s.renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = {0.0, 1.0, -4.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.view.position = {0.0, 2.0, 0.0};
+    frame.lighting.sun_direction = {0.3f, 0.9f, 0.2f};
+    frame.settings.antialiasing = false;
+    RenderStats st = s.draw(frame);
+    GIANT_CHECK(st.shadows && st.shadow_capacity == 1024);
+    GIANT_CHECK(st.shadow_pages == 0 && st.shadow_draws == 0);
+    ShadowPages& pages = s.renderer->shadow_pages();
+    const auto ask = [&](u32 level, const DVec3& world) {
+        std::vector<u32> bits(pages.levels() * 8, 0u);
+        const DVec3 l = pages.to_light(world);
+        const double size = pages.page_size(level);
+        const u32 slot = pages.slot_of(i32(std::floor(l.x / size)), i32(std::floor(l.y / size)));
+        bits[level * 8 + slot / 32] |= 1u << (slot % 32);
+        pages.request(bits);
+    };
+    ask(0, instances[1].position);
+    ask(0, instances[1].position + DVec3{3.0, 0.0, 0.0});
+    ask(4, instances[1].position);
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_pages == 3 && st.shadow_drawn == 3 && st.shadow_waiting == 0);
+    GIANT_CHECK(st.shadow_draws == 2); // levels 0 and 4
+    GIANT_CHECK(st.draws == 3);        // the view's two raster passes and shading: shadows apart
+    GIANT_CHECK(s.device->last_frame_stats().draws == st.draws + st.shadow_draws);
+    // Cached: nothing to draw while nothing changes.
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_drawn == 0 && st.shadow_draws == 0 && st.shadow_pages == 3);
+    // The cube moves: the pages under it are drawn again.
+    instances[1].position.x += 0.5;
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_drawn >= 2 && st.shadow_draws == 2);
+    // The budget: one page a frame (coarse first), the rest wait.
+    frame.settings.shadow_pages_per_frame = 1;
+    pages.invalidate_all();
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_drawn == 1 && st.shadow_waiting == 2 && st.shadow_draws == 1);
+    // Off: nothing drawn, nothing asked; back on, the pages are drawn again.
+    frame.settings.shadows = false;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.shadows && st.shadow_draws == 0);
+    frame.settings.shadows = true;
+    frame.settings.shadow_pages_per_frame = 64;
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadows && st.shadow_drawn == 3);
+    // The CPU path and the debug views have no shadows.
+    frame.settings.gpu_culling = false;
+    GIANT_CHECK(!s.draw(frame).shadows);
+    frame.settings.gpu_culling = true;
+    frame.settings.debug_view = DebugView::clusters;
+    GIANT_CHECK(!s.draw(frame).shadows);
 }
 
 GIANT_TEST("render: many meshes added in one frame draw once their coarsest levels are in") {
@@ -523,6 +587,7 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.lighting.sky_light = {0.02f, 0.02f, 0.02f};
     frame.lighting.ground_light = {0.02f, 0.02f, 0.02f};
     frame.lighting.background = {0.0f, 0.0f, 1.0f};
+    frame.settings.shadows = false; // the CPU path has none: compared below
 
     // Renders frames until streaming settles (occlusion uses the last frame's depth) and reads
     // the image back, with the GPU's counts for the last frame.
@@ -698,3 +763,95 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     GIANT_CHECK(device->validation_errors() == 0);
 }
 #endif
+
+GIANT_TEST("render: d3d12 casts sun shadows from shadow pages") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) {
+        return; // not on Windows
+    }
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    constexpr u32 k_w = 96, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+
+    // Ground, and a cube floating over it; the camera 6 m up looking
+    // straight down (screen right is +X, screen up is -Z), far from the origin.
+    const DVec3 origin{-40'000.0, 120.0, 70'000.0};
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = origin;
+    instances[0].scale = {40.0f, 1.0f, 40.0f};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = origin + DVec3{0.0, 1.5, 0.0};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.7f, 0.7f, 0.7f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.view.position = origin + DVec3{0.0, 6.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
+    frame.instances = instances;
+    frame.materials = materials;
+    // The sun to the +X side: the cube's shadow falls towards -X, from
+    // about x = -2 to -0.25 (the cube hides x in [-0.75, 0.75] from above).
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.6f, 0.8f, 0.0f});
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.1f, 0.1f, 0.1f};
+    frame.lighting.ground_light = {0.1f, 0.1f, 0.1f};
+    frame.settings.antialiasing = false;
+    // Shading asks for pages; they are read back two frames on and drawn.
+    const auto draw = [&](bool shadows) {
+        frame.settings.shadows = shadows;
+        for (int i = 0; i < 16; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto plain = draw(false);
+    const auto shadowed = draw(true);
+    const RenderStats st = renderer->last_stats();
+    GIANT_CHECK(st.shadows && st.shadow_pages > 0 && st.shadow_waiting == 0 && st.shadow_missing == 0);
+    GIANT_CHECK(plain.size() == k_w * k_h * 4 && shadowed.size() == plain.size());
+    if (plain.size() == k_w * k_h * 4 && shadowed.size() == plain.size()) {
+        const auto at = [](const std::vector<u8>& p, u32 x, u32 y) { return int{p[(static_cast<usize>(y) * k_w + x) * 4]}; };
+        // About 0.108 m a pixel on the ground; the centre is x = 0.
+        const u32 shade_x = k_w / 2 - 13; // x = -1.4 m: in the shadow
+        const u32 open_x = k_w / 2 + 16;  // x = +1.7 m: in the sun
+        GIANT_CHECK(at(shadowed, shade_x, k_h / 2) < at(plain, shade_x, k_h / 2) / 2);
+        // No shadow acne: open ground is as bright as without shadows.
+        for (u32 y = 4; y < k_h - 4; y += 6) {
+            GIANT_CHECK(std::abs(at(shadowed, open_x, y) - at(plain, open_x, y)) <= 3);
+            GIANT_CHECK(std::abs(at(shadowed, k_w - 3, y) - at(plain, k_w - 3, y)) <= 3);
+        }
+        // The cube's lit top is unchanged too.
+        GIANT_CHECK(std::abs(at(shadowed, k_w / 2, k_h / 2) - at(plain, k_w / 2, k_h / 2)) <= 3);
+    }
+    // Moving the cube moves its shadow (its pages are drawn again).
+    instances[1].position.z += 3.0; // 28 pixels down the screen
+    const auto moved = draw(true);
+    if (moved.size() == k_w * k_h * 4 && plain.size() == moved.size()) {
+        const auto at = [](const std::vector<u8>& p, u32 x, u32 y) { return int{p[(static_cast<usize>(y) * k_w + x) * 4]}; };
+        const u32 shade_x = k_w / 2 - 13;
+        GIANT_CHECK(std::abs(at(moved, shade_x, k_h / 2) - at(plain, shade_x, k_h / 2)) <= 3); // sunlit again
+    }
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+    device->destroy(target);
+}

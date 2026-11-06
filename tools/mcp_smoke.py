@@ -405,6 +405,68 @@ def far_field_gate(tool, call, check):
     tool("new_scene")
 
 
+def shadow_gate(tool, call, check):
+    """N2 part 4: sun shadows from virtual shadow pages. The pages shading asks for are drawn
+    a few frames later, cast where the sun says, and stay cached until something moves."""
+    tool("new_scene")
+    tool("create_entity", {"name": "Ground", "shape": "plane", "scale": [200, 1, 200],
+                           "base_color": [0.6, 0.6, 0.6], "roughness": 0.9})
+    # A slab floating 2 m up, east of the origin (x 3 to 9, z -4 to 4).
+    block = tool("create_entity", {"name": "Block", "shape": "cube", "position": [6, 3, 0],
+                                   "scale": [6, 2, 8], "base_color": [0.6, 0.6, 0.6]})["id"]
+    # The sun in the east, 30 degrees up: the shadow falls west, over the origin (x -3.9 to 5.5).
+    tool("set_lighting", {"sun_elevation_degrees": 30, "sun_azimuth_degrees": 90})
+    tool("set_camera", {"position": [0, 12, 6], "look_at": [0, 0, 0]})
+
+    def settle():
+        # Requests take a few frames to come back: quiet three samples in a row.
+        last, quiet = None, 0
+        for _ in range(60):
+            for _ in range(10):
+                call("ping")
+            last = tool("get_render_settings")["last_frame"]
+            shadows = last["shadows"]
+            still = not shadows["on"] or (shadows["pages"] > 0 and shadows["waiting"] == 0 and shadows["drawn"] == 0)
+            quiet = quiet + 1 if still else 0
+            if not real or quiet >= 3:
+                return last
+        return last
+
+    def centre():
+        call("ping")
+        shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 480}})
+        image = [c for c in shot["content"] if c["type"] == "image"][0]
+        width, height, pixels = decode_png(base64.b64decode(image["data"]))
+        x, y = width // 2, height // 2
+        return pixels[(y * width + x) * 4:(y * width + x) * 4 + 3]
+
+    real = tool("get_engine_info")["backend"] != "null"
+    settings = tool("get_render_settings")
+    check(settings["shadows"] is True and settings["shadow_pages_per_frame"] == 64, "shadows are on by default")
+    last = settle()
+    check(last["shadows"]["on"] and last["shadows"]["capacity"] == 1024,
+          f"the shadow page pool is there, got {last['shadows']}")
+    if real:
+        check(last["shadows"]["pages"] > 0 and last["shadows"]["missing"] == 0,
+              f"shading asked for pages and they were drawn, got {last['shadows']}")
+        shaded = centre()
+        tool("set_render_settings", {"shadows": False})
+        settle()
+        sunlit = centre()
+        check(sum(shaded) < 0.6 * sum(sunlit), f"the block shadows the ground, got {shaded} against {sunlit}")
+        tool("set_render_settings", {"shadows": True})
+        # Moved away, the block takes its shadow along: its pages are drawn again.
+        tool("set_entity", {"id": block, "position": [6, 3, 40]})
+        settle()
+        moved = centre()
+        check(abs(sum(moved) - sum(sunlit)) <= 9, f"the ground is sunlit again, got {moved} against {sunlit}")
+    tool("set_render_settings", {"shadows": False})
+    last = settle()
+    check(not last["shadows"]["on"] and last["shadows"]["draws"] == 0, f"shadows turn off, got {last['shadows']}")
+    tool("set_render_settings", {"shadows": True})
+    tool("new_scene")
+
+
 def n1_gate(tool, call, check):
     """N1 part 6, the N1 gate scene (tools/n1_gate.py measures its speed on a real GPU): a
     kit-built town and 10,000 trees in a fixed number of draws, with every bit of detail the
@@ -549,6 +611,7 @@ def main() -> int:
         kit_gate(tool, call, check)
         voxel_gate(tool, call, check)
         far_field_gate(tool, call, check)
+        shadow_gate(tool, call, check)
         n1_gate(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
