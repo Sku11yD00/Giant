@@ -319,7 +319,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"remove_terrain",
          "Removes the terrain tiles of every 64 m cell the area [from, to] (x, z metres) "
-         "touches, or every tile with all. Undoable.",
+         "touches, or every tile with all (in a streamed world: every tile loaded). Undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
@@ -336,7 +336,10 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                  std::string error;
                  const std::optional<Area> area = area_of(args["from"], args["to"], error);
                  if (!area) return CommandResult::failure(error);
-                 for (const CellCoord c : cells_in(*area)) {
+                 const std::vector<CellCoord> touched = cells_in(*area);
+                 // Ground on disk there would stream back: refused, as for the other commands.
+                 if (auto refused = ground_not_loaded(state, touched)) return CommandResult::failure(*refused);
+                 for (const CellCoord c : touched) {
                      if (t.find(c) != nullptr) cells.push_back(c);
                  }
              } else {

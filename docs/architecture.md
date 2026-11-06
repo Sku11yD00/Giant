@@ -371,9 +371,11 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   `unloads_per_frame` cells (128) go in one frame, the rest in the frames
   after; their meshes are freed `drops_per_frame` (64) a frame. A tile new
   to `TerrainMeshes` waits `settle_frames` (6) with its neighbours before
-  it is built, so tiles streaming in one after another build once, not
-  again as each neighbour arrives (changes to tiles already there do not
-  wait). `world.json` holds the terrain's `samples` and
+  it is built, so a burst of tiles (a world opening) builds each once
+  (changes to tiles already there do not wait). Flying, a tile at the
+  edge of the loaded area is still built again when the next row arrives
+  and when a neighbour unloads (its edge reaches into them): about 2.8
+  builds per tile. `world.json` holds the terrain's `samples` and
   `material` and which cells' files hold a tile (`terrain.cells`; for the
   far ground later). A tile made or put back by an undo in a cell still on
   disk makes the cell load at once, and the scene's tile wins over the

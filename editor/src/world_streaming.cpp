@@ -626,9 +626,9 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         return it != m_cells.end() && it->second.state != State::loaded;
     });
     if (!terrain.empty() && on_disk_ground && terrain.samples() != m_index.terrain_samples) {
-        return {"the terrain is " + std::to_string(terrain.samples()) + " samples a side and the world's tiles on "
-                "disk are " + std::to_string(m_index.terrain_samples) + ": remove the terrain, or load the "
-                "world's tiles (fly over them) and make them again"};
+        return {"the terrain is " + std::to_string(terrain.samples()) + " samples a side (an undo put back "
+                "tiles of an older spacing) and the world's tiles on disk are " +
+                std::to_string(m_index.terrain_samples) + ": undo further, or remove_terrain all, to save"};
     }
     const u32 samples = !terrain.empty() || !on_disk_ground ? terrain.samples() : m_index.terrain_samples;
     // While files hold tiles of the old spacing, the first index keeps it

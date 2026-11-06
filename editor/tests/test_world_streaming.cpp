@@ -915,6 +915,8 @@ GIANT_TEST("world streaming: terrain commands leave ground on disk alone until i
     GIANT_CHECK(!r.ok && r.error.find("not loaded") != std::string::npos);
     r = e.commands.execute("set_terrain_heights", {{"cell", {40, 0}}, {"heights", ai::Json(std::vector<float>(64, 9.0f))}});
     GIANT_CHECK(!r.ok && e.state.scene.terrain.empty());
+    r = e.commands.execute("remove_terrain", {{"from", {2560, 0}}, {"to", {2570, 10}}});
+    GIANT_CHECK(!r.ok && r.error.find("not loaded") != std::string::npos);
     // Next to it is fine; loaded, it is too, and undo then save keeps the file's tile.
     GIANT_CHECK(e.run("create_terrain", {{"from", {2500, 0}}, {"to", {2510, 10}}, {"height", 1}}));
     e.settle(2565.0, 5.0);
