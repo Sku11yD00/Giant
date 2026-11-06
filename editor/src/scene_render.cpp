@@ -261,8 +261,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             }
         }
     }
-    // Rebuild what changed. A material nothing uses any more: start over,
-    // so the table holds only what is drawn.
+    // Rebuild what changed.
     bool layout = out.order.empty();
     bool compact = false;
     for (auto it = out.grid.begin(); it != out.grid.end();) {
@@ -279,6 +278,14 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         } else {
             ++it;
         }
+    }
+    // Unused entries linger (a cell streaming out must not rebuild every
+    // cell): the table is made again once they outnumber the used ones and
+    // compact_unused_over.
+    if (compact) {
+        usize unused = 0;
+        for (const u32 u : out.users) unused += u == 0 ? 1 : 0;
+        compact = unused > out.compact_unused_over && unused > out.users.size() - unused;
     }
     if (compact) {
         start_over(scene, out);

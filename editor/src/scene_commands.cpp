@@ -408,6 +408,12 @@ Json import_meshes(EditorState& state, const std::vector<std::string>& paths) {
     return errors;
 }
 
+Json streaming_json(const StreamingSettings& k) {
+    return {{"load_radius", k.load_radius},           {"unload_margin", k.unload_margin},
+            {"entities_per_frame", k.entities_per_frame}, {"reads_in_flight", k.reads_in_flight},
+            {"unload_every", k.unload_every}};
+}
+
 std::filesystem::path utf8_path(const std::string& path) {
     return std::filesystem::path(std::u8string(path.begin(), path.end()));
 }
@@ -603,6 +609,11 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
              if (const usize n = placements(state.scene, name); n > 0) {
                  return CommandResult::failure(std::to_string(n) + " entities place \"" + name +
                                                "\"; delete them first");
+             }
+             if (state.world != nullptr && state.world->active(state.scene_generation) &&
+                 !state.world->all_loaded()) {
+                 return CommandResult::failure("cells of the open world not loaded now may place \"" + name +
+                                               "\": load them all (set_world_streaming load_radius) first");
              }
              auto before = std::make_shared<std::vector<world::Kit>>(state.scene.kits);
              std::erase_if(state.scene.kits, [&](const world::Kit& k) { return k.name == name; });
@@ -974,24 +985,33 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
         {"open_world",
          "Opens a world saved by save_world (a folder with world.json and a file per 64 m cell). "
          "The scene becomes the world: cells near the camera load in the background and far "
-         "ones unload (get_world shows progress; set_world_streaming sets the radius). Clears "
-         "the undo history, like opening a file. Imports the meshes the world lists.",
-         folder_schema, false,
+         "ones unload (get_world shows progress; set_world_streaming sets the radius). Undoable "
+         "(undo brings the old scene back, unstreamed). Refused while the open world has unsaved "
+         "edits, unless discard_unsaved is true. Imports the meshes the world lists.",
+         Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["folder"],
+             "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024},
+                            "discard_unsaved": {"type": "boolean"}}})"),
+         false,
          [&state](const Json& args, CommandContext& context) {
              if (state.world == nullptr) {
                  return CommandResult::failure("worlds are not available in this editor");
              }
+             WorldStreaming& w = *state.world;
+             if (w.active(state.scene_generation) && !args.value("discard_unsaved", false)) {
+                 if (const u32 n = w.unsaved_cells(state.scene); n > 0) {
+                     return CommandResult::failure(
+                         "the open world has " + std::to_string(n) +
+                         " cells with unsaved edits: save_world first, or pass discard_unsaved: true");
+                 }
+             }
              const std::filesystem::path folder = utf8_path(args["folder"].get<std::string>());
              world::Scene next;
              const u64 generation = state.next_scene_generation;
-             if (const auto error = state.world->open(folder, next, generation)) {
+             if (const auto error = w.open(folder, next, generation)) {
                  return CommandResult::failure(*error);
              }
-             ++state.next_scene_generation;
-             state.scene = std::move(next);
-             state.scene_generation = generation;
-             state.selected = 0;
-             context.forget_history();
+             // swap_scene takes the next generation: the one open() was given.
+             swap_scene(state, std::move(next), context);
              Json mesh_errors = import_meshes(state, state.world->index().meshes);
              std::error_code error;
              Json result = {{"folder", path_to_utf8(std::filesystem::absolute(folder, error))},
@@ -1006,7 +1026,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "those files are written; a cell left empty loses its file). With a folder and no "
          "world open, makes a new world there from the scene and opens it (the folder must "
          "not hold one). Cells with unsaved edits never unload, so nothing is lost by "
-         "flying away; saving lets them go.",
+         "flying away; saving lets them go. Making a new world is refused while one is open "
+         "(close_world first).",
          Json::parse(R"({"type": "object", "additionalProperties": false,
              "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024}}})"),
          false,
@@ -1048,6 +1069,20 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          }});
 
     add(registry,
+        {"close_world",
+         "Stops streaming the open world. The scene stays as it is (the cells loaded now), as a "
+         "plain scene; edits not saved with save_world are no longer saved to the world. Not "
+         "undoable.",
+         Json{{"type", "object"}, {"additionalProperties", false}}, false,
+         [&state](const Json&, CommandContext&) {
+             if (state.world == nullptr || !state.world->is_open()) {
+                 return CommandResult::failure("no world is open");
+             }
+             state.world->close();
+             return CommandResult::success({{"closed", true}});
+         }});
+
+    add(registry,
         {"get_world",
          "The open world's streaming: cells with a file, loaded, being read, parsed and waiting, "
          "failed (see the log), cells with unsaved edits, entities in the scene, and the "
@@ -1057,7 +1092,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              if (state.world == nullptr || !state.world->is_open()) {
                  return CommandResult::success({{"open", false}});
              }
-             const WorldStreaming& w = *state.world;
+             WorldStreaming& w = *state.world;
              const StreamingStats s = w.stats();
              const StreamingSettings& k = w.settings;
              return CommandResult::success(
@@ -1073,21 +1108,23 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                   {"entities", state.scene.size()},
                   {"entities_loaded", s.entities_loaded},
                   {"entities_unloaded", s.entities_unloaded},
-                  {"load_radius", k.load_radius},
-                  {"unload_margin", k.unload_margin},
-                  {"entities_per_frame", k.entities_per_frame}});
+                  {"ids_changed", s.ids_changed},
+                  {"streaming", streaming_json(k)}});
          }});
 
     add(registry,
         {"set_world_streaming",
          "Sets how far around the camera world cells load (load_radius, metres on the ground), "
-         "how much further they unload (unload_margin) and how many entities join the scene per "
-         "frame (entities_per_frame; more loads faster, fewer keeps frames even). Not undoable: "
-         "a view setting.",
+         "how much further they unload (unload_margin), how many entities join the scene per "
+         "frame (entities_per_frame; more loads faster, fewer keeps frames even), how many cell "
+         "files are read at once (reads_in_flight) and how many frames pass between looks for "
+         "cells to unload (unload_every). Not undoable: a view setting.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "properties": {
-             "load_radius": {"type": "number", "minimum": 64, "maximum": 100000},
+             "load_radius": {"type": "number", "minimum": 64, "maximum": 8192},
              "unload_margin": {"type": "number", "minimum": 0, "maximum": 10000},
-             "entities_per_frame": {"type": "integer", "minimum": 1, "maximum": 1000000}}})"),
+             "entities_per_frame": {"type": "integer", "minimum": 1, "maximum": 1000000},
+             "reads_in_flight": {"type": "integer", "minimum": 1, "maximum": 256},
+             "unload_every": {"type": "integer", "minimum": 1, "maximum": 10000}}})"),
          false,
          [&state](const Json& args, CommandContext&) {
              if (state.world == nullptr) {
@@ -1097,9 +1134,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              k.load_radius = args.value("load_radius", k.load_radius);
              k.unload_margin = args.value("unload_margin", k.unload_margin);
              k.entities_per_frame = args.value("entities_per_frame", k.entities_per_frame);
-             return CommandResult::success({{"load_radius", k.load_radius},
-                                            {"unload_margin", k.unload_margin},
-                                            {"entities_per_frame", k.entities_per_frame}});
+             k.reads_in_flight = args.value("reads_in_flight", k.reads_in_flight);
+             k.unload_every = args.value("unload_every", k.unload_every);
+             return CommandResult::success(streaming_json(k));
          }});
 
     add(registry,

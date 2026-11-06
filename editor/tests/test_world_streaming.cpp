@@ -220,11 +220,127 @@ GIANT_TEST("world streaming: open_world and save_world commands") {
     GIANT_CHECK(!commands.execute("save_world").ok); // the scene is not the world's now
     const auto opened = commands.execute("open_world", {{"folder", folder}});
     GIANT_CHECK(opened.ok && opened.value["cells"] == 1);
-    GIANT_CHECK(!commands.can_undo() && !commands.can_redo()); // opening a file forgets the history
     GIANT_CHECK(state.scene.size() == 0);
     const auto info = commands.execute("get_world");
     GIANT_CHECK(info.ok && info.value["open"] == true && info.value["active"] == true && info.value["cells"] == 1);
     GIANT_CHECK(commands.execute("set_world_streaming", {{"load_radius", 500}}).ok);
     GIANT_CHECK(w.streaming.settings.load_radius == 500.0);
     GIANT_CHECK(!commands.execute("open_world", {{"folder", folder + "_missing"}}).ok);
+}
+
+namespace {
+// The editor's state and commands, with frames built and streamed as main does.
+struct Editor {
+    World w;
+    ai::CommandRegistry commands;
+    EditorState state;
+    Editor() {
+        state.world = &w.streaming;
+        register_scene_commands(commands, state);
+    }
+    bool run(const char* name, const ai::Json& args = ai::Json::object()) { return commands.execute(name, args).ok; }
+    void settle(double x, double z) {
+        for (int i = 0; i < 50; ++i) {
+            w.streaming.finish_reads();
+            scene_frame(state.scene, *w.renderer, *w.meshes, w.frame);
+            w.streaming.update(state.scene, state.scene_generation, {x, 10.0, z}, w.frame);
+        }
+    }
+    std::string folder() const { return w.folder.generic_string(); }
+};
+
+void write_file(const std::filesystem::path& path, const std::string& text) {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file << text;
+}
+} // namespace
+
+GIANT_TEST("world streaming: undo and redo across new_scene never lose cell files") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_entities", {{"entities", {{{"position", {5, 0, 5}}}, {{"position", {70, 0, 5}}}}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("new_scene"));
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("new_scene"));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.state.scene.size() == 0); // paused: the scene is not the world's
+    GIANT_CHECK(e.commands.undo());
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.state.scene.size() == 2); // resumed
+    // A copy of the world's scene from before the cells loaded comes back.
+    GIANT_CHECK(e.commands.redo());
+    GIANT_CHECK(e.commands.undo());
+    GIANT_CHECK(e.state.scene.size() == 0);
+    const auto saved = e.commands.execute("save_world");
+    GIANT_CHECK(saved.ok && saved.value["cells_removed"] == 0 && saved.value["cells"] == 2);
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.state.scene.size() == 2);
+    // open_world is undoable too.
+    GIANT_CHECK(e.commands.undo() && e.state.scene.size() == 0 && !e.w.streaming.active(e.state.scene_generation));
+}
+
+GIANT_TEST("world streaming: an id two cell files share is loaded twice, under a new id") {
+    World w;
+    if (w.renderer == nullptr) return;
+    w.add(10.0, 10.0, "a");
+    GIANT_CHECK(w.streaming.create(w.folder, w.scene, w.generation, {}).error.empty());
+    write_file(w.folder / "cells" / "0_0.cell.json", R"({"format": "giant-cell", "version": 1, "cell": [0, 0],
+        "entities": [{"id": 1, "name": "a1"}, {"id": 2, "name": "a2"}]})");
+    write_file(w.folder / "cells" / "1_0.cell.json", R"({"format": "giant-cell", "version": 1, "cell": [1, 0],
+        "entities": [{"id": 2, "name": "b2", "position": [70, 0, 5]}]})");
+    write_file(w.folder / "world.json", R"({"format": "giant-world", "version": 1, "next_id": 2,
+        "cells": [[0, 0], [1, 0], [2, 0]]})"); // a stale next id, and a cell whose file is gone
+    w.reopen();
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.size() == 3 && w.named("a2") == 1 && w.named("b2") == 1);
+    GIANT_CHECK(w.streaming.stats().ids_changed == 1 && w.streaming.stats().failed == 0);
+    GIANT_CHECK(w.streaming.stats().cells == 2); // the missing file counts as an empty cell
+    const world::EntityId fresh = w.add(20.0, 20.0, "new");
+    GIANT_CHECK(fresh > 2);
+    GIANT_CHECK(w.streaming.save(w.scene, {}).error.empty());
+    w.reopen();
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.size() == 4 && w.streaming.stats().ids_changed == 0);
+}
+
+GIANT_TEST("world streaming: saving merges a cell parsed but not yet added") {
+    World w;
+    if (w.renderer == nullptr) return;
+    w.add(10.0, 10.0, "old");
+    GIANT_CHECK(w.streaming.create(w.folder, w.scene, w.generation, {}).error.empty());
+    w.reopen();
+    w.step({10.0, 10.0, 10.0}); // starts the read
+    w.streaming.finish_reads(); // parsed, waiting for the next frame
+    GIANT_CHECK(w.streaming.stats().waiting == 1 && w.scene.size() == 0);
+    w.add(30.0, 30.0, "new"); // into that cell
+    GIANT_CHECK(w.streaming.save(w.scene, {}).error.empty());
+    w.reopen();
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.named("old") == 1 && w.named("new") == 1);
+}
+
+GIANT_TEST("world streaming: commands guard what streaming cannot see") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_kit", {{"name", "hut"}, {"pieces", {{{"shape", "cube"}}}}}));
+    GIANT_CHECK(e.run("create_entity", {{"shape", "kit"}, {"kit", "hut"}, {"position", {2570, 0, 5}}}));
+    GIANT_CHECK(e.run("create_entity", {{"position", {5, 0, 5}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(!e.run("save_world", {{"folder", e.folder() + "_2"}})); // a world is open
+    GIANT_CHECK(e.run("new_scene"));
+    GIANT_CHECK(!e.run("save_world", {{"folder", e.folder() + "_2"}})); // still open, paused
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.state.scene.size() == 1);
+    GIANT_CHECK(e.run("delete_entities", {{"ids", {e.state.scene.entities()[0].id}}}));
+    // The far cell places the kit, unseen: deleting it is refused.
+    GIANT_CHECK(!e.run("delete_kit", {{"name", "hut"}}));
+    // Unsaved edits: another open is refused unless they are given up.
+    GIANT_CHECK(!e.run("open_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}, {"discard_unsaved", true}}));
+    GIANT_CHECK(e.run("close_world"));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder() + "_2"}}));
+    std::error_code error;
+    std::filesystem::remove_all(e.folder() + "_2", error);
 }

@@ -16,7 +16,8 @@ namespace giant::editor {
 // cell (world::k_cell_size): a frame rebuilds only the cells whose
 // entities changed (world::Scene::take_changes), and those of a kit that
 // changed; importing a mesh, a new scene or a material falling out of use
-// rebuild them all. Equal materials share one table entry, so every
+// rebuild them all (as does the material table filling up with unused
+// entries). Equal materials share one table entry, so every
 // placement of a kit, and every entity with the same look, sends its
 // material once.
 struct SceneFrame {
@@ -37,6 +38,9 @@ struct SceneFrame {
     };
     std::unordered_map<MaterialKey, u32, MaterialHash> lookup; // material -> index
     std::vector<u32> users; // instances using each material
+    // Materials nothing uses stay in the table (they come back when used
+    // again) until more than this many, and more than the used ones.
+    usize compact_unused_over = 256;
     std::vector<u32> scratch;
 
     struct Cell {

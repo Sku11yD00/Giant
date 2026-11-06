@@ -149,7 +149,6 @@ def world_gate(tool, call, check):
         tool("set_camera", {"position": [10, 5, 30], "look_at": [10, 0, 0]})
         opened = tool("open_world", {"folder": world})
         check(opened["cells"] == 3 and tool("list_entities")["count"] == 0, "world opened, nothing loaded yet")
-        check(not tool("get_history")["undo"], "opening a world clears the history")
         info = {}
         for _ in range(200):
             info = tool("get_world")

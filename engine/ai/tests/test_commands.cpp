@@ -259,18 +259,3 @@ GIANT_TEST("commands: history names come in the same order as the history") {
     GIANT_CHECK((f.registry.redo_names() == std::vector<std::string>{"set_value", "bump_value"}));
     GIANT_CHECK(f.registry.redo_history().front().command == "set_value");
 }
-
-GIANT_TEST("commands: a command can forget the history (opening a file)") {
-    Fixture f;
-    GIANT_CHECK(f.registry.execute("set_value", {{"value", 1}}).ok);
-    GIANT_CHECK(f.registry.execute("set_value", {{"value", 2}}).ok);
-    GIANT_CHECK(f.registry.undo());
-    GIANT_CHECK(f.registry.can_undo() && f.registry.can_redo());
-    GIANT_CHECK(f.registry.add({"open_file", "Forgets the history.", Json{{"type", "object"}}, false,
-                                [](const Json&, CommandContext& context) {
-                                    context.forget_history();
-                                    return CommandResult::success();
-                                }}));
-    GIANT_CHECK(f.registry.execute("open_file").ok);
-    GIANT_CHECK(!f.registry.can_undo() && !f.registry.can_redo());
-}

@@ -211,19 +211,25 @@ std::vector<Scene::Removed> Scene::remove_many(std::span<const EntityId> ids) {
         return removed;
     }
     removed.reserve(doomed.size());
-    std::vector<Entity> kept;
-    kept.reserve(m_entities.size() - doomed.size());
+    // Compacted in place (keeping the capacity, so adding after a removal
+    // does not grow the list again); only what moved is reindexed.
+    usize first = m_entities.size();
+    usize kept = 0;
     for (usize i = 0; i < m_entities.size(); ++i) {
         if (doomed.contains(m_entities[i].id)) {
             m_index.erase(m_entities[i].id);
             changed(m_entities[i].id);
             removed.push_back({std::move(m_entities[i]), i});
+            first = std::min(first, i);
         } else {
-            kept.push_back(std::move(m_entities[i]));
+            if (kept != i) {
+                m_entities[kept] = std::move(m_entities[i]);
+            }
+            ++kept;
         }
     }
-    m_entities = std::move(kept);
-    reindex(0);
+    m_entities.erase(m_entities.begin() + static_cast<std::ptrdiff_t>(kept), m_entities.end());
+    reindex(first);
     return removed;
 }
 
