@@ -290,6 +290,8 @@ Json render_settings_json(const EditorState& state) {
             {"voxel_far_field", state.render_settings.voxel_far_field},
             {"far_field_distance", state.render_settings.far_field_distance},
             {"far_field_max_radius", state.render_settings.far_field_max_radius},
+            {"shadows", state.render_settings.shadows},
+            {"shadow_pages_per_frame", state.render_settings.shadow_pages_per_frame},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
               {"clusters", s.clusters},
@@ -305,7 +307,11 @@ Json render_settings_json(const EditorState& state) {
                {{"bricks", s.voxel_bricks}, {"capacity", s.voxel_capacity}, {"pending", s.voxel_pending},
                 {"built", s.voxel_built}, {"missing", s.voxel_missing}, {"overflow", s.voxel_overflow},
                 {"cpu_ms", s.voxel_cpu_ms}}},
-              {"far_field", {{"on", s.far_field}, {"culled", s.far_culled}}}}}};
+              {"far_field", {{"on", s.far_field}, {"culled", s.far_culled}}},
+              {"shadows",
+               {{"on", s.shadows}, {"pages", s.shadow_pages}, {"capacity", s.shadow_capacity},
+                {"drawn", s.shadow_drawn}, {"waiting", s.shadow_waiting}, {"missing", s.shadow_missing},
+                {"draws", s.shadow_draws}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -1004,6 +1010,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "voxel_far_field: past far_field_distance metres (default 3000) the voxel world stands in "
          "for instances whose bounding radius is at most far_field_max_radius metres (default 50); "
          "they are not drawn as meshes (lit view, voxel_world on; last_frame.far_field.culled counts them). "
+         "shadows: sun shadows from virtual shadow pages (default on; lit view with GPU culling): pages "
+         "are drawn when shading first needs them and again when what casts onto them changes, at most "
+         "shadow_pages_per_frame a frame (default 64); last_frame.shadows has the pool and this frame's work. "
          "View state: not undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
@@ -1019,7 +1028,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"voxel_ms_per_frame", number(0, 100, "Milliseconds. Default 1.")},
                 {"voxel_far_field", {{"type", "boolean"}}},
                 {"far_field_distance", number(0, 1e6, "Metres from the camera. Default 3000.")},
-                {"far_field_max_radius", number(0, 1e6, "Metres. Default 50.")}}}},
+                {"far_field_max_radius", number(0, 1e6, "Metres. Default 50.")},
+                {"shadows", {{"type", "boolean"}}},
+                {"shadow_pages_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096},
+                                            {"description", "Pages drawn a frame at most. Default 64."}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -1037,6 +1049,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.voxel_far_field = args.value("voxel_far_field", r.voxel_far_field);
              r.far_field_distance = args.value("far_field_distance", r.far_field_distance);
              r.far_field_max_radius = args.value("far_field_max_radius", r.far_field_max_radius);
+             r.shadows = args.value("shadows", r.shadows);
+             r.shadow_pages_per_frame = args.value("shadow_pages_per_frame", r.shadow_pages_per_frame);
              return CommandResult::success(render_settings_json(state));
          }});
 

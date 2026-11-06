@@ -304,13 +304,73 @@ Done in N2 part 3, the far field:
   scene still building, an instance just added or moved far out, a slab
   just come into view or a full pool keep meshes, never holes. Checking
   costs a few lookups per far instance and frame.
-- Not yet: shadows on far voxels (part 4); fading between mesh and voxels
+- Not yet: fading between mesh and voxels
   at the distance (the switch can show). A stand-in still drawn as a mesh
   also has its voxels around it (a halo up to a voxel wide against what
   is behind), and one that moves leaves them behind for a few frames until
   rebuilt; something far that changes every frame (a vehicle) is never
   left out and shows both. Stand-ins could drop their bit while they keep
   changing.
+
+## Sun shadows
+
+Done in N2 part 4: virtual shadow maps for the sun (`src/shadow_pages.h`,
+`shaders/shadow_pages.slang`), drawn from the same clusters and culling as
+the view, so every mesh casts at the detail its shadow texels need.
+
+- The sun's view is a clipmap of 12 square levels in light space, centred
+  on the camera: level 0 is 16 m across, each level twice the one before
+  (level 11 is about 33 km). Each level is a window of 16 x 16 virtual
+  pages of 128 x 128 texels, so texels run from 8 mm near the camera to
+  16 m at the edge. Windows move a page at a time; a page keeps its slot
+  (its coordinate modulo 16) while it stays in the window. Depth spans
+  40 km along the light, centred on the camera.
+- Only pages something on screen needs are kept. Shading picks, per pixel,
+  the finest level whose window holds the point with room for the filter
+  and whose texels are no finer than the pixel; it asks for that page with
+  a bit in a request buffer (and, while the page is not drawn yet, for
+  each coarser page it falls back to, until one is drawn). The bits are
+  read back two frames later; each page asked for gets room in the pool
+  (1024 pages, a 64 MiB atlas of u32 depths, `RendererDesc::shadow_pages`)
+  and is drawn. When the pool is full the page asked for longest ago makes
+  room; pages that leave their window are freed.
+- A drawn page is cached until what casts onto it changes. Each frame the
+  CPU compares the instances with its copy (position, rotation, scale,
+  mesh, and whether it is drawn as a mesh this frame: one left to the far
+  field casts nothing) and dirties the pages under the old and new bounds
+  of each that changed, on every level (a shadow lies under its caster
+  across the light). Many changes at once (over max(256, an eighth))
+  dirty everything, as does a new sun direction.
+- Drawing is budgeted: at most `shadow_pages_per_frame` pages a frame (64
+  by default, at least one when any wait), pages never drawn first, then
+  coarse levels first. A page not drawn yet reads as missing (a coarser
+  level stands in); a dirty page keeps its old content until redrawn, so
+  a moving caster's shadow may lag a frame or two behind when many pages
+  wait, but nothing pops to unshadowed.
+- Per level with pages to draw: the pages are cleared, then culled and
+  drawn like the view's first pass (no occlusion) with their own lists:
+  the frustum is the pages' rectangle across the light plus a plane half
+  the depth range towards the sun; LOD picks clusters by their error in
+  shadow texels. The raster pass has no targets (the graphics layer's
+  `RenderPassDesc::width`/`height`), is scissored to the rectangle and its
+  pixel shader (`raster.slang` `ps_shadow`) keeps, with an atomic max, the
+  depth nearest the sun in the page's place in the atlas, only for pages
+  being drawn this frame. Both faces cast. Shadow culling marks the
+  groups it uses (they stay loaded) but asks streaming for nothing: it
+  draws what is loaded.
+- Shading offsets the point along its normal by 1.5 texels, adds a depth
+  margin of a texel (more where the sun grazes the surface) and filters 3
+  x 3 texels with bilinear weights (16 taps; a tap on a page not drawn
+  does not count). Far voxels are shadowed through the same lookup.
+- Lit view with GPU culling only (the CPU path and the debug views are
+  unshadowed). `RenderStats` (and `last_frame.shadows` over MCP) report
+  the pages resident and drawn, those waiting, those asked for that found
+  no room, and the raster passes. The work is timed as "shadows".
+- Not yet: casters left to the far field (small things past 3 km) cast
+  nothing; finer geometry streaming in does not redraw the pages it falls
+  on; the sun moving (time of day) redraws every page over a few frames;
+  no contact-hardening (soft shadows by distance) or local lights (later
+  with GI, part 5).
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 

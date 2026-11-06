@@ -304,31 +304,31 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     // The far field: past far_start the meshes are left out (the CPU drops
     // instances wholly beyond it) and the voxel world stands in, in front
     // of whatever mesh is drawn there (lit view only).
-    const Extras x = load_extras();
-    if (f.debug_view == 0 && x.voxel_level_count != 0) {
+    const Extras extras = load_extras();
+    if (f.debug_view == 0 && extras.voxel_level_count != 0) {
         const float mesh_t = hit ? length(s.world) : 3.0e38;
         // A stand-in drawn as a mesh (straddling the distance, moving, or
         // not in the voxel world yet): its own voxels must not cover it.
-        const float4 skip = hit && s.radius <= x.far_radius ? float4(s.center, s.radius)
+        const float4 skip = hit && s.radius <= extras.far_radius ? float4(s.center, s.radius)
                                                             : float4(0.0, 0.0, 0.0, -1.0);
-        if (mesh_t > x.far_start) {
+        if (mesh_t > extras.far_start) {
             const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
             const float3 dir = normalize(f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz);
             VoxelWorld w;
-            w.pool = x.voxel_pool;
-            w.table = x.voxel_table;
-            w.levels = x.voxel_levels;
-            w.levels_offset = x.voxel_levels_offset;
-            w.level_count = x.voxel_level_count;
-            w.bricks_per_axis = x.voxel_bricks_per_axis;
+            w.pool = extras.voxel_pool;
+            w.table = extras.voxel_table;
+            w.levels = extras.voxel_levels;
+            w.levels_offset = extras.voxel_levels_offset;
+            w.level_count = extras.voxel_level_count;
+            w.bricks_per_axis = extras.voxel_bricks_per_axis;
             w.stand_ins = 1u; // only what the CPU left out (meshes drawn keep their own look)
             float t;
             uint packed;
-            if (march_voxels(w, dir, x.far_start, mesh_t, skip, t, packed)) {
+            if (march_voxels(w, dir, extras.far_start, mesh_t, skip, t, packed)) {
                 const float3 world = dir * t;
                 const float3 vn = unpack_normal(packed);
                 const float far_pixel = t * 2.0 / max(f.p11 * f.height, 1e-6);
-                const float sun = sun_visibility(x.shadows, world, vn, f.sun_direction.xyz, far_pixel);
+                const float sun = sun_visibility(extras.shadows, world, vn, f.sun_direction.xyz, far_pixel);
                 const float3 color = shade(f, world, vn, unpack_color(packed), k_far_roughness, 0.0,
                                            float3(0.0, 0.0, 0.0), 0.0, sun);
                 return float4(tone_map(color * f.exposure), 1.0);
@@ -363,7 +363,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
                  push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
-    const float sun = sun_visibility(x.shadows, world, n, f.sun_direction.xyz, pixel_size);
+    const float sun = sun_visibility(extras.shadows, world, n, f.sun_direction.xyz, pixel_size);
     const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun);
     return float4(tone_map(color * f.exposure), 1.0);
 }
