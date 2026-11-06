@@ -256,8 +256,12 @@ cell's work, not the world's:
   world's (`new_scene`, `load_scene` or undoing `open_world` pause it;
   undoing them resumes it). What streaming knows of the world's scene is
   kept with each copy of it an undo step holds (`WorldStreaming::memo`),
-  so an undo or redo that puts a copy back puts back the bookkeeping that
-  matches it, and the ids saved since are never handed out again; a
+  taken when the undo or redo leaves that scene, so the copy put back is
+  the scene as it was left (cells loaded since included) with the
+  bookkeeping that matches it and the files, and the ids saved since are
+  never handed out again. An entity's cell of origin is kept when its cell
+  unloads, so an entity a redo puts back is never copied from the file it
+  was saved to since; a
   scene replaced any other way stops streaming. Opening another world is
   refused while the open one has unsaved edits, or its scene is replaced
   (it may be in the undo history), unless they are given up. The main thread does no work
@@ -280,9 +284,7 @@ cell's work, not the world's:
   index lists them), not as cells stream. Unloading a cell is one
   `Scene::remove_many`, a pass over the scene's entities, and the unload
   look walks the loaded cells. Undoing an edit to a cell that was saved
-  and unloaded since does nothing; undoing back to a copy of the world's
-  scene made before a save puts back that scene as it was (saving it then
-  writes it). A world cannot yet be saved to another folder, and its kits cannot
+  and unloaded since does nothing. A world cannot yet be saved to another folder, and its kits cannot
   be deleted while some cells are not loaded. Decals overlapping across a cell border draw in cell
   order, not the outliner's.
 

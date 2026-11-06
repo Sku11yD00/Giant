@@ -337,34 +337,46 @@ const char* const k_ids_exhausted =
     "entities can be added";
 
 // Replaces the whole scene, undoably (new_scene, load_scene, open_world).
-// A streamed world's bookkeeping is kept with each side (`after_memo`:
-// the next scene's, when it is a world's), so putting a scene back puts
-// back what streaming knew of it.
+// Each side keeps its scene with what a streamed world knew of it
+// (`after_memo`: the next scene's, when it is a world's). Undo and redo
+// keep the side they leave as it is then (with streaming's loads and
+// unloads, which are not in the history, and its bookkeeping now), so the
+// scene and the bookkeeping put back always match each other and the files.
 void swap_scene(EditorState& state, world::Scene next, CommandContext& context,
                 std::shared_ptr<const WorldStreaming::Memo> after_memo = nullptr) {
+    struct Side {
+        world::Scene scene;
+        u64 generation = 0;
+        std::shared_ptr<const WorldStreaming::Memo> memo;
+    };
     WorldStreaming* world = state.world;
-    std::shared_ptr<const WorldStreaming::Memo> before_memo;
-    if (world != nullptr && world->active(state.scene_generation)) {
-        before_memo = world->memo();
-    }
-    auto before = std::make_shared<world::Scene>(state.scene);
-    auto after = std::make_shared<world::Scene>(std::move(next));
-    const u64 before_generation = state.scene_generation;
-    const u64 after_generation = state.next_scene_generation++;
-    const auto put = [&state, world](const world::Scene& scene, u64 generation,
-                                     const std::shared_ptr<const WorldStreaming::Memo>& memo) {
-        state.scene = scene;
-        state.scene_generation = generation;
+    const auto leave = [&state, world](Side& side) {
+        side.memo = world != nullptr && world->active(state.scene_generation) ? world->memo() : nullptr;
+        side.scene = state.scene;
+        side.generation = state.scene_generation;
+    };
+    const auto enter = [&state, world](const Side& side) {
+        state.scene = side.scene;
+        state.scene_generation = side.generation;
         state.selected = 0;
-        if (memo != nullptr) {
-            world->restore(*memo, state.scene);
+        if (side.memo != nullptr) {
+            world->restore(*side.memo, state.scene);
         }
     };
-    put(*after, after_generation, after_memo);
+    auto before = std::make_shared<Side>();
+    leave(*before);
+    auto after = std::make_shared<Side>(Side{std::move(next), state.next_scene_generation++, std::move(after_memo)});
+    enter(*after);
     // Not guarded: a swap replaces whatever scene is there, and restores the
     // generation its neighbours in the history were recorded against.
-    context.record({[put, before, before_generation, before_memo] { put(*before, before_generation, before_memo); },
-                    [put, after, after_generation, after_memo] { put(*after, after_generation, after_memo); }});
+    context.record({[leave, enter, before, after] {
+                        leave(*after);
+                        enter(*before);
+                    },
+                    [leave, enter, before, after] {
+                        leave(*before);
+                        enter(*after);
+                    }});
 }
 
 // One spelling per file, as entities made in the editor have.

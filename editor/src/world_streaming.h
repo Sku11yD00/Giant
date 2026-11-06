@@ -156,9 +156,10 @@ private:
     // The scene object the bookkeeping matches (world::Scene::identity).
     u64 m_scene = 0;
     u64 m_session = 0; // new on each open, create and close
-    // Which cell's file each entity in the scene was read from or last
-    // saved to: an id met again in that cell's file is the same entity
-    // (maybe moved since); met in another cell's file, it is a clash.
+    // Which cell's file each entity was read from or last saved to (kept
+    // when its cell unloads): an id met again in that cell's file is the
+    // same entity (maybe moved, or put back by a redo, since); met in
+    // another cell's file, it is a clash.
     std::unordered_map<world::EntityId, world::CellCoord> m_origin;
     u64 m_epoch = 0; // reads from an older epoch (a closed world) are dropped
     world::WorldIndex m_index;

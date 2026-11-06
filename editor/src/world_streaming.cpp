@@ -345,8 +345,7 @@ void WorldStreaming::unload(world::Scene& scene, const DVec3& camera, const Scen
             continue; // unsaved edits: stays
         }
         for (const Entity* e : now) {
-            gone.push_back(e->id);
-            m_origin.erase(e->id);
+            gone.push_back(e->id); // its origin stays: met again, it is the same entity
         }
         set_state(coord, cell, State::on_disk);
         cell.saved = {};

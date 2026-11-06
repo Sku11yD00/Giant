@@ -273,12 +273,13 @@ GIANT_TEST("world streaming: undo and redo across new_scene never lose cell file
     GIANT_CHECK(e.commands.undo());
     e.settle(10.0, 10.0);
     GIANT_CHECK(e.state.scene.size() == 2); // resumed
-    // A copy of the world's scene from before the cells loaded comes back.
+    // The world's scene comes back as it was left, cells loaded.
     GIANT_CHECK(e.commands.redo());
     GIANT_CHECK(e.commands.undo());
-    GIANT_CHECK(e.state.scene.size() == 0);
+    GIANT_CHECK(e.state.scene.size() == 2);
     const auto saved = e.commands.execute("save_world");
-    GIANT_CHECK(saved.ok && saved.value["cells_removed"] == 0 && saved.value["cells"] == 2);
+    GIANT_CHECK(saved.ok && saved.value["cells_removed"] == 0 && saved.value["cells_written"] == 0 &&
+                saved.value["cells"] == 2);
     e.settle(10.0, 10.0);
     GIANT_CHECK(e.state.scene.size() == 2);
     // open_world is undoable too.
@@ -379,18 +380,18 @@ GIANT_TEST("world streaming: ids saved since never go out again after undo and r
     GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
     GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
     e.settle(10.0, 10.0);
-    GIANT_CHECK(e.run("create_entity", {{"name", "B"}, {"position", {20, 0, 20}}}));
+    const ai::CommandResult made = e.commands.execute("create_entity", {{"name", "B"}, {"position", {20, 0, 20}}});
+    GIANT_CHECK(made.ok);
+    const world::EntityId b = made.value["id"];
     GIANT_CHECK(e.run("save_world"));
-    GIANT_CHECK(e.commands.undo());                     // B goes (unsaved)
+    GIANT_CHECK(e.commands.undo());                      // B goes (unsaved: its file still has it)
     GIANT_CHECK(e.commands.undo() && e.commands.redo()); // out of the world and back
-    GIANT_CHECK(e.run("create_entity", {{"name", "C"}, {"position", {30, 0, 30}}}));
+    const ai::CommandResult next = e.commands.execute("create_entity", {{"name", "C"}, {"position", {30, 0, 30}}});
+    GIANT_CHECK(next.ok);
+    const world::EntityId c = next.value["id"];
     e.settle(10.0, 10.0);
-    usize b = 0, c = 0;
-    for (const auto& x : e.state.scene.entities()) {
-        b += x.name == "B" ? usize{1} : usize{0};
-        c += x.name == "C" ? usize{1} : usize{0};
-    }
-    GIANT_CHECK(b == 1 && c == 1); // B is read back from its file, C has its own id
+    GIANT_CHECK(c > b && e.state.scene.find(b) == nullptr && e.state.scene.find(c) != nullptr);
+    GIANT_CHECK(e.w.streaming.unsaved_cells(e.state.scene) == 1); // B's removal, C's arrival
 }
 
 GIANT_TEST("world streaming: cells near the camera are read before cells left behind") {
@@ -408,4 +409,78 @@ GIANT_TEST("world streaming: cells near the camera are read before cells left be
         w.step({20005.0, 10.0, 10.0});
     }
     GIANT_CHECK(w.named("far") == 1);
+}
+
+namespace {
+usize count_named(const world::Scene& scene, const char* name) {
+    usize n = 0;
+    for (const world::Entity& e : scene.entities()) n += e.name == name ? usize{1} : usize{0};
+    return n;
+}
+} // namespace
+
+GIANT_TEST("world streaming: a cell saved after open_world survives undo and redo of open_world") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_entity", {{"name", "one"}, {"position", {10, 0, 10}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.run("create_entity", {{"name", "C"}, {"position", {100, 0, 10}}})); // new cell (1, 0)
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.commands.undo());                      // C leaves the scene, not the file
+    GIANT_CHECK(e.commands.undo() && e.commands.redo()); // out of the world and back
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.w.streaming.stats().cells == 2 && count_named(e.state.scene, "C") == 0);
+    GIANT_CHECK(e.commands.redo()); // C again
+    GIANT_CHECK(count_named(e.state.scene, "C") == 1);
+    GIANT_CHECK(e.run("create_entity", {{"name", "D"}, {"position", {110, 0, 10}}}));
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(count_named(e.state.scene, "C") == 1 && count_named(e.state.scene, "D") == 1);
+}
+
+GIANT_TEST("world streaming: redoing an entity saved elsewhere since does not copy it") {
+    for (const bool swap : {true, false}) {
+        Editor e;
+        if (e.w.renderer == nullptr) return;
+        GIANT_CHECK(e.run("create_entities", {{"entities", {{{"name", "a"}, {"position", {10, 0, 10}}},
+                                                            {{"name", "b"}, {"position", {100, 0, 10}}}}}}));
+        GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+        GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+        e.settle(10.0, 10.0);
+        const ai::CommandResult made = e.commands.execute("create_entity", {{"name", "X"}, {"position", {20, 0, 10}}});
+        GIANT_CHECK(made.ok);
+        const world::EntityId x = made.value["id"];
+        GIANT_CHECK(e.run("save_world"));
+        GIANT_CHECK(e.run("set_entity", {{"id", x}, {"position", {110, 0, 10}}})); // into b's cell
+        GIANT_CHECK(e.run("save_world"));
+        if (swap) {
+            GIANT_CHECK(e.commands.undo() && e.commands.undo()); // the move, the create
+            GIANT_CHECK(e.commands.undo() && e.commands.redo()); // open_world
+        } else {
+            e.settle(5000.0, 10.0); // every cell unloads
+            GIANT_CHECK(e.state.scene.size() == 0);
+            GIANT_CHECK(e.commands.undo() && e.commands.undo());
+        }
+        GIANT_CHECK(e.commands.redo()); // the create: X back in cell (0, 0), its file in (1, 0)
+        e.settle(10.0, 10.0);
+        GIANT_CHECK(count_named(e.state.scene, "X") == 1 && e.w.streaming.stats().ids_changed == 0);
+    }
+}
+
+GIANT_TEST("world streaming: a world made from a new scene keeps streaming across its undo and redo") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("new_scene"));
+    GIANT_CHECK(e.run("create_entity", {{"name", "a"}, {"position", {10, 0, 10}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.commands.undo() && e.commands.undo()); // the create, new_scene
+    GIANT_CHECK(e.commands.redo() && e.commands.redo());
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.w.streaming.active(e.state.scene_generation));
+    GIANT_CHECK(count_named(e.state.scene, "a") == 1);
+    GIANT_CHECK(e.run("create_entity", {{"name", "b"}, {"position", {20, 0, 10}}}));
+    GIANT_CHECK(e.run("save_world"));
 }
