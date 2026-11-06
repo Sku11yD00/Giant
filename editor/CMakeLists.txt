@@ -56,6 +56,19 @@ if(GIANT_BUILD_TESTS)
         "ASAN_OPTIONS=handle_segv=0:allow_user_segv_handler=1:detect_leaks=0:use_sigaltstack=0")
     endif()
     set_tests_properties(editor_mcp PROPERTIES TIMEOUT 900 ENVIRONMENT "${mcp_env}")
+    # The N2 gate's scene and flight, on the null device (the software
+    # renderer would take hours): everything but the speed. Optimised builds
+    # only: a debug or sanitizer build takes most of an hour over it.
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+      add_test(NAME editor_n2_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/n2_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set(gate_env "")
+      if(NOT WIN32)
+        list(APPEND gate_env "SDL_VIDEO_DRIVER=dummy")
+      endif()
+      set_tests_properties(editor_n2_gate PROPERTIES TIMEOUT 900 ENVIRONMENT "${gate_env}")
+    endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")
   endif()

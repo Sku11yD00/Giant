@@ -121,12 +121,22 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   "Screen-space reflections" in the Engine panel (or `set_render_settings`
   `reflections`, `screen_space_reflections`) turn them off;
   `last_frame.reflections` shows which were traced.
+- Part 6: the N2 gate. The N1 town and forest in a 40 km landscape with wet
+  streets, a still lake, hills out to 19 km and villages and woods 4 to 18
+  km off. With everything on (voxel world, far field, sun shadows, global
+  illumination, reflections) it flies down a street, out over the lake and
+  up to 1.5 km, turning to look round the horizon. It passes when the
+  flight holds 60 fps without stutter, GI and reflections take under 4 ms
+  of GPU time, and the voxel world reaches 20 km:
+
+      python tools/n2_gate.py giant_editor.exe
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
-close the window to exit. Keep the `D3D12` folder next to the exe. The N1
-performance gate comes with it: in that folder, run
-`python n1_gate.py giant_editor.exe` (Python 3). C# scripts need the .NET 10 runtime
+close the window to exit. Keep the `D3D12` folder next to the exe. The
+performance gates come with it: in that folder, run
+`python n1_gate.py giant_editor.exe` and `python n2_gate.py giant_editor.exe`
+(Python 3; keep `gate_common.py` beside them). C# scripts need the .NET 10 runtime
 (https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
 The earlier Godot-based work is archived on the branches

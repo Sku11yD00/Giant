@@ -17,40 +17,14 @@ may wait a frame while flying; none may be left waiting).
 tools/mcp_smoke.py runs the same scene on CI, where only the software
 renderer exists: there it checks the draw counts and the image, not speed.
 """
-import json
 import random
-import subprocess
 import sys
-import threading
+
+from gate_common import Editor, describe, frame_stats, speed_failures
 
 TREES = 10_000
 HOUSES_X, HOUSES_Z = 20, 15
 SPACING = 9.0
-FRAME_BUDGET_MS = 1000.0 / 60.0
-# No micro stutter: the 99th percentile frame stays near the budget, and
-# hitches (frames half again over the target, i.e. at least one missed 60 Hz
-# refresh) are at most one per flight, for a stray OS hiccup. The target is
-# the median or the budget, whichever is longer, so a 144 Hz screen running
-# faster than 60 fps is not judged against its own faster frames.
-P99_LIMIT_MS = FRAME_BUDGET_MS * 1.25
-HITCH_FACTOR = 1.5
-MAX_HITCHES = 1
-
-
-def frame_stats(times):
-    """Average, median, 99th percentile, worst and hitches of frame times (ms)."""
-    if not times:
-        raise RuntimeError("no frames were timed (was the editor window minimised?)")
-    ordered = sorted(times)
-
-    def rank(fraction):
-        return ordered[min(len(ordered) - 1, int(fraction * (len(ordered) - 1) + 0.5))]
-
-    median = rank(0.5)
-    limit = HITCH_FACTOR * max(median, FRAME_BUDGET_MS)
-    return {"frames": len(times), "average_ms": sum(times) / len(times), "median_ms": median,
-            "p99_ms": rank(0.99), "worst_ms": ordered[-1],
-            "hitches": sum(1 for t in times if t > limit)}
 
 
 def build_gate_scene(tool):
@@ -121,93 +95,50 @@ def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    editor = subprocess.Popen([sys.argv[1], "--mcp", *sys.argv[2:]], stdin=subprocess.PIPE,
-                              stdout=subprocess.PIPE, stderr=None, text=True, encoding="utf-8", bufsize=1)
-    timer = threading.Timer(300, editor.kill)
-    timer.start()
-    next_id = 0
-
-    def call(method, params=None):
-        nonlocal next_id
-        next_id += 1
-        message = {"jsonrpc": "2.0", "id": next_id, "method": method}
-        if params is not None:
-            message["params"] = params
-        editor.stdin.write(json.dumps(message) + "\n")
-        editor.stdin.flush()
-        reply = json.loads(editor.stdout.readline())
-        if "error" in reply:
-            raise RuntimeError(f"{method} failed: {reply['error']}")
-        return reply["result"]
-
-    def tool(name, arguments=None):
-        result = call("tools/call", {"name": name, "arguments": arguments or {}})
-        if result.get("isError"):
-            raise RuntimeError(f"tool {name} failed: {result['content'][0]['text']}")
-        return result.get("structuredContent", {})
-
     failures = []
     real_gpu = False
+    editor = None
     try:
-        call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
-                            "clientInfo": {"name": "n1_gate", "version": "1"}})
+        editor = Editor(sys.argv[1], sys.argv[2:], "n1_gate")
+        tool = editor.tool
         info = tool("get_engine_info")
         print(f"n1_gate: {info['adapter']} ({info['backend']})")
-        if info["software_adapter"] or info["backend"] == "null":
+        real_gpu = editor.real_gpu()
+        if not real_gpu:
             print("n1_gate: warning: not a real GPU, the frame times mean nothing")
         materials = build_gate_scene(tool)
         tool("set_render_settings", {"gpu_culling": True, "occlusion_culling": True,
                                      "antialiasing": True, "specular_antialiasing": True})
-        waiting = 0
-        overflow = False
-        bad_draws = []
         path = flight_path(600)
         for position, look_at in path[:30]:  # warm up: streaming fills the pool
             tool("set_camera", {"position": position, "look_at": look_at})
-        # Hover first so the editor's 240 recorded frame times hold none of
-        # the scene build (the 10,000-tree batch is one long frame).
-        tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
-        for _ in range(240):
-            call("ping")
-        # Then read the frame times every 110 stops (two commands a stop, a
-        # frame each, plus the read: about 221 frames, under the 240 kept),
-        # keeping only the frames new since the last read.
-        flight_times = []
-        recorded = tool("get_engine_info")["frame_times"]["recorded"]
-        for stop, (position, look_at) in enumerate(path):
-            tool("set_camera", {"position": position, "look_at": look_at})
-            frame = tool("get_render_settings")["last_frame"]
+        waiting = 0
+        overflow = False
+        bad_draws = []
+
+        def each_stop(stop, frame):
+            nonlocal waiting, overflow
             waiting = max(waiting, frame["streaming"]["waiting"])
             overflow = overflow or frame["overflow"]
-            # GPU culling with occlusion: two raster passes and shading.
+            # GPU culling with occlusion: two raster passes and shading, then
+            # screen reflections and SMAA's three.
             if frame["draws"] != 3 or frame["post_draws"] != 4:
                 bad_draws.append((stop, frame["draws"], frame["post_draws"]))
-            if stop % 110 == 109 or stop == len(path) - 1:
-                now = tool("get_engine_info")["frame_times"]
-                new = now["recorded"] - recorded
-                recorded = now["recorded"]
-                if new > len(now["recent_ms"]):
-                    failures.append(f"{new} frames passed between samples: some were not timed")
-                if new > 0:
-                    flight_times += now["recent_ms"][-new:]
-        times = frame_stats(flight_times)
-        for _ in range(30):  # hovering at the end: what the view wants loads
-            call("ping")
-        left_waiting = tool("get_render_settings")["last_frame"]["streaming"]["waiting"]
+
+        times = frame_stats(editor.fly(path, each_stop))
+        editor.hover(30)  # hovering at the end: what the view wants loads
+        left_waiting = editor.last_frame()["streaming"]["waiting"]
         gpu = tool("get_engine_info").get("gpu", {})  # GPU-culled frame, timestamped
         if gpu.get("passes"):
             passes = ", ".join(f"{p['name']} {p['ms']:.2f}" for p in gpu["passes"])
             print(f"n1_gate: GPU time at the end {gpu['frame_ms']:.2f} ms ({passes} ms)")
         tool("set_render_settings", {"gpu_culling": False})
-        for _ in range(3):
-            call("ping")
-        frame = tool("get_render_settings")["last_frame"]
+        editor.hover(3)
+        frame = editor.last_frame()
         print(f"n1_gate: {frame['instances']} instances in {frame['draws']} draws "
               f"(+{frame['post_draws']} full-screen), {frame['materials']} materials, "
               f"{frame['triangles']} triangles in view at the end")
-        print(f"n1_gate: frame time over the flight ({times['frames']} frames sampled): "
-              f"average {times['average_ms']:.2f} ms, 99th percentile {times['p99_ms']:.2f} ms, "
-              f"worst {times['worst_ms']:.2f} ms, {times['hitches']} hitches")
+        print(f"n1_gate: frame time over the flight ({times['frames']} frames sampled): {describe(times)}")
         if bad_draws:
             failures.append(f"the draw count changed during the flight (stop, draws, post): {bad_draws[:5]}")
         if frame["draws"] != 2 or frame["post_draws"] != 4:
@@ -221,20 +152,13 @@ def main() -> int:
         if waiting > 0:
             # Waiting a frame is normal while flying fast; a backlog is not.
             print(f"n1_gate: at most {waiting} detail groups waited a frame to load")
-        real_gpu = not info["software_adapter"] and info["backend"] != "null"
-        if real_gpu and times["average_ms"] > FRAME_BUDGET_MS + 0.3:
-            failures.append(f"average frame {times['average_ms']:.2f} ms is over the 60 fps budget")
-        if real_gpu and times["p99_ms"] > P99_LIMIT_MS:
-            failures.append(f"99th percentile frame {times['p99_ms']:.2f} ms: frame pacing is uneven")
-        if real_gpu and times["hitches"] > MAX_HITCHES:
-            failures.append(f"{times['hitches']} hitches (frames over {HITCH_FACTOR}x the target): micro stutter")
-        tool("quit_editor")
-        editor.wait(timeout=60)
+        if real_gpu:
+            failures += speed_failures(times)
+        editor.close()
     except Exception as error:
         failures.append(str(error))
-        editor.kill()
-    finally:
-        timer.cancel()
+        if editor is not None:
+            editor.kill()
     for failure in failures:
         print(f"n1_gate: FAIL: {failure}", file=sys.stderr)
     if not failures:
