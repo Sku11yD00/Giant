@@ -136,7 +136,7 @@ void FarGround::unload(const DVec3& camera, const WorldStreaming& streaming) {
     for (u32 l = 0; l < world::k_far_levels; ++l) {
         Level& level = m_levels[l];
         const double size = world::far_tile_size(l + 1);
-        const double limit = radius(l, streaming) + settings.margin[l];
+        const double limit = radius(l + 1, streaming) + settings.margin[l];
         std::vector<CellCoord> far;
         for (const auto& [chunk, heights] : level.terrain.tiles()) {
             if (chunk_distance(camera, chunk, size) > limit) far.push_back(chunk);
@@ -149,11 +149,11 @@ void FarGround::unload(const DVec3& camera, const WorldStreaming& streaming) {
     }
 }
 
-double FarGround::radius(u32 l, const WorldStreaming& streaming) const {
+double FarGround::radius(u32 level, const WorldStreaming& streaming) const {
     // Level 1 must reach a level-2 chunk's diagonal past the loaded cells,
     // or a level-2 chunk would draw over the full tiles by the camera.
-    if (l == 0) return std::max(settings.radius[0], streaming.settings.load_radius + k_min_reach);
-    return std::max(settings.radius[1], radius(0, streaming));
+    const double one = std::max(settings.radius[0], std::min(streaming.settings.load_radius, k_max_load_radius) + k_min_reach);
+    return level <= 1 ? one : std::max(settings.radius[1], one);
 }
 
 void FarGround::start_reads(const DVec3& camera, const WorldStreaming& streaming) {
@@ -161,11 +161,16 @@ void FarGround::start_reads(const DVec3& camera, const WorldStreaming& streaming
         Level& level = m_levels[l];
         const auto& files = streaming.far_chunks(l + 1);
         const double size = world::far_tile_size(l + 1);
-        const double r = radius(l, streaming);
+        const double r = radius(l + 1, streaming);
         const CellCoord at = level.terrain.tile_of(camera.x, camera.z);
-        if (level.wanted_stale || !(at == level.wanted_at) || r != level.wanted_radius) {
+        // Made again in another chunk, or half a margin from where it was made
+        // (chunks let go there may be in reach again), or for a new radius.
+        const double moved = std::hypot(camera.x - level.wanted_from.x, camera.z - level.wanted_from.z);
+        if (level.wanted_stale || !(at == level.wanted_at) || r != level.wanted_radius ||
+            moved > settings.margin[l] * 0.5) {
             level.wanted_stale = false;
             level.wanted_at = at;
+            level.wanted_from = camera;
             level.wanted_radius = r;
             std::vector<std::pair<double, CellCoord>> near;
             const auto consider = [&](CellCoord c) {
@@ -252,19 +257,26 @@ bool FarGround::covered(CellCoord chunk, const TerrainMeshes& ground, const worl
     const world::Terrain::Heights* heights = m_levels[0].terrain.find(chunk);
     if (heights == nullptr) return false;
     constexpr u32 per = world::k_far_samples / world::k_far_branch;
+    bool any = false; // ground in it, and a tile of it drawn
+    bool none = true; // no ground in it at all
     for (i32 b = 0; b < world::k_far_branch; ++b) {
         for (i32 a = 0; a < world::k_far_branch; ++a) {
             // A cell with a tile has every one of its samples; one without, none.
             const float h = (*heights)[usize{static_cast<u32>(b) * per} * world::k_far_samples + static_cast<u32>(a) * per];
             if (std::isnan(h)) continue;
+            none = false;
             const CellCoord cell{chunk.x * world::k_far_branch + a, chunk.z * world::k_far_branch + b};
-            if (ground.drawn(cell)) continue;
+            if (ground.drawn(cell)) {
+                any = true;
+                continue;
+            }
             // Waiting for its mesh, or for streaming to bring its tile; else (taken
             // away and not saved yet, or its file failed) nothing to wait for.
             if (terrain.find(cell) != nullptr || streaming.ground_coming(cell)) return false;
         }
     }
-    return true;
+    // Every one of its tiles gone or failed: its mesh, not a hole.
+    return none || any;
 }
 
 void FarGround::mark_tiles(CellCoord chunk, const TerrainMeshes& ground) {
@@ -292,6 +304,12 @@ void FarGround::select(TerrainMeshes& ground, const world::Terrain& terrain, con
     for (const CellCoord c : meshes2.take_changed()) {
         m_dirty[1].insert(c);
         m_changed.push_back(corner(c, 2));
+    }
+    // A cell file failing is a change no mesh reports: every chunk is looked at again (rare).
+    const u32 failed = streaming.stats().failed;
+    if (failed != m_cells_failed) {
+        m_cells_failed = failed;
+        for (const auto& [chunk, heights] : m_levels[0].terrain.tiles()) m_dirty[0].insert(chunk);
     }
     if (m_dirty[0].empty() && m_dirty[1].empty()) return;
     const auto& files1 = streaming.far_chunks(1);

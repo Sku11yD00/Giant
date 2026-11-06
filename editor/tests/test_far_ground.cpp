@@ -330,6 +330,20 @@ GIANT_TEST("far ground: chunks a save cut short did not write are written by the
     const auto again = f.streaming.save(f.scene, {});
     GIANT_CHECK(again.error.empty() && again.chunks_written == 1);
     GIANT_CHECK(f.chunk(2, {0, 0}).has_value() && f.chunk(2, {0, 0}).value()[0] == 40.0f);
+    GIANT_CHECK(f.streaming.index().far_owed.empty() && f.streaming.index().far_owed_2.empty());
+
+    // Cut short again, then the world closed before another save: world.json keeps what is owed.
+    f.settle(10.0, 10.0);
+    (*f.scene.terrain.modify({0, 0}))[0] = 41.0f;
+    std::filesystem::remove(f.chunk_path(1, {0, 0}));
+    std::filesystem::create_directories(f.chunk_path(1, {0, 0}) / "x");
+    GIANT_CHECK(!f.streaming.save(f.scene, {}).error.empty());
+    std::filesystem::remove_all(f.chunk_path(1, {0, 0}));
+    f.reopen();
+    GIANT_CHECK(f.streaming.index().far_owed.size() == 1);
+    const auto later = f.streaming.save(f.scene, {}); // the tile is on disk only: read from its file
+    GIANT_CHECK(later.error.empty() && later.chunks_written == 2);
+    GIANT_CHECK(f.chunk(1, {0, 0}).value()[0] == 41.0f && f.chunk(2, {0, 0}).value()[0] == 41.0f);
 }
 
 GIANT_TEST("far ground: a cell whose file fails is not waited for: its chunk's other tiles draw") {

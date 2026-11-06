@@ -433,7 +433,8 @@ Json import_meshes(EditorState& state, const std::vector<std::string>& paths) {
     return errors;
 }
 
-Json streaming_json(const StreamingSettings& k, const FarGround* far) {
+Json streaming_json(const WorldStreaming& w, const FarGround* far) {
+    const StreamingSettings& k = w.settings;
     Json out = {{"load_radius", k.load_radius},           {"unload_margin", k.unload_margin},
                 {"entities_per_frame", k.entities_per_frame}, {"reads_in_flight", k.reads_in_flight},
                 {"unload_every", k.unload_every},
@@ -441,6 +442,8 @@ Json streaming_json(const StreamingSettings& k, const FarGround* far) {
     if (far != nullptr) {
         out["far_radius_1"] = far->settings.radius[0];
         out["far_radius_2"] = far->settings.radius[1];
+        // As used: level 1 at least load_radius + 5800 m, level 2 at least level 1.
+        out["far_radius_used"] = {far->radius(1, w), far->radius(2, w)};
     }
     return out;
 }
@@ -1105,7 +1108,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  }
              } else if (active) {
                  if (state.far_ground != nullptr) state.far_ground->wait_reads(); // a file read stays open (Windows)
-                     saved = w.save(state.scene, meshes_used(state.scene));
+                 saved = w.save(state.scene, meshes_used(state.scene));
              } else {
                  return CommandResult::failure(
                      w.is_open() ? "the scene is no longer the open world's (new_scene or load_scene "
@@ -1153,7 +1156,6 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              }
              WorldStreaming& w = *state.world;
              const StreamingStats s = w.stats();
-             const StreamingSettings& k = w.settings;
              return CommandResult::success(
                  {{"open", true},
                   {"active", w.active(state.scene_generation)},
@@ -1172,7 +1174,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                   {"tiles_loaded", s.tiles_loaded},
                   {"tiles_unloaded", s.tiles_unloaded},
                   {"far_ground", state.far_ground != nullptr ? far_ground_json(*state.far_ground) : Json(nullptr)},
-                  {"streaming", streaming_json(k, state.far_ground)}});
+                  {"streaming", streaming_json(*state.world, state.far_ground)}});
          }});
 
     add(registry,
@@ -1211,7 +1213,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  f.radius[0] = args.value("far_radius_1", f.radius[0]);
                  f.radius[1] = args.value("far_radius_2", f.radius[1]);
              }
-             return CommandResult::success(streaming_json(k, state.far_ground));
+             return CommandResult::success(streaming_json(*state.world, state.far_ground));
          }});
 
     add(registry,

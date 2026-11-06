@@ -430,9 +430,9 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   (its full tiles draw where loaded), and a cell whose file failed is not
   waited for. The coarse ground stops one of its own samples short (16 m,
   128 m) at the edge of the ground, where the tiles' walls hang. A save
-  cut short owes its chunks to the next save (a crash between the cell
-  files and the chunk files leaves those chunks old until their tiles
-  change again). Every tile gets the 8 m edge walls, streamed world or not.
+  cut short owes its chunks to the next save, kept in `world.json`
+  (`terrain.far_owed`, `far_owed_2`: written before the cells, cleared by
+  the save that writes them), so a crash or reopen does not lose them. Every tile gets the 8 m edge walls, streamed world or not.
   A world saved before part 4c has no chunks until its tiles
   are saved again. Every loaded
   tile is a full mesh in memory (CPU copy and cluster data: about 0.4 MB

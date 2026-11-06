@@ -233,6 +233,8 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
     for (u32 level = 1; level <= world::k_far_levels; ++level) {
         m_far[level - 1] = list_far_chunks(folder / "ground" / std::to_string(level));
     }
+    m_far_owed.insert(m_index.far_owed.begin(), m_index.far_owed.end());
+    m_far_owed2.insert(m_index.far_owed_2.begin(), m_index.far_owed_2.end());
     m_count[static_cast<usize>(State::on_disk)] = static_cast<u32>(m_cells.size());
     m_wanted_stale = true;
     return std::nullopt;
@@ -734,6 +736,20 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     for (const auto& [coord, heights] : terrain.tiles()) {
         if (!m_ground.contains(coord)) m_index.terrain_cells.push_back(coord);
     }
+    // The far ground owed if the save is cut short: every tile that may change
+    // (put says exactly which do), and what was owed already.
+    std::unordered_set<CellCoord, world::CellCoordHash> may_owe = m_far_owed;
+    for (const auto& [coord, heights] : terrain.tiles()) {
+        const auto it = m_cells.find(coord);
+        if (it == m_cells.end() || it->second.state != State::loaded || !same_tile(terrain, coord, it->second)) {
+            may_owe.insert(coord);
+        }
+    }
+    for (const CellCoord coord : m_loaded) {
+        if (m_cells[coord].saved_tile && terrain.find(coord) == nullptr) may_owe.insert(coord);
+    }
+    m_index.far_owed.assign(may_owe.begin(), may_owe.end());
+    m_index.far_owed_2.assign(m_far_owed2.begin(), m_far_owed2.end());
     if (!write_text(m_folder / "world.json", world::save_world_index(m_index))) {
         return {"could not write " + path_to_utf8(m_folder / "world.json")};
     }
@@ -867,6 +883,8 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     m_index.kits = scene.kits;
     m_index.terrain_cells.assign(m_ground.begin(), m_ground.end());
     m_index.terrain_samples = samples;
+    m_index.far_owed.assign(m_far_owed.begin(), m_far_owed.end()); // empty, unless chunks failed
+    m_index.far_owed_2.assign(m_far_owed2.begin(), m_far_owed2.end());
     for (std::string& m : meshes) {
         m_index.meshes.push_back(std::move(m));
     }

@@ -983,8 +983,15 @@ std::string save_world_index(const WorldIndex& world) {
     std::vector<CellCoord> ground = world.terrain_cells;
     std::sort(ground.begin(), ground.end(), by_zx);
     ground.erase(std::unique(ground.begin(), ground.end()), ground.end());
+    const auto sorted_list = [&](std::vector<CellCoord> owed) {
+        std::sort(owed.begin(), owed.end(), by_zx);
+        owed.erase(std::unique(owed.begin(), owed.end()), owed.end());
+        Json array = Json::array();
+        for (const CellCoord c : owed) array.push_back(cell_json(c));
+        return array;
+    };
     if (!ground.empty() || world.terrain_samples != k_default_terrain_samples ||
-        !(world.terrain_material == TerrainMaterial{})) {
+        !(world.terrain_material == TerrainMaterial{}) || !world.far_owed.empty() || !world.far_owed_2.empty()) {
         Json tiles = Json::array();
         for (const CellCoord c : ground) {
             tiles.push_back(cell_json(c));
@@ -992,6 +999,8 @@ std::string save_world_index(const WorldIndex& world) {
         out["terrain"] = {{"samples", world.terrain_samples},
                           {"material", terrain_material_json(world.terrain_material)},
                           {"cells", std::move(tiles)}};
+        if (!world.far_owed.empty()) out["terrain"]["far_owed"] = sorted_list(world.far_owed);
+        if (!world.far_owed_2.empty()) out["terrain"]["far_owed_2"] = sorted_list(world.far_owed_2);
     }
     return out.dump(2) + "\n";
 }
@@ -1063,6 +1072,23 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
                     tr.fail(key, "is not in the world's cells (a cell with ground has a file)");
                 } else {
                     world.terrain_cells.push_back(*c);
+                }
+            }
+        }
+        for (const auto& [key, list] : {std::pair<const char*, std::vector<CellCoord>*>{"far_owed", &world.far_owed},
+                                        {"far_owed_2", &world.far_owed_2}}) {
+            const Json* owed = tr.get(key, false);
+            if (owed == nullptr || !tr.ok()) continue;
+            if (!owed->is_array()) {
+                tr.fail(key, "must be an array of [x, z] cells");
+                continue;
+            }
+            for (usize i = 0; tr.ok() && i < owed->size(); ++i) {
+                const auto c = read_cell((*owed)[i]);
+                if (!c) {
+                    tr.fail(std::string(key) + "[" + std::to_string(i) + "]", "must be [x, z], two whole numbers");
+                } else {
+                    list->push_back(*c);
                 }
             }
         }

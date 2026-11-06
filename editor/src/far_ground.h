@@ -107,6 +107,9 @@ public:
     const world::Terrain& chunks(u32 level) const { return m_levels[level - 1].terrain; }
     TerrainMeshes& meshes(u32 level) { return *m_levels[level - 1].meshes; }
     FarGroundSettings settings;
+    // The radius a level (1, 2) loads to, as used: level 1 at least
+    // load_radius + 5800 m, level 2 at least level 1.
+    double radius(u32 level, const WorldStreaming& streaming) const;
 
 private:
     enum class Mode : u8 { tiles, mesh, hidden }; // a level-1 chunk: what draws over it
@@ -117,6 +120,7 @@ private:
         std::vector<world::CellCoord> wanted; // to read, the nearest at the back
         world::CellCoord wanted_at{};
         double wanted_radius = -1.0;
+        DVec3 wanted_from{}; // where the camera was
         bool wanted_stale = true;
     };
     struct Read {
@@ -127,7 +131,7 @@ private:
     };
 
     void clear(const TerrainMeshes& ground);
-    double radius(u32 level, const WorldStreaming& streaming) const; // as used: level 1 at least load_radius + 5800
+
     void take_reads(const WorldStreaming& streaming);
     void start_reads(const DVec3& camera, const WorldStreaming& streaming);
     void unload(const DVec3& camera, const WorldStreaming& streaming);
@@ -144,6 +148,7 @@ private:
     std::array<std::unordered_set<world::CellCoord, world::CellCoordHash>, 2> m_failed;
     std::vector<Read> m_arrived; // read, waiting for the per-frame budget (still in Level::reading)
     std::array<u32, 2> m_files{};
+    u32 m_cells_failed = 0; // streaming's failed cells, as last seen
 
     // What draws.
     std::unordered_map<world::CellCoord, Mode, world::CellCoordHash> m_mode;   // level 1 (absent: tiles)
