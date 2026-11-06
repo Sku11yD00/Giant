@@ -506,12 +506,13 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
 
     const u32 n = static_cast<u32>(instances.size());
     const u32 m = static_cast<u32>(m_copies.size());
-    if (only != nullptr && n == m) {
-        // Laid out as last time: only the cells that changed can differ.
+    if (only != nullptr && n >= m) {
+        // Only the cells listed can differ (instances past the copies are
+        // new, and in them).
         std::vector<u32> changed = std::move(forced);
         for (const CellRange& c : *only) {
             for (u32 i = c.first; i < c.first + c.count && i < n; ++i) {
-                if (differs(instances[i], materials, m_copies[i])) {
+                if (i >= m || differs(instances[i], materials, m_copies[i])) {
                     changed.push_back(i);
                 }
             }

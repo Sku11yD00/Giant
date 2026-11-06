@@ -38,7 +38,7 @@ public:
     u32 uploaded() const { return m_uploaded; } // instances uploaded by the last update
 
 private:
-    bool ensure(u32 instances, u32 cells);
+    bool ensure(u32 instances, u32 cells, bool& fresh); // fresh: a new buffer (holding nothing)
     bool upload(rhi::CommandList& cmd, std::span<const Instance> instances, const CellRange& cell, u32 slot,
                 u32 material_count);
 
@@ -51,7 +51,13 @@ private:
     std::vector<CellRange> m_seen;    // the cells as uploaded
     std::vector<CellRange> m_changed; // scratch
     std::vector<CellRange> m_previous; // m_seen before this update (scratch)
-    std::vector<DVec3> m_anchors;     // per cell, as uploaded
+    std::vector<u32> m_slots;          // per cell of m_seen: its anchor slot
+    std::vector<u32> m_previous_slots; // scratch
+    std::vector<u8> m_claimed;         // scratch
+    std::vector<u8> m_kept;            // per cell: exactly as before (scratch)
+    std::vector<u32> m_free_slots;     // anchor slots no cell has
+    u32 m_slot_count = 0;              // anchor slots in use or free
+    std::vector<DVec3> m_anchors;      // per anchor slot, as uploaded
     u32 m_material_count = ~0u;
     u32 m_uploaded = 0;
     std::vector<u8> m_scratch;

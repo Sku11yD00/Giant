@@ -4,6 +4,7 @@
 #include "giant/rhi/rhi.h"
 #include "giant_test.h"
 #include "gpu_layout.h"
+#include "cells.h"
 #include "instance_store.h"
 
 #include <cmath>
@@ -121,4 +122,54 @@ GIANT_TEST("instance store: a changed cell after an empty one is found by its sl
     GIANT_CHECK(s.update(in, cells, {0.0, 0.0, 0.0}, {0, 1, 2}));
     GIANT_CHECK(s.store->uploaded() == 2);
     GIANT_CHECK(std::fabs(s.translation(2).x - 60.0f) < 1e-4f);
+}
+
+GIANT_TEST("instance store: cells coming, going and moving upload only themselves") {
+    Store s;
+    std::vector<Instance> in{at(1.0, 0.0), at(2.0, 0.0), at(100.0, 0.0), at(200.0, 0.0)};
+    std::vector<CellRange> cells{{0, 2, 1}, {2, 1, 2}, {3, 1, 3}};
+    GIANT_CHECK(s.update(in, cells, {0.0, 0.0, 0.0}, {0, 1, 2, 3}));
+    // The middle cell goes (a hole of its own), and a cell joins at the end.
+    in[2] = Instance{};
+    in[2].mesh = k_no_mesh;
+    in.push_back(at(300.0, 0.0));
+    in.push_back(at(301.0, 0.0));
+    cells = {{0, 2, 1}, {2, 1, 7}, {3, 1, 3}, {4, 2, 8}};
+    GIANT_CHECK(s.update(in, cells, {0.0, 0.0, 0.0}, {0, 1, 3, 4, 5}));
+    GIANT_CHECK(s.store->uploaded() == 3);
+    for (u32 i : {0u, 1u, 3u, 4u, 5u}) {
+        GIANT_CHECK(std::fabs(s.translation(i).x - static_cast<float>(in[i].position.x)) < 1e-3f);
+    }
+    GIANT_CHECK(!s.drawn(2));
+    // The camera moves: the kept cells' anchors still place them.
+    GIANT_CHECK(s.update(in, cells, {50.0, 0.0, 0.0}, {0, 1, 3, 4, 5}));
+    GIANT_CHECK(s.store->uploaded() == 0);
+    for (u32 i : {0u, 1u, 3u, 4u, 5u}) {
+        GIANT_CHECK(std::fabs(s.translation(i).x - static_cast<float>(in[i].position.x - 50.0)) < 1e-3f);
+    }
+    // Two cells join into one place (a hole and its neighbour): just it.
+    in[2] = at(150.0, 0.0);
+    cells = {{0, 2, 1}, {2, 2, 9}, {4, 2, 8}};
+    in[3] = at(151.0, 0.0);
+    GIANT_CHECK(s.update(in, cells, {0.0, 0.0, 0.0}, {0, 1, 2, 3, 4, 5}));
+    GIANT_CHECK(s.store->uploaded() == 2);
+    for (u32 i = 0; i < 6; ++i) {
+        GIANT_CHECK(std::fabs(s.translation(i).x - static_cast<float>(in[i].position.x)) < 1e-3f);
+    }
+}
+
+GIANT_TEST("changed cells: lists the cells not exactly as seen") {
+    std::vector<CellRange> seen;
+    std::vector<CellRange> changed;
+    const std::vector<CellRange> a{{0, 2, 1}, {2, 0, 2}, {2, 3, 3}};
+    GIANT_CHECK(!changed_cells(a, 5, seen, changed)); // nothing seen yet
+    GIANT_CHECK(changed_cells(a, 5, seen, changed) && changed.empty());
+    const std::vector<CellRange> b{{0, 2, 1}, {2, 0, 4}, {2, 3, 3}, {5, 2, 5}};
+    GIANT_CHECK(changed_cells(b, 7, seen, changed) && changed.size() == 2);
+    GIANT_CHECK(changed[0].version == 4 && changed[1].version == 5);
+    const std::vector<CellRange> c{{0, 4, 1}, {4, 3, 6}};
+    GIANT_CHECK(changed_cells(c, 7, seen, changed) && changed.size() == 2); // same versions, other places
+    GIANT_CHECK(!changed_cells(a, 5, seen, changed)); // fewer instances: everything
+    GIANT_CHECK(!changed_cells(std::vector<CellRange>{{0, 2, 1}, {3, 2, 2}}, 5, seen, changed)); // a gap
+    GIANT_CHECK(seen.empty());
 }

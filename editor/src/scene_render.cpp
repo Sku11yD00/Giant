@@ -8,6 +8,13 @@ namespace giant::editor {
 
 namespace {
 
+// Unique in the process: a renderer handed cells by another SceneFrame
+// never takes one version for another.
+u64 new_version() {
+    static std::atomic<u64> next_version{1};
+    return next_version.fetch_add(1, std::memory_order_relaxed);
+}
+
 render::BuiltinMesh builtin(world::Shape shape) {
     switch (shape) {
     case world::Shape::sphere: return render::BuiltinMesh::sphere;
@@ -122,10 +129,7 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
                  cell);
         }
     }
-    // Unique in the process: a renderer handed cells by another SceneFrame
-    // never takes one version for another.
-    static std::atomic<u64> next_version{1};
-    cell.version = next_version.fetch_add(1, std::memory_order_relaxed);
+    cell.version = new_version();
     cell.dirty = false;
     ++out.cells_rebuilt;
     for (const u32 m : before) {
@@ -144,11 +148,63 @@ void start_over(const world::Scene& scene, SceneFrame& out) {
     out.materials.clear();
     out.users.clear();
     out.order.clear();
+    out.instances.clear(); // laid out afresh
+    out.free.clear();
     for (const world::Entity& e : scene.entities()) {
         const world::CellCoord c = world::cell_of(e.transform.position);
         out.grid[c].ids.push_back(e.id);
         out.where[e.id] = c;
     }
+}
+
+const render::Instance k_hole{{}, {}, {1.0f, 1.0f, 1.0f}, render::k_no_mesh, 0};
+
+// Makes [first, first + count) a hole, joined to the holes beside it.
+void release(SceneFrame& out, u32 first, u32 count) {
+    if (count == 0) return;
+    std::fill_n(out.instances.begin() + first, count, k_hole);
+    auto next = out.free.lower_bound(first);
+    if (next != out.free.end() && next->first == first + count) {
+        count += next->second.count;
+        next = out.free.erase(next);
+    }
+    if (next != out.free.begin()) {
+        const auto before = std::prev(next);
+        if (before->first + before->second.count == first) {
+            first = before->first;
+            count += before->second.count;
+            out.free.erase(before);
+        }
+    }
+    out.free[first] = {count, new_version()};
+}
+
+// Puts the cell's instances in its place, finding it a new one (the first
+// hole it fits, or the end) if it has none or has outgrown it: with room to
+// grow if it outgrew its place (a new cell gets none, so it fits a hole
+// another cell of its size left).
+void place(SceneFrame& out, SceneFrame::Cell& cell) {
+    const u32 need = static_cast<u32>(cell.instances.size());
+    if (!cell.placed || need > cell.capacity) {
+        const bool room = cell.placed;
+        if (cell.placed) release(out, cell.first, cell.capacity);
+        cell.placed = true;
+        cell.capacity = need == 0 || !room ? need : need + std::max<u32>(need / 4, 4);
+        cell.first = static_cast<u32>(out.instances.size());
+        for (auto it = out.free.begin(); it != out.free.end() && cell.capacity > 0; ++it) {
+            if (it->second.count < cell.capacity) continue;
+            cell.first = it->first;
+            const u32 rest = it->second.count - cell.capacity;
+            out.free.erase(it);
+            if (rest > 0) out.free[cell.first + cell.capacity] = {rest, new_version()};
+            break;
+        }
+        if (cell.first == out.instances.size()) {
+            out.instances.resize(out.instances.size() + cell.capacity, k_hole);
+        }
+    }
+    std::copy(cell.instances.begin(), cell.instances.end(), out.instances.begin() + cell.first);
+    std::fill_n(out.instances.begin() + cell.first + need, cell.capacity - need, k_hole);
 }
 
 bool same_kit(const world::Kit& a, const world::Kit& b) {
@@ -264,16 +320,19 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     // Rebuild what changed.
     bool layout = out.order.empty();
     bool compact = false;
+    std::vector<world::CellCoord>& rebuilt = out.rebuilt;
+    rebuilt.clear();
     for (auto it = out.grid.begin(); it != out.grid.end();) {
         SceneFrame::Cell& cell = it->second;
         if (cell.dirty) {
-            const usize count = cell.instances.size();
             const bool fresh = cell.version == 0; // not laid out yet, even with no instances
             compact = !rebuild(scene, renderer, meshes, out, cell) || compact;
-            layout = layout || fresh || cell.instances.size() != count;
+            layout = layout || fresh;
+            rebuilt.push_back(it->first);
         }
         if (cell.ids.empty()) {
             layout = true;
+            if (cell.placed) release(out, cell.first, cell.capacity);
             it = out.grid.erase(it);
         } else {
             ++it;
@@ -308,27 +367,47 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     if (!layout && out.cells_rebuilt == 0) {
         return; // as last frame
     }
-    // Lay the cells out end to end (only the rebuilt ones when none moved).
-    if (layout) {
-        out.instances.clear();
-        out.cells.clear();
-    }
-    out.decals.clear();
-    for (usize n = 0; n < out.order.size(); ++n) {
-        const SceneFrame::Cell& cell = out.grid.at(out.order[n]);
-        out.decals.insert(out.decals.end(), cell.decals.begin(), cell.decals.end());
-        if (layout) {
-            render::CellRange r;
-            r.first = static_cast<u32>(out.instances.size());
-            r.count = static_cast<u32>(cell.instances.size());
-            r.version = cell.version;
-            out.cells.push_back(r);
-            out.instances.insert(out.instances.end(), cell.instances.begin(), cell.instances.end());
-        } else if (out.cells[n].version != cell.version) {
-            out.cells[n].version = cell.version;
-            std::copy(cell.instances.begin(), cell.instances.end(),
-                      out.instances.begin() + static_cast<std::ptrdiff_t>(out.cells[n].first));
+    // Each cell keeps its place in the instance list (with room to grow),
+    // so cells coming, going or changing leave the others where they are:
+    // a cell that outgrows its place moves, and one that goes leaves a
+    // hole (instances that draw nothing) for later cells to fill.
+    bool all = (out.instances.empty() && out.free.empty()) || out.grid.empty(); // nothing to keep
+    if (!all) {
+        for (const world::CellCoord coord : rebuilt) {
+            const auto it = out.grid.find(coord);
+            if (it != out.grid.end()) place(out, it->second);
         }
+        // Too much of the list is holes no cell has: laid out afresh, end
+        // to end (each cell's own room to grow is not counted: it is at
+        // most a quarter of it, and four).
+        usize holes = 0;
+        for (const auto& [first, block] : out.free) holes += block.count;
+        all = holes > std::max(out.holes_allowed, out.instances.size() / 2);
+    }
+    if (all) {
+        out.instances.clear();
+        out.free.clear();
+        for (const world::CellCoord coord : out.order) {
+            SceneFrame::Cell& cell = out.grid.at(coord);
+            cell.placed = false;
+            place(out, cell);
+        }
+    }
+    out.cells.clear();
+    for (const auto& [coord, cell] : out.grid) {
+        out.cells.push_back({cell.first, cell.capacity, cell.version}); // empty ones too (decals only)
+    }
+    for (const auto& [first, block] : out.free) {
+        out.cells.push_back({first, block.count, block.version});
+    }
+    std::sort(out.cells.begin(), out.cells.end(),
+              [](const render::CellRange& a, const render::CellRange& b) {
+                  return a.first != b.first ? a.first < b.first : a.count < b.count;
+              });
+    out.decals.clear();
+    for (const world::CellCoord coord : out.order) {
+        const SceneFrame::Cell& cell = out.grid.at(coord);
+        out.decals.insert(out.decals.end(), cell.decals.begin(), cell.decals.end());
     }
 }
 

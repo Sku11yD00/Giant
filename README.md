@@ -150,6 +150,11 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   are let go, so a world can be far bigger than memory. A square with
   edits you have not saved never unloads, however far you fly, so nothing
   is lost; `save_world` writes only the squares that changed.
+- Part 3b: squares keep their place. The list of objects handed to the
+  renderer keeps each square where it was as others come and go (a square
+  that leaves is a gap the next one of its size fills), so squares
+  streaming in and out cost only themselves, not the whole voxel world
+  and GPU copy.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

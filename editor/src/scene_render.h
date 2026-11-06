@@ -7,6 +7,7 @@
 #include "giant/render/renderer.h"
 #include "giant/world/scene.h"
 
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -21,8 +22,10 @@ namespace giant::editor {
 // placement of a kit, and every entity with the same look, sends its
 // material once.
 struct SceneFrame {
-    // For the renderer: instances cell after cell (render::CellRange says
-    // where each starts), the material table, the decals.
+    // For the renderer: instances by cell (render::CellRange says where
+    // each cell's are; a cell keeps its place from frame to frame, with
+    // room to grow, and places no cell has are holes: instances with no
+    // mesh, sent as cells of their own), the material table, the decals.
     std::vector<render::Instance> instances;
     std::vector<render::CellRange> cells;
     std::vector<render::Material> materials;
@@ -49,10 +52,25 @@ struct SceneFrame {
         std::vector<render::Decal> decals;
         u64 version = 0; // new each rebuild, unique in the process (0: never built)
         bool dirty = true;
+        // Its place in `instances`: capacity instances from first, the
+        // ones past its own holes. placed: it has one (maybe of none).
+        u32 first = 0;
+        u32 capacity = 0;
+        bool placed = false;
     };
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> grid;
     std::unordered_map<world::EntityId, world::CellCoord> where; // entity -> its cell
-    std::vector<world::CellCoord> order;                          // cells, as sent
+    std::vector<world::CellCoord> order;                          // cells by z, then x (decals go so)
+    // Holes in `instances` no cell has (first -> size, version), sent as
+    // cells of their own. Past holes_allowed (and half the list) holes in
+    // all, the list is laid out again end to end.
+    struct Free {
+        u32 count = 0;
+        u64 version = 0;
+    };
+    std::map<u32, Free> free;
+    usize holes_allowed = 4096;
+    std::vector<world::CellCoord> rebuilt; // scratch
     std::vector<world::Kit> kits;                                 // as last built
     u64 scene_identity = 0;
     u64 meshes_version = ~u64{0};
@@ -61,7 +79,8 @@ struct SceneFrame {
 // The scene's visible entities, with kits expanded into their pieces. Mesh
 // entities and pieces whose file is not imported are left out, as are kit
 // entities whose kit is missing. Takes the scene's changes. Within a cell,
-// instances and decals go in id (creation) order; cells go by z, then x.
+// instances and decals go in id (creation) order; decals of cells go by z,
+// then x.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out);
 

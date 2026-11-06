@@ -30,6 +30,14 @@ struct Cells {
         return scene.add(e);
     }
     void build() { scene_frame(scene, *renderer, *meshes, frame); }
+    // The instances that draw, in list order (holes left out).
+    std::vector<render::Instance> live() const {
+        std::vector<render::Instance> out;
+        for (const render::Instance& i : frame.instances) {
+            if (i.mesh != render::k_no_mesh) out.push_back(i);
+        }
+        return out;
+    }
 };
 } // namespace
 
@@ -68,17 +76,16 @@ GIANT_TEST("scene cells: moving between cells, removing and hiding") {
     GIANT_CHECK(c.frame.cells.size() == 2);
     c.scene.modify(a)->transform.position.x = 110.0; // into b's cell
     c.build();
-    GIANT_CHECK(c.frame.cells.size() == 1 && c.frame.cells[0].count == 2 && c.frame.instances.size() == 2);
-    GIANT_CHECK(c.frame.instances[0].position.x == 110.0); // a's id is lower
+    GIANT_CHECK(c.live().size() == 2 && c.live()[0].position.x == 110.0); // a's id is lower
     c.scene.remove(b);
     c.build();
-    GIANT_CHECK(c.frame.instances.size() == 1 && c.frame.instances[0].position.x == 110.0);
+    GIANT_CHECK(c.live().size() == 1 && c.live()[0].position.x == 110.0);
     c.scene.modify(a)->visible = false;
     c.build();
-    GIANT_CHECK(c.frame.instances.empty() && c.frame.cells.size() == 1 && c.frame.cells[0].count == 0);
+    GIANT_CHECK(c.live().empty());
     c.scene.remove(a);
     c.build();
-    GIANT_CHECK(c.frame.cells.empty());
+    GIANT_CHECK(c.frame.cells.empty() && c.frame.instances.empty());
 }
 
 GIANT_TEST("scene cells: a kit change rebuilds the cells placing it, and unused materials go") {
@@ -152,4 +159,70 @@ GIANT_TEST("scene cells: a new cell with only decals is laid out") {
     c.scene.add(stamp);
     c.build();
     GIANT_CHECK(c.frame.decals.size() == 1 && c.frame.cells.size() == 2 && c.frame.cells[1].count == 0);
+}
+
+GIANT_TEST("scene cells: cells coming and going leave the others where they are") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    std::vector<world::EntityId> ids;
+    for (int x = 0; x < 6; ++x) {
+        for (int k = 0; k < 3; ++k) ids.push_back(c.add(10.0 + 64.0 * x + k, 10.0));
+    }
+    c.build();
+    GIANT_CHECK(c.frame.cells.size() == 6 && c.frame.instances.size() == 18);
+    const std::vector<render::CellRange> before = c.frame.cells;
+    const auto unchanged = [&](usize cell) {
+        for (const render::CellRange& r : c.frame.cells) {
+            if (r.first == before[cell].first && r.count == before[cell].count && r.version == before[cell].version) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // A cell goes: a hole of its size, the others as they were.
+    c.scene.remove_many(std::vector<world::EntityId>{ids[3], ids[4], ids[5]});
+    c.build();
+    GIANT_CHECK(c.frame.instances.size() == 18 && c.live().size() == 15);
+    for (const usize k : {0u, 2u, 3u, 4u, 5u}) GIANT_CHECK(unchanged(k));
+    // A new cell of the same size takes the hole.
+    for (int k = 0; k < 3; ++k) c.add(10.0 + k, 500.0);
+    c.build();
+    GIANT_CHECK(c.frame.instances.size() == 18 && c.live().size() == 18);
+    for (const usize k : {0u, 2u, 3u, 4u, 5u}) GIANT_CHECK(unchanged(k));
+    // A cell that grows moves to the end, with room to grow there.
+    c.add(10.0 + 64.0 * 2 + 5, 10.0);
+    c.build();
+    GIANT_CHECK(c.live().size() == 19 && c.frame.instances.size() > 19);
+    for (const usize k : {0u, 3u, 4u, 5u}) GIANT_CHECK(unchanged(k));
+    const usize size = c.frame.instances.size();
+    c.add(10.0 + 64.0 * 2 + 6, 10.0); // within the room it has now
+    c.build();
+    GIANT_CHECK(c.live().size() == 20 && c.frame.instances.size() == size);
+    // The cells cover the list end to end.
+    u32 next = 0;
+    for (const render::CellRange& r : c.frame.cells) {
+        GIANT_CHECK(r.first == next);
+        next += r.count;
+    }
+    GIANT_CHECK(next == c.frame.instances.size());
+}
+
+GIANT_TEST("scene cells: too many holes and the list is laid out again") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    c.frame.holes_allowed = 4;
+    std::vector<world::EntityId> ids;
+    for (int x = 0; x < 4; ++x) {
+        for (int k = 0; k < 3; ++k) ids.push_back(c.add(10.0 + 64.0 * x + k, 10.0));
+    }
+    c.build();
+    c.scene.remove_many(std::vector<world::EntityId>{ids[0], ids[1], ids[2]});
+    c.build();
+    GIANT_CHECK(c.frame.instances.size() == 12); // 3 holes: kept
+    c.scene.remove_many(std::vector<world::EntityId>{ids[3], ids[4], ids[5]});
+    c.build();
+    GIANT_CHECK(c.frame.instances.size() == 12); // 6: half the list, kept
+    c.scene.remove_many(std::vector<world::EntityId>{ids[6], ids[7], ids[8]});
+    c.build();
+    GIANT_CHECK(c.frame.instances.size() == 3 && c.live().size() == 3); // 9: laid out again
 }
