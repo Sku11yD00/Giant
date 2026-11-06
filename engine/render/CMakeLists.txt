@@ -26,6 +26,7 @@ giant_shaders(render
     shaders/shadow_clear.slang:cs_words:compute:shadow_clear_words_cs
     shaders/resolve.slang:vs_main:vertex:resolve_vs
     shaders/resolve.slang:ps_main:pixel:resolve_ps
+    shaders/resolve.slang:ps_direct:pixel:resolve_direct_ps
     shaders/reflect.slang:vs_main:vertex:reflect_vs
     shaders/reflect.slang:ps_main:pixel:reflect_ps
     shaders/smaa.slang:vs_main:vertex:smaa_vs

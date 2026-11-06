@@ -3,8 +3,10 @@
 // correct barycentrics, interpolates the normal and lights it once.
 //
 // Lighting: one sun (GGX specular, Lambert diffuse) plus sky/ground ambient,
-// written as radiance before exposure; reflect.slang then adds the screen's
-// reflections, applies exposure and tone maps.
+// then exposure and the Khronos PBR Neutral tone mapper (tone_map.slang).
+// With screen reflections on, shading writes radiance before exposure and
+// reflect.slang adds the reflections and tone maps (ps_main); off, it tone
+// maps here into the sRGB target (ps_direct).
 //
 // The far field: pixels past RenderSettings::far_field_distance (with
 // nothing drawn, or a mesh drawn farther) march the voxel world from there
@@ -28,6 +30,7 @@
 #include "voxel_march.slang"
 #include "voxel_gi.slang"
 #include "shadow_pages.slang"
+#include "tone_map.slang"
 
 struct ResolvePush {
     float4 background; // linear; where nothing was drawn
@@ -354,8 +357,7 @@ Output lit_output(float3 color) {
     return o;
 }
 
-[shader("pixel")]
-Output ps_main(float4 position : SV_Position) {
+Output shade_pixel(float4 position) {
     const uint2 pixel = uint2(position.xy);
     const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
     const Frame f = load_frame(push.frame, push.frame_offset);
@@ -477,4 +479,21 @@ Output ps_main(float4 position : SV_Position) {
     o.gloss = uint2(q.x | (q.y << 10) | (q.z << 20), pack_octahedral(n));
     o.reflected = float4(min(spec_light, float3(60000.0, 60000.0, 60000.0)), 0.0);
     return o;
+}
+
+// With screen reflections: the three targets for reflect.slang to finish.
+[shader("pixel")]
+Output ps_main(float4 position : SV_Position) {
+    return shade_pixel(position);
+}
+
+// Without: finished here, exposed and tone mapped into the sRGB target.
+[shader("pixel")]
+float4 ps_direct(float4 position : SV_Position) : SV_Target {
+    const Output o = shade_pixel(position);
+    if (o.radiance.a <= 0.0) {
+        return float4(o.radiance.rgb, 1.0); // the background and debug views, as they are
+    }
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    return float4(tone_map(o.radiance.rgb * f.exposure), 1.0);
 }

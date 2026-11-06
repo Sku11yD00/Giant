@@ -477,7 +477,7 @@ def gi_gate(tool, call, check):
                            "base_color": [0.9, 0.05, 0.05], "roughness": 0.9})
     tool("set_lighting", {"sun_elevation_degrees": 37, "sun_azimuth_degrees": 270})
     tool("set_camera", {"position": [-2, 8, 6], "look_at": [1, 0, 0]})
-    tool("set_render_settings", {"gi": True, "gi_bricks_per_frame": 64})
+    tool("set_render_settings", {"gi": True, "gi_bricks_per_frame": 64, "screen_space_reflections": True})
 
     def settle():
         last = None
@@ -503,7 +503,7 @@ def gi_gate(tool, call, check):
     last = settle()
     check(not last["reflections"]["voxel"] and not last["reflections"]["screen"],
           f"reflections turn off, got {last['reflections']}")
-    tool("set_render_settings", {"reflections": True})
+    tool("set_render_settings", {"reflections": True, "screen_space_reflections": False})
     tool("set_render_settings", {"debug_view": "lighting"})
     check(tool("get_render_settings")["debug_view"] == "lighting", "the lighting view can be picked")
     last = settle()
@@ -537,15 +537,14 @@ def n1_gate(tool, call, check):
     for position, look_at in flight_path(6):
         tool("set_camera", {"position": position, "look_at": look_at})
         frame = settle()
-        check(frame["draws"] == 2 and frame["post_draws"] == 4,
-              f"20,000 pieces still take one raster pass, one shading pass, the screen reflections pass and "
-              f"3 anti-aliasing passes, got {frame}")
+        check(frame["draws"] == 2 and frame["post_draws"] == 3,
+              f"20,000 pieces still take one raster pass, one shading pass and 3 anti-aliasing passes, got {frame}")
         check(frame["materials"] == materials, f"{materials} shared materials, got {frame['materials']}")
         check(not frame["overflow"], f"nothing dropped, got {frame}")
         check(frame["streaming"]["waiting"] == 0, f"all detail in view loaded (no late sharpening), got {frame}")
     tool("set_render_settings", {"antialiasing": False})
     call("ping")
-    check(tool("get_render_settings")["last_frame"]["post_draws"] == 1, "anti-aliasing turns off")
+    check(tool("get_render_settings")["last_frame"]["post_draws"] == 0, "anti-aliasing turns off")
     tool("set_render_settings", {"antialiasing": True, "gpu_culling": True})
     if tool("get_engine_info")["backend"] != "null":
         # Popping: small steps down the street change the image a little each time, evenly.
@@ -661,10 +660,10 @@ def main() -> int:
         check(settings["gi"] is True and settings["gi_bricks_per_frame"] == 256, "global illumination is on by default")
         check(settings["reflections"] is True and settings["screen_space_reflections"] is True,
               "reflections are on by default")
-        # Lighting the voxel world is heavy on the software GPU CI runs on:
-        # off for the other gates (the renderer's own d3d12 test checks the
-        # light itself), on in gi_gate.
-        tool("set_render_settings", {"gi": False})
+        # Lighting the voxel world and the screen reflections pass are heavy
+        # on the software GPU CI runs on: off for the other gates (the
+        # renderer's own d3d12 tests check them), on in gi_gate.
+        tool("set_render_settings", {"gi": False, "screen_space_reflections": False})
         build_scene(tool, call, check)
         lod_gate(tool, call, check)
         kit_gate(tool, call, check)

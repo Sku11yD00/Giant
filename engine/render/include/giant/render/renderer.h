@@ -206,7 +206,7 @@ struct FrameInput {
 struct RenderStats {
     u32 instances = 0; // with at least one cluster drawn (GPU culling: passing instance culling)
     u32 draws = 0;     // draw calls this frame (raster passes and shading)
-    u32 post_draws = 0; // full-screen passes after shading (screen reflections, anti-aliasing): fixed, not per object
+    u32 post_draws = 0; // full-screen passes after shading (screen reflections when on, anti-aliasing): fixed, not per object
     u32 clusters = 0;
     u32 triangles = 0;
     // GPU culling: the counts above come from the GPU, from a frame or two
@@ -405,6 +405,7 @@ private:
     rhi::PipelineHandle m_smaa_blend;
     rhi::PipelineHandle m_voxel_view;
     rhi::PipelineHandle m_reflect; // screen reflections, exposure and tone mapping
+    rhi::PipelineHandle m_resolve_direct; // shading without screen reflections, tone mapped in place
     rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables
     rhi::TextureHandle m_smaa_search;
     // Targets, sized to the frame.

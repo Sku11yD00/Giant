@@ -134,8 +134,8 @@ Renderer::~Renderer() {
     for (const rhi::PipelineHandle p :
          {m_raster_mesh, m_raster_vertex, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
-          m_smaa_blend, m_voxel_view, m_reflect, m_shadow_mesh, m_shadow_vertex, m_shadow_clear_pages,
-          m_shadow_clear_words, m_light_clear, m_light_voxels}) {
+          m_smaa_blend, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
+          m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels}) {
         m_device.destroy(p);
     }
     m_device.destroy(m_voxel_light);
@@ -244,6 +244,12 @@ bool Renderer::init() {
     resolve.cull = rhi::CullMode::none;
     resolve.name = "shade visibility";
     m_resolve = m_device.create_pipeline(resolve);
+    resolve.pixel = shaders::resolve_direct_ps(); // without screen reflections: finished in one pass
+    resolve.color_formats = {};
+    resolve.color_formats[0] = rhi::Format::rgba8_srgb;
+    resolve.color_count = 1;
+    resolve.name = "shade visibility (no screen reflections)";
+    m_resolve_direct = m_device.create_pipeline(resolve);
     rhi::GraphicsPipelineDesc reflect;
     reflect.vertex = shaders::reflect_vs();
     reflect.pixel = shaders::reflect_ps();
@@ -275,7 +281,8 @@ bool Renderer::init() {
     for (const rhi::PipelineHandle p :
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
           m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
-          m_reflect, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels}) {
+          m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
+          m_light_voxels}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1480,16 +1487,21 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const bool voxel_reflections = reflections && gi;
     const bool screen_reflections = reflections && settings.screen_space_reflections;
     cmd.begin_timing("shading");
-    // Shading writes radiance before exposure; the screen reflections pass
-    // then reflects it and tone maps it into `shaded`.
+    // With screen reflections, shading writes radiance before exposure and
+    // the screen reflections pass reflects it and tone maps it into
+    // `shaded`; without, shading tone maps into `shaded` itself.
     rhi::RenderPassDesc pass;
     const Vec3& bg = light.background;
-    pass.colors[0] = {m_radiance, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 0.0f}};
-    pass.colors[1] = {m_gloss, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
-    pass.colors[2] = {m_fallback, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
-    pass.color_count = 3;
+    if (screen_reflections) {
+        pass.colors[0] = {m_radiance, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 0.0f}};
+        pass.colors[1] = {m_gloss, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+        pass.colors[2] = {m_fallback, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+        pass.color_count = 3;
+    } else {
+        pass.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
+    }
     cmd.begin_render_pass(pass);
-    cmd.set_pipeline(m_resolve);
+    cmd.set_pipeline(screen_reflections ? m_resolve : m_resolve_direct);
     gpu::ResolvePush push{};
     set4(push.background, bg, 1.0f);
     push.frame = data.frame.descriptor;
@@ -1579,31 +1591,31 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.draw(3);
     ++m_stats.draws;
     cmd.end_render_pass();
-    // Screen reflections from this frame's radiance, then exposure and
-    // tone mapping.
-    cmd.barrier(m_radiance, rhi::ResourceState::shader_read);
-    cmd.barrier(m_gloss, rhi::ResourceState::shader_read);
-    cmd.barrier(m_fallback, rhi::ResourceState::shader_read);
     if (screen_reflections) {
+        // Screen reflections from this frame's radiance, then exposure and
+        // tone mapping.
+        cmd.barrier(m_radiance, rhi::ResourceState::shader_read);
+        cmd.barrier(m_gloss, rhi::ResourceState::shader_read);
+        cmd.barrier(m_fallback, rhi::ResourceState::shader_read);
         cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+        rhi::RenderPassDesc finish;
+        // Cleared all the same: defined where no draw is recorded (the null device).
+        finish.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
+        cmd.begin_render_pass(finish);
+        cmd.set_pipeline(m_reflect);
+        gpu::ReflectPush reflect{};
+        reflect.frame = data.frame.descriptor;
+        reflect.frame_offset = data.frame.offset;
+        reflect.radiance = m_device.read_descriptor(m_radiance);
+        reflect.gloss = m_device.read_descriptor(m_gloss);
+        reflect.fallback = m_device.read_descriptor(m_fallback);
+        reflect.depth = m_device.read_descriptor(m_depth);
+        reflect.on = 1;
+        cmd.push(reflect);
+        cmd.draw(3);
+        ++m_stats.post_draws;
+        cmd.end_render_pass();
     }
-    rhi::RenderPassDesc finish;
-    // Cleared all the same: defined where no draw is recorded (the null device).
-    finish.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
-    cmd.begin_render_pass(finish);
-    cmd.set_pipeline(m_reflect);
-    gpu::ReflectPush reflect{};
-    reflect.frame = data.frame.descriptor;
-    reflect.frame_offset = data.frame.offset;
-    reflect.radiance = m_device.read_descriptor(m_radiance);
-    reflect.gloss = m_device.read_descriptor(m_gloss);
-    reflect.fallback = m_device.read_descriptor(m_fallback);
-    reflect.depth = screen_reflections ? m_device.read_descriptor(m_depth) : reflect.radiance;
-    reflect.on = screen_reflections ? 1u : 0u;
-    cmd.push(reflect);
-    cmd.draw(3);
-    ++m_stats.post_draws;
-    cmd.end_render_pass();
     cmd.end_timing();
     m_stats.reflections = voxel_reflections;
     m_stats.screen_reflections = screen_reflections;

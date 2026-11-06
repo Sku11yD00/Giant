@@ -496,7 +496,9 @@ reflections are as sharp moving as standing still.
   pixel's radiance replaces the reflected light shading used. It fades out
   at the screen's edges, for rays coming back at the camera and from
   roughness 0.25 to 0.4 (mirror sharp: no blur yet). The same pass applies
-  exposure and tone mapping, so it always runs (`post_draws` counts it).
+  exposure and tone mapping (`post_draws` counts it); with screen
+  reflections off, shading tone maps in place instead (`ps_direct`), one
+  pass and one target as before.
 - Targets: 24 bytes a pixel (about 88 MB at 1440p). `RenderStats::
   reflections` and `screen_reflections` (`last_frame.reflections.voxel`
   and `.screen` over MCP) say which are on.

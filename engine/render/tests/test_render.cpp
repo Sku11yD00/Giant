@@ -433,15 +433,15 @@ GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a p
     frame.settings.gi = true;
     frame.settings.screen_space_reflections = false;
     st = s.draw(frame);
-    GIANT_CHECK(st.reflections && !st.screen_reflections && st.post_draws == 1);
+    GIANT_CHECK(st.reflections && !st.screen_reflections && st.post_draws == 0); // tone mapped in shading
     frame.settings.screen_space_reflections = true;
     frame.settings.debug_view = DebugView::lighting;
     st = s.draw(frame);
     GIANT_CHECK(st.reflections && st.screen_reflections);
-    // Views of the geometry have none (the pass still finishes the image).
+    // Views of the geometry have none.
     frame.settings.debug_view = DebugView::clusters;
     st = s.draw(frame);
-    GIANT_CHECK(!st.reflections && !st.screen_reflections && st.post_draws == 1);
+    GIANT_CHECK(!st.reflections && !st.screen_reflections && st.post_draws == 0);
     frame.settings.debug_view = DebugView::voxels;
     st = s.draw(frame);
     GIANT_CHECK(!st.reflections && !st.screen_reflections && st.post_draws == 0);
