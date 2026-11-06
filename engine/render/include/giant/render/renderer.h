@@ -437,7 +437,7 @@ private:
     // Global illumination.
     std::unique_ptr<VoxelLight> m_light_plan;
     rhi::BufferHandle m_voxel_light; // u32 per voxel, beside the brick pool (made on first use)
-    bool m_voxel_light_logged = false;
+    bool m_voxel_light_failed = false; // could not be made: not tried again until gi is turned off and on
     bool m_gi_on = false; // this frame
     rhi::PipelineHandle m_light_clear;
     rhi::PipelineHandle m_light_voxels;

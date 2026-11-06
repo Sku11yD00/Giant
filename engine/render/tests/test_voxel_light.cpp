@@ -146,7 +146,7 @@ GIANT_TEST("gi light: new bricks are cleared and lit first, then every brick in 
     GIANT_CHECK(round == owned);
 }
 
-GIANT_TEST("gi light: changed bricks go before the round; after a pause everything starts afresh") {
+GIANT_TEST("gi light: changed bricks go before the round; after a pause what was placed meanwhile is cleared") {
     Bench b;
     GIANT_CHECK(b.voxels->init());
     Instance ground;
@@ -182,20 +182,58 @@ GIANT_TEST("gi light: changed bricks go before the round; after a pause everythi
     for (const u32 i : rebuilt) if (b.voxels->pool_brick(i, level, brick)) first.insert(i);
     GIANT_CHECK(jobs.size() >= first.size());
     GIANT_CHECK(std::set<u32>(jobs.begin(), jobs.begin() + static_cast<std::ptrdiff_t>(first.size())) == first);
-    // Off for a while (the world changes meanwhile): back on, every brick
-    // is cleared and lit afresh.
+    // Off for a while (the world changes meanwhile): back on, the bricks
+    // put in the pool meanwhile are cleared and lit first, the rest keep
+    // their light.
     light.off();
     GIANT_CHECK(light.stats().lit == 0 && light.jobs().empty());
-    b.instances[1].position.x -= 3.0;
+    const u64 before = b.voxels->placements();
+    b.instances[1].position.y += 3.0; // up into bricks of its own (new in the pool)
     b.step();
+    b.step();
+    std::set<u32> meanwhile;
+    for (const u32 i : b.owned()) if (b.voxels->placed_at(i) > before) meanwhile.insert(i);
+    GIANT_CHECK(!meanwhile.empty() && meanwhile.size() < b.owned().size());
+    light.plan(*b.voxels, 1);
+    GIANT_CHECK(std::set<u32>(light.clears().begin(), light.clears().end()) == meanwhile);
+    GIANT_CHECK(light.stats().lit == 1 && light.stats().waiting == meanwhile.size() - 1);
+    // Clears lost (out of memory): the next plan clears them again.
+    light.lost();
     b.step();
     light.plan(*b.voxels, 1);
-    GIANT_CHECK(std::set<u32>(light.clears().begin(), light.clears().end()) == b.owned());
-    GIANT_CHECK(light.stats().lit == 1 && light.stats().waiting == b.owned().size() - 1);
+    GIANT_CHECK(std::set<u32>(light.clears().begin(), light.clears().end()) == meanwhile);
     // A zero budget still lights one.
     b.step();
     light.plan(*b.voxels, 0);
     GIANT_CHECK(light.stats().lit == 1);
+}
+
+GIANT_TEST("gi light: a quarter of the budget goes round while new bricks keep coming") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    Instance ground;
+    ground.mesh = 0;
+    ground.position = {0.0, -0.05, 0.0};
+    ground.scale = {1000.0f, 0.1f, 1000.0f};
+    b.instances = {ground};
+    b.step();
+    VoxelLight light(b.voxels->capacity());
+    // Many new bricks every frame (the camera flying on): the urgent ones
+    // never drain, yet the round still reaches every brick.
+    std::set<u32> round;
+    u32 most_waiting = 0;
+    for (int frame = 0; frame < 400; ++frame) {
+        b.camera.x += 1.0; // a new slab of bricks every other frame (2 m bricks)
+        b.step();
+        light.plan(*b.voxels, 8);
+        GIANT_CHECK(light.stats().lit == 8);
+        most_waiting = std::max(most_waiting, light.stats().waiting);
+        for (const u32 i : indices_of(light.jobs())) round.insert(i);
+    }
+    GIANT_CHECK(most_waiting > 64); // the new ones did pile up
+    u32 owned_lit = 0;
+    for (const u32 i : b.owned()) owned_lit += round.count(i) != 0 ? 1u : 0u;
+    GIANT_CHECK(owned_lit == b.owned().size());
 }
 
 GIANT_TEST("gi light: the renderer lights voxels in the lit views and the voxel view only") {
@@ -246,10 +284,10 @@ GIANT_TEST("gi light: the renderer lights voxels in the lit views and the voxel 
     frame.settings.debug_view = DebugView::clusters;
     st = draw();
     GIANT_CHECK(!st.gi && st.gi_lit == 0 && !timed());
-    // Back in the lit view, everything is cleared and lit afresh.
+    // Back in the lit view, nothing was placed meanwhile: nothing cleared.
     frame.settings.debug_view = DebugView::lit;
     st = draw();
-    GIANT_CHECK(st.gi && st.gi_cleared == st.voxel_bricks);
+    GIANT_CHECK(st.gi && st.gi_cleared == 0 && st.gi_lit == 4);
     // Off, or with the voxel world off: none.
     frame.settings.gi = false;
     GIANT_CHECK(!draw().gi);

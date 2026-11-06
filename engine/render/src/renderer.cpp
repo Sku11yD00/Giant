@@ -1148,6 +1148,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const bool lit_view = settings.debug_view == DebugView::lit || settings.debug_view == DebugView::lighting;
     // Global illumination: the voxel world lit (in the lit views and the
     // voxel view), a budgeted number of bricks a frame.
+    if (!settings.gi) {
+        m_voxel_light_failed = false; // try again when turned back on
+    }
     m_gi_on = settings.gi && settings.voxel_world && (lit_view || settings.debug_view == DebugView::voxels) &&
               ensure_voxel_light();
     if (m_gi_on) {
@@ -1362,6 +1365,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         data.voxel_levels = cmd.upload(bytes_of(m_voxel_levels));
     }
     if (data.frame.data == nullptr || data.meshes.data == nullptr || data.materials.data == nullptr) {
+        if (m_gi_on) {
+            m_light_plan->lost(); // this frame's clears never ran
+        }
         return; // out of memory: the device is lost
     }
     light_voxels(cmd, data);
@@ -1666,21 +1672,21 @@ void Renderer::copy_streaming_stats() {
 }
 
 bool Renderer::ensure_voxel_light() {
-    if (!m_voxel_light.valid()) {
+    if (!m_voxel_light.valid() && !m_voxel_light_failed) {
         rhi::BufferDesc desc;
         desc.size = u64{m_voxels->capacity()} * voxel::k_brick_voxels * 4;
         desc.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
         desc.name = "voxel light";
         m_voxel_light = m_device.create_buffer(desc);
         if (!m_voxel_light.valid()) {
-            if (!m_voxel_light_logged) {
-                m_voxel_light_logged = true;
-                log_error("render", "could not create the voxel light pool (out of GPU memory?); no global illumination");
-            }
+            // Not tried again every frame (a failing 64 MiB allocation each
+            // frame would hitch); turning gi off and on tries again.
+            m_voxel_light_failed = true;
+            log_error("render", "could not create the voxel light pool (out of GPU memory?); no global illumination");
             return false;
         }
     }
-    return true;
+    return m_voxel_light.valid();
 }
 
 void Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
@@ -1690,7 +1696,9 @@ void Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
     cmd.begin_timing("gi");
     const std::span<const u32> clears = m_light_plan->clears();
     const std::span<const gpu::LightJob> jobs = m_light_plan->jobs();
-    if (data.voxel_levels.data != nullptr && (!clears.empty() || !jobs.empty())) {
+    if (data.voxel_levels.data == nullptr) {
+        m_light_plan->lost(); // out of memory: nothing lit, the clears again next time
+    } else if (!clears.empty() || !jobs.empty()) {
         gpu::LightPush push{};
         push.frame = data.frame.descriptor;
         push.frame_offset = data.frame.offset;
@@ -1704,7 +1712,12 @@ void Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
         cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // after last frame's reads
         if (!clears.empty()) {
             const rhi::TransientMemory list = cmd.upload_array(clears);
-            if (list.data != nullptr) {
+            if (list.data == nullptr) {
+                m_light_plan->lost();
+                cmd.end_timing();
+                return; // lighting bricks not cleared would read another brick's light
+            }
+            {
                 cmd.set_pipeline(m_light_clear);
                 push.jobs = list.descriptor;
                 for (usize first = 0; first < clears.size(); first += 65535) { // groups per dimension

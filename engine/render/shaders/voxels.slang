@@ -44,13 +44,13 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     w.stand_ins = 0u; // every voxel
     float t;
     uint packed;
-    uint where;
-    if (march_voxels(w, dir, f.near_plane, 3.0e38, float4(0.0, 0.0, 0.0, -1.0), t, packed, where)) {
+    uint hit_at;
+    if (march_voxels(w, dir, f.near_plane, 3.0e38, float4(0.0, 0.0, 0.0, -1.0), t, packed, hit_at)) {
         const float3 normal = unpack_normal(packed);
         const float3 albedo = unpack_color(packed);
         float3 lit;
         if (push.light_on != 0u) {
-            lit = voxel_radiance(f, packed, write_buffer(push.light).Load(where * 4)) * f.exposure;
+            lit = voxel_radiance(f, packed, write_buffer(push.light).Load(hit_at * 4)) * f.exposure;
         } else {
             const float3 sun = f.sun_light.xyz * max(dot(normal, f.sun_direction.xyz), 0.0);
             const float3 ambient = lerp(f.ground_light.xyz, f.sky_light.xyz, normal.y * 0.5 + 0.5);

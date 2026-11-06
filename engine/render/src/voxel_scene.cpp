@@ -123,6 +123,7 @@ bool VoxelScene::init() {
     m_occupancy.assign(m_capacity, {});
     m_has_stand_in.assign(m_capacity, 0);
     m_owner.assign(m_capacity, ~0u);
+    m_placed_at.assign(m_capacity, 0);
     m_stand_in_bricks.assign(levels, 0);
     m_free.clear();
     for (u32 i = m_capacity; i > 0; --i) {
@@ -928,6 +929,7 @@ bool VoxelScene::finish_build(rhi::CommandList& cmd, bool& pool_writable) {
     } else {
         m_placed.push_back(index);
         m_owner[index] = s;
+        m_placed_at[index] = ++m_placements;
     }
     if (!here) {
         set_slot(level, slot, index, key.brick);

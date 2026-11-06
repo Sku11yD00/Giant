@@ -40,11 +40,11 @@ uint pack_light(float3 c, bool sun) {
         ++e;
     }
     float scale = 512.0 / exp2(float(e) - 9.0);
-    if (uint(round(peak * scale)) > 511u && e < 15u) {
+    if (uint(floor(peak * scale + 0.5)) > 511u && e < 15u) {
         ++e;
         scale *= 0.5;
     }
-    const uint3 m = min(uint3(round(v * scale)), uint3(511u, 511u, 511u));
+    const uint3 m = min(uint3(floor(v * scale + 0.5)), uint3(511u, 511u, 511u)); // halves up, as std::lround
     return m.x | (m.y << 9) | (m.z << 18) | (e << 27) | (sun ? 0x80000000u : 0u);
 }
 
@@ -53,9 +53,12 @@ float3 sky_radiance(Frame f, float3 dir) {
     return lerp(f.ground_light.rgb, f.sky_light.rgb, dir.y * 0.5 + 0.5);
 }
 
-// What a filled voxel sends back (diffuse, the same every way): its colour
-// times the sun (if it reaches it) and the light reaching it. Not lit yet:
-// the sky colours stand in.
+static const float k_gi_pi = 3.14159265;
+
+// What a filled voxel sends back (diffuse, the same every way), as shading
+// lights a Lambert surface: its colour times the sun over pi (if it
+// reaches it) plus the light reaching it (ambient-like, as the flat sky
+// colours are). Not lit yet: the sky colours stand in.
 float3 voxel_radiance(Frame f, uint packed, uint light) {
     const float3 albedo = unpack_color(packed);
     const float3 n = unpack_normal(packed);
@@ -63,15 +66,17 @@ float3 voxel_radiance(Frame f, uint packed, uint light) {
         return albedo * sky_radiance(f, n);
     }
     const float sun = light_sun(light) ? saturate(dot(n, f.sun_direction.xyz)) : 0.0;
-    return albedo * (f.sun_light.rgb * sun + unpack_light(light));
+    return albedo * (f.sun_light.rgb * (sun / k_gi_pi) + unpack_light(light));
 }
 
 // The voxel at a camera-relative point on the finest level from `min_level`
 // up whose window holds it (a slot not built yet: the next coarser level).
 // False past the coarsest window. `level` is the level looked at; `index`
-// and `voxel` place a filled one (pool index, voxel in the brick).
+// and `voxel` place a filled one (pool index, voxel in the brick), `centre`
+// its centre (camera-relative).
 bool voxel_at(VoxelWorld w, ByteAddressBuffer levels, ByteAddressBuffer pool, ByteAddressBuffer table, float3 p,
-              uint min_level, out uint level, out bool filled, out uint index, out uint voxel) {
+              uint min_level, out uint level, out bool filled, out uint index, out uint voxel, out float3 centre) {
+    centre = p;
     level = 0u;
     filled = false;
     index = k_no_brick;
@@ -99,6 +104,7 @@ bool voxel_at(VoxelWorld w, ByteAddressBuffer levels, ByteAddressBuffer pool, By
         const uint at = uint(v.x + 8 * (v.y + 8 * v.z));
         const uint word = pool.Load(found * k_brick_bytes + (at >> 5) * 4);
         filled = ((word >> (at & 31u)) & 1u) != 0u;
+        centre = brick_min + (float3(v) + 0.5) * size;
         index = found;
         voxel = at;
         return true;
@@ -115,11 +121,13 @@ static const uint k_cone_steps = 24;
 
 // The light arriving along a cone from `origin` (camera-relative) along
 // `dir` (unit), from `t` on, sampling levels `min_level` and up with
-// samples as wide as the cone (at most half its width, so a sample never
-// reaches back over the surface the cone leaves). Whatever gets through
-// comes from the sky.
-float3 trace_cone(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origin, float3 dir, uint min_level,
-                  float t) {
+// samples about half as wide as the cone. Filled voxels whose centre is
+// less than half a voxel above `ground` (the plane of the surface the cone
+// leaves: unit normal, offset) are its own surface, coarse voxels being
+// fuller than what they hold: left out. Whatever gets through comes from
+// the sky.
+float3 trace_cone(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origin, float3 dir, float4 ground,
+                  uint min_level, float t) {
     ByteAddressBuffer levels = read_buffer(w.levels);
     ByteAddressBuffer pool = read_buffer(w.pool);
     ByteAddressBuffer table = read_buffer(w.table);
@@ -135,8 +143,13 @@ float3 trace_cone(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origi
         bool filled;
         uint index;
         uint voxel;
-        if (!voxel_at(w, levels, pool, table, origin + dir * t, level, used, filled, index, voxel)) {
+        float3 centre;
+        if (!voxel_at(w, levels, pool, table, origin + dir * t, level, used, filled, index, voxel, centre)) {
             break; // past the coarsest window
+        }
+        const float size = load_level(levels, w.levels_offset, used).brick_size / 8.0;
+        if (filled) {
+            filled = dot(ground.xyz, centre) - ground.w >= 0.5 * size;
         }
         if (filled) {
             const uint packed = pool.Load(index * k_brick_bytes + 64 + voxel * 4);
@@ -144,24 +157,26 @@ float3 trace_cone(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origi
             color += (1.0 - a) * k_cone_alpha * voxel_radiance(f, packed, lw);
             a += (1.0 - a) * k_cone_alpha;
         }
-        const float size = load_level(levels, w.levels_offset, used).brick_size / 8.0;
         t += max(width * 0.5, size * 0.5);
     }
     return color + (1.0 - a) * sky_radiance(f, dir);
 }
 
-// Six cones over the hemisphere around `n`: one up it, five around at 60
-// degrees, weighted by the cosine (a quarter, and 0.15 each).
-float3 gather_cones(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origin, float3 n, uint min_level,
-                    float t) {
+// Six cones over the hemisphere around `n` from a voxel at `centre`
+// (starting at `origin`): one up the normal, five around at 60 degrees,
+// weighted by the cosine-weighted solid angle each covers (a quarter for
+// the one up, 0.15 for each of the others).
+float3 gather_cones(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origin, float3 n, float3 centre,
+                    uint min_level, float t) {
+    const float4 ground = float4(n, dot(n, centre));
     const float3 helper = abs(n.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
     const float3 tx = normalize(cross(helper, n));
     const float3 ty = cross(n, tx);
-    float3 sum = 0.25 * trace_cone(w, light, f, origin, n, min_level, t);
+    float3 sum = 0.25 * trace_cone(w, light, f, origin, n, ground, min_level, t);
     for (uint k = 0; k < 5; ++k) {
         const float phi = float(k) * (6.2831853 / 5.0);
         const float3 dir = n * 0.5 + (tx * cos(phi) + ty * sin(phi)) * 0.8660254;
-        sum += 0.15 * trace_cone(w, light, f, origin, dir, min_level, t);
+        sum += 0.15 * trace_cone(w, light, f, origin, dir, ground, min_level, t);
     }
     return sum;
 }
@@ -169,8 +184,8 @@ float3 gather_cones(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 ori
 // --- Shading's lookup -----------------------------------------------------
 
 // The light around a surface point (camera-relative, normal `n`) on one
-// level: the lit voxels of the 2 x 2 x 2 around it (half a voxel out along
-// the normal), weighted by distance and by how much they face the same way
+// level: the lit voxels of the 2 x 2 x 2 around it, weighted by distance
+// and by how much they face the same way
 // (a wall's other side, or the floor under a wall, does not count). rgb:
 // the weighted sum, a: the weights' (0: nothing lit there).
 float4 bounce_on_level(VoxelWorld w, RWByteAddressBuffer light, ByteAddressBuffer levels, ByteAddressBuffer pool,
@@ -179,7 +194,10 @@ float4 bounce_on_level(VoxelWorld w, RWByteAddressBuffer light, ByteAddressBuffe
     const int n_axis = int(w.bricks_per_axis);
     const uint slots = uint(n_axis * n_axis * n_axis);
     const float size = l.brick_size / 8.0;
-    const float3 g = (p + n * (0.5 * size) - l.origin) / size - 0.5;
+    // At the point itself, not pushed out along the normal: a surface on a
+    // voxel boundary (its voxel on one side, whichever way it faces) still
+    // gets half the weight.
+    const float3 g = (p - l.origin) / size - 0.5;
     const int3 base = int3(floor(g));
     const float3 within = g - float3(base);
     float3 sum = float3(0.0, 0.0, 0.0);

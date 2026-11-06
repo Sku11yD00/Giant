@@ -354,8 +354,8 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
             const float3 dir = normalize(f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz);
             float t;
             uint packed;
-            uint where;
-            if (march_voxels(w, dir, extras.far_start, mesh_t, skip, t, packed, where)) {
+            uint hit_at;
+            if (march_voxels(w, dir, extras.far_start, mesh_t, skip, t, packed, hit_at)) {
                 const float3 world = dir * t;
                 const float3 vn = unpack_normal(packed);
                 const float far_pixel = t * 2.0 / max(f.p11 * f.height, 1e-6);
@@ -363,7 +363,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
                 // The voxel's own light word.
                 float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
                 if (extras.gi_on != 0) {
-                    const uint lw = write_buffer(extras.gi_light).Load(where * 4);
+                    const uint lw = write_buffer(extras.gi_light).Load(hit_at * 4);
                     bounce = light_lit(lw) ? float4(unpack_light(lw), 1.0) : bounce;
                 }
                 const float3 albedo = lighting_view ? k_lighting_albedo : unpack_color(packed);

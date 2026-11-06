@@ -663,6 +663,7 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
             run("set_render_settings", {{"shadow_pages_per_frame", std::clamp(pages, 1, 4096)}});
         }
         ImGui::EndDisabled();
+        ImGui::BeginDisabled(!r.voxel_world);
         bool gi = r.gi;
         if (ImGui::Checkbox("Global illumination", &gi)) {
             run("set_render_settings", {{"gi", gi}});
@@ -671,6 +672,7 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::SliderInt("GI bricks a frame", &gi_bricks, 1, 4096, "%d", ImGuiSliderFlags_Logarithmic)) {
             run("set_render_settings", {{"gi_bricks_per_frame", std::clamp(gi_bricks, 1, 4096)}});
         }
+        ImGui::EndDisabled();
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {
             ImGui::TextDisabled(m_state.dotnet_available ? "None loaded (load_scripts command)."

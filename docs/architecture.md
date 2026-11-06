@@ -418,22 +418,32 @@ as standing still.
   cosine weighted, 30 degree half angle) gather the light. A cone steps
   out through the clipmap, sampling the level whose voxels are about half
   its width (the coarser levels serve as its wider samples), each filled
-  voxel taking 85% of what is left; what a voxel sends back is its colour
-  times the sun (when its bit says the sun reaches it) plus its own light
-  word, so light bounces once more each time a brick is lit again. What
+  voxel taking 85% of what is left; voxels straddling the surface the
+  cone leaves (centre less than half a voxel above its plane) are left
+  out, as coarse voxels are fuller than what they hold (the sun march
+  leaves them out the same way). What a voxel sends back is lit as
+  shading lights a Lambert surface: its colour times the sun over pi
+  (when its bit says the sun reaches it) plus its own light word, so
+  light bounces once more each time a brick is lit again. What
   gets through comes from the sky (the sky and ground colours by
   direction).
 - `VoxelLight` picks the bricks on the CPU: a brick just put in a pool
   index is first cleared to "not lit" (what the index held was another
   brick's), then lit before anything else, as is a brick built again in
   place (it keeps its old light meanwhile); the rest are lit again in
-  turn, round the pool. So a moving sun or a change nearby reaches every
-  brick within (bricks / budget) frames (a few hundred frames for a full
-  pool at the default). Turned off and on again (or after a debug view
-  without it), every brick is cleared and lit afresh.
+  turn, round the pool, with a quarter of the budget always kept for the
+  round (so it goes on while the camera flies and new bricks keep
+  coming). So a moving sun or a change nearby reaches every brick within
+  (bricks / budget) frames, about (4/3 x) that while new bricks keep
+  coming (a few hundred frames for a full pool at the default). Turned off
+  and on again (or after a debug view without it), the bricks put in the
+  pool meanwhile are cleared (the voxel world numbers its placements);
+  the rest keep their light until the round reaches them. If a frame's
+  clears are lost (out of memory), the next frame clears them again.
 - Shading looks the light up per pixel (`voxel_bounce`): on the finest
-  level that holds the point, the 2 x 2 x 2 voxels around it (half a voxel
-  out along the normal), weighted by distance and by how far each faces
+  level that holds the point, the 2 x 2 x 2 voxels around it (at the
+  point itself, so a surface on a voxel boundary gets the same weight
+  whichever way it faces), weighted by distance and by how far each faces
   the same way as the surface (a wall's other side, the floor under it, do
   not count). Where none there is lit, the next levels up; over the last
   brick before a window's edge it blends with the next level up, so the

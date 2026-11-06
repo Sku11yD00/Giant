@@ -12,9 +12,13 @@
 //   which it is next, the same way;
 // - the rest are lit again in turn, round the pool, so moving sun and
 //   changing surroundings reach every brick within (bricks / budget)
-//   frames, and light bounces once more each time round.
-// Nothing is lit when global illumination is off; turned on again, every
-// brick is cleared and lit afresh (they missed what changed meanwhile).
+//   frames, and light bounces once more each time round. A quarter of the
+//   budget is kept for the round, so it goes on while new bricks keep
+//   coming (the camera flying fast).
+// Nothing is lit when global illumination is off; turned on again, the
+// bricks put in the pool meanwhile are cleared and lit first (the voxel
+// world numbers its placements), the rest keep their light until the round
+// comes to them.
 #pragma once
 
 #include "giant/core/types.h"
@@ -44,9 +48,12 @@ public:
     // This frame's work, after the voxel world's update: up to `budget`
     // bricks lit (at least one when any are in the pool).
     void plan(const VoxelScene& scene, u32 budget);
-    // A frame without global illumination: what the voxel world does
-    // meanwhile is not followed, so next time everything starts afresh.
+    // A frame without global illumination: what the voxel world places
+    // meanwhile is caught up with next time.
     void off();
+    // This frame's clears never reached the GPU (out of memory): next
+    // time, what was placed since the frame before is cleared again.
+    void lost();
 
     std::span<const u32> clears() const { return m_clears; }       // pool indices
     std::span<const gpu::LightJob> jobs() const { return m_jobs; }
@@ -56,12 +63,15 @@ private:
     void queue(u32 index);
 
     u32 m_capacity = 0;
-    bool m_fresh = true; // everything to be cleared and lit (first frame, or after off())
+    bool m_catch_up = true; // first frame, or after off() / lost(): look for what was placed meanwhile
+    u64 m_seen = 0;         // the voxel world's placements() as of the last plan
+    u64 m_seen_before = 0;  // ...and as of the one before it (lost())
     std::vector<u32> m_clears;
     std::vector<gpu::LightJob> m_jobs;
     std::deque<u32> m_urgent;  // pool indices to light before the round
     std::vector<u8> m_queued;  // per pool index: in m_urgent
     std::vector<u32> m_stamp;  // per pool index: the plan() that last lit it
+    std::vector<u32> m_cleared; // per pool index: the plan() that last cleared it
     u32 m_frame = 0;
     u32 m_cursor = 0;          // the round's next pool index
     VoxelLightStats m_stats;

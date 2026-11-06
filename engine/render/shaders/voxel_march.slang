@@ -114,10 +114,13 @@ uint slot_of(int3 brick, int n) {
 // (xyz: camera-relative centre, w: radius; negative: none) is a stand-in
 // still drawn as a mesh at t_limit: its own voxels, within two voxels of
 // its bounding sphere, do not count (they would cover it), others in
-// front of it do.
+// front of it do. `ground` (xyz: unit normal, w: offset; a camera-relative
+// plane) leaves out voxels whose centre is less than half a voxel above
+// it: a ray leaving a surface does not meet that surface's own voxels,
+// however coarse the level it goes on in (zero normal: none left out).
 bool march_voxels_from(VoxelWorld w, float3 origin, float3 dir, uint first_level, float t_start, float t_limit,
-                       float4 skip, out float hit_t, out uint packed, out uint where) {
-    where = 0u;
+                       float4 skip, float4 ground, out float hit_t, out uint packed, out uint hit_at) {
+    hit_at = 0u;
     hit_t = 0.0;
     packed = 0u;
     // No division by zero: axis-parallel rays get a tiny slope.
@@ -226,10 +229,13 @@ bool march_voxels_from(VoxelWorld w, float3 origin, float3 dir, uint first_level
         const int3 v = clamp(int3(floor((p - sample_min) / voxel)), int3(0, 0, 0), int3(7, 7, 7));
         const uint i = uint(v.x + 8 * (v.y + 8 * v.z));
         const uint word = pool.Load(base + (stand_ins ? k_stand_in_offset : 0u) + (i >> 5) * 4);
-        if (((word >> (i & 31u)) & 1u) != 0u && !(skip.w >= 0.0 && length(p - skip.xyz) < skip.w + 2.0 * voxel)) {
+        const float3 centre = sample_min + (float3(v) + 0.5) * voxel;
+        const bool own = dot(ground.xyz, centre) - ground.w < 0.5 * voxel && dot(ground.xyz, ground.xyz) > 0.5;
+        if (((word >> (i & 31u)) & 1u) != 0u && !(skip.w >= 0.0 && length(p - skip.xyz) < skip.w + 2.0 * voxel) &&
+            !own) {
             hit_t = t;
             packed = pool.Load(base + 64 + i * 4);
-            where = index * 512u + i;
+            hit_at = index * 512u + i;
             return true;
         }
         float step_to;
@@ -247,6 +253,7 @@ bool march_voxels_from(VoxelWorld w, float3 origin, float3 dir, uint first_level
 
 // From the camera: the view ray through a pixel.
 bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4 skip, out float hit_t,
-                  out uint packed, out uint where) {
-    return march_voxels_from(w, float3(0.0, 0.0, 0.0), dir, 0u, t_start, t_limit, skip, hit_t, packed, where);
+                  out uint packed, out uint hit_at) {
+    return march_voxels_from(w, float3(0.0, 0.0, 0.0), dir, 0u, t_start, t_limit, skip, float4(0.0, 0.0, 0.0, 0.0),
+                             hit_t, packed, hit_at);
 }
