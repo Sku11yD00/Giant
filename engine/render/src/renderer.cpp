@@ -1427,7 +1427,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
     }
     data.meshes = cmd.upload(bytes_of(table));
-    if (far_field || m_gi_on || settings.debug_view == DebugView::voxels) {
+    // The weather's cover map reads the voxel world too.
+    const bool weather_cover = frame.sky.on && settings.weather_cover && settings.voxel_world &&
+                               (frame.sky.rain > 0.0f || frame.sky.snow > 0.0f || frame.sky.wetness > 0.0f ||
+                                frame.sky.snow_cover > 0.0f);
+    if (far_field || m_gi_on || settings.debug_view == DebugView::voxels || weather_cover) {
         m_voxel_levels.resize(m_voxels->levels());
         m_voxels->write_levels(m_voxel_levels.data(), frame.view.position);
         data.voxel_levels = cmd.upload(bytes_of(m_voxel_levels));
@@ -1988,8 +1992,9 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     p.snow_cover = unit(sky.snow_cover);
     p.wind[0] = std::clamp(finite(sky.wind.x, 0.0f), -200.0f, 200.0f);
     p.wind[1] = std::clamp(finite(sky.wind.z, 0.0f), -200.0f, 200.0f);
-    // Wrapped at an hour: what falls repeats long before (a fall is seconds).
-    p.time = static_cast<float>(std::isfinite(sky.time) ? std::fmod(std::max(sky.time, 0.0), 3600.0) : 0.0);
+    // Wrapped: what falls repeats every 64 s without a seam.
+    // (3584 s: a whole number of apply_falling's 64 s cycles.)
+    p.time = static_cast<float>(std::isfinite(sky.time) ? std::fmod(std::max(sky.time, 0.0), 3584.0) : 0.0);
     const auto wrap_place = [](double v) {
         const double m = std::fmod(v, k_weather_wrap);
         return std::isfinite(m) ? static_cast<float>(m < 0.0 ? m + k_weather_wrap : m) : 0.0f;

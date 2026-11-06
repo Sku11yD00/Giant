@@ -651,11 +651,11 @@ def weather_gate(tool, call, check):
         check(clear[2] > clear[0] + 20, f"the clear sky is blue, got {clear}")
         check(abs(grey[2] - grey[0]) < abs(clear[2] - clear[0]), f"overcast is greyer, got {grey} against {clear}")
     # N3 part 8: snow falls and lies on the ground; rain wets it.
-    tool("set_weather", {"preset": "snow"})
+    tool("set_weather", {"preset": "snow", "snow_cover": 1})  # a preset alone keeps the ground as it is
     state = frames()
     check(state["falling"]["snow"] > 0 and state["falling"]["rain"] == 0 and state["ground"]["snow_cover"] == 1
           and state["sky"]["falling"] and state["sky"]["wet_surfaces"], f"snow falls and lies, got {state}")
-    tool("set_weather", {"preset": "rain", "wetness": 0.5})
+    tool("set_weather", {"preset": "rain", "wetness": 0.5, "snow_cover": 0})
     state = frames()
     check(state["falling"]["rain"] > 0 and state["ground"]["snow_cover"] == 0
           and abs(state["ground"]["wetness"] - 0.5) < 0.05, f"rain on half-wet ground, got {state}")

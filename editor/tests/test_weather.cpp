@@ -180,6 +180,15 @@ GIANT_TEST("weather state: the ground wets in rain, snows over in the cold, and 
     const Json got = f.run("get_weather").value;
     GIANT_CHECK(got["falling"]["snow"].get<float>() > 0.0f && got["falling"]["rain"].get<float>() == 0.0f);
     GIANT_CHECK(got["ground"]["snow_cover"].get<float>() == 1.0f);
+    // One ground value given leaves the other where the weather took it.
+    GIANT_CHECK(f.run("set_weather", {{"snow_cover", 0.3}}).ok);
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
+    GIANT_CHECK(f.run("set_weather", {{"wetness", 0.5}}).ok);
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
+    GIANT_CHECK(std::fabs(f.weather.ground().snow_cover - 0.3f) < 0.01f);
+    GIANT_CHECK(std::fabs(f.weather.ground().wetness - 0.5f) < 0.01f);
+    GIANT_CHECK(f.run("set_weather", {{"snow_cover", 1}}).ok);
+    f.weather.update(f.state.scene.weather, 0.1, {}, 99);
     // The renderer is handed what falls and the ground.
     const render::Sky sky = weather_sky(f.state.scene.lighting, f.weather.shown(), f.weather.cloud_offset(),
                                         f.weather.ground(), f.weather.time());

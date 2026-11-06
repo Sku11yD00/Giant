@@ -505,6 +505,10 @@ Output shade_pixel(float4 position) {
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
                  push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
+    // Voxel cones follow the dry surface: rain makes all open ground glossy,
+    // and a cone on every wet pixel would cost the frame what a storm must
+    // not (the wet gloss shows in the screen's reflections and the sky's).
+    const float dry_rough = rough;
     if (sky_on && !lighting_view) {
         weather_surface(sky, world, base, rough, metal, n); // wet, puddles, snow
     }
@@ -526,9 +530,9 @@ Output shade_pixel(float4 position) {
     float4 cone = float4(0.0, 0.0, 0.0, 0.0);
     float cone_weight = 0.0;
     if ((extras.reflect_on & 1u) != 0u) {
-        cone_weight = saturate((k_voxel_reflection_rough - rough) / k_reflection_fade);
+        cone_weight = saturate((k_voxel_reflection_rough - dry_rough) / k_reflection_fade);
         if (cone_weight > 0.0) {
-            const float roughness = clamp(rough, 0.045, 1.0);
+            const float roughness = clamp(dry_rough, 0.045, 1.0);
             const float3 r = reflect(-safe_normalize(-world, n), n);
             VoxelWorld all_voxels = w;
             all_voxels.stand_ins = 0u; // everything reflects, not only the far field's stand-ins
