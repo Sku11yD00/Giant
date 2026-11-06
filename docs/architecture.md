@@ -560,8 +560,9 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   pixel (the wet gloss shows in screen and sky reflections). `apply_falling`
   draws rain streaks or snowflakes on five cylinders round the camera (1.5
   to 24 m), a hash per cell of a fixed size per cylinder, falling whole
-  cells per 64 s cycle so the time wraps without a jump, leaning with the
-  wind (not carried round: a carry would differ by view direction), none
+  cells per 64 s cycle so the time wraps without a jump, the drops and
+  their streaks leaning with the wind (a bounded shear, so cells never fold
+  across columns; not carried round, which would differ by view), none
   where sheltered: no particles, no history. Settings `precipitation`, `wet_surfaces`,
   `weather_cover`. Not yet: ripples, splashes, drips, wet voxel colours for
   GI, snow depth (it is a coat, not a volume).

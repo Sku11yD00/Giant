@@ -578,7 +578,8 @@ float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
     const float2 tangent = float2(-dh.y, dh.x);
     const bool flakes = snowy > 0.5; // one look or the other, so a blend never steps the cells
     const float speed = flakes ? 1.2 : 8.0;         // metres a second down
-    const float drift = dot(s.wind, tangent) * 0.8; // along the cylinder
+    const float wind = length(s.wind);
+    const float across_wind = wind > 1e-4 ? dot(s.wind / wind, tangent) : 0.0; // -1 to 1 along the cylinder
     const float cycle = fmod(s.time, k_fall_cycle);
     const float3 lit = s.sky_light * 0.7 + s.sun_light * (0.08 + 0.25 * snowy) * saturate(s.sun_direction.y * 2.0 + 0.2);
     float3 c = color;
@@ -603,12 +604,17 @@ float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
         // would differ by view direction and split the cells column by column.
         const float fall_cells = max(round(speed * k_fall_cycle / cell_v), 1.0);
         const float fall = fall_cells * cell_v / k_fall_cycle;
-        const float lean = clamp(drift / fall, -3.0, 3.0); // metres along for each metre down
+        // Metres along for each metre down. The lean turns with the view
+        // (a cosine of it), so its size and the height it shears are both
+        // bounded (1.5, half the radius): the cells never fold across the
+        // columns (their step per column stays above a quarter).
+        const float lean = across_wind * min(wind * 0.8 / fall, 1.5);
+        const float sheared = clamp(p.y, -0.5 * radius, 0.5 * radius);
         // Where this point was in the falling frame (cells), the height
         // taken within the hash's vertical period.
         const float period_v = fall_cells * cell_v;
         const float height = fmod(fmod(s.cam_alt, period_v) + period_v, period_v) + p.y;
-        const float2 g = float2((turn * 2.0 * k_pi_sky * radius + lean * p.y) / cell_u,
+        const float2 g = float2((turn * 2.0 * k_pi_sky * radius + lean * sheared) / cell_u,
                                 (height + fall * cycle) / cell_v);
         const float2 gi = floor(g);
         const int2 cell = int2(gi);
@@ -628,10 +634,10 @@ float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
             const float r = max(px * 0.9, 0.006);
             alpha = 0.85 * saturate(1.0 - length(d) / r);
         } else {
-            // A streak along its motion (down, with the drift), about 0.3 m long.
-            const float2 v = normalize(float2(lean, -1.0));
-            const float along = dot(d, v);
-            const float across = abs(d.x * v.y - d.y * v.x);
+            // A streak along its motion, about 0.3 m long: straight down in the
+            // sheared cells, so it follows the drops' lean.
+            const float along = d.y;
+            const float across = abs(d.x);
             alpha = 0.3 * saturate(1.0 - across / max(px * 0.7, 0.0015)) * saturate(1.0 - abs(along) / 0.15);
         }
         c = lerp(c, lit, alpha);
