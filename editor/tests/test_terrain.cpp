@@ -2,6 +2,7 @@
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
 #include "../src/scene_render.h"
+#include "../src/terrain_brush_tool.h"
 #include "../src/terrain_meshes.h"
 #include "../src/world_streaming.h"
 
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <chrono>
 #include <set>
 #include <thread>
@@ -440,4 +442,110 @@ GIANT_TEST("terrain commands: saved with the scene") {
     GIANT_CHECK(f.state.scene.terrain.size() == 2 && f.state.scene.terrain.tiles() == made.tiles());
     std::error_code e;
     std::filesystem::remove(file, e);
+}
+
+GIANT_TEST("terrain commands: sculpt a stroke, undone in one step; a drag's calls are one step too") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 2}}).ok);
+    ai::CommandResult r = f.run("sculpt_terrain", {{"op", "raise"}, {"points", {{20, 30}, {100, 30}}},
+                                                   {"radius", 6}, {"strength", 1}, {"falloff", 0}});
+    GIANT_CHECK(r.ok && r.value["tiles_changed"] == 2 && r.value["dabs"].get<int>() > 50);
+    const Terrain& t = f.state.scene.terrain;
+    GIANT_CHECK(t.height_at(60, 30).value() > 2.0 && t.height_at(60, 50).value() == 2.0);
+    GIANT_CHECK(f.run("undo").ok && t.height_at(60, 30).value() == 2.0);
+    GIANT_CHECK(f.run("redo").ok && t.height_at(60, 30).value() > 2.0);
+    GIANT_CHECK(f.run("undo").ok);
+    // Two calls in one merge group (a drag): one undo step.
+    const Json dab = {{"op", "flatten"}, {"points", {{10, 10}}}, {"height", -3}, {"strength", 1}, {"falloff", 0}};
+    GIANT_CHECK(f.commands.execute("sculpt_terrain", dab, {77, true}).ok);
+    Json dab2 = dab;
+    dab2["points"] = {{40, 10}};
+    GIANT_CHECK(f.commands.execute("sculpt_terrain", dab2, {77, true}).ok);
+    GIANT_CHECK(t.height_at(10, 10).value() == -3.0 && t.height_at(40, 10).value() == -3.0);
+    GIANT_CHECK(f.run("undo").ok && t.height_at(10, 10).value() == 2.0 && t.height_at(40, 10).value() == 2.0);
+    // Nothing there: nothing changes, no undo step; schema and reach checks.
+    const usize steps = f.commands.undo_history().size();
+    r = f.run("sculpt_terrain", {{"op", "lower"}, {"points", {{5000, 5000}}}});
+    GIANT_CHECK(r.ok && r.value["tiles_changed"] == 0 && f.commands.undo_history().size() == steps);
+    GIANT_CHECK(!f.run("sculpt_terrain", {{"op", "dig"}, {"points", {{0, 0}}}}).ok);
+    GIANT_CHECK(!f.run("sculpt_terrain", {{"op", "raise"}, {"points", {{0, 0}, {100000, 0}}}, {"radius", 100}}).ok);
+}
+
+GIANT_TEST("terrain commands: a height map makes ground over an area, black at low and white at high") {
+    Fixture f;
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("giant_height_map_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".r16");
+    {
+        // 2 x 2: black on the first row, white on the second.
+        std::ofstream out(file, std::ios::binary);
+        const char bytes[] = {0, 0, 0, 0, '\xFF', '\xFF', '\xFF', '\xFF'};
+        out.write(bytes, sizeof(bytes));
+    }
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {63, 63}}, {"samples", 16}, {"height", 7}}).ok);
+    ai::CommandResult r = f.run("import_height_map", {{"file", file.generic_string()}, {"from", {0, 0}},
+                                                      {"to", {100, 100}}, {"low", -10}, {"high", 30}});
+    GIANT_CHECK(r.ok && r.value["tiles"] == 4 && r.value["width"] == 2);
+    const Terrain& t = f.state.scene.terrain;
+    GIANT_CHECK(t.height_at(0, 0).value() == -10.0 && std::fabs(t.height_at(0, 100).value() - 30.0) < 1e-4);
+    GIANT_CHECK(std::fabs(t.height_at(40, 50).value() - 10.0) < 1e-4); // halfway: bilinear
+    GIANT_CHECK(t.find({1, 1})->at(16 * 16 - 1) == 30.0f); // past the area on a new tile: the image's edge
+    GIANT_CHECK(f.run("undo").ok && t.size() == 1 && t.height_at(10, 10).value() == 7.0);
+    GIANT_CHECK(!f.run("import_height_map", {{"file", "no/such/file.r16"}, {"from", {0, 0}}, {"to", {1, 1}}}).ok);
+    std::filesystem::remove(file);
+}
+
+GIANT_TEST("terrain brush tool: a ray from the camera finds the ground under the pointer") {
+    Terrain t;
+    t.set_samples(16);
+    t.set({0, 0}, Terrain::Heights(256, 3.0f));
+    EditorCamera camera;
+    camera.position = {32.0, 50.0, 32.0};
+    camera.pitch_degrees = -89.0f;
+    const Vec3 down = camera_ray(camera, 400.0f, 300.0f, 800.0f, 600.0f); // the middle of the window
+    GIANT_CHECK(down.y < -0.99f);
+    const auto hit = terrain_ray_hit(t, camera.position, down, 1000.0);
+    GIANT_CHECK(hit.has_value() && std::fabs(hit->y - 3.0) < 1e-3 && std::fabs(hit->x - 32.0) < 1.0);
+    // Looking up, or away from all ground: no hit.
+    GIANT_CHECK(!terrain_ray_hit(t, camera.position, {0.0f, 1.0f, 0.0f}, 1000.0).has_value());
+    GIANT_CHECK(!terrain_ray_hit(t, {500.0, 50.0, 500.0}, {0.0f, -1.0f, 0.0f}, 1000.0).has_value());
+    // The left edge of the window looks left of the middle.
+    camera.pitch_degrees = 0.0f;
+    const Vec3 left = camera_ray(camera, 0.0f, 300.0f, 800.0f, 600.0f);
+    GIANT_CHECK(left.x < -0.5f && std::fabs(left.y) < 1e-5f);
+}
+
+GIANT_TEST("terrain brush tool: a drag in the viewport sculpts under the pointer, as one undo step") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {63, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    f.state.camera.position = {32.0, 40.0, 32.0};
+    f.state.camera.pitch_degrees = -89.0f;
+    f.state.brush = {true, "raise", 6.0, 1.0f, 0.0f, 0.0f};
+    TerrainBrushTool tool;
+    const usize steps = f.commands.undo_history().size();
+    platform::InputEvent press;
+    press.type = platform::InputEvent::Type::mouse_button;
+    press.button = platform::MouseButton::left;
+    press.down = true;
+    press.x = 400.0f;
+    press.y = 300.0f;
+    tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    const Terrain& t = f.state.scene.terrain;
+    const double first = t.height_at(32.0, 32.0).value();
+    GIANT_CHECK(first > 0.9 && tool.stroking());
+    tool.update({}, false, 800.0f, 600.0f, 0.001f, f.state, f.commands); // held still, too soon: no dab
+    GIANT_CHECK(t.height_at(32.0, 32.0).value() == first);
+    tool.update({}, false, 800.0f, 600.0f, 0.05f, f.state, f.commands); // held: another dab
+    GIANT_CHECK(t.height_at(32.0, 32.0).value() > first);
+    platform::InputEvent release = press;
+    release.down = false;
+    tool.update({release}, false, 800.0f, 600.0f, 0.05f, f.state, f.commands);
+    GIANT_CHECK(!tool.stroking() && f.commands.undo_history().size() == steps + 1);
+    GIANT_CHECK(f.run("undo").ok && t.height_at(32.0, 32.0).value() == 0.0);
+    // Over a panel, or with the tool off, a click does nothing.
+    tool.update({press}, true, 800.0f, 600.0f, 0.05f, f.state, f.commands);
+    GIANT_CHECK(!tool.stroking());
+    f.state.brush.enabled = false;
+    tool.update({press}, false, 800.0f, 600.0f, 0.05f, f.state, f.commands);
+    GIANT_CHECK(!tool.stroking() && t.height_at(32.0, 32.0).value() == 0.0);
 }

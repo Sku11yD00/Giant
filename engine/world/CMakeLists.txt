@@ -3,6 +3,8 @@ giant_module(world
     src/scene.cpp
     src/terrain.cpp
     src/far_ground.cpp
+  src/terrain_brush.cpp
+  src/height_map.cpp
   DEPENDS core
 )
 # JSON stays private: the scene API is plain C++ types.

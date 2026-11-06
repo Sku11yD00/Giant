@@ -161,8 +161,34 @@ void EditorPanels::draw_scene_settings() {
         draw_outliner();
         draw_properties();
         draw_lighting();
+        draw_terrain_brush();
     }
     ImGui::End();
+}
+
+void EditorPanels::draw_terrain_brush() {
+    ImGui::SeparatorText("Terrain brush");
+    BrushSettings& b = m_state.brush;
+    ImGui::Checkbox("Sculpt (left mouse in the viewport)", &b.enabled);
+    static constexpr const char* k_ops[] = {"raise", "lower", "smooth", "flatten"};
+    int op = 0;
+    for (int k = 0; k < 4; ++k) {
+        if (b.op == k_ops[k]) op = k;
+    }
+    for (int k = 0; k < 4; ++k) {
+        if (k > 0) ImGui::SameLine();
+        if (ImGui::RadioButton(k_ops[k], op == k)) b.op = k_ops[k];
+    }
+    float radius = static_cast<float>(b.radius);
+    if (ImGui::SliderFloat("Radius (m)", &radius, 0.5f, 500.0f, "%.1f", ImGuiSliderFlags_Logarithmic)) {
+        b.radius = radius;
+    }
+    const bool metres = b.op == "raise" || b.op == "lower";
+    ImGui::SliderFloat(metres ? "Strength (m a dab)" : "Strength", &b.strength, 0.0f, metres ? 10.0f : 1.0f, "%.2f");
+    ImGui::SliderFloat("Falloff", &b.falloff, 0.0f, 1.0f, "%.2f");
+    if (b.op == "flatten") {
+        ImGui::DragFloat("Height (m)", &b.height, 0.1f, -10000.0f, 10000.0f, "%.1f");
+    }
 }
 
 void EditorPanels::create_ahead(ai::Json args) {

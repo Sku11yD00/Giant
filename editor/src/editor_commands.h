@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace giant::editor {
@@ -24,6 +25,17 @@ struct EditorCamera {
     float pitch_degrees = -10.0f; // up is positive, -89 to 89
     float vertical_fov_degrees = 60.0f;
     float speed = 8.0f; // metres per second when flying
+};
+
+// The viewport's terrain brush (editor/src/terrain_brush_tool.h): view
+// state, set in the Scene panel's Terrain section.
+struct BrushSettings {
+    bool enabled = false;
+    std::string op = "raise"; // sculpt_terrain's op
+    double radius = 8.0;
+    float strength = 0.5f;
+    float falloff = 0.5f;
+    float height = 0.0f; // flatten
 };
 
 class MeshLibrary;
@@ -97,6 +109,7 @@ struct EditorState {
     u64 scene_generation = 1;
     u64 next_scene_generation = 2;
     EditorCamera camera;
+    BrushSettings brush;
     world::EntityId selected = 0; // in the outliner; view state
     // Imported meshes; set by main (and tests). Entities with shape mesh
     // name a file in it.

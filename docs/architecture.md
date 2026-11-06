@@ -443,9 +443,28 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   triangles (256 at 64 samples) however far. An undo step holds copies of the tiles a command changed
   (before and after), and a scene swap's undo side the whole terrain. One
   material for all of it (changing it rebuilds every cell with ground,
-  once); painted layers, sculpt brushes, erosion and height map import
-  come with the terrain editor. Like lighting, a changed terrain material
-  does not count as an unsaved cell.
+  once); painted layers and erosion come later. Like lighting, a changed
+  terrain material does not count as an unsaved cell.
+- **Terrain editor (N3 part 5).** Brushes (`engine/world/include/giant/world/terrain_brush.h`):
+  a round brush of a radius, full strength inside `radius * (1 - falloff)`
+  and easing (smoothstep) to nothing at the rim, dabbed at least every
+  quarter radius along a stroke. Raise and lower add metres; flatten moves
+  towards a height and smooth towards each sample's 3 x 3 average (read
+  from a copy taken before the dab, across tile edges), both by up to the
+  strength (0 to 1). Each sample belongs to one tile, so a dab over a tile
+  edge changes both tiles' own samples and their meshes stay joined. Only
+  tiles that exist change. `sculpt_terrain` keeps the tiles a call changed
+  (before and after) for undo; a stroke reaches at most 4096 cells a call.
+  The viewport brush (`editor/src/terrain_brush_tool.h`) casts a ray from
+  the camera through the pointer, marches it over the ground at half the
+  sample spacing and refines the hit, and sends one `sculpt_terrain` a
+  frame while the left button is held (only when it moved a quarter
+  radius, or 30 times a second held still, so the frame rate does not set
+  the speed), in one merge group: the stroke is one undo step (holding
+  every call's copies until undone). Height maps
+  (`engine/world/include/giant/world/height_map.h`): 16-bit RAW (.r16,
+  .raw; square, little-endian) and PGM (P5 or P2, 8 or 16 bit), up to
+  16384 a side, sampled bilinearly into tiles at the terrain's spacing.
 
 ## Window events (known limit)
 
