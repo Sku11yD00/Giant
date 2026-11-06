@@ -122,6 +122,8 @@ bool VoxelScene::init() {
     m_order.assign(levels, {});
     m_occupancy.assign(m_capacity, {});
     m_has_stand_in.assign(m_capacity, 0);
+    m_owner.assign(m_capacity, ~0u);
+    m_placed_at.assign(m_capacity, 0);
     m_stand_in_bricks.assign(levels, 0);
     m_free.clear();
     for (u32 i = m_capacity; i > 0; --i) {
@@ -922,6 +924,13 @@ bool VoxelScene::finish_build(rhi::CommandList& cmd, bool& pool_writable) {
     }
     m_retry.erase(key);
     ++m_stats.uploaded;
+    if (here) {
+        m_rebuilt.push_back(index);
+    } else {
+        m_placed.push_back(index);
+        m_owner[index] = s;
+        m_placed_at[index] = ++m_placements;
+    }
     if (!here) {
         set_slot(level, slot, index, key.brick);
         grow_filled(level, key.brick);
@@ -965,6 +974,8 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     const auto start = clock::now();
     m_stats.built = 0;
     m_stats.uploaded = 0;
+    m_placed.clear();
+    m_rebuilt.clear();
     if (!m_pool.valid()) {
         return;
     }
@@ -1143,12 +1154,27 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
 }
 
 void VoxelScene::idle() {
+    m_placed.clear();
+    m_rebuilt.clear();
     m_stats.built = 0;
     m_stats.uploaded = 0;
     m_stats.cpu_ms = 0.0f;
 }
 
 // --- Queries --------------------------------------------------------------
+
+bool VoxelScene::pool_brick(u32 index, u32& level, voxel::BrickCoord& brick) const {
+    if (index >= m_owner.size()) {
+        return false;
+    }
+    const u32 s = m_owner[index];
+    if (s >= m_slots.size() || m_slots[s] != index) {
+        return false; // freed since (its slot holds something else)
+    }
+    level = s / m_clipmap.slots_per_level();
+    brick = m_slot_bricks[s];
+    return true;
+}
 
 u32 VoxelScene::brick_index(u32 level, const voxel::BrickCoord& brick) const {
     if (level >= m_clipmap.levels() || !m_clipmap.contains(level, brick)) {

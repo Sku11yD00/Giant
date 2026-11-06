@@ -595,6 +595,9 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
                                    stats.shadow_missing);
             }
         }
+        if (stats.gi) {
+            ImGui::Text("GI: %u bricks lit, %u waiting", stats.gi_lit, stats.gi_waiting);
+        }
         ImGui::Text("Materials: %u shared, decals: %u in view", stats.materials, stats.decals);
         if (stats.decal_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many decals on screen: some not drawn");
@@ -605,8 +608,8 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::SeparatorText("Geometry");
         const render::RenderSettings& r = m_state.render_settings;
         int view = static_cast<int>(r.debug_view);
-        const char* const views[] = {"lit", "clusters", "lod_levels", "triangles", "voxels"};
-        const char* const labels[] = {"Lit", "Clusters", "LOD levels", "Triangles", "Voxels"};
+        const char* const views[] = {"lit", "clusters", "lod_levels", "triangles", "voxels", "lighting"};
+        const char* const labels[] = {"Lit", "Clusters", "LOD levels", "Triangles", "Voxels", "Lighting only"};
         if (ImGui::Combo("View", &view, labels, IM_ARRAYSIZE(labels))) {
             run("set_render_settings", {{"debug_view", views[view]}});
         }
@@ -658,6 +661,16 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         int pages = static_cast<int>(r.shadow_pages_per_frame);
         if (ImGui::SliderInt("Shadow pages a frame", &pages, 1, 512, "%d", ImGuiSliderFlags_Logarithmic)) {
             run("set_render_settings", {{"shadow_pages_per_frame", std::clamp(pages, 1, 4096)}});
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(!r.voxel_world);
+        bool gi = r.gi;
+        if (ImGui::Checkbox("Global illumination", &gi)) {
+            run("set_render_settings", {{"gi", gi}});
+        }
+        int gi_bricks = static_cast<int>(r.gi_bricks_per_frame);
+        if (ImGui::SliderInt("GI bricks a frame", &gi_bricks, 1, 4096, "%d", ImGuiSliderFlags_Logarithmic)) {
+            run("set_render_settings", {{"gi_bricks_per_frame", std::clamp(gi_bricks, 1, 4096)}});
         }
         ImGui::EndDisabled();
         ImGui::SeparatorText("C# scripts");

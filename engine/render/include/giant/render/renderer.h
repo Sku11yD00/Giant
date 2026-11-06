@@ -49,6 +49,7 @@ struct CullPush;
 class GeometryStreamer; // src/streaming.h
 class VoxelScene;       // src/voxel_scene.h
 class ShadowPages;      // src/shadow_pages.h
+class VoxelLight;       // src/voxel_light.h
 struct ShadowWindows;
 struct DecalBins;       // src/decals.h
 
@@ -130,7 +131,8 @@ enum class DebugView : u32 {
     clusters,   // each cluster in its own colour
     lod_levels, // colour by level: 0 (original triangles) is red, then yellow, green, cyan...
     triangles,  // each triangle in its own colour
-    voxels,     // the voxel copy of the scene (RenderSettings::voxel_world), lit simply
+    voxels,     // the voxel copy of the scene (RenderSettings::voxel_world), with its light when gi is on
+    lighting,   // the lit view in plain white: the light alone (sun, shadows, bounce and sky)
 };
 
 struct RenderSettings {
@@ -174,6 +176,14 @@ struct RenderSettings {
     // the rest keep their old content (or fall back to coarser pages).
     bool shadows = true;
     u32 shadow_pages_per_frame = 64;
+    // Global illumination: light bouncing off the scene and the sky's light
+    // shut out by it (lit views, with voxel_world on), from the lit voxel
+    // world. Up to gi_bricks_per_frame voxel bricks are lit again a frame
+    // (at least one): new and rebuilt bricks first, then the rest in turn,
+    // so light follows the sun and changes within about bricks / budget
+    // frames. Off: the flat sky and ground colours.
+    bool gi = true;
+    u32 gi_bricks_per_frame = 256;
 };
 
 struct FrameInput {
@@ -227,6 +237,11 @@ struct RenderStats {
     u32 shadow_waiting = 0;   // pages asked for or changed, not drawn yet
     u32 shadow_missing = 0;   // pages asked for that found no room
     u32 shadow_draws = 0;     // raster passes for them (one per level with pages to draw)
+    // Global illumination (this frame, on the CPU).
+    bool gi = false;      // on this frame
+    u32 gi_lit = 0;       // voxel bricks lit this frame
+    u32 gi_cleared = 0;   // bricks new in the pool, cleared to wait for their light
+    u32 gi_waiting = 0;   // new or rebuilt bricks not lit yet
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -350,6 +365,10 @@ private:
     void read_stats_slot(u32 slot);
     void copy_streaming_stats(); // and the voxel world's
     void finish_stats(const FrameData& data);
+    bool ensure_voxel_light();
+    // Global illumination's voxel lighting. False: the light pool may hold
+    // stale words this frame (out of memory), so nothing may read it.
+    bool light_voxels(rhi::CommandList& cmd, const FrameData& data);
 
     rhi::Device& m_device;
     RendererDesc m_desc;
@@ -417,6 +436,13 @@ private:
     std::vector<u32> m_shadow_requests_cpu;
     std::vector<u32> m_shadow_table;
     std::vector<gpu::ShadowLevel> m_shadow_levels;
+    // Global illumination.
+    std::unique_ptr<VoxelLight> m_light_plan;
+    rhi::BufferHandle m_voxel_light; // u32 per voxel, beside the brick pool (made on first use)
+    bool m_voxel_light_failed = false; // could not be made: not tried again until gi is turned off and on
+    bool m_gi_on = false; // this frame
+    rhi::PipelineHandle m_light_clear;
+    rhi::PipelineHandle m_light_voxels;
     bool m_overflow_logged = false;
     bool m_cull_buffers_logged = false;
     bool m_instances_logged = false;

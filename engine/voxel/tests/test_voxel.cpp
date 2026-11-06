@@ -49,6 +49,26 @@ GIANT_TEST("voxel: colours and normals survive packing") {
     GIANT_CHECK(near(unpack_color(pack_voxel({1, 1, k_nan}, {0, 1, 0})), {1, 1, 0}, 1e-6f));
 }
 
+GIANT_TEST("voxel: light packs within a percent, with the sun bit and an unlit state") {
+    const Vec3 lights[] = {{0, 0, 0}, {1, 1, 1}, {0.5f, 0.25f, 0.125f}, {3.0f, 2.9f, 2.5f}, {0.002f, 0.01f, 0.001f},
+                           {40.0f, 0.5f, 0.0f}, {0.999f, 0.0f, 0.0f}, {0.9995f, 0.0f, 0.0f}};
+    for (const Vec3& c : lights) {
+        for (const bool sun : {false, true}) {
+            const u32 packed = pack_light(c, sun);
+            GIANT_CHECK(light_lit(packed) && light_sun(packed) == sun);
+            const Vec3 back = unpack_light(packed);
+            const float peak = std::max(c.x, std::max(c.y, c.z));
+            // Each channel within half a mantissa step of the brightest.
+            GIANT_CHECK(near(back, c, peak / 511.0f + 1e-7f));
+        }
+    }
+    GIANT_CHECK(!light_lit(k_unlit) && unpack_light(k_unlit) == Vec3{});
+    // Too bright is clamped; negative and NaN are black (still lit).
+    GIANT_CHECK(near(unpack_light(pack_light({1000.0f, 0, 0}, false)), {k_max_light, 0, 0}, 0.07f));
+    GIANT_CHECK(unpack_light(pack_light({-1.0f, k_nan, 0.0f}, false)) == Vec3{});
+    GIANT_CHECK(light_lit(pack_light({-1.0f, k_nan, 0.0f}, false)));
+}
+
 GIANT_TEST("voxel: the triangle-box test is exact on simple cases") {
     const Vec3 c{0.5f, 0.5f, 0.5f};
     const Vec3 h{0.5f, 0.5f, 0.5f};

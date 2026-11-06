@@ -267,8 +267,9 @@ static_assert(sizeof(ResolvePush) == 100);
 
 // The rest of what shading needs, in the frame's transient memory.
 struct ResolveExtras {
-    // The far field (voxel_march.slang): beyond far_start the voxel world
-    // stands in for the meshes left out there. voxel_level_count 0: off.
+    // The voxel world (voxel_march.slang), for the far field (beyond
+    // far_start it stands in for the meshes left out there) and global
+    // illumination.
     u32 voxel_pool;
     u32 voxel_table;
     u32 voxel_levels; // VoxelLevel per level
@@ -289,8 +290,13 @@ struct ResolveExtras {
     float shadow_x[4];   // the light's axes (camera-relative dot products); x.w: 1 / depth range
     float shadow_y[4];
     float shadow_z[4];   // z.w: the depth offset (depths from the CPU's anchor, ShadowPages::depth_offset)
+    // What uses the voxel fields at the top (either sets them).
+    u32 far_on;   // 1: the far field marches
+    u32 gi_on;    // 1: bounce light from the lit voxels (voxel_gi.slang)
+    u32 gi_light; // write descriptor of the voxel light pool (u32 per voxel, brick after brick)
+    u32 pad;
 };
-static_assert(sizeof(ResolveExtras) == 112);
+static_assert(sizeof(ResolveExtras) == 128);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {
@@ -337,8 +343,36 @@ struct VoxelPush {
     u32 level_count;
     u32 bricks_per_axis;
     float background[4];
+    u32 light;    // write descriptor of the voxel light pool
+    u32 light_on; // 1: show the voxels with their light (bounce and the sun bit)
+    u32 pad[2];
 };
-static_assert(sizeof(VoxelPush) == 48);
+static_assert(sizeof(VoxelPush) == 64);
+
+// voxel_light.slang: lighting voxel bricks (src/voxel_light.h).
+struct LightJob {
+    u32 index;    // the brick's pool index
+    u32 level;
+    u32 pad[2];
+    i32 brick[4]; // xyz: its brick coordinate on the level
+};
+static_assert(sizeof(LightJob) == 32);
+
+struct LightPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 jobs;     // read descriptor: LightJob each (cs_light), or u32 pool indices (cs_clear)
+    u32 jobs_offset;
+    u32 count;
+    u32 pool;     // the voxel world (VoxelWorld in voxel_march.slang)
+    u32 table;
+    u32 levels;
+    u32 levels_offset;
+    u32 level_count;
+    u32 bricks_per_axis;
+    u32 light;    // write descriptor of the light pool
+};
+static_assert(sizeof(LightPush) == 48);
 inline constexpr u32 k_no_brick = ~0u;  // a slot with nothing in it
 inline constexpr u32 k_unbuilt = ~1u;   // a slot not built yet: use the next coarser level
 

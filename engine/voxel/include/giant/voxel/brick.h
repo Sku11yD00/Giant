@@ -29,6 +29,17 @@ u32 pack_voxel(const Vec3& color, const Vec3& normal);
 Vec3 unpack_color(u32 voxel);
 Vec3 unpack_normal(u32 voxel); // unit (a zero normal packs as +Y)
 
+// A voxel's light (the GPU's light pool, render/shaders/voxel_gi.slang):
+// the bounce and sky light reaching it (linear RGB, 9-bit mantissas over a
+// shared 4-bit exponent, up to about 64) and whether the sun reaches it, in
+// one u32. 0 (exponent 0) means not lit yet.
+inline constexpr u32 k_unlit = 0;
+inline constexpr float k_max_light = 63.875f;
+u32 pack_light(const Vec3& light, bool sun);
+Vec3 unpack_light(u32 light);
+constexpr bool light_lit(u32 light) { return (light >> 27 & 15u) != 0; }
+constexpr bool light_sun(u32 light) { return (light >> 31) != 0; }
+
 struct Brick {
     std::array<u32, k_brick_voxels / 32> occupancy{}; // bit i % 32 of word i / 32
     std::array<u32, k_brick_voxels> voxels{};         // pack_voxel; 0 where empty

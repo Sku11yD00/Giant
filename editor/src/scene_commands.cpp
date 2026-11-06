@@ -263,6 +263,7 @@ const char* to_string(render::DebugView v) {
     case render::DebugView::lod_levels: return "lod_levels";
     case render::DebugView::triangles: return "triangles";
     case render::DebugView::voxels: return "voxels";
+    case render::DebugView::lighting: return "lighting";
     }
     return "lit";
 }
@@ -270,7 +271,7 @@ const char* to_string(render::DebugView v) {
 render::DebugView debug_view_from(const std::string& name) {
     for (const auto v : {render::DebugView::lit, render::DebugView::clusters,
                          render::DebugView::lod_levels, render::DebugView::triangles,
-                         render::DebugView::voxels}) {
+                         render::DebugView::voxels, render::DebugView::lighting}) {
         if (name == to_string(v)) return v;
     }
     return render::DebugView::lit;
@@ -292,6 +293,8 @@ Json render_settings_json(const EditorState& state) {
             {"far_field_max_radius", state.render_settings.far_field_max_radius},
             {"shadows", state.render_settings.shadows},
             {"shadow_pages_per_frame", state.render_settings.shadow_pages_per_frame},
+            {"gi", state.render_settings.gi},
+            {"gi_bricks_per_frame", state.render_settings.gi_bricks_per_frame},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
               {"clusters", s.clusters},
@@ -311,7 +314,9 @@ Json render_settings_json(const EditorState& state) {
               {"shadows",
                {{"on", s.shadows}, {"pages", s.shadow_pages}, {"capacity", s.shadow_capacity},
                 {"drawn", s.shadow_drawn}, {"waiting", s.shadow_waiting}, {"missing", s.shadow_missing},
-                {"draws", s.shadow_draws}}}}}};
+                {"draws", s.shadow_draws}}},
+              {"gi",
+               {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -1013,12 +1018,16 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "shadows: sun shadows from virtual shadow pages (default on; lit view with GPU culling): pages "
          "are drawn when shading first needs them and again when what casts onto them changes, at most "
          "shadow_pages_per_frame a frame (default 64); last_frame.shadows has the pool and this frame's work. "
+         "gi: global illumination (default on; lit views and the voxel view, voxel_world on): bounce and "
+         "sky light from the lit voxel world; up to gi_bricks_per_frame voxel bricks (default 256) are lit "
+         "again a frame, new and rebuilt ones first; last_frame.gi has this frame's work. "
+         "debug_view lighting shows the lit view in plain white (the light alone). "
          "View state: not undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
                {{"lod_error_pixels", number(0.1, 64, "Pixels of error allowed. Default 1.")},
-                {"debug_view", {{"enum", {"lit", "clusters", "lod_levels", "triangles", "voxels"}}}},
+                {"debug_view", {{"enum", {"lit", "clusters", "lod_levels", "triangles", "voxels", "lighting"}}}},
                 {"gpu_culling", {{"type", "boolean"}}},
                 {"occlusion_culling", {{"type", "boolean"}}},
                 {"mesh_shaders", {{"type", "boolean"}}},
@@ -1031,7 +1040,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"far_field_max_radius", number(0, 1e6, "Metres. Default 50.")},
                 {"shadows", {{"type", "boolean"}}},
                 {"shadow_pages_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096},
-                                            {"description", "Pages drawn a frame at most. Default 64."}}}}}},
+                                            {"description", "Pages drawn a frame at most. Default 64."}}},
+                {"gi", {{"type", "boolean"}}},
+                {"gi_bricks_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096},
+                                         {"description", "Voxel bricks lit a frame at most. Default 256."}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -1051,6 +1063,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.far_field_max_radius = args.value("far_field_max_radius", r.far_field_max_radius);
              r.shadows = args.value("shadows", r.shadows);
              r.shadow_pages_per_frame = args.value("shadow_pages_per_frame", r.shadow_pages_per_frame);
+             r.gi = args.value("gi", r.gi);
+             r.gi_bricks_per_frame = args.value("gi_bricks_per_frame", r.gi_bricks_per_frame);
              return CommandResult::success(render_settings_json(state));
          }});
 

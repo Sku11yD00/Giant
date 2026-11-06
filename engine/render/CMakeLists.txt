@@ -6,6 +6,7 @@ giant_module(render
     src/smaa.cpp
     src/voxel_scene.cpp
     src/shadow_pages.cpp
+    src/voxel_light.cpp
   DEPENDS core rhi geometry voxel
 )
 giant_shaders(render
@@ -31,6 +32,8 @@ giant_shaders(render
     shaders/smaa.slang:ps_blend:pixel:smaa_blend_ps
     shaders/voxels.slang:vs_main:vertex:voxels_vs
     shaders/voxels.slang:ps_main:pixel:voxels_ps
+    shaders/voxel_light.slang:cs_clear:compute:light_clear_cs
+    shaders/voxel_light.slang:cs_light:compute:light_voxels_cs
 )
 # SMAA's precomputed area and search tables (headers only).
 target_link_libraries(giant_render PRIVATE third_party::smaa)
@@ -42,6 +45,7 @@ giant_module_tests(render
     tests/test_streaming.cpp
     tests/test_voxel_scene.cpp
     tests/test_shadow_pages.cpp
+    tests/test_voxel_light.cpp
 )
 if(GIANT_BUILD_TESTS)
   # The streaming tests check the module's own streamer directly.

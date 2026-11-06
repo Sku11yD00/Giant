@@ -105,6 +105,14 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   next to nothing. Far voxels are shadowed too. "Sun shadows" in the Engine
   panel (or `set_render_settings` `shadows`) turns them off;
   `last_frame.shadows` shows the work.
+- Part 5a (done): global illumination. Sunlight bounces off the scene and
+  the sky's light is shut out where it is hidden (under trees, behind
+  walls, in alleys), from the lit voxel world: each voxel works out the
+  light reaching it a few hundred bricks a frame, and each pixel looks it
+  up, so there is no noise and nothing smeared over frames. The "Lighting
+  only" view shows the light alone. "Global illumination" in the Engine
+  panel (or `set_render_settings` `gi`) turns it off; `last_frame.gi` shows
+  the work. Part 5b adds reflections.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
