@@ -29,6 +29,9 @@ void VoxelLight::off() {
 void VoxelLight::lost() {
     m_catch_up = true;
     m_seen = m_seen_before;
+    for (const gpu::LightJob& job : m_jobs) {
+        queue(job.index); // lit next time, before the round
+    }
 }
 
 void VoxelLight::plan(const VoxelScene& scene, u32 budget) {

@@ -1370,7 +1370,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         return; // out of memory: the device is lost
     }
-    light_voxels(cmd, data);
+    if (!light_voxels(cmd, data)) {
+        m_gi_on = false; // this frame shades without it
+    }
 
     if (gpu && !m_valid.empty()) {
         cull_on_gpu(cmd, data); // counts its raster passes in m_stats.draws
@@ -1689,9 +1691,9 @@ bool Renderer::ensure_voxel_light() {
     return m_voxel_light.valid();
 }
 
-void Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
+bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
     if (!m_gi_on) {
-        return;
+        return true;
     }
     cmd.begin_timing("gi");
     const std::span<const u32> clears = m_light_plan->clears();
@@ -1715,7 +1717,7 @@ void Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
             if (list.data == nullptr) {
                 m_light_plan->lost();
                 cmd.end_timing();
-                return; // lighting bricks not cleared would read another brick's light
+                return false; // bricks not cleared would read another brick's light
             }
             {
                 cmd.set_pipeline(m_light_clear);
@@ -1738,10 +1740,13 @@ void Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
                 cmd.set_pipeline(m_light_voxels);
                 cmd.push(push);
                 cmd.dispatch(push.count);
+            } else {
+                m_light_plan->lost(); // lit next frame instead (they read as not lit meanwhile)
             }
         }
     }
     cmd.end_timing();
+    return true;
 }
 
 } // namespace giant::render

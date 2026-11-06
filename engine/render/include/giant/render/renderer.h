@@ -366,7 +366,9 @@ private:
     void copy_streaming_stats(); // and the voxel world's
     void finish_stats(const FrameData& data);
     bool ensure_voxel_light();
-    void light_voxels(rhi::CommandList& cmd, const FrameData& data); // global illumination's voxel lighting
+    // Global illumination's voxel lighting. False: the light pool may hold
+    // stale words this frame (out of memory), so nothing may read it.
+    bool light_voxels(rhi::CommandList& cmd, const FrameData& data);
 
     rhi::Device& m_device;
     RendererDesc m_desc;

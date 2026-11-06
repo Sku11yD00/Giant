@@ -51,8 +51,9 @@ public:
     // A frame without global illumination: what the voxel world places
     // meanwhile is caught up with next time.
     void off();
-    // This frame's clears never reached the GPU (out of memory): next
-    // time, what was placed since the frame before is cleared again.
+    // This frame's work never reached the GPU (out of memory): next time,
+    // what was placed since the frame before is cleared again, and this
+    // frame's bricks are lit first.
     void lost();
 
     std::span<const u32> clears() const { return m_clears; }       // pool indices
