@@ -194,9 +194,9 @@ GIANT_TEST("gi light: changed bricks go before the round; after a pause what was
     std::set<u32> meanwhile;
     for (const u32 i : b.owned()) if (b.voxels->placed_at(i) > before) meanwhile.insert(i);
     GIANT_CHECK(!meanwhile.empty() && meanwhile.size() < b.owned().size());
-    light.plan(*b.voxels, 1);
+    light.plan(*b.voxels, 2); // one of them, and one for the round
     GIANT_CHECK(std::set<u32>(light.clears().begin(), light.clears().end()) == meanwhile);
-    GIANT_CHECK(light.stats().lit == 1 && light.stats().waiting == meanwhile.size() - 1);
+    GIANT_CHECK(light.stats().lit == 2 && light.stats().waiting == meanwhile.size() - 1);
     // Clears lost (out of memory): the next plan clears them again.
     light.lost();
     b.step();

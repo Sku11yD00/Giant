@@ -99,11 +99,13 @@ void cs_light(uint3 group : SV_GroupID, uint thread : SV_GroupIndex) {
             float hit_t;
             uint hit;
             uint hit_at;
-            // The voxel's own surface (its plane through the centre) is left out.
+            // The voxel's own surface is left out: a plane a voxel above its
+            // centre, as a surface on a voxel boundary fills a voxel on each
+            // side, and the inner one's must not shade it.
             sun = !march_voxels_from(w, origin, sun_dir, level, size * 0.5, 3.0e38, float4(0.0, 0.0, 0.0, -1.0),
-                                     float4(n, dot(n, centre)), hit_t, hit, hit_at);
+                                     float4(n, dot(n, centre) + size), hit_t, hit, hit_at);
         }
-        const float3 bounce = gather_cones(w, light, f, origin, n, centre, level, size);
+        const float3 bounce = gather_cones(w, light, f, origin, n, centre + n * size, level, size);
         light.Store((index * k_brick_voxels + i) * 4, pack_light(bounce, sun));
     }
 }

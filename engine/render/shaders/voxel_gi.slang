@@ -162,8 +162,8 @@ float3 trace_cone(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origi
     return color + (1.0 - a) * sky_radiance(f, dir);
 }
 
-// Six cones over the hemisphere around `n` from a voxel at `centre`
-// (starting at `origin`): one up the normal, five around at 60 degrees,
+// Six cones over the hemisphere around `n` from a voxel whose surface's
+// plane goes through `centre` (starting at `origin`): one up the normal, five around at 60 degrees,
 // weighted by the cosine-weighted solid angle each covers (a quarter for
 // the one up, 0.15 for each of the others).
 float3 gather_cones(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origin, float3 n, float3 centre,

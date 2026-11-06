@@ -419,8 +419,9 @@ as standing still.
   out through the clipmap, sampling the level whose voxels are about half
   its width (the coarser levels serve as its wider samples), each filled
   voxel taking 85% of what is left; voxels straddling the surface the
-  cone leaves (centre less than half a voxel above its plane) are left
-  out, as coarse voxels are fuller than what they hold (the sun march
+  cone leaves (centre less than half a voxel above its plane, taken a
+  voxel above the lit voxel's centre: a surface on a voxel boundary fills
+  a voxel on each side) are left out, as coarse voxels are fuller than what they hold (the sun march
   leaves them out the same way). What a voxel sends back is lit as
   shading lights a Lambert surface: its colour times the sun over pi
   (when its bit says the sun reaches it) plus its own light word, so
@@ -454,7 +455,8 @@ as standing still.
   the flat colours. Far voxels use their own light word.
 - Lit views (and the voxel view, which then shows voxels with their own
   light) with `voxel_world` on; the debug view `lighting` is the lit view
-  in plain white-grey, the light alone. `RenderStats` (and
+  in plain white-grey, the light alone. (The voxel view without GI keeps
+  its simple, brighter sun term.) `RenderStats` (and
   `last_frame.gi` over MCP) report bricks lit and cleared this frame and
   those new or rebuilt still waiting. Timed as "gi".
 - Known limits: the light is only as fine as the voxels (0.25 m near the

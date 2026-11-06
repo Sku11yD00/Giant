@@ -97,8 +97,10 @@ void VoxelLight::plan(const VoxelScene& scene, u32 budget) {
             add(i);
         }
     };
-    // New and rebuilt bricks first, leaving a quarter for the round.
-    urgent(limit - limit / 4);
+    // New and rebuilt bricks first, leaving a quarter for the round (at
+    // least one; with a budget of one, every other frame).
+    const u32 reserve = limit > 1 ? std::max(1u, limit / 4) : (m_frame & 1u);
+    urgent(limit - reserve);
     // The round: one look at each pool index at most per frame, stopping
     // once every brick in the pool has been looked at.
     const u32 bricks = scene.stats().bricks;
