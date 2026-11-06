@@ -121,10 +121,13 @@ public:
     u32 entry_at(u32 level, const DVec3& world) const;
 
     // Keeps a copy of the casters (the frame's instances with their world
-    // bounds) and dirties the pages under every one that changed. Many
-    // changes at once (more than max(256, an eighth)) dirty everything.
+    // bounds) and dirties the pages under every one that changed: moved,
+    // another mesh, or starting or stopping to cast (`casts`, per instance:
+    // drawn as a mesh this frame; empty: all cast). Many changes at once
+    // (more than max(256, an eighth)) dirty everything.
     using MeshLookup = std::function<const geometry::ClusterMesh*(MeshId)>;
-    void track(std::span<const Instance> instances, u64 meshes_version, const MeshLookup& meshes);
+    void track(std::span<const Instance> instances, std::span<const u8> casts, u64 meshes_version,
+               const MeshLookup& meshes);
 
 private:
     struct Page {
@@ -144,7 +147,8 @@ private:
         Instance instance;
         DVec3 min{};
         DVec3 max{};
-        bool live = false; // has a mesh (and bounds)
+        bool live = false;  // has a mesh (and bounds)
+        bool casts = false; // drawn this frame (with live: dirties pages)
     };
 
     Page& page(u32 level, u32 slot) { return m_pages[level * k_slots + slot]; }

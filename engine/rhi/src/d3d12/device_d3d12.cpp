@@ -2171,7 +2171,15 @@ void D3D12CommandList::begin_render_pass(const RenderPassDesc& desc) {
             m_pass_height = t->desc.height;
         }
     }
-    m_list->OMSetRenderTargets(desc.color_count, rtvs.data(), FALSE, has_depth ? &dsv : nullptr);
+    if (desc.color_count == 0 && !has_depth) {
+        // No targets: the shaders write buffers; the pass gives the size.
+        GIANT_ASSERT(desc.width > 0 && desc.height > 0 && desc.width <= 16384 && desc.height <= 16384,
+                     "a render pass without targets needs a size (at most 16384)");
+        m_pass_width = desc.width;
+        m_pass_height = desc.height;
+    }
+    m_list->OMSetRenderTargets(desc.color_count, desc.color_count > 0 ? rtvs.data() : nullptr, FALSE,
+                               has_depth ? &dsv : nullptr);
     for (u32 i = 0; i < desc.color_count; ++i) {
         if (desc.colors[i].load == LoadOp::clear) {
             const Color& c = desc.colors[i].clear;

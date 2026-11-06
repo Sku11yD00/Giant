@@ -339,7 +339,9 @@ ShadowPages::Caster ShadowPages::caster_of(const Instance& in, const MeshLookup&
     return c;
 }
 
-void ShadowPages::track(std::span<const Instance> instances, u64 meshes_version, const MeshLookup& meshes) {
+void ShadowPages::track(std::span<const Instance> instances, std::span<const u8> casts, u64 meshes_version,
+                        const MeshLookup& meshes) {
+    const auto casting = [&](size_t i) { return casts.empty() || (i < casts.size() && casts[i] != 0); };
     const bool remesh = meshes_version != m_meshes_version;
     m_meshes_version = meshes_version;
     const size_t limit = std::max<size_t>(256, std::max(instances.size(), m_casters.size()) / 8);
@@ -347,7 +349,7 @@ void ShadowPages::track(std::span<const Instance> instances, u64 meshes_version,
     std::vector<std::pair<DVec3, DVec3>> boxes;
     bool all = false;
     const auto dirty = [&](const Caster& c) {
-        if (!c.live || all) {
+        if (!c.live || !c.casts || all) {
             return;
         }
         if (boxes.size() >= limit) {
@@ -364,12 +366,20 @@ void ShadowPages::track(std::span<const Instance> instances, u64 meshes_version,
         const Instance& was = c.instance;
         const bool moved = !(in.position == was.position && in.rotation == was.rotation && in.scale == was.scale &&
                              in.mesh == was.mesh);
+        const bool cast = casting(i);
         if (!moved && !remesh) {
             c.instance = in; // the material may differ: shadows do not care
+            if (cast != c.casts) {
+                c.casts = true; // dirties where it is, whichever way it changed
+                dirty(c);
+                c.casts = cast;
+            }
             continue;
         }
         Caster now = caster_of(in, meshes);
-        if (!moved && now.live == c.live && (!now.live || (now.min == c.min && now.max == c.max))) {
+        now.casts = cast;
+        if (!moved && now.live == c.live && now.casts == c.casts &&
+            (!now.live || (now.min == c.min && now.max == c.max))) {
             c = now;
             continue; // the mesh table changed, this caster did not
         }
@@ -383,6 +393,7 @@ void ShadowPages::track(std::span<const Instance> instances, u64 meshes_version,
     m_casters.resize(instances.size());
     for (size_t i = common; i < instances.size(); ++i) {
         m_casters[i] = caster_of(instances[i], meshes); // added
+        m_casters[i].casts = casting(i);
         dirty(m_casters[i]);
     }
     if (all) {
