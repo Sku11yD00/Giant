@@ -339,6 +339,9 @@ float fog_transmittance(Sky s, float3 dir, float distance) {
     const float b = s.fog_falloff;
     const float h0 = max(s.cam_alt, -1000.0);
     const float h1 = max(h0 + dir.y * distance, -1000.0);
+    if (min(-b * h0, -b * h1) > 80.0) {
+        return 0.0; // the whole ray deep in fog thicker than floats hold: opaque
+    }
     const float e0 = exp(clamp(-b * h0, -80.0, 80.0));
     const float k = b * (h1 - h0);
     float depth;
