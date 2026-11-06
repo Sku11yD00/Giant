@@ -55,7 +55,7 @@ if(GIANT_BUILD_TESTS)
         "GIANT_SAMPLE_SCRIPTS=${CMAKE_BINARY_DIR}/managed/samples/HelloGiant/HelloGiant.dll"
         "ASAN_OPTIONS=handle_segv=0:allow_user_segv_handler=1:detect_leaks=0:use_sigaltstack=0")
     endif()
-    set_tests_properties(editor_mcp PROPERTIES TIMEOUT 900 ENVIRONMENT "${mcp_env}")
+    set_tests_properties(editor_mcp PROPERTIES TIMEOUT 1560 ENVIRONMENT "${mcp_env}")
     # The N2 gate's scene and flight, on the null device (the software
     # renderer would take hours): everything but the speed. Optimised builds
     # only: a debug or sanitizer build takes most of an hour over it.
