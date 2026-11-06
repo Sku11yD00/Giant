@@ -3,8 +3,10 @@
 // (TerrainMeshes), so get_terrain says when they are all drawn.
 #include "editor_commands.h"
 #include "terrain_meshes.h"
+#include "world_streaming.h"
 
 #include "giant/core/assert.h"
+#include "giant/core/log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,27 +39,64 @@ void add(ai::CommandRegistry& registry, ai::CommandDesc desc) {
     GIANT_ASSERT(added, "terrain command could not be registered");
 }
 
-// Tiles as they were (or will be): none means no tile.
-using TileStates = std::vector<std::pair<CellCoord, std::optional<Terrain::Heights>>>;
+// Tiles as they were (or will be), with their versions (Terrain::version:
+// put back, a tile is again exactly what it was, so streaming sees a tile
+// undone to what its file holds as unchanged): none means no tile.
+struct TileState {
+    CellCoord cell;
+    std::optional<Terrain::Heights> heights;
+    u64 version = 0;
+};
+using TileStates = std::vector<TileState>;
 
 TileStates snapshot(const Terrain& t, const std::vector<CellCoord>& cells) {
     TileStates out;
     out.reserve(cells.size());
     for (const CellCoord c : cells) {
         const Terrain::Heights* h = t.find(c);
-        out.emplace_back(c, h != nullptr ? std::optional<Terrain::Heights>(*h) : std::nullopt);
+        out.push_back({c, h != nullptr ? std::optional<Terrain::Heights>(*h) : std::nullopt, t.version(c)});
     }
     return out;
 }
 
+// Puts the tiles back as `states` says. Tiles of another spacing than the
+// terrain's (streaming gives an empty terrain its world's spacing outside
+// the history) take theirs back when the terrain is empty, and are skipped
+// otherwise (logged), never asserted on.
 void apply(Terrain& t, const TileStates& states) {
-    for (const auto& [cell, heights] : states) {
-        if (heights) {
-            t.set(cell, *heights);
-        } else {
-            t.remove(cell);
+    for (const auto& [cell, heights, version] : states) {
+        if (!heights) t.remove(cell);
+    }
+    for (const auto& [cell, heights, version] : states) {
+        if (!heights) continue;
+        const usize n = t.samples();
+        if (heights->size() != n * n) {
+            const auto side = static_cast<u32>(std::lround(std::sqrt(static_cast<double>(heights->size()))));
+            if (!t.empty() || !t.set_samples(side) || heights->size() != usize{side} * side) {
+                log_warning("terrain", "undo: tile [" + std::to_string(cell.x) + ", " + std::to_string(cell.z) +
+                                           "] is " + std::to_string(side) + " samples a side and the terrain " +
+                                           std::to_string(n) + ": not put back");
+                continue;
+            }
+        }
+        t.restore(cell, *heights, version);
+    }
+}
+
+// Refused when a cell the command would change has ground in the open
+// world's files that is not loaded (WorldStreaming::ground_on_disk).
+std::optional<std::string> ground_not_loaded(const EditorState& state, const std::vector<CellCoord>& cells) {
+    if (state.world == nullptr || !state.world->active(state.scene_generation)) {
+        return std::nullopt;
+    }
+    for (const CellCoord c : cells) {
+        if (state.world->ground_on_disk(c)) {
+            return "cell [" + std::to_string(c.x) + ", " + std::to_string(c.z) +
+                   "] has ground saved in the open world that is not loaded yet: bring the camera near it "
+                   "(get_world shows loading), or leave it out of the area";
         }
     }
+    return std::nullopt;
 }
 
 // Records `before` -> `after` (with the sample spacing each side had).
@@ -67,7 +106,7 @@ void record(EditorState& state, CommandContext& context, std::shared_ptr<const T
         state,
         [&state, before, samples_before] {
             apply(state.scene.terrain, *before);
-            state.scene.terrain.set_samples(samples_before);
+            if (state.scene.terrain.empty()) state.scene.terrain.set_samples(samples_before);
         },
         [&state, after, samples_after] {
             // Spacing first: it can change only while there are no tiles,
@@ -194,7 +233,17 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              const std::optional<Area> area = area_of(args["from"], args["to"], error);
              if (!area) return CommandResult::failure(error);
              const u32 samples_before = t.samples();
-             u32 samples = args.value("samples", samples_before);
+             // In a streamed world whose files hold tiles, the spacing is theirs.
+             // (0: the world has none, or none is open; a plain u32 keeps GCC's
+             // maybe-uninitialized check quiet.)
+             const u32 ground = state.world != nullptr && state.world->active(state.scene_generation)
+                                    ? state.world->ground_samples().value_or(0u)
+                                    : 0u;
+             u32 samples = args.value("samples", ground != 0 ? ground : samples_before);
+             if (ground != 0 && samples != ground) {
+                 return CommandResult::failure("the open world's terrain tiles are " + std::to_string(ground) +
+                                               " samples a side; its terrain cannot take another");
+             }
              if (samples != samples_before && !t.empty()) {
                  return CommandResult::failure("samples is " + std::to_string(samples_before) +
                                                " and can change only while there is no terrain "
@@ -226,8 +275,9 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              if ((t.size() + added) * n * n > k_max_terrain_samples) {
                  return CommandResult::failure("the terrain would hold " + std::to_string(t.size() + added) +
                                                " tiles; at most " + std::to_string(k_max_terrain_samples / (n * n)) +
-                                               " of " + std::to_string(n) + " samples until terrain streams");
+                                               " of " + std::to_string(n) + " samples loaded at once");
              }
+             if (auto refused = ground_not_loaded(state, cells)) return CommandResult::failure(*refused);
              auto before = std::make_shared<const TileStates>(snapshot(t, cells));
              t.set_samples(samples);
              const double spacing = t.spacing();
@@ -269,7 +319,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"remove_terrain",
          "Removes the terrain tiles of every 64 m cell the area [from, to] (x, z metres) "
-         "touches, or every tile with all. Undoable.",
+         "touches, or every tile with all (in a streamed world: every tile loaded). Undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
@@ -286,12 +336,16 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                  std::string error;
                  const std::optional<Area> area = area_of(args["from"], args["to"], error);
                  if (!area) return CommandResult::failure(error);
-                 for (const CellCoord c : cells_in(*area)) {
+                 const std::vector<CellCoord> touched = cells_in(*area);
+                 // Ground on disk there would stream back: refused, as for the other commands.
+                 if (auto refused = ground_not_loaded(state, touched)) return CommandResult::failure(*refused);
+                 for (const CellCoord c : touched) {
                      if (t.find(c) != nullptr) cells.push_back(c);
                  }
              } else {
                  return CommandResult::failure("give from and to, or all");
              }
+             if (auto refused = ground_not_loaded(state, cells)) return CommandResult::failure(*refused);
              auto before = std::make_shared<const TileStates>(snapshot(t, cells));
              for (const CellCoord c : cells) t.remove(c);
              auto after = std::make_shared<const TileStates>(snapshot(t, cells));
@@ -336,6 +390,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              Terrain::Heights heights(n * n);
              for (usize i = 0; i < n * n; ++i) heights[i] = values[i].get<float>();
              const std::vector<CellCoord> cells{cell};
+             if (auto refused = ground_not_loaded(state, cells)) return CommandResult::failure(*refused);
              auto before = std::make_shared<const TileStates>(snapshot(t, cells));
              t.set(cell, std::move(heights));
              auto after = std::make_shared<const TileStates>(snapshot(t, cells));

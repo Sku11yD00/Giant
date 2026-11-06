@@ -139,14 +139,18 @@ def build_scene(tool, call, check):
 
 
 def world_gate(tool, call, check):
-    """A world streamed by cell: saved, opened, loaded around the camera, let go far off."""
+    """A world streamed by cell: saved, opened, loaded around the camera, let go far off.
+    Terrain tiles are saved in their cell's file and stream with it."""
     with tempfile.TemporaryDirectory() as folder:
         world = os.path.join(folder, "valley")
         tool("create_entities", {"entities": [{"name": "near", "position": [5, 0.5, 5]},
                                               {"name": "near", "position": [70, 0.5, 5]},
                                               {"name": "far", "position": [6000, 0.5, 5]}]})
+        tool("create_terrain", {"from": [0, 0], "to": [10, 10], "samples": 8, "height": 1})
+        tool("create_terrain", {"from": [6000, 0], "to": [6010, 10], "height": 2})
         made = tool("save_world", {"folder": world})
         check(made["cells_written"] == 3 and made["cells"] == 3, f"world saved, got {made}")
+        check(tool("get_world")["ground"] == 2, "two cells' files hold ground")
         tool("set_camera", {"position": [10, 5, 30], "look_at": [10, 0, 0]})
         opened = tool("open_world", {"folder": world})
         check(opened["cells"] == 3 and tool("list_entities")["count"] == 0, "world opened, nothing loaded yet")
@@ -156,6 +160,9 @@ def world_gate(tool, call, check):
             if info["loaded"] == 2 and info["reading"] == 0 and info["waiting"] == 0:
                 break
         check(info["loaded"] == 2 and info["entities"] == 2, f"the near cells load, got {info}")
+        ground = tool("get_terrain", {"points": [[5, 5], [6005, 5]]})
+        check(ground["tiles"] == 1 and ground["samples"] == 8 and ground["heights"] == [1, None],
+              f"the near tile loads with its cell, got {ground}")
         tool("set_camera", {"position": [6000, 5, 30], "look_at": [6000, 0, 0]})
         for _ in range(200):
             info = tool("get_world")
@@ -163,6 +170,9 @@ def world_gate(tool, call, check):
                 break
         check(info["loaded"] == 1 and info["entities"] == 1 and info["unsaved_cells"] == 0,
               f"far off, the far cell loads and the near ones go, got {info}")
+        ground = tool("get_terrain", {"points": [[5, 5], [6005, 5]]})
+        check(ground["tiles"] == 1 and ground["heights"] == [None, 2] and info["tiles_unloaded"] == 1,
+              f"the far tile comes, the near one goes, got {ground} and {info}")
     tool("new_scene")
 
 
@@ -454,7 +464,8 @@ def terrain_gate(tool, call, check):
         info = tool("get_terrain")
         if info["meshes"]["building"] == 0:
             break
-    check(info["meshes"] == {"tiles": 5, "building": 0, "built": 5, "triangles": 5 * 16 * 16 * 2},
+    meshes = {k: v for k, v in info["meshes"].items() if k != "built"}  # built: ever, other gates too
+    check(meshes == {"tiles": 5, "building": 0, "triangles": 5 * 16 * 16 * 2},
           f"every tile's mesh is built, got {info['meshes']}")
     height = tool("get_terrain", {"points": [[0, 0], [500, 500]]})["heights"]
     check(height[1] is None and abs(height[0]) <= 6, f"the ground's height is sampled, got {height}")

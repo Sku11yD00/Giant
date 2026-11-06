@@ -122,9 +122,12 @@ std::vector<world::CellCoord> TerrainMeshes::take_changed() {
     return out;
 }
 
-void TerrainMeshes::want(world::CellCoord cell) {
-    if (m_queued.insert(cell).second) {
+void TerrainMeshes::want(world::CellCoord cell, u64 not_before) {
+    const auto [it, added] = m_queued.emplace(cell, not_before);
+    if (added) {
         m_queue.push_back(cell);
+    } else {
+        it->second = std::max(it->second, not_before);
     }
 }
 
@@ -171,6 +174,7 @@ void TerrainMeshes::update(world::Terrain& terrain) {
     // What changed: a changed tile's mesh and its neighbours' (they reach
     // into it; one whose heights snapshot comes out the same is not built).
     world::TerrainChanges changes = terrain.take_changes();
+    ++m_frame;
     if (terrain.identity() != m_identity) {
         m_identity = terrain.identity();
         changes.all = true;
@@ -181,6 +185,10 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         for (const auto& [cell, tile] : m_tiles) want(cell);
     } else {
         for (const world::CellCoord c : changes.tiles) {
+            // A tile new here waits a few frames with its neighbours, for
+            // the tiles arriving after it.
+            const bool fresh = !m_tiles.contains(c) && terrain.find(c) != nullptr;
+            const u64 not_before = fresh ? m_frame + settle_frames : 0;
             for (i32 dz = -1; dz <= 1; ++dz) {
                 for (i32 dx = -1; dx <= 1; ++dx) {
                     const i64 x = i64{c.x} + dx;
@@ -190,7 +198,7 @@ void TerrainMeshes::update(world::Terrain& terrain) {
                         continue;
                     }
                     const world::CellCoord n{static_cast<i32>(x), static_cast<i32>(z)};
-                    if (terrain.find(n) != nullptr || m_tiles.contains(n)) want(n);
+                    if (terrain.find(n) != nullptr || m_tiles.contains(n)) want(n, not_before);
                 }
             }
         }
@@ -257,23 +265,39 @@ void TerrainMeshes::update(world::Terrain& terrain) {
     u32 looks = 0;
     const u32 max_looks = builds_per_frame > std::numeric_limits<u32>::max() / 8 ? builds_per_frame
                                                                                  : builds_per_frame * 8;
-    for (usize looked = 0, n = m_queue.size(); looked < n; ++looked) {
-        if (started >= builds_per_frame || looks >= max_looks || m_in_flight >= builds_in_flight) break;
+    u32 dropped = 0;
+    // Tiles gone are dropped (their meshes freed) within their own budget,
+    // even while builds are full; a scan looks at a bounded part of the queue.
+    const usize scan = m_finishing ? m_queue.size() : std::min<usize>(m_queue.size(), 4096);
+    for (usize looked = 0; looked < scan; ++looked) {
+        const bool can_build = started < builds_per_frame && looks < max_looks && m_in_flight < builds_in_flight;
+        if (!can_build && dropped >= drops_per_frame) break;
         const world::CellCoord cell = m_queue.front();
         m_queue.pop_front();
+        if (const auto q = m_queued.find(cell); !m_finishing && q != m_queued.end() && q->second > m_frame) {
+            m_queue.push_back(cell); // settling
+            continue;
+        }
         const auto t = m_tiles.find(cell);
         if (terrain.find(cell) == nullptr) {
             if (t != m_tiles.end() && t->second.in_flight) {
                 m_queue.push_back(cell); // dropped once its build is back
                 continue;
             }
+            if (t != m_tiles.end()) {
+                if (dropped >= drops_per_frame) {
+                    m_queue.push_back(cell); // next frame
+                    continue;
+                }
+                drop(cell, t->second);
+                ++dropped;
+            }
             m_queued.erase(cell);
-            if (t != m_tiles.end()) drop(cell, t->second);
             continue;
         }
         Tile& tile = t != m_tiles.end() ? t->second : m_tiles[cell];
-        if (tile.in_flight) {
-            m_queue.push_back(cell); // still wanted: built again after this one
+        if (tile.in_flight || !can_build) {
+            m_queue.push_back(cell); // still wanted: built after this one, or next frame
             continue;
         }
         m_queued.erase(cell);
@@ -287,8 +311,9 @@ void TerrainMeshes::update(world::Terrain& terrain) {
 }
 
 void TerrainMeshes::finish(world::Terrain& terrain) {
-    const u32 budgets[3] = {builds_per_frame, uploads_per_frame, builds_in_flight};
-    builds_per_frame = uploads_per_frame = builds_in_flight = std::numeric_limits<u32>::max();
+    const u32 budgets[4] = {builds_per_frame, uploads_per_frame, builds_in_flight, drops_per_frame};
+    builds_per_frame = uploads_per_frame = builds_in_flight = drops_per_frame = std::numeric_limits<u32>::max();
+    m_finishing = true;
     for (;;) {
         update(terrain);
         // Not drawn yet: with no frames to stream them in, swapped in now.
@@ -300,9 +325,11 @@ void TerrainMeshes::finish(world::Terrain& terrain) {
         if (m_queue.empty() && m_in_flight == 0 && m_arrived.empty()) break;
         m_jobs.wait(m_builds);
     }
+    m_finishing = false;
     builds_per_frame = budgets[0];
     uploads_per_frame = budgets[1];
     builds_in_flight = budgets[2];
+    drops_per_frame = budgets[3];
 }
 
 TerrainMeshStats TerrainMeshes::stats() const {

@@ -71,10 +71,18 @@ public:
     // Adds or replaces a tile. `heights` must hold samples()^2 finite
     // values within k_max_terrain_height (asserted: callers check).
     void set(CellCoord cell, Heights heights);
+    // Puts back a tile exactly as it was: `heights` with the `version` they
+    // had then (an undo; anything else would break "equal versions are
+    // equal heights"). A version of 0 takes a new one.
+    void restore(CellCoord cell, Heights heights, u64 version);
     // The removed tile's heights (none if it had no tile).
     std::optional<Heights> remove(CellCoord cell);
     void clear();
     const std::unordered_map<CellCoord, Heights, CellCoordHash>& tiles() const { return m_tiles; }
+    // The tile's version: new (unique across every terrain) each time it is
+    // set or modified, kept by copies; 0 for no tile. Equal versions are
+    // equal heights, so "unchanged since" is one compare.
+    u64 version(CellCoord cell) const;
 
     // The surface at a point on the ground (x, z), exactly as the finest
     // mesh draws it (each square of samples is two triangles, split from
@@ -115,6 +123,7 @@ private:
 
     u32 m_samples = k_default_terrain_samples;
     std::unordered_map<CellCoord, Heights, CellCoordHash> m_tiles;
+    std::unordered_map<CellCoord, u64, CellCoordHash> m_versions; // the same cells
     TerrainChanges m_changes{{}, true};
     Identity m_identity;
 };

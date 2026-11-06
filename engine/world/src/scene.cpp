@@ -372,6 +372,19 @@ std::string heights_row(std::span<const float> row) {
     return out;
 }
 
+// A tile's heights as rows of text, one per row of samples.
+Json heights_json(const Terrain::Heights& h, usize n) {
+    Json rows = Json::array();
+    for (usize j = 0; j < n; ++j) {
+        rows.push_back(heights_row(std::span<const float>(h).subspan(j * n, n)));
+    }
+    return rows;
+}
+
+Json terrain_material_json(const TerrainMaterial& m) {
+    return {{"base_color", vec3_json(m.base_color)}, {"roughness", m.roughness}};
+}
+
 Json terrain_json(const Terrain& t) {
     std::vector<CellCoord> cells;
     cells.reserve(t.size());
@@ -381,16 +394,9 @@ Json terrain_json(const Terrain& t) {
     const usize n = t.samples();
     Json tiles = Json::array();
     for (const CellCoord c : cells) {
-        const Terrain::Heights& h = *t.find(c);
-        Json rows = Json::array();
-        for (usize j = 0; j < n; ++j) {
-            rows.push_back(heights_row(std::span<const float>(h).subspan(j * n, n)));
-        }
-        tiles.push_back({{"cell", Json::array({c.x, c.z})}, {"heights", std::move(rows)}});
+        tiles.push_back({{"cell", Json::array({c.x, c.z})}, {"heights", heights_json(*t.find(c), n)}});
     }
-    return {{"samples", t.samples()},
-            {"material", {{"base_color", vec3_json(t.material.base_color)}, {"roughness", t.material.roughness}}},
-            {"tiles", std::move(tiles)}};
+    return {{"samples", t.samples()}, {"material", terrain_material_json(t.material)}, {"tiles", std::move(tiles)}};
 }
 
 Json entity_json(const Entity& e) {
@@ -728,23 +734,73 @@ std::optional<CellCoord> read_cell(const Json& v) {
     return CellCoord{static_cast<i32>(x), static_cast<i32>(z)};
 }
 
-// A terrain: its sample spacing, material and tiles (heights as rows of text).
-void read_terrain(const Json& json, Terrain& out, std::string& error) {
-    Reader r(json, "terrain", error);
-    Terrain t;
+// "samples" and "material" of a terrain (or a world's terrain settings).
+void read_terrain_settings(Reader& r, const std::string& path, u32& samples, TerrainMaterial& material,
+                           std::string& error) {
     if (const Json* v = r.get("samples", false); v != nullptr && r.ok()) {
         if (!v->is_number_unsigned() || !valid_terrain_samples(static_cast<u32>(std::min<u64>(v->get<u64>(), 1u << 20)))) {
             r.fail("samples", "must be 8, 16, 32, 64 or 128");
         } else {
-            t.set_samples(v->get<u32>());
+            samples = v->get<u32>();
         }
     }
     if (const Json* m = r.get("material", false); m != nullptr && r.ok()) {
-        Reader mr(*m, "terrain.material", error);
-        mr.vec3("base_color", t.material.base_color, 0, 1);
-        mr.number("roughness", t.material.roughness, 0, 1);
+        Reader mr(*m, path + ".material", error);
+        mr.vec3("base_color", material.base_color, 0, 1);
+        mr.number("roughness", material.roughness, 0, 1);
         mr.finish();
     }
+}
+
+// A tile's heights under `key`: n rows of n numbers as text.
+void read_heights(Reader& tr, const char* key, usize n, Terrain::Heights& heights) {
+    const Json* rows = tr.get(key, true);
+    if (rows == nullptr || !tr.ok()) {
+        return;
+    }
+    if (!rows->is_array() || rows->size() != n) {
+        tr.fail(key, "must be " + std::to_string(n) + " rows (samples)");
+        return;
+    }
+    heights.reserve(n * n);
+    for (usize j = 0; tr.ok() && j < n; ++j) {
+        const Json& row = (*rows)[j];
+        const std::string where = std::string(key) + "[" + std::to_string(j) + "]";
+        if (!row.is_string()) {
+            tr.fail(where, "must be a string of numbers");
+            break;
+        }
+        const std::string& text = row.get_ref<const std::string&>();
+        const char* at = text.data();
+        const char* end = text.data() + text.size();
+        usize count = 0;
+        while (tr.ok()) {
+            while (at < end && *at == ' ') ++at;
+            if (at == end) break;
+            float h = 0.0f;
+            const auto [next, ec] = std::from_chars(at, end, h);
+            if (ec != std::errc{} || (next < end && *next != ' ') || !std::isfinite(h) ||
+                std::fabs(h) > k_max_terrain_height) {
+                tr.fail(where, "must hold numbers from -10000 to 10000, one space apart");
+                break;
+            }
+            heights.push_back(h);
+            ++count;
+            at = next;
+        }
+        if (tr.ok() && count != n) {
+            tr.fail(where, "must hold " + std::to_string(n) + " heights (samples)");
+        }
+    }
+}
+
+// A terrain: its sample spacing, material and tiles (heights as rows of text).
+void read_terrain(const Json& json, Terrain& out, std::string& error) {
+    Reader r(json, "terrain", error);
+    Terrain t;
+    u32 samples = t.samples();
+    read_terrain_settings(r, "terrain", samples, t.material, error);
+    t.set_samples(samples);
     const Json* tiles = r.get("tiles", false);
     if (tiles != nullptr && r.ok() && !tiles->is_array()) {
         r.fail("tiles", "must be an array");
@@ -763,41 +819,7 @@ void read_terrain(const Json& json, Terrain& out, std::string& error) {
             }
         }
         Terrain::Heights heights;
-        if (const Json* rows = tr.get("heights", true); rows != nullptr && tr.ok()) {
-            if (!rows->is_array() || rows->size() != n) {
-                tr.fail("heights", "must be " + std::to_string(n) + " rows (samples)");
-            }
-            heights.reserve(n * n);
-            for (usize j = 0; tr.ok() && j < n; ++j) {
-                const Json& row = (*rows)[j];
-                const std::string where = "heights[" + std::to_string(j) + "]";
-                if (!row.is_string()) {
-                    tr.fail(where, "must be a string of numbers");
-                    break;
-                }
-                const std::string& text = row.get_ref<const std::string&>();
-                const char* at = text.data();
-                const char* end = text.data() + text.size();
-                usize count = 0;
-                while (tr.ok()) {
-                    while (at < end && *at == ' ') ++at;
-                    if (at == end) break;
-                    float h = 0.0f;
-                    const auto [next, ec] = std::from_chars(at, end, h);
-                    if (ec != std::errc{} || (next < end && *next != ' ') || !std::isfinite(h) ||
-                        std::fabs(h) > k_max_terrain_height) {
-                        tr.fail(where, "must hold numbers from -10000 to 10000, one space apart");
-                        break;
-                    }
-                    heights.push_back(h);
-                    ++count;
-                    at = next;
-                }
-                if (tr.ok() && count != n) {
-                    tr.fail(where, "must hold " + std::to_string(n) + " heights (samples)");
-                }
-            }
-        }
+        read_heights(tr, "heights", n, heights);
         tr.finish();
         if (tr.ok() && error.empty()) {
             t.set(*cell, std::move(heights));
@@ -957,6 +979,19 @@ std::string save_world_index(const WorldIndex& world) {
         list.push_back(cell_json(c));
     }
     out["cells"] = std::move(list);
+    std::vector<CellCoord> ground = world.terrain_cells;
+    std::sort(ground.begin(), ground.end(), by_zx);
+    ground.erase(std::unique(ground.begin(), ground.end()), ground.end());
+    if (!ground.empty() || world.terrain_samples != k_default_terrain_samples ||
+        !(world.terrain_material == TerrainMaterial{})) {
+        Json tiles = Json::array();
+        for (const CellCoord c : ground) {
+            tiles.push_back(cell_json(c));
+        }
+        out["terrain"] = {{"samples", world.terrain_samples},
+                          {"material", terrain_material_json(world.terrain_material)},
+                          {"cells", std::move(tiles)}};
+    }
     return out.dump(2) + "\n";
 }
 
@@ -1006,6 +1041,32 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
             }
         }
     }
+    if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
+        Reader tr(*terrain, "terrain", error);
+        read_terrain_settings(tr, "terrain", world.terrain_samples, world.terrain_material, error);
+        std::unordered_map<CellCoord, bool, CellCoordHash> listed;
+        for (const CellCoord c : world.cells) listed.emplace(c, true);
+        if (const Json* cells = tr.get("cells", false); cells != nullptr && tr.ok()) {
+            if (!cells->is_array()) {
+                tr.fail("cells", "must be an array of [x, z] cells");
+            }
+            std::unordered_map<CellCoord, bool, CellCoordHash> seen;
+            for (usize i = 0; tr.ok() && i < cells->size(); ++i) {
+                const std::string key = "cells[" + std::to_string(i) + "]";
+                const auto c = read_cell((*cells)[i]);
+                if (!c) {
+                    tr.fail(key, "must be [x, z], two whole numbers");
+                } else if (!seen.emplace(*c, true).second) {
+                    tr.fail(key, "is listed twice");
+                } else if (!listed.contains(*c)) {
+                    tr.fail(key, "is not in the world's cells (a cell with ground has a file)");
+                } else {
+                    world.terrain_cells.push_back(*c);
+                }
+            }
+        }
+        tr.finish();
+    }
     root.finish();
     if (!error.empty()) {
         return LoadError{std::move(error)};
@@ -1014,7 +1075,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     return std::nullopt;
 }
 
-std::string save_cell(CellCoord cell, std::span<const Entity> entities) {
+std::string save_cell(CellCoord cell, std::span<const Entity> entities, const Terrain::Heights* heights) {
     std::vector<const Entity*> sorted;
     sorted.reserve(entities.size());
     for (const Entity& e : entities) {
@@ -1030,10 +1091,23 @@ std::string save_cell(CellCoord cell, std::span<const Entity> entities) {
         list.push_back(entity_json(*e));
     }
     out["entities"] = std::move(list);
+    if (heights != nullptr) {
+        const auto n = static_cast<usize>(std::lround(std::sqrt(static_cast<double>(heights->size()))));
+        GIANT_ASSERT(n * n == heights->size() && valid_terrain_samples(static_cast<u32>(n)),
+                     "a terrain tile is samples x samples heights");
+        out["heights"] = heights_json(*heights, n);
+    }
     return out.dump(2) + "\n";
 }
 
 std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::vector<Entity>& out) {
+    std::optional<Terrain::Heights> heights;
+    return load_cell(text, cell, 0, out, heights);
+}
+
+std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 terrain_samples,
+                                   std::vector<Entity>& out, std::optional<Terrain::Heights>& heights_out) {
+    GIANT_ASSERT(terrain_samples == 0 || valid_terrain_samples(terrain_samples), "terrain samples must be valid");
     Json json;
     if (auto bad = parse(text, json)) {
         return bad;
@@ -1062,11 +1136,21 @@ std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::v
         entities.push_back(std::move(entity));
         return {};
     });
+    std::optional<Terrain::Heights> heights;
+    if (root.ok() && error.empty() && root.get("heights", false) != nullptr) {
+        if (terrain_samples == 0) {
+            root.fail("heights", "is a terrain tile, and this cell is read without terrain");
+        } else {
+            heights.emplace();
+            read_heights(root, "heights", terrain_samples, *heights);
+        }
+    }
     root.finish();
     if (!error.empty()) {
         return LoadError{std::move(error)};
     }
     out = std::move(entities);
+    heights_out = std::move(heights);
     return std::nullopt;
 }
 

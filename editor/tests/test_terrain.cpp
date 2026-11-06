@@ -58,13 +58,6 @@ struct Fixture {
     }
 };
 
-std::filesystem::path temp_folder(const char* name) {
-    const std::filesystem::path p = std::filesystem::temp_directory_path() / name;
-    std::error_code e;
-    std::filesystem::remove_all(p, e);
-    return p;
-}
-
 } // namespace
 
 GIANT_TEST("terrain meshes: a tile's surface meets its neighbours' exactly") {
@@ -213,6 +206,45 @@ GIANT_TEST("terrain meshes: built off the main thread, a change rebuilds its nei
         std::this_thread::sleep_for(std::chrono::microseconds(500)); // a frame's worth of time for the workers
     }
     GIANT_CHECK(m.stats().building == 0 && m.stats().built == built + 8);
+}
+
+GIANT_TEST("terrain meshes: new tiles settle before building; changed ones do not wait; drops are budgeted") {
+    Terrain t;
+    t.set_samples(8);
+    TerrainMeshes m(nullptr);
+    m.settle_frames = 3;
+    m.update(t); // a terrain new to it: everything is looked at at once
+    // A row of tiles arriving one a frame (a world streaming in): each builds once.
+    for (i32 x = 0; x < 6; ++x) {
+        t.set({x, 0}, Terrain::Heights(64, 1.0f));
+        m.update(t);
+    }
+    GIANT_CHECK(m.stats().in_flight <= 2); // the first ones, whose neighbours are all in
+    for (int frame = 0; frame < 20000 && m.stats().building > 0; ++frame) {
+        m.update(t);
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    GIANT_CHECK(m.stats().tiles == 6 && m.stats().built == 6);
+    // A change to a tile already there starts at once.
+    t.modify({2, 0})->at(10) = 3.0f;
+    m.update(t);
+    GIANT_CHECK(m.stats().in_flight == 1);
+    m.finish(t);
+    GIANT_CHECK(m.stats().built == 7);
+    // Many tiles going at once are dropped a few a frame (drops_per_frame), builds or not.
+    for (i32 z = 1; z < 11; ++z) {
+        for (i32 x = 0; x < 10; ++x) t.set({x, z}, Terrain::Heights(64, 1.0f));
+    }
+    m.finish(t);
+    GIANT_CHECK(m.stats().tiles == 106);
+    m.drops_per_frame = 16;
+    for (i32 z = 1; z < 11; ++z) {
+        for (i32 x = 0; x < 10; ++x) t.remove({x, z});
+    }
+    m.update(t);
+    GIANT_CHECK(m.stats().tiles == 106 - 16);
+    m.finish(t);
+    GIANT_CHECK(m.stats().tiles == 6);
 }
 
 GIANT_TEST("terrain meshes: a tile changed while it builds is drawn with its newest heights") {
@@ -396,13 +428,9 @@ GIANT_TEST("terrain commands: work a command and a terrain may hold is capped") 
                 world::hills_height(h, 7 * 64.0 + 77 * 0.5, 3 * 64.0 + 5 * 0.5));
 }
 
-GIANT_TEST("terrain commands: saved with the scene; not yet in streamed worlds") {
+GIANT_TEST("terrain commands: saved with the scene") {
     Fixture f;
     GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {100, 10}}, {"hills", Json::object()}}).ok);
-    const std::filesystem::path folder = temp_folder("giant_terrain_world");
-    const ai::CommandResult w = f.run("save_world", {{"folder", folder.string()}});
-    GIANT_CHECK(!w.ok && w.error.find("terrain") != std::string::npos);
-    GIANT_CHECK(!std::filesystem::exists(folder / "world.json"));
 
     const std::filesystem::path file = std::filesystem::temp_directory_path() / "giant_terrain.scene.json";
     GIANT_CHECK(f.run("save_scene", {{"path", file.string()}}).ok);

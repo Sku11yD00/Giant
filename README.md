@@ -162,7 +162,10 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   detail-on-demand meshes as everything else on a background thread, meet
   their neighbours without cracks at any detail, cast shadows and light
   the scene, and stay real meshes all the way to the horizon. Terrain is
-  saved with the scene as text; streamed worlds hold it from the next part.
+  saved with the scene as text.
+- Part 4b: terrain in streamed worlds. Each square's file holds its piece
+  of ground, which loads and unloads with the square; a piece you have
+  changed stays until saved, like everything else.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

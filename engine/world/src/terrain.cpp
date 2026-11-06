@@ -25,11 +25,19 @@ Terrain::Identity& Terrain::Identity::operator=(const Identity&) {
     return *this;
 }
 
+namespace {
+u64 next_version() {
+    static std::atomic<u64> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+} // namespace
+
 Terrain::Terrain(const Terrain& other)
-    : material(other.material), m_samples(other.m_samples), m_tiles(other.m_tiles) {}
+    : material(other.material), m_samples(other.m_samples), m_tiles(other.m_tiles), m_versions(other.m_versions) {}
 
 Terrain::Terrain(Terrain&& other) noexcept
-    : material(other.material), m_samples(other.m_samples), m_tiles(std::move(other.m_tiles)) {
+    : material(other.material), m_samples(other.m_samples), m_tiles(std::move(other.m_tiles)),
+      m_versions(std::move(other.m_versions)) {
     other.clear();
 }
 
@@ -45,6 +53,7 @@ Terrain& Terrain::operator=(Terrain&& other) noexcept {
         material = other.material;
         m_samples = other.m_samples;
         m_tiles = std::move(other.m_tiles);
+        m_versions = std::move(other.m_versions);
         m_changes = {{}, true};
         m_identity = Identity();
         other.clear();
@@ -71,7 +80,13 @@ Terrain::Heights* Terrain::modify(CellCoord cell) {
         return nullptr;
     }
     changed(cell);
+    m_versions[cell] = next_version();
     return &it->second;
+}
+
+u64 Terrain::version(CellCoord cell) const {
+    const auto it = m_versions.find(cell);
+    return it == m_versions.end() ? 0 : it->second;
 }
 
 void Terrain::set(CellCoord cell, Heights heights) {
@@ -80,7 +95,13 @@ void Terrain::set(CellCoord cell, Heights heights) {
                              [](float h) { return std::isfinite(h) && std::fabs(h) <= k_max_terrain_height; }),
                  "terrain heights are finite and within k_max_terrain_height");
     m_tiles[cell] = std::move(heights);
+    m_versions[cell] = next_version();
     changed(cell);
+}
+
+void Terrain::restore(CellCoord cell, Heights heights, u64 version) {
+    set(cell, std::move(heights));
+    if (version != 0) m_versions[cell] = version;
 }
 
 std::optional<Terrain::Heights> Terrain::remove(CellCoord cell) {
@@ -90,12 +111,14 @@ std::optional<Terrain::Heights> Terrain::remove(CellCoord cell) {
     }
     Heights out = std::move(it->second);
     m_tiles.erase(it);
+    m_versions.erase(cell);
     changed(cell);
     return out;
 }
 
 void Terrain::clear() {
     m_tiles.clear();
+    m_versions.clear();
     m_changes = {{}, true};
 }
 

@@ -61,10 +61,11 @@ public:
 
     // Once a frame, before the scene's frame is built: takes the terrain's
     // changes, looks at queued tiles (a heights snapshot each, at most
-    // 8 * builds_per_frame; one as drawn needs no build), starts builds (at
-    // most builds_per_frame, builds_in_flight at once), uploads finished
-    // meshes (at most uploads_per_frame) and swaps each in once the
-    // renderer can draw it.
+    // 8 * builds_per_frame; one as drawn needs no build; one new here
+    // settles first), starts builds (at most builds_per_frame,
+    // builds_in_flight at once), frees the meshes of tiles gone (at most
+    // drops_per_frame), uploads finished meshes (at most
+    // uploads_per_frame) and swaps each in once the renderer can draw it.
     void update(world::Terrain& terrain);
     // The tile's mesh drawn now (k_no_mesh: none yet, or no renderer).
     render::MeshId mesh(world::CellCoord cell) const;
@@ -80,6 +81,12 @@ public:
     u32 builds_per_frame = 8;
     u32 uploads_per_frame = 8;
     u32 builds_in_flight = 8;
+    u32 drops_per_frame = 64; // meshes of tiles gone, freed a frame
+    // Frames a newly added tile (and its neighbours) wait before they are
+    // looked at, so tiles arriving one after another (a world streaming
+    // in) build once, not again as each neighbour arrives. Changes to tiles
+    // already there (sculpting) do not wait.
+    u32 settle_frames = 6;
 
 private:
     struct Tile {
@@ -103,7 +110,7 @@ private:
         u32 triangles = 0;
     };
 
-    void want(world::CellCoord cell);
+    void want(world::CellCoord cell, u64 not_before = 0);
     void start(world::CellCoord cell, Tile& tile, TileHeights heights, u64 hash);
     void commit(world::CellCoord cell, Tile& tile);
     void drop(world::CellCoord cell, Tile& tile);
@@ -114,7 +121,10 @@ private:
     u64 m_built = 0;
     std::unordered_map<world::CellCoord, Tile, world::CellCoordHash> m_tiles;
     std::deque<world::CellCoord> m_queue; // waiting to start, oldest first
-    std::unordered_set<world::CellCoord, world::CellCoordHash> m_queued;
+    // Queued cells, each with the frame it may be looked at from.
+    std::unordered_map<world::CellCoord, u64, world::CellCoordHash> m_queued;
+    u64 m_frame = 0;
+    bool m_finishing = false; // finish(): nothing waits to settle
     std::vector<world::CellCoord> m_changed;
     std::deque<Result> m_arrived;            // finished builds waiting for the upload budget
     std::vector<world::CellCoord> m_waiting; // tiles with an uploaded mesh not loaded yet

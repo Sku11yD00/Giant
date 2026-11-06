@@ -103,6 +103,35 @@ bool WorldStreaming::matches(std::vector<const Entity*>& now, const std::vector<
     return true;
 }
 
+bool WorldStreaming::same_tile(const world::Terrain& terrain, CellCoord coord, const Cell& cell) {
+    const u64 version = terrain.version(coord);
+    if (!cell.saved_tile) {
+        return version == 0;
+    }
+    return version != 0 && version == cell.saved_version;
+}
+
+namespace {
+// What a tile weighs against entities_per_frame: as many entities as its
+// heights over 64 (64 at 64 samples, 256 at 128).
+usize tile_weight(u32 samples) { return std::max<usize>(1, usize{samples} * samples / 64); }
+} // namespace
+
+std::optional<u32> WorldStreaming::ground_samples() const {
+    if (m_ground.empty()) {
+        return std::nullopt;
+    }
+    return m_index.terrain_samples;
+}
+
+bool WorldStreaming::ground_on_disk(CellCoord cell) const {
+    if (!m_ground.contains(cell)) {
+        return false;
+    }
+    const auto it = m_cells.find(cell);
+    return it != m_cells.end() && it->second.state != State::loaded;
+}
+
 WorldStreaming::WorldStreaming() = default;
 
 WorldStreaming::~WorldStreaming() { m_jobs.wait(m_reads); }
@@ -135,6 +164,8 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
     base.lighting = index.lighting;
     base.kits = index.kits;
     base.reserve_ids_below(index.next_id);
+    base.terrain.set_samples(index.terrain_samples);
+    base.terrain.material = index.terrain_material;
     scene = std::move(base);
     m_scene = scene.identity();
     m_folder = folder;
@@ -143,6 +174,7 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
     for (const CellCoord c : m_index.cells) {
         m_cells[c] = Cell{};
     }
+    m_ground.insert(m_index.terrain_cells.begin(), m_index.terrain_cells.end());
     m_count[static_cast<usize>(State::on_disk)] = static_cast<u32>(m_cells.size());
     m_wanted_stale = true;
     return std::nullopt;
@@ -159,6 +191,7 @@ void WorldStreaming::close() {
     m_generation = 0;
     m_index = {};
     m_cells.clear();
+    m_ground.clear();
     m_ready.clear();
     m_origin.clear();
     m_ids_seen = 1;
@@ -185,6 +218,7 @@ void WorldStreaming::forget(CellCoord coord) {
         m_loaded.erase(coord);
         m_cells.erase(it);
     }
+    m_ground.erase(coord);
     std::erase_if(m_ready, [&](const Read& r) { return r.cell == coord; });
 }
 
@@ -228,9 +262,13 @@ void WorldStreaming::restore(const Memo& memo, world::Scene& scene) {
             then->second.written == cell.written) {
             cell.state = State::loaded;
             cell.saved = then->second.saved;
+            cell.saved_tile = then->second.saved_tile;
+            cell.saved_version = then->second.saved_version;
         } else {
             cell.state = State::on_disk;
             cell.saved = {};
+            cell.saved_tile = false;
+            cell.saved_version = 0;
         }
         ++m_count[static_cast<usize>(cell.state)];
         if (cell.state == State::loaded) m_loaded.insert(coord);
@@ -245,12 +283,13 @@ void WorldStreaming::restore(const Memo& memo, world::Scene& scene) {
 
 void WorldStreaming::start_read(CellCoord cell) {
     set_state(cell, m_cells[cell], State::reading);
-    m_jobs.submit(m_reads, [this, cell, path = cell_path(cell), epoch = m_epoch] {
+    m_jobs.submit(m_reads, [this, cell, path = cell_path(cell), epoch = m_epoch,
+                            samples = m_index.terrain_samples] {
         Read read;
         read.cell = cell;
         read.epoch = epoch;
         if (const auto text = read_text(path)) {
-            if (const auto error = world::load_cell(*text, cell, read.entities)) {
+            if (const auto error = world::load_cell(*text, cell, samples, read.entities, read.heights)) {
                 read.error = path_to_utf8(path) + ": " + error->message;
             } else {
                 for (Entity& e : read.entities) {
@@ -309,7 +348,8 @@ void WorldStreaming::insert(world::Scene& scene) {
     usize taken = 0;
     for (; taken < m_ready.size(); ++taken) {
         Read& r = m_ready[taken];
-        if (taken > 0 && added + r.entities.size() > settings.entities_per_frame) {
+        const usize weight = r.entities.size() + (r.heights ? tile_weight(scene.terrain.samples()) : 0);
+        if (taken > 0 && added + weight > settings.entities_per_frame) {
             break;
         }
         const auto found = m_cells.find(r.cell);
@@ -317,8 +357,34 @@ void WorldStreaming::insert(world::Scene& scene) {
             continue; // its file was removed since (never happens: forget drops its read)
         }
         Cell& cell = found->second;
+        const usize samples = scene.terrain.samples();
+        if (r.heights && r.heights->size() != samples * samples) {
+            // Only when the scene's terrain took another spacing while
+            // tiles of the world's were on disk (see update): not loaded,
+            // so a save cannot write over the file with less.
+            log_error("world", "cell [" + std::to_string(r.cell.x) + ", " + std::to_string(r.cell.z) +
+                                   "]'s terrain tile is not " + std::to_string(samples) +
+                                   " samples a side, as the scene's terrain is: not loaded");
+            set_state(r.cell, cell, State::failed);
+            continue;
+        }
         set_state(r.cell, cell, State::loaded);
         cell.saved = std::move(r.entities);
+        cell.saved_tile = r.heights.has_value();
+        cell.saved_version = 0;
+        if (r.heights) {
+            // A tile in the scene already (made or put back by an undo while
+            // the cell was on disk) is newer than the file's: clean only if
+            // it holds the same heights.
+            if (const world::Terrain::Heights* there = scene.terrain.find(r.cell); there == nullptr) {
+                scene.terrain.set(r.cell, std::move(*r.heights));
+                ++m_totals.tiles_loaded;
+                added += tile_weight(scene.terrain.samples());
+                cell.saved_version = scene.terrain.version(r.cell);
+            } else if (*there == *r.heights) {
+                cell.saved_version = scene.terrain.version(r.cell);
+            }
+        }
         for (const Entity& e : cell.saved) {
             const Entity* there = scene.find(e.id);
             const auto origin = m_origin.find(e.id);
@@ -352,24 +418,37 @@ void WorldStreaming::insert(world::Scene& scene) {
     m_totals.entities_loaded += added;
 }
 
-void WorldStreaming::unload(world::Scene& scene, const DVec3& camera, const SceneFrame& frame) {
+bool WorldStreaming::unload(world::Scene& scene, const DVec3& camera, const SceneFrame& frame) {
     const double limit = settings.load_radius + settings.unload_margin;
     std::vector<world::EntityId> gone;
     std::vector<CellCoord> far;
     for (const CellCoord coord : m_loaded) {
         if (ground_distance(camera, coord) > limit) far.push_back(coord);
     }
+    u32 let_go = 0;
+    bool more = false;
     for (const CellCoord coord : far) {
+        if (let_go >= std::max<u32>(1, settings.unloads_per_frame)) {
+            more = true;
+            break;
+        }
         Cell& cell = m_cells[coord];
         std::vector<const Entity*> now = cell_entities(scene, frame, coord);
-        if (!matches(now, cell.saved)) {
+        if (!same_tile(scene.terrain, coord, cell) || !matches(now, cell.saved)) {
             continue; // unsaved edits: stays
         }
         for (const Entity* e : now) {
             gone.push_back(e->id); // its origin stays: met again, it is the same entity
         }
+        if (cell.saved_tile) {
+            scene.terrain.remove(coord);
+            ++m_totals.tiles_unloaded;
+        }
         set_state(coord, cell, State::on_disk);
         cell.saved = {};
+        cell.saved_tile = false;
+        cell.saved_version = 0;
+        ++let_go;
     }
     if (!gone.empty()) {
         scene.remove_many(gone);
@@ -385,6 +464,14 @@ void WorldStreaming::unload(world::Scene& scene, const DVec3& camera, const Scen
             m_touched.push_back(coord);
         }
     }
+    // And those the scene has a terrain tile in.
+    for (const auto& [coord, heights] : scene.terrain.tiles()) {
+        const auto it = m_cells.find(coord);
+        if (it != m_cells.end() && it->second.state == State::on_disk) {
+            m_touched.push_back(coord);
+        }
+    }
+    return more;
 }
 
 void WorldStreaming::start_reads(const DVec3& camera) {
@@ -444,12 +531,18 @@ void WorldStreaming::update(world::Scene& scene, u64 generation, const DVec3& ca
         return;
     }
     m_ids_seen = std::max(m_ids_seen, scene.next_id());
+    // The scene's terrain takes the spacing of the tiles on disk while it
+    // has none of its own (an undo can put another back while it is empty).
+    if (!m_ground.empty() && scene.terrain.empty() && scene.terrain.samples() != m_index.terrain_samples) {
+        scene.terrain.set_samples(m_index.terrain_samples);
+    }
     take_reads();
     // The frame must be of this scene, or its cell lists mean nothing.
     const bool frame_current = frame.scene_identity == scene.identity();
     if (frame_current && ++m_frames >= std::max<u32>(1, settings.unload_every)) {
         m_frames = 0;
-        unload(scene, camera, frame);
+        // Cut short by the budget: looked at again next frame.
+        if (unload(scene, camera, frame)) m_frames = std::max<u32>(1, settings.unload_every) - 1;
     }
     start_reads(camera);
     insert(scene);
@@ -474,6 +567,8 @@ WorldStreaming::Saved WorldStreaming::create(const std::filesystem::path& folder
     m_scene = scene.identity();
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;
+    m_index.terrain_samples = scene.terrain.samples();
+    m_index.terrain_material = scene.terrain.material;
     Saved saved = write(scene, std::move(meshes));
     if (!saved.error.empty()) {
         close();
@@ -499,6 +594,13 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     for (const Entity& e : scene.entities()) {
         members[world::cell_of(e.transform.position)].push_back(e);
     }
+    const world::Terrain& terrain = scene.terrain;
+    for (const auto& [coord, heights] : terrain.tiles()) {
+        members[coord]; // a cell with ground has a file
+    }
+    // The tiles in the files of cells on disk that the scene has no tile
+    // in, kept when the file is written again.
+    std::unordered_map<CellCoord, world::Terrain::Heights, world::CellCoordHash> kept_heights;
     // Cells on disk that an entity of the scene was read from or saved to,
     // and has left since (moved, or put back elsewhere by an undo): their
     // file is written again without it, so it is in one file only.
@@ -517,6 +619,23 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
                     " before saving"};
         }
     }
+    // The tiles must all be one spacing: the scene's, unless it has none
+    // (then the world's stays). Commands keep them so; this is the guard.
+    const bool on_disk_ground = std::any_of(m_ground.begin(), m_ground.end(), [&](CellCoord c) {
+        const auto it = m_cells.find(c);
+        return it != m_cells.end() && it->second.state != State::loaded;
+    });
+    if (!terrain.empty() && on_disk_ground && terrain.samples() != m_index.terrain_samples) {
+        return {"the terrain is " + std::to_string(terrain.samples()) + " samples a side (an undo put back "
+                "tiles of an older spacing) and the world's tiles on disk are " +
+                std::to_string(m_index.terrain_samples) + ": undo further, or remove_terrain all, to save"};
+    }
+    const u32 samples = !terrain.empty() || !on_disk_ground ? terrain.samples() : m_index.terrain_samples;
+    // While files hold tiles of the old spacing, the first index keeps it
+    // (a save cut short then leaves files and index agreeing); the last
+    // one, after every file is written, has the new.
+    if (m_ground.empty()) m_index.terrain_samples = samples;
+    m_index.terrain_material = terrain.material;
     // The index first, with the next id past every id about to be written
     // and every cell about to have a file, so a save cut short never hands
     // out ids on disk nor loses track of a file (a listed file that is
@@ -525,6 +644,12 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     m_index.next_id = std::max(m_index.next_id, m_ids_seen);
     for (const auto& [coord, list] : members) {
         if (!m_cells.contains(coord)) m_index.cells.push_back(coord);
+    }
+    // Every cell about to hold a tile too (listed with a file, or not, is
+    // harmless; a tile not listed would be missed by what reads the list).
+    m_index.terrain_cells.assign(m_ground.begin(), m_ground.end());
+    for (const auto& [coord, heights] : terrain.tiles()) {
+        if (!m_ground.contains(coord)) m_index.terrain_cells.push_back(coord);
     }
     if (!write_text(m_folder / "world.json", world::save_world_index(m_index))) {
         return {"could not write " + path_to_utf8(m_folder / "world.json")};
@@ -537,12 +662,17 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
             continue;
         }
         std::vector<Entity> from_file;
+        std::optional<world::Terrain::Heights> heights_from_file;
         if (it->second.state == State::ready) {
             for (const Read& r : m_ready) {
-                if (r.cell == coord) from_file = r.entities;
+                if (r.cell == coord) {
+                    from_file = r.entities;
+                    heights_from_file = r.heights;
+                }
             }
         } else if (const auto text = read_text(cell_path(coord))) {
-            if (const auto bad = world::load_cell(*text, coord, from_file)) {
+            if (const auto bad =
+                    world::load_cell(*text, coord, m_index.terrain_samples, from_file, heights_from_file)) {
                 return {path_to_utf8(cell_path(coord)) + ": " + bad->message};
             }
         } else if (std::error_code error; !std::filesystem::exists(cell_path(coord), error) && !error) {
@@ -555,13 +685,25 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         for (Entity& e : from_file) {
             if (scene.find(e.id) == nullptr) list.push_back(std::move(e));
         }
+        if (heights_from_file && terrain.find(coord) == nullptr) {
+            if (heights_from_file->size() != usize{terrain.samples()} * terrain.samples()) {
+                return {path_to_utf8(cell_path(coord)) + ": its terrain tile is not " +
+                        std::to_string(terrain.samples()) + " samples a side, as the terrain is"};
+            }
+            kept_heights[coord] = std::move(*heights_from_file);
+        }
     }
     // Write what differs from its file. Every loaded cell is looked at,
     // whether or not it still has entities. The bookkeeping follows each
     // file as it is written, so a save cut short leaves it true.
     const auto put = [&](CellCoord coord, std::vector<Entity>& list) -> bool {
         const auto it = m_cells.find(coord);
-        if (list.empty()) {
+        const world::Terrain::Heights* heights = terrain.find(coord);
+        if (heights == nullptr) {
+            const auto kept = kept_heights.find(coord);
+            if (kept != kept_heights.end()) heights = &kept->second;
+        }
+        if (list.empty() && heights == nullptr) {
             if (it != m_cells.end()) {
                 std::error_code error;
                 std::filesystem::remove(cell_path(coord), error);
@@ -575,20 +717,32 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
             return true;
         }
         std::sort(list.begin(), list.end(), by_id);
-        const bool same = it != m_cells.end() && it->second.state == State::loaded && list == it->second.saved;
+        const bool same = it != m_cells.end() && it->second.state == State::loaded &&
+                          same_tile(terrain, coord, it->second) && list == it->second.saved;
         if (!same) {
-            if (!write_text(cell_path(coord), world::save_cell(coord, list))) {
+            if (!write_text(cell_path(coord), world::save_cell(coord, list, heights))) {
                 saved.error = "could not write " + path_to_utf8(cell_path(coord));
                 return false;
             }
             ++saved.cells_written;
         }
         for (const Entity& e : list) m_origin[e.id] = coord;
+        if (heights != nullptr) {
+            m_ground.insert(coord);
+        } else {
+            m_ground.erase(coord);
+        }
+        // A loaded cell's tile is the scene's (kept ones are for cells on disk).
+        const auto keep_tile = [&](Cell& cell) {
+            cell.saved_tile = heights != nullptr;
+            cell.saved_version = terrain.version(coord);
+        };
         if (it == m_cells.end()) {
             Cell& cell = m_cells[coord]; // new: all of it is in the scene
             ++m_count[static_cast<usize>(State::on_disk)];
             set_state(coord, cell, State::loaded);
             cell.saved = std::move(list);
+            keep_tile(cell);
             cell.written = ++m_writes;
             return true;
         }
@@ -596,11 +750,14 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         if (!same) cell.written = ++m_writes;
         if (cell.state == State::loaded) {
             cell.saved = std::move(list);
+            keep_tile(cell);
         } else {
             // On disk with some entities in the scene: stays on disk, and
             // is read in full next (the scene's entities win at insert).
             set_state(coord, cell, State::on_disk);
             cell.saved = {};
+            cell.saved_tile = false;
+            cell.saved_version = 0;
             std::erase_if(m_ready, [&](const Read& r) { return r.cell == coord; });
         }
         return true;
@@ -618,6 +775,8 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     }
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;
+    m_index.terrain_cells.assign(m_ground.begin(), m_ground.end());
+    m_index.terrain_samples = samples;
     for (std::string& m : meshes) {
         m_index.meshes.push_back(std::move(m));
     }
@@ -642,12 +801,15 @@ u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
     for (const Entity& e : scene.entities()) {
         members[world::cell_of(e.transform.position)].push_back(&e);
     }
+    for (const auto& [coord, heights] : scene.terrain.tiles()) {
+        members[coord];
+    }
     u32 unsaved = 0;
     for (auto& [coord, list] : members) {
         const auto it = m_cells.find(coord);
         if (it == m_cells.end() || it->second.state != State::loaded) {
-            ++unsaved; // no file yet, or entities in a cell still on disk
-        } else if (!matches(list, it->second.saved)) {
+            ++unsaved; // no file yet, or entities or a tile in a cell still on disk
+        } else if (!same_tile(scene.terrain, coord, it->second) || !matches(list, it->second.saved)) {
             ++unsaved;
         }
     }
@@ -664,6 +826,7 @@ StreamingStats WorldStreaming::stats() const {
     s.reading = m_count[static_cast<usize>(State::reading)];
     s.waiting = m_count[static_cast<usize>(State::ready)];
     s.failed = m_count[static_cast<usize>(State::failed)];
+    s.ground = static_cast<u32>(m_ground.size());
     return s;
 }
 
