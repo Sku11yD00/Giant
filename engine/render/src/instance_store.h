@@ -50,6 +50,7 @@ private:
     u32 m_skip_offset = 0;
     std::vector<CellRange> m_seen;    // the cells as uploaded
     std::vector<CellRange> m_changed; // scratch
+    std::vector<CellRange> m_previous; // m_seen before this update (scratch)
     std::vector<DVec3> m_anchors;     // per cell, as uploaded
     u32 m_material_count = ~0u;
     u32 m_uploaded = 0;

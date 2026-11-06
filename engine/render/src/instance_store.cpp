@@ -127,6 +127,7 @@ bool InstanceStore::update(rhi::CommandList& cmd, std::span<const Instance> inst
         m_seen.clear();
         return false;
     }
+    m_previous = m_seen; // changed cells are found by slot: empty cells share `first`
     const bool same = usable && changed_cells(layout, n, m_seen, m_changed); // updates m_seen
     const bool all = !same || material_count != m_material_count;
     m_material_count = material_count;
@@ -143,14 +144,12 @@ bool InstanceStore::update(rhi::CommandList& cmd, std::span<const Instance> inst
             ok = upload(cmd, instances, layout[slot], slot, material_count);
         }
     } else {
-        // changed_cells lists the changed ones in order: find their slots.
-        u32 slot = 0;
-        for (const CellRange& c : m_changed) {
-            while (slot < count && layout[slot].first != c.first) {
-                ++slot;
+        // Same layout as before: the slots whose version moved.
+        for (u32 slot = 0; slot < count && ok; ++slot) {
+            if (m_previous[slot].version != layout[slot].version) {
+                m_anchors[slot] = anchor_of(layout[slot]);
+                ok = upload(cmd, instances, layout[slot], slot, material_count);
             }
-            m_anchors[slot] = anchor_of(layout[slot]);
-            ok = ok && upload(cmd, instances, layout[slot], slot, material_count);
         }
     }
     if (!ok) {

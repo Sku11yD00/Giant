@@ -29,10 +29,9 @@ namespace {
 constexpr u32 k_queue_capacity = 1u << 19;    // (instance, node) items per tree level
 constexpr u32 k_visible_capacity = 1u << 20;  // clusters drawn per frame
 constexpr u32 k_occluded_capacity = 1u << 18; // clusters retested in the second pass
-// Instance culling is one dispatch (65535 groups of 64), and the instances
-// are one transient upload.
-constexpr u32 k_max_instances =
-    std::min<u32>(65535u * 64u, rhi::k_max_transient_allocation / sizeof(gpu::Instance));
+// Instance culling is one dispatch (65535 groups of 64). The instances
+// live in the InstanceStore, uploaded in chunks.
+constexpr u32 k_max_instances = 65535u * 64u;
 constexpr u32 k_vertices_per_cluster = geometry::k_cluster_max_triangles * 3;
 constexpr u32 k_max_materials = 1u << 20; // per frame (32 MiB)
 constexpr u32 k_max_mesh_groups = 65535; // per dimension of a mesh dispatch
@@ -1203,7 +1202,14 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_far_field = far_field;
     m_far_culled = 0;
     m_valid.clear();
-    for (u32 i = 0; i < frame.instances.size(); ++i) {
+    // Instances past k_max_instances are not stored on the GPU: never drawn.
+    const u32 instance_count = static_cast<u32>(std::min<usize>(frame.instances.size(), k_max_instances));
+    if (instance_count < frame.instances.size() && !m_instances_logged) {
+        m_instances_logged = true;
+        log_error("render", "more than " + std::to_string(k_max_instances) +
+                                " instances in one frame; the rest are not drawn");
+    }
+    for (u32 i = 0; i < instance_count; ++i) {
         const Instance& in = frame.instances[i];
         const geometry::ClusterMesh* m = mesh(in.mesh);
         if (m == nullptr || !m_streamer->ready(in.mesh) || !m_streamer->tables_current()) {
@@ -1215,14 +1221,6 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         m_valid.push_back(i);
     }
-    if (m_valid.size() > k_max_instances) {
-        if (!m_instances_logged) {
-            m_instances_logged = true;
-            log_error("render", "more than " + std::to_string(k_max_instances) +
-                                    " instances in one frame; the rest are not drawn");
-        }
-        m_valid.resize(k_max_instances);
-    }
     if (gpu && !ensure_cull_buffers(m_cull, static_cast<u32>(m_valid.size()))) {
         m_valid.clear(); // out of memory: draw nothing
     }
@@ -1232,7 +1230,6 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
 
     // The instances, kept on the GPU by cell (before the frame constants:
     // the store may grow, which moves its not-drawn bits).
-    const u32 instance_count = static_cast<u32>(std::min<usize>(frame.instances.size(), k_max_instances));
     const u32 material_count = static_cast<u32>(std::min<usize>(frame.materials.size(), k_max_materials));
     bool stored = false;
     if (!m_valid.empty()) {

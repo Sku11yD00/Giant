@@ -102,3 +102,23 @@ GIANT_TEST("instance store: without cells everything goes up every frame; it gro
     GIANT_CHECK(s.store->uploaded() == 5000);
     GIANT_CHECK(std::fabs(s.translation(4999).x - 3.0f) < 1e-5f && s.drawn(4999));
 }
+
+GIANT_TEST("instance store: a changed cell after an empty one is found by its slot") {
+    Store s;
+    std::vector<Instance> in{at(1.0, 0.0), at(3.0, 0.0), at(4.0, 0.0)};
+    // The middle cell holds nothing (decals only): it shares `first` with the next.
+    std::vector<CellRange> cells{{0, 1, 1}, {1, 0, 2}, {1, 2, 3}};
+    GIANT_CHECK(s.update(in, cells, {0.0, 0.0, 0.0}, {0, 1, 2}));
+    in[1].position.x = 50.0;
+    cells[2].version = 4;
+    GIANT_CHECK(s.update(in, cells, {0.0, 0.0, 0.0}, {0, 1, 2}));
+    GIANT_CHECK(s.store->uploaded() == 2);
+    GIANT_CHECK(std::fabs(s.translation(1).x - 50.0f) < 1e-4f);
+    // Two changed cells in a row, one of them empty.
+    cells[1].version = 5;
+    cells[2].version = 6;
+    in[2].position.x = 60.0;
+    GIANT_CHECK(s.update(in, cells, {0.0, 0.0, 0.0}, {0, 1, 2}));
+    GIANT_CHECK(s.store->uploaded() == 2);
+    GIANT_CHECK(std::fabs(s.translation(2).x - 60.0f) < 1e-4f);
+}
