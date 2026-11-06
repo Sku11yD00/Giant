@@ -1175,3 +1175,163 @@ GIANT_TEST("render: d3d12 reflects a block in a mirror floor, from the voxels an
     GIANT_CHECK(device->validation_errors() == 0);
     device->destroy(target);
 }
+
+GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds only with some") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {100.0f, 1.0f, 100.0f};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.view.position = {0.0, 2.0, 0.0};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.3f, 0.8f, -0.4f});
+    frame.settings.gpu_culling = false;
+    frame.settings.antialiasing = false;
+    const auto names = [&s] {
+        std::vector<std::string> out;
+        for (const rhi::GpuTiming& t : s.device->gpu_timings()) out.push_back(t.name);
+        return out;
+    };
+    RenderStats st = s.draw(frame);
+    GIANT_CHECK(!st.sky && !st.clouds); // off: the flat background
+    frame.sky.on = true;
+    st = s.draw(frame); // no cover: the air alone
+    GIANT_CHECK(st.sky && !st.clouds && !st.cloud_shadows);
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "shading"}));
+    frame.sky.cloud_cover = 0.6f;
+    st = s.draw(frame);
+    GIANT_CHECK(st.sky && st.clouds && st.cloud_shadows);
+    GIANT_CHECK(names() ==
+                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "clouds", "shading"}));
+    // Settings turn them off; a sun below the horizon casts no cloud shadows.
+    frame.settings.cloud_shadows = false;
+    st = s.draw(frame);
+    GIANT_CHECK(st.clouds && !st.cloud_shadows);
+    frame.settings.cloud_shadows = true;
+    frame.lighting.sun_direction = {0.0f, -1.0f, 0.0f};
+    st = s.draw(frame);
+    GIANT_CHECK(st.clouds && !st.cloud_shadows);
+    frame.settings.clouds = false;
+    st = s.draw(frame);
+    GIANT_CHECK(st.sky && !st.clouds);
+    // Views of the geometry have no sky; nor do odd values break it.
+    frame.settings.clouds = true;
+    frame.settings.debug_view = DebugView::triangles;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.sky);
+    frame.settings.debug_view = DebugView::lit;
+    frame.sky.cloud_base = NAN;
+    frame.sky.cloud_tile = -5.0f;
+    frame.sky.cloud_offset = {1e300, 0.0, -1e300};
+    frame.view.position = {-3.0e7, 2.0, 1.0e9};
+    st = s.draw(frame);
+    GIANT_CHECK(st.sky);
+}
+
+GIANT_TEST("render: d3d12 draws a blue sky, grey under overcast clouds that shade the ground, and fog") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) {
+        return; // not on Windows
+    }
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    constexpr u32 k_w = 64, k_h = 48;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A grey ground to the horizon; the camera looks out level, a little up.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {40000.0f, 1.0f, 40000.0f};
+    instances[0].always_mesh = true;
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.view.position = {1000.0, 2.0, -500.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(10.0f));
+    frame.view.vertical_fov_degrees = 70.0f;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.2f, 0.7f, -0.6f});
+    frame.lighting.sun_light = {2.6f, 2.5f, 2.3f};
+    frame.lighting.sky_light = {0.15f, 0.25f, 0.45f};
+    frame.lighting.ground_light = {0.08f, 0.07f, 0.06f};
+    frame.sky.on = true;
+    frame.sky.sun_top = {3.0f, 3.0f, 3.0f};
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.shadows = false;
+    frame.settings.antialiasing = false;
+    frame.settings.cloud_steps = 24;
+    const auto draw = [&] {
+        for (int i = 0; i < 6; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto clear = draw();
+    GIANT_CHECK(renderer->last_stats().sky && !renderer->last_stats().clouds);
+    frame.sky.cloud_cover = 1.0f;
+    frame.sky.cloud_density = 1.0f;
+    frame.sky.cloud_base = 600.0f;
+    frame.sky.cloud_top = 2500.0f;
+    const auto overcast = draw();
+    GIANT_CHECK(renderer->last_stats().clouds && renderer->last_stats().cloud_shadows);
+    frame.sky.cloud_cover = 0.0f;
+    frame.sky.fog_density = 0.05f;
+    frame.sky.fog_falloff = 1.0f / 100.0f;
+    const auto fog = draw();
+    const usize size = usize{k_w} * k_h * 4;
+    GIANT_CHECK(clear.size() == size && overcast.size() == size && fog.size() == size);
+    if (clear.size() == size && overcast.size() == size && fog.size() == size) {
+        const auto px = [](const std::vector<u8>& p, u32 x, u32 y) {
+            const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+            return std::array<int, 3>{p[i], p[i + 1], p[i + 2]};
+        };
+        const auto print = [&](const char* what, const std::vector<u8>& p) {
+            const auto up = px(p, k_w / 2, 2);
+            const auto down = px(p, k_w / 2, k_h - 2);
+            const auto mid = px(p, k_w / 2, k_h / 2 + 4);
+            std::printf("sky %s: up %d %d %d, ground near %d %d %d, ground far %d %d %d\n", what, up[0], up[1], up[2],
+                        down[0], down[1], down[2], mid[0], mid[1], mid[2]);
+        };
+        print("clear", clear);
+        print("overcast", overcast);
+        print("fog", fog);
+        // Clear: the sky overhead is blue.
+        const auto up = px(clear, k_w / 2, 2);
+        GIANT_CHECK(up[2] > up[0] + 20);
+        // Overcast: grey, and the ground in the clouds' shadow is darker.
+        const auto grey = px(overcast, k_w / 2, 2);
+        GIANT_CHECK(std::abs(grey[2] - grey[0]) < (up[2] - up[0]) / 2);
+        GIANT_CHECK(px(overcast, k_w / 2, k_h - 2)[1] < px(clear, k_w / 2, k_h - 2)[1]);
+        // Fog: the far ground fades towards the sky; the near ground barely.
+        const auto far_clear = px(clear, k_w / 2, k_h / 2 + 4);
+        const auto far_fog = px(fog, k_w / 2, k_h / 2 + 4);
+        GIANT_CHECK(std::abs(far_fog[1] - far_clear[1]) > 8);
+        const auto near_clear = px(clear, k_w / 2, k_h - 2);
+        const auto near_fog = px(fog, k_w / 2, k_h - 2);
+        GIANT_CHECK(std::abs(near_fog[1] - near_clear[1]) < std::abs(far_fog[1] - far_clear[1]));
+    }
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+    device->destroy(target);
+}

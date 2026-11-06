@@ -997,3 +997,27 @@ GIANT_TEST("world streaming: a tile undone to what its file holds is clean again
     const ai::CommandResult saved = e.commands.execute("save_world");
     GIANT_CHECK(saved.ok && saved.value["cells_written"] == 1 && e.w.streaming.unsaved_cells(e.state.scene) == 0);
 }
+
+GIANT_TEST("world streaming: the weather is saved in world.json and comes back on open") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    world::Weather storm;
+    storm.cloud_cover = 0.9f;
+    storm.fog_density = 0.25f;
+    e.state.scene.weather = storm;
+    GIANT_CHECK(e.run("create_entities", {{"entities", {{{"position", {5, 0, 5}}}}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world") && e.run("new_scene"));
+    GIANT_CHECK(!e.state.scene.weather.has_value());
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.state.scene.weather == storm);
+    // A change saved again with the world open, and cleared: written as none.
+    e.state.scene.weather->haze = 3.0f;
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}, {"discard_unsaved", true}}));
+    GIANT_CHECK(e.state.scene.weather && e.state.scene.weather->haze == 3.0f);
+    e.state.scene.weather.reset();
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}, {"discard_unsaved", true}}));
+    GIANT_CHECK(!e.state.scene.weather.has_value());
+}

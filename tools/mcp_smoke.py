@@ -608,6 +608,59 @@ def shadow_gate(tool, call, check):
     tool("new_scene")
 
 
+def weather_gate(tool, call, check):
+    """N3 part 7: weather. A sky the sun shines through, clouds that drift on the wind and
+    shade the ground, and fog; undoable, and a scene without it keeps the flat sky."""
+    tool("new_scene")
+    tool("create_entity", {"name": "Ground", "shape": "plane", "scale": [2000, 1, 2000],
+                           "base_color": [0.5, 0.5, 0.5], "roughness": 0.9})
+    tool("set_lighting", {"sun_elevation_degrees": 40, "sun_azimuth_degrees": 180})
+    tool("set_camera", {"position": [0, 2, 0], "look_at": [0, 6, -40]})
+    real = tool("get_engine_info")["backend"] != "null"
+
+    def frames(n=6):
+        for _ in range(n):
+            call("ping")
+        return tool("get_weather")
+
+    def sky_pixel():
+        call("ping")
+        shot = call("tools/call", {"name": "capture_screenshot", "arguments": {"max_width": 320}})
+        image = [c for c in shot["content"] if c["type"] == "image"][0]
+        width, height, pixels = decode_png(base64.b64decode(image["data"]))
+        x, y = width // 2, height // 8
+        return pixels[(y * width + x) * 4:(y * width + x) * 4 + 3]
+
+    state = frames()
+    check(state["weather"] is None and not state["sky"]["on"], f"no weather: the flat sky, got {state}")
+    check(set(state["presets"]) >= {"clear", "overcast", "storm", "fog"}, f"presets listed, got {state['presets']}")
+    tool("set_weather", {"preset": "clear"})
+    state = frames()
+    check(state["weather"]["cloud_cover"] == 0 and state["sky"]["on"] and state["progress"] == 1,
+          f"clear weather: the sky on, got {state}")
+    clear = sky_pixel() if real else None
+    tool("set_weather", {"preset": "overcast", "over_seconds": 3600})
+    state = frames()
+    check(state["weather"]["cloud_cover"] > 0.9 and state["progress"] < 1
+          and state["shown"]["cloud_cover"] < 0.1, f"overcast blends in slowly, got {state}")
+    tool("set_weather", {"preset": "overcast"})
+    state = frames()
+    check(state["shown"] == state["weather"] and state["sky"]["clouds"], f"overcast at once, got {state}")
+    if real:
+        grey = sky_pixel()
+        check(clear[2] > clear[0] + 20, f"the clear sky is blue, got {clear}")
+        check(abs(grey[2] - grey[0]) < abs(clear[2] - clear[0]), f"overcast is greyer, got {grey} against {clear}")
+    bad = call("tools/call", {"name": "set_weather", "arguments": {"preset": "hail"}})
+    check(bad.get("isError") is True, "an unknown preset is refused")
+    tool("undo")  # the overcast at once
+    tool("undo")  # the overcast blending in
+    check(tool("get_weather")["weather"]["cloud_cover"] == 0, "undo brings the clear sky back")
+    tool("clear_weather")
+    state = frames()
+    check(state["weather"] is None and not state["sky"]["on"], f"cleared: the flat sky again, got {state}")
+    tool("new_scene")
+
+
 def gi_gate(tool, call, check):
     """N2 part 5: global illumination. The voxel world is lit a budgeted number of bricks a
     frame (new ones first, then all in turn), in the lit views and the voxel view."""
@@ -806,7 +859,7 @@ def main() -> int:
         # renderer's own d3d12 tests check them), on in gi_gate.
         tool("set_render_settings", {"gi": False, "screen_space_reflections": False})
         for gate in (build_scene, world_gate, lod_gate, kit_gate, voxel_gate, far_field_gate,
-                     terrain_gate, shadow_gate, gi_gate, n1_gate):
+                     terrain_gate, shadow_gate, weather_gate, gi_gate, n1_gate):
             # Each gate's time, so a run near the timeout shows which one grew.
             started = time.monotonic()
             frames = tool("get_engine_info")["frames_completed"]

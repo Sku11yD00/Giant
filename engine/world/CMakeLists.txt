@@ -6,6 +6,7 @@ giant_module(world
   src/terrain_brush.cpp
   src/height_map.cpp
   src/scatter.cpp
+  src/weather.cpp
   DEPENDS core
 )
 # JSON stays private: the scene API is plain C++ types.
@@ -16,4 +17,5 @@ giant_module_tests(world
     tests/test_scene.cpp
     tests/test_terrain.cpp
     tests/test_scatter.cpp
+    tests/test_weather.cpp
 )

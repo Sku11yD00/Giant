@@ -120,12 +120,12 @@ Scene::Identity& Scene::Identity::operator=(const Identity&) {
 
 Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
-      m_entities(other.m_entities), m_index(other.m_index),
+      weather(other.weather), m_entities(other.m_entities), m_index(other.m_index),
       m_next_id(other.m_next_id) {}
 
 Scene::Scene(Scene&& other) noexcept
     : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
-      scatter(std::move(other.scatter)), m_entities(std::move(other.m_entities)),
+      scatter(std::move(other.scatter)), weather(other.weather), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id) {
     other.clear();
 }
@@ -143,6 +143,7 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         kits = std::move(other.kits);
         terrain = std::move(other.terrain);
         scatter = std::move(other.scatter);
+        weather = other.weather;
         m_entities = std::move(other.m_entities);
         m_index = std::move(other.m_index);
         m_next_id = other.m_next_id;
@@ -335,6 +336,22 @@ void write_look(Json& out, Shape shape, const std::string& mesh, const std::stri
     }
 }
 
+Json weather_json(const Weather& w) {
+    return {
+        {"cloud_cover", w.cloud_cover},
+        {"cloud_density", w.cloud_density},
+        {"cloud_base", w.cloud_base},
+        {"cloud_thickness", w.cloud_thickness},
+        {"cloud_scale", w.cloud_scale},
+        {"wind_direction_degrees", w.wind_direction_degrees},
+        {"wind_speed", w.wind_speed},
+        {"fog_density", w.fog_density},
+        {"fog_height", w.fog_height},
+        {"haze", w.haze},
+        {"precipitation", w.precipitation},
+    };
+}
+
 Json lighting_json(const Lighting& l) {
     return {
         {"sun_elevation_degrees", l.sun_elevation_degrees},
@@ -462,6 +479,9 @@ std::string save_scene(const Scene& scene) {
     }
     if (!scene.scatter.empty()) {
         out["scatter"] = scatter_json(scene.scatter);
+    }
+    if (scene.weather) {
+        out["weather"] = weather_json(*scene.weather);
     }
     if (const Terrain& t = scene.terrain;
         !t.empty() || t.samples() != k_default_terrain_samples || !(t.material == TerrainMaterial{})) {
@@ -667,6 +687,24 @@ void read_lighting(const Json& json, Lighting& l, std::string& error) {
     r.number("ambient_intensity", l.ambient_intensity, 0, 100);
     r.number("exposure", l.exposure, 0.01, 100);
     r.finish();
+}
+
+void read_weather(const Json& json, std::optional<Weather>& out, std::string& error) {
+    Reader r(json, "weather", error);
+    Weather w;
+    r.number("cloud_cover", w.cloud_cover, 0, 1);
+    r.number("cloud_density", w.cloud_density, 0, 1);
+    r.number("cloud_base", w.cloud_base, 100, 10000);
+    r.number("cloud_thickness", w.cloud_thickness, 100, 10000);
+    r.number("cloud_scale", w.cloud_scale, 0.25, 4);
+    r.number("wind_direction_degrees", w.wind_direction_degrees, -360, 360);
+    r.number("wind_speed", w.wind_speed, 0, 200);
+    r.number("fog_density", w.fog_density, 0, 1);
+    r.number("fog_height", w.fog_height, 1, 10000);
+    r.number("haze", w.haze, 0, 10);
+    r.number("precipitation", w.precipitation, 0, 1);
+    r.finish();
+    if (error.empty()) out = w;
 }
 
 // Shape, files, transform, material and decal of an entity or kit piece.
@@ -1080,6 +1118,9 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     if (const Json* lighting = root.get("lighting", false); lighting != nullptr && root.ok()) {
         read_lighting(*lighting, scene.lighting, error);
     }
+    if (const Json* weather = root.get("weather", false); weather != nullptr && root.ok()) {
+        read_weather(*weather, scene.weather, error);
+    }
     read_kits(root, scene.kits, error);
     read_scatter(root, scene.kits, scene.scatter, error);
     if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
@@ -1133,6 +1174,9 @@ std::string save_world_index(const WorldIndex& world) {
     if (!world.scatter.empty()) {
         out["scatter"] = scatter_json(world.scatter);
     }
+    if (world.weather) {
+        out["weather"] = weather_json(*world.weather);
+    }
     std::vector<std::string> meshes = world.meshes;
     std::sort(meshes.begin(), meshes.end());
     meshes.erase(std::unique(meshes.begin(), meshes.end()), meshes.end());
@@ -1183,6 +1227,9 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     root.id("next_id", world.next_id, false, k_max_entity_id + 1);
     if (const Json* lighting = root.get("lighting", false); lighting != nullptr && root.ok()) {
         read_lighting(*lighting, world.lighting, error);
+    }
+    if (const Json* weather = root.get("weather", false); weather != nullptr && root.ok()) {
+        read_weather(*weather, world.weather, error);
     }
     read_kits(root, world.kits, error);
     read_scatter(root, world.kits, world.scatter, error);

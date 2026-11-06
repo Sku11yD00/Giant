@@ -174,6 +174,25 @@ struct Lighting {
 // A unit vector pointing towards the sun.
 Vec3 sun_direction(const Lighting& lighting);
 
+// The weather (weather.h for presets, blending and the light it gives):
+// clouds, wind, fog and haze. A scene with none keeps the flat sky colours
+// of its Lighting; with one, the sky is an atmosphere the sun shines
+// through, with clouds that drift on the wind and shade the ground.
+struct Weather {
+    float cloud_cover = 0.35f;      // 0 clear to 1 overcast: how much of the sky the clouds fill
+    float cloud_density = 0.5f;     // 0 to 1: how thick they are (light and dark)
+    float cloud_base = 1500.0f;     // metres above 0, 100 to 10000
+    float cloud_thickness = 1500.0f; // metres, 100 to 10000
+    float cloud_scale = 1.0f;       // 0.25 to 4: the clouds' size (1: about 3 km across)
+    float wind_direction_degrees = 90.0f; // where it blows to, compass (0 = north = -Z, 90 = east = +X)
+    float wind_speed = 10.0f;       // metres a second, 0 to 200 (moves the clouds)
+    float fog_density = 0.0f;       // 0 to 1: at 1 the ground fog hides things about 150 m away
+    float fog_height = 200.0f;      // metres, 1 to 10000: the fog thins by half each this much higher
+    float haze = 1.0f;              // 0 to 10: dust and moisture in the air (paler sky, redder sun)
+    float precipitation = 0.0f;     // 0 to 1: rain or snow to come (drawn from N3 part 8)
+    bool operator==(const Weather&) const = default;
+};
+
 // What changed in a scene since its last take_changes().
 struct SceneChanges {
     // Entities added, removed or handed out by Scene::modify, oldest first
@@ -239,6 +258,8 @@ public:
     // What is strewn over the ground (scatter.h), by name, in order (not
     // tracked: compare).
     std::vector<ScatterLayer> scatter;
+    // None: the flat sky of `lighting` (not tracked: compare).
+    std::optional<Weather> weather;
 
     // The id the next new entity gets.
     EntityId next_id() const { return m_next_id; }
@@ -287,6 +308,7 @@ struct WorldIndex {
     Lighting lighting;
     std::vector<Kit> kits;
     std::vector<ScatterLayer> scatter;
+    std::optional<Weather> weather;
     std::vector<std::string> meshes; // imported when the world opens
     std::vector<CellCoord> cells;    // cells that have a file
     // The ground: one sample spacing and material for every tile, and the

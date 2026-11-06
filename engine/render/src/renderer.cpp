@@ -68,6 +68,13 @@ void set_bounds(float* out, const Vec3& center, float radius) { set4(out, center
 } // namespace
 
 // This frame's uploads, shared by the passes.
+// The sky's fixed textures (sky_common.slang has the same sizes).
+constexpr u32 k_sky_view_width = 192;
+constexpr u32 k_sky_view_height = 108;
+constexpr u32 k_cloud_map_size = 512;
+constexpr u32 k_cloud_shadow_size = 256;
+constexpr double k_cloud_shadow_metres = 32000.0; // the square the cloud shadow map covers
+
 struct Renderer::FrameData {
     rhi::TransientMemory frame;
     rhi::TransientMemory materials; // the frame's, then the default
@@ -113,8 +120,12 @@ Renderer::~Renderer() {
          {m_raster_mesh, m_raster_vertex, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
           m_smaa_blend, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
-          m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels}) {
+          m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
+          m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass}) {
         m_device.destroy(p);
+    }
+    for (const rhi::TextureHandle t : {m_sky_view, m_cloud_map, m_cloud_shadow, m_clouds_a, m_clouds_b}) {
+        m_device.destroy(t);
     }
     m_device.destroy(m_voxel_light);
     m_device.destroy(m_smaa_area);
@@ -174,6 +185,10 @@ bool Renderer::init() {
     m_shadow_clear_words = compute(shaders::shadow_clear_words_cs(), "shadows: clear requests");
     m_light_clear = compute(shaders::light_clear_cs(), "GI: clear new bricks");
     m_light_voxels = compute(shaders::light_voxels_cs(), "GI: light voxels");
+    m_sky_view_pass = compute(shaders::sky_view_cs(), "sky: view table");
+    m_cloud_map_pass = compute(shaders::cloud_map_cs(), "sky: cloud pattern");
+    m_cloud_shadow_pass = compute(shaders::cloud_shadow_cs(), "sky: cloud shadows");
+    m_clouds_pass = compute(shaders::clouds_cs(), "sky: clouds");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     ShadowDesc shadow_desc;
     shadow_desc.pool_pages = m_desc.shadow_pages;
@@ -261,7 +276,7 @@ bool Renderer::init() {
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
           m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
-          m_light_voxels}) {
+          m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -447,6 +462,10 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_device.destroy(m_radiance);
     m_device.destroy(m_gloss);
     m_device.destroy(m_fallback);
+    m_device.destroy(m_clouds_a); // half the frame's size: made again with the sky's
+    m_device.destroy(m_clouds_b);
+    m_clouds_a = {};
+    m_clouds_b = {};
     rhi::TextureDesc desc;
     desc.width = width;
     desc.height = height;
@@ -1494,6 +1513,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const bool reflections = settings.reflections && lit_view;
     const bool voxel_reflections = reflections && gi;
     const bool screen_reflections = reflections && settings.screen_space_reflections;
+    // The sky (lit views): its view table, cloud shadows and clouds, before shading.
+    rhi::TransientMemory sky_params{};
+    const bool sky = frame.sky.on && lit_view && draw_sky(cmd, data, frame, sky_params);
     cmd.begin_timing("shading");
     // With screen reflections, shading writes radiance before exposure and
     // the screen reflections pass reflects it and tone maps it into
@@ -1567,6 +1589,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         extras.gi_light = m_device.write_descriptor(m_voxel_light);
     }
     extras.reflect_on = (voxel_reflections ? 1u : 0u) | (screen_reflections ? 2u : 0u);
+    extras.sky_params = sky ? sky_params.descriptor : data.frame.descriptor;
+    extras.sky_params_offset = sky ? sky_params.offset : 0u;
+    extras.sky_on = sky ? 1u : 0u;
     const bool shadows = m_shadows_on && data.shadow_table.data != nullptr && data.shadow_levels.data != nullptr;
     if (shadows) {
         extras.shadow_atlas = m_device.read_descriptor(m_shadow_atlas);
@@ -1832,6 +1857,161 @@ bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
         }
     }
     cmd.end_timing();
+    return true;
+}
+
+bool Renderer::ensure_sky_targets() {
+    if (m_sky_failed) {
+        return false;
+    }
+    const auto make = [this](rhi::TextureHandle& t, u32 w, u32 h, rhi::Format format, const char* name) {
+        if (t.valid()) {
+            return;
+        }
+        rhi::TextureDesc desc;
+        desc.width = w;
+        desc.height = h;
+        desc.format = format;
+        desc.usage = rhi::TextureUsage::sampled | rhi::TextureUsage::shader_write;
+        desc.name = name;
+        t = m_device.create_texture(desc);
+    };
+    if (!m_cloud_map.valid()) {
+        m_cloud_map_made = false;
+    }
+    make(m_sky_view, k_sky_view_width, k_sky_view_height, rhi::Format::rgba16_float, "sky view");
+    make(m_cloud_map, k_cloud_map_size, k_cloud_map_size, rhi::Format::rgba8_unorm, "cloud pattern");
+    make(m_cloud_shadow, k_cloud_shadow_size, k_cloud_shadow_size, rhi::Format::rgba16_float, "cloud shadows");
+    const u32 hw = std::max((m_width + 1) / 2, 1u);
+    const u32 hh = std::max((m_height + 1) / 2, 1u);
+    make(m_clouds_a, hw, hh, rhi::Format::rgba16_float, "clouds: light");
+    make(m_clouds_b, hw, hh, rhi::Format::rgba16_float, "clouds: distances");
+    if (!m_sky_view.valid() || !m_cloud_map.valid() || !m_cloud_shadow.valid() || !m_clouds_a.valid() ||
+        !m_clouds_b.valid()) {
+        m_sky_failed = true;
+        log_error("render", "could not create the sky's textures (out of GPU memory?); the flat sky stays");
+        return false;
+    }
+    return true;
+}
+
+bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
+                        rhi::TransientMemory& params) {
+    if (!ensure_sky_targets()) {
+        return false;
+    }
+    const Sky& sky = frame.sky;
+    const RenderSettings& settings = frame.settings;
+    const Lighting& light = frame.lighting;
+    const Vec3 sun = normalize_or_zero(light.sun_direction);
+    const auto put3 = [](float* out, const Vec3& v) {
+        out[0] = v.x;
+        out[1] = v.y;
+        out[2] = v.z;
+    };
+    const auto finite = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
+    gpu::SkyParams p{};
+    put3(p.sun_direction, sun);
+    put3(p.sun_light, light.sun_light);
+    put3(p.sky_light, light.sky_light);
+    put3(p.ground_light, light.ground_light);
+    put3(p.sun_top, sky.sun_top);
+    p.cloud_cover = std::clamp(finite(sky.cloud_cover, 0.0f), 0.0f, 1.0f);
+    p.cloud_density = std::clamp(finite(sky.cloud_density, 0.0f), 0.0f, 1.0f);
+    p.cloud_base = finite(sky.cloud_base, 1500.0f);
+    p.cloud_top = std::max(finite(sky.cloud_top, 3000.0f), p.cloud_base + 1.0f);
+    // The camera's place in the clouds' pattern, within one tile (floats
+    // keep it exact however far out the camera is).
+    const double tile = std::max(static_cast<double>(finite(sky.cloud_tile, 32000.0f)), 1000.0);
+    const DVec3 cam = frame.view.position;
+    const auto wrap = [tile](double v) {
+        const double m = std::fmod(v, tile);
+        return std::isfinite(m) ? (m < 0.0 ? m + tile : m) : 0.0;
+    };
+    p.cam_x = static_cast<float>(wrap(cam.x - sky.cloud_offset.x));
+    p.cam_z = static_cast<float>(wrap(cam.z - sky.cloud_offset.z));
+    p.cam_alt = static_cast<float>(cam.y);
+    p.cloud_tile = static_cast<float>(tile);
+    p.fog_density = std::clamp(finite(sky.fog_density, 0.0f), 0.0f, 1.0f);
+    p.fog_falloff = std::clamp(finite(sky.fog_falloff, 0.005f), 1e-5f, 10.0f);
+    p.haze = std::clamp(finite(sky.haze, 1.0f), 0.0f, 10.0f);
+    p.cloud_steps = static_cast<float>(std::clamp<u32>(settings.cloud_steps, 8u, 256u));
+    const bool clouds = settings.clouds && p.cloud_cover > 0.0f && p.cloud_density > 0.0f;
+    const bool shadows = clouds && settings.cloud_shadows && sun.y > 0.0f;
+    // The shadow map: a square on the camera, its corner snapped to the
+    // map's texels in the world (so it does not crawl as the camera moves).
+    const double size = k_cloud_shadow_metres;
+    const double texel = size / k_cloud_shadow_size;
+    const double min_x = std::floor((cam.x - size * 0.5) / texel) * texel;
+    const double min_z = std::floor((cam.z - size * 0.5) / texel) * texel;
+    p.shadow_origin[0] = static_cast<float>(min_x - cam.x);
+    p.shadow_origin[1] = static_cast<float>(min_z - cam.z);
+    p.shadow_size = static_cast<float>(size);
+    p.flags = (clouds ? 1u : 0u) | (shadows ? 2u : 0u);
+    const u32 hw = std::max((m_width + 1) / 2, 1u);
+    const u32 hh = std::max((m_height + 1) / 2, 1u);
+    p.half_size[0] = static_cast<float>(hw);
+    p.half_size[1] = static_cast<float>(hh);
+    p.full_size[0] = static_cast<float>(m_width);
+    p.full_size[1] = static_cast<float>(m_height);
+    p.sky_view = m_device.read_descriptor(m_sky_view);
+    p.cloud_map = m_device.read_descriptor(m_cloud_map);
+    p.cloud_shadow = m_device.read_descriptor(m_cloud_shadow);
+    p.clouds_a = m_device.read_descriptor(m_clouds_a);
+    p.clouds_b = m_device.read_descriptor(m_clouds_b);
+    p.depth = m_device.read_descriptor(m_depth);
+    params = cmd.upload(bytes_of_one(p));
+    if (params.data == nullptr) {
+        return false; // out of memory: the flat sky this frame
+    }
+    gpu::SkyPush push{};
+    push.params = params.descriptor;
+    push.params_offset = params.offset;
+    push.frame = data.frame.descriptor;
+    push.frame_offset = data.frame.offset;
+    const auto groups = [](u32 n) { return (n + 7) / 8; };
+    cmd.begin_timing("sky");
+    if (!m_cloud_map_made) {
+        cmd.barrier(m_cloud_map, rhi::ResourceState::shader_write);
+        cmd.set_pipeline(m_cloud_map_pass);
+        push.target = m_device.write_descriptor(m_cloud_map);
+        cmd.push(push);
+        cmd.dispatch(groups(k_cloud_map_size), groups(k_cloud_map_size));
+        cmd.barrier(m_cloud_map, rhi::ResourceState::shader_read);
+        m_cloud_map_made = true;
+    }
+    cmd.barrier(m_sky_view, rhi::ResourceState::shader_write);
+    cmd.set_pipeline(m_sky_view_pass);
+    push.target = m_device.write_descriptor(m_sky_view);
+    cmd.push(push);
+    cmd.dispatch(groups(k_sky_view_width), groups(k_sky_view_height));
+    cmd.barrier(m_sky_view, rhi::ResourceState::shader_read);
+    if (shadows) {
+        cmd.barrier(m_cloud_shadow, rhi::ResourceState::shader_write);
+        cmd.set_pipeline(m_cloud_shadow_pass);
+        push.target = m_device.write_descriptor(m_cloud_shadow);
+        cmd.push(push);
+        cmd.dispatch(groups(k_cloud_shadow_size), groups(k_cloud_shadow_size));
+        cmd.barrier(m_cloud_shadow, rhi::ResourceState::shader_read);
+    }
+    cmd.end_timing();
+    if (clouds) {
+        cmd.begin_timing("clouds");
+        cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+        cmd.barrier(m_clouds_a, rhi::ResourceState::shader_write);
+        cmd.barrier(m_clouds_b, rhi::ResourceState::shader_write);
+        cmd.set_pipeline(m_clouds_pass);
+        push.target = m_device.write_descriptor(m_clouds_a);
+        push.target_b = m_device.write_descriptor(m_clouds_b);
+        cmd.push(push);
+        cmd.dispatch(groups(hw), groups(hh));
+        cmd.barrier(m_clouds_a, rhi::ResourceState::shader_read);
+        cmd.barrier(m_clouds_b, rhi::ResourceState::shader_read);
+        cmd.end_timing();
+    }
+    m_stats.sky = true;
+    m_stats.clouds = clouds;
+    m_stats.cloud_shadows = shadows;
     return true;
 }
 
