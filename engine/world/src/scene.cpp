@@ -1,4 +1,5 @@
 #include "giant/world/scene.h"
+#include "giant/world/far_ground.h"
 
 #include "giant/core/assert.h"
 
@@ -1151,6 +1152,111 @@ std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 te
     }
     out = std::move(entities);
     heights_out = std::move(heights);
+    return std::nullopt;
+}
+
+// --- Far ground chunks -----------------------------------------------------------
+
+std::string far_chunk_file_name(CellCoord chunk) {
+    return std::to_string(chunk.x) + "_" + std::to_string(chunk.z) + ".ground.json";
+}
+
+std::string save_far_chunk(u32 level, CellCoord chunk, const Terrain::Heights& heights) {
+    const usize n = k_far_samples;
+    GIANT_ASSERT(heights.size() == n * n, "a far ground chunk is k_far_samples squared heights");
+    Json out;
+    out["format"] = "giant-ground";
+    out["version"] = k_version;
+    out["level"] = level;
+    out["chunk"] = cell_json(chunk);
+    Json rows = Json::array();
+    char text[32];
+    for (usize j = 0; j < n; ++j) {
+        std::string row;
+        row.reserve(n * 8);
+        for (usize i = 0; i < n; ++i) {
+            if (i > 0) row += ' ';
+            const float h = heights[j * n + i];
+            if (std::isnan(h)) {
+                row += '-';
+                continue;
+            }
+            const auto [end, ec] = std::to_chars(text, text + sizeof(text), h);
+            GIANT_ASSERT(ec == std::errc{}, "a height did not fit its text");
+            row.append(text, end);
+        }
+        rows.push_back(std::move(row));
+    }
+    out["heights"] = std::move(rows);
+    return out.dump(2) + "\n";
+}
+
+std::optional<LoadError> load_far_chunk(std::string_view text, u32 level, CellCoord chunk, Terrain::Heights& out) {
+    Json json;
+    if (auto bad = parse(text, json)) {
+        return bad;
+    }
+    std::string error;
+    Reader root(json, "", error);
+    read_header(root, "giant-ground", "far ground chunks");
+    if (const Json* l = root.get("level", true); l != nullptr && root.ok()) {
+        if (!l->is_number_unsigned() || l->get<u64>() != level) {
+            root.fail("level", "must be " + std::to_string(level) + ", the level its folder says");
+        }
+    }
+    if (const Json* c = root.get("chunk", true); c != nullptr && root.ok()) {
+        const auto read = read_cell(*c);
+        if (!read || !(*read == chunk)) {
+            root.fail("chunk", "must be [" + std::to_string(chunk.x) + ", " + std::to_string(chunk.z) +
+                                   "], the chunk its file name says");
+        }
+    }
+    const usize n = k_far_samples;
+    Terrain::Heights heights;
+    if (const Json* rows = root.get("heights", true); rows != nullptr && root.ok()) {
+        if (!rows->is_array() || rows->size() != n) {
+            root.fail("heights", "must be " + std::to_string(n) + " rows");
+        }
+        heights.reserve(n * n);
+        for (usize j = 0; root.ok() && j < n; ++j) {
+            const Json& row = (*rows)[j];
+            const std::string where = "heights[" + std::to_string(j) + "]";
+            if (!row.is_string()) {
+                root.fail(where, "must be a string of numbers");
+                break;
+            }
+            const std::string& t = row.get_ref<const std::string&>();
+            const char* at = t.data();
+            const char* end = t.data() + t.size();
+            usize count = 0;
+            while (root.ok()) {
+                while (at < end && *at == ' ') ++at;
+                if (at == end) break;
+                float h = std::numeric_limits<float>::quiet_NaN();
+                const char* next = at + 1;
+                if (*at != '-' || (next < end && *next != ' ')) {
+                    const auto [after, ec] = std::from_chars(at, end, h);
+                    next = after;
+                    if (ec != std::errc{} || (next < end && *next != ' ') || !std::isfinite(h) ||
+                        std::fabs(h) > k_max_terrain_height) {
+                        root.fail(where, "must hold numbers from -10000 to 10000 or -, one space apart");
+                        break;
+                    }
+                }
+                heights.push_back(h);
+                ++count;
+                at = next;
+            }
+            if (root.ok() && count != n) {
+                root.fail(where, "must hold " + std::to_string(n) + " heights");
+            }
+        }
+    }
+    root.finish();
+    if (!error.empty()) {
+        return LoadError{std::move(error)};
+    }
+    out = std::move(heights);
     return std::nullopt;
 }
 

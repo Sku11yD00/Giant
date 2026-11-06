@@ -79,6 +79,15 @@ public:
         u32 cells_written = 0;
         u32 cells_removed = 0; // files of cells left empty
         u32 cells = 0;         // with a file, after saving
+        u32 chunks_written = 0; // far ground chunk files (written or removed)
+        // The far ground chunks written (or removed: no heights), for the
+        // editor's far ground to take.
+        struct Chunk {
+            u32 level = 0;
+            world::CellCoord chunk;
+            std::optional<world::Terrain::Heights> heights;
+        };
+        std::vector<Chunk> chunks = {};
     };
     Saved create(const std::filesystem::path& folder, const world::Scene& scene, u64 generation,
                  std::vector<std::string> meshes);
@@ -93,6 +102,8 @@ public:
     // load_scene or a script since).
     bool active(u64 generation) const { return is_open() && generation == m_generation; }
     const std::filesystem::path& folder() const { return m_folder; }
+    // New on each open, create and close.
+    u64 session() const { return m_session; }
     const world::WorldIndex& index() const { return m_index; }
     // The samples a side of the terrain tiles in the world's files, while
     // any file holds one (the scene's terrain must use the same).
@@ -102,6 +113,9 @@ public:
     // cell alone, since what they would record as "before" is not what
     // the file holds.
     bool ground_on_disk(world::CellCoord cell) const;
+    // The far ground chunks (world/far_ground.h) with a file, by level (1, 2).
+    const std::unordered_set<world::CellCoord, world::CellCoordHash>& far_chunks(u32 level) const;
+    std::filesystem::path far_chunk_path(u32 level, world::CellCoord chunk) const;
 
     // Once a frame, after `frame` was built from `scene`: adds what is ready,
     // starts reads near the camera, and now and then unloads far cells that
@@ -175,6 +189,11 @@ private:
     void set_state(world::CellCoord coord, Cell& cell, State state); // keeps the counts
     void forget(world::CellCoord coord);                            // no file any more
     Saved write(const world::Scene& scene, std::vector<std::string> meshes);
+    // Writes the far ground chunks over the cells whose tile changed (after
+    // their files are written: m_ground is the files'). False on an error (in saved).
+    bool write_far(const world::Scene& scene, const std::unordered_set<world::CellCoord, world::CellCoordHash>& changed,
+                   const std::unordered_map<world::CellCoord, world::Terrain::Heights, world::CellCoordHash>& kept,
+                   Saved& saved);
     std::filesystem::path cell_path(world::CellCoord cell) const;
 
     std::filesystem::path m_folder;
@@ -195,6 +214,7 @@ private:
     world::WorldIndex m_index;
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> m_cells; // cells with a file
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_ground;     // whose file holds a tile
+    std::array<std::unordered_set<world::CellCoord, world::CellCoordHash>, 2> m_far; // chunk files, levels 1 and 2
     std::vector<Read> m_ready;  // parsed, in the order they finished
     std::array<u32, 5> m_count{}; // cells per State
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_loaded;

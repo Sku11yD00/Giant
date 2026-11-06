@@ -32,11 +32,26 @@ u64 next_version() {
 }
 } // namespace
 
+Terrain::Terrain(double tile_size, bool holes) : m_tile_size(tile_size), m_holes(holes) {
+    GIANT_ASSERT(tile_size > 0.0, "terrain tiles have a positive size");
+}
+
+CellCoord Terrain::tile_of(double x, double z) const {
+    const auto axis = [&](double v) {
+        const double t = std::floor(v / m_tile_size);
+        return static_cast<i32>(std::clamp(t, static_cast<double>(std::numeric_limits<i32>::min()),
+                                           static_cast<double>(std::numeric_limits<i32>::max())));
+    };
+    return {axis(x), axis(z)};
+}
+
 Terrain::Terrain(const Terrain& other)
-    : material(other.material), m_samples(other.m_samples), m_tiles(other.m_tiles), m_versions(other.m_versions) {}
+    : material(other.material), m_tile_size(other.m_tile_size), m_holes(other.m_holes), m_samples(other.m_samples),
+      m_tiles(other.m_tiles), m_versions(other.m_versions) {}
 
 Terrain::Terrain(Terrain&& other) noexcept
-    : material(other.material), m_samples(other.m_samples), m_tiles(std::move(other.m_tiles)),
+    : material(other.material), m_tile_size(other.m_tile_size), m_holes(other.m_holes), m_samples(other.m_samples),
+      m_tiles(std::move(other.m_tiles)),
       m_versions(std::move(other.m_versions)) {
     other.clear();
 }
@@ -51,6 +66,8 @@ Terrain& Terrain::operator=(const Terrain& other) {
 Terrain& Terrain::operator=(Terrain&& other) noexcept {
     if (this != &other) {
         material = other.material;
+        m_tile_size = other.m_tile_size;
+        m_holes = other.m_holes;
         m_samples = other.m_samples;
         m_tiles = std::move(other.m_tiles);
         m_versions = std::move(other.m_versions);
@@ -92,7 +109,10 @@ u64 Terrain::version(CellCoord cell) const {
 void Terrain::set(CellCoord cell, Heights heights) {
     GIANT_ASSERT(heights.size() == usize{m_samples} * m_samples, "a terrain tile has samples() squared heights");
     GIANT_ASSERT(std::all_of(heights.begin(), heights.end(),
-                             [](float h) { return std::isfinite(h) && std::fabs(h) <= k_max_terrain_height; }),
+                             [&](float h) {
+                                 return (m_holes && std::isnan(h)) ||
+                                        (std::isfinite(h) && std::fabs(h) <= k_max_terrain_height);
+                             }),
                  "terrain heights are finite and within k_max_terrain_height");
     m_tiles[cell] = std::move(heights);
     m_versions[cell] = next_version();
@@ -184,10 +204,10 @@ std::optional<float> Terrain::sample(i64 i, i64 j, const CellCoord* home) const 
 
 std::optional<double> Terrain::height_at(double x, double z) const {
     // The tile the point is in, or the one it is the far edge of.
-    CellCoord home = cell_of({x, 0.0, z});
+    CellCoord home = tile_of(x, z);
     if (find(home) == nullptr) {
-        const bool on_x = x == home.x * k_cell_size && home.x > std::numeric_limits<i32>::min();
-        const bool on_z = z == home.z * k_cell_size && home.z > std::numeric_limits<i32>::min();
+        const bool on_x = x == home.x * m_tile_size && home.x > std::numeric_limits<i32>::min();
+        const bool on_z = z == home.z * m_tile_size && home.z > std::numeric_limits<i32>::min();
         const CellCoord before[3] = {{home.x - (on_x ? 1 : 0), home.z},
                                      {home.x, home.z - (on_z ? 1 : 0)},
                                      {home.x - (on_x ? 1 : 0), home.z - (on_z ? 1 : 0)}};
@@ -203,8 +223,8 @@ std::optional<double> Terrain::height_at(double x, double z) const {
     }
     const double s = spacing();
     // In samples from the cell's corner: [0, samples()].
-    const double u = std::clamp((x - home.x * k_cell_size) / s, 0.0, static_cast<double>(m_samples));
-    const double v = std::clamp((z - home.z * k_cell_size) / s, 0.0, static_cast<double>(m_samples));
+    const double u = std::clamp((x - home.x * m_tile_size) / s, 0.0, static_cast<double>(m_samples));
+    const double v = std::clamp((z - home.z * m_tile_size) / s, 0.0, static_cast<double>(m_samples));
     const double fu = std::min(std::floor(u), static_cast<double>(m_samples - 1));
     const double fv = std::min(std::floor(v), static_cast<double>(m_samples - 1));
     const i64 i = i64{home.x} * m_samples + static_cast<i64>(fu);

@@ -3,6 +3,7 @@
 // the camera is view state and is not.
 #include "editor_commands.h"
 #include "mesh_library.h"
+#include "far_ground.h"
 #include "world_streaming.h"
 
 #include "giant/core/assert.h"
@@ -432,11 +433,29 @@ Json import_meshes(EditorState& state, const std::vector<std::string>& paths) {
     return errors;
 }
 
-Json streaming_json(const StreamingSettings& k) {
-    return {{"load_radius", k.load_radius},           {"unload_margin", k.unload_margin},
-            {"entities_per_frame", k.entities_per_frame}, {"reads_in_flight", k.reads_in_flight},
-            {"unload_every", k.unload_every},
-            {"unloads_per_frame", k.unloads_per_frame}};
+Json streaming_json(const StreamingSettings& k, const FarGround* far) {
+    Json out = {{"load_radius", k.load_radius},           {"unload_margin", k.unload_margin},
+                {"entities_per_frame", k.entities_per_frame}, {"reads_in_flight", k.reads_in_flight},
+                {"unload_every", k.unload_every},
+                {"unloads_per_frame", k.unloads_per_frame}};
+    if (far != nullptr) {
+        out["far_radius_1"] = far->settings.radius[0];
+        out["far_radius_2"] = far->settings.radius[1];
+    }
+    return out;
+}
+
+Json far_ground_json(const FarGround& far) {
+    const FarGroundStats s = far.stats();
+    Json levels = Json::array();
+    for (usize l = 0; l < 2; ++l) {
+        levels.push_back({{"files", s.files[l]},
+                          {"loaded", s.loaded[l]},
+                          {"meshes", s.meshes[l]},
+                          {"building", s.building[l]},
+                          {"drawn", s.drawn[l]}});
+    }
+    return {{"levels", std::move(levels)}, {"hidden", s.hidden}, {"reading", s.reading}, {"failed", s.failed}};
 }
 
 std::filesystem::path utf8_path(const std::string& path) {
@@ -1091,6 +1110,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                    "replaced it; undo brings it back); give a folder to make a new world"
                                  : "no world is open: give a folder to make one from the scene");
              }
+             // Chunks written before a failure are on disk: the far ground takes them either way.
+             if (state.far_ground != nullptr) state.far_ground->saved(saved);
              if (!saved.error.empty()) {
                  return CommandResult::failure(saved.error);
              }
@@ -1098,7 +1119,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              return CommandResult::success({{"folder", path_to_utf8(std::filesystem::absolute(w.folder(), error))},
                                             {"cells_written", saved.cells_written},
                                             {"cells_removed", saved.cells_removed},
-                                            {"cells", saved.cells}});
+                                            {"cells", saved.cells},
+                                            {"chunks_written", saved.chunks_written}});
          }});
 
     add(registry,
@@ -1119,7 +1141,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
         {"get_world",
          "The open world's streaming: cells with a file, loaded, being read, parsed and waiting, "
          "failed (see the log), cells with unsaved edits, entities in the scene, cells whose file "
-         "holds terrain (ground) and tiles loaded and unloaded, and the "
+         "holds terrain (ground) and tiles loaded and unloaded, the far ground (coarse chunks of "
+         "the terrain past the loaded cells: files, loaded, with a mesh, drawing, by level), and the "
          "streaming settings.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
@@ -1146,7 +1169,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                   {"ground", s.ground},
                   {"tiles_loaded", s.tiles_loaded},
                   {"tiles_unloaded", s.tiles_unloaded},
-                  {"streaming", streaming_json(k)}});
+                  {"far_ground", state.far_ground != nullptr ? far_ground_json(*state.far_ground) : Json(nullptr)},
+                  {"streaming", streaming_json(k, state.far_ground)}});
          }});
 
     add(registry,
@@ -1155,15 +1179,19 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "how much further they unload (unload_margin), how many entities join the scene per "
          "frame (entities_per_frame; more loads faster, fewer keeps frames even), how many cell "
          "files are read at once (reads_in_flight), how many frames pass between looks for "
-         "cells to unload (unload_every), and how many cells may unload in one frame (unloads_per_frame; "
-         "the rest go in the next frames). Not undoable: a view setting.",
+         "cells to unload (unload_every), how many cells may unload in one frame (unloads_per_frame; "
+         "the rest go in the next frames), and how far the far ground's level-1 (512 m) and level-2 "
+         "(4096 m) chunks load (far_radius_1, far_radius_2; level 1 should reach past load_radius by "
+         "about 5800 m). Not undoable: a view setting.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "properties": {
              "load_radius": {"type": "number", "minimum": 64, "maximum": 8192},
              "unload_margin": {"type": "number", "minimum": 0, "maximum": 10000},
              "entities_per_frame": {"type": "integer", "minimum": 1, "maximum": 1000000},
              "reads_in_flight": {"type": "integer", "minimum": 1, "maximum": 256},
              "unload_every": {"type": "integer", "minimum": 1, "maximum": 10000},
-             "unloads_per_frame": {"type": "integer", "minimum": 1, "maximum": 1000000}}})"),
+             "unloads_per_frame": {"type": "integer", "minimum": 1, "maximum": 1000000},
+             "far_radius_1": {"type": "number", "minimum": 0, "maximum": 65536},
+             "far_radius_2": {"type": "number", "minimum": 0, "maximum": 131072}}})"),
          false,
          [&state](const Json& args, CommandContext&) {
              if (state.world == nullptr) {
@@ -1176,7 +1204,12 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              k.reads_in_flight = args.value("reads_in_flight", k.reads_in_flight);
              k.unload_every = args.value("unload_every", k.unload_every);
              k.unloads_per_frame = args.value("unloads_per_frame", k.unloads_per_frame);
-             return CommandResult::success(streaming_json(k));
+             if (state.far_ground != nullptr) {
+                 FarGroundSettings& f = state.far_ground->settings;
+                 f.radius[0] = args.value("far_radius_1", f.radius[0]);
+                 f.radius[1] = args.value("far_radius_2", f.radius[1]);
+             }
+             return CommandResult::success(streaming_json(k, state.far_ground));
          }});
 
     add(registry,

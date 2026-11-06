@@ -28,6 +28,7 @@ struct EditorCamera {
 
 class MeshLibrary;
 class TerrainMeshes;
+class FarGround;
 class WorldStreaming;
 
 // The last few seconds of frame times, for get_engine_info (performance
@@ -105,6 +106,9 @@ struct EditorState {
     WorldStreaming* world = nullptr;
     // The terrain's tile meshes (get_terrain reports them); set by main.
     TerrainMeshes* terrain_meshes = nullptr;
+    // The streamed world's far ground (get_terrain reports it; save_world
+    // hands it the chunks written); set by main.
+    FarGround* far_ground = nullptr;
     // LOD error and debug view: view state, not undoable.
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
