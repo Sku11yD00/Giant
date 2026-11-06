@@ -179,9 +179,10 @@ void ShadowPages::request(std::span<const u32> bits, const Windows* asked_in) {
     }
     m_stats.missing = 0;
     const size_t words = std::min(bits.size(), size_t(m_desc.levels) * (k_slots / 32));
-    const i32 n = i32(k_pages_per_axis);
     // The page a slot holds in a window.
-    const auto page_in = [n](i32 window, u32 slot_axis) { return window + wrap(i32(slot_axis) - window, n); };
+    const auto page_in = [](i32 window, u32 slot_axis) {
+        return window + wrap(i32(slot_axis) - window, i32(k_pages_per_axis));
+    };
     // The requests asked for, as the windows are now: a slot whose page
     // has changed since (the window moved) is dropped, not taken for the
     // page now in its place.
