@@ -502,6 +502,25 @@ def terrain_gate(tool, call, check):
           f"the height map makes ground, got {imported} and {ramp}")
     tool("undo")
     check(tool("get_terrain")["tiles"] == 5, "undo takes the imported ground away")
+    # N3 part 6: a scatter layer strews stones over the four tiles (a point every 8 m square),
+    # placed on a worker; undone, they go.
+    tool("add_scatter_layer", {"name": "stones", "items": [{"shape": "sphere", "scale": [0.5, 1]}],
+                               "spacing": 8, "area": {"from": [-64, -64], "to": [64, 64]}})
+    scatter = None
+    for _ in range(200):
+        call("ping")
+        scatter = tool("get_scatter")
+        if scatter["building"] == 0:
+            break
+    check(scatter["cells"] == 4 and scatter["points"] == 256 and scatter["layers"][0]["points"] == 256,
+          f"the stones are placed, got cells {scatter['cells']}, points {scatter['points']}")
+    tool("undo")
+    for _ in range(200):
+        call("ping")
+        scatter = tool("get_scatter")
+        if scatter["building"] == 0:
+            break
+    check(scatter["layers"] == [] and scatter["points"] == 0, f"undo takes the stones away, got {scatter}")
     last = None
     for _ in range(60):
         for _ in range(10):

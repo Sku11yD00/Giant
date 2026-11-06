@@ -399,6 +399,11 @@ void normalize_meshes(world::Scene& scene) {
             if (!p.mesh.empty()) p.mesh = MeshLibrary::normalize(p.mesh);
         }
     }
+    for (world::ScatterLayer& layer : scene.scatter) {
+        for (world::ScatterItem& i : layer.items) {
+            if (!i.mesh.empty()) i.mesh = MeshLibrary::normalize(i.mesh);
+        }
+    }
 }
 
 // The mesh files the scene's entities and kits draw (normalized, once each).
@@ -410,6 +415,11 @@ std::vector<std::string> meshes_used(const world::Scene& scene) {
     for (const world::Kit& kit : scene.kits) {
         for (const world::KitPiece& p : kit.pieces) {
             if (p.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(p.mesh));
+        }
+    }
+    for (const world::ScatterLayer& layer : scene.scatter) {
+        for (const world::ScatterItem& i : layer.items) {
+            if (i.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(i.mesh));
         }
     }
     std::sort(out.begin(), out.end());
@@ -644,7 +654,7 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
 
     add(registry,
         {"delete_kit",
-         "Removes a kit. Refused while entities place it (delete those first). Undoable.",
+         "Removes a kit. Refused while entities or scatter layers place it (delete or change those first). Undoable.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["name"],
              "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 128}}})"),
          false,
@@ -656,6 +666,14 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
              if (const usize n = placements(state.scene, name); n > 0) {
                  return CommandResult::failure(std::to_string(n) + " entities place \"" + name +
                                                "\"; delete them first");
+             }
+             for (const world::ScatterLayer& l : state.scene.scatter) {
+                 for (const world::ScatterItem& i : l.items) {
+                     if (i.shape == world::Shape::kit && i.kit == name) {
+                         return CommandResult::failure("scatter layer \"" + l.name + "\" places \"" + name +
+                                                       "\"; change or remove it first");
+                     }
+                 }
              }
              if (state.world != nullptr && state.world->active(state.scene_generation) &&
                  !state.world->all_loaded()) {

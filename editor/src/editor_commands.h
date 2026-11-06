@@ -45,6 +45,7 @@ struct BrushSettings {
 class MeshLibrary;
 class TerrainMeshes;
 class FarGround;
+class ScatterPlacer;
 class WorldStreaming;
 
 // The last few seconds of frame times, for get_engine_info (performance
@@ -126,6 +127,8 @@ struct EditorState {
     // The streamed world's far ground (get_terrain reports it; save_world
     // hands it the chunks written); set by main.
     FarGround* far_ground = nullptr;
+    // The scatter layers' placements (get_scatter reports them); set by main.
+    ScatterPlacer* scatter = nullptr;
     // LOD error and debug view: view state, not undoable.
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
@@ -158,6 +161,8 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
 void register_scene_commands(ai::CommandRegistry& registry, EditorState& state);
 // The terrain commands (terrain_commands.cpp).
 void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state);
+// The scatter commands (scatter_commands.cpp).
+void register_scatter_commands(ai::CommandRegistry& registry, EditorState& state);
 
 // What the AI is told when it connects over MCP.
 const char* mcp_instructions();

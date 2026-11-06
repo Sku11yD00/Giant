@@ -35,6 +35,7 @@ private:
     void draw_properties();
     void draw_lighting();
     void draw_terrain_brush(); // the viewport brush's settings (EditorState::brush)
+    void draw_scatter();       // the scatter layers' main settings
     void draw_log();
     void draw_commands();
     void draw_engine(const FrameInfo& frame);

@@ -16,6 +16,7 @@
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
 #include "far_ground.h"
+#include "scatter_placer.h"
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
 #include "world_streaming.h"
@@ -288,6 +289,8 @@ int run(const Options& options) {
     terrain_meshes.skirt_depth = 8.0f; // hides the gaps where the far ground's chunks meet the tiles
     editor::FarGround far_ground(renderer.get()); // after the renderer: released first
     state.far_ground = &far_ground;
+    editor::ScatterPlacer scatter;
+    state.scatter = &scatter;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -328,7 +331,9 @@ int run(const Options& options) {
         terrain_meshes.update(state.scene.terrain);
         far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes,
                           state.scene.terrain);
-        editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground);
+        scatter.camera = state.camera.position;
+        scatter.update(state.scene, terrain_meshes.last_changes());
+        editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::scene_lighting(state.scene.lighting);

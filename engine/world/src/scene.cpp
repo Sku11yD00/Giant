@@ -1,5 +1,6 @@
 #include "giant/world/scene.h"
 #include "giant/world/far_ground.h"
+#include "giant/world/scatter.h"
 
 #include "giant/core/assert.h"
 
@@ -118,11 +119,13 @@ Scene::Identity& Scene::Identity::operator=(const Identity&) {
 }
 
 Scene::Scene(const Scene& other)
-    : lighting(other.lighting), kits(other.kits), terrain(other.terrain), m_entities(other.m_entities), m_index(other.m_index),
+    : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
+      m_entities(other.m_entities), m_index(other.m_index),
       m_next_id(other.m_next_id) {}
 
 Scene::Scene(Scene&& other) noexcept
-    : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)), m_entities(std::move(other.m_entities)),
+    : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
+      scatter(std::move(other.scatter)), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id) {
     other.clear();
 }
@@ -139,6 +142,7 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         lighting = other.lighting;
         kits = std::move(other.kits);
         terrain = std::move(other.terrain);
+        scatter = std::move(other.scatter);
         m_entities = std::move(other.m_entities);
         m_index = std::move(other.m_index);
         m_next_id = other.m_next_id;
@@ -358,6 +362,45 @@ Json kits_json(std::span<const Kit> kits) {
     return out;
 }
 
+Json scatter_json(std::span<const ScatterLayer> layers) {
+    Json out = Json::array();
+    const ScatterLayer none;
+    for (const ScatterLayer& l : layers) {
+        Json layer = {{"name", l.name},         {"spacing", l.spacing},   {"density", l.density},
+                      {"jitter", l.jitter},     {"seed", l.seed},         {"visible", l.visible}};
+        if (l.clump_size != none.clump_size || l.clumping != none.clumping) {
+            layer["clump_size"] = l.clump_size;
+            layer["clumping"] = l.clumping;
+        }
+        if (l.height_min != none.height_min) layer["height_min"] = l.height_min;
+        if (l.height_max != none.height_max) layer["height_max"] = l.height_max;
+        if (l.slope_min != none.slope_min) layer["slope_min"] = l.slope_min;
+        if (l.slope_max != none.slope_max) layer["slope_max"] = l.slope_max;
+        if (l.area) {
+            layer["area"] = {{"from", Json::array({l.area->from_x, l.area->from_z})},
+                             {"to", Json::array({l.area->to_x, l.area->to_z})}};
+        }
+        Json items = Json::array();
+        for (const ScatterItem& i : l.items) {
+            Json item = {{"shape", to_string(i.shape)}};
+            if (!i.mesh.empty()) item["mesh"] = i.mesh;
+            if (!i.kit.empty()) item["kit"] = i.kit;
+            item["material"] = {{"base_color", vec3_json(i.material.base_color)},
+                                {"roughness", i.material.roughness},
+                                {"metallic", i.material.metallic},
+                                {"emissive", vec3_json(i.material.emissive)}};
+            item["weight"] = i.weight;
+            item["scale"] = Json::array({i.scale_min, i.scale_max});
+            item["align"] = i.align;
+            item["sink"] = i.sink;
+            items.push_back(std::move(item));
+        }
+        layer["items"] = std::move(items);
+        out.push_back(std::move(layer));
+    }
+    return out;
+}
+
 // One row of a terrain tile as text: its heights, shortest exact form,
 // one space apart (a row per line keeps a tile readable and diffable).
 std::string heights_row(std::span<const float> row) {
@@ -416,6 +459,9 @@ std::string save_scene(const Scene& scene) {
     out["lighting"] = lighting_json(scene.lighting);
     if (!scene.kits.empty()) {
         out["kits"] = kits_json(scene.kits);
+    }
+    if (!scene.scatter.empty()) {
+        out["scatter"] = scatter_json(scene.scatter);
     }
     if (const Terrain& t = scene.terrain;
         !t.empty() || t.samples() != k_default_terrain_samples || !(t.material == TerrainMaterial{})) {
@@ -879,6 +925,122 @@ void read_kits(Reader& root, std::vector<Kit>& out, std::string& error) {
     }
 }
 
+// A pair of numbers [a, b], each within +-limit.
+bool read_pair(const Json& v, double limit, double& a, double& b) {
+    if (!v.is_array() || v.size() != 2 || !v[0].is_number() || !v[1].is_number()) return false;
+    a = v[0].get<double>();
+    b = v[1].get<double>();
+    return std::isfinite(a) && std::isfinite(b) && std::fabs(a) <= limit && std::fabs(b) <= limit;
+}
+
+void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer& l, std::string& error) {
+    Reader r(json, path, error);
+    r.string("name", l.name, true, k_max_name_bytes);
+    r.number("spacing", l.spacing, k_min_scatter_spacing, k_max_scatter_spacing);
+    r.number("density", l.density, 0, 1);
+    r.number("jitter", l.jitter, 0, 1);
+    r.number("clump_size", l.clump_size, 0, 100000);
+    r.number("clumping", l.clumping, 0, 1);
+    r.number("height_min", l.height_min, -k_max_terrain_height, k_max_terrain_height);
+    r.number("height_max", l.height_max, -k_max_terrain_height, k_max_terrain_height);
+    r.number("slope_min", l.slope_min, 0, 90);
+    r.number("slope_max", l.slope_max, 0, 90);
+    r.boolean("visible", l.visible);
+    if (const Json* v = r.get("seed", false); v != nullptr && r.ok()) {
+        if (!v->is_number_unsigned() || v->get<u64>() > 0xFFFF'FFFFull) {
+            r.fail("seed", "must be a whole number from 0 to 4294967295");
+        } else {
+            l.seed = static_cast<u32>(v->get<u64>());
+        }
+    }
+    if (const Json* a = r.get("area", false); a != nullptr && r.ok()) {
+        Reader ar(*a, path + ".area", error);
+        ScatterArea area;
+        const Json* from = ar.get("from", true);
+        const Json* to = ar.get("to", true);
+        if (ar.ok() && (!read_pair(*from, 1e8, area.from_x, area.from_z) || !read_pair(*to, 1e8, area.to_x, area.to_z))) {
+            ar.fail("", "from and to must be [x, z], within 1e8 metres");
+        }
+        ar.finish();
+        l.area = area;
+    }
+    if (const Json* items = r.get("items", true); items != nullptr && r.ok()) {
+        if (!items->is_array() || items->size() > k_max_scatter_items) {
+            r.fail("items", "must be an array of 1 to " + std::to_string(k_max_scatter_items) + " items");
+        }
+        for (usize k = 0; r.ok() && error.empty() && k < items->size(); ++k) {
+            const std::string at = path + ".items[" + std::to_string(k) + "]";
+            Reader ir((*items)[k], at, error);
+            ScatterItem item;
+            std::string shape = to_string(item.shape);
+            ir.string("shape", shape);
+            if (ir.ok()) {
+                const auto parsed = shape_from_string(shape);
+                if (parsed && *parsed != Shape::decal) {
+                    item.shape = *parsed;
+                } else {
+                    ir.fail("shape", "must be cube, sphere, plane, mesh or kit");
+                }
+            }
+            ir.string("mesh", item.mesh, false, k_max_mesh_path_bytes);
+            ir.string("kit", item.kit, false, k_max_name_bytes);
+            if (const Json* m = ir.get("material", false); m != nullptr && ir.ok()) {
+                Reader mr(*m, at + ".material", error);
+                mr.vec3("base_color", item.material.base_color, 0, 1);
+                mr.number("roughness", item.material.roughness, 0, 1);
+                mr.number("metallic", item.material.metallic, 0, 1);
+                mr.vec3("emissive", item.material.emissive, 0, 1000);
+                mr.finish();
+            }
+            ir.number("weight", item.weight, 1e-6, 1e6);
+            if (const Json* sc = ir.get("scale", false); sc != nullptr && ir.ok()) {
+                double lo = 0.0, hi = 0.0;
+                if (!read_pair(*sc, 1e4, lo, hi)) {
+                    ir.fail("scale", "must be [min, max]");
+                } else {
+                    item.scale_min = static_cast<float>(lo);
+                    item.scale_max = static_cast<float>(hi);
+                }
+            }
+            ir.number("align", item.align, 0, 1);
+            ir.number("sink", item.sink, -1000, 1000);
+            ir.finish();
+            l.items.push_back(std::move(item));
+        }
+    }
+    r.finish();
+    if (error.empty()) {
+        if (const auto bad = check_scatter_layer(l)) error = path + ": " + *bad;
+    }
+}
+
+// After read_kits: a kit item names one of `kits`.
+void read_scatter(Reader& root, const std::vector<Kit>& kits, std::vector<ScatterLayer>& out, std::string& error) {
+    const Json* layers = root.get("scatter", false);
+    if (layers == nullptr || !root.ok()) return;
+    if (!layers->is_array() || layers->size() > k_max_scatter_layers) {
+        root.fail("scatter", "must be an array of at most " + std::to_string(k_max_scatter_layers) + " layers");
+        return;
+    }
+    for (usize i = 0; i < layers->size() && error.empty(); ++i) {
+        const std::string path = "scatter[" + std::to_string(i) + "]";
+        ScatterLayer layer;
+        read_scatter_layer((*layers)[i], path, layer, error);
+        if (error.empty() &&
+            std::any_of(out.begin(), out.end(), [&](const ScatterLayer& l) { return l.name == layer.name; })) {
+            error = path + ".name \"" + layer.name + "\" is used twice";
+        }
+        for (usize k = 0; error.empty() && k < layer.items.size(); ++k) {
+            const ScatterItem& item = layer.items[k];
+            if (item.shape == Shape::kit &&
+                std::none_of(kits.begin(), kits.end(), [&](const Kit& kit) { return kit.name == item.kit; })) {
+                error = path + ".items[" + std::to_string(k) + "].kit \"" + item.kit + "\" is not one of the kits";
+            }
+        }
+        if (error.empty()) out.push_back(std::move(layer));
+    }
+}
+
 // Calls `take` with each entity of the "entities" array, read strictly;
 // `take` returns an error to stop.
 template <typename Take>
@@ -919,6 +1081,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
         read_lighting(*lighting, scene.lighting, error);
     }
     read_kits(root, scene.kits, error);
+    read_scatter(root, scene.kits, scene.scatter, error);
     if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
         read_terrain(*terrain, scene.terrain, error);
     }
@@ -966,6 +1129,9 @@ std::string save_world_index(const WorldIndex& world) {
     out["lighting"] = lighting_json(world.lighting);
     if (!world.kits.empty()) {
         out["kits"] = kits_json(world.kits);
+    }
+    if (!world.scatter.empty()) {
+        out["scatter"] = scatter_json(world.scatter);
     }
     std::vector<std::string> meshes = world.meshes;
     std::sort(meshes.begin(), meshes.end());
@@ -1019,6 +1185,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
         read_lighting(*lighting, world.lighting, error);
     }
     read_kits(root, world.kits, error);
+    read_scatter(root, world.kits, world.scatter, error);
     if (const Json* meshes = root.get("meshes", false); meshes != nullptr && root.ok()) {
         if (!meshes->is_array()) {
             root.fail("meshes", "must be an array of paths");

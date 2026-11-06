@@ -485,6 +485,38 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   .raw; square, little-endian) and PGM (P5 or P2, 8 or 16 bit), up to
   16384 a side, sampled bilinearly into tiles at the terrain's spacing; a
   `to` on a cell's edge also sets the first samples of a tile past it.
+- **Scatter (N3 part 6).** Rules for strewing things over the ground
+  (`engine/world/include/giant/world/scatter.h`; the layer types are scene
+  data in `scene.h`, saved with scenes and in world.json). A layer's points
+  come from a global grid of `spacing` squares, one point a square jittered
+  inside it (no two closer than spacing x (1 - jitter)), each square's
+  numbers from a hash of the seed and the square, so a point is the same
+  whichever cell asks and cells share none. Points are kept by density, a
+  value-noise clump mask, the area, and the ground's height and slope
+  (normal from heights a sample either side); each gets an item by weight,
+  a turn about up, a scale, and a tilt towards the normal (`align`).
+  `scatter_cell` reads only the cell's tile and its neighbours', so the
+  editor's `ScatterPlacer` (`editor/src/scatter_placer.h`) copies those 9
+  tiles to a worker job (2 workers) and swaps a cell's points in whole
+  (within `instances_per_frame`, one cell at least). Only cells within
+  `radius` (2048 m) of the camera are placed, nearest first; a cell draws
+  at most 16384 instances (a frame swaps in one whole, about 1.5 ms) and
+  all cells together `max_instances` (524288; a kit item counts its
+  pieces, and a kit's piece count is part of every cell's key). A cell
+  arriving over the budget takes room from farther cells, cells out of
+  range go before any arrive, and cells cut short try again when room
+  frees. The scene's instance list reserves room for scatter once, so it
+  never doubles in a frame. A cell is placed again when its
+  tile or a neighbour's changes (TerrainMeshes::last_changes) or the layers
+  change (compared each frame), and keyed by the layers and those 9 tile
+  versions, so an unchanged cell is never placed twice. Placements are not
+  saved and not entities: `scene_frame` draws them after the cell's
+  entities (items' meshes and materials looked up once a cell, kits
+  expanded), so they stream with the ground, reach the voxel world and far
+  field like any instance, and a kit change rebuilds scattered cells. At
+  most 2^18 points a cell (`cells_cut_short`). Not yet: masks from
+  entities (no trees in houses), layers avoiding each other, painted
+  density, and destruction removing placements.
 
 ## Window events (known limit)
 

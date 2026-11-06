@@ -15,6 +15,7 @@
 namespace giant::editor {
 
 class FarGround;
+class ScatterPlacer;
 
 // What the renderer draws of a scene, kept from frame to frame by world
 // cell (world::k_cell_size): a frame rebuilds only the cells whose
@@ -34,6 +35,7 @@ struct SceneFrame {
     std::vector<render::Material> materials;
     std::vector<render::Decal> decals;
     u32 cells_rebuilt = 0; // by the last scene_frame
+    usize scatter_room = 0; // instances reserved once for scatter to grow into (0: not yet)
 
     struct MaterialKey {
         u32 bits[8];
@@ -56,6 +58,7 @@ struct SceneFrame {
         u64 version = 0; // new each rebuild, unique in the process (0: never built)
         bool dirty = true;
         bool ground = false; // it draws a terrain tile (so it stays without entities)
+        bool scattered = false; // it draws scatter placements (so it stays too)
         // Its place in `instances`: capacity instances from first, the
         // ones past its own holes. placed: it has one (maybe of none).
         u32 first = 0;
@@ -94,8 +97,12 @@ struct SceneFrame {
 // id (creation) order; decals of cells go by z, then x. With `far` (updated
 // first, and taking `terrain`'s changed cells itself), a tile draws only
 // where the far ground says, and its chunks are drawn from their corner cells.
+// With `scatter` (updated first), each cell's scatter placements draw after
+// its entities, as their items (kits expanded); a cell is rebuilt when its
+// placements change (ScatterPlacer::take_changed) or a kit changes.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
-                 SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr);
+                 SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
+                 ScatterPlacer* scatter = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches
