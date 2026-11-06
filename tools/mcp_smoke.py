@@ -20,7 +20,7 @@ import threading
 
 from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
-TIMEOUT = 540  # seconds for the whole run (the N1 gate scene is large on the software renderer; slow CI runners take 2-3x the usual ~115 s)
+TIMEOUT = 840  # seconds for the whole run (the N1 gate scene and GI are heavy on the software renderer with GPU validation: ~400-520 s on CI, slow runners take more)
 
 
 def decode_png(data):
