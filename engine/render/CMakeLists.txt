@@ -5,6 +5,7 @@ giant_module(render
     src/streaming.cpp
     src/smaa.cpp
     src/voxel_scene.cpp
+    src/instance_store.cpp
     src/shadow_pages.cpp
     src/voxel_light.cpp
   DEPENDS core rhi geometry voxel
@@ -49,6 +50,7 @@ giant_module_tests(render
     tests/test_voxel_scene.cpp
     tests/test_shadow_pages.cpp
     tests/test_voxel_light.cpp
+    tests/test_instance_store.cpp
 )
 if(GIANT_BUILD_TESTS)
   # The streaming tests check the module's own streamer directly.

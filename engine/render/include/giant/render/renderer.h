@@ -48,6 +48,7 @@ struct CullPush;
 }
 class GeometryStreamer; // src/streaming.h
 class VoxelScene;       // src/voxel_scene.h
+class InstanceStore;    // src/instance_store.h
 class ShadowPages;      // src/shadow_pages.h
 class VoxelLight;       // src/voxel_light.h
 struct ShadowWindows;
@@ -401,6 +402,7 @@ private:
     std::unique_ptr<GeometryStreamer> m_streamer;
     std::unique_ptr<DecalBins> m_decal_bins; // this frame's, reused
     std::unique_ptr<VoxelScene> m_voxels;
+    std::unique_ptr<InstanceStore> m_store; // the instances, on the GPU by cell
     u64 m_meshes_version = 0; // changes on every add_mesh and remove_mesh
     std::vector<CellRange> m_seen_cells; // last frame's FrameInput::cells
     std::vector<CellRange> m_changed_cells;
