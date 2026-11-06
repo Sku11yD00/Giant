@@ -182,7 +182,8 @@ an offline cooker can use it without a device.
   search) runs after shading in three full-screen passes (edges from luma,
   blend weights from SMAA's area and search tables, then the blend into the
   target); `RenderStats::post_draws` counts them. It is skipped in debug
-  views. Shading renders into its own sRGB image first. Specular: in the
+  views. Shading's image is finished (screen reflections, tone mapping)
+  into its own sRGB image first. Specular: in the
   shading pass, the change in normal across each 2x2 pixel quad (same
   instance only) widens the GGX roughness (Kaplanyan-Hoffman style, capped),
   so highlights on tight curves stay stable instead of flickering.
@@ -450,7 +451,7 @@ as standing still.
   brick before a window's edge it blends with the next level up, so the
   windows moving show no seams. The light replaces the flat sky and ground
   colours for diffuse, and dims the sky in reflections as much as the sky
-  is hidden (until part 5b's reflections). With nothing lit around (a
+  is hidden (for surfaces too rough for traced reflections). With nothing lit around (a
   brick just built, things the voxel world does not hold) it falls back to
   the flat colours. Far voxels use their own light word.
 - Lit views (and the voxel view, which then shows voxels with their own
@@ -465,6 +466,49 @@ as standing still.
   coarse voxels are fuller than what they hold, so cones far out see a
   little too much blocked; emissive surfaces do not light the voxels yet;
   light lags changes by up to a round of the pool.
+
+## Reflections
+
+Glossy surfaces reflect along the mirror direction, traced every frame
+from this frame's data alone (AGENTS.md rule 2: no history), so
+reflections are as sharp moving as standing still.
+
+- Voxel cones (`trace_reflection` in `voxel_gi.slang`, with `gi` on),
+  in shading (`resolve.slang`): a cone through the lit voxel world along
+  the mirror direction, as wide as the highlight (tan of the half angle
+  from roughness squared, 0.03 to 0.577). Samples are at least a sixth of
+  their distance wide and steps an eighth of it or more, so 48 samples
+  reach a hundred metres and more. What they meet shines with its light
+  word (as GI's cones do); the rest of the cone takes the hemisphere
+  colours, dimmed by GI where the sky is hidden (so no sky indoors). The
+  surface's own voxels are left out (a plane half a voxel above it), and
+  with them coarse voxels further out holding its plane. Full weight up to
+  roughness 0.45, none past 0.6; rougher surfaces keep the dimmed
+  hemisphere.
+- Screen space (`reflect.slang`, `screen_space_reflections`): shading
+  writes radiance before exposure (rgba16 float), and for glossy pixels
+  the reflection's weight (Fresnel times the roughness fades, 10:10:10)
+  with the normal (octahedral, rg32 uint) and the reflected light it used
+  (rgba16 float). A full-screen pass then marches each glossy pixel's
+  mirror ray against the depth buffer (32 steps, closer together near the
+  surface, out to 200 m, then 6 halvings; surfaces taken to be
+  0.3 m + 2% of their distance thick); where it hits a lit surface, that
+  pixel's radiance replaces the reflected light shading used. It fades out
+  at the screen's edges, for rays coming back at the camera and from
+  roughness 0.25 to 0.4 (mirror sharp: no blur yet). The same pass applies
+  exposure and tone mapping (`post_draws` counts it); with screen
+  reflections off, shading tone maps in place instead (`ps_direct`), one
+  pass and one target as before.
+- Targets: 24 bytes a pixel (about 88 MB at 1440p). `RenderStats::
+  reflections` and `screen_reflections` (`last_frame.reflections.voxel`
+  and `.screen` over MCP) say which are on.
+- Known limits: reflections in mirrors show what shading gave the
+  reflected point (a mirror in a mirror shows the voxel reflection, not a
+  second sharp one); screen reflections are mirror sharp up to their
+  roughness limit; voxel reflections are only as fine as the voxels they
+  meet (coarse further out, and they lose the foot of distant things
+  standing on the reflecting plane), miss emissive light and leak through
+  thin walls; far voxels (the far field) do not reflect.
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 

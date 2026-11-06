@@ -294,9 +294,25 @@ struct ResolveExtras {
     u32 far_on;   // 1: the far field marches
     u32 gi_on;    // 1: bounce light from the lit voxels (voxel_gi.slang)
     u32 gi_light; // write descriptor of the voxel light pool (u32 per voxel, brick after brick)
-    u32 pad;
+    // Reflections. Bit 0: voxel cones (needs gi_on); bit 1: glossy pixels
+    // are marked for the screen reflections pass.
+    u32 reflect_on;
 };
 static_assert(sizeof(ResolveExtras) == 128);
+
+// reflect.slang's ReflectPush: screen reflections, then exposure and tone
+// mapping, from shading's targets.
+struct ReflectPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 radiance; // read descriptors of shading's targets
+    u32 gloss;
+    u32 fallback;
+    u32 depth;
+    u32 on;       // 1: trace screen reflections
+    u32 pad;
+};
+static_assert(sizeof(ReflectPush) == 32);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {

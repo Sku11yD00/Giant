@@ -184,6 +184,14 @@ struct RenderSettings {
     // frames. Off: the flat sky and ground colours.
     bool gi = true;
     u32 gi_bricks_per_frame = 256;
+    // Reflections on glossy surfaces (lit views): a cone through the lit
+    // voxel world along the mirror direction, as wide as the highlight
+    // (needs gi), and, where what it meets is on screen, a sharp one from
+    // this frame's shaded image (screen_space_reflections). Off: the sky
+    // and ground colours, dimmed where global illumination finds them
+    // hidden.
+    bool reflections = true;
+    bool screen_space_reflections = true;
 };
 
 struct FrameInput {
@@ -198,7 +206,7 @@ struct FrameInput {
 struct RenderStats {
     u32 instances = 0; // with at least one cluster drawn (GPU culling: passing instance culling)
     u32 draws = 0;     // draw calls this frame (raster passes and shading)
-    u32 post_draws = 0; // full-screen passes after shading (anti-aliasing): fixed, not per object
+    u32 post_draws = 0; // full-screen passes after shading (screen reflections when on, anti-aliasing): fixed, not per object
     u32 clusters = 0;
     u32 triangles = 0;
     // GPU culling: the counts above come from the GPU, from a frame or two
@@ -242,6 +250,9 @@ struct RenderStats {
     u32 gi_lit = 0;       // voxel bricks lit this frame
     u32 gi_cleared = 0;   // bricks new in the pool, cleared to wait for their light
     u32 gi_waiting = 0;   // new or rebuilt bricks not lit yet
+    // Reflections (this frame).
+    bool reflections = false;        // voxel cones on
+    bool screen_reflections = false; // screen-space rays on
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -393,6 +404,8 @@ private:
     rhi::PipelineHandle m_smaa_weights;
     rhi::PipelineHandle m_smaa_blend;
     rhi::PipelineHandle m_voxel_view;
+    rhi::PipelineHandle m_reflect; // screen reflections, exposure and tone mapping
+    rhi::PipelineHandle m_resolve_direct; // shading without screen reflections, tone mapped in place
     rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables
     rhi::TextureHandle m_smaa_search;
     // Targets, sized to the frame.
@@ -402,6 +415,13 @@ private:
     rhi::TextureHandle m_color;   // shaded image before anti-aliasing (rgba8_srgb)
     rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
     rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)
+    // Shading's output, before exposure (resolve.slang), which the screen
+    // reflections pass then finishes (reflect.slang): radiance (a: 1 to
+    // tone map, 0 as it is), the glossy pixels' reflection weight and
+    // normal, and the reflected light shading used.
+    rhi::TextureHandle m_radiance; // rgba16_float
+    rhi::TextureHandle m_gloss;    // rg32_uint
+    rhi::TextureHandle m_fallback; // rgba16_float
     u32 m_width = 0;
     u32 m_height = 0;
     u32 m_hzb_width = 0;

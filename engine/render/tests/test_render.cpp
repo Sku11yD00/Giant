@@ -83,8 +83,8 @@ GIANT_TEST("render: the scene is one raster draw and one shading pass on the nul
     GIANT_CHECK(renderer->last_stats().instances == 3);
     GIANT_CHECK(renderer->last_stats().clusters >= 3);
     GIANT_CHECK(!renderer->last_stats().from_gpu);
-    GIANT_CHECK(renderer->last_stats().post_draws == 3); // SMAA: edges, weights, blend
-    GIANT_CHECK(device->last_frame_stats().draws == 2 + 3);
+    GIANT_CHECK(renderer->last_stats().post_draws == 4); // screen reflections; SMAA: edges, weights, blend
+    GIANT_CHECK(device->last_frame_stats().draws == 2 + 4);
     // The background is cleared as linear colour: 0.5 is sRGB byte 188.
     const auto pixels = device->read_texture(target);
     GIANT_CHECK(pixels.size() == 64 * 32 * 4 && pixels[0] == 188 && pixels[1] == 0);
@@ -408,6 +408,49 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
                                                      "raster", "HZB", "shadows", "shading"}));
 }
 
+GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a pass after shading") {
+    NullScene s;
+    GIANT_CHECK(s.renderer != nullptr);
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {20.0f, 1.0f, 20.0f};
+    instances[1].mesh = s.renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = {0.0, 1.0, -5.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.view.position = {0.0, 1.5, 0.0};
+    frame.settings.antialiasing = false;
+    RenderStats st = s.draw(frame);
+    GIANT_CHECK(st.reflections && st.screen_reflections);
+    // Shading, then the pass that reflects and tone maps its image.
+    GIANT_CHECK(st.post_draws == 1);
+    GIANT_CHECK(s.device->last_frame_stats().draws == st.draws + st.post_draws + st.shadow_draws);
+    // Without global illumination, only the screen's.
+    frame.settings.gi = false;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.reflections && st.screen_reflections);
+    frame.settings.gi = true;
+    frame.settings.screen_space_reflections = false;
+    st = s.draw(frame);
+    GIANT_CHECK(st.reflections && !st.screen_reflections && st.post_draws == 0); // tone mapped in shading
+    frame.settings.screen_space_reflections = true;
+    frame.settings.debug_view = DebugView::lighting;
+    st = s.draw(frame);
+    GIANT_CHECK(st.reflections && st.screen_reflections);
+    // Views of the geometry have none.
+    frame.settings.debug_view = DebugView::clusters;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.reflections && !st.screen_reflections && st.post_draws == 0);
+    frame.settings.debug_view = DebugView::voxels;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.reflections && !st.screen_reflections && st.post_draws == 0);
+    frame.settings.debug_view = DebugView::lit;
+    frame.settings.reflections = false;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.reflections && !st.screen_reflections);
+}
+
 GIANT_TEST("render: shadow pages asked for are drawn, a pass per level, and cached") {
     // The null device runs no shaders, so shading asks for nothing: the
     // test asks for pages itself, as the read-back requests would.
@@ -442,7 +485,7 @@ GIANT_TEST("render: shadow pages asked for are drawn, a pass per level, and cach
     GIANT_CHECK(st.shadow_pages == 3 && st.shadow_drawn == 3 && st.shadow_waiting == 0);
     GIANT_CHECK(st.shadow_draws == 2); // levels 0 and 4
     GIANT_CHECK(st.draws == 3);        // the view's two raster passes and shading: shadows apart
-    GIANT_CHECK(s.device->last_frame_stats().draws == st.draws + st.shadow_draws);
+    GIANT_CHECK(s.device->last_frame_stats().draws == st.draws + st.post_draws + st.shadow_draws);
     // Cached: nothing to draw while nothing changes.
     st = s.draw(frame);
     GIANT_CHECK(st.shadow_drawn == 0 && st.shadow_draws == 0 && st.shadow_pages == 3);
@@ -695,10 +738,10 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.decals = {};
     frame.settings.antialiasing = false;
     const auto aliased = draw(false, false, false);
-    GIANT_CHECK(renderer->last_stats().post_draws == 0);
+    GIANT_CHECK(renderer->last_stats().post_draws == 1); // the screen reflections pass alone
     frame.settings.antialiasing = true;
     const auto smoothed = draw(false, false, false);
-    GIANT_CHECK(renderer->last_stats().post_draws == 3);
+    GIANT_CHECK(renderer->last_stats().post_draws == 4);
     if (aliased.size() == k_w * k_h * 4 && smoothed.size() == aliased.size()) {
         const auto luma = [](const std::vector<u8>& p, u32 x, u32 y) {
             const usize i = (static_cast<usize>(y) * k_w + x) * 4;
@@ -964,6 +1007,138 @@ GIANT_TEST("render: d3d12 global illumination bounces colour and shuts out the s
                     int{light_only[i + 2]});
         GIANT_CHECK(light_only[i + 1] > 60 && std::abs(int{light_only[i + 1]} - int{light_only[i + 2]}) <= 3);
         GIANT_CHECK(light_only[i] >= light_only[i + 1]);
+    }
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("render: d3d12 reflects a block in a mirror floor, from the voxels and the screen") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) {
+        return; // not on Windows
+    }
+    RendererDesc rd;
+    rd.voxel_clipmap.levels = 6;
+    rd.voxel_clipmap.bricks_per_axis = 16;
+    rd.voxel_bricks = 4096;
+    auto renderer = Renderer::create(*device, rd);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    constexpr u32 k_w = 96, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+
+    // A mirror-smooth metal floor and a green block on it, 5 to 7 m ahead
+    // (-Z); the camera 1.5 m up, looking 15 degrees down; the sun behind
+    // and above it lights the block's face. The floor between 2.1 and 5 m
+    // ahead shows the block's reflection: at the screen's centre column,
+    // rows 34 to 52 or so (row 44: 2.9 m ahead, the block 1.1 m up).
+    const DVec3 origin{25'000.0, 40.0, -60'000.0};
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = origin;
+    instances[0].scale = {20.0f, 1.0f, 20.0f};
+    instances[0].material = 0;
+    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = origin + DVec3{0.0, 1.0, -6.0};
+    instances[1].scale = {2.0f, 2.0f, 2.0f};
+    instances[1].material = 1;
+    std::vector<Material> materials(2);
+    materials[0].base_color = {0.9f, 0.9f, 0.9f};
+    materials[0].roughness = 0.05f;
+    materials[0].metallic = 1.0f;
+    materials[1].base_color = {0.05f, 0.8f, 0.05f};
+    materials[1].roughness = 0.9f;
+    FrameInput frame;
+    frame.view.position = origin + DVec3{0.0, 1.5, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi / 12.0f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.0f, 0.7f, 0.7f});
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.4f, 0.4f, 0.4f};
+    frame.lighting.ground_light = {0.4f, 0.4f, 0.4f};
+    frame.settings.antialiasing = false;
+    frame.settings.voxel_ms_per_frame = 1000.0f;
+    frame.settings.gi_bricks_per_frame = 4096;
+    const auto draw = [&] {
+        for (int i = 0; i < 12; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    frame.settings.reflections = false;
+    const auto off = draw();
+    frame.settings.reflections = true;
+    frame.settings.screen_space_reflections = false;
+    const auto voxel = draw();
+    GIANT_CHECK(renderer->last_stats().reflections && !renderer->last_stats().screen_reflections);
+    frame.settings.screen_space_reflections = true;
+    const auto both = draw();
+    GIANT_CHECK(renderer->last_stats().reflections && renderer->last_stats().screen_reflections);
+    // The screen alone (no voxel world to trace).
+    frame.settings.gi = false;
+    const auto screen = draw();
+    GIANT_CHECK(!renderer->last_stats().reflections && renderer->last_stats().screen_reflections);
+    // Moving: the screen's reflection is this frame's, wherever the camera
+    // is (one frame drawn after the move).
+    frame.view.position = frame.view.position + DVec3{0.4, 0.0, 0.0};
+    const auto moved = [&] {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd != nullptr) {
+            renderer->render(*cmd, target, frame);
+            device->end_frame();
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    }();
+    const usize size = usize{k_w} * k_h * 4;
+    GIANT_CHECK(off.size() == size && voxel.size() == size && both.size() == size && screen.size() == size &&
+                moved.size() == size);
+    if (off.size() == size && voxel.size() == size && both.size() == size && screen.size() == size &&
+        moved.size() == size) {
+        const auto px = [](const std::vector<u8>& p, u32 y, u32 c) {
+            return int{p[(static_cast<usize>(y) * k_w + k_w / 2) * 4 + c]};
+        };
+        for (const u32 y : {40u, 44u, 48u}) {
+            std::printf("mirror floor row %u: off %d %d %d, voxel %d %d %d, both %d %d %d, screen %d %d %d\n", y,
+                        px(off, y, 0), px(off, y, 1), px(off, y, 2), px(voxel, y, 0), px(voxel, y, 1),
+                        px(voxel, y, 2), px(both, y, 0), px(both, y, 1), px(both, y, 2), px(screen, y, 0),
+                        px(screen, y, 1), px(screen, y, 2));
+        }
+        const u32 y = 44;
+        // Without reflections the floor shows the grey sky; with them, the
+        // green block.
+        GIANT_CHECK(std::abs(px(off, y, 1) - px(off, y, 0)) <= 3);
+        GIANT_CHECK(px(voxel, y, 1) > px(voxel, y, 0) + 10);
+        GIANT_CHECK(px(both, y, 1) > px(both, y, 0) + 10);
+        GIANT_CHECK(px(screen, y, 1) > px(screen, y, 0) + 10);
+        GIANT_CHECK(px(moved, y, 1) > px(moved, y, 0) + 10);
+        // Well to the side, the mirror direction misses the block: the sky
+        // reflects (column 78: about 3 m to the side where it passes it).
+        const auto side = [](const std::vector<u8>& p, u32 c) {
+            return int{p[(static_cast<usize>(44) * k_w + 78) * 4 + c]};
+        };
+        std::printf("mirror floor to the side: %d %d %d\n", side(both, 0), side(both, 1), side(both, 2));
+        GIANT_CHECK(std::abs(side(both, 1) - side(both, 0)) <= 4);
     }
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);

@@ -3,8 +3,10 @@
 // correct barycentrics, interpolates the normal and lights it once.
 //
 // Lighting: one sun (GGX specular, Lambert diffuse) plus sky/ground ambient,
-// then exposure and the Khronos PBR Neutral tone mapper, which keeps base
-// colours true until highlights roll off. Written to an sRGB target.
+// then exposure and the Khronos PBR Neutral tone mapper (tone_map.slang).
+// With screen reflections on, shading writes radiance before exposure and
+// reflect.slang adds the reflections and tone maps (ps_main); off, it tone
+// maps here into the sRGB target (ps_direct).
 //
 // The far field: pixels past RenderSettings::far_field_distance (with
 // nothing drawn, or a mesh drawn farther) march the voxel world from there
@@ -17,11 +19,18 @@
 // up in the lit voxel world (voxel_gi.slang), in place of the flat sky
 // and ground colours; it also shuts the sky out of reflections where the
 // sky is hidden.
+//
+// Reflections, on glossy surfaces: a cone through the lit voxel world
+// along the mirror direction (voxel_gi.slang), the hemisphere colours past
+// it. Glossy pixels are marked (their reflection's weight and normal, and
+// the reflected light used here) for the screen's sharper reflections,
+// which reflect.slang traces once this frame's image is shaded.
 #include "common.slang"
 #include "decals.slang"
 #include "voxel_march.slang"
 #include "voxel_gi.slang"
 #include "shadow_pages.slang"
+#include "tone_map.slang"
 
 struct ResolvePush {
     float4 background; // linear; where nothing was drawn
@@ -65,6 +74,7 @@ struct Extras {
     uint far_on;      // 1: the far field marches
     uint gi_on;       // 1: global illumination from the voxel light
     uint gi_light;    // write descriptor of the voxel light pool
+    uint reflect_on;  // bit 0: voxel cone reflections; bit 1: mark pixels for the screen's
 };
 
 Extras load_extras() {
@@ -103,6 +113,7 @@ Extras load_extras() {
     o.far_on = g.x;
     o.gi_on = g.y;
     o.gi_light = g.z;
+    o.reflect_on = g.w;
     return o;
 }
 
@@ -132,24 +143,6 @@ float v_smith(float n_dot_v, float n_dot_l, float alpha) {
 
 float3 f_schlick(float3 f0, float v_dot_h) {
     return f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
-}
-
-// Khronos PBR Neutral tone mapping.
-float3 tone_map(float3 color) {
-    const float start = 0.8 - 0.04;
-    const float desaturation = 0.15;
-    const float x = min(color.r, min(color.g, color.b));
-    const float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
-    color -= offset;
-    const float peak = max(color.r, max(color.g, color.b));
-    if (peak < start) {
-        return color;
-    }
-    const float d = 1.0 - start;
-    const float new_peak = 1.0 - d * d / (peak + d - start);
-    color *= new_peak / peak;
-    const float g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
-    return lerp(color, float3(new_peak, new_peak, new_peak), g);
 }
 
 struct Surface {
@@ -265,9 +258,14 @@ float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 // ambient light, before exposure and tone mapping. `variance`: the
 // normal's change across the pixel (specular AA); `sun`: how much of the
 // sun reaches it (shadows); `bounce`: global illumination's light there
-// (rgb) and how far to trust it (a; 0: the flat sky and ground colours).
+// (rgb) and how far to trust it (a; 0: the flat sky and ground colours);
+// `cone`: the light a voxel cone along the mirror direction met (rgb) and
+// how much it met (a: the rest is the hemisphere), weighted `cone_weight`
+// against the hemisphere alone. Out: what the ambient
+// reflection is multiplied by (`spec_weight`) and the reflected light it
+// used (`spec_light`), for the screen's reflections to replace.
 float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
-             float sun, float4 bounce) {
+             float sun, float4 bounce, float4 cone, float cone_weight, out float3 spec_weight, out float3 spec_light) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
@@ -305,8 +303,12 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
         ambient_specular *= saturate(luminance(gi) / max(luminance(ambient_diffuse), 1e-4));
         ambient_diffuse = gi;
     }
+    // The voxel cone: what it met, and the dimmed hemisphere past it.
+    ambient_specular = lerp(ambient_specular, cone.rgb + (1.0 - cone.a) * ambient_specular, cone_weight);
     const float3 env_fresnel = f0 + (max(1.0 - roughness, f0) - f0) * pow(1.0 - n_dot_v, 5.0);
-    color += diffuse_color * ambient_diffuse + env_fresnel * ambient_specular * (1.0 - 0.7 * roughness);
+    spec_weight = env_fresnel * (1.0 - 0.7 * roughness);
+    spec_light = ambient_specular;
+    color += diffuse_color * ambient_diffuse + spec_weight * ambient_specular;
     return color + emissive;
 }
 
@@ -316,8 +318,46 @@ static const float k_far_roughness = 0.8;
 static const float3 k_lighting_albedo = float3(0.75, 0.75, 0.75);
 static const uint k_view_lighting = 5;
 
-[shader("pixel")]
-float4 ps_main(float4 position : SV_Position) : SV_Target {
+// --- Reflections -----------------------------------------------------------
+
+// Rougher than this, the voxel cone's reflection fades out (the hemisphere
+// colours, dimmed by global illumination, stay); the screen's, sharp as a
+// mirror, fade out sooner.
+static const float k_voxel_reflection_rough = 0.6;
+static const float k_screen_reflection_rough = 0.4;
+static const float k_reflection_fade = 0.15;
+
+// Octahedral unit vector in 16 + 16 bits (reflect.slang decodes it).
+uint pack_octahedral(float3 n) {
+    float2 p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0.0) {
+        p = (1.0 - abs(p.yx)) * float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    }
+    const uint2 q = uint2(round(saturate(p * 0.5 + 0.5) * 65535.0));
+    return q.x | (q.y << 16);
+}
+
+struct Output {
+    float4 radiance : SV_Target0; // before exposure; a: 1 to tone map, 0 as it is (background, debug views)
+    uint2 gloss : SV_Target1;     // x: the screen reflection's weight (10:10:10; 0: none), y: the normal
+    float4 reflected : SV_Target2; // rgb: the reflected light shading used, which the screen's replaces
+};
+
+Output plain_output(float3 color) {
+    Output o;
+    o.radiance = float4(color, 0.0);
+    o.gloss = uint2(0u, 0u);
+    o.reflected = float4(0.0, 0.0, 0.0, 0.0);
+    return o;
+}
+
+Output lit_output(float3 color) {
+    Output o = plain_output(min(color, float3(60000.0, 60000.0, 60000.0)));
+    o.radiance.a = 1.0;
+    return o;
+}
+
+Output shade_pixel(float4 position) {
     const uint2 pixel = uint2(position.xy);
     const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
     const Frame f = load_frame(push.frame, push.frame_offset);
@@ -367,14 +407,16 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
                     bounce = light_lit(lw) ? float4(unpack_light(lw), 1.0) : bounce;
                 }
                 const float3 albedo = lighting_view ? k_lighting_albedo : unpack_color(packed);
+                float3 spec_weight;
+                float3 spec_light;
                 const float3 color = shade(f, world, vn, albedo, k_far_roughness, 0.0, float3(0.0, 0.0, 0.0), 0.0,
-                                           sun, bounce);
-                return float4(tone_map(color * f.exposure), 1.0);
+                                           sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, spec_weight, spec_light);
+                return lit_output(color);
             }
         }
     }
     if (!hit) {
-        return float4(push.background.rgb, 1.0);
+        return plain_output(push.background.rgb);
     }
     const float3 n = s.n;
     const float3 world = s.world;
@@ -385,7 +427,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
                          : f.debug_view == 2 ? level_color(s.level)
                                              : hash_color(s.cluster * 131u + vis.y);
         const float shade_amount = 0.35 + 0.65 * saturate(dot(n, f.sun_direction.xyz) * 0.5 + 0.5);
-        return float4(col * shade_amount, 1.0);
+        return plain_output(col * shade_amount);
     }
 
     // The instance's material (the CPU keeps the index in range), then
@@ -411,6 +453,47 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     if (extras.gi_on != 0) {
         bounce = voxel_bounce(w, write_buffer(extras.gi_light), world, n);
     }
-    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce);
-    return float4(tone_map(color * f.exposure), 1.0);
+    // Reflections: the voxel cone along the mirror direction, and the
+    // screen's weight for reflect.slang.
+    float4 cone = float4(0.0, 0.0, 0.0, 0.0);
+    float cone_weight = 0.0;
+    if ((extras.reflect_on & 1u) != 0u) {
+        cone_weight = saturate((k_voxel_reflection_rough - rough) / k_reflection_fade);
+        if (cone_weight > 0.0) {
+            const float roughness = clamp(rough, 0.045, 1.0);
+            const float3 r = reflect(-safe_normalize(-world, n), n);
+            VoxelWorld all_voxels = w;
+            all_voxels.stand_ins = 0u; // everything reflects, not only the far field's stand-ins
+            cone = trace_reflection(all_voxels, write_buffer(extras.gi_light), f, world, n, r,
+                                    clamp(roughness * roughness, 0.03, 0.577));
+        }
+    }
+    float3 spec_weight;
+    float3 spec_light;
+    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
+                               spec_weight, spec_light);
+    Output o = lit_output(color);
+    const float screen_weight =
+        (extras.reflect_on & 2u) != 0u ? saturate((k_screen_reflection_rough - rough) / k_reflection_fade) : 0.0;
+    const uint3 q = uint3(round(saturate(spec_weight * screen_weight) * 1023.0));
+    o.gloss = uint2(q.x | (q.y << 10) | (q.z << 20), pack_octahedral(n));
+    o.reflected = float4(min(spec_light, float3(60000.0, 60000.0, 60000.0)), 0.0);
+    return o;
+}
+
+// With screen reflections: the three targets for reflect.slang to finish.
+[shader("pixel")]
+Output ps_main(float4 position : SV_Position) {
+    return shade_pixel(position);
+}
+
+// Without: finished here, exposed and tone mapped into the sRGB target.
+[shader("pixel")]
+float4 ps_direct(float4 position : SV_Position) : SV_Target {
+    const Output o = shade_pixel(position);
+    if (o.radiance.a <= 0.0) {
+        return float4(o.radiance.rgb, 1.0); // the background and debug views, as they are
+    }
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    return float4(tone_map(o.radiance.rgb * f.exposure), 1.0);
 }

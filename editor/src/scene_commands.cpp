@@ -295,6 +295,8 @@ Json render_settings_json(const EditorState& state) {
             {"shadow_pages_per_frame", state.render_settings.shadow_pages_per_frame},
             {"gi", state.render_settings.gi},
             {"gi_bricks_per_frame", state.render_settings.gi_bricks_per_frame},
+            {"reflections", state.render_settings.reflections},
+            {"screen_space_reflections", state.render_settings.screen_space_reflections},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
               {"clusters", s.clusters},
@@ -316,7 +318,8 @@ Json render_settings_json(const EditorState& state) {
                 {"drawn", s.shadow_drawn}, {"waiting", s.shadow_waiting}, {"missing", s.shadow_missing},
                 {"draws", s.shadow_draws}}},
               {"gi",
-               {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting}}}}}};
+               {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting}}},
+              {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -1021,6 +1024,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "gi: global illumination (default on; lit views and the voxel view, voxel_world on): bounce and "
          "sky light from the lit voxel world; up to gi_bricks_per_frame voxel bricks (default 256) are lit "
          "again a frame, new and rebuilt ones first; last_frame.gi has this frame's work. "
+         "reflections: glossy surfaces reflect along the mirror direction (default on; lit views): a cone "
+         "through the lit voxel world as wide as the highlight (needs gi), and with screen_space_reflections "
+         "(default on) a sharp reflection from the image itself where what it meets is on screen; "
+         "last_frame.reflections says which are on. "
          "debug_view lighting shows the lit view in plain white (the light alone). "
          "View state: not undoable.",
          Json{{"type", "object"},
@@ -1043,7 +1050,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                             {"description", "Pages drawn a frame at most. Default 64."}}},
                 {"gi", {{"type", "boolean"}}},
                 {"gi_bricks_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096},
-                                         {"description", "Voxel bricks lit a frame at most. Default 256."}}}}}},
+                                         {"description", "Voxel bricks lit a frame at most. Default 256."}}},
+                {"reflections", {{"type", "boolean"}}},
+                {"screen_space_reflections", {{"type", "boolean"}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -1065,6 +1074,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.shadow_pages_per_frame = args.value("shadow_pages_per_frame", r.shadow_pages_per_frame);
              r.gi = args.value("gi", r.gi);
              r.gi_bricks_per_frame = args.value("gi_bricks_per_frame", r.gi_bricks_per_frame);
+             r.reflections = args.value("reflections", r.reflections);
+             r.screen_space_reflections = args.value("screen_space_reflections", r.screen_space_reflections);
              return CommandResult::success(render_settings_json(state));
          }});
 
