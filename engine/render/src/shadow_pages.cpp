@@ -1,5 +1,7 @@
 #include "shadow_pages.h"
 
+#include "cells.h"
+
 #include "gpu_layout.h"
 
 #include <algorithm>
@@ -427,11 +429,21 @@ ShadowPages::Caster ShadowPages::caster_of(const Instance& in, const MeshLookup&
     return c;
 }
 
-void ShadowPages::track(std::span<const Instance> instances, std::span<const u8> casts, u64 meshes_version,
-                        const MeshLookup& meshes) {
+void ShadowPages::track(std::span<const Instance> instances, std::span<const CellRange> cells,
+                        std::span<const u8> casts, u64 meshes_version, const MeshLookup& meshes) {
     const auto casting = [&](size_t i) { return casts.empty() || (i < casts.size() && casts[i] != 0); };
     const bool remesh = meshes_version != m_meshes_version;
     m_meshes_version = meshes_version;
+    // Laid out as last time: only instances in the cells that changed can
+    // have moved (whether each casts is per frame: looked at for all).
+    const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells) &&
+                      instances.size() == m_casters.size() && !remesh;
+    if (only) {
+        m_look.assign(instances.size(), 0);
+        for (const CellRange& c : m_changed_cells) {
+            std::fill_n(m_look.begin() + c.first, c.count, u8{1});
+        }
+    }
     const size_t limit = std::max<size_t>(256, std::max(instances.size(), m_casters.size()) / 8);
     // Boxes to dirty; past the limit, everything is.
     std::vector<std::pair<DVec3, DVec3>>& boxes = m_boxes;
@@ -450,8 +462,17 @@ void ShadowPages::track(std::span<const Instance> instances, std::span<const u8>
     };
     const size_t common = std::min(instances.size(), m_casters.size());
     for (size_t i = 0; i < common; ++i) {
-        const Instance& in = instances[i];
         Caster& c = m_casters[i];
+        if (only && m_look[i] == 0) {
+            const bool cast = casting(i);
+            if (cast != c.casts) {
+                c.casts = true;
+                dirty(c);
+                c.casts = cast;
+            }
+            continue;
+        }
+        const Instance& in = instances[i];
         const Instance& was = c.instance;
         const bool moved = !(in.position == was.position && in.rotation == was.rotation && in.scale == was.scale &&
                              in.mesh == was.mesh);

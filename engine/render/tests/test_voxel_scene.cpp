@@ -58,7 +58,7 @@ struct Bench {
     }
     void step(float budget_ms = 1000.0f) {
         rhi::CommandList* cmd = device->begin_frame(nullptr);
-        voxels->update(*cmd, camera, instances, materials, version,
+        voxels->update(*cmd, camera, instances, {}, materials, version,
                        [this](MeshId id) { return id == 0 ? &cube : nullptr; }, budget_ms);
         device->end_frame();
     }

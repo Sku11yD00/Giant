@@ -145,8 +145,10 @@ public:
     // drawn as a mesh this frame; empty: all cast). Many changes at once
     // (more than max(256, an eighth)) dirty everything.
     using MeshLookup = std::function<const geometry::ClusterMesh*(MeshId)>;
-    void track(std::span<const Instance> instances, std::span<const u8> casts, u64 meshes_version,
-               const MeshLookup& meshes);
+    // With `cells` (FrameInput::cells), only the cells that changed since
+    // the last call are compared.
+    void track(std::span<const Instance> instances, std::span<const CellRange> cells, std::span<const u8> casts,
+               u64 meshes_version, const MeshLookup& meshes);
 
 private:
     struct Page {
@@ -192,6 +194,9 @@ private:
     std::vector<Page> m_pages; // per level and slot
     std::vector<u32> m_free;   // physical pages
     std::vector<Caster> m_casters;
+    std::vector<CellRange> m_seen_cells;    // FrameInput::cells as last tracked
+    std::vector<CellRange> m_changed_cells; // scratch
+    std::vector<u8> m_look;                 // scratch: 1 for instances in changed cells
     u64 m_meshes_version = ~u64{0};
     ShadowStats m_stats;
     // Scratch, kept to avoid allocating every frame.

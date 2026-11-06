@@ -66,7 +66,7 @@ Milestone **N1 Virtual geometry** (in progress):
 
       python tools/n1_gate.py giant_editor.exe
 
-Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays sharp while moving, GI and reflections under 4 ms, no hitches):
+Milestone **N2, voxel world and GI** (done in code; gate: a 20 km view that stays sharp while moving, GI and reflections under 4 ms, no hitches):
 
 - Part 1 (done): stutter-free uploads and GPU timing. Buffers and textures
   made inside a frame (streaming's own tables, meshes added mid-frame) no
@@ -130,6 +130,16 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   of GPU time, and the voxel world reaches 20 km:
 
       python tools/n2_gate.py giant_editor.exe
+
+Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rolls over an edited valley, and the fly-through has no hitches):
+
+- Part 1: world cells. The world is cut into 64 m squares, and the editor
+  and renderer keep their work by square: moving, recolouring or deleting
+  something redoes only its square, not the whole world, which is what
+  lets a world grow to millions of objects. (`last_frame.cells` shows how
+  many squares there are and how many changed.) Keeping the objects
+  themselves on the GPU by square, and loading squares from disk around
+  the camera, are the next parts.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

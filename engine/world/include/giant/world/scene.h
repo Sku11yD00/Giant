@@ -117,8 +117,44 @@ struct Lighting {
 // A unit vector pointing towards the sun.
 Vec3 sun_direction(const Lighting& lighting);
 
+// The world is cut into square cells on the ground (x and z), k_cell_size
+// metres a side, cell (0, 0) spanning [0, k_cell_size) on both. An entity
+// belongs to the cell its position is in, whatever its size. What draws,
+// streams and is worked on together goes by cell, so a change to one
+// entity costs its cell's work, not the world's.
+constexpr double k_cell_size = 64.0;
+
+struct CellCoord {
+    i32 x = 0;
+    i32 z = 0;
+    bool operator==(const CellCoord&) const = default;
+};
+struct CellCoordHash {
+    usize operator()(const CellCoord& c) const;
+};
+// The cell a point is in (clamped to the range i32 holds).
+CellCoord cell_of(const DVec3& position);
+
+// What changed in a scene since its last take_changes().
+struct SceneChanges {
+    // Entities added, removed or handed out by Scene::modify, oldest first
+    // (an id may be listed more than once, and may be gone by now).
+    std::vector<EntityId> ids;
+    // Everything may have changed: the list was cleared, or it grew too
+    // long to be worth keeping.
+    bool all = false;
+};
+
 class Scene {
 public:
+    Scene() = default;
+    // A copy or a moved-to scene is a new scene: all changed, new identity.
+    Scene(const Scene& other);
+    Scene(Scene&& other) noexcept;
+    Scene& operator=(const Scene& other);
+    Scene& operator=(Scene&& other) noexcept;
+    ~Scene() = default;
+
     // Adds `entity` and returns its id (0, adding nothing, once all 2^53 - 1
     // ids have been handed out). Id 0 gets a new id; a non-zero id
     // (restoring a deleted entity, loading) must be unused. `at` is its
@@ -136,12 +172,22 @@ public:
     // Puts back what remove_many returned, each at its old place.
     void restore_many(std::vector<Removed> removed);
 
-    Entity* find(EntityId id);
     const Entity* find(EntityId id) const;
+    // The entity, to change: marks it changed (see take_changes), so call
+    // it only to change it.
+    Entity* modify(EntityId id);
     // In creation order (the outliner's order).
     const std::vector<Entity>& entities() const { return m_entities; }
     usize size() const { return m_entities.size(); }
     void clear(); // entities only; lighting and kits are kept
+
+    // Hands over what changed since the last call (kits, lighting and the
+    // meshes entities name are not tracked: compare those). A scene
+    // made, copied or assigned starts as "all changed".
+    SceneChanges take_changes();
+    // Tells apart scenes (a copy or an assignment is a new scene), so a
+    // follower of take_changes knows when to start over.
+    u64 identity() const { return m_identity.value; }
 
     Lighting lighting;
     // By name, in creation order. Names are unique (the commands and
@@ -157,10 +203,21 @@ public:
 
 private:
     void reindex(usize from);
+    void changed(EntityId id);
+
+    // A new value on construction, copy and assignment.
+    struct Identity {
+        Identity();
+        Identity(const Identity&) : Identity() {}
+        Identity& operator=(const Identity&);
+        u64 value = 0;
+    };
 
     std::vector<Entity> m_entities;
     std::unordered_map<EntityId, usize> m_index; // id -> place in m_entities
     EntityId m_next_id = 1;
+    SceneChanges m_changes{{}, true};
+    Identity m_identity;
 };
 
 // JSON text, stable key order, with a trailing newline.

@@ -51,6 +51,8 @@ public:
     // cheap enough to run per entity per frame.
     const Mesh* find_normalized(const std::string& path) const;
     const std::vector<std::unique_ptr<Mesh>>& meshes() const { return m_meshes; }
+    // Changes whenever a mesh is imported or replaced.
+    u64 version() const { return m_version; }
 
     // "a/./b\\c.glb" -> "a/b/c.glb": one spelling per file, forward slashes.
     static std::string normalize(std::string_view path);
@@ -61,6 +63,7 @@ private:
     render::Renderer* m_renderer;
     std::vector<std::unique_ptr<Mesh>> m_meshes; // stable addresses
     std::unordered_map<std::string, Mesh*> m_by_path;
+    u64 m_version = 0;
 };
 
 } // namespace giant::editor

@@ -42,7 +42,7 @@ struct Bench {
     }
     void step() {
         rhi::CommandList* cmd = device->begin_frame(nullptr);
-        voxels->update(*cmd, camera, instances, materials, 1,
+        voxels->update(*cmd, camera, instances, {}, materials, 1,
                        [this](MeshId id) { return id == 0 ? &cube : nullptr; }, 1000.0f);
         device->end_frame();
     }

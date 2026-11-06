@@ -194,11 +194,24 @@ struct RenderSettings {
     bool screen_space_reflections = true;
 };
 
+// A run of FrameInput::instances that changes together (a world cell).
+struct CellRange {
+    u32 first = 0;
+    u32 count = 0;
+    // A cell whose version and place are as last frame's holds the same
+    // instances as then, by value (their materials' values included).
+    u64 version = 0;
+};
+
 struct FrameInput {
     View view;
     Lighting lighting;
     RenderSettings settings;
     std::span<const Instance> instances;
+    // Optional. When given, the cells cover `instances` end to end, in
+    // order, and the renderer looks for changes only in the cells that
+    // changed; without, it compares every instance with last frame's.
+    std::span<const CellRange> cells;
     std::span<const Material> materials;
     std::span<const Decal> decals;
 };
@@ -218,6 +231,8 @@ struct RenderStats {
     u32 materials = 0;     // in the frame's material table
     u32 decals = 0;        // in view this frame (on the CPU: never late)
     bool decal_overflow = false; // too many decals on screen: some were not drawn
+    u32 cells = 0;         // in FrameInput::cells (0 without them)
+    u32 cells_changed = 0; // of them, looked at for changes this frame (all of them when the layout changed)
     // Streaming (this frame, on the CPU: never late).
     u64 pool_bytes = 0;      // GPU memory for cluster geometry
     u64 pool_used_bytes = 0;
@@ -387,6 +402,10 @@ private:
     std::unique_ptr<DecalBins> m_decal_bins; // this frame's, reused
     std::unique_ptr<VoxelScene> m_voxels;
     u64 m_meshes_version = 0; // changes on every add_mesh and remove_mesh
+    std::vector<CellRange> m_seen_cells; // last frame's FrameInput::cells
+    std::vector<CellRange> m_changed_cells;
+    u32 m_cells_count = 0;
+    u32 m_cells_changed = 0;
     u32 m_request_count = 0; // GPU streaming requests in the slot read last
     u64 m_requests_taken = ~u64{0}; // the frame whose requests were taken last
     // Pipelines.

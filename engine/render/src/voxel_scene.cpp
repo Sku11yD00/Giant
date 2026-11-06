@@ -1,5 +1,7 @@
 #include "voxel_scene.h"
 
+#include "cells.h"
+
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
 #include "gpu_layout.h"
@@ -474,7 +476,7 @@ void VoxelScene::remove_range(u32 first, u32 count) {
 }
 
 void VoxelScene::see_changes(std::span<const Instance> instances, std::span<const Material> materials,
-                             u64 meshes_version, const MeshLookup& meshes) {
+                             const std::vector<CellRange>* only, u64 meshes_version, const MeshLookup& meshes) {
     // Meshes added or removed: the cached ones that are gone (or came back)
     // and the instances using them.
     std::vector<u32> forced;
@@ -504,6 +506,31 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
 
     const u32 n = static_cast<u32>(instances.size());
     const u32 m = static_cast<u32>(m_copies.size());
+    if (only != nullptr && n == m) {
+        // Laid out as last time: only the cells that changed can differ.
+        std::vector<u32> changed = std::move(forced);
+        for (const CellRange& c : *only) {
+            for (u32 i = c.first; i < c.first + c.count && i < n; ++i) {
+                if (differs(instances[i], materials, m_copies[i])) {
+                    changed.push_back(i);
+                }
+            }
+        }
+        if (changed.size() > std::max<usize>(k_bulk, n / 8)) {
+            copy_all(instances, materials, meshes);
+            request_rebuild();
+            return;
+        }
+        std::sort(changed.begin(), changed.end());
+        changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
+        for (const u32 i : changed) {
+            change(i, instances[i], materials, meshes);
+        }
+        if (m_old.size() + m_changed.size() > k_max_backlog) {
+            request_rebuild();
+        }
+        return;
+    }
     if (n < m) {
         // One run removed from the middle (or the end) shifts the rest down:
         // see whether that is all that happened.
@@ -968,8 +995,8 @@ void VoxelScene::upload_tables(rhi::CommandList& cmd) {
 // --- The frame ------------------------------------------------------------
 
 void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<const Instance> instances,
-                        std::span<const Material> materials, u64 meshes_version, const MeshLookup& meshes,
-                        float budget_ms) {
+                        std::span<const CellRange> cells, std::span<const Material> materials, u64 meshes_version,
+                        const MeshLookup& meshes, float budget_ms) {
     using clock = std::chrono::steady_clock;
     const auto start = clock::now();
     m_stats.built = 0;
@@ -1007,7 +1034,8 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         }
         order = std::move(kept);
     }
-    see_changes(instances, materials, meshes_version, meshes);
+    const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells);
+    see_changes(instances, materials, only ? &m_changed_cells : nullptr, meshes_version, meshes);
     // Waiting changes become jobs while the queue is short.
     while (m_jobs.size() < k_max_jobs && (!m_old.empty() || !m_changed_order.empty())) {
         if (!m_old.empty()) {

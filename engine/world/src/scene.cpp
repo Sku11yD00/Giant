@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
 #include <cstdio>
+#include <limits>
 #include <set>
 
 namespace giant::world {
@@ -82,7 +84,87 @@ Vec3 sun_direction(const Lighting& lighting) {
     return {flat * std::sin(azimuth), std::sin(elevation), -flat * std::cos(azimuth)};
 }
 
+// --- Cells ----------------------------------------------------------------------
+
+usize CellCoordHash::operator()(const CellCoord& c) const {
+    const u64 key = (static_cast<u64>(static_cast<u32>(c.x)) << 32) | static_cast<u32>(c.z);
+    return static_cast<usize>(key * 0x9E3779B97F4A7C15ull ^ (key >> 29));
+}
+
+CellCoord cell_of(const DVec3& position) {
+    const auto axis = [](double v) {
+        const double cell = std::floor(v / k_cell_size);
+        if (!(cell >= -2147483648.0)) {
+            return std::numeric_limits<i32>::min(); // also NaN
+        }
+        return cell >= 2147483647.0 ? std::numeric_limits<i32>::max() : static_cast<i32>(cell);
+    };
+    return {axis(position.x), axis(position.z)};
+}
+
 // --- Scene ----------------------------------------------------------------------
+
+Scene::Identity::Identity() {
+    static std::atomic<u64> next{1};
+    value = next.fetch_add(1, std::memory_order_relaxed);
+}
+
+Scene::Identity& Scene::Identity::operator=(const Identity&) {
+    value = Identity().value;
+    return *this;
+}
+
+Scene::Scene(const Scene& other)
+    : lighting(other.lighting), kits(other.kits), m_entities(other.m_entities), m_index(other.m_index),
+      m_next_id(other.m_next_id) {}
+
+Scene::Scene(Scene&& other) noexcept
+    : lighting(other.lighting), kits(std::move(other.kits)), m_entities(std::move(other.m_entities)),
+      m_index(std::move(other.m_index)), m_next_id(other.m_next_id) {
+    other.clear();
+}
+
+Scene& Scene::operator=(const Scene& other) {
+    if (this != &other) {
+        *this = Scene(other);
+    }
+    return *this;
+}
+
+Scene& Scene::operator=(Scene&& other) noexcept {
+    if (this != &other) {
+        lighting = other.lighting;
+        kits = std::move(other.kits);
+        m_entities = std::move(other.m_entities);
+        m_index = std::move(other.m_index);
+        m_next_id = other.m_next_id;
+        m_changes = {{}, true};
+        m_identity = Identity();
+        other.clear();
+    }
+    return *this;
+}
+
+void Scene::changed(EntityId id) {
+    if (m_changes.all) {
+        return;
+    }
+    // Nobody may be taking them (tests, a scene being built): past a
+    // point, "everything" says it as well in less memory.
+    if (m_changes.ids.size() >= 4096 + m_entities.size()) {
+        m_changes.ids.clear();
+        m_changes.ids.shrink_to_fit();
+        m_changes.all = true;
+        return;
+    }
+    m_changes.ids.push_back(id);
+}
+
+SceneChanges Scene::take_changes() {
+    SceneChanges out = std::move(m_changes);
+    m_changes = {};
+    return out;
+}
 
 EntityId Scene::add(Entity entity, std::optional<usize> at) {
     if (entity.id == 0) {
@@ -98,6 +180,7 @@ EntityId Scene::add(Entity entity, std::optional<usize> at) {
     const EntityId id = entity.id;
     m_entities.insert(m_entities.begin() + static_cast<std::ptrdiff_t>(index), std::move(entity));
     reindex(index);
+    changed(id);
     return id;
 }
 
@@ -111,6 +194,7 @@ std::optional<Scene::Removed> Scene::remove(EntityId id) {
     m_entities.erase(m_entities.begin() + static_cast<std::ptrdiff_t>(index));
     m_index.erase(it);
     reindex(index);
+    changed(id);
     return removed;
 }
 
@@ -131,6 +215,7 @@ std::vector<Scene::Removed> Scene::remove_many(std::span<const EntityId> ids) {
     for (usize i = 0; i < m_entities.size(); ++i) {
         if (doomed.contains(m_entities[i].id)) {
             m_index.erase(m_entities[i].id);
+            changed(m_entities[i].id);
             removed.push_back({std::move(m_entities[i]), i});
         } else {
             kept.push_back(std::move(m_entities[i]));
@@ -158,6 +243,7 @@ void Scene::restore_many(std::vector<Removed> removed) {
             merged.push_back(std::move(m_entities[next++]));
         }
         m_next_id = std::max(m_next_id, r.entity.id + 1);
+        changed(r.entity.id);
         merged.push_back(std::move(r.entity));
     }
     while (next < m_entities.size()) {
@@ -167,16 +253,24 @@ void Scene::restore_many(std::vector<Removed> removed) {
     reindex(0);
 }
 
-Entity* Scene::find(EntityId id) {
+const Entity* Scene::find(EntityId id) const {
     const auto it = m_index.find(id);
     return it == m_index.end() ? nullptr : &m_entities[it->second];
 }
 
-const Entity* Scene::find(EntityId id) const { return const_cast<Scene*>(this)->find(id); }
+Entity* Scene::modify(EntityId id) {
+    const auto it = m_index.find(id);
+    if (it == m_index.end()) {
+        return nullptr;
+    }
+    changed(id);
+    return &m_entities[it->second];
+}
 
 void Scene::clear() {
     m_entities.clear();
     m_index.clear();
+    m_changes = {{}, true};
     // Ids are never reused within a session, so an undo history that
     // mentions an old id cannot reach a new entity by mistake.
 }

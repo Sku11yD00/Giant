@@ -93,9 +93,11 @@ public:
     // Inside a frame, before anything reads the voxels. `meshes_version`
     // changes whenever a mesh is added or removed. Works for about
     // `budget_ms` (at least one step and one brick, if any wait).
+    // With `cells` (FrameInput::cells), only the cells that changed since
+    // the last update are compared.
     void update(rhi::CommandList& cmd, const DVec3& camera, std::span<const Instance> instances,
-                std::span<const Material> materials, u64 meshes_version, const MeshLookup& meshes,
-                float budget_ms);
+                std::span<const CellRange> cells, std::span<const Material> materials, u64 meshes_version,
+                const MeshLookup& meshes, float budget_ms);
     // Instances whose bounding radius (the mesh's sphere times the largest
     // |scale|) is at most this are stand-ins: their voxels carry the
     // stand-in bit the far field shows (it stands in for them; bigger
@@ -213,8 +215,9 @@ private:
     void grid_rebuild();
     void find(const Box& box); // into m_found, each instance once
 
+    // `only`: the cells to compare (the rest are as last time); null: all.
     void see_changes(std::span<const Instance> instances, std::span<const Material> materials,
-                     u64 meshes_version, const MeshLookup& meshes);
+                     const std::vector<CellRange>* only, u64 meshes_version, const MeshLookup& meshes);
     void set_copy(u32 index, const Instance& in, std::span<const Material> materials, const MeshLookup& meshes);
     void change(u32 index, const Instance& in, std::span<const Material> materials, const MeshLookup& meshes);
     void copy_all(std::span<const Instance> instances, std::span<const Material> materials,
@@ -292,6 +295,8 @@ private:
 
     // What the bricks are built from.
     std::vector<Copy> m_copies;
+    std::vector<CellRange> m_seen_cells;    // FrameInput::cells as last seen
+    std::vector<CellRange> m_changed_cells; // this update's (scratch)
     std::unordered_map<Cell, std::vector<u32>, CellHash> m_grid;
     std::vector<u32> m_large; // instances spanning too many cells
     std::vector<u32> m_seen;  // per copy: the find() that last saw it
