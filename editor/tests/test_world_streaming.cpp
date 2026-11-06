@@ -900,3 +900,98 @@ GIANT_TEST("world streaming: undo and redo of terrain edits in a streamed world"
     GIANT_CHECK(e.state.scene.terrain.size() == 2 && e.state.scene.terrain.find({0, 0})->at(0) == 4.0f &&
                 e.state.scene.terrain.find({1, 0})->at(0) == 2.0f);
 }
+
+GIANT_TEST("world streaming: terrain commands leave ground on disk alone until it is loaded") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_terrain", {{"from", {2560, 0}}, {"to", {2570, 10}}, {"samples", 8}, {"height", 3}}));
+    GIANT_CHECK(e.run("create_entities", {{"entities", {{{"position", {2600, 0, 20}}}}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0); // cell (40, 0) stays on disk
+    GIANT_CHECK(e.w.streaming.ground_on_disk({40, 0}) && e.state.scene.terrain.empty());
+    // Made, set or removed there, the undo would not know the file's tile: refused.
+    ai::CommandResult r = e.commands.execute("create_terrain", {{"from", {2560, 0}}, {"to", {2570, 10}}, {"height", 9}});
+    GIANT_CHECK(!r.ok && r.error.find("not loaded") != std::string::npos);
+    r = e.commands.execute("set_terrain_heights", {{"cell", {40, 0}}, {"heights", ai::Json(std::vector<float>(64, 9.0f))}});
+    GIANT_CHECK(!r.ok && e.state.scene.terrain.empty());
+    // Next to it is fine; loaded, it is too, and undo then save keeps the file's tile.
+    GIANT_CHECK(e.run("create_terrain", {{"from", {2500, 0}}, {"to", {2510, 10}}, {"height", 1}}));
+    e.settle(2565.0, 5.0);
+    GIANT_CHECK(!e.w.streaming.ground_on_disk({40, 0}) && e.state.scene.terrain.find({40, 0})->at(0) == 3.0f);
+    GIANT_CHECK(e.run("set_terrain_heights", {{"cell", {40, 0}}, {"heights", ai::Json(std::vector<float>(64, 9.0f))}}));
+    GIANT_CHECK(e.commands.undo());
+    const ai::CommandResult saved = e.commands.execute("save_world");
+    GIANT_CHECK(saved.ok && saved.value["cells_removed"] == 0);
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(2565.0, 5.0);
+    GIANT_CHECK(e.state.scene.terrain.find({40, 0}) != nullptr && e.state.scene.terrain.find({40, 0})->at(0) == 3.0f);
+    GIANT_CHECK(e.state.scene.size() == 1);
+}
+
+GIANT_TEST("world streaming: undo puts back tiles of a spacing the world has since left") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_terrain", {{"from", {0, 0}}, {"to", {10, 10}}, {"samples", 16}, {"height", 1}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("remove_terrain", {{"all", true}}) && e.run("save_world"));
+    GIANT_CHECK(!e.w.streaming.ground_samples());
+    GIANT_CHECK(e.run("create_terrain", {{"from", {200, 0}}, {"to", {210, 10}}, {"samples", 32}}));
+    GIANT_CHECK(e.run("save_world") && e.w.streaming.ground_samples() == 32u);
+    GIANT_CHECK(e.commands.undo()); // the 32-sample tile goes; spacing 16
+    e.settle(10.0, 10.0);             // streaming gives the empty terrain the world's 32
+    GIANT_CHECK(e.state.scene.terrain.samples() == 32);
+    GIANT_CHECK(e.commands.undo()); // the 16-sample tile comes back, its spacing with it (no assert)
+    GIANT_CHECK(e.state.scene.terrain.size() == 1 && e.state.scene.terrain.samples() == 16);
+    GIANT_CHECK(e.state.scene.terrain.find({0, 0})->at(0) == 1.0f);
+    // Saved: the cell left with no ground loses its file, the 16-sample tile gets one.
+    const ai::CommandResult saved = e.commands.execute("save_world");
+    GIANT_CHECK(saved.ok && saved.value["cells_removed"] == 1);
+    GIANT_CHECK(e.w.streaming.ground_samples() == 16u);
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.state.scene.terrain.size() == 1 && e.state.scene.terrain.samples() == 16);
+}
+
+GIANT_TEST("world streaming: tiles join within the per-frame budget and leave a few cells a frame") {
+    World w;
+    if (w.renderer == nullptr) return;
+    w.scene.terrain.set_samples(16); // a tile weighs 4 entities
+    for (i32 x = 0; x < 3; ++x) {
+        for (i32 z = 0; z < 4; ++z) w.scene.terrain.set({x, z}, ramp(16, static_cast<float>(x + z)));
+    }
+    GIANT_CHECK(w.streaming.create(w.folder, w.scene, w.generation, {}).error.empty());
+    w.reopen();
+    w.streaming.settings.entities_per_frame = 8;
+    w.step({90.0, 10.0, 120.0}); // starts reading all twelve
+    w.streaming.finish_reads();
+    w.step({90.0, 10.0, 120.0});
+    GIANT_CHECK(w.scene.terrain.size() == 2); // 8 entities' worth
+    w.settle(90.0, 120.0);
+    GIANT_CHECK(w.scene.terrain.size() == 12 && w.streaming.unsaved_cells(w.scene) == 0);
+    // Far off: three cells a frame go.
+    w.streaming.settings.unloads_per_frame = 3;
+    w.step({5000.0, 10.0, 0.0});
+    GIANT_CHECK(w.scene.terrain.size() == 9);
+    w.step({5000.0, 10.0, 0.0});
+    GIANT_CHECK(w.scene.terrain.size() == 6);
+    w.settle(5000.0, 0.0);
+    GIANT_CHECK(w.scene.terrain.empty() && w.streaming.stats().tiles_unloaded == 12);
+}
+
+GIANT_TEST("world streaming: a tile undone to what its file holds is clean again, with no copy kept") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_terrain", {{"from", {0, 0}}, {"to", {10, 10}}, {"samples", 8}, {"height", 2}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.w.streaming.unsaved_cells(e.state.scene) == 0);
+    GIANT_CHECK(e.run("set_terrain_heights", {{"cell", {0, 0}}, {"heights", ai::Json(std::vector<float>(64, 5.0f))}}));
+    GIANT_CHECK(e.w.streaming.unsaved_cells(e.state.scene) == 1);
+    GIANT_CHECK(e.commands.undo() && e.w.streaming.unsaved_cells(e.state.scene) == 0);
+    GIANT_CHECK(e.commands.redo() && e.w.streaming.unsaved_cells(e.state.scene) == 1);
+    // Set back to the same heights by hand is a change (versions, not a compare): saved, clean.
+    GIANT_CHECK(e.run("set_terrain_heights", {{"cell", {0, 0}}, {"heights", ai::Json(std::vector<float>(64, 2.0f))}}));
+    GIANT_CHECK(e.w.streaming.unsaved_cells(e.state.scene) == 1);
+    const ai::CommandResult saved = e.commands.execute("save_world");
+    GIANT_CHECK(saved.ok && saved.value["cells_written"] == 1 && e.w.streaming.unsaved_cells(e.state.scene) == 0);
+}

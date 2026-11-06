@@ -362,8 +362,18 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
 - **In streamed worlds (N3 part 4b).** A cell's file holds its tile too
   (`"heights"`, rows of text as in a scene), so a tile loads and unloads
   with its cell: a cell is let go only when its entities and its tile are
-  exactly what its file holds (the file's tile is kept, shared, while the
-  cell is loaded). `world.json` holds the terrain's `samples` and
+  exactly what its file holds. That check is one compare: every tile has a
+  version (`Terrain::version`, new on each set or modify, unique across
+  terrains, kept by copies and put back by undo), and a loaded cell keeps
+  the version its file's tile had in the scene, so no second copy of the
+  heights is kept and nothing compares them. A tile weighs samples^2 / 64
+  entities against `entities_per_frame` (64 at 64 samples), and at most
+  `unloads_per_frame` cells (128) go in one frame, the rest in the frames
+  after; their meshes are freed `drops_per_frame` (64) a frame. A tile new
+  to `TerrainMeshes` waits `settle_frames` (6) with its neighbours before
+  it is built, so tiles streaming in one after another build once, not
+  again as each neighbour arrives (changes to tiles already there do not
+  wait). `world.json` holds the terrain's `samples` and
   `material` and which cells' files hold a tile (`terrain.cells`; for the
   far ground later). A tile made or put back by an undo in a cell still on
   disk makes the cell load at once, and the scene's tile wins over the
@@ -750,7 +760,13 @@ over the target frame time). Where it stands:
   (spread over the terrain's workers; about half a second for 4096
   hilly tiles of 64 samples, the most a command may make), and a mesh
   that arrives for a cell with nothing else in it re-sorts the cell order
-  (every frame of a first build).
+  (every frame of a first build). Terrain streaming (N3 part 4b): each
+  tile set or freed costs about 6 to 20 us (64 to 128 samples) within
+  the budgets above, and the two mesh workers build about 115 tiles of 64
+  samples a second: on opening a world at the default radius the ground
+  is all drawn after some 16 s, and flying faster than about 50 m/s at
+  that radius outruns them (late ground, not stutter) until far tiles get
+  a coarse copy.
 
 | GPU work | Budget |
 | --- | --- |

@@ -41,6 +41,9 @@ struct StreamingSettings {
     // Frames between looks for cells to unload (each look walks the loaded
     // cells, and an unload is a pass over the scene's entities).
     u32 unload_every = 30;
+    // Cells let go in one frame (each frees its entities and tile, and its
+    // tile's mesh goes the next frames): the rest go in the frames after.
+    u32 unloads_per_frame = 128;
 };
 
 struct StreamingStats {
@@ -94,6 +97,11 @@ public:
     // The samples a side of the terrain tiles in the world's files, while
     // any file holds one (the scene's terrain must use the same).
     std::optional<u32> ground_samples() const;
+    // Whether the cell's file holds a terrain tile the scene does not hold
+    // in full yet (the cell is not loaded): terrain commands leave such a
+    // cell alone, since what they would record as "before" is not what
+    // the file holds.
+    bool ground_on_disk(world::CellCoord cell) const;
 
     // Once a frame, after `frame` was built from `scene`: adds what is ready,
     // starts reads near the camera, and now and then unloads far cells that
@@ -130,9 +138,11 @@ private:
         // Loaded: what its file holds, sorted by id (what the scene must
         // match, entity for entity, for the cell to be clean).
         std::vector<world::Entity> saved;
-        // Loaded: its file's terrain tile (none: the file holds none).
-        // Shared, so undo memos do not copy it.
-        std::shared_ptr<const world::Terrain::Heights> saved_heights;
+        // Loaded: whether its file holds a terrain tile, and the version
+        // (world::Terrain::version) of the scene's tile when it was the
+        // file's (0: the scene's tile is not, or was not known to be).
+        bool saved_tile = false;
+        u64 saved_version = 0;
         u64 written = 0; // when this editor last wrote its file (0: not since open)
     };
     struct Read {
@@ -152,14 +162,15 @@ public:
 private:
     // Whether `now` (any order) is exactly `saved`.
     static bool matches(std::vector<const world::Entity*>& now, const std::vector<world::Entity>& saved);
-    // Whether the scene's tile (null: none) is exactly the file's.
-    static bool same_heights(const world::Terrain::Heights* now, const world::Terrain::Heights* saved);
+    // Whether the scene's tile in a loaded cell is the file's (or neither has one).
+    static bool same_tile(const world::Terrain& terrain, world::CellCoord coord, const Cell& cell);
 
     bool follows(const world::Scene& scene); // false: replaced, streaming stops
     void start_read(world::CellCoord cell);
     void take_reads();
     void insert(world::Scene& scene);
-    void unload(world::Scene& scene, const DVec3& camera, const SceneFrame& frame);
+    // True when it stopped at unloads_per_frame with more far cells to look at.
+    bool unload(world::Scene& scene, const DVec3& camera, const SceneFrame& frame);
     void start_reads(const DVec3& camera);
     void set_state(world::CellCoord coord, Cell& cell, State state); // keeps the counts
     void forget(world::CellCoord coord);                            // no file any more

@@ -145,6 +145,31 @@ GIANT_TEST("terrain: changes are tracked, a copy is a new terrain") {
     GIANT_CHECK(sc.terrain.size() == 1 && sc.terrain.identity() != s.terrain.identity());
 }
 
+GIANT_TEST("terrain: each tile has a version, new on every change, kept by copies and restores") {
+    Terrain t;
+    t.set_samples(8);
+    GIANT_CHECK(t.version({0, 0}) == 0);
+    t.set({0, 0}, Terrain::Heights(64, 1.0f));
+    const u64 v1 = t.version({0, 0});
+    GIANT_CHECK(v1 != 0);
+    t.modify({0, 0})->at(3) = 2.0f;
+    const u64 v2 = t.version({0, 0});
+    GIANT_CHECK(v2 != v1);
+    Terrain copy = t;
+    GIANT_CHECK(copy.version({0, 0}) == v2 && copy.identity() != t.identity());
+    t.set({0, 0}, Terrain::Heights(64, 1.0f)); // same heights as v1, but set again: new
+    GIANT_CHECK(t.version({0, 0}) != v1 && t.version({0, 0}) != v2);
+    t.restore({0, 0}, Terrain::Heights(64, 1.0f), v1);
+    GIANT_CHECK(t.version({0, 0}) == v1);
+    Terrain other;
+    other.set_samples(8);
+    other.set({5, 5}, Terrain::Heights(64, 0.0f));
+    GIANT_CHECK(other.version({5, 5}) != v1 && other.version({5, 5}) != v2); // unique across terrains
+    GIANT_CHECK(t.remove({0, 0}) && t.version({0, 0}) == 0);
+    Terrain moved = std::move(copy);
+    GIANT_CHECK(moved.version({0, 0}) == v2 && copy.version({0, 0}) == 0);
+}
+
 GIANT_TEST("terrain: saved with the scene as rows of text, exactly") {
     Scene s;
     s.terrain.set_samples(8);

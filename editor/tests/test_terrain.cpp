@@ -208,6 +208,45 @@ GIANT_TEST("terrain meshes: built off the main thread, a change rebuilds its nei
     GIANT_CHECK(m.stats().building == 0 && m.stats().built == built + 8);
 }
 
+GIANT_TEST("terrain meshes: new tiles settle before building; changed ones do not wait; drops are budgeted") {
+    Terrain t;
+    t.set_samples(8);
+    TerrainMeshes m(nullptr);
+    m.settle_frames = 3;
+    m.update(t); // a terrain new to it: everything is looked at at once
+    // A row of tiles arriving one a frame (a world streaming in): each builds once.
+    for (i32 x = 0; x < 6; ++x) {
+        t.set({x, 0}, Terrain::Heights(64, 1.0f));
+        m.update(t);
+    }
+    GIANT_CHECK(m.stats().in_flight <= 2); // the first ones, whose neighbours are all in
+    for (int frame = 0; frame < 20000 && m.stats().building > 0; ++frame) {
+        m.update(t);
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    GIANT_CHECK(m.stats().tiles == 6 && m.stats().built == 6);
+    // A change to a tile already there starts at once.
+    t.modify({2, 0})->at(10) = 3.0f;
+    m.update(t);
+    GIANT_CHECK(m.stats().in_flight == 1);
+    m.finish(t);
+    GIANT_CHECK(m.stats().built == 7);
+    // Many tiles going at once are dropped a few a frame (drops_per_frame), builds or not.
+    for (i32 z = 1; z < 11; ++z) {
+        for (i32 x = 0; x < 10; ++x) t.set({x, z}, Terrain::Heights(64, 1.0f));
+    }
+    m.finish(t);
+    GIANT_CHECK(m.stats().tiles == 106);
+    m.drops_per_frame = 16;
+    for (i32 z = 1; z < 11; ++z) {
+        for (i32 x = 0; x < 10; ++x) t.remove({x, z});
+    }
+    m.update(t);
+    GIANT_CHECK(m.stats().tiles == 106 - 16);
+    m.finish(t);
+    GIANT_CHECK(m.stats().tiles == 6);
+}
+
 GIANT_TEST("terrain meshes: a tile changed while it builds is drawn with its newest heights") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::null;
