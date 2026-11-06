@@ -334,7 +334,9 @@ the view, so every mesh casts at the detail its shadow texels need.
   the finest level whose window holds the point with room for the filter
   and whose texels are no finer than the pixel; it asks for that page with
   a bit in a request buffer (and, while the page is not drawn yet, for
-  each coarser page it falls back to, until one is drawn). The bits are
+  each coarser page it falls back to, until one is drawn, and for the
+  level above the one it uses, so a fallback is there when a new sun makes
+  pages draw again, coarse levels first). The bits are
   read back two frames later, with the windows they were made in: a slot
   whose page has changed since is dropped. Each page asked for gets room
   in the pool (1024 pages, a 64 MiB atlas of u32 depths,
@@ -352,11 +354,14 @@ the view, so every mesh casts at the detail its shadow texels need.
 - A new sun direction (taken up in steps of a quarter of a degree, so
   time of day redraws now and then, not every frame) makes every page
   read as missing until drawn again: light space turns about the world's
-  origin, so old pages are of no use. Coarse levels are drawn first, so
-  for a frame or few the shadows are coarser, not gone.
+  origin, so old pages are of no use. Coarse levels are drawn first (and
+  pages not drawn are drawn whether or not they were asked for lately),
+  so for a few frames the shadows are coarser, not gone. Shadows follow the
+  stepped sun, so they may lag the lighting's sun by up to a quarter of a
+  degree (a 100 m tower's shadow by about 0.4 m).
 - Drawing is budgeted: at most `shadow_pages_per_frame` pages a frame (64
-  by default, at least one when any wait), only pages asked for in the
-  last 30 frames: pages never drawn first (coarse levels first), then the
+  by default, at least one when any wait), drawn pages only if asked for
+  in the last 30 frames: pages never drawn first (coarse levels first), then the
   pages dirty longest, so every level gets its turn however often things
   change (a giant walking through dirties pages on every level each
   frame). A dirty page keeps its old content until redrawn, so a moving

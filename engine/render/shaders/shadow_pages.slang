@@ -5,7 +5,8 @@
 // the camera. A point uses the finest level whose window holds it with
 // room for the filter, no finer than its pixel needs; it asks for that
 // page, and where the page is not drawn yet falls back to coarser levels
-// (asking for each) until one is. Nothing drawn: lit.
+// (asking for each) until one is, and asks for the level above that one
+// too, to fall back on later. Nothing drawn: lit.
 //
 // Depths: 0.5 - (light z - anchor) / depth range, larger nearer the sun,
 // from a fixed anchor (cached pages stay right as the camera moves); 0 is
@@ -132,6 +133,15 @@ float sun_visibility(Shadows s, float3 world, float3 n, float3 l, float pixel_si
         const uint entry = table.Load(s.table_offset + (level * 256 + slot) * 4);
         if (entry == k_shadow_no_page || (entry & k_shadow_drawn_bit) == 0u) {
             continue; // not drawn yet: a coarser level stands in
+        }
+        // The next level up is asked for too, so a fallback stays there for
+        // when this page is drawn again (a new sun: coarse levels first).
+        if (level + 1 < count) {
+            const ShadowLevel up = load_shadow_level(levels, s.levels_offset, level + 1);
+            const float2 up_uv = (float2(dot(world, s.x), dot(world, s.y)) - up.origin) / up.texel_size;
+            if (all(up_uv >= float2(0.0, 0.0)) && all(up_uv < float2(k_shadow_window, k_shadow_window))) {
+                shadow_request(s, level + 1, shadow_slot(up, int2(floor(up_uv))));
+            }
         }
         // Past the far end of the depth range nothing is stored (0): kept
         // at 0 there, so empty texels never shadow it.

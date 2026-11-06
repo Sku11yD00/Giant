@@ -306,12 +306,13 @@ void ShadowPages::invalidate_all() {
 }
 
 std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget) {
-    // Only pages shading asked for lately: the rest stay dirty, and are
-    // drawn once asked for again (their content is not looked at).
+    // Drawn pages only if shading asked for them lately (the rest stay
+    // dirty, drawn once asked for again); pages not drawn (new, or after a
+    // new sun or depth anchor) always, so coarse fallbacks come back.
     m_waiting.clear();
     for (u32 i = 0; i < m_pages.size(); ++i) {
         const Page& p = m_pages[i];
-        if (p.physical != k_no_page && p.dirty && p.used + k_recent_frames >= m_frame) {
+        if (p.physical != k_no_page && p.dirty && (!p.drawn || p.used + k_recent_frames >= m_frame)) {
             m_waiting.push_back(i);
         }
     }

@@ -1032,7 +1032,7 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
         plane(1, -b.x, lx1);
         plane(2, b.y, -ly0);
         plane(3, -b.y, ly1);
-        plane(4, b.z, range * (0.5 + depth_offset));
+        plane(4, b.z, range * (0.5 - depth_offset)); // depth 1 is z_rel = range * (offset - 0.5)
         // LOD by the texel: the error over a distance that never wins.
         constexpr float k_far = 1.0e7f;
         k.near_plane = k_far;

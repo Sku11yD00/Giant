@@ -414,7 +414,7 @@ GIANT_TEST("shadow pages: pages not asked for lately wait; old requests for move
     s.plan(16);
     for (int f = 0; f < 40; ++f) s.begin_frame(camera, k_up_sun); // not asked for since
     s.invalidate_all();
-    GIANT_CHECK(s.plan(16).empty() && s.stats().waiting == 0);
+    GIANT_CHECK(s.plan(16).empty() && s.stats().waiting == 0); // drawn and stale: waits to be asked
     s.request(r.bits); // asked for again: drawn
     GIANT_CHECK(s.plan(16).size() == 1);
     // Requests made while the window was elsewhere: the slot holds another page now.
@@ -466,6 +466,16 @@ GIANT_TEST("shadow pages: depths come from an anchor; tiny sun moves are not tak
     }
     const ShadowPages::Basis& basis = s.basis();
     const DVec3 far = camera - basis.z * 10001.0;
+    Requests coarse(s);
+    coarse.ask(s, 11, camera);
+    s.request(coarse.bits);
+    s.plan(16);
+    GIANT_CHECK(has(s.entry_at(11, camera), ShadowPages::k_drawn_bit));
     s.begin_frame(far, normalize_or_zero(Vec3{0.0f, std::cos(0.785398f + b), std::sin(0.785398f + b)}));
     GIANT_CHECK_NEAR(s.depth_offset(far), 0.0, 1e-12);
+    // The level 11 page still holds `far` (10 km on, along the light only): drawn again.
+    GIANT_CHECK(s.entry_at(11, far) != ShadowPages::k_no_page);
+    GIANT_CHECK(!has(s.entry_at(11, far), ShadowPages::k_drawn_bit));
+    const std::vector<ShadowPages::Draw> again = s.plan(16);
+    GIANT_CHECK(!again.empty() && has(s.entry_at(11, far), ShadowPages::k_drawn_bit));
 }
