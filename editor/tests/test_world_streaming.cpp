@@ -244,6 +244,11 @@ struct Editor {
         register_scene_commands(commands, state);
     }
     bool run(const char* name, const ai::Json& args = ai::Json::object()) { return commands.execute(name, args).ok; }
+    bool script(const char* name, const ai::Json& args = ai::Json::object()) { // outside the history
+        ai::ExecuteOptions options;
+        options.record_history = false;
+        return commands.execute(name, args, options).ok;
+    }
     void settle(double x, double z) {
         for (int i = 0; i < 50; ++i) {
             w.streaming.finish_reads();
@@ -483,4 +488,66 @@ GIANT_TEST("world streaming: a world made from a new scene keeps streaming acros
     GIANT_CHECK(count_named(e.state.scene, "a") == 1);
     GIANT_CHECK(e.run("create_entity", {{"name", "b"}, {"position", {20, 0, 10}}}));
     GIANT_CHECK(e.run("save_world"));
+}
+
+GIANT_TEST("world streaming: a scene a script put there is never kept as an undo step's") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_entity", {{"name", "one"}, {"position", {10, 0, 10}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.run("create_entity", {{"name", "two"}, {"position", {20, 0, 10}}})); // unsaved
+    GIANT_CHECK(e.script("new_scene"));
+    GIANT_CHECK(e.script("create_entity", {{"name", "s"}}));
+    GIANT_CHECK(e.commands.undo() && e.commands.undo()); // two (not this scene's: nothing), open_world
+    GIANT_CHECK(e.commands.redo() && e.commands.redo()); // open_world, two
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.w.streaming.active(e.state.scene_generation));
+    GIANT_CHECK(count_named(e.state.scene, "one") == 1 && count_named(e.state.scene, "two") == 1 &&
+                count_named(e.state.scene, "s") == 0);
+}
+
+GIANT_TEST("world streaming: a save the stored bookkeeping does not know of is merged, not lost") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_entity", {{"name", "one"}, {"position", {10, 0, 10}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.run("create_entity", {{"name", "two"}, {"position", {20, 0, 10}}}));
+    GIANT_CHECK(e.run("create_entity", {{"name", "far"}, {"position", {150, 0, 10}}})); // a new cell
+    GIANT_CHECK(e.run("save_world"));
+    // A script replaces the world's scene, so the open_world step keeps its
+    // world side from before the save.
+    GIANT_CHECK(e.script("new_scene"));
+    GIANT_CHECK(e.commands.undo() && e.commands.undo()); // far, two: not this scene's
+    GIANT_CHECK(e.commands.undo() && e.commands.redo()); // open_world
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.w.streaming.active(e.state.scene_generation) && e.w.streaming.stats().cells == 2);
+    // That side held no cells yet, so every cell is read as it is now,
+    // the new one included: nothing saved is lost or copied.
+    GIANT_CHECK(count_named(e.state.scene, "one") == 1 && count_named(e.state.scene, "far") == 1 &&
+                count_named(e.state.scene, "two") == 1);
+    GIANT_CHECK(e.commands.redo() && e.commands.redo());
+    GIANT_CHECK(count_named(e.state.scene, "two") == 1 && count_named(e.state.scene, "far") == 1);
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(count_named(e.state.scene, "one") == 1 && count_named(e.state.scene, "two") == 1 &&
+                count_named(e.state.scene, "far") == 1 && e.w.streaming.stats().ids_changed == 0);
+}
+
+GIANT_TEST("world streaming: redo of new_scene after a script's new_scene gives back the user's scene") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_entity", {{"name", "p"}}));
+    GIANT_CHECK(e.run("new_scene"));
+    GIANT_CHECK(e.run("create_entity", {{"name", "n"}}));
+    GIANT_CHECK(e.script("new_scene"));
+    GIANT_CHECK(e.script("create_entity", {{"name", "s"}}));
+    GIANT_CHECK(e.commands.undo() && e.commands.undo()); // n (not this scene's), new_scene
+    GIANT_CHECK(count_named(e.state.scene, "p") == 1);
+    GIANT_CHECK(e.commands.redo() && e.commands.redo()); // new_scene, n
+    GIANT_CHECK(count_named(e.state.scene, "n") == 1 && count_named(e.state.scene, "s") == 0);
 }

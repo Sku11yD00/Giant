@@ -121,6 +121,7 @@ private:
         // Loaded: what its file holds, sorted by id (what the scene must
         // match, entity for entity, for the cell to be clean).
         std::vector<world::Entity> saved;
+        u64 written = 0; // when this editor last wrote its file (0: not since open)
     };
     struct Read {
         world::CellCoord cell;
@@ -133,7 +134,6 @@ public:
     struct Memo {
         u64 session = 0;
         std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> cells;
-        std::unordered_map<world::EntityId, world::CellCoord> origin;
     };
 
 private:
@@ -161,6 +161,7 @@ private:
     // same entity (maybe moved, or put back by a redo, since); met in
     // another cell's file, it is a clash.
     std::unordered_map<world::EntityId, world::CellCoord> m_origin;
+    u64 m_writes = 0; // cell files written since open (Cell::written)
     u64 m_epoch = 0; // reads from an older epoch (a closed world) are dropped
     world::WorldIndex m_index;
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> m_cells; // cells with a file

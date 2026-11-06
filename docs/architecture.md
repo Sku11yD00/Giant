@@ -256,12 +256,15 @@ cell's work, not the world's:
   world's (`new_scene`, `load_scene` or undoing `open_world` pause it;
   undoing them resumes it). What streaming knows of the world's scene is
   kept with each copy of it an undo step holds (`WorldStreaming::memo`),
-  taken when the undo or redo leaves that scene, so the copy put back is
-  the scene as it was left (cells loaded since included) with the
-  bookkeeping that matches it and the files, and the ids saved since are
-  never handed out again. An entity's cell of origin is kept when its cell
+  taken when the undo or redo leaves that scene (unless a script replaced
+  it since: a script's scene is never kept), so the copy put back is the
+  scene as it was left, cells loaded since included. Which cells have a
+  file stays as it is now; a cell whose file was written since the memo
+  was taken is read again and merged, and the ids saved since are never
+  handed out again. An entity's cell of origin is kept when its cell
   unloads, so an entity a redo puts back is never copied from the file it
-  was saved to since; a
+  was saved to since (this costs about 40 bytes per entity met since the
+  world opened: a later part bounds it); a
   scene replaced any other way stops streaming. Opening another world is
   refused while the open one has unsaved edits, or its scene is replaced
   (it may be in the undo history), unless they are given up. The main thread does no work

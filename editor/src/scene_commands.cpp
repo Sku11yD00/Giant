@@ -350,7 +350,10 @@ void swap_scene(EditorState& state, world::Scene next, CommandContext& context,
         std::shared_ptr<const WorldStreaming::Memo> memo;
     };
     WorldStreaming* world = state.world;
+    // Only the scene it put there is kept: one a script put there since
+    // (outside the history) is not this side's.
     const auto leave = [&state, world](Side& side) {
+        if (state.scene_generation != side.generation) return;
         side.memo = world != nullptr && world->active(state.scene_generation) ? world->memo() : nullptr;
         side.scene = state.scene;
         side.generation = state.scene_generation;
@@ -364,6 +367,7 @@ void swap_scene(EditorState& state, world::Scene next, CommandContext& context,
         }
     };
     auto before = std::make_shared<Side>();
+    before->generation = state.scene_generation;
     leave(*before);
     auto after = std::make_shared<Side>(Side{std::move(next), state.next_scene_generation++, std::move(after_memo)});
     enter(*after);

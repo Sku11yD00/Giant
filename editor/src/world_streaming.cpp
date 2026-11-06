@@ -202,7 +202,6 @@ std::shared_ptr<const WorldStreaming::Memo> WorldStreaming::memo() const {
     auto out = std::make_shared<Memo>();
     out->session = m_session;
     out->cells = m_cells;
-    out->origin = m_origin;
     return out;
 }
 
@@ -213,13 +212,22 @@ void WorldStreaming::restore(const Memo& memo, world::Scene& scene) {
     ++m_epoch; // reads in flight were for the bookkeeping replaced here
     m_ready.clear();
     m_touched.clear();
-    m_cells = memo.cells;
-    m_origin = memo.origin;
+    // Which cells have a file, and what they hold, is as it is now (origins
+    // too); the memo says only which of them that scene holds in full.
+    // A cell whose file was written since (by a save the memo does not
+    // know of) is read again and merged, as a cell on disk the scene has
+    // entities in is, so nothing in the scene or the file is lost.
     m_count = {};
     m_loaded.clear();
     for (auto& [coord, cell] : m_cells) {
-        if (cell.state == State::reading || cell.state == State::ready) {
+        const auto then = memo.cells.find(coord);
+        if (then != memo.cells.end() && then->second.state == State::loaded &&
+            then->second.written == cell.written) {
+            cell.state = State::loaded;
+            cell.saved = then->second.saved;
+        } else {
             cell.state = State::on_disk;
+            cell.saved = {};
         }
         ++m_count[static_cast<usize>(cell.state)];
         if (cell.state == State::loaded) m_loaded.insert(coord);
@@ -521,6 +529,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     // Write what differs from its file. Every loaded cell is looked at,
     // whether or not it still has entities.
     std::vector<std::pair<CellCoord, std::vector<Entity>>> kept; // as now on disk
+    std::vector<CellCoord> written;
     const auto put = [&](CellCoord coord, std::vector<Entity>& list) -> bool {
         const auto it = m_cells.find(coord);
         const bool had_file = it != m_cells.end();
@@ -543,6 +552,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
                 return false;
             }
             ++saved.cells_written;
+            written.push_back(coord);
         }
         kept.push_back({coord, std::move(list)});
         return true;
@@ -576,6 +586,9 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
             set_state(coord, it->second, State::on_disk);
             std::erase_if(m_ready, [&](const Read& r) { return r.cell == coord; });
         }
+    }
+    for (const CellCoord coord : written) {
+        m_cells[coord].written = ++m_writes;
     }
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;
