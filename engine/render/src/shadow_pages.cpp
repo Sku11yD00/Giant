@@ -434,10 +434,10 @@ void ShadowPages::track(std::span<const Instance> instances, std::span<const Cel
     const auto casting = [&](size_t i) { return casts.empty() || (i < casts.size() && casts[i] != 0); };
     const bool remesh = meshes_version != m_meshes_version;
     m_meshes_version = meshes_version;
-    // Laid out as last time: only instances in the cells that changed can
-    // have moved (whether each casts is per frame: looked at for all).
+    // Only instances in the cells listed can have moved, and those past the
+    // casters are new (whether each casts is per frame: looked at for all).
     const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells) &&
-                      instances.size() == m_casters.size() && !remesh;
+                      instances.size() >= m_casters.size() && !remesh;
     if (only) {
         m_look.assign(instances.size(), 0);
         for (const CellRange& c : m_changed_cells) {

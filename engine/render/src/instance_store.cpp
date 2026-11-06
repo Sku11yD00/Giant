@@ -47,13 +47,17 @@ InstanceStore::~InstanceStore() {
     }
 }
 
-bool InstanceStore::ensure(u32 instances, u32 cells) {
+bool InstanceStore::ensure(u32 instances, u32 cells, bool& fresh) {
+    fresh = false;
     if (m_buffer.valid() && instances <= m_instance_capacity && cells <= m_cell_capacity) {
         return true;
     }
+    fresh = true;
     // Room to grow by half, so a world filling up does not reupload every frame.
     const u32 icap = std::max<u32>(1024, instances + instances / 2);
-    const u32 ccap = std::max<u32>(64, cells + cells / 2 + 1);
+    // Anchors are 16 bytes: plenty of room, so cells and holes coming and
+    // going rarely make a new buffer (which uploads everything again).
+    const u32 ccap = std::max<u32>(4096, cells * 2 + 1);
     const u64 anchors = u64{icap} * sizeof(gpu::Instance);
     const u64 skip = anchors + u64{ccap} * 16;
     const u64 size = skip + u64{(icap + 31) / 32} * 4;
@@ -76,7 +80,6 @@ bool InstanceStore::ensure(u32 instances, u32 cells) {
     m_cell_capacity = ccap;
     m_anchor_offset = static_cast<u32>(anchors);
     m_skip_offset = static_cast<u32>(skip);
-    m_seen.clear(); // a new buffer holds nothing yet
     return true;
 }
 
@@ -122,34 +125,79 @@ bool InstanceStore::update(rhi::CommandList& cmd, std::span<const Instance> inst
     }
     const std::span<const CellRange> layout = usable ? cells : std::span<const CellRange>(&whole, 1);
     const u32 count = static_cast<u32>(layout.size());
-    if (!ensure(n, count)) {
-        log_error("render", "out of GPU memory for " + std::to_string(n) + " instances");
-        m_seen.clear();
-        return false;
-    }
-    m_previous = m_seen; // changed cells are found by slot: empty cells share `first`
-    const bool same = usable && changed_cells(layout, n, m_seen, m_changed); // updates m_seen
-    const bool all = !same || material_count != m_material_count;
+    m_previous = m_seen;
+    m_previous_slots = m_slots;
+    const bool listed = usable && changed_cells(layout, n, m_seen, m_changed); // updates m_seen
+    bool all = !listed || !m_buffer.valid() || material_count != m_material_count;
     m_material_count = material_count;
+    // Each cell's anchor slot: a cell exactly as before keeps its own (and
+    // its instances, which point at it); the others take free ones.
+    m_slots.assign(count, ~0u);
+    m_kept.assign(count, 0);
+    if (!all) {
+        m_claimed.assign(m_previous.size(), 0);
+        usize j = 0;
+        for (u32 i = 0; i < count; ++i) {
+            const CellRange& c = layout[i];
+            while (j < m_previous.size() && m_previous[j].first < c.first) ++j;
+            for (usize k = j; k < m_previous.size() && m_previous[k].first == c.first; ++k) {
+                if (m_claimed[k] == 0 && m_previous[k].count == c.count && m_previous[k].version == c.version) {
+                    m_claimed[k] = 1;
+                    m_slots[i] = m_previous_slots[k];
+                    m_kept[i] = 1;
+                    break;
+                }
+            }
+        }
+        for (usize k = 0; k < m_previous.size(); ++k) {
+            if (m_claimed[k] == 0) m_free_slots.push_back(m_previous_slots[k]);
+        }
+        for (u32 i = 0; i < count; ++i) {
+            if (m_slots[i] != ~0u) continue;
+            if (m_free_slots.empty()) {
+                m_slots[i] = m_slot_count++;
+            } else {
+                m_slots[i] = m_free_slots.back();
+                m_free_slots.pop_back();
+            }
+        }
+        bool fresh = false;
+        if (!ensure(n, m_slot_count, fresh)) {
+            log_error("render", "out of GPU memory for " + std::to_string(n) + " instances");
+            m_seen.clear();
+            return false;
+        }
+        all = fresh; // a new buffer holds nothing yet
+    }
+    if (all) {
+        for (u32 i = 0; i < count; ++i) m_slots[i] = i;
+        m_slot_count = count;
+        m_free_slots.clear();
+        bool fresh = false;
+        if (!ensure(n, count, fresh)) {
+            log_error("render", "out of GPU memory for " + std::to_string(n) + " instances");
+            m_seen.clear();
+            return false;
+        }
+    }
     cmd.barrier(m_buffer, rhi::ResourceState::copy_dest);
     // Anchors: the first instance of each cell, when (re)uploaded.
-    m_anchors.resize(count);
+    m_anchors.resize(m_slot_count);
     const auto anchor_of = [&](const CellRange& c) {
         return !usable ? camera : c.count > 0 ? instances[c.first].position : DVec3{};
     };
     bool ok = true;
     if (all) {
-        for (u32 slot = 0; slot < count && ok; ++slot) {
-            m_anchors[slot] = anchor_of(layout[slot]);
-            ok = upload(cmd, instances, layout[slot], slot, material_count);
+        for (u32 i = 0; i < count && ok; ++i) {
+            m_anchors[m_slots[i]] = anchor_of(layout[i]);
+            ok = upload(cmd, instances, layout[i], m_slots[i], material_count);
         }
     } else {
-        // Same layout as before: the slots whose version moved.
-        for (u32 slot = 0; slot < count && ok; ++slot) {
-            if (m_previous[slot].version != layout[slot].version) {
-                m_anchors[slot] = anchor_of(layout[slot]);
-                ok = upload(cmd, instances, layout[slot], slot, material_count);
-            }
+        // The cells not as before (m_changed): uploaded, at their slot.
+        for (u32 i = 0; i < count && ok; ++i) {
+            if (m_kept[i] != 0) continue;
+            m_anchors[m_slots[i]] = anchor_of(layout[i]);
+            ok = upload(cmd, instances, layout[i], m_slots[i], material_count);
         }
     }
     if (!ok) {
@@ -160,8 +208,8 @@ bool InstanceStore::update(rhi::CommandList& cmd, std::span<const Instance> inst
         m_seen.clear();
     }
     // Every anchor, camera-relative (positions get their precision here).
-    m_anchor_data.assign(usize{count} * 4, 0.0f);
-    for (u32 slot = 0; slot < count; ++slot) {
+    m_anchor_data.assign(usize{m_slot_count} * 4, 0.0f);
+    for (u32 slot = 0; slot < m_slot_count; ++slot) {
         const Vec3 a = to_camera_relative(m_anchors[slot], camera);
         m_anchor_data[slot * 4 + 0] = a.x;
         m_anchor_data[slot * 4 + 1] = a.y;
@@ -180,7 +228,7 @@ bool InstanceStore::update(rhi::CommandList& cmd, std::span<const Instance> inst
         m_seen.clear();
         return false;
     }
-    cmd.copy_buffer(m_buffer, m_anchor_offset, anchors.buffer, anchors.offset, u64{count} * 16);
+    cmd.copy_buffer(m_buffer, m_anchor_offset, anchors.buffer, anchors.offset, u64{m_slot_count} * 16);
     const u64 bit_bytes = std::min<u64>(u64{m_bits.size()} * 4, u64{(m_instance_capacity + 31) / 32} * 4);
     cmd.copy_buffer(m_buffer, m_skip_offset, bits.buffer, bits.offset, bit_bytes);
     cmd.barrier(m_buffer, rhi::ResourceState::shader_read);

@@ -208,21 +208,35 @@ cell's work, not the world's:
   cells whose entities changed, or that place a kit that changed, and
   copies them into place. A new scene, an imported mesh, or a material
   losing its last user (the table is made again, so it holds only what is
-  drawn) rebuild everything. Instances go cell after cell (by z, then x;
-  within a cell by id), and `FrameInput::cells` says where each cell starts
-  and its version (new on every rebuild).
+  drawn) rebuild everything. Each cell keeps its place in the instance
+  list from frame to frame (N3 part 3b): a cell that goes leaves a hole
+  (instances with no mesh, which nothing draws, sent as a cell of its
+  own, in pieces of at most 1024, each keeping its place and version
+  until a cell takes it, so the renderer looks at it once; joined with
+  the holes beside it to find
+  room), a new cell takes the first hole it fits or the end (an empty
+  cell sits at 0), and a cell that outgrows its place moves, with a
+  quarter more room. So cells coming and going (streaming) leave the
+  others where they are. When holes no cell has pass half the list (and
+  4096), or push the list past `render::k_max_instances` when laying it
+  out again would not, and on a new scene, the list is laid out afresh, end to end, by
+  z then x (within a cell by id). `FrameInput::cells` covers the list
+  end to end: each cell's (and hole's) place, size and version (new on
+  every rebuild).
 - **The renderer looks only at cells that changed.** The voxel world and
-  sun shadows each keep a copy of the instances to find what moved; with
-  cells laid out as when they last looked, they compare only the cells
-  whose version differs (`src/cells.h`). Otherwise (no cells, a cell
-  added, removed or resized) they compare everything, as before.
-  `RenderStats::cells` and `cells_changed` count them.
+  sun shadows each keep a copy of the instances to find what moved; they
+  compare only the cells not exactly as when they last looked (place,
+  size and version, `src/cells.h`), so cells joining, leaving or moving
+  cost only themselves. Otherwise (no cells, or fewer instances than
+  before: the list laid out afresh) they compare everything, as before.
+  `RenderStats::cells` and `cells_changed` count them (holes included).
 - **Instances stay on the GPU (N3 part 2, `src/instance_store.h`).** One
   buffer keeps every instance, in frame order, from frame to frame; a frame
-  uploads only the cells that changed (all of them for a new layout or
-  material table size, or without cells). Translations are kept from each
-  cell's anchor (its first instance when uploaded), which keeps them
-  precise in float however big the world; each frame writes the anchors
+  uploads only the cells not as before (all of them for a fresh layout,
+  a new material table size, or without cells). Translations are kept from each
+  cell's anchor (its first instance when uploaded; each cell keeps its
+  anchor slot while it stays as it is, and new ones take free slots),
+  which keeps them precise in float however big the world; each frame writes the anchors
   relative to the camera (16 bytes a cell) and a bit per instance saying
   whether it is drawn (its mesh ready, not left to the far field), and
   `load_instance` adds the instance's anchor back. Culling walks every
@@ -283,11 +297,10 @@ cell's work, not the world's:
   frame to decide which are drawn (mesh ready, far field) and which cast
   shadows: cheap per instance, but whole-cell tests come next. Streamed
   out cells are gone from the voxel far field too (cells need saved voxel
-  stand-ins for that, later). A cell joining or leaving the scene shifts
-  the instances after it (cells go by z, then x), so the voxel world and
-  the GPU store see a new layout and redo everything: while cells stream
-  the voxel world keeps rebuilding. The next part keeps the layout stable
-  as cells come and go. Meshes are imported when a world opens (the
+  stand-ins for that, later). While many cells stream in at once (more
+  than an eighth of the scene in a frame, or over 4096 changes waiting)
+  the voxel world still rebuilds every window; holes cost a few bytes per
+  instance a frame in the loops that walk every instance. Meshes are imported when a world opens (the
   index lists them), not as cells stream. Unloading a cell is one
   `Scene::remove_many`, a pass over the scene's entities, and the unload
   look walks the loaded cells. Undoing an edit to a cell that was saved
