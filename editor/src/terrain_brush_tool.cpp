@@ -113,7 +113,7 @@ void TerrainBrushTool::update(const std::vector<platform::InputEvent>& events, b
                                            at.z - state.camera.position.z);
         const double angle = to_view(state.camera).vertical_fov_degrees * 3.14159265358979 / 180.0 /
                              std::max(1.0, static_cast<double>(window_height));
-        return distance * angle / std::max(cosine, 0.01);
+        return distance * angle / std::max(cosine, 1e-5); // grazing ground km out from walking height is ~1e-3
     };
     // Held still, it dabs k_dabs_per_second (whatever the frame rate); moved,
     // a dab every quarter radius along the way.
