@@ -7,6 +7,7 @@
 #include "giant/core/math.h"
 #include "giant/render/renderer.h"
 #include "giant/world/scene.h"
+#include "giant/world/weather.h"
 
 #include <optional>
 
@@ -29,6 +30,12 @@ public:
     // Seconds left of a blend under way (0: none).
     double remaining() const;
     DVec3 cloud_offset() const { return m_offset; }
+    // The ground under the shown weather (wet, snow-covered): from the
+    // scene's start values, then wetted, dried, covered and thawed as time
+    // passes. Jumps to the scene's start values when those change.
+    world::Ground ground() const { return m_ground; }
+    // Seconds the weather has been shown (what falls moves with it).
+    double time() const { return m_time; }
 
 private:
     std::optional<world::Weather> m_target; // the scene's, as last seen
@@ -40,6 +47,9 @@ private:
     double m_elapsed = 0.0;
     DVec3 m_offset{};
     double m_tile = 0.0; // the cloud tile m_offset was last used with (0: none)
+    world::Ground m_ground;
+    std::optional<world::Ground> m_ground_start; // the scene's start values, as last seen
+    double m_time = 0.0;
 };
 
 // Metres the cloud pattern repeats over.
@@ -48,8 +58,9 @@ double cloud_tile_metres(const world::Weather& weather);
 // The renderer's lighting for a scene: its own, or under its weather (the
 // sun through the air, the sky's light greyed by clouds).
 render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather);
-// The renderer's sky for a weather (off without one).
+// The renderer's sky for a weather (off without one), with what falls
+// and the ground (`ground`, `time`: WeatherState's).
 render::Sky weather_sky(const world::Lighting& lighting, const std::optional<world::Weather>& weather,
-                        const DVec3& cloud_offset);
+                        const DVec3& cloud_offset, const world::Ground& ground = {}, double time = 0.0);
 
 } // namespace giant::editor

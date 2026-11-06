@@ -302,6 +302,9 @@ Json render_settings_json(const EditorState& state) {
             {"clouds", state.render_settings.clouds},
             {"cloud_steps", state.render_settings.cloud_steps},
             {"cloud_shadows", state.render_settings.cloud_shadows},
+            {"precipitation", state.render_settings.precipitation},
+            {"wet_surfaces", state.render_settings.wet_surfaces},
+            {"weather_cover", state.render_settings.weather_cover},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
               {"clusters", s.clusters},
@@ -326,7 +329,13 @@ Json render_settings_json(const EditorState& state) {
               {"gi",
                {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting}}},
               {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}},
-              {"sky", {{"on", s.sky}, {"clouds", s.clouds}, {"cloud_shadows", s.cloud_shadows}}}}}};
+              {"sky",
+               {{"on", s.sky},
+                {"clouds", s.clouds},
+                {"cloud_shadows", s.cloud_shadows},
+                {"falling", s.falling},
+                {"wet_surfaces", s.wet_surfaces},
+                {"weather_cover", s.weather_cover}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -1327,6 +1336,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "clouds: with a weather set (set_weather), its clouds marched at half resolution, cloud_steps "
          "steps a ray (default 48; fewer is faster and grainier), and cloud_shadows their shadows on the "
          "ground (both default on; last_frame.sky says what drew). "
+         "precipitation: the weather's rain or snow drawn falling; wet_surfaces: the ground wet (darker, "
+         "glossier, puddles) and snow on what faces up; weather_cover: a map from above made from the voxel "
+         "world keeps both off what is sheltered (all default on). "
          "debug_view lighting shows the lit view in plain white (the light alone). "
          "View state: not undoable.",
          Json{{"type", "object"},
@@ -1355,7 +1367,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"clouds", {{"type", "boolean"}}},
                 {"cloud_steps", {{"type", "integer"}, {"minimum", 8}, {"maximum", 256},
                                  {"description", "Steps a cloud ray. Default 48."}}},
-                {"cloud_shadows", {{"type", "boolean"}}}}}},
+                {"cloud_shadows", {{"type", "boolean"}}},
+                {"precipitation", {{"type", "boolean"}}},
+                {"wet_surfaces", {{"type", "boolean"}}},
+                {"weather_cover", {{"type", "boolean"}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -1382,6 +1397,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.clouds = args.value("clouds", r.clouds);
              r.cloud_steps = args.value("cloud_steps", r.cloud_steps);
              r.cloud_shadows = args.value("cloud_shadows", r.cloud_shadows);
+             r.precipitation = args.value("precipitation", r.precipitation);
+             r.wet_surfaces = args.value("wet_surfaces", r.wet_surfaces);
+             r.weather_cover = args.value("weather_cover", r.weather_cover);
              return CommandResult::success(render_settings_json(state));
          }});
 

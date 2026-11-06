@@ -23,6 +23,7 @@ Texture2D<uint2> read_texture_uint2(uint descriptor) { return ResourceDescriptor
 RWTexture2D<uint> write_texture_uint(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 RWTexture2D<uint2> write_texture_uint2(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 Texture2D<float> read_texture_float(uint descriptor) { return ResourceDescriptorHeap[descriptor]; } // depth, r32_float
+RWTexture2D<float> write_texture_float(uint descriptor) { return ResourceDescriptorHeap[descriptor]; } // r32_float
 
 // Fixed samplers, matching rhi::Sampler.
 static const uint k_sampler_linear_clamp = 0;

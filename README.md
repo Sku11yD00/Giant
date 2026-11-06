@@ -190,8 +190,16 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   in haze), a layer of volumetric clouds that drift on the wind and shade
   the ground, and height fog. Presets (clear, fair, cloudy, overcast, storm,
   fog) or any mix of cover, density, base, thickness, size, wind, fog and
-  haze; `over_seconds` blends from one weather to the next. Rain and snow
-  come next. The Scene panel's Weather section has the settings.
+  haze; `over_seconds` blends from one weather to the next. The Scene
+  panel's Weather section has the settings.
+- Part 8: rain, snow and wet ground. The weather's `precipitation` falls as
+  rain or snow by its `temperature` (sleet between), drawn falling and
+  blown by the wind. Rain wets the ground (darker where it is porous,
+  glossier, puddles in the hollows of flat ground) and it dries again;
+  snow covers what faces up and melts when it is warm. Under a roof, a
+  bridge or a tree it stays dry: a map from above made from the voxel world
+  says what is sheltered. Presets `rain`, `snow` and `blizzard`;
+  `wetness` and `snow_cover` set how the ground starts.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

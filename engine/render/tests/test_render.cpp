@@ -1348,3 +1348,102 @@ GIANT_TEST("render: d3d12 draws a blue sky, grey under overcast clouds that shad
     GIANT_CHECK(device->validation_errors() == 0);
     device->destroy(target);
 }
+
+GIANT_TEST("render: d3d12 snow and wet ground under the weather, kept off where a roof shelters it") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) {
+        return; // not on Windows
+    }
+    RendererDesc rd; // a small voxel world (the cover map is made from it)
+    rd.voxel_clipmap.levels = 6;
+    rd.voxel_clipmap.bricks_per_axis = 16;
+    rd.voxel_bricks = 4096;
+    auto renderer = Renderer::create(*device, rd);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    constexpr u32 k_w = 64, k_h = 48;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // Grey ground; a roof 3 m up over the camera (or moved far off); the
+    // camera 1.5 m up looking straight down at the ground.
+    const DVec3 origin{12'000.0, 40.0, -9'000.0};
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = origin;
+    instances[0].scale = {16.0f, 1.0f, 16.0f};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[1].scale = {8.0f, 0.3f, 8.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.35f, 0.35f, 0.35f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.view.position = origin + DVec3{0.0, 1.5, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
+    frame.view.vertical_fov_degrees = 50.0f;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.3f, 0.9f, 0.2f});
+    frame.lighting.sun_light = {2.5f, 2.5f, 2.5f};
+    frame.lighting.sky_light = {0.4f, 0.4f, 0.45f};
+    frame.lighting.ground_light = {0.2f, 0.2f, 0.2f};
+    frame.sky.on = true;
+    frame.settings.antialiasing = false;
+    frame.settings.gi = false;
+    frame.settings.shadows = false; // the roof's shade is not what this checks
+    frame.settings.voxel_ms_per_frame = 1000.0f;
+    const auto draw = [&](bool roof) {
+        instances[1].position = origin + (roof ? DVec3{0.0, 3.0, 0.0} : DVec3{60.0, 3.0, 0.0});
+        for (int i = 0; i < 16; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto dry = draw(false);
+    frame.sky.wetness = 1.0f;
+    const auto wet = draw(false);
+    frame.sky.wetness = 0.0f;
+    frame.sky.snow_cover = 1.0f;
+    frame.sky.snow = 0.5f;
+    const auto snowy = draw(false);
+    const RenderStats st = renderer->last_stats();
+    GIANT_CHECK(st.sky && st.wet_surfaces && st.weather_cover && st.falling && st.voxel_pending == 0);
+    const auto sheltered = draw(true);
+    const usize size = usize{k_w} * k_h * 4;
+    GIANT_CHECK(dry.size() == size && wet.size() == size && snowy.size() == size && sheltered.size() == size);
+    if (dry.size() == size && wet.size() == size && snowy.size() == size && sheltered.size() == size) {
+        // The ground a little off centre (no flake on it: falling snow is
+        // sparse; three pixels averaged).
+        const auto px = [](const std::vector<u8>& p) {
+            int sum = 0;
+            for (const u32 x : {k_w / 2 - 6, k_w / 2, k_w / 2 + 6}) {
+                const usize i = (static_cast<usize>(k_h / 2 + 5) * k_w + x) * 4;
+                sum += p[i] + p[i + 1] + p[i + 2];
+            }
+            return sum / 9;
+        };
+        std::printf("weather ground: dry %d, wet %d, snow %d, snow under a roof %d\n", px(dry), px(wet), px(snowy),
+                    px(sheltered));
+        GIANT_CHECK(px(wet) < px(dry) - 8);       // wet ground is darker
+        GIANT_CHECK(px(snowy) > px(dry) + 40);    // snow is bright
+        GIANT_CHECK(px(sheltered) < px(snowy) - 40); // none under the roof
+    }
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+    device->destroy(target);
+}

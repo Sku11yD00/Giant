@@ -102,3 +102,56 @@ GIANT_TEST("weather: saved with scenes and worlds, strictly") {
     unknown.replace(unknown.find("\"haze\""), 6, "\"hazy\"");
     GIANT_CHECK(load_scene(unknown, loaded).has_value());
 }
+
+GIANT_TEST("weather: rain or snow by temperature; the ground wets, dries, is covered and thaws") {
+    Weather w;
+    w.precipitation = 0.8f;
+    w.temperature = 10.0f;
+    GIANT_CHECK(falling(w).rain == 0.8f && falling(w).snow == 0.0f);
+    w.temperature = -5.0f;
+    GIANT_CHECK(falling(w).rain == 0.0f && falling(w).snow == 0.8f);
+    w.temperature = 0.5f; // sleet: some of each, adding up
+    const Falling sleet = falling(w);
+    GIANT_CHECK(sleet.rain > 0.0f && sleet.snow > 0.0f && std::fabs(sleet.rain + sleet.snow - 0.8f) < 1e-6f);
+    GIANT_CHECK(weather_preset("snow")->snow_cover == 1.0f && falling(*weather_preset("snow")).snow > 0.0f);
+    GIANT_CHECK(falling(*weather_preset("rain")).rain > 0.0f && falling(*weather_preset("clear")).rain == 0.0f);
+
+    // Rain: wet within minutes; then dry: drier within the hour.
+    Weather rain = *weather_preset("rain");
+    rain.precipitation = 1.0f;
+    Ground g;
+    g = weather_ground(g, rain, 600.0);
+    GIANT_CHECK(g.wetness > 0.8f && g.snow_cover == 0.0f);
+    const Weather sun = *weather_preset("clear");
+    const Ground dried = weather_ground(g, sun, 3600.0);
+    GIANT_CHECK(dried.wetness < 0.4f * g.wetness);
+    // Any step size gives about the same.
+    Ground steps = g;
+    for (int i = 0; i < 3600; ++i) steps = weather_ground(steps, sun, 1.0);
+    GIANT_CHECK(std::fabs(steps.wetness - dried.wetness) < 1e-3f);
+    // Snow covers in tens of minutes and stays while cold.
+    Weather snow = *weather_preset("snow");
+    Ground s = weather_ground({}, snow, 3600.0); // half-strength snow: 40 minutes
+    GIANT_CHECK(s.snow_cover > 0.7f && s.wetness == 0.0f);
+    snow.precipitation = 0.0f;
+    GIANT_CHECK(weather_ground(s, snow, 7200.0).snow_cover == s.snow_cover);
+    // Warm: it melts, wetting the ground.
+    Weather thaw = sun;
+    thaw.temperature = 10.0f;
+    const Ground melted = weather_ground(s, thaw, 1200.0);
+    GIANT_CHECK(melted.snow_cover < 0.2f * s.snow_cover && melted.wetness > 0.5f);
+    // Nothing for no time or a bad step.
+    GIANT_CHECK(weather_ground(s, thaw, 0.0) == s && weather_ground(s, thaw, std::nan("")) == s);
+    // The new fields are checked and saved.
+    Weather bad;
+    bad.temperature = 80.0f;
+    GIANT_CHECK(check_weather(bad).has_value());
+    bad = Weather{};
+    bad.snow_cover = 1.5f;
+    GIANT_CHECK(check_weather(bad).has_value());
+    Scene scene;
+    scene.weather = *weather_preset("blizzard");
+    scene.weather->wetness = 0.25f;
+    Scene loaded;
+    GIANT_CHECK(!load_scene(save_scene(scene), loaded).has_value() && loaded.weather == scene.weather);
+}

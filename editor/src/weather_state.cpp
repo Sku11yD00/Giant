@@ -48,6 +48,8 @@ void WeatherState::update(const std::optional<world::Weather>& target, double se
         m_from.reset();
         m_duration = 0.0;
         m_tile = 0.0;
+        m_ground = {};
+        m_ground_start.reset();
         return;
     }
     if (m_from && m_duration > 0.0) {
@@ -73,6 +75,14 @@ void WeatherState::update(const std::optional<world::Weather>& target, double se
     m_tile = tile;
     const Vec3 wind = world::wind_velocity(*m_shown);
     m_offset = m_offset + DVec3{wind.x, 0.0, wind.z} * seconds; // doubles: exact for centuries of wind
+    m_time += seconds;
+    const world::Ground start{m_target->wetness, m_target->snow_cover};
+    if (!(m_ground_start == start)) {
+        m_ground_start = start;
+        m_ground = start;
+    } else {
+        m_ground = world::weather_ground(m_ground, *m_shown, seconds);
+    }
 }
 
 render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather) {
@@ -87,7 +97,7 @@ render::Lighting weather_lighting(const world::Lighting& lighting, const std::op
 }
 
 render::Sky weather_sky(const world::Lighting& lighting, const std::optional<world::Weather>& weather,
-                        const DVec3& cloud_offset) {
+                        const DVec3& cloud_offset, const world::Ground& ground, double time) {
     render::Sky sky;
     if (!weather) {
         return sky;
@@ -106,6 +116,13 @@ render::Sky weather_sky(const world::Lighting& lighting, const std::optional<wor
     // fog_density 1: things 150 m away mostly hidden (a few optical depths).
     sky.fog_density = w.fog_density * 0.02f;
     sky.fog_falloff = std::log(2.0f) / std::max(w.fog_height, 1.0f);
+    const world::Falling f = world::falling(w);
+    sky.rain = f.rain;
+    sky.snow = f.snow;
+    sky.wind = world::wind_velocity(w);
+    sky.wetness = ground.wetness;
+    sky.snow_cover = ground.snow_cover;
+    sky.time = time;
     return sky;
 }
 

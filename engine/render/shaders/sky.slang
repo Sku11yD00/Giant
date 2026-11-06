@@ -6,6 +6,7 @@
 //
 // Layouts: SkyPush and SkyParams in src/gpu_layout.h.
 #include "sky_common.slang"
+#include "voxel_march.slang"
 
 struct SkyPush {
     uint params; // read descriptor of the SkyParams
@@ -236,4 +237,71 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
     // field's voxels, not in depth) takes only the clouds in front of it.
     const float end_km = leave > enter ? min(leave * 0.001, k_no_cloud_km) : k_no_cloud_km;
     write_texture(push.target_b)[id.xy] = float4(first, scene_km, end_km, 0.0);
+}
+
+// --- Cover from above (rain and snow) ------------------------------------------
+
+// What is on top over each metre round the camera: the camera-relative
+// height where a ray straight down first meets the voxel world (-1e9:
+// nothing), less a voxel (the surface is somewhere in the voxel it
+// meets: so what is on top is never judged under itself). Rain and snow
+// reach only what is at that height; what is
+// under a roof, a bridge or a tree stays dry. Marched in two parts: from
+// well above down to the top of the finest window holding the column (on
+// the coarse levels, for what towers over it), then down that window, so
+// the ground near the camera is found to its finest voxels.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void cs_weather_cover(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= k_cover_size || id.y >= k_cover_size) {
+        return;
+    }
+    const Sky s = load_sky(push.params, push.params_offset);
+    VoxelWorld w;
+    w.pool = s.voxel_pool;
+    w.table = s.voxel_table;
+    w.levels = s.voxel_levels;
+    w.levels_offset = s.voxel_levels_offset;
+    w.level_count = min(s.voxel_level_count, k_max_levels);
+    w.bricks_per_axis = s.voxel_bricks_per_axis;
+    w.stand_ins = 0u; // everything shelters
+    const float texel = s.cover_size / float(k_cover_size);
+    const float2 xz = s.cover_origin + (float2(id.xy) + 0.5) * texel;
+    const float top = 800.0; // camera-relative: above anything a rain shelter needs
+    // The finest window holding this column.
+    ByteAddressBuffer levels = read_buffer(w.levels);
+    const float n = float(w.bricks_per_axis);
+    uint fine = w.level_count;
+    float fine_top = top;
+    float fine_voxel = 1.0;   // metres: a voxel on the finest level holding the column
+    float coarse_voxel = 2.0; // and on the next level up
+    for (uint i = 0; i < w.level_count; ++i) {
+        const Level c = load_level(levels, w.levels_offset, i);
+        const float size = n * c.brick_size;
+        if (xz.x >= c.origin.x && xz.x < c.origin.x + size && xz.y >= c.origin.z && xz.y < c.origin.z + size) {
+            fine = i;
+            fine_top = min(c.origin.y + size - 0.001, top);
+            fine_voxel = c.brick_size / 8.0; // 8 voxels a brick side
+            coarse_voxel = fine_voxel * 2.0;
+            break;
+        }
+    }
+    float height = -1.0e9;
+    const float3 down = float3(0.0, -1.0, 0.0);
+    const float4 no_skip = float4(0.0, 0.0, 0.0, -1.0);
+    const float4 no_ground = float4(0.0, 0.0, 0.0, 0.0);
+    float hit_t;
+    uint packed;
+    uint hit_at;
+    if (fine < w.level_count) {
+        if (fine_top < top &&
+            march_voxels_from(w, float3(xz.x, top, xz.y), down, 0u, 0.0, top - fine_top, no_skip, no_ground, hit_t,
+                              packed, hit_at)) {
+            height = top - hit_t - coarse_voxel;
+        } else if (march_voxels_from(w, float3(xz.x, fine_top, xz.y), down, fine, 0.0, 4000.0, no_skip, no_ground,
+                                     hit_t, packed, hit_at)) {
+            height = fine_top - hit_t - fine_voxel;
+        }
+    }
+    write_texture_float(push.target)[id.xy] = height;
 }

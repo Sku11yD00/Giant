@@ -370,7 +370,7 @@ Output lit_output(float3 color) {
 
 // The clouds in front of what a pixel shows `distance` metres away, then
 // the fog over it all (as far as 30 km: the sky's own air does the rest).
-float3 under_sky(Sky s, float3 color, float3 dir, float distance, uint2 pixel, out float through) {
+float3 clouds_and_fog(Sky s, float3 color, float3 dir, float distance, uint2 pixel, out float through) {
     // The scene fogged over its whole distance, then the clouds over it,
     // themselves fogged only over the distance to the first of them.
     // `through`: how much of the scene's own light comes through.
@@ -385,7 +385,14 @@ float3 under_sky(Sky s, float3 color, float3 dir, float distance, uint2 pixel, o
     }
     through = t * cloud.a;
     const float near_t = fog_transmittance(s, dir, min(first, 30000.0));
-    return color * cloud.a + cloud.rgb * near_t + fog * ((1.0 - near_t) * (1.0 - cloud.a));
+    color = color * cloud.a + cloud.rgb * near_t + fog * ((1.0 - near_t) * (1.0 - cloud.a));
+    return color;
+}
+
+// The sky's part over what a pixel shows: clouds, fog, then what falls.
+float3 under_sky(Sky s, float3 color, float3 dir, float distance, uint2 pixel, out float through) {
+    color = clouds_and_fog(s, color, dir, distance, pixel, through);
+    return apply_falling(s, color, dir, distance);
 }
 
 Output shade_pixel(float4 position) {
@@ -447,10 +454,16 @@ Output shade_pixel(float4 position) {
                     const uint lw = write_buffer(extras.gi_light).Load(hit_at * 4);
                     bounce = light_lit(lw) ? float4(unpack_light(lw), 1.0) : bounce;
                 }
-                const float3 albedo = lighting_view ? k_lighting_albedo : unpack_color(packed);
+                float3 albedo = lighting_view ? k_lighting_albedo : unpack_color(packed);
+                float far_rough = k_far_roughness;
+                float far_metal = 0.0;
+                float3 far_n = vn;
+                if (sky_on && !lighting_view) {
+                    weather_surface(sky, world, albedo, far_rough, far_metal, far_n);
+                }
                 float3 spec_weight;
                 float3 spec_light;
-                float3 color = shade(f, world, vn, albedo, k_far_roughness, 0.0, float3(0.0, 0.0, 0.0), 0.0,
+                float3 color = shade(f, world, far_n, albedo, far_rough, far_metal, float3(0.0, 0.0, 0.0), 0.0,
                                      sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, spec_weight, spec_light);
                 if (sky_on) {
                     float through;
@@ -467,7 +480,7 @@ Output shade_pixel(float4 position) {
         }
         return plain_output(push.background.rgb);
     }
-    const float3 n = s.n;
+    float3 n = s.n;
     const float3 world = s.world;
 
     if (!lit_path) {
@@ -492,6 +505,9 @@ Output shade_pixel(float4 position) {
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
                  push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
+    if (sky_on && !lighting_view) {
+        weather_surface(sky, world, base, rough, metal, n); // wet, puddles, snow
+    }
     if (lighting_view) {
         base = k_lighting_albedo;
         metal = 0.0;

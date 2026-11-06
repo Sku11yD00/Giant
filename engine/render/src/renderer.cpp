@@ -74,6 +74,9 @@ constexpr u32 k_sky_view_height = 108;
 constexpr u32 k_cloud_map_size = 512;
 constexpr u32 k_cloud_shadow_size = 256;
 constexpr double k_cloud_shadow_metres = 32000.0; // the square the cloud shadow map covers
+constexpr u32 k_cover_size = 256;        // the cover map (sky_common.slang has the same)
+constexpr double k_cover_metres = 256.0; // the square it covers: a metre a texel
+constexpr double k_weather_wrap = 4096.0; // ground patterns repeat this far (sky_common.slang)
 
 struct Renderer::FrameData {
     rhi::TransientMemory frame;
@@ -121,10 +124,10 @@ Renderer::~Renderer() {
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
           m_smaa_blend, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
-          m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass}) {
+          m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass}) {
         m_device.destroy(p);
     }
-    for (const rhi::TextureHandle t : {m_sky_view, m_cloud_map, m_cloud_shadow, m_clouds_a, m_clouds_b}) {
+    for (const rhi::TextureHandle t : {m_sky_view, m_cloud_map, m_cloud_shadow, m_clouds_a, m_clouds_b, m_cover}) {
         m_device.destroy(t);
     }
     m_device.destroy(m_voxel_light);
@@ -189,6 +192,7 @@ bool Renderer::init() {
     m_cloud_map_pass = compute(shaders::cloud_map_cs(), "sky: cloud pattern");
     m_cloud_shadow_pass = compute(shaders::cloud_shadow_cs(), "sky: cloud shadows");
     m_clouds_pass = compute(shaders::clouds_cs(), "sky: clouds");
+    m_cover_pass = compute(shaders::weather_cover_cs(), "weather: cover from above");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     ShadowDesc shadow_desc;
     shadow_desc.pool_pages = m_desc.shadow_pages;
@@ -276,7 +280,7 @@ bool Renderer::init() {
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
           m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
-          m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass}) {
+          m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1886,11 +1890,12 @@ bool Renderer::ensure_sky_targets() {
     make(m_sky_view, k_sky_view_width, k_sky_view_height, rhi::Format::rgba16_float, "sky view");
     make(m_cloud_map, k_cloud_map_size, k_cloud_map_size, rhi::Format::rgba8_unorm, "cloud pattern");
     make(m_cloud_shadow, k_cloud_shadow_size, k_cloud_shadow_size, rhi::Format::rgba16_float, "cloud shadows");
+    make(m_cover, k_cover_size, k_cover_size, rhi::Format::r32_float, "weather: cover from above");
     const u32 hw = std::max((m_width + 1) / 2, 1u);
     const u32 hh = std::max((m_height + 1) / 2, 1u);
     make(m_clouds_a, hw, hh, rhi::Format::rgba16_float, "clouds: light");
     make(m_clouds_b, hw, hh, rhi::Format::rgba16_float, "clouds: distances");
-    if (!m_sky_view.valid() || !m_cloud_map.valid() || !m_cloud_shadow.valid() || !m_clouds_a.valid() ||
+    if (!m_sky_view.valid() || !m_cloud_map.valid() || !m_cloud_shadow.valid() || !m_cover.valid() || !m_clouds_a.valid() ||
         !m_clouds_b.valid()) {
         m_sky_failed = true;
         log_error("render", "could not create the sky's textures (out of GPU memory?); the flat sky stays");
@@ -1975,6 +1980,46 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     p.clouds_a = m_device.read_descriptor(m_clouds_a);
     p.clouds_b = m_device.read_descriptor(m_clouds_b);
     p.depth = m_device.read_descriptor(m_depth);
+    // Rain and snow, and the ground under them.
+    const auto unit = [&finite](float v) { return std::clamp(finite(v, 0.0f), 0.0f, 1.0f); };
+    p.rain = unit(sky.rain);
+    p.snow = unit(sky.snow);
+    p.wetness = unit(sky.wetness);
+    p.snow_cover = unit(sky.snow_cover);
+    p.wind[0] = std::clamp(finite(sky.wind.x, 0.0f), -200.0f, 200.0f);
+    p.wind[1] = std::clamp(finite(sky.wind.z, 0.0f), -200.0f, 200.0f);
+    // Wrapped at an hour: what falls repeats long before (a fall is seconds).
+    p.time = static_cast<float>(std::isfinite(sky.time) ? std::fmod(std::max(sky.time, 0.0), 3600.0) : 0.0);
+    const auto wrap_place = [](double v) {
+        const double m = std::fmod(v, k_weather_wrap);
+        return std::isfinite(m) ? static_cast<float>(m < 0.0 ? m + k_weather_wrap : m) : 0.0f;
+    };
+    p.place[0] = wrap_place(cam.x);
+    p.place[1] = wrap_place(cam.z);
+    p.pixel_angle = 2.0f * std::tan(degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f)) * 0.5f) /
+                    static_cast<float>(std::max(m_height, 1u));
+    const bool falling = settings.precipitation && (p.rain > 0.0f || p.snow > 0.0f);
+    const bool surfaces = settings.wet_surfaces && (p.wetness > 0.0f || p.snow_cover > 0.0f);
+    const bool voxels = m_voxels != nullptr && data.voxel_levels.data != nullptr && m_voxels->levels() > 0;
+    const bool cover = settings.weather_cover && (falling || surfaces) && voxels;
+    p.weather_flags = (falling ? 1u : 0u) | (surfaces ? 2u : 0u) | (cover ? 4u : 0u);
+    // The cover map: a square on the camera snapped to its metre texels.
+    const double cover_texel = k_cover_metres / k_cover_size;
+    p.cover_origin[0] = static_cast<float>(std::floor((cam.x - k_cover_metres * 0.5) / cover_texel) * cover_texel - cam.x);
+    p.cover_origin[1] = static_cast<float>(std::floor((cam.z - k_cover_metres * 0.5) / cover_texel) * cover_texel - cam.z);
+    p.cover_size = static_cast<float>(k_cover_metres);
+    p.cover = m_device.read_descriptor(m_cover);
+    p.voxel_pool = data.frame.descriptor; // read, never used, without the voxel world
+    p.voxel_table = data.frame.descriptor;
+    p.voxel_levels = data.frame.descriptor;
+    if (voxels) {
+        p.voxel_pool = m_device.read_descriptor(m_voxels->pool());
+        p.voxel_table = m_device.read_descriptor(m_voxels->table());
+        p.voxel_levels = data.voxel_levels.descriptor;
+        p.voxel_levels_offset = data.voxel_levels.offset;
+        p.voxel_level_count = m_voxels->levels();
+        p.voxel_bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
+    }
     params = cmd.upload(bytes_of_one(p));
     if (params.data == nullptr) {
         return false; // out of memory: the flat sky this frame
@@ -2009,6 +2054,14 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
         cmd.dispatch(groups(k_cloud_shadow_size), groups(k_cloud_shadow_size));
         cmd.barrier(m_cloud_shadow, rhi::ResourceState::shader_read);
     }
+    if (cover) {
+        cmd.barrier(m_cover, rhi::ResourceState::shader_write);
+        cmd.set_pipeline(m_cover_pass);
+        push.target = m_device.write_descriptor(m_cover);
+        cmd.push(push);
+        cmd.dispatch(groups(k_cover_size), groups(k_cover_size));
+        cmd.barrier(m_cover, rhi::ResourceState::shader_read);
+    }
     cmd.end_timing();
     if (clouds) {
         cmd.begin_timing("clouds");
@@ -2027,6 +2080,9 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     m_stats.sky = true;
     m_stats.clouds = clouds;
     m_stats.cloud_shadows = shadows;
+    m_stats.falling = falling;
+    m_stats.wet_surfaces = surfaces;
+    m_stats.weather_cover = cover;
     return true;
 }
 

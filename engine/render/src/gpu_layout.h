@@ -343,8 +343,31 @@ struct SkyParams {
     u32 pad1;
     float sun_top[3];
     float pad2;
+    // What falls and the ground under it (N3 part 8).
+    float rain;       // 0 to 1
+    float snow;       // 0 to 1
+    float wetness;    // the ground, 0 to 1
+    float snow_cover; // 0 to 1
+    float wind[2];    // x, z metres a second
+    float time;       // seconds (wrapped): what falls moves with it
+    u32 cover;        // read descriptor: the cover map (camera-relative height of what is on top, r32)
+    float cover_origin[2]; // camera-relative x, z of the cover map's corner
+    float cover_size;      // metres it covers
+    u32 weather_flags;     // bit 0: falling; bit 1: wet and snowy surfaces; bit 2: the cover map
+    float place[2];        // the camera's x, z wrapped at k_weather_wrap metres (patterns on the ground)
+    float pixel_angle;     // radians a pixel spans (vertically)
+    u32 pad3;
+    // The voxel world, for the cover map (voxel_march.slang's VoxelWorld).
+    u32 voxel_pool;
+    u32 voxel_table;
+    u32 voxel_levels;
+    u32 voxel_levels_offset;
+    u32 voxel_level_count;
+    u32 voxel_bricks_per_axis;
+    u32 pad4;
+    u32 pad5;
 };
-static_assert(sizeof(SkyParams) == 176);
+static_assert(sizeof(SkyParams) == 272);
 
 // sky.slang's SkyPush (all its passes).
 struct SkyPush {
