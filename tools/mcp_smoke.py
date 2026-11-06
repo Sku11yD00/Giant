@@ -17,10 +17,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
-TIMEOUT = 1500  # seconds for the whole run (the N1 gate scene and GI are heavy on the software renderer with GPU validation: 400-840 s on Windows CI runners, whose speed varies 2x)
+TIMEOUT = 2400  # seconds for the whole run (the gates are heavy on the software renderer with GPU validation: 1300-1500 s on Windows CI runners by N3 part 4, whose speed varies 2x; each gate prints its time)
 
 
 def decode_png(data):
@@ -741,16 +742,15 @@ def main() -> int:
         # on the software GPU CI runs on: off for the other gates (the
         # renderer's own d3d12 tests check them), on in gi_gate.
         tool("set_render_settings", {"gi": False, "screen_space_reflections": False})
-        build_scene(tool, call, check)
-        world_gate(tool, call, check)
-        lod_gate(tool, call, check)
-        kit_gate(tool, call, check)
-        voxel_gate(tool, call, check)
-        far_field_gate(tool, call, check)
-        terrain_gate(tool, call, check)
-        shadow_gate(tool, call, check)
-        gi_gate(tool, call, check)
-        n1_gate(tool, call, check)
+        for gate in (build_scene, world_gate, lod_gate, kit_gate, voxel_gate, far_field_gate,
+                     terrain_gate, shadow_gate, gi_gate, n1_gate):
+            # Each gate's time, so a run near the timeout shows which one grew.
+            started = time.monotonic()
+            frames = tool("get_engine_info")["frames_completed"]
+            gate(tool, call, check)
+            frames = tool("get_engine_info")["frames_completed"] - frames
+            print(f"mcp_smoke: {gate.__name__} took {time.monotonic() - started:.1f} s, "
+                  f"{frames} frames", flush=True)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")
         if sample:
