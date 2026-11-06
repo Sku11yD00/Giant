@@ -117,7 +117,7 @@ Milestone **N2, voxel world and GI** (in progress; gate: a 20 km view that stays
   polished floors) reflect what is around them: sharply, from the image
   itself, where what they reflect is on screen, and from the lit voxel
   world everywhere else (blurrier the rougher the surface), with the sky
-  past it. Nothing is smeared over frames. "Reflections" and
+  past it. Every frame works them out afresh, so nothing smears or lags. "Reflections" and
   "Screen-space reflections" in the Engine panel (or `set_render_settings`
   `reflections`, `screen_space_reflections`) turn them off;
   `last_frame.reflections` shows which were traced.

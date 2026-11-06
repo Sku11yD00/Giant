@@ -134,7 +134,7 @@ Renderer::~Renderer() {
     for (const rhi::PipelineHandle p :
          {m_raster_mesh, m_raster_vertex, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
-          m_smaa_blend, m_voxel_view, m_shadow_mesh, m_shadow_vertex, m_shadow_clear_pages,
+          m_smaa_blend, m_voxel_view, m_reflect, m_shadow_mesh, m_shadow_vertex, m_shadow_clear_pages,
           m_shadow_clear_words, m_light_clear, m_light_voxels}) {
         m_device.destroy(p);
     }
@@ -150,8 +150,9 @@ Renderer::~Renderer() {
     m_device.destroy(m_color);
     m_device.destroy(m_edges);
     m_device.destroy(m_weights);
-    m_device.destroy(m_radiance[0]);
-    m_device.destroy(m_radiance[1]);
+    m_device.destroy(m_radiance);
+    m_device.destroy(m_gloss);
+    m_device.destroy(m_fallback);
     for (const CullBuffers* c : {&m_cull, &m_shadow_cull}) {
         for (const rhi::BufferHandle b : {c->counters, c->args, c->queues[0], c->queues[1], c->visible,
                                           c->occluded_clusters, c->occluded_instances, c->readback[0],
@@ -236,12 +237,20 @@ bool Renderer::init() {
     rhi::GraphicsPipelineDesc resolve;
     resolve.vertex = shaders::resolve_vs();
     resolve.pixel = shaders::resolve_ps();
-    resolve.color_formats[0] = rhi::Format::rgba8_srgb;
-    resolve.color_formats[1] = rhi::Format::rgba16_float; // radiance, for next frame's reflections
-    resolve.color_count = 2;
+    resolve.color_formats[0] = rhi::Format::rgba16_float; // radiance
+    resolve.color_formats[1] = rhi::Format::rg32_uint;    // gloss
+    resolve.color_formats[2] = rhi::Format::rgba16_float; // the reflected light used
+    resolve.color_count = 3;
     resolve.cull = rhi::CullMode::none;
     resolve.name = "shade visibility";
     m_resolve = m_device.create_pipeline(resolve);
+    rhi::GraphicsPipelineDesc reflect;
+    reflect.vertex = shaders::reflect_vs();
+    reflect.pixel = shaders::reflect_ps();
+    reflect.color_formats[0] = rhi::Format::rgba8_srgb;
+    reflect.cull = rhi::CullMode::none;
+    reflect.name = "screen reflections and tone mapping";
+    m_reflect = m_device.create_pipeline(reflect);
     rhi::GraphicsPipelineDesc smaa;
     smaa.vertex = shaders::smaa_vs();
     smaa.cull = rhi::CullMode::none;
@@ -266,7 +275,7 @@ bool Renderer::init() {
     for (const rhi::PipelineHandle p :
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
           m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
-          m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels}) {
+          m_reflect, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -423,19 +432,19 @@ Mat4 Renderer::view_projection(const View& view, float aspect) {
 
 bool Renderer::ensure_targets(u32 width, u32 height) {
     if (m_depth.valid() && m_vis.valid() && m_hzb.valid() && m_color.valid() && m_edges.valid() &&
-        m_weights.valid() && m_radiance[0].valid() && m_radiance[1].valid() && m_width == width &&
+        m_weights.valid() && m_radiance.valid() && m_gloss.valid() && m_fallback.valid() && m_width == width &&
         m_height == height) {
         return true;
     }
-    m_history_valid = false;
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
     m_device.destroy(m_hzb);
     m_device.destroy(m_color);
     m_device.destroy(m_edges);
     m_device.destroy(m_weights);
-    m_device.destroy(m_radiance[0]);
-    m_device.destroy(m_radiance[1]);
+    m_device.destroy(m_radiance);
+    m_device.destroy(m_gloss);
+    m_device.destroy(m_fallback);
     rhi::TextureDesc desc;
     desc.width = width;
     desc.height = height;
@@ -456,12 +465,15 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_edges = m_device.create_texture(desc);
     desc.name = "SMAA blend weights";
     m_weights = m_device.create_texture(desc);
-    // Shading's radiance, this frame's and last frame's (reflections).
+    // Shading's output before the screen reflections pass finishes it.
     desc.format = rhi::Format::rgba16_float;
-    desc.name = "radiance A";
-    m_radiance[0] = m_device.create_texture(desc);
-    desc.name = "radiance B";
-    m_radiance[1] = m_device.create_texture(desc);
+    desc.name = "radiance";
+    m_radiance = m_device.create_texture(desc);
+    desc.name = "reflected light";
+    m_fallback = m_device.create_texture(desc);
+    desc.format = rhi::Format::rg32_uint;
+    desc.name = "gloss";
+    m_gloss = m_device.create_texture(desc);
     // The HZB: mip 0 the largest power of two not above the viewport.
     m_hzb_width = std::bit_floor(width);
     m_hzb_height = std::bit_floor(height);
@@ -479,7 +491,7 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_width = width;
     m_height = height;
     if (!m_depth.valid() || !m_vis.valid() || !m_hzb.valid() || !m_color.valid() || !m_edges.valid() ||
-        !m_weights.valid() || !m_radiance[0].valid() || !m_radiance[1].valid()) {
+        !m_weights.valid() || !m_radiance.valid() || !m_gloss.valid() || !m_fallback.valid()) {
         // Half-made targets are not reused: the next frame tries again.
         m_width = 0;
         m_height = 0;
@@ -1120,10 +1132,6 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (!ensure_targets(width, height)) {
         return;
     }
-    // Last frame's radiance serves reflections only if that frame was shaded
-    // to the end (set again once this one is).
-    const bool had_history = m_history_valid;
-    m_history_valid = false;
     const RenderSettings& settings = frame.settings;
     bool gpu = settings.gpu_culling;
 
@@ -1467,24 +1475,19 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (gi) {
         cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // after lighting's writes
     }
-    // Reflections (lit views): voxel cones need the lit voxel world; the
-    // screen's need last frame's radiance, of the same view and size.
+    // Reflections (lit views): voxel cones need the lit voxel world.
     const bool reflections = settings.reflections && lit_view;
     const bool voxel_reflections = reflections && gi;
-    const bool screen_reflections = reflections && settings.screen_space_reflections && had_history &&
-                                    m_history_view == settings.debug_view;
-    const rhi::TextureHandle radiance = m_radiance[m_radiance_index];
-    const rhi::TextureHandle last_radiance = m_radiance[m_radiance_index ^ 1u];
-    if (screen_reflections) {
-        cmd.barrier(m_depth, rhi::ResourceState::shader_read);
-        cmd.barrier(last_radiance, rhi::ResourceState::shader_read);
-    }
+    const bool screen_reflections = reflections && settings.screen_space_reflections;
     cmd.begin_timing("shading");
+    // Shading writes radiance before exposure; the screen reflections pass
+    // then reflects it and tone maps it into `shaded`.
     rhi::RenderPassDesc pass;
     const Vec3& bg = light.background;
-    pass.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
-    pass.colors[1] = {radiance, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
-    pass.color_count = 2;
+    pass.colors[0] = {m_radiance, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 0.0f}};
+    pass.colors[1] = {m_gloss, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+    pass.colors[2] = {m_fallback, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+    pass.color_count = 3;
     cmd.begin_render_pass(pass);
     cmd.set_pipeline(m_resolve);
     gpu::ResolvePush push{};
@@ -1542,17 +1545,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         extras.gi_on = 1;
         extras.gi_light = m_device.write_descriptor(m_voxel_light);
     }
-    extras.depth = push.vis; // a valid descriptor all the same (unread without screen reflections)
-    extras.history = push.vis;
     extras.reflect_on = (voxel_reflections ? 1u : 0u) | (screen_reflections ? 2u : 0u);
-    if (screen_reflections) {
-        extras.depth = m_device.read_descriptor(m_depth);
-        extras.history = m_device.read_descriptor(last_radiance);
-        extras.prev_p00 = m_history_p00;
-        extras.prev_p11 = m_history_p11;
-        std::memcpy(extras.prev_rows, m_history_rows, sizeof(extras.prev_rows));
-        set4(extras.prev_delta, to_camera_relative(frame.view.position, m_history_camera), 0.0f);
-    }
     const bool shadows = m_shadows_on && data.shadow_table.data != nullptr && data.shadow_levels.data != nullptr;
     if (shadows) {
         extras.shadow_atlas = m_device.read_descriptor(m_shadow_atlas);
@@ -1586,17 +1579,33 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.draw(3);
     ++m_stats.draws;
     cmd.end_render_pass();
+    // Screen reflections from this frame's radiance, then exposure and
+    // tone mapping.
+    cmd.barrier(m_radiance, rhi::ResourceState::shader_read);
+    cmd.barrier(m_gloss, rhi::ResourceState::shader_read);
+    cmd.barrier(m_fallback, rhi::ResourceState::shader_read);
+    if (screen_reflections) {
+        cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+    }
+    rhi::RenderPassDesc finish;
+    finish.colors[0] = {shaded, rhi::LoadOp::discard, {}};
+    cmd.begin_render_pass(finish);
+    cmd.set_pipeline(m_reflect);
+    gpu::ReflectPush reflect{};
+    reflect.frame = data.frame.descriptor;
+    reflect.frame_offset = data.frame.offset;
+    reflect.radiance = m_device.read_descriptor(m_radiance);
+    reflect.gloss = m_device.read_descriptor(m_gloss);
+    reflect.fallback = m_device.read_descriptor(m_fallback);
+    reflect.depth = screen_reflections ? m_device.read_descriptor(m_depth) : reflect.radiance;
+    reflect.on = screen_reflections ? 1u : 0u;
+    cmd.push(reflect);
+    cmd.draw(3);
+    ++m_stats.post_draws;
+    cmd.end_render_pass();
     cmd.end_timing();
     m_stats.reflections = voxel_reflections;
     m_stats.screen_reflections = screen_reflections;
-    // This frame's radiance is next frame's history.
-    m_history_valid = lit_view;
-    m_history_view = settings.debug_view;
-    m_history_camera = frame.view.position;
-    std::memcpy(m_history_rows, view_rows, sizeof(m_history_rows));
-    m_history_p00 = k.p00;
-    m_history_p11 = k.p11;
-    m_radiance_index ^= 1u;
     if (shadows) {
         // What shading asked for, read back once the GPU is done with it.
         const u64 frame_index = m_device.frames_completed();

@@ -180,7 +180,7 @@ def main() -> int:
             waiting = max(waiting, frame["streaming"]["waiting"])
             overflow = overflow or frame["overflow"]
             # GPU culling with occlusion: two raster passes and shading.
-            if frame["draws"] != 3 or frame["post_draws"] != 3:
+            if frame["draws"] != 3 or frame["post_draws"] != 4:
                 bad_draws.append((stop, frame["draws"], frame["post_draws"]))
             if stop % 110 == 109 or stop == len(path) - 1:
                 now = tool("get_engine_info")["frame_times"]
@@ -210,8 +210,8 @@ def main() -> int:
               f"worst {times['worst_ms']:.2f} ms, {times['hitches']} hitches")
         if bad_draws:
             failures.append(f"the draw count changed during the flight (stop, draws, post): {bad_draws[:5]}")
-        if frame["draws"] != 2 or frame["post_draws"] != 3:
-            failures.append(f"on the CPU path the scene should take 2 draws and 3 full-screen passes, got {frame}")
+        if frame["draws"] != 2 or frame["post_draws"] != 4:
+            failures.append(f"on the CPU path the scene should take 2 draws and 4 full-screen passes, got {frame}")
         if left_waiting > 0:
             failures.append(f"{left_waiting} detail groups still waiting to load after the flight")
         if frame["materials"] != materials:

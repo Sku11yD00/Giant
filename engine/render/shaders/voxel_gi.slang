@@ -300,9 +300,11 @@ static const uint k_reflection_steps = 48;
 // direction `dir`, as wide as the highlight (`cone_tan`, from roughness).
 // Samples are at least a sixth of their distance wide, so steps grow by an
 // eighth or more and 48 reach a hundred metres and more; sharper detail
-// comes from the screen (resolve.slang). The surface's own voxels (centres
-// within a voxel above it) are left out. Whatever gets through comes from
-// the sky. rgb: the light; a: how much of it the voxels gave (0: all sky).
+// comes from the screen (reflect.slang). The surface's own voxels (centres
+// within a voxel above it) are left out; so are other voxels holding the
+// surface's plane, coarse ones further out holding the foot of what
+// stands on it too. rgb: the light the voxels gave; a: how much of the
+// cone they filled (the rest, the caller's sky or hemisphere).
 float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 p, float3 n, float3 dir,
                         float cone_tan) {
     ByteAddressBuffer levels = read_buffer(w.levels);
@@ -318,7 +320,7 @@ float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3
         }
     }
     if (first == count || n_axis <= 0) {
-        return float4(sky_radiance(f, dir), 0.0);
+        return float4(0.0, 0.0, 0.0, 0.0);
     }
     const float voxel0 = load_level(levels, w.levels_offset, 0).brick_size / 8.0;
     const float own = load_level(levels, w.levels_offset, first).brick_size / 8.0;
@@ -350,5 +352,5 @@ float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3
         }
         t += max(t * cone_tan, size * 0.75);
     }
-    return float4(color + (1.0 - a) * sky_radiance(f, dir), a);
+    return float4(color, a);
 }

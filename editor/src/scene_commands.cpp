@@ -1026,8 +1026,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "again a frame, new and rebuilt ones first; last_frame.gi has this frame's work. "
          "reflections: glossy surfaces reflect along the mirror direction (default on; lit views): a cone "
          "through the lit voxel world as wide as the highlight (needs gi), and with screen_space_reflections "
-         "(default on) a sharp reflection from last frame's image where what it meets is on screen; "
-         "last_frame.reflections says which were traced. "
+         "(default on) a sharp reflection from the image itself where what it meets is on screen; "
+         "last_frame.reflections says which are on. "
          "debug_view lighting shows the lit view in plain white (the light alone). "
          "View state: not undoable.",
          Json{{"type", "object"},
