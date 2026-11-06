@@ -114,8 +114,10 @@ def flight_path(steps):
         elif t < 0.55:  # up over the roofs and trees, then low over the lake
             u = (t - 0.3) / 0.25
             start, end = (STREET_X, -115.0), (LAKE[0], LAKE[1] + LAKE_LOW_Z)
-            position = [start[0] + u * (end[0] - start[0]), 1.8 + (LAKE_LOW - 1.8) * min(1.0, u / 0.1),
-                        start[1] + u * (end[1] - start[1])]
+            # Straight up out of the street first (houses on both sides), then across.
+            across = max(0.0, (u - 0.1) / 0.9)
+            position = [start[0] + across * (end[0] - start[0]), 1.8 + (LAKE_LOW - 1.8) * min(1.0, u / 0.1),
+                        start[1] + across * (end[1] - start[1])]
             # Turning from down the street to the lake's far shore.
             k = min(1.0, u / 0.15)
             ahead = unit([0.0, -0.4, -30.0])
