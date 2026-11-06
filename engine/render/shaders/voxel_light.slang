@@ -42,7 +42,7 @@ groupshared uint g_count;
 // evenly (a brick is mostly empty: a surface's shell).
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_light(uint3 group : SV_GroupID, uint thread : SV_GroupIndex) {
+void cs_light(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     if (group.x >= push.count) {
         return;
     }
@@ -56,12 +56,12 @@ void cs_light(uint3 group : SV_GroupID, uint thread : SV_GroupIndex) {
     RWByteAddressBuffer light = write_buffer(push.light);
     const uint base = index * k_brick_bytes;
 
-    if (thread == 0) {
+    if (lane == 0) {
         g_count = 0;
     }
     GroupMemoryBarrierWithGroupSync();
     for (uint k = 0; k < k_brick_voxels / 64; ++k) {
-        const uint i = thread + k * 64;
+        const uint i = lane + k * 64;
         const uint word = pool.Load(base + (i >> 5) * 4);
         if (((word >> (i & 31u)) & 1u) != 0u) {
             uint slot;
@@ -87,7 +87,7 @@ void cs_light(uint3 group : SV_GroupID, uint thread : SV_GroupIndex) {
     const float size = l.brick_size / 8.0;
     const float3 sun_dir = f.sun_direction.xyz;
     const uint count = g_count;
-    for (uint j = thread; j < count; j += 64) {
+    for (uint j = lane; j < count; j += 64) {
         const uint i = g_filled[j];
         const uint packed = pool.Load(base + 64 + i * 4);
         const float3 n = unpack_normal(packed);
