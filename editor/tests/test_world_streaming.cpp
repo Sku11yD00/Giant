@@ -152,8 +152,12 @@ GIANT_TEST("world streaming: an entity moved into a cell on disk keeps that cell
     w.scene.modify(a)->transform.position = {2580.0, 0.0, 30.0};
     GIANT_CHECK(w.streaming.save(w.scene, {}).error.empty());
     std::vector<world::Entity> far;
-    std::ifstream file(w.folder / "cells" / "40_0.cell.json", std::ios::binary);
-    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::string text;
+    {
+        // Closed again at once: Windows cannot replace a file that is open.
+        std::ifstream file(w.folder / "cells" / "40_0.cell.json", std::ios::binary);
+        text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
     GIANT_CHECK(!world::load_cell(text, {40, 0}, far).has_value() && far.size() == 3);
     w.settle(2570.0, 10.0);
     GIANT_CHECK(w.scene.size() == 3 && w.named("mover") == 1 && w.named("far") == 2);
@@ -165,7 +169,8 @@ GIANT_TEST("world streaming: an entity moved into a cell on disk keeps that cell
     w.settle(10.0, 10.0);
     GIANT_CHECK(w.scene.size() == 4 && w.named("stayer") == 1 && w.named("far") == 2 && w.named("mover") == 1);
     GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 2); // the far cell and the emptied near one
-    GIANT_CHECK(w.streaming.save(w.scene, {}).cells_removed == 1);
+    const WorldStreaming::Saved last = w.streaming.save(w.scene, {});
+    GIANT_CHECK(last.error.empty() && last.cells_removed == 1);
     GIANT_CHECK(!std::filesystem::exists(w.folder / "cells" / "0_0.cell.json"));
 }
 
@@ -403,4 +408,81 @@ GIANT_TEST("world streaming: cells near the camera are read before cells left be
         w.step({20005.0, 10.0, 10.0});
     }
     GIANT_CHECK(w.named("far") == 1);
+}
+
+namespace {
+usize count_named(const world::Scene& s, const char* n) {
+    usize k = 0;
+    for (const auto& x : s.entities()) k += x.name == n ? usize{1} : usize{0};
+    return k;
+}
+}
+
+GIANT_TEST("SCRATCH 1: cell made by a save after open_world, then undo/redo open_world") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_entity", {{"name", "one"}, {"position", {10, 0, 10}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.run("create_entity", {{"name", "C"}, {"position", {100, 0, 10}}})); // new cell (1,0)
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(std::filesystem::exists(e.w.folder / "cells" / "1_0.cell.json"));
+    GIANT_CHECK(e.commands.undo());                      // C goes (scene only)
+    GIANT_CHECK(e.commands.undo() && e.commands.redo()); // out of the world and back
+    e.settle(10.0, 10.0);
+    printf("S1 after redo: one=%zu C=%zu cells=%u loaded=%u\n", count_named(e.state.scene, "one"),
+           count_named(e.state.scene, "C"), e.w.streaming.stats().cells, e.w.streaming.stats().loaded);
+    GIANT_CHECK(count_named(e.state.scene, "C") == 1);
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    printf("S1 after reopen: one=%zu C=%zu\n", count_named(e.state.scene, "one"), count_named(e.state.scene, "C"));
+    GIANT_CHECK(count_named(e.state.scene, "C") == 1);
+}
+
+GIANT_TEST("SCRATCH 2: redo create after save+move, undo/redo open_world: duplicate") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_entities", {{"entities", {{{"name", "a"}, {"position", {10, 0, 10}}},
+                                                        {{"name", "b"}, {"position", {100, 0, 10}}}}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    auto r = e.commands.execute("create_entity", {{"name", "X"}, {"position", {20, 0, 10}}});
+    GIANT_CHECK(r.ok);
+    const world::EntityId x = r.value["id"];
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.run("set_entity", {{"id", x}, {"position", {110, 0, 10}}})); // into b's cell
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.commands.undo()); // move
+    GIANT_CHECK(e.commands.undo()); // create
+    GIANT_CHECK(e.commands.undo() && e.commands.redo()); // open_world
+    GIANT_CHECK(e.commands.redo()); // create: X back in cell 0 before any frame
+    e.settle(10.0, 10.0);
+    printf("S2: X=%zu ids_changed=%llu\n", count_named(e.state.scene, "X"),
+           (unsigned long long)e.w.streaming.stats().ids_changed);
+    GIANT_CHECK(count_named(e.state.scene, "X") == 1);
+}
+
+GIANT_TEST("SCRATCH 3: same as 2 without the open_world swap (control)") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_entities", {{"entities", {{{"name", "a"}, {"position", {10, 0, 10}}},
+                                                        {{"name", "b"}, {"position", {100, 0, 10}}}}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    auto r = e.commands.execute("create_entity", {{"name", "X"}, {"position", {20, 0, 10}}});
+    const world::EntityId x = r.value["id"];
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.run("set_entity", {{"id", x}, {"position", {110, 0, 10}}}));
+    GIANT_CHECK(e.run("save_world"));
+    e.settle(5000.0, 10.0); // everything unloads
+    GIANT_CHECK(e.commands.undo()); // move: X absent from scene -> nothing?
+    GIANT_CHECK(e.commands.undo()); // create
+    GIANT_CHECK(e.commands.redo()); // create: X at cell 0 while cell 1 on disk
+    e.settle(10.0, 10.0);
+    printf("S3: X=%zu ids_changed=%llu\n", count_named(e.state.scene, "X"),
+           (unsigned long long)e.w.streaming.stats().ids_changed);
 }
