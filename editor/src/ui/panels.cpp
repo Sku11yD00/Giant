@@ -1,8 +1,10 @@
 #include "panels.h"
 
 #include "../mesh_library.h"
+#include "../weather_state.h"
 
 #include "giant/core/log.h"
+#include "giant/world/weather.h"
 
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder, for the first-run layout
@@ -161,6 +163,7 @@ void EditorPanels::draw_scene_settings() {
         draw_outliner();
         draw_properties();
         draw_lighting();
+        draw_weather();
         draw_terrain_brush();
         draw_scatter();
     }
@@ -501,6 +504,49 @@ void EditorPanels::draw_lighting() {
     }
     ImGui::TextDisabled("Colours are linear. Undo with Ctrl+Z.");
     ImGui::TextDisabled("Fly: hold right mouse, W A S D, Q / E, Shift.");
+}
+
+void EditorPanels::draw_weather() {
+    ImGui::SeparatorText("Weather");
+    const std::optional<world::Weather>& w = m_state.scene.weather;
+    // A preset blends in over a few seconds; the sliders change it at once.
+    if (ImGui::BeginCombo("Preset", "choose...")) {
+        for (const std::string_view name : world::weather_preset_names()) {
+            if (ImGui::Selectable(std::string(name).c_str())) {
+                run("set_weather", {{"preset", std::string(name)}, {"over_seconds", 5.0}}, 0);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (!w) {
+        ImGui::TextDisabled("No weather: the flat sky colours above.");
+        return;
+    }
+    const auto set = [this](const char* field, float value) {
+        ai::Json args = {{field, value}};
+        // During a preset's blend, a slider keeps blending (over what is left).
+        if (m_state.weather != nullptr && m_state.weather->remaining() > 0.0) {
+            args["over_seconds"] = m_state.weather->remaining();
+        }
+        run("set_weather", args, edit_group());
+    };
+    const auto slider = [&set](const char* label, const char* field, float value, float lo, float hi,
+                               const char* format = "%.2f", ImGuiSliderFlags flags = 0) {
+        if (ImGui::SliderFloat(label, &value, lo, hi, format, flags)) set(field, std::clamp(value, lo, hi));
+    };
+    slider("Cloud cover", "cloud_cover", w->cloud_cover, 0.0f, 1.0f);
+    slider("Cloud density", "cloud_density", w->cloud_density, 0.0f, 1.0f);
+    slider("Cloud base", "cloud_base", w->cloud_base, 100.0f, 10000.0f, "%.0f m");
+    slider("Cloud thickness", "cloud_thickness", w->cloud_thickness, 100.0f, 10000.0f, "%.0f m");
+    slider("Cloud size", "cloud_scale", w->cloud_scale, 0.25f, 4.0f);
+    slider("Wind direction", "wind_direction_degrees", w->wind_direction_degrees, -360.0f, 360.0f, "%.0f deg");
+    slider("Wind speed", "wind_speed", w->wind_speed, 0.0f, 200.0f, "%.1f m/s", ImGuiSliderFlags_Logarithmic);
+    slider("Fog", "fog_density", w->fog_density, 0.0f, 1.0f);
+    slider("Fog height", "fog_height", w->fog_height, 1.0f, 10000.0f, "%.0f m", ImGuiSliderFlags_Logarithmic);
+    slider("Haze", "haze", w->haze, 0.0f, 10.0f);
+    if (ImGui::Button("Clear weather")) {
+        run("clear_weather");
+    }
 }
 
 void EditorPanels::draw_log() {

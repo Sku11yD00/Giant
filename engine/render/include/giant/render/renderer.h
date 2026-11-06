@@ -123,6 +123,26 @@ struct Lighting {
     float exposure = 1.0f;
 };
 
+// The sky over the scene: an atmosphere the sun shines through, a layer of
+// clouds that shades the ground, and height fog (src/sky shaders). Off:
+// Lighting::background, flat, and no fog. Lit views only.
+struct Sky {
+    bool on = false;
+    Vec3 sun_top{3.0f, 3.0f, 3.0f}; // the sun above the air, colour times intensity (Lighting::sun_light is at the ground)
+    float haze = 1.0f;              // 0 to 10: dust and moisture (paler sky)
+    // Clouds: a layer from cloud_base to cloud_top, metres above y = 0, over
+    // a round earth.
+    float cloud_cover = 0.0f;    // 0 to 1
+    float cloud_density = 0.5f;  // 0 to 1
+    float cloud_base = 1500.0f;
+    float cloud_top = 3000.0f;
+    float cloud_tile = 32000.0f; // metres the clouds' pattern repeats (their size: about a tenth)
+    DVec3 cloud_offset{};        // metres the wind has carried the clouds (x and z)
+    // Height fog: per metre at y = 0, thinning by exp(-falloff * height).
+    float fog_density = 0.0f;
+    float fog_falloff = 1.0f / 200.0f;
+};
+
 struct View {
     DVec3 position{};
     Quat orientation{}; // looks down -Z, +Y up, before rotation
@@ -197,6 +217,11 @@ struct RenderSettings {
     // hidden.
     bool reflections = true;
     bool screen_space_reflections = true;
+    // The clouds (with FrameInput::sky on): marched at half resolution,
+    // cloud_steps steps a ray (8 to 256), and their shadows on the ground.
+    bool clouds = true;
+    u32 cloud_steps = 48;
+    bool cloud_shadows = true;
 };
 
 // A run of FrameInput::instances that changes together (a world cell).
@@ -215,6 +240,7 @@ struct CellRange {
 struct FrameInput {
     View view;
     Lighting lighting;
+    Sky sky;
     RenderSettings settings;
     std::span<const Instance> instances;
     // Optional. When given, the cells cover `instances` end to end, in
@@ -277,6 +303,10 @@ struct RenderStats {
     // Reflections (this frame).
     bool reflections = false;        // voxel cones on
     bool screen_reflections = false; // screen-space rays on
+    // The sky (this frame).
+    bool sky = false;           // the atmosphere drawn
+    bool clouds = false;        // clouds marched
+    bool cloud_shadows = false; // and their shadows cast
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -408,6 +438,11 @@ private:
     // Global illumination's voxel lighting. False: the light pool may hold
     // stale words this frame (out of memory), so nothing may read it.
     bool light_voxels(rhi::CommandList& cmd, const FrameData& data);
+    // The sky's passes before shading (sky view, cloud shadows, clouds):
+    // fills `params` (the SkyParams shading reads). False: no sky this frame.
+    bool draw_sky(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
+                  rhi::TransientMemory& params);
+    bool ensure_sky_targets();
 
     rhi::Device& m_device;
     RendererDesc m_desc;
@@ -496,6 +531,18 @@ private:
     bool m_gi_on = false; // this frame
     rhi::PipelineHandle m_light_clear;
     rhi::PipelineHandle m_light_voxels;
+    // The sky.
+    rhi::PipelineHandle m_sky_view_pass;
+    rhi::PipelineHandle m_cloud_map_pass;
+    rhi::PipelineHandle m_cloud_shadow_pass;
+    rhi::PipelineHandle m_clouds_pass;
+    rhi::TextureHandle m_sky_view;     // rgba16_float, the sky's light by direction
+    rhi::TextureHandle m_cloud_map;    // rgba8_unorm, the clouds' pattern (made once)
+    rhi::TextureHandle m_cloud_shadow; // rgba16_float, sunlight through the clouds over the ground
+    rhi::TextureHandle m_clouds_a;     // rgba16_float, half resolution: the clouds' light and transmittance
+    rhi::TextureHandle m_clouds_b;     // rgba16_float, half resolution: their distance and the scene's
+    bool m_cloud_map_made = false;
+    bool m_sky_failed = false; // its textures could not be made: tried again when the frame's targets are remade
     bool m_overflow_logged = false;
     bool m_cull_buffers_logged = false;
     bool m_instances_logged = false;

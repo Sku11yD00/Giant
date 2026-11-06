@@ -517,6 +517,26 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   most 2^18 points a cell (`cells_cut_short`). Not yet: masks from
   entities (no trees in houses), layers avoiding each other, painted
   density, and destruction removing placements.
+- **Weather and sky (N3 part 7).** `world::Weather` (`weather.h`) is
+  optional scene data (saved in scenes and world.json); without it the flat
+  sky colours stay exactly as before. The editor's `WeatherState`
+  (`editor/src/weather_state.h`) is view state: it follows the scene's
+  weather, blends towards a new one over `over_seconds`, and carries the
+  cloud pattern along on the wind (an offset, so the clouds move without
+  history). `weather_light` turns sun height, haze and cloud cover into
+  the sun, sky and ground light the shading uses (the sun through the air
+  by air mass, the sky greyed by cloud). The renderer gets a `Sky` in
+  `FrameInput` and runs, before shading (`sky.slang`, `sky_common.slang`):
+  a 192x108 sky-view table of single scattering (Rayleigh and Mie, round
+  earth), a 512^2 tiling cloud pattern made once, a 256^2 cloud shadow map
+  over 32 km about where the sun's rays from the ground near the camera meet the cloud base (snapped to texels; past it, the clouds' mean shade), and half-resolution
+  volumetric clouds (a shell between base and top, a fixed dither, no
+  temporal history: rule 2) written as light and transmittance plus the
+  distances to the first cloud and to the scene. The resolve upsamples the
+  clouds by nearest depth, composites them over sky and scene, adds height
+  fog (exponential in height, capped at 30 km) and darkens the sun by the
+  cloud shadow (screen reflections are added scaled by what of the pixel comes through). A change of cloud size rescales the wind offset about the camera, so the clouds overhead stay put. Settings `clouds`, `cloud_steps` (48) and `cloud_shadows`.
+  Not yet: rain and snow (part 8), lightning, clouds parting round giants.
 
 ## Window events (known limit)
 

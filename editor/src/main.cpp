@@ -17,6 +17,7 @@
 #include "viewport_camera.h"
 #include "far_ground.h"
 #include "scatter_placer.h"
+#include "weather_state.h"
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
 #include "world_streaming.h"
@@ -291,6 +292,8 @@ int run(const Options& options) {
     state.far_ground = &far_ground;
     editor::ScatterPlacer scatter;
     state.scatter = &scatter;
+    editor::WeatherState weather;
+    state.weather = &weather;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -336,7 +339,8 @@ int run(const Options& options) {
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
-        input.lighting = editor::scene_lighting(state.scene.lighting);
+        input.lighting = editor::weather_lighting(state.scene.lighting, weather.shown());
+        input.sky = editor::weather_sky(state.scene.lighting, weather.shown(), weather.cloud_offset());
         input.settings = state.render_settings;
         input.instances = scene_frame.instances;
         input.cells = scene_frame.cells;
@@ -422,6 +426,7 @@ int run(const Options& options) {
         viewport_camera.update(state.camera, delta);
         panels.draw(frame_info);
         ui->end_frame();
+        weather.update(state.scene.weather, delta, state.camera.position); // after the panels' changes
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }

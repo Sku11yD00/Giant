@@ -185,6 +185,13 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   and the ground on a worker thread, cell by cell, and follow every sculpt
   and every change to the layer; the Scene panel's Scatter section has the
   main settings.
+- Part 7: weather and clouds. `set_weather` gives a scene a sky the sun
+  shines through (blue overhead, pale at the horizon, red low in the sky or
+  in haze), a layer of volumetric clouds that drift on the wind and shade
+  the ground, and height fog. Presets (clear, fair, cloudy, overcast, storm,
+  fog) or any mix of cover, density, base, thickness, size, wind, fog and
+  haze; `over_seconds` blends from one weather to the next. Rain and snow
+  come next. The Scene panel's Weather section has the settings.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

@@ -130,6 +130,9 @@ public:
     // Cells whose contents differ from their file, or that have no file
     // yet. Walks the whole scene.
     u32 unsaved_cells(const world::Scene& scene) const;
+    // Whether the scene's world-wide settings (lighting, kits, scatter
+    // layers, weather) differ from what world.json holds.
+    bool unsaved_settings(const world::Scene& scene) const;
 
     // What streaming knows of the scene now, to keep with a copy of it that
     // an undo or redo may put back (swap_scene): restore() then makes the

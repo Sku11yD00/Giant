@@ -38,6 +38,10 @@ giant_shaders(render
     shaders/voxels.slang:ps_main:pixel:voxels_ps
     shaders/voxel_light.slang:cs_clear:compute:light_clear_cs
     shaders/voxel_light.slang:cs_light:compute:light_voxels_cs
+    shaders/sky.slang:cs_sky_view:compute:sky_view_cs
+    shaders/sky.slang:cs_cloud_map:compute:cloud_map_cs
+    shaders/sky.slang:cs_cloud_shadow:compute:cloud_shadow_cs
+    shaders/sky.slang:cs_clouds:compute:clouds_cs
 )
 # SMAA's precomputed area and search tables (headers only).
 target_link_libraries(giant_render PRIVATE third_party::smaa)

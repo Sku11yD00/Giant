@@ -302,8 +302,61 @@ struct ResolveExtras {
     // Reflections. Bit 0: voxel cones (needs gi_on); bit 1: glossy pixels
     // are marked for the screen reflections pass.
     u32 reflect_on;
+    // The sky (sky_common.slang): its SkyParams, or sky_on 0 (the flat background).
+    u32 sky_params;
+    u32 sky_params_offset;
+    u32 sky_on;
+    u32 sky_pad;
 };
-static_assert(sizeof(ResolveExtras) == 128);
+static_assert(sizeof(ResolveExtras) == 144);
+
+// sky_common.slang's Sky: what the sky's passes and shading read.
+struct SkyParams {
+    float sun_direction[3];
+    float cloud_cover;
+    float sun_light[3];
+    float cloud_density;
+    float sky_light[3];
+    float cloud_base;
+    float ground_light[3];
+    float cloud_top;
+    float cam_x;   // the camera's place in the cloud pattern (within a tile)
+    float cam_alt; // its height above y = 0
+    float cam_z;
+    float cloud_tile;
+    float fog_density;
+    float fog_falloff;
+    float haze;
+    float cloud_steps;
+    float shadow_origin[2]; // camera-relative x, z of the cloud shadow map's corner
+    float shadow_size;
+    u32 flags; // bit 0: clouds; bit 1: cloud shadows
+    float half_size[2];
+    float full_size[2];
+    u32 sky_view; // read descriptors
+    u32 cloud_map;
+    u32 cloud_shadow;
+    u32 clouds_a;
+    u32 clouds_b;
+    u32 depth;
+    u32 pad0;
+    u32 pad1;
+    float sun_top[3];
+    float pad2;
+};
+static_assert(sizeof(SkyParams) == 176);
+
+// sky.slang's SkyPush (all its passes).
+struct SkyPush {
+    u32 params;
+    u32 params_offset;
+    u32 frame;
+    u32 frame_offset;
+    u32 target;   // write descriptor
+    u32 target_b; // the clouds' second target
+    u32 pad[2];
+};
+static_assert(sizeof(SkyPush) == 32);
 
 // reflect.slang's ReflectPush: screen reflections, then exposure and tone
 // mapping, from shading's targets.

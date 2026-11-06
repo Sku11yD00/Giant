@@ -299,6 +299,9 @@ Json render_settings_json(const EditorState& state) {
             {"gi_bricks_per_frame", state.render_settings.gi_bricks_per_frame},
             {"reflections", state.render_settings.reflections},
             {"screen_space_reflections", state.render_settings.screen_space_reflections},
+            {"clouds", state.render_settings.clouds},
+            {"cloud_steps", state.render_settings.cloud_steps},
+            {"cloud_shadows", state.render_settings.cloud_shadows},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
               {"clusters", s.clusters},
@@ -322,7 +325,8 @@ Json render_settings_json(const EditorState& state) {
                 {"draws", s.shadow_draws}}},
               {"gi",
                {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting}}},
-              {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}}}}};
+              {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}},
+              {"sky", {{"on", s.sky}, {"clouds", s.clouds}, {"cloud_shadows", s.cloud_shadows}}}}}};
 }
 
 Json camera_json(const EditorCamera& c) {
@@ -1069,6 +1073,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                              "the open world has " + std::to_string(n) +
                              " cells with unsaved edits: save_world first, or pass discard_unsaved: true");
                      }
+                     if (w.unsaved_settings(state.scene)) {
+                         return CommandResult::failure(
+                             "the open world's lighting, kits, scatter or weather have unsaved changes: "
+                             "save_world first, or pass discard_unsaved: true");
+                     }
                  } else if (w.is_open()) {
                      return CommandResult::failure(
                          "the world in " + path_to_utf8(w.folder()) +
@@ -1184,6 +1193,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                   {"waiting", s.waiting},
                   {"failed", s.failed},
                   {"unsaved_cells", w.active(state.scene_generation) ? w.unsaved_cells(state.scene) : 0},
+                  {"unsaved_settings", w.active(state.scene_generation) && w.unsaved_settings(state.scene)},
                   {"entities", state.scene.size()},
                   {"entities_loaded", s.entities_loaded},
                   {"entities_unloaded", s.entities_unloaded},
@@ -1314,6 +1324,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "through the lit voxel world as wide as the highlight (needs gi), and with screen_space_reflections "
          "(default on) a sharp reflection from the image itself where what it meets is on screen; "
          "last_frame.reflections says which are on. "
+         "clouds: with a weather set (set_weather), its clouds marched at half resolution, cloud_steps "
+         "steps a ray (default 48; fewer is faster and grainier), and cloud_shadows their shadows on the "
+         "ground (both default on; last_frame.sky says what drew). "
          "debug_view lighting shows the lit view in plain white (the light alone). "
          "View state: not undoable.",
          Json{{"type", "object"},
@@ -1338,7 +1351,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"gi_bricks_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096},
                                          {"description", "Voxel bricks lit a frame at most. Default 256."}}},
                 {"reflections", {{"type", "boolean"}}},
-                {"screen_space_reflections", {{"type", "boolean"}}}}}},
+                {"screen_space_reflections", {{"type", "boolean"}}},
+                {"clouds", {{"type", "boolean"}}},
+                {"cloud_steps", {{"type", "integer"}, {"minimum", 8}, {"maximum", 256},
+                                 {"description", "Steps a cloud ray. Default 48."}}},
+                {"cloud_shadows", {{"type", "boolean"}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -1362,6 +1379,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.gi_bricks_per_frame = args.value("gi_bricks_per_frame", r.gi_bricks_per_frame);
              r.reflections = args.value("reflections", r.reflections);
              r.screen_space_reflections = args.value("screen_space_reflections", r.screen_space_reflections);
+             r.clouds = args.value("clouds", r.clouds);
+             r.cloud_steps = args.value("cloud_steps", r.cloud_steps);
+             r.cloud_shadows = args.value("cloud_shadows", r.cloud_shadows);
              return CommandResult::success(render_settings_json(state));
          }});
 

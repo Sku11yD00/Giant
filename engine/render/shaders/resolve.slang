@@ -31,6 +31,7 @@
 #include "voxel_gi.slang"
 #include "shadow_pages.slang"
 #include "tone_map.slang"
+#include "sky_common.slang"
 
 struct ResolvePush {
     float4 background; // linear; where nothing was drawn
@@ -75,6 +76,9 @@ struct Extras {
     uint gi_on;       // 1: global illumination from the voxel light
     uint gi_light;    // write descriptor of the voxel light pool
     uint reflect_on;  // bit 0: voxel cone reflections; bit 1: mark pixels for the screen's
+    uint sky_params;  // the sky's SkyParams (sky_on 0: the flat background)
+    uint sky_params_offset;
+    uint sky_on;
 };
 
 Extras load_extras() {
@@ -114,6 +118,10 @@ Extras load_extras() {
     o.gi_on = g.y;
     o.gi_light = g.z;
     o.reflect_on = g.w;
+    const uint4 k = b.Load4(at + 128);
+    o.sky_params = k.x;
+    o.sky_params_offset = k.y;
+    o.sky_on = k.z;
     return o;
 }
 
@@ -360,6 +368,26 @@ Output lit_output(float3 color) {
     return o;
 }
 
+// The clouds in front of what a pixel shows `distance` metres away, then
+// the fog over it all (as far as 30 km: the sky's own air does the rest).
+float3 under_sky(Sky s, float3 color, float3 dir, float distance, uint2 pixel, out float through) {
+    // The scene fogged over its whole distance, then the clouds over it,
+    // themselves fogged only over the distance to the first of them.
+    // `through`: how much of the scene's own light comes through.
+    const float t = fog_transmittance(s, dir, min(distance, 30000.0));
+    const float3 fog = fog_color(s, dir);
+    color = color * t + fog * (1.0 - t);
+    through = t;
+    float first;
+    const float4 cloud = clouds_at(s, pixel, distance, first);
+    if (cloud.a >= 0.9999) {
+        return color;
+    }
+    through = t * cloud.a;
+    const float near_t = fog_transmittance(s, dir, min(first, 30000.0));
+    return color * cloud.a + cloud.rgb * near_t + fog * ((1.0 - near_t) * (1.0 - cloud.a));
+}
+
 Output shade_pixel(float4 position) {
     const uint2 pixel = uint2(position.xy);
     const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
@@ -378,6 +406,11 @@ Output shade_pixel(float4 position) {
     const Extras extras = load_extras();
     const bool lighting_view = f.debug_view == k_view_lighting;
     const bool lit_path = f.debug_view == 0 || lighting_view;
+    const bool sky_on = lit_path && extras.sky_on != 0u;
+    // (Off, the descriptor is the frame's: read, never used.)
+    const Sky sky = load_sky(extras.sky_params, extras.sky_params_offset);
+    const float2 pixel_ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
+    const float3 view_dir = normalize(f.ray_x.xyz * pixel_ndc.x + f.ray_y.xyz * pixel_ndc.y + f.ray_z.xyz);
     VoxelWorld w;
     w.pool = extras.voxel_pool;
     w.table = extras.voxel_table;
@@ -404,7 +437,10 @@ Output shade_pixel(float4 position) {
                 const float3 world = dir * t;
                 const float3 vn = unpack_normal(packed);
                 const float far_pixel = t * 2.0 / max(f.p11 * f.height, 1e-6);
-                const float sun = sun_visibility(extras.shadows, world, vn, f.sun_direction.xyz, far_pixel);
+                float sun = sun_visibility(extras.shadows, world, vn, f.sun_direction.xyz, far_pixel);
+                if (sky_on) {
+                    sun *= cloud_shadow(sky, world);
+                }
                 // The voxel's own light word.
                 float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
                 if (extras.gi_on != 0) {
@@ -414,13 +450,21 @@ Output shade_pixel(float4 position) {
                 const float3 albedo = lighting_view ? k_lighting_albedo : unpack_color(packed);
                 float3 spec_weight;
                 float3 spec_light;
-                const float3 color = shade(f, world, vn, albedo, k_far_roughness, 0.0, float3(0.0, 0.0, 0.0), 0.0,
-                                           sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, spec_weight, spec_light);
+                float3 color = shade(f, world, vn, albedo, k_far_roughness, 0.0, float3(0.0, 0.0, 0.0), 0.0,
+                                     sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, spec_weight, spec_light);
+                if (sky_on) {
+                    float through;
+                    color = under_sky(sky, color, dir, t, pixel, through);
+                }
                 return lit_output(color);
             }
         }
     }
     if (!hit) {
+        if (sky_on) {
+            float through;
+            return lit_output(under_sky(sky, sky_background(sky, view_dir), view_dir, 3.0e38, pixel, through));
+        }
         return plain_output(push.background.rgb);
     }
     const float3 n = s.n;
@@ -453,7 +497,10 @@ Output shade_pixel(float4 position) {
         metal = 0.0;
         emissive = float3(0.0, 0.0, 0.0);
     }
-    const float sun = sun_visibility(extras.shadows, world, n, f.sun_direction.xyz, pixel_size);
+    float sun = sun_visibility(extras.shadows, world, n, f.sun_direction.xyz, pixel_size);
+    if (sky_on) {
+        sun *= cloud_shadow(sky, world);
+    }
     float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
     if (extras.gi_on != 0) {
         bounce = voxel_bounce(w, write_buffer(extras.gi_light), world, n);
@@ -475,12 +522,16 @@ Output shade_pixel(float4 position) {
     }
     float3 spec_weight;
     float3 spec_light;
-    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
-                               spec_weight, spec_light);
+    float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
+                         spec_weight, spec_light);
+    float through = 1.0; // of the reflection, which reflect.slang adds over the fog and clouds
+    if (sky_on) {
+        color = under_sky(sky, color, view_dir, length(world), pixel, through);
+    }
     Output o = lit_output(color);
     const float screen_weight =
         (extras.reflect_on & 2u) != 0u ? saturate((k_screen_reflection_rough - rough) / k_reflection_fade) : 0.0;
-    const uint3 q = uint3(round(saturate(spec_weight * screen_weight) * 1023.0));
+    const uint3 q = uint3(round(saturate(spec_weight * (screen_weight * through)) * 1023.0));
     o.gloss = uint2(q.x | (q.y << 10) | (q.z << 20), pack_octahedral(n));
     o.reflected = float4(min(spec_light, float3(60000.0, 60000.0, 60000.0)), 0.0);
     return o;

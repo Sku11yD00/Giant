@@ -1,0 +1,414 @@
+// The sky, the clouds and the fog (sky.slang draws them; resolve.slang
+// puts them in the image): the parameters (gpu::SkyParams, in the frame's
+// transient memory), an atmosphere the sun shines through (Rayleigh air and
+// Mie haze, single scattering), a layer of clouds over a round earth, their
+// shadows on the ground and height fog.
+//
+// Positions are camera-relative, as everywhere else; the camera stands
+// `cam_alt` metres above y = 0, and the clouds' pattern is looked up from
+// the camera's place in it (`cam_xz`, kept small on the CPU).
+#pragma once
+#include "common.slang"
+
+static const float k_pi_sky = 3.14159265358979;
+static const float k_earth_radius = 6360000.0;
+static const float k_atmosphere_top = 100000.0; // metres above the ground
+static const float3 k_rayleigh = float3(5.802e-6, 13.558e-6, 33.1e-6); // scattering per metre at sea level
+static const float k_rayleigh_height = 8000.0;
+static const float k_mie = 4.4e-6;            // scattering per metre at sea level, haze 1
+static const float k_mie_extinction = 1.11;   // extinction / scattering
+static const float k_mie_height = 1200.0;
+static const float k_mie_g = 0.76;
+// How much light a fully dense cloud takes out, per metre.
+static const float k_cloud_extinction = 0.05;
+// The sky view table and the cloud shadow map (sizes the CPU makes them).
+static const uint k_sky_view_width = 192;
+static const uint k_sky_view_height = 108;
+static const uint k_cloud_shadow_size = 256;
+static const uint k_cloud_map_size = 512;
+// Where a pixel has no cloud in front of it (km, as the cloud target stores it).
+static const float k_no_cloud_km = 60000.0;
+
+// gpu::SkyParams.
+struct Sky {
+    float3 sun_direction; // unit, towards the sun
+    float cloud_cover;
+    float3 sun_light;     // at the ground, through the air
+    float cloud_density;
+    float3 sky_light;
+    float cloud_base;     // metres above y = 0
+    float3 ground_light;
+    float cloud_top;
+    float2 cam_xz;        // the camera's place in the cloud pattern (metres, within one tile)
+    float cam_alt;        // the camera's height above y = 0
+    float cloud_tile;     // metres a tile of the pattern repeats
+    float fog_density;    // per metre at y = 0
+    float fog_falloff;    // per metre up
+    float haze;
+    float cloud_steps;
+    float2 shadow_origin; // the cloud shadow map's minimum corner, camera-relative x and z
+    float shadow_size;    // metres it covers
+    uint flags;           // bit 0: clouds; bit 1: cloud shadows
+    float2 half_size;     // the cloud target
+    float2 full_size;     // the image
+    uint sky_view;        // read descriptors
+    uint cloud_map;
+    uint cloud_shadow;
+    uint clouds_a;        // radiance (rgb) and transmittance (a) of the clouds before each pixel
+    uint clouds_b;        // x: km to the first cloud (k_no_cloud_km: none); y: km to what the pixel shows z: km where the march ended
+    uint depth;
+    uint pad0;
+    uint pad1;
+    float3 sun_top;       // the sun above the air (colour times intensity)
+    float pad2;
+};
+static const uint k_sky_params_bytes = 176;
+
+Sky load_sky(uint descriptor, uint offset) {
+    ByteAddressBuffer b = read_buffer(descriptor);
+    const float4 r0 = load4(b, offset);
+    const float4 r1 = load4(b, offset + 16);
+    const float4 r2 = load4(b, offset + 32);
+    const float4 r3 = load4(b, offset + 48);
+    const float4 r4 = load4(b, offset + 64);
+    const float4 r5 = load4(b, offset + 80);
+    const float4 r6 = load4(b, offset + 96);
+    const float4 r7 = load4(b, offset + 112);
+    const uint4 r8 = b.Load4(offset + 128);
+    const uint4 r9 = b.Load4(offset + 144);
+    const float4 r10 = load4(b, offset + 160);
+    Sky s;
+    s.sun_direction = r0.xyz;
+    s.cloud_cover = r0.w;
+    s.sun_light = r1.xyz;
+    s.cloud_density = r1.w;
+    s.sky_light = r2.xyz;
+    s.cloud_base = r2.w;
+    s.ground_light = r3.xyz;
+    s.cloud_top = r3.w;
+    s.cam_xz = float2(r4.x, r4.z);
+    s.cam_alt = r4.y;
+    s.cloud_tile = r4.w;
+    s.fog_density = r5.x;
+    s.fog_falloff = r5.y;
+    s.haze = r5.z;
+    s.cloud_steps = r5.w;
+    s.shadow_origin = r6.xy;
+    s.shadow_size = r6.z;
+    s.flags = asuint(r6.w);
+    s.half_size = r7.xy;
+    s.full_size = r7.zw;
+    s.sky_view = r8.x;
+    s.cloud_map = r8.y;
+    s.cloud_shadow = r8.z;
+    s.clouds_a = r8.w;
+    s.clouds_b = r9.x;
+    s.depth = r9.y;
+    s.pad0 = r9.z;
+    s.pad1 = r9.w;
+    s.sun_top = r10.xyz;
+    s.pad2 = r10.w;
+    return s;
+}
+
+// --- Geometry over a round earth ----------------------------------------------
+
+// Where a ray from the camera (`alt` metres up, direction's y `dir_y`)
+// meets the sphere `height` metres up: (near, far) distances; far < 0:
+// it does not. Written so the earth's radius does not swamp float
+// precision (the product of the roots is exact, and the larger root comes
+// from no cancellation).
+float2 sphere_hits(float alt, float height, float dir_y) {
+    const float c = (alt - height) * (2.0 * k_earth_radius + alt + height);
+    const float b = (k_earth_radius + alt) * dir_y;
+    const float disc = b * b - c;
+    if (disc < 0.0) {
+        return float2(-1.0, -1.0);
+    }
+    const float sq = sqrt(disc);
+    const float q = -(b + (b >= 0.0 ? sq : -sq));
+    const float other = q != 0.0 ? c / q : 0.0;
+    return float2(min(q, other), max(q, other));
+}
+
+// The height above y = 0 of a camera-relative point (the earth curving away).
+float height_at(float alt, float3 p) {
+    const float3 centre_to = p + float3(0.0, k_earth_radius + alt, 0.0);
+    return length(centre_to) - k_earth_radius;
+}
+
+// --- Atmosphere ---------------------------------------------------------------
+
+float rayleigh_phase(float mu) { return 3.0 / (16.0 * k_pi_sky) * (1.0 + mu * mu); }
+
+float hg_phase(float mu, float g) {
+    const float g2 = g * g;
+    return (1.0 - g2) / (4.0 * k_pi_sky * pow(max(1.0 + g2 - 2.0 * g * mu, 1e-4), 1.5));
+}
+
+// Extinction per metre at a height (air and haze).
+float3 air_extinction(float h, float haze) {
+    const float rho_r = exp(-max(h, 0.0) / k_rayleigh_height);
+    const float rho_m = exp(-max(h, 0.0) / k_mie_height);
+    return k_rayleigh * rho_r + k_mie * k_mie_extinction * haze * rho_m;
+}
+
+// The fraction of sunlight reaching a height `h` along `sun` (a few steps
+// to the top of the air; none below the horizon there).
+float3 sun_transmittance(float h, float3 sun, float haze) {
+    const float2 ground = sphere_hits(h, 0.0, sun.y);
+    if (ground.x > 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    const float2 top = sphere_hits(h, k_atmosphere_top, sun.y);
+    const float length_up = max(top.y, 0.0);
+    float3 depth = float3(0.0, 0.0, 0.0);
+    const uint steps = 6;
+    const float ds = length_up / float(steps);
+    for (uint i = 0; i < steps; ++i) {
+        const float t = (float(i) + 0.5) * ds;
+        depth += air_extinction(height_at(h, sun * t), haze) * ds;
+    }
+    return exp(-depth);
+}
+
+// The sky's light along `dir` from a camera `alt` metres up: sunlight
+// scattered once by the air and the haze on the way.
+float3 sky_radiance(float3 dir, float alt, float3 sun, float3 sun_top, float haze) {
+    const float2 top = sphere_hits(alt, k_atmosphere_top, dir.y);
+    const float2 ground = sphere_hits(alt, 0.0, dir.y);
+    float far_end = max(top.y, 0.0);
+    if (ground.x > 0.0) {
+        far_end = min(far_end, ground.x);
+    }
+    const float mu = dot(dir, sun);
+    const float pr = rayleigh_phase(mu);
+    const float pm = hg_phase(mu, k_mie_g);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float3 view_depth = float3(0.0, 0.0, 0.0);
+    const uint steps = 24;
+    float prev = 0.0;
+    for (uint i = 0; i < steps; ++i) {
+        // Steps bunch up near the camera, where the air is densest.
+        const float f = (float(i) + 0.5) / float(steps);
+        const float t = far_end * f * f;
+        const float ds = t - prev;
+        prev = t;
+        const float h = height_at(alt, dir * t);
+        const float rho_r = exp(-max(h, 0.0) / k_rayleigh_height);
+        const float rho_m = exp(-max(h, 0.0) / k_mie_height);
+        const float3 ext = k_rayleigh * rho_r + k_mie * k_mie_extinction * haze * rho_m;
+        view_depth += ext * ds;
+        const float3 scatter = k_rayleigh * rho_r * pr + k_mie * haze * rho_m * pm;
+        sum += exp(-view_depth) * sun_transmittance(h, sun, haze) * scatter * ds;
+    }
+    return sum * sun_top;
+}
+
+// The sky view table: azimuth from the sun (0 to pi) across, elevation
+// down (more rows near the horizon).
+float2 sky_view_uv(float3 dir, float3 sun) {
+    const float elevation = asin(clamp(dir.y, -1.0, 1.0));
+    const float v = 0.5 - 0.5 * sign(elevation) * sqrt(abs(elevation) / (0.5 * k_pi_sky));
+    const float a = atan2(dir.z, dir.x) - atan2(sun.z, sun.x);
+    const float u = abs(atan2(sin(a), cos(a))) / k_pi_sky;
+    const float2 size = float2(k_sky_view_width, k_sky_view_height);
+    return (float2(u, v) * (size - 1.0) + 0.5) / size;
+}
+
+float3 sky_view_dir(float2 uv, float3 sun) {
+    const float2 size = float2(k_sky_view_width, k_sky_view_height);
+    const float2 f = saturate((uv * size - 0.5) / (size - 1.0));
+    const float s = 0.5 - f.y; // 0.5 up, -0.5 down
+    const float elevation = sign(s) * (2.0 * s) * (2.0 * s) * 0.5 * k_pi_sky;
+    const float azimuth = atan2(sun.z, sun.x) + f.x * k_pi_sky;
+    const float c = cos(elevation);
+    return float3(c * cos(azimuth), sin(elevation), c * sin(azimuth));
+}
+
+float3 sample_sky(Sky s, float3 dir) {
+    const float2 uv = sky_view_uv(dir, s.sun_direction);
+    return read_texture(s.sky_view).SampleLevel(get_sampler(k_sampler_linear_clamp), uv, 0.0).rgb;
+}
+
+// What the sky shows along `dir`: the air, and the sun's disc.
+float3 sky_background(Sky s, float3 dir) {
+    float3 c = sample_sky(s, dir);
+    const float mu = dot(dir, s.sun_direction);
+    const float disc = smoothstep(0.99996, 0.99999, mu); // about half a degree across
+    c += s.sun_light * (disc * 2000.0);
+    return c;
+}
+
+// --- Clouds ---------------------------------------------------------------------
+
+// The clouds' 2D pattern at a camera-relative point: r and g shape the
+// coverage, b is detail, a varies how tall they grow.
+float4 cloud_pattern(Sky s, float2 xz, float scale) {
+    const float2 uv = (s.cam_xz + xz) / s.cloud_tile * scale;
+    return read_texture(s.cloud_map).SampleLevel(get_sampler(k_sampler_linear_wrap), uv, 0.0);
+}
+
+// How dense the clouds are (0 to 1) at a camera-relative point; `detail`
+// erodes their edges (the view's march), off for the light's.
+float cloud_shape(Sky s, float3 p, bool detail) {
+    const float h = (height_at(s.cam_alt, p) - s.cloud_base) / max(s.cloud_top - s.cloud_base, 1.0);
+    if (h <= 0.0 || h >= 1.0) {
+        return 0.0;
+    }
+    const float4 m = cloud_pattern(s, p.xz, 1.0);
+    const float base = m.r * 0.65 + m.g * 0.35;
+    const float cover = saturate(s.cloud_cover);
+    float coverage = saturate((base - (1.0 - cover)) / max(cover, 0.05));
+    if (cover >= 0.999) {
+        coverage = max(coverage, 0.6); // overcast: no gaps
+    }
+    // Flat bases, rounded tops that reach higher where the pattern says.
+    const float tall = lerp(0.45, 1.0, m.a);
+    const float profile = smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(tall * 0.55, tall, h));
+    float shape = coverage * profile;
+    if (detail && shape > 0.0) {
+        // Two slices of the detail pattern slid by height stand in for 3D noise.
+        const float4 d0 = cloud_pattern(s, p.xz + float2(h * 900.0, h * 400.0), 7.0);
+        const float4 d1 = cloud_pattern(s, p.xz - float2(h * 500.0, h * 1100.0), 13.0);
+        const float erode = d0.b * 0.6 + d1.b * 0.4;
+        shape = saturate((shape - erode * 0.35 * (1.0 - shape)) / 0.75);
+    }
+    return shape;
+}
+
+// The cloud layer's span along a ray from the camera: (enter, leave), or
+// leave <= enter where it misses.
+float2 cloud_span(Sky s, float3 dir) {
+    const float alt = s.cam_alt;
+    const float2 low = sphere_hits(alt, s.cloud_base, dir.y);
+    const float2 high = sphere_hits(alt, s.cloud_top, dir.y);
+    float enter = 0.0;
+    float leave = 0.0;
+    if (alt < s.cloud_base) {
+        enter = low.y;
+        leave = high.y;
+    } else if (alt <= s.cloud_top) {
+        enter = 0.0;
+        leave = low.x > 0.0 ? low.x : high.y;
+    } else {
+        if (high.y <= 0.0) {
+            return float2(0.0, 0.0);
+        }
+        enter = max(high.x, 0.0);
+        leave = low.x > 0.0 ? low.x : high.y;
+    }
+    return float2(max(enter, 0.0), max(leave, 0.0));
+}
+
+// --- Cloud shadows and fog ----------------------------------------------------
+
+// The fraction of sunlight the clouds let through to a camera-relative
+// point (from the cloud shadow map: the point carried along the sun to
+// the clouds' base).
+float cloud_shadow(Sky s, float3 p) {
+    if ((s.flags & 2u) == 0u) {
+        return 1.0;
+    }
+    const float3 sun = s.sun_direction;
+    const float up = max(sun.y, 0.05);
+    const float rise = s.cloud_base - (s.cam_alt + p.y);
+    const float2 q = p.xz + sun.xz / up * max(rise, 0.0);
+    const float2 uv = (q - s.shadow_origin) / s.shadow_size;
+    // Past the map (far off, or a low sun's long shadows), the clouds' mean
+    // shade, faded into over the map's outer tenth: no hard edge.
+    const float mean = 1.0 - 0.65 * s.cloud_cover * s.cloud_density;
+    const float2 edge = min(uv, 1.0 - uv);
+    const float inside = saturate(min(edge.x, edge.y) * 10.0);
+    if (inside <= 0.0) {
+        return mean;
+    }
+    const float map = read_texture(s.cloud_shadow).SampleLevel(get_sampler(k_sampler_linear_clamp), uv, 0.0).r;
+    return lerp(mean, map, inside);
+}
+
+// Height fog along a ray from the camera to `distance`: what is left of
+// what lies there (transmittance), from fog thinning exponentially upwards.
+float fog_transmittance(Sky s, float3 dir, float distance) {
+    if (s.fog_density <= 0.0) {
+        return 1.0;
+    }
+    // Optical depth of density * exp(-b h) along the ray, from h0 to h1,
+    // in one difference of exponents each clamped (a high camera looking
+    // down must neither underflow the camera's term nor overflow the far one).
+    const float b = s.fog_falloff;
+    const float h0 = max(s.cam_alt, -1000.0);
+    const float h1 = max(h0 + dir.y * distance, -1000.0);
+    if (min(-b * h0, -b * h1) > 80.0) {
+        return 0.0; // the whole ray deep in fog thicker than floats hold: opaque
+    }
+    const float e0 = exp(clamp(-b * h0, -80.0, 80.0));
+    const float k = b * (h1 - h0);
+    float depth;
+    if (abs(k) > 1e-4) {
+        const float e1 = exp(clamp(-b * h1, -80.0, 80.0));
+        depth = s.fog_density * distance * (e0 - e1) / k;
+    } else {
+        depth = s.fog_density * distance * e0 * (1.0 - 0.5 * k);
+    }
+    return isfinite(depth) ? exp(-max(depth, 0.0)) : 0.0;
+}
+
+// The colour fog fades towards, looking along `dir`: the horizon's.
+float3 fog_color(Sky s, float3 dir) {
+    const float3 level = normalize(float3(dir.x, max(dir.y, 0.03), dir.z));
+    return sample_sky(s, level) * 0.6 + s.sky_light * 0.4 +
+           s.sun_light * (hg_phase(dot(dir, s.sun_direction), 0.6) * 0.15);
+}
+
+// Fog over what a pixel shows `distance` away: it fades into the horizon's colour.
+float3 apply_fog(Sky s, float3 color, float3 dir, float distance) {
+    const float t = fog_transmittance(s, dir, distance);
+    if (t >= 0.9999) {
+        return color;
+    }
+    return color * t + fog_color(s, dir) * (1.0 - t);
+}
+
+// The clouds in front of a full-resolution pixel `distance` metres away,
+// from the half-resolution cloud targets: the texel of the four nearest
+// whose own distance matches best (so the clouds keep to silhouettes).
+// Returns their light (rgb) and transmittance (a), and in `first` the
+// distance to the first of them (metres).
+float4 clouds_at(Sky s, uint2 pixel, float distance, out float first) {
+    first = 3.0e38;
+    if ((s.flags & 1u) == 0u) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+    const int2 hsize = int2(s.half_size);
+    const float2 at = (float2(pixel) + 0.5) * 0.5 - 0.5;
+    const int2 base = int2(floor(at));
+    Texture2D<float4> ta = read_texture(s.clouds_a);
+    Texture2D<float4> tb = read_texture(s.clouds_b);
+    const float want = log2(max(distance, 1.0) * 0.001 + 1.0);
+    float best = 3.0e38;
+    int2 pick = clamp(base, int2(0, 0), hsize - 1);
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 q = clamp(base + int2(k & 1, k >> 1), int2(0, 0), hsize - 1);
+        const float d = tb.Load(int3(q, 0)).y;
+        const float score = abs(log2(d + 1.0) - want);
+        if (score < best) {
+            best = score;
+            pick = q;
+        }
+    }
+    const float4 b = tb.Load(int3(pick, 0));
+    first = b.x * 1000.0;
+    if (distance < first) {
+        return float4(0.0, 0.0, 0.0, 1.0); // the pixel is in front of the clouds
+    }
+    float4 a = ta.Load(int3(pick, 0));
+    // Nearer than where the march ended (the far field's voxels are not in
+    // depth): only the share of the clouds in front of it, by distance.
+    const float end = b.z * 1000.0;
+    if (distance < end) {
+        const float share = saturate((distance - first) / max(end - first, 1.0));
+        a = float4(a.rgb * share, lerp(1.0, a.a, share));
+    }
+    return a;
+}

@@ -224,6 +224,7 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
     base.lighting = index.lighting;
     base.kits = index.kits;
     base.scatter = index.scatter;
+    base.weather = index.weather;
     base.reserve_ids_below(index.next_id);
     base.terrain.set_samples(index.terrain_samples);
     base.terrain.material = index.terrain_material;
@@ -659,6 +660,7 @@ WorldStreaming::Saved WorldStreaming::create(const std::filesystem::path& folder
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;
     m_index.scatter = scene.scatter;
+    m_index.weather = scene.weather;
     m_index.terrain_samples = scene.terrain.samples();
     m_index.terrain_material = scene.terrain.material;
     Saved saved = write(scene, std::move(meshes));
@@ -889,6 +891,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;
     m_index.scatter = scene.scatter;
+    m_index.weather = scene.weather;
     m_index.terrain_cells.assign(m_ground.begin(), m_ground.end());
     m_index.terrain_samples = samples;
     m_index.far_owed.assign(m_far_owed.begin(), m_far_owed.end()); // empty, unless chunks failed
@@ -1064,6 +1067,11 @@ u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
         unsaved += members.contains(coord) ? 0u : 1u; // emptied
     }
     return unsaved;
+}
+
+bool WorldStreaming::unsaved_settings(const world::Scene& scene) const {
+    return !(scene.lighting == m_index.lighting) || !(scene.kits == m_index.kits) ||
+           !(scene.scatter == m_index.scatter) || !(scene.weather == m_index.weather);
 }
 
 StreamingStats WorldStreaming::stats() const {
