@@ -47,6 +47,36 @@ Vec3 unpack_color(u32 voxel) {
     return {r * r, g * g, b * b};
 }
 
+u32 pack_light(const Vec3& light, bool sun) {
+    // Mantissa m and exponent e (1 to 15) stand for m / 512 * 2^(e - 9).
+    const auto clean = [](float c) { return std::min(std::max(0.0f, c), k_max_light); }; // NaN: 0
+    const float r = clean(light.x);
+    const float g = clean(light.y);
+    const float b = clean(light.z);
+    const float peak = std::max(r, std::max(g, b));
+    int e = 1;
+    while (e < 15 && peak >= std::ldexp(1.0f, e - 9)) {
+        ++e;
+    }
+    float scale = std::ldexp(512.0f, 9 - e);
+    if (std::lround(peak * scale) > 511 && e < 15) {
+        ++e; // rounds up into the next exponent
+        scale *= 0.5f;
+    }
+    const auto mantissa = [scale](float c) { return static_cast<u32>(std::min<long>(std::lround(c * scale), 511)); };
+    return mantissa(r) | mantissa(g) << 9 | mantissa(b) << 18 | static_cast<u32>(e) << 27 | (sun ? 1u << 31 : 0u);
+}
+
+Vec3 unpack_light(u32 light) {
+    const u32 e = light >> 27 & 15u;
+    if (e == 0) {
+        return {};
+    }
+    const float scale = std::ldexp(1.0f / 512.0f, static_cast<int>(e) - 9);
+    return {static_cast<float>(light & 511u) * scale, static_cast<float>(light >> 9 & 511u) * scale,
+            static_cast<float>(light >> 18 & 511u) * scale};
+}
+
 Vec3 unpack_normal(u32 voxel) {
     const float u = static_cast<float>(voxel >> 16 & 255u) / 255.0f * 2.0f - 1.0f;
     const float v = static_cast<float>(voxel >> 24 & 255u) / 255.0f * 2.0f - 1.0f;

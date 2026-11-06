@@ -394,7 +394,65 @@ the view, so every mesh casts at the detail its shadow texels need.
   nothing; finer geometry streaming in does not redraw the pages it falls
   on; a shadow culling list that overflows leaves holes in its pages
   until they are next drawn; no contact-hardening (soft shadows by
-  distance) or local lights (later with GI, part 5).
+  distance) or local lights.
+
+## Global illumination
+
+Light bouncing off the scene, and the sky's light shut out by it, from the
+lit voxel world (N2 part 5; `src/voxel_light.h`, `shaders/voxel_light.slang`,
+`shaders/voxel_gi.slang`). No ray tracing hardware, no noise to denoise and
+nothing carried over from earlier frames, so the image is as sharp moving
+as standing still.
+
+- Every filled voxel has a light word in the light pool, a buffer beside
+  the brick pool in the same pool indices (one u32 per voxel, 2 KiB a
+  brick, 64 MiB for the default 32768 bricks, made on the first frame with
+  GI): the bounce and sky light reaching it (RGB, 9-bit mantissas over a
+  shared exponent, `voxel::pack_light`) and a bit for whether the sun
+  reaches it. A word of 0 means "not lit yet".
+- The GPU lights up to `gi_bricks_per_frame` bricks a frame (256 by
+  default, at least one; one group per brick, its filled voxels shared out
+  evenly). For each filled voxel: a march through the voxel world towards
+  the sun (from its own level up) sets the sun bit, and six cones over the
+  hemisphere around its normal (one straight out, five at 60 degrees,
+  cosine weighted, 30 degree half angle) gather the light. A cone steps
+  out through the clipmap, sampling the level whose voxels are about half
+  its width (the coarser levels serve as its wider samples), each filled
+  voxel taking 85% of what is left; what a voxel sends back is its colour
+  times the sun (when its bit says the sun reaches it) plus its own light
+  word, so light bounces once more each time a brick is lit again. What
+  gets through comes from the sky (the sky and ground colours by
+  direction).
+- `VoxelLight` picks the bricks on the CPU: a brick just put in a pool
+  index is first cleared to "not lit" (what the index held was another
+  brick's), then lit before anything else, as is a brick built again in
+  place (it keeps its old light meanwhile); the rest are lit again in
+  turn, round the pool. So a moving sun or a change nearby reaches every
+  brick within (bricks / budget) frames (a few hundred frames for a full
+  pool at the default). Turned off and on again (or after a debug view
+  without it), every brick is cleared and lit afresh.
+- Shading looks the light up per pixel (`voxel_bounce`): on the finest
+  level that holds the point, the 2 x 2 x 2 voxels around it (half a voxel
+  out along the normal), weighted by distance and by how far each faces
+  the same way as the surface (a wall's other side, the floor under it, do
+  not count). Where none there is lit, the next levels up; over the last
+  brick before a window's edge it blends with the next level up, so the
+  windows moving show no seams. The light replaces the flat sky and ground
+  colours for diffuse, and dims the sky in reflections as much as the sky
+  is hidden (until part 5b's reflections). With nothing lit around (a
+  brick just built, things the voxel world does not hold) it falls back to
+  the flat colours. Far voxels use their own light word.
+- Lit views (and the voxel view, which then shows voxels with their own
+  light) with `voxel_world` on; the debug view `lighting` is the lit view
+  in plain white-grey, the light alone. `RenderStats` (and
+  `last_frame.gi` over MCP) report bricks lit and cleared this frame and
+  those new or rebuilt still waiting. Timed as "gi".
+- Known limits: the light is only as fine as the voxels (0.25 m near the
+  camera, doubling outwards), so small gaps and contact shadows are left
+  to later small-scale occlusion; walls thinner than a voxel leak light;
+  coarse voxels are fuller than what they hold, so cones far out see a
+  little too much blocked; emissive surfaces do not light the voxels yet;
+  light lags changes by up to a round of the pool.
 
 ## Frame budget (1440p, 60 fps, reference GPU, High preset)
 

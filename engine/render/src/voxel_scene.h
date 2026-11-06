@@ -122,6 +122,15 @@ public:
     // stay a mesh, or it would vanish.
     bool holds(u32 index) const;
 
+    // Pool brick `index`'s level and brick; false when it holds none.
+    bool pool_brick(u32 index, u32& level, voxel::BrickCoord& brick) const;
+    u32 capacity() const { return m_capacity; }
+    // This frame's copies into the pool (by the last update): bricks put in
+    // a pool index of their own (new there: whatever it held before was
+    // another brick), and bricks built again in place.
+    std::span<const u32> placed() const { return m_placed; }
+    std::span<const u32> rebuilt() const { return m_rebuilt; }
+
     // The pool index of a brick, or gpu::k_no_brick (none, or not built yet).
     u32 brick_index(u32 level, const voxel::BrickCoord& brick) const;
     // What level `level` holds at a world position (from a CPU copy of the
@@ -248,6 +257,9 @@ private:
     std::vector<voxel::BrickBox> m_filled; // per level: around its bricks
     std::vector<bool> m_loose;   // per level: m_filled may be loose
     std::vector<u32> m_free;     // pool indices
+    std::vector<u32> m_owner;    // per pool index: the slot (level * slots + slot) it was put in last
+    std::vector<u32> m_placed;   // this frame's (placed())
+    std::vector<u32> m_rebuilt;
     u32 m_used = 0;
     std::vector<std::array<u32, voxel::k_brick_voxels / 32>> m_occupancy; // per pool index (probe)
     std::vector<u8> m_has_stand_in;      // per pool index: any stand-in voxel

@@ -9,6 +9,7 @@
 #include "shadow_pages.h"
 #include "smaa.h"
 #include "streaming.h"
+#include "voxel_light.h"
 #include "voxel_scene.h"
 
 #include <algorithm>
@@ -134,9 +135,10 @@ Renderer::~Renderer() {
          {m_raster_mesh, m_raster_vertex, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
           m_smaa_blend, m_voxel_view, m_shadow_mesh, m_shadow_vertex, m_shadow_clear_pages,
-          m_shadow_clear_words}) {
+          m_shadow_clear_words, m_light_clear, m_light_voxels}) {
         m_device.destroy(p);
     }
+    m_device.destroy(m_voxel_light);
     m_device.destroy(m_smaa_area);
     m_device.destroy(m_smaa_search);
     for (Mesh& mesh : m_meshes) {
@@ -188,6 +190,9 @@ bool Renderer::init() {
     m_hzb_down = compute(shaders::hzb_down_cs(), "HZB: down");
     m_shadow_clear_pages = compute(shaders::shadow_clear_pages_cs(), "shadows: clear pages");
     m_shadow_clear_words = compute(shaders::shadow_clear_words_cs(), "shadows: clear requests");
+    m_light_clear = compute(shaders::light_clear_cs(), "GI: clear new bricks");
+    m_light_voxels = compute(shaders::light_voxels_cs(), "GI: light voxels");
+    m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     ShadowDesc shadow_desc;
     shadow_desc.pool_pages = m_desc.shadow_pages;
     m_shadows = std::make_unique<ShadowPages>(shadow_desc);
@@ -257,7 +262,7 @@ bool Renderer::init() {
     for (const rhi::PipelineHandle p :
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
           m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
-          m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words}) {
+          m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1139,11 +1144,22 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     } else {
         m_voxels->idle();
     }
+    // Views that light the scene: the lit view and the light alone.
+    const bool lit_view = settings.debug_view == DebugView::lit || settings.debug_view == DebugView::lighting;
+    // Global illumination: the voxel world lit (in the lit views and the
+    // voxel view), a budgeted number of bricks a frame.
+    m_gi_on = settings.gi && settings.voxel_world && (lit_view || settings.debug_view == DebugView::voxels) &&
+              ensure_voxel_light();
+    if (m_gi_on) {
+        m_light_plan->plan(*m_voxels, std::clamp<u32>(settings.gi_bricks_per_frame, 1u, 4096u));
+    } else {
+        m_light_plan->off();
+    }
 
     // Instances with a live mesh, but for the small ones wholly past the
     // far field's distance: the voxel world shows those (once it holds
     // them as they are now).
-    const bool far_field = settings.voxel_far_field && settings.voxel_world && settings.debug_view == DebugView::lit;
+    const bool far_field = settings.voxel_far_field && settings.voxel_world && lit_view;
     const double far_distance = std::max(static_cast<double>(settings.far_field_distance), 0.0);
     const double far_radius = std::max(static_cast<double>(settings.far_field_max_radius), 0.0);
     // The instance's bounding sphere is wholly past the distance, it is
@@ -1189,7 +1205,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_valid.clear(); // out of memory: draw nothing
     }
     // Sun shadows: the lit view, with GPU culling (pages are drawn with it).
-    plan_shadows(frame, settings.shadows && gpu && settings.debug_view == DebugView::lit &&
+    plan_shadows(frame, settings.shadows && gpu && lit_view &&
                             ensure_shadow_buffers(static_cast<u32>(m_valid.size())));
 
     // Frame constants.
@@ -1340,7 +1356,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             }
         }
     }
-    if (far_field || settings.debug_view == DebugView::voxels) {
+    if (far_field || m_gi_on || settings.debug_view == DebugView::voxels) {
         m_voxel_levels.resize(m_voxels->levels());
         m_voxels->write_levels(m_voxel_levels.data(), frame.view.position);
         data.voxel_levels = cmd.upload(bytes_of(m_voxel_levels));
@@ -1348,6 +1364,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (data.frame.data == nullptr || data.meshes.data == nullptr || data.materials.data == nullptr) {
         return; // out of memory: the device is lost
     }
+    light_voxels(cmd, data);
 
     if (gpu && !m_valid.empty()) {
         cull_on_gpu(cmd, data); // counts its raster passes in m_stats.draws
@@ -1409,7 +1426,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     }
     // With anti-aliasing the shading goes to an image of its own, which
     // SMAA then smooths into the target.
-    const bool antialias = settings.antialiasing && settings.debug_view == DebugView::lit;
+    const bool antialias = settings.antialiasing && lit_view;
     const rhi::TextureHandle shaded = antialias ? m_color : target;
     if (settings.debug_view == DebugView::voxels) {
         draw_voxels(cmd, target, data, light.background);
@@ -1419,6 +1436,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (m_shadows_on) {
         cmd.barrier(m_shadow_atlas, rhi::ResourceState::shader_read);
         cmd.barrier(m_shadow_requests, rhi::ResourceState::shader_write);
+    }
+    const bool gi = m_gi_on && data.voxel_levels.data != nullptr;
+    if (gi) {
+        cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // after lighting's writes
     }
     cmd.begin_timing("shading");
     rhi::RenderPassDesc pass;
@@ -1465,7 +1486,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.shadow_table = data.frame.descriptor;
     extras.shadow_levels = data.frame.descriptor;
     extras.shadow_requests = data.frame.descriptor;
-    if (far_march) {
+    extras.gi_light = data.frame.descriptor;
+    if (far_march || gi) {
         extras.voxel_pool = m_device.read_descriptor(m_voxels->pool());
         extras.voxel_table = m_device.read_descriptor(m_voxels->table());
         extras.voxel_levels = data.voxel_levels.descriptor;
@@ -1474,6 +1496,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         extras.voxel_bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
         extras.far_start = static_cast<float>(far_distance);
         extras.far_radius = static_cast<float>(far_radius);
+        extras.far_on = far_march ? 1u : 0u;
+    }
+    if (gi) {
+        extras.gi_on = 1;
+        extras.gi_light = m_device.write_descriptor(m_voxel_light);
     }
     const bool shadows = m_shadows_on && data.shadow_table.data != nullptr && data.shadow_levels.data != nullptr;
     if (shadows) {
@@ -1537,6 +1564,9 @@ void Renderer::finish_stats(const FrameData& data) {
 void Renderer::draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
                            const Vec3& background) {
     cmd.begin_timing("voxel view");
+    if (m_gi_on && data.voxel_levels.data != nullptr) {
+        cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // after lighting's writes
+    }
     rhi::RenderPassDesc pass;
     pass.colors[0] = {target, rhi::LoadOp::clear, {background.x, background.y, background.z, 1.0f}};
     cmd.begin_render_pass(pass);
@@ -1552,6 +1582,11 @@ void Renderer::draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, con
         push.level_count = m_voxels->levels();
         push.bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
         set4(push.background, background, 1.0f);
+        push.light = push.pool;
+        if (m_gi_on) {
+            push.light = m_device.write_descriptor(m_voxel_light);
+            push.light_on = 1;
+        }
         cmd.push(push);
         cmd.draw(3);
         ++m_stats.draws;
@@ -1623,6 +1658,77 @@ void Renderer::copy_streaming_stats() {
     m_stats.shadow_waiting = m_shadows_on ? sh.waiting : 0u;
     m_stats.shadow_missing = m_shadows_on ? sh.missing : 0u;
     m_stats.shadow_draws = m_shadow_draws;
+    const VoxelLightStats& gi = m_light_plan->stats();
+    m_stats.gi = m_gi_on;
+    m_stats.gi_lit = gi.lit;
+    m_stats.gi_cleared = gi.cleared;
+    m_stats.gi_waiting = gi.waiting;
+}
+
+bool Renderer::ensure_voxel_light() {
+    if (!m_voxel_light.valid()) {
+        rhi::BufferDesc desc;
+        desc.size = u64{m_voxels->capacity()} * voxel::k_brick_voxels * 4;
+        desc.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
+        desc.name = "voxel light";
+        m_voxel_light = m_device.create_buffer(desc);
+        if (!m_voxel_light.valid()) {
+            if (!m_voxel_light_logged) {
+                m_voxel_light_logged = true;
+                log_error("render", "could not create the voxel light pool (out of GPU memory?); no global illumination");
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+void Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
+    if (!m_gi_on) {
+        return;
+    }
+    cmd.begin_timing("gi");
+    const std::span<const u32> clears = m_light_plan->clears();
+    const std::span<const gpu::LightJob> jobs = m_light_plan->jobs();
+    if (data.voxel_levels.data != nullptr && (!clears.empty() || !jobs.empty())) {
+        gpu::LightPush push{};
+        push.frame = data.frame.descriptor;
+        push.frame_offset = data.frame.offset;
+        push.pool = m_device.read_descriptor(m_voxels->pool());
+        push.table = m_device.read_descriptor(m_voxels->table());
+        push.levels = data.voxel_levels.descriptor;
+        push.levels_offset = data.voxel_levels.offset;
+        push.level_count = m_voxels->levels();
+        push.bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
+        push.light = m_device.write_descriptor(m_voxel_light);
+        cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // after last frame's reads
+        if (!clears.empty()) {
+            const rhi::TransientMemory list = cmd.upload_array(clears);
+            if (list.data != nullptr) {
+                cmd.set_pipeline(m_light_clear);
+                push.jobs = list.descriptor;
+                for (usize first = 0; first < clears.size(); first += 65535) { // groups per dimension
+                    push.jobs_offset = list.offset + static_cast<u32>(first * 4);
+                    push.count = static_cast<u32>(std::min<usize>(clears.size() - first, 65535));
+                    cmd.push(push);
+                    cmd.dispatch(voxel::k_brick_voxels / 4 / 64, push.count);
+                }
+                cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // cleared before lit
+            }
+        }
+        if (!jobs.empty()) {
+            const rhi::TransientMemory list = cmd.upload_array(jobs);
+            if (list.data != nullptr) {
+                push.jobs = list.descriptor;
+                push.jobs_offset = list.offset;
+                push.count = static_cast<u32>(jobs.size());
+                cmd.set_pipeline(m_light_voxels);
+                cmd.push(push);
+                cmd.dispatch(push.count);
+            }
+        }
+    }
+    cmd.end_timing();
 }
 
 } // namespace giant::render

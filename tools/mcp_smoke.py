@@ -467,6 +467,44 @@ def shadow_gate(tool, call, check):
     tool("new_scene")
 
 
+def gi_gate(tool, call, check):
+    """N2 part 5: global illumination. The voxel world is lit a budgeted number of bricks a
+    frame (new ones first, then all in turn), in the lit views and the voxel view."""
+    tool("new_scene")
+    tool("create_entity", {"name": "Ground", "shape": "plane", "scale": [40, 1, 40],
+                           "base_color": [0.8, 0.8, 0.8], "roughness": 0.9})
+    tool("create_entity", {"name": "Wall", "shape": "cube", "position": [2, 1, 0], "scale": [0.4, 2, 8],
+                           "base_color": [0.9, 0.05, 0.05], "roughness": 0.9})
+    tool("set_lighting", {"sun_elevation_degrees": 37, "sun_azimuth_degrees": 270})
+    tool("set_camera", {"position": [-2, 8, 6], "look_at": [1, 0, 0]})
+    tool("set_render_settings", {"gi": True, "gi_bricks_per_frame": 64})
+
+    def settle():
+        last = None
+        for _ in range(60):
+            for _ in range(5):
+                call("ping")
+            last = tool("get_render_settings")["last_frame"]
+            if last["voxels"]["pending"] == 0 and last["gi"]["waiting"] == 0:
+                return last
+        return last
+
+    last = settle()
+    check(last["gi"]["on"] and last["gi"]["waiting"] == 0 and last["gi"]["lit"] > 0,
+          f"the voxel world is lit, new bricks first, then in turn, got {last['gi']}")
+    tool("set_render_settings", {"debug_view": "lighting"})
+    check(tool("get_render_settings")["debug_view"] == "lighting", "the lighting view can be picked")
+    last = settle()
+    check(last["gi"]["on"], f"the lighting view has global illumination, got {last['gi']}")
+    tool("set_render_settings", {"debug_view": "clusters"})
+    last = settle()
+    check(not last["gi"]["on"] and last["gi"]["lit"] == 0, f"debug views of the geometry have none, got {last['gi']}")
+    tool("set_render_settings", {"debug_view": "lit", "gi": False})
+    last = settle()
+    check(not last["gi"]["on"], f"global illumination turns off, got {last['gi']}")
+    tool("new_scene")
+
+
 def n1_gate(tool, call, check):
     """N1 part 6, the N1 gate scene (tools/n1_gate.py measures its speed on a real GPU): a
     kit-built town and 10,000 trees in a fixed number of draws, with every bit of detail the
@@ -606,12 +644,19 @@ def main() -> int:
               f"viewport pixel is the background colour, got {(r, g, b)}")
         check(os.path.isfile(info["saved_to"]), "screenshot saved")
 
+        settings = tool("get_render_settings")
+        check(settings["gi"] is True and settings["gi_bricks_per_frame"] == 256, "global illumination is on by default")
+        # Lighting the voxel world is heavy on the software GPU CI runs on:
+        # off for the other gates (the renderer's own d3d12 test checks the
+        # light itself), on in gi_gate.
+        tool("set_render_settings", {"gi": False})
         build_scene(tool, call, check)
         lod_gate(tool, call, check)
         kit_gate(tool, call, check)
         voxel_gate(tool, call, check)
         far_field_gate(tool, call, check)
         shadow_gate(tool, call, check)
+        gi_gate(tool, call, check)
         n1_gate(tool, call, check)
 
         sample = os.environ.get("GIANT_SAMPLE_SCRIPTS")

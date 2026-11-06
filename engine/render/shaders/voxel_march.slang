@@ -105,16 +105,19 @@ uint slot_of(int3 brick, int n) {
     return uint(wrap(brick.x, n) + n * (wrap(brick.y, n) + n * wrap(brick.z, n)));
 }
 
-// The first filled voxel along the camera-relative ray `dir` (unit, from
-// the camera) from distance `t_start` up to `t_limit` (a mesh drawn there,
-// or 3e38). With w.stand_ins only stand-in voxels count, so meshes still
-// drawn are never covered by their own voxels. Out: the distance to the
-// voxel and its packed colour and normal. `skip` (xyz: camera-relative
-// centre, w: radius; negative: none) is a stand-in still drawn as a mesh
-// at t_limit: its own voxels, within two voxels of its bounding sphere,
-// do not count (they would cover it), others in front of it do.
-bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4 skip, out float hit_t,
-                  out uint packed) {
+// The first filled voxel along the ray from `origin` (camera-relative)
+// along `dir` (unit), from distance `t_start` up to `t_limit` (a mesh drawn
+// there, or 3e38), looking at levels `first_level` and up. With
+// w.stand_ins only stand-in voxels count, so meshes still drawn are never
+// covered by their own voxels. Out: the distance to the voxel, its packed
+// colour and normal, and where it is (pool index * 512 + voxel). `skip`
+// (xyz: camera-relative centre, w: radius; negative: none) is a stand-in
+// still drawn as a mesh at t_limit: its own voxels, within two voxels of
+// its bounding sphere, do not count (they would cover it), others in
+// front of it do.
+bool march_voxels_from(VoxelWorld w, float3 origin, float3 dir, uint first_level, float t_start, float t_limit,
+                       float4 skip, out float hit_t, out uint packed, out uint where) {
+    where = 0u;
     hit_t = 0.0;
     packed = 0u;
     // No division by zero: axis-parallel rays get a tiny slope.
@@ -133,14 +136,16 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
     const bool stand_ins = w.stand_ins != 0u;
 
     float t = t_start;
-    // Every window holds the camera, so the ray leaves each (a box) once
-    // for good: the level only goes up.
-    uint first = 0;
+    // A ray leaves each window (a box) once for good, so once past a
+    // level's window it only goes up. (One from far off may yet enter a
+    // finer window, nearer the camera: it stays on the coarser level,
+    // which holds the same things.)
+    uint first = first_level;
     for (uint step = 0; step < k_max_steps; ++step) {
         if (t >= t_limit) {
             break;
         }
-        const float3 p = dir * t;
+        const float3 p = origin + dir * t;
         // The finest level whose window holds the point.
         // (Levels are loaded as needed, not into an array: a dynamically
         // indexed local array spills, slowly on software GPUs.)
@@ -224,6 +229,7 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
         if (((word >> (i & 31u)) & 1u) != 0u && !(skip.w >= 0.0 && length(p - skip.xyz) < skip.w + 2.0 * voxel)) {
             hit_t = t;
             packed = pool.Load(base + 64 + i * 4);
+            where = index * 512u + i;
             return true;
         }
         float step_to;
@@ -237,4 +243,10 @@ bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4
         t += min(step_to, brick_exit) + l.brick_size / 8.0 * 1e-4;
     }
     return false;
+}
+
+// From the camera: the view ray through a pixel.
+bool march_voxels(VoxelWorld w, float3 dir, float t_start, float t_limit, float4 skip, out float hit_t,
+                  out uint packed, out uint where) {
+    return march_voxels_from(w, float3(0.0, 0.0, 0.0), dir, 0u, t_start, t_limit, skip, hit_t, packed, where);
 }

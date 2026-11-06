@@ -12,9 +12,15 @@
 //
 // Sun shadows: virtual shadow pages (shadow_pages.slang), for meshes and
 // far voxels alike.
+//
+// Global illumination: the bounce and sky light around each pixel, looked
+// up in the lit voxel world (voxel_gi.slang), in place of the flat sky
+// and ground colours; it also shuts the sky out of reflections where the
+// sky is hidden.
 #include "common.slang"
 #include "decals.slang"
 #include "voxel_march.slang"
+#include "voxel_gi.slang"
 #include "shadow_pages.slang"
 
 struct ResolvePush {
@@ -56,6 +62,9 @@ struct Extras {
     float far_start;  // metres from the camera
     float far_radius; // instances this small are stand-ins (RenderSettings::far_field_max_radius)
     Shadows shadows;
+    uint far_on;      // 1: the far field marches
+    uint gi_on;       // 1: global illumination from the voxel light
+    uint gi_light;    // write descriptor of the voxel light pool
 };
 
 Extras load_extras() {
@@ -90,6 +99,10 @@ Extras load_extras() {
     o.shadows.y = y.xyz;
     o.shadows.z = z.xyz;
     o.shadows.depth_offset = z.w;
+    const uint4 g = b.Load4(at + 112);
+    o.far_on = g.x;
+    o.gi_on = g.y;
+    o.gi_light = g.z;
     return o;
 }
 
@@ -246,12 +259,15 @@ float normal_variance(float3 n, uint instance) {
     return v;
 }
 
+float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
 // Lights a surface: one sun (GGX specular, Lambert diffuse) plus the
-// hemisphere ambient, before exposure and tone mapping. `variance`: the
+// ambient light, before exposure and tone mapping. `variance`: the
 // normal's change across the pixel (specular AA); `sun`: how much of the
-// sun reaches it (shadows).
+// sun reaches it (shadows); `bounce`: global illumination's light there
+// (rgb) and how far to trust it (a; 0: the flat sky and ground colours).
 float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
-             float sun) {
+             float sun, float4 bounce) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
@@ -279,8 +295,16 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
     // Hemisphere ambient: sky above, ground below, for diffuse along the
     // normal and for specular along the reflection.
     const float3 r = reflect(-v, n);
-    const float3 ambient_diffuse = lerp(f.ground_light.rgb, f.sky_light.rgb, n.y * 0.5 + 0.5);
-    const float3 ambient_specular = lerp(f.ground_light.rgb, f.sky_light.rgb, r.y * 0.5 + 0.5);
+    float3 ambient_diffuse = lerp(f.ground_light.rgb, f.sky_light.rgb, n.y * 0.5 + 0.5);
+    float3 ambient_specular = lerp(f.ground_light.rgb, f.sky_light.rgb, r.y * 0.5 + 0.5);
+    if (bounce.w > 0.0) {
+        // The bounce light takes the flat colours' place; reflections of
+        // the sky dim as much as the sky is hidden from here (until they
+        // trace rays of their own).
+        const float3 gi = lerp(ambient_diffuse, bounce.rgb, bounce.w);
+        ambient_specular *= saturate(luminance(gi) / max(luminance(ambient_diffuse), 1e-4));
+        ambient_diffuse = gi;
+    }
     const float3 env_fresnel = f0 + (max(1.0 - roughness, f0) - f0) * pow(1.0 - n_dot_v, 5.0);
     color += diffuse_color * ambient_diffuse + env_fresnel * ambient_specular * (1.0 - 0.7 * roughness);
     return color + emissive;
@@ -288,6 +312,9 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
 
 // Voxels have a colour and a normal only; the rest is a rough dielectric.
 static const float k_far_roughness = 0.8;
+// The lighting view's surfaces: plain white-grey, the light alone.
+static const float3 k_lighting_albedo = float3(0.75, 0.75, 0.75);
+static const uint k_view_lighting = 5;
 
 [shader("pixel")]
 float4 ps_main(float4 position : SV_Position) : SV_Target {
@@ -304,9 +331,19 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
 
     // The far field: past far_start the meshes are left out (the CPU drops
     // instances wholly beyond it) and the voxel world stands in, in front
-    // of whatever mesh is drawn there (lit view only).
+    // of whatever mesh is drawn there (lit views only).
     const Extras extras = load_extras();
-    if (f.debug_view == 0 && extras.voxel_level_count != 0) {
+    const bool lighting_view = f.debug_view == k_view_lighting;
+    const bool lit_path = f.debug_view == 0 || lighting_view;
+    VoxelWorld w;
+    w.pool = extras.voxel_pool;
+    w.table = extras.voxel_table;
+    w.levels = extras.voxel_levels;
+    w.levels_offset = extras.voxel_levels_offset;
+    w.level_count = extras.voxel_level_count;
+    w.bricks_per_axis = extras.voxel_bricks_per_axis;
+    w.stand_ins = 1u; // the far field: only what the CPU left out (meshes drawn keep their own look)
+    if (lit_path && extras.far_on != 0) {
         const float mesh_t = hit ? length(s.world) : 3.0e38;
         // A stand-in drawn as a mesh (straddling the distance, moving, or
         // not in the voxel world yet): its own voxels must not cover it.
@@ -315,23 +352,23 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
         if (mesh_t > extras.far_start) {
             const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
             const float3 dir = normalize(f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz);
-            VoxelWorld w;
-            w.pool = extras.voxel_pool;
-            w.table = extras.voxel_table;
-            w.levels = extras.voxel_levels;
-            w.levels_offset = extras.voxel_levels_offset;
-            w.level_count = extras.voxel_level_count;
-            w.bricks_per_axis = extras.voxel_bricks_per_axis;
-            w.stand_ins = 1u; // only what the CPU left out (meshes drawn keep their own look)
             float t;
             uint packed;
-            if (march_voxels(w, dir, extras.far_start, mesh_t, skip, t, packed)) {
+            uint where;
+            if (march_voxels(w, dir, extras.far_start, mesh_t, skip, t, packed, where)) {
                 const float3 world = dir * t;
                 const float3 vn = unpack_normal(packed);
                 const float far_pixel = t * 2.0 / max(f.p11 * f.height, 1e-6);
                 const float sun = sun_visibility(extras.shadows, world, vn, f.sun_direction.xyz, far_pixel);
-                const float3 color = shade(f, world, vn, unpack_color(packed), k_far_roughness, 0.0,
-                                           float3(0.0, 0.0, 0.0), 0.0, sun);
+                // The voxel's own light word.
+                float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
+                if (extras.gi_on != 0) {
+                    const uint lw = write_buffer(extras.gi_light).Load(where * 4);
+                    bounce = light_lit(lw) ? float4(unpack_light(lw), 1.0) : bounce;
+                }
+                const float3 albedo = lighting_view ? k_lighting_albedo : unpack_color(packed);
+                const float3 color = shade(f, world, vn, albedo, k_far_roughness, 0.0, float3(0.0, 0.0, 0.0), 0.0,
+                                           sun, bounce);
                 return float4(tone_map(color * f.exposure), 1.0);
             }
         }
@@ -342,7 +379,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float3 n = s.n;
     const float3 world = s.world;
 
-    if (f.debug_view != 0) {
+    if (!lit_path) {
         // Flat colour shaded just enough to read the shape.
         const float3 col = f.debug_view == 1 ? hash_color(s.cluster)
                          : f.debug_view == 2 ? level_color(s.level)
@@ -364,7 +401,16 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
                  push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
+    if (lighting_view) {
+        base = k_lighting_albedo;
+        metal = 0.0;
+        emissive = float3(0.0, 0.0, 0.0);
+    }
     const float sun = sun_visibility(extras.shadows, world, n, f.sun_direction.xyz, pixel_size);
-    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun);
+    float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
+    if (extras.gi_on != 0) {
+        bounce = voxel_bounce(w, write_buffer(extras.gi_light), world, n);
+    }
+    const float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce);
     return float4(tone_map(color * f.exposure), 1.0);
 }

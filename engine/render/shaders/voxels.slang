@@ -1,9 +1,10 @@
 // The voxel debug view: marches each pixel's view ray through the voxel
-// clipmap (voxel_march.slang) and shades the first voxel it meets with the
-// sun and sky.
+// clipmap (voxel_march.slang) and shades the first voxel it meets: with
+// its light from global illumination (the sun where it reaches, and the
+// bounce and sky light) when that is on, else simply with the sun and sky.
 //
 // Layout: VoxelPush in src/gpu_layout.h.
-#include "voxel_march.slang"
+#include "voxel_gi.slang"
 
 struct VoxelPush {
     uint frame;
@@ -15,6 +16,9 @@ struct VoxelPush {
     uint level_count;
     uint bricks_per_axis;
     float4 background;  // linear
+    uint light;         // write descriptor of the voxel light pool
+    uint light_on;      // 1: lit by global illumination
+    uint2 pad;
 };
 ConstantBuffer<VoxelPush> push : register(b0);
 
@@ -40,12 +44,18 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     w.stand_ins = 0u; // every voxel
     float t;
     uint packed;
-    if (march_voxels(w, dir, f.near_plane, 3.0e38, float4(0.0, 0.0, 0.0, -1.0), t, packed)) {
+    uint where;
+    if (march_voxels(w, dir, f.near_plane, 3.0e38, float4(0.0, 0.0, 0.0, -1.0), t, packed, where)) {
         const float3 normal = unpack_normal(packed);
         const float3 albedo = unpack_color(packed);
-        const float3 sun = f.sun_light.xyz * max(dot(normal, f.sun_direction.xyz), 0.0);
-        const float3 ambient = lerp(f.ground_light.xyz, f.sky_light.xyz, normal.y * 0.5 + 0.5);
-        const float3 lit = albedo * (sun + ambient) * f.exposure;
+        float3 lit;
+        if (push.light_on != 0u) {
+            lit = voxel_radiance(f, packed, write_buffer(push.light).Load(where * 4)) * f.exposure;
+        } else {
+            const float3 sun = f.sun_light.xyz * max(dot(normal, f.sun_direction.xyz), 0.0);
+            const float3 ambient = lerp(f.ground_light.xyz, f.sky_light.xyz, normal.y * 0.5 + 0.5);
+            lit = albedo * (sun + ambient) * f.exposure;
+        }
         return float4(lit / (1.0 + lit), 1.0); // simple tone map: a debug view
     }
     return float4(push.background.rgb, 1.0);
