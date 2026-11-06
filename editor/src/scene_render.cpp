@@ -150,6 +150,7 @@ void start_over(const world::Scene& scene, SceneFrame& out) {
     out.order.clear();
     out.instances.clear(); // laid out afresh
     out.free.clear();
+    out.pieces.clear();
     for (const world::Entity& e : scene.entities()) {
         const world::CellCoord c = world::cell_of(e.transform.position);
         out.grid[c].ids.push_back(e.id);
@@ -159,10 +160,15 @@ void start_over(const world::Scene& scene, SceneFrame& out) {
 
 const render::Instance k_hole{{}, {}, {1.0f, 1.0f, 1.0f}, render::k_no_mesh, 0};
 
-// Makes [first, first + count) a hole, joined to the holes beside it.
+// Makes [first, first + count) a hole. For finding room it joins the
+// holes beside it; it is sent as a piece of its own, which keeps its
+// place and version until a cell takes it, so the renderer looks at a
+// hole once, when it is made (pieces are never larger than the cell that
+// left them).
 void release(SceneFrame& out, u32 first, u32 count) {
     if (count == 0) return;
     std::fill_n(out.instances.begin() + first, count, k_hole);
+    out.pieces[first] = {count, new_version()};
     auto next = out.free.lower_bound(first);
     if (next != out.free.end() && next->first == first + count) {
         count += next->second.count;
@@ -176,7 +182,22 @@ void release(SceneFrame& out, u32 first, u32 count) {
             out.free.erase(before);
         }
     }
-    out.free[first] = {count, new_version()};
+    out.free[first] = {count, 0};
+}
+
+// [first, first + count), part of a hole, taken by a cell: the pieces in
+// it go, and one cut by its end leaves the rest as a new piece.
+void take(SceneFrame& out, u32 first, u32 count) {
+    const u32 end = first + count;
+    auto it = out.pieces.lower_bound(first);
+    while (it != out.pieces.end() && it->first < end) {
+        const u32 piece_end = it->first + it->second.count;
+        it = out.pieces.erase(it);
+        if (piece_end > end) {
+            out.pieces[end] = {piece_end - end, new_version()};
+            break;
+        }
+    }
 }
 
 // Puts the cell's instances in its place, finding it a new one (the first
@@ -196,10 +217,13 @@ void place(SceneFrame& out, SceneFrame::Cell& cell) {
             cell.first = it->first;
             const u32 rest = it->second.count - cell.capacity;
             out.free.erase(it);
-            if (rest > 0) out.free[cell.first + cell.capacity] = {rest, new_version()};
+            if (rest > 0) out.free[cell.first + cell.capacity] = {rest, 0};
+            take(out, cell.first, cell.capacity);
             break;
         }
-        if (cell.first == out.instances.size()) {
+        if (cell.capacity == 0) {
+            cell.first = 0; // an empty place tiles anywhere, and holes never merge around it there
+        } else if (cell.first == out.instances.size()) {
             out.instances.resize(out.instances.size() + cell.capacity, k_hole);
         }
     }
@@ -382,11 +406,13 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         // most a quarter of it, and four).
         usize holes = 0;
         for (const auto& [first, block] : out.free) holes += block.count;
-        all = holes > std::max(out.holes_allowed, out.instances.size() / 2);
+        all = holes > std::max(out.holes_allowed, out.instances.size() / 2) ||
+              (holes > 0 && out.instances.size() > render::k_max_instances); // holes must not push cells past it
     }
     if (all) {
         out.instances.clear();
         out.free.clear();
+        out.pieces.clear();
         for (const world::CellCoord coord : out.order) {
             SceneFrame::Cell& cell = out.grid.at(coord);
             cell.placed = false;
@@ -397,8 +423,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     for (const auto& [coord, cell] : out.grid) {
         out.cells.push_back({cell.first, cell.capacity, cell.version}); // empty ones too (decals only)
     }
-    for (const auto& [first, block] : out.free) {
-        out.cells.push_back({first, block.count, block.version});
+    for (const auto& [first, piece] : out.pieces) {
+        out.cells.push_back({first, piece.count, piece.version});
     }
     std::sort(out.cells.begin(), out.cells.end(),
               [](const render::CellRange& a, const render::CellRange& b) {

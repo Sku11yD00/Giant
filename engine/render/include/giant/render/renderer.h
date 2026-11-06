@@ -196,6 +196,10 @@ struct RenderSettings {
 };
 
 // A run of FrameInput::instances that changes together (a world cell).
+// Instances one frame draws at most (instance culling is one dispatch of
+// 65535 groups of 64); the ones past it are not drawn.
+inline constexpr u32 k_max_instances = 65535u * 64u;
+
 struct CellRange {
     u32 first = 0;
     u32 count = 0;

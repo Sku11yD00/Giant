@@ -211,11 +211,13 @@ cell's work, not the world's:
   drawn) rebuild everything. Each cell keeps its place in the instance
   list from frame to frame (N3 part 3b): a cell that goes leaves a hole
   (instances with no mesh, which nothing draws, sent as a cell of its
-  own, joined with the holes beside it), a new cell takes the first hole
-  it fits or the end, and a cell that outgrows its place moves, with a
+  own that keeps its place and version until a cell takes it, so the
+  renderer looks at it once; joined with the holes beside it to find
+  room), a new cell takes the first hole it fits or the end (an empty
+  cell sits at 0), and a cell that outgrows its place moves, with a
   quarter more room. So cells coming and going (streaming) leave the
   others where they are. When holes no cell has pass half the list (and
-  4096), and on a new scene, the list is laid out afresh, end to end, by
+  4096), or would push the list past `render::k_max_instances`, and on a new scene, the list is laid out afresh, end to end, by
   z then x (within a cell by id). `FrameInput::cells` covers the list
   end to end: each cell's (and hole's) place, size and version (new on
   every rebuild).

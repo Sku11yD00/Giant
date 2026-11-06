@@ -55,7 +55,9 @@ bool InstanceStore::ensure(u32 instances, u32 cells, bool& fresh) {
     fresh = true;
     // Room to grow by half, so a world filling up does not reupload every frame.
     const u32 icap = std::max<u32>(1024, instances + instances / 2);
-    const u32 ccap = std::max<u32>(64, cells + cells / 2 + 1);
+    // Anchors are 16 bytes: plenty of room, so cells and holes coming and
+    // going rarely make a new buffer (which uploads everything again).
+    const u32 ccap = std::max<u32>(4096, cells * 2 + 1);
     const u64 anchors = u64{icap} * sizeof(gpu::Instance);
     const u64 skip = anchors + u64{ccap} * 16;
     const u64 size = skip + u64{(icap + 31) / 32} * 4;

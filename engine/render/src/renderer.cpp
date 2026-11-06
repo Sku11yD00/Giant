@@ -29,9 +29,8 @@ namespace {
 constexpr u32 k_queue_capacity = 1u << 19;    // (instance, node) items per tree level
 constexpr u32 k_visible_capacity = 1u << 20;  // clusters drawn per frame
 constexpr u32 k_occluded_capacity = 1u << 18; // clusters retested in the second pass
-// Instance culling is one dispatch (65535 groups of 64). The instances
-// live in the InstanceStore, uploaded in chunks.
-constexpr u32 k_max_instances = 65535u * 64u;
+// The instances live in the InstanceStore, uploaded in chunks
+// (k_max_instances: renderer.h).
 constexpr u32 k_vertices_per_cluster = geometry::k_cluster_max_triangles * 3;
 constexpr u32 k_max_materials = 1u << 20; // per frame (32 MiB)
 constexpr u32 k_max_mesh_groups = 65535; // per dimension of a mesh dispatch

@@ -158,7 +158,8 @@ GIANT_TEST("scene cells: a new cell with only decals is laid out") {
     stamp.transform.position = {200.0, 0.0, 200.0};
     c.scene.add(stamp);
     c.build();
-    GIANT_CHECK(c.frame.decals.size() == 1 && c.frame.cells.size() == 2 && c.frame.cells[1].count == 0);
+    GIANT_CHECK(c.frame.decals.size() == 1 && c.frame.cells.size() == 2);
+    GIANT_CHECK(c.frame.cells[0].count == 0 || c.frame.cells[1].count == 0); // the decal cell, empty
 }
 
 GIANT_TEST("scene cells: cells coming and going leave the others where they are") {
@@ -225,4 +226,66 @@ GIANT_TEST("scene cells: too many holes and the list is laid out again") {
     c.scene.remove_many(std::vector<world::EntityId>{ids[6], ids[7], ids[8]});
     c.build();
     GIANT_CHECK(c.frame.instances.size() == 3 && c.live().size() == 3); // 9: laid out again
+}
+
+GIANT_TEST("scene cells: an empty cell never sits inside a hole") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    std::vector<world::EntityId> left, right;
+    for (int k = 0; k < 10; ++k) left.push_back(c.add(10.0 + k, 10.0));
+    world::Entity stamp;
+    stamp.shape = world::Shape::decal;
+    stamp.transform.position = {80.0, 0.0, 10.0}; // cell (1, 0): decals only
+    c.scene.add(stamp);
+    for (int k = 0; k < 10; ++k) right.push_back(c.add(140.0 + k, 10.0));
+    c.build();
+    const auto tiles = [&] {
+        u32 next = 0;
+        for (const render::CellRange& r : c.frame.cells) {
+            if (r.first != next) return false;
+            next += r.count;
+        }
+        return next == c.frame.instances.size();
+    };
+    GIANT_CHECK(tiles());
+    c.scene.remove_many(left);
+    c.build();
+    GIANT_CHECK(tiles());
+    c.scene.remove_many(right); // the holes either side of where the empty cell was join
+    c.build();
+    GIANT_CHECK(tiles() && c.frame.decals.size() == 1);
+    c.add(20.0, 500.0);
+    c.build();
+    GIANT_CHECK(tiles());
+}
+
+GIANT_TEST("scene cells: a hole is sent once, and stays as it is while holes beside it come and go") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    std::vector<std::vector<world::EntityId>> cells(4);
+    for (int x = 0; x < 4; ++x) {
+        for (int k = 0; k < 5; ++k) cells[static_cast<usize>(x)].push_back(c.add(10.0 + 64.0 * x + k, 10.0));
+    }
+    c.build();
+    const auto range_at = [&](u32 first) {
+        for (const render::CellRange& r : c.frame.cells) {
+            if (r.first == first && r.count > 0) return r;
+        }
+        return render::CellRange{};
+    };
+    c.scene.remove_many(cells[1]); // [5, 10) becomes a hole
+    c.build();
+    const render::CellRange hole = range_at(5);
+    GIANT_CHECK(hole.count == 5);
+    c.scene.remove_many(cells[2]); // [10, 15) too, beside it
+    c.build();
+    const render::CellRange kept = range_at(5);
+    GIANT_CHECK(kept.count == 5 && kept.version == hole.version);
+    // A cell of 7 takes the first 7 of the 10: the piece it cut is new,
+    // and no bigger than what was left of it.
+    for (int k = 0; k < 7; ++k) c.add(10.0 + k, 600.0);
+    c.build();
+    const render::CellRange rest = range_at(12);
+    GIANT_CHECK(rest.count == 3 && rest.version != kept.version);
+    GIANT_CHECK(c.frame.instances.size() == 20 && c.live().size() == 17);
 }

@@ -61,14 +61,18 @@ struct SceneFrame {
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> grid;
     std::unordered_map<world::EntityId, world::CellCoord> where; // entity -> its cell
     std::vector<world::CellCoord> order;                          // cells by z, then x (decals go so)
-    // Holes in `instances` no cell has (first -> size, version), sent as
-    // cells of their own. Past holes_allowed (and half the list) holes in
-    // all, the list is laid out again end to end.
+    // Holes in `instances` no cell has (first -> size), joined, to find
+    // room in; and the same holes as sent to the renderer, as cells of
+    // their own: one piece per place a cell left (first -> size, version),
+    // kept until a cell takes it. Past holes_allowed (and half the list)
+    // holes in all, or with the list past render::k_max_instances, it is
+    // laid out again end to end.
     struct Free {
         u32 count = 0;
         u64 version = 0;
     };
     std::map<u32, Free> free;
+    std::map<u32, Free> pieces;
     usize holes_allowed = 4096;
     std::vector<world::CellCoord> rebuilt; // scratch
     std::vector<world::Kit> kits;                                 // as last built
