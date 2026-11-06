@@ -229,11 +229,71 @@ cell's work, not the world's:
   instance and skips the unset ones; instances are addressed by their
   place in the frame everywhere. Per frame that is a bit per instance
   instead of 64 bytes.
+- **Worlds stream by cell (N3 part 3, `editor/src/world_streaming.h`).** A
+  world is a folder: `world.json` (`world::WorldIndex`: lighting, kits,
+  the meshes its cells use, which cells have a file, the next id) and
+  `cells/<x>_<z>.cell.json`, one per cell with entities (`world::save_cell`:
+  sorted by id, so an unchanged cell saves the same text). Cells with any
+  part within `load_radius` of the camera are read and parsed on a worker
+  thread, nearest first, a few at a time; the main thread adds whole
+  parsed cells to the scene up to `entities_per_frame` a frame and never
+  waits on disk. Every `unload_every` frames, loaded cells past
+  `load_radius + unload_margin` are let go, but only when what the scene
+  holds of the cell is, entity for entity, what its file held (kept in
+  memory while loaded): a cell with unsaved edits stays loaded until
+  `save_world`. An
+  entity moved (or put back by an undo) into a cell still on disk makes
+  that cell load at once, and an entity id already in the scene is
+  skipped when its cell loads (the scene's copy is newer). Saving writes
+  only cells whose entities changed, through a temporary file and a
+  rename, after `world.json` (with a next id past every id about to be
+  written, and every cell about to have a file: a listed file that is
+  missing loads as an empty cell); a cell on disk that the scene has
+  entities in is merged with its file. An id met in a cell's file that
+  the scene holds elsewhere, and was not read from that cell, is a clash
+  (two files share it, or a new entity took it): the file's entity gets a
+  new id, so neither is lost. Streaming runs only while the scene is the
+  world's (`new_scene`, `load_scene` or undoing `open_world` pause it;
+  undoing them resumes it). What streaming knows of the world's scene is
+  kept with each copy of it an undo step holds (`WorldStreaming::memo`),
+  taken when the undo or redo leaves that scene (unless a script replaced
+  it since: a script's scene is never kept), so the copy put back is the
+  scene as it was left, cells loaded since included. Which cells have a
+  file stays as it is now; a cell whose file was written since the memo
+  was taken is read again and merged, and the ids saved since are never
+  handed out again. An entity's cell of origin is kept when its cell
+  unloads, so an entity a redo puts back is never copied from the file it
+  was saved to since (this costs about 40 bytes per entity met since the
+  world opened: a later part bounds it), and a save writes again, without
+  it, the file on disk of a cell an entity has left. Ids any of the
+  world's scenes has handed out are never handed out again by another
+  undo side. A save keeps the bookkeeping true to each file as it writes
+  it, so one cut short by an error loses nothing either; a
+  scene replaced any other way stops streaming. Opening another world is
+  refused while the open one has unsaved edits, or its scene is replaced
+  (it may be in the undo history), unless they are given up. The main thread does no work
+  per frame that grows with the world: the cells to read are worked out
+  again only when the camera enters another cell or a cell goes back on
+  disk, and counts and the loaded cells are kept as they change. Loaded
+  cells also keep their file's entities in memory (twice the entity
+  memory of what is loaded). A material falling out of use no longer
+  rebuilds every cell: unused entries stay in the table until they
+  outnumber the used ones (and 256).
 - **Known limits, next parts.** The CPU still looks at every instance each
   frame to decide which are drawn (mesh ready, far field) and which cast
-  shadows: cheap per instance, but whole-cell tests come next. Part 3
-  streams cells from disk around the camera. Decals overlapping across a
-  cell border draw in cell order, not the outliner's.
+  shadows: cheap per instance, but whole-cell tests come next. Streamed
+  out cells are gone from the voxel far field too (cells need saved voxel
+  stand-ins for that, later). A cell joining or leaving the scene shifts
+  the instances after it (cells go by z, then x), so the voxel world and
+  the GPU store see a new layout and redo everything: while cells stream
+  the voxel world keeps rebuilding. The next part keeps the layout stable
+  as cells come and go. Meshes are imported when a world opens (the
+  index lists them), not as cells stream. Unloading a cell is one
+  `Scene::remove_many`, a pass over the scene's entities, and the unload
+  look walks the loaded cells. Undoing an edit to a cell that was saved
+  and unloaded since does nothing. A world cannot yet be saved to another folder, and its kits cannot
+  be deleted while some cells are not loaded. Decals overlapping across a cell border draw in cell
+  order, not the outliner's.
 
 ## Window events (known limit)
 
@@ -580,8 +640,17 @@ over the target frame time). Where it stands:
   table, when it grows, is uploaded outside the streaming budget (rare: on
   doubling, and small); the editor's mesh import runs between frames, so
   its `add_mesh` still takes the load-time path that waits for the GPU, and
-  it reads and clusters files on the main thread (editor only today; both
-  move into the frame and onto jobs with cell streaming, N3).
+  it reads and clusters files on the main thread (editor only today; a
+  streamed world imports every mesh it lists when it opens, so cells never
+  import while streaming; moving imports onto jobs is still to come).
+  World streaming (N3 part 3): unloading cells is one `Scene::remove_many`,
+  a pass over the scene's entities (a few milliseconds at tens of
+  thousands of entities, once every `unload_every` frames that unloads
+  anything; entities should stay in the tens of thousands per loaded
+  area, with scatter for the rest), and a
+  cell joining or leaving relays out the instance list (see "World
+  cells"). `save_world` and `open_world` are commands, not frames: they
+  wait for reads in flight and read or write files on the main thread.
 
 | GPU work | Budget |
 | --- | --- |

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <limits>
 #include <set>
+#include <unordered_map>
 
 namespace giant::world {
 
@@ -210,19 +211,25 @@ std::vector<Scene::Removed> Scene::remove_many(std::span<const EntityId> ids) {
         return removed;
     }
     removed.reserve(doomed.size());
-    std::vector<Entity> kept;
-    kept.reserve(m_entities.size() - doomed.size());
+    // Compacted in place (keeping the capacity, so adding after a removal
+    // does not grow the list again); only what moved is reindexed.
+    usize first = m_entities.size();
+    usize kept = 0;
     for (usize i = 0; i < m_entities.size(); ++i) {
         if (doomed.contains(m_entities[i].id)) {
             m_index.erase(m_entities[i].id);
             changed(m_entities[i].id);
             removed.push_back({std::move(m_entities[i]), i});
+            first = std::min(first, i);
         } else {
-            kept.push_back(std::move(m_entities[i]));
+            if (kept != i) {
+                m_entities[kept] = std::move(m_entities[i]);
+            }
+            ++kept;
         }
     }
-    m_entities = std::move(kept);
-    reindex(0);
+    m_entities.erase(m_entities.begin() + static_cast<std::ptrdiff_t>(kept), m_entities.end());
+    reindex(first);
     return removed;
 }
 
@@ -321,15 +328,8 @@ void write_look(Json& out, Shape shape, const std::string& mesh, const std::stri
     }
 }
 
-} // namespace
-
-std::string save_scene(const Scene& scene) {
-    const Lighting& l = scene.lighting;
-    Json out;
-    out["format"] = k_format;
-    out["version"] = k_version;
-    out["next_id"] = scene.next_id();
-    out["lighting"] = {
+Json lighting_json(const Lighting& l) {
+    return {
         {"sun_elevation_degrees", l.sun_elevation_degrees},
         {"sun_azimuth_degrees", l.sun_azimuth_degrees},
         {"sun_color", vec3_json(l.sun_color)},
@@ -339,24 +339,42 @@ std::string save_scene(const Scene& scene) {
         {"ambient_intensity", l.ambient_intensity},
         {"exposure", l.exposure},
     };
-    Json kits = Json::array();
-    for (const Kit& k : scene.kits) {
+}
+
+Json kits_json(std::span<const Kit> kits) {
+    Json out = Json::array();
+    for (const Kit& k : kits) {
         Json pieces = Json::array();
         for (const KitPiece& p : k.pieces) {
             Json piece = {{"name", p.name}};
             write_look(piece, p.shape, p.mesh, {}, p.transform, p.material, p.decal);
             pieces.push_back(std::move(piece));
         }
-        kits.push_back({{"name", k.name}, {"pieces", std::move(pieces)}});
+        out.push_back({{"name", k.name}, {"pieces", std::move(pieces)}});
     }
-    if (!kits.empty()) {
-        out["kits"] = std::move(kits);
+    return out;
+}
+
+Json entity_json(const Entity& e) {
+    Json entity = {{"id", e.id}, {"name", e.name}, {"visible", e.visible}};
+    write_look(entity, e.shape, e.mesh, e.kit, e.transform, e.material, e.decal);
+    return entity;
+}
+
+} // namespace
+
+std::string save_scene(const Scene& scene) {
+    Json out;
+    out["format"] = k_format;
+    out["version"] = k_version;
+    out["next_id"] = scene.next_id();
+    out["lighting"] = lighting_json(scene.lighting);
+    if (!scene.kits.empty()) {
+        out["kits"] = kits_json(scene.kits);
     }
     Json entities = Json::array();
     for (const Entity& e : scene.entities()) {
-        Json entity = {{"id", e.id}, {"name", e.name}, {"visible", e.visible}};
-        write_look(entity, e.shape, e.mesh, e.kit, e.transform, e.material, e.decal);
-        entities.push_back(std::move(entity));
+        entities.push_back(entity_json(e));
     }
     out["entities"] = std::move(entities);
     return out.dump(2) + "\n";
@@ -653,27 +671,85 @@ void read_kit(const Json& json, const std::string& path, Kit& k, std::string& er
     r.finish();
 }
 
-} // namespace
-
-std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
-    Json json;
+// The JSON in `text`, or why it is not JSON.
+std::optional<LoadError> parse(std::string_view text, Json& json) {
     try {
         json = Json::parse(text);
     } catch (const nlohmann::json::parse_error& e) {
         return LoadError{std::string("not valid JSON: ") + e.what()};
     }
-    std::string error;
-    Reader root(json, "", error);
+    return std::nullopt;
+}
+
+// "format" and "version" (1) of a giant text file.
+void read_header(Reader& root, const char* format_name, const char* what) {
     std::string format;
     root.string("format", format, true);
-    if (root.ok() && format != k_format) {
-        root.fail("format", "must be \"giant-scene\"");
+    if (root.ok() && format != format_name) {
+        root.fail("format", std::string("must be \"") + format_name + "\"");
     }
     if (const Json* version = root.get("version", true); version != nullptr && root.ok()) {
         if (!version->is_number_integer() || version->get<i64>() != k_version) {
-            root.fail("version", "must be 1 (this editor reads version 1 scenes)");
+            root.fail("version", std::string("must be 1 (this editor reads version 1 ") + what + ")");
         }
     }
+}
+
+void read_kits(Reader& root, std::vector<Kit>& out, std::string& error) {
+    const Json* kits = root.get("kits", false);
+    if (kits == nullptr || !root.ok()) {
+        return;
+    }
+    if (!kits->is_array()) {
+        root.fail("kits", "must be an array");
+        return;
+    }
+    for (usize i = 0; i < kits->size() && error.empty(); ++i) {
+        const std::string path = "kits[" + std::to_string(i) + "]";
+        Kit kit;
+        read_kit((*kits)[i], path, kit, error);
+        if (error.empty() &&
+            std::any_of(out.begin(), out.end(), [&](const Kit& k) { return k.name == kit.name; })) {
+            error = path + ".name \"" + kit.name + "\" is used twice";
+        }
+        if (error.empty()) {
+            out.push_back(std::move(kit));
+        }
+    }
+}
+
+// Calls `take` with each entity of the "entities" array, read strictly;
+// `take` returns an error to stop.
+template <typename Take>
+void read_entities(Reader& root, std::string& error, Take take) {
+    const Json* entities = root.get("entities", false);
+    if (entities == nullptr || !root.ok()) {
+        return;
+    }
+    if (!entities->is_array()) {
+        root.fail("entities", "must be an array");
+        return;
+    }
+    for (usize i = 0; i < entities->size() && error.empty(); ++i) {
+        const std::string path = "entities[" + std::to_string(i) + "]";
+        Entity entity;
+        read_entity((*entities)[i], path, entity, error);
+        if (error.empty()) {
+            error = take(path, std::move(entity));
+        }
+    }
+}
+
+} // namespace
+
+std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
+    Json json;
+    if (auto bad = parse(text, json)) {
+        return bad;
+    }
+    std::string error;
+    Reader root(json, "", error);
+    read_header(root, k_format, "scenes");
     u64 next_id = 1;
     root.id("next_id", next_id, false, k_max_entity_id + 1); // one past the last id
 
@@ -681,43 +757,17 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     if (const Json* lighting = root.get("lighting", false); lighting != nullptr && root.ok()) {
         read_lighting(*lighting, scene.lighting, error);
     }
-    if (const Json* kits = root.get("kits", false); kits != nullptr && root.ok()) {
-        if (!kits->is_array()) {
-            root.fail("kits", "must be an array");
-        } else {
-            for (usize i = 0; i < kits->size() && error.empty(); ++i) {
-                const std::string path = "kits[" + std::to_string(i) + "]";
-                Kit kit;
-                read_kit((*kits)[i], path, kit, error);
-                if (error.empty() && scene.find_kit(kit.name) != nullptr) {
-                    error = path + ".name \"" + kit.name + "\" is used twice";
-                }
-                if (error.empty()) {
-                    scene.kits.push_back(std::move(kit));
-                }
-            }
+    read_kits(root, scene.kits, error);
+    read_entities(root, error, [&](const std::string& path, Entity entity) -> std::string {
+        if (scene.find(entity.id) != nullptr) {
+            return path + ".id " + std::to_string(entity.id) + " is used twice";
         }
-    }
-    if (const Json* entities = root.get("entities", false); entities != nullptr && root.ok()) {
-        if (!entities->is_array()) {
-            root.fail("entities", "must be an array");
-        } else {
-            for (usize i = 0; i < entities->size() && error.empty(); ++i) {
-                const std::string path = "entities[" + std::to_string(i) + "]";
-                Entity entity;
-                read_entity((*entities)[i], path, entity, error);
-                if (error.empty() && scene.find(entity.id) != nullptr) {
-                    error = path + ".id " + std::to_string(entity.id) + " is used twice";
-                }
-                if (error.empty() && entity.shape == Shape::kit && scene.find_kit(entity.kit) == nullptr) {
-                    error = path + ".kit \"" + entity.kit + "\" is not one of the scene's kits";
-                }
-                if (error.empty()) {
-                    scene.add(std::move(entity));
-                }
-            }
+        if (entity.shape == Shape::kit && scene.find_kit(entity.kit) == nullptr) {
+            return path + ".kit \"" + entity.kit + "\" is not one of the scene's kits";
         }
-    }
+        scene.add(std::move(entity));
+        return {};
+    });
     root.finish();
     if (!error.empty()) {
         return LoadError{std::move(error)};
@@ -725,6 +775,171 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     // A hand-edited next_id that is too low must not hand out used ids.
     scene.reserve_ids_below(next_id);
     out = std::move(scene);
+    return std::nullopt;
+}
+
+// --- Worlds -----------------------------------------------------------------------
+
+namespace {
+
+constexpr const char* k_world_format = "giant-world";
+constexpr const char* k_cell_format = "giant-cell";
+
+Json cell_json(CellCoord c) { return Json::array({c.x, c.z}); }
+
+// A [x, z] pair of whole numbers in i32.
+std::optional<CellCoord> read_cell(const Json& v) {
+    if (!v.is_array() || v.size() != 2 || !v[0].is_number_integer() || !v[1].is_number_integer()) {
+        return std::nullopt;
+    }
+    const i64 x = v[0].get<i64>();
+    const i64 z = v[1].get<i64>();
+    const i64 lo = std::numeric_limits<i32>::min();
+    const i64 hi = std::numeric_limits<i32>::max();
+    if (x < lo || x > hi || z < lo || z > hi) {
+        return std::nullopt;
+    }
+    return CellCoord{static_cast<i32>(x), static_cast<i32>(z)};
+}
+
+} // namespace
+
+std::string cell_file_name(CellCoord cell) {
+    return std::to_string(cell.x) + "_" + std::to_string(cell.z) + ".cell.json";
+}
+
+std::string save_world_index(const WorldIndex& world) {
+    Json out;
+    out["format"] = k_world_format;
+    out["version"] = k_version;
+    out["next_id"] = world.next_id;
+    out["lighting"] = lighting_json(world.lighting);
+    if (!world.kits.empty()) {
+        out["kits"] = kits_json(world.kits);
+    }
+    std::vector<std::string> meshes = world.meshes;
+    std::sort(meshes.begin(), meshes.end());
+    meshes.erase(std::unique(meshes.begin(), meshes.end()), meshes.end());
+    out["meshes"] = meshes;
+    std::vector<CellCoord> cells = world.cells;
+    const auto by_zx = [](CellCoord a, CellCoord b) { return a.z != b.z ? a.z < b.z : a.x < b.x; };
+    std::sort(cells.begin(), cells.end(), by_zx);
+    cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+    Json list = Json::array();
+    for (const CellCoord c : cells) {
+        list.push_back(cell_json(c));
+    }
+    out["cells"] = std::move(list);
+    return out.dump(2) + "\n";
+}
+
+std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out) {
+    Json json;
+    if (auto bad = parse(text, json)) {
+        return bad;
+    }
+    std::string error;
+    Reader root(json, "", error);
+    read_header(root, k_world_format, "worlds");
+    WorldIndex world;
+    root.id("next_id", world.next_id, false, k_max_entity_id + 1);
+    if (const Json* lighting = root.get("lighting", false); lighting != nullptr && root.ok()) {
+        read_lighting(*lighting, world.lighting, error);
+    }
+    read_kits(root, world.kits, error);
+    if (const Json* meshes = root.get("meshes", false); meshes != nullptr && root.ok()) {
+        if (!meshes->is_array()) {
+            root.fail("meshes", "must be an array of paths");
+        }
+        for (usize i = 0; root.ok() && i < meshes->size(); ++i) {
+            const Json& m = (*meshes)[i];
+            if (!m.is_string() || m.get_ref<const std::string&>().empty() ||
+                m.get_ref<const std::string&>().size() > k_max_mesh_path_bytes) {
+                root.fail("meshes[" + std::to_string(i) + "]", "must be a path of 1 to " +
+                                                                  std::to_string(k_max_mesh_path_bytes) + " bytes");
+            } else {
+                world.meshes.push_back(m.get<std::string>());
+            }
+        }
+    }
+    if (const Json* cells = root.get("cells", true); cells != nullptr && root.ok()) {
+        if (!cells->is_array()) {
+            root.fail("cells", "must be an array of [x, z] cells");
+        }
+        std::unordered_map<CellCoord, bool, CellCoordHash> seen;
+        for (usize i = 0; root.ok() && i < cells->size(); ++i) {
+            const std::string key = "cells[" + std::to_string(i) + "]";
+            const auto c = read_cell((*cells)[i]);
+            if (!c) {
+                root.fail(key, "must be [x, z], two whole numbers");
+            } else if (!seen.emplace(*c, true).second) {
+                root.fail(key, "is listed twice");
+            } else {
+                world.cells.push_back(*c);
+            }
+        }
+    }
+    root.finish();
+    if (!error.empty()) {
+        return LoadError{std::move(error)};
+    }
+    out = std::move(world);
+    return std::nullopt;
+}
+
+std::string save_cell(CellCoord cell, std::span<const Entity> entities) {
+    std::vector<const Entity*> sorted;
+    sorted.reserve(entities.size());
+    for (const Entity& e : entities) {
+        sorted.push_back(&e);
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const Entity* a, const Entity* b) { return a->id < b->id; });
+    Json out;
+    out["format"] = k_cell_format;
+    out["version"] = k_version;
+    out["cell"] = cell_json(cell);
+    Json list = Json::array();
+    for (const Entity* e : sorted) {
+        list.push_back(entity_json(*e));
+    }
+    out["entities"] = std::move(list);
+    return out.dump(2) + "\n";
+}
+
+std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::vector<Entity>& out) {
+    Json json;
+    if (auto bad = parse(text, json)) {
+        return bad;
+    }
+    std::string error;
+    Reader root(json, "", error);
+    read_header(root, k_cell_format, "cells");
+    if (const Json* c = root.get("cell", true); c != nullptr && root.ok()) {
+        const auto read = read_cell(*c);
+        if (!read || !(*read == cell)) {
+            root.fail("cell", "must be [" + std::to_string(cell.x) + ", " + std::to_string(cell.z) +
+                                  "], the cell its file name says");
+        }
+    }
+    std::vector<Entity> entities;
+    std::unordered_map<EntityId, bool> ids;
+    read_entities(root, error, [&](const std::string& path, Entity entity) -> std::string {
+        if (!ids.emplace(entity.id, true).second) {
+            return path + ".id " + std::to_string(entity.id) + " is used twice";
+        }
+        if (!(cell_of(entity.transform.position) == cell)) {
+            return path + ".position is not in cell [" + std::to_string(cell.x) + ", " +
+                   std::to_string(cell.z) + "] (cells are " + std::to_string(static_cast<int>(k_cell_size)) +
+                   " m on x and z)";
+        }
+        entities.push_back(std::move(entity));
+        return {};
+    });
+    root.finish();
+    if (!error.empty()) {
+        return LoadError{std::move(error)};
+    }
+    out = std::move(entities);
     return std::nullopt;
 }
 

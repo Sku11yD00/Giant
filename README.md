@@ -142,8 +142,14 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   frame, and a frame sends only the squares that changed, plus a few bytes
   a square, instead of every object every frame. Positions are kept
   relative to their square, so they stay exact to well under a millimetre
-  anywhere in a huge world. Loading squares from disk around the camera
-  comes next.
+  anywhere in a huge world.
+- Part 3: worlds load from disk around the camera. A world is a folder
+  with one small text file per 64 m square (`save_world` makes one from a
+  scene, `open_world` opens it). Squares near the camera are read on a
+  background thread and join a few thousand objects a frame, and far ones
+  are let go, so a world can be far bigger than memory. A square with
+  edits you have not saved never unloads, however far you fly, so nothing
+  is lost; `save_world` writes only the squares that changed.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

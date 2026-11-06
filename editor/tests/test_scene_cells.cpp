@@ -105,7 +105,18 @@ GIANT_TEST("scene cells: a kit change rebuilds the cells placing it, and unused 
     GIANT_CHECK(c.frame.cells[1].version == before[1].version);
     GIANT_CHECK(c.frame.instances[0].scale.x == 2.0f);
 
-    // The last green instance goes: the table is made again without it.
+    // The last green instance goes: its entry stays, unused (no rebuild of
+    // every cell for it)...
+    c.scene.modify(green)->material.base_color = {1.0f, 0.0f, 0.0f};
+    c.build();
+    GIANT_CHECK(c.frame.materials.size() == 3 && c.frame.cells_rebuilt == 1);
+    // ...until unused entries pass the limit: the table is made again.
+    c.frame.compact_unused_over = 0;
+    c.scene.modify(green)->material.base_color = {0.0f, 0.0f, 1.0f};
+    c.build();
+    c.scene.modify(green)->material.base_color = {1.0f, 1.0f, 0.0f};
+    c.build();
+    GIANT_CHECK(c.frame.materials.size() == 5); // two unused, three used
     c.scene.modify(green)->material.base_color = {1.0f, 0.0f, 0.0f};
     c.build();
     GIANT_CHECK(c.frame.materials.size() == 2);

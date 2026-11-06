@@ -27,6 +27,7 @@ struct EditorCamera {
 };
 
 class MeshLibrary;
+class WorldStreaming;
 
 // The last few seconds of frame times, for get_engine_info (performance
 // checks such as the N1 gate run over MCP).
@@ -98,6 +99,9 @@ struct EditorState {
     // Imported meshes; set by main (and tests). Entities with shape mesh
     // name a file in it.
     MeshLibrary* meshes = nullptr;
+    // The world streamed by cell (open_world, save_world); set by main (and
+    // tests). Null: worlds are not available.
+    WorldStreaming* world = nullptr;
     // LOD error and debug view: view state, not undoable.
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
