@@ -34,6 +34,7 @@ gpu::Instance to_gpu(const Instance& in, const DVec3& anchor, u32 anchor_at, u32
     }
     out.mesh = in.mesh;
     out.material = in.material < material_count ? in.material : material_count; // the default, last
+    out.material |= in.always_mesh ? gpu::k_always_mesh_bit : 0u;
     out.max_scale = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
     out.anchor = anchor_at;
     return out;

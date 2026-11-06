@@ -214,7 +214,7 @@ Vec3 VoxelScene::color_of(const Instance& in, std::span<const Material> material
 bool VoxelScene::differs(const Instance& in, std::span<const Material> materials, const Copy& copy) const {
     const Instance& c = copy.instance;
     return !(in.position == c.position && in.rotation == c.rotation && in.scale == c.scale && in.mesh == c.mesh &&
-             in.material == c.material && color_of(in, materials) == copy.color);
+             in.material == c.material && in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color);
 }
 
 void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Material> materials,
@@ -225,7 +225,8 @@ void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Materia
     c.box = bounds_of(in, meshes);
     c.large = false;
     const MeshCache* m = c.box.empty() ? nullptr : mesh_cache(in.mesh, meshes);
-    c.stand_in = m != nullptr && m->mesh != nullptr && stand_in_radius_of(*m->mesh, in.scale) <= m_stand_in_radius;
+    c.stand_in = !in.always_mesh && m != nullptr && m->mesh != nullptr &&
+                 stand_in_radius_of(*m->mesh, in.scale) <= m_stand_in_radius;
 }
 
 float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale) {
@@ -245,7 +246,8 @@ void VoxelScene::set_stand_in_radius(float radius) {
         // The same rule as set_copy, from the copy's own instance.
         const auto it = m_meshes.find(c.instance.mesh);
         const geometry::ClusterMesh* mesh = it != m_meshes.end() ? it->second.mesh : nullptr;
-        const bool stand_in = !c.box.empty() && mesh != nullptr && stand_in_radius_of(*mesh, c.instance.scale) <= r;
+        const bool stand_in = !c.instance.always_mesh && !c.box.empty() && mesh != nullptr &&
+                              stand_in_radius_of(*mesh, c.instance.scale) <= r;
         any = any || stand_in != c.stand_in;
         c.stand_in = stand_in;
     }

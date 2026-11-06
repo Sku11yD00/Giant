@@ -9,6 +9,8 @@
 
 #include "giant/core/math.h"
 #include "giant/core/types.h"
+#include "giant/world/cell.h"
+#include "giant/world/terrain.h"
 
 #include <optional>
 #include <span>
@@ -121,24 +123,6 @@ struct Lighting {
 // A unit vector pointing towards the sun.
 Vec3 sun_direction(const Lighting& lighting);
 
-// The world is cut into square cells on the ground (x and z), k_cell_size
-// metres a side, cell (0, 0) spanning [0, k_cell_size) on both. An entity
-// belongs to the cell its position is in, whatever its size. What draws,
-// streams and is worked on together goes by cell, so a change to one
-// entity costs its cell's work, not the world's.
-constexpr double k_cell_size = 64.0;
-
-struct CellCoord {
-    i32 x = 0;
-    i32 z = 0;
-    bool operator==(const CellCoord&) const = default;
-};
-struct CellCoordHash {
-    usize operator()(const CellCoord& c) const;
-};
-// The cell a point is in (clamped to the range i32 holds).
-CellCoord cell_of(const DVec3& position);
-
 // What changed in a scene since its last take_changes().
 struct SceneChanges {
     // Entities added, removed or handed out by Scene::modify, oldest first
@@ -183,7 +167,7 @@ public:
     // In creation order (the outliner's order).
     const std::vector<Entity>& entities() const { return m_entities; }
     usize size() const { return m_entities.size(); }
-    void clear(); // entities only; lighting and kits are kept
+    void clear(); // entities only; lighting, kits and terrain are kept
 
     // Hands over what changed since the last call (kits, lighting and the
     // meshes entities name are not tracked: compare those). A scene
@@ -199,6 +183,8 @@ public:
     std::vector<Kit> kits;
     const Kit* find_kit(std::string_view name) const;
     Kit* find_kit(std::string_view name);
+    // The ground (terrain.h): it tracks its own changes (Terrain::take_changes).
+    Terrain terrain;
 
     // The id the next new entity gets.
     EntityId next_id() const { return m_next_id; }

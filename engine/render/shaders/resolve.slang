@@ -181,6 +181,7 @@ struct Hit {
     uint level;
     float3 center; // the instance's bounding sphere, camera-relative
     float radius;
+    bool always_mesh; // never a far-field stand-in (terrain tiles)
 };
 
 Hit no_hit() {
@@ -193,6 +194,7 @@ Hit no_hit() {
     h.level = 0;
     h.center = float3(0.0, 0.0, 0.0);
     h.radius = 0.0;
+    h.always_mesh = false;
     return h;
 }
 
@@ -225,6 +227,7 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     h.level = cluster.level;
     h.center = to_world(inst, mesh.bounds.xyz);
     h.radius = mesh.bounds.w * inst.max_scale;
+    h.always_mesh = inst.always_mesh;
     return h;
 }
 
@@ -387,7 +390,9 @@ Output shade_pixel(float4 position) {
         const float mesh_t = hit ? length(s.world) : 3.0e38;
         // A stand-in drawn as a mesh (straddling the distance, moving, or
         // not in the voxel world yet): its own voxels must not cover it.
-        const float4 skip = hit && s.radius <= extras.far_radius ? float4(s.center, s.radius)
+        // An always-mesh instance has none, and the stand-ins on it (trees
+        // on a terrain tile) must still show.
+        const float4 skip = hit && !s.always_mesh && s.radius <= extras.far_radius ? float4(s.center, s.radius)
                                                             : float4(0.0, 0.0, 0.0, -1.0);
         if (mesh_t > extras.far_start) {
             const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);

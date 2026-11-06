@@ -60,7 +60,9 @@ const char* mcp_instructions() {
            "set_entity and set_lighting, frame them with set_camera (look_at is easiest) and "
            "check the result with capture_screenshot. Imported models: create_entity with mesh "
            "(a .glb or .gltf path; imported on first use, or import_mesh first to see its "
-           "size); set_render_settings shows how LOD works (debug_view lod_levels). Units are "
+           "size); set_render_settings shows how LOD works (debug_view lod_levels). Ground: "
+           "create_terrain (flat or hills), then get_terrain with points gives heights to stand "
+           "things on. Units are "
            "metres and degrees; +Y is up, "
            "-Z is north. Colours are linear (not sRGB), each channel 0 to 1. Check `get_log` "
            "after a change for warnings and errors.";
@@ -68,6 +70,7 @@ const char* mcp_instructions() {
 
 void register_editor_commands(ai::CommandRegistry& registry, EditorState& state) {
     register_scene_commands(registry, state);
+    register_terrain_commands(registry, state);
     add(registry,
         {"get_engine_info",
          "Describes the running editor: version, graphics backend and adapter, whether the GPU "

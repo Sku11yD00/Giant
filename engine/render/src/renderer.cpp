@@ -1187,7 +1187,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const auto left_to_voxels = [&](u32 index, const Instance& in, const geometry::ClusterMesh* m) {
         const geometry::Sphere& bounds = m->bounds;
         const double radius = stand_in_radius_of(*m, in.scale);
-        if (!(radius <= far_radius)) {
+        if (in.always_mesh || !(radius <= far_radius)) {
             return false;
         }
         const Vec3 c = rotate(in.rotation, Vec3{bounds.center.x * in.scale.x, bounds.center.y * in.scale.y,

@@ -85,7 +85,10 @@ struct ClusterMesh {
 // Builds the hierarchy. Indices must be in range (asserted); degenerate
 // triangles and duplicate vertices are fine. An empty mesh gives an empty
 // result. Single-threaded: a few seconds per million triangles in release.
-ClusterMesh build_clusters(const TriangleMesh& mesh);
+// Vertices marked non-zero in `locked` (one per mesh vertex, or empty) keep
+// their place at every level: the edges of terrain tiles, which must meet
+// their neighbours' at any detail.
+ClusterMesh build_clusters(const TriangleMesh& mesh, std::span<const u8> locked = {});
 
 // Planes (xyz normal pointing inside, w offset) in camera-relative space.
 struct Frustum {

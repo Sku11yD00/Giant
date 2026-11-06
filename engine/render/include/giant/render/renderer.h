@@ -82,6 +82,10 @@ struct Instance {
     MeshId mesh = 0;
     // Into FrameInput::materials; out of range draws the default Material.
     u32 material = 0;
+    // Drawn as a mesh at every distance: the far field never stands in for
+    // it, however small (terrain tiles: each is small, together they are
+    // the ground and the skyline). It is still in the voxel world.
+    bool always_mesh = false;
 };
 
 // The mask a decal stamps (shapes for now; image stamps arrive with textures).

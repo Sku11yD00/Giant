@@ -308,6 +308,54 @@ cell's work, not the world's:
   be deleted while some cells are not loaded. Decals overlapping across a cell border draw in cell
   order, not the outliner's.
 
+## Terrain (N3 part 4)
+
+The ground is a height field (`world::Terrain`, `engine/world/include/giant/world/terrain.h`),
+cut into tiles, one per world cell, kept in `Scene::terrain`:
+
+- **Samples.** A tile holds `samples()` x `samples()` heights (8 to 128 a
+  side, a power of two: 8 m to 0.5 m apart; 64, 1 m, by default; set only
+  while there are no tiles), the first at its cell's corner. The surface's
+  last row and column come from the neighbours; `Terrain::sample(i, j)`
+  takes a height by whole-world sample number, from its tile or, when that
+  tile is missing, from the sample before it on x, z or both. It depends
+  on (i, j) alone, so every tile meeting at a point sees the same height
+  and normal there. `height_at(x, z)` is the surface exactly as the finest
+  mesh draws it (two triangles a square, split on the (0, 0)-(1, 1)
+  diagonal).
+- **Changes.** The terrain logs the tiles set, changed (`modify`) and
+  removed, as the scene logs entities (`take_changes`; a new, copied or
+  assigned terrain is "all").
+- **Meshes** (`editor/src/terrain_meshes.h`). Each frame `TerrainMeshes`
+  takes the changes, queues the changed tiles and their eight neighbours
+  (a tile's mesh reaches one sample into them), and builds a few a frame
+  on two worker threads: a snapshot of the heights is taken on the main
+  thread, the job makes the triangles and normals and runs
+  `geometry::build_clusters` with the tile's edge vertices locked
+  (`meshopt_SimplifyVertex_Lock`), so every level of detail keeps the
+  edge and tiles drawn at different detail meet without cracks. Finished
+  meshes are swapped in a few a frame (`add_mesh`; the old one keeps
+  drawing until then). A tile changed while it builds is built again with
+  the newest heights.
+- **Drawing.** `scene_frame` puts each built tile first in its cell, at
+  the cell's corner, with the terrain's material and
+  `render::Instance::always_mesh`: the far field never stands in for it
+  (the CPU never leaves it to the voxels, its voxels are not stand-ins,
+  and the resolve pass does not skip stand-in voxels around it, so far
+  trees on a tile still show). It is in the voxel world like any mesh, so
+  it casts shadows and takes part in GI and reflections. `always_mesh`
+  travels to the GPU in the top bit of `gpu::Instance::material`.
+- **Saved as text** with the scene (`"terrain"`: `samples`, `material`,
+  `tiles` of `cell` and `heights`, one string of numbers per row in the
+  shortest form that reads back exactly).
+- **Known limits, next parts.** Streamed worlds do not hold terrain yet
+  (`save_world` refuses a scene with terrain; terrain streaming is next,
+  with a coarse copy of far tiles so the whole world's ground need not be
+  in memory). Every tile is a full mesh in memory (CPU copy and cluster
+  data: about 0.4 MB a 1 m tile), so terrain is sized for a few thousand
+  tiles until then. One material for all of it; painted layers, sculpt
+  brushes, erosion and height map import come with the terrain editor.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

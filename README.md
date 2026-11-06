@@ -155,6 +155,14 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   that leaves is a gap the next one of its size fills), so squares
   streaming in and out cost only themselves, not the whole voxel world
   and GPU copy.
+- Part 4: terrain. The ground is a height field with one tile per 64 m
+  square (`create_terrain` makes flat ground or rolling hills,
+  `set_terrain_heights` sets a tile by hand, `get_terrain` samples heights
+  so things can stand on the ground). Tiles are built into the same
+  detail-on-demand meshes as everything else on a background thread, meet
+  their neighbours without cracks at any detail, cast shadows and light
+  the scene, and stay real meshes all the way to the horizon. Terrain is
+  saved with the scene as text; streamed worlds hold it from the next part.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

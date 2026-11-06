@@ -96,10 +96,30 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     cell.instances.push_back(i);
 }
 
-// Rebuilds a cell's instances and decals from its entities. False if a
-// material lost its last user (the table should be compacted).
+// The cell's terrain tile, if its mesh is built.
+void emit_ground(const world::Scene& scene, const TerrainMeshes* terrain, world::CellCoord coord, SceneFrame& out,
+                 SceneFrame::Cell& cell) {
+    cell.ground = false;
+    if (terrain == nullptr) return;
+    const render::MeshId mesh = terrain->mesh(coord);
+    if (mesh == render::k_no_mesh || scene.terrain.find(coord) == nullptr) return;
+    world::Material m;
+    m.base_color = scene.terrain.material.base_color;
+    m.roughness = scene.terrain.material.roughness;
+    render::Instance i;
+    i.position = {coord.x * world::k_cell_size, 0.0, coord.z * world::k_cell_size};
+    i.mesh = mesh;
+    i.material = material_index(m, out);
+    i.always_mesh = true;
+    cell.instances.push_back(i);
+    cell.ground = true;
+}
+
+// Rebuilds a cell's instances and decals from its entities (and its
+// terrain tile). False if a material lost its last user (the table should
+// be compacted).
 bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
-             SceneFrame& out, SceneFrame::Cell& cell) {
+             const TerrainMeshes* terrain, world::CellCoord coord, SceneFrame& out, SceneFrame::Cell& cell) {
     std::vector<u32>& before = out.scratch;
     before.clear();
     for (const render::Instance& i : cell.instances) {
@@ -110,6 +130,7 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
     }
     cell.instances.clear();
     cell.decals.clear();
+    emit_ground(scene, terrain, coord, out, cell);
     std::sort(cell.ids.begin(), cell.ids.end());
     for (const world::EntityId id : cell.ids) {
         const world::Entity* e = scene.find(id);
@@ -140,8 +161,9 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
     return true;
 }
 
-// Every entity into its cell, all of them to be built; an empty material table.
-void start_over(const world::Scene& scene, SceneFrame& out) {
+// Every entity (and built terrain tile) into its cell, all of them to be
+// built; an empty material table.
+void start_over(const world::Scene& scene, const TerrainMeshes* terrain, SceneFrame& out) {
     out.grid.clear();
     out.where.clear();
     out.lookup.clear();
@@ -155,6 +177,12 @@ void start_over(const world::Scene& scene, SceneFrame& out) {
         const world::CellCoord c = world::cell_of(e.transform.position);
         out.grid[c].ids.push_back(e.id);
         out.where[e.id] = c;
+    }
+    out.terrain_material = scene.terrain.material;
+    if (terrain != nullptr) {
+        for (const auto& [c, heights] : scene.terrain.tiles()) {
+            if (terrain->mesh(c) != render::k_no_mesh) out.grid[c];
+        }
     }
 }
 
@@ -300,15 +328,25 @@ world::Transform place(const world::Transform& parent, const world::Transform& c
 }
 
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
-                 SceneFrame& out) {
+                 SceneFrame& out, TerrainMeshes* terrain) {
     out.cells_rebuilt = 0;
     world::SceneChanges changes = scene.take_changes();
+    const std::vector<world::CellCoord> ground = terrain != nullptr ? terrain->take_changed()
+                                                                    : std::vector<world::CellCoord>{};
     if (changes.all || scene.identity() != out.scene_identity || meshes.version() != out.meshes_version) {
         out.scene_identity = scene.identity();
         out.meshes_version = meshes.version();
         out.kits = scene.kits;
-        start_over(scene, out);
+        start_over(scene, terrain, out);
     } else {
+        // Terrain tiles whose mesh came, went or changed; all of them for a new look.
+        for (const world::CellCoord c : ground) {
+            out.grid[c].dirty = true;
+        }
+        if (!(scene.terrain.material == out.terrain_material)) {
+            out.terrain_material = scene.terrain.material;
+            for (auto& [coord, cell] : out.grid) cell.dirty = cell.dirty || cell.ground;
+        }
         // Entities added, removed, changed or moved to another cell.
         for (const world::EntityId id : changes.ids) {
             const world::Entity* e = scene.find(id);
@@ -353,11 +391,11 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         SceneFrame::Cell& cell = it->second;
         if (cell.dirty) {
             const bool fresh = cell.version == 0; // not laid out yet, even with no instances
-            compact = !rebuild(scene, renderer, meshes, out, cell) || compact;
+            compact = !rebuild(scene, renderer, meshes, terrain, it->first, out, cell) || compact;
             layout = layout || fresh;
             rebuilt.push_back(it->first);
         }
-        if (cell.ids.empty()) {
+        if (cell.ids.empty() && !cell.ground) {
             layout = true;
             if (cell.placed) release(out, cell.first, cell.capacity);
             it = out.grid.erase(it);
@@ -374,10 +412,15 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         compact = unused > out.compact_unused_over && unused > out.users.size() - unused;
     }
     if (compact) {
-        start_over(scene, out);
+        start_over(scene, terrain, out);
         out.cells_rebuilt = 0; // counted once, by the full rebuild
-        for (auto& [coord, cell] : out.grid) {
-            rebuild(scene, renderer, meshes, out, cell);
+        for (auto it = out.grid.begin(); it != out.grid.end();) {
+            rebuild(scene, renderer, meshes, terrain, it->first, out, it->second);
+            if (it->second.ids.empty() && !it->second.ground) {
+                it = out.grid.erase(it); // a tile gone since its mesh was built
+            } else {
+                ++it;
+            }
         }
         layout = true;
     }

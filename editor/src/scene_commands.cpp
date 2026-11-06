@@ -1068,6 +1068,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure("worlds are not available in this editor");
              }
              WorldStreaming& w = *state.world;
+             if (!state.scene.terrain.empty()) {
+                 return CommandResult::failure(
+                     "the scene has terrain, which streamed worlds do not hold yet (it arrives with "
+                     "terrain streaming); save_scene keeps it");
+             }
              const bool active = w.active(state.scene_generation);
              WorldStreaming::Saved saved;
              if (args.contains("folder")) {

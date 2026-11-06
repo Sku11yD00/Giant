@@ -27,6 +27,7 @@ struct EditorCamera {
 };
 
 class MeshLibrary;
+class TerrainMeshes;
 class WorldStreaming;
 
 // The last few seconds of frame times, for get_engine_info (performance
@@ -102,6 +103,8 @@ struct EditorState {
     // The world streamed by cell (open_world, save_world); set by main (and
     // tests). Null: worlds are not available.
     WorldStreaming* world = nullptr;
+    // The terrain's tile meshes (get_terrain reports them); set by main.
+    TerrainMeshes* terrain_meshes = nullptr;
     // LOD error and debug view: view state, not undoable.
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
@@ -132,6 +135,8 @@ ai::Change scene_change(EditorState& state, std::function<void()> undo,
 void register_editor_commands(ai::CommandRegistry& registry, EditorState& state);
 // The scene, lighting and camera commands (scene_commands.cpp).
 void register_scene_commands(ai::CommandRegistry& registry, EditorState& state);
+// The terrain commands (terrain_commands.cpp).
+void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state);
 
 // What the AI is told when it connects over MCP.
 const char* mcp_instructions();
