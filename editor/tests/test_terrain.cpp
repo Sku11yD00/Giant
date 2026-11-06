@@ -679,3 +679,42 @@ GIANT_TEST("terrain brush tool: a fast drag over far ground leaves no gaps") {
         GIANT_CHECK(t.height_at(x, 32.0).value() > 0.5);
     }
 }
+
+GIANT_TEST("terrain brush tool: the pointer over a ridge starts the line again behind it") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {511, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    // A wall 30 m high at x 100 to 108, seen from 40 m up.
+    Terrain& t = f.state.scene.terrain;
+    Terrain::Heights* wall = t.modify({1, 0});
+    for (usize j = 0; j < 16; ++j) {
+        for (usize i = 9; i <= 11; ++i) (*wall)[j * 16 + i] = 30.0f; // x = 100, 104, 108
+    }
+    f.state.camera.position = {0.0, 40.0, 32.0};
+    f.state.camera.yaw_degrees = -90.0f;
+    f.state.camera.pitch_degrees = -10.0f;
+    f.state.brush = {true, "raise", 4.0, 1.0f, 0.0f, 0.0f};
+    // The rows of the window just on the wall and just past it.
+    const auto hit_x = [&](float y) {
+        const auto h = terrain_ray_hit(t, f.state.camera.position, camera_ray(f.state.camera, 400.0f, y, 800.0f, 600.0f),
+                                       5000.0);
+        return h ? h->x : -1.0;
+    };
+    float on = 600.0f;
+    while (on > 0.0f && hit_x(on - 1.0f) < 150.0) on -= 1.0f; // last row hitting the wall
+    GIANT_CHECK(hit_x(on) < 110.0 && hit_x(on - 2.0f) > 200.0);
+    TerrainBrushTool tool;
+    platform::InputEvent press;
+    press.type = platform::InputEvent::Type::mouse_button;
+    press.button = platform::MouseButton::left;
+    press.down = true;
+    press.x = 400.0f;
+    press.y = on;
+    tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    const double behind = hit_x(on - 2.0f);
+    platform::InputEvent move = press;
+    move.type = platform::InputEvent::Type::mouse_move;
+    move.y = on - 2.0f; // two pixels up: over the top
+    tool.update({move}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    GIANT_CHECK(t.height_at(behind, 32.0).value() > 0.5); // dabbed where it landed
+    for (double x = 120.0; x < behind - 10.0; x += 4.0) GIANT_CHECK(t.height_at(x, 32.0).value() == 0.0);
+}

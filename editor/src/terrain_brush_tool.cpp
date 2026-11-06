@@ -97,12 +97,23 @@ void TerrainBrushTool::update(const std::vector<platform::InputEvent>& events, b
     m_pitch = state.camera.pitch_degrees;
     m_cast_x = m_x;
     m_cast_y = m_y;
-    const auto cast = [&](float px, float py) {
-        return terrain_ray_hit(state.scene.terrain, state.camera.position,
-                               camera_ray(state.camera, px, py, window_width, window_height),
-                               20000.0);
+    const auto ray = [&](float px, float py) { return camera_ray(state.camera, px, py, window_width, window_height); };
+    const auto hit = terrain_ray_hit(state.scene.terrain, state.camera.position, ray(m_x, m_y), 20000.0);
+    // The ground a pixel covers at a hit: the distance times a pixel's
+    // angle, over the cosine between the ray and the ground's normal.
+    const auto metres_per_pixel = [&](const DVec3& at, const Vec3& dir) {
+        const world::Terrain& t = state.scene.terrain;
+        const double e = t.spacing();
+        const auto h = [&](double x, double z) { return t.height_at(x, z).value_or(at.y); };
+        const double sx = (h(at.x + e, at.z) - h(at.x - e, at.z)) / (2.0 * e);
+        const double sz = (h(at.x, at.z + e) - h(at.x, at.z - e)) / (2.0 * e);
+        const double cosine = std::fabs(-sx * dir.x + dir.y - sz * dir.z) / std::sqrt(sx * sx + 1.0 + sz * sz);
+        const double distance = std::hypot(at.x - state.camera.position.x, at.y - state.camera.position.y,
+                                           at.z - state.camera.position.z);
+        const double angle = to_view(state.camera).vertical_fov_degrees * 3.14159265358979 / 180.0 /
+                             std::max(1.0, static_cast<double>(window_height));
+        return distance * angle / std::max(cosine, 0.01);
     };
-    const auto hit = cast(m_x, m_y);
     if (!hit) return;
     // Held still, it dabs k_dabs_per_second (whatever the frame rate); moved,
     // a dab every quarter radius along the way.
@@ -111,50 +122,24 @@ void TerrainBrushTool::update(const std::vector<platform::InputEvent>& events, b
     if (m_last && !moved && !due) return;
     if (!m_last) m_start_height = static_cast<float>(hit->y);
     m_since_dab = 0.0f;
-    // The line from the last dab follows the ground the pointer went over:
-    // a far move is cast again at points between (in the window), and a
-    // jump over 4 radii between two of them (the pointer over a ridge) or
-    // since the camera moved (flown) starts the line again where it lands.
+    // A hit that moved much further than the pointer could carry it (the
+    // pointer over a ridge, onto ground behind it), or a jump since the
+    // camera moved (flown), starts the line again where it lands, so no
+    // line is drawn over ground the pointer never went over. How far the
+    // pointer carries it is the ground a pixel covers there (metres a
+    // pixel: more at a grazing angle), so a fast drag over far ground
+    // stays one line.
+    const double per_pixel = metres_per_pixel(*hit, ray(m_x, m_y));
     std::vector<std::vector<DVec3>> lines(1);
     if (moved) {
         const bool camera_same = state.camera.position.x == m_dab_camera.x &&
                                  state.camera.position.y == m_dab_camera.y &&
                                  state.camera.position.z == m_dab_camera.z &&
-                                 state.camera.yaw_degrees == m_dab_yaw &&
-                                 state.camera.pitch_degrees == m_dab_pitch;
-        const double jump = b.radius * 4.0;
-        if (camera_same && gone > jump) {
-            // The pointer's path, cast every few pixels: a gap over 4 radii
-            // that is also 4 times its neighbours' is a ridge passed over
-            // (a smooth drag's gaps change slowly, even seen at a grazing
-            // angle).
-            std::vector<DVec3> path{*m_last};
-            const float pixels = std::hypot(m_x - m_dab_x, m_y - m_dab_y);
-            const int parts =
-                std::clamp(static_cast<int>(std::ceil(pixels / 4.0f)), 1, k_max_casts_per_frame);
-            for (int k = 1; k < parts; ++k) {
-                const float f = static_cast<float>(k) / static_cast<float>(parts);
-                if (const auto between =
-                        cast(m_dab_x + (m_x - m_dab_x) * f, m_dab_y + (m_y - m_dab_y) * f)) {
-                    path.push_back(*between);
-                }
-            }
-            path.push_back(*hit);
-            const auto gap = [&](usize k) { // from path[k - 1] to path[k]; 0 off the ends
-                if (k == 0 || k >= path.size()) return 0.0;
-                return std::hypot(path[k].x - path[k - 1].x, path[k].z - path[k - 1].z);
-            };
-            lines.back().push_back(path[0]);
-            for (usize k = 1; k < path.size(); ++k) {
-                const double g = gap(k);
-                const bool ridge = g > jump && g > 4.0 * std::max(gap(k - 1), gap(k + 1));
-                if (ridge) lines.emplace_back();
-                if (k + 1 < path.size()) lines.back().push_back(path[k]);
-            }
-        } else {
-            lines.back().push_back(*m_last);
-            if (gone > jump) lines.emplace_back();
-        }
+                                 state.camera.yaw_degrees == m_dab_yaw && state.camera.pitch_degrees == m_dab_pitch;
+        const double pixels = std::hypot(m_x - m_dab_x, m_y - m_dab_y);
+        const double carried = camera_same ? 3.0 * (pixels + 1.0) * std::max(per_pixel, m_dab_per_pixel) : 0.0;
+        lines.back().push_back(*m_last);
+        if (gone > b.radius * 4.0 + carried) lines.emplace_back();
     }
     lines.back().push_back(*hit);
     for (usize k = 0; k < lines.size(); ++k) {
@@ -174,6 +159,7 @@ void TerrainBrushTool::update(const std::vector<platform::InputEvent>& events, b
         }
     }
     m_last = hit;
+    m_dab_per_pixel = per_pixel;
     m_dab_x = m_x;
     m_dab_y = m_y;
     m_dab_camera = state.camera.position;

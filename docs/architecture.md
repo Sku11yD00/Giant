@@ -469,11 +469,11 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   button is held (only when it moved a quarter radius, or 30 times a second
   held still, so the frame rate does not set the speed; no ray is cast
   until the pointer or camera moves or a dab is due), in one merge group:
-  the stroke is one undo step. A move of over 4 radii is cast again every
-  4 pixels between (up to 16 a frame), so a fast drag over far ground,
-  where a pixel is metres, stays one line; a gap over 4 radii that is 4
-  times its neighbours' (the pointer over a ridge), or a jump since the
-  camera moved, starts the line again where it lands. The panel
+  the stroke is one undo step. A hit that moved over 4 radii more than the
+  pointer could carry it (3 times the pixels moved times the ground a pixel
+  covers there, more at a grazing angle: the pointer over a ridge), or a
+  jump over 4 radii since the camera moved, starts the line again where it
+  lands; a fast drag over far ground stays one line. The panel
   keeps the radius to 128 samples (`BrushSettings::max_radius`), and
   flatten goes to the ground where the stroke began unless a height is
   given. Far ground (past the loaded tiles) cannot be sculpted. Height maps

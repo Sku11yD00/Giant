@@ -34,8 +34,6 @@ public:
     void update(const std::vector<platform::InputEvent>& events, bool ui_has_mouse, float window_width,
                 float window_height, float delta_seconds, EditorState& state, ai::CommandRegistry& commands);
     static constexpr float k_dabs_per_second = 30.0f; // held still
-    // A far move is cast again every 4 pixels between, up to this many a frame.
-    static constexpr int k_max_casts_per_frame = 16;
 
     bool stroking() const { return m_down; }
 
@@ -60,6 +58,7 @@ private:
     DVec3 m_dab_camera{};
     float m_dab_yaw = 0.0f;
     float m_dab_pitch = 0.0f;
+    double m_dab_per_pixel = 0.0; // metres of ground a pixel covered at the last dab
 };
 
 } // namespace giant::editor
