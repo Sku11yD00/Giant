@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 
 namespace giant::editor {
 
@@ -38,15 +39,21 @@ std::vector<world::CellCoord> ScatterPlacer::cells() const {
     return out;
 }
 
-void ScatterPlacer::want(world::CellCoord cell) {
-    if (m_queued.insert(cell).second) m_queue.push_back(cell);
+void ScatterPlacer::want(world::CellCoord cell, bool first) {
+    if (!m_queued.insert(cell).second) return;
+    if (first) {
+        m_queue.push_front(cell);
+    } else {
+        m_queue.push_back(cell);
+    }
 }
 
+// Edits come first (ahead of retries and far cells).
 void ScatterPlacer::want_around(world::CellCoord c) {
     for (i32 dz = -1; dz <= 1; ++dz) {
         for (i32 dx = -1; dx <= 1; ++dx) {
             const i64 x = i64{c.x} + dx, z = i64{c.z} + dz;
-            if (in_i32(x) && in_i32(z)) want({static_cast<i32>(x), static_cast<i32>(z)});
+            if (in_i32(x) && in_i32(z)) want({static_cast<i32>(x), static_cast<i32>(z)}, true);
         }
     }
 }
@@ -80,8 +87,15 @@ void ScatterPlacer::drop_all() {
     for (const auto& [cell, placed] : m_cells) m_changed.push_back(cell);
     m_cells.clear();
     m_cut_short.clear();
+    m_capped.clear();
     m_wanted.clear();
     m_instances = 0;
+}
+
+double ScatterPlacer::farthest2() const {
+    double farthest = -1.0;
+    for (const auto& [cell, placed] : m_cells) farthest = std::max(farthest, distance2(cell));
+    return farthest;
 }
 
 // Takes a cell's placements away (room freed for cells cut short).
@@ -130,6 +144,7 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
         }
         for (const world::CellCoord c : gone) remove(c);
         std::erase_if(m_cut_short, [&](world::CellCoord c) { return !in_range(c); });
+        std::erase_if(m_capped, [&](world::CellCoord c) { return !in_range(c); });
         std::erase_if(m_wanted, [&](const auto& w) { return !in_range(w.first); }); // their results are not wanted
     }
     if (all || moved) {
@@ -170,6 +185,7 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
                 return it == m_cells.end() ? u64{0} : it->second.cell.instances;
             }();
             u64 others = m_instances - was;
+            bool evicted = false;
             if (others + r.placed.instances > max_instances) {
                 // Over the whole budget: farther cells make room (they are
                 // left out, to come back when there is room), then what
@@ -189,6 +205,7 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
                     m_cells.erase(it);
                     m_changed.push_back(cell);
                     m_cut_short.insert(cell);
+                    evicted = true;
                 }
             }
             if (others + r.placed.instances > max_instances) {
@@ -212,6 +229,11 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
             } else {
                 m_cut_short.erase(r.cell);
             }
+            if (r.capped) {
+                m_capped.insert(r.cell);
+            } else {
+                m_capped.erase(r.cell);
+            }
             if (r.placed.points.empty()) {
                 remove(r.cell);
             } else {
@@ -220,12 +242,21 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
                 m_cells[r.cell] = {std::move(r.placed), r.key};
                 m_changed.push_back(r.cell);
             }
+            // An eviction may free more than this cell took: the rest is room.
+            m_freed = m_freed || (evicted && m_instances < max_instances);
         }
         m_arrived.pop_front();
     }
-    // Room freed: the cells cut short (or left out) try again, nearest first.
+    // Room freed: the cells cut short (or left out) by the budget try again,
+    // nearest first: all of them while there is room, else those nearer
+    // than the farthest cell placed (they may take its room).
     if (m_freed && !m_cut_short.empty()) {
-        std::vector<world::CellCoord> retry(m_cut_short.begin(), m_cut_short.end());
+        const double farthest = m_instances < max_instances ? -1.0 : farthest2();
+        std::vector<world::CellCoord> retry;
+        for (const world::CellCoord c : m_cut_short) {
+            if (m_instances < max_instances || distance2(c) < farthest) retry.push_back(c);
+        }
+        // (The look below checks again as the budget fills.)
         std::sort(retry.begin(), retry.end(),
                   [&](world::CellCoord a, world::CellCoord b) { return distance2(a) < distance2(b); });
         for (const world::CellCoord c : retry) want(c);
@@ -233,6 +264,7 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
     m_freed = false;
 
     // Look at the cells wanted: start a placement where the key changed.
+    std::optional<double> farthest; // of the cells placed, when the budget is full (worked out once)
     bool any = false;
     for (const world::ScatterLayer& l : *m_layers) any = any || (l.visible && !l.items.empty());
     for (u32 looked = 0; looked < looks_per_frame && !m_queue.empty() && m_in_flight < cells_in_flight; ++looked) {
@@ -243,7 +275,13 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
         const auto placed = m_cells.find(cell);
         const auto flying = m_wanted.find(cell);
         if (flying != m_wanted.end() && flying->second.key == key) continue; // on its way
-        const bool cut = m_cut_short.contains(cell); // tries again whatever its key
+        // A cell the budget cut tries again whatever its key, while it can
+        // get room (there is some, or it is nearer than the farthest placed).
+        const bool cut = m_cut_short.contains(cell) && [&] {
+            if (m_instances < max_instances) return true;
+            if (!farthest) farthest = farthest2();
+            return distance2(cell) < *farthest;
+        }();
         if (flying == m_wanted.end() && !cut && (placed == m_cells.end() ? key == 0 : placed->second.key == key)) {
             continue;
         }
@@ -251,6 +289,7 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
             // Nothing to place: gone now (and whatever is in flight is not wanted).
             if (flying != m_wanted.end()) m_wanted.erase(flying);
             m_cut_short.erase(cell);
+            m_capped.erase(cell);
             remove(cell);
             continue;
         }
@@ -289,7 +328,7 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
             r.serial = serial;
             r.key = key;
             r.placed.layers = layers;
-            for (usize k = 0; k < layers->size() && !r.cut_short; ++k) {
+            for (usize k = 0; k < layers->size() && !r.capped; ++k) {
                 const usize from = r.placed.points.size();
                 world::scatter_cell((*layers)[k], static_cast<u32>(k), ground, cell, r.placed.points);
                 for (usize n = from; n < r.placed.points.size(); ++n) {
@@ -297,7 +336,7 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
                     const u32 w8 = weights[first_item[p.layer] + p.item];
                     if (r.placed.instances + w8 > k_max_instances_per_cell) {
                         r.placed.points.resize(n);
-                        r.cut_short = true;
+                        r.capped = true;
                         break;
                     }
                     r.placed.instances += w8;
@@ -336,6 +375,7 @@ ScatterStats ScatterPlacer::stats() const {
     for (const auto& [cell, flight] : m_wanted) flying += m_queued.contains(cell) ? 0u : 1u;
     s.building = static_cast<u32>(m_queue.size() + flying);
     s.cut_short = static_cast<u32>(m_cut_short.size());
+    for (const world::CellCoord c : m_capped) s.cut_short += m_cut_short.contains(c) ? 0u : 1u;
     s.placed = m_placed_count;
     return s;
 }

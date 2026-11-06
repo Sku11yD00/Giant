@@ -88,16 +88,18 @@ private:
         Cell placed;
         std::vector<u32> weights; // instances a point of each item draws (by first[layer] + item)
         std::vector<u32> first;
-        bool cut_short = false;
+        bool cut_short = false; // by the budget (max_instances)
+        bool capped = false;    // by k_max_instances_per_cell
     };
 
-    void want(world::CellCoord cell);
+    void want(world::CellCoord cell, bool first = false);
     void want_around(world::CellCoord cell);
     u64 key_of(const world::Terrain& terrain, world::CellCoord cell) const;
     bool in_range(world::CellCoord cell) const;
     double distance2(world::CellCoord cell) const;
     void drop_all();
     void remove(world::CellCoord cell);
+    double farthest2() const; // of the cells placed (squared; -1: none)
 
     std::shared_ptr<const Layers> m_layers = std::make_shared<const Layers>();
     u64 m_layers_serial = 1;
@@ -110,7 +112,8 @@ private:
     u64 m_kits = 0;         // the piece counts of the kits items name, as last seen
     bool m_freed = false;   // room freed this frame
     std::unordered_map<world::CellCoord, Placed, world::CellCoordHash> m_cells;
-    std::unordered_set<world::CellCoord, world::CellCoordHash> m_cut_short;
+    std::unordered_set<world::CellCoord, world::CellCoordHash> m_cut_short; // by the budget, or left out: retried
+    std::unordered_set<world::CellCoord, world::CellCoordHash> m_capped;    // by the cell cap: not retried
     std::deque<world::CellCoord> m_queue;
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_queued;
     struct Flight {

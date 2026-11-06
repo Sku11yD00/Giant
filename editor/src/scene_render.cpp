@@ -129,7 +129,11 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
     std::vector<usize> first(layers.size() + 1, 0);
     for (usize k = 0; k < layers.size(); ++k) first[k + 1] = first[k] + layers[k].items.size();
     std::vector<Look> looks(first.back());
+    // At most what the placer counted (a kit grown since draws its old
+    // points' share until the cell is placed again).
+    const usize most = cell.instances.size() + cell.decals.size() + placed.instances;
     for (const world::ScatterPoint& p : placed.points) {
+        if (cell.instances.size() + cell.decals.size() >= most) break;
         const world::ScatterItem& item = layers[p.layer].items[p.item];
         Look& look = looks[first[p.layer] + p.item];
         if (!look.known) {
@@ -348,7 +352,10 @@ void take(SceneFrame& out, u32 first, u32 count) {
 // another cell of its size left).
 void place(SceneFrame& out, SceneFrame::Cell& cell) {
     const u32 need = static_cast<u32>(cell.instances.size());
-    if (!cell.placed || need > cell.capacity) {
+    // A place far bigger than the cell needs now (scatter thinned) is given
+    // back, so its room is a hole others take.
+    const bool shrink = cell.placed && cell.capacity > 4096 && need < cell.capacity / 4;
+    if (!cell.placed || need > cell.capacity || shrink) {
         const bool room = cell.placed;
         if (cell.placed) release(out, cell.first, cell.capacity);
         cell.placed = true;

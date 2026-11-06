@@ -168,6 +168,13 @@ GIANT_TEST("scatter placer: near the camera only, nearest first, within a budget
     }
     GIANT_CHECK(q.find({0, 0}) == nullptr && q.instances() == q.max_instances);
     GIANT_CHECK(points_in(q, {7, 0}) == 256 && points_in(q, {8, 0}) == 256 && q.stats().building == 0);
+    // Settled with cells left out: nothing is placed again and again.
+    const u64 settled = q.stats().placed;
+    for (int frames = 0; frames < 50; ++frames) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        q.update(scene, {});
+    }
+    GIANT_CHECK(q.stats().placed == settled);
     // All at once (more in flight than one, any order): nearer cells win room from farther ones.
     ScatterPlacer n;
     n.camera = {32.0, 0.0, 32.0};
@@ -259,6 +266,17 @@ GIANT_TEST("scatter: placements draw with their cell, as their items, and follow
     scene.kits[0].pieces.pop_back();
     scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
     GIANT_CHECK(frame.cells_rebuilt == 2);
+    // The kit grows (the placer not yet run again): the cells draw no more
+    // than the placer counted.
+    const u64 counted = p.instances();
+    scene.kits[0].pieces.resize(40);
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
+    live = 0;
+    for (const render::Instance& i : frame.instances) live += i.mesh != render::k_no_mesh ? 1 : 0;
+    GIANT_CHECK(live <= counted + 2 * 40); // a point's pieces past it, a cell
+    place(p, scene); // placed again, counting 40 pieces
+    GIANT_CHECK(p.instances() > counted);
+    scene.kits[0].pieces.resize(1);
     // Everything gone: the cells go.
     scene.scatter.clear();
     place(p, scene);
