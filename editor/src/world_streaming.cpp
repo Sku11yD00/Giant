@@ -156,6 +156,12 @@ std::filesystem::path WorldStreaming::far_chunk_path(u32 level, CellCoord chunk)
     return m_folder / "ground" / std::to_string(level) / world::far_chunk_file_name(chunk);
 }
 
+bool WorldStreaming::ground_coming(CellCoord cell) const {
+    if (!m_ground.contains(cell)) return false;
+    const auto it = m_cells.find(cell);
+    return it != m_cells.end() && it->second.state != State::loaded && it->second.state != State::failed;
+}
+
 const std::unordered_set<CellCoord, world::CellCoordHash>& WorldStreaming::far_chunks(u32 level) const {
     GIANT_ASSERT(level >= 1 && level <= world::k_far_levels, "far ground levels are 1 and 2");
     return m_far[level - 1];
@@ -245,6 +251,8 @@ void WorldStreaming::close() {
     m_cells.clear();
     m_ground.clear();
     for (auto& level : m_far) level.clear();
+    m_far_owed.clear();
+    m_far_owed2.clear();
     m_ready.clear();
     m_origin.clear();
     m_ids_seen = 1;
@@ -771,8 +779,6 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     // Write what differs from its file. Every loaded cell is looked at,
     // whether or not it still has entities. The bookkeeping follows each
     // file as it is written, so a save cut short leaves it true.
-    // Cells whose file's tile changed: the far ground over them is written after.
-    std::unordered_set<CellCoord, world::CellCoordHash> tiles_changed;
     const auto put = [&](CellCoord coord, std::vector<Entity>& list) -> bool {
         const auto it = m_cells.find(coord);
         const world::Terrain::Heights* heights = terrain.find(coord);
@@ -783,7 +789,9 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         const bool tile_changed = it == m_cells.end()                 ? heights != nullptr
                                   : it->second.state == State::loaded ? !same_tile(terrain, coord, it->second)
                                                                       : terrain.find(coord) != nullptr;
-        if (tile_changed || (heights == nullptr && m_ground.contains(coord))) tiles_changed.insert(coord);
+        // The far ground over it is owed (written after the cells; kept owed
+        // across a save cut short, until its chunk is written).
+        if (tile_changed || (heights == nullptr && m_ground.contains(coord))) m_far_owed.insert(coord);
         if (list.empty() && heights == nullptr) {
             if (it != m_cells.end()) {
                 std::error_code error;
@@ -854,7 +862,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         std::vector<Entity> none;
         if (!put(coord, none)) return saved;
     }
-    if (!write_far(scene, tiles_changed, kept_heights, saved)) return saved;
+    if (!write_far(scene, kept_heights, saved)) return saved;
     m_index.lighting = scene.lighting;
     m_index.kits = scene.kits;
     m_index.terrain_cells.assign(m_ground.begin(), m_ground.end());
@@ -876,9 +884,10 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     return saved;
 }
 
-bool WorldStreaming::write_far(const world::Scene& scene, const std::unordered_set<CellCoord, world::CellCoordHash>& changed,
+bool WorldStreaming::write_far(const world::Scene& scene,
                                const std::unordered_map<CellCoord, world::Terrain::Heights, world::CellCoordHash>& kept,
                                Saved& saved) {
+    const auto& changed = m_far_owed;
     using Heights = world::Terrain::Heights;
     constexpr usize k_chunk = usize{world::k_far_samples} * world::k_far_samples;
     const auto none = [] { return Heights(k_chunk, std::numeric_limits<float>::quiet_NaN()); };
@@ -932,6 +941,11 @@ bool WorldStreaming::write_far(const world::Scene& scene, const std::unordered_s
     for (const CellCoord c : changed) chunks1.insert(world::far_chunk_of_cell(c, 1));
     std::unordered_map<CellCoord, std::optional<Heights>, world::CellCoordHash> made1; // nullopt: no ground
     const u32 samples = scene.terrain.samples();
+    const auto side = [](usize size) {
+        u32 n = 1;
+        while (usize{n} * n < size) n *= 2;
+        return n;
+    };
     for (const CellCoord chunk : chunks1) {
         const std::optional<Heights> file = read_chunk(1, chunk);
         Heights heights = file ? *file : none();
@@ -953,17 +967,27 @@ bool WorldStreaming::write_far(const world::Scene& scene, const std::unordered_s
                             from_file.reset();
                         }
                     }
-                    if (from_file && from_file->size() == usize{samples} * samples) tile = &*from_file;
+                    if (from_file && from_file->size() == usize{side(from_file->size())} * side(from_file->size())) {
+                        tile = &*from_file;
+                    }
                 }
-                world::far_fill(1, chunk, cell, tile, tile != nullptr ? samples : world::k_far_samples, heights);
+                // A tile read from its file has the file's spacing (the scene's when it has tiles).
+                const u32 n = tile == nullptr ? world::k_far_samples : (from_file && tile == &*from_file) ? side(tile->size()) : samples;
+                world::far_fill(1, chunk, cell, tile, n, heights);
             }
         }
         made1[chunk] = empty(heights) ? std::nullopt : std::optional<Heights>(heights);
         if (!put_chunk(1, chunk, std::move(heights))) return false;
+        for (i32 b = 0; b < world::k_far_branch; ++b) {
+            for (i32 a = 0; a < world::k_far_branch; ++a) {
+                m_far_owed.erase({chunk.x * world::k_far_branch + a, chunk.z * world::k_far_branch + b});
+            }
+        }
+        m_far_owed2.insert(chunk);
     }
-    // Level 2, over the level-1 chunks written.
+    // Level 2, over the level-1 chunks written (this save or one cut short).
     std::unordered_set<CellCoord, world::CellCoordHash> chunks2;
-    for (const CellCoord c : chunks1) chunks2.insert(world::far_parent(c));
+    for (const CellCoord c : m_far_owed2) chunks2.insert(world::far_parent(c));
     for (const CellCoord chunk : chunks2) {
         const std::optional<Heights> file = read_chunk(2, chunk);
         Heights heights = file ? *file : none();
@@ -973,7 +997,7 @@ bool WorldStreaming::write_far(const world::Scene& scene, const std::unordered_s
                 std::optional<Heights> h;
                 if (const auto m = made1.find(child); m != made1.end()) {
                     h = m->second;
-                } else if (file) {
+                } else if (file && !m_far_owed2.contains(child)) {
                     continue; // as the chunk's file has it
                 } else {
                     h = read_chunk(1, child);
@@ -982,6 +1006,11 @@ bool WorldStreaming::write_far(const world::Scene& scene, const std::unordered_s
             }
         }
         if (!put_chunk(2, chunk, std::move(heights))) return false;
+        for (i32 b = 0; b < world::k_far_branch; ++b) {
+            for (i32 a = 0; a < world::k_far_branch; ++a) {
+                m_far_owed2.erase({chunk.x * world::k_far_branch + a, chunk.z * world::k_far_branch + b});
+            }
+        }
     }
     return true;
 }

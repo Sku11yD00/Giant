@@ -113,6 +113,11 @@ public:
     // cell alone, since what they would record as "before" is not what
     // the file holds.
     bool ground_on_disk(world::CellCoord cell) const;
+    // Whether the cell's file is in the scene (loaded).
+    bool cell_loaded(world::CellCoord cell) const { return m_loaded.contains(cell); }
+    // Whether the cell's file holds a tile not in the scene yet that streaming
+    // will bring (on disk, being read or waiting; not one that failed).
+    bool ground_coming(world::CellCoord cell) const;
     // The far ground chunks (world/far_ground.h) with a file, by level (1, 2).
     const std::unordered_set<world::CellCoord, world::CellCoordHash>& far_chunks(u32 level) const;
     std::filesystem::path far_chunk_path(u32 level, world::CellCoord chunk) const;
@@ -189,9 +194,9 @@ private:
     void set_state(world::CellCoord coord, Cell& cell, State state); // keeps the counts
     void forget(world::CellCoord coord);                            // no file any more
     Saved write(const world::Scene& scene, std::vector<std::string> meshes);
-    // Writes the far ground chunks over the cells whose tile changed (after
+    // Writes the far ground chunks over the cells whose tile changed (m_far_owed; after
     // their files are written: m_ground is the files'). False on an error (in saved).
-    bool write_far(const world::Scene& scene, const std::unordered_set<world::CellCoord, world::CellCoordHash>& changed,
+    bool write_far(const world::Scene& scene,
                    const std::unordered_map<world::CellCoord, world::Terrain::Heights, world::CellCoordHash>& kept,
                    Saved& saved);
     std::filesystem::path cell_path(world::CellCoord cell) const;
@@ -215,6 +220,10 @@ private:
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> m_cells; // cells with a file
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_ground;     // whose file holds a tile
     std::array<std::unordered_set<world::CellCoord, world::CellCoordHash>, 2> m_far; // chunk files, levels 1 and 2
+    // Cells written whose level-1 chunk is not yet, and level-1 chunks written
+    // whose level-2 chunk is not yet (a save cut short owes them to the next).
+    std::unordered_set<world::CellCoord, world::CellCoordHash> m_far_owed;
+    std::unordered_set<world::CellCoord, world::CellCoordHash> m_far_owed2;
     std::vector<Read> m_ready;  // parsed, in the order they finished
     std::array<u32, 5> m_count{}; // cells per State
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_loaded;

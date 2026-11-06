@@ -1094,6 +1094,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  const std::filesystem::path folder = utf8_path(args["folder"].get<std::string>());
                  std::error_code a;
                  if (active && std::filesystem::equivalent(folder, w.folder(), a) && !a) {
+                     if (state.far_ground != nullptr) state.far_ground->wait_reads(); // a file read stays open (Windows)
                      saved = w.save(state.scene, meshes_used(state.scene));
                  } else if (active) {
                      return CommandResult::failure(
@@ -1103,7 +1104,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                      saved = w.create(folder, state.scene, state.scene_generation, meshes_used(state.scene));
                  }
              } else if (active) {
-                 saved = w.save(state.scene, meshes_used(state.scene));
+                 if (state.far_ground != nullptr) state.far_ground->wait_reads(); // a file read stays open (Windows)
+                     saved = w.save(state.scene, meshes_used(state.scene));
              } else {
                  return CommandResult::failure(
                      w.is_open() ? "the scene is no longer the open world's (new_scene or load_scene "

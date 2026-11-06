@@ -50,6 +50,7 @@ std::optional<CellCoord> chunk_at_corner(CellCoord cell, u32 level) {
     return chunk;
 }
 
+constexpr double k_min_reach = 5800.0; // a level-2 chunk's diagonal (5793 m)
 constexpr float k_skirts[2] = {64.0f, 256.0f}; // edge walls, by level: beyond the gaps to the next finer level
 
 } // namespace
@@ -66,14 +67,10 @@ FarGround::FarGround(render::Renderer* renderer) {
 
 FarGround::~FarGround() { m_jobs.wait(m_reads); }
 
-void FarGround::clear() {
+void FarGround::clear(const TerrainMeshes& ground) {
     for (auto& [chunk, mode] : m_mode) {
-        m_changed.push_back(corner(chunk, 1));
-        for (i32 b = 0; b < world::k_far_branch; ++b) {
-            for (i32 a = 0; a < world::k_far_branch; ++a) {
-                m_changed.push_back({chunk.x * world::k_far_branch + a, chunk.z * world::k_far_branch + b});
-            }
-        }
+        if (mode == Mode::mesh) m_changed.push_back(corner(chunk, 1));
+        mark_tiles(chunk, ground); // only tiles with a mesh are drawn again
     }
     for (const CellCoord chunk : m_draw2) m_changed.push_back(corner(chunk, 2));
     m_mode.clear();
@@ -103,12 +100,13 @@ void FarGround::take_reads(const WorldStreaming& streaming) {
             Level& level = m_levels[r.level - 1];
             const auto it = level.reading.find(r.chunk);
             if (it == level.reading.end() || it->second != r.serial) continue; // not wanted any more
-            level.reading.erase(it);
             if (!r.heights) {
+                level.reading.erase(it);
                 m_failed[r.level - 1].insert(r.chunk);
+                m_dirty[r.level - 1].insert(r.chunk); // it stands in for nothing: what draws changes
                 continue;
             }
-            m_arrived.push_back(std::move(r));
+            m_arrived.push_back(std::move(r)); // still "reading" (not read again) until added
         }
     }
     // A few a frame.
@@ -120,20 +118,25 @@ void FarGround::take_reads(const WorldStreaming& streaming) {
             ++k;
             continue;
         }
-        if (streaming.far_chunks(r.level).contains(r.chunk)) {
-            m_levels[l].terrain.set(r.chunk, std::move(*r.heights));
-            m_dirty[l].insert(r.chunk);
-            ++added[l];
+        Level& level = m_levels[l];
+        const auto it = level.reading.find(r.chunk);
+        if (it != level.reading.end() && it->second == r.serial) {
+            level.reading.erase(it);
+            if (streaming.far_chunks(r.level).contains(r.chunk)) {
+                level.terrain.set(r.chunk, std::move(*r.heights));
+                m_dirty[l].insert(r.chunk);
+                ++added[l];
+            }
         }
         m_arrived.erase(m_arrived.begin() + static_cast<std::ptrdiff_t>(k));
     }
 }
 
-void FarGround::unload(const DVec3& camera) {
+void FarGround::unload(const DVec3& camera, const WorldStreaming& streaming) {
     for (u32 l = 0; l < world::k_far_levels; ++l) {
         Level& level = m_levels[l];
         const double size = world::far_tile_size(l + 1);
-        const double limit = settings.radius[l] + settings.margin[l];
+        const double limit = radius(l, streaming) + settings.margin[l];
         std::vector<CellCoord> far;
         for (const auto& [chunk, heights] : level.terrain.tiles()) {
             if (chunk_distance(camera, chunk, size) > limit) far.push_back(chunk);
@@ -141,29 +144,50 @@ void FarGround::unload(const DVec3& camera) {
         }
         for (const CellCoord chunk : far) {
             level.terrain.remove(chunk);
-            m_dirty[l].insert(chunk);
-            level.wanted_stale = true;
+            m_dirty[l].insert(chunk); // past the radius: wanted again only once the camera moves
         }
     }
 }
 
+double FarGround::radius(u32 l, const WorldStreaming& streaming) const {
+    // Level 1 must reach a level-2 chunk's diagonal past the loaded cells,
+    // or a level-2 chunk would draw over the full tiles by the camera.
+    if (l == 0) return std::max(settings.radius[0], streaming.settings.load_radius + k_min_reach);
+    return std::max(settings.radius[1], radius(0, streaming));
+}
+
 void FarGround::start_reads(const DVec3& camera, const WorldStreaming& streaming) {
-    u32 reading = 0;
-    for (const Level& level : m_levels) reading += static_cast<u32>(level.reading.size());
     for (u32 l = 0; l < world::k_far_levels; ++l) {
         Level& level = m_levels[l];
         const auto& files = streaming.far_chunks(l + 1);
         const double size = world::far_tile_size(l + 1);
+        const double r = radius(l, streaming);
         const CellCoord at = level.terrain.tile_of(camera.x, camera.z);
-        if (level.wanted_stale || !(at == level.wanted_at) || settings.radius[l] != level.wanted_radius) {
+        if (level.wanted_stale || !(at == level.wanted_at) || r != level.wanted_radius) {
             level.wanted_stale = false;
             level.wanted_at = at;
-            level.wanted_radius = settings.radius[l];
+            level.wanted_radius = r;
             std::vector<std::pair<double, CellCoord>> near;
-            for (const CellCoord c : files) {
-                if (level.terrain.find(c) != nullptr || level.reading.contains(c) || m_failed[l].contains(c)) continue;
+            const auto consider = [&](CellCoord c) {
+                if (level.terrain.find(c) != nullptr || level.reading.contains(c) || m_failed[l].contains(c)) return;
                 const double d = chunk_distance(camera, c, size);
-                if (d <= settings.radius[l]) near.push_back({d, c});
+                if (d <= r) near.push_back({d, c});
+            };
+            // The square of chunks around the camera, or every file if there are fewer.
+            const i64 reach = static_cast<i64>(std::ceil(r / size)) + 1;
+            if (files.size() < static_cast<usize>((2 * reach + 1) * (2 * reach + 1))) {
+                for (const CellCoord c : files) consider(c);
+            } else {
+                for (i64 z = i64{at.z} - reach; z <= i64{at.z} + reach; ++z) {
+                    for (i64 x = i64{at.x} - reach; x <= i64{at.x} + reach; ++x) {
+                        if (x < std::numeric_limits<i32>::min() || x > std::numeric_limits<i32>::max() ||
+                            z < std::numeric_limits<i32>::min() || z > std::numeric_limits<i32>::max()) {
+                            continue;
+                        }
+                        const CellCoord c{static_cast<i32>(x), static_cast<i32>(z)};
+                        if (files.contains(c)) consider(c);
+                    }
+                }
             }
             // Farthest first: the nearest is at the back, read first.
             std::sort(near.begin(), near.end(), [](const auto& a, const auto& b) {
@@ -173,6 +197,8 @@ void FarGround::start_reads(const DVec3& camera, const WorldStreaming& streaming
             level.wanted.clear();
             for (const auto& [d, c] : near) level.wanted.push_back(c);
         }
+        // Each level its own reads, so the far one is not starved by the near.
+        u32 reading = static_cast<u32>(level.reading.size());
         while (reading < std::max<u32>(1, settings.reads_in_flight) && !level.wanted.empty()) {
             const CellCoord chunk = level.wanted.back();
             level.wanted.pop_back();
@@ -202,6 +228,8 @@ void FarGround::start_reads(const DVec3& camera, const WorldStreaming& streaming
     }
 }
 
+void FarGround::wait_reads() { m_jobs.wait(m_reads); }
+
 void FarGround::saved(const WorldStreaming::Saved& saved) {
     if (!m_open) return;
     for (const WorldStreaming::Saved::Chunk& c : saved.chunks) {
@@ -219,7 +247,8 @@ void FarGround::saved(const WorldStreaming::Saved& saved) {
     }
 }
 
-bool FarGround::covered(CellCoord chunk, const TerrainMeshes& ground) const {
+bool FarGround::covered(CellCoord chunk, const TerrainMeshes& ground, const world::Terrain& terrain,
+                        const WorldStreaming& streaming) const {
     const world::Terrain::Heights* heights = m_levels[0].terrain.find(chunk);
     if (heights == nullptr) return false;
     constexpr u32 per = world::k_far_samples / world::k_far_branch;
@@ -228,7 +257,11 @@ bool FarGround::covered(CellCoord chunk, const TerrainMeshes& ground) const {
             // A cell with a tile has every one of its samples; one without, none.
             const float h = (*heights)[usize{static_cast<u32>(b) * per} * world::k_far_samples + static_cast<u32>(a) * per];
             if (std::isnan(h)) continue;
-            if (!ground.drawn({chunk.x * world::k_far_branch + a, chunk.z * world::k_far_branch + b})) return false;
+            const CellCoord cell{chunk.x * world::k_far_branch + a, chunk.z * world::k_far_branch + b};
+            if (ground.drawn(cell)) continue;
+            // Waiting for its mesh, or for streaming to bring its tile; else (taken
+            // away and not saved yet, or its file failed) nothing to wait for.
+            if (terrain.find(cell) != nullptr || streaming.ground_coming(cell)) return false;
         }
     }
     return true;
@@ -243,7 +276,7 @@ void FarGround::mark_tiles(CellCoord chunk, const TerrainMeshes& ground) {
     }
 }
 
-void FarGround::select(TerrainMeshes& ground, const WorldStreaming& streaming) {
+void FarGround::select(TerrainMeshes& ground, const world::Terrain& terrain, const WorldStreaming& streaming) {
     TerrainMeshes& meshes1 = *m_levels[0].meshes;
     TerrainMeshes& meshes2 = *m_levels[1].meshes;
     // What changed: full tiles drawn (their chunk may now be covered, or no
@@ -263,7 +296,7 @@ void FarGround::select(TerrainMeshes& ground, const WorldStreaming& streaming) {
     if (m_dirty[0].empty() && m_dirty[1].empty()) return;
     const auto& files1 = streaming.far_chunks(1);
     for (const CellCoord c : m_dirty[0]) {
-        if (covered(c, ground)) {
+        if (covered(c, ground, terrain, streaming)) {
             m_covered.insert(c);
         } else {
             m_covered.erase(c);
@@ -271,7 +304,10 @@ void FarGround::select(TerrainMeshes& ground, const WorldStreaming& streaming) {
         m_dirty[1].insert(world::far_parent(c));
     }
     // A level-1 chunk can stand in for its part of its parent.
-    const auto usable = [&](CellCoord c) { return !files1.contains(c) || m_covered.contains(c) || meshes1.drawn(c); };
+    // (One whose file could not be read stands in too: it has nothing to show.)
+    const auto usable = [&](CellCoord c) {
+        return !files1.contains(c) || m_covered.contains(c) || meshes1.drawn(c) || m_failed[0].contains(c);
+    };
     for (const CellCoord p : m_dirty[1]) {
         bool all = true;
         for (i32 b = 0; all && b < world::k_far_branch; ++b) {
@@ -315,42 +351,44 @@ void FarGround::select(TerrainMeshes& ground, const WorldStreaming& streaming) {
     m_dirty[1].clear();
 }
 
-void FarGround::update(const DVec3& camera, const WorldStreaming& streaming, u64 generation, TerrainMeshes& ground) {
+void FarGround::update(const DVec3& camera, const WorldStreaming& streaming, u64 generation, TerrainMeshes& ground,
+                       const world::Terrain& terrain) {
     if (!streaming.active(generation)) {
-        if (m_open) clear();
+        if (m_open) clear(ground);
     } else if (!m_open || streaming.session() != m_session) {
-        clear();
+        clear(ground);
         m_open = true;
         m_session = streaming.session();
     }
     if (m_open) {
         take_reads(streaming);
-        unload(camera);
+        unload(camera, streaming);
         start_reads(camera, streaming);
     }
     for (Level& level : m_levels) level.meshes->update(level.terrain);
     if (m_open) {
         for (u32 l = 0; l < world::k_far_levels; ++l) m_files[l] = static_cast<u32>(streaming.far_chunks(l + 1).size());
-        select(ground, streaming);
+        select(ground, terrain, streaming);
     } else {
         m_files = {};
         for (const CellCoord c : ground.take_changed()) m_changed.push_back(c);
     }
 }
 
-void FarGround::finish(const DVec3& camera, const WorldStreaming& streaming, u64 generation, TerrainMeshes& ground) {
+void FarGround::finish(const DVec3& camera, const WorldStreaming& streaming, u64 generation, TerrainMeshes& ground,
+                       const world::Terrain& terrain) {
     const FarGroundSettings kept = settings;
     settings.chunks_per_frame = std::numeric_limits<u32>::max();
     settings.unloads_per_frame = std::numeric_limits<u32>::max();
     for (;;) {
-        update(camera, streaming, generation, ground);
+        update(camera, streaming, generation, ground, terrain);
         for (Level& level : m_levels) level.meshes->finish(level.terrain);
         bool busy = !m_arrived.empty();
         for (const Level& level : m_levels) busy = busy || !level.reading.empty() || !level.wanted.empty();
         if (!busy) break;
         m_jobs.wait(m_reads);
     }
-    update(camera, streaming, generation, ground); // what draws, with every mesh in
+    update(camera, streaming, generation, ground, terrain); // what draws, with every mesh in
     settings = kept;
 }
 

@@ -87,7 +87,7 @@ struct Far {
     }
     void frame_at(double x, double z) {
         ground->update(scene.terrain);
-        far->update({x, 10.0, z}, streaming, generation, *ground);
+        far->update({x, 10.0, z}, streaming, generation, *ground, scene.terrain);
         scene_frame(scene, *renderer, *meshes, frame, ground.get(), far.get());
         streaming.update(scene, generation, {x, 10.0, z}, frame);
     }
@@ -96,7 +96,7 @@ struct Far {
         for (int i = 0; i < 40; ++i) {
             streaming.finish_reads();
             ground->finish(scene.terrain);
-            far->finish({x, 10.0, z}, streaming, generation, *ground);
+            far->finish({x, 10.0, z}, streaming, generation, *ground, scene.terrain);
             frame_at(x, z);
         }
     }
@@ -238,20 +238,25 @@ GIANT_TEST("far ground: full tiles near the camera, chunk meshes past them, the 
     GIANT_CHECK(f.instances_at(0.0, 0.0) == 1 && f.instances_at(64.0, 0.0) == 1);
     GIANT_CHECK(f.instances_at(1536.0, 0.0) == 1);
 
-    // A level-1 chunk let go (out of its radius) cannot stand in: the level-2 chunk draws over all of it.
+    // Far off (9 km), level 1 is let go but level 2 is in reach: it draws, over all of its children.
+    f.settle(9000.0, 10.0);
+    const FarGroundStats t = f.far->stats();
+    GIANT_CHECK(t.loaded[0] == 0 && t.loaded[1] == 1 && t.drawn[1] == 1 && t.drawn[0] == 0 && t.hidden == 64);
+    GIANT_CHECK(f.scene.terrain.empty() && !f.far->draws_tile({0, 0}));
+    GIANT_CHECK(f.instances_at(0.0, 0.0) == 1 && f.instances_at(1536.0, 0.0) == 0); // level 2, from the corner cell
+
+    // A level-1 radius too small is taken as reaching past the loaded cells by a level-2 chunk's
+    // diagonal, so level 2 never draws over the tiles by the camera.
     f.far->settings.radius[0] = 600.0;
     f.settle(10.0, 10.0);
-    const FarGroundStats t = f.far->stats();
-    GIANT_CHECK(t.loaded[0] == 1 && t.drawn[1] == 1 && t.drawn[0] == 0 && t.hidden == 64);
-    GIANT_CHECK(!f.far->draws_tile({0, 0}));
-    GIANT_CHECK(f.instances_at(64.0, 0.0) == 0 && f.instances_at(1536.0, 0.0) == 0);
-    GIANT_CHECK(f.instances_at(0.0, 0.0) == 1); // the level-2 chunk, from the same corner cell
-
-    // Back in reach: the tiles again.
-    f.far->settings.radius[0] = 3000.0;
-    f.settle(10.0, 10.0);
-    GIANT_CHECK(f.far->draws_tile({0, 0}) && f.far->stats().drawn[1] == 0);
+    GIANT_CHECK(f.far->draws_tile({0, 0}) && f.far->stats().drawn[1] == 0 && f.far->stats().loaded[0] == 2);
     GIANT_CHECK(f.instances_at(64.0, 0.0) == 1 && f.instances_at(1536.0, 0.0) == 1);
+
+    // A saved tile taken away (not saved yet): the chunk still draws its tiles, not its old mesh.
+    GIANT_CHECK(f.scene.terrain.remove({1, 0}).has_value());
+    f.settle(10.0, 10.0);
+    GIANT_CHECK(f.far->draws_tile({0, 0}) && f.instances_at(0.0, 0.0) == 1 && f.instances_at(64.0, 0.0) == 0);
+    GIANT_CHECK(f.far->stats().drawn[0] == 1); // only chunk (3, 0)
 
     // Closed: no far ground, every tile draws.
     f.streaming.close();
@@ -285,4 +290,61 @@ GIANT_TEST("far ground: a save hands the far ground the chunks it wrote") {
     GIANT_CHECK(f.far->chunks(1).find({0, 0}) == nullptr && f.far->chunks(1).find({3, 0}) != nullptr);
     f.settle(10.0, 10.0);
     GIANT_CHECK(f.far->stats().loaded[0] == 1 && f.instances_at(1536.0, 0.0) == 1);
+}
+
+GIANT_TEST("far ground: a chunk file that cannot be read stands in for nothing, and hides nothing") {
+    Far f;
+    if (f.renderer == nullptr) return;
+    f.scene.terrain.set_samples(8);
+    for (i32 z = 0; z < 4; ++z) {
+        for (i32 x = 0; x < 4; ++x) {
+            f.scene.terrain.set({x, z}, tile(8, 1.0f));
+            f.scene.terrain.set({24 + x, z}, tile(8, 2.0f));
+        }
+    }
+    GIANT_CHECK(f.streaming.create(f.folder, f.scene, f.generation, {}).error.empty());
+    {
+        std::ofstream bad(f.chunk_path(1, {3, 0}), std::ios::binary | std::ios::trunc);
+        bad << "{ not json";
+    }
+    f.reopen();
+    f.settle(10.0, 10.0);
+    const FarGroundStats s = f.far->stats();
+    GIANT_CHECK(s.failed == 1 && s.loaded[0] == 1 && s.drawn[1] == 0 && s.hidden == 0);
+    GIANT_CHECK(f.far->draws_tile({0, 0}) && f.instances_at(64.0, 0.0) == 1);
+}
+
+GIANT_TEST("far ground: chunks a save cut short did not write are written by the next") {
+    Far f;
+    if (f.renderer == nullptr) return;
+    f.scene.terrain.set_samples(8);
+    f.scene.terrain.set({0, 0}, tile(8, 1.0f));
+    GIANT_CHECK(f.streaming.create(f.folder, f.scene, f.generation, {}).error.empty());
+    (*f.scene.terrain.modify({0, 0}))[0] = 40.0f;
+    // Level 2's file can not be written (a folder in its place).
+    std::filesystem::remove(f.chunk_path(2, {0, 0}));
+    std::filesystem::create_directories(f.chunk_path(2, {0, 0}) / "x");
+    const auto cut = f.streaming.save(f.scene, {});
+    GIANT_CHECK(!cut.error.empty() && f.chunk(1, {0, 0}).value()[0] == 40.0f);
+    std::filesystem::remove_all(f.chunk_path(2, {0, 0}));
+    const auto again = f.streaming.save(f.scene, {});
+    GIANT_CHECK(again.error.empty() && again.chunks_written == 1);
+    GIANT_CHECK(f.chunk(2, {0, 0}).has_value() && f.chunk(2, {0, 0}).value()[0] == 40.0f);
+}
+
+GIANT_TEST("far ground: a cell whose file fails is not waited for: its chunk's other tiles draw") {
+    Far f;
+    if (f.renderer == nullptr) return;
+    f.scene.terrain.set_samples(8);
+    f.scene.terrain.set({0, 0}, tile(8, 1.0f));
+    f.scene.terrain.set({1, 0}, tile(8, 2.0f));
+    GIANT_CHECK(f.streaming.create(f.folder, f.scene, f.generation, {}).error.empty());
+    {
+        std::ofstream bad(f.folder / "cells" / "1_0.cell.json", std::ios::binary | std::ios::trunc);
+        bad << "{ not json";
+    }
+    f.reopen();
+    f.settle(10.0, 10.0);
+    GIANT_CHECK(f.streaming.stats().failed == 1 && f.scene.terrain.size() == 1);
+    GIANT_CHECK(f.far->draws_tile({0, 0}) && f.instances_at(0.0, 0.0) == 1 && f.far->stats().drawn[0] == 0);
 }

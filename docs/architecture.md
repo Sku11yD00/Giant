@@ -424,9 +424,16 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   only every other cell's corner, so ground narrower than 128 m (a lone
   tile) may not show at all at that distance, and a level-2 chunk whose
   points make no square draws nothing (its children do as they can).
-  `far_radius_1` must reach past `load_radius` by a level-2 chunk's
-  diagonal (5793 m), or a level-2 chunk near the camera draws over the
-  full tiles. A world saved before part 4c has no chunks until its tiles
+  `far_radius_1` is taken as at least `load_radius` + 5800 m (a level-2
+  chunk's diagonal), so a level-2 chunk never draws over the full tiles
+  by the camera. A chunk file that cannot be read stands in for nothing
+  (its full tiles draw where loaded), and a cell whose file failed is not
+  waited for. The coarse ground stops one of its own samples short (16 m,
+  128 m) at the edge of the ground, where the tiles' walls hang. A save
+  cut short owes its chunks to the next save (a crash between the cell
+  files and the chunk files leaves those chunks old until their tiles
+  change again). Every tile gets the 8 m edge walls, streamed world or not.
+  A world saved before part 4c has no chunks until its tiles
   are saved again. Every loaded
   tile is a full mesh in memory (CPU copy and cluster data: about 0.4 MB
   a 1 m tile, 1.2 MB at 128 samples; the default radius loads about 1,800

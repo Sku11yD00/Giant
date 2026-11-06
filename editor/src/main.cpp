@@ -324,7 +324,8 @@ int run(const Options& options) {
     // Records the scene and the panels into `target` (an sRGB image).
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         terrain_meshes.update(state.scene.terrain);
-        far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes);
+        far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes,
+                          state.scene.terrain);
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
