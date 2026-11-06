@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Docs alone need no build.
+    paths-ignore: ['**.md', 'docs/**']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -23,7 +25,8 @@ jobs:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
-        preset: [dev, tsan, release]
+        # Thread sanitizer builds after merging only (Actions minutes).
+        preset: ${{ github.event_name == 'push' && fromJSON('["dev", "tsan", "release"]') || fromJSON('["dev", "release"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -71,7 +74,10 @@ jobs:
           if-no-files-found: warn
       - run: cmake --preset msvc-release -DGIANT_REQUIRE_VALIDATION=ON -DGIANT_REQUIRE_DOTNET=ON
       - run: cmake --build --preset msvc-release
-      - run: ctest --preset msvc-release
+      # The release build's tests after merging only (Windows minutes count
+      # double); pull requests test the debug build above.
+      - if: github.event_name == 'push'
+        run: ctest --preset msvc-release
       - name: Package the editor
         shell: pwsh
         run: |
