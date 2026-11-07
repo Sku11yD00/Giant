@@ -98,6 +98,16 @@ Vec3 transform_direction(const Mat4& m, const Vec3& d) {
             m.at(2, 0) * d.x + m.at(2, 1) * d.y + m.at(2, 2) * d.z};
 }
 
+// At least how far the matrix's 3x3 part can stretch a vector (its
+// Frobenius norm: never below the largest singular value, shear or not).
+float stretch(const Mat4& m) {
+    float sum = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        for (int r = 0; r < 3; ++r) sum += m.at(r, c) * m.at(r, c);
+    }
+    return std::sqrt(sum);
+}
+
 } // namespace
 
 std::string validate(const Skeleton& s) {
@@ -211,11 +221,7 @@ Bounds pose_bounds(std::span<const Mat4> model, std::span<const Mat4> skin, std:
     for (usize i = 0; i < n; ++i) {
         if (!(joint_radius[i] > 0.0f)) continue;
         const Vec3 c{model[i].at(0, 3), model[i].at(1, 3), model[i].at(2, 3)};
-        float s = 0.0f;
-        for (int col = 0; col < 3; ++col) {
-            s = std::max(s, length(Vec3{skin[i].at(0, col), skin[i].at(1, col), skin[i].at(2, col)}));
-        }
-        const float r = joint_radius[i] * s;
+        const float r = joint_radius[i] * stretch(skin[i]);
         const Vec3 a{c.x - r, c.y - r, c.z - r}, b{c.x + r, c.y + r, c.z + r};
         lo = any ? Vec3{std::min(lo.x, a.x), std::min(lo.y, a.y), std::min(lo.z, a.z)} : a;
         hi = any ? Vec3{std::max(hi.x, b.x), std::max(hi.y, b.y), std::max(hi.z, b.z)} : b;
@@ -227,11 +233,7 @@ Bounds pose_bounds(std::span<const Mat4> model, std::span<const Mat4> skin, std:
     for (usize i = 0; i < n; ++i) {
         if (!(joint_radius[i] > 0.0f)) continue;
         const Vec3 c{model[i].at(0, 3), model[i].at(1, 3), model[i].at(2, 3)};
-        float s = 0.0f;
-        for (int col = 0; col < 3; ++col) {
-            s = std::max(s, length(Vec3{skin[i].at(0, col), skin[i].at(1, col), skin[i].at(2, col)}));
-        }
-        out.radius = std::max(out.radius, length(c - out.center) + joint_radius[i] * s);
+        out.radius = std::max(out.radius, length(c - out.center) + joint_radius[i] * stretch(skin[i]));
     }
     return out;
 }
@@ -242,7 +244,10 @@ Mat4 affine_inverse(const Mat4& m) {
     const float det = a(0, 0) * (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1)) -
                       a(0, 1) * (a(1, 0) * a(2, 2) - a(1, 2) * a(2, 0)) +
                       a(0, 2) * (a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0));
-    if (!std::isfinite(det) || std::fabs(det) < 1e-30f) return {};
+    // Singular next to its own size (any uniform scale, however small, inverts).
+    float size = 1.0f;
+    for (int c = 0; c < 3; ++c) size *= length(Vec3{a(0, c), a(1, c), a(2, c)});
+    if (!std::isfinite(det) || det == 0.0f || std::fabs(det) <= 1e-6f * size) return {};
     Mat4 out;
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {

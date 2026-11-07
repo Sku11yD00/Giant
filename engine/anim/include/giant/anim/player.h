@@ -1,13 +1,16 @@
 // Playing clips on one skeleton: a clip looping or once at a speed, a
 // cross-fade from one clip to the next, or two clips held blended (a walk
-// and a run by speed), their phases kept in step if asked. Plain state: it
-// owns no skeleton or clips, which are handed in, and allocates nothing
-// once its scratch has grown to the skeleton.
+// and a run by speed), their phases kept in step if asked. It owns no
+// skeleton or clips, which are handed in, and allocates nothing once its
+// buffers have grown to the skeleton.
+//
+// A fade starts from whatever showed: a single clip fades out still
+// playing; a blend, or a fade not yet done, is caught as it stood (one
+// still pose) and that fades out, so starting a clip never jumps.
 #pragma once
 
 #include "giant/anim/skeleton.h"
 
-#include <optional>
 #include <span>
 #include <vector>
 
@@ -29,12 +32,15 @@ struct PoseScratch {
 
 class AnimationPlayer {
 public:
-    // Plays `clip` from `start` seconds: at once, or fading from what played
-    // over `blend_seconds`. Ends a held blend.
-    void play(u32 clip, float blend_seconds = 0.0f, bool loop = true, float start = 0.0f);
-    // Holds `a` and `b` blended by `weight` (0 all a, 1 all b). `sync`: b's
-    // time follows a's, at the same fraction of its length (feet in step).
-    void set_blend(u32 a, u32 b, float weight, bool sync);
+    // Plays `clip` from `start` seconds (wrapped into it, or held within it):
+    // at once, or fading from what showed over `blend_seconds`. Ends a held
+    // blend.
+    void play(const Skeleton& skeleton, std::span<const Clip> clips, u32 clip, float blend_seconds = 0.0f,
+              bool loop = true, float start = 0.0f);
+    // Holds `a` and `b` (both looping) blended by `weight` (0 all a, 1 all
+    // b). `sync`: b's time follows a's, at the same fraction of its length
+    // (feet in step).
+    void set_blend(std::span<const Clip> clips, u32 a, u32 b, float weight, bool sync);
     void stop(); // the rest pose
 
     float speed() const { return m_speed; }
@@ -43,8 +49,8 @@ public:
     void set_paused(bool paused) { m_paused = paused; }
     void set_time(float seconds, std::span<const Clip> clips); // the main clip's time
 
-    // Moves time on (scaled by the speed, nothing while paused). Clips not
-    // in `clips` are dropped.
+    // Moves time on (scaled by the speed, nothing while paused; a fade
+    // goes by real time). Clips not in `clips` are dropped.
     void advance(float seconds, std::span<const Clip> clips);
 
     // The pose now, into `local` (one per joint): the rest pose with nothing playing.
@@ -52,10 +58,13 @@ public:
                   std::span<JointTransform> local) const;
 
     const ClipState& main() const { return m_main; }
-    // The other clip (fading out, or held blended), and its weight.
+    // The other clip (fading out, or held blended); none while a caught
+    // pose fades out (fading() is then true).
     const ClipState& other() const { return m_other; }
-    float other_weight() const { return m_other.clip == k_no_clip ? 0.0f : m_weight; }
+    // How much of the pose is the other clip's (or the caught pose's).
+    float other_weight() const { return m_other.clip != k_no_clip || m_frozen_fading ? m_weight : 0.0f; }
     bool blending() const { return m_held; } // a held blend, not a fade
+    bool fading() const { return !m_held && other_weight() > 0.0f; }
     bool synced() const { return m_sync; }
 
 private:
@@ -64,12 +73,15 @@ private:
 
     ClipState m_main;
     ClipState m_other;
-    float m_weight = 0.0f;       // of m_other
+    float m_weight = 0.0f;       // of m_other (or the caught pose)
     float m_fade_seconds = 0.0f; // fading: how long the whole fade is (m_weight falls 1 to 0)
     bool m_held = false;
     bool m_sync = false;
     float m_speed = 1.0f;
     bool m_paused = false;
+    bool m_frozen_fading = false;           // the caught pose fades out
+    std::vector<JointTransform> m_frozen;   // the pose caught when a fade began
+    PoseScratch m_catch;                    // for catching it
 };
 
 } // namespace giant::anim

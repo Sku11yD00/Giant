@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <numbers>
+#include <string>
 
 using namespace giant;
 using namespace giant::anim;
@@ -232,6 +233,20 @@ GIANT_TEST("anim: pose bounds hold every vertex, in any pose and at any scale") 
     }
     const Posed p = pose(s, nullptr, 0.0f);
     GIANT_CHECK(pose_bounds(p.model, p.skin, std::vector<float>(2, 0.0f)).radius == 0.0f);
+    // Shear: a stretched parent and a turned child. The vertex a metre from
+    // the child lands two metres out; the bounds still hold it.
+    Skeleton sheared;
+    sheared.names = {"a", "b"};
+    sheared.parents = {-1, 0};
+    sheared.rest = {JointTransform{{}, {}, {2.0f, 1.0f, 1.0f}},
+                    JointTransform{{}, quat_from_axis_angle({0.0f, 0.0f, 1.0f}, 0.25f * std::numbers::pi_v<float>)}};
+    sheared.inverse_bind = {Mat4{}, Mat4{}};
+    const Posed q = pose(sheared, nullptr, 0.0f);
+    const std::vector<float> reach{0.0f, 1.0f};
+    const Bounds b = pose_bounds(q.model, q.skin, reach);
+    const float r = std::sqrt(0.5f);
+    const Vec3 v = skin_point(q.skin, {1, 0, 0, 0}, {255, 0, 0, 0}, {r, -r, 0.0f});
+    GIANT_CHECK(std::fabs(length(v) - 2.0f) < 1e-4f && length(v - b.center) <= b.radius);
 }
 
 GIANT_TEST("anim: the player loops, holds, fades, blends in step, and runs at its speed") {
@@ -244,15 +259,15 @@ GIANT_TEST("anim: the player loops, holds, fades, blends in step, and runs at it
     player.evaluate(s, clips, scratch, local);
     GIANT_CHECK(local == s.rest);
     // Looping: 1.25 s into a 1 s clip is a quarter in.
-    player.play(0);
+    player.play(s, clips, 0);
     player.advance(1.25f, clips);
     GIANT_CHECK(std::fabs(player.main().time - 0.25f) < 1e-5f);
     // Once: held at the end.
-    player.play(0, 0.0f, false);
+    player.play(s, clips, 0, 0.0f, false);
     player.advance(5.0f, clips);
     GIANT_CHECK(player.main().time == 1.0f);
     // Twice as fast; paused; backwards wraps.
-    player.play(1);
+    player.play(s, clips, 1);
     player.set_speed(2.0f);
     player.advance(0.5f, clips);
     GIANT_CHECK(std::fabs(player.main().time - 1.0f) < 1e-5f);
@@ -266,7 +281,7 @@ GIANT_TEST("anim: the player loops, holds, fades, blends in step, and runs at it
     player.set_speed(1.0f);
     // A fade from hop (at x = 1) to bend over a second: halfway, half each.
     player.set_time(1.0f, clips);
-    player.play(0, 1.0f);
+    player.play(s, clips, 0, 1.0f);
     GIANT_CHECK(player.other().clip == 1 && player.other_weight() == 1.0f);
     player.advance(0.5f, clips);
     GIANT_CHECK(std::fabs(player.other_weight() - 0.5f) < 1e-5f);
@@ -275,7 +290,9 @@ GIANT_TEST("anim: the player loops, holds, fades, blends in step, and runs at it
     player.advance(0.6f, clips);
     GIANT_CHECK(player.other().clip == k_no_clip && player.other_weight() == 0.0f);
     // Held blend, in step: b's time keeps a's fraction.
-    player.set_blend(0, 1, 0.25f, true);
+    player.set_time(0.5f, clips);
+    player.set_blend(clips, 0, 1, 0.25f, true);
+    GIANT_CHECK(std::fabs(player.other().time - 1.0f) < 1e-5f); // in step at once
     player.set_time(0.0f, clips);
     player.advance(0.4f, clips);
     GIANT_CHECK(player.blending() && std::fabs(player.other().time - 0.8f) < 1e-5f);
@@ -288,8 +305,65 @@ GIANT_TEST("anim: the player loops, holds, fades, blends in step, and runs at it
     player.evaluate(s, clips, scratch, local);
     GIANT_CHECK(local == s.rest);
     // Bad numbers do nothing harmful.
-    player.play(0, std::nanf(""), true, std::nanf(""));
+    player.play(s, clips, 0, std::nanf(""), true, std::nanf(""));
     player.set_speed(std::nanf(""));
     player.advance(std::nanf(""), clips);
     GIANT_CHECK(player.main().time == 0.0f && player.speed() == 1.0f);
+}
+
+GIANT_TEST("anim: starting a clip mid-fade or from a blend never jumps; starts wrap into the clip") {
+    const Skeleton s = arm();
+    // Three clips holding the shoulder at x = 0, 1 and 2.
+    std::vector<Clip> clips;
+    for (int i = 0; i < 3; ++i) {
+        Clip c;
+        c.name = "at " + std::to_string(i);
+        c.duration = 1.0f;
+        Channel ch;
+        ch.joint = 0;
+        ch.times = {0.0f, 1.0f};
+        ch.values = {{float(i), 0, 0, 0}, {float(i), 0, 0, 0}};
+        c.channels.push_back(ch);
+        clips.push_back(c);
+    }
+    PoseScratch scratch;
+    std::vector<JointTransform> local(2);
+    const auto x = [&](const AnimationPlayer& p) {
+        p.evaluate(s, clips, scratch, local);
+        return local[0].translation.x;
+    };
+    AnimationPlayer player;
+    player.play(s, clips, 0);
+    player.play(s, clips, 1, 1.0f);
+    player.advance(0.5f, clips);
+    GIANT_CHECK(std::fabs(x(player) - 0.5f) < 1e-5f);
+    // Again, mid-fade: it carries on from where it stood.
+    player.play(s, clips, 2, 1.0f);
+    GIANT_CHECK(std::fabs(x(player) - 0.5f) < 1e-5f && player.fading());
+    player.advance(0.5f, clips);
+    GIANT_CHECK(std::fabs(x(player) - 1.25f) < 1e-5f); // halfway from 0.5 to 2
+    player.advance(0.6f, clips);
+    GIANT_CHECK(std::fabs(x(player) - 2.0f) < 1e-5f && !player.fading());
+    // From a held blend: the same.
+    player.set_blend(clips, 0, 2, 0.8f, false);
+    GIANT_CHECK(std::fabs(x(player) - 1.6f) < 1e-5f);
+    player.play(s, clips, 1, 1.0f);
+    GIANT_CHECK(std::fabs(x(player) - 1.6f) < 1e-5f && !player.blending());
+    player.advance(1.0f, clips);
+    GIANT_CHECK(std::fabs(x(player) - 1.0f) < 1e-5f);
+    // A start past a looping clip's end wraps into it; past a single play's, holds at its end.
+    player.play(s, clips, 0, 0.0f, true, 1.25f);
+    GIANT_CHECK(std::fabs(player.main().time - 0.25f) < 1e-5f);
+    player.play(s, clips, 0, 0.0f, false, 7.0f);
+    GIANT_CHECK(player.main().time == 1.0f);
+    // A held blend loops even if its clip played once before; paused, b stays in step.
+    player.set_blend(clips, 0, 1, 0.5f, true);
+    GIANT_CHECK(player.main().loop);
+    player.set_paused(true);
+    player.set_time(0.5f, clips);
+    player.advance(0.1f, clips);
+    GIANT_CHECK(std::fabs(player.other().time - 0.5f) < 1e-5f);
+    // A clip that is not there plays nothing.
+    player.play(s, clips, 9);
+    GIANT_CHECK(player.main().clip == k_no_clip && x(player) == 0.0f);
 }

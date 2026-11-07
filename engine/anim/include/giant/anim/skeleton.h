@@ -25,6 +25,7 @@ namespace giant::anim {
 inline constexpr usize k_max_joints = 1024;          // joint indices fit u16
 inline constexpr float k_max_clip_seconds = 3600.0f; // an hour
 inline constexpr usize k_max_keys = 8'000'000;       // over all of a file's clips
+inline constexpr usize k_max_clips = 4096;           // a file's animations
 
 struct JointTransform {
     Vec3 translation{};
@@ -103,7 +104,8 @@ struct Bounds {
 // A sphere holding every skinned vertex in this pose. `joint_radius` (per
 // joint, from the import) is how far a vertex the joint moves lies from it
 // when bound (0: it moves none); a joint's vertices then lie within that
-// times its skin matrix's largest scale of the joint.
+// times the most its skin matrix can stretch (its Frobenius norm, so shear
+// and uneven scales are covered).
 Bounds pose_bounds(std::span<const Mat4> model, std::span<const Mat4> skin, std::span<const float> joint_radius);
 
 // The inverse of an affine matrix (its last row 0 0 0 1); the identity when

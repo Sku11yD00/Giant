@@ -13,6 +13,7 @@
 #include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace giant::geometry {
 
@@ -155,6 +156,14 @@ Mat4 world_matrix(const cgltf_node* node) {
     return m;
 }
 
+// An accessor the skin and clip readers may unpack: it has data in the
+// file (so the work is bounded by the file's size), and no sparse values on
+// an interleaved view (cgltf 1.15 reads those with the wrong stride).
+bool readable(const cgltf_accessor* a) {
+    return a != nullptr && a->buffer_view != nullptr &&
+           (!a->is_sparse || a->stride == cgltf_calc_size(a->type, a->component_type));
+}
+
 // Where a primitive's vertices go: the mesh, and (skinned) their weights:
 // all on one joint (`rigid`), or read from the primitive's own joints and
 // weights, which index `skin_joints` (the skin's joints, as skeleton joints).
@@ -250,6 +259,7 @@ private:
         }
         float total = 0.0f;
         for (usize i = 0; i < count; ++i) total += found[i].first;
+        if (!std::isfinite(total) || !(total > 0.0f)) return fail("a vertex's weights are too large to add up");
         // 255ths by largest remainder, so they sum to 255 exactly.
         std::array<float, 4> rest{};
         u32 given = 0;
@@ -274,10 +284,16 @@ private:
     }
 
     // A vec4 accessor as floats (joints and weights), for one primitive.
-    bool unpack4(const cgltf_accessor* accessor, usize count, std::vector<Vec4>& out) {
+    bool unpack4(const cgltf_accessor* accessor, usize count, std::vector<Vec4>& out, bool joints) {
         out.assign(count, Vec4{});
         if (accessor->type != cgltf_type_vec4 || accessor->count != count) {
             return fail("a skinned mesh's joints or weights do not match its vertices");
+        }
+        if (!readable(accessor)) return fail("a skinned mesh's joints or weights have no data, or are sparse and interleaved");
+        if (joints && ((accessor->component_type != cgltf_component_type_r_8u &&
+                        accessor->component_type != cgltf_component_type_r_16u) ||
+                       accessor->normalized)) {
+            return fail("a skinned mesh's joint indices are not unsigned bytes or shorts");
         }
         if (count > 0 && cgltf_accessor_unpack_floats(accessor, &out[0].x, count * 4) != count * 4) {
             return fail("could not read joints or weights");
@@ -395,7 +411,7 @@ private:
                 const cgltf_accessor* w = cgltf_find_accessor(&prim, cgltf_attribute_type_weights, set);
                 if (j == nullptr || w == nullptr) continue;
                 const usize s2 = static_cast<usize>(set) * 2;
-                if (!unpack4(j, vertex_count, skin_data[s2]) || !unpack4(w, vertex_count, skin_data[s2 + 1])) {
+                if (!unpack4(j, vertex_count, skin_data[s2], true) || !unpack4(w, vertex_count, skin_data[s2 + 1], false)) {
                     return false;
                 }
                 joint_sets[static_cast<usize>(set)] = &skin_data[s2];
@@ -581,7 +597,7 @@ bool build_skeleton(const cgltf_skin& skin, anim::Skeleton& out,
     std::vector<Mat4> inverse_bind(skin.joints_count);
     if (skin.inverse_bind_matrices != nullptr) {
         const cgltf_accessor* a = skin.inverse_bind_matrices;
-        if (a->type != cgltf_type_mat4 || a->count != skin.joints_count) {
+        if (a->type != cgltf_type_mat4 || a->count != skin.joints_count || !readable(a)) {
             error = "the skin's inverse bind matrices do not match its joints";
             return false;
         }
@@ -638,15 +654,18 @@ bool read_clips(const cgltf_data& data, const anim::Skeleton& skeleton,
     bool warned_morph = false;
     bool warned_other = false;
     usize keys = 0;
+    if (data.animations_count > anim::k_max_clips) {
+        return importer.fail("the file has more than 4096 animations");
+    }
+    std::unordered_set<std::string> names;
     for (cgltf_size a = 0; a < data.animations_count; ++a) {
         const cgltf_animation& animation = data.animations[a];
         anim::Clip clip;
         std::string name = animation.name != nullptr && animation.name[0] != '\0' ? animation.name
                                                                                   : "clip " + std::to_string(a + 1);
         std::string unique = name;
-        for (int k = 2; std::any_of(clips.begin(), clips.end(), [&unique](const anim::Clip& c) { return c.name == unique; }); ++k) {
-            unique = name + " (" + std::to_string(k) + ")";
-        }
+        for (int k = 2; names.count(unique) != 0; ++k) unique = name + " (" + std::to_string(k) + ")";
+        names.insert(unique);
         clip.name = unique;
         for (cgltf_size c = 0; c < animation.channels_count; ++c) {
             const cgltf_animation_channel& ch = animation.channels[c];
@@ -673,8 +692,8 @@ bool read_clips(const cgltf_data& data, const anim::Skeleton& skeleton,
             const cgltf_accessor* values = sampler.output;
             const usize per = out.interpolation == anim::Interpolation::cubic ? 3 : 1;
             const cgltf_type want = out.path == anim::Path::rotation ? cgltf_type_vec4 : cgltf_type_vec3;
-            if (in == nullptr || values == nullptr || in->type != cgltf_type_scalar || values->type != want ||
-                values->count != in->count * per) {
+            if (!readable(in) || !readable(values) || in->type != cgltf_type_scalar || values->type != want ||
+                in->count > anim::k_max_keys || values->count != in->count * per) {
                 return importer.fail("the clip " + clip.name + " has a channel whose values do not match its keys");
             }
             keys += in->count * per;
@@ -720,12 +739,14 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
     std::vector<Mat4> rest(skeleton.size());
     anim::model_matrices(skeleton, skeleton.rest, model);
     anim::skin_matrices(skeleton, model, rest);
+    std::unordered_set<const cgltf_mesh*> skinned_meshes; // each once: bind space ignores the node
     for (const cgltf_node* node : shown) {
         if (node->mesh == nullptr) continue;
         Target target;
         target.mesh = &out.mesh.mesh;
         target.weights = &out.mesh.weights;
         if (node->skin == &skin) {
+            if (!skinned_meshes.insert(node->mesh).second) continue;
             // In bind space as written: a skinned mesh's node does not place it.
             target.skin_joints = &skin_joints;
             float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -766,6 +787,16 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
             float& r = out.joint_radius[w.joints[k]];
             r = std::max(r, length(bound.vertices[v].position - origin[w.joints[k]]));
         }
+    }
+    // Triangles whose joints mirror them at rest are turned back to face out.
+    for (usize t = 0; t + 2 < result.mesh.indices.size(); t += 3) {
+        const SkinWeights& w = out.mesh.weights[result.mesh.indices[t]];
+        const Mat4& m = rest[w.joints[0]];
+        const auto a = [&m](int r, int c) { return m.at(r, c); };
+        const float det = a(0, 0) * (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1)) -
+                          a(0, 1) * (a(1, 0) * a(2, 2) - a(1, 2) * a(2, 0)) +
+                          a(0, 2) * (a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0));
+        if (det < 0.0f) std::swap(result.mesh.indices[t + 1], result.mesh.indices[t + 2]);
     }
     return true;
 }
