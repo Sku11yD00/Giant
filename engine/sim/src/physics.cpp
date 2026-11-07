@@ -26,11 +26,13 @@
 #include <Jolt/RegisterTypes.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <mutex>
 
 namespace giant::sim {
@@ -424,9 +426,14 @@ struct PhysicsWorld::Impl {
 PhysicsWorld::PhysicsWorld(JobSystem& jobs, const PhysicsSettings& settings)
     : m_impl(std::make_unique<Impl>(jobs, settings)) {}
 
+struct PhysicsWorld::Disposal {
+    std::thread thread;
+    std::atomic<bool> done{false};
+};
+
 PhysicsWorld::~PhysicsWorld() {
     m_impl.reset();
-    if (m_disposal.joinable()) m_disposal.join();
+    for (const std::unique_ptr<Disposal>& d : m_disposals) d->thread.join();
 }
 
 void PhysicsWorld::clear() {
@@ -436,9 +443,20 @@ void PhysicsWorld::clear() {
     std::swap(m_impl, fresh);
     m_moved.clear();
     // Letting tens of thousands of bodies go takes tens of milliseconds: on
-    // a thread of its own (one at a time), not in a frame.
-    if (m_disposal.joinable()) m_disposal.join();
-    m_disposal = std::thread([old = std::move(fresh)]() mutable { old.reset(); });
+    // a thread of its own, never waited for here (one still going when the
+    // next comes just runs beside it).
+    std::erase_if(m_disposals, [](const std::unique_ptr<Disposal>& d) {
+        if (!d->done.load(std::memory_order_acquire)) return false;
+        d->thread.join(); // finished: at once
+        return true;
+    });
+    auto disposal = std::make_unique<Disposal>();
+    Disposal* d = disposal.get();
+    d->thread = std::thread([d, old = std::move(fresh)]() mutable {
+        old.reset();
+        d->done.store(true, std::memory_order_release);
+    });
+    m_disposals.push_back(std::move(disposal));
 }
 
 BodyId PhysicsWorld::add(const BodyDesc& desc) {

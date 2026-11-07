@@ -982,8 +982,8 @@ over the target frame time). Where it stands:
   workers (the main thread waits for them). A frame's sync looks at no
   more than 1024 entities, a body counting each of its parts (1024 cubes
   or 25 kit placements of 40 pieces, about a millisecond, made in one
-  batch; an eighth kept for dynamic entities, so an edit to one never
-  waits behind a stream of fixed ones), and copies out no more than 16
+  batch; an eighth kept for dynamic entities, which have a queue of their
+  own, so an edit to one never waits behind a stream of fixed ones), and copies out no more than 16
   terrain tiles, whose height fields (0.2 to 0.8 ms each at 64 to 128
   samples) are made on a worker of their own (one thread, kept) and
   swapped in when ready, the old tile holding the ground meanwhile; the
@@ -991,8 +991,10 @@ over the target frame time). Where it stands:
   over a few seconds, not in one frame. A new dynamic entity's body waits
   until no fixed one is waiting and the ground round it is in, so nothing
   falls through. A new scene (new, load, open, and their undo) starts a
-  fresh physics world and lets the old one's bodies go on a thread of its
-  own (tens of milliseconds for 60,000 bodies, off the frame). Every body
+  fresh physics world (about 4 ms on the main thread, sized for 262,144
+  bodies) and lets the old one's bodies and the follower's tables go on
+  threads of their own (tens of milliseconds for 60,000 bodies, off the
+  frame); the scene's entities are then looked at a share a frame. Every body
   that moved rebuilds its cell's instances that frame (as any edit does;
   cost grows with what else is in the cell). Kits are compared whole each
   frame (as the renderer does). `raycast` and `step_physics` finish

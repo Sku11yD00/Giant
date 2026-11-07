@@ -126,16 +126,27 @@ void ScenePhysics::clear() {
         m_physics.remove_many(gone, false); // all of ours: nothing left to wake
     }
     for (const auto& [id, pose] : m_poses) m_redraw.push_back(id);
-    m_entities.clear();
-    m_by_body.clear();
+    // Freeing tens of thousands of entries takes milliseconds: on the
+    // builder's worker, off the frame.
+    struct Garbage {
+        std::unordered_map<world::EntityId, Tracked> entities;
+        std::unordered_map<BodyId, world::EntityId> by_body;
+        std::unordered_map<world::CellCoord, Tile, world::CellCoordHash> tiles;
+        std::unordered_set<world::EntityId> queued;
+    };
+    auto garbage = std::make_unique<Garbage>(
+        Garbage{std::move(m_entities), std::move(m_by_body), std::move(m_tiles), std::move(m_queued)});
+    m_builder.submit(m_builds, [g = std::shared_ptr<Garbage>(std::move(garbage))]() mutable { g.reset(); });
+    m_entities = {};
+    m_by_body = {};
     m_poses.clear();
     m_queue.clear();
     m_dynamic_queue.clear();
     m_dynamic_queued.clear();
-    m_queued.clear();
+    m_queued = {};
     m_scan.clear();
     m_scan_at = 0;
-    m_tiles.clear(); // builds on their way finish into nothing
+    m_tiles = {}; // builds on their way finish into nothing
     m_tile_queue.clear();
     m_tile_queued.clear();
     m_building.clear();
@@ -185,7 +196,18 @@ void ScenePhysics::enqueue(const world::Scene& scene, world::EntityId id) {
             drop_pose(id);
         }
     }
-    if (m_queued.insert(id).second) m_queue.push_back(id);
+    // A dynamic one (now, or as its body was made) goes to its own queue,
+    // with its share of each sync: an edit to it never waits behind a
+    // stream of fixed ones.
+    const world::Entity* e = scene.find(id);
+    const auto it = m_entities.find(id);
+    const bool dynamic = (e != nullptr && e->body == world::BodyKind::dynamic && e->shape != world::Shape::kit) ||
+                         (it != m_entities.end() && it->second.dynamic);
+    if (dynamic) {
+        if (m_dynamic_queued.insert(id).second) m_dynamic_queue.push_back(id);
+    } else if (m_queued.insert(id).second) {
+        m_queue.push_back(id);
+    }
 }
 
 void ScenePhysics::enqueue_tile(world::CellCoord cell) {
@@ -264,7 +286,8 @@ void ScenePhysics::sync_entities(const world::Scene& scene, u32 budget) {
     };
     // An eighth kept for dynamic ones (an edit to one must not wait on a
     // stream of fixed ones).
-    u32 fixed_budget = budget - budget / 8;
+    const u32 reserve = budget / 8;
+    u32 fixed_budget = budget - reserve;
     const auto next_fixed = [&](world::EntityId& id) {
         if (!m_queue.empty()) {
             id = m_queue.front();
@@ -291,9 +314,9 @@ void ScenePhysics::sync_entities(const world::Scene& scene, u32 budget) {
             continue;
         }
         const u32 cost = sync_entity(scene, id, made, gone);
-        fixed_budget -= std::min(cost, fixed_budget);
-        budget -= std::min(cost, budget);
+        fixed_budget -= std::min(cost, fixed_budget); // a big kit may overrun it, never the reserve
     }
+    budget = reserve + fixed_budget;
     const bool fixed_waiting = !m_queue.empty() || m_scan_at < m_scan.size();
     usize looked = 0;
     const usize waiting = m_dynamic_queue.size();
@@ -486,6 +509,8 @@ usize ScenePhysics::update_poses() {
         if (owner == m_by_body.end()) continue;
         const auto it = m_entities.find(owner->second);
         if (it == m_entities.end() || !it->second.dynamic) continue;
+        // An edit waiting to be seen: its old body is not where it is drawn.
+        if (m_dynamic_queued.count(owner->second) != 0) continue;
         const std::optional<BodyState> s = m_physics.state(body);
         if (!s) continue;
         world::Transform& pose = m_poses[owner->second];

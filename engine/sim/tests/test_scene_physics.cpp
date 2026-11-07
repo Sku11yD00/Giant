@@ -280,3 +280,22 @@ GIANT_TEST("scene physics: a crate on a crate falls when the one under it goes; 
     follow.flush(scene);
     GIANT_CHECK(physics.size() == 1 && follow.stats().entity_bodies == 1);
 }
+
+GIANT_TEST("scene physics: an edit to a falling crate is seen at once, behind a stream of fixed entities") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ScenePhysicsSettings budget;
+    budget.entities_per_sync = 64;
+    ScenePhysics follow(physics, budget);
+    Scene scene;
+    scene.add(make(world::Shape::plane, {0.0, 0.0, 0.0}, {100.0f, 1.0f, 100.0f}));
+    const EntityId crate =
+        scene.add(make(world::Shape::cube, {0.0, 100.0, 0.0}, {1.0f, 1.0f, 1.0f}, world::BodyKind::dynamic));
+    run(physics, follow, scene, 30);
+    GIANT_CHECK(at(follow, scene, crate).y < 99.0); // falling
+    for (int i = 0; i < 2000; ++i) scene.add(make(world::Shape::cube, {300.0 + i, 0.5, 0.0}, {1.0f, 1.0f, 1.0f}));
+    scene.modify(crate)->transform.position = {0.0, 500.0, 0.0};
+    run(physics, follow, scene, 1);
+    GIANT_CHECK(follow.stats().waiting > 1000);                    // the stream still going in
+    GIANT_CHECK(std::fabs(at(follow, scene, crate).y - 500.0) < 0.1); // but the crate is where it was put
+}

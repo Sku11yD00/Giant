@@ -199,7 +199,10 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     std::vector<BodyId> m_moved;
-    std::thread m_disposal; // letting a cleared world's bodies go
+    // Cleared worlds being let go, each on a thread of its own (joined once
+    // done, or when this world goes).
+    struct Disposal;
+    std::vector<std::unique_ptr<Disposal>> m_disposals;
 };
 
 } // namespace giant::sim
