@@ -60,6 +60,7 @@ Json physics_json(const EditorState& state) {
                        {"laid", f.laid},
                        {"refused", f.refused},
                        {"shrugged", f.shrugged}}},
+            {"ground", {{"dents", p.ground().dents()}, {"tiles", p.ground().tiles()}}},
             {"dust", {{"puffs", d.puffs}, {"emitted", d.emitted}, {"merged", d.merged}, {"dropped", d.dropped}}}};
 }
 
@@ -228,6 +229,43 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              Json out = physics_json(state);
              out["loosened"] = hit.loosened;
              out["felled"] = hit.felled;
+             return CommandResult::success(out);
+         }});
+
+    add(registry,
+        {"dent_ground",
+         "While simulating, presses a dent into the terrain at `point` (x and z; y is not used): a crater, "
+         "a bowl `radius` metres across its middle and `depth` metres deep at the centre with a rim "
+         "thrown up round it (`rim`: its height as a share of depth, out to 1.5 radius; default 0.25), or, "
+         "with `stretch` over 1, a footprint `stretch` times as long as wide along `yaw` (degrees from "
+         "+x toward +z). The ground follows everywhere (drawing, bodies, scatter); a round crater throws "
+         "up dust. View state: stopping the simulation puts the ground back exactly, and saving saves it "
+         "as it was. Only tiles that exist are dented. Returns `tiles` (changed) and get_physics.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"point", "radius", "depth"}},
+              {"properties",
+               {{"point", triple(1e8, "World metres.")},
+                {"radius", {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 200}, {"description", "Metres."}}},
+                {"depth", {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 100}, {"description", "Metres."}}},
+                {"rim", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
+                {"stretch", {{"type", "number"}, {"minimum", 1}, {"maximum", 8}}},
+                {"yaw", {{"type", "number"}, {"minimum", -360}, {"maximum", 360}, {"description", "Degrees."}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.physics == nullptr) return no_physics();
+             if (!state.physics->simulating()) return CommandResult::failure("not simulating (simulate on first)");
+             const Json& p = args["point"];
+             world::Dent dent;
+             dent.radius = args["radius"].get<double>();
+             dent.depth = args["depth"].get<float>();
+             dent.rim = args.value("rim", 0.25f);
+             dent.stretch = args.value("stretch", 1.0f);
+             dent.yaw = degrees_to_radians(args.value("yaw", 0.0f));
+             const usize tiles =
+                 state.physics->dent(state.scene, dent, {p[0].get<double>(), p[1].get<double>(), p[2].get<double>()});
+             Json out = physics_json(state);
+             out["tiles"] = tiles;
              return CommandResult::success(out);
          }});
 

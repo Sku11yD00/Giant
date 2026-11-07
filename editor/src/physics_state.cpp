@@ -48,6 +48,8 @@ void PhysicsState::notice_scene(const world::Scene& scene) {
     if (scene.identity() == m_scene) return;
     m_scene = scene.identity();
     m_dust.clear();
+    m_ground.forget(); // another scene's ground
+    m_restore_ground = false;
     // The scene's bodies and the trunks all go: the world cleared whole
     // (off the frame) when they are all it holds, the trunks' ids forgotten.
     if (m_bodies.clear(m_forest.bodies())) {
@@ -64,6 +66,7 @@ void PhysicsState::set_simulating(bool on) {
         m_bodies.reset_poses();
         m_forest.reset();
         m_dust.clear();
+        m_restore_ground = true; // with the scene, at the next update
     }
 }
 
@@ -120,8 +123,40 @@ void PhysicsState::feed_forest(const world::Scene& scene, const ScatterPlacer& s
     }
 }
 
+void PhysicsState::restore_ground(world::Scene& scene) {
+    if (!m_restore_ground) return;
+    m_restore_ground = false;
+    m_ground.restore(scene.terrain);
+}
+
+usize PhysicsState::dent(world::Scene& scene, const world::Dent& dent, const DVec3& at) {
+    notice_scene(scene);
+    restore_ground(scene); // (stopped and started again since: that first)
+    std::vector<world::CellCoord> changed;
+    m_ground.dent(scene.terrain, dent, at.x, at.z, changed);
+    // A crater throws up the ground it was.
+    if (!changed.empty() && dent.stretch <= 1.0f && dent.radius >= 2.0) {
+        const float r = std::clamp(static_cast<float>(0.8 * dent.radius), 2.0f, 60.0f);
+        const std::optional<double> ground = scene.terrain.height_at(at.x, at.z);
+        m_dust.emit({at.x, ground.value_or(at.y) + 0.4 * r, at.z}, r, 1.2f / r, sim::k_dust_earth);
+    }
+    return changed.size();
+}
+
+PhysicsState::GroundAsSaved::GroundAsSaved(PhysicsState* physics, world::Scene& scene)
+    : m_physics(physics), m_scene(scene) {
+    if (m_physics == nullptr) return;
+    m_physics->restore_ground(scene);
+    m_physics->m_ground.lift(scene.terrain);
+}
+
+PhysicsState::GroundAsSaved::~GroundAsSaved() {
+    if (m_physics != nullptr) m_physics->m_ground.put_back(m_scene.terrain);
+}
+
 void PhysicsState::update(world::Scene& scene, const world::SceneChanges& changed, double seconds) {
     notice_scene(scene);
+    restore_ground(scene);
     m_bodies.sync(scene, changed.ids, changed.all);
     m_forest.sync(m_camera);
     if (!m_on) return;
@@ -171,6 +206,7 @@ PhysicsState::Impact PhysicsState::impact(const DVec3& point, float radius, floa
 
 void PhysicsState::flush(world::Scene& scene) {
     notice_scene(scene);
+    restore_ground(scene);
     if (take_frame_changes) {
         const world::SceneChanges taken = take_frame_changes();
         m_bodies.sync(scene, taken.ids, taken.all);
@@ -182,6 +218,7 @@ void PhysicsState::flush(world::Scene& scene) {
 
 void PhysicsState::catch_up(world::Scene& scene) {
     notice_scene(scene);
+    restore_ground(scene);
     if (take_frame_changes) {
         const world::SceneChanges taken = take_frame_changes();
         m_bodies.sync(scene, taken.ids, taken.all);

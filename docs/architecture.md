@@ -795,6 +795,34 @@ ignores shadows (a puff in a building's shade is lit as in the sun) and is
 drawn over the fog rather than in it; pieces still break whole (no
 splintering); craters and footprints are part 7.
 
+### Craters and footprints (N4 part 7)
+
+`world::Dent` is a dent pressed into the terrain: a smooth bowl,
+`-depth (1 - e²)²` for the elliptical distance e under 1, with a rim
+`depth × rim × (1 - t²)²` out to 1.5 (`apply_dent`, `dent_offset`); a
+footprint is the same stretched along a yaw. While simulating,
+`PhysicsState::dent` (the `dent_ground` command) presses it into the
+scene's terrain itself, so everything that follows the ground follows
+with its own budgets: the terrain meshes, the physics tiles (a resting body
+wakes as its tile is swapped), the voxel world, scatter (re-placed onto the
+new ground). It is still view state: `world::GroundDamage` keeps each
+dented tile's heights and version as they were before its first dent, and
+stopping puts them back with `Terrain::restore` (the same versions, so
+nothing reads as edited or unsaved and every cache stays good). A tile
+edited otherwise after its last dent (a sculpt, an undo) is left as that
+made it. `save_world`, `save_scene` and `open_world`'s unsaved check run
+with the ground as it was (`PhysicsState::GroundAsSaved`: lift, then put
+back); a dented cell reads as unsaved meanwhile, so it never unloads.
+
+A cell placed again keeps its fallen trees whose point stands at the same
+x and z (`Forest::set_cell`): a dent re-places the scatter of the cells it
+touches, and the trees felled there stay down (their bodies wake and settle
+into the dent).
+
+Known limits: rubble and laid trees (no bodies) stay at the height they
+were laid; a dent is applied at once, its cost the samples under it (200 m
+at most); damage is not saved yet (part 8).
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

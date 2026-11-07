@@ -108,6 +108,71 @@ void apply_brush(Terrain& terrain, const Brush& brush, double x, double z, std::
     }
 }
 
+double dent_reach(const Dent& dent) {
+    if (!(dent.radius > 0.0) || !std::isfinite(dent.radius)) return 0.0;
+    const double stretch = std::isfinite(dent.stretch) ? std::max(1.0, static_cast<double>(dent.stretch)) : 1.0;
+    return 1.5 * dent.radius * stretch;
+}
+
+float dent_offset(const Dent& dent, double du, double dv) {
+    if (!(dent.radius > 0.0) || !std::isfinite(dent.depth)) return 0.0f;
+    const double stretch = std::isfinite(dent.stretch) ? std::max(1.0, static_cast<double>(dent.stretch)) : 1.0;
+    const double a = du / (dent.radius * stretch);
+    const double b = dv / dent.radius;
+    const double e = std::sqrt(a * a + b * b);
+    if (e < 1.0) {
+        const double q = 1.0 - e * e;
+        return static_cast<float>(-dent.depth * q * q); // a smooth bowl, flat at its edge
+    }
+    if (e < 1.5) {
+        const double t = (e - 1.25) / 0.25; // -1 to 1 across the rim
+        const double rim = std::isfinite(dent.rim) ? std::clamp(static_cast<double>(dent.rim), 0.0, 1.0) : 0.0;
+        const double bump = 1.0 - t * t;
+        return static_cast<float>(dent.depth * rim * bump * bump);
+    }
+    return 0.0f;
+}
+
+void apply_dent(Terrain& terrain, const Dent& dent, double x, double z, std::vector<CellCoord>& changed) {
+    const double reach = dent_reach(dent);
+    if (terrain.empty() || !(reach > 0.0) || !std::isfinite(x) || !std::isfinite(z) || !std::isfinite(dent.depth) ||
+        !std::isfinite(dent.yaw)) {
+        return;
+    }
+    const double s = terrain.spacing();
+    const i64 n = terrain.samples();
+    const i64 i0 = static_cast<i64>(std::ceil((x - reach) / s)), i1 = static_cast<i64>(std::floor((x + reach) / s));
+    const i64 j0 = static_cast<i64>(std::ceil((z - reach) / s)), j1 = static_cast<i64>(std::floor((z + reach) / s));
+    if (i1 < i0 || j1 < j0) return;
+    const double cu = std::cos(static_cast<double>(dent.yaw)), su = std::sin(static_cast<double>(dent.yaw));
+    for (i64 cz = floor_div(j0, n); cz <= floor_div(j1, n); ++cz) {
+        for (i64 cx = floor_div(i0, n); cx <= floor_div(i1, n); ++cx) {
+            if (!in_i32(cx) || !in_i32(cz)) continue;
+            const CellCoord cell{static_cast<i32>(cx), static_cast<i32>(cz)};
+            const Terrain::Heights* source = terrain.find(cell);
+            if (source == nullptr) continue;
+            Terrain::Heights* heights = nullptr; // modified only once a sample changes
+            for (i64 j = std::max(j0, cz * n); j <= std::min(j1, cz * n + n - 1); ++j) {
+                for (i64 i = std::max(i0, cx * n); i <= std::min(i1, cx * n + n - 1); ++i) {
+                    const double dx = static_cast<double>(i) * s - x;
+                    const double dz = static_cast<double>(j) * s - z;
+                    const float off = dent_offset(dent, dx * cu + dz * su, dz * cu - dx * su);
+                    if (off == 0.0f) continue;
+                    const usize at = static_cast<usize>((j - cz * n) * n + (i - cx * n));
+                    const float h = heights != nullptr ? (*heights)[at] : (*source)[at];
+                    const float next = std::clamp(h + off, -k_max_terrain_height, k_max_terrain_height);
+                    if (next == h) continue;
+                    if (heights == nullptr) {
+                        heights = terrain.modify(cell);
+                        changed.push_back(cell);
+                    }
+                    (*heights)[at] = next;
+                }
+            }
+        }
+    }
+}
+
 std::vector<GroundPoint> brush_dabs(const Brush& brush, std::span<const GroundPoint> points, usize max_dabs) {
     std::vector<GroundPoint> out;
     if (points.empty()) return out;

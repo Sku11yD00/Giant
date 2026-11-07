@@ -140,7 +140,38 @@ void Forest::drop_trunks(Cell& cell) {
 }
 
 void Forest::set_cell(world::CellCoord coord, u64 serial, std::vector<TreeSpot> trees) {
-    if (const auto it = m_cells.find(coord); it != m_cells.end()) drop_bodies(coord, it->second);
+    // Fallen trees whose spot the new placement keeps (the same point,
+    // standing where it stood: the ground under it dented, a cell placed
+    // again for other trees) stay fallen, where they lie.
+    struct Kept {
+        u32 point = 0;
+        BodyId body = k_no_body;
+        bool laid = false;
+        world::Transform at;
+    };
+    std::vector<Kept> kept;
+    if (const auto it = m_cells.find(coord); it != m_cells.end()) {
+        Cell& old = it->second;
+        const auto lying = m_fallen.find(coord);
+        if (old.fallen > 0 && lying != m_fallen.end()) {
+            usize k = 0; // trees are in point order, both lists
+            for (Tree& t : old.trees) {
+                if (!t.fallen) continue;
+                while (k < trees.size() && trees[k].point < t.spot.point) ++k;
+                if (k == trees.size() || trees[k].point != t.spot.point) continue;
+                const DVec3 d = trees[k].at.position - t.spot.at.position;
+                if (std::fabs(d.x) > 0.01 || std::fabs(d.z) > 0.01) continue;
+                const auto at = std::lower_bound(lying->second.trees.begin(), lying->second.trees.end(), t.spot.point,
+                                                 [](const FallenTree& a, u32 p) { return a.point < p; });
+                if (at == lying->second.trees.end() || at->point != t.spot.point) continue;
+                kept.push_back({t.spot.point, t.body, t.laid, at->at});
+                // Out of the old cell, so dropping it leaves this one be.
+                if (t.body != k_no_body) m_by_body.erase(t.body);
+                t.body = k_no_body;
+            }
+        }
+        drop_bodies(coord, old); // (the kept ones' bodies are not the old cell's now: left as they are)
+    }
     Cell& cell = m_cells[coord];
     cell = Cell{};
     cell.serial = serial;
@@ -150,6 +181,25 @@ void Forest::set_cell(world::CellCoord coord, u64 serial, std::vector<TreeSpot> 
         t.spot = s;
         cell.reach = std::max(cell.reach, s.height + s.trunk_radius);
     }
+    if (kept.empty()) return;
+    FallenCell& f = m_fallen[coord];
+    f.serial = serial;
+    f.trees.clear();
+    usize k = 0;
+    for (const Kept& kp : kept) {
+        while (k < cell.trees.size() && cell.trees[k].spot.point < kp.point) ++k;
+        if (k == cell.trees.size()) break;
+        Tree& t = cell.trees[k];
+        t.fallen = true;
+        t.laid = kp.laid;
+        t.body = kp.body;
+        if (kp.body != k_no_body) m_by_body[kp.body] = {coord, static_cast<u32>(k)};
+        ++cell.fallen;
+        ++m_fallen_count;
+        if (kp.laid) ++m_laid;
+        f.trees.push_back({kp.point, kp.at});
+    }
+    redraw(coord);
 }
 
 void Forest::remove_cell(world::CellCoord coord) {

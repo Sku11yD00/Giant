@@ -1094,7 +1094,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          false,
          [&state](const Json& args, CommandContext&) {
              const std::filesystem::path path = utf8_path(args["path"].get<std::string>());
-             const std::string text = world::save_scene(state.scene);
+             std::string text;
+             {
+                 const PhysicsState::GroundAsSaved as_saved(state.physics, state.scene); // not the dents of simulating
+                 text = world::save_scene(state.scene);
+             }
              std::ofstream file(path, std::ios::binary);
              file.write(text.data(), static_cast<std::streamsize>(text.size()));
              file.close();
@@ -1157,6 +1161,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure("worlds are not available in this editor");
              }
              WorldStreaming& w = *state.world;
+             // The dents of simulating are not edits (back as they were for the check).
+             const PhysicsState::GroundAsSaved as_saved(state.physics, state.scene);
              if (!args.value("discard_unsaved", false)) {
                  if (w.active(state.scene_generation)) {
                      if (const u32 n = w.unsaved_cells(state.scene); n > 0) {
@@ -1210,6 +1216,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              }
              WorldStreaming& w = *state.world;
              const bool active = w.active(state.scene_generation);
+             const PhysicsState::GroundAsSaved as_saved(state.physics, state.scene); // not the dents of simulating
              WorldStreaming::Saved saved;
              if (args.contains("folder")) {
                  const std::filesystem::path folder = utf8_path(args["folder"].get<std::string>());
