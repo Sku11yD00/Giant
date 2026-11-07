@@ -199,6 +199,15 @@ void Window::set_text_input(bool enabled) {
     }
 }
 
+void Window::set_relative_mouse(bool enabled) {
+    if (enabled == m_relative_mouse) {
+        return;
+    }
+    if (SDL_SetWindowRelativeMouseMode(m_impl->window, enabled)) {
+        m_relative_mouse = enabled;
+    }
+}
+
 void Window::set_cursor(Cursor cursor) {
     if (cursor == m_cursor) {
         return;
@@ -252,6 +261,8 @@ bool Window::poll_events() {
                 input.type = InputEvent::Type::mouse_move;
                 input.x = event.motion.x;
                 input.y = event.motion.y;
+                input.dx = event.motion.xrel;
+                input.dy = event.motion.yrel;
                 m_input.push_back(std::move(input));
             }
             break;

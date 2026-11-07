@@ -4,6 +4,7 @@
 #include "editor_commands.h"
 #include "mesh_library.h"
 #include "physics_state.h"
+#include "play_state.h"
 #include "far_ground.h"
 #include "world_streaming.h"
 
@@ -1468,7 +1469,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
     add(registry,
         {"set_camera",
          "Moves the viewport camera. Give look_at to aim it at a point (easiest), or yaw and "
-         "pitch. Fields left out stay as they are. View state, like scrolling: not undoable.",
+         "pitch. Fields left out stay as they are. Refused while playing (the camera is the player's eyes). "
+         "View state, like scrolling: not undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
@@ -1480,6 +1482,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"fly_speed", number(0.1, 10000, "Metres per second when flying.")}}}},
          false,
          [&state](const Json& args, CommandContext&) {
+             if (state.play != nullptr && state.play->playing()) {
+                 return CommandResult::failure("playing: the camera is the player's eyes (play off first, or "
+                                               "set_player_input to look)");
+             }
              // Worked out on a copy: a failure leaves the camera untouched.
              EditorCamera c = state.camera;
              if (args.contains("position")) c.position = dvec3_from(args["position"]);

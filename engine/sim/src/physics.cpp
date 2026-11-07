@@ -12,6 +12,7 @@
 #include <Jolt/Core/JobSystemWithBarrier.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -31,6 +32,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <thread>
 #include <mutex>
@@ -308,6 +310,40 @@ struct JoltUser {
     JoltUser& operator=(const JoltUser&) = delete;
 };
 
+bool valid_character(const CharacterDesc& d) {
+    return finite(d.position) && std::isfinite(d.height) && std::isfinite(d.radius) &&
+           std::isfinite(d.max_slope_degrees) && std::isfinite(d.step_height) && std::isfinite(d.mass) &&
+           std::isfinite(d.strength) && d.radius >= 0.05f && d.height >= 2.0f * d.radius + 0.01f &&
+           d.height <= 100.0f && d.max_slope_degrees >= 0.0f && d.max_slope_degrees <= 89.0f &&
+           d.step_height >= 0.0f && d.step_height < d.height && d.mass > 0.0f && d.strength >= 0.0f;
+}
+
+bool valid_input(const CharacterInput& in) {
+    return finite(in.velocity) && std::isfinite(in.acceleration) && in.acceleration >= 0.0f &&
+           std::isfinite(in.air_acceleration) && in.air_acceleration >= 0.0f;
+}
+
+// A capsule standing on the origin (the character's feet).
+JPH::RefConst<JPH::Shape> standing_capsule(float height, float radius) {
+    const float half = 0.5f * height;
+    JPH::ShapeSettings::ShapeResult capsule = JPH::CapsuleShapeSettings(half - radius, radius).Create();
+    if (capsule.HasError()) return nullptr;
+    JPH::ShapeSettings::ShapeResult r =
+        JPH::RotatedTranslatedShapeSettings(JPH::Vec3(0.0f, half, 0.0f), JPH::Quat::sIdentity(), capsule.Get())
+            .Create();
+    return r.HasError() ? nullptr : r.Get();
+}
+
+// `from` moved toward `to` by at most `step`.
+JPH::Vec3 approach(JPH::Vec3Arg from, JPH::Vec3Arg to, float step) {
+    const JPH::Vec3 d = to - from;
+    const float length = d.Length();
+    return length <= step || length < 1e-6f ? JPH::Vec3(to) : from + d * (step / length);
+}
+
+// How long a jump asked for in the air waits for the ground (seconds).
+constexpr float k_jump_wait = 0.2f;
+
 } // namespace
 
 // --- The world ----------------------------------------------------------------
@@ -325,7 +361,9 @@ struct PhysicsWorld::Impl {
         system.SetGravity(to_jolt(s.gravity));
     }
     ~Impl() {
-        // Bodies go before the system that owns them (then Jolt's types, last).
+        // Characters (their bodies with them), then the bodies, before the
+        // system that owns them (then Jolt's types, last).
+        characters.clear();
         JPH::BodyIDVector all;
         system.GetBodies(all);
         if (!all.empty()) {
@@ -353,6 +391,18 @@ struct PhysicsWorld::Impl {
     u32 dropped = 0;
     double last_step_ms = 0.0;
     u32 bodies = 0;
+
+    struct Character {
+        CharacterDesc desc;
+        JPH::Ref<JPH::CharacterVirtual> body;
+        CharacterInput input;
+        float jump_speed = 0.0f;
+        float jump_wait = 0.0f; // seconds a jump asked for still waits for the ground
+        JPH::Vec3 velocity = JPH::Vec3::sZero(); // how it moved in the last step (Jolt keeps the speed asked for)
+        float vertical = 0.0f; // the speed up it was given in the last step
+    };
+    std::map<CharacterId, Character> characters; // in id order: the same steps every run
+    CharacterId next_character = 1;
 
     JPH::BodyInterface& bodies_interface() { return system.GetBodyInterface(); }
     const JPH::BodyInterface& bodies_interface() const { return system.GetBodyInterface(); }
@@ -400,6 +450,82 @@ struct PhysicsWorld::Impl {
         if (lock.Succeeded()) wake_in(lock.GetBody().GetWorldSpaceBounds());
     }
 
+    // A character's Jolt half, at `position` moving at `velocity`; null
+    // when its shapes could not be made.
+    JPH::Ref<JPH::CharacterVirtual> make_character(const CharacterDesc& d, const DVec3& position, const Vec3& velocity) {
+        JPH::RefConst<JPH::Shape> shape = standing_capsule(d.height, d.radius);
+        // The body others meet: a little inside the character (it keeps that
+        // far from things), so it never holds the character back.
+        JPH::RefConst<JPH::Shape> inner = standing_capsule(d.height - 0.04f, d.radius - 0.02f);
+        if (shape == nullptr || inner == nullptr) return nullptr;
+        JPH::Ref<JPH::CharacterVirtualSettings> s = new JPH::CharacterVirtualSettings();
+        s->mShape = shape;
+        s->mMaxSlopeAngle = JPH::DegreesToRadians(d.max_slope_degrees);
+        s->mMass = d.mass;
+        s->mMaxStrength = d.strength;
+        // What touches the lower half-sphere holds it up; the rest only stops it.
+        s->mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -d.radius);
+        s->mEnhancedInternalEdgeRemoval = true; // no snagging on a height field's triangle edges
+        s->mInnerBodyShape = inner;
+        s->mInnerBodyLayer = layers::moving;
+        JPH::Ref<JPH::CharacterVirtual> c =
+            new JPH::CharacterVirtual(s, to_jolt(position), JPH::Quat::sIdentity(), d.user, &system);
+        c->SetLinearVelocity(to_jolt(velocity));
+        return c;
+    }
+
+    void refresh(JPH::CharacterVirtual& c) {
+        c.RefreshContacts(system.GetDefaultBroadPhaseLayerFilter(layers::moving),
+                          system.GetDefaultLayerFilter(layers::moving), {}, {}, temp);
+    }
+
+    // One fixed step of a character: its velocity from its input, then
+    // moved (sliding along what it meets, up steps, down onto the floor).
+    void step_character(Character& c, float dt) {
+        JPH::CharacterVirtual& cv = *c.body;
+        const JPH::Vec3 up = JPH::Vec3::sAxisY();
+        const JPH::Vec3 gravity = system.GetGravity();
+        cv.UpdateGroundVelocity(); // what it stands on may have changed speed
+        // How it really moved: a wall, a ceiling or a slope stopped what it asked for.
+        const JPH::Vec3 v = c.velocity;
+        const JPH::Vec3 ground = cv.GetGroundVelocity();
+        const JPH::Vec3 want(c.input.velocity.x, 0.0f, c.input.velocity.z);
+        // Not on its way up off the ground (a jump), by the speed it was
+        // given: walking up a slope rises without leaving it.
+        const bool towards_ground = c.vertical - ground.GetY() < 0.1f;
+        JPH::Vec3 out;
+        if (cv.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround && towards_ground) {
+            // Walking: its speed over the ground, carried along with it.
+            const JPH::Vec3 ground_flat(ground.GetX(), 0.0f, ground.GetZ());
+            const JPH::Vec3 over = JPH::Vec3(v.GetX(), 0.0f, v.GetZ()) - ground_flat;
+            out = ground + approach(over, want, c.input.acceleration * dt);
+            if (c.jump_wait > 0.0f) {
+                out += up * c.jump_speed;
+                c.jump_wait = 0.0f;
+            }
+        } else {
+            // In the air: its own speed up or down, slowed where something
+            // stopped it (a ceiling, a slope it slides on), never turned
+            // round by how a step up or an edge moved it.
+            float vy = c.vertical;
+            if (vy > 0.0f) vy = std::min(vy, std::max(v.GetY(), 0.0f));
+            else vy = std::max(vy, std::min(v.GetY(), 0.0f));
+            const JPH::Vec3 flat(v.GetX(), 0.0f, v.GetZ());
+            out = approach(flat, want, c.input.air_acceleration * dt) + up * vy;
+            c.jump_wait = std::max(0.0f, c.jump_wait - dt);
+        }
+        out += gravity * dt;
+        c.vertical = out.GetY();
+        cv.SetLinearVelocity(out);
+        JPH::CharacterVirtual::ExtendedUpdateSettings update;
+        update.mStickToFloorStepDown = JPH::Vec3(0.0f, -std::max(c.desc.step_height, 0.05f), 0.0f);
+        update.mWalkStairsStepUp = JPH::Vec3(0.0f, c.desc.step_height, 0.0f);
+        const JPH::RVec3 from = cv.GetPosition();
+        cv.ExtendedUpdate(dt, gravity, update, system.GetDefaultBroadPhaseLayerFilter(layers::moving),
+                          system.GetDefaultLayerFilter(layers::moving), {}, {}, temp);
+        c.velocity = JPH::Vec3(cv.GetPosition() - from) / dt;
+    }
+
     std::vector<BodyId> add(std::span<const BodyDesc> descs, std::span<const JPH::RefConst<JPH::Shape>> shapes) {
         std::vector<BodyId> out(descs.size(), k_no_body);
         std::vector<JPH::BodyID> moving;
@@ -440,6 +566,14 @@ void PhysicsWorld::clear() {
     auto fresh = std::make_unique<Impl>(m_impl->jobs.jobs(), m_impl->settings);
     fresh->steps = m_impl->steps;
     fresh->dropped = m_impl->dropped;
+    fresh->next_character = m_impl->next_character;
+    // Characters carry on in the fresh world where they were.
+    for (auto& [id, c] : m_impl->characters) {
+        Impl::Character moved = c;
+        moved.body = fresh->make_character(c.desc, from_jolt_r(c.body->GetPosition()), from_jolt(c.velocity));
+        if (moved.body != nullptr) fresh->characters.emplace(id, std::move(moved));
+    }
+    m_impl->characters.clear(); // their bodies out of the old world here, not on its thread
     std::swap(m_impl, fresh);
     m_moved.clear();
     // Letting tens of thousands of bodies go takes tens of milliseconds: on
@@ -579,6 +713,7 @@ u32 PhysicsWorld::step(double seconds) {
             break;
         }
         m_impl->carried -= k_step_seconds;
+        for (auto& [id, c] : m_impl->characters) m_impl->step_character(c, static_cast<float>(k_step_seconds));
         const JPH::EPhysicsUpdateError error =
             m_impl->system.Update(static_cast<float>(k_step_seconds), 1, &m_impl->temp, &m_impl->jobs);
         m_impl->jobs.drain();
@@ -598,6 +733,73 @@ u32 PhysicsWorld::step(double seconds) {
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     return run;
 }
+
+CharacterId PhysicsWorld::add_character(const CharacterDesc& desc) {
+    if (!valid_character(desc)) return k_no_character;
+    Impl::Character c;
+    c.desc = desc;
+    c.body = m_impl->make_character(desc, desc.position, {});
+    if (c.body == nullptr || c.body->GetInnerBodyID().IsInvalid()) return k_no_character; // full
+    m_impl->refresh(*c.body); // standing (or not) from the start
+    const CharacterId id = m_impl->next_character++;
+    m_impl->characters.emplace(id, std::move(c));
+    return id;
+}
+
+void PhysicsWorld::remove_character(CharacterId id) {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end()) return;
+    m_impl->wake_in(it->second.body->GetShape()->GetWorldSpaceBounds(it->second.body->GetCenterOfMassTransform(),
+                                                                      JPH::Vec3::sOne()));
+    m_impl->characters.erase(it);
+}
+
+bool PhysicsWorld::contains_character(CharacterId id) const { return m_impl->characters.count(id) != 0; }
+
+void PhysicsWorld::set_character_input(CharacterId id, const CharacterInput& input) {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end() || !valid_input(input)) return;
+    it->second.input = input;
+}
+
+void PhysicsWorld::jump(CharacterId id, float speed) {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end() || !std::isfinite(speed) || speed <= 0.0f) return;
+    it->second.jump_speed = speed;
+    it->second.jump_wait = k_jump_wait;
+}
+
+void PhysicsWorld::set_character_position(CharacterId id, const DVec3& position) {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end() || !finite(position)) return;
+    it->second.body->SetPosition(to_jolt(position));
+    it->second.body->SetLinearVelocity(JPH::Vec3::sZero());
+    it->second.velocity = JPH::Vec3::sZero();
+    it->second.vertical = 0.0f;
+    it->second.jump_wait = 0.0f;
+    m_impl->refresh(*it->second.body);
+}
+
+std::optional<CharacterState> PhysicsWorld::character_state(CharacterId id) const {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end()) return std::nullopt;
+    const JPH::CharacterVirtual& c = *it->second.body;
+    CharacterState s;
+    s.position = from_jolt_r(c.GetPosition());
+    s.velocity = from_jolt(it->second.velocity);
+    s.on_ground = c.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround;
+    s.on_steep = c.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnSteepGround;
+    if (c.IsSupported()) s.ground_normal = from_jolt(c.GetGroundNormal());
+    if (c.GetGroundState() != JPH::CharacterVirtual::EGroundState::InAir) s.ground = to_id(c.GetGroundBodyID());
+    return s;
+}
+
+BodyId PhysicsWorld::character_body(CharacterId id) const {
+    const auto it = m_impl->characters.find(id);
+    return it == m_impl->characters.end() ? k_no_body : to_id(it->second.body->GetInnerBodyID());
+}
+
+usize PhysicsWorld::characters() const { return m_impl->characters.size(); }
 
 std::optional<RayHit> PhysicsWorld::raycast(const DVec3& origin, const Vec3& direction, double max_distance) const {
     const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
@@ -627,7 +829,10 @@ std::optional<RayHit> PhysicsWorld::raycast(const DVec3& origin, const Vec3& dir
 PhysicsStats PhysicsWorld::stats() const {
     PhysicsStats s;
     s.bodies = m_impl->bodies;
-    s.active = m_impl->system.GetNumActiveBodies(JPH::EBodyType::RigidBody);
+    s.characters = static_cast<u32>(m_impl->characters.size());
+    // Characters' bodies never sleep: left out, so a world at rest reads 0.
+    const u32 active = m_impl->system.GetNumActiveBodies(JPH::EBodyType::RigidBody);
+    s.active = active - std::min(active, s.characters);
     s.steps = m_impl->steps;
     s.dropped = m_impl->dropped;
     s.last_step_ms = m_impl->last_step_ms;

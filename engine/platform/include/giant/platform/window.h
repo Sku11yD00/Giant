@@ -49,6 +49,11 @@ public:
     // while enabled. Turn it on while a text field has focus.
     void set_text_input(bool enabled);
 
+    // Relative mouse (looking around in play): the cursor hidden and held
+    // in the window, motion reported as mouse_move's dx, dy.
+    void set_relative_mouse(bool enabled);
+    bool relative_mouse() const { return m_relative_mouse; }
+
     enum class Cursor : u8 { arrow, text, resize_all, resize_ns, resize_ew, resize_nesw,
                              resize_nwse, hand, not_allowed, hidden };
     void set_cursor(Cursor cursor);
@@ -101,6 +106,7 @@ private:
     bool m_minimized = false;
     bool m_close_requested = false;
     bool m_text_input = false;
+    bool m_relative_mouse = false;
     Cursor m_cursor = Cursor::arrow;
     std::vector<InputEvent> m_input;
 };

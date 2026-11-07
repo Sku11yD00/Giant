@@ -18,6 +18,7 @@
 #include "far_ground.h"
 #include "scatter_placer.h"
 #include "physics_state.h"
+#include "play_state.h"
 #include "weather_state.h"
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
@@ -297,6 +298,8 @@ int run(const Options& options) {
     state.weather = &weather;
     editor::PhysicsState physics;
     state.physics = &physics;
+    editor::PlayState play(physics);
+    state.play = &play;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -428,16 +431,25 @@ int run(const Options& options) {
 
         // Build the UI first: what it changes shows in this frame.
         ui->begin_frame(delta, input);
-        viewport_camera.handle_input(input, ui->wants_mouse());
-        terrain_brush.update(input, ui->wants_mouse(), static_cast<float>(window->point_width()),
-                             static_cast<float>(window->point_height()), delta, state, commands);
-        viewport_camera.update(state.camera, delta);
+        if (play.playing()) {
+            // The player's keys and mouse, not the editor camera's.
+            play.handle_input(input, ui->wants_keyboard());
+        } else {
+            viewport_camera.handle_input(input, ui->wants_mouse());
+            terrain_brush.update(input, ui->wants_mouse(), static_cast<float>(window->point_width()),
+                                 static_cast<float>(window->point_height()), delta, state, commands);
+            viewport_camera.update(state.camera, delta);
+        }
         panels.draw(frame_info);
         ui->end_frame();
+        // The player's wanted motion (or play stopped: Esc, a new scene).
+        const bool playing = play.before_step(state.scene, state.camera, state.scene_generation);
+        window->set_relative_mouse(playing); // mouse look, the cursor held in the window
         weather.update(state.scene.weather, delta, state.camera.position, state.scene_generation); // after the panels' changes
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
         physics.update(state.scene, scene_frame.take_for_followers(), delta);
+        if (playing) play.after_step(state.camera, delta); // the camera at its eyes
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }

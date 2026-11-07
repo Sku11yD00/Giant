@@ -607,6 +607,29 @@ bodies follow the scene while stopped too, so starting costs nothing and a
 raycast answers at once. A body remade while simulating (its size, body
 or mass edited) starts again from where the scene has the entity.
 
+## The player (N4 part 2)
+
+`PhysicsWorld` also holds characters (`add_character`, `CharacterDesc`):
+Jolt's `CharacterVirtual`, a capsule that is moved rather than pushed
+about. Each fixed step, before the bodies, a character's velocity comes
+from its input (a wanted speed over the ground, reached within a set
+acceleration on the ground, slowly in the air, plus a jump asked for in
+the last fifth of a second); then it is swept through the world, sliding
+along walls, walking up steps, sticking to the floor going down them and
+sliding off slopes over its limit. Jolt keeps the speed it was asked for,
+not the one it got, so the character keeps both: how it really moved (a
+wall stops it) and its own speed up or down (so a step up is never taken
+for a leap). A kinematic body inside it lets rays and falling things meet
+it. `PhysicsWorld::clear` keeps characters, made again where they were.
+
+Play mode in the editor (`editor/src/play_state.h`) puts one on what is
+under the camera, turns simulating on and puts the camera at its eyes,
+easing it up steps; the window's relative mouse mode gives the look. It
+holds the player still while the ground tile under it is still being made
+(`ScenePhysics::ground_waiting`), so streaming in never drops it through.
+Like simulating it is view state: stopping removes the character and puts
+the camera and simulating back as they were.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

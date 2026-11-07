@@ -12,6 +12,9 @@
 //   const BodyId id = physics.add(crate);
 //   physics.step(1.0);                     // a second: 60 fixed steps
 //   const BodyState s = *physics.state(id); // resting on the ground
+//   const CharacterId player = physics.add_character({.position = {3, 0.5, 0}});
+//   physics.set_character_input(player, {.velocity = {1.5f, 0, 0}});
+//   physics.step(1.0);                     // walked 1.5 m along x
 //
 // Time moves in fixed steps of 1/60 s (the same result at any frame rate),
 // each spread over the job system's workers; step() runs as many as the
@@ -118,11 +121,50 @@ struct PhysicsSettings {
 };
 
 struct PhysicsStats {
-    u32 bodies = 0;
+    u32 bodies = 0;     // characters' bodies left out
+    u32 characters = 0;
     u32 active = 0;  // dynamic and kinematic bodies awake
     u64 steps = 0;   // fixed steps run since made
     u32 dropped = 0; // steps a step() call left out (over max_steps_per_call), in all
     double last_step_ms = 0.0; // CPU time of the last step() call
+};
+
+// A walking character (the player, later people in the town): a capsule
+// that is moved, not pushed about like a body. It walks up steps, stays on
+// the ground walking down slopes and stairs, stops at walls and slides off
+// slopes too steep, jumps, rides what it stands on, and pushes dynamic
+// bodies it walks into. Its position is its feet.
+struct CharacterDesc {
+    float height = 1.8f; // feet to the top of the head
+    float radius = 0.3f;
+    float max_slope_degrees = 50.0f; // steeper is a wall it slides down
+    float step_height = 0.4f;        // steps it walks up (and down without leaving the ground)
+    float mass = 80.0f;              // kilograms: how hard what it stands on is pressed
+    float strength = 500.0f;         // newtons it pushes dynamic bodies with
+    DVec3 position{};
+    u64 user = 0; // handed back by queries that hit it
+};
+
+// A character's handle; 0 is none.
+using CharacterId = u32;
+constexpr CharacterId k_no_character = 0;
+
+// What the character is told to do, held until told otherwise.
+struct CharacterInput {
+    // Metres a second over the ground (y left out): reached at once on the
+    // ground (within `acceleration`), slowly in the air.
+    Vec3 velocity{};
+    float acceleration = 60.0f;     // metres a second squared, on the ground
+    float air_acceleration = 6.0f;  // and in the air
+};
+
+struct CharacterState {
+    DVec3 position{}; // feet
+    Vec3 velocity{};
+    bool on_ground = false; // stands on ground it can walk on
+    bool on_steep = false;  // on a slope too steep: sliding
+    Vec3 ground_normal{0.0f, 1.0f, 0.0f};
+    BodyId ground = k_no_body; // the body stood on (or touched, sliding)
 };
 
 struct PreparedShapeData;
@@ -168,8 +210,9 @@ public:
     void remove(BodyId id);
     void remove_many(std::span<const BodyId> ids, bool wake_neighbours = true);
     // Every body gone at once (a new scene): the world starts afresh and the
-    // old one is let go on a thread of its own. Every id handed out before
-    // is stale, and may name a new body later: forget them all.
+    // old one is let go on a thread of its own. Every body id handed out
+    // before is stale, and may name a new body later: forget them all.
+    // Characters stay (made again where they were; their bodies' ids change).
     void clear();
     bool contains(BodyId id) const;
     usize size() const;
@@ -188,8 +231,26 @@ public:
     // fixed steps run.
     u32 step(double seconds);
     // Bodies that moved in the last step() call (dynamic and kinematic ones
-    // awake in any of its fixed steps), in id order.
+    // awake in any of its fixed steps, characters' bodies too), in id order.
     const std::vector<BodyId>& moved() const { return m_moved; }
+
+    // Characters (see CharacterDesc). k_no_character when the description
+    // has bad numbers (a radius too big for the height) or the world is full.
+    CharacterId add_character(const CharacterDesc& desc);
+    void remove_character(CharacterId id);
+    bool contains_character(CharacterId id) const;
+    // Followed in each fixed step until changed.
+    void set_character_input(CharacterId id, const CharacterInput& input);
+    // A jump at `speed` m/s: at once when on the ground, else as soon as it
+    // lands within a fifth of a second (a press just before landing counts).
+    void jump(CharacterId id, float speed);
+    // Puts it somewhere at once, still.
+    void set_character_position(CharacterId id, const DVec3& position);
+    std::optional<CharacterState> character_state(CharacterId id) const;
+    // The body standing for the character (raycasts hit it; falling things
+    // land on it): kinematic, moved with it. k_no_body when not a character.
+    BodyId character_body(CharacterId id) const;
+    usize characters() const;
 
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance) const;
 

@@ -40,6 +40,10 @@ struct InputEvent {
     // the user, +x is right).
     float x = 0.0f;
     float y = 0.0f;
+    // mouse_move: how far it moved (points), which keeps coming while the
+    // mouse is held in relative mode (Window::set_relative_mouse) and x, y stand still.
+    float dx = 0.0f;
+    float dy = 0.0f;
     MouseButton button = MouseButton::left; // mouse_button
     Key key = Key::unknown;                 // key
     u8 modifiers = 0;                       // key: modifier:: bits held
