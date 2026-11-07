@@ -981,3 +981,63 @@ GIANT_TEST("geometry: locked vertices keep their place at every level") {
     const ClusterMesh empty_locks = build_clusters(mesh, {});
     GIANT_CHECK(plain.clusters.size() == empty_locks.clusters.size() && plain.indices == empty_locks.indices);
 }
+
+GIANT_TEST("geometry: skinned clusters are the original triangles alone, weights kept per vertex") {
+    using namespace giant::geometry;
+    // A finely cut sphere (many clusters); its top half moved by joint 1,
+    // the rest by joint 0, and one vertex's twin at the same place with
+    // other weights (it must not merge).
+    SkinnedTriangleMesh skinned;
+    skinned.mesh = make_sphere(64, 32);
+    for (const Vertex& v : skinned.mesh.vertices) {
+        SkinWeights w;
+        w.joints = {v.position.y > 0.0f ? u16{1} : u16{0}, 0, 0, 0};
+        w.weights = {255, 0, 0, 0};
+        skinned.weights.push_back(w);
+    }
+    const SkinnedClusterMesh out = build_skinned_clusters(skinned);
+    GIANT_CHECK(!out.mesh.empty());
+    GIANT_CHECK(out.mesh.levels == 1);
+    GIANT_CHECK(out.weights.size() == out.mesh.vertices.size());
+    usize triangles = 0;
+    for (const ClusterGroup& g : out.mesh.groups) {
+        GIANT_CHECK(g.depth == 0 && is_root_group(g));
+    }
+    for (const Cluster& c : out.mesh.clusters) {
+        GIANT_CHECK(c.refined == -1);
+        triangles += c.triangle_count;
+    }
+    GIANT_CHECK(out.mesh.clusters.size() > 8);
+    GIANT_CHECK(triangles == skinned.mesh.indices.size() / 3); // nothing simplified, nothing lost
+    // Each vertex keeps its own weights.
+    for (usize i = 0; i < out.mesh.vertices.size(); ++i) {
+        const u16 want = out.mesh.vertices[i].position.y > 0.0f ? 1 : 0;
+        GIANT_CHECK(out.weights[i].joints[0] == want && out.weights[i].weights[0] == 255);
+    }
+    // Every cut selects every cluster: one level, all terminal.
+    LodView view;
+    view.position = {0.0f, 0.0f, -1000.0f}; // far: a plain mesh would be one cluster
+    std::vector<u32> picked;
+    select_clusters(out.mesh, view, picked);
+    GIANT_CHECK(picked.size() == out.mesh.clusters.size());
+
+    // Twins: the same corner with other weights stays two vertices.
+    SkinnedTriangleMesh twins;
+    twins.mesh.vertices = {{{0, 0, 0}, {0, 0, 1}}, {{1, 0, 0}, {0, 0, 1}}, {{0, 1, 0}, {0, 0, 1}},
+                           {{0, 0, 0}, {0, 0, 1}}, {{0, -1, 0}, {0, 0, 1}}};
+    twins.mesh.indices = {0, 1, 2, 3, 4, 1};
+    SkinWeights a, b;
+    a.weights = {255, 0, 0, 0};
+    b.joints = {2, 0, 0, 0};
+    b.weights = {255, 0, 0, 0};
+    twins.weights = {a, a, a, b, b};
+    const SkinnedClusterMesh t = build_skinned_clusters(twins);
+    GIANT_CHECK(t.mesh.vertices.size() == 5);
+    // The same twins with equal weights merge.
+    twins.weights = {a, a, a, a, b};
+    GIANT_CHECK(build_skinned_clusters(twins).mesh.vertices.size() == 4);
+    // Not one weight per vertex: nothing.
+    twins.weights.pop_back();
+    GIANT_CHECK(build_skinned_clusters(twins).mesh.empty());
+    GIANT_CHECK(build_skinned_clusters({}).mesh.empty());
+}

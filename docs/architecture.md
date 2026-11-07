@@ -974,6 +974,30 @@ Validation refuses joint indices out of range, mismatched inverse binds,
 key times that do not increase, values that do not match their keys,
 clips over an hour, more than 1024 joints and more than 8 million keys.
 
+Drawing them (`render`). A skinned mesh is built by
+`geometry::build_skinned_clusters`: its original triangles alone, one
+level, every group terminal (a pose moves the vertices, so errors measured
+at bind would not hold), vertices merged only where their weights match
+too. Each character adds its own (`Renderer::add_skinned_mesh`: every
+instance of one shows its one pose), and it goes through the same cluster
+path as everything else:
+its groups stream into the geometry pool as terminal groups do (loaded
+first, never evicted), and a source buffer keeps its vertices at bind
+with their joints and weights, cluster by cluster in the pool's order.
+`set_pose` takes one skin matrix per joint and a sphere around the pose;
+in the frame after, before anything reads geometry, `skin.slang` (a
+thread group per cluster) writes the posed vertices and normals into the
+mesh's place in the pool and refits each cluster's culling sphere to
+them, so culling, raster, shadows and shading read posed geometry with no
+change of their own. It runs only for a new pose (or once the mesh has
+loaded), not every frame. Instance culling uses the pose's sphere; the
+CPU cut (GPU culling off) tests that sphere and then takes every cluster.
+Shadow pages under a skinned mesh's instances are dirtied when its pose
+or place changes. Skinned meshes are never left to the far field, and the
+voxel world does not hold them (they bounce no light yet: a known gap,
+until a coarse pose is voxelized). Later: levels of detail for skinned
+meshes (refitting group bounds too) and morph targets.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

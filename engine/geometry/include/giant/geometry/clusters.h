@@ -90,6 +90,17 @@ struct ClusterMesh {
 // their neighbours' at any detail.
 ClusterMesh build_clusters(const TriangleMesh& mesh, std::span<const u8> locked = {});
 
+// A skinned mesh's clusters: its original triangles alone, one level (every
+// group terminal: a pose moves the vertices, so simplification errors
+// measured at bind would not hold), vertices merged only where their
+// weights match too. `weights` is one per ClusterMesh vertex. Empty when the
+// mesh is, or it has not one weight per vertex.
+struct SkinnedClusterMesh {
+    ClusterMesh mesh;
+    std::vector<SkinWeights> weights;
+};
+SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& mesh);
+
 // Planes (xyz normal pointing inside, w offset) in camera-relative space.
 struct Frustum {
     std::array<Vec4, 5> planes{}; // left, right, bottom, top, near (no far plane)

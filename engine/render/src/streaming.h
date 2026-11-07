@@ -69,6 +69,21 @@ private:
     std::multimap<u64, u64> m_by_size; // the same: units -> offset
 };
 
+// How a cluster's geometry is laid out in the pool: its distinct vertices
+// (indices into ClusterMesh::vertices) in the order of first use, and its
+// triangles as three local indices 8 bits apart. Its scratch is reused
+// between calls (sized to the mesh's vertices).
+struct ClusterPacking {
+    std::vector<u32> order;
+    std::vector<u32> triangles;
+    void pack(const geometry::ClusterMesh& data, u32 cluster);
+
+private:
+    const geometry::ClusterMesh* mesh = nullptr; // the scratch's
+    std::vector<u32> seen; // the cluster that last numbered a vertex
+    std::vector<u32> local;
+};
+
 struct StreamingStats {
     u64 pool_bytes = 0;
     u64 used_bytes = 0;

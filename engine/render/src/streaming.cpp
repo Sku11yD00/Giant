@@ -120,8 +120,9 @@ bool GeometryStreamer::init() {
         desc.name = name;
         return m_device.create_buffer(desc);
     };
-    m_pool = make(std::max<u64>(m_pool_bytes, k_unit), rhi::BufferUsage::shader_read, rhi::Memory::gpu,
-                  "geometry pool (streamed clusters)");
+    // Written in shaders too: skinned meshes' vertices, posed (renderer.h).
+    m_pool = make(std::max<u64>(m_pool_bytes, k_unit), rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write,
+                  rhi::Memory::gpu, "geometry pool (streamed clusters)");
     m_requests = make(u64{k_request_capacity} * sizeof(gpu::Entry),
                       rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write, rhi::Memory::gpu,
                       "streaming requests");
@@ -140,13 +141,40 @@ bool GeometryStreamer::init() {
     return grow_usage(nullptr);
 }
 
+void ClusterPacking::pack(const geometry::ClusterMesh& data, u32 cluster) {
+    if (mesh != &data || seen.size() != data.vertices.size()) {
+        mesh = &data;
+        seen.assign(data.vertices.size(), ~0u);
+        local.assign(data.vertices.size(), 0);
+    }
+    const geometry::Cluster& c = data.clusters[cluster];
+    order.clear();
+    triangles.clear();
+    triangles.reserve(c.triangle_count);
+    for (u32 t = 0; t < c.triangle_count; ++t) {
+        u32 corner[3];
+        for (u32 k = 0; k < 3; ++k) {
+            const u32 v = data.indices[c.first_index + t * 3 + k];
+            if (seen[v] != cluster) {
+                seen[v] = cluster;
+                local[v] = static_cast<u32>(order.size());
+                order.push_back(v);
+            }
+            corner[k] = local[v];
+        }
+        triangles.push_back(corner[0] | (corner[1] << 8) | (corner[2] << 16));
+    }
+    for (const u32 v : order) {
+        seen[v] = ~0u; // clean for any next call (the same cluster again too)
+    }
+}
+
 bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vector<gpu::Cluster>& clusters) {
     GIANT_ASSERT(clusters.size() == data.clusters.size(), "one gpu cluster per cluster");
     MeshState m;
     const usize groups = data.groups.size();
     m.blob_offsets.reserve(groups + 1);
-    std::vector<u32> seen(data.vertices.size(), ~0u); // cluster that last numbered a vertex
-    std::vector<u32> local(data.vertices.size(), 0);
+    ClusterPacking packing;
     const auto append = [&m](const void* bytes, usize size) {
         const auto* p = static_cast<const u8*>(bytes);
         m.blob.insert(m.blob.end(), p, p + size);
@@ -160,22 +188,9 @@ bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vec
             const geometry::Cluster& c = data.clusters[ci];
             gpu::Cluster& out = clusters[ci];
             // Its distinct vertices, then its triangles as local indices.
-            std::vector<u32> order;
-            std::vector<u32> triangles;
-            triangles.reserve(c.triangle_count);
-            for (u32 t = 0; t < c.triangle_count; ++t) {
-                u32 corner[3];
-                for (u32 k = 0; k < 3; ++k) {
-                    const u32 v = data.indices[c.first_index + t * 3 + k];
-                    if (seen[v] != ci) {
-                        seen[v] = ci;
-                        local[v] = static_cast<u32>(order.size());
-                        order.push_back(v);
-                    }
-                    corner[k] = local[v];
-                }
-                triangles.push_back(corner[0] | (corner[1] << 8) | (corner[2] << 16));
-            }
+            packing.pack(data, ci);
+            const std::vector<u32>& order = packing.order;
+            const std::vector<u32>& triangles = packing.triangles;
             if (order.size() > geometry::k_cluster_max_vertices ||
                 c.triangle_count > geometry::k_cluster_max_triangles) {
                 log_error("render", "a cluster is over 128 vertices or triangles; mesh not added");

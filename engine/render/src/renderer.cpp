@@ -126,7 +126,7 @@ Renderer::~Renderer() {
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
           m_smaa_blend, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
-          m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass}) {
+          m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_skin}) {
         m_device.destroy(p);
     }
     for (const rhi::TextureHandle t : {m_sky_view, m_cloud_map, m_cloud_shadow, m_clouds_a, m_clouds_b, m_cover}) {
@@ -195,6 +195,7 @@ bool Renderer::init() {
     m_cloud_shadow_pass = compute(shaders::cloud_shadow_cs(), "sky: cloud shadows");
     m_clouds_pass = compute(shaders::clouds_cs(), "sky: clouds");
     m_cover_pass = compute(shaders::weather_cover_cs(), "weather: cover from above");
+    m_skin = compute(shaders::skin_cs(), "skin: pose meshes");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     ShadowDesc shadow_desc;
     shadow_desc.pool_pages = m_desc.shadow_pages;
@@ -282,7 +283,8 @@ bool Renderer::init() {
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
           m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
-          m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass}) {
+          m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
+          m_skin}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -313,10 +315,78 @@ void Renderer::destroy(Mesh& mesh) {
     for (const rhi::BufferHandle b : {mesh.clusters, mesh.groups, mesh.nodes}) {
         m_device.destroy(b);
     }
+    if (mesh.skin != nullptr) {
+        m_device.destroy(mesh.skin->source);
+    }
     mesh = {};
 }
 
-MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
+MeshId Renderer::add_mesh(geometry::ClusterMesh data) { return add(std::move(data), nullptr, 0); }
+
+MeshId Renderer::add_skinned_mesh(geometry::SkinnedClusterMesh skinned, u32 joints) {
+    const geometry::ClusterMesh& data = skinned.mesh;
+    if (data.empty() || joints == 0 || joints > k_max_skin_joints || data.levels != 1 ||
+        skinned.weights.size() != data.vertices.size()) {
+        log_error("render", "a skinned mesh must be one level, one weight per vertex, 1 to 1024 joints; not added");
+        return k_no_mesh;
+    }
+    for (const geometry::ClusterGroup& g : data.groups) {
+        if (!geometry::is_root_group(g)) {
+            log_error("render", "a skinned mesh must be its original triangles alone; not added");
+            return k_no_mesh;
+        }
+    }
+    for (const geometry::SkinWeights& w : skinned.weights) {
+        if (u32{w.weights[0]} + w.weights[1] + w.weights[2] + w.weights[3] != 255) {
+            log_error("render", "a skinned mesh's vertex weights do not sum to 255; not added");
+            return k_no_mesh;
+        }
+        for (usize k = 0; k < 4; ++k) {
+            if (w.weights[k] != 0 && w.joints[k] >= joints) {
+                log_error("render", "a skinned mesh's vertex is moved by a joint it does not have; not added");
+                return k_no_mesh;
+            }
+        }
+    }
+    return add(std::move(skinned.mesh), &skinned.weights, joints);
+}
+
+bool Renderer::skinned(MeshId id) const {
+    return id < m_meshes.size() && m_meshes[id].live && m_meshes[id].skin != nullptr;
+}
+
+bool Renderer::set_pose(MeshId id, std::span<const Mat4> skin, const geometry::Sphere& bounds) {
+    if (!skinned(id)) {
+        return false;
+    }
+    Skin& s = *m_meshes[id].skin;
+    if (skin.size() != s.joints || !std::isfinite(bounds.center.x) || !std::isfinite(bounds.center.y) ||
+        !std::isfinite(bounds.center.z) || !std::isfinite(bounds.radius) || !(bounds.radius >= 0.0f)) {
+        return false;
+    }
+    for (const Mat4& m : skin) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                if (!std::isfinite(m.at(r, c))) {
+                    return false;
+                }
+            }
+        }
+    }
+    for (usize j = 0; j < skin.size(); ++j) {
+        float* rows = s.matrices.data() + j * 12;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                rows[r * 4 + c] = skin[j].at(r, c);
+            }
+        }
+    }
+    s.bounds = bounds;
+    ++s.version;
+    return true;
+}
+
+MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::SkinWeights>* weights, u32 joints) {
     if (data.empty() || m_meshes.size() >= k_no_mesh) {
         return k_no_mesh;
     }
@@ -391,10 +461,57 @@ MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
     if (!m_streamer->add(id, data, clusters)) {
         return k_no_mesh;
     }
-    mesh.clusters = upload(bytes_of(clusters), "mesh clusters");
+    // A skinned mesh's source: its vertices at bind, cluster by cluster in
+    // the order the pool has them (skin.slang poses them into it).
+    std::vector<gpu::SkinVertex> source;
+    if (weights != nullptr) {
+        ClusterPacking packing;
+        for (u32 ci = 0; ci < data.clusters.size(); ++ci) {
+            packing.pack(data, ci);
+            clusters[ci].skin_first = static_cast<u32>(source.size());
+            for (const u32 v : packing.order) {
+                const geometry::Vertex& p = data.vertices[v];
+                const geometry::SkinWeights& w = (*weights)[v];
+                gpu::SkinVertex out{};
+                out.position[0] = p.position.x;
+                out.position[1] = p.position.y;
+                out.position[2] = p.position.z;
+                out.normal[0] = p.normal.x;
+                out.normal[1] = p.normal.y;
+                out.normal[2] = p.normal.z;
+                for (usize k = 0; k < 4; ++k) {
+                    out.joints[k] = w.weights[k] != 0 ? w.joints[k] : u16{0};
+                    out.weights[k] = w.weights[k];
+                }
+                source.push_back(out);
+            }
+        }
+        mesh.skin = std::make_unique<Skin>();
+        mesh.skin->joints = joints;
+        mesh.skin->bounds = data.bounds;
+        mesh.skin->posed_bounds = data.bounds;
+        // Until posed: the identity (the bind pose).
+        mesh.skin->matrices.assign(usize{joints} * 12, 0.0f);
+        for (u32 j = 0; j < joints; ++j) {
+            float* rows = mesh.skin->matrices.data() + usize{j} * 12;
+            rows[0] = rows[5] = rows[10] = 1.0f;
+        }
+        mesh.skin->source = upload(bytes_of(source), "skinned mesh source");
+    }
+    if (weights != nullptr) {
+        // Its clusters' spheres are refit to every pose.
+        rhi::BufferDesc desc;
+        desc.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
+        desc.size = std::max<u64>(clusters.size() * sizeof(gpu::Cluster), 4);
+        desc.name = "skinned mesh clusters";
+        mesh.clusters = m_device.create_buffer(desc, bytes_of(clusters));
+    } else {
+        mesh.clusters = upload(bytes_of(clusters), "mesh clusters");
+    }
     mesh.groups = upload(bytes_of(groups), "mesh cluster groups");
     mesh.nodes = upload(bytes_of(nodes), "mesh LOD tree");
-    for (const rhi::BufferHandle b : {mesh.clusters, mesh.groups, mesh.nodes}) {
+    for (const rhi::BufferHandle b : {mesh.clusters, mesh.groups, mesh.nodes,
+                                      mesh.skin != nullptr ? mesh.skin->source : mesh.nodes}) {
         if (!b.valid()) {
             destroy(mesh);
             m_streamer->remove(id);
@@ -405,6 +522,9 @@ MeshId Renderer::add_mesh(geometry::ClusterMesh data) {
     mesh.tree_levels = tree_levels;
     mesh.data = std::move(data);
     mesh.live = true;
+    if (mesh.skin != nullptr) {
+        m_skinned.push_back(id);
+    }
     if (id == m_meshes.size()) {
         m_meshes.push_back(std::move(mesh));
     } else {
@@ -421,6 +541,14 @@ void Renderer::remove_mesh(MeshId id) {
     }
     if (!m_meshes[id].live) {
         return; // removed already
+    }
+    if (const Skin* skin = m_meshes[id].skin.get(); skin != nullptr) {
+        m_skinned.erase(std::find(m_skinned.begin(), m_skinned.end(), id));
+        // Its shadow where the pose had it (shadow tracking sees only the
+        // bind sphere go). With shadows off, all is redrawn when they return.
+        if (skin->shadow_known && m_shadows_on) {
+            m_shadows->invalidate(skin->shadow_min, skin->shadow_max);
+        }
     }
     destroy(m_meshes[id]); // the slot stays, empty, until a new mesh takes it
     m_streamer->remove(id);
@@ -641,6 +769,104 @@ void Renderer::read_gpu_stats() {
     }
 }
 
+void Renderer::pose_skins(rhi::CommandList& cmd) {
+    m_posed = 0;
+    if (m_skinned.empty() || !m_streamer->tables_current()) {
+        return; // (stale tables: posed once they are current)
+    }
+    bool begun = false;
+    for (const MeshId id : m_skinned) {
+        Mesh& mesh = m_meshes[id];
+        Skin& skin = *mesh.skin;
+        // A new pose, or just loaded (the pool holds the bind pose): pose it.
+        if (skin.posed == skin.version || !m_streamer->ready(id)) {
+            continue;
+        }
+        const rhi::TransientMemory matrices = cmd.upload(bytes_of(skin.matrices));
+        if (matrices.data == nullptr) {
+            break; // out of transient memory: next frame
+        }
+        if (!begun) {
+            begun = true;
+            cmd.begin_timing("skin");
+            cmd.set_pipeline(m_skin);
+            cmd.barrier(m_streamer->pool(), rhi::ResourceState::shader_write);
+        }
+        cmd.barrier(mesh.clusters, rhi::ResourceState::shader_write);
+        gpu::SkinPush push{};
+        push.source = m_device.read_descriptor(skin.source);
+        push.clusters = m_device.write_descriptor(mesh.clusters);
+        push.residency = m_device.read_descriptor(m_streamer->residency_table(id));
+        push.pool = m_device.write_descriptor(m_streamer->pool());
+        push.matrices = matrices.descriptor;
+        push.matrix_offset = matrices.offset;
+        push.cluster_count = static_cast<u32>(mesh.data.clusters.size());
+        push.joint_count = skin.joints;
+        cmd.push(push);
+        const u32 n = push.cluster_count;
+        cmd.dispatch(std::min(n, gpu::k_skin_dispatch_width), (n + gpu::k_skin_dispatch_width - 1) / gpu::k_skin_dispatch_width);
+        cmd.barrier(mesh.clusters, rhi::ResourceState::shader_read);
+        skin.posed = skin.version;
+        skin.posed_bounds = skin.bounds;
+        ++m_posed;
+    }
+    if (begun) {
+        cmd.barrier(m_streamer->pool(), rhi::ResourceState::shader_read);
+        cmd.end_timing();
+    }
+}
+
+void Renderer::track_skin_shadows(const FrameInput& frame) {
+    if (!m_shadows_on || m_skinned.empty()) {
+        for (const MeshId id : m_skinned) {
+            m_meshes[id].skin->shadow_known = false; // casters may change meanwhile (invalidate_all on return)
+        }
+        return;
+    }
+    // The world box around a skinned mesh's instances drawn this frame.
+    // Shadow tracking sees the bind sphere; a pose moves past it, so each
+    // change of pose or place dirties where its casters were and are.
+    m_skin_boxes.assign(m_meshes.size(), SkinBox{});
+    for (const u32 i : m_valid) {
+        const Instance& in = frame.instances[i];
+        const Mesh& mesh = m_meshes[in.mesh];
+        if (mesh.skin == nullptr) {
+            continue;
+        }
+        const geometry::Sphere& b = mesh.skin->posed_bounds;
+        const Vec3 c = rotate(in.rotation, Vec3{b.center.x * in.scale.x, b.center.y * in.scale.y, b.center.z * in.scale.z});
+        const double r = static_cast<double>(b.radius) *
+                         std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
+        const DVec3 centre = in.position + DVec3{c.x, c.y, c.z};
+        const DVec3 lo = centre - DVec3{r, r, r}, hi = centre + DVec3{r, r, r};
+        SkinBox& box = m_skin_boxes[in.mesh];
+        box.min = box.any ? DVec3{std::min(box.min.x, lo.x), std::min(box.min.y, lo.y), std::min(box.min.z, lo.z)} : lo;
+        box.max = box.any ? DVec3{std::max(box.max.x, hi.x), std::max(box.max.y, hi.y), std::max(box.max.z, hi.z)} : hi;
+        box.any = true;
+    }
+    for (const MeshId id : m_skinned) {
+        Skin& skin = *m_meshes[id].skin;
+        const SkinBox& box = m_skin_boxes[id];
+        // The pose drawn is the one in the pool.
+        const bool same = skin.shadow_known == box.any &&
+                          (!box.any || (skin.shadow_version == skin.posed && skin.shadow_min == box.min &&
+                                        skin.shadow_max == box.max));
+        if (same) {
+            continue;
+        }
+        if (skin.shadow_known) {
+            m_shadows->invalidate(skin.shadow_min, skin.shadow_max);
+        }
+        if (box.any) {
+            m_shadows->invalidate(box.min, box.max);
+        }
+        skin.shadow_known = box.any;
+        skin.shadow_min = box.min;
+        skin.shadow_max = box.max;
+        skin.shadow_version = skin.posed;
+    }
+}
+
 void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number) {
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
     const geometry::Frustum frustum = geometry::frustum_from_view_projection(view_proj);
@@ -652,7 +878,8 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
     m_entries.clear();
     for (u32 slot = 0; slot < m_valid.size(); ++slot) {
         const Instance& in = frame.instances[m_valid[slot]];
-        const geometry::ClusterMesh& data = m_meshes[in.mesh].data;
+        const Mesh& mesh = m_meshes[in.mesh];
+        const geometry::ClusterMesh& data = mesh.data;
         lod.position = to_camera_relative(in.position, frame.view.position);
         lod.rotation = in.rotation;
         lod.scale = in.scale;
@@ -660,7 +887,21 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
         m_wanted.clear();
         m_touched.clear();
         const geometry::LodResidency residency{&m_streamer->resident(in.mesh), &m_wanted, &m_touched};
-        geometry::select_clusters(data, lod, m_selected, &residency);
+        if (mesh.skin != nullptr) {
+            // The CPU's cluster spheres are at bind: the pose's sphere
+            // decides, then every cluster is drawn (one level, all terminal).
+            const geometry::Sphere& b = mesh.skin->posed_bounds;
+            const Vec3 c = lod.position + rotate(in.rotation, Vec3{b.center.x * in.scale.x, b.center.y * in.scale.y,
+                                                                    b.center.z * in.scale.z});
+            const float s = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
+            if (geometry::sphere_in_frustum(frustum, c, b.radius * s)) {
+                lod.frustum = nullptr;
+                geometry::select_clusters(data, lod, m_selected, &residency);
+                lod.frustum = &frustum;
+            }
+        } else {
+            geometry::select_clusters(data, lod, m_selected, &residency);
+        }
         m_streamer->want(in.mesh, m_wanted);
         m_streamer->touch(in.mesh, m_touched, frame_number);
         if (!m_selected.empty() && m_entries.size() / 2 < k_max_cpu_clusters) {
@@ -1206,12 +1447,16 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.begin_timing("streaming");
     m_streamer->update(cmd, frame_number);
     cmd.end_timing();
+    pose_skins(cmd);
     mark(CpuSection::streaming);
     if (settings.voxel_world) {
         cmd.begin_timing("voxels");
         m_voxels->set_stand_in_radius(settings.far_field_max_radius);
+        // Skinned meshes are not held: their pose is not the bind the
+        // voxels would be made from (they bounce no light; known gap).
         m_voxels->update(cmd, frame.view.position, frame.instances, frame.cells, frame.materials, m_meshes_version,
-                         [this](MeshId id) { return mesh(id); }, std::clamp(settings.voxel_ms_per_frame, 0.0f, 1000.0f));
+                         [this](MeshId id) { return skinned(id) ? nullptr : mesh(id); },
+                         std::clamp(settings.voxel_ms_per_frame, 0.0f, 1000.0f));
         cmd.end_timing();
     } else {
         m_voxels->idle();
@@ -1244,7 +1489,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const auto left_to_voxels = [&](u32 index, const Instance& in, const geometry::ClusterMesh* m) {
         const geometry::Sphere& bounds = m->bounds;
         const double radius = stand_in_radius_of(*m, in.scale);
-        if (in.always_mesh || !(radius <= far_radius)) {
+        if (in.always_mesh || !(radius <= far_radius) || skinned(in.mesh)) {
             return false;
         }
         const Vec3 c = rotate(in.rotation, Vec3{bounds.center.x * in.scale.x, bounds.center.y * in.scale.y,
@@ -1284,6 +1529,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // Sun shadows: the lit view, with GPU culling (pages are drawn with it).
     plan_shadows(frame, settings.shadows && gpu && lit_view &&
                             ensure_shadow_buffers(static_cast<u32>(m_valid.size())));
+    track_skin_shadows(frame);
     mark(CpuSection::shadow_plan);
 
     // The instances, kept on the GPU by cell (before the frame constants:
@@ -1435,7 +1681,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         e.groups = m_device.read_descriptor(m.groups);
         e.nodes = m_device.read_descriptor(m.nodes);
         e.levels = m.data.levels;
-        set_bounds(e.bounds, m.data.bounds.center, m.data.bounds.radius);
+        const geometry::Sphere& bounds = m.skin != nullptr ? m.skin->posed_bounds : m.data.bounds;
+        set_bounds(e.bounds, bounds.center, bounds.radius);
         if (used[id]) {
             data.tree_levels = std::max(data.tree_levels, m.tree_levels);
             for (const rhi::BufferHandle b : {m.clusters, m.groups, m.nodes}) {
@@ -1820,6 +2067,8 @@ void Renderer::smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3
 }
 
 void Renderer::copy_streaming_stats() {
+    m_stats.skinned_meshes = static_cast<u32>(m_skinned.size());
+    m_stats.posed = m_posed;
     const StreamingStats& s = m_streamer->stats();
     m_stats.pool_bytes = s.pool_bytes;
     m_stats.pool_used_bytes = s.used_bytes;

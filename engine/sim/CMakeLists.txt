@@ -18,3 +18,8 @@ giant_module_tests(sim
     tests/test_physics.cpp
     tests/test_scene_physics.cpp
 )
+if(GIANT_BUILD_TESTS)
+  # Jolt in an unoptimized MSVC build is slow: the character tests alone take
+  # ~100 s on a CI Windows runner, past the default 120 s.
+  set_tests_properties(sim PROPERTIES TIMEOUT 600)
+endif()

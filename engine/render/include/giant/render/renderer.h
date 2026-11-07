@@ -256,6 +256,7 @@ struct RenderSettings {
 // Instances one frame draws at most (instance culling is one dispatch of
 // 65535 groups of 64); the ones past it are not drawn.
 inline constexpr u32 k_max_instances = 65535u * 64u;
+inline constexpr u32 k_max_skin_joints = 1024; // anim::k_max_joints
 
 struct CellRange {
     u32 first = 0;
@@ -349,6 +350,8 @@ struct RenderStats {
     bool wet_surfaces = false;  // wet or snowy surfaces
     bool weather_cover = false; // the cover map made (sheltered places stay dry)
     u32 dust_puffs = 0;         // dust puffs drawn
+    u32 skinned_meshes = 0;     // skinned meshes added (live)
+    u32 posed = 0;              // of them, posed on the GPU this frame (a new pose, or just loaded)
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -417,6 +420,24 @@ public:
     // an id once they remove it (an instance left with it would draw
     // whatever mesh comes next). Safe mid-frame.
     MeshId add_mesh(geometry::ClusterMesh mesh);
+    // A skinned mesh (geometry::build_skinned_clusters: its original
+    // triangles alone), with `joints` joints. Each is its own copy, one per
+    // character: set_pose poses it on the GPU (its vertices, and each
+    // cluster's culling sphere refit), and every instance of it shows that
+    // pose. It shows the bind pose until posed. It is never left to the far
+    // field and the voxel world does not hold it (no bounce light from
+    // it); it casts shadows, its pages drawn again when the pose changes.
+    // k_no_mesh when empty, not one level, not one weight per vertex, weights
+    // not summing to 255, a weighted joint out of range, or no joints or more
+    // than k_max_skin_joints.
+    MeshId add_skinned_mesh(geometry::SkinnedClusterMesh mesh, u32 joints);
+    // The pose for a skinned mesh's next frames: one matrix per joint, from
+    // bind space to the mesh's space (anim::skin_matrices), and a sphere
+    // around the posed mesh in its space (anim::pose_bounds). False (and
+    // nothing changes) for a mesh not skinned, the wrong count, numbers
+    // that are not finite, or a negative radius.
+    bool set_pose(MeshId mesh, std::span<const Mat4> skin, const geometry::Sphere& bounds);
+    bool skinned(MeshId mesh) const;
     // Built-in meshes stay. Unknown or removed ids are ignored.
     void remove_mesh(MeshId mesh);
     // Its coarsest level is loaded, so instances of it draw (a mesh added
@@ -448,8 +469,25 @@ public:
     Renderer(ConstructKey, rhi::Device& device, const RendererDesc& desc);
 
 private:
+    // A skinned mesh's pose and its source on the GPU.
+    struct Skin {
+        rhi::BufferHandle source;     // gpu::SkinVertex each, cluster after cluster
+        u32 joints = 0;
+        std::vector<float> matrices;  // 12 per joint (3 rows of the 3x4): the pose to draw
+        geometry::Sphere bounds;      // around the pose, in the mesh's space
+        u64 version = 1;              // of the pose (set_pose)
+        u64 posed = 0;                // the version in the pool; 0: none yet
+        geometry::Sphere posed_bounds; // bounds of the pose in the pool (culling and shadows use these)
+        // Where its instances were when their shadows were last drawn
+        // (world box), and with which pose: a change dirties both places.
+        bool shadow_known = false;
+        DVec3 shadow_min{};
+        DVec3 shadow_max{};
+        u64 shadow_version = 0;
+    };
     struct Mesh {
         geometry::ClusterMesh data; // the CPU copy (CPU culling, stats, editor)
+        std::unique_ptr<Skin> skin; // skinned meshes only
         rhi::BufferHandle clusters;   // gpu::Cluster (geometry streams: GeometryStreamer)
         rhi::BufferHandle groups;     // gpu::Group
         rhi::BufferHandle nodes;      // gpu::Node
@@ -475,6 +513,9 @@ private:
     bool ensure_targets(u32 width, u32 height);
     bool ensure_cull_buffers(CullBuffers& c, u32 instance_count);
     void destroy(Mesh& mesh);
+    MeshId add(geometry::ClusterMesh data, const std::vector<geometry::SkinWeights>* weights, u32 joints);
+    void pose_skins(rhi::CommandList& cmd);           // after streaming, before anything reads the geometry
+    void track_skin_shadows(const FrameInput& frame); // after the shadows' own tracking
     void draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
                      const Vec3& background); // the voxel debug view, in place of shading
     void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number);
@@ -528,6 +569,15 @@ private:
     rhi::PipelineHandle m_raster_mesh;   // invalid without mesh shaders
     rhi::PipelineHandle m_raster_vertex;
     rhi::PipelineHandle m_resolve;
+    rhi::PipelineHandle m_skin; // skin.slang
+    u32 m_posed = 0;            // skinned meshes posed this frame
+    std::vector<MeshId> m_skinned; // the skinned meshes live
+    struct SkinBox {
+        DVec3 min{};
+        DVec3 max{};
+        bool any = false;
+    };
+    std::vector<SkinBox> m_skin_boxes; // scratch, by MeshId: around a skinned mesh's instances drawn
     rhi::PipelineHandle m_cull_reset;
     rhi::PipelineHandle m_cull_prepare;
     rhi::PipelineHandle m_cull_instances;
