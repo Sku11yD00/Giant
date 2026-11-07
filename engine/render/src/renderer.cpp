@@ -1531,6 +1531,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (settings.debug_view == DebugView::voxels) {
         draw_voxels(cmd, target, data, light.background);
         finish_stats(data);
+        mark(CpuSection::shading);
         return;
     }
     if (m_shadows_on) {

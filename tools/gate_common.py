@@ -5,10 +5,10 @@ Gates run on a real GPU (the owner's PC), in a visible window (not
 --hidden, which idles between frames). Each stop of a flight is two
 commands, a frame each.
 
-A flight with slow frames prints where the main thread's time went in
-them (each frame's phases, from get_engine_info's recent_phases). With
-GIANT_GATE_FRAMES set to a file, each flight's frame times and phases are
-added to it as a line of JSON, for a closer look.
+A flight with hitches prints where the main thread's time went in them
+(their phases, from get_engine_info's phases_since). With
+GIANT_GATE_FRAMES set to a file, each flight's frame times, slow frames
+and typical frames are added to it as a line of JSON, for a closer look.
 """
 import json
 import os
@@ -54,40 +54,85 @@ def speed_failures(times):
     return failures
 
 
-def slow_frames(times, phases):
-    """Where the main thread's time went in a flight's slow frames: `times`
-    and `phases` as Editor.fly gives them. A line naming each phase's share of
-    the hitches (frames over the frame_stats limit) against a typical frame,
-    or None when there were none."""
-    if not times or not phases or len(phases) != len(times):
-        return None
+def hitch_limit(times):
+    """The frame time over which a frame is a hitch (frame_stats)."""
     ordered = sorted(times)
-    median = ordered[len(ordered) // 2]
-    limit = HITCH_FACTOR * max(median, FRAME_BUDGET_MS)
-    slow = [i for i, t in enumerate(times) if t > limit]
-    if not slow:
+    median = ordered[min(len(ordered) - 1, int(0.5 * (len(ordered) - 1) + 0.5))]
+    return HITCH_FACTOR * max(median, FRAME_BUDGET_MS)
+
+
+def _median(values):
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2] if ordered else 0.0
+
+
+# Waiting on the GPU or the display, not work of the main thread's own.
+WAIT_PHASES = ("begin_frame", "end_frame", "tail")
+# A hitch with this much wall time unaccounted for by CPU work and those
+# waits was stalled (not busy).
+STALL_MS = 5.0
+
+
+def slow_frames(times, slow, typicals):
+    """Where the main thread's time went in a flight's hitches: `times` as
+    Editor.fly gives them, `slow` its slow frames' phases and `typicals` each
+    sample's typical frame (Editor.fly's self.slow, self.typicals). Lines
+    naming the phase most over its typical time in each hitch, and how much
+    of a hitch the thread spent neither working nor waiting on the GPU
+    (preempted, or blocked on a lock or the disk); None when there were no
+    hitches."""
+    if not times or not typicals:
         return None
-    every = list(phases[0].keys())
-    typical = {n: sorted(p[n] for p in phases)[len(phases) // 2] for n in every}
-    mean = {n: sum(phases[i][n] for i in slow) / len(slow) for n in every}
+    limit = hitch_limit(times)
+    hitches = [f for f in slow if f["ms"] > limit]
+    if not hitches:
+        return None
+    names = set()
+    for _, typical, _ in typicals:
+        names.update(typical)
+    typical = {n: _median([t.get(n, 0.0) for _, t, _ in typicals]) for n in names}
+    typical["render/rest"] = max(0.0, typical.get("render", 0.0) -
+                                 sum(v for n, v in typical.items() if n.startswith("render/")))
+    typical_cpu = _median([c for _, _, c in typicals])
 
-    def summary(names):
-        worst_phase = {}
-        for i in slow:
-            top = max(names, key=lambda n: phases[i][n] - typical[n])
-            worst_phase[top] = worst_phase.get(top, 0) + 1
-        parts = sorted(names, key=lambda n: mean[n] - typical[n], reverse=True)
-        shares = ", ".join(f"{n} {mean[n]:.1f} (typical {typical[n]:.1f})" for n in parts if mean[n] >= 0.5)
-        blamed = ", ".join(f"{n} {c}" for n, c in sorted(worst_phase.items(), key=lambda x: -x[1]))
-        return f"mean ms per phase: {shares}; most over its typical time: {blamed}"
+    def phases_of(frame):
+        p = dict(frame["phases"])
+        p["render/rest"] = max(0.0, p.get("render", 0.0) - sum(v for n, v in p.items() if n.startswith("render/")))
+        return p
 
-    # "render/..." are parts of "render": a line of their own.
-    top = [n for n in every if "/" not in n]
-    inner = [n for n in every if "/" in n]
-    text = f"{len(slow)} slow frames, {summary(top)}"
-    if inner:
-        text += f"\n  inside render: {summary(inner)}"
-    return text
+    top = sorted(n for n in typical if "/" not in n)
+    inner = sorted(n for n in typical if "/" in n)
+    blamed, inner_blamed, excess, stalled = {}, {}, {n: [] for n in typical}, []
+    for frame in hitches:
+        p = phases_of(frame)
+        for n in typical:
+            excess[n].append(p.get(n, 0.0) - typical[n])
+        worst = max(top, key=lambda n: p.get(n, 0.0) - typical[n])
+        blamed[worst] = blamed.get(worst, 0) + 1
+        if worst == "render" and inner:
+            part = max(inner, key=lambda n: p.get(n, 0.0) - typical[n])
+            if p.get(part, 0.0) - typical[part] >= 1.0:
+                inner_blamed[part] = inner_blamed.get(part, 0) + 1
+        waits = sum(p.get(n, 0.0) for n in WAIT_PHASES)
+        stalled.append(max(0.0, frame["ms"] - frame["cpu_ms"] - waits))
+
+    def counts(table):
+        return ", ".join(f"{n} {c}" for n, c in sorted(table.items(), key=lambda x: -x[1]))
+
+    over = sorted(((n, _median(v)) for n, v in excess.items() if "/" not in n), key=lambda x: -x[1])
+    lines = [f"{len(hitches)} hitches (over {limit:.1f} ms); the phase most over its typical time in each: "
+             f"{counts(blamed)}",
+             "  median ms over typical: " + ", ".join(f"{n} +{e:.1f}" for n, e in over if e >= 0.5)]
+    if inner_blamed:
+        lines.append(f"  inside render, most over: {counts(inner_blamed)}")
+    stalls = sum(1 for t in stalled if t > STALL_MS)
+    lines.append(f"  the main thread neither working nor waiting on the GPU (preempted, or blocked on a lock or "
+                 f"the disk) over {STALL_MS:.0f} ms in {stalls} of the {len(hitches)}, worst {max(stalled):.1f} ms; "
+                 f"a typical frame's CPU time {typical_cpu:.1f} ms")
+    if any(blamed.get(n) for n in ("begin_frame", "end_frame")):
+        lines.append("  (begin_frame or end_frame: waiting on the GPU, the driver or the display, "
+                     "not the CPU's own work)")
+    return "\n".join(lines)
 
 
 def describe(times):
@@ -148,7 +193,10 @@ class Editor:
         more each_stop makes). Also read at each stop in `marks`: then
         self.marked[stop] is how many of the times came before it ended."""
         self.marked = {}
-        self.phases = []  # beside the times: each frame's main-thread ms per phase
+        # The slow frames' phases (with the stop sampled after them) and
+        # each sample's typical frame: (frames, phase medians, CPU ms).
+        self.slow = []
+        self.typicals = []
         # Hover first so the 240 recorded frame times hold none of what
         # came before (a scene build is one long frame).
         self.tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
@@ -159,23 +207,24 @@ class Editor:
             self.tool("set_camera", {"position": position, "look_at": look_at})
             each_stop(stop, self.last_frame())
             if stop % 100 == 99 or stop == len(path) - 1 or stop in marks:
-                now = self.tool("get_engine_info")["frame_times"]
+                now = self.tool("get_engine_info", {"phases_since": recorded})["frame_times"]
                 new = now["recorded"] - recorded
                 recorded = now["recorded"]
                 if new > len(now["recent_ms"]):
                     raise RuntimeError(f"{new} frames passed between samples: some were not timed")
                 if new > 0:
                     times += now["recent_ms"][-new:]
-                    recent = now.get("recent_phases", {})
-                    if recent and all(len(v) == len(now["recent_ms"]) for v in recent.values()):
-                        self.phases += [{n: recent[n][i] for n in recent}
-                                        for i in range(len(now["recent_ms"]) - new, len(now["recent_ms"]))]
+                phases = now.get("phases")
+                if phases and phases["frames"] > 0:
+                    self.slow += [dict(frame, stop=stop) for frame in phases["slow"]]
+                    self.typicals.append((phases["frames"], phases["typical"], phases["typical_cpu_ms"]))
                 if stop in marks:
                     self.marked[stop] = len(times)
         dump = os.environ.get("GIANT_GATE_FRAMES")
         if dump:  # each frame's time and phases, for a closer look
             with open(dump, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"times": times, "phases": self.phases}) + "\n")
+                f.write(json.dumps({"times": times, "marked": self.marked, "slow": self.slow,
+                                    "typicals": self.typicals}) + "\n")
         return times
 
     def gpu_passes(self, frames):

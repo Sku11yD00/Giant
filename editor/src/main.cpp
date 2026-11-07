@@ -28,6 +28,7 @@
 #include "giant/ai/mcp_server.h"
 #include "giant/core/log.h"
 #include "giant/core/log_history.h"
+#include "giant/core/thread_time.h"
 #include "giant/platform/line_reader.h"
 #include "giant/platform/window.h"
 #include "giant/render/renderer.h"
@@ -341,11 +342,14 @@ int run(const Options& options) {
     // Where the main thread's time goes each frame (get_engine_info's
     // recent_phases): mark(p) gives p the time since the last mark.
     using clock = std::chrono::steady_clock;
+    // A screenshot (taken by a command) is the command's time.
     editor::FramePhaseMs phase_ms{};
     auto phase_mark = clock::now();
+    bool in_screenshot = false;
     const auto mark = [&](editor::FramePhase phase) {
         const auto now = clock::now();
-        phase_ms[static_cast<usize>(phase)] += std::chrono::duration<float, std::milli>(now - phase_mark).count();
+        const editor::FramePhase to = in_screenshot ? editor::FramePhase::mcp : phase;
+        phase_ms[static_cast<usize>(to)] += std::chrono::duration<float, std::milli>(now - phase_mark).count();
         phase_mark = now;
     };
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
@@ -373,14 +377,17 @@ int run(const Options& options) {
         input.materials = scene_frame.materials;
         input.decals = scene_frame.decals;
         renderer->render(cmd, target, input);
-        for (usize i = 0; i < render::k_cpu_section_names.size(); ++i) {
-            phase_ms[static_cast<usize>(editor::FramePhase::count) + i] += renderer->last_cpu_ms()[i];
+        mark(editor::FramePhase::render);
+        if (!in_screenshot) {
+            for (usize i = 0; i < render::k_cpu_section_names.size(); ++i) {
+                phase_ms[static_cast<usize>(editor::FramePhase::count) + i] += renderer->last_cpu_ms()[i];
+            }
         }
         state.scene_stats = renderer->last_stats();
         cmd.begin_timing("UI");
         cmd.draw_ui(target, ui->frame());
         cmd.end_timing();
-        mark(editor::FramePhase::render);
+        mark(editor::FramePhase::ui_draw);
     };
     state.render_screenshot = [&]() -> std::vector<u8> {
         // The same frame, offscreen: what the screen shows, sRGB-encoded.
@@ -399,7 +406,9 @@ int run(const Options& options) {
             device->destroy(target);
             return {};
         }
+        in_screenshot = true;
         record_frame(*cmd, target);
+        in_screenshot = false;
         device->end_frame();
         std::vector<u8> pixels = device->read_texture(target);
         device->destroy(target);
@@ -422,6 +431,8 @@ int run(const Options& options) {
     constexpr u64 k_max_skipped_frames = 1000;
     u64 skipped_in_a_row = 0;
 
+    phase_mark = clock::now(); // setup is no frame's
+    double cpu_mark = thread_cpu_ms();
     while (window->poll_events() && !state.quit_requested) {
         mark(editor::FramePhase::events);
         if (mcp_reader != nullptr) {
@@ -440,6 +451,9 @@ int run(const Options& options) {
             // Nothing to show: idle instead of spinning a CPU core.
             window->wait_events(100);
             last_frame = std::chrono::steady_clock::now();
+            phase_ms = {}; // minimised time is no frame's
+            phase_mark = last_frame;
+            cpu_mark = thread_cpu_ms();
             continue;
         }
         const auto frame_start = std::chrono::steady_clock::now();
@@ -448,7 +462,9 @@ int run(const Options& options) {
         frame_info.frame_ms = 1000.0f * delta;
         // The phases since the last frame began: the same span as delta.
         mark(editor::FramePhase::other);
-        state.frame_times.add(frame_info.frame_ms, phase_ms);
+        const double cpu_now = thread_cpu_ms();
+        state.frame_times.add(frame_info.frame_ms, phase_ms, static_cast<float>(cpu_now - cpu_mark));
+        cpu_mark = cpu_now;
         phase_ms = {};
 
         scripts.update(delta);
@@ -534,6 +550,7 @@ int run(const Options& options) {
         if (options.max_frames != 0 && device->frames_completed() >= options.max_frames) {
             break;
         }
+        mark(editor::FramePhase::tail);
     }
 
     device->wait_idle();

@@ -1,6 +1,7 @@
 add_executable(giant_editor
   src/main.cpp
   src/editor_commands.cpp
+  src/frame_times.cpp
   src/mesh_library.cpp
   src/scene_commands.cpp
   src/scene_render.cpp
@@ -68,6 +69,8 @@ if(GIANT_BUILD_TESTS)
         "ASAN_OPTIONS=handle_segv=0:allow_user_segv_handler=1:detect_leaks=0:use_sigaltstack=0")
     endif()
     set_tests_properties(editor_mcp PROPERTIES TIMEOUT 2460 ENVIRONMENT "${mcp_env}")
+    # The gates' summaries of a flight (no editor).
+    add_test(NAME gate_common COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_gate_common.py)
     # The N2 gate's scene and flight, on the null device (the software
     # renderer would take hours): everything but the speed. Optimised builds
     # only: a debug or sanitizer build takes most of an hour over it.
@@ -97,7 +100,7 @@ if(GIANT_BUILD_TESTS)
                  tests/test_world_streaming.cpp tests/test_terrain.cpp tests/test_far_ground.cpp tests/test_scatter.cpp tests/test_weather.cpp tests/test_physics.cpp
                  src/scene_commands.cpp src/terrain_commands.cpp src/terrain_meshes.cpp src/far_ground.cpp src/terrain_brush_tool.cpp src/viewport_camera.cpp
                  src/scatter_placer.cpp src/scatter_commands.cpp src/weather_state.cpp src/weather_commands.cpp src/physics_state.cpp src/physics_commands.cpp src/play_state.cpp
-                 src/mesh_library.cpp src/scene_render.cpp src/world_streaming.cpp)
+                 src/mesh_library.cpp src/scene_render.cpp src/world_streaming.cpp src/frame_times.cpp)
   target_link_libraries(giant_editor_tests PRIVATE giant::core giant::platform giant::rhi giant::geometry
                         giant::render giant::world giant::sim giant::ai giant::test_main)
   giant_apply_warnings(giant_editor_tests)
