@@ -106,6 +106,8 @@ public:
     void remove_cell(world::CellCoord cell);
     // The placement a cell's trees are of (0: not known).
     u64 serial(world::CellCoord cell) const;
+    // Its trees fallen now (0: none, or not known).
+    u32 fallen_in(world::CellCoord cell) const;
     // Whether set_cell should be given the cell's trees (it is in reach of `camera`).
     bool wants(world::CellCoord cell, const DVec3& camera) const;
     std::vector<world::CellCoord> cells() const;

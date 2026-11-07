@@ -33,7 +33,10 @@ public:
     void lift(Terrain& terrain);
     void put_back(Terrain& terrain);
     // A new scene: nothing to put back.
-    void forget() { m_tiles.clear(); }
+    void forget() {
+        m_tiles.clear();
+        m_dents = 0;
+    }
     usize tiles() const { return m_tiles.size(); }
     u32 dents() const { return m_dents; }
 

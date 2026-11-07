@@ -84,13 +84,14 @@ void PhysicsState::feed_forest(const world::Scene& scene, const ScatterPlacer& s
         m_forest.set_cell(c, placed.serial, trees_of(placed));
         looked += placed.points.size();
     };
-    // Cells known whose placement went, or changed.
+    // Cells known whose placement went, or changed (a cell with fallen
+    // trees is given again wherever it is: they stay down where they stand).
     for (const world::CellCoord c : m_forest.cells()) {
         const ScatterPlacer::Cell* placed = scatter.find(c);
         if (placed == nullptr) {
             m_forest.remove_cell(c);
         } else if (placed->serial != m_forest.serial(c)) {
-            if (m_forest.wants(c, camera) && fits(*placed)) {
+            if (m_forest.fallen_in(c) > 0 || (m_forest.wants(c, camera) && fits(*placed))) {
                 give(c, *placed);
             } else {
                 m_forest.remove_cell(c); // given again when in reach
@@ -120,6 +121,15 @@ void PhysicsState::feed_forest(const world::Scene& scene, const ScatterPlacer& s
         const ScatterPlacer::Cell& placed = *scatter.find(c);
         if (!fits(placed)) break;
         give(c, placed);
+    }
+}
+
+void PhysicsState::refresh_forest(const world::Scene& scene, const ScatterPlacer& scatter) {
+    notice_scene(scene);
+    for (const world::CellCoord c : m_forest.cells()) {
+        const ScatterPlacer::Cell* placed = scatter.find(c);
+        if (placed == nullptr || placed->serial == m_forest.serial(c) || m_forest.fallen_in(c) == 0) continue;
+        m_forest.set_cell(c, placed->serial, trees_of(*placed));
     }
 }
 

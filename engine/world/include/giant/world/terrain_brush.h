@@ -6,6 +6,7 @@
 #include "giant/core/types.h"
 #include "giant/world/terrain.h"
 
+#include <functional>
 #include <limits>
 #include <span>
 #include <vector>
@@ -52,14 +53,19 @@ struct Dent {
     float yaw = 0.0f;     // radians: its length's way, from +x toward +z
 };
 
-// The ground's reach of a dent: metres from its centre (rim included).
+// The farthest a dent reaches (larger: not a dent).
+inline constexpr double k_max_dent_reach = 4096.0;
+// The ground's reach of a dent: metres from its centre (rim included; 0: not a dent).
 double dent_reach(const Dent& dent);
 // How much a dent lowers (positive: raises) the ground `du` metres along
 // its length and `dv` across it.
 float dent_offset(const Dent& dent, double du, double dv);
 // Presses a dent in at (x, z) into the tiles there are, adding the cells
-// changed to `changed` (each once). Heights stay within k_max_terrain_height.
-void apply_dent(Terrain& terrain, const Dent& dent, double x, double z, std::vector<CellCoord>& changed);
+// changed to `changed` (each once; `before`, when given, is told each one
+// just before it changes). Heights stay within k_max_terrain_height. The
+// work is the samples in the dent's own (turned) bounds.
+void apply_dent(Terrain& terrain, const Dent& dent, double x, double z, std::vector<CellCoord>& changed,
+                const std::function<void(CellCoord)>& before = {});
 
 // The dabs a stroke through `points` makes: the points, with more between
 // them so dabs are at most a quarter radius apart (a fast drag leaves no gaps).

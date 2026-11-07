@@ -364,6 +364,7 @@ int run(const Options& options) {
         mark(editor::FramePhase::far_ground);
         scatter.camera = state.camera.position;
         scatter.update(state.scene, terrain_meshes.last_changes());
+        physics.refresh_forest(state.scene, scatter); // fallen trees of cells placed again, drawn lying this frame
         mark(editor::FramePhase::scatter);
         const std::vector<world::EntityId> redraw = physics.take_redraw();
         const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();

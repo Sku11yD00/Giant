@@ -808,20 +808,32 @@ wakes as its tile is swapped), the voxel world, scatter (re-placed onto the
 new ground). It is still view state: `world::GroundDamage` keeps each
 dented tile's heights and version as they were before its first dent, and
 stopping puts them back with `Terrain::restore` (the same versions, so
-nothing reads as edited or unsaved and every cache stays good). A tile
-edited otherwise after its last dent (a sculpt, an undo) is left as that
-made it. `save_world`, `save_scene` and `open_world`'s unsaved check run
-with the ground as it was (`PhysicsState::GroundAsSaved`: lift, then put
-back); a dented cell reads as unsaved meanwhile, so it never unloads.
+nothing reads as edited or unsaved and every cache stays good). Every
+terrain command, every undo and redo of a scene change, a new scene's
+copy for its undo, `save_world`, `save_scene` and `open_world`'s unsaved
+check run on the ground as authored (`PhysicsState::GroundAsSaved`: the
+dents lifted, then put back with their own versions, so nothing that
+follows the ground sees a change); a tile such an edit changes loses its
+dents, so a snapshot never holds one and nothing brings one back for good.
+`simulate off` puts the ground back at once. A dented cell reads as
+unsaved meanwhile, so it never unloads.
 
-A cell placed again keeps its fallen trees whose point stands at the same
-x and z (`Forest::set_cell`): a dent re-places the scatter of the cells it
-touches, and the trees felled there stay down (their bodies wake and settle
-into the dent).
+A cell placed again keeps its fallen trees that stand where they stood
+(`Forest::set_cell`: the same x and z to the centimetre, size and model,
+whatever their point numbers now: a dent adds or takes other layers'
+points). A dent re-places the scatter of the cells it touches; the editor
+gives the forest those cells as soon as the placer swaps them in
+(`PhysicsState::refresh_forest`, the same frame, so felled trees are
+never drawn standing), wherever they are, and the trees felled there stay
+down (their bodies wake and settle into the dent; laid ones move with the
+ground under their foot).
 
-Known limits: rubble and laid trees (no bodies) stay at the height they
-were laid; a dent is applied at once, its cost the samples under it (200 m
-at most); damage is not saved yet (part 8).
+Cost: a dent walks the samples in its own turned bounds once (radius times
+stretch is at most 200 m: about 1.4 million samples at the finest
+spacing, a one-off), and keeps a copy of only the tiles it changes.
+
+Known limits: rubble (no body) stays at the height it was laid; stopping
+puts every dented tile back in one frame; damage is not saved yet (part 8).
 
 ## Window events (known limit)
 

@@ -84,6 +84,12 @@ public:
     // Returns the tiles it changed.
     usize dent(world::Scene& scene, const world::Dent& dent, const DVec3& at);
     const world::GroundDamage& ground() const { return m_ground; }
+    // Stopped: the dented ground put back now (else the next update does).
+    void restore_ground(world::Scene& scene);
+    // Each frame once the placer swapped in new placements: the cells the
+    // forest knows that were placed again, given to it now (so their fallen
+    // trees are drawn as they lie this frame, never standing).
+    void refresh_forest(const world::Scene& scene, const ScatterPlacer& scatter);
     // While one lives, the dented ground is as it was (a save in between).
     class GroundAsSaved {
     public:
@@ -108,8 +114,6 @@ public:
 private:
     // A new scene: the forest's trunks go before the scene's bodies clear the world.
     void notice_scene(const world::Scene& scene);
-    // Stopped: the dented ground put back.
-    void restore_ground(world::Scene& scene);
     // The trees of a cell's placement, in point order.
     static std::vector<sim::TreeSpot> trees_of(const ScatterPlacer::Cell& placed);
 

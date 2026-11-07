@@ -114,6 +114,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              // Off while playing: play stops too (it needs the simulation).
              if (!on && state.play != nullptr && state.play->playing()) state.play->stop(state.camera);
              state.physics->set_simulating(on);
+             if (!on) state.physics->restore_ground(state.scene); // now: what follows in this batch sees it
              return CommandResult::success(physics_json(state));
          }});
 
@@ -238,7 +239,8 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "a bowl `radius` metres across its middle and `depth` metres deep at the centre with a rim "
          "thrown up round it (`rim`: its height as a share of depth, out to 1.5 radius; default 0.25), or, "
          "with `stretch` over 1, a footprint `stretch` times as long as wide along `yaw` (degrees from "
-         "+x toward +z). The ground follows everywhere (drawing, bodies, scatter); a round crater throws "
+         "+x toward +z); radius times stretch at most 200. Terrain edits while dented are made to the ground "
+         "as authored (a tile edited loses its dents). The ground follows everywhere (drawing, bodies, scatter); a round crater throws "
          "up dust. View state: stopping the simulation puts the ground back exactly, and saving saves it "
          "as it was. Only tiles that exist are dented. Returns `tiles` (changed) and get_physics.",
          Json{{"type", "object"},
@@ -262,6 +264,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              dent.rim = args.value("rim", 0.25f);
              dent.stretch = args.value("stretch", 1.0f);
              dent.yaw = degrees_to_radians(args.value("yaw", 0.0f));
+             if (dent.radius * static_cast<double>(dent.stretch) > 200.0) {
+                 return CommandResult::failure("a dent reaches 200 m at most: radius times stretch");
+             }
              const usize tiles =
                  state.physics->dent(state.scene, dent, {p[0].get<double>(), p[1].get<double>(), p[2].get<double>()});
              Json out = physics_json(state);

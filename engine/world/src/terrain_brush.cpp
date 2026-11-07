@@ -111,11 +111,12 @@ void apply_brush(Terrain& terrain, const Brush& brush, double x, double z, std::
 double dent_reach(const Dent& dent) {
     if (!(dent.radius > 0.0) || !std::isfinite(dent.radius)) return 0.0;
     const double stretch = std::isfinite(dent.stretch) ? std::max(1.0, static_cast<double>(dent.stretch)) : 1.0;
-    return 1.5 * dent.radius * stretch;
+    const double reach = 1.5 * dent.radius * stretch;
+    return reach <= k_max_dent_reach ? reach : 0.0; // (past it: not a dent, and the sample numbers would overflow)
 }
 
 float dent_offset(const Dent& dent, double du, double dv) {
-    if (!(dent.radius > 0.0) || !std::isfinite(dent.depth)) return 0.0f;
+    if (!(dent.radius > 0.0) || !std::isfinite(dent.radius) || !std::isfinite(dent.depth)) return 0.0f;
     const double stretch = std::isfinite(dent.stretch) ? std::max(1.0, static_cast<double>(dent.stretch)) : 1.0;
     const double a = du / (dent.radius * stretch);
     const double b = dv / dent.radius;
@@ -133,18 +134,23 @@ float dent_offset(const Dent& dent, double du, double dv) {
     return 0.0f;
 }
 
-void apply_dent(Terrain& terrain, const Dent& dent, double x, double z, std::vector<CellCoord>& changed) {
+void apply_dent(Terrain& terrain, const Dent& dent, double x, double z, std::vector<CellCoord>& changed,
+                const std::function<void(CellCoord)>& before) {
     const double reach = dent_reach(dent);
-    if (terrain.empty() || !(reach > 0.0) || !std::isfinite(x) || !std::isfinite(z) || !std::isfinite(dent.depth) ||
-        !std::isfinite(dent.yaw)) {
+    if (terrain.empty() || !(reach > 0.0) || !std::isfinite(x) || !std::isfinite(z) || std::fabs(x) > 1e12 ||
+        std::fabs(z) > 1e12 || !std::isfinite(dent.depth) || !std::isfinite(dent.yaw)) {
         return;
     }
     const double s = terrain.spacing();
     const i64 n = terrain.samples();
-    const i64 i0 = static_cast<i64>(std::ceil((x - reach) / s)), i1 = static_cast<i64>(std::floor((x + reach) / s));
-    const i64 j0 = static_cast<i64>(std::ceil((z - reach) / s)), j1 = static_cast<i64>(std::floor((z + reach) / s));
-    if (i1 < i0 || j1 < j0) return;
     const double cu = std::cos(static_cast<double>(dent.yaw)), su = std::sin(static_cast<double>(dent.yaw));
+    // The turned ellipse's bounds (rim included).
+    const double stretch = reach / (1.5 * dent.radius);
+    const double ex = 1.5 * dent.radius * std::sqrt(stretch * stretch * cu * cu + su * su);
+    const double ez = 1.5 * dent.radius * std::sqrt(stretch * stretch * su * su + cu * cu);
+    const i64 i0 = static_cast<i64>(std::ceil((x - ex) / s)), i1 = static_cast<i64>(std::floor((x + ex) / s));
+    const i64 j0 = static_cast<i64>(std::ceil((z - ez) / s)), j1 = static_cast<i64>(std::floor((z + ez) / s));
+    if (i1 < i0 || j1 < j0) return;
     for (i64 cz = floor_div(j0, n); cz <= floor_div(j1, n); ++cz) {
         for (i64 cx = floor_div(i0, n); cx <= floor_div(i1, n); ++cx) {
             if (!in_i32(cx) || !in_i32(cz)) continue;
@@ -163,6 +169,7 @@ void apply_dent(Terrain& terrain, const Dent& dent, double x, double z, std::vec
                     const float next = std::clamp(h + off, -k_max_terrain_height, k_max_terrain_height);
                     if (next == h) continue;
                     if (heights == nullptr) {
+                        if (before) before(cell);
                         heights = terrain.modify(cell);
                         changed.push_back(cell);
                     }

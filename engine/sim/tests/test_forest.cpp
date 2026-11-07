@@ -441,10 +441,20 @@ GIANT_TEST("forest: a cell placed again keeps the fallen trees that stand where 
     GIANT_CHECK(forest.body_of({0, 0}, 0) == body && forest.tree_of(body)->fallen);
     GIANT_CHECK(forest.stats().fallen == 1);
     GIANT_CHECK(forest.take_redraw().size() == 1);
+    // Its point renumbered (a dent took other points before it): kept by where it stands.
+    forest.set_cell({0, 0}, 3, {tree(1, {10.0, -1.0, 10.0}), tree(2, {50.0, 0.0, 10.0})});
+    GIANT_CHECK(fallen(forest, {0, 0}, 1) != nullptr && fallen(forest, {0, 0}, 0) == nullptr);
+    GIANT_CHECK(forest.body_of({0, 0}, 1) == body && forest.tree_of(body)->point == 1);
+    GIANT_CHECK(forest.stats().fallen == 1 && forest.fallen_in({0, 0}) == 1);
+    // Another model there (bigger): stands up anew.
+    TreeSpot big = tree(1, {10.0, -1.0, 10.0});
+    big.height = 20.0f;
+    forest.set_cell({0, 0}, 4, {big, tree(2, {50.0, 0.0, 10.0})});
+    GIANT_CHECK(forest.stats().fallen == 0 && forest.fallen().empty());
     // Still a body of its own: what falls on goes on (reset stands it up and lets it go).
     forest.reset();
     forest.flush({0.0, 0.0, 0.0});
-    GIANT_CHECK(forest.stats().fallen == 0 && forest.stats().trunks == 3);
+    GIANT_CHECK(forest.stats().fallen == 0 && forest.stats().trunks == 2);
     forest.clear();
     GIANT_CHECK(physics.size() == 1);
 }

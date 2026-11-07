@@ -617,6 +617,49 @@ GIANT_TEST("dent_ground: a crater while simulating, the bodies follow, saving se
     GIANT_CHECK(r.value["ground"]["dents"] == 0 && r.value["ground"]["tiles"] == 0);
 }
 
+GIANT_TEST("dent_ground: terrain edits, their undo and a new scene's undo never keep a dent for good") {
+    PhysicsState physics;
+    EditorState state;
+    state.physics = &physics;
+    ai::CommandRegistry commands;
+    register_scene_commands(commands, state);
+    register_terrain_commands(commands, state);
+    register_physics_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args = Json::object()) { return commands.execute(name, args, {}); };
+    world::Scene& scene = state.scene;
+    flat(scene.terrain, 0, 0, 1, 0, 2.0f);
+    const auto at = [&](double x, double z) { return state.scene.terrain.height_at(x, z).value(); };
+    // A sculpt on a dented tile is made to the ground as authored; it takes the dent off that tile.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}}).ok);
+    GIANT_CHECK(at(32.0, 32.0) < 0.0);
+    GIANT_CHECK(run("sculpt_terrain", {{"op", "raise"}, {"points", {{4.0, 4.0}}}, {"radius", 3.0}, {"strength", 1.0}}).ok);
+    GIANT_CHECK(at(32.0, 32.0) == 2.0 && at(4.0, 4.0) > 2.0);
+    // Stopped, then undone: the sculpt goes, and no crater comes back.
+    GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+    GIANT_CHECK(run("undo").ok);
+    GIANT_CHECK(at(32.0, 32.0) == 2.0 && at(4.0, 4.0) == 2.0);
+    // A dent, and a sculpt elsewhere (another tile): the dent stays, and stopping takes it away.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}}).ok);
+    GIANT_CHECK(run("sculpt_terrain", {{"op", "raise"}, {"points", {{100.0, 32.0}}}, {"radius", 3.0}, {"strength", 1.0}}).ok);
+    GIANT_CHECK(at(32.0, 32.0) < 0.0 && at(100.0, 32.0) > 2.0);
+    GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+    GIANT_CHECK(at(32.0, 32.0) == 2.0 && at(100.0, 32.0) > 2.0); // at once, in the same batch
+    GIANT_CHECK(run("undo").ok && at(100.0, 32.0) == 2.0 && at(32.0, 32.0) == 2.0);
+    // A new scene while dented, then undone: the scene comes back as authored.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}}).ok);
+    GIANT_CHECK(run("new_scene").ok);
+    physics.update(state.scene, {}, 0.0);
+    GIANT_CHECK(run("undo").ok);
+    physics.update(state.scene, {}, 0.0);
+    GIANT_CHECK(at(32.0, 32.0) == 2.0);
+    // Too long a footprint is refused.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(!run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 100.0}, {"depth", 1.0}, {"stretch", 3.0}}).ok);
+}
+
 GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable") {
     Fixture f;
     GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 1}}).ok);

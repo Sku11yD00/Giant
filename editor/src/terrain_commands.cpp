@@ -2,6 +2,7 @@
 // Every change is undoable; the tiles' meshes follow on worker threads
 // (TerrainMeshes), so get_terrain says when they are all drawn.
 #include "editor_commands.h"
+#include "physics_state.h"
 #include "terrain_meshes.h"
 #include "world_streaming.h"
 
@@ -41,7 +42,16 @@ constexpr usize k_max_samples_per_command = 4096 * 64 * 64;
 constexpr usize k_max_terrain_samples = 4 * k_max_samples_per_command;
 constexpr usize k_max_points = 4096;
 
-void add(ai::CommandRegistry& registry, ai::CommandDesc desc) {
+// Every terrain edit is made to the ground as authored: dents pressed in
+// while simulating are lifted for it (and its snapshots), and put back
+// after on the tiles it left as they were (an edited tile loses its dents).
+void add(ai::CommandRegistry& registry, EditorState& state, ai::CommandDesc desc) {
+    if (!desc.read_only) {
+        desc.run = [&state, run = std::move(desc.run)](const Json& args, CommandContext& context) {
+            const PhysicsState::GroundAsSaved as_authored(state.physics, state.scene);
+            return run(args, context);
+        };
+    }
     const bool added = registry.add(std::move(desc));
     GIANT_ASSERT(added, "terrain command could not be registered");
 }
@@ -260,7 +270,7 @@ std::optional<std::vector<u8>> read_bytes(const std::filesystem::path& path, std
 } // namespace
 
 void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state) {
-    add(registry,
+    add(registry, state,
         {"create_terrain",
          "Makes ground: a height field tile for every 64 m cell the area [from, to] (x, z "
          "metres) touches, replacing tiles already there. Flat at `height`, or rolling `hills`. "
@@ -369,7 +379,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              return CommandResult::success(std::move(out));
          }});
 
-    add(registry,
+    add(registry, state,
         {"remove_terrain",
          "Removes the terrain tiles of every 64 m cell the area [from, to] (x, z metres) "
          "touches, or every tile with all (in a streamed world: every tile loaded). Undoable.",
@@ -406,7 +416,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              return CommandResult::success({{"removed", cells.size()}, {"terrain_tiles", t.size()}});
          }});
 
-    add(registry,
+    add(registry, state,
         {"set_terrain_heights",
          "Sets one tile's heights (adding the tile if the cell has none): samples x samples "
          "numbers (get_terrain gives samples), row by row from the cell's corner (lowest x and "
@@ -453,7 +463,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              return CommandResult::success(std::move(out));
          }});
 
-    add(registry,
+    add(registry, state,
         {"sculpt_terrain",
          "Sculpts the ground with a round brush along a stroke (one point is one dab): raise or "
          "lower (strength in metres at the centre), smooth (towards the average of each sample's "
@@ -579,7 +589,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              return CommandResult::success(std::move(out));
          }});
 
-    add(registry,
+    add(registry, state,
         {"import_height_map",
          "Makes ground from a height map file over the area [from, to] (x, z metres; the image's "
          "first row at `from`'s z, its first column at `from`'s x): a tile for every 64 m cell the "
@@ -676,7 +686,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              return CommandResult::success(std::move(out));
          }});
 
-    add(registry,
+    add(registry, state,
         {"set_terrain_material",
          "Sets how the ground looks (all of it, until painted layers arrive): base_color "
          "(linear RGB) and roughness. Undoable.",
@@ -703,7 +713,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
              return CommandResult::success(material_json(after));
          }});
 
-    add(registry,
+    add(registry, state,
         {"get_terrain",
          "Describes the terrain: tiles, samples per tile side and their spacing, the cells it "
          "covers, the material, its meshes (tiles drawn, building: still being made). With "

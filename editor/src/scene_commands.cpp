@@ -386,6 +386,8 @@ void swap_scene(EditorState& state, world::Scene next, CommandContext& context,
     // (outside the history) is not this side's.
     const auto leave = [&state, world](Side& side) {
         if (state.scene_generation != side.generation) return;
+        // Kept as authored: never the dents of simulating (they would come back for good).
+        const PhysicsState::GroundAsSaved as_authored(state.physics, state.scene);
         side.memo = world != nullptr && world->active(state.scene_generation) ? world->memo(state.scene) : nullptr;
         side.scene = state.scene;
         side.generation = state.scene_generation;
@@ -805,11 +807,17 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
 ai::Change scene_change(EditorState& state, std::function<void()> undo,
                         std::function<void()> redo) {
     const u64 generation = state.scene_generation;
+    // Undone and redone on the ground as authored (the dents of simulating
+    // lifted meanwhile): a snapshot never holds a dent, nor brings one back.
     return {[&state, generation, undo = std::move(undo)] {
-                if (state.scene_generation == generation) undo();
+                if (state.scene_generation != generation) return;
+                const PhysicsState::GroundAsSaved as_authored(state.physics, state.scene);
+                undo();
             },
             [&state, generation, redo = std::move(redo)] {
-                if (state.scene_generation == generation) redo();
+                if (state.scene_generation != generation) return;
+                const PhysicsState::GroundAsSaved as_authored(state.physics, state.scene);
+                redo();
             }};
 }
 
