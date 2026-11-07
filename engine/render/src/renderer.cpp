@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -1148,6 +1149,14 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
 }
 
 void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameInput& frame) {
+    // mark(s) gives section s the CPU time since the last mark.
+    m_cpu_ms = {};
+    auto since = std::chrono::steady_clock::now();
+    const auto mark = [&](CpuSection section) {
+        const auto now = std::chrono::steady_clock::now();
+        m_cpu_ms[static_cast<usize>(section)] += std::chrono::duration<float, std::milli>(now - since).count();
+        since = now;
+    };
     m_stats = {};
     m_shadow_draws = 0;
     const rhi::TextureDesc* target_desc = m_device.describe(target);
@@ -1168,6 +1177,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_cells_changed = changed_cells(frame.cells, frame.instances.size(), m_seen_cells, m_changed_cells)
                           ? static_cast<u32>(m_changed_cells.size())
                           : m_cells_count;
+    mark(CpuSection::cells);
 
     // Newest GPU counts the GPU is done with (frames in flight: two back).
     if (gpu) {
@@ -1195,6 +1205,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.begin_timing("streaming");
     m_streamer->update(cmd, frame_number);
     cmd.end_timing();
+    mark(CpuSection::streaming);
     if (settings.voxel_world) {
         cmd.begin_timing("voxels");
         m_voxels->set_stand_in_radius(settings.far_field_max_radius);
@@ -1204,6 +1215,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     } else {
         m_voxels->idle();
     }
+    mark(CpuSection::voxels);
     // Views that light the scene: the lit view and the light alone.
     const bool lit_view = settings.debug_view == DebugView::lit || settings.debug_view == DebugView::lighting;
     // Global illumination: the voxel world lit (in the lit views and the
@@ -1218,6 +1230,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     } else {
         m_light_plan->off();
     }
+    mark(CpuSection::gi_plan);
 
     // Instances with a live mesh, but for the small ones wholly past the
     // far field's distance: the voxel world shows those (once it holds
@@ -1266,9 +1279,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (gpu && !ensure_cull_buffers(m_cull, static_cast<u32>(m_valid.size()))) {
         m_valid.clear(); // out of memory: draw nothing
     }
+    mark(CpuSection::instances);
     // Sun shadows: the lit view, with GPU culling (pages are drawn with it).
     plan_shadows(frame, settings.shadows && gpu && lit_view &&
                             ensure_shadow_buffers(static_cast<u32>(m_valid.size())));
+    mark(CpuSection::shadow_plan);
 
     // The instances, kept on the GPU by cell (before the frame constants:
     // the store may grow, which moves its not-drawn bits).
@@ -1283,6 +1298,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             m_valid.clear(); // out of memory: draw nothing
         }
     }
+    mark(CpuSection::store);
 
     // Frame constants.
     const Lighting& light = frame.lighting;
@@ -1427,6 +1443,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
     }
     data.meshes = cmd.upload(bytes_of(table));
+    mark(CpuSection::tables);
     // The weather's cover map reads the voxel world too.
     const bool weather_cover = frame.sky.on && settings.weather_cover && settings.voxel_world &&
                                (frame.sky.rain > 0.0f || frame.sky.snow > 0.0f || frame.sky.wetness > 0.0f ||
@@ -1445,6 +1462,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (!light_voxels(cmd, data)) {
         m_gi_on = false; // this frame shades without it
     }
+    mark(CpuSection::light);
 
     if (gpu && !m_valid.empty()) {
         cull_on_gpu(cmd, data); // counts its raster passes in m_stats.draws
@@ -1485,9 +1503,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         raster(cmd, data, 0, false); // clears the visibility buffer, draws CPU picks
     }
+    mark(CpuSection::culling);
     if (m_shadows_on) {
         draw_shadows(cmd, data, frame, k); // after the view's culling: its streaming requests go first
     }
+    mark(CpuSection::shadows);
     if (data.occlusion && !m_valid.empty()) {
         m_hzb_valid = true;
         m_hzb_camera = frame.view.position;
@@ -1528,6 +1548,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // The sky (lit views): its view table, cloud shadows and clouds, before shading.
     rhi::TransientMemory sky_params{};
     const bool sky = frame.sky.on && lit_view && draw_sky(cmd, data, frame, sky_params);
+    mark(CpuSection::sky);
     cmd.begin_timing("shading");
     // With screen reflections, shading writes radiance before exposure and
     // the screen reflections pass reflects it and tone maps it into
@@ -1681,6 +1702,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.end_timing();
     }
     finish_stats(data);
+    mark(CpuSection::shading);
 }
 
 void Renderer::finish_stats(const FrameData& data) {

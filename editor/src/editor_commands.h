@@ -53,12 +53,56 @@ class WorldStreaming;
 
 // The last few seconds of frame times, for get_engine_info (performance
 // checks such as the N1 gate run over MCP).
+// Where the main thread's time went in a frame, for finding what makes a
+// slow one (get_engine_info's `recent_phases`).
+enum class FramePhase : u8 {
+    events,     // window events
+    mcp,        // MCP commands
+    scripts,    // C# scripts
+    ui,         // panels
+    weather,    // weather and the player's input
+    physics,    // bodies following the scene, stepping
+    begin_frame, // waiting for a frame in flight to finish
+    terrain,    // terrain meshes
+    far_ground, // far ground levels
+    scatter,    // scatter placement results
+    scene,      // the scene's instances and cells
+    render,     // recording the GPU work
+    end_frame,  // submitting and presenting
+    streaming,  // world cells loading and unloading
+    other,
+    count
+};
+inline constexpr std::array<const char*, static_cast<usize>(FramePhase::count)> k_frame_phase_names = {
+    "events", "mcp",   "scripts", "ui",     "weather",  "physics",   "begin_frame", "terrain",
+    "far_ground", "scatter", "scene", "render", "end_frame", "streaming", "other"};
+// Then the renderer's own (render::CpuSection, within `render`), named
+// "render/<section>".
+inline constexpr usize k_frame_phases = static_cast<usize>(FramePhase::count) + render::k_cpu_section_names.size();
+using FramePhaseMs = std::array<float, k_frame_phases>;
+inline std::string frame_phase_name(usize i) {
+    return i < k_frame_phase_names.size() ? std::string(k_frame_phase_names[i])
+                                          : "render/" + std::string(render::k_cpu_section_names[i - k_frame_phase_names.size()]);
+}
+
 struct FrameTimes {
     static constexpr usize k_frames = 240;
     std::array<float, k_frames> ms{};
+    std::array<FramePhaseMs, k_frames> phase_ms{}; // the same frames' phases
     usize count = 0; // frames recorded, ever
-    void add(float frame_ms) { ms[count++ % k_frames] = frame_ms; }
+    void add(float frame_ms, const FramePhaseMs& phases = {}) {
+        phase_ms[count % k_frames] = phases;
+        ms[count++ % k_frames] = frame_ms;
+    }
     usize size() const { return std::min(count, k_frames); }
+    // One phase's times over the recorded frames, oldest first.
+    std::vector<float> phase_in_order(usize phase) const {
+        std::vector<float> out;
+        out.reserve(size());
+        const usize start = count > k_frames ? count % k_frames : 0;
+        for (usize i = 0; i < size(); ++i) out.push_back(phase_ms[(start + i) % k_frames][phase]);
+        return out;
+    }
     // The recorded times, oldest first.
     std::vector<float> in_order() const {
         std::vector<float> out;

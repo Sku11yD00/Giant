@@ -36,6 +36,16 @@ LogLevel parse_level(const std::string& name) {
     return LogLevel::trace;
 }
 
+// Each phase's main-thread milliseconds over the recorded frames, beside
+// recent_ms (the same frames, oldest first).
+Json recent_phases(const FrameTimes& times) {
+    Json out = Json::object();
+    for (usize i = 0; i < k_frame_phases; ++i) {
+        out[frame_phase_name(i)] = times.phase_in_order(i);
+    }
+    return out;
+}
+
 } // namespace
 
 std::vector<rhi::GpuTiming> gpu_passes(const rhi::Device& device) {
@@ -108,7 +118,8 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                                    {"p99_ms", state.frame_times.percentile(0.99f)},
                                    {"hitches", state.frame_times.hitches()},
                                    {"recorded", state.frame_times.count},
-                                   {"recent_ms", state.frame_times.in_order()}}},
+                                   {"recent_ms", state.frame_times.in_order()},
+                                   {"recent_phases", recent_phases(state.frame_times)}}},
                   {"gpu", {{"frame_ms", state.device->gpu_frame_ms()}, {"passes", std::move(passes)}}},
                   {"window", {{"pixel_width", state.window->pixel_width()},
                               {"pixel_height", state.window->pixel_height()},

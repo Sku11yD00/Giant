@@ -338,15 +338,30 @@ int run(const Options& options) {
     state.scripts_to_load = options.scripts;
     editor::TerrainBrushTool terrain_brush;
     // Records the scene and the panels into `target` (an sRGB image).
+    // Where the main thread's time goes each frame (get_engine_info's
+    // recent_phases): mark(p) gives p the time since the last mark.
+    using clock = std::chrono::steady_clock;
+    editor::FramePhaseMs phase_ms{};
+    auto phase_mark = clock::now();
+    const auto mark = [&](editor::FramePhase phase) {
+        const auto now = clock::now();
+        phase_ms[static_cast<usize>(phase)] += std::chrono::duration<float, std::milli>(now - phase_mark).count();
+        phase_mark = now;
+    };
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
+        mark(editor::FramePhase::other);
         terrain_meshes.update(state.scene.terrain);
+        mark(editor::FramePhase::terrain);
         far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes,
                           state.scene.terrain);
+        mark(editor::FramePhase::far_ground);
         scatter.camera = state.camera.position;
         scatter.update(state.scene, terrain_meshes.last_changes());
+        mark(editor::FramePhase::scatter);
         const std::vector<world::EntityId> redraw = physics.take_redraw();
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw);
+        mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::weather_lighting(state.scene.lighting, weather.shown());
@@ -358,10 +373,14 @@ int run(const Options& options) {
         input.materials = scene_frame.materials;
         input.decals = scene_frame.decals;
         renderer->render(cmd, target, input);
+        for (usize i = 0; i < render::k_cpu_section_names.size(); ++i) {
+            phase_ms[static_cast<usize>(editor::FramePhase::count) + i] += renderer->last_cpu_ms()[i];
+        }
         state.scene_stats = renderer->last_stats();
         cmd.begin_timing("UI");
         cmd.draw_ui(target, ui->frame());
         cmd.end_timing();
+        mark(editor::FramePhase::render);
     };
     state.render_screenshot = [&]() -> std::vector<u8> {
         // The same frame, offscreen: what the screen shows, sRGB-encoded.
@@ -395,7 +414,6 @@ int run(const Options& options) {
     // instead of spinning a CPU core.
     const bool pace_null = device->backend() == rhi::Backend::null && options.vsync;
 
-    using clock = std::chrono::steady_clock;
     auto report_start = clock::now();
     u64 report_frames = 0;
     // With --frames, give up after this many frames in a row could not be
@@ -405,6 +423,7 @@ int run(const Options& options) {
     u64 skipped_in_a_row = 0;
 
     while (window->poll_events() && !state.quit_requested) {
+        mark(editor::FramePhase::events);
         if (mcp_reader != nullptr) {
             if (!pump_mcp(*mcp_reader, *mcp_server, state.quit_requested) ||
                 mcp_reader->finished()) {
@@ -415,6 +434,7 @@ int run(const Options& options) {
                 break;
             }
         }
+        mark(editor::FramePhase::mcp);
         const auto input = window->take_input_events();
         if (window->minimized()) {
             // Nothing to show: idle instead of spinning a CPU core.
@@ -426,9 +446,13 @@ int run(const Options& options) {
         const float delta = std::chrono::duration<float>(frame_start - last_frame).count();
         last_frame = frame_start;
         frame_info.frame_ms = 1000.0f * delta;
-        state.frame_times.add(frame_info.frame_ms);
+        // The phases since the last frame began: the same span as delta.
+        mark(editor::FramePhase::other);
+        state.frame_times.add(frame_info.frame_ms, phase_ms);
+        phase_ms = {};
 
         scripts.update(delta);
+        mark(editor::FramePhase::scripts);
 
         // Playing: the mouse and keys are the player's (the panels get
         // only releases, so nothing they hold sticks).
@@ -450,18 +474,22 @@ int run(const Options& options) {
         }
         panels.draw(frame_info);
         ui->end_frame();
+        mark(editor::FramePhase::ui);
         // The player's wanted motion (or play stopped: Esc, a new scene).
         const bool playing = play.before_step(state.scene, state.camera, state.scene_generation, delta);
         window->set_relative_mouse(playing); // mouse look, the cursor held in the window
         weather.update(state.scene.weather, delta, state.camera.position, state.scene_generation); // after the panels' changes
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
+        mark(editor::FramePhase::weather);
         physics.update(state.scene, scene_frame.take_for_followers(), delta);
         if (playing) play.after_step(state.camera, delta); // the camera at its eyes
+        mark(editor::FramePhase::physics);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }
         rhi::CommandList* cmd = device->begin_frame(swap_chain.get());
+        mark(editor::FramePhase::begin_frame);
         if (cmd == nullptr) {
             if (device->device_lost()) {
                 log_error("editor", "the GPU device was lost; closing");
@@ -479,9 +507,11 @@ int run(const Options& options) {
         }
         record_frame(*cmd, swap_chain->current_texture());
         device->end_frame();
+        mark(editor::FramePhase::end_frame);
         // After the frame's cells were built from the scene: loads and
         // unloads world cells (what joins the scene draws next frame).
         world_streaming.update(state.scene, state.scene_generation, state.camera.position, scene_frame);
+        mark(editor::FramePhase::streaming);
         if (state.selected != 0 && state.scene.find(state.selected) == nullptr) {
             state.selected = 0;
         }

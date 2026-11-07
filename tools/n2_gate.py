@@ -35,7 +35,7 @@ import math
 import random
 import sys
 
-from gate_common import Editor, describe, frame_stats, speed_failures
+from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures
 from n1_gate import HOUSES_Z, SPACING, STREET_X, build_gate_scene
 
 VIEW_M = 20_000.0      # the view the gate asks for
@@ -248,7 +248,11 @@ def main() -> int:
             if not (frame["gi"]["on"] and frame["reflections"]["voxel"] and frame["reflections"]["screen"]):
                 reflections_off.append(stop)
 
-        times = frame_stats(editor.fly(path, each_stop))
+        flown = editor.fly(path, each_stop)
+        times = frame_stats(flown)
+        slow = slow_frames(flown, editor.phases)
+        if slow:
+            print(f"n2_gate: {slow}")
         print(f"n2_gate: frame time over the flight ({times['frames']} frames sampled): {describe(times)}")
         for name, leg in legs.items():
             print(f"n2_gate: flying the {name}: at most {leg['pending']} voxel bricks waiting, "

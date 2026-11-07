@@ -4,8 +4,14 @@ editor over MCP, flying the camera along a path and timing the frames.
 Gates run on a real GPU (the owner's PC), in a visible window (not
 --hidden, which idles between frames). Each stop of a flight is two
 commands, a frame each.
+
+A flight with slow frames prints where the main thread's time went in
+them (each frame's phases, from get_engine_info's recent_phases). With
+GIANT_GATE_FRAMES set to a file, each flight's frame times and phases are
+added to it as a line of JSON, for a closer look.
 """
 import json
+import os
 import subprocess
 import threading
 
@@ -46,6 +52,42 @@ def speed_failures(times):
     if times["hitches"] > MAX_HITCHES:
         failures.append(f"{times['hitches']} hitches (frames over {HITCH_FACTOR}x the target): micro stutter")
     return failures
+
+
+def slow_frames(times, phases):
+    """Where the main thread's time went in a flight's slow frames: `times`
+    and `phases` as Editor.fly gives them. A line naming each phase's share of
+    the hitches (frames over the frame_stats limit) against a typical frame,
+    or None when there were none."""
+    if not times or not phases or len(phases) != len(times):
+        return None
+    ordered = sorted(times)
+    median = ordered[len(ordered) // 2]
+    limit = HITCH_FACTOR * max(median, FRAME_BUDGET_MS)
+    slow = [i for i, t in enumerate(times) if t > limit]
+    if not slow:
+        return None
+    every = list(phases[0].keys())
+    typical = {n: sorted(p[n] for p in phases)[len(phases) // 2] for n in every}
+    mean = {n: sum(phases[i][n] for i in slow) / len(slow) for n in every}
+
+    def summary(names):
+        worst_phase = {}
+        for i in slow:
+            top = max(names, key=lambda n: phases[i][n] - typical[n])
+            worst_phase[top] = worst_phase.get(top, 0) + 1
+        parts = sorted(names, key=lambda n: mean[n] - typical[n], reverse=True)
+        shares = ", ".join(f"{n} {mean[n]:.1f} (typical {typical[n]:.1f})" for n in parts if mean[n] >= 0.5)
+        blamed = ", ".join(f"{n} {c}" for n, c in sorted(worst_phase.items(), key=lambda x: -x[1]))
+        return f"mean ms per phase: {shares}; most over its typical time: {blamed}"
+
+    # "render/..." are parts of "render": a line of their own.
+    top = [n for n in every if "/" not in n]
+    inner = [n for n in every if "/" in n]
+    text = f"{len(slow)} slow frames, {summary(top)}"
+    if inner:
+        text += f"\n  inside render: {summary(inner)}"
+    return text
 
 
 def describe(times):
@@ -106,6 +148,7 @@ class Editor:
         more each_stop makes). Also read at each stop in `marks`: then
         self.marked[stop] is how many of the times came before it ended."""
         self.marked = {}
+        self.phases = []  # beside the times: each frame's main-thread ms per phase
         # Hover first so the 240 recorded frame times hold none of what
         # came before (a scene build is one long frame).
         self.tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
@@ -123,8 +166,16 @@ class Editor:
                     raise RuntimeError(f"{new} frames passed between samples: some were not timed")
                 if new > 0:
                     times += now["recent_ms"][-new:]
+                    recent = now.get("recent_phases", {})
+                    if recent and all(len(v) == len(now["recent_ms"]) for v in recent.values()):
+                        self.phases += [{n: recent[n][i] for n in recent}
+                                        for i in range(len(now["recent_ms"]) - new, len(now["recent_ms"]))]
                 if stop in marks:
                     self.marked[stop] = len(times)
+        dump = os.environ.get("GIANT_GATE_FRAMES")
+        if dump:  # each frame's time and phases, for a closer look
+            with open(dump, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"times": times, "phases": self.phases}) + "\n")
         return times
 
     def gpu_passes(self, frames):
