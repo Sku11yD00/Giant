@@ -215,6 +215,13 @@ GIANT_TEST("scatter: layers are checked, and saved with scenes and worlds") {
     bad = l;
     bad.items[0].mesh = "assets/rock.glb"; // a sphere with a mesh
     GIANT_CHECK(check_scatter_layer(bad).has_value());
+    bad = l;
+    bad.items[0].tree = ScatterTree{.trunk_radius = 1.0f, .height = 1.5f}; // shorter than it is wide
+    GIANT_CHECK(check_scatter_layer(bad).has_value());
+    bad.items[0].tree = ScatterTree{.strength = -1.0f};
+    GIANT_CHECK(check_scatter_layer(bad).has_value());
+    bad.items[0].tree = ScatterTree{};
+    GIANT_CHECK(!check_scatter_layer(bad).has_value());
 
     Scene scene;
     l.area = ScatterArea{-5.5, 2.0, 100.0, 200.25};
@@ -227,6 +234,7 @@ GIANT_TEST("scatter: layers are checked, and saved with scenes and worlds") {
     l.items[0].material.base_color = {0.25f, 0.5f, 0.75f};
     l.items[0].align = 0.5f;
     l.items[0].sink = 0.25f;
+    l.items[0].tree = ScatterTree{.trunk_radius = 0.4f, .height = 18.5f, .strength = 5000.0f};
     scene.scatter.push_back(l);
     ScatterLayer grass;
     grass.name = "grass";
@@ -257,6 +265,10 @@ GIANT_TEST("scatter: layers are checked, and saved with scenes and worlds") {
     std::string slow = text;
     slow.replace(slow.find("\"spacing\": 0.5"), 14, "\"spacing\": 0.1");
     GIANT_CHECK(load_scene(slow, loaded).has_value());
+    GIANT_CHECK(text.find("\"tree\"") != std::string::npos);
+    std::string weak_tree = text;
+    weak_tree.replace(weak_tree.find("\"height\": 18.5"), 14, "\"height\": 0.01");
+    GIANT_CHECK(load_scene(weak_tree, loaded).has_value());
     std::string no_kit = text;
     no_kit.replace(no_kit.find("\"tuft\""), 6, "\"nokit\"");
     GIANT_CHECK(load_scene(no_kit, loaded).has_value()); // a kit item names one of the scene's kits

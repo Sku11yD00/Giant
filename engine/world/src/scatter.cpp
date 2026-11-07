@@ -189,6 +189,14 @@ std::optional<std::string> check_scatter_layer(const ScatterLayer& l) {
         }
         if (!range(i.align, 0.0f, 1.0f)) return "an item's align is 0 to 1";
         if (!range(i.sink, -1000.0f, 1000.0f)) return "an item's sink is -1000 to 1000 metres";
+        if (i.tree) {
+            const ScatterTree& t = *i.tree;
+            if (!range(t.trunk_radius, 0.01f, 100.0f) || !range(t.height, 0.1f, 1000.0f) ||
+                t.height < 2.0f * t.trunk_radius) {
+                return "a tree's trunk_radius is 0.01 to 100 m, its height 0.1 to 1000 m and at least twice the radius";
+            }
+            if (!range(t.strength, 0.0f, 1e9f)) return "a tree's strength is 0 to 1000000000 N s";
+        }
         const Material& m = i.material;
         const auto colour = [&](const Vec3& c, float hi) { return range(c.x, 0, hi) && range(c.y, 0, hi) && range(c.z, 0, hi); };
         if (!colour(m.base_color, 1.0f) || !range(m.roughness, 0, 1) || !range(m.metallic, 0, 1) ||

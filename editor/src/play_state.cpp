@@ -25,7 +25,8 @@ DVec3 PlayState::spawn_at(const DVec3& eye) const {
 }
 
 bool PlayState::placing_waits(const world::Scene& scene, const DVec3& eye) const {
-    return m_physics.bodies().entities_waiting() || m_physics.bodies().ground_waiting(scene.terrain, eye);
+    return m_physics.bodies().entities_waiting() || m_physics.bodies().ground_waiting(scene.terrain, eye) ||
+           m_physics.forest().waiting(); // trunks made later could stand inside the player
 }
 
 bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_generation) {

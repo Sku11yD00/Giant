@@ -275,10 +275,20 @@ public:
     void OnContactAdded(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
                         JPH::ContactSettings&) override {
         if (manifold.mRelativeContactPointsOn1.empty()) return;
-        const float inverse_a = a.IsDynamic() ? a.GetMotionProperties()->GetInverseMass() : 0.0f;
-        const float inverse_b = b.IsDynamic() ? b.GetMotionProperties()->GetInverseMass() : 0.0f;
-        if (inverse_a + inverse_b <= 0.0f) return;
+        if (!a.IsDynamic() && !b.IsDynamic()) return;
         const JPH::RVec3 point = manifold.GetWorldSpaceContactPointOn1(0);
+        // What it takes to stop each body at the point, along the normal:
+        // its mass and, as it turns, its inertia (a long log struck at its
+        // tip is stopped far more easily than its mass says).
+        const auto inverse = [&](const JPH::Body& body) {
+            if (!body.IsDynamic()) return 0.0f;
+            const JPH::Vec3 r(point - body.GetCenterOfMassPosition());
+            const JPH::Vec3 rn = r.Cross(manifold.mWorldSpaceNormal);
+            return body.GetMotionProperties()->GetInverseMass() + rn.Dot(body.GetInverseInertia() * rn);
+        };
+        const float inverse_a = inverse(a);
+        const float inverse_b = inverse(b);
+        if (!(inverse_a + inverse_b > 0.0f)) return;
         // Closing speed along the normal (a's point toward b's).
         const float closing = (a.GetPointVelocity(point) - b.GetPointVelocity(point)).Dot(manifold.mWorldSpaceNormal);
         const float impulse = closing / (inverse_a + inverse_b);

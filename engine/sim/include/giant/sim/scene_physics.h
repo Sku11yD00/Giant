@@ -122,7 +122,10 @@ public:
     // True while entities are still waiting to be looked at (bodies to make).
     bool entities_waiting() const;
     // Lets every body go (the physics world is left empty of the scene's).
-    void clear();
+    // `others`: bodies in the world not ours that may go too (a forest's);
+    // when ours and those are all it holds, the world is cleared whole (off
+    // the frame) and true is returned: the others' ids are stale.
+    bool clear(usize others = 0);
 
 private:
     struct Broken; // a breakable kit placement with pieces loose

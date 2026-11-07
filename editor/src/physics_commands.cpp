@@ -34,6 +34,7 @@ Json physics_json(const EditorState& state) {
     const PhysicsState& p = *state.physics;
     const sim::PhysicsStats w = p.world().stats();
     const sim::ScenePhysicsStats s = p.bodies().stats();
+    const sim::ForestStats f = p.forest().stats();
     return {{"simulating", p.simulating()},
             {"bodies", w.bodies},
             {"active", w.active},
@@ -49,7 +50,13 @@ Json physics_json(const EditorState& state) {
             {"ground_waiting", s.tiles_waiting},
             {"moved", s.posed},
             {"broken_kits", s.broken_kits},
-            {"loose_pieces", s.loose_pieces}};
+            {"loose_pieces", s.loose_pieces},
+            {"trees", {{"trunks", f.trunks},
+                       {"waiting", f.waiting},
+                       {"falling", f.falling},
+                       {"fallen", f.fallen},
+                       {"refused", f.refused},
+                       {"shrugged", f.shrugged}}}};
 }
 
 CommandResult no_physics() { return CommandResult::failure("physics is not available"); }
@@ -146,8 +153,8 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"raycast",
          "Casts a ray through what collides (entities with a body, kits, the ground, the player) and returns "
-         "the first hit: the entity (0 for the ground; `player` true for the player), the point, the surface "
-         "normal and the distance; hit false "
+         "the first hit: the entity (0 for the ground; `player` true for the player; `tree` {cell, point, fallen} "
+         "for a scatter tree's trunk), the point, the surface normal and the distance; hit false "
          "when nothing is within max_distance. Finishes any bodies still waiting first (in a big world "
          "just opened, that can take a moment).",
          Json{{"type", "object"},
@@ -182,6 +189,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              if (state.play != nullptr && state.play->playing() && hit->body == state.play->player_body()) {
                  out["player"] = true;
              }
+             if (const auto tree = state.physics->forest().tree_of(hit->body)) {
+                 out["tree"] = {{"cell", {tree->cell.x, tree->cell.z}}, {"point", tree->point}, {"fallen", tree->fallen}};
+             }
              return CommandResult::success(out);
          }});
 
@@ -190,7 +200,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "While simulating, a blow at `point`: the pieces of breakable kits (set_kit_breakable) within "
          "`radius` metres take `impulse` (N s, about mass times speed; less toward the edge), and those it "
          "is enough for come loose, pushed away, with whatever they held up. A footstep, an explosion, a "
-         "wrecking ball. Stopping the simulation puts every piece back. Returns `loosened` and get_physics.",
+         "wrecking ball. Scatter trees (items with `tree`) whose trunk is within reach and takes at least its "
+         "strength snap and topple away from the point. Stopping the simulation puts every piece back and "
+         "stands every tree up. Returns `loosened` (pieces), `felled` (trees) and get_physics.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"point", "radius", "impulse"}},
@@ -204,11 +216,12 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              if (!state.physics->simulating()) return CommandResult::failure("not simulating (simulate on first)");
              const Json& p = args["point"];
              state.physics->flush(state.scene);
-             const usize loosened =
+             const PhysicsState::Impact hit =
                  state.physics->impact({p[0].get<double>(), p[1].get<double>(), p[2].get<double>()},
                                        args["radius"].get<float>(), args["impulse"].get<float>());
              Json out = physics_json(state);
-             out["loosened"] = loosened;
+             out["loosened"] = hit.loosened;
+             out["felled"] = hit.felled;
              return CommandResult::success(out);
          }});
 

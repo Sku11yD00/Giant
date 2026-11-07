@@ -115,8 +115,9 @@ struct RayHit {
 
 // Something struck something (a contact begun this step, hard enough):
 // what breaks buildings. `normal` points from a to b; `impulse` (N s) is
-// about how much the blow would take to stop (the closing speed times the
-// pair's reduced mass).
+// about how much the blow would take to stop (the closing speed at the
+// point times the pair's effective mass there: masses, and inertia as they
+// turn, so a falling log's tip strikes softer than a block as heavy).
 struct ContactHit {
     BodyId a = 0;
     BodyId b = 0;

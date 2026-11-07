@@ -101,8 +101,12 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
 
 // A cell's scatter placements: each item's mesh and material looked up
 // once a cell (a forest cell is thousands of the same few things).
+// Fallen trees (`fallen`, in point order) are drawn where they lie, after
+// all the rest (so moving ones are made again in place: rebuild_fallen);
+// `fallen_only` draws them alone.
 void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, const render::Renderer& renderer,
-                  const MeshLibrary& meshes, SceneFrame& out, SceneFrame::Cell& cell) {
+                  const MeshLibrary& meshes, SceneFrame& out, SceneFrame::Cell& cell,
+                  const std::vector<sim::FallenTree>* fallen, bool fallen_only = false) {
     struct Piece {
         const world::KitPiece* piece = nullptr;
         render::MeshId mesh = render::k_no_mesh; // k_no_mesh: a decal (emitted as one), or nothing
@@ -132,8 +136,8 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
     // At most what the placer counted (a kit grown since draws its old
     // points' share until the cell is placed again).
     const usize most = cell.instances.size() + cell.decals.size() + placed.instances;
-    for (const world::ScatterPoint& p : placed.points) {
-        if (cell.instances.size() + cell.decals.size() >= most) break;
+    // Every point but the fallen, then the fallen.
+    const auto draw = [&](const world::ScatterPoint& p, const world::Transform& at) {
         const world::ScatterItem& item = layers[p.layer].items[p.item];
         Look& look = looks[first[p.layer] + p.item];
         if (!look.known) {
@@ -169,7 +173,7 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
         }
         if (look.kit != nullptr) {
             for (const Piece& lp : look.pieces) {
-                const world::Transform t = place(p.transform, lp.piece->transform);
+                const world::Transform t = place(at, lp.piece->transform);
                 if (lp.mesh != render::k_no_mesh) {
                     put(t, lp.mesh, lp.material);
                 } else if (lp.piece->shape == world::Shape::decal) {
@@ -177,9 +181,23 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
                          out, cell);
                 }
             }
-            continue;
+            return;
         }
-        if (look.mesh != render::k_no_mesh) put(p.transform, look.mesh, look.material);
+        if (look.mesh != render::k_no_mesh) put(at, look.mesh, look.material);
+    };
+    usize next_fallen = 0;
+    for (u32 index = 0; index < placed.points.size() && !fallen_only; ++index) {
+        if (cell.instances.size() + cell.decals.size() >= most) break;
+        while (fallen != nullptr && next_fallen < fallen->size() && (*fallen)[next_fallen].point < index) ++next_fallen;
+        if (fallen != nullptr && next_fallen < fallen->size() && (*fallen)[next_fallen].point == index) continue;
+        draw(placed.points[index], placed.points[index].transform);
+    }
+    cell.fallen_first = static_cast<u32>(cell.instances.size());
+    cell.fallen_decals = static_cast<u32>(cell.decals.size());
+    if (fallen == nullptr) return;
+    for (const sim::FallenTree& f : *fallen) {
+        if (cell.instances.size() + cell.decals.size() >= most) break;
+        if (f.point < placed.points.size()) draw(placed.points[f.point], f.at);
     }
 }
 
@@ -271,14 +289,25 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
         }
     }
     cell.scattered = false;
+    cell.fallen_points.clear();
     if (scatter != nullptr) {
         if (const ScatterPlacer::Cell* placed = scatter->find(coord)) {
             cell.scattered = true;
-            emit_scatter(scene, *placed, renderer, meshes, out, cell);
+            const std::vector<sim::FallenTree>* fallen = nullptr;
+            if (out.fallen != nullptr) {
+                const auto f = out.fallen->find(coord);
+                if (f != out.fallen->end() && f->second.serial == placed->serial) fallen = &f->second.trees;
+            }
+            emit_scatter(scene, *placed, renderer, meshes, out, cell, fallen);
+            cell.fallen_points.clear();
+            if (fallen != nullptr) {
+                for (const sim::FallenTree& f : *fallen) cell.fallen_points.push_back(f.point);
+            }
         }
     }
     cell.version = new_version();
     cell.dirty = false;
+    cell.fallen_dirty = false;
     ++out.cells_rebuilt;
     for (const u32 m : before) {
         if (out.users[m] == 0) {
@@ -312,8 +341,54 @@ bool rebuild_ground(const world::Scene& scene, const TerrainMeshes* terrain, con
     }
     cell.ground = fresh.ground;
     cell.prev_version = cell.version;
+    cell.changed_first = 0;
+    cell.changed_count = cell.ground_count;
     cell.version = new_version();
     cell.ground_dirty = false;
+    ++out.cells_rebuilt;
+    return true;
+}
+
+// Makes a cell's fallen trees' instances again in place when the same
+// trees are fallen and they draw as many instances as before (the rest of
+// the cell kept, its place too); false when it needs a full rebuild.
+// `compact`: a material lost its last user.
+bool rebuild_fallen(const world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
+                    const ScatterPlacer* scatter, world::CellCoord coord, SceneFrame& out, SceneFrame::Cell& cell,
+                    bool& compact) {
+    if (cell.version == 0 || !cell.placed || !cell.scattered || scatter == nullptr || out.fallen == nullptr ||
+        cell.fallen_first > cell.instances.size() || cell.fallen_decals != cell.decals.size()) {
+        return false;
+    }
+    const ScatterPlacer::Cell* placed = scatter->find(coord);
+    const auto f = out.fallen->find(coord);
+    if (placed == nullptr || f == out.fallen->end() || f->second.serial != placed->serial ||
+        f->second.trees.size() != cell.fallen_points.size()) {
+        return false;
+    }
+    for (usize k = 0; k < cell.fallen_points.size(); ++k) {
+        if (f->second.trees[k].point != cell.fallen_points[k]) return false;
+    }
+    SceneFrame::Cell fresh;
+    emit_scatter(scene, *placed, renderer, meshes, out, fresh, &f->second.trees, true); // counts its materials' users
+    const usize count = cell.instances.size() - cell.fallen_first;
+    if (fresh.instances.size() != count || !fresh.decals.empty()) {
+        for (const render::Instance& i : fresh.instances) {
+            if (i.material < out.users.size()) --out.users[i.material]; // not used after all
+        }
+        return false;
+    }
+    for (usize k = 0; k < count; ++k) {
+        render::Instance& was = cell.instances[cell.fallen_first + k];
+        if (was.material < out.users.size() && --out.users[was.material] == 0) compact = true;
+        was = fresh.instances[k];
+        out.instances[cell.first + cell.fallen_first + k] = fresh.instances[k];
+    }
+    cell.prev_version = cell.version;
+    cell.version = new_version();
+    cell.changed_first = cell.fallen_first;
+    cell.changed_count = static_cast<u32>(count);
+    cell.fallen_dirty = false;
     ++out.cells_rebuilt;
     return true;
 }
@@ -498,10 +573,12 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  SceneFrame& out, TerrainMeshes* terrain, FarGround* far, ScatterPlacer* scatter,
                  const std::unordered_map<world::EntityId, world::Transform>* poses,
                  std::span<const world::EntityId> redraw,
-                 const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses) {
+                 const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses,
+                 const sim::FallenTrees* fallen, std::span<const world::CellCoord> redraw_cells) {
     out.cells_rebuilt = 0;
     out.poses = poses;
     out.piece_poses = piece_poses;
+    out.fallen = fallen;
     world::SceneChanges changes = scene.take_changes();
     if (!out.for_followers.all) {
         if (changes.all || out.for_followers.ids.size() + changes.ids.size() > (usize{1} << 20)) {
@@ -557,6 +634,11 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             const auto was = out.where.find(id);
             if (was != out.where.end()) out.grid[was->second].dirty = true;
         }
+        // Fallen trees moved, came or went.
+        for (const world::CellCoord c : redraw_cells) {
+            const auto it = out.grid.find(c);
+            if (it != out.grid.end() && it->second.scattered) it->second.fallen_dirty = true;
+        }
         // Scatter placements changed.
         if (scatter != nullptr) {
             for (const world::CellCoord c : scatter->take_changed()) out.grid[c].dirty = true;
@@ -599,12 +681,27 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     bool compact = false;
     std::vector<world::CellCoord>& rebuilt = out.rebuilt;
     rebuilt.clear();
+    u32 fallen_rebuilds = 0;
     for (auto it = out.grid.begin(); it != out.grid.end();) {
         SceneFrame::Cell& cell = it->second;
+        bool in_place = false; // one change in place a frame (the renderer is told of one range)
         if (!cell.dirty && cell.ground_dirty) {
             // Only the ground: in place if it can be, else the whole cell.
             bool lost = false;
             cell.dirty = !rebuild_ground(scene, terrain, far, it->first, out, cell, lost);
+            compact = compact || lost;
+            in_place = !cell.dirty;
+        }
+        if (!cell.dirty && cell.fallen_dirty) {
+            // Only fallen trees moved: in place if it can be, else the whole
+            // cell (so many a frame; the rest stay waiting).
+            bool lost = false;
+            if (in_place || !rebuild_fallen(scene, renderer, meshes, scatter, it->first, out, cell, lost)) {
+                if (fallen_rebuilds < out.fallen_rebuilds_per_frame) {
+                    cell.dirty = true;
+                    ++fallen_rebuilds;
+                }
+            }
             compact = compact || lost;
         }
         if (cell.dirty) {
@@ -654,6 +751,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     }
     out.poses = nullptr; // the cells are built
     out.piece_poses = nullptr;
+    out.fallen = nullptr;
     if (!layout && out.cells_rebuilt == 0) {
         return; // as last frame
     }
@@ -693,8 +791,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         if (cell.prev_version != 0) {
             // Changed from prev_version in its ground alone.
             range.prev_version = cell.prev_version;
-            range.changed_first = 0;
-            range.changed_count = cell.ground_count;
+            range.changed_first = cell.changed_first;
+            range.changed_count = cell.changed_count;
         }
         out.cells.push_back(range);
     }

@@ -363,8 +363,9 @@ int run(const Options& options) {
         scatter.update(state.scene, terrain_meshes.last_changes());
         mark(editor::FramePhase::scatter);
         const std::vector<world::EntityId> redraw = physics.take_redraw();
+        const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
-                            &physics.poses(), redraw, &physics.piece_poses());
+                            &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw);
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
@@ -499,6 +500,7 @@ int run(const Options& options) {
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
         mark(editor::FramePhase::weather);
+        physics.feed_forest(state.scene, scatter, state.camera.position);
         physics.update(state.scene, scene_frame.take_for_followers(), delta);
         if (playing) play.after_step(state.camera, delta); // the camera at its eyes
         mark(editor::FramePhase::physics);
