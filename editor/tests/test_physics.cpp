@@ -3,6 +3,7 @@
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
 #include "../src/physics_state.h"
+#include "../src/play_state.h"
 
 #include "giant_test.h"
 
@@ -18,10 +19,12 @@ struct Fixture {
     ai::CommandRegistry commands;
     MeshLibrary meshes{nullptr};
     PhysicsState physics;
+    PlayState play{physics};
     EditorState state;
     Fixture() {
         state.meshes = &meshes;
         state.physics = &physics;
+        state.play = &play;
         register_scene_commands(commands, state);
         register_physics_commands(commands, state);
     }
@@ -123,4 +126,101 @@ GIANT_TEST("physics commands: raycasts hit entities, miss past max_distance") {
     r = f.run("raycast", {{"origin", {0, 100, 0}}, {"direction", {0, -1, 0}}, {"max_distance", 95}});
     GIANT_CHECK(r.ok && r.value["hit"] == false);
     GIANT_CHECK(f.run("get_physics").value["not_colliding"] == 1);
+}
+
+namespace {
+DVec3 triple(const Json& j) { return {j[0].get<double>(), j[1].get<double>(), j[2].get<double>()}; }
+} // namespace
+
+GIANT_TEST("play commands: the player stands under the camera, walks where it looks, stops and gives the camera back") {
+    Fixture f;
+    const world::EntityId plane = f.create({{"shape", "plane"}, {"scale", {200, 1, 200}}});
+    // A crate to push, a wall, a step.
+    const world::EntityId crate =
+        f.create({{"shape", "cube"}, {"position", {0, 0.5, -20}}, {"body", "dynamic"}, {"mass", 20}});
+    const world::EntityId step = f.create({{"shape", "cube"}, {"position", {10, 0.15, 0}}, {"scale", {4, 0.3, 4}}});
+    GIANT_CHECK(!f.run("set_player_input", {{"forward", 1}}).ok); // not playing
+    GIANT_CHECK(!f.run("step_player", {{"seconds", 1}}).ok);
+    f.state.camera.position = {0.0, 10.0, 0.0};
+    f.state.camera.yaw_degrees = 0.0f; // looking down -z, at the crate
+    f.state.camera.pitch_degrees = -30.0f;
+    const EditorCamera before = f.state.camera;
+    ai::CommandResult r = f.run("play", {{"on", true}});
+    GIANT_CHECK(r.ok && r.value["playing"] == true && f.physics.simulating());
+    // On the plane under the camera, eyes 1.65 m up.
+    GIANT_CHECK(std::fabs(triple(r.value["position"]).y) < 0.05 && std::fabs(f.state.camera.position.y - 1.65) < 0.06);
+    r = f.run("step_player", {{"seconds", 0.5}});
+    GIANT_CHECK(r.ok && r.value["on_ground"] == true && r.value["standing_on"] == plane);
+    // Rays hit the player.
+    r = f.run("raycast", {{"origin", {0, 5, 0}}, {"direction", {0, -1, 0}}});
+    GIANT_CHECK(r.ok && r.value["player"] == true);
+    // Walking forward 4 m/s for 3 s: 12 m down -z.
+    GIANT_CHECK(f.run("set_player_input", {{"forward", 1}}).ok);
+    r = f.run("step_player", {{"seconds", 3}});
+    DVec3 p = triple(r.value["position"]);
+    GIANT_CHECK(r.ok && std::fabs(p.z + 12.0) < 0.3 && std::fabs(p.x) < 0.05);
+    // On into the crate: pushed along.
+    r = f.run("step_player", {{"seconds", 4}});
+    GIANT_CHECK(f.at(crate).z < -21.0);
+    // Again from beside the step, looking down +x (yaw -90): up it.
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+    f.state.camera.position = {6.0, 3.0, 0.0};
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    GIANT_CHECK(f.run("set_player_input", {{"yaw", -90}, {"forward", 1}}).ok);
+    r = f.run("step_player", {{"seconds", 1.25}});
+    p = triple(r.value["position"]);
+    GIANT_CHECK(p.x > 9.0 && p.x < 11.5 && std::fabs(p.y - 0.3) < 0.03 && r.value["standing_on"] == step);
+    // A jump: up about 1.3 m.
+    GIANT_CHECK(f.run("set_player_input", {{"forward", 0}, {"jump", true}}).ok);
+    double top = 0.0;
+    for (int i = 0; i < 40; ++i) top = std::max(top, triple(f.run("step_player", {{"seconds", 1.0 / 60.0}}).value["position"]).y);
+    GIANT_CHECK(top > 1.4 && top < 1.75);
+    // Stopping: the camera back, simulating as it was (off), the scene untouched.
+    r = f.run("play", {{"on", false}});
+    GIANT_CHECK(r.ok && r.value["playing"] == false && !f.physics.simulating());
+    GIANT_CHECK(f.state.camera.position == DVec3(6.0, 3.0, 0.0) && f.state.camera.pitch_degrees == before.pitch_degrees);
+    GIANT_CHECK(f.at(crate) == DVec3(0.0, 0.5, -20.0) && f.physics.world().characters() == 0);
+    GIANT_CHECK(f.run("get_player").value["playing"] == false);
+}
+
+GIANT_TEST("play commands: Esc stops, a new scene stops, simulate off stops; simulating kept as it was") {
+    Fixture f;
+    f.create({{"shape", "plane"}, {"scale", {100, 1, 100}}});
+    f.state.camera.position = {0.0, 3.0, 0.0};
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok && f.play.playing());
+    GIANT_CHECK(!f.run("set_camera", {{"position", {0, 50, 0}}}).ok); // the camera is the player's eyes
+    // Esc, then the next frame's step stops it; simulating stays on (it was on).
+    platform::InputEvent esc;
+    esc.type = platform::InputEvent::Type::key;
+    esc.key = platform::Key::escape;
+    esc.down = true;
+    f.play.handle_input({esc}, false);
+    GIANT_CHECK(!f.play.before_step(f.state.scene, f.state.camera, f.state.scene_generation, 0.0));
+    GIANT_CHECK(!f.play.playing() && f.physics.simulating() && f.state.camera.position == DVec3(0.0, 3.0, 0.0));
+    // The keys walk it; a key let go stops it.
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    platform::InputEvent w;
+    w.type = platform::InputEvent::Type::key;
+    w.key = platform::Key::w;
+    w.down = true;
+    f.play.handle_input({w}, false);
+    GIANT_CHECK(f.play.input().forward == 1.0f);
+    w.down = false;
+    f.play.handle_input({w}, true); // a release counts even over a panel
+    GIANT_CHECK(f.play.input().forward == 0.0f);
+    // Mouse look turns it.
+    platform::InputEvent move;
+    move.type = platform::InputEvent::Type::mouse_move;
+    move.dx = 100.0f;
+    const float yaw = f.play.yaw();
+    f.play.handle_input({move}, false);
+    GIANT_CHECK(f.play.yaw() < yaw - 10.0f);
+    // A new scene: stops on the next step.
+    GIANT_CHECK(f.run("new_scene").ok);
+    GIANT_CHECK(f.run("step_player", {{"seconds", 0.1}}).ok && !f.play.playing());
+    // simulate off while playing stops play.
+    f.create({{"shape", "plane"}, {"scale", {100, 1, 100}}});
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    GIANT_CHECK(f.run("simulate", {{"on", false}}).ok && !f.play.playing() && !f.physics.simulating());
 }

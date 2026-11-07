@@ -48,6 +48,7 @@ class FarGround;
 class ScatterPlacer;
 class WeatherState;
 class PhysicsState;
+class PlayState;
 class WorldStreaming;
 
 // The last few seconds of frame times, for get_engine_info (performance
@@ -136,6 +137,9 @@ struct EditorState {
     // The scene's bodies and simulating them (a play button); set by main
     // (and tests). Null: physics is not available.
     PhysicsState* physics = nullptr;
+    // Walking the scene as the player (play mode, on the physics); set by
+    // main (and tests). Null: play is not available.
+    PlayState* play = nullptr;
     // LOD error and debug view: view state, not undoable.
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.

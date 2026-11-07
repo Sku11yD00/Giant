@@ -95,6 +95,11 @@ public:
     world::EntityId entity_of(BodyId body) const;
     BodyId body_of(world::EntityId entity) const;
     ScenePhysicsStats stats() const;
+    // True while ground near `at` (its tile and those round it) is still on
+    // its way: what walks or falls there would go through.
+    bool ground_waiting(const world::Terrain& terrain, const DVec3& at) const;
+    // True while entities are still waiting to be looked at (bodies to make).
+    bool entities_waiting() const;
     // Lets every body go (the physics world is left empty of the scene's).
     void clear();
 
@@ -124,7 +129,6 @@ private:
     void sync_entities(const world::Scene& scene, u32 budget);
     void sync_tiles(world::Terrain& terrain, u32 budget);
     void finish_tiles(bool wait);
-    bool ground_waiting(const world::Terrain& terrain, const DVec3& at) const;
     BodyDesc entity_body(const world::Scene& scene, const world::Entity& e) const;
     void drop_pose(world::EntityId id);
 

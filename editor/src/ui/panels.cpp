@@ -2,6 +2,7 @@
 
 #include "../mesh_library.h"
 #include "../physics_state.h"
+#include "../play_state.h"
 #include "../weather_state.h"
 
 #include "giant/core/log.h"
@@ -144,6 +145,13 @@ void EditorPanels::draw_menu_bar() {
         bool on = m_state.physics->simulating();
         if (ImGui::MenuItem(on ? "Stop simulating" : "Simulate", nullptr, on)) {
             run("simulate", {{"on", !on}});
+        }
+    }
+    if (m_state.play != nullptr) {
+        // Walk the scene as the player (Esc stops).
+        const bool playing = m_state.play->playing();
+        if (ImGui::MenuItem(playing ? "Stop playing (Esc)" : "Play", nullptr, playing)) {
+            run("play", {{"on", !playing}});
         }
     }
     if (ImGui::BeginMenu("View")) {

@@ -716,6 +716,40 @@ def physics_gate(tool, call, check):
     tool("new_scene")
 
 
+def player_gate(tool, call, check):
+    """N4 part 2: play mode. The player stands on what is under the camera, walks in real time
+    where it is told (frames move it), up a step, and stopping gives the camera back."""
+    tool("new_scene")
+    tool("create_entity", {"name": "Ground", "shape": "plane", "scale": [200, 1, 200]})
+    step = tool("create_entity", {"name": "Step", "shape": "cube", "position": [0, 0.15, -8],
+                                  "scale": [4, 0.3, 4]})["id"]
+    tool("set_camera", {"position": [0, 6, 0], "look_at": [0, 0, -10]})
+    camera = tool("get_camera")
+    player = tool("play", {"on": True})
+    check(player["playing"] and abs(player["position"][1]) < 0.05, f"the player stands on the ground, got {player}")
+    tool("set_player_input", {"forward": 1, "yaw": 0})  # down -z, onto the step
+    started = time.monotonic()
+    player = None
+    while time.monotonic() - started < 120:
+        call("ping")
+        player = tool("get_player")
+        if player["position"][2] < -7 and player["on_ground"]:
+            break
+    tool("set_player_input", {"forward": 0})  # stays on the step, the eyes catch up
+    for _ in range(30):
+        call("ping")
+    player = tool("get_player")
+    check(player["standing_on"] == step and abs(player["position"][1] - 0.3) < 0.03,
+          f"the player walks up onto the step in real time, got {player}")
+    check(abs(tool("get_camera")["position"][1] - (0.3 + 1.65)) < 0.2, "the camera is at the player's eyes")
+    stopped = tool("play", {"on": False})
+    check(not stopped["playing"] and not tool("get_physics")["simulating"], f"stopped, got {stopped}")
+    back = tool("get_camera")
+    check(all(abs(a - b) < 1e-6 for a, b in zip(back["position"], camera["position"])),
+          f"the camera goes back, got {back}")
+    tool("new_scene")
+
+
 def gi_gate(tool, call, check):
     """N2 part 5: global illumination. The voxel world is lit a budgeted number of bricks a
     frame (new ones first, then all in turn), in the lit views and the voxel view."""
@@ -914,7 +948,7 @@ def main() -> int:
         # renderer's own d3d12 tests check them), on in gi_gate.
         tool("set_render_settings", {"gi": False, "screen_space_reflections": False})
         for gate in (build_scene, world_gate, lod_gate, kit_gate, voxel_gate, far_field_gate,
-                     terrain_gate, shadow_gate, weather_gate, physics_gate, gi_gate, n1_gate):
+                     terrain_gate, shadow_gate, weather_gate, physics_gate, player_gate, gi_gate, n1_gate):
             # Each gate's time, so a run near the timeout shows which one grew.
             started = time.monotonic()
             frames = tool("get_engine_info")["frames_completed"]

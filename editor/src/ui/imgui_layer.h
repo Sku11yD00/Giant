@@ -39,6 +39,9 @@ public:
     // True when the pointer is over a panel (or a panel is being dragged),
     // so clicks belong to the UI rather than the 3D viewport.
     bool wants_mouse() const;
+    // Captured (playing): the mouse and keys belong to the game. The panels
+    // get no mouse and only key releases; their focus is dropped.
+    void set_captured(bool captured);
 
     struct ConstructKey {
     private:
@@ -51,6 +54,8 @@ private:
     platform::Window& m_window;
     rhi::Device& m_device;
     ImGuiContext* m_context = nullptr;
+    bool m_captured = false;
+    bool m_drop_focus = false;
     rhi::TextureHandle m_font_texture;
 
     // Converted draw data; m_lists views into the other three.

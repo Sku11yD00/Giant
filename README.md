@@ -222,6 +222,12 @@ Milestone **N4, first playable slice** (in progress; gate: a growing giantess wr
   were put); `raycast` finds what a ray meets. Bodies are built a share
   each frame, the ground's in the background, so big worlds open without
   a stall.
+- Part 2: play mode. Play (the menu bar, or `play` over MCP) puts a
+  player on the ground under the camera and looks through its eyes: the
+  mouse looks, W A S D walk, Shift runs, Space jumps, Esc stops. It walks
+  up steps, stops at walls, slides off slopes too steep, rides what it
+  stands on and pushes crates; stopping gives the camera back. Over MCP,
+  `set_player_input`, `step_player` and `get_player` drive and read it.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

@@ -38,6 +38,9 @@ public:
     // handed out.
     void flush(world::Scene& scene);
     std::function<world::SceneChanges()> take_frame_changes;
+    // As flush, within the budgets of a frame (starting play): what the
+    // scene changed is queued and a share made; the rest follows.
+    void catch_up(world::Scene& scene);
     // `steps` fixed steps at once (step_physics); the poses follow.
     u32 run_steps(u32 steps);
 
