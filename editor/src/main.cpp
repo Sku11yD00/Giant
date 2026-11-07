@@ -340,7 +340,7 @@ int run(const Options& options) {
     editor::TerrainBrushTool terrain_brush;
     // Records the scene and the panels into `target` (an sRGB image).
     // Where the main thread's time goes each frame (get_engine_info's
-    // recent_phases): mark(p) gives p the time since the last mark.
+    // phases_since): mark(p) gives p the time since the last mark.
     using clock = std::chrono::steady_clock;
     // A screenshot (taken by a command) is the command's time.
     editor::FramePhaseMs phase_ms{};
@@ -431,8 +431,9 @@ int run(const Options& options) {
     constexpr u64 k_max_skipped_frames = 1000;
     u64 skipped_in_a_row = 0;
 
-    phase_mark = clock::now(); // setup is no frame's
-    double cpu_mark = thread_cpu_ms();
+    double cpu_mark = thread_cpu_ms(); // (on Windows its first call calibrates: 5 ms)
+    phase_mark = clock::now();         // setup is no frame's
+    last_frame = phase_mark;
     while (window->poll_events() && !state.quit_requested) {
         mark(editor::FramePhase::events);
         if (mcp_reader != nullptr) {
@@ -519,6 +520,7 @@ int run(const Options& options) {
             // the current size, and wait a little so a lasting failure idles.
             window->wait_events(16);
             swap_chain->resize(window->pixel_width(), window->pixel_height());
+            mark(editor::FramePhase::tail);
             continue;
         }
         record_frame(*cmd, swap_chain->current_texture());

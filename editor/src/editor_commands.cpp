@@ -7,7 +7,6 @@
 #include "giant/core/text.h"
 
 #include <algorithm>
-#include <cmath>
 #include <filesystem>
 #include <fstream>
 
@@ -38,8 +37,6 @@ LogLevel parse_level(const std::string& name) {
 }
 
 } // namespace
-
-
 
 std::vector<rhi::GpuTiming> gpu_passes(const rhi::Device& device) {
     std::vector<rhi::GpuTiming> passes;
