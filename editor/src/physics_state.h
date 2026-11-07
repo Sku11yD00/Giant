@@ -9,10 +9,13 @@
 // Edits while simulating follow (an entity moved is put there, at rest;
 // one added joins in). The scatter trees near the camera stand as trunks
 // (sim::Forest, fed from the scatter placer); struck while simulating they
-// topple, and stopping stands them up again.
+// topple, and stopping stands them up again. What comes down throws up
+// dust (sim::Dust), drawn by the renderer; far from the camera pieces come
+// down as rubble and trees are laid down, with no bodies.
 #pragma once
 
 #include "giant/core/jobs.h"
+#include "giant/sim/dust.h"
 #include "giant/sim/forest.h"
 #include "giant/sim/physics.h"
 #include "giant/sim/scene_physics.h"
@@ -61,12 +64,18 @@ public:
         return m_bodies.piece_poses();
     }
     // A blow (impact command): breakable kits' pieces in reach come loose,
-    // and trees in reach topple.
+    // and trees in reach topple (the scatter cells in the blow given to the
+    // forest first, at most points_per_impact points: far ones are laid down).
     struct Impact {
         usize loosened = 0; // kit pieces
         usize felled = 0;   // trees
     };
     Impact impact(const DVec3& point, float radius, float impulse);
+    u32 points_per_impact = 1u << 16;
+    // The dust in the air (drawn by the renderer), moved by `wind` (m/s:
+    // the weather's, set each frame) while simulating; stopping clears it.
+    const sim::Dust& dust() const { return m_dust; }
+    Vec3 wind{};
     // Fallen scatter trees (drawn where they lie), and the cells to draw again (taken by the frame).
     const sim::FallenTrees& fallen_trees() const { return m_forest.fallen(); }
     std::vector<world::CellCoord> take_tree_redraw() { return m_forest.take_redraw(); }
@@ -79,13 +88,17 @@ public:
 private:
     // A new scene: the forest's trunks go before the scene's bodies clear the world.
     void notice_scene(const world::Scene& scene);
+    // The trees of a cell's placement, in point order.
+    static std::vector<sim::TreeSpot> trees_of(const ScatterPlacer::Cell& placed);
 
     JobSystem m_jobs; // first: outlives the physics world
+    sim::Dust m_dust; // before what emits into it
     sim::PhysicsWorld m_physics;
     sim::ScenePhysics m_bodies;
     sim::Forest m_forest; // after the world: its trunks go first
     u64 m_scene = 0;
     DVec3 m_camera{}; // as last fed
+    const ScatterPlacer* m_scatter = nullptr; // as last fed (it outlives this)
     bool m_on = false;
 };
 

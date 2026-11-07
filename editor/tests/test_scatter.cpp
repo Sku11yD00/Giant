@@ -520,6 +520,54 @@ GIANT_TEST("scatter trees: the commands report them, cells come a share a frame,
     GIANT_CHECK(physics.fallen_trees().empty());
 }
 
+GIANT_TEST("scatter trees: a blow far from the camera lays its trees down, with dust; stopping clears it") {
+    PhysicsState physics;
+    EditorState state;
+    state.physics = &physics;
+    ai::CommandRegistry commands;
+    register_scene_commands(commands, state);
+    register_physics_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args = Json::object()) { return commands.execute(name, args, {}); };
+    world::Scene& scene = state.scene;
+    flat(scene.terrain, 0, 0, 3, 0, 0.0f);
+    world::ScatterLayer l = stones(16.0f);
+    l.name = "pines";
+    l.jitter = 0.0f;
+    l.items[0].shape = world::Shape::cube;
+    l.items[0].tree = world::ScatterTree{};
+    scene.scatter.push_back(l);
+    ScatterPlacer p;
+    place(p, scene);
+    // The camera 3 km off: no cell's trees are in reach, none given.
+    physics.feed_forest(scene, p, {3000.0, 10.0, 32.0});
+    GIANT_CHECK(physics.forest().cells().empty());
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    ai::CommandResult r = run("impact", {{"point", {96.0, 1.0, 32.0}}, {"radius", 30.0}, {"impulse", 1e6}});
+    GIANT_CHECK(r.ok && r.value["felled"].get<u64>() > 4);
+    GIANT_CHECK(r.value["trees"]["laid"] == r.value["felled"] && r.value["trees"]["trunks"] == 0);
+    GIANT_CHECK(r.value["dust"]["puffs"].get<u64>() > 0);
+    // Laid with their tops on the ground (flat here), about their feet.
+    usize lying = 0;
+    for (const auto& [c, f] : physics.fallen_trees()) {
+        for (const sim::FallenTree& t : f.trees) {
+            const Vec3 up = rotate(t.at.rotation, Vec3{0.0f, 1.0f, 0.0f});
+            GIANT_CHECK(std::fabs(up.y) < 0.2f);
+            ++lying;
+        }
+    }
+    GIANT_CHECK(lying == r.value["felled"].get<usize>());
+    // Dust drifts and rises while simulating; the cells stay while their trees lie.
+    const double y = physics.dust().puffs().front().position.y;
+    r = run("step_physics", {{"seconds", 1}});
+    GIANT_CHECK(r.ok && physics.dust().puffs().front().position.y > y);
+    physics.feed_forest(scene, p, {3000.0, 10.0, 32.0});
+    physics.update(scene, {}, 0.0);
+    GIANT_CHECK(!physics.forest().cells().empty());
+    GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+    r = run("get_physics");
+    GIANT_CHECK(r.value["dust"]["puffs"] == 0 && r.value["trees"]["fallen"] == 0 && r.value["trees"]["laid"] == 0);
+}
+
 GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable") {
     Fixture f;
     GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 1}}).ok);

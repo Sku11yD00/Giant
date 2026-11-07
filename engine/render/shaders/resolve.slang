@@ -79,6 +79,9 @@ struct Extras {
     uint sky_params;  // the sky's SkyParams (sky_on 0: the flat background)
     uint sky_params_offset;
     uint sky_on;
+    uint dust_puffs;  // dust_count puffs of 32 bytes at dust_offset (gpu::GpuDustPuff)
+    uint dust_offset;
+    uint dust_count;
 };
 
 Extras load_extras() {
@@ -122,6 +125,10 @@ Extras load_extras() {
     o.sky_params = k.x;
     o.sky_params_offset = k.y;
     o.sky_on = k.z;
+    o.dust_puffs = k.w;
+    const uint4 m = b.Load4(at + 144);
+    o.dust_offset = m.x;
+    o.dust_count = m.y;
     return o;
 }
 
@@ -395,6 +402,59 @@ float3 under_sky(Sky s, float3 color, float3 dir, float distance, uint2 pixel, o
     return apply_falling(s, color, dir, distance);
 }
 
+// Dust in the air: soft balls (gpu::GpuDustPuff, centres camera-relative)
+// whose density falls as (1 - r^2 / R^2)^2 from the centre, taken along the
+// ray exactly from the camera to what the pixel shows `scene_t` metres
+// away, over `color`, lit by the sun (scattered about evenly, a little
+// forward, and again inside the cloud) and by the sky and ground round it.
+// `through` (how much of the scene's own light comes through) thins alike.
+float dust_integral(float s, float a, float k) {
+    // The antiderivative of (a - s^2 k)^2.
+    const float s2k = s * s * k;
+    return s * (a * a - s2k * (2.0 * a / 3.0 - s2k / 5.0));
+}
+
+float3 apply_dust(Extras e, Frame f, float3 color, float3 dir, float scene_t, inout float through) {
+    if (e.dust_count == 0u) {
+        return color;
+    }
+    ByteAddressBuffer puffs = read_buffer(e.dust_puffs);
+    float depth = 0.0;
+    float3 tint = float3(0.0, 0.0, 0.0);
+    const uint count = min(e.dust_count, 32u);
+    for (uint i = 0u; i < count; ++i) {
+        const uint at = e.dust_offset + i * 32u;
+        const float4 cr = asfloat(puffs.Load4(at));
+        const float4 cd = asfloat(puffs.Load4(at + 16u));
+        const float r2 = cr.w * cr.w;
+        const float tc = dot(cr.xyz, dir);
+        const float b2 = max(dot(cr.xyz, cr.xyz) - tc * tc, 0.0);
+        if (b2 >= r2) {
+            continue;
+        }
+        const float a = 1.0 - b2 / r2;
+        const float h = cr.w * sqrt(a);
+        const float s0 = max(-h, -tc);
+        const float s1 = min(h, scene_t - tc);
+        if (s1 <= s0) {
+            continue;
+        }
+        const float k = 1.0 / r2;
+        const float d = cd.w * max(dust_integral(s1, a, k) - dust_integral(s0, a, k), 0.0);
+        depth += d;
+        tint += cd.rgb * d;
+    }
+    if (depth <= 1e-5) {
+        return color;
+    }
+    const float trans = exp(-min(depth, 60.0));
+    const float mu = dot(dir, f.sun_direction.xyz);
+    const float phase = (1.0 + 0.5 * mu) / (4.0 * k_pi);
+    const float3 light = f.sun_light.rgb * (2.0 * phase) + lerp(f.ground_light.rgb, f.sky_light.rgb, 0.6);
+    through *= trans;
+    return color * trans + (tint / depth) * light * (1.0 - trans);
+}
+
 Output shade_pixel(float4 position) {
     const uint2 pixel = uint2(position.xy);
     const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
@@ -465,18 +525,19 @@ Output shade_pixel(float4 position) {
                 float3 spec_light;
                 float3 color = shade(f, world, far_n, albedo, far_rough, far_metal, float3(0.0, 0.0, 0.0), 0.0,
                                      sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, spec_weight, spec_light);
+                float far_through = 1.0;
                 if (sky_on) {
-                    float through;
-                    color = under_sky(sky, color, dir, t, pixel, through);
+                    color = under_sky(sky, color, dir, t, pixel, far_through);
                 }
-                return lit_output(color);
+                return lit_output(apply_dust(extras, f, color, dir, t, far_through));
             }
         }
     }
     if (!hit) {
         if (sky_on) {
             float through;
-            return lit_output(under_sky(sky, sky_background(sky, view_dir), view_dir, 3.0e38, pixel, through));
+            const float3 behind = under_sky(sky, sky_background(sky, view_dir), view_dir, 3.0e38, pixel, through);
+            return lit_output(apply_dust(extras, f, behind, view_dir, 3.0e38, through));
         }
         return plain_output(push.background.rgb);
     }
@@ -548,6 +609,7 @@ Output shade_pixel(float4 position) {
     if (sky_on) {
         color = under_sky(sky, color, view_dir, length(world), pixel, through);
     }
+    color = apply_dust(extras, f, color, view_dir, length(world), through);
     Output o = lit_output(color);
     const float screen_weight =
         (extras.reflect_on & 2u) != 0u ? saturate((k_screen_reflection_rough - rough) / k_reflection_fade) : 0.0;

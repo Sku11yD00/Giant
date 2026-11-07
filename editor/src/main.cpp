@@ -33,6 +33,7 @@
 #include "giant/platform/window.h"
 #include "giant/render/renderer.h"
 #include "giant/rhi/rhi.h"
+#include "giant/world/weather.h"
 #include "giant/script/script_host.h"
 
 #include <algorithm>
@@ -352,6 +353,8 @@ int run(const Options& options) {
         phase_ms[static_cast<usize>(to)] += std::chrono::duration<float, std::milli>(now - phase_mark).count();
         phase_mark = now;
     };
+    std::vector<sim::DustPuff> dust_near;
+    std::vector<render::DustPuff> dust_frame;
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         mark(editor::FramePhase::other);
         terrain_meshes.update(state.scene.terrain);
@@ -377,6 +380,11 @@ int run(const Options& options) {
         input.cells = scene_frame.cells;
         input.materials = scene_frame.materials;
         input.decals = scene_frame.decals;
+        // The dust in the air nearest the camera.
+        physics.dust().nearest(state.camera.position, render::k_max_dust_puffs, dust_near);
+        dust_frame.clear();
+        for (const sim::DustPuff& d : dust_near) dust_frame.push_back({d.position, d.radius, d.density, d.color});
+        input.dust = dust_frame;
         renderer->render(cmd, target, input);
         mark(editor::FramePhase::render);
         if (!in_screenshot) {
@@ -500,6 +508,7 @@ int run(const Options& options) {
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
         mark(editor::FramePhase::weather);
+        physics.wind = weather.shown() ? world::wind_velocity(*weather.shown()) : Vec3{};
         physics.feed_forest(state.scene, scatter, state.camera.position);
         physics.update(state.scene, scene_frame.take_for_followers(), delta);
         if (playing) play.after_step(state.camera, delta); // the camera at its eyes

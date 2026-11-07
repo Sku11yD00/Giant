@@ -15,6 +15,7 @@
 #include "voxel_scene.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -1647,6 +1648,39 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         axis(extras.shadow_y, b.y, 0.0);
         axis(extras.shadow_z, b.z, m_shadows->depth_offset(frame.view.position));
     }
+    // Dust in the air (lit views): the first puffs given, camera-relative.
+    extras.dust_puffs = data.frame.descriptor;
+    if (lit_view && !frame.dust.empty()) {
+        std::array<gpu::GpuDustPuff, k_max_dust_puffs> puffs{};
+        u32 count = 0;
+        for (const DustPuff& d : frame.dust) {
+            if (count == k_max_dust_puffs) break;
+            const Vec3 c = to_camera_relative(d.center, frame.view.position);
+            if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) || !std::isfinite(d.radius) ||
+                !std::isfinite(d.density) || !(d.radius > 0.0f) || !(d.density > 0.0f)) {
+                continue;
+            }
+            gpu::GpuDustPuff& g = puffs[count++];
+            g.center[0] = c.x;
+            g.center[1] = c.y;
+            g.center[2] = c.z;
+            g.radius = d.radius;
+            g.color[0] = std::isfinite(d.color.x) ? std::clamp(d.color.x, 0.0f, 1.0f) : 0.5f;
+            g.color[1] = std::isfinite(d.color.y) ? std::clamp(d.color.y, 0.0f, 1.0f) : 0.5f;
+            g.color[2] = std::isfinite(d.color.z) ? std::clamp(d.color.z, 0.0f, 1.0f) : 0.5f;
+            g.density = std::min(d.density, 100.0f);
+        }
+        if (count > 0) {
+            const rhi::TransientMemory dust =
+                cmd.upload({reinterpret_cast<const u8*>(puffs.data()), count * sizeof(gpu::GpuDustPuff)});
+            if (dust.data != nullptr) {
+                extras.dust_puffs = dust.descriptor;
+                extras.dust_offset = dust.offset;
+                extras.dust_count = count;
+            }
+        }
+    }
+    m_stats.dust_puffs = extras.dust_count;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;

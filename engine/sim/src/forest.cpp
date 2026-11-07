@@ -117,7 +117,11 @@ void Forest::drop_bodies(world::CellCoord coord, Cell& cell) {
     if (cell.fallen > 0) {
         m_fallen_count -= cell.fallen;
         cell.fallen = 0;
-        for (Tree& t : cell.trees) t.fallen = false;
+        for (Tree& t : cell.trees) {
+            if (t.laid) --m_laid;
+            t.fallen = false;
+            t.laid = false;
+        }
         m_fallen.erase(coord);
         redraw(coord);
     }
@@ -224,6 +228,16 @@ void Forest::sync(const DVec3& camera, u32 budget) {
     }
 }
 
+Vec3 Forest::across_of(const world::Transform& at, const Vec3& away) {
+    const Vec3 axis = axis_of(at);
+    Vec3 across = normalize_or_zero(away - axis * dot(away, axis));
+    if (across == Vec3{}) {
+        across = normalize_or_zero(cross(axis, Vec3{0.0f, 0.0f, 1.0f}));
+        if (across == Vec3{}) across = Vec3{1.0f, 0.0f, 0.0f};
+    }
+    return across;
+}
+
 usize Forest::topple(std::vector<Topple>& topples) {
     // A tree struck twice: by the hardest blow. Then the hardest blows first.
     std::sort(topples.begin(), topples.end(), [](const Topple& a, const Topple& b) {
@@ -246,11 +260,7 @@ usize Forest::topple(std::vector<Topple>& topples) {
             continue;
         }
         const Vec3 axis = axis_of(tree.spot.at);
-        Vec3 across = normalize_or_zero(t.away - axis * dot(t.away, axis));
-        if (across == Vec3{}) {
-            across = normalize_or_zero(cross(axis, Vec3{0.0f, 0.0f, 1.0f}));
-            if (across == Vec3{}) across = Vec3{1.0f, 0.0f, 0.0f};
-        }
+        const Vec3 across = across_of(tree.spot.at, t.away);
         const float rate = tip_rate(t.taken, tree.spot.strength);
         const Span sp = span_of(tree.spot);
         BodyDesc d = trunk(tree.spot, Motion::dynamic);
@@ -290,8 +300,80 @@ usize Forest::topple(std::vector<Topple>& topples) {
                                          [](const FallenTree& a, u32 p) { return a.point < p; });
         f.trees.insert(at, entry);
         redraw(t.cell);
+        if (m_dust != nullptr) {
+            // Torn up at the foot.
+            const float r = std::clamp(0.2f * tree.spot.height, 1.5f, 6.0f);
+            m_dust->emit(tree.spot.at.position + DVec3{0.0, 0.5 * r, 0.0}, r, 0.6f / r, k_dust_earth);
+        }
     }
     return felled.size();
+}
+
+usize Forest::lay(std::vector<Topple>& lays) {
+    std::sort(lays.begin(), lays.end(), [](const Topple& a, const Topple& b) {
+        return a.taken != b.taken ? a.taken > b.taken : std::tie(a.cell.x, a.cell.z, a.index) < std::tie(b.cell.x, b.cell.z, b.index);
+    });
+    usize laid = 0;
+    for (const Topple& t : lays) {
+        Cell& cell = m_cells.at(t.cell);
+        Tree& tree = cell.trees[t.index];
+        if (tree.fallen || tree.body != k_no_body) continue;
+        if (laid >= m_settings.lays_per_impact || m_fallen_count >= m_settings.max_fallen) {
+            ++m_shrugged;
+            continue;
+        }
+        const world::Transform& foot = tree.spot.at;
+        const Vec3 axis = axis_of(foot);
+        const Vec3 across = across_of(foot, t.away);
+        const float h = std::max(tree.spot.height, 0.1f);
+        // Tipped about its foot until its top is on what is under it there
+        // (past standing trunks: they would be struck too), lying no
+        // flatter than a little past level and no steeper than half up.
+        float tip = 0.5f * k_pi;
+        const Vec3 over = across * (0.95f * h) + Vec3{0.0f, h, 0.0f};
+        DVec3 from = foot.position + DVec3{over.x, over.y, over.z};
+        for (int look = 0; look < 4; ++look) {
+            const std::optional<RayHit> hit = m_physics.raycast(from, {0.0f, -1.0f, 0.0f}, 2.0 * h + 50.0);
+            if (!hit) break;
+            if (m_by_body.contains(hit->body)) {
+                from = hit->point - DVec3{0.0, 0.01, 0.0};
+                continue;
+            }
+            const DVec3 d = hit->point - foot.position;
+            const Vec3 v = Vec3{static_cast<float>(d.x), static_cast<float>(d.y), static_cast<float>(d.z)} +
+                           Vec3{0.0f, tree.spot.trunk_radius, 0.0f};
+            const float a = dot(v, axis);
+            const float c = dot(v, across);
+            if (std::isfinite(a) && std::isfinite(c) && (a != 0.0f || c != 0.0f)) {
+                tip = std::clamp(std::atan2(c, a), 0.25f * k_pi, 0.6f * k_pi);
+            }
+            break;
+        }
+        Vec3 turn = normalize_or_zero(cross(axis, across));
+        if (turn == Vec3{}) turn = Vec3{0.0f, 0.0f, 1.0f};
+        tree.fallen = true;
+        tree.laid = true;
+        ++cell.fallen;
+        ++m_fallen_count;
+        ++m_laid;
+        ++laid;
+        FallenCell& f = m_fallen[t.cell];
+        f.serial = cell.serial;
+        world::Transform lying = foot;
+        lying.rotation = normalize(quat_from_axis_angle(turn, tip) * foot.rotation);
+        const FallenTree entry{tree.spot.point, lying};
+        const auto at = std::lower_bound(f.trees.begin(), f.trees.end(), entry.point,
+                                         [](const FallenTree& x, u32 p) { return x.point < p; });
+        f.trees.insert(at, entry);
+        redraw(t.cell);
+        if (m_dust != nullptr) {
+            // Where it came down: along its middle.
+            const Vec3 mid = rotate(lying.rotation, Vec3{0.0f, 0.5f * h, 0.0f});
+            const float r = std::clamp(0.3f * h, 2.0f, 10.0f);
+            m_dust->emit(foot.position + DVec3{mid.x, mid.y + 0.3 * r, mid.z}, r, 0.5f / r, k_dust_earth);
+        }
+    }
+    return laid;
 }
 
 void Forest::settle() {
@@ -314,9 +396,21 @@ usize Forest::after_step() {
         if (t.fallen || !(impulse >= t.spot.strength)) return;
         topples.push_back({owner->second.cell, owner->second.index, away, impulse});
     };
+    // A falling tree landing hard throws up dust where it strikes.
+    const auto landed = [&](BodyId body, float impulse, const DVec3& point) {
+        if (m_dust == nullptr || !m_falling.contains(body)) return;
+        const auto owner = m_by_body.find(body);
+        if (owner == m_by_body.end()) return;
+        const Tree& t = m_cells.at(owner->second.cell).trees[owner->second.index];
+        if (!(impulse >= 0.25f * t.spot.strength)) return;
+        const float r = std::clamp(0.25f * t.spot.height, 2.0f, 8.0f);
+        m_dust->emit(point + DVec3{0.0, 0.3 * r, 0.0}, r, 0.5f / r, k_dust_earth);
+    };
     for (const ContactHit& h : m_physics.hits()) {
         struck(h.b, h.impulse, h.normal);         // pushed along the normal (a to b)
         struck(h.a, h.impulse, h.normal * -1.0f); // and a the other way
+        landed(h.a, h.impulse, h.point);
+        landed(h.b, h.impulse, h.point);
     }
     const usize felled = topples.empty() ? 0 : topple(topples);
     // Where the moving ones are now (resting ones woken too: falling again).
@@ -346,8 +440,9 @@ usize Forest::impact(const DVec3& point, float radius, float impulse) {
         return 0;
     }
     std::vector<Topple> topples;
+    std::vector<Topple> lays;
     for (auto& [coord, cell] : m_cells) {
-        if (cell.trunks == 0) continue;
+        if (cell.fallen >= cell.trees.size()) continue;
         // The cell's square on the ground, widened by its tallest tree.
         const double x0 = coord.x * world::k_cell_size, z0 = coord.z * world::k_cell_size;
         const double dx = std::max({x0 - point.x, 0.0, point.x - (x0 + world::k_cell_size)});
@@ -355,7 +450,7 @@ usize Forest::impact(const DVec3& point, float radius, float impulse) {
         if (std::sqrt(dx * dx + dz * dz) > static_cast<double>(radius) + cell.reach) continue;
         for (u32 i = 0; i < cell.trees.size(); ++i) {
             const Tree& t = cell.trees[i];
-            if (t.fallen || t.body == k_no_body) continue;
+            if (t.fallen) continue;
             // The nearest point of its trunk (foot to top) to the blow.
             const DVec3 rel_d = point - t.spot.at.position;
             const Vec3 rel{static_cast<float>(rel_d.x), static_cast<float>(rel_d.y), static_cast<float>(rel_d.z)};
@@ -366,10 +461,12 @@ usize Forest::impact(const DVec3& point, float radius, float impulse) {
             if (gap > radius) continue;
             const float taken = impulse * (1.0f - gap / radius);
             if (taken < t.spot.strength) continue;
-            topples.push_back({coord, i, to_trunk, taken});
+            (t.body == k_no_body ? lays : topples).push_back({coord, i, to_trunk, taken});
         }
     }
-    return topples.empty() ? 0 : topple(topples);
+    usize felled = topples.empty() ? 0 : topple(topples);
+    felled += lays.empty() ? 0 : lay(lays);
+    return felled;
 }
 
 void Forest::reset() {
@@ -387,6 +484,7 @@ void Forest::reset() {
                 t.body = k_no_body;
             }
             t.fallen = false;
+            t.laid = false;
         }
         cell.fallen = 0;
         cell.next = 0; // trunks made again where they stood
@@ -395,6 +493,7 @@ void Forest::reset() {
     for (const auto& [coord, f] : m_fallen) redraw(coord);
     m_fallen.clear();
     m_fallen_count = 0;
+    m_laid = 0;
     std::sort(moving.begin(), moving.end());
     m_physics.remove_many(moving);
 }
@@ -409,6 +508,7 @@ usize Forest::forget() {
     m_doomed.clear();
     m_trunks = 0;
     m_fallen_count = 0;
+    m_laid = 0;
     return bodies;
 }
 
@@ -461,6 +561,7 @@ ForestStats Forest::stats() const {
     s.fallen = m_fallen_count;
     s.refused = m_refused;
     s.shrugged = m_shrugged;
+    s.laid = m_laid;
     return s;
 }
 

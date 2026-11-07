@@ -153,6 +153,18 @@ struct Sky {
     double time = 0.0; // seconds: what falls moves with it
 };
 
+// A soft ball of dust in the air (a collapse's cloud): densest at its
+// centre, thinning to nothing at `radius`, over whatever is behind it, lit
+// by the sun and the sky.
+struct DustPuff {
+    DVec3 center{};
+    float radius = 1.0f;
+    float density = 0.1f;  // light taken out per metre at the centre
+    Vec3 color{0.5f, 0.5f, 0.5f}; // how much light its dust gives back (0 to 1)
+};
+// Puffs one frame draws at most (the first of FrameInput::dust).
+inline constexpr u32 k_max_dust_puffs = 32;
+
 struct View {
     DVec3 position{};
     Quat orientation{}; // looks down -Z, +Y up, before rotation
@@ -272,6 +284,8 @@ struct FrameInput {
     std::span<const CellRange> cells;
     std::span<const Material> materials;
     std::span<const Decal> decals;
+    // Dust in the air, nearest first (lit views; past k_max_dust_puffs left out).
+    std::span<const DustPuff> dust;
 };
 
 struct RenderStats {
@@ -334,6 +348,7 @@ struct RenderStats {
     bool falling = false;       // rain or snow drawn falling
     bool wet_surfaces = false;  // wet or snowy surfaces
     bool weather_cover = false; // the cover map made (sheltered places stay dry)
+    u32 dust_puffs = 0;         // dust puffs drawn
 };
 
 // What the voxel world holds at a point, on one clipmap level

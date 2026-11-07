@@ -684,8 +684,7 @@ Known limits: `impact` walks every entity (fine for a town; a cell index
 later); loose pieces stay in their kit's render cell however far they roll;
 mesh and decal pieces never come loose (only cubes, spheres and planes
 collide, and no sphere flattened under a centimetre); the part index assumes every piece built a shape; damage is not
-saved (N4 part 8); pieces break whole, never into smaller bits (the
-destruction rings, N4 part 6).
+saved (N4 part 8); pieces break whole, never into smaller bits.
 
 ### Falling trees (N4 part 5)
 
@@ -742,6 +741,51 @@ leaving the placer's radius); trunks stand only near the camera, so a tree
 farther than about 450 m never falls; the player's and a giant's kinematic
 bodies make no contacts with fixed trunks (as with buildings: `impact` is
 the way in).
+
+### Destruction near and far (N4 part 6)
+
+What breaks costs by distance from the camera, in rings:
+
+- Near (within `ScenePhysicsSettings::simulate_radius`, 600 m, and at most
+  `max_loose`, 4096, loose pieces as bodies at once): a loose piece falls
+  as its own body (part 4), a felled tree as a dynamic trunk (part 5).
+- Mid (past that, or past the cap): a loose piece comes down at once as
+  rubble with no body (`ScenePhysics::rubble_at`): thrown along its push as
+  far as half a second carries it (10 m at most), laid with its thinnest
+  side down, turned about the up axis by a hash of its placement and index,
+  on what a ray down finds (past its own building's standing and falling
+  pieces, at most 8 looks; the building's foot when nothing). A tree whose
+  trunk has no body (beyond about 450 m, or still waiting for it) struck
+  by `impact` is laid down at once (`Forest::lay`): tipped about its foot
+  away from the blow until its top meets what a ray down finds there (past
+  standing trunks; 45 to 108 degrees over), at most `lays_per_impact`
+  (2048) a blow, hardest first. The editor gives the forest the scatter
+  cells the blow reaches first (`PhysicsState::impact`, nearest first, at
+  most 65536 points), and keeps a far cell only while trees in it lie.
+- Far: the voxel world follows the instances, so rubble and fallen trees
+  show in the far field as they are drawn (nothing new).
+
+Dust (`sim::Dust`): a collapse throws up a puff at the foot of what came
+down (sized to it, 2 to 60 m), a felled tree one at its foot, a falling
+tree landing hard (a quarter of its strength) one where it strikes, and a
+laid tree one along its middle. A puff grows to three times its size over
+its life (8 to 30 s, by size), rises 0.4 m/s, drifts with 60% of the wind
+and thins (its dust across it kept, faded over the last 40% of its life).
+Bounded: 512 puffs (a new one takes the faintest's place), 64 emits
+between steps, and an emit inside a puff younger than a second swells it
+instead (a street falling is one cloud). The renderer draws the 32 nearest
+(`FrameInput::dust`, `render::DustPuff`): in the resolve pass each puff's
+density (1 − r²/R²)² is integrated along the pixel's ray exactly, clipped
+to what the pixel shows, lit by the sun (a mildly forward phase, doubled
+for light scattered inside the cloud) and the sky and ground, over the
+fog and clouds, thinning the screen reflection's weight alike. No history
+(rule 2). Dust is view state: stopping or a new scene clears it.
+
+Known limits: rubble and laid trees have no bodies (the player walks
+through them, and they stay as laid when what is under them goes); dust
+ignores shadows (a puff in a building's shade is lit as in the sun) and is
+drawn over the fog rather than in it; pieces still break whole (no
+splintering); craters and footprints are part 7.
 
 ## Window events (known limit)
 

@@ -270,3 +270,72 @@ GIANT_TEST("breakage: placements waiting to be made again after their kit change
     GIANT_CHECK(follow.impact({0.6, 1.5, 0.0}, 0.3f, 6000.0f) == 0); // nothing there now
     GIANT_CHECK(follow.impact({0.6, 0.5, 0.0}, 0.3f, 6000.0f) == 1); // the one block
 }
+
+GIANT_TEST("breakage: far from the camera loose pieces come down at once as rubble, flat on the ground, with dust") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ScenePhysics follow(physics);
+    Dust dust;
+    follow.set_dust(&dust);
+    follow.set_camera({2000.0, 10.0, 0.0}); // past simulate_radius (600 m)
+    Scene scene;
+    ground(scene);
+    scene.kits.push_back(house());
+    const EntityId h = place(scene, "house", {0.0, 0.0, 0.0});
+    run(physics, follow, scene, 1);
+    const usize bodies = physics.size();
+    // A blow on the whole house: every piece comes loose, none a body.
+    GIANT_CHECK(follow.impact({0.0, 1.5, 0.0}, 10.0f, 1e6f) == 5);
+    ScenePhysicsStats s = follow.stats();
+    GIANT_CHECK(s.broken_kits == 1 && s.loose_pieces == 0 && s.rubble == 5);
+    GIANT_CHECK(physics.size() == bodies - 1); // the house's body gone, no new ones
+    for (u32 i = 0; i < 5; ++i) {
+        const PiecePose* p = loose(follow, h, i);
+        GIANT_CHECK(p != nullptr);
+        if (p == nullptr) continue;
+        // Its thinnest side (0.2 m) down, on the ground.
+        GIANT_CHECK(std::fabs(p->at.position.y - 0.1) < 0.02);
+        const Vec3 s3 = p->at.scale;
+        const float thin = std::min({s3.x, s3.y, s3.z});
+        const Vec3 up = rotate(p->at.rotation, Vec3{s3.x == thin ? 1.0f : 0.0f, s3.y == thin ? 1.0f : 0.0f,
+                                                    s3.z == thin ? 1.0f : 0.0f});
+        GIANT_CHECK(std::fabs(std::fabs(up.y) - 1.0f) < 1e-3f);
+    }
+    GIANT_CHECK(dust.puffs().size() == 1);
+    // Rubble lies still: steps move nothing of it.
+    const PiecePose before = *loose(follow, h, 4);
+    run(physics, follow, scene, 30);
+    GIANT_CHECK(loose(follow, h, 4)->at == before.at);
+    follow.reset_poses();
+    s = follow.stats();
+    GIANT_CHECK(s.broken_kits == 0 && s.rubble == 0 && follow.piece_poses().empty());
+}
+
+GIANT_TEST("breakage: near the camera at most max_loose pieces fall as bodies, the rest as rubble") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ScenePhysicsSettings settings;
+    settings.max_loose = 2;
+    ScenePhysics follow(physics, settings);
+    follow.set_camera({10.0, 2.0, 10.0});
+    Scene scene;
+    ground(scene);
+    scene.kits.push_back(house());
+    const EntityId h = place(scene, "house", {0.0, 0.0, 0.0});
+    run(physics, follow, scene, 1);
+    GIANT_CHECK(follow.impact({0.0, 1.5, 0.0}, 10.0f, 1e6f) == 5);
+    ScenePhysicsStats s = follow.stats();
+    GIANT_CHECK(s.loose_pieces == 2 && s.rubble == 3);
+    run(physics, follow, scene, 120);
+    for (u32 i = 0; i < 5; ++i) {
+        const PiecePose* p = loose(follow, h, i);
+        GIANT_CHECK(p != nullptr && p->at.position.y > -0.5 && p->at.position.y < 3.0);
+    }
+    // A second house: no room, all rubble.
+    const EntityId h2 = place(scene, "house", {30.0, 0.0, 0.0});
+    run(physics, follow, scene, 2);
+    GIANT_CHECK(follow.impact({30.0, 1.5, 0.0}, 10.0f, 1e6f) == 5);
+    s = follow.stats();
+    GIANT_CHECK(s.loose_pieces == 2 && s.rubble == 8 && s.broken_kits == 2);
+    GIANT_CHECK(loose(follow, h2, 4) != nullptr);
+}

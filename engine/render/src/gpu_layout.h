@@ -306,9 +306,22 @@ struct ResolveExtras {
     u32 sky_params;
     u32 sky_params_offset;
     u32 sky_on;
-    u32 sky_pad;
+    // Dust in the air: dust_count GpuDustPuff at dust_offset (0: none).
+    u32 dust_puffs;
+    u32 dust_offset;
+    u32 dust_count;
+    u32 dust_pad[2];
 };
-static_assert(sizeof(ResolveExtras) == 144);
+static_assert(sizeof(ResolveExtras) == 160);
+
+// resolve.slang's dust puff: centre camera-relative.
+struct GpuDustPuff {
+    float center[3];
+    float radius;
+    float color[3];
+    float density;
+};
+static_assert(sizeof(GpuDustPuff) == 32);
 
 // sky_common.slang's Sky: what the sky's passes and shading read.
 struct SkyParams {
