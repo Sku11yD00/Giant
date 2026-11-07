@@ -251,8 +251,18 @@ private:
             out.weights[0] = 255;
             return true;
         }
-        std::sort(found.begin(), found.begin() + static_cast<std::ptrdiff_t>(count),
-                  [](const auto& a, const auto& b) { return a.first > b.first || (a.first == b.first && a.second < b.second); });
+        // Heaviest first (an insertion sort: at most eight).
+        for (usize i = 1; i < count; ++i) {
+            for (usize k = i; k > 0; --k) {
+                const auto& x = found[k - 1];
+                const auto& y = found[k];
+                if (y.first > x.first || (y.first == x.first && y.second < x.second)) {
+                    std::swap(found[k - 1], found[k]);
+                } else {
+                    break;
+                }
+            }
+        }
         if (count > 4) {
             warn_once(m_warned_weights, "vertices moved by more than four joints keep the four heaviest");
             count = 4;
