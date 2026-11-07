@@ -650,6 +650,36 @@ step left them, so a platform it rides can lag the view by up to a step
 Like simulating it is view state: stopping removes the character and puts
 the camera and simulating back as they were.
 
+### Climbing and being carried (N4 part 9)
+
+A character told it may climb (`CharacterInput::climb`, on for the player)
+takes hold of what it walks into when a ray from its chest finds a surface
+too steep to walk, facing it, within a third of a metre, and not a dynamic
+body (a crate is pushed, not climbed). On the wall its step is its own,
+before the walking step: its input turns into the wall's frame (into the
+wall is up, away is down, across is along, at `climb_speed`), it is held
+5 cm off the surface (re-found by a ray each step, so it follows round
+corners of a convex wall and a moving wall's surface speed), and swept
+with no gravity. It lets go when the ray finds nothing to hold (past an
+edge, or what it held came loose and is dynamic now), when climbing down
+reaches the ground, when told not to climb, and when a jump pushes it off
+(away and up; no hold again for 0.4 s). At the top (the chest ray hits,
+one over the head does not) a ray down beyond the edge looks for ground it
+can stand on with room for its height: it mantles there, up for 0.27 s and
+then over the edge for 0.18 s, moved directly (it was checked clear).
+
+Any body that is not a character's can carry one (`carry_character`): the
+character's place in the body's frame is kept, and after each step it is
+put there, its speed the body's speed at that point (so a body put
+somewhere at once, as `set_entity` does, carries it there without
+flinging it on when let go). Its input is left aside. `release_character`,
+`set_character_position`, the body removed or the world cleared let it
+go, and it falls on from there. The editor's `carry_player` carries the
+player by an entity's body; an entity whose body is made again (its
+shape or kind changed) lets it go. It is the start of a giant's hand
+picking the player up: the hand will be a kinematic body moved with the
+animation.
+
 ## Breakable buildings (N4 part 4)
 
 A kit marked `breakable` (with a `strength` in N·s, default 1500) is still

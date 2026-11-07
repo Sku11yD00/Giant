@@ -116,6 +116,7 @@ void PlayState::set_input(const PlayerInput& input) {
     m_input.forward = std::isfinite(input.forward) ? std::clamp(input.forward, -1.0f, 1.0f) : 0.0f;
     m_input.right = std::isfinite(input.right) ? std::clamp(input.right, -1.0f, 1.0f) : 0.0f;
     m_input.sprint = input.sprint;
+    m_input.climb = input.climb;
     m_from_keys = false; // until a key is pressed
 }
 
@@ -138,6 +139,7 @@ void PlayState::apply_input() {
     if (length > 1.0f) move = move * (1.0f / length); // diagonals no faster
     sim::CharacterInput in;
     in.velocity = move * (m_input.sprint ? m_settings.sprint_speed : m_settings.walk_speed);
+    in.climb = m_input.climb;
     m_physics.world().set_character_input(m_player, in);
 }
 
@@ -184,6 +186,24 @@ void PlayState::after_step(EditorCamera& camera, double seconds) {
     camera.position = {at.x, m_eye, at.z};
     camera.yaw_degrees = m_yaw;
     camera.pitch_degrees = m_pitch;
+}
+
+bool PlayState::carry(world::EntityId entity) {
+    if (!playing() || entity == 0) return false;
+    const sim::BodyId body = m_physics.bodies().body_of(entity);
+    return body != sim::k_no_body && m_physics.world().carry_character(m_player, body);
+}
+
+void PlayState::release() {
+    if (playing()) m_physics.world().release_character(m_player);
+}
+
+std::optional<world::EntityId> PlayState::carried_by() const {
+    const std::optional<sim::CharacterState> s = player();
+    if (!s || s->carrier == sim::k_no_body) return std::nullopt;
+    const world::EntityId entity = m_physics.bodies().entity_of(s->carrier);
+    if (entity == 0) return std::nullopt;
+    return entity;
 }
 
 std::optional<sim::CharacterState> PlayState::player() const {

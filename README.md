@@ -245,6 +245,10 @@ Milestone **N4, first playable slice** (in progress; gate: a growing giantess wr
   world: broken buildings, felled trees and craters stay, are saved with each
   square's file and come back when the world is opened again. `clear_damage`
   (or undo) takes it away.
+- Part 9: climbing and being carried. Walking into a wall, a cliff or a
+  building's side, the player climbs it (W up, S down, A and D along it), pulls
+  itself up onto the top and pushes off with Space. Anything with a body can
+  carry the player (`carry_player`), ready for a giant's hand to pick them up.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

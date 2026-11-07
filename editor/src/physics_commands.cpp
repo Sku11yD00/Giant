@@ -103,7 +103,17 @@ Json player_json(const EditorState& state) {
     out["standing_on"] = s->ground == sim::k_no_body ? Json(nullptr) : Json(ground);
     out["yaw"] = play.yaw();
     out["pitch"] = play.pitch();
-    out["input"] = {{"forward", play.input().forward}, {"right", play.input().right}, {"sprint", play.input().sprint}};
+    out["climbing"] = s->climbing;
+    out["mantling"] = s->mantling;
+    // The wall climbed: an entity's id, 0 for something else (the ground, a tree), null for none.
+    out["wall"] = s->climbing && s->wall != sim::k_no_body ? Json(state.physics->bodies().entity_of(s->wall))
+                                                            : Json(nullptr);
+    const std::optional<world::EntityId> carrier = play.carried_by();
+    out["carried_by"] = carrier ? Json(*carrier) : (s->carrier != sim::k_no_body ? Json(0) : Json(nullptr));
+    out["input"] = {{"forward", play.input().forward},
+                    {"right", play.input().right},
+                    {"sprint", play.input().sprint},
+                    {"climb", play.input().climb}};
     out["waiting_for_ground"] = play.waiting_for_ground();
     return out;
 }
@@ -370,8 +380,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"play",
          "Starts or stops play mode: walking the scene as the player, a 1.8 m capsule that walks up steps "
-         "(0.4 m), stops at walls, slides off slopes over 50 degrees, jumps (about 1.3 m) and pushes dynamic "
-         "entities. Starting puts it on what is under the camera, looking where the camera looks, turns "
+         "(0.4 m), stops at walls, slides off slopes over 50 degrees, jumps (about 1.3 m), pushes dynamic "
+         "entities and climbs walls it walks into (W up, S down, A/D along, onto the top; Space pushes off). "
+         "Starting puts it on what is under the camera, looking where the camera looks, turns "
          "simulating on and puts the camera at its eyes; in the viewport the mouse looks, W A S D walk, "
          "Shift runs, Space jumps, Esc stops. Stopping takes it away, puts the camera back and simulating "
          "back as it was. A new scene stops it. View state, not undoable. Returns get_player's report.",
@@ -396,7 +407,10 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
         {"set_player_input",
          "While playing, tells the player what to do, as the keys would (held until changed; a key pressed "
          "takes over again): `forward` and `right` from -1 to 1 along where it looks (W/S and D/A), "
-         "`sprint` (Shift: 8 m/s, else 4), `jump` true jumps once (as soon as it is on the ground), `yaw` and "
+         "`sprint` (Shift: 8 m/s, else 4), `climb` (default true: walked into a wall too steep to walk it "
+         "climbs, forward up, back down, right/left along it, at 2 m/s, and pulls itself up onto the top; "
+         "false lets go), `jump` true jumps once (as soon as it is on the ground; on a wall it pushes off), "
+         "`yaw` and "
          "`pitch` where it looks (degrees, as the camera's: yaw 0 looks down -z, 90 down -x). Leave out what "
          "stays. Time moves with the frames, or with step_player. Returns get_player's report.",
          Json{{"type", "object"},
@@ -405,6 +419,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
                {{"forward", {{"type", "number"}, {"minimum", -1}, {"maximum", 1}}},
                 {"right", {{"type", "number"}, {"minimum", -1}, {"maximum", 1}}},
                 {"sprint", {{"type", "boolean"}}},
+                {"climb", {{"type", "boolean"}}},
                 {"jump", {{"type", "boolean"}}},
                 {"yaw", {{"type", "number"}, {"minimum", -720}, {"maximum", 720}}},
                 {"pitch", {{"type", "number"}, {"minimum", -89}, {"maximum", 89}}}}}},
@@ -416,6 +431,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              in.forward = args.value("forward", in.forward);
              in.right = args.value("right", in.right);
              in.sprint = args.value("sprint", in.sprint);
+             in.climb = args.value("climb", in.climb);
              state.play->set_input(in);
              state.play->look(args.value("yaw", state.play->yaw()), args.value("pitch", state.play->pitch()));
              if (args.value("jump", false)) state.play->jump();
@@ -455,11 +471,44 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          }});
 
     add(registry,
+        {"carry_player",
+         "While playing, `entity` (one with a body: a crate, a platform; later a giant's hand) carries the "
+         "player: held where it is against it, it goes wherever the entity goes (simulated, or moved), its "
+         "input left aside, until `release` true lets it go (it falls on as it was carried) or the body "
+         "goes (the entity removed, or changed so its body is made again). View state, not undoable. "
+         "Returns get_player's report.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"properties",
+               {{"entity", {{"type", "integer"}, {"minimum", 1}}}, {"release", {{"type", "boolean"}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.physics == nullptr || state.play == nullptr) return no_play();
+             if (!state.play->playing()) return not_playing();
+             const bool release = args.value("release", false);
+             if (release == args.contains("entity")) {
+                 return CommandResult::failure("give `entity` to carry the player, or `release` true");
+             }
+             if (release) {
+                 state.play->release();
+             } else {
+                 state.physics->flush(state.scene); // its body in line with the scene
+                 const world::EntityId entity = args["entity"].get<world::EntityId>();
+                 if (!state.play->carry(entity)) {
+                     return CommandResult::failure("entity " + std::to_string(entity) + " has no body to carry the player");
+                 }
+             }
+             return CommandResult::success(player_json(state));
+         }});
+
+    add(registry,
         {"get_player",
          "Reports play mode: whether playing and, while it is, the player's feet (`position`), `eye` (the "
          "camera), `velocity`, `on_ground`, `sliding` (on a slope too steep), `standing_on` (an entity's id, "
-         "0 the ground, null nothing), `yaw`, `pitch`, its `input`, and `waiting_for_ground` (held still "
-         "while the ground under it is still being made).",
+         "0 the ground, null nothing), `climbing` (on a wall: `wall` its entity, 0 something else), "
+         "`mantling` (pulling itself up onto a ledge), `carried_by` (carry_player: the entity, null none), "
+         "`yaw`, `pitch`, its `input`, and `waiting_for_ground` (held still while the ground under it is "
+         "still being made).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
          [&state](const Json&, CommandContext&) {

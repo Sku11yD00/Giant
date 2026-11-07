@@ -3,7 +3,12 @@
 //
 // Starting puts a player character (giant/sim) on the ground under the
 // camera, turns simulating on and looks through the player's eyes: the
-// mouse looks, W A S D walk, Shift runs, Space jumps, Esc stops. Stopping
+// mouse looks, W A S D walk, Shift runs, Space jumps, Esc stops. Walked
+// into a wall too steep to walk (a cliff, a building's side), the player
+// climbs it: W up, S down, A and D along it; at the top it pulls itself up
+// onto the ledge, and Space pushes off. Something can carry the player (an
+// entity it is held to, later a giant's hand): it goes where that goes
+// until let go. Stopping
 // takes the player away, puts the camera back where it was and simulating
 // back as it was. Like simulating, it is view state: the scene is never
 // touched. A new scene stops it.
@@ -26,6 +31,7 @@ struct PlayerInput {
     float forward = 0.0f; // -1 (back) to 1, along where it looks
     float right = 0.0f;   // -1 (left) to 1
     bool sprint = false;
+    bool climb = true; // climbs walls walked into
 };
 
 struct PlayerSettings {
@@ -68,6 +74,15 @@ public:
     // between the last two fixed steps (smooth at any frame rate), a step
     // up eased (`seconds` since the last call), not snapped.
     void after_step(EditorCamera& camera, double seconds);
+
+    // Carried by `entity`'s body (a hand, a cart): held where it is against
+    // it, going wherever it goes, its input left aside, until released (or
+    // the body goes: the entity removed, or its body made again). False
+    // when not playing or the entity has no body.
+    bool carry(world::EntityId entity);
+    void release();
+    // What carries the player: an entity's id, or nothing.
+    std::optional<world::EntityId> carried_by() const;
 
     std::optional<sim::CharacterState> player() const;
     sim::BodyId player_body() const;

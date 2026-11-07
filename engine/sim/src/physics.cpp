@@ -473,6 +473,19 @@ struct PhysicsWorld::Impl {
         float vertical = 0.0f; // the speed up it was given in the last step
         DVec3 previous{}; // where it was before the last step
         bool held = false;
+        // Climbing (CharacterInput::climb): on the wall with this normal (flat, unit).
+        bool climbing = false;
+        JPH::BodyID wall;
+        Vec3 wall_normal{};
+        float climb_wait = 0.0f; // seconds before it may take hold again (pushed off)
+        // Pulling itself up onto a ledge: from, to, and how far (0 to 1).
+        bool mantling = false;
+        DVec3 mantle_from{};
+        DVec3 mantle_to{};
+        float mantle_t = 0.0f;
+        // Carried (carry_character): by this body, held at `carry_at` in its frame.
+        JPH::BodyID carrier;
+        DVec3 carry_at{};
     };
     std::map<CharacterId, Character> characters; // in id order: the same steps every run
 
@@ -560,6 +573,179 @@ struct PhysicsWorld::Impl {
         return c;
     }
 
+    // A ray for a character's own looks (a wall, a ledge): what it meets
+    // first but the character's own body (and other characters').
+    struct Hit {
+        float distance = 0.0f;
+        JPH::RVec3 point;
+        JPH::Vec3 normal;
+        JPH::BodyID body;
+        bool dynamic = false; // pushed about: nothing to hold on to
+    };
+    std::optional<Hit> look(const JPH::RVec3& from, const JPH::Vec3& along, float length) const {
+        const JPH::RRayCast ray(from, along * length);
+        JPH::RayCastResult result;
+        struct NotCharacters final : JPH::BodyFilter {
+            const Impl* impl = nullptr;
+            bool ShouldCollideLocked(const JPH::Body& body) const override { return !impl->is_character_body(body.GetID()); }
+        } filter;
+        filter.impl = this;
+        if (!system.GetNarrowPhaseQuery().CastRay(ray, result, {}, {}, filter)) return std::nullopt;
+        Hit hit;
+        hit.distance = result.mFraction * length;
+        hit.point = ray.GetPointOnRay(result.mFraction);
+        hit.body = result.mBodyID;
+        const JPH::BodyLockRead lock(system.GetBodyLockInterface(), result.mBodyID);
+        if (!lock.Succeeded()) return std::nullopt;
+        hit.normal = lock.GetBody().GetWorldSpaceSurfaceNormal(result.mSubShapeID2, hit.point);
+        hit.dynamic = lock.GetBody().IsDynamic();
+        return hit;
+    }
+
+    // How fast the surface of `body` at `point` moves (a giant's leg climbed).
+    JPH::Vec3 surface_velocity(JPH::BodyID body, const JPH::RVec3& point) const {
+        const JPH::BodyLockRead lock(system.GetBodyLockInterface(), body);
+        return lock.Succeeded() ? lock.GetBody().GetPointVelocity(point) : JPH::Vec3::sZero();
+    }
+
+    // One fixed step on a wall, or onto its ledge. False: not climbing (any
+    // more): the step goes on as walking or falling.
+    bool climb_step(Character& c, float dt) {
+        JPH::CharacterVirtual& cv = *c.body;
+        const JPH::Vec3 up = JPH::Vec3::sAxisY();
+        const float h = c.desc.height;
+        const float r = c.desc.radius;
+        const float steep = std::cos(JPH::DegreesToRadians(c.desc.max_slope_degrees));
+        c.climb_wait = std::max(0.0f, c.climb_wait - dt);
+        if (c.mantling) {
+            // Up first, then over the edge.
+            c.mantle_t = std::min(1.0f, c.mantle_t + dt / 0.45f);
+            const double t = c.mantle_t;
+            const double rise = std::min(1.0, t / 0.6);
+            const double over = std::clamp((t - 0.6) / 0.4, 0.0, 1.0);
+            const DVec3 at{c.mantle_from.x + (c.mantle_to.x - c.mantle_from.x) * over,
+                           c.mantle_from.y + (c.mantle_to.y - c.mantle_from.y) * rise,
+                           c.mantle_from.z + (c.mantle_to.z - c.mantle_from.z) * over};
+            const JPH::RVec3 from = cv.GetPosition();
+            cv.SetPosition(to_jolt(at));
+            c.velocity = from_jolt(JPH::Vec3(cv.GetPosition() - from) / dt);
+            cv.SetLinearVelocity(JPH::Vec3::sZero());
+            c.vertical = 0.0f;
+            if (c.mantle_t >= 1.0f) {
+                c.mantling = false;
+                c.climbing = false;
+                c.velocity = {};
+                refresh(cv);
+            }
+            return true;
+        }
+        const JPH::Vec3 want(c.input.velocity.x, 0.0f, c.input.velocity.z);
+        const JPH::RVec3 feet = cv.GetPosition();
+        const JPH::RVec3 chest = feet + up * (0.5f * h);
+        if (!c.climbing) {
+            // Taking hold: walking into something too steep to walk on.
+            if (!c.input.climb || c.climb_wait > 0.0f || want.LengthSq() < 0.25f) return false;
+            const JPH::Vec3 dir = want.Normalized();
+            const std::optional<Hit> wall = look(chest, dir, r + 0.35f);
+            if (!wall || wall->dynamic) return false; // (a crate walked into is pushed)
+            JPH::Vec3 flat(wall->normal.GetX(), 0.0f, wall->normal.GetZ());
+            if (std::fabs(wall->normal.GetY()) >= steep || flat.LengthSq() < 1e-4f) return false;
+            flat = flat.Normalized();
+            if (flat.Dot(dir) > -0.5f) return false; // along it, not into it
+            c.climbing = true;
+            c.wall = wall->body;
+            c.wall_normal = from_jolt(flat);
+        }
+        const JPH::Vec3 n = to_jolt(c.wall_normal);
+        if (!c.input.climb) {
+            c.climbing = false;
+            return false;
+        }
+        // Pushed off: away and up, falling from there.
+        if (c.jump_wait > 0.0f) {
+            const JPH::Vec3 push = n * (0.5f * c.jump_speed) + up * (0.7f * c.jump_speed);
+            c.climbing = false;
+            c.climb_wait = 0.4f;
+            c.jump_wait = 0.0f;
+            c.velocity = from_jolt(push);
+            c.vertical = push.GetY();
+            cv.SetLinearVelocity(push);
+            return false;
+        }
+        const std::optional<Hit> wall = look(chest, -n, r + 0.6f);
+        const JPH::Vec3 across = up.Cross(n).Normalized();
+        float climb = want.Dot(-n); // into it: up
+        float side = want.Dot(across);
+        const float speed = std::sqrt(climb * climb + side * side);
+        if (speed > c.desc.climb_speed) {
+            climb *= c.desc.climb_speed / speed;
+            side *= c.desc.climb_speed / speed;
+        }
+        // The top: the wall goes on at the chest but not over the head:
+        // up onto the ledge, if there is ground there with room to stand.
+        if (wall && !wall->dynamic && climb > 0.0f && !look(feet + up * (h + 0.05f), -n, r + 0.6f)) {
+            const JPH::RVec3 above = feet + up * (h + 0.6f) - n * (r + 0.4f);
+            const std::optional<Hit> ledge = look(above, -up, h + 0.6f);
+            if (ledge && ledge->normal.GetY() >= steep && ledge->point.GetY() > feet.GetY() + 0.3f &&
+                !look(ledge->point + up * 0.05f, up, h)) {
+                c.mantling = true;
+                c.mantle_t = 0.0f;
+                c.mantle_from = from_jolt_r(feet);
+                c.mantle_to = from_jolt_r(ledge->point + up * 0.02f);
+                return climb_step(c, dt);
+            }
+        }
+        if (!wall || wall->dynamic || std::fabs(wall->normal.GetY()) >= steep) {
+            // Nothing to hold: past an edge, onto ground it can walk, or what
+            // it held came loose (a wall knocked down).
+            c.climbing = false;
+            return false;
+        }
+        JPH::Vec3 flat(wall->normal.GetX(), 0.0f, wall->normal.GetZ());
+        if (flat.LengthSq() > 1e-4f) c.wall_normal = from_jolt(flat.Normalized());
+        c.wall = wall->body;
+        // Down on the ground, climbing down: lets go.
+        if (climb < 0.0f && cv.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround) {
+            c.climbing = false;
+            return false;
+        }
+        // Kept just off the wall, moving with it.
+        const float gap = wall->distance - r;
+        const JPH::Vec3 hold = -n * std::clamp((gap - 0.05f) * 10.0f, -1.0f, 3.0f);
+        const JPH::Vec3 out = up * climb + across * side + hold + surface_velocity(wall->body, wall->point);
+        cv.SetLinearVelocity(out);
+        const JPH::RVec3 from = cv.GetPosition();
+        cv.Update(dt, JPH::Vec3::sZero(), system.GetDefaultBroadPhaseLayerFilter(layers::moving),
+                  system.GetDefaultLayerFilter(layers::moving), {}, {}, temp);
+        c.velocity = from_jolt(JPH::Vec3(cv.GetPosition() - from) / dt);
+        c.vertical = 0.0f;
+        return true;
+    }
+
+    // After a step: a carried character where its carrier has it now.
+    // Its speed is the carrier's there (a body put somewhere at once
+    // carries it there at once, not flinging it on when let go).
+    void carry(Character& c) {
+        JPH::RVec3 to;
+        JPH::Vec3 v;
+        {
+            // (Let go before moving the character: that locks its own body.)
+            const JPH::BodyLockRead lock(system.GetBodyLockInterface(), c.carrier);
+            if (!lock.Succeeded()) { // the carrier went: let go
+                c.carrier = JPH::BodyID();
+                return;
+            }
+            to = lock.GetBody().GetWorldTransform() * to_jolt(c.carry_at);
+            v = lock.GetBody().GetPointVelocity(to);
+        }
+        const float speed = v.Length();
+        if (!(speed <= k_max_character_speed)) v = speed > 0.0f ? v * (k_max_character_speed / speed) : JPH::Vec3::sZero();
+        c.body->SetPosition(to);
+        c.body->SetLinearVelocity(v);
+        c.velocity = from_jolt(v);
+        c.vertical = v.GetY();
+    }
+
     void refresh(JPH::CharacterVirtual& c) {
         c.RefreshContacts(system.GetDefaultBroadPhaseLayerFilter(layers::moving),
                           system.GetDefaultLayerFilter(layers::moving), {}, {}, temp);
@@ -568,6 +754,7 @@ struct PhysicsWorld::Impl {
     // One fixed step of a character: its velocity from its input, then
     // moved (sliding along what it meets, up steps, down onto the floor).
     void step_character(Character& c, float dt) {
+        if (climb_step(c, dt)) return;
         JPH::CharacterVirtual& cv = *c.body;
         const JPH::Vec3 up = JPH::Vec3::sAxisY();
         const JPH::Vec3 gravity = system.GetGravity();
@@ -659,6 +846,9 @@ void PhysicsWorld::clear() {
     // Characters carry on in the fresh world where they were.
     for (auto& [id, c] : m_impl->characters) {
         Impl::Character moved = c;
+        moved.carrier = JPH::BodyID(); // (its carrier went with the old world)
+        moved.climbing = false;
+        moved.mantling = false;
         moved.body = fresh->make_character(c.desc, from_jolt_r(c.body->GetPosition()), c.velocity);
         if (moved.body != nullptr) fresh->characters.emplace(id, std::move(moved));
     }
@@ -806,7 +996,9 @@ u32 PhysicsWorld::step(double seconds) {
         m_impl->carried -= k_step_seconds;
         for (auto& [id, c] : m_impl->characters) {
             c.previous = from_jolt_r(c.body->GetPosition());
-            if (!c.held) {
+            if (!c.carrier.IsInvalid()) {
+                c.jump_wait = 0.0f; // (carried after the step, below)
+            } else if (!c.held) {
                 m_impl->step_character(c, static_cast<float>(k_step_seconds));
             } else {
                 // A jump pressed while held still lasts only its fifth of a second.
@@ -816,6 +1008,9 @@ u32 PhysicsWorld::step(double seconds) {
         const JPH::EPhysicsUpdateError error =
             m_impl->system.Update(static_cast<float>(k_step_seconds), 1, &m_impl->temp, &m_impl->jobs);
         m_impl->jobs.drain();
+        for (auto& [id, c] : m_impl->characters) {
+            if (!c.carrier.IsInvalid()) m_impl->carry(c);
+        }
         m_impl->hits.take(m_hits);
         if (error != JPH::EPhysicsUpdateError::None) {
             log_warning("physics", "a step ran short: too many body pairs or contacts");
@@ -882,7 +1077,30 @@ void PhysicsWorld::set_character_position(CharacterId id, const DVec3& position)
     it->second.velocity = {};
     it->second.vertical = 0.0f;
     it->second.jump_wait = 0.0f;
+    it->second.climbing = false;
+    it->second.mantling = false;
+    it->second.carrier = JPH::BodyID();
     m_impl->refresh(*it->second.body);
+}
+
+bool PhysicsWorld::carry_character(CharacterId id, BodyId carrier) {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end() || !contains(carrier) || m_impl->is_character_body(from_id(carrier))) return false;
+    const JPH::BodyLockRead lock(m_impl->system.GetBodyLockInterface(), from_id(carrier));
+    if (!lock.Succeeded()) return false;
+    Impl::Character& c = it->second;
+    c.carrier = from_id(carrier);
+    c.carry_at = from_jolt_r(lock.GetBody().GetWorldTransform().Inversed() * c.body->GetPosition());
+    c.climbing = false;
+    c.mantling = false;
+    return true;
+}
+
+void PhysicsWorld::release_character(CharacterId id) {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end() || it->second.carrier.IsInvalid()) return;
+    it->second.carrier = JPH::BodyID();
+    m_impl->refresh(*it->second.body); // falls on as it was carried (its speed kept)
 }
 
 void PhysicsWorld::hold_character(CharacterId id, bool held) {
@@ -905,6 +1123,14 @@ std::optional<CharacterState> PhysicsWorld::character_state(CharacterId id) cons
     s.on_steep = c.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnSteepGround;
     if (c.IsSupported()) s.ground_normal = from_jolt(c.GetGroundNormal());
     if (c.GetGroundState() != JPH::CharacterVirtual::EGroundState::InAir) s.ground = to_id(c.GetGroundBodyID());
+    const Impl::Character& ch = it->second;
+    s.climbing = ch.climbing || ch.mantling;
+    s.mantling = ch.mantling;
+    if (ch.climbing) {
+        s.wall = to_id(ch.wall);
+        s.wall_normal = ch.wall_normal;
+    }
+    if (!ch.carrier.IsInvalid()) s.carrier = to_id(ch.carrier);
     return s;
 }
 
