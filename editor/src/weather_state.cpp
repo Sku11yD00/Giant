@@ -26,7 +26,8 @@ double cloud_tile_metres(const world::Weather& weather) {
     return 32000.0 * std::max(static_cast<double>(weather.cloud_scale), 0.03125);
 }
 
-void WeatherState::update(const std::optional<world::Weather>& target, double seconds, const DVec3& camera) {
+void WeatherState::update(const std::optional<world::Weather>& target, double seconds, const DVec3& camera,
+                          u64 scene) {
     seconds = std::isfinite(seconds) ? std::clamp(seconds, 0.0, 1.0) : 0.0; // a stall does not jump the weather
     // A change, or a command asking again (the same weather at once ends a blend).
     if (!(target == m_target) || m_requested) {
@@ -48,6 +49,9 @@ void WeatherState::update(const std::optional<world::Weather>& target, double se
         m_from.reset();
         m_duration = 0.0;
         m_tile = 0.0;
+        m_ground = {};
+        m_ground_on = false;
+        m_scene = scene;
         return;
     }
     if (m_from && m_duration > 0.0) {
@@ -73,6 +77,23 @@ void WeatherState::update(const std::optional<world::Weather>& target, double se
     m_tile = tile;
     const Vec3 wind = world::wind_velocity(*m_shown);
     m_offset = m_offset + DVec3{wind.x, 0.0, wind.z} * seconds; // doubles: exact for centuries of wind
+    m_time += seconds;
+    // The ground starts from the scene's start values when weather first
+    // shows or the scene is replaced; after that it goes on under what is
+    // shown (a new weather blends in over a dry or wet ground as it is).
+    if (!m_ground_on || scene != m_scene) {
+        m_ground = {m_target->wetness, m_target->snow_cover};
+        m_ground_on = true;
+    } else {
+        m_ground = world::weather_ground(m_ground, *m_shown, seconds);
+    }
+    m_scene = scene;
+}
+
+void WeatherState::set_ground(const world::Ground& ground) {
+    m_ground = {std::clamp(std::isfinite(ground.wetness) ? ground.wetness : 0.0f, 0.0f, 1.0f),
+                std::clamp(std::isfinite(ground.snow_cover) ? ground.snow_cover : 0.0f, 0.0f, 1.0f)};
+    m_ground_on = true;
 }
 
 render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather) {
@@ -87,7 +108,7 @@ render::Lighting weather_lighting(const world::Lighting& lighting, const std::op
 }
 
 render::Sky weather_sky(const world::Lighting& lighting, const std::optional<world::Weather>& weather,
-                        const DVec3& cloud_offset) {
+                        const DVec3& cloud_offset, const world::Ground& ground, double time) {
     render::Sky sky;
     if (!weather) {
         return sky;
@@ -106,6 +127,13 @@ render::Sky weather_sky(const world::Lighting& lighting, const std::optional<wor
     // fog_density 1: things 150 m away mostly hidden (a few optical depths).
     sky.fog_density = w.fog_density * 0.02f;
     sky.fog_falloff = std::log(2.0f) / std::max(w.fog_height, 1.0f);
+    const world::Falling f = world::falling(w);
+    sky.rain = f.rain;
+    sky.snow = f.snow;
+    sky.wind = world::wind_velocity(w);
+    sky.wetness = ground.wetness;
+    sky.snow_cover = ground.snow_cover;
+    sky.time = time;
     return sky;
 }
 

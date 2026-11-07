@@ -141,6 +141,15 @@ struct Sky {
     // Height fog: per metre at y = 0, thinning by exp(-falloff * height).
     float fog_density = 0.0f;
     float fog_falloff = 1.0f / 200.0f;
+    // What falls (0 to 1 each), blown by the wind (metres a second), and
+    // the ground under it: wet (darker, glossier, puddles on the flat) and
+    // snow on what faces up, except where something above shelters it.
+    float rain = 0.0f;
+    float snow = 0.0f;
+    Vec3 wind{};
+    float wetness = 0.0f;
+    float snow_cover = 0.0f;
+    double time = 0.0; // seconds: what falls moves with it
 };
 
 struct View {
@@ -222,6 +231,12 @@ struct RenderSettings {
     bool clouds = true;
     u32 cloud_steps = 48;
     bool cloud_shadows = true;
+    // Rain and snow (with FrameInput::sky on): falling (`precipitation`),
+    // on surfaces (`wet_surfaces`), and kept off what is sheltered
+    // (`weather_cover`: a map from above made from the voxel world).
+    bool precipitation = true;
+    bool wet_surfaces = true;
+    bool weather_cover = true;
 };
 
 // A run of FrameInput::instances that changes together (a world cell).
@@ -307,6 +322,9 @@ struct RenderStats {
     bool sky = false;           // the atmosphere drawn
     bool clouds = false;        // clouds marched
     bool cloud_shadows = false; // and their shadows cast
+    bool falling = false;       // rain or snow drawn falling
+    bool wet_surfaces = false;  // wet or snowy surfaces
+    bool weather_cover = false; // the cover map made (sheltered places stay dry)
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -535,10 +553,12 @@ private:
     rhi::PipelineHandle m_sky_view_pass;
     rhi::PipelineHandle m_cloud_map_pass;
     rhi::PipelineHandle m_cloud_shadow_pass;
+    rhi::PipelineHandle m_cover_pass;
     rhi::PipelineHandle m_clouds_pass;
     rhi::TextureHandle m_sky_view;     // rgba16_float, the sky's light by direction
     rhi::TextureHandle m_cloud_map;    // rgba8_unorm, the clouds' pattern (made once)
     rhi::TextureHandle m_cloud_shadow; // rgba16_float, sunlight through the clouds over the ground
+    rhi::TextureHandle m_cover;        // r32_float, camera-relative height of what is on top (rain and snow)
     rhi::TextureHandle m_clouds_a;     // rgba16_float, half resolution: the clouds' light and transmittance
     rhi::TextureHandle m_clouds_b;     // rgba16_float, half resolution: their distance and the scene's
     bool m_cloud_map_made = false;

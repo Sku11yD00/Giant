@@ -536,7 +536,36 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   clouds by nearest depth, composites them over sky and scene, adds height
   fog (exponential in height, capped at 30 km) and darkens the sun by the
   cloud shadow (screen reflections are added scaled by what of the pixel comes through). A change of cloud size rescales the wind offset about the camera, so the clouds overhead stay put. Settings `clouds`, `cloud_steps` (48) and `cloud_shadows`.
-  Not yet: rain and snow (part 8), lightning, clouds parting round giants.
+  Not yet: lightning, clouds parting round giants.
+- **Rain, snow and wet ground (N3 part 8).** `world::falling` splits the
+  weather's precipitation into rain and snow by temperature;
+  `world::weather_ground` steps the ground's wetness and snow cover
+  (exponential approaches in steps of at most 10 s, so any step size
+  agrees) from the scene's start values when weather first shows or the
+  scene is replaced; the editor's `WeatherState` carries it on each frame
+  under the shown weather (view state, like the blend), and set_weather's
+  `wetness`/`snow_cover` put it somewhere at once. The renderer's `Sky` takes what falls, the wind,
+  the ground and a time. In the sky passes a cover map (256^2, a metre a
+  texel round the camera, r32) marches the voxel world straight down per
+  column (from 800 m above, or the coarsest window's top, to the finest
+  window holding it, then down that window) and stores the height of what
+  is on top, less the size of the voxel it hit (the march reports it,
+  whichever level or stand-in brick it was found on).
+  `weather_surface` (sky_common.slang) then wets surfaces open to the sky
+  (darker by porosity, rougher surfaces most; glossier; puddles from a
+  noise that repeats every 4096 m in the hollows of flat ground) and lays
+  snow on what faces up, before shading, on meshes and far-field voxels
+  alike (walls judged from the air beside them). Voxel-cone reflections
+  follow the dry roughness, so rain does not put a cone on every open
+  pixel (the wet gloss shows in screen and sky reflections). `apply_falling`
+  draws rain streaks or snowflakes on five cylinders round the camera (1.5
+  to 24 m), a hash per cell of a fixed size per cylinder, falling whole
+  cells per 64 s cycle so the time wraps without a jump, the drops and
+  their streaks leaning with the wind (a bounded shear, so cells never fold
+  across columns; not carried round, which would differ by view), none
+  where sheltered: no particles, no history. Settings `precipitation`, `wet_surfaces`,
+  `weather_cover`. Not yet: ripples, splashes, drips, wet voxel colours for
+  GI, snow depth (it is a coat, not a volume).
 
 ## Window events (known limit)
 

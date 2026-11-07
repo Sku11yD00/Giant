@@ -41,6 +41,7 @@ giant_shaders(render
     shaders/sky.slang:cs_sky_view:compute:sky_view_cs
     shaders/sky.slang:cs_cloud_map:compute:cloud_map_cs
     shaders/sky.slang:cs_cloud_shadow:compute:cloud_shadow_cs
+    shaders/sky.slang:cs_weather_cover:compute:weather_cover_cs
     shaders/sky.slang:cs_clouds:compute:clouds_cs
 )
 # SMAA's precomputed area and search tables (headers only).

@@ -349,6 +349,9 @@ Json weather_json(const Weather& w) {
         {"fog_height", w.fog_height},
         {"haze", w.haze},
         {"precipitation", w.precipitation},
+        {"temperature", w.temperature},
+        {"wetness", w.wetness},
+        {"snow_cover", w.snow_cover},
     };
 }
 
@@ -703,6 +706,9 @@ void read_weather(const Json& json, std::optional<Weather>& out, std::string& er
     r.number("fog_height", w.fog_height, 1, 10000);
     r.number("haze", w.haze, 0, 10);
     r.number("precipitation", w.precipitation, 0, 1);
+    r.number("temperature", w.temperature, -50, 50);
+    r.number("wetness", w.wetness, 0, 1);
+    r.number("snow_cover", w.snow_cover, 0, 1);
     r.finish();
     if (error.empty()) out = w;
 }

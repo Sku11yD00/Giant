@@ -8,7 +8,8 @@ namespace giant::world {
 
 namespace {
 
-constexpr std::array<std::string_view, 6> k_presets = {"clear", "fair", "cloudy", "overcast", "storm", "fog"};
+constexpr std::array<std::string_view, 9> k_presets = {"clear", "fair",  "cloudy",   "overcast", "rain",
+                                                        "storm", "snow", "blizzard", "fog"};
 
 bool in(float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; }
 
@@ -55,6 +56,47 @@ std::optional<Weather> weather_preset(std::string_view name) {
         w.fog_density = 0.05f;
         w.fog_height = 400.0f;
         w.precipitation = 1.0f;
+        w.temperature = 14.0f;
+        w.wetness = 1.0f;
+    } else if (name == "rain") {
+        w.cloud_cover = 0.9f;
+        w.cloud_density = 0.65f;
+        w.cloud_base = 800.0f;
+        w.cloud_thickness = 2500.0f;
+        w.cloud_scale = 1.5f;
+        w.wind_speed = 8.0f;
+        w.haze = 2.5f;
+        w.fog_density = 0.04f;
+        w.fog_height = 300.0f;
+        w.precipitation = 0.45f;
+        w.temperature = 11.0f;
+        w.wetness = 1.0f;
+    } else if (name == "snow") {
+        w.cloud_cover = 0.9f;
+        w.cloud_density = 0.55f;
+        w.cloud_base = 900.0f;
+        w.cloud_thickness = 2000.0f;
+        w.cloud_scale = 1.5f;
+        w.wind_speed = 3.0f;
+        w.haze = 2.0f;
+        w.fog_density = 0.05f;
+        w.fog_height = 300.0f;
+        w.precipitation = 0.5f;
+        w.temperature = -4.0f;
+        w.snow_cover = 1.0f;
+    } else if (name == "blizzard") {
+        w.cloud_cover = 1.0f;
+        w.cloud_density = 0.85f;
+        w.cloud_base = 500.0f;
+        w.cloud_thickness = 4000.0f;
+        w.cloud_scale = 2.0f;
+        w.wind_speed = 20.0f;
+        w.haze = 4.0f;
+        w.fog_density = 0.35f;
+        w.fog_height = 200.0f;
+        w.precipitation = 1.0f;
+        w.temperature = -12.0f;
+        w.snow_cover = 1.0f;
     } else if (name == "fog") {
         w.cloud_cover = 0.5f;
         w.cloud_density = 0.4f;
@@ -88,6 +130,11 @@ Weather blend(const Weather& a, const Weather& b, float t) {
     w.fog_height = std::exp(lerp(std::log(a.fog_height), std::log(b.fog_height), t));
     w.haze = lerp(a.haze, b.haze, t);
     w.precipitation = lerp(a.precipitation, b.precipitation, t);
+    w.temperature = lerp(a.temperature, b.temperature, t);
+    // The ground's starting state is the target's: the editor carries the
+    // ground on from what it is, not from a blend of starts.
+    w.wetness = b.wetness;
+    w.snow_cover = b.snow_cover;
     if (t == 1.0f) w = b; // exactly the target at the end
     return w;
 }
@@ -104,12 +151,71 @@ std::optional<std::string> check_weather(const Weather& w) {
     if (!in(w.fog_height, 1, 10000)) return "fog_height is 1 to 10000 metres";
     if (!in(w.haze, 0, 10)) return "haze is 0 to 10";
     if (!in(w.precipitation, 0, 1)) return "precipitation is 0 to 1";
+    if (!in(w.temperature, -50, 50)) return "temperature is -50 to 50 degrees";
+    if (!in(w.wetness, 0, 1) || !in(w.snow_cover, 0, 1)) return "wetness and snow_cover are 0 to 1";
     return std::nullopt;
 }
 
 Vec3 wind_velocity(const Weather& w) {
     const float a = degrees_to_radians(w.wind_direction_degrees);
     return {std::sin(a) * w.wind_speed, 0.0f, -std::cos(a) * w.wind_speed};
+}
+
+Falling falling(const Weather& w) {
+    const float p = std::isfinite(w.precipitation) ? std::clamp(w.precipitation, 0.0f, 1.0f) : 0.0f;
+    const float t = std::isfinite(w.temperature) ? w.temperature : 10.0f;
+    const float snow_share = std::clamp((2.0f - t) / 3.0f, 0.0f, 1.0f);
+    return {p * (1.0f - snow_share), p * snow_share};
+}
+
+namespace {
+
+// One step of weather_ground, short enough that the coupling between
+// melting and wetting stays close to the continuous one.
+Ground ground_step(Ground ground, const Weather& w, double seconds) {
+    const Falling f = falling(w);
+    const double t = std::isfinite(w.temperature) ? w.temperature : 10.0;
+    const double warm = std::clamp((t + 5.0) / 30.0, 0.0, 1.0);
+    const double wind = std::isfinite(w.wind_speed) ? std::clamp(static_cast<double>(w.wind_speed), 0.0, 200.0) : 0.0;
+    const double cloud = std::isfinite(w.cloud_cover) ? std::clamp(static_cast<double>(w.cloud_cover), 0.0, 1.0) : 0.0;
+    // Rates a second, each applied as a steady approach to its end
+    // (exponential within the step).
+    const double wet_rate = f.rain / 300.0; // wetting: 5 minutes at full rain
+    const double dry_rate = (0.3 + 0.7 * warm) * (1.0 + wind / 10.0) * (1.0 - 0.5 * cloud) / 2400.0;
+    const double snow_rate = f.snow / 1200.0;                // 20 minutes to cover
+    const double melt_rate = t > 0.0 ? t / 6000.0 : 0.0;     // 10 minutes at 10 degrees
+    double wet = std::clamp(static_cast<double>(ground.wetness), 0.0, 1.0);
+    double snow = std::clamp(static_cast<double>(ground.snow_cover), 0.0, 1.0);
+    // Snow: towards 1 while it falls, melting away when warm.
+    const double snow_before = snow;
+    if (const double sum = snow_rate + melt_rate; sum > 0.0) {
+        const double target = snow_rate / sum;
+        snow = target + (snow - target) * std::exp(-sum * seconds);
+    }
+    // Melt water wets the ground (twice what melted: slush is wet).
+    const double melted = std::max(snow_before - snow, 0.0);
+    wet = std::min(wet + 2.0 * melted, 1.0);
+    // Wetness: towards rain's share of rain and drying (a drizzle on a warm
+    // day stays damp, not soaked); lying snow keeps what is under it.
+    const double wet_out = dry_rate * (1.0 - snow) * (1.0 - f.rain);
+    if (const double sum = wet_rate + wet_out; sum > 0.0) {
+        const double target = wet_rate / sum;
+        wet = target + (wet - target) * std::exp(-sum * seconds);
+    }
+    return {static_cast<float>(std::clamp(wet, 0.0, 1.0)), static_cast<float>(std::clamp(snow, 0.0, 1.0))};
+}
+
+} // namespace
+
+Ground weather_ground(Ground ground, const Weather& w, double seconds) {
+    if (!std::isfinite(seconds) || seconds <= 0.0) return ground;
+    // Steps of at most 10 s (a minute's worth of steps for long ones past
+    // a day), so any step size the caller takes gives about the same.
+    const double longest = std::max(10.0, seconds / 8640.0);
+    const int steps = static_cast<int>(std::ceil(seconds / longest));
+    const double step = seconds / steps;
+    for (int i = 0; i < steps; ++i) ground = ground_step(ground, w, step);
+    return ground;
 }
 
 Vec3 air_transmittance(float sun_elevation_degrees, float haze) {

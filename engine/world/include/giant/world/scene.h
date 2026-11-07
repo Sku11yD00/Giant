@@ -192,7 +192,12 @@ struct Weather {
     float fog_density = 0.0f;       // 0 to 1: at 1 the ground fog hides things about 150 m away
     float fog_height = 200.0f;      // metres, 1 to 10000: the fog thins by half each this much higher
     float haze = 1.0f;              // 0 to 10: dust and moisture in the air (paler sky, redder sun)
-    float precipitation = 0.0f;     // 0 to 1: rain or snow to come (drawn from N3 part 8)
+    float precipitation = 0.0f;     // 0 to 1: how hard it rains or snows
+    float temperature = 10.0f;      // degrees Celsius, -50 to 50: snow below about 0, rain above 2
+    // The ground as the scene starts (what has fallen before): 0 to 1. The
+    // editor then wets, dries, covers and melts it as the weather goes on.
+    float wetness = 0.0f;
+    float snow_cover = 0.0f;
     bool operator==(const Weather&) const = default;
 };
 

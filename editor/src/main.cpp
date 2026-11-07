@@ -340,7 +340,8 @@ int run(const Options& options) {
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::weather_lighting(state.scene.lighting, weather.shown());
-        input.sky = editor::weather_sky(state.scene.lighting, weather.shown(), weather.cloud_offset());
+        input.sky = editor::weather_sky(state.scene.lighting, weather.shown(), weather.cloud_offset(), weather.ground(),
+                                        weather.time());
         input.settings = state.render_settings;
         input.instances = scene_frame.instances;
         input.cells = scene_frame.cells;
@@ -426,7 +427,7 @@ int run(const Options& options) {
         viewport_camera.update(state.camera, delta);
         panels.draw(frame_info);
         ui->end_frame();
-        weather.update(state.scene.weather, delta, state.camera.position); // after the panels' changes
+        weather.update(state.scene.weather, delta, state.camera.position, state.scene_generation); // after the panels' changes
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }

@@ -544,6 +544,17 @@ void EditorPanels::draw_weather() {
     slider("Fog", "fog_density", w->fog_density, 0.0f, 1.0f);
     slider("Fog height", "fog_height", w->fog_height, 1.0f, 10000.0f, "%.0f m", ImGuiSliderFlags_Logarithmic);
     slider("Haze", "haze", w->haze, 0.0f, 10.0f);
+    slider("Rain / snow", "precipitation", w->precipitation, 0.0f, 1.0f);
+    slider("Temperature", "temperature", w->temperature, -50.0f, 50.0f, "%.0f C");
+    // The ground's start values: setting one puts the ground there now.
+    slider("Ground wet", "wetness", w->wetness, 0.0f, 1.0f);
+    slider("Snow lying", "snow_cover", w->snow_cover, 0.0f, 1.0f);
+    if (m_state.weather != nullptr) {
+        const world::Ground g = m_state.weather->ground();
+        const world::Falling f = world::falling(m_state.weather->shown() ? *m_state.weather->shown() : *w);
+        ImGui::TextDisabled("Now: ground %.0f%% wet, %.0f%% snow; falling: rain %.2f, snow %.2f", g.wetness * 100.0f,
+                            g.snow_cover * 100.0f, f.rain, f.snow);
+    }
     if (ImGui::Button("Clear weather")) {
         run("clear_weather");
     }

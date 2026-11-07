@@ -39,7 +39,10 @@ Json weather_json(const Weather& w) {
             {"fog_density", w.fog_density},
             {"fog_height", w.fog_height},
             {"haze", w.haze},
-            {"precipitation", w.precipitation}};
+            {"precipitation", w.precipitation},
+            {"temperature", w.temperature},
+            {"wetness", w.wetness},
+            {"snow_cover", w.snow_cover}};
 }
 
 void record(EditorState& state, CommandContext& context, std::optional<Weather> before, std::optional<Weather> after) {
@@ -55,7 +58,10 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"set_weather",
          "Sets the scene's weather: an atmosphere the sun shines through (redder low in the sky and in "
-         "haze), a layer of clouds that drifts on the wind and shades the ground, and height fog. Starts "
+         "haze), a layer of clouds that drifts on the wind and shades the ground, height fog, and rain or "
+         "snow (by temperature) that wets the ground (darker, glossier, puddles) or covers what faces up, "
+         "except where something above shelters it; the ground then wets, dries, snows over and thaws as "
+         "time passes (wetness and snow_cover put it there; a preset's only start a new scene). Starts "
          "from `preset` if given, else the weather now (or the defaults), then sets the fields given. "
          "over_seconds blends the view from what shows now to the new weather (default 0: at once, and at "
          "once from no weather; the scene saves the new weather either way). A scene without weather keeps the flat sky colours of "
@@ -74,7 +80,13 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
                 {"fog_density", number(0, 1, "Ground fog: at 1 things about 150 m away are hidden.")},
                 {"fog_height", number(1, 10000, "Metres: the fog thins by half each this much higher.")},
                 {"haze", number(0, 10, "Dust and moisture in the air (paler sky, redder sun). Default 1.")},
-                {"precipitation", number(0, 1, "Rain or snow to come (drawn from a later part).")},
+                {"precipitation", number(0, 1, "How hard it rains or snows.")},
+                {"temperature", number(-50, 50, "Degrees Celsius: snow at -1 and below, rain at 2 and above, "
+                                                "sleet between; warm melts lying snow. Default 10.")},
+                {"wetness", number(0, 1, "How wet the ground is, now and as the scene starts (then it wets and dries "
+                                         "with the weather).")},
+                {"snow_cover", number(0, 1, "How much snow lies, now and as the scene starts (then it falls and "
+                                            "melts with the weather).")},
                 {"over_seconds", number(0, 3600, "Blend the view into it over this long. Default 0.")}}}},
          false,
          [&state](const Json& args, CommandContext& context) {
@@ -96,10 +108,27 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
              field("fog_height", w.fog_height);
              field("haze", w.haze);
              field("precipitation", w.precipitation);
+             field("temperature", w.temperature);
+             field("wetness", w.wetness);
+             field("snow_cover", w.snow_cover);
              if (const auto bad = world::check_weather(w)) return CommandResult::failure(*bad);
              const std::optional<Weather> before = state.scene.weather;
              state.scene.weather = w;
-             if (state.weather != nullptr) state.weather->transition(args.value("over_seconds", 0.0));
+             if (state.weather != nullptr) {
+                 state.weather->transition(args.value("over_seconds", 0.0));
+                 // The ground's start values given: the ground is there now
+                 // (a preset's alone only say how a new scene starts).
+                 // Only the values given: the other stays where the
+                 // weather has taken it (or, with no ground yet, starts at
+                 // the new weather's start value).
+                 if (args.contains("wetness") || args.contains("snow_cover")) {
+                     world::Ground g = state.weather->ground_on() ? state.weather->ground()
+                                                                  : world::Ground{w.wetness, w.snow_cover};
+                     if (args.contains("wetness")) g.wetness = w.wetness;
+                     if (args.contains("snow_cover")) g.snow_cover = w.snow_cover;
+                     state.weather->set_ground(g);
+                 }
+             }
              record(state, context, before, w);
              return CommandResult::success({{"weather", weather_json(w)}});
          }});
@@ -118,8 +147,9 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"get_weather",
          "The scene's weather (null: none, the flat sky), what the view shows now (mid-blend it differs), "
-         "how far a blend has come (1: done), the presets, and whether the last frame drew the sky, clouds "
-         "and their shadows (sky).",
+         "how far a blend has come (1: done), what is falling (rain, snow), the ground now (wetness, "
+         "snow_cover), the presets, and what the last frame drew (sky: the sky, clouds, their shadows, "
+         "falling rain or snow, wet or snowy surfaces, the cover map).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
          [&state](const Json&, CommandContext&) {
@@ -128,14 +158,27 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
              Json presets_out = Json::array();
              for (const std::string_view name : world::weather_preset_names()) presets_out.push_back(std::string(name));
              out["presets"] = std::move(presets_out);
+             const std::optional<Weather>& now =
+                 state.weather != nullptr && state.weather->shown() ? state.weather->shown() : state.scene.weather;
+             if (now) {
+                 const world::Falling f = world::falling(*now);
+                 out["falling"] = {{"rain", f.rain}, {"snow", f.snow}};
+             }
              if (state.weather != nullptr) {
                  out["shown"] = state.weather->shown() ? weather_json(*state.weather->shown()) : Json(nullptr);
                  out["progress"] = state.weather->progress();
                  const DVec3 o = state.weather->cloud_offset();
                  out["cloud_offset"] = {o.x, o.z};
+                 const world::Ground g = state.weather->ground();
+                 out["ground"] = {{"wetness", g.wetness}, {"snow_cover", g.snow_cover}};
              }
              const render::RenderStats& s = state.scene_stats;
-             out["sky"] = {{"on", s.sky}, {"clouds", s.clouds}, {"cloud_shadows", s.cloud_shadows}};
+             out["sky"] = {{"on", s.sky},
+                           {"clouds", s.clouds},
+                           {"cloud_shadows", s.cloud_shadows},
+                           {"falling", s.falling},
+                           {"wet_surfaces", s.wet_surfaces},
+                           {"weather_cover", s.weather_cover}};
              return CommandResult::success(std::move(out));
          }});
 }

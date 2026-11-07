@@ -61,8 +61,32 @@ struct Sky {
     uint pad1;
     float3 sun_top;       // the sun above the air (colour times intensity)
     float pad2;
+    // What falls and the ground under it.
+    float rain;           // 0 to 1
+    float snow;           // 0 to 1
+    float wetness;        // the ground, 0 to 1
+    float snow_cover;     // 0 to 1
+    float2 wind;          // x, z metres a second
+    float time;           // seconds
+    uint cover;           // read descriptor: camera-relative height of what is on top (r32)
+    float2 cover_origin;  // camera-relative x, z of the cover map's corner
+    float cover_size;     // metres
+    uint weather_flags;   // bit 0: falling; bit 1: wet and snowy surfaces; bit 2: the cover map
+    float2 place;         // the camera's x, z wrapped at k_weather_wrap metres
+    float pixel_angle;    // radians a pixel spans
+    uint pad3;
+    uint voxel_pool;      // the voxel world (VoxelWorld), for the cover map
+    uint voxel_table;
+    uint voxel_levels;
+    uint voxel_levels_offset;
+    uint voxel_level_count;
+    uint voxel_bricks_per_axis;
+    uint pad4;
+    uint pad5;
 };
-static const uint k_sky_params_bytes = 176;
+static const uint k_sky_params_bytes = 272;
+static const uint k_cover_size = 256;       // texels a side (gpu: renderer.cpp k_cover_size)
+static const float k_weather_wrap = 4096.0; // metres: ground patterns repeat this far
 
 Sky load_sky(uint descriptor, uint offset) {
     ByteAddressBuffer b = read_buffer(descriptor);
@@ -108,6 +132,33 @@ Sky load_sky(uint descriptor, uint offset) {
     s.pad1 = r9.w;
     s.sun_top = r10.xyz;
     s.pad2 = r10.w;
+    const float4 r11 = load4(b, offset + 176);
+    const float4 r12 = load4(b, offset + 192);
+    const float4 r13 = load4(b, offset + 208);
+    const float4 r14 = load4(b, offset + 224);
+    const uint4 r15 = b.Load4(offset + 240);
+    const uint4 r16 = b.Load4(offset + 256);
+    s.rain = r11.x;
+    s.snow = r11.y;
+    s.wetness = r11.z;
+    s.snow_cover = r11.w;
+    s.wind = r12.xy;
+    s.time = r12.z;
+    s.cover = asuint(r12.w);
+    s.cover_origin = r13.xy;
+    s.cover_size = r13.z;
+    s.weather_flags = asuint(r13.w);
+    s.place = r14.xy;
+    s.pixel_angle = r14.z;
+    s.pad3 = asuint(r14.w);
+    s.voxel_pool = r15.x;
+    s.voxel_table = r15.y;
+    s.voxel_levels = r15.z;
+    s.voxel_levels_offset = r15.w;
+    s.voxel_level_count = r16.x;
+    s.voxel_bricks_per_axis = r16.y;
+    s.pad4 = r16.z;
+    s.pad5 = r16.w;
     return s;
 }
 
@@ -411,4 +462,185 @@ float4 clouds_at(Sky s, uint2 pixel, float distance, out float first) {
         a = float4(a.rgb * share, lerp(1.0, a.a, share));
     }
     return a;
+}
+
+// --- Rain and snow ---------------------------------------------------------------
+
+uint weather_hash(uint3 v) {
+    v = v * uint3(1664525u, 1013904223u, 2654435761u) + uint3(1013904223u, 1664525u, 374761393u);
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    return v.x ^ (v.x >> 13u);
+}
+
+float weather_unit(uint3 v) { return float(weather_hash(v) & 0xFFFFFFu) / 16777216.0; }
+
+// Value noise over the ground, 0 to 1, in cells of `cell` metres, the same
+// again every k_weather_wrap metres (so the camera's wrapped place moves
+// it on without a jump). `seed` picks the pattern.
+float weather_noise(float2 at, float cell, uint seed) {
+    const float2 v = at / cell;
+    const float2 i = floor(v);
+    const float2 u = v - i;
+    const float2 w = u * u * (3.0 - 2.0 * u);
+    const int period = int(k_weather_wrap / cell);
+    const int2 a = int2(i);
+    const uint2 c0 = uint2(((a % period) + period) % period);
+    const uint2 c1 = uint2((((a + 1) % period) + period) % period);
+    const float n00 = weather_unit(uint3(c0.x, c0.y, seed));
+    const float n10 = weather_unit(uint3(c1.x, c0.y, seed));
+    const float n01 = weather_unit(uint3(c0.x, c1.y, seed));
+    const float n11 = weather_unit(uint3(c1.x, c1.y, seed));
+    return lerp(lerp(n00, n10, w.x), lerp(n01, n11, w.x), w.y);
+}
+
+// How open to the sky a camera-relative point on a surface with normal `n`
+// is (1: rain and snow reach it; 0: something above shelters it), from the
+// cover map. A wall is judged from the open air just in front of it.
+// Without the map (or past it): open.
+float open_sky(Sky s, float3 p, float3 n) {
+    if ((s.weather_flags & 4u) == 0u) {
+        return 1.0;
+    }
+    const float2 q = p.xz + n.xz * 0.75;
+    const float2 uv = (q - s.cover_origin) / s.cover_size;
+    if (any(uv < 0.0) || any(uv >= 1.0)) {
+        return 1.0;
+    }
+    // The nearest texel: heights do not blend across a roof's edge.
+    const int2 t = clamp(int2(uv * float(k_cover_size)), int2(0, 0), int2(int(k_cover_size) - 1, int(k_cover_size) - 1));
+    const float h = read_texture_float(s.cover).Load(int3(t, 0));
+    // At (or above) what is on top (the map is a voxel low already): open.
+    return saturate((p.y + max(n.y, 0.0) * 0.25 - h + 0.25) / 0.5);
+}
+
+// The weather on a surface at camera-relative `p`: wet (darker where it is
+// porous, glossier, puddles in the hollows of flat ground) and snow on
+// what faces up, where the sky is open above it.
+void weather_surface(Sky s, float3 p, inout float3 base, inout float rough, inout float metal, inout float3 n) {
+    if ((s.weather_flags & 2u) == 0u) {
+        return;
+    }
+    const float open = open_sky(s, p, n);
+    if (open <= 0.0) {
+        return;
+    }
+    const float2 at = s.place + p.xz;
+    const float up = n.y;
+    // Wet: water fills the pores (rough, non-metal surfaces darken most)
+    // and films the surface (glossier).
+    const float wet = s.wetness * open;
+    const float porous = saturate(rough * 1.3) * (1.0 - saturate(metal));
+    base *= lerp(1.0, 0.45, wet * porous);
+    rough = lerp(rough, min(rough, 0.2), wet);
+    // Puddles: in the hollows of a noise on flat ground, spreading as it gets wetter.
+    const float hollows = weather_noise(at, 8.0, 7u) * 0.7 + weather_noise(at, 2.0, 11u) * 0.3;
+    const float flat = smoothstep(0.9, 0.98, up);
+    const float puddle = flat * smoothstep(0.62, 0.56, hollows - (s.wetness - 0.6) * 0.3) * saturate(s.wetness * 2.5 - 1.2) * open;
+    base = lerp(base, base * 0.6, puddle);
+    rough = lerp(rough, 0.03, puddle);
+    metal = lerp(metal, 0.0, puddle);
+    n = normalize(lerp(n, float3(0.0, 1.0, 0.0), puddle));
+    // Snow: on what faces up, thin first in lumps, then all over.
+    const float lumps = weather_noise(at, 1.6, 23u); // cells that divide k_weather_wrap
+    const float facing = smoothstep(0.3, 0.7, up + (lumps - 0.5) * 0.2);
+    const float snow = saturate(s.snow_cover * 1.4 - lumps * 0.4) * facing * open;
+    base = lerp(base, float3(0.86, 0.88, 0.92), snow);
+    rough = lerp(rough, 0.7, snow);
+    metal = lerp(metal, 0.0, snow);
+    n = normalize(lerp(n, float3(0.0, 1.0, 0.0), snow * 0.5));
+}
+
+// Rain or snow falling in front of what a pixel shows `distance` metres
+// away along `dir`: drops on cylinders round the camera (1.5 to 24 m out),
+// each a cell's worth of falling streaks or flakes from a hash, moving
+// with the time and the wind. None where it is sheltered (the cover map).
+// Each cylinder's cells are one size (about 18 pixels at its radius), a
+// whole number round it (no seam) and a whole number fallen every 64 s,
+// with the hash repeating to match: the time wraps without a jump, and the
+// numbers stay small. The wind leans the drops.
+static const float k_fall_cycle = 64.0; // seconds
+float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
+    if ((s.weather_flags & 1u) == 0u) {
+        return color;
+    }
+    const float amount = s.rain + s.snow;
+    if (amount <= 0.0) {
+        return color;
+    }
+    const float snowy = s.snow / amount;
+    const float flat = length(dir.xz);
+    const float2 dh = flat > 1e-4 ? dir.xz / flat : float2(0.0, -1.0);
+    const float turn = atan2(dh.x, -dh.y) * (0.5 / k_pi_sky) + 0.5; // 0 to 1 round the camera
+    const float2 tangent = float2(-dh.y, dh.x);
+    const bool flakes = snowy > 0.5; // one look or the other, so a blend never steps the cells
+    const float speed = flakes ? 1.2 : 8.0;         // metres a second down
+    const float wind = length(s.wind);
+    const float across_wind = wind > 1e-4 ? dot(s.wind / wind, tangent) : 0.0; // -1 to 1 along the cylinder
+    const float cycle = fmod(s.time, k_fall_cycle);
+    const float3 lit = s.sky_light * 0.7 + s.sun_light * (0.08 + 0.25 * snowy) * saturate(s.sun_direction.y * 2.0 + 0.2);
+    float3 c = color;
+    // Far to near, so nearer drops are over farther ones.
+    [unroll] for (int k = 4; k >= 0; --k) {
+        const float radius = 1.5 * exp2(float(k));
+        const float t = radius / max(flat, 0.3);
+        if (t >= distance || t > 80.0) {
+            continue;
+        }
+        const float3 p = dir * t;
+        if (open_sky(s, p, float3(0.0, 1.0, 0.0)) <= 0.5) {
+            continue;
+        }
+        const float px = radius * s.pixel_angle; // metres a pixel spans at this radius
+        // Cells: a whole number round the cylinder; tall for streaks.
+        const float around = max(floor(2.0 * k_pi_sky * radius / max(px * 18.0, 0.05)), 8.0);
+        const float cell_u = 2.0 * k_pi_sky * radius / around;
+        const float cell_v = cell_u * (flakes ? 1.0 : 4.0);
+        // The fall rounded to whole cells a cycle. The wind leans the drops
+        // (a slant with height) rather than carrying them round: a carry
+        // would differ by view direction and split the cells column by column.
+        const float fall_cells = max(round(speed * k_fall_cycle / cell_v), 1.0);
+        const float fall = fall_cells * cell_v / k_fall_cycle;
+        // Metres along for each metre down. The lean turns with the view
+        // (a cosine of it), so its size and the height it shears are both
+        // bounded (1.5, half the radius): the cells never fold across the
+        // columns (their step per column stays above a quarter).
+        const float lean = across_wind * min(wind * 0.8 / fall, 1.5);
+        const float sheared = 0.5 * radius * tanh(p.y / (0.5 * radius)); // smooth: no bend in the streaks
+        // Where this point was in the falling frame (cells), the height
+        // taken within the hash's vertical period.
+        const float period_v = fall_cells * cell_v;
+        const float height = fmod(fmod(s.cam_alt, period_v) + period_v, period_v) + p.y;
+        const float2 g = float2((turn * 2.0 * k_pi_sky * radius + lean * sheared) / cell_u,
+                                (height + fall * cycle) / cell_v);
+        const float2 gi = floor(g);
+        const int2 cell = int2(gi);
+        const int2 periods = int2(int(around), int(fall_cells));
+        const uint2 wrapped = uint2(((cell % periods) + periods) % periods);
+        const uint3 key = uint3(wrapped.x | (uint(k) << 20), wrapped.y, 0x5EEDu);
+        if (weather_unit(key) > amount * 0.9) {
+            continue; // no drop in this cell
+        }
+        float2 centre = float2(weather_unit(key + uint3(0u, 0u, 1u)), weather_unit(key + uint3(0u, 0u, 2u)));
+        if (flakes) {
+            centre.x += sin(cycle * (2.0 * k_pi_sky / k_fall_cycle) * 5.0 + weather_unit(key + uint3(0u, 0u, 3u)) * 6.28) * 0.15;
+        }
+        const float2 d = (g - gi - centre) * float2(cell_u, cell_v); // metres from the drop's centre
+        float alpha;
+        if (flakes) {
+            const float r = max(px * 0.9, 0.006);
+            alpha = 0.85 * saturate(1.0 - length(d) / r);
+        } else {
+            // A streak along its motion, about 0.3 m long: straight down in the
+            // sheared cells, so it follows the drops' lean.
+            const float along = d.y;
+            const float across = abs(d.x);
+            alpha = 0.3 * saturate(1.0 - across / max(px * 0.7, 0.0015)) * saturate(1.0 - abs(along) / 0.15);
+        }
+        c = lerp(c, lit, alpha);
+    }
+    return c;
 }
