@@ -10,6 +10,7 @@
 #include "giant/core/math.h"
 #include "giant/core/types.h"
 #include "giant/world/cell.h"
+#include "giant/world/damage.h"
 #include "giant/world/terrain.h"
 
 #include <optional>
@@ -314,6 +315,19 @@ public:
     // None: the flat sky of `lighting` (not tracked: compare).
     std::optional<Weather> weather;
 
+    // Damage kept (damage.h), by cell: copied, saved and loaded with the
+    // scene, not undone by itself (commands record it). Setting a cell's
+    // marks the kit placements its records name, before and after, as
+    // changed (take_changes), so what follows them sees the change.
+    const Damage& damage() const { return m_damage; }
+    const CellDamage* damage_in(CellCoord cell) const;
+    // Replaces the cell's damage (empty: none), sorted (sort_damage).
+    void set_damage(CellCoord cell, CellDamage damage);
+    // The kept record of a kit placement (null: none).
+    const KeptKit* kept_kit(EntityId id) const;
+    // Counts every set_damage (a follower looks over the damage only when it moved).
+    u64 damage_edits() const { return m_damage_edits; }
+
     // The id the next new entity gets.
     EntityId next_id() const { return m_next_id; }
     // New ids start at `next` or later (ids of deleted entities stay unused).
@@ -334,6 +348,9 @@ private:
     std::vector<Entity> m_entities;
     std::unordered_map<EntityId, usize> m_index; // id -> place in m_entities
     EntityId m_next_id = 1;
+    Damage m_damage;
+    std::unordered_map<EntityId, CellCoord> m_kept_kits; // the cell whose damage holds each kit record
+    u64 m_damage_edits = 0;
     SceneChanges m_changes{{}, true};
     Identity m_identity;
 };
@@ -387,15 +404,19 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
 // One cell's entities, sorted by id, so an unchanged cell saves the same
 // text, and its terrain tile if it has one ("heights", rows of text as in
 // a scene; samples x samples of them).
+// Its kept damage too, if any ("damage": damage.h).
 std::string save_cell(CellCoord cell, std::span<const Entity> entities,
-                      const Terrain::Heights* heights = nullptr);
+                      const Terrain::Heights* heights = nullptr, const CellDamage* damage = nullptr);
 // Replaces `out` and `heights` only on success (`heights` empty when the
 // file holds no tile). Every entity must be in `cell` (by position) and
 // ids unique in the file; a tile must be `terrain_samples` a side (the
 // world's; 0: none may be there). Kits are not checked (the world's index holds them): an
 // entity naming a missing kit just draws nothing.
+// `damage` (when given) takes the cell's kept damage (empty: none; it is
+// read and checked either way).
 std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 terrain_samples,
-                                   std::vector<Entity>& out, std::optional<Terrain::Heights>& heights);
+                                   std::vector<Entity>& out, std::optional<Terrain::Heights>& heights,
+                                   CellDamage* damage = nullptr);
 // The same for a cell that must hold no terrain (terrain_samples 0).
 std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::vector<Entity>& out);
 

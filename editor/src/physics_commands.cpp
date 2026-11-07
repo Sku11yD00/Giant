@@ -8,6 +8,8 @@
 #include "giant/core/assert.h"
 
 #include <cmath>
+#include <memory>
+#include <unordered_set>
 
 namespace giant::editor {
 
@@ -28,6 +30,20 @@ Json triple(double limit, const char* description) {
             {"minItems", 3},
             {"maxItems", 3},
             {"description", description}};
+}
+
+// The scene's kept damage, and what of it is applied now.
+Json kept_json(const world::Scene& scene, const sim::ScenePhysicsStats& s, const sim::ForestStats& f) {
+    usize kits = 0;
+    usize pieces = 0;
+    usize trees = 0;
+    for (const auto& [c, d] : scene.damage()) {
+        kits += d.kits.size();
+        for (const world::KeptKit& k : d.kits) pieces += k.pieces.size();
+        trees += d.trees.size();
+    }
+    return {{"cells", scene.damage().size()}, {"kits", kits}, {"pieces", pieces}, {"trees", trees},
+            {"pieces_down", s.kept_pieces}, {"trees_down", f.kept}};
 }
 
 Json physics_json(const EditorState& state) {
@@ -61,6 +77,7 @@ Json physics_json(const EditorState& state) {
                        {"refused", f.refused},
                        {"shrugged", f.shrugged}}},
             {"ground", {{"dents", p.ground().dents()}, {"tiles", p.ground().tiles()}}},
+            {"kept", kept_json(state.scene, s, f)},
             {"dust", {{"puffs", d.puffs}, {"emitted", d.emitted}, {"merged", d.merged}, {"dropped", d.dropped}}}};
 }
 
@@ -230,6 +247,77 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              Json out = physics_json(state);
              out["loosened"] = hit.loosened;
              out["felled"] = hit.felled;
+             return CommandResult::success(out);
+         }});
+
+    add(registry,
+        {"keep_damage",
+         "Makes what simulating broke part of the world, undoably: every broken building's pieces stay down "
+         "where they are drawn (falling ones stop where they are), every felled tree stays down where it "
+         "lies, and every dent becomes the ground itself. Kept damage is saved in each cell's file (and in "
+         "scene files), streams with its cell, and shows whether simulating or not; stopping the "
+         "simulation leaves it. A building moved, resized or given another kit afterwards stands whole "
+         "again, and a tree placed anew (another model, size or place) stands. clear_damage takes it "
+         "away. Returns `cells` (changed), `tiles` (dents kept), the totals kept (`kits`, `pieces`, "
+         "`trees`) and get_physics.",
+         Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
+         false,
+         [&state](const Json&, CommandContext& context) {
+             if (state.physics == nullptr) return no_physics();
+             auto kept = std::make_shared<PhysicsState::KeptDamage>(state.physics->keep_damage(state.scene));
+             if (!kept->before.empty() || !kept->after.empty() || !kept->ground.empty()) {
+                 const auto put = [&state, kept](bool after) {
+                     std::unordered_set<world::CellCoord, world::CellCoordHash> cells;
+                     for (const auto& [c, d] : kept->before) cells.insert(c);
+                     for (const auto& [c, d] : kept->after) cells.insert(c);
+                     const world::Damage& to = after ? kept->after : kept->before;
+                     for (const world::CellCoord c : cells) {
+                         const auto it = to.find(c);
+                         state.scene.set_damage(c, it != to.end() ? it->second : world::CellDamage{});
+                     }
+                     for (const world::GroundDamage::Kept& g : kept->ground) {
+                         state.scene.terrain.restore(g.cell, after ? g.after : g.before,
+                                                     after ? g.after_version : g.before_version);
+                     }
+                 };
+                 context.record(scene_change(state, [put] { put(false); }, [put] { put(true); }));
+             }
+             std::unordered_set<world::CellCoord, world::CellCoordHash> cells;
+             for (const auto& [c, d] : kept->before) cells.insert(c);
+             for (const auto& [c, d] : kept->after) cells.insert(c);
+             Json out = physics_json(state);
+             out["cells"] = cells.size();
+             out["tiles"] = kept->ground.size();
+             out["kits"] = kept->kits;
+             out["pieces"] = kept->pieces;
+             out["trees"] = kept->trees;
+             return CommandResult::success(out);
+         }});
+
+    add(registry,
+        {"clear_damage",
+         "Takes away the kept damage (keep_damage) of every loaded cell, undoably: broken buildings stand "
+         "whole and felled trees stand again (kept craters are the ground now: undo keep_damage, or "
+         "sculpt, to take them away). What simulating breaks since is not touched. Returns `cells` "
+         "(cleared) and get_physics.",
+         Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
+         false,
+         [&state](const Json&, CommandContext& context) {
+             if (state.physics == nullptr) return no_physics();
+             auto before = std::make_shared<const world::Damage>(state.scene.damage());
+             for (const auto& [c, d] : *before) state.scene.set_damage(c, {});
+             if (!before->empty()) {
+                 context.record(scene_change(
+                     state,
+                     [&state, before] {
+                         for (const auto& [c, d] : *before) state.scene.set_damage(c, d);
+                     },
+                     [&state, before] {
+                         for (const auto& [c, d] : *before) state.scene.set_damage(c, {});
+                     }));
+             }
+             Json out = physics_json(state);
+             out["cells"] = before->size();
              return CommandResult::success(out);
          }});
 

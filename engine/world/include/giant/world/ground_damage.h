@@ -32,6 +32,18 @@ public:
     // aside; put_back presses them in again.
     void lift(Terrain& terrain);
     void put_back(Terrain& terrain);
+    // The dents kept for good (keep_damage): the dented tiles stay as they
+    // are, now the ground as authored, and are forgotten here. Returns each
+    // one's heights before its first dent and now, with their versions (an
+    // undo puts `before` back with Terrain::restore).
+    struct Kept {
+        CellCoord cell;
+        Terrain::Heights before;
+        u64 before_version = 0;
+        Terrain::Heights after;
+        u64 after_version = 0;
+    };
+    std::vector<Kept> keep(const Terrain& terrain);
     // A new scene: nothing to put back.
     void forget() {
         m_tiles.clear();

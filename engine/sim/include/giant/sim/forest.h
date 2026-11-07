@@ -36,6 +36,7 @@
 #include "giant/sim/dust.h"
 #include "giant/sim/physics.h"
 #include "giant/world/cell.h"
+#include "giant/world/damage.h"
 #include "giant/world/scene.h"
 
 #include <optional>
@@ -88,6 +89,7 @@ struct ForestStats {
     u32 refused = 0;  // trunks the physics world refused (bad numbers, or full), in all
     u32 shrugged = 0; // blows enough to fell a tree left out (the caps), in all
     u32 laid = 0;     // fallen with no body (laid down where they fell: far off), now
+    u32 kept = 0;     // of those, lying as the scene's kept damage says (they stay down)
 };
 
 class Forest {
@@ -101,7 +103,17 @@ public:
     // `trees` in point order, maybe none): its old trunks go (in the next
     // syncs) and its fallen trees stand again (drawn again), but for those
     // whose point stands at the same x and z, kept fallen with their bodies.
-    void set_cell(world::CellCoord cell, u64 serial, std::vector<TreeSpot> trees);
+    // `records`, the scene's kept damage for the cell (world::CellDamage::
+    // trees): the trees they name (the same x and z to the centimetre, as
+    // big) lie where they say, with no bodies, and stay down through
+    // reset(); a tree fallen there now gives its place to its record.
+    void set_cell(world::CellCoord cell, u64 serial, std::vector<TreeSpot> trees,
+                  std::vector<world::KeptTree> records = {});
+    // The records the cell was last given (null: not known).
+    const std::vector<world::KeptTree>* records(world::CellCoord cell) const;
+    // Every known cell's fallen trees as kept damage (keep_damage), by cell
+    // (x then z; a cell with none fallen listed with none).
+    std::vector<std::pair<world::CellCoord, std::vector<world::KeptTree>>> damage() const;
     // A cell gone (its placements left): its trunks, fallen or not, go.
     void remove_cell(world::CellCoord cell);
     // The placement a cell's trees are of (0: not known).
@@ -164,6 +176,7 @@ private:
         BodyId body = k_no_body;
         bool fallen = false;
         bool laid = false; // fallen with no body: laid down (lay())
+        bool kept = false; // laid as the scene's kept damage says: stays down
     };
     struct Cell {
         u64 serial = 0;
@@ -172,6 +185,7 @@ private:
         u32 trunks = 0;   // standing trunks with bodies
         u32 fallen = 0;
         float reach = 0.0f; // its tallest tree's height and radius (metres)
+        std::vector<world::KeptTree> records; // as given to set_cell
     };
     struct Owner {
         world::CellCoord cell;
@@ -215,6 +229,7 @@ private:
     u32 m_refused = 0;
     u32 m_shrugged = 0;
     u32 m_laid = 0;
+    u32 m_kept = 0;
     Dust* m_dust = nullptr;
 };
 

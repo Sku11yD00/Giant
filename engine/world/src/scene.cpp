@@ -139,13 +139,17 @@ Scene::Identity& Scene::Identity::operator=(const Identity&) {
 Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
       weather(other.weather), m_entities(other.m_entities), m_index(other.m_index),
-      m_next_id(other.m_next_id) {}
+      m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
+      m_damage_edits(other.m_damage_edits) {}
 
 Scene::Scene(Scene&& other) noexcept
     : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
       scatter(std::move(other.scatter)), weather(other.weather), m_entities(std::move(other.m_entities)),
-      m_index(std::move(other.m_index)), m_next_id(other.m_next_id) {
+      m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
+      m_kept_kits(std::move(other.m_kept_kits)), m_damage_edits(other.m_damage_edits) {
     other.clear();
+    other.m_damage.clear();
+    other.m_kept_kits.clear();
 }
 
 Scene& Scene::operator=(const Scene& other) {
@@ -165,6 +169,11 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         m_entities = std::move(other.m_entities);
         m_index = std::move(other.m_index);
         m_next_id = other.m_next_id;
+        m_damage = std::move(other.m_damage);
+        m_kept_kits = std::move(other.m_kept_kits);
+        m_damage_edits = other.m_damage_edits + 1;
+        other.m_damage.clear();
+        other.m_kept_kits.clear();
         m_changes = {{}, true};
         m_identity = Identity();
         other.clear();
@@ -306,6 +315,53 @@ void Scene::clear() {
     m_changes = {{}, true};
     // Ids are never reused within a session, so an undo history that
     // mentions an old id cannot reach a new entity by mistake.
+}
+
+void sort_damage(CellDamage& damage) {
+    std::sort(damage.kits.begin(), damage.kits.end(), [](const KeptKit& a, const KeptKit& b) { return a.entity < b.entity; });
+    for (KeptKit& k : damage.kits) {
+        std::sort(k.pieces.begin(), k.pieces.end(), [](const KeptPiece& a, const KeptPiece& b) { return a.piece < b.piece; });
+    }
+    std::sort(damage.trees.begin(), damage.trees.end(),
+              [](const KeptTree& a, const KeptTree& b) { return a.x != b.x ? a.x < b.x : a.z < b.z; });
+}
+
+const CellDamage* Scene::damage_in(CellCoord cell) const {
+    const auto it = m_damage.find(cell);
+    return it == m_damage.end() ? nullptr : &it->second;
+}
+
+void Scene::set_damage(CellCoord cell, CellDamage damage) {
+    sort_damage(damage);
+    const auto it = m_damage.find(cell);
+    if (it == m_damage.end() ? damage.empty() : it->second == damage) return;
+    ++m_damage_edits;
+    if (it != m_damage.end()) {
+        for (const KeptKit& k : it->second.kits) {
+            const auto at = m_kept_kits.find(k.entity);
+            if (at != m_kept_kits.end() && at->second == cell) m_kept_kits.erase(at);
+            changed(k.entity);
+        }
+    }
+    for (const KeptKit& k : damage.kits) {
+        m_kept_kits[k.entity] = cell;
+        changed(k.entity);
+    }
+    if (damage.empty()) {
+        m_damage.erase(cell);
+    } else {
+        m_damage[cell] = std::move(damage);
+    }
+}
+
+const KeptKit* Scene::kept_kit(EntityId id) const {
+    const auto at = m_kept_kits.find(id);
+    if (at == m_kept_kits.end()) return nullptr;
+    const auto cell = m_damage.find(at->second);
+    if (cell == m_damage.end()) return nullptr;
+    const std::vector<KeptKit>& records = cell->second.kits;
+    const auto it = std::lower_bound(records.begin(), records.end(), id, [](const KeptKit& k, EntityId v) { return k.entity < v; });
+    return it != records.end() && it->entity == id ? &*it : nullptr;
 }
 
 void Scene::reindex(usize from) {
@@ -498,6 +554,44 @@ Json entity_json(const Entity& e) {
     return entity;
 }
 
+Json transform_json(Json& out, const DVec3& position, const Quat& q, const Vec3& scale) {
+    out["position"] = dvec3_json(position);
+    out["rotation"] = Json::array({q.x, q.y, q.z, q.w});
+    out["scale"] = vec3_json(scale);
+    return out;
+}
+
+// A cell's damage (sorted already: Scene::set_damage keeps it so; sorted
+// again for callers that build one by hand).
+Json damage_json(CellDamage damage) {
+    sort_damage(damage);
+    Json out = Json::object();
+    if (!damage.kits.empty()) {
+        Json kits = Json::array();
+        for (const KeptKit& k : damage.kits) {
+            Json kit = {{"entity", k.entity}, {"kit", k.kit}};
+            transform_json(kit, k.position, k.rotation, k.scale);
+            Json pieces = Json::array();
+            for (const KeptPiece& p : k.pieces) {
+                Json piece = {{"piece", p.piece}};
+                pieces.push_back(transform_json(piece, p.position, p.rotation, p.scale));
+            }
+            kit["pieces"] = std::move(pieces);
+            kits.push_back(std::move(kit));
+        }
+        out["kits"] = std::move(kits);
+    }
+    if (!damage.trees.empty()) {
+        Json trees = Json::array();
+        for (const KeptTree& t : damage.trees) {
+            Json tree = {{"x", t.x}, {"z", t.z}, {"height", t.height}, {"trunk_radius", t.trunk_radius}};
+            trees.push_back(transform_json(tree, t.position, t.rotation, t.scale));
+        }
+        out["trees"] = std::move(trees);
+    }
+    return out;
+}
+
 } // namespace
 
 std::string save_scene(const Scene& scene) {
@@ -524,6 +618,18 @@ std::string save_scene(const Scene& scene) {
         entities.push_back(entity_json(e));
     }
     out["entities"] = std::move(entities);
+    if (!scene.damage().empty()) {
+        std::vector<CellCoord> cells;
+        for (const auto& [c, d] : scene.damage()) cells.push_back(c);
+        std::sort(cells.begin(), cells.end(), [](CellCoord a, CellCoord b) { return a.z != b.z ? a.z < b.z : a.x < b.x; });
+        Json damage = Json::array();
+        for (const CellCoord c : cells) {
+            Json cell = damage_json(*scene.damage_in(c));
+            cell["cell"] = Json::array({c.x, c.z});
+            damage.push_back(std::move(cell));
+        }
+        out["damage"] = std::move(damage);
+    }
     return out.dump(2) + "\n";
 }
 
@@ -634,7 +740,11 @@ public:
                 fail(key, "must not be all zeros");
                 return;
             }
-            out = normalize(Quat{q[0], q[1], q[2], q[3]});
+            // One already unit (as saved) reads back exactly (normalizing
+            // again would move it by a rounding: a kept record would no longer
+            // be what was kept); others are made unit.
+            const Quat read{q[0], q[1], q[2], q[3]};
+            out = std::fabs(length - 1.0f) <= 1e-6f ? read : normalize(read);
         }
     }
 
@@ -863,6 +973,90 @@ std::optional<CellCoord> read_cell(const Json& v) {
         return std::nullopt;
     }
     return CellCoord{static_cast<i32>(x), static_cast<i32>(z)};
+}
+
+// A transform's "position" (metres, within 1e8), "rotation" and "scale" (all required).
+void read_transform(Reader& r, DVec3& position, Quat& rotation, Vec3& scale) {
+    for (const char* key : {"position", "rotation", "scale"}) {
+        if (r.get(key, true) == nullptr) return;
+    }
+    r.vec3("position", position, -1e8, 1e8);
+    r.quat("rotation", rotation);
+    r.vec3("scale", scale, 0.0001, 1e6);
+}
+
+// A cell's damage (`json`: its "kits" and "trees", with `extra` keys
+// allowed beside them for the caller to read). Every kit placement and
+// tree foot must be in `cell`.
+void read_damage(Reader& r, const std::string& path, CellCoord cell, CellDamage& out, std::string& error) {
+    const std::string where = "is not in cell [" + std::to_string(cell.x) + ", " + std::to_string(cell.z) + "]";
+    if (const Json* kits = r.get("kits", false); kits != nullptr && r.ok()) {
+        if (!kits->is_array() || kits->size() > k_max_kept_kits) {
+            r.fail("kits", "must be an array of at most " + std::to_string(k_max_kept_kits) + " kit placements");
+            return;
+        }
+        std::set<u64> seen;
+        for (usize i = 0; i < kits->size() && error.empty(); ++i) {
+            const std::string kit_path = path + "kits[" + std::to_string(i) + "]";
+            KeptKit k;
+            Reader kr((*kits)[i], kit_path, error);
+            kr.id("entity", k.entity, true);
+            kr.string("kit", k.kit, true, k_max_name_bytes);
+            read_transform(kr, k.position, k.rotation, k.scale);
+            if (kr.ok() && !seen.insert(k.entity).second) kr.fail("entity", "is listed twice");
+            if (kr.ok() && !(cell_of(k.position) == cell)) kr.fail("position", where);
+            if (const Json* pieces = kr.get("pieces", true); pieces != nullptr && kr.ok()) {
+                if (!pieces->is_array() || pieces->empty() || pieces->size() > k_max_kit_pieces) {
+                    kr.fail("pieces", "must be an array of 1 to " + std::to_string(k_max_kit_pieces) + " pieces");
+                } else {
+                    std::set<u32> taken;
+                    for (usize j = 0; j < pieces->size() && error.empty(); ++j) {
+                        KeptPiece p;
+                        Reader pr((*pieces)[j], kit_path + ".pieces[" + std::to_string(j) + "]", error);
+                        if (const Json* v = pr.get("piece", true); v != nullptr && pr.ok()) {
+                            if (!v->is_number_unsigned() || v->get<u64>() >= k_max_kit_pieces) {
+                                pr.fail("piece", "must be a whole number below " + std::to_string(k_max_kit_pieces));
+                            } else {
+                                p.piece = static_cast<u32>(v->get<u64>());
+                                if (!taken.insert(p.piece).second) pr.fail("piece", "is listed twice");
+                            }
+                        }
+                        read_transform(pr, p.position, p.rotation, p.scale);
+                        pr.finish();
+                        k.pieces.push_back(p);
+                    }
+                }
+            }
+            kr.finish();
+            out.kits.push_back(std::move(k));
+        }
+    }
+    if (const Json* trees = r.get("trees", false); trees != nullptr && r.ok() && error.empty()) {
+        if (!trees->is_array() || trees->size() > k_max_kept_trees) {
+            r.fail("trees", "must be an array of at most " + std::to_string(k_max_kept_trees) + " trees");
+            return;
+        }
+        for (usize i = 0; i < trees->size() && error.empty(); ++i) {
+            KeptTree t;
+            Reader tr((*trees)[i], path + "trees[" + std::to_string(i) + "]", error);
+            for (const char* key : {"x", "z"}) {
+                if (const Json* v = tr.get(key, true); v != nullptr && tr.ok()) {
+                    if (!v->is_number() || !std::isfinite(v->get<double>()) || std::fabs(v->get<double>()) > 1e8) {
+                        tr.fail(key, "must be a finite number within 1e8");
+                    } else {
+                        (key[0] == 'x' ? t.x : t.z) = v->get<double>();
+                    }
+                }
+            }
+            if (tr.get("height", true) != nullptr) tr.number("height", t.height, 0.01, 10000);
+            if (tr.get("trunk_radius", true) != nullptr) tr.number("trunk_radius", t.trunk_radius, 0.001, 1000);
+            read_transform(tr, t.position, t.rotation, t.scale);
+            if (tr.ok() && !(cell_of({t.x, 0.0, t.z}) == cell)) tr.fail("x", where);
+            tr.finish();
+            out.trees.push_back(t);
+        }
+    }
+    sort_damage(out);
 }
 
 // "samples" and "material" of a terrain (or a world's terrain settings).
@@ -1191,6 +1385,27 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
         scene.add(std::move(entity));
         return {};
     });
+    if (const Json* damage = root.get("damage", false); damage != nullptr && root.ok() && error.empty()) {
+        if (!damage->is_array()) {
+            root.fail("damage", "must be an array of cells");
+        }
+        for (usize i = 0; root.ok() && error.empty() && i < damage->size(); ++i) {
+            const std::string path = "damage[" + std::to_string(i) + "]";
+            Reader dr((*damage)[i], path, error);
+            std::optional<CellCoord> cell;
+            if (const Json* c = dr.get("cell", true); c != nullptr && dr.ok()) {
+                cell = read_cell(*c);
+                if (!cell) dr.fail("cell", "must be [x, z], whole numbers");
+            }
+            CellDamage d;
+            if (cell) {
+                if (scene.damage_in(*cell) != nullptr) dr.fail("cell", "is listed twice");
+                read_damage(dr, path + ".", *cell, d, error);
+            }
+            dr.finish();
+            if (error.empty() && cell) scene.set_damage(*cell, std::move(d));
+        }
+    }
     root.finish();
     if (!error.empty()) {
         return LoadError{std::move(error)};
@@ -1371,7 +1586,8 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     return std::nullopt;
 }
 
-std::string save_cell(CellCoord cell, std::span<const Entity> entities, const Terrain::Heights* heights) {
+std::string save_cell(CellCoord cell, std::span<const Entity> entities, const Terrain::Heights* heights,
+                      const CellDamage* damage) {
     std::vector<const Entity*> sorted;
     sorted.reserve(entities.size());
     for (const Entity& e : entities) {
@@ -1393,6 +1609,7 @@ std::string save_cell(CellCoord cell, std::span<const Entity> entities, const Te
                      "a terrain tile is samples x samples heights");
         out["heights"] = heights_json(*heights, n);
     }
+    if (damage != nullptr && !damage->empty()) out["damage"] = damage_json(*damage);
     return out.dump(2) + "\n";
 }
 
@@ -1402,7 +1619,8 @@ std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::v
 }
 
 std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 terrain_samples,
-                                   std::vector<Entity>& out, std::optional<Terrain::Heights>& heights_out) {
+                                   std::vector<Entity>& out, std::optional<Terrain::Heights>& heights_out,
+                                   CellDamage* damage_out) {
     GIANT_ASSERT(terrain_samples == 0 || valid_terrain_samples(terrain_samples), "terrain samples must be valid");
     Json json;
     if (auto bad = parse(text, json)) {
@@ -1441,12 +1659,19 @@ std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 te
             read_heights(root, "heights", terrain_samples, *heights);
         }
     }
+    CellDamage damage;
+    if (const Json* d = root.get("damage", false); d != nullptr && root.ok() && error.empty()) {
+        Reader dr(*d, "damage", error);
+        read_damage(dr, "damage.", cell, damage, error);
+        dr.finish();
+    }
     root.finish();
     if (!error.empty()) {
         return LoadError{std::move(error)};
     }
     out = std::move(entities);
     heights_out = std::move(heights);
+    if (damage_out != nullptr) *damage_out = std::move(damage);
     return std::nullopt;
 }
 

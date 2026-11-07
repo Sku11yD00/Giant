@@ -102,6 +102,23 @@ public:
         PhysicsState* m_physics;
         world::Scene& m_scene;
     };
+    // What simulating broke, made part of the world (keep_damage): the
+    // broken kit placements' pieces down where they are drawn and the felled
+    // trees where they lie become the scene's kept damage (world::Scene::
+    // set_damage, by cell), and the dents the ground as authored (forgotten
+    // here). Bodies falling now stop where they are. Kept damage is applied
+    // whether simulating or not, and stopping leaves it so. Returns what
+    // changed, for an undo: the cells' damage before and after, and the
+    // ground's tiles (heights and versions before their first dent, and now).
+    struct KeptDamage {
+        world::Damage before; // the cells it changes, as they were (no entry: none)
+        world::Damage after;
+        std::vector<world::GroundDamage::Kept> ground;
+        usize kits = 0;   // kit placements with pieces down, kept now in all
+        usize pieces = 0;
+        usize trees = 0;
+    };
+    KeptDamage keep_damage(world::Scene& scene);
     // Fallen scatter trees (drawn where they lie), and the cells to draw again (taken by the frame).
     const sim::FallenTrees& fallen_trees() const { return m_forest.fallen(); }
     std::vector<world::CellCoord> take_tree_redraw() { return m_forest.take_redraw(); }
@@ -116,6 +133,11 @@ private:
     void notice_scene(const world::Scene& scene);
     // The trees of a cell's placement, in point order.
     static std::vector<sim::TreeSpot> trees_of(const ScatterPlacer::Cell& placed);
+    // The cell's placement given to the forest, with the scene's kept trees there.
+    void give(world::CellCoord cell, const ScatterPlacer::Cell& placed);
+    // When the scene's kept damage changed: the cells whose kept trees the
+    // forest was given otherwise are given again (wherever they are).
+    void follow_kept(const world::Scene& scene);
 
     JobSystem m_jobs; // first: outlives the physics world
     sim::Dust m_dust; // before what emits into it
@@ -125,6 +147,8 @@ private:
     sim::ScenePhysics m_bodies;
     sim::Forest m_forest; // after the world: its trunks go first
     u64 m_scene = 0;
+    const world::Scene* m_scene_at = nullptr; // as last noticed (the editor's scene outlives this)
+    u64 m_damage_edits = ~u64{0};             // the scene's kept damage the forest follows
     DVec3 m_camera{}; // as last fed
     const ScatterPlacer* m_scatter = nullptr; // as last fed (it outlives this)
     bool m_on = false;

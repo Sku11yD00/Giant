@@ -145,6 +145,11 @@ world::Transform piece_place(const world::Transform& parent, const world::Transf
     return out;
 }
 
+// Whether a tracked placement's kept pieces are the record's (none: none).
+bool same_kept(const std::vector<world::KeptPiece>& had, const world::KeptKit* now) {
+    return now == nullptr ? had.empty() : had == now->pieces;
+}
+
 // Pieces this close (metres) count as touching: holding each other up.
 constexpr float k_touching = 0.02f;
 // Pieces whose bottom is this close to the kit's lowest stand on the ground.
@@ -165,6 +170,7 @@ struct ScenePhysics::Broken {
         std::vector<u32> touching;
         BodyId body = k_no_body; // loose: its own
         bool rubble = false;     // loose with no body: lying as rubble
+        bool kept = false;       // loose as the scene's kept damage says (no body)
     };
     std::vector<Piece> pieces;
     std::vector<u32> standing_parts; // the standing body's parts: which piece each is
@@ -264,6 +270,7 @@ bool ScenePhysics::clear(usize others) {
     m_piece_bodies.clear();
     m_broken.clear();
     m_rubble = 0;
+    m_kept = 0;
     m_queue.clear();
     m_dynamic_queue.clear();
     m_dynamic_queued.clear();
@@ -353,9 +360,11 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
     m_edited.erase(id);
     const world::Entity* e = scene.find(id);
     const auto it = m_entities.find(id);
+    const world::KeptKit* kept = e != nullptr ? kept_of(scene, *e) : nullptr;
+    const bool kept_same = it == m_entities.end() ? kept == nullptr : same_kept(it->second.kept, kept);
     if (it != m_entities.end() && it->second.broken != nullptr) {
         const Tracked& t = it->second;
-        const bool unchanged = e != nullptr && !t.remake && same_body(t.look, *e) &&
+        const bool unchanged = e != nullptr && !t.remake && kept_same && same_body(t.look, *e) &&
                                t.look.transform.position == e->transform.position &&
                                t.look.transform.rotation == e->transform.rotation;
         if (!unchanged) {
@@ -374,7 +383,7 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
         m_poses.erase(id); // gone from the scene: nothing to draw
         return 1;
     }
-    if (it != m_entities.end() && !it->second.remake && same_body(it->second.look, *e)) {
+    if (it != m_entities.end() && !it->second.remake && kept_same && same_body(it->second.look, *e)) {
         Tracked& t = it->second;
         if (t.look.transform.position == e->transform.position && t.look.transform.rotation == e->transform.rotation) {
             return 1; // unchanged where it counts (a colour, a name)
@@ -396,7 +405,10 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
     Tracked& t = m_entities[id];
     t = Tracked{};
     t.look = *e;
-    BodyDesc desc = entity_body(e->shape == world::Shape::kit ? find_kit(e->kit) : nullptr, *e);
+    const world::Kit* kit = e->shape == world::Shape::kit ? find_kit(e->kit) : nullptr;
+    // Kept damage: the pieces it says came down lie where it says (no
+    // bodies), the rest stand as one body.
+    BodyDesc desc = kept != nullptr && kit != nullptr ? make_kept(id, t, *kit, kept->pieces) : entity_body(kit, *e);
     const u32 cost = std::max<u32>(1, static_cast<u32>(desc.parts.size())); // a kit's pieces count each
     if (!desc.parts.empty()) {
         const bool dynamic = desc.motion == Motion::dynamic;
@@ -694,8 +706,16 @@ void ScenePhysics::reset_poses() {
     for (const world::EntityId id : mended) {
         const auto it = m_entities.find(id);
         if (it == m_entities.end()) continue;
-        mend(id, it->second, gone);
-        BodyDesc d = entity_body(find_kit(it->second.look.kit), it->second.look);
+        Tracked& t = it->second;
+        // Broken only as its kept damage says: it stays so.
+        if (t.broken != nullptr && std::all_of(t.broken->pieces.begin(), t.broken->pieces.end(),
+                                               [](const Broken::Piece& p) { return !p.loose || p.kept; })) {
+            continue;
+        }
+        const std::vector<world::KeptPiece> kept = t.kept;
+        mend(id, t, gone);
+        const world::Kit* kit = find_kit(t.look.kit);
+        BodyDesc d = !kept.empty() && kit != nullptr ? make_kept(id, t, *kit, kept) : entity_body(kit, t.look);
         if (d.parts.empty()) continue;
         made_ids.push_back(id);
         descs.push_back(std::move(d));
@@ -763,6 +783,7 @@ ScenePhysicsStats ScenePhysics::stats() const {
     s.broken_kits = static_cast<u32>(m_broken.size());
     s.loose_pieces = static_cast<u32>(m_piece_bodies.size());
     s.rubble = m_rubble;
+    s.kept_pieces = m_kept;
     return s;
 }
 
@@ -774,6 +795,7 @@ void ScenePhysics::mend(world::EntityId id, Tracked& t, std::vector<BodyId>& gon
     if (t.broken == nullptr) return;
     for (const Broken::Piece& p : t.broken->pieces) {
         if (p.rubble) --m_rubble;
+        if (p.kept) --m_kept;
         if (p.body == k_no_body) continue;
         gone.push_back(p.body);
         m_piece_bodies.erase(p.body);
@@ -784,6 +806,7 @@ void ScenePhysics::mend(world::EntityId id, Tracked& t, std::vector<BodyId>& gon
         t.body = k_no_body;
     }
     t.broken.reset();
+    t.kept.clear();
     m_piece_poses.erase(id);
     m_broken.erase(id);
     m_redraw.push_back(id);
@@ -842,22 +865,7 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
         t.body = k_no_body;
     }
     std::vector<BodyDesc> descs;
-    BodyDesc standing;
-    standing.position = t.look.transform.position;
-    standing.rotation = t.look.transform.rotation;
-    standing.user = id;
-    standing.report_parts = true;
-    b.standing_parts.clear();
-    const Vec3& ps = t.look.transform.scale;
-    for (u32 i = 0; i < b.pieces.size(); ++i) {
-        if (!b.pieces[i].collides || b.pieces[i].loose) continue;
-        const world::KitPiece& p = kit->pieces[i];
-        const Vec3 offset{static_cast<float>(p.transform.position.x) * ps.x,
-                          static_cast<float>(p.transform.position.y) * ps.y,
-                          static_cast<float>(p.transform.position.z) * ps.z};
-        add_part(p.shape, mul3(p.transform.scale, ps), offset, p.transform.rotation, standing.parts);
-        b.standing_parts.push_back(i);
-    }
+    BodyDesc standing = standing_body(id, t, *kit);
     const bool any_standing = !standing.parts.empty();
     if (any_standing) descs.push_back(std::move(standing));
     // Each loose piece a body of its own, where it is drawn: near the
@@ -946,6 +954,86 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
     m_broken.insert(id);
     m_redraw.push_back(id);
     return newly.size();
+}
+
+const world::KeptKit* ScenePhysics::kept_of(const world::Scene& scene, const world::Entity& e) const {
+    if (e.shape != world::Shape::kit) return nullptr;
+    const world::KeptKit* k = scene.kept_kit(e.id);
+    if (k == nullptr || k->kit != e.kit || !(k->position == e.transform.position) ||
+        !(k->rotation == e.transform.rotation) || !(k->scale == e.transform.scale)) {
+        return nullptr; // moved, resized or another kit since: it stands whole
+    }
+    const world::Kit* kit = find_kit(e.kit);
+    return kit != nullptr && kit->breakable ? k : nullptr;
+}
+
+BodyDesc ScenePhysics::make_kept(world::EntityId id, Tracked& t, const world::Kit& kit,
+                                 std::span<const world::KeptPiece> kept) {
+    BodyDesc d;
+    if (t.look.body == world::BodyKind::none) return d;
+    t.broken = std::make_shared<Broken>(kit, t.look.transform);
+    Broken& b = *t.broken;
+    std::vector<PiecePose>& poses = m_piece_poses[id];
+    poses.clear();
+    for (const world::KeptPiece& k : kept) {
+        if (k.piece >= b.pieces.size() || b.pieces[k.piece].loose) continue;
+        b.pieces[k.piece].loose = true;
+        b.pieces[k.piece].kept = true;
+        ++m_kept;
+        world::Transform at;
+        at.position = k.position;
+        at.rotation = k.rotation;
+        at.scale = k.scale;
+        poses.push_back({k.piece, at});
+    }
+    std::sort(poses.begin(), poses.end(), [](const PiecePose& x, const PiecePose& y) { return x.piece < y.piece; });
+    t.kept.assign(kept.begin(), kept.end());
+    d = standing_body(id, t, kit);
+    m_broken.insert(id);
+    m_redraw.push_back(id);
+    return d;
+}
+
+BodyDesc ScenePhysics::standing_body(world::EntityId id, Tracked& t, const world::Kit& kit) const {
+    Broken& b = *t.broken;
+    BodyDesc standing;
+    standing.position = t.look.transform.position;
+    standing.rotation = t.look.transform.rotation;
+    standing.user = id;
+    standing.report_parts = true;
+    b.standing_parts.clear();
+    const Vec3& ps = t.look.transform.scale;
+    for (u32 i = 0; i < b.pieces.size(); ++i) {
+        if (!b.pieces[i].collides || b.pieces[i].loose) continue;
+        const world::KitPiece& p = kit.pieces[i];
+        const Vec3 offset{static_cast<float>(p.transform.position.x) * ps.x,
+                          static_cast<float>(p.transform.position.y) * ps.y,
+                          static_cast<float>(p.transform.position.z) * ps.z};
+        add_part(p.shape, mul3(p.transform.scale, ps), offset, p.transform.rotation, standing.parts);
+        b.standing_parts.push_back(i);
+    }
+    return standing;
+}
+
+std::vector<world::KeptKit> ScenePhysics::damage() const {
+    std::vector<world::EntityId> ids(m_broken.begin(), m_broken.end());
+    std::sort(ids.begin(), ids.end());
+    std::vector<world::KeptKit> out;
+    for (const world::EntityId id : ids) {
+        const auto it = m_entities.find(id);
+        const auto poses = m_piece_poses.find(id);
+        if (it == m_entities.end() || poses == m_piece_poses.end() || poses->second.empty()) continue;
+        world::KeptKit& k = out.emplace_back();
+        k.entity = id;
+        k.kit = it->second.look.kit;
+        k.position = it->second.look.transform.position;
+        k.rotation = it->second.look.transform.rotation;
+        k.scale = it->second.look.transform.scale;
+        for (const PiecePose& p : poses->second) {
+            k.pieces.push_back({p.piece, p.at.position, p.at.rotation, p.at.scale});
+        }
+    }
+    return out;
 }
 
 world::Transform ScenePhysics::rubble_at(world::EntityId id, const world::KitPiece& piece, const world::Transform& at,

@@ -1,6 +1,7 @@
 #include "physics_state.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include <cmath>
 #include <thread>
 
@@ -44,9 +45,36 @@ std::vector<sim::TreeSpot> PhysicsState::trees_of(const ScatterPlacer::Cell& pla
     return out;
 }
 
+void PhysicsState::give(world::CellCoord cell, const ScatterPlacer::Cell& placed) {
+    const world::CellDamage* kept = m_scene_at != nullptr ? m_scene_at->damage_in(cell) : nullptr;
+    m_forest.set_cell(cell, placed.serial, trees_of(placed), kept != nullptr ? kept->trees : std::vector<world::KeptTree>{});
+}
+
+void PhysicsState::follow_kept(const world::Scene& scene) {
+    if (scene.damage_edits() == m_damage_edits || m_scatter == nullptr) return;
+    m_damage_edits = scene.damage_edits();
+    const auto differs = [&](world::CellCoord c) {
+        const world::CellDamage* kept = scene.damage_in(c);
+        const std::vector<world::KeptTree>* had = m_forest.records(c);
+        const usize now = kept != nullptr ? kept->trees.size() : 0;
+        if (had == nullptr) return now > 0;
+        return now == 0 ? !had->empty() : !(*had == kept->trees);
+    };
+    std::vector<world::CellCoord> cells = m_forest.cells();
+    for (const auto& [c, d] : scene.damage()) {
+        if (!d.trees.empty() && m_forest.records(c) == nullptr) cells.push_back(c);
+    }
+    for (const world::CellCoord c : cells) {
+        const ScatterPlacer::Cell* placed = m_scatter->find(c);
+        if (placed != nullptr && differs(c)) give(c, *placed);
+    }
+}
+
 void PhysicsState::notice_scene(const world::Scene& scene) {
+    m_scene_at = &scene;
     if (scene.identity() == m_scene) return;
     m_scene = scene.identity();
+    m_damage_edits = ~u64{0};
     m_dust.clear();
     m_ground.forget(); // another scene's ground
     m_restore_ground = false;
@@ -80,10 +108,11 @@ void PhysicsState::feed_forest(const world::Scene& scene, const ScatterPlacer& s
     const auto fits = [&](const ScatterPlacer::Cell& placed) {
         return looked == 0 || looked + placed.points.size() <= points_per_feed;
     };
-    const auto give = [&](world::CellCoord c, const ScatterPlacer::Cell& placed) {
-        m_forest.set_cell(c, placed.serial, trees_of(placed));
+    const auto give_cell = [&](world::CellCoord c, const ScatterPlacer::Cell& placed) {
+        give(c, placed);
         looked += placed.points.size();
     };
+    follow_kept(scene);
     // Cells known whose placement went, or changed (a cell with fallen
     // trees is given again wherever it is: they stay down where they stand).
     for (const world::CellCoord c : m_forest.cells()) {
@@ -92,7 +121,7 @@ void PhysicsState::feed_forest(const world::Scene& scene, const ScatterPlacer& s
             m_forest.remove_cell(c);
         } else if (placed->serial != m_forest.serial(c)) {
             if (m_forest.fallen_in(c) > 0 || (m_forest.wants(c, camera) && fits(*placed))) {
-                give(c, *placed);
+                give_cell(c, *placed);
             } else {
                 m_forest.remove_cell(c); // given again when in reach
             }
@@ -120,7 +149,7 @@ void PhysicsState::feed_forest(const world::Scene& scene, const ScatterPlacer& s
     for (const auto& [d, c] : wanted) {
         const ScatterPlacer::Cell& placed = *scatter.find(c);
         if (!fits(placed)) break;
-        give(c, placed);
+        give_cell(c, placed);
     }
 }
 
@@ -129,7 +158,7 @@ void PhysicsState::refresh_forest(const world::Scene& scene, const ScatterPlacer
     for (const world::CellCoord c : m_forest.cells()) {
         const ScatterPlacer::Cell* placed = scatter.find(c);
         if (placed == nullptr || placed->serial == m_forest.serial(c) || m_forest.fallen_in(c) == 0) continue;
-        m_forest.set_cell(c, placed->serial, trees_of(*placed));
+        give(c, *placed);
     }
 }
 
@@ -151,6 +180,65 @@ usize PhysicsState::dent(world::Scene& scene, const world::Dent& dent, const DVe
         m_dust.emit({at.x, ground.value_or(at.y) + 0.4 * r, at.z}, r, 1.2f / r, sim::k_dust_earth);
     }
     return changed.size();
+}
+
+PhysicsState::KeptDamage PhysicsState::keep_damage(world::Scene& scene) {
+    notice_scene(scene);
+    restore_ground(scene); // (stopped since: that ground is not this simulation's)
+    follow_kept(scene);    // the forest holds the scene's kept trees as they are
+    KeptDamage out;
+    world::Damage next = scene.damage();
+    std::unordered_set<world::CellCoord, world::CellCoordHash> touched;
+    // Records whose placement is there but moved or changed since: they no
+    // longer apply, and go.
+    for (auto& [c, d] : next) {
+        const usize was = d.kits.size();
+        std::erase_if(d.kits, [&](const world::KeptKit& k) {
+            const world::Entity* e = scene.find(k.entity);
+            return e != nullptr && (e->shape != world::Shape::kit || e->kit != k.kit ||
+                                    !(e->transform.position == k.position) || !(e->transform.rotation == k.rotation) ||
+                                    !(e->transform.scale == k.scale));
+        });
+        if (d.kits.size() != was) touched.insert(c);
+    }
+    // The broken placements as they are now.
+    for (world::KeptKit& k : m_bodies.damage()) {
+        const world::CellCoord c = world::cell_of(k.position);
+        std::vector<world::KeptKit>& kits = next[c].kits;
+        const auto same = std::find_if(kits.begin(), kits.end(), [&](const world::KeptKit& x) { return x.entity == k.entity; });
+        if (same != kits.end()) {
+            *same = std::move(k);
+        } else {
+            kits.push_back(std::move(k));
+        }
+        touched.insert(c);
+    }
+    // The fallen trees of every cell the forest knows (its own trees only:
+    // those standing in it).
+    for (auto& [c, trees] : m_forest.damage()) {
+        std::erase_if(trees, [c](const world::KeptTree& t) { return !(world::cell_of({t.x, 0.0, t.z}) == c); });
+        const world::CellDamage* had = scene.damage_in(c);
+        if (trees.empty() && (had == nullptr || had->trees.empty())) continue;
+        next[c].trees = std::move(trees);
+        touched.insert(c);
+    }
+    for (const world::CellCoord c : touched) {
+        world::CellDamage d = next[c];
+        world::sort_damage(d);
+        const world::CellDamage* had = scene.damage_in(c);
+        if (had == nullptr ? d.empty() : *had == d) continue;
+        if (had != nullptr) out.before[c] = *had;
+        if (!d.empty()) out.after[c] = d;
+        scene.set_damage(c, std::move(d));
+    }
+    out.ground = m_ground.keep(scene.terrain);
+    for (const auto& [c, d] : scene.damage()) {
+        out.kits += d.kits.size();
+        for (const world::KeptKit& k : d.kits) out.pieces += k.pieces.size();
+        out.trees += d.trees.size();
+    }
+    follow_kept(scene); // the trees laid as kept now (the kit placements follow with the scene's changes)
+    return out;
 }
 
 PhysicsState::GroundAsSaved::GroundAsSaved(PhysicsState* physics, world::Scene& scene)
@@ -205,7 +293,7 @@ PhysicsState::Impact PhysicsState::impact(const DVec3& point, float radius, floa
         for (const auto& [d, c] : cells) {
             const ScatterPlacer::Cell& placed = *m_scatter->find(c);
             if (looked > 0 && looked + placed.points.size() > points_per_impact) break;
-            m_forest.set_cell(c, placed.serial, trees_of(placed));
+            give(c, placed);
             looked += placed.points.size();
         }
     }

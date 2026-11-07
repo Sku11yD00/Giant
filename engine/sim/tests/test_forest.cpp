@@ -458,3 +458,60 @@ GIANT_TEST("forest: a cell placed again keeps the fallen trees that stand where 
     forest.clear();
     GIANT_CHECK(physics.size() == 1);
 }
+
+GIANT_TEST("forest: kept trees lie where their records say, stay down through reset, and stand when taken away") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ground(physics);
+    Forest forest(physics);
+    // 25 m apart across the way they fall (+x): none falls on another.
+    const std::vector<TreeSpot> spots{tree(0, {10.0, 0.0, 10.0}), tree(1, {10.0, 0.0, 35.0}), tree(2, {10.0, 0.0, 60.0})};
+    forest.set_cell({0, 0}, 1, spots);
+    forest.flush({0.0, 0.0, 0.0});
+    GIANT_CHECK(forest.stats().trunks == 3);
+    // Tree 0 felled; the forest's damage names it as it lies.
+    GIANT_CHECK(forest.impact({8.0, 1.0, 10.0}, 3.0f, 1e6f) == 1);
+    run(physics, forest, 240);
+    auto damage = forest.damage();
+    GIANT_CHECK(damage.size() == 1 && damage[0].second.size() == 1);
+    if (damage.size() != 1 || damage[0].second.size() != 1) return;
+    const world::KeptTree record = damage[0].second[0];
+    GIANT_CHECK(record.x == 10.0 && record.z == 10.0 && record.height == 10.0f);
+    GIANT_CHECK(lean({record.position, record.rotation, record.scale}) > 80.0f);
+    // Kept: given again with its record, it lies there with no body.
+    const usize bodies = physics.size();
+    forest.set_cell({0, 0}, 2, spots, {record});
+    forest.flush({0.0, 0.0, 0.0});
+    ForestStats s = forest.stats();
+    GIANT_CHECK(s.kept == 1 && s.fallen == 1 && s.laid == 1 && s.trunks == 2);
+    GIANT_CHECK(physics.size() < bodies); // its fallen body gone
+    const FallenTree* lying = fallen(forest, {0, 0}, 0);
+    GIANT_CHECK(lying != nullptr && lying->at.position == record.position);
+    GIANT_CHECK(forest.records({0, 0}) != nullptr && forest.records({0, 0})->size() == 1);
+    // Another felled, then reset: the kept one stays down, the other stands.
+    GIANT_CHECK(forest.impact({8.0, 1.0, 60.0}, 3.0f, 1e6f) == 1);
+    run(physics, forest, 60);
+    GIANT_CHECK(forest.stats().fallen == 2);
+    forest.reset();
+    forest.flush({0.0, 0.0, 0.0});
+    s = forest.stats();
+    GIANT_CHECK(s.kept == 1 && s.fallen == 1 && s.trunks == 2 && fallen(forest, {0, 0}, 0) != nullptr);
+    GIANT_CHECK(fallen(forest, {0, 0}, 2) == nullptr);
+    // A record for a tree another size, or none there, lays nothing.
+    world::KeptTree other = record;
+    other.height = 12.0f;
+    world::KeptTree nowhere = record;
+    nowhere.x = 40.0;
+    forest.set_cell({0, 0}, 3, spots, {other, nowhere});
+    forest.flush({0.0, 0.0, 0.0});
+    s = forest.stats();
+    GIANT_CHECK(s.kept == 0 && s.fallen == 0 && s.trunks == 3);
+    // Points renumbered (another layer's point first): the record finds its tree by place.
+    forest.set_cell({0, 0}, 4, {tree(0, {40.0, 0.0, 40.0}), tree(1, {10.0, 0.0, 10.0}), tree(2, {10.0, 0.0, 35.0})}, {record});
+    GIANT_CHECK(fallen(forest, {0, 0}, 1) != nullptr && forest.stats().kept == 1);
+    // Taken away (given again with none), it stands.
+    forest.set_cell({0, 0}, 5, spots);
+    forest.flush({0.0, 0.0, 0.0});
+    s = forest.stats();
+    GIANT_CHECK(s.kept == 0 && s.fallen == 0 && s.trunks == 3);
+}

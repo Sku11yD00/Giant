@@ -76,6 +76,7 @@ struct ScenePhysicsStats {
     u32 broken_kits = 0;    // breakable kit placements with pieces loose
     u32 loose_pieces = 0;   // their pieces falling (or fallen) as bodies of their own
     u32 rubble = 0;         // their pieces come down as rubble (no body: far off, or past max_loose)
+    u32 kept_pieces = 0;    // their pieces down as the scene's kept damage says (no body)
 };
 
 // A breakable kit's piece, come loose: where it is (its world transform).
@@ -130,6 +131,13 @@ public:
     void set_camera(const DVec3& camera) { m_camera = camera; }
     // Where collapses throw up dust (none: no dust). Not owned.
     void set_dust(Dust* dust) { m_dust = dust; }
+    // The broken kit placements as they are now, by id (keep_damage): each
+    // piece down where it is drawn (falling ones where they are this step).
+    // The scene's kept damage (world::Scene::damage) is applied by sync: a
+    // placement its record still matches stands with those pieces down
+    // where the record says, with no bodies, simulating or not, and
+    // reset_poses puts it back so (not whole).
+    std::vector<world::KeptKit> damage() const;
 
     // Where the scene had the entity when its body was last brought in line
     // (null: not tracked). A pose is stale while the scene's transform differs.
@@ -156,6 +164,7 @@ private:
         bool dynamic = false;
         bool remake = false; // its kit changed: made again whatever else
         std::shared_ptr<Broken> broken;
+        std::vector<world::KeptPiece> kept; // the scene's kept damage it was made with (none: none)
     };
     struct Build; // a tile's shape being made
     struct Tile {
@@ -179,6 +188,13 @@ private:
     void drop_pose(world::EntityId id);
     const world::Kit* find_kit(const std::string& name) const;
     BodyDesc entity_body(const world::Kit* kit, const world::Entity& e) const;
+    // The scene's kept record of `e` while it still matches it (null: none).
+    const world::KeptKit* kept_of(const world::Scene& scene, const world::Entity& e) const;
+    // A placement broken as `kept` says (Tracked::broken, its poses): returns
+    // the body of what still stands (no parts: none).
+    BodyDesc make_kept(world::EntityId id, Tracked& t, const world::Kit& kit, std::span<const world::KeptPiece> kept);
+    // The standing pieces of a broken placement as one fixed body (its standing_parts set).
+    BodyDesc standing_body(world::EntityId id, Tracked& t, const world::Kit& kit) const;
     // A broken kit's bodies gone (into `gone`), its pieces drawn whole again.
     void mend(world::EntityId id, Tracked& t, std::vector<BodyId>& gone);
     // Pieces of a breakable kit come loose (with what they held up), each
@@ -219,6 +235,7 @@ private:
     std::optional<DVec3> m_camera;
     Dust* m_dust = nullptr;
     u32 m_rubble = 0;
+    u32 m_kept = 0; // pieces down as kept damage says
     mutable u32 m_rays_left = 0; // rubble_rays left in this blow
     // Ground tiles to look at, and those whose shape is being made.
     std::unordered_map<world::CellCoord, Tile, world::CellCoordHash> m_tiles;

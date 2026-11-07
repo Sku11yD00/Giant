@@ -385,3 +385,71 @@ GIANT_TEST("breakage: rubble lies on fixed things under it, never on its own bui
     }
     GIANT_CHECK(follow.stats().rubble >= 2);
 }
+
+GIANT_TEST("breakage: kept damage stands a placement with its pieces down where kept, through reset; edits mend it") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ScenePhysics follow(physics);
+    Scene scene;
+    ground(scene);
+    scene.kits.push_back(tower(true));
+    const EntityId t = place(scene, "tower", {0.0, 0.0, 0.0});
+    run(physics, follow, scene, 1);
+    // Knocked down, and kept as it is (what keep_damage does).
+    GIANT_CHECK(follow.impact({0.6, 1.5, 0.0}, 0.3f, 6000.0f) == 2);
+    run(physics, follow, scene, 240);
+    const std::vector<world::KeptKit> damage = follow.damage();
+    GIANT_CHECK(damage.size() == 1);
+    if (damage.size() != 1) return;
+    GIANT_CHECK(damage[0].entity == t && damage[0].kit == "tower" && damage[0].pieces.size() == 2);
+    GIANT_CHECK(damage[0].pieces[0].piece == 1 && damage[0].pieces[1].piece == 2);
+    const DVec3 middle = damage[0].pieces[0].position;
+    world::CellDamage cell;
+    cell.kits = damage;
+    scene.set_damage(world::cell_of(damage[0].position), cell);
+    GIANT_CHECK(scene.kept_kit(t) != nullptr);
+    run(physics, follow, scene, 1);
+    // Made again from the record: the two pieces down where kept, with no bodies.
+    ScenePhysicsStats s = follow.stats();
+    GIANT_CHECK(s.broken_kits == 1 && s.loose_pieces == 0 && s.kept_pieces == 2 && s.rubble == 0);
+    const PiecePose* m = loose(follow, t, 1);
+    GIANT_CHECK(m != nullptr && m->at.position == middle);
+    // Reset (a simulation stopping) leaves it so; the bottom block still stands as a body.
+    follow.reset_poses();
+    s = follow.stats();
+    GIANT_CHECK(s.broken_kits == 1 && s.kept_pieces == 2 && loose(follow, t, 2) != nullptr);
+    const auto hit = physics.raycast({0.0, 10.0, 0.0}, {0.0f, -1.0f, 0.0f}, 20.0);
+    GIANT_CHECK(hit && follow.entity_of(hit->body) == t && std::fabs(hit->point.y - 1.0) < 0.01);
+    // Struck again, the bottom comes loose too, as with any break.
+    GIANT_CHECK(follow.impact({0.6, 0.5, 0.0}, 0.3f, 6000.0f) == 1);
+    s = follow.stats();
+    GIANT_CHECK(s.loose_pieces == 1 && s.kept_pieces == 2);
+    // A fresh ScenePhysics (the scene opened again) applies it at once.
+    {
+        PhysicsWorld other(jobs);
+        ScenePhysics fresh(other);
+        Scene copy = scene;
+        fresh.flush(copy);
+        GIANT_CHECK(fresh.stats().kept_pieces == 2 && fresh.stats().broken_kits == 1);
+    }
+    // Moved: the record no longer matches it, and it stands whole.
+    scene.modify(t)->transform.position.x = 1.0;
+    run(physics, follow, scene, 1);
+    s = follow.stats();
+    GIANT_CHECK(s.broken_kits == 0 && s.kept_pieces == 0 && follow.piece_poses().empty());
+    // Back, it is broken again; the record taken away, whole.
+    scene.modify(t)->transform.position.x = 0.0;
+    run(physics, follow, scene, 1);
+    GIANT_CHECK(follow.stats().kept_pieces == 2);
+    scene.set_damage(world::cell_of(damage[0].position), {});
+    run(physics, follow, scene, 1);
+    s = follow.stats();
+    GIANT_CHECK(s.broken_kits == 0 && s.kept_pieces == 0);
+    const auto whole = physics.raycast({0.0, 10.0, 0.0}, {0.0f, -1.0f, 0.0f}, 20.0);
+    GIANT_CHECK(whole && std::fabs(whole->point.y - 3.0) < 0.01);
+    // A record for a kit no longer breakable does nothing.
+    scene.set_damage(world::cell_of(damage[0].position), cell);
+    scene.kits[0].breakable = false;
+    run(physics, follow, scene, 1);
+    GIANT_CHECK(follow.stats().kept_pieces == 0 && follow.stats().broken_kits == 0);
+}

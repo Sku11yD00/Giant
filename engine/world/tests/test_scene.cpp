@@ -466,3 +466,113 @@ GIANT_TEST("world index: the far ground a save still owes reads back") {
     text.replace(text.find("\"far_owed_2\""), 12, "\"far_owed_2\": 3, \"x\"");
     GIANT_CHECK(load_world_index(text, back).has_value());
 }
+
+namespace {
+CellDamage some_damage() {
+    CellDamage d;
+    KeptKit k;
+    k.entity = 7;
+    k.kit = "house";
+    k.position = {70.5, 2.0, 10.25};
+    k.rotation = normalize(Quat{0.0f, 0.38268343f, 0.0f, 0.92387953f});
+    k.scale = {1.5f, 1.0f, 1.0f};
+    k.pieces.push_back({3, {72.123456789, 0.1, 11.0}, normalize(Quat{0.1f, 0.2f, 0.3f, 0.9f}), {4.0f, 0.2f, 3.0f}});
+    k.pieces.push_back({1, {69.0, 0.25, 9.0}, Quat{}, {0.2f, 3.0f, 3.6f}});
+    d.kits.push_back(k);
+    KeptTree t;
+    t.x = 100.125;
+    t.z = 33.3;
+    t.height = 12.5f;
+    t.trunk_radius = 0.3f;
+    t.position = {100.125, 4.2, 33.3};
+    t.rotation = normalize(Quat{0.0f, 0.0f, 0.70710677f, 0.70710677f});
+    d.trees.push_back(t);
+    KeptTree u = t;
+    u.x = 90.0;
+    d.trees.push_back(u);
+    return d;
+}
+} // namespace
+
+GIANT_TEST("world: kept damage saves and loads exactly in cells and scenes, sorted, and marks its placements changed") {
+    const CellCoord c{1, 0};
+    CellDamage d = some_damage();
+    Entity house;
+    house.id = 7;
+    house.shape = Shape::kit;
+    house.kit = "house";
+    house.transform.position = {70.5, 2.0, 10.25};
+    const std::string text = save_cell(c, std::vector<Entity>{house}, nullptr, &d);
+    GIANT_CHECK(contains(text, "\"damage\""));
+    std::vector<Entity> entities;
+    std::optional<Terrain::Heights> heights;
+    CellDamage loaded;
+    GIANT_CHECK(!load_cell(text, c, 0, entities, heights, &loaded).has_value());
+    sort_damage(d);
+    GIANT_CHECK(loaded == d); // every number exact
+    GIANT_CHECK(loaded.kits[0].pieces[0].piece == 1 && loaded.trees[0].x == 90.0);
+    GIANT_CHECK(save_cell(c, entities, nullptr, &loaded) == text); // the same text again
+    GIANT_CHECK(!contains(save_cell(c, entities, nullptr, nullptr), "damage"));
+    const CellDamage none;
+    GIANT_CHECK(!contains(save_cell(c, entities, nullptr, &none), "damage"));
+    // A scene: set_damage keeps it sorted, finds kit records, marks them changed.
+    Scene scene;
+    Kit kit;
+    kit.name = "house";
+    kit.pieces.resize(4);
+    scene.kits.push_back(kit);
+    scene.add(house);
+    (void)scene.take_changes();
+    const u64 edits = scene.damage_edits();
+    scene.set_damage(c, some_damage());
+    GIANT_CHECK(scene.damage_edits() == edits + 1 && scene.damage_in(c) != nullptr && *scene.damage_in(c) == d);
+    GIANT_CHECK(scene.kept_kit(7) != nullptr && scene.kept_kit(7)->pieces.size() == 2 && scene.kept_kit(8) == nullptr);
+    const SceneChanges changed = scene.take_changes();
+    GIANT_CHECK(!changed.all && changed.ids.size() == 1 && changed.ids[0] == 7);
+    scene.set_damage(c, some_damage()); // the same: nothing
+    GIANT_CHECK(scene.damage_edits() == edits + 1 && scene.take_changes().ids.empty());
+    Scene loaded_scene;
+    GIANT_CHECK(!load_scene(save_scene(scene), loaded_scene).has_value());
+    GIANT_CHECK(loaded_scene.damage().size() == 1 && *loaded_scene.damage_in(c) == d && loaded_scene.kept_kit(7) != nullptr);
+    const Scene copy = scene;
+    GIANT_CHECK(copy.damage() == scene.damage() && copy.kept_kit(7) != nullptr);
+    scene.set_damage(c, {});
+    GIANT_CHECK(scene.damage().empty() && scene.kept_kit(7) == nullptr && scene.take_changes().ids.size() == 1);
+    GIANT_CHECK(!contains(save_scene(scene), "damage"));
+}
+
+GIANT_TEST("world: bad kept damage says what is wrong") {
+    const CellCoord c{1, 0};
+    const auto error = [&](CellDamage d) {
+        std::vector<Entity> entities;
+        std::optional<Terrain::Heights> heights;
+        CellDamage out;
+        const auto bad = load_cell(save_cell(c, entities, nullptr, &d), c, 0, entities, heights, &out);
+        return bad ? bad->message : std::string();
+    };
+    CellDamage d = some_damage();
+    d.kits[0].position.x = 10.0; // the placement in another cell
+    GIANT_CHECK(contains(error(d), "damage.kits[0].position is not in cell [1, 0]"));
+    d = some_damage();
+    d.trees[0].x = 200.0;
+    GIANT_CHECK(contains(error(d), "is not in cell [1, 0]"));
+    d = some_damage();
+    d.kits[0].pieces[1].piece = 3; // twice
+    GIANT_CHECK(contains(error(d), "piece is listed twice"));
+    d = some_damage();
+    d.kits.push_back(d.kits[0]);
+    GIANT_CHECK(contains(error(d), "entity is listed twice"));
+    d = some_damage();
+    d.kits[0].pieces.clear();
+    GIANT_CHECK(contains(error(d), "pieces must be an array of 1"));
+    d = some_damage();
+    d.trees[0].height = 0.0f;
+    GIANT_CHECK(contains(error(d), "height must be from"));
+    GIANT_CHECK(error(some_damage()).empty());
+    // A scene's damage in the wrong cell is refused.
+    Scene scene;
+    scene.set_damage({5, 0}, some_damage());
+    Scene out;
+    const auto bad = load_scene(save_scene(scene), out);
+    GIANT_CHECK(bad && contains(bad->message, "damage[0].kits[0].position is not in cell [5, 0]"));
+}

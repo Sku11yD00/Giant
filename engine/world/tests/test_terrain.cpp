@@ -607,3 +607,34 @@ GIANT_TEST("terrain dent: turned, its length runs from +x toward +z; past the fa
     apply_dent(t, huge, 32.0, 32.0, changed);
     GIANT_CHECK(changed.empty());
 }
+
+GIANT_TEST("ground damage: keep leaves the dents as the ground, hands back before and after, and forgets them") {
+    Terrain t;
+    t.set_samples(32);
+    t.set({0, 0}, Terrain::Heights(1024, 5.0f));
+    t.set({1, 0}, Terrain::Heights(1024, 5.0f));
+    t.set({3, 0}, Terrain::Heights(1024, 5.0f));
+    const u64 v1 = t.version({1, 0});
+    GroundDamage damage;
+    Dent d;
+    d.radius = 8.0;
+    d.depth = 2.0f;
+    std::vector<CellCoord> changed;
+    damage.dent(t, d, 64.0, 32.0, changed);  // tiles 0 and 1
+    damage.dent(t, d, 200.0, 32.0, changed); // tile 3
+    // Tile 3 edited otherwise since: not ours to keep.
+    t.modify({3, 0})->at(0) = 6.0f;
+    const u64 dented = t.version({1, 0});
+    const std::vector<GroundDamage::Kept> kept = damage.keep(t);
+    GIANT_CHECK(kept.size() == 2 && kept[0].cell == (CellCoord{0, 0}) && kept[1].cell == (CellCoord{1, 0}));
+    GIANT_CHECK(kept[1].before_version == v1 && kept[1].after_version == dented && kept[1].before[0] == 5.0f);
+    GIANT_CHECK(kept[1].after == *t.find({1, 0}));
+    GIANT_CHECK(damage.tiles() == 0 && damage.dents() == 0);
+    // Nothing to put back: the dents stay.
+    GIANT_CHECK(damage.restore(t) == 0 && t.height_at(65.0, 32.0).value() < 4.0 && t.version({1, 0}) == dented);
+    // An undo of it, and a redo: exactly as each was.
+    t.restore({1, 0}, kept[1].before, kept[1].before_version);
+    GIANT_CHECK(t.version({1, 0}) == v1 && t.height_at(65.0, 32.0).value() == 5.0);
+    t.restore({1, 0}, kept[1].after, kept[1].after_version);
+    GIANT_CHECK(t.version({1, 0}) == dented);
+}
