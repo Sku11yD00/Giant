@@ -206,7 +206,8 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   streamed back from disk. It flies low up the river, down the town's
   street and up 1 km into the clouds while a storm rolls in over 20
   seconds. It passes when the flight holds 60 fps without stutter, the
-  weather takes under 3 ms of GPU time in the full storm, streaming and
+  weather takes under 1.5 ms of GPU time in the full storm (its share of
+  the frame budget), streaming and
   scatter keep up, and the storm arrives with rain and wet ground:
 
       python tools/n3_gate.py giant_editor.exe
