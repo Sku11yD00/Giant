@@ -229,6 +229,14 @@ cell's work, not the world's:
   size and version, `src/cells.h`), so cells joining, leaving or moving
   cost only themselves. Otherwise (no cells, or fewer instances than
   before: the list laid out afresh) they compare everything, as before.
+  A cell whose ground alone changed (its terrain or far ground tile mesh,
+  rebuilt in place by the editor) says so: `CellRange::prev_version` and
+  `changed_first`/`changed_count` name the part that changed, and one
+  seen at `prev_version` is compared over that part only, not its
+  thousands of scatter instances. Meshes coming and going (tiles stream
+  all the time) make the voxel world and shadows look again only at the
+  instances of meshes that went or changed bounds, found from a packed
+  list of each copy's mesh.
   `RenderStats::cells` and `cells_changed` count them (holes included).
 - **Instances stay on the GPU (N3 part 2, `src/instance_store.h`).** One
   buffer keeps every instance, in frame order, from frame to frame; a frame
@@ -299,8 +307,8 @@ cell's work, not the world's:
   shadows: cheap per instance, but whole-cell tests come next. Streamed
   out cells are gone from the voxel far field too (cells need saved voxel
   stand-ins for that, later). While many cells stream in at once (more
-  than an eighth of the scene in a frame, or over 4096 changes waiting)
-  the voxel world still rebuilds every window; holes cost a few bytes per
+  than an eighth of the scene in a frame, or over 4096 64 m squares of
+  changes waiting) the voxel world still rebuilds every window; holes cost a few bytes per
   instance a frame in the loops that walk every instance. Meshes are imported when a world opens (the
   index lists them), not as cells stream. Unloading a cell is one
   `Scene::remove_many`, a pass over the scene's entities, and the unload
@@ -500,7 +508,9 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   tiles to a worker job (2 workers) and swaps a cell's points in whole
   (within `instances_per_frame`, one cell at least). Only cells within
   `radius` (2048 m) of the camera are placed, nearest first; a cell draws
-  at most 16384 instances (a frame swaps in one whole, about 1.5 ms) and
+  at most 16384 instances (a frame swaps in one whole, about 1.5 ms;
+  otherwise `instances_per_frame` is 4096, since every part of the
+  renderer looks at each placement the frame it arrives) and
   all cells together `max_instances` (524288; a kit item counts its
   pieces, and a kit's piece count is part of every cell's key). A cell
   arriving over the budget takes room from farther cells, cells out of
@@ -674,11 +684,17 @@ Done in N2 part 2:
   compares the frame's instances with it. A moved, changed, added or
   removed instance (one contiguous run removed counts as removals) rebuilds
   the bricks under where it was and is; a recoloured material or an added
-  or removed mesh counts as a change to the instances using it. More than
-  256 changes in a frame (or an eighth of the instances), a backlog of over
-  4,096, or any other removal rebuild every window, one rebuild at a time
-  (another waits for it rather than restarting it, so constant changes
-  still settle).
+  or removed mesh counts as a change to the instances using it. Changes
+  wait gathered by 64 m square (a box wider than two squares waits on its
+  own): each square becomes one job per level over its boxes' bricks (the
+  old boxes' built bricks, every brick under the changed instances), so
+  thousands of scatter placements arriving are a few hundred jobs, not a
+  rebuild. More than 256 changes in a frame (or an eighth of the
+  instances), over 4,096 squares waiting, or any other removal rebuild
+  every window, one rebuild at a time (another waits for it rather than
+  restarting it, so constant changes still settle); `voxels.rebuilds`
+  counts them. Big searches (coarse bricks, whole windows) look through
+  the grid's 512 m coarse cells, not every 32 m cell.
 - All the work is queues worked through under
   `RenderSettings::voxel_ms_per_frame` (1 ms, at least one step and one
   brick a frame): finding bricks in resumable steps (a time check every
@@ -798,8 +814,9 @@ the view, so every mesh casts at the detail its shadow texels need.
   mesh, and whether it is drawn as a mesh this frame: one left to the far
   field casts nothing) and dirties the pages under the old and new bounds
   of each that changed, on every level (a shadow lies under its caster
-  across the light). Many changes at once (over max(256, an eighth))
-  dirty everything. The copy is kept by index, so removing an instance
+  across the light). Dirtied boxes are gathered by 32 m square (a wider
+  box keeps its own), and many squares at once (over max(256, an eighth
+  of the instances)) dirty everything. The copy is kept by index, so removing an instance
   early in the list reads as all the rest moving (everything is redrawn).
 - A new sun direction (taken up in steps of a quarter of a degree, so
   time of day redraws now and then, not every frame) makes every page

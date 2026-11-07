@@ -33,6 +33,7 @@
 #include <functional>
 #include <utility>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace giant::render {
@@ -198,12 +199,26 @@ private:
     std::vector<CellRange> m_changed_cells; // scratch
     std::vector<u8> m_look;                 // scratch: 1 for instances in changed cells
     u64 m_meshes_version = ~u64{0};
+    // The bounds each mesh had when casters last used it (by MeshId): when
+    // meshes come and go, only the casters of those whose bounds changed
+    // are looked at again.
+    struct MeshSeen {
+        bool known = false;
+        bool live = false;
+        geometry::Sphere bounds{};
+    };
+    std::vector<MeshSeen> m_mesh_seen;
+    std::vector<u8> m_mesh_stale; // scratch, by MeshId
+    bool m_meshes_version_changed = false; // this track() call (scratch)
+    static constexpr MeshId k_max_seen_mesh = 1u << 22; // ids noted in m_mesh_seen
     ShadowStats m_stats;
     // Scratch, kept to avoid allocating every frame.
     std::vector<u32> m_asked;
     std::vector<u32> m_victims;
     std::vector<u32> m_waiting;
-    std::vector<std::pair<DVec3, DVec3>> m_boxes;
+    // Boxes to dirty this frame, gathered by 32 m square (thousands of
+    // scatter placements arriving are a few invalidations, not thousands).
+    std::unordered_map<u64, std::pair<DVec3, DVec3>> m_boxes;
 };
 
 } // namespace giant::render

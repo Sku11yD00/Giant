@@ -251,6 +251,13 @@ struct CellRange {
     // A cell whose version and place are as last frame's holds the same
     // instances as then, by value (their materials' values included).
     u64 version = 0;
+    // A cell changed from version prev_version (same place and count) only
+    // in instances [first + changed_first, + changed_count): the rest are
+    // as then, so whoever saw prev_version need look at those alone. 0: no
+    // such promise.
+    u64 prev_version = 0;
+    u32 changed_first = 0;
+    u32 changed_count = 0;
 };
 
 struct FrameInput {
@@ -300,6 +307,7 @@ struct RenderStats {
     u32 voxel_missing = 0;        // bricks that did not fit in the pool (built as room frees up)
     bool voxel_overflow = false;  // voxel_missing > 0: the pool is full
     float voxel_cpu_ms = 0.0f;    // voxel work this frame
+    u32 voxel_rebuilds = 0;       // whole windows rebuilt (too many changes at once, a new stand-in radius), ever
     // The far field (this frame, on the CPU).
     bool far_field = false; // on this frame
     u32 far_culled = 0;     // instances left to the voxel world

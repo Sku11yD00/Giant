@@ -429,36 +429,108 @@ ShadowPages::Caster ShadowPages::caster_of(const Instance& in, const MeshLookup&
     return c;
 }
 
+// Dirtied boxes are gathered in squares this many metres wide.
+constexpr double k_dirty_square = 32.0;
+
 void ShadowPages::track(std::span<const Instance> instances, std::span<const CellRange> cells,
                         std::span<const u8> casts, u64 meshes_version, const MeshLookup& meshes) {
     const auto casting = [&](size_t i) { return casts.empty() || (i < casts.size() && casts[i] != 0); };
-    const bool remesh = meshes_version != m_meshes_version;
-    m_meshes_version = meshes_version;
+    // Meshes came or went: those whose bounds differ from what the casters
+    // used (terrain tiles stream in all the time; most meshes stay put).
+    bool stale_any = false;
+    m_meshes_version_changed = meshes_version != m_meshes_version;
+    if (m_meshes_version_changed) {
+        m_meshes_version = meshes_version;
+        m_mesh_stale.assign(m_mesh_seen.size(), 0);
+        for (MeshId id = 0; id < m_mesh_seen.size(); ++id) {
+            MeshSeen& seen = m_mesh_seen[id];
+            if (!seen.known) {
+                continue;
+            }
+            const geometry::ClusterMesh* mesh = meshes ? meshes(id) : nullptr;
+            const bool live = mesh != nullptr;
+            if (live != seen.live || (live && !(mesh->bounds.center == seen.bounds.center &&
+                                                mesh->bounds.radius == seen.bounds.radius))) {
+                m_mesh_stale[id] = 1;
+                stale_any = true;
+                seen.live = live;
+                seen.bounds = live ? mesh->bounds : geometry::Sphere{};
+            }
+        }
+    }
+    // k_no_mesh never has one; ids past any real table are looked at again
+    // on every mesh change.
+    const bool remeshed = m_meshes_version_changed;
+    const auto stale = [&](MeshId id) {
+        if (id == k_no_mesh) {
+            return false;
+        }
+        return id >= k_max_seen_mesh ? remeshed : stale_any && id < m_mesh_stale.size() && m_mesh_stale[id] != 0;
+    };
     // Only instances in the cells listed can have moved, and those past the
     // casters are new (whether each casts is per frame: looked at for all).
     const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells) &&
-                      instances.size() >= m_casters.size() && !remesh;
+                      instances.size() >= m_casters.size();
     if (only) {
         m_look.assign(instances.size(), 0);
         for (const CellRange& c : m_changed_cells) {
             std::fill_n(m_look.begin() + c.first, c.count, u8{1});
         }
+        if (m_meshes_version_changed) {
+            for (size_t i = 0; i < m_casters.size(); ++i) {
+                if (stale(m_casters[i].instance.mesh)) {
+                    m_look[i] = 1;
+                }
+            }
+        }
     }
+    // The casters' bounds, noting the bounds of each mesh first used.
+    const auto caster = [&](const Instance& in) {
+        // Ids past any real table (k_max_seen_mesh: a stale or bogus id)
+        // are not noted: their casters are looked at again on every mesh
+        // change instead (stale() says so).
+        if (in.mesh < k_max_seen_mesh) {
+            if (in.mesh >= m_mesh_seen.size()) {
+                m_mesh_seen.resize(size_t{in.mesh} + 1);
+            }
+            MeshSeen& seen = m_mesh_seen[in.mesh];
+            if (!seen.known) {
+                const geometry::ClusterMesh* mesh = meshes ? meshes(in.mesh) : nullptr;
+                seen = {true, mesh != nullptr, mesh != nullptr ? mesh->bounds : geometry::Sphere{}};
+            }
+        }
+        return caster_of(in, meshes);
+    };
     const size_t limit = std::max<size_t>(256, std::max(instances.size(), m_casters.size()) / 8);
     // Boxes to dirty; past the limit, everything is.
-    std::vector<std::pair<DVec3, DVec3>>& boxes = m_boxes;
+    auto& boxes = m_boxes;
     boxes.clear();
     bool all = false;
     const auto dirty = [&](const Caster& c) {
         if (!c.live || !c.casts || all) {
             return;
         }
-        if (boxes.size() >= limit) {
+        // A box wider than a square keeps to itself (merged, it would
+        // widen the square's); the rest share their centre's square.
+        u64 key = 0;
+        if (c.max.x - c.min.x > k_dirty_square || c.max.z - c.min.z > k_dirty_square) {
+            key = (u64{1} << 63) | boxes.size();
+        } else {
+            const auto at = [](double v) {
+                return static_cast<u64>(static_cast<u32>(static_cast<i32>(std::floor(v / k_dirty_square))));
+            };
+            key = (at(0.5 * (c.min.x + c.max.x)) | at(0.5 * (c.min.z + c.max.z)) << 32) & ~(u64{1} << 63);
+        }
+        const auto [it, added] = boxes.try_emplace(key, c.min, c.max);
+        if (!added) {
+            DVec3& lo = it->second.first;
+            DVec3& hi = it->second.second;
+            lo = {std::min(lo.x, c.min.x), std::min(lo.y, c.min.y), std::min(lo.z, c.min.z)};
+            hi = {std::max(hi.x, c.max.x), std::max(hi.y, c.max.y), std::max(hi.z, c.max.z)};
+        } else if (boxes.size() > limit) {
             all = true;
             boxes.clear();
-            return;
         }
-        boxes.emplace_back(c.min, c.max);
     };
     const size_t common = std::min(instances.size(), m_casters.size());
     for (size_t i = 0; i < common; ++i) {
@@ -477,7 +549,7 @@ void ShadowPages::track(std::span<const Instance> instances, std::span<const Cel
         const bool moved = !(in.position == was.position && in.rotation == was.rotation && in.scale == was.scale &&
                              in.mesh == was.mesh);
         const bool cast = casting(i);
-        if (!moved && !remesh) {
+        if (!moved && !stale(in.mesh)) {
             c.instance = in; // the material may differ: shadows do not care
             if (cast != c.casts) {
                 c.casts = true; // dirties where it is, whichever way it changed
@@ -486,7 +558,7 @@ void ShadowPages::track(std::span<const Instance> instances, std::span<const Cel
             }
             continue;
         }
-        Caster now = caster_of(in, meshes);
+        Caster now = caster(in);
         now.casts = cast;
         if (!moved && now.live == c.live && now.casts == c.casts &&
             (!now.live || (now.min == c.min && now.max == c.max))) {
@@ -502,7 +574,7 @@ void ShadowPages::track(std::span<const Instance> instances, std::span<const Cel
     }
     m_casters.resize(instances.size());
     for (size_t i = common; i < instances.size(); ++i) {
-        m_casters[i] = caster_of(instances[i], meshes); // added
+        m_casters[i] = caster(instances[i]); // added
         m_casters[i].casts = casting(i);
         dirty(m_casters[i]);
     }
@@ -510,8 +582,8 @@ void ShadowPages::track(std::span<const Instance> instances, std::span<const Cel
         invalidate_all();
         return;
     }
-    for (const auto& [lo, hi] : boxes) {
-        invalidate(lo, hi);
+    for (const auto& [key, box] : boxes) {
+        invalidate(box.first, box.second);
     }
 }
 

@@ -328,12 +328,27 @@ GIANT_TEST("terrain: tiles draw in their cells, as meshes at every distance") {
     // Nothing changed: nothing rebuilt.
     build();
     GIANT_CHECK(frame.cells_rebuilt == 0);
-    // A new look: only the cells with ground.
+    // A new look: only the cells with ground, and in them only the ground
+    // (in place: the rock is as it was, and the renderer is told so).
+    const std::vector<render::CellRange> cells_before = frame.cells;
+    const std::vector<render::Instance> list_before = frame.instances;
     scene.terrain.material.base_color = {0.5f, 0.1f, 0.1f};
     build();
     GIANT_CHECK(frame.cells_rebuilt == 2);
     for (const render::Instance& i : live()) {
         if (i.always_mesh) GIANT_CHECK(frame.materials[i.material].base_color == scene.terrain.material.base_color);
+    }
+    GIANT_CHECK(frame.cells.size() == cells_before.size() && frame.instances.size() == list_before.size());
+    for (usize k = 0; k < frame.cells.size(); ++k) {
+        const render::CellRange& r = frame.cells[k];
+        GIANT_CHECK(r.first == cells_before[k].first && r.count == cells_before[k].count);
+        if (r.version == cells_before[k].version) continue; // a hole
+        GIANT_CHECK(r.prev_version == cells_before[k].version && r.changed_first == 0 && r.changed_count == 1);
+        for (u32 j = 1; j < r.count; ++j) {
+            const render::Instance& a = frame.instances[r.first + j];
+            const render::Instance& b = list_before[r.first + j];
+            GIANT_CHECK(a.position == b.position && a.mesh == b.mesh && a.material == b.material);
+        }
     }
     // A tile goes: its cell (with no entities) goes once the mesh is dropped.
     scene.terrain.remove({1, 0});

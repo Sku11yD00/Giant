@@ -74,7 +74,7 @@ public:
     u64 max_instances = 1u << 19;
     u32 looks_per_frame = 256;
     u32 cells_in_flight = 4;
-    usize instances_per_frame = 16384;
+    usize instances_per_frame = 4096; // every part of the renderer looks at each one the frame it arrives
 
 private:
     struct Placed {

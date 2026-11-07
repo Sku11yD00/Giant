@@ -338,7 +338,7 @@ Json render_settings_json(const EditorState& state) {
               {"voxels",
                {{"bricks", s.voxel_bricks}, {"capacity", s.voxel_capacity}, {"pending", s.voxel_pending},
                 {"built", s.voxel_built}, {"missing", s.voxel_missing}, {"overflow", s.voxel_overflow},
-                {"cpu_ms", s.voxel_cpu_ms}}},
+                {"cpu_ms", s.voxel_cpu_ms}, {"rebuilds", s.voxel_rebuilds}}},
               {"far_field", {{"on", s.far_field}, {"culled", s.far_culled}}},
               {"shadows",
                {{"on", s.shadows}, {"pages", s.shadow_pages}, {"capacity", s.shadow_capacity},

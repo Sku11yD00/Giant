@@ -330,7 +330,7 @@ GIANT_TEST("shadow pages: many changes at once dirty everything") {
     const DVec3 camera{0.0, 0.0, 0.0};
     std::vector<Instance> instances(300);
     for (u32 i = 0; i < instances.size(); ++i) {
-        instances[i].position = {5000.0 + i * 3.0, 0.0, 5000.0}; // far from every page asked for
+        instances[i].position = {5000.0 + i * 40.0, 0.0, 5000.0}; // far from every page asked for, a square each
         instances[i].mesh = 1;
     }
     s.begin_frame(camera, k_up_sun);
@@ -344,11 +344,23 @@ GIANT_TEST("shadow pages: many changes at once dirty everything") {
     s.begin_frame(camera, k_up_sun);
     s.track(instances, {}, {}, 1, meshes);
     GIANT_CHECK(s.plan(16).empty());
-    // All of them: too many to list, so everything is redrawn.
+    // All of them: too many squares to list, so everything is redrawn.
     for (Instance& in : instances) in.position.y += 1.0;
     s.begin_frame(camera, k_up_sun);
     s.track(instances, {}, {}, 1, meshes);
     GIANT_CHECK(s.plan(16).size() == 1);
+    // Thousands arriving in a few squares far away (a scatter cell): gathered,
+    // so the page near the camera is left alone.
+    std::vector<Instance> more = instances;
+    for (u32 i = 0; i < 3000; ++i) {
+        Instance in;
+        in.position = {-5000.0 + (i % 60) * 1.0, 0.0, -5000.0 + (i / 60) * 1.0};
+        in.mesh = 1;
+        more.push_back(in);
+    }
+    s.begin_frame(camera, k_up_sun);
+    s.track(more, {}, {}, 1, meshes);
+    GIANT_CHECK(s.plan(16).empty());
 }
 
 GIANT_TEST("shadow pages: a caster that starts or stops being drawn dirties its pages") {
@@ -513,5 +525,84 @@ GIANT_TEST("shadow pages: with cells, only cells whose version changed are compa
     instances[1].position = b;
     cells = {{0, 2, 4}};
     GIANT_CHECK(settle().size() == 2);
+    GIANT_CHECK(settle().empty());
+}
+
+GIANT_TEST("shadow pages: meshes coming and going redraw only the casters whose mesh bounds changed") {
+    const geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
+    geometry::ClusterMesh bigger = cube;
+    bigger.bounds.radius *= 3.0f;
+    const geometry::ClusterMesh* second = &cube; // what mesh 2 is now
+    const ShadowPages::MeshLookup meshes = [&](MeshId id) {
+        return id == 1 ? &cube : id == 2 ? second : nullptr;
+    };
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const DVec3 a{-5.5, 0.0, -5.5};
+    const DVec3 b{5.5, 0.0, 5.5};
+    std::vector<Instance> instances(2);
+    instances[0].position = a;
+    instances[1].position = b;
+    instances[0].mesh = 1;
+    instances[1].mesh = 2;
+    const std::vector<CellRange> cells{{0, 1, 1}, {1, 1, 2}};
+    Requests r(s);
+    r.ask(s, 0, a);
+    r.ask(s, 0, b);
+    u64 version = 1;
+    const auto settle = [&] {
+        s.begin_frame(camera, k_up_sun);
+        s.track(instances, cells, {}, version, meshes);
+        s.request(r.bits);
+        return s.plan(16);
+    };
+    GIANT_CHECK(settle().size() == 2);
+    GIANT_CHECK(settle().empty());
+    // Other meshes added and removed (the table's version moves): nothing to redraw.
+    for (int i = 0; i < 5; ++i) {
+        ++version;
+        GIANT_CHECK(settle().empty());
+    }
+    // Mesh 2's slot now holds a bigger mesh, its cell unchanged: its caster is redrawn.
+    second = &bigger;
+    ++version;
+    const std::vector<ShadowPages::Draw> drawn = settle();
+    GIANT_CHECK(!drawn.empty());
+    GIANT_CHECK(has(s.entry_at(0, b), ShadowPages::k_drawn_bit));
+    GIANT_CHECK(settle().empty());
+    // Mesh 2 removed: the caster stops casting, its pages are redrawn.
+    second = nullptr;
+    ++version;
+    GIANT_CHECK(!settle().empty());
+    GIANT_CHECK(settle().empty());
+}
+
+GIANT_TEST("shadow pages: a mesh arriving for a caster that had none casts; bogus ids cost nothing") {
+    const geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
+    bool arrived = false;
+    const ShadowPages::MeshLookup meshes = [&](MeshId id) { return id == 3 && arrived ? &cube : nullptr; };
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const DVec3 a{-5.5, 0.0, -5.5};
+    std::vector<Instance> instances(2);
+    instances[0].position = a;
+    instances[0].mesh = 3;          // not loaded yet
+    instances[1].mesh = 0xFFFFFFF0u; // never a real id
+    const std::vector<CellRange> cells{{0, 2, 1}};
+    Requests r(s);
+    r.ask(s, 0, a);
+    u64 version = 1;
+    const auto settle = [&] {
+        s.begin_frame(camera, k_up_sun);
+        s.track(instances, cells, {}, version, meshes);
+        s.request(r.bits);
+        return s.plan(16);
+    };
+    GIANT_CHECK(settle().size() == 1); // drawn once, empty
+    GIANT_CHECK(settle().empty());
+    // Mesh 3 arrives, the cell as it was: its caster is redrawn.
+    arrived = true;
+    ++version;
+    GIANT_CHECK(!settle().empty());
     GIANT_CHECK(settle().empty());
 }

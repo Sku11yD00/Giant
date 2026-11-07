@@ -172,4 +172,15 @@ GIANT_TEST("changed cells: lists the cells not exactly as seen") {
     GIANT_CHECK(!changed_cells(a, 5, seen, changed)); // fewer instances: everything
     GIANT_CHECK(!changed_cells(std::vector<CellRange>{{0, 2, 1}, {3, 2, 2}}, 5, seen, changed)); // a gap
     GIANT_CHECK(seen.empty());
+    // A cell changed only in part from the version seen: just that part.
+    GIANT_CHECK(!changed_cells(b, 7, seen, changed));
+    std::vector<CellRange> d = b;
+    d[2] = {2, 3, 9, 3, 1, 1}; // from version 3, only its second instance
+    GIANT_CHECK(changed_cells(d, 7, seen, changed) && changed.size() == 1);
+    GIANT_CHECK(changed[0].first == 3 && changed[0].count == 1 && changed[0].version == 9);
+    // Seen at another version (a frame skipped): the whole cell.
+    std::vector<CellRange> e = d;
+    e[2] = {2, 3, 10, 3, 1, 1}; // still "from 3", but 9 was seen
+    GIANT_CHECK(changed_cells(e, 7, seen, changed) && changed.size() == 1);
+    GIANT_CHECK(changed[0].first == 2 && changed[0].count == 3);
 }

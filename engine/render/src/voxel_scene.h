@@ -41,6 +41,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -61,6 +62,7 @@ struct VoxelStats {
     u32 missing = 0;   // bricks that did not fit in the pool (waiting for room)
     bool overflow = false; // missing > 0: the pool is full
     float cpu_ms = 0.0f;   // voxel work this frame
+    u32 rebuilds = 0;      // whole windows rebuilt (too many changes at once, a new stand-in radius), ever
 };
 
 // What the voxel world holds at a point, on one level.
@@ -196,10 +198,22 @@ private:
                  // empty the box's unbuilt slots nothing is over
         present, // mark the box's bricks that are in the pool
         all,     // mark every brick of the box
+        region,  // within the box: the bricks in the pool under the region's
+                 // old boxes, and every brick under its changed instances
+    };
+    // Changes not turned into jobs yet, gathered by region (k_region
+    // metres square, so a scatter cell's thousands of placements are a few
+    // jobs, not thousands): where instances were (their bricks are built
+    // again) and which instances changed (the bricks where they are now
+    // are).
+    struct Region {
+        std::vector<Box> old;
+        std::vector<u32> changed;
     };
     struct Job {
         voxel::BrickBox box;
         JobKind kind = JobKind::find;
+        std::shared_ptr<const Region> region; // region: what it marks
         bool rebuild = false;   // part of a full rebuild
         bool started = false;
         std::vector<u32> found; // find: instances over the box
@@ -289,18 +303,34 @@ private:
     std::vector<voxel::BrickBox> m_job_bounds; // per level: around its queued jobs (count 0: none), for holds()
     std::vector<std::vector<voxel::BrickBox>> m_job_boxes; // per level: the queued jobs' boxes
     float m_stand_in_radius = 0.0f;
-    // Changes not turned into jobs yet: where instances were (their bricks
-    // are built again) and which instances changed (the bricks where they
-    // are now are).
-    std::deque<Box> m_old;
-    std::unordered_set<u32> m_changed;
-    std::deque<u32> m_changed_order;
+    // The regions waiting (m_changed: how many hold each changed instance).
+    void queue_old(const Box& box);
+    void queue_changed(u32 index);
+    Region& region_for(const Box& box);
+    std::unordered_map<u64, Region> m_regions;
+    std::deque<u64> m_region_order;
+    u64 m_next_own_region = 0; // keys for boxes too big to share one
+    std::vector<u32> m_changed; // by copy: how many regions wait on it
+    u32 m_changed_count = 0;    // copies some region waits on
 
     // What the bricks are built from.
     std::vector<Copy> m_copies;
+    std::vector<MeshId> m_copy_mesh; // each copy's mesh, packed (looked through whenever meshes come and go)
     std::vector<CellRange> m_seen_cells;    // FrameInput::cells as last seen
     std::vector<CellRange> m_changed_cells; // this update's (scratch)
     std::unordered_map<Cell, std::vector<u32>, CellHash> m_grid;
+    // The grid's cells by coarse cell (k_coarse cells a side): big boxes
+    // (coarse bricks, whole windows) look at the coarse cells they cover,
+    // not every cell of the grid. Points into m_grid's nodes, which stay put.
+    static constexpr i32 k_coarse_shift = 4;
+    struct Fine {
+        Cell cell;
+        const std::vector<u32>* list = nullptr;
+    };
+    std::unordered_map<Cell, std::vector<Fine>, CellHash> m_coarse;
+    static Cell coarse_of(const Cell& c) {
+        return {c.x >> k_coarse_shift, c.y >> k_coarse_shift, c.z >> k_coarse_shift};
+    }
     std::vector<u32> m_large; // instances spanning too many cells
     std::vector<u32> m_seen;  // per copy: the find() that last saw it
     u32 m_find_stamp = 0;
