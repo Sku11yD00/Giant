@@ -80,15 +80,27 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
          "validation layer runs, frames completed, the last frame's draw counts, frame times over the last 240 frames (average, median, 99th percentile, worst, hitches: frames 1.5x the median and 2 ms over it, and the times themselves, oldest first; wall clock, so vsync and "
          "time spent running commands count), the GPU's own time for the newest finished frame "
          "and each of its passes (gpu: frame_ms and passes, from GPU timestamps; 0 ms on the "
-         "null backend) and the window size in pixels.",
-         Json{{"type", "object"}, {"additionalProperties", false}}, true,
-         [&state](const Json&, CommandContext&) {
+         "null backend) and the window size in pixels. With phases_since, frame_times.phases: where the main "
+         "thread's time went in the frames since then (each phase's median, and the phases of those over "
+         "phases_over_ms), for finding what makes a frame slow.",
+         Json::parse(R"({"type": "object", "additionalProperties": false, "properties": {
+             "phases_since": {"type": "integer", "minimum": 0,
+                              "description": "The frames from this one on (frame_times.recorded counts them; those still kept, the last 240)."},
+             "phases_over_ms": {"type": "number", "minimum": 0,
+                                "description": "Frames longer than this are given in full (default 25: 1.5x a 60 fps frame)."}}})"),
+         true,
+         [&state](const Json& args, CommandContext&) {
              const auto& adapter = state.device->adapter();
              Json passes = Json::array();
              for (const rhi::GpuTiming& pass : gpu_passes(*state.device)) {
                  passes.push_back({{"name", pass.name}, {"ms", pass.ms}});
              }
-             return CommandResult::success(
+             Json info = Json::object();
+             if (args.contains("phases_since")) {
+                 info = frame_phases(state.frame_times, args["phases_since"].get<usize>(),
+                                     args.value("phases_over_ms", 25.0f));
+             }
+             Json result(
                  {{"editor_version", k_version},
                   {"backend", rhi::to_string(state.device->backend())},
                   {"adapter", adapter.name},
@@ -115,6 +127,10 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                               {"point_width", state.window->point_width()},
                               {"point_height", state.window->point_height()},
                               {"minimized", state.window->minimized()}}}});
+             if (!info.empty()) {
+                 result["frame_times"]["phases"] = std::move(info);
+             }
+             return CommandResult::success(std::move(result));
          }});
 
     add(registry,

@@ -101,6 +101,30 @@ def build_scene(tool, call, check):
           f"GPU passes timed, got {info['gpu']}")
     check(info["gpu"]["frame_ms"] >= 0 and all(p["ms"] >= 0 for p in info["gpu"]["passes"]),
           "GPU times are not negative")
+    # Each frame's main-thread time by phase: the last 10 frames in full.
+    recorded = info["frame_times"]["recorded"]
+    check("phases" not in info["frame_times"], "phases only when asked")
+    timed = tool("get_engine_info", {"phases_since": recorded - 10, "phases_over_ms": 0})["frame_times"]
+    phases = timed["phases"]
+    check(phases["since"] == recorded - 10 and phases["frames"] >= 10, f"the frames asked for: {phases}")
+    check(all(name in phases["typical"] for name in ("mcp", "ui", "physics", "scene", "render", "ui_draw",
+                                                     "render/voxels", "render/shading", "end_frame",
+                                                     "streaming", "tail")),
+          f"the frame's phases, got {sorted(phases['typical'])}")
+    check(len(phases["slow"]) == phases["frames"], "every frame over 0 ms is given in full")
+    check(phases["typical"]["render"] > 0, "rendering a scene takes time")
+    for frame in phases["slow"]:
+        p = frame["phases"]
+        check(all(t >= 0 for t in p.values()) and frame["cpu_ms"] >= 0, f"no negative times: {frame}")
+        # The renderer's parts lie within render (rounding and parts under
+        # 0.05 ms left out: a little slack).
+        parts = sum(t for n, t in p.items() if n.startswith("render/"))
+        check(parts <= p.get("render", 0) + 0.1, f"the renderer's parts fit within render: {frame}")
+        # The phases cover the frame: together close to its wall-clock time.
+        whole = sum(t for n, t in p.items() if "/" not in n)
+        check(abs(whole - frame["ms"]) <= 1.0 + 0.02 * frame["ms"],
+              f"the phases add up to the frame time: {whole} vs {frame}")
+        check(frame["cpu_ms"] <= 1.1 * frame["ms"] + 1.0, f"no more CPU than wall time: {frame}")
     tool("set_render_settings", {"gpu_culling": True})
     shot = call("tools/call", {"name": "capture_screenshot",
                                "arguments": {"max_width": 800, "file_name": "mcp_scene"}})

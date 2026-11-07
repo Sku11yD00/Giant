@@ -20,7 +20,7 @@ renderer exists: there it checks the draw counts and the image, not speed.
 import random
 import sys
 
-from gate_common import Editor, describe, frame_stats, speed_failures
+from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures
 
 TREES = 10_000
 HOUSES_X, HOUSES_Z = 20, 15
@@ -125,7 +125,11 @@ def main() -> int:
             if frame["draws"] != 3 or frame["post_draws"] != 4:
                 bad_draws.append((stop, frame["draws"], frame["post_draws"]))
 
-        times = frame_stats(editor.fly(path, each_stop))
+        flown = editor.fly(path, each_stop)
+        times = frame_stats(flown)
+        slow = slow_frames(flown, editor.slow, editor.typicals)
+        if slow:
+            print(f"n1_gate: {slow}")
         editor.hover(30)  # hovering at the end: what the view wants loads
         left_waiting = editor.last_frame()["streaming"]["waiting"]
         gpu = tool("get_engine_info").get("gpu", {})  # GPU-culled frame, timestamped

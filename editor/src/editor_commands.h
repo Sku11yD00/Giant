@@ -51,14 +51,64 @@ class PhysicsState;
 class PlayState;
 class WorldStreaming;
 
+// Where the main thread's time went in a frame, for finding what makes a
+// slow one (get_engine_info's `phases_since`).
+enum class FramePhase : u8 {
+    events,      // window events
+    mcp,         // MCP commands (a screenshot's frame too)
+    scripts,     // C# scripts
+    ui,          // panels
+    weather,     // weather and the player's input
+    physics,     // bodies following the scene, stepping
+    begin_frame, // waiting for a frame in flight to finish
+    terrain,     // terrain meshes
+    far_ground,  // far ground levels
+    scatter,     // scatter placement results
+    scene,       // the scene's instances and cells
+    render,      // recording the GPU work (render::CpuSection: its parts)
+    ui_draw,     // recording the panels' draw
+    end_frame,   // submitting and presenting
+    streaming,   // world cells loading and unloading
+    tail,        // the end of the loop: the log's report, pacing on the null device
+    other,
+    count
+};
+inline constexpr std::array<const char*, static_cast<usize>(FramePhase::count)> k_frame_phase_names = {
+    "events",  "mcp",   "scripts", "ui",      "weather",   "physics",   "begin_frame", "terrain", "far_ground",
+    "scatter", "scene", "render",  "ui_draw", "end_frame", "streaming", "tail",        "other"};
+static_assert(k_frame_phase_names.back() != nullptr, "a name for every phase");
+static_assert(render::k_cpu_section_names.back() != nullptr, "a name for every section");
+// Then the renderer's own (render::CpuSection, within `render`), named
+// "render/<section>".
+inline constexpr usize k_frame_phases = static_cast<usize>(FramePhase::count) + render::k_cpu_section_names.size();
+using FramePhaseMs = std::array<float, k_frame_phases>;
+inline std::string frame_phase_name(usize i) {
+    return i < k_frame_phase_names.size() ? std::string(k_frame_phase_names[i])
+                                          : "render/" + std::string(render::k_cpu_section_names[i - k_frame_phase_names.size()]);
+}
+
 // The last few seconds of frame times, for get_engine_info (performance
-// checks such as the N1 gate run over MCP).
+// checks such as the N1 gate run over MCP), with each frame's phases and
+// the main thread's CPU time.
 struct FrameTimes {
     static constexpr usize k_frames = 240;
     std::array<float, k_frames> ms{};
+    std::array<FramePhaseMs, k_frames> phase_ms{}; // the same frames' phases
+    std::array<float, k_frames> cpu_ms{};          // and the main thread's CPU time
     usize count = 0; // frames recorded, ever
-    void add(float frame_ms) { ms[count++ % k_frames] = frame_ms; }
+    void add(float frame_ms, const FramePhaseMs& phases = {}, float thread_cpu_ms = 0.0f) {
+        phase_ms[count % k_frames] = phases;
+        cpu_ms[count % k_frames] = thread_cpu_ms;
+        ms[count++ % k_frames] = frame_ms;
+    }
     usize size() const { return std::min(count, k_frames); }
+    // Where frame `frame` (counted from 0, ever) is kept; false when it is
+    // not (too old, or not yet).
+    bool slot_of(usize frame, usize& slot) const {
+        if (frame >= count || count - frame > k_frames) return false;
+        slot = frame % k_frames;
+        return true;
+    }
     // The recorded times, oldest first.
     std::vector<float> in_order() const {
         std::vector<float> out;
@@ -97,6 +147,11 @@ struct FrameTimes {
         return n;
     }
 };
+
+// get_engine_info's frame_times.phases: the frames since `since` (counted
+// from 0, ever) still kept, each phase's median over them (`typical`,
+// `typical_cpu_ms`) and those over `over_ms` in full (`slow`).
+ai::Json frame_phases(const FrameTimes& times, usize since, float over_ms);
 
 // The newest finished frame's GPU time per pass (Device::gpu_timings), with
 // repeats of a name (the two culling passes, say) added up, in the order

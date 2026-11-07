@@ -47,7 +47,7 @@ import os
 import sys
 import tempfile
 
-from gate_common import Editor, describe, frame_stats, speed_failures
+from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures
 from n2_gate import ALL_ON, set_resolution, settle
 
 RESOLUTION = (2560, 1440)
@@ -321,6 +321,9 @@ def main() -> int:
         flown = editor.fly(path, each_stop, marks=(low_end, street_end))
         after = tool("get_world")
         times = frame_stats(flown)
+        slow = slow_frames(flown, editor.slow, editor.typicals)
+        if slow:
+            print(f"n3_gate: {slow}")
         print(f"n3_gate: frame time over the flight ({times['frames']} frames sampled): {describe(times)}")
         # Each leg on its own too: the low leg streams the most, and a whole
         # flight's 99th percentile could hide its slow frames.

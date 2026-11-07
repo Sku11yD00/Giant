@@ -32,6 +32,7 @@
 #include "giant/rhi/rhi.h"
 #include "giant/voxel/clipmap.h"
 
+#include <array>
 #include <memory>
 #include <span>
 #include <vector>
@@ -351,6 +352,29 @@ struct RendererDesc {
     u32 shadow_pages = 1024;
 };
 
+// Where render()'s CPU time goes (Renderer::last_cpu_ms), for finding what
+// makes a slow frame.
+enum class CpuSection : u8 {
+    cells,       // which cells changed
+    streaming,   // geometry streaming
+    voxels,      // the voxel world's updates (voxel_ms_per_frame)
+    gi_plan,     // which bricks to light
+    instances,   // which instances to draw
+    shadow_plan, // shadow pages to draw
+    store,       // the GPU instance store
+    tables,      // frame constants, materials, decals, the mesh table
+    light,       // voxel levels and lighting the voxel world
+    culling,     // culling and raster
+    shadows,     // drawing shadow pages
+    sky,         // sky, cloud shadows, clouds
+    shading,     // shading, reflections, anti-aliasing
+    count
+};
+inline constexpr std::array<const char*, static_cast<usize>(CpuSection::count)> k_cpu_section_names = {
+    "cells", "streaming", "voxels", "gi_plan", "instances", "shadow_plan", "store",
+    "tables", "light",     "culling", "shadows", "sky",       "shading"};
+using CpuSectionMs = std::array<float, static_cast<usize>(CpuSection::count)>;
+
 class Renderer {
     struct ConstructKey {
         explicit ConstructKey() = default;
@@ -384,6 +408,8 @@ public:
     void render(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameInput& frame);
 
     const RenderStats& last_stats() const { return m_stats; }
+    // The last render()'s CPU milliseconds by section.
+    const CpuSectionMs& last_cpu_ms() const { return m_cpu_ms; }
     // The voxel world at a world position, finest level first.
     std::vector<VoxelProbeLevel> probe_voxels(const DVec3& position) const;
     // The sun's shadow pages (src/shadow_pages.h; tests and tools).
@@ -586,6 +612,7 @@ private:
     std::vector<gpu::Material> m_gpu_materials;
     std::vector<bool> m_used;            // meshes drawn this frame
     RenderStats m_stats;
+    CpuSectionMs m_cpu_ms{};
     RenderStats m_gpu_stats; // newest read back
 };
 

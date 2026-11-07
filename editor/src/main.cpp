@@ -28,6 +28,7 @@
 #include "giant/ai/mcp_server.h"
 #include "giant/core/log.h"
 #include "giant/core/log_history.h"
+#include "giant/core/thread_time.h"
 #include "giant/platform/line_reader.h"
 #include "giant/platform/window.h"
 #include "giant/render/renderer.h"
@@ -338,15 +339,33 @@ int run(const Options& options) {
     state.scripts_to_load = options.scripts;
     editor::TerrainBrushTool terrain_brush;
     // Records the scene and the panels into `target` (an sRGB image).
+    // Where the main thread's time goes each frame (get_engine_info's
+    // phases_since): mark(p) gives p the time since the last mark.
+    using clock = std::chrono::steady_clock;
+    // A screenshot (taken by a command) is the command's time.
+    editor::FramePhaseMs phase_ms{};
+    auto phase_mark = clock::now();
+    bool in_screenshot = false;
+    const auto mark = [&](editor::FramePhase phase) {
+        const auto now = clock::now();
+        const editor::FramePhase to = in_screenshot ? editor::FramePhase::mcp : phase;
+        phase_ms[static_cast<usize>(to)] += std::chrono::duration<float, std::milli>(now - phase_mark).count();
+        phase_mark = now;
+    };
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
+        mark(editor::FramePhase::other);
         terrain_meshes.update(state.scene.terrain);
+        mark(editor::FramePhase::terrain);
         far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes,
                           state.scene.terrain);
+        mark(editor::FramePhase::far_ground);
         scatter.camera = state.camera.position;
         scatter.update(state.scene, terrain_meshes.last_changes());
+        mark(editor::FramePhase::scatter);
         const std::vector<world::EntityId> redraw = physics.take_redraw();
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw);
+        mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::weather_lighting(state.scene.lighting, weather.shown());
@@ -358,10 +377,17 @@ int run(const Options& options) {
         input.materials = scene_frame.materials;
         input.decals = scene_frame.decals;
         renderer->render(cmd, target, input);
+        mark(editor::FramePhase::render);
+        if (!in_screenshot) {
+            for (usize i = 0; i < render::k_cpu_section_names.size(); ++i) {
+                phase_ms[static_cast<usize>(editor::FramePhase::count) + i] += renderer->last_cpu_ms()[i];
+            }
+        }
         state.scene_stats = renderer->last_stats();
         cmd.begin_timing("UI");
         cmd.draw_ui(target, ui->frame());
         cmd.end_timing();
+        mark(editor::FramePhase::ui_draw);
     };
     state.render_screenshot = [&]() -> std::vector<u8> {
         // The same frame, offscreen: what the screen shows, sRGB-encoded.
@@ -380,7 +406,9 @@ int run(const Options& options) {
             device->destroy(target);
             return {};
         }
+        in_screenshot = true;
         record_frame(*cmd, target);
+        in_screenshot = false;
         device->end_frame();
         std::vector<u8> pixels = device->read_texture(target);
         device->destroy(target);
@@ -395,7 +423,6 @@ int run(const Options& options) {
     // instead of spinning a CPU core.
     const bool pace_null = device->backend() == rhi::Backend::null && options.vsync;
 
-    using clock = std::chrono::steady_clock;
     auto report_start = clock::now();
     u64 report_frames = 0;
     // With --frames, give up after this many frames in a row could not be
@@ -404,7 +431,11 @@ int run(const Options& options) {
     constexpr u64 k_max_skipped_frames = 1000;
     u64 skipped_in_a_row = 0;
 
+    double cpu_mark = thread_cpu_ms(); // (on Windows its first call calibrates: 5 ms)
+    phase_mark = clock::now();         // setup is no frame's
+    last_frame = phase_mark;
     while (window->poll_events() && !state.quit_requested) {
+        mark(editor::FramePhase::events);
         if (mcp_reader != nullptr) {
             if (!pump_mcp(*mcp_reader, *mcp_server, state.quit_requested) ||
                 mcp_reader->finished()) {
@@ -415,20 +446,30 @@ int run(const Options& options) {
                 break;
             }
         }
+        mark(editor::FramePhase::mcp);
         const auto input = window->take_input_events();
         if (window->minimized()) {
             // Nothing to show: idle instead of spinning a CPU core.
             window->wait_events(100);
             last_frame = std::chrono::steady_clock::now();
+            phase_ms = {}; // minimised time is no frame's
+            phase_mark = last_frame;
+            cpu_mark = thread_cpu_ms();
             continue;
         }
         const auto frame_start = std::chrono::steady_clock::now();
         const float delta = std::chrono::duration<float>(frame_start - last_frame).count();
         last_frame = frame_start;
         frame_info.frame_ms = 1000.0f * delta;
-        state.frame_times.add(frame_info.frame_ms);
+        // The phases since the last frame began: the same span as delta.
+        mark(editor::FramePhase::other);
+        const double cpu_now = thread_cpu_ms();
+        state.frame_times.add(frame_info.frame_ms, phase_ms, static_cast<float>(cpu_now - cpu_mark));
+        cpu_mark = cpu_now;
+        phase_ms = {};
 
         scripts.update(delta);
+        mark(editor::FramePhase::scripts);
 
         // Playing: the mouse and keys are the player's (the panels get
         // only releases, so nothing they hold sticks).
@@ -450,18 +491,22 @@ int run(const Options& options) {
         }
         panels.draw(frame_info);
         ui->end_frame();
+        mark(editor::FramePhase::ui);
         // The player's wanted motion (or play stopped: Esc, a new scene).
         const bool playing = play.before_step(state.scene, state.camera, state.scene_generation, delta);
         window->set_relative_mouse(playing); // mouse look, the cursor held in the window
         weather.update(state.scene.weather, delta, state.camera.position, state.scene_generation); // after the panels' changes
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
+        mark(editor::FramePhase::weather);
         physics.update(state.scene, scene_frame.take_for_followers(), delta);
         if (playing) play.after_step(state.camera, delta); // the camera at its eyes
+        mark(editor::FramePhase::physics);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }
         rhi::CommandList* cmd = device->begin_frame(swap_chain.get());
+        mark(editor::FramePhase::begin_frame);
         if (cmd == nullptr) {
             if (device->device_lost()) {
                 log_error("editor", "the GPU device was lost; closing");
@@ -475,13 +520,16 @@ int run(const Options& options) {
             // the current size, and wait a little so a lasting failure idles.
             window->wait_events(16);
             swap_chain->resize(window->pixel_width(), window->pixel_height());
+            mark(editor::FramePhase::tail);
             continue;
         }
         record_frame(*cmd, swap_chain->current_texture());
         device->end_frame();
+        mark(editor::FramePhase::end_frame);
         // After the frame's cells were built from the scene: loads and
         // unloads world cells (what joins the scene draws next frame).
         world_streaming.update(state.scene, state.scene_generation, state.camera.position, scene_frame);
+        mark(editor::FramePhase::streaming);
         if (state.selected != 0 && state.scene.find(state.selected) == nullptr) {
             state.selected = 0;
         }
@@ -504,6 +552,7 @@ int run(const Options& options) {
         if (options.max_frames != 0 && device->frames_completed() >= options.max_frames) {
             break;
         }
+        mark(editor::FramePhase::tail);
     }
 
     device->wait_idle();

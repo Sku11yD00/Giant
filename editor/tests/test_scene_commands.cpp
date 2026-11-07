@@ -217,6 +217,47 @@ GIANT_TEST("editor: render settings are view state") {
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["streaming"].contains("pool_bytes"));
 }
 
+GIANT_TEST("editor: frame phases name the slow frames' parts") {
+    FrameTimes t;
+    const auto at = [](FramePhase p) { return static_cast<usize>(p); };
+    // 300 frames (the first 60 roll out): steady 10 ms of render, one of
+    // 40 ms where the scatter took 30, the renderer's voxels a part of render.
+    for (usize i = 0; i < 300; ++i) {
+        FramePhaseMs phases{};
+        phases[at(FramePhase::render)] = 10.0f;
+        phases[at(FramePhase::count) + static_cast<usize>(render::CpuSection::voxels)] = 4.0f;
+        phases[at(FramePhase::mcp)] = 0.01f; // under 0.05 ms: left out
+        float ms = 10.01f;
+        if (i == 290) {
+            phases[at(FramePhase::scatter)] = 30.0f;
+            ms = 40.01f;
+        }
+        t.add(ms, phases, i == 290 ? 39.0f : 9.0f);
+    }
+    usize slot = 0;
+    GIANT_CHECK(t.slot_of(299, slot) && slot == 299 % FrameTimes::k_frames);
+    GIANT_CHECK(t.slot_of(60, slot) && !t.slot_of(59, slot) && !t.slot_of(300, slot));
+    // All kept frames: from 60, the oldest kept, whatever was asked.
+    const ai::Json all = frame_phases(t, 0, 25.0f);
+    GIANT_CHECK(all["since"] == 60 && all["frames"] == 240);
+    GIANT_CHECK(all["typical"]["render"] == 10.0 && all["typical"]["render/voxels"] == 4.0);
+    GIANT_CHECK(all["typical"]["scatter"] == 0.0 && all["typical_cpu_ms"] == 9.0);
+    GIANT_CHECK(all["slow"].size() == 1);
+    const ai::Json& slow = all["slow"][0];
+    GIANT_CHECK(slow["frame"] == 290 && slow["ms"] == 40.01 && slow["cpu_ms"] == 39.0);
+    GIANT_CHECK(slow["phases"]["scatter"] == 30.0 && slow["phases"]["render/voxels"] == 4.0);
+    GIANT_CHECK(!slow["phases"].contains("mcp") && !slow["phases"].contains("ui"));
+    // Since frame 295: five frames, none slow; past the newest: none.
+    const ai::Json recent = frame_phases(t, 295, 25.0f);
+    GIANT_CHECK(recent["since"] == 295 && recent["frames"] == 5 && recent["slow"].empty());
+    const ai::Json none = frame_phases(t, 1000, 25.0f);
+    GIANT_CHECK(none["frames"] == 0 && none["slow"].empty() && none["typical"]["render"] == 0.0);
+    // Every frame in full when asked for all over 0 ms.
+    GIANT_CHECK(frame_phases(t, 290, 0.0f)["slow"].size() == 10);
+    GIANT_CHECK(frame_phase_name(at(FramePhase::count)) == "render/cells");
+    GIANT_CHECK(frame_phase_name(at(FramePhase::tail)) == "tail");
+}
+
 GIANT_TEST("editor: mesh paths have one spelling") {
     GIANT_CHECK(MeshLibrary::normalize("assets/./rocks/../rock.glb") == "assets/rock.glb");
     GIANT_CHECK(MeshLibrary::normalize("assets\\rock.glb") == "assets/rock.glb");
