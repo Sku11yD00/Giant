@@ -22,13 +22,14 @@ This table is the source of truth for `tools/check_architecture.py`.
 | core | (nothing) |
 | platform | core |
 | rhi | core |
-| geometry | core |
+| anim | core |
+| geometry | core, anim |
 | voxel | core |
 | render | core, rhi, geometry, voxel |
 | world | core, voxel |
 | sim | core, world |
 | script | core, world, sim |
-| ai | core, platform, rhi, geometry, render, world, sim, script |
+| ai | core, platform, rhi, anim, geometry, render, world, sim, script |
 | editor | everything |
 
 `rhi` never includes `platform`: a swap chain takes the native window handle
@@ -931,6 +932,47 @@ record's placement deleted keeps its record (harmless: it applies to
 nothing) until `clear_damage`; a kept piece has no body (the player walks
 through rubble, as through far rubble); a kit's pieces changed since make
 the record's piece indices the new kit's.
+
+## Animation (N5 part 1)
+
+`anim` (core only) holds skeletons and clips as plain data and the work
+done on them each frame, so the importer, the editor and later the
+simulation share one definition and none of it needs a GPU.
+
+- **Skeleton.** Joints with names, parents (always before their children,
+  so one pass from the start works out every joint), a rest pose as
+  translation, rotation and scale, and inverse bind matrices; `root`
+  places the root joints' parent. Model space is the file's own space.
+- **Clips.** Per joint channels of translation, rotation or scale, each
+  linear (rotations along the shorter arc at constant speed), step or
+  cubic (glTF's Hermite spline, tangents scaled by the key spacing).
+  `sample` starts from the rest pose and replaces what the clip animates,
+  holding each channel's first and last keys outside them.
+- **Skinning.** `model_matrices` then `skin_matrices` (model times inverse
+  bind) per joint; a vertex is the weighted sum of its (at most four)
+  joints' skin matrices applied to its bind-space place, weights in 255ths
+  summing to 255. `skin_point` is the CPU reference the GPU pass will
+  match. `pose_bounds` bounds a pose from the joints alone: each joint's
+  vertices lie within the reach the import measured from it when bound,
+  scaled by its skin matrix, so no vertex is visited per frame.
+- **Player.** `AnimationPlayer` plays one clip (looping or once, at a
+  speed, paused), cross-fades to the next over a time, or holds two clips
+  blended (a walk and a run), the second one's phase following the
+  first's when asked. It owns nothing but the clip numbers and times, and
+  `PoseScratch` keeps evaluation free of allocation once grown.
+
+The glTF importer reads one skin per file (a second is refused). Its
+skeleton is the skin's joints plus any node between two of them (their
+transforms count, as glTF says), ordered parents first; JOINTS/WEIGHTS
+sets 0 and 1 are merged and cut to the four heaviest. Skinned meshes are
+kept in bind space, as written (their node's transform is ignored, as
+glTF asks); meshes that are not skinned but hang under a joint move
+rigidly with it, others with the first root joint. `ImportResult::mesh` is
+the character as its rest pose has it, so everything that draws meshes
+unanimated (kits, scatter, the bind-pose preview) keeps working.
+Validation refuses joint indices out of range, mismatched inverse binds,
+key times that do not increase, values that do not match their keys,
+clips over an hour, more than 1024 joints and more than 8 million keys.
 
 ## Window events (known limit)
 

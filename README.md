@@ -250,6 +250,14 @@ Milestone **N4, first playable slice** (in progress; gate: a growing giantess wr
   itself up onto the top and pushes off with Space. Anything with a body can
   carry the player (`carry_player`), ready for a giant's hand to pick them up.
 
+Milestone **N5, photoreal characters** (in progress; gate: close-ups hold up beside Unreal reference shots, with no smear):
+
+- Part 1a: skinned characters, the data. A glTF/GLB file with a skin
+  imports its skeleton, each vertex's joints and weights and every
+  animation clip (a walk cycle); the new `anim` module samples clips,
+  cross-fades and blends them, and works out the skinning. Drawing them
+  animated (1b) and playing them from the editor (1c) come next.
+
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
 close the window to exit. Keep the `D3D12` folder next to the exe. The
