@@ -5,6 +5,7 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <cmath>
 
 using namespace giant;
