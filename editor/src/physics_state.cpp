@@ -40,6 +40,15 @@ void PhysicsState::flush(world::Scene& scene) {
     m_bodies.flush(scene, untaken.ids, untaken.all);
 }
 
+void PhysicsState::catch_up(world::Scene& scene) {
+    if (take_frame_changes) {
+        const world::SceneChanges taken = take_frame_changes();
+        m_bodies.sync(scene, taken.ids, taken.all);
+    }
+    const world::SceneChanges& untaken = scene.untaken_changes();
+    m_bodies.sync(scene, untaken.ids, untaken.all);
+}
+
 u32 PhysicsState::run_steps(u32 steps) {
     for (u32 i = 0; i < steps; ++i) {
         m_physics.step(sim::PhysicsWorld::k_step_seconds);

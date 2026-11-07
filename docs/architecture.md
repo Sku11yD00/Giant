@@ -624,8 +624,14 @@ it. `PhysicsWorld::clear` keeps characters, made again where they were.
 
 Play mode in the editor (`editor/src/play_state.h`) puts one on what is
 under the camera, turns simulating on and puts the camera at its eyes,
-easing it up steps; the window's relative mouse mode gives the look. It
-holds the player still while the ground tile under it is still being made
+drawn between the last two fixed steps (`PhysicsWorld::step_fraction`) so
+it moves smoothly at 144 Hz as at 60, and eased up steps; the window's
+relative mouse mode gives the look, and the panels get no mouse and only
+key releases meanwhile. Starting never flushes the bodies (a stall in a
+world just opened): it queues a frame's share and holds the player at the
+camera until nothing waits (`ScenePhysics::busy`, five seconds at most),
+then stands it on what is under the camera. It also holds it
+(`hold_character`) while the ground tile under it is still being made
 (`ScenePhysics::ground_waiting`), so streaming in never drops it through.
 Like simulating it is view state: stopping removes the character and puts
 the camera and simulating back as they were.

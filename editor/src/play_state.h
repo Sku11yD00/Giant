@@ -42,8 +42,11 @@ public:
 
     bool playing() const { return m_player != sim::k_no_character; }
     // Starts: the player stands on what is under the camera (or falls from
-    // there, if nothing is), looking where the camera looks. False when it
-    // could not be put there (the physics world refused it).
+    // there, if nothing is), looking where the camera looks. Bodies still
+    // being made (a world just opened, entities just added) are waited for
+    // without stalling a frame: the player is held at the camera until
+    // they are in (at most five seconds), then put on what is under it.
+    // False when it could not be put there (the physics world refused it).
     bool start(world::Scene& scene, EditorCamera& camera, u64 scene_generation);
     // Stops: the camera back where it was, simulating as it was.
     void stop(EditorCamera& camera);
@@ -60,20 +63,23 @@ public:
 
     // Each frame, before the physics steps: the player's wanted motion. A
     // new scene (another generation) stops play; true while still playing.
-    bool before_step(const world::Scene& scene, EditorCamera& camera, u64 scene_generation);
-    // After the physics steps: the camera at the player's eyes (`seconds`
-    // since the last: a step up is eased, not snapped).
+    bool before_step(const world::Scene& scene, EditorCamera& camera, u64 scene_generation, double seconds);
+    // After the physics steps: the camera at the player's eyes, drawn
+    // between the last two fixed steps (smooth at any frame rate), a step
+    // up eased (`seconds` since the last call), not snapped.
     void after_step(EditorCamera& camera, double seconds);
 
     std::optional<sim::CharacterState> player() const;
     sim::BodyId player_body() const;
     const PlayerInput& input() const { return m_input; }
     const PlayerSettings& settings() const { return m_settings; }
-    // Held still in the air: the ground under it is still being made.
-    bool waiting_for_ground() const { return m_waiting; }
+    // Held still: what it stands on is still being made.
+    bool waiting_for_ground() const { return m_waiting || m_placing; }
 
 private:
     void apply_input();
+    // On what is under `eye` (within a kilometre), else hanging from it.
+    DVec3 spawn_at(const DVec3& eye) const;
 
     PhysicsState& m_physics;
     PlayerSettings m_settings;
@@ -91,7 +97,8 @@ private:
     bool m_from_keys = false; // the keys, not set_input, give the input
     double m_eye = 0.0; // the camera's height shown (eased up steps)
     bool m_waiting = false;
-    DVec3 m_held{}; // where it is held while the ground is made
+    bool m_placing = false;   // started, waiting for the bodies before standing
+    double m_placing_for = 0.0; // seconds of it
 };
 
 } // namespace giant::editor

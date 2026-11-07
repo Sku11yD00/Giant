@@ -196,7 +196,7 @@ GIANT_TEST("play commands: Esc stops, a new scene stops, simulate off stops; sim
     esc.key = platform::Key::escape;
     esc.down = true;
     f.play.handle_input({esc}, false);
-    GIANT_CHECK(!f.play.before_step(f.state.scene, f.state.camera, f.state.scene_generation));
+    GIANT_CHECK(!f.play.before_step(f.state.scene, f.state.camera, f.state.scene_generation, 0.0));
     GIANT_CHECK(!f.play.playing() && f.physics.simulating() && f.state.camera.position == DVec3(0.0, 3.0, 0.0));
     // The keys walk it; a key let go stops it.
     GIANT_CHECK(f.run("play", {{"on", true}}).ok);

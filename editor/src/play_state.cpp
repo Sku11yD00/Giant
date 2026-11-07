@@ -19,15 +19,16 @@ constexpr double k_eye_ease = 14.0;
 
 PlayState::PlayState(PhysicsState& physics, const PlayerSettings& settings) : m_physics(physics), m_settings(settings) {}
 
+DVec3 PlayState::spawn_at(const DVec3& eye) const {
+    const auto hit = m_physics.world().raycast(eye, {0.0f, -1.0f, 0.0f}, 1000.0);
+    return hit ? hit->point + DVec3(0.0, 0.02, 0.0) : eye - DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0);
+}
+
 bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_generation) {
     if (playing()) return true;
-    m_physics.flush(scene); // everything there to stand on
+    m_physics.catch_up(scene); // a frame's share: never a stall
     sim::CharacterDesc desc = m_settings.body;
-    // On what is under the camera (within a kilometre), else from where it is.
-    const DVec3 eye = camera.position;
-    const auto hit = m_physics.world().raycast(eye, {0.0f, -1.0f, 0.0f}, 1000.0);
-    desc.position = hit ? hit->point + DVec3(0.0, 0.02, 0.0)
-                        : eye - DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0);
+    desc.position = spawn_at(camera.position);
     m_player = m_physics.world().add_character(desc);
     if (m_player == sim::k_no_character) return false;
     m_generation = scene_generation;
@@ -38,6 +39,9 @@ bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_gener
     m_keys = {};
     m_shift = m_space = m_stop = m_from_keys = false;
     m_waiting = false;
+    m_placing = m_physics.bodies().busy();
+    m_placing_for = 0.0;
+    m_physics.world().hold_character(m_player, m_placing);
     m_yaw = camera.yaw_degrees;
     m_pitch = camera.pitch_degrees;
     m_eye = desc.position.y + m_settings.eye_height;
@@ -64,7 +68,7 @@ void PlayState::handle_input(const std::vector<InputEvent>& events, bool ui_has_
         case InputEvent::Type::key: {
             m_shift = (e.modifiers & platform::modifier::shift) != 0;
             // Releases always count, so a key let go over a panel never sticks.
-            if (ui_has_keyboard && e.down) break;
+            if (ui_has_keyboard && e.down && e.key != Key::escape) break;
             const auto set = [&](usize i) {
                 m_keys[i] = e.down;
                 m_from_keys = true;
@@ -81,7 +85,7 @@ void PlayState::handle_input(const std::vector<InputEvent>& events, bool ui_has_
                 m_space = e.down;
                 break;
             case Key::escape:
-                if (e.down) m_stop = true;
+                if (e.down) m_stop = true; // even with a text field focused
                 break;
             default: break;
             }
@@ -132,27 +136,38 @@ void PlayState::apply_input() {
     m_physics.world().set_character_input(m_player, in);
 }
 
-bool PlayState::before_step(const world::Scene& scene, EditorCamera& camera, u64 scene_generation) {
+bool PlayState::before_step(const world::Scene& scene, EditorCamera& camera, u64 scene_generation, double seconds) {
     if (!playing()) return false;
     if (m_stop || scene_generation != m_generation) {
         stop(camera);
         return false;
     }
     apply_input();
+    sim::PhysicsWorld& world = m_physics.world();
+    if (m_placing) {
+        // Just started: held until what it could stand on is in, then put on it.
+        m_placing_for += std::max(seconds, 0.0);
+        if (m_physics.bodies().busy() && m_placing_for < 5.0) return true;
+        m_placing = false;
+        const DVec3 at = spawn_at(m_saved_camera.position);
+        world.set_character_position(m_player, at);
+        m_eye = at.y + m_settings.eye_height;
+    }
     // Ground on its way under it (streamed in, just edited): held where it
     // is until it is there, rather than falling through.
-    const std::optional<sim::CharacterState> s = m_physics.world().character_state(m_player);
-    const bool waiting = s && m_physics.bodies().ground_waiting(scene.terrain, s->position);
-    if (waiting && !m_waiting) m_held = s->position;
-    if (waiting) m_physics.world().set_character_position(m_player, m_held);
-    m_waiting = waiting;
+    const std::optional<sim::CharacterState> s = world.character_state(m_player);
+    m_waiting = s && m_physics.bodies().ground_waiting(scene.terrain, s->position);
+    world.hold_character(m_player, m_waiting);
     return true;
 }
 
 void PlayState::after_step(EditorCamera& camera, double seconds) {
     const std::optional<sim::CharacterState> s = player();
     if (!s) return;
-    const double eye = s->position.y + static_cast<double>(m_settings.eye_height);
+    // Between the last two fixed steps, by how far time is into the next.
+    const double t = m_physics.world().step_fraction();
+    const DVec3 at = s->previous + (s->position - s->previous) * t;
+    const double eye = at.y + static_cast<double>(m_settings.eye_height);
     // Up a step (a small rise while on the ground): eased. Anything else
     // (falling, jumping, down a step) followed at once.
     const double rise = eye - m_eye;
@@ -161,7 +176,7 @@ void PlayState::after_step(EditorCamera& camera, double seconds) {
     } else {
         m_eye = eye;
     }
-    camera.position = {s->position.x, m_eye, s->position.z};
+    camera.position = {at.x, m_eye, at.z};
     camera.yaw_degrees = m_yaw;
     camera.pitch_degrees = m_pitch;
 }

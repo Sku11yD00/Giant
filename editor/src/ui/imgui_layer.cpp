@@ -157,7 +157,17 @@ void ImGuiLayer::begin_frame(float delta_seconds, const std::vector<InputEvent>&
     }
     io.DeltaTime = delta_seconds > 0.0f ? delta_seconds : 1.0f / 60.0f;
 
+    if (m_captured) {
+        io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
+    } else {
+        io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+    }
     for (const InputEvent& e : input) {
+        // Captured: no hover or clicks from the hidden cursor, no keys
+        // pressed (a release still lets go of one held before).
+        if (m_captured && e.type != InputEvent::Type::focus && !(e.type == InputEvent::Type::key && !e.down)) {
+            continue;
+        }
         switch (e.type) {
         case InputEvent::Type::mouse_move: io.AddMousePosEvent(e.x, e.y); break;
         case InputEvent::Type::mouse_left: io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); break;
@@ -188,6 +198,20 @@ void ImGuiLayer::begin_frame(float delta_seconds, const std::vector<InputEvent>&
         }
     }
     ImGui::NewFrame();
+    if (m_drop_focus) {
+        ImGui::SetWindowFocus(nullptr); // no panel keeps the keys (Space would press its button)
+        m_drop_focus = false;
+    }
+}
+
+void ImGuiLayer::set_captured(bool captured) {
+    if (captured == m_captured) return;
+    m_captured = captured;
+    m_drop_focus = captured;
+    if (captured) {
+        ImGui::SetCurrentContext(m_context);
+        ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX); // no hover left behind
+    }
 }
 
 void ImGuiLayer::end_frame() {

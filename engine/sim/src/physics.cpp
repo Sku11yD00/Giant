@@ -315,11 +315,16 @@ bool valid_character(const CharacterDesc& d) {
            std::isfinite(d.max_slope_degrees) && std::isfinite(d.step_height) && std::isfinite(d.mass) &&
            std::isfinite(d.strength) && d.radius >= 0.05f && d.height >= 2.0f * d.radius + 0.01f &&
            d.height <= 100.0f && d.max_slope_degrees >= 0.0f && d.max_slope_degrees <= 89.0f &&
-           d.step_height >= 0.0f && d.step_height < d.height && d.mass > 0.0f && d.strength >= 0.0f;
+           d.step_height >= 0.0f && d.step_height <= 0.5f * d.height && d.mass > 0.0f && d.strength >= 0.0f;
 }
 
+// Fastest a character is told to go, jump or fall (metres a second): far
+// past running, within what Jolt keeps exact.
+constexpr float k_max_character_speed = 100.0f;
+
 bool valid_input(const CharacterInput& in) {
-    return finite(in.velocity) && std::isfinite(in.acceleration) && in.acceleration >= 0.0f &&
+    return finite(in.velocity) && std::fabs(in.velocity.x) <= k_max_character_speed &&
+           std::fabs(in.velocity.z) <= k_max_character_speed && std::isfinite(in.acceleration) && in.acceleration >= 0.0f &&
            std::isfinite(in.air_acceleration) && in.air_acceleration >= 0.0f;
 }
 
@@ -400,8 +405,18 @@ struct PhysicsWorld::Impl {
         float jump_wait = 0.0f; // seconds a jump asked for still waits for the ground
         JPH::Vec3 velocity = JPH::Vec3::sZero(); // how it moved in the last step (Jolt keeps the speed asked for)
         float vertical = 0.0f; // the speed up it was given in the last step
+        JPH::RVec3 previous = JPH::RVec3::sZero(); // where it was before the last step
+        bool held = false;
     };
     std::map<CharacterId, Character> characters; // in id order: the same steps every run
+
+    // A character's own body: moved with it, never by the body calls.
+    bool is_character_body(JPH::BodyID b) const {
+        for (const auto& [id, c] : characters) {
+            if (c.body->GetInnerBodyID() == b) return true;
+        }
+        return false;
+    }
     CharacterId next_character = 1;
 
     JPH::BodyInterface& bodies_interface() { return system.GetBodyInterface(); }
@@ -454,9 +469,13 @@ struct PhysicsWorld::Impl {
     // when its shapes could not be made.
     JPH::Ref<JPH::CharacterVirtual> make_character(const CharacterDesc& d, const DVec3& position, const Vec3& velocity) {
         JPH::RefConst<JPH::Shape> shape = standing_capsule(d.height, d.radius);
-        // The body others meet: a little inside the character (it keeps that
-        // far from things), so it never holds the character back.
-        JPH::RefConst<JPH::Shape> inner = standing_capsule(d.height - 0.04f, d.radius - 0.02f);
+        // The body others meet: a little narrower than the character (it
+        // keeps that far from things, so it never holds the character back
+        // against a wall), and reaching past the top of its padded shape, so
+        // something resting on its head rests clear of it: a crate on the
+        // head inside the shape would pin it, the floor below and the crate
+        // above leaving no way to move.
+        JPH::RefConst<JPH::Shape> inner = standing_capsule(d.height + 0.03f, d.radius - 0.02f);
         if (shape == nullptr || inner == nullptr) return nullptr;
         JPH::Ref<JPH::CharacterVirtualSettings> s = new JPH::CharacterVirtualSettings();
         s->mShape = shape;
@@ -515,6 +534,8 @@ struct PhysicsWorld::Impl {
             c.jump_wait = std::max(0.0f, c.jump_wait - dt);
         }
         out += gravity * dt;
+        // A fall's speed has an end (air): no endless speed-up into a world still empty.
+        out.SetY(std::clamp(out.GetY(), -k_max_character_speed, k_max_character_speed));
         c.vertical = out.GetY();
         cv.SetLinearVelocity(out);
         JPH::CharacterVirtual::ExtendedUpdateSettings update;
@@ -567,6 +588,7 @@ void PhysicsWorld::clear() {
     fresh->steps = m_impl->steps;
     fresh->dropped = m_impl->dropped;
     fresh->next_character = m_impl->next_character;
+    fresh->carried = m_impl->carried;
     // Characters carry on in the fresh world where they were.
     for (auto& [id, c] : m_impl->characters) {
         Impl::Character moved = c;
@@ -635,7 +657,7 @@ void PhysicsWorld::remove_many(std::span<const BodyId> ids, bool wake_neighbours
     JPH::BodyInterface& bi = m_impl->bodies_interface();
     for (const BodyId id : ids) {
         const JPH::BodyID b = from_id(id);
-        if (!b.IsInvalid() && bi.IsAdded(b)) gone.push_back(b);
+        if (!b.IsInvalid() && bi.IsAdded(b) && !m_impl->is_character_body(b)) gone.push_back(b);
     }
     std::sort(gone.begin(), gone.end());
     gone.erase(std::unique(gone.begin(), gone.end()), gone.end());
@@ -677,7 +699,7 @@ u64 PhysicsWorld::user(BodyId id) const {
 }
 
 void PhysicsWorld::set_transform(BodyId id, const DVec3& position, const Quat& rotation) {
-    if (!contains(id) || !finite(position) || !finite(rotation)) return;
+    if (!contains(id) || !finite(position) || !finite(rotation) || m_impl->is_character_body(from_id(id))) return;
     m_impl->wake_around(from_id(id)); // a fixed body: what rested on it where it was
     m_impl->bodies_interface().SetPositionAndRotation(from_id(id), to_jolt(position), to_jolt(rotation),
                                                       JPH::EActivation::Activate);
@@ -685,12 +707,12 @@ void PhysicsWorld::set_transform(BodyId id, const DVec3& position, const Quat& r
 }
 
 void PhysicsWorld::set_velocity(BodyId id, const Vec3& linear, const Vec3& angular) {
-    if (!contains(id) || !finite(linear) || !finite(angular)) return;
+    if (!contains(id) || !finite(linear) || !finite(angular) || m_impl->is_character_body(from_id(id))) return;
     m_impl->bodies_interface().SetLinearAndAngularVelocity(from_id(id), to_jolt(linear), to_jolt(angular));
 }
 
 void PhysicsWorld::move_kinematic(BodyId id, const DVec3& position, const Quat& rotation) {
-    if (!contains(id) || !finite(position) || !finite(rotation)) return;
+    if (!contains(id) || !finite(position) || !finite(rotation) || m_impl->is_character_body(from_id(id))) return;
     m_impl->bodies_interface().MoveKinematic(from_id(id), to_jolt(position), to_jolt(rotation),
                                              static_cast<float>(k_step_seconds));
 }
@@ -713,7 +735,10 @@ u32 PhysicsWorld::step(double seconds) {
             break;
         }
         m_impl->carried -= k_step_seconds;
-        for (auto& [id, c] : m_impl->characters) m_impl->step_character(c, static_cast<float>(k_step_seconds));
+        for (auto& [id, c] : m_impl->characters) {
+            c.previous = c.body->GetPosition();
+            if (!c.held) m_impl->step_character(c, static_cast<float>(k_step_seconds));
+        }
         const JPH::EPhysicsUpdateError error =
             m_impl->system.Update(static_cast<float>(k_step_seconds), 1, &m_impl->temp, &m_impl->jobs);
         m_impl->jobs.drain();
@@ -739,6 +764,7 @@ CharacterId PhysicsWorld::add_character(const CharacterDesc& desc) {
     Impl::Character c;
     c.desc = desc;
     c.body = m_impl->make_character(desc, desc.position, {});
+    c.previous = to_jolt(desc.position);
     if (c.body == nullptr || c.body->GetInnerBodyID().IsInvalid()) return k_no_character; // full
     m_impl->refresh(*c.body); // standing (or not) from the start
     const CharacterId id = m_impl->next_character++;
@@ -765,7 +791,7 @@ void PhysicsWorld::set_character_input(CharacterId id, const CharacterInput& inp
 void PhysicsWorld::jump(CharacterId id, float speed) {
     const auto it = m_impl->characters.find(id);
     if (it == m_impl->characters.end() || !std::isfinite(speed) || speed <= 0.0f) return;
-    it->second.jump_speed = speed;
+    it->second.jump_speed = std::min(speed, k_max_character_speed);
     it->second.jump_wait = k_jump_wait;
 }
 
@@ -773,6 +799,7 @@ void PhysicsWorld::set_character_position(CharacterId id, const DVec3& position)
     const auto it = m_impl->characters.find(id);
     if (it == m_impl->characters.end() || !finite(position)) return;
     it->second.body->SetPosition(to_jolt(position));
+    it->second.previous = to_jolt(position);
     it->second.body->SetLinearVelocity(JPH::Vec3::sZero());
     it->second.velocity = JPH::Vec3::sZero();
     it->second.vertical = 0.0f;
@@ -780,12 +807,21 @@ void PhysicsWorld::set_character_position(CharacterId id, const DVec3& position)
     m_impl->refresh(*it->second.body);
 }
 
+void PhysicsWorld::hold_character(CharacterId id, bool held) {
+    const auto it = m_impl->characters.find(id);
+    if (it != m_impl->characters.end()) it->second.held = held;
+}
+
+double PhysicsWorld::step_fraction() const { return std::clamp(m_impl->carried / k_step_seconds, 0.0, 1.0); }
+
 std::optional<CharacterState> PhysicsWorld::character_state(CharacterId id) const {
     const auto it = m_impl->characters.find(id);
     if (it == m_impl->characters.end()) return std::nullopt;
     const JPH::CharacterVirtual& c = *it->second.body;
     CharacterState s;
     s.position = from_jolt_r(c.GetPosition());
+    s.previous = from_jolt_r(it->second.previous);
+    s.held = it->second.held;
     s.velocity = from_jolt(it->second.velocity);
     s.on_ground = c.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround;
     s.on_steep = c.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnSteepGround;

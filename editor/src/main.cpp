@@ -387,6 +387,7 @@ int run(const Options& options) {
         return pixels;
     };
     editor::ViewportCamera viewport_camera;
+    bool was_playing = false;
     editor::FrameInfo frame_info;
     auto last_frame = std::chrono::steady_clock::now();
 
@@ -429,6 +430,13 @@ int run(const Options& options) {
 
         scripts.update(delta);
 
+        // Playing: the mouse and keys are the player's (the panels get
+        // only releases, so nothing they hold sticks).
+        if (play.playing() != was_playing) {
+            was_playing = play.playing();
+            ui->set_captured(was_playing);
+            viewport_camera.reset(); // keys held when play started or stopped never arrive
+        }
         // Build the UI first: what it changes shows in this frame.
         ui->begin_frame(delta, input);
         if (play.playing()) {
@@ -443,7 +451,7 @@ int run(const Options& options) {
         panels.draw(frame_info);
         ui->end_frame();
         // The player's wanted motion (or play stopped: Esc, a new scene).
-        const bool playing = play.before_step(state.scene, state.camera, state.scene_generation);
+        const bool playing = play.before_step(state.scene, state.camera, state.scene_generation, delta);
         window->set_relative_mouse(playing); // mouse look, the cursor held in the window
         weather.update(state.scene.weather, delta, state.camera.position, state.scene_generation); // after the panels' changes
         // What the last frame took from the scene; dynamic entities move

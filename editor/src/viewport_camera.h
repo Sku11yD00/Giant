@@ -21,6 +21,8 @@ public:
     void handle_input(const std::vector<platform::InputEvent>& events, bool ui_has_mouse);
     void update(EditorCamera& camera, float delta_seconds);
     bool flying() const { return m_flying; }
+    // Lets go of everything held (the mouse button, the keys).
+    void reset();
 
 private:
     bool m_flying = false;

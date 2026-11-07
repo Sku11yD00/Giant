@@ -256,13 +256,17 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              const double seconds = args["seconds"].get<double>();
              const u32 steps = std::max(1u, static_cast<u32>(std::lround(seconds / sim::PhysicsWorld::k_step_seconds)));
              state.physics->flush(state.scene);
-             for (u32 i = 0; i < steps; ++i) {
-                 if (!state.play->before_step(state.scene, state.camera, state.scene_generation)) break;
+             u32 stepped = 0;
+             for (; stepped < steps; ++stepped) {
+                 if (!state.play->before_step(state.scene, state.camera, state.scene_generation,
+                                              sim::PhysicsWorld::k_step_seconds)) {
+                     break; // play stopped (a new scene)
+                 }
                  state.physics->run_steps(1);
                  state.play->after_step(state.camera, sim::PhysicsWorld::k_step_seconds);
              }
              Json out = player_json(state);
-             out["stepped"] = steps;
+             out["stepped"] = stepped;
              return CommandResult::success(out);
          }});
 

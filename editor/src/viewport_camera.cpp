@@ -78,6 +78,13 @@ void ViewportCamera::handle_input(const std::vector<InputEvent>& events, bool ui
     }
 }
 
+void ViewportCamera::reset() {
+    m_flying = false;
+    m_move = {};
+    m_look_x = m_look_y = m_wheel = 0.0f;
+    m_fast = false;
+}
+
 void ViewportCamera::update(EditorCamera& camera, float delta_seconds) {
     camera.yaw_degrees -= m_look_x * k_degrees_per_point;
     camera.pitch_degrees =

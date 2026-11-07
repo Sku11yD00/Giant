@@ -735,6 +735,10 @@ def player_gate(tool, call, check):
         player = tool("get_player")
         if player["position"][2] < -7 and player["on_ground"]:
             break
+    tool("set_player_input", {"forward": 0})  # stays on the step, the eyes catch up
+    for _ in range(30):
+        call("ping")
+    player = tool("get_player")
     check(player["standing_on"] == step and abs(player["position"][1] - 0.3) < 0.03,
           f"the player walks up onto the step in real time, got {player}")
     check(abs(tool("get_camera")["position"][1] - (0.3 + 1.65)) < 0.2, "the camera is at the player's eyes")

@@ -138,7 +138,7 @@ struct CharacterDesc {
     float height = 1.8f; // feet to the top of the head
     float radius = 0.3f;
     float max_slope_degrees = 50.0f; // steeper is a wall it slides down
-    float step_height = 0.4f;        // steps it walks up (and down without leaving the ground)
+    float step_height = 0.4f;        // steps it walks up (and down without leaving the ground); at most half its height
     float mass = 80.0f;              // kilograms: how hard what it stands on is pressed
     float strength = 500.0f;         // newtons it pushes dynamic bodies with
     DVec3 position{};
@@ -151,8 +151,9 @@ constexpr CharacterId k_no_character = 0;
 
 // What the character is told to do, held until told otherwise.
 struct CharacterInput {
-    // Metres a second over the ground (y left out): reached at once on the
-    // ground (within `acceleration`), slowly in the air.
+    // Metres a second over the ground (y left out; at most 100): reached at
+    // once on the ground (within `acceleration`), slowly in the air (there
+    // over the world, not over what it jumped off).
     Vec3 velocity{};
     float acceleration = 60.0f;     // metres a second squared, on the ground
     float air_acceleration = 6.0f;  // and in the air
@@ -160,6 +161,10 @@ struct CharacterInput {
 
 struct CharacterState {
     DVec3 position{}; // feet
+    // Where it was before the last fixed step: draw it at
+    // lerp(previous, position, step_fraction()) so it moves smoothly at any frame rate.
+    DVec3 previous{};
+    bool held = false;
     Vec3 velocity{};
     bool on_ground = false; // stands on ground it can walk on
     bool on_steep = false;  // on a slope too steep: sliding
@@ -233,6 +238,9 @@ public:
     // Bodies that moved in the last step() call (dynamic and kinematic ones
     // awake in any of its fixed steps, characters' bodies too), in id order.
     const std::vector<BodyId>& moved() const { return m_moved; }
+    // How far time is into the next fixed step (0 to 1): the share of the
+    // way from where things were to where they are to draw them at.
+    double step_fraction() const;
 
     // Characters (see CharacterDesc). k_no_character when the description
     // has bad numbers (a radius too big for the height) or the world is full.
@@ -246,9 +254,13 @@ public:
     void jump(CharacterId id, float speed);
     // Puts it somewhere at once, still.
     void set_character_position(CharacterId id, const DVec3& position);
+    // Held: left where it is by the steps (the ground under it on its way),
+    // keeping its speed and a jump asked for until let go.
+    void hold_character(CharacterId id, bool held);
     std::optional<CharacterState> character_state(CharacterId id) const;
     // The body standing for the character (raycasts hit it; falling things
-    // land on it): kinematic, moved with it. k_no_body when not a character.
+    // land on it): kinematic, moved with it; remove, set_transform,
+    // set_velocity and move_kinematic leave it alone. k_no_body when not a character.
     BodyId character_body(CharacterId id) const;
     usize characters() const;
 

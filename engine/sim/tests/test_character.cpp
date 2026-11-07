@@ -263,11 +263,52 @@ GIANT_TEST("character: carries on through a cleared world; falling things land o
     ball.position = {5.0, 4.0, 0.0};
     ball.parts.push_back({SphereShape{0.2f}});
     const BodyId b = physics.add(ball);
+    // Over its head (within its radius) the ball is never lower than the top of it.
     bool above = true;
-    for (int i = 0; i < 30; ++i) {
+    for (int i = 0; i < 90; ++i) {
         physics.step(1.0 / 60.0);
         const BodyState s = *physics.state(b);
-        if (std::fabs(s.position.x - 5.0) < 0.1 && std::fabs(s.position.z) < 0.1) above = above && s.position.y > 1.7;
+        const double off = std::hypot(s.position.x - 5.0, s.position.z);
+        if (off < 0.25) above = above && s.position.y > 1.8 + 0.15;
     }
     GIANT_CHECK(above);
+}
+
+GIANT_TEST("character: walks with a crate on its head; its body is its own; huge numbers are held in") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground());
+    CharacterDesc desc;
+    const CharacterId player = physics.add_character(desc);
+    run(physics, 0.2);
+    // A 20 kg crate dropped onto its head rests there, and does not pin it.
+    BodyDesc crate = box({0.0, 2.6, 0.0}, {0.2f, 0.2f, 0.2f}, Motion::dynamic);
+    crate.mass = 20.0f;
+    const BodyId c = physics.add(crate);
+    run(physics, 1.0);
+    GIANT_CHECK(physics.state(c)->position.y > 1.8 + 0.15);
+    physics.set_character_input(player, {{1.0f, 0.0f, 0.0f}});
+    run(physics, 1.0);
+    GIANT_CHECK(state(physics, player).position.x > 0.8);
+    // Its body cannot be taken away or moved as a body.
+    const BodyId body = physics.character_body(player);
+    physics.remove(body);
+    physics.set_transform(body, {50.0, 0.0, 0.0}, {});
+    physics.set_velocity(body, {10.0f, 0.0f, 0.0f}, {});
+    run(physics, 0.1);
+    GIANT_CHECK(physics.contains(body) && physics.size() == 2);
+    // Far-fetched speeds: refused or held to 100 m/s, never a broken world.
+    physics.set_character_input(player, {{1e30f, 0.0f, 0.0f}});
+    GIANT_CHECK(std::fabs(state(physics, player).velocity.x - 1.0f) < 0.05f); // refused: kept walking
+    physics.set_character_input(player, {});
+    physics.jump(player, 1e30f);
+    run(physics, 0.05);
+    GIANT_CHECK(state(physics, player).velocity.y <= 100.0f && state(physics, player).velocity.y > 50.0f);
+    // Falling with nothing below: no faster than 100 m/s.
+    physics.clear();
+    run(physics, 20.0);
+    GIANT_CHECK(state(physics, player).velocity.y >= -100.01f);
+    // A step as high as itself: refused.
+    desc.step_height = 1.0f;
+    GIANT_CHECK(physics.add_character(desc) == k_no_character);
 }
