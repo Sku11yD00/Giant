@@ -35,6 +35,7 @@ Json physics_json(const EditorState& state) {
     const sim::PhysicsStats w = p.world().stats();
     const sim::ScenePhysicsStats s = p.bodies().stats();
     const sim::ForestStats f = p.forest().stats();
+    const sim::DustStats d = p.dust().stats();
     return {{"simulating", p.simulating()},
             {"bodies", w.bodies},
             {"active", w.active},
@@ -51,12 +52,15 @@ Json physics_json(const EditorState& state) {
             {"moved", s.posed},
             {"broken_kits", s.broken_kits},
             {"loose_pieces", s.loose_pieces},
+            {"rubble", s.rubble},
             {"trees", {{"trunks", f.trunks},
                        {"waiting", f.waiting},
                        {"falling", f.falling},
                        {"fallen", f.fallen},
+                       {"laid", f.laid},
                        {"refused", f.refused},
-                       {"shrugged", f.shrugged}}}};
+                       {"shrugged", f.shrugged}}},
+            {"dust", {{"puffs", d.puffs}, {"emitted", d.emitted}, {"merged", d.merged}, {"dropped", d.dropped}}}};
 }
 
 CommandResult no_physics() { return CommandResult::failure("physics is not available"); }
@@ -201,8 +205,10 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "`radius` metres take `impulse` (N s, about mass times speed; less toward the edge), and those it "
          "is enough for come loose, pushed away, with whatever they held up. A footstep, an explosion, a "
          "wrecking ball. Scatter trees (items with `tree`) whose trunk is within reach and takes at least its "
-         "strength snap and topple away from the point. Stopping the simulation puts every piece back and "
-         "stands every tree up. Returns `loosened` (pieces), `felled` (trees) and get_physics.",
+         "strength snap and topple away from the point. Within 600 m of the camera loose pieces fall as "
+         "bodies (4096 at most); farther, or past that, they come down at once as rubble lying flat, and "
+         "trees with no trunk body (beyond about 400 m) are laid down where they fall. What comes down throws "
+         "up dust. Stopping the simulation puts every piece back, stands every tree up and clears the dust. Returns `loosened` (pieces), `felled` (trees) and get_physics.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"point", "radius", "impulse"}},

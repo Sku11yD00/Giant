@@ -355,3 +355,65 @@ GIANT_TEST("forest: blows past what may fall at once are shrugged off") {
     GIANT_CHECK(forest.stats().trunks == 0);
     GIANT_CHECK(physics.size() == 1 + 5);
 }
+
+GIANT_TEST("forest: far from the camera a blow lays its trees down at once, tops on what is there, with dust") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ground(physics);
+    // A block 4 m tall east of the first tree, where its top comes down.
+    BodyDesc block;
+    block.parts.push_back({BoxShape{{5.0f, 2.0f, 5.0f}}});
+    block.position = {90.0, 2.0, 20.0};
+    physics.add(block);
+    Dust dust;
+    Forest forest(physics);
+    forest.set_dust(&dust);
+    forest.set_cell({1, 0}, 1, {tree(0, {80.0, 0.0, 20.0}), tree(1, {80.0, 0.0, 60.0}), tree(2, {150.0, 0.0, 20.0})});
+    const DVec3 camera{5000.0, 0.0, 0.0};
+    // (A sync this far off would forget the cell: given it for the blow, as the editor does.)
+    const usize bodies = physics.size();
+    GIANT_CHECK(forest.stats().trunks == 0);
+    // Too weak: nothing.
+    GIANT_CHECK(forest.impact({70.0, 1.0, 20.0}, 15.0f, 100.0f) == 0);
+    GIANT_CHECK(forest.impact({70.0, 1.0, 20.0}, 15.0f, 1e6f) == 1);
+    GIANT_CHECK(forest.impact({70.0, 1.0, 60.0}, 15.0f, 1e6f) == 1);
+    ForestStats s = forest.stats();
+    GIANT_CHECK(s.laid == 2 && s.fallen == 2 && s.falling == 0 && s.trunks == 0);
+    GIANT_CHECK(physics.size() == bodies); // no bodies for them
+    const FallenTree* onto = fallen(forest, {1, 0}, 0);
+    const FallenTree* flat = fallen(forest, {1, 0}, 1);
+    GIANT_CHECK(onto != nullptr && flat != nullptr && fallen(forest, {1, 0}, 2) == nullptr);
+    if (onto != nullptr && flat != nullptr) {
+        // Its top on the block (about 66 degrees over), to the east; the other flat on the ground.
+        GIANT_CHECK(lean(onto->at) > 58.0f && lean(onto->at) < 72.0f);
+        GIANT_CHECK(rotate(onto->at.rotation, Vec3{0.0f, 1.0f, 0.0f}).x > 0.8f);
+        GIANT_CHECK(lean(flat->at) > 85.0f && lean(flat->at) < 95.0f);
+        GIANT_CHECK(onto->at.position == DVec3(80.0, 0.0, 20.0)); // about its foot
+    }
+    GIANT_CHECK(!dust.puffs().empty());
+    GIANT_CHECK(!forest.take_redraw().empty());
+    // Far off, the cell stays for its fallen trees; standing up again, it goes.
+    forest.sync(camera);
+    GIANT_CHECK(forest.cells().size() == 1);
+    forest.reset();
+    s = forest.stats();
+    GIANT_CHECK(s.laid == 0 && s.fallen == 0 && forest.fallen().empty());
+    forest.sync(camera);
+    GIANT_CHECK(forest.cells().empty());
+}
+
+GIANT_TEST("forest: at most lays_per_impact trees are laid down by one blow, the hardest struck first") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ground(physics);
+    ForestSettings settings;
+    settings.lays_per_impact = 3;
+    Forest forest(physics, settings);
+    std::vector<TreeSpot> trees;
+    for (u32 i = 0; i < 8; ++i) trees.push_back(tree(i, {2.0 + 4.0 * i, 0.0, 10.0}));
+    forest.set_cell({0, 0}, 1, trees);
+    GIANT_CHECK(forest.impact({0.0, 1.0, 10.0}, 40.0f, 1e6f) == 3);
+    GIANT_CHECK(forest.stats().laid == 3 && forest.stats().shrugged == 5);
+    // The nearest three (struck hardest).
+    for (u32 i = 0; i < 8; ++i) GIANT_CHECK((fallen(forest, {0, 0}, i) != nullptr) == (i < 3));
+}

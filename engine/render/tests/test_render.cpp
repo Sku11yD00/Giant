@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -1343,6 +1344,143 @@ GIANT_TEST("render: d3d12 draws a blue sky, grey under overcast clouds that shad
         const auto near_clear = px(clear, k_w / 2, k_h - 2);
         const auto near_fog = px(fog, k_w / 2, k_h - 2);
         GIANT_CHECK(std::abs(near_fog[1] - near_clear[1]) < std::abs(far_fog[1] - far_clear[1]));
+    }
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("render: dust puffs given are counted, bad ones and those past the cap left out (null device)") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    rhi::TextureDesc target_desc;
+    target_desc.width = 32;
+    target_desc.height = 16;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[0].position = {0.0, 0.0, -6.0};
+    std::vector<DustPuff> dust(40);
+    for (usize i = 0; i < dust.size(); ++i) dust[i].center = {0.0, 0.0, -10.0 - static_cast<double>(i)};
+    dust[1].radius = std::numeric_limits<float>::quiet_NaN();
+    dust[2].density = 0.0f;
+    FrameInput frame;
+    frame.instances = instances;
+    frame.dust = dust;
+    const auto draw = [&] {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd != nullptr) {
+            renderer->render(*cmd, target, frame);
+            device->end_frame();
+        }
+    };
+    draw();
+    GIANT_CHECK(renderer->last_stats().dust_puffs == k_max_dust_puffs - 2); // the first 32, two of them bad
+    frame.settings.debug_view = DebugView::clusters; // not lit: no dust
+    draw();
+    GIANT_CHECK(renderer->last_stats().dust_puffs == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("render: d3d12 a dust puff hides what is behind it, lit; one behind the ground shows nothing") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) {
+        return; // not on Windows
+    }
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    constexpr u32 k_w = 64, k_h = 48;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A dark ground; the camera 2 m up looks a little down at it.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {400.0f, 1.0f, 400.0f};
+    instances[0].always_mesh = true;
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.05f, 0.05f, 0.05f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.view.position = {0.0, 2.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(-10.0f));
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.2f, 0.7f, -0.6f});
+    frame.lighting.sun_light = {2.6f, 2.5f, 2.3f};
+    frame.lighting.sky_light = {0.15f, 0.25f, 0.45f};
+    frame.lighting.ground_light = {0.08f, 0.07f, 0.06f};
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.shadows = false;
+    frame.settings.antialiasing = false;
+    const auto draw = [&] {
+        for (int i = 0; i < 3; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto bare = draw();
+    // A pale puff 6 m across about 9 m ahead, low over the ground: its middle hides the ground.
+    std::vector<DustPuff> dust(1);
+    const Vec3 ahead = rotate(frame.view.orientation, Vec3{0.0f, 0.0f, -1.0f});
+    const double along = 2.0 / -ahead.y; // where the view's middle meets the ground
+    dust[0].center = {ahead.x * along * 0.8, 2.0 + ahead.y * along * 0.8, ahead.z * along * 0.8};
+    dust[0].radius = 3.0f;
+    dust[0].density = 2.0f;
+    dust[0].color = {0.8f, 0.75f, 0.7f};
+    frame.dust = dust;
+    const auto dusty = draw();
+    GIANT_CHECK(renderer->last_stats().dust_puffs == 1);
+    // The same puff under the ground, behind what the pixels show: nothing.
+    dust[0].center = {ahead.x * along * 1.5, -20.0, ahead.z * along * 1.5};
+    const auto buried = draw();
+    const usize size = usize{k_w} * k_h * 4;
+    GIANT_CHECK(bare.size() == size && dusty.size() == size && buried.size() == size);
+    if (bare.size() == size && dusty.size() == size && buried.size() == size) {
+        const auto px = [](const std::vector<u8>& p, u32 x, u32 y) {
+            const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+            return std::array<int, 3>{p[i], p[i + 1], p[i + 2]};
+        };
+        const auto mid_bare = px(bare, k_w / 2, k_h / 2);
+        const auto mid_dusty = px(dusty, k_w / 2, k_h / 2);
+        const auto edge_bare = px(bare, 2, k_h - 2);
+        const auto edge_dusty = px(dusty, 2, k_h - 2);
+        std::printf("dust: middle %d %d %d -> %d %d %d, corner %d %d %d -> %d %d %d\n", mid_bare[0], mid_bare[1],
+                    mid_bare[2], mid_dusty[0], mid_dusty[1], mid_dusty[2], edge_bare[0], edge_bare[1], edge_bare[2],
+                    edge_dusty[0], edge_dusty[1], edge_dusty[2]);
+        // Lit dust in front of the dark ground: brighter.
+        GIANT_CHECK(mid_dusty[0] > mid_bare[0] + 30 && mid_dusty[1] > mid_bare[1] + 30);
+        // Away from it, and with it behind the ground, the image as without.
+        GIANT_CHECK(std::abs(edge_dusty[1] - edge_bare[1]) <= 2);
+        usize differ = 0;
+        for (usize i = 0; i < size; ++i) differ += std::abs(int{buried[i]} - int{bare[i]}) > 1 ? 1u : 0u;
+        GIANT_CHECK(differ == 0);
     }
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);

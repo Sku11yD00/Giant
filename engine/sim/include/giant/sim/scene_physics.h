@@ -19,6 +19,10 @@
 // or impact()), and so do the pieces no longer standing on the ground
 // through pieces they touch; loose pieces fall as bodies of their own,
 // drawn where they are (piece_poses), until reset_poses puts them back.
+// Near the camera they fall as bodies; far off (or past a cap) they come
+// down at once as rubble, laid on what is under them, with no body (the
+// mid ring: a city wrecked a kilometre away costs the steps nothing). A
+// collapse throws up dust (set_dust).
 //
 // A sync does a bounded amount of work (rule 9): at most
 // `entities_per_sync` entities are looked at and `tiles_per_sync` ground
@@ -30,11 +34,13 @@
 #pragma once
 
 #include "giant/core/jobs.h"
+#include "giant/sim/dust.h"
 #include "giant/sim/physics.h"
 #include "giant/world/scene.h"
 
 #include <deque>
 #include <memory>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,6 +53,15 @@ struct ScenePhysicsSettings {
     // a body made counting each of its parts (a kit of 40 pieces counts 40).
     u32 entities_per_sync = 1024;
     u32 tiles_per_sync = 16;      // ground tiles copied out per sync (their shapes are made on a worker)
+    // Loose pieces fall as bodies within `simulate_radius` metres of the
+    // camera (set_camera), at most `max_loose` at once; past either they
+    // come down as rubble: no body, laid flat on what is under them (where
+    // the blow threw them), at once. Without a camera all are bodies.
+    double simulate_radius = 600.0;
+    u32 max_loose = 4096;
+    // Rays a blow (an impact, a step's hits) casts at most to lay rubble on
+    // what is under it; past them rubble lies at its building's foot.
+    u32 rubble_rays = 4096;
 };
 
 struct ScenePhysicsStats {
@@ -60,6 +75,7 @@ struct ScenePhysicsStats {
     u32 posed = 0;          // dynamic entities drawn where the simulation moved them
     u32 broken_kits = 0;    // breakable kit placements with pieces loose
     u32 loose_pieces = 0;   // their pieces falling (or fallen) as bodies of their own
+    u32 rubble = 0;         // their pieces come down as rubble (no body: far off, or past max_loose)
 };
 
 // A breakable kit's piece, come loose: where it is (its world transform).
@@ -109,6 +125,11 @@ public:
     // those it is enough for come loose. Returns how many came loose
     // (with what they held up). A giantess's footstep, an explosion.
     usize impact(const DVec3& point, float radius, float impulse);
+    // Where the camera is (the near ring: loose pieces within
+    // simulate_radius of it fall as bodies).
+    void set_camera(const DVec3& camera) { m_camera = camera; }
+    // Where collapses throw up dust (none: no dust). Not owned.
+    void set_dust(Dust* dust) { m_dust = dust; }
 
     // Where the scene had the entity when its body was last brought in line
     // (null: not tracked). A pose is stale while the scene's transform differs.
@@ -164,6 +185,10 @@ private:
     // pushed by its `pushes` entry (m/s). Returns how many came loose.
     usize loosen(world::EntityId id, Tracked& t, const std::vector<std::pair<u32, Vec3>>& pushes);
     void break_from_hits();
+    // Where a loose piece placed `at` comes down as rubble: thrown by
+    // `push`, flat on what is under it (`base`: the building's foot, if nothing).
+    world::Transform rubble_at(world::EntityId id, const world::KitPiece& piece, const world::Transform& at,
+                               const Vec3& push, u32 index, double base) const;
 
     PhysicsWorld& m_physics;
     ScenePhysicsSettings m_settings;
@@ -191,6 +216,10 @@ private:
     std::unordered_set<world::EntityId> m_dynamic_queued;
     std::unordered_set<world::EntityId> m_edited; // moved by an edit not yet seen: no pose from the old body
     bool m_closing = false;                        // going: no fresh physics world to clear into
+    std::optional<DVec3> m_camera;
+    Dust* m_dust = nullptr;
+    u32 m_rubble = 0;
+    mutable u32 m_rays_left = 0; // rubble_rays left in this blow
     // Ground tiles to look at, and those whose shape is being made.
     std::unordered_map<world::CellCoord, Tile, world::CellCoordHash> m_tiles;
     std::deque<world::CellCoord> m_tile_queue;

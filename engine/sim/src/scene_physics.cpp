@@ -164,9 +164,11 @@ struct ScenePhysics::Broken {
         Vec3 hi{};
         std::vector<u32> touching;
         BodyId body = k_no_body; // loose: its own
+        bool rubble = false;     // loose with no body: lying as rubble
     };
     std::vector<Piece> pieces;
     std::vector<u32> standing_parts; // the standing body's parts: which piece each is
+    float lowest = 0.0f;             // the lowest piece's bottom in the placement's frame
 
     // The pieces of `kit` placed at `at`: their bounds, which touch, which stand on the ground.
     Broken(const world::Kit& kit, const world::Transform& at) {
@@ -187,6 +189,7 @@ struct ScenePhysics::Broken {
             standing_parts.push_back(static_cast<u32>(i));
         }
         for (Piece& p : pieces) p.footing = p.collides && p.lo.y <= bottom + k_footing;
+        lowest = bottom == std::numeric_limits<float>::max() ? 0.0f : bottom;
         // Touching: bounds within k_touching (pairs: a kit has at most a few thousand pieces).
         for (u32 i = 0; i < pieces.size(); ++i) {
             if (!pieces[i].collides) continue;
@@ -260,6 +263,7 @@ bool ScenePhysics::clear(usize others) {
     m_piece_poses.clear();
     m_piece_bodies.clear();
     m_broken.clear();
+    m_rubble = 0;
     m_queue.clear();
     m_dynamic_queue.clear();
     m_dynamic_queued.clear();
@@ -758,6 +762,7 @@ ScenePhysicsStats ScenePhysics::stats() const {
     s.posed = static_cast<u32>(m_poses.size());
     s.broken_kits = static_cast<u32>(m_broken.size());
     s.loose_pieces = static_cast<u32>(m_piece_bodies.size());
+    s.rubble = m_rubble;
     return s;
 }
 
@@ -768,6 +773,7 @@ namespace giant::sim {
 void ScenePhysics::mend(world::EntityId id, Tracked& t, std::vector<BodyId>& gone) {
     if (t.broken == nullptr) return;
     for (const Broken::Piece& p : t.broken->pieces) {
+        if (p.rubble) --m_rubble;
         if (p.body == k_no_body) continue;
         gone.push_back(p.body);
         m_piece_bodies.erase(p.body);
@@ -854,11 +860,24 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
     }
     const bool any_standing = !standing.parts.empty();
     if (any_standing) descs.push_back(std::move(standing));
-    // Each loose piece a body of its own, where it is drawn.
+    // Each loose piece a body of its own, where it is drawn: near the
+    // camera, as many as there is room for; the rest come down as rubble.
     std::vector<PiecePose>& poses = m_piece_poses[id];
+    std::vector<u32> bodied;
+    std::vector<u32> rubbled;
+    const usize room = m_piece_bodies.size() < m_settings.max_loose ? m_settings.max_loose - m_piece_bodies.size() : 0;
     for (const u32 i : newly) {
         const world::KitPiece& p = kit->pieces[i];
         const world::Transform at = piece_place(t.look.transform, p.transform);
+        bool near = true;
+        if (m_camera) {
+            const DVec3 d = at.position - *m_camera;
+            near = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) <= m_settings.simulate_radius;
+        }
+        if (!near || bodied.size() >= room) {
+            rubbled.push_back(i);
+            continue;
+        }
         BodyDesc d;
         d.motion = Motion::dynamic;
         d.position = at.position;
@@ -882,26 +901,96 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
         add_part(p.shape, {shrink(at.scale.x), shrink(at.scale.y), shrink(at.scale.z)}, {}, {}, d.parts);
         descs.push_back(std::move(d));
         poses.push_back({i, at});
+        bodied.push_back(i);
     }
-    std::sort(poses.begin(), poses.end(), [](const PiecePose& x, const PiecePose& y) { return x.piece < y.piece; });
     const std::vector<BodyId> ids = m_physics.add_many(descs);
     usize k = 0;
     if (any_standing) {
         t.body = ids[k++];
         if (t.body != k_no_body) m_by_body[t.body] = id;
     }
-    for (const u32 i : newly) {
+    for (const u32 i : bodied) {
         const BodyId body = ids[k++];
         b.pieces[i].body = body;
-        if (body != k_no_body) m_piece_bodies[body] = {id, i};
+        if (body != k_no_body) {
+            m_piece_bodies[body] = {id, i};
+        } else {
+            // Refused (the world full, bad numbers): rubble rather than hang where it stood.
+            std::erase_if(poses, [i](const PiecePose& pp) { return pp.piece == i; });
+            rubbled.push_back(i);
+        }
     }
     m_physics.remove_many(gone); // what rested on the old standing body wakes
+    // Rubble laid on what is under it now (the standing pieces' new body in).
+    for (const u32 i : rubbled) {
+        b.pieces[i].rubble = true;
+        ++m_rubble;
+        poses.push_back({i, rubble_at(id, kit->pieces[i], piece_place(t.look.transform, kit->pieces[i].transform),
+                                      push[i], i, t.look.transform.position.y + b.lowest)});
+    }
+    std::sort(poses.begin(), poses.end(), [](const PiecePose& x, const PiecePose& y) { return x.piece < y.piece; });
+    // Dust thrown up at the foot of what came down.
+    if (m_dust != nullptr) {
+        DVec3 lo{std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), std::numeric_limits<double>::max()};
+        DVec3 hi{-lo.x, -lo.y, -lo.z};
+        for (const u32 i : newly) {
+            const DVec3 c = piece_place(t.look.transform, kit->pieces[i].transform).position;
+            lo = {std::min(lo.x, c.x), std::min(lo.y, c.y), std::min(lo.z, c.z)};
+            hi = {std::max(hi.x, c.x), std::max(hi.y, c.y), std::max(hi.z, c.z)};
+        }
+        const double across = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+        const float r = std::clamp(static_cast<float>(0.6 * across) + 1.5f, 2.0f, 60.0f);
+        const DVec3 at{0.5 * (lo.x + hi.x), lo.y + 0.4 * r, 0.5 * (lo.z + hi.z)};
+        m_dust->emit(at, r, 1.5f / r, k_dust_rubble);
+    }
     m_broken.insert(id);
     m_redraw.push_back(id);
     return newly.size();
 }
 
+world::Transform ScenePhysics::rubble_at(world::EntityId id, const world::KitPiece& piece, const world::Transform& at,
+                                         const Vec3& push, u32 index, double base) const {
+    world::Transform out = at;
+    // Thrown as far as the push carries it in about half a second (10 m at most).
+    Vec3 thrown{0.5f * push.x, 0.0f, 0.5f * push.z};
+    const float far = length(thrown);
+    if (!(far <= 10.0f)) thrown = far > 0.0f && std::isfinite(far) ? thrown * (10.0f / far) : Vec3{};
+    // Flat: its thinnest side down, turned any way about the up axis (the
+    // same every time for the same piece).
+    const Vec3 s = abs3(at.scale);
+    Quat lay{};
+    float half = 0.5f * s.y;
+    if (piece.shape == world::Shape::plane) {
+        half = 0.01f;
+    } else if (s.x <= s.y && s.x <= s.z) {
+        lay = quat_from_axis_angle({0.0f, 0.0f, 1.0f}, 0.5f * k_pi);
+        half = 0.5f * s.x;
+    } else if (s.z < s.y) {
+        lay = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, 0.5f * k_pi);
+        half = 0.5f * s.z;
+    }
+    u64 h = (static_cast<u64>(id) * 0x9E3779B97F4A7C15ull) ^ (static_cast<u64>(index) * 0xC2B2AE3D27D4EB4Full);
+    h ^= h >> 29;
+    const float yaw = static_cast<float>(h % 6283u) * 0.001f;
+    out.rotation = normalize(quat_from_axis_angle({0.0f, 1.0f, 0.0f}, yaw) * lay);
+    // On what is under it for good: fixed bodies only (what falls would
+    // leave it in the air), not its own building's standing pieces (they may
+    // go); within the rays a blow may cast (rule 9), else on its building's foot.
+    const DVec3 from = at.position + DVec3{thrown.x, 0.0, thrown.z};
+    out.position = {from.x, std::min(from.y, base + half), from.z};
+    if (m_rays_left == 0) return out;
+    --m_rays_left;
+    PhysicsWorld::RayFilter filter;
+    filter.fixed_only = true;
+    filter.accept = [id](BodyId, u64 user) { return user != id; };
+    if (const std::optional<RayHit> hit = m_physics.raycast(from, {0.0f, -1.0f, 0.0f}, 1000.0, filter)) {
+        out.position.y = hit->point.y + half;
+    }
+    return out;
+}
+
 void ScenePhysics::break_from_hits() {
+    m_rays_left = m_settings.rubble_rays;
     // The blows on breakable kits' standing bodies, by placement.
     std::vector<std::pair<world::EntityId, std::vector<std::pair<u32, Vec3>>>> blows;
     const auto struck = [&](BodyId body, u32 part, BodyId by, float impulse, const Vec3& away) {
@@ -948,6 +1037,7 @@ void ScenePhysics::break_from_hits() {
 }
 
 usize ScenePhysics::impact(const DVec3& point, float radius, float impulse) {
+    m_rays_left = m_settings.rubble_rays;
     if (!std::isfinite(radius) || radius <= 0.0f || !std::isfinite(impulse) || impulse <= 0.0f ||
         !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
         return 0;

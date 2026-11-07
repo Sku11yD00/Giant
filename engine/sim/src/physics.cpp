@@ -12,6 +12,7 @@
 #include <Jolt/Core/JobSystemWithBarrier.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/RayCast.h>
@@ -915,6 +916,11 @@ BodyId PhysicsWorld::character_body(CharacterId id) const {
 usize PhysicsWorld::characters() const { return m_impl->characters.size(); }
 
 std::optional<RayHit> PhysicsWorld::raycast(const DVec3& origin, const Vec3& direction, double max_distance) const {
+    return raycast(origin, direction, max_distance, RayFilter{});
+}
+
+std::optional<RayHit> PhysicsWorld::raycast(const DVec3& origin, const Vec3& direction, double max_distance,
+                                            const RayFilter& filter) const {
     const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
     if (!finite(origin) || !finite(direction) || length < 1e-9f || !std::isfinite(max_distance) ||
         max_distance <= 0.0) {
@@ -923,7 +929,15 @@ std::optional<RayHit> PhysicsWorld::raycast(const DVec3& origin, const Vec3& dir
     const float reach = static_cast<float>(max_distance) / length;
     const JPH::RRayCast ray(to_jolt(origin), to_jolt(direction) * reach);
     JPH::RayCastResult result;
-    if (!m_impl->system.GetNarrowPhaseQuery().CastRay(ray, result)) return std::nullopt;
+    struct Filter final : JPH::BodyFilter {
+        const RayFilter* f = nullptr;
+        bool ShouldCollideLocked(const JPH::Body& body) const override {
+            if (f->fixed_only && !body.IsStatic()) return false;
+            return !f->accept || f->accept(to_id(body.GetID()), body.GetUserData());
+        }
+    } body_filter;
+    body_filter.f = &filter;
+    if (!m_impl->system.GetNarrowPhaseQuery().CastRay(ray, result, {}, {}, body_filter)) return std::nullopt;
     RayHit hit;
     hit.body = to_id(result.mBodyID);
     hit.distance = static_cast<double>(result.mFraction) * max_distance;

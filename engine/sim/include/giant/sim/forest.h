@@ -7,7 +7,9 @@
 // other blow (ScenePhysics reads the same hits). Once it comes to rest a
 // fallen tree sleeps (costing the steps nothing) and wakes, falling again,
 // when what it rests on goes. Fallen trees are drawn where they lie
-// (fallen()), until reset() stands them up again.
+// (fallen()), until reset() stands them up again. Far off, where trunks
+// have no bodies, a blow lays its trees down at once where they would fall
+// (impact()); a felled tree throws up dust where it lands (set_dust).
 //
 //   Forest forest(physics);
 //   forest.set_cell(cell, serial, trees); // a scatter cell's trees, each time it is placed
@@ -29,6 +31,7 @@
 // stands all its trees up afresh.
 #pragma once
 
+#include "giant/sim/dust.h"
 #include "giant/sim/physics.h"
 #include "giant/world/cell.h"
 #include "giant/world/scene.h"
@@ -69,6 +72,7 @@ struct ForestSettings {
     u32 topples_per_step = 64;   // trees that may start falling in one after_step or impact
     u32 max_falling = 512;       // moving (awake) at once
     u32 max_fallen = 1u << 14;   // fallen at once (resting ones asleep)
+    u32 lays_per_impact = 2048;  // trees with no trunk body an impact lays down at most
     float density = 700.0f;      // kilograms a cubic metre (wood)
 };
 
@@ -81,6 +85,7 @@ struct ForestStats {
     u32 fallen = 0;   // falling or fallen
     u32 refused = 0;  // trunks the physics world refused (bad numbers, or full), in all
     u32 shrugged = 0; // blows enough to fell a tree left out (the caps), in all
+    u32 laid = 0;     // fallen with no body (laid down where they fell: far off), now
 };
 
 class Forest {
@@ -113,10 +118,15 @@ public:
     // their pose (their cells to draw again; a resting one woken falls
     // again). Returns how many started falling.
     usize after_step();
-    // A blow at `point`: standing trunks within `radius` metres take
+    // A blow at `point`: standing trees within `radius` metres take
     // `impulse` (N s; less toward the edge) and those it is enough for
-    // topple away from it. Returns how many.
+    // topple away from it. Returns how many. A tree whose trunk has no body
+    // (far from the camera, or still waiting) is laid down at once where it
+    // would fall, its top on what is there, with no body (at most
+    // lays_per_impact, the hardest struck first).
     usize impact(const DVec3& point, float radius, float impulse);
+    // Where felled trees throw up dust (none: no dust). Not owned.
+    void set_dust(Dust* dust) { m_dust = dust; }
     // Every fallen tree stands again (their bodies go; trunks made again by
     // the next syncs). A simulation stopping.
     void reset();
@@ -148,6 +158,7 @@ private:
         TreeSpot spot;
         BodyId body = k_no_body;
         bool fallen = false;
+        bool laid = false; // fallen with no body: laid down (lay())
     };
     struct Cell {
         u64 serial = 0;
@@ -176,6 +187,10 @@ private:
     void drop_trunks(Cell& cell);
     BodyDesc trunk(const TreeSpot& spot, Motion motion) const;
     usize topple(std::vector<Topple>& topples);
+    // Trees with no trunk body laid down where they fall (no body).
+    usize lay(std::vector<Topple>& lays);
+    // Which way a tree struck `away` falls: across its trunk.
+    static Vec3 across_of(const world::Transform& at, const Vec3& away);
     void settle();
     void redraw(world::CellCoord cell);
     double distance(world::CellCoord cell, const DVec3& camera) const;
@@ -194,6 +209,8 @@ private:
     u32 m_fallen_count = 0;
     u32 m_refused = 0;
     u32 m_shrugged = 0;
+    u32 m_laid = 0;
+    Dust* m_dust = nullptr;
 };
 
 } // namespace giant::sim
