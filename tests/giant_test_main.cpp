@@ -1,6 +1,7 @@
 #include "giant_test.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 
 namespace giant::test {
@@ -33,14 +34,22 @@ int main(int argc, char** argv) {
             continue;
         }
         g_failures_in_current_test.store(0);
+        // Named (and flushed) before it runs: a test that hangs until the
+        // ctest timeout kills it is the last one named.
+        std::printf("[ run ] %s\n", test.name);
+        std::fflush(stdout);
+        const auto start = std::chrono::steady_clock::now();
         test.fn();
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         ++run;
         if (g_failures_in_current_test.load() > 0) {
             ++failed;
-            std::fprintf(stderr, "[FAIL] %s (%s:%d)\n", test.name, test.file, test.line);
+            std::fprintf(stderr, "[FAIL] %s (%s:%d, %.2f s)\n", test.name, test.file, test.line, seconds);
         } else {
-            std::printf("[ ok ] %s\n", test.name);
+            std::printf("[ ok ] %s (%.2f s)\n", test.name, seconds);
         }
+        std::fflush(stdout);
+        std::fflush(stderr);
     }
 
     std::printf("%d tests, %d failed\n", run, failed);

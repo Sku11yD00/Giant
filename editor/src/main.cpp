@@ -364,7 +364,7 @@ int run(const Options& options) {
         mark(editor::FramePhase::scatter);
         const std::vector<world::EntityId> redraw = physics.take_redraw();
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
-                            &physics.poses(), redraw);
+                            &physics.poses(), redraw, &physics.piece_poses());
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);

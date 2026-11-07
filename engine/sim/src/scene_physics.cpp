@@ -18,7 +18,8 @@ bool same_body(const world::Entity& a, const world::Entity& b) {
            (a.body != world::BodyKind::dynamic || a.mass == b.mass);
 }
 
-// The kits whose pieces differ (or that came or went), by name.
+// The kits whose pieces differ, or breakable (their bodies report contacts
+// by part), or that came or went, by name. Strength is read at each break.
 std::vector<std::string> changed_kits(const std::vector<world::Kit>& was, const std::vector<world::Kit>& now) {
     std::vector<std::string> out;
     const auto find = [](const std::vector<world::Kit>& kits, const std::string& name) -> const world::Kit* {
@@ -29,7 +30,9 @@ std::vector<std::string> changed_kits(const std::vector<world::Kit>& was, const 
     };
     for (const world::Kit& k : now) {
         const world::Kit* before = find(was, k.name);
-        if (before == nullptr || !(before->pieces == k.pieces)) out.push_back(k.name);
+        if (before == nullptr || !(before->pieces == k.pieces) || before->breakable != k.breakable) {
+            out.push_back(k.name);
+        }
     }
     for (const world::Kit& k : was) {
         if (find(now, k.name) == nullptr) out.push_back(k.name);
@@ -46,6 +49,12 @@ Vec3 mul3(const Vec3& a, const Vec3& b) { return {a.x * b.x, a.y * b.y, a.z * b.
 bool add_part(world::Shape shape, const Vec3& scale, const Vec3& offset, const Quat& rotation,
               std::vector<Part>& parts) {
     const Vec3 s = abs3(scale);
+    // A sphere flattened under a centimetre makes a hull Jolt cannot build
+    // (or give mass): it does not collide, left out here so it is left out
+    // of every list of a kit's parts alike. (Thin boxes are fine: their
+    // half extents are kept to a millimetre at least.)
+    constexpr float k_min_sphere = 0.01f;
+    if (shape == world::Shape::sphere && std::min({s.x, s.y, s.z}) < k_min_sphere) return false;
     switch (shape) {
     case world::Shape::cube:
         parts.push_back({BoxShape{{0.5f * s.x, 0.5f * s.y, 0.5f * s.z}}, offset, rotation});
@@ -91,7 +100,110 @@ bool add_part(world::Shape shape, const Vec3& scale, const Vec3& offset, const Q
     return false;
 }
 
+// A part's bounds in its body's frame.
+void part_bounds(const Part& part, Vec3& lo, Vec3& hi) {
+    Vec3 half{};
+    if (const auto* box = std::get_if<BoxShape>(&part.shape)) {
+        // A turned box: what its corners reach along each axis.
+        const Vec3 x = abs3(rotate(part.rotation, Vec3{box->half_extents.x, 0.0f, 0.0f}));
+        const Vec3 y = abs3(rotate(part.rotation, Vec3{0.0f, box->half_extents.y, 0.0f}));
+        const Vec3 z = abs3(rotate(part.rotation, Vec3{0.0f, 0.0f, box->half_extents.z}));
+        half = {x.x + y.x + z.x, x.y + y.y + z.y, x.z + y.z + z.z};
+    } else if (const auto* sphere = std::get_if<SphereShape>(&part.shape)) {
+        half = {sphere->radius, sphere->radius, sphere->radius};
+    } else if (const auto* hull = std::get_if<ConvexShape>(&part.shape)) {
+        for (const Vec3& p : hull->points) {
+            const Vec3 r = abs3(rotate(part.rotation, p));
+            half = {std::max(half.x, r.x), std::max(half.y, r.y), std::max(half.z, r.z)};
+        }
+    }
+    lo = part.offset - half;
+    hi = part.offset + half;
+}
+
+// Which kit piece each part of a kit's body is (pieces that collide, in order).
+std::vector<u32> kit_parts(const world::Kit& kit, const Vec3& scale) {
+    std::vector<u32> out;
+    std::vector<Part> scratch;
+    for (u32 i = 0; i < kit.pieces.size(); ++i) {
+        scratch.clear();
+        if (add_part(kit.pieces[i].shape, mul3(kit.pieces[i].transform.scale, scale), {}, {}, scratch)) out.push_back(i);
+    }
+    return out;
+}
+
+// A piece's place in the world, as the renderer puts it.
+world::Transform piece_place(const world::Transform& parent, const world::Transform& child) {
+    world::Transform out;
+    const Vec3 scaled{static_cast<float>(child.position.x) * parent.scale.x,
+                      static_cast<float>(child.position.y) * parent.scale.y,
+                      static_cast<float>(child.position.z) * parent.scale.z};
+    const Vec3 offset = rotate(parent.rotation, scaled);
+    out.position = parent.position + DVec3{offset.x, offset.y, offset.z};
+    out.rotation = normalize(parent.rotation * child.rotation);
+    out.scale = mul3(parent.scale, child.scale);
+    return out;
+}
+
+// Pieces this close (metres) count as touching: holding each other up.
+constexpr float k_touching = 0.02f;
+// Pieces whose bottom is this close to the kit's lowest stand on the ground.
+constexpr float k_footing = 0.05f;
+// Fastest a blow sends a piece flying (m/s).
+constexpr float k_max_push = 15.0f;
+
 } // namespace
+
+// A breakable kit placement with pieces loose.
+struct ScenePhysics::Broken {
+    struct Piece {
+        bool collides = false;
+        bool loose = false;
+        bool footing = false; // stands on the ground
+        Vec3 lo{};            // bounds in the placement's frame
+        Vec3 hi{};
+        std::vector<u32> touching;
+        BodyId body = k_no_body; // loose: its own
+    };
+    std::vector<Piece> pieces;
+    std::vector<u32> standing_parts; // the standing body's parts: which piece each is
+
+    // The pieces of `kit` placed at `at`: their bounds, which touch, which stand on the ground.
+    Broken(const world::Kit& kit, const world::Transform& at) {
+        pieces.resize(kit.pieces.size());
+        float bottom = std::numeric_limits<float>::max();
+        std::vector<Part> scratch;
+        for (usize i = 0; i < kit.pieces.size(); ++i) {
+            const world::KitPiece& p = kit.pieces[i];
+            scratch.clear();
+            const Vec3 offset{static_cast<float>(p.transform.position.x) * at.scale.x,
+                              static_cast<float>(p.transform.position.y) * at.scale.y,
+                              static_cast<float>(p.transform.position.z) * at.scale.z};
+            if (!add_part(p.shape, mul3(p.transform.scale, at.scale), offset, p.transform.rotation, scratch)) continue;
+            Piece& piece = pieces[i];
+            piece.collides = true;
+            part_bounds(scratch.front(), piece.lo, piece.hi);
+            bottom = std::min(bottom, piece.lo.y);
+            standing_parts.push_back(static_cast<u32>(i));
+        }
+        for (Piece& p : pieces) p.footing = p.collides && p.lo.y <= bottom + k_footing;
+        // Touching: bounds within k_touching (pairs: a kit has at most a few thousand pieces).
+        for (u32 i = 0; i < pieces.size(); ++i) {
+            if (!pieces[i].collides) continue;
+            for (u32 j = i + 1; j < pieces.size(); ++j) {
+                const Piece& a = pieces[i];
+                const Piece& b = pieces[j];
+                if (!b.collides) continue;
+                if (a.lo.x > b.hi.x + k_touching || b.lo.x > a.hi.x + k_touching || a.lo.y > b.hi.y + k_touching ||
+                    b.lo.y > a.hi.y + k_touching || a.lo.z > b.hi.z + k_touching || b.lo.z > a.hi.z + k_touching) {
+                    continue;
+                }
+                pieces[i].touching.push_back(j);
+                pieces[j].touching.push_back(i);
+            }
+        }
+    }
+};
 
 // A tile's shape, made on the builder's worker.
 struct ScenePhysics::Build {
@@ -117,6 +229,8 @@ void ScenePhysics::clear() {
     for (const auto& [id, t] : m_entities) {
         if (t.body != k_no_body) gone.push_back(t.body);
     }
+    for (const auto& [body, piece] : m_piece_bodies) gone.push_back(body);
+    for (const world::EntityId id : m_broken) m_redraw.push_back(id);
     for (const auto& [cell, tile] : m_tiles) {
         if (tile.body != k_no_body) gone.push_back(tile.body);
         if (tile.building != nullptr) tile.building->superseded.store(true, std::memory_order_relaxed);
@@ -141,6 +255,9 @@ void ScenePhysics::clear() {
     m_entities = {};
     m_by_body = {};
     m_poses.clear();
+    m_piece_poses.clear();
+    m_piece_bodies.clear();
+    m_broken.clear();
     m_queue.clear();
     m_dynamic_queue.clear();
     m_dynamic_queued.clear();
@@ -160,14 +277,20 @@ void ScenePhysics::drop_pose(world::EntityId id) {
     if (m_poses.erase(id) != 0) m_redraw.push_back(id);
 }
 
-BodyDesc ScenePhysics::entity_body(const world::Scene& scene, const world::Entity& e) const {
+const world::Kit* ScenePhysics::find_kit(const std::string& name) const {
+    for (const world::Kit& k : m_kits) {
+        if (k.name == name) return &k;
+    }
+    return nullptr;
+}
+
+BodyDesc ScenePhysics::entity_body(const world::Kit* kit, const world::Entity& e) const {
     BodyDesc d;
     if (e.body == world::BodyKind::none) return d;
     d.position = e.transform.position;
     d.rotation = e.transform.rotation;
     d.user = e.id;
     if (e.shape == world::Shape::kit) {
-        const world::Kit* kit = scene.find_kit(e.kit);
         if (kit == nullptr) return d;
         const Vec3& ps = e.transform.scale;
         for (const world::KitPiece& p : kit->pieces) {
@@ -177,7 +300,8 @@ BodyDesc ScenePhysics::entity_body(const world::Scene& scene, const world::Entit
                               static_cast<float>(p.transform.position.z) * ps.z};
             add_part(p.shape, mul3(p.transform.scale, ps), offset, p.transform.rotation, d.parts);
         }
-        d.motion = Motion::fixed; // kits break from N4 part 4; they never fall whole
+        d.motion = Motion::fixed; // a kit never falls whole: a breakable one breaks
+        d.report_parts = kit->breakable; // which piece a blow strikes
         return d;
     }
     add_part(e.shape, e.transform.scale, {}, {}, d.parts);
@@ -222,6 +346,16 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
     m_edited.erase(id);
     const world::Entity* e = scene.find(id);
     const auto it = m_entities.find(id);
+    if (it != m_entities.end() && it->second.broken != nullptr) {
+        const Tracked& t = it->second;
+        const bool unchanged = e != nullptr && !t.remake && same_body(t.look, *e) &&
+                               t.look.transform.position == e->transform.position &&
+                               t.look.transform.rotation == e->transform.rotation;
+        if (!unchanged) {
+            mend(id, it->second, gone); // moved, resized or gone: whole again first
+            it->second.remake = true;
+        }
+    }
     if (e == nullptr) {
         if (it != m_entities.end()) {
             if (it->second.body != k_no_body) {
@@ -255,7 +389,7 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
     Tracked& t = m_entities[id];
     t = Tracked{};
     t.look = *e;
-    BodyDesc desc = entity_body(scene, *e);
+    BodyDesc desc = entity_body(e->shape == world::Shape::kit ? find_kit(e->kit) : nullptr, *e);
     const u32 cost = std::max<u32>(1, static_cast<u32>(desc.parts.size())); // a kit's pieces count each
     if (!desc.parts.empty()) {
         const bool dynamic = desc.motion == Motion::dynamic;
@@ -511,8 +645,20 @@ void ScenePhysics::flush(world::Scene& scene, std::span<const world::EntityId> c
 }
 
 usize ScenePhysics::update_poses() {
+    break_from_hits(); // the last step's blows
     usize moved = 0;
     for (const BodyId body : m_physics.moved()) {
+        if (const auto piece = m_piece_bodies.find(body); piece != m_piece_bodies.end()) {
+            const std::optional<BodyState> s = m_physics.state(body);
+            if (!s) continue;
+            for (PiecePose& pose : m_piece_poses[piece->second.entity]) {
+                if (pose.piece != piece->second.piece) continue;
+                pose.at.position = s->position;
+                pose.at.rotation = normalize(s->rotation);
+            }
+            m_redraw.push_back(piece->second.entity);
+            continue;
+        }
         const auto owner = m_by_body.find(body);
         if (owner == m_by_body.end()) continue;
         const auto it = m_entities.find(owner->second);
@@ -532,6 +678,29 @@ usize ScenePhysics::update_poses() {
 }
 
 void ScenePhysics::reset_poses() {
+    // Broken kits whole again: their loose pieces back, as one body.
+    std::vector<BodyId> gone;
+    std::vector<world::EntityId> mended(m_broken.begin(), m_broken.end());
+    std::sort(mended.begin(), mended.end());
+    std::vector<world::EntityId> made_ids;
+    std::vector<BodyDesc> descs;
+    for (const world::EntityId id : mended) {
+        const auto it = m_entities.find(id);
+        if (it == m_entities.end()) continue;
+        mend(id, it->second, gone);
+        BodyDesc d = entity_body(find_kit(it->second.look.kit), it->second.look);
+        if (d.parts.empty()) continue;
+        made_ids.push_back(id);
+        descs.push_back(std::move(d));
+    }
+    if (!descs.empty()) {
+        const std::vector<BodyId> ids = m_physics.add_many(descs);
+        for (usize k = 0; k < ids.size(); ++k) {
+            m_entities[made_ids[k]].body = ids[k];
+            if (ids[k] != k_no_body) m_by_body[ids[k]] = made_ids[k];
+        }
+    }
+    m_physics.remove_many(gone);
     for (const auto& [id, pose] : m_poses) {
         const auto it = m_entities.find(id);
         if (it != m_entities.end() && it->second.body != k_no_body) {
@@ -570,7 +739,7 @@ BodyId ScenePhysics::body_of(world::EntityId entity) const {
 ScenePhysicsStats ScenePhysics::stats() const {
     ScenePhysicsStats s;
     for (const auto& [id, t] : m_entities) {
-        if (t.body != k_no_body) {
+        if (t.body != k_no_body || t.broken != nullptr) { // (a kit all in loose pieces has no body of its own)
             ++s.entity_bodies;
             s.dynamic_bodies += t.dynamic ? 1u : 0u;
         } else if (t.look.body == world::BodyKind::none || t.look.shape == world::Shape::mesh ||
@@ -584,7 +753,242 @@ ScenePhysicsStats ScenePhysics::stats() const {
     s.waiting = static_cast<u32>(m_queued.size() + m_dynamic_queue.size() + (m_scan.size() - m_scan_at));
     s.tiles_waiting = static_cast<u32>(m_tile_queued.size() + m_building.size());
     s.posed = static_cast<u32>(m_poses.size());
+    s.broken_kits = static_cast<u32>(m_broken.size());
+    s.loose_pieces = static_cast<u32>(m_piece_bodies.size());
     return s;
+}
+
+} // namespace giant::sim
+
+namespace giant::sim {
+
+void ScenePhysics::mend(world::EntityId id, Tracked& t, std::vector<BodyId>& gone) {
+    if (t.broken == nullptr) return;
+    for (const Broken::Piece& p : t.broken->pieces) {
+        if (p.body == k_no_body) continue;
+        gone.push_back(p.body);
+        m_piece_bodies.erase(p.body);
+    }
+    if (t.body != k_no_body) {
+        gone.push_back(t.body);
+        m_by_body.erase(t.body);
+        t.body = k_no_body;
+    }
+    t.broken.reset();
+    m_piece_poses.erase(id);
+    m_broken.erase(id);
+    m_redraw.push_back(id);
+}
+
+usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std::pair<u32, Vec3>>& pushes) {
+    const world::Kit* kit = find_kit(t.look.kit);
+    if (kit == nullptr || !kit->breakable || t.look.shape != world::Shape::kit) return 0;
+    // Its kit changed and it waits to be made again: its pieces (and parts)
+    // are the old kit's, not `kit`'s.
+    if (t.remake) return 0;
+    if (t.broken == nullptr) {
+        if (t.body == k_no_body) return 0; // never made (refused): nothing to break
+        t.broken = std::make_shared<Broken>(*kit, t.look.transform);
+    }
+    Broken& b = *t.broken;
+    std::vector<Vec3> push(b.pieces.size(), Vec3{});
+    std::vector<u32> newly;
+    for (const auto& [piece, velocity] : pushes) {
+        if (piece >= b.pieces.size() || !b.pieces[piece].collides || b.pieces[piece].loose) continue;
+        if (std::find(newly.begin(), newly.end(), piece) == newly.end()) newly.push_back(piece);
+        push[piece] = velocity;
+    }
+    if (newly.empty()) return 0;
+    for (const u32 i : newly) b.pieces[i].loose = true;
+    // What still stands on the ground through touching pieces; the rest falls.
+    std::vector<u8> held(b.pieces.size(), 0);
+    std::vector<u32> walk;
+    for (u32 i = 0; i < b.pieces.size(); ++i) {
+        if (b.pieces[i].footing && !b.pieces[i].loose) {
+            held[i] = 1;
+            walk.push_back(i);
+        }
+    }
+    while (!walk.empty()) {
+        const u32 i = walk.back();
+        walk.pop_back();
+        for (const u32 j : b.pieces[i].touching) {
+            if (held[j] == 0 && !b.pieces[j].loose) {
+                held[j] = 1;
+                walk.push_back(j);
+            }
+        }
+    }
+    for (u32 i = 0; i < b.pieces.size(); ++i) {
+        if (b.pieces[i].collides && !b.pieces[i].loose && held[i] == 0) {
+            b.pieces[i].loose = true;
+            newly.push_back(i);
+        }
+    }
+    // The standing pieces as one fixed body again (one remake per blow).
+    std::vector<BodyId> gone;
+    if (t.body != k_no_body) {
+        gone.push_back(t.body);
+        m_by_body.erase(t.body);
+        t.body = k_no_body;
+    }
+    std::vector<BodyDesc> descs;
+    BodyDesc standing;
+    standing.position = t.look.transform.position;
+    standing.rotation = t.look.transform.rotation;
+    standing.user = id;
+    standing.report_parts = true;
+    b.standing_parts.clear();
+    const Vec3& ps = t.look.transform.scale;
+    for (u32 i = 0; i < b.pieces.size(); ++i) {
+        if (!b.pieces[i].collides || b.pieces[i].loose) continue;
+        const world::KitPiece& p = kit->pieces[i];
+        const Vec3 offset{static_cast<float>(p.transform.position.x) * ps.x,
+                          static_cast<float>(p.transform.position.y) * ps.y,
+                          static_cast<float>(p.transform.position.z) * ps.z};
+        add_part(p.shape, mul3(p.transform.scale, ps), offset, p.transform.rotation, standing.parts);
+        b.standing_parts.push_back(i);
+    }
+    const bool any_standing = !standing.parts.empty();
+    if (any_standing) descs.push_back(std::move(standing));
+    // Each loose piece a body of its own, where it is drawn.
+    std::vector<PiecePose>& poses = m_piece_poses[id];
+    for (const u32 i : newly) {
+        const world::KitPiece& p = kit->pieces[i];
+        const world::Transform at = piece_place(t.look.transform, p.transform);
+        BodyDesc d;
+        d.motion = Motion::dynamic;
+        d.position = at.position;
+        d.rotation = at.rotation;
+        d.user = id;
+        d.linear_velocity = push[i];
+        // Knocked over as well as away: turning about the level axis across
+        // the push, as fast as the push would tip something its height (a
+        // wall knocked out topples rather than stand balanced on its end).
+        const float tall = std::max(0.5f, 0.5f * (b.pieces[i].hi.y - b.pieces[i].lo.y));
+        const Vec3 tip{push[i].z, 0.0f, -push[i].x}; // up x push
+        d.angular_velocity = tip * (1.0f / tall);
+        // A hair smaller than drawn (2 cm across at most, and never under a
+        // centimetre: a sphere needs that), so it comes out of the gap it
+        // filled rather than wedge in it.
+        const auto shrink = [](float v) {
+            const float m = std::fabs(v);
+            const float to = std::max({0.9f * m, m - 0.02f, std::min(m, 0.01f)});
+            return v >= 0.0f ? to : -to;
+        };
+        add_part(p.shape, {shrink(at.scale.x), shrink(at.scale.y), shrink(at.scale.z)}, {}, {}, d.parts);
+        descs.push_back(std::move(d));
+        poses.push_back({i, at});
+    }
+    std::sort(poses.begin(), poses.end(), [](const PiecePose& x, const PiecePose& y) { return x.piece < y.piece; });
+    const std::vector<BodyId> ids = m_physics.add_many(descs);
+    usize k = 0;
+    if (any_standing) {
+        t.body = ids[k++];
+        if (t.body != k_no_body) m_by_body[t.body] = id;
+    }
+    for (const u32 i : newly) {
+        const BodyId body = ids[k++];
+        b.pieces[i].body = body;
+        if (body != k_no_body) m_piece_bodies[body] = {id, i};
+    }
+    m_physics.remove_many(gone); // what rested on the old standing body wakes
+    m_broken.insert(id);
+    m_redraw.push_back(id);
+    return newly.size();
+}
+
+void ScenePhysics::break_from_hits() {
+    // The blows on breakable kits' standing bodies, by placement.
+    std::vector<std::pair<world::EntityId, std::vector<std::pair<u32, Vec3>>>> blows;
+    const auto struck = [&](BodyId body, u32 part, BodyId by, float impulse, const Vec3& away) {
+        const auto owner = m_by_body.find(body);
+        if (owner == m_by_body.end()) return;
+        const auto it = m_entities.find(owner->second);
+        if (it == m_entities.end() || it->second.body != body || it->second.look.shape != world::Shape::kit) return;
+        const world::Kit* kit = find_kit(it->second.look.kit);
+        if (kit == nullptr || !kit->breakable) return;
+        // Its own falling pieces bring down only what they held up (the
+        // support graph's work), never shred the rest.
+        if (const auto piece = m_piece_bodies.find(by); piece != m_piece_bodies.end() && piece->second.entity == owner->second) {
+            return;
+        }
+        const float strength = kit->strength > 0.0f ? kit->strength : world::k_default_kit_strength;
+        if (impulse < strength) return;
+        u32 piece = 0;
+        if (it->second.broken != nullptr) {
+            if (part >= it->second.broken->standing_parts.size()) return;
+            piece = it->second.broken->standing_parts[part];
+        } else {
+            const std::vector<u32> parts = kit_parts(*kit, it->second.look.transform.scale);
+            if (part >= parts.size()) return;
+            piece = parts[part];
+        }
+        const float speed = std::min(k_max_push, 2.0f * impulse / strength);
+        const Vec3 push = away * speed;
+        for (auto& [id, list] : blows) {
+            if (id == owner->second) {
+                list.push_back({piece, push});
+                return;
+            }
+        }
+        blows.push_back({owner->second, {{piece, push}}});
+    };
+    for (const ContactHit& h : m_physics.hits()) {
+        struck(h.b, h.part_b, h.a, h.impulse, h.normal);         // pushed along the normal (a to b)
+        struck(h.a, h.part_a, h.b, h.impulse, h.normal * -1.0f); // and a the other way
+    }
+    for (const auto& [id, list] : blows) {
+        const auto it = m_entities.find(id);
+        if (it != m_entities.end()) loosen(id, it->second, list);
+    }
+}
+
+usize ScenePhysics::impact(const DVec3& point, float radius, float impulse) {
+    if (!std::isfinite(radius) || radius <= 0.0f || !std::isfinite(impulse) || impulse <= 0.0f ||
+        !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+        return 0;
+    }
+    std::vector<world::EntityId> ids;
+    for (const auto& [id, t] : m_entities) {
+        if (t.look.shape != world::Shape::kit) continue;
+        const DVec3 d = t.look.transform.position - point;
+        // Kits reach a few hundred metres round their origin at most.
+        if (std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) > static_cast<double>(radius) + 500.0) continue;
+        ids.push_back(id);
+    }
+    std::sort(ids.begin(), ids.end()); // the same order every run
+    usize loosened = 0;
+    for (const world::EntityId id : ids) {
+        Tracked& t = m_entities[id];
+        const world::Kit* kit = find_kit(t.look.kit);
+        if (kit == nullptr || !kit->breakable || t.body == k_no_body || t.remake) continue;
+        const float strength = kit->strength > 0.0f ? kit->strength : world::k_default_kit_strength;
+        const Broken pieces = t.broken != nullptr ? *t.broken : Broken(*kit, t.look.transform);
+        // The blow in the placement's frame.
+        const DVec3 rel = point - t.look.transform.position;
+        const Vec3 local = rotate(conjugate(t.look.transform.rotation),
+                                  Vec3{static_cast<float>(rel.x), static_cast<float>(rel.y), static_cast<float>(rel.z)});
+        std::vector<std::pair<u32, Vec3>> pushes;
+        for (u32 i = 0; i < pieces.pieces.size(); ++i) {
+            const Broken::Piece& p = pieces.pieces[i];
+            if (!p.collides || p.loose) continue;
+            const Vec3 nearest{std::clamp(local.x, p.lo.x, p.hi.x), std::clamp(local.y, p.lo.y, p.hi.y),
+                               std::clamp(local.z, p.lo.z, p.hi.z)};
+            const Vec3 gap = nearest - local;
+            const float distance = std::sqrt(gap.x * gap.x + gap.y * gap.y + gap.z * gap.z);
+            if (distance > radius) continue;
+            const float taken = impulse * (1.0f - distance / radius);
+            if (taken < strength) continue;
+            const Vec3 centre = (p.lo + p.hi) * 0.5f;
+            Vec3 away = centre - local;
+            const float length = std::sqrt(away.x * away.x + away.y * away.y + away.z * away.z);
+            away = length > 1e-4f ? away * (1.0f / length) : Vec3{0.0f, 1.0f, 0.0f};
+            pushes.push_back({i, rotate(t.look.transform.rotation, away) * std::min(k_max_push, 2.0f * taken / strength)});
+        }
+        loosened += loosen(id, t, pushes);
+    }
+    return loosened;
 }
 
 } // namespace giant::sim

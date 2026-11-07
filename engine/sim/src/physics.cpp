@@ -15,7 +15,9 @@
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
@@ -35,6 +37,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <mutex>
 
 namespace giant::sim {
@@ -256,6 +259,54 @@ JPH::RefConst<JPH::Shape> make_shape(const Shape& shape, bool moving) {
     return result.Get();
 }
 
+// Which part of a body's shape a contact is on (a compound's part, else 0).
+u32 part_of(const JPH::Body& body, const JPH::SubShapeID& id) {
+    const JPH::Shape* shape = body.GetShape();
+    if (shape->GetType() != JPH::EShapeType::Compound) return 0;
+    JPH::SubShapeID rest;
+    return static_cast<const JPH::CompoundShape*>(shape)->GetSubShapeIndexFromID(id, rest);
+}
+
+// Collects hard new contacts during a step (on the physics workers).
+class HitListener final : public JPH::ContactListener {
+public:
+    float min_impulse = 50.0f;
+
+    void OnContactAdded(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
+                        JPH::ContactSettings&) override {
+        if (manifold.mRelativeContactPointsOn1.empty()) return;
+        const float inverse_a = a.IsDynamic() ? a.GetMotionProperties()->GetInverseMass() : 0.0f;
+        const float inverse_b = b.IsDynamic() ? b.GetMotionProperties()->GetInverseMass() : 0.0f;
+        if (inverse_a + inverse_b <= 0.0f) return;
+        const JPH::RVec3 point = manifold.GetWorldSpaceContactPointOn1(0);
+        // Closing speed along the normal (a's point toward b's).
+        const float closing = (a.GetPointVelocity(point) - b.GetPointVelocity(point)).Dot(manifold.mWorldSpaceNormal);
+        const float impulse = closing / (inverse_a + inverse_b);
+        if (!(impulse >= min_impulse)) return;
+        ContactHit hit;
+        hit.a = to_id(a.GetID());
+        hit.b = to_id(b.GetID());
+        hit.part_a = part_of(a, manifold.mSubShapeID1);
+        hit.part_b = part_of(b, manifold.mSubShapeID2);
+        hit.impulse = impulse;
+        hit.point = from_jolt_r(point);
+        hit.normal = from_jolt(manifold.mWorldSpaceNormal);
+        const std::lock_guard lock(m_mutex);
+        m_hits.push_back(hit);
+    }
+
+    // The hits since the last take, in a fixed order (workers find them in any).
+    void take(std::vector<ContactHit>& out) {
+        const std::lock_guard lock(m_mutex);
+        out.insert(out.end(), m_hits.begin(), m_hits.end());
+        m_hits.clear();
+    }
+
+private:
+    std::mutex m_mutex;
+    std::vector<ContactHit> m_hits;
+};
+
 } // namespace
 
 // --- Shapes made ahead --------------------------------------------------------
@@ -364,6 +415,8 @@ struct PhysicsWorld::Impl {
           system() {
         system.Init(s.max_bodies, 0, s.max_body_pairs, s.max_contacts, broad_layers, object_vs_broad, pairs);
         system.SetGravity(to_jolt(s.gravity));
+        hits.min_impulse = s.min_hit_impulse;
+        system.SetContactListener(&hits);
     }
     ~Impl() {
         // Characters (their bodies with them), then the bodies, before the
@@ -390,6 +443,7 @@ struct PhysicsWorld::Impl {
 #else
     JPH::TempAllocatorImplWithMallocFallback temp; // a big step outgrows it: the heap, not a crash
 #endif
+    HitListener hits; // before the system: outlives its use
     JPH::PhysicsSystem system;
     double carried = 0.0; // time not yet stepped
     u64 steps = 0;
@@ -437,6 +491,7 @@ struct PhysicsWorld::Impl {
         s.mLinearVelocity = to_jolt(d.linear_velocity);
         s.mAngularVelocity = to_jolt(d.angular_velocity);
         s.mUserData = d.user;
+        s.mUseManifoldReduction = !d.report_parts; // merged manifolds keep one part's id
         if (d.motion == Motion::dynamic) {
             if (d.mass > 0.0f) {
                 s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
@@ -599,6 +654,7 @@ void PhysicsWorld::clear() {
     m_impl->characters.clear(); // their bodies out of the old world here, not on its thread
     std::swap(m_impl, fresh);
     m_moved.clear();
+    m_hits.clear();
     // Letting tens of thousands of bodies go takes tens of milliseconds: on
     // a thread of its own, never waited for here (one still going when the
     // next comes just runs beside it).
@@ -721,6 +777,7 @@ void PhysicsWorld::move_kinematic(BodyId id, const DVec3& position, const Quat& 
 u32 PhysicsWorld::step(double seconds) {
     const auto start = std::chrono::steady_clock::now();
     m_moved.clear();
+    m_hits.clear();
     if (!std::isfinite(seconds) || seconds <= 0.0) {
         m_impl->last_step_ms = 0.0;
         return 0;
@@ -748,6 +805,7 @@ u32 PhysicsWorld::step(double seconds) {
         const JPH::EPhysicsUpdateError error =
             m_impl->system.Update(static_cast<float>(k_step_seconds), 1, &m_impl->temp, &m_impl->jobs);
         m_impl->jobs.drain();
+        m_impl->hits.take(m_hits);
         if (error != JPH::EPhysicsUpdateError::None) {
             log_warning("physics", "a step ran short: too many body pairs or contacts");
         }
@@ -758,6 +816,9 @@ u32 PhysicsWorld::step(double seconds) {
         for (const JPH::BodyID b : active) m_moved.push_back(to_id(b));
     }
     m_impl->steps += run;
+    std::sort(m_hits.begin(), m_hits.end(), [](const ContactHit& x, const ContactHit& y) {
+        return std::tie(x.a, x.b, x.part_a, x.part_b, x.impulse) < std::tie(y.a, y.b, y.part_a, y.part_b, y.impulse);
+    });
     std::sort(m_moved.begin(), m_moved.end()); // the same order every run
     m_moved.erase(std::unique(m_moved.begin(), m_moved.end()), m_moved.end());
     m_impl->last_step_ms =

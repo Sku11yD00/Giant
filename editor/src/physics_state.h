@@ -48,6 +48,11 @@ public:
     // them there); and which to draw again (taken by the frame).
     const std::unordered_map<world::EntityId, world::Transform>& poses() const { return m_bodies.poses(); }
     std::vector<world::EntityId> take_redraw() { return m_bodies.take_redraw(); }
+    const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>& piece_poses() const {
+        return m_bodies.piece_poses();
+    }
+    // A blow (impact command): breakable kits' pieces in reach come loose.
+    usize impact(const DVec3& point, float radius, float impulse) { return m_bodies.impact(point, radius, impulse); }
 
     sim::PhysicsWorld& world() { return m_physics; }
     const sim::PhysicsWorld& world() const { return m_physics; }

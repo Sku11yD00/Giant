@@ -114,9 +114,19 @@ struct KitPiece {
 // A reusable assembly of pieces (a modular wall, a house, a tree with its
 // rocks): placed any number of times by kit entities, which all share its
 // meshes and materials. Changing a kit changes every placement.
+constexpr float k_default_kit_strength = 1500.0f; // a 100 kg rock at 15 m/s
+constexpr float k_max_kit_strength = 1e9f;
+
 struct Kit {
     std::string name; // unique in the scene
     std::vector<KitPiece> pieces;
+    // Breakable (a building): while simulating, a piece struck hard enough
+    // comes loose and falls, and so does whatever it held up (pieces that
+    // touch are joined; those at the kit's bottom stand on the ground).
+    bool breakable = false;
+    // The blow a piece takes before it comes loose, newton seconds: about
+    // the mass times the speed of what strikes it (0: k_default_kit_strength).
+    float strength = 0.0f;
     bool operator==(const Kit&) const = default;
 };
 

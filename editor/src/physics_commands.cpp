@@ -47,7 +47,9 @@ Json physics_json(const EditorState& state) {
             {"refused", s.refused},
             {"waiting", s.waiting},
             {"ground_waiting", s.tiles_waiting},
-            {"moved", s.posed}};
+            {"moved", s.posed},
+            {"broken_kits", s.broken_kits},
+            {"loose_pieces", s.loose_pieces}};
 }
 
 CommandResult no_physics() { return CommandResult::failure("physics is not available"); }
@@ -180,6 +182,33 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              if (state.play != nullptr && state.play->playing() && hit->body == state.play->player_body()) {
                  out["player"] = true;
              }
+             return CommandResult::success(out);
+         }});
+
+    add(registry,
+        {"impact",
+         "While simulating, a blow at `point`: the pieces of breakable kits (set_kit_breakable) within "
+         "`radius` metres take `impulse` (N s, about mass times speed; less toward the edge), and those it "
+         "is enough for come loose, pushed away, with whatever they held up. A footstep, an explosion, a "
+         "wrecking ball. Stopping the simulation puts every piece back. Returns `loosened` and get_physics.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"point", "radius", "impulse"}},
+              {"properties",
+               {{"point", triple(1e8, "World metres.")},
+                {"radius", {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 1000}, {"description", "Metres."}}},
+                {"impulse", {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 1e9}, {"description", "N s."}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.physics == nullptr) return no_physics();
+             if (!state.physics->simulating()) return CommandResult::failure("not simulating (simulate on first)");
+             const Json& p = args["point"];
+             state.physics->flush(state.scene);
+             const usize loosened =
+                 state.physics->impact({p[0].get<double>(), p[1].get<double>(), p[2].get<double>()},
+                                       args["radius"].get<float>(), args["impulse"].get<float>());
+             Json out = physics_json(state);
+             out["loosened"] = loosened;
              return CommandResult::success(out);
          }});
 

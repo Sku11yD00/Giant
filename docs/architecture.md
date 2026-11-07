@@ -650,6 +650,42 @@ step left them, so a platform it rides can lag the view by up to a step
 Like simulating it is view state: stopping removes the character and puts
 the camera and simulating back as they were.
 
+## Breakable buildings (N4 part 4)
+
+A kit marked `breakable` (with a `strength` in N·s, default 1500) is still
+one fixed compound body while whole, but its contacts are reported piece by
+piece: `PhysicsWorld` keeps a contact listener that, for each new contact,
+records the two bodies, the parts struck and the impulse (closing speed over
+the two inverse masses), keeping hits of at least `min_hit_impulse` (50
+N·s). Manifold reduction is off for those bodies (`BodyDesc::report_parts`)
+so the part struck is the one named.
+
+`ScenePhysics` makes a support graph for a placement the first time it is
+struck: pieces whose bounds lie within 2 cm of each other touch, and those
+within 5 cm of the kit's lowest bottom stand on the ground. After each step
+(`break_from_hits`) a piece hit harder than the kit's strength comes loose;
+then a breadth-first walk from the ground pieces finds what still stands,
+and every piece not reached comes loose too (a roof whose walls are gone).
+The standing pieces are rebuilt as one fixed compound; each loose piece
+becomes a dynamic body of its own, up to 2 cm smaller across than drawn (so neighbours
+don't wedge it) with a small tipping spin (so a wall falls rather than
+balancing). A building's own falling pieces never break the rest of it, so
+it does not shake itself apart. `impact` is the other way in: a blow at a
+point over a radius, for kinematic movers (a giant's feet) that make no
+contacts with fixed bodies.
+
+As with all simulating, it is view state: loose pieces are drawn from
+`piece_poses`, the scene is untouched, stopping (`reset_poses`) mends every
+building, and a real edit of a placement (moving, resizing, deleting, a
+kit change) mends it too, while a colour change keeps the break.
+
+Known limits: `impact` walks every entity (fine for a town; a cell index
+later); loose pieces stay in their kit's render cell however far they roll;
+mesh and decal pieces never come loose (only cubes, spheres and planes
+collide, and no sphere flattened under a centimetre); the part index assumes every piece built a shape; damage is not
+saved (N4 part 8); pieces break whole, never into smaller bits (the
+destruction rings, N4 part 6).
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

@@ -224,3 +224,44 @@ GIANT_TEST("play commands: Esc stops, a new scene stops, simulate off stops; sim
     GIANT_CHECK(f.run("play", {{"on", true}}).ok);
     GIANT_CHECK(f.run("simulate", {{"on", false}}).ok && !f.play.playing() && !f.physics.simulating());
 }
+
+GIANT_TEST("breakage commands: a breakable house, an impact knocks a wall out, stopping mends it; saved and undone") {
+    Fixture f;
+    f.create({{"shape", "plane"}, {"scale", {100, 1, 100}}});
+    const Json wall_x = {{"shape", "cube"}, {"position", {1.9, 1.5, 0}}, {"scale", {0.2, 3, 3.6}}};
+    const Json wall_w = {{"shape", "cube"}, {"position", {-1.9, 1.5, 0}}, {"scale", {0.2, 3, 3.6}}};
+    const Json roof = {{"shape", "cube"}, {"position", {0, 3.1, 0}}, {"scale", {4.2, 0.2, 4}}};
+    ai::CommandResult r = f.run("create_kit", {{"name", "hut"}, {"pieces", {wall_x, wall_w, roof}}});
+    GIANT_CHECK(r.ok);
+    const world::EntityId hut = f.create({{"kit", "hut"}, {"position", {0, 0, 0}}});
+    GIANT_CHECK(f.run("get_kit", {{"name", "hut"}}).value["breakable"] == false);
+    // Not breakable yet: an impact loosens nothing. Not simulating: refused.
+    GIANT_CHECK(!f.run("impact", {{"point", {2.3, 1.5, 0}}, {"radius", 1}, {"impulse", 1e5}}).ok);
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    r = f.run("impact", {{"point", {2.3, 1.5, 0}}, {"radius", 1}, {"impulse", 1e5}});
+    GIANT_CHECK(r.ok && r.value["loosened"] == 0);
+    r = f.run("set_kit_breakable", {{"name", "hut"}, {"breakable", true}, {"strength", 2000}});
+    GIANT_CHECK(r.ok && r.value["strength"] == 2000.0);
+    // The east wall out: the roof still on the west wall.
+    r = f.run("impact", {{"point", {2.3, 1.5, 0}}, {"radius", 0.5}, {"impulse", 8000}});
+    GIANT_CHECK(r.ok && r.value["loosened"] == 1 && r.value["broken_kits"] == 1 && r.value["loose_pieces"] == 1);
+    GIANT_CHECK(f.run("step_physics", {{"seconds", 2}}).ok);
+    // Then the west: the roof comes down with it.
+    r = f.run("impact", {{"point", {-2.3, 1.5, 0}}, {"radius", 0.5}, {"impulse", 8000}});
+    GIANT_CHECK(r.ok && r.value["loosened"] == 2 && r.value["loose_pieces"] == 3);
+    GIANT_CHECK(f.physics.piece_poses().count(hut) == 1 && f.physics.piece_poses().at(hut).size() == 3);
+    // The scene keeps the kit where it was put: saving is untouched by the break.
+    GIANT_CHECK(f.state.scene.find(hut)->transform.position == DVec3(0.0, 0.0, 0.0));
+    const std::string text = world::save_scene(f.state.scene);
+    world::Scene loaded;
+    GIANT_CHECK(!world::load_scene(text, loaded) && loaded.find_kit("hut") != nullptr &&
+                loaded.find_kit("hut")->breakable && loaded.find_kit("hut")->strength == 2000.0f);
+    // Stopping: whole again.
+    GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
+    r = f.run("get_physics");
+    GIANT_CHECK(r.value["broken_kits"] == 0 && r.value["loose_pieces"] == 0 && f.physics.piece_poses().empty());
+    r = f.run("raycast", {{"origin", {0, 10, 0}}, {"direction", {0, -1, 0}}});
+    GIANT_CHECK(r.ok && r.value["entity"] == hut && std::fabs(r.value["point"][1].get<double>() - 3.2) < 0.01);
+    // Undo the breakable setting.
+    GIANT_CHECK(f.run("undo").ok && !f.state.scene.find_kit("hut")->breakable);
+}

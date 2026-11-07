@@ -555,7 +555,8 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
          "(create_entities with {\"kit\": name} places it). Give the pieces, or take them "
          "from_entities (their positions become relative to origin, by default the first "
          "entity's). replace_entities swaps those entities for one placement of the new kit. "
-         "replace: true changes an existing kit, and so every placement. Undoable.",
+         "replace: true changes an existing kit, and so every placement. breakable makes it a building "
+         "that breaks while simulating. Undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"name"}},
@@ -575,7 +576,17 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
                 {"replace_entities",
                  {{"type", "boolean"},
                   {"description", "With from_entities: delete them and place the kit where they were."}}},
-                {"replace", {{"type", "boolean"}, {"description", "Overwrite a kit of this name."}}}}}},
+                {"replace", {{"type", "boolean"}, {"description", "Overwrite a kit of this name."}}},
+                {"breakable",
+                 {{"type", "boolean"},
+                  {"description", "A building: while simulating, pieces struck hard enough come loose, and what "
+                                  "they held up falls (see set_kit_breakable)."}}},
+                {"strength",
+                 {{"type", "number"},
+                  {"minimum", 0},
+                  {"maximum", world::k_max_kit_strength},
+                  {"description", "The blow (N s, about mass times speed) a piece takes before it comes loose; "
+                                  "0: 1500."}}}}}},
          false,
          [&state](const Json& args, CommandContext& context) {
              const std::string name = args["name"].get<std::string>();
@@ -593,6 +604,13 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
              }
              world::Kit kit;
              kit.name = name;
+             // Replacing keeps how it breaks unless given.
+             if (const world::Kit* existing = state.scene.find_kit(name)) {
+                 kit.breakable = existing->breakable;
+                 kit.strength = existing->strength;
+             }
+             kit.breakable = args.value("breakable", kit.breakable);
+             kit.strength = args.value("strength", kit.strength);
              std::vector<EntityId> sources;
              DVec3 origin{};
              if (args.contains("pieces")) {
@@ -727,7 +745,7 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
              Json list = Json::array();
              for (const world::Kit& k : state.scene.kits) {
                  list.push_back({{"name", k.name}, {"pieces", k.pieces.size()},
-                                 {"placements", placements(state.scene, k.name)}});
+                                 {"placements", placements(state.scene, k.name)}, {"breakable", k.breakable}});
              }
              return CommandResult::success({{"kits", std::move(list)}});
          }});
@@ -746,7 +764,39 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
              Json pieces = Json::array();
              for (const world::KitPiece& p : k->pieces) pieces.push_back(piece_json(p));
              return CommandResult::success({{"name", k->name}, {"pieces", std::move(pieces)},
-                                            {"placements", placements(state.scene, k->name)}});
+                                            {"placements", placements(state.scene, k->name)},
+                                            {"breakable", k->breakable},
+                                            {"strength", k->strength > 0.0f ? k->strength : world::k_default_kit_strength}});
+         }});
+
+    add(registry,
+        {"set_kit_breakable",
+         "Makes a kit a building that breaks, or not: while simulating, a piece struck hard enough (a "
+         "falling or thrown dynamic entity, or `impact`) comes loose and falls, and so does whatever no "
+         "longer stands on the ground through touching pieces (those at the kit's bottom stand on it). "
+         "`strength`: the blow (N s, about mass times speed) a piece takes, 0 for 1500. Stopping the "
+         "simulation puts every piece back. Undoable.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"name", "breakable"}},
+              {"properties",
+               {{"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes}}},
+                {"breakable", {{"type", "boolean"}}},
+                {"strength", {{"type", "number"}, {"minimum", 0}, {"maximum", world::k_max_kit_strength}}}}}},
+         false,
+         [&state](const Json& args, CommandContext& context) {
+             const std::string name = args["name"].get<std::string>();
+             world::Kit* kit = state.scene.find_kit(name);
+             if (kit == nullptr) return CommandResult::failure("no kit named \"" + name + "\"; list_kits shows them");
+             auto before = std::make_shared<std::vector<world::Kit>>(state.scene.kits);
+             kit->breakable = args["breakable"].get<bool>();
+             kit->strength = args.value("strength", kit->strength);
+             auto after = std::make_shared<std::vector<world::Kit>>(state.scene.kits);
+             context.record(scene_change(
+                 state, [&state, before] { state.scene.kits = *before; },
+                 [&state, after] { state.scene.kits = *after; }));
+             return CommandResult::success({{"name", name}, {"breakable", kit->breakable},
+                                            {"strength", kit->strength > 0.0f ? kit->strength : world::k_default_kit_strength}});
          }});
 }
 

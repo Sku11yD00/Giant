@@ -395,7 +395,10 @@ Json kits_json(std::span<const Kit> kits) {
             write_look(piece, p.shape, p.mesh, {}, p.transform, p.material, p.decal);
             pieces.push_back(std::move(piece));
         }
-        out.push_back({{"name", k.name}, {"pieces", std::move(pieces)}});
+        Json kit = {{"name", k.name}, {"pieces", std::move(pieces)}};
+        if (k.breakable) kit["breakable"] = true;
+        if (k.strength != 0.0f) kit["strength"] = k.strength;
+        out.push_back(std::move(kit));
     }
     return out;
 }
@@ -837,6 +840,8 @@ void read_kit(const Json& json, const std::string& path, Kit& k, std::string& er
             }
         }
     }
+    r.boolean("breakable", k.breakable);
+    r.number("strength", k.strength, 0, k_max_kit_strength);
     r.finish();
 }
 

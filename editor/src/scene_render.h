@@ -6,6 +6,7 @@
 #include "terrain_meshes.h"
 
 #include "giant/render/renderer.h"
+#include "giant/sim/scene_physics.h"
 #include "giant/world/scene.h"
 
 #include <map>
@@ -49,6 +50,8 @@ struct SceneFrame {
     // Where entities are drawn instead of where the scene has them (the
     // physics' poses), during a scene_frame call.
     const std::unordered_map<world::EntityId, world::Transform>* poses = nullptr;
+    // Breakable kits' loose pieces, drawn where they are (likewise).
+    const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr;
 
     struct MaterialKey {
         u32 bits[8];
@@ -121,12 +124,15 @@ struct SceneFrame {
 // placements change (ScatterPlacer::take_changed) or a kit changes.
 // With `poses`, an entity in it is drawn there (position and rotation; it
 // stays in the cell the scene puts it in), and the cells of the entities in
-// `redraw` (whose pose changed or went) are rebuilt.
+// `redraw` (whose pose changed or went) are rebuilt. With `piece_poses`, a
+// kit's loose pieces are drawn where they are (world transforms), the rest
+// of it where it stands.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
                  const std::unordered_map<world::EntityId, world::Transform>* poses = nullptr,
-                 std::span<const world::EntityId> redraw = {});
+                 std::span<const world::EntityId> redraw = {},
+                 const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches
