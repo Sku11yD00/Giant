@@ -15,6 +15,8 @@
 #include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -38,6 +40,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <tuple>
 #include <mutex>
 
@@ -478,8 +481,11 @@ struct PhysicsWorld::Impl {
         JPH::BodyID wall;
         Vec3 wall_normal{};
         float climb_wait = 0.0f; // seconds before it may take hold again (pushed off)
-        // Pulling itself up onto a ledge: from, to, and how far (0 to 1).
+        // Pulling itself up onto a ledge: from, to, and how far (0 to 1);
+        // with a ledge body, from and to are in its frame (a moving ledge).
         bool mantling = false;
+        JPH::BodyID mantle_on;
+        JPH::RefConst<JPH::Shape> room; // (clear_at's shape, made once)
         DVec3 mantle_from{};
         DVec3 mantle_to{};
         float mantle_t = 0.0f;
@@ -490,12 +496,10 @@ struct PhysicsWorld::Impl {
     std::map<CharacterId, Character> characters; // in id order: the same steps every run
 
     // A character's own body: moved with it, never by the body calls.
-    bool is_character_body(JPH::BodyID b) const {
-        for (const auto& [id, c] : characters) {
-            if (c.body->GetInnerBodyID() == b) return true;
-        }
-        return false;
-    }
+    // (Asked for every body a character's ray meets: a set, not a scan.)
+    std::unordered_set<JPH::uint32> character_bodies;
+    bool is_character_body(JPH::BodyID b) const { return character_bodies.contains(b.GetIndexAndSequenceNumber()); }
+    void index_character(const Character& c) { character_bodies.insert(c.body->GetInnerBodyID().GetIndexAndSequenceNumber()); }
     CharacterId next_character = 1;
 
     JPH::BodyInterface& bodies_interface() { return system.GetBodyInterface(); }
@@ -608,6 +612,34 @@ struct PhysicsWorld::Impl {
         return lock.Succeeded() ? lock.GetBody().GetPointVelocity(point) : JPH::Vec3::sZero();
     }
 
+    // Where a mantle has the feet: up by `rise`, over by `over` (0 to 1).
+    static DVec3 mantle_point(const Character& c, double rise, double over) {
+        return {c.mantle_from.x + (c.mantle_to.x - c.mantle_from.x) * over,
+                c.mantle_from.y + (c.mantle_to.y - c.mantle_from.y) * rise,
+                c.mantle_from.z + (c.mantle_to.z - c.mantle_from.z) * over};
+    }
+
+    // Room for the character standing at `feet` (its shape a little smaller:
+    // touching is room). Characters' bodies are left out.
+    bool clear_at(Character& c, const JPH::RVec3& feet) const {
+        if (c.room == nullptr) c.room = standing_capsule(c.desc.height - 0.06f, c.desc.radius - 0.03f);
+        const JPH::RefConst<JPH::Shape>& shape = c.room;
+        if (shape == nullptr) return false;
+        const JPH::RVec3 at = feet + JPH::Vec3(0.0f, 0.03f, 0.0f);
+        JPH::CollideShapeSettings collide;
+        collide.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
+        JPH::AnyHitCollisionCollector<JPH::CollideShapeCollector> hit;
+        struct NotCharacters final : JPH::BodyFilter {
+            const Impl* impl = nullptr;
+            bool ShouldCollideLocked(const JPH::Body& body) const override { return !impl->is_character_body(body.GetID()); }
+        } filter;
+        filter.impl = this;
+        system.GetNarrowPhaseQuery().CollideShape(shape, JPH::Vec3::sOne(),
+                                                  JPH::RMat44::sTranslation(at) * JPH::Mat44::sTranslation(shape->GetCenterOfMass()),
+                                                  collide, at, hit, {}, {}, filter);
+        return !hit.HadHit();
+    }
+
     // One fixed step on a wall, or onto its ledge. False: not climbing (any
     // more): the step goes on as walking or falling.
     bool climb_step(Character& c, float dt) {
@@ -618,15 +650,29 @@ struct PhysicsWorld::Impl {
         const float steep = std::cos(JPH::DegreesToRadians(c.desc.max_slope_degrees));
         c.climb_wait = std::max(0.0f, c.climb_wait - dt);
         if (c.mantling) {
-            // Up first, then over the edge.
+            // Up first, then over the edge (a jump pressed meanwhile lasts its fifth of a second).
+            c.jump_wait = std::max(0.0f, c.jump_wait - dt);
             c.mantle_t = std::min(1.0f, c.mantle_t + dt / 0.45f);
             const double t = c.mantle_t;
             const double rise = std::min(1.0, t / 0.6);
             const double over = std::clamp((t - 0.6) / 0.4, 0.0, 1.0);
-            const DVec3 at{c.mantle_from.x + (c.mantle_to.x - c.mantle_from.x) * over,
-                           c.mantle_from.y + (c.mantle_to.y - c.mantle_from.y) * rise,
-                           c.mantle_from.z + (c.mantle_to.z - c.mantle_from.z) * over};
+            DVec3 at = mantle_point(c, rise, over);
             const JPH::RVec3 from = cv.GetPosition();
+            if (!c.mantle_on.IsInvalid()) {
+                // On a moving ledge: where its frame has the point now.
+                const JPH::BodyLockRead lock(system.GetBodyLockInterface(), c.mantle_on);
+                if (lock.Succeeded()) {
+                    at = from_jolt_r(lock.GetBody().GetWorldTransform() * to_jolt(at));
+                } else { // the ledge went: falls from where it is
+                    c.mantling = false;
+                    c.climbing = false;
+                    c.mantle_on = JPH::BodyID();
+                }
+            }
+            if (!c.mantling) {
+                refresh(cv);
+                return false;
+            }
             cv.SetPosition(to_jolt(at));
             c.velocity = from_jolt(JPH::Vec3(cv.GetPosition() - from) / dt);
             cv.SetLinearVelocity(JPH::Vec3::sZero());
@@ -634,6 +680,7 @@ struct PhysicsWorld::Impl {
             if (c.mantle_t >= 1.0f) {
                 c.mantling = false;
                 c.climbing = false;
+                c.mantle_on = JPH::BodyID();
                 c.velocity = {};
                 refresh(cv);
             }
@@ -644,7 +691,8 @@ struct PhysicsWorld::Impl {
         const JPH::RVec3 chest = feet + up * (0.5f * h);
         if (!c.climbing) {
             // Taking hold: walking into something too steep to walk on.
-            if (!c.input.climb || c.climb_wait > 0.0f || want.LengthSq() < 0.25f) return false;
+            // (A jump asked for is a jump, not a push off a wall just met.)
+            if (!c.input.climb || c.climb_wait > 0.0f || c.jump_wait > 0.0f || want.LengthSq() < 0.25f) return false;
             const JPH::Vec3 dir = want.Normalized();
             const std::optional<Hit> wall = look(chest, dir, r + 0.35f);
             if (!wall || wall->dynamic) return false; // (a crate walked into is pushed)
@@ -686,13 +734,27 @@ struct PhysicsWorld::Impl {
         if (wall && !wall->dynamic && climb > 0.0f && !look(feet + up * (h + 0.05f), -n, r + 0.6f)) {
             const JPH::RVec3 above = feet + up * (h + 0.6f) - n * (r + 0.4f);
             const std::optional<Hit> ledge = look(above, -up, h + 0.6f);
-            if (ledge && ledge->normal.GetY() >= steep && ledge->point.GetY() > feet.GetY() + 0.3f &&
-                !look(ledge->point + up * 0.05f, up, h)) {
-                c.mantling = true;
-                c.mantle_t = 0.0f;
-                c.mantle_from = from_jolt_r(feet);
-                c.mantle_to = from_jolt_r(ledge->point + up * 0.02f);
-                return climb_step(c, dt);
+            if (ledge && ledge->normal.GetY() >= steep && ledge->point.GetY() > feet.GetY() + 0.3f) {
+                const JPH::RVec3 to = ledge->point + up * 0.02f;
+                // Room on the way: risen beside the wall, halfway over, and there.
+                const JPH::RVec3 risen(feet.GetX(), to.GetY(), feet.GetZ());
+                if (clear_at(c, risen) && clear_at(c, (risen + to) * 0.5) && clear_at(c, to)) {
+                    c.mantling = true;
+                    c.mantle_t = 0.0f;
+                    c.mantle_from = from_jolt_r(feet);
+                    c.mantle_to = from_jolt_r(to);
+                    c.mantle_on = JPH::BodyID();
+                    if (!ledge->dynamic) {
+                        const JPH::BodyLockRead lock(system.GetBodyLockInterface(), ledge->body);
+                        if (lock.Succeeded() && !lock.GetBody().IsStatic()) { // a moving ledge: in its frame
+                            const JPH::RMat44 into = lock.GetBody().GetWorldTransform().Inversed();
+                            c.mantle_on = ledge->body;
+                            c.mantle_from = from_jolt_r(into * feet);
+                            c.mantle_to = from_jolt_r(into * to);
+                        }
+                    }
+                    return climb_step(c, dt);
+                }
             }
         }
         if (!wall || wall->dynamic || std::fabs(wall->normal.GetY()) >= steep) {
@@ -712,7 +774,9 @@ struct PhysicsWorld::Impl {
         // Kept just off the wall, moving with it.
         const float gap = wall->distance - r;
         const JPH::Vec3 hold = -n * std::clamp((gap - 0.05f) * 10.0f, -1.0f, 3.0f);
-        const JPH::Vec3 out = up * climb + across * side + hold + surface_velocity(wall->body, wall->point);
+        JPH::Vec3 out = up * climb + across * side + hold + surface_velocity(wall->body, wall->point);
+        const float fast = out.Length();
+        if (!(fast <= k_max_character_speed)) out = fast > 0.0f ? out * (k_max_character_speed / fast) : JPH::Vec3::sZero();
         cv.SetLinearVelocity(out);
         const JPH::RVec3 from = cv.GetPosition();
         cv.Update(dt, JPH::Vec3::sZero(), system.GetDefaultBroadPhaseLayerFilter(layers::moving),
@@ -742,6 +806,7 @@ struct PhysicsWorld::Impl {
         if (!(speed <= k_max_character_speed)) v = speed > 0.0f ? v * (k_max_character_speed / speed) : JPH::Vec3::sZero();
         c.body->SetPosition(to);
         c.body->SetLinearVelocity(v);
+        refresh(*c.body); // what it touches where it is held (held up in the air: not on the ground)
         c.velocity = from_jolt(v);
         c.vertical = v.GetY();
     }
@@ -850,7 +915,10 @@ void PhysicsWorld::clear() {
         moved.climbing = false;
         moved.mantling = false;
         moved.body = fresh->make_character(c.desc, from_jolt_r(c.body->GetPosition()), c.velocity);
-        if (moved.body != nullptr) fresh->characters.emplace(id, std::move(moved));
+        if (moved.body != nullptr) {
+            fresh->index_character(moved);
+            fresh->characters.emplace(id, std::move(moved));
+        }
     }
     m_impl->characters.clear(); // their bodies out of the old world here, not on its thread
     std::swap(m_impl, fresh);
@@ -1041,6 +1109,7 @@ CharacterId PhysicsWorld::add_character(const CharacterDesc& desc) {
     if (c.body == nullptr || c.body->GetInnerBodyID().IsInvalid()) return k_no_character; // full
     m_impl->refresh(*c.body); // standing (or not) from the start
     const CharacterId id = m_impl->next_character++;
+    m_impl->index_character(c);
     m_impl->characters.emplace(id, std::move(c));
     return id;
 }
@@ -1050,6 +1119,7 @@ void PhysicsWorld::remove_character(CharacterId id) {
     if (it == m_impl->characters.end()) return;
     m_impl->wake_in(it->second.body->GetShape()->GetWorldSpaceBounds(it->second.body->GetCenterOfMassTransform(),
                                                                       JPH::Vec3::sOne()));
+    m_impl->character_bodies.erase(it->second.body->GetInnerBodyID().GetIndexAndSequenceNumber());
     m_impl->characters.erase(it);
 }
 
@@ -1126,7 +1196,7 @@ std::optional<CharacterState> PhysicsWorld::character_state(CharacterId id) cons
     const Impl::Character& ch = it->second;
     s.climbing = ch.climbing || ch.mantling;
     s.mantling = ch.mantling;
-    if (ch.climbing) {
+    if (ch.climbing || ch.mantling) {
         s.wall = to_id(ch.wall);
         s.wall_normal = ch.wall_normal;
     }

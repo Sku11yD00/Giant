@@ -78,7 +78,8 @@ public:
     // Carried by `entity`'s body (a hand, a cart): held where it is against
     // it, going wherever it goes, its input left aside, until released (or
     // the body goes: the entity removed, or its body made again). False
-    // when not playing or the entity has no body.
+    // when not playing, still being put down (waiting_for_ground just
+    // after starting), or the entity has no body.
     bool carry(world::EntityId entity);
     void release();
     // What carries the player: an entity's id, or nothing.
@@ -90,6 +91,7 @@ public:
     const PlayerSettings& settings() const { return m_settings; }
     // Held still: what it stands on is still being made.
     bool waiting_for_ground() const { return m_waiting || m_placing; }
+    bool placing() const { return m_placing; }
 
 private:
     void apply_input();

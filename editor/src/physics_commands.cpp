@@ -494,6 +494,10 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              } else {
                  state.physics->flush(state.scene); // its body in line with the scene
                  const world::EntityId entity = args["entity"].get<world::EntityId>();
+                 if (state.play->placing()) {
+                     return CommandResult::failure("the player is still being put down (step until "
+                                                   "waiting_for_ground is false)");
+                 }
                  if (!state.play->carry(entity)) {
                      return CommandResult::failure("entity " + std::to_string(entity) + " has no body to carry the player");
                  }
@@ -506,7 +510,8 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "Reports play mode: whether playing and, while it is, the player's feet (`position`), `eye` (the "
          "camera), `velocity`, `on_ground`, `sliding` (on a slope too steep), `standing_on` (an entity's id, "
          "0 the ground, null nothing), `climbing` (on a wall: `wall` its entity, 0 something else), "
-         "`mantling` (pulling itself up onto a ledge), `carried_by` (carry_player: the entity, null none), "
+         "`mantling` (pulling itself up onto a ledge), `carried_by` (carry_player: the entity, 0 a body that "
+         "is no entity's (or one just removed), null none), "
          "`yaw`, `pitch`, its `input`, and `waiting_for_ground` (held still while the ground under it is "
          "still being made).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},

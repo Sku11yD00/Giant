@@ -106,6 +106,7 @@ void PlayState::handle_input(const std::vector<InputEvent>& events, bool ui_has_
         }
     }
     if (m_from_keys) {
+        m_input.climb = true; // the keys climb (set_input can say not to)
         m_input.forward = (m_keys[0] ? 1.0f : 0.0f) - (m_keys[1] ? 1.0f : 0.0f);
         m_input.right = (m_keys[3] ? 1.0f : 0.0f) - (m_keys[2] ? 1.0f : 0.0f);
         m_input.sprint = m_shift;
@@ -178,7 +179,8 @@ void PlayState::after_step(EditorCamera& camera, double seconds) {
     // Up a step (a small rise while on the ground): eased. Anything else
     // (falling, jumping, down a step) followed at once.
     const double rise = eye - m_eye;
-    if (s->on_ground && rise > 0.0 && rise <= static_cast<double>(m_settings.body.step_height) + 0.05) {
+    if (s->on_ground && s->carrier == sim::k_no_body && !s->climbing && rise > 0.0 &&
+        rise <= static_cast<double>(m_settings.body.step_height) + 0.05) {
         m_eye += rise * (1.0 - std::exp(-k_eye_ease * std::max(seconds, 0.0)));
     } else {
         m_eye = eye;
@@ -189,7 +191,7 @@ void PlayState::after_step(EditorCamera& camera, double seconds) {
 }
 
 bool PlayState::carry(world::EntityId entity) {
-    if (!playing() || entity == 0) return false;
+    if (!playing() || m_placing || entity == 0) return false; // (placing puts it down where it stands)
     const sim::BodyId body = m_physics.bodies().body_of(entity);
     return body != sim::k_no_body && m_physics.world().carry_character(m_player, body);
 }

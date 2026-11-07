@@ -209,7 +209,8 @@ GIANT_TEST("play commands: the player climbs a wall and onto its top; an entity 
     GIANT_CHECK(f.run("play", {{"on", true}}).ok);
     GIANT_CHECK(f.run("set_player_input", {{"forward", 1}, {"climb", false}}).ok);
     r = f.run("step_player", {{"seconds", 2}});
-    GIANT_CHECK(r.value["climbing"] == false && std::fabs(triple(r.value["position"]).y) < 0.05);
+    p = triple(r.value["position"]);
+    GIANT_CHECK(r.value["climbing"] == false && std::fabs(p.y) < 0.05 && p.z < -2.0); // at the wall
     GIANT_CHECK(r.value["input"]["climb"] == false);
     // A crate walked into is pushed, never climbed.
     GIANT_CHECK(f.run("play", {{"on", false}}).ok);
@@ -236,7 +237,7 @@ GIANT_TEST("play commands: the player climbs a wall and onto its top; an entity 
     r = f.run("step_player", {{"seconds", 0.1}});
     p = triple(r.value["position"]);
     GIANT_CHECK(r.value["carried_by"] == platform && std::fabs(p.y - 10.5) < 0.05 && std::fabs(p.x + 30.0) < 0.05);
-    // Carried away sideways, then let go: it falls (not flung by the moves).
+    // Carried away sideways (put there at once), then let go: it falls.
     GIANT_CHECK(f.run("set_entity", {{"id", platform}, {"position", {-40, 10.25, 0}}}).ok);
     r = f.run("step_player", {{"seconds", 0.1}});
     GIANT_CHECK(std::fabs(triple(r.value["position"]).x + 40.0) < 0.05);
@@ -246,6 +247,11 @@ GIANT_TEST("play commands: the player climbs a wall and onto its top; an entity 
     r = f.run("step_player", {{"seconds", 3}});
     p = triple(r.value["position"]);
     GIANT_CHECK(r.value["on_ground"] == true && std::fabs(p.y) < 0.05 && std::fabs(p.x + 40.0) < 0.05);
+    // Carried again (it need not stand on what carries it), the platform removed: let go.
+    GIANT_CHECK(f.run("carry_player", {{"entity", platform}}).value["carried_by"] == platform);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {platform}}}).ok);
+    r = f.run("step_player", {{"seconds", 0.1}});
+    GIANT_CHECK(r.value["carried_by"].is_null());
     GIANT_CHECK(f.run("play", {{"on", false}}).ok);
     GIANT_CHECK(!f.run("carry_player", {{"release", true}}).ok); // not playing
 }

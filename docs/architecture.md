@@ -663,16 +663,21 @@ corners of a convex wall and a moving wall's surface speed), and swept
 with no gravity. It lets go when the ray finds nothing to hold (past an
 edge, or what it held came loose and is dynamic now), when climbing down
 reaches the ground, when told not to climb, and when a jump pushes it off
-(away and up; no hold again for 0.4 s). At the top (the chest ray hits,
-one over the head does not) a ray down beyond the edge looks for ground it
-can stand on with room for its height: it mantles there, up for 0.27 s and
-then over the edge for 0.18 s, moved directly (it was checked clear).
+(away and up; no hold again for 0.4 s); a jump asked for as it meets a
+wall is a plain jump, not a push off. At the top (the chest ray hits, one
+over the head does not) a ray down beyond the edge looks for ground it can
+stand on: if its shape (a little smaller) fits risen beside the wall,
+halfway over and there, it mantles, up for 0.27 s and then over the edge
+for 0.18 s, moved directly. On a ledge that moves (not static) the path is
+kept in the ledge's frame, so it lands where the ledge is now. Climbing
+speed, the wall's surface speed included, is held to the characters' cap.
 
 Any body that is not a character's can carry one (`carry_character`): the
 character's place in the body's frame is kept, and after each step it is
 put there, its speed the body's speed at that point (so a body put
 somewhere at once, as `set_entity` does, carries it there without
-flinging it on when let go). Its input is left aside. `release_character`,
+flinging it on when let go), and what it touches is found again there (so
+held up in the air it is not on the ground). Its input is left aside. `release_character`,
 `set_character_position`, the body removed or the world cleared let it
 go, and it falls on from there. The editor's `carry_player` carries the
 player by an entity's body; an entity whose body is made again (its
