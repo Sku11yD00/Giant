@@ -403,9 +403,10 @@ struct PhysicsWorld::Impl {
         CharacterInput input;
         float jump_speed = 0.0f;
         float jump_wait = 0.0f; // seconds a jump asked for still waits for the ground
-        JPH::Vec3 velocity = JPH::Vec3::sZero(); // how it moved in the last step (Jolt keeps the speed asked for)
+        // Plain types, not Jolt's SIMD ones (no alignment padding).
+        Vec3 velocity{}; // how it moved in the last step (Jolt keeps the speed asked for)
         float vertical = 0.0f; // the speed up it was given in the last step
-        JPH::RVec3 previous = JPH::RVec3::sZero(); // where it was before the last step
+        DVec3 previous{}; // where it was before the last step
         bool held = false;
     };
     std::map<CharacterId, Character> characters; // in id order: the same steps every run
@@ -506,7 +507,7 @@ struct PhysicsWorld::Impl {
         const JPH::Vec3 gravity = system.GetGravity();
         cv.UpdateGroundVelocity(); // what it stands on may have changed speed
         // How it really moved: a wall, a ceiling or a slope stopped what it asked for.
-        const JPH::Vec3 v = c.velocity;
+        const JPH::Vec3 v = to_jolt(c.velocity);
         const JPH::Vec3 ground = cv.GetGroundVelocity();
         const JPH::Vec3 want(c.input.velocity.x, 0.0f, c.input.velocity.z);
         // Not on its way up off the ground (a jump), by the speed it was
@@ -544,7 +545,7 @@ struct PhysicsWorld::Impl {
         const JPH::RVec3 from = cv.GetPosition();
         cv.ExtendedUpdate(dt, gravity, update, system.GetDefaultBroadPhaseLayerFilter(layers::moving),
                           system.GetDefaultLayerFilter(layers::moving), {}, {}, temp);
-        c.velocity = JPH::Vec3(cv.GetPosition() - from) / dt;
+        c.velocity = from_jolt(JPH::Vec3(cv.GetPosition() - from) / dt);
     }
 
     std::vector<BodyId> add(std::span<const BodyDesc> descs, std::span<const JPH::RefConst<JPH::Shape>> shapes) {
@@ -592,7 +593,7 @@ void PhysicsWorld::clear() {
     // Characters carry on in the fresh world where they were.
     for (auto& [id, c] : m_impl->characters) {
         Impl::Character moved = c;
-        moved.body = fresh->make_character(c.desc, from_jolt_r(c.body->GetPosition()), from_jolt(c.velocity));
+        moved.body = fresh->make_character(c.desc, from_jolt_r(c.body->GetPosition()), c.velocity);
         if (moved.body != nullptr) fresh->characters.emplace(id, std::move(moved));
     }
     m_impl->characters.clear(); // their bodies out of the old world here, not on its thread
@@ -736,7 +737,7 @@ u32 PhysicsWorld::step(double seconds) {
         }
         m_impl->carried -= k_step_seconds;
         for (auto& [id, c] : m_impl->characters) {
-            c.previous = c.body->GetPosition();
+            c.previous = from_jolt_r(c.body->GetPosition());
             if (!c.held) {
                 m_impl->step_character(c, static_cast<float>(k_step_seconds));
             } else {
@@ -769,7 +770,7 @@ CharacterId PhysicsWorld::add_character(const CharacterDesc& desc) {
     Impl::Character c;
     c.desc = desc;
     c.body = m_impl->make_character(desc, desc.position, {});
-    c.previous = to_jolt(desc.position);
+    c.previous = desc.position;
     if (c.body == nullptr || c.body->GetInnerBodyID().IsInvalid()) return k_no_character; // full
     m_impl->refresh(*c.body); // standing (or not) from the start
     const CharacterId id = m_impl->next_character++;
@@ -804,9 +805,9 @@ void PhysicsWorld::set_character_position(CharacterId id, const DVec3& position)
     const auto it = m_impl->characters.find(id);
     if (it == m_impl->characters.end() || !finite(position)) return;
     it->second.body->SetPosition(to_jolt(position));
-    it->second.previous = to_jolt(position);
+    it->second.previous = position;
     it->second.body->SetLinearVelocity(JPH::Vec3::sZero());
-    it->second.velocity = JPH::Vec3::sZero();
+    it->second.velocity = {};
     it->second.vertical = 0.0f;
     it->second.jump_wait = 0.0f;
     m_impl->refresh(*it->second.body);
@@ -825,9 +826,9 @@ std::optional<CharacterState> PhysicsWorld::character_state(CharacterId id) cons
     const JPH::CharacterVirtual& c = *it->second.body;
     CharacterState s;
     s.position = from_jolt_r(c.GetPosition());
-    s.previous = from_jolt_r(it->second.previous);
+    s.previous = it->second.previous;
     s.held = it->second.held;
-    s.velocity = from_jolt(it->second.velocity);
+    s.velocity = it->second.velocity;
     s.on_ground = c.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround;
     s.on_steep = c.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnSteepGround;
     if (c.IsSupported()) s.ground_normal = from_jolt(c.GetGroundNormal());
