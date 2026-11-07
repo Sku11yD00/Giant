@@ -234,6 +234,17 @@ Milestone **N4, first playable slice** (in progress; gate: a growing giantess wr
   roof it held. A heavy ball, a falling crate or `impact` over MCP (a blow
   at a point, as a giant's foot will strike) does it; stopping simulating
   puts every building back whole, and the scene is never changed.
+- Part 5: trees topple. Scatter items marked as trees stand as trunks near
+  the camera and fall when struck hard enough, knocking down what they land on.
+- Part 6: destruction near and far. Far from the camera, pieces come down at
+  once as rubble and trees are laid down, with no cost to the simulation;
+  collapses throw up dust clouds that drift with the wind.
+- Part 7: craters and footprints. `dent_ground` presses a crater or a
+  footprint into the ground while simulating; everything on the ground follows.
+- Part 8: damage kept. `keep_damage` makes what simulating broke part of the
+  world: broken buildings, felled trees and craters stay, are saved with each
+  square's file and come back when the world is opened again. `clear_damage`
+  (or undo) takes it away.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

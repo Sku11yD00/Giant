@@ -1038,3 +1038,62 @@ GIANT_TEST("world streaming: unsaved weather, lighting, kits or scatter keep ope
     GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}, {"discard_unsaved", true}}));
     GIANT_CHECK(e.state.scene.weather.has_value() && e.state.scene.lighting.exposure == 1.0f);
 }
+
+GIANT_TEST("world streaming: kept damage is saved in its cell's file, streams with it, and holds a cell as unsaved") {
+    World w;
+    if (w.renderer == nullptr) return;
+    w.add(10.0, 10.0, "near");
+    world::CellDamage near;
+    world::KeptTree t;
+    t.x = 20.0;
+    t.z = 20.0;
+    t.position = {20.0, 0.5, 20.0};
+    near.trees.push_back(t);
+    w.scene.set_damage({0, 0}, near);
+    world::CellDamage far = near; // a cell with nothing but damage
+    far.trees[0].x = t.position.x = 2580.0;
+    far.trees[0].position = {2580.0, 0.5, 20.0};
+    w.scene.set_damage({40, 0}, far);
+    auto saved = w.streaming.create(w.folder, w.scene, w.generation, {});
+    GIANT_CHECK(saved.error.empty() && saved.cells == 2);
+    GIANT_CHECK(std::filesystem::exists(w.folder / "cells" / "40_0.cell.json"));
+    w.reopen();
+    GIANT_CHECK(w.scene.damage().empty());
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.damage_in({0, 0}) != nullptr && *w.scene.damage_in({0, 0}) == near);
+    GIANT_CHECK(w.scene.damage_in({40, 0}) == nullptr && w.streaming.unsaved_cells(w.scene) == 0);
+    // Far off: it unloads with its cell, and the far cell's comes.
+    w.settle(2570.0, 10.0);
+    GIANT_CHECK(w.scene.damage_in({0, 0}) == nullptr && w.scene.damage_in({40, 0}) != nullptr);
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 0);
+    // Changed: unsaved, and the cell stays loaded however far the camera goes.
+    world::CellDamage more = far;
+    more.trees[0].position.y = 1.0;
+    w.scene.set_damage({40, 0}, more);
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 1);
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.damage_in({40, 0}) != nullptr && *w.scene.damage_in({40, 0}) == more);
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.cells_written == 1 && w.streaming.unsaved_cells(w.scene) == 0);
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.damage_in({40, 0}) == nullptr); // saved: it may go now
+    w.settle(2570.0, 10.0);
+    GIANT_CHECK(w.scene.damage_in({40, 0}) != nullptr && *w.scene.damage_in({40, 0}) == more);
+    // An undo while the cell is on disk ("none here", held): when the cell
+    // comes back the scene's side wins over its file's, and saving writes it.
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.damage_in({40, 0}) == nullptr);
+    w.scene.set_damage({40, 0}, {}, true);
+    GIANT_CHECK(w.scene.damage_in({40, 0}) != nullptr && w.scene.damage_in({40, 0})->empty());
+    w.settle(10.0, 10.0); // loaded wherever it is (the scene holds something of it)
+    GIANT_CHECK(w.scene.damage_in({40, 0}) != nullptr && w.scene.damage_in({40, 0})->empty());
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 1);
+    w.scene.set_damage({40, 0}, more); // (redone)
+    w.settle(2570.0, 10.0);
+    // Taken away, the file of a cell with nothing else goes on saving.
+    w.scene.set_damage({40, 0}, {});
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 1);
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.cells_removed == 1);
+    GIANT_CHECK(!std::filesystem::exists(w.folder / "cells" / "40_0.cell.json"));
+}

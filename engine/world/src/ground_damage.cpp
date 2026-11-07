@@ -49,6 +49,22 @@ usize GroundDamage::restore(Terrain& terrain) {
     return back;
 }
 
+std::vector<GroundDamage::Kept> GroundDamage::keep(const Terrain& terrain) {
+    std::vector<Kept> out;
+    if (terrain.identity() == m_terrain) {
+        for (auto& [c, t] : m_tiles) {
+            if (t.lifted || !ours(terrain, c, t)) continue;
+            out.push_back({c, std::move(t.before), t.before_version, *terrain.find(c), terrain.version(c)});
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const Kept& a, const Kept& b) {
+        return a.cell.z != b.cell.z ? a.cell.z < b.cell.z : a.cell.x < b.cell.x;
+    });
+    m_tiles.clear();
+    m_dents = 0;
+    return out;
+}
+
 void GroundDamage::lift(Terrain& terrain) {
     if (terrain.identity() != m_terrain) {
         m_tiles.clear();

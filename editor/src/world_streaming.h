@@ -5,8 +5,8 @@
 // never waits on disk (AGENTS.md rule 9).
 //
 // Edits are never lost by streaming: a cell is unloaded only when what the
-// scene holds of it (its entities and its terrain tile) is exactly what its
-// file holds. A cell with unsaved edits stays loaded however far the camera
+// scene holds of it (its entities, its terrain tile and its kept damage) is
+// exactly what its file holds. A cell with unsaved edits stays loaded however far the camera
 // goes, until save().
 #pragma once
 
@@ -165,6 +165,7 @@ private:
         // file's (0: the scene's tile is not, or was not known to be).
         bool saved_tile = false;
         u64 saved_version = 0;
+        world::CellDamage saved_damage; // loaded: the kept damage its file holds
         u64 written = 0; // when this editor last wrote its file (0: not since open)
     };
     struct Read {
@@ -172,6 +173,7 @@ private:
         u64 epoch = 0;
         std::vector<world::Entity> entities; // sorted by id
         std::optional<world::Terrain::Heights> heights;
+        world::CellDamage damage;
         std::string error;
         bool missing = false; // the file is not there
     };
@@ -186,6 +188,8 @@ private:
     static bool matches(std::vector<const world::Entity*>& now, const std::vector<world::Entity>& saved);
     // Whether the scene's tile in a loaded cell is the file's (or neither has one).
     static bool same_tile(const world::Terrain& terrain, world::CellCoord coord, const Cell& cell);
+    // Whether the scene's kept damage in a loaded cell is the file's.
+    static bool same_damage(const world::Scene& scene, world::CellCoord coord, const Cell& cell);
 
     bool follows(const world::Scene& scene); // false: replaced, streaming stops
     void start_read(world::CellCoord cell);

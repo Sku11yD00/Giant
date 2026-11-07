@@ -125,8 +125,10 @@ void Forest::drop_bodies(world::CellCoord coord, Cell& cell) {
         cell.fallen = 0;
         for (Tree& t : cell.trees) {
             if (t.laid) --m_laid;
+            if (t.kept) --m_kept;
             t.fallen = false;
             t.laid = false;
+            t.kept = false;
         }
         m_fallen.erase(coord);
         redraw(coord);
@@ -145,7 +147,8 @@ void Forest::drop_trunks(Cell& cell) {
     cell.next = 0;
 }
 
-void Forest::set_cell(world::CellCoord coord, u64 serial, std::vector<TreeSpot> trees) {
+void Forest::set_cell(world::CellCoord coord, u64 serial, std::vector<TreeSpot> trees,
+                      std::vector<world::KeptTree> records) {
     // Fallen trees whose spot the new placement keeps (the same point,
     // standing where it stood: the ground under it dented, a cell placed
     // again for other trees) stay fallen, where they lie.
@@ -154,38 +157,47 @@ void Forest::set_cell(world::CellCoord coord, u64 serial, std::vector<TreeSpot> 
         BodyId body = k_no_body;
         bool laid = false;
         world::Transform at;
+        bool record = false; // as the scene's kept damage says
     };
     std::vector<Kept> kept;
+    // The new spots by where they stand (to the centimetre): point
+    // numbers move when a dent adds or takes another layer's points.
+    const auto key = [](double x, double z) {
+        return (static_cast<u64>(std::llround(x * 100.0)) * 0x9E3779B97F4A7C15ull) ^ static_cast<u64>(std::llround(z * 100.0));
+    };
+    std::unordered_multimap<u64, usize> by_place;
+    const auto index = [&] {
+        if (!by_place.empty() || trees.empty()) return;
+        by_place.reserve(trees.size());
+        for (usize k = 0; k < trees.size(); ++k) by_place.emplace(key(trees[k].at.position.x, trees[k].at.position.z), k);
+    };
+    // The spot standing at (x, z), as big (null: none).
+    const auto spot_at = [&](double x, double z, float height, float trunk_radius,
+                             const Vec3* scale) -> const TreeSpot* {
+        const auto [from, to] = by_place.equal_range(key(x, z));
+        for (auto m = from; m != to; ++m) {
+            const TreeSpot& n = trees[m->second];
+            if (std::fabs(n.at.position.x - x) <= 0.01 && std::fabs(n.at.position.z - z) <= 0.01 &&
+                (scale == nullptr || n.at.scale == *scale) && n.height == height && n.trunk_radius == trunk_radius) {
+                return &n;
+            }
+        }
+        return nullptr;
+    };
     if (const auto it = m_cells.find(coord); it != m_cells.end()) {
         Cell& old = it->second;
         const auto lying = m_fallen.find(coord);
         if (old.fallen > 0 && lying != m_fallen.end()) {
-            // The new spots by where they stand (to the centimetre): point
-            // numbers move when a dent adds or takes another layer's points.
-            const auto key = [](const DVec3& p) {
-                return (static_cast<u64>(std::llround(p.x * 100.0)) * 0x9E3779B97F4A7C15ull) ^
-                       static_cast<u64>(std::llround(p.z * 100.0));
-            };
-            std::unordered_multimap<u64, usize> by_place;
-            by_place.reserve(trees.size());
-            for (usize k = 0; k < trees.size(); ++k) by_place.emplace(key(trees[k].at.position), k);
+            index();
             for (Tree& t : old.trees) {
-                if (!t.fallen) continue;
+                // (Kept ones lie by their records alone: one taken away stands.)
+                if (!t.fallen || t.kept) continue;
                 const auto at = std::lower_bound(lying->second.trees.begin(), lying->second.trees.end(), t.spot.point,
                                                  [](const FallenTree& a, u32 p) { return a.point < p; });
                 if (at == lying->second.trees.end() || at->point != t.spot.point) continue;
                 // The same tree: where it stood, as big (another model: stands up anew).
-                const TreeSpot* same = nullptr;
-                const auto [from, to] = by_place.equal_range(key(t.spot.at.position));
-                for (auto m = from; m != to; ++m) {
-                    const TreeSpot& n = trees[m->second];
-                    const DVec3 d = n.at.position - t.spot.at.position;
-                    if (std::fabs(d.x) <= 0.01 && std::fabs(d.z) <= 0.01 && n.at.scale == t.spot.at.scale &&
-                        n.height == t.spot.height && n.trunk_radius == t.spot.trunk_radius) {
-                        same = &n;
-                        break;
-                    }
-                }
+                const TreeSpot* same = spot_at(t.spot.at.position.x, t.spot.at.position.z, t.spot.height,
+                                               t.spot.trunk_radius, &t.spot.at.scale);
                 if (same == nullptr) continue;
                 world::Transform lies = at->at;
                 // With no body (laid, or refused one), it moves with the ground under its foot.
@@ -198,9 +210,34 @@ void Forest::set_cell(world::CellCoord coord, u64 serial, std::vector<TreeSpot> 
         }
         drop_bodies(coord, old); // (the kept ones' bodies are not the old cell's now: left as they are)
     }
+    // The scene's kept damage: the trees it names lie as it says, with no
+    // body (one fallen there now gives its place: the record is what stays).
+    if (!records.empty()) {
+        index();
+        for (const world::KeptTree& r : records) {
+            const TreeSpot* same = spot_at(r.x, r.z, r.height, r.trunk_radius, nullptr);
+            if (same == nullptr) continue;
+            world::Transform lies;
+            lies.position = r.position;
+            lies.rotation = r.rotation;
+            lies.scale = r.scale;
+            const auto carried = std::find_if(kept.begin(), kept.end(), [&](const Kept& k) { return k.point == same->point; });
+            if (carried != kept.end()) {
+                if (carried->record) continue; // two records on one spot: the first
+                if (carried->body != k_no_body) {
+                    m_falling.erase(carried->body);
+                    m_doomed.push_back(carried->body);
+                }
+                *carried = {same->point, k_no_body, true, lies, true};
+            } else {
+                kept.push_back({same->point, k_no_body, true, lies, true});
+            }
+        }
+    }
     Cell& cell = m_cells[coord];
     cell = Cell{};
     cell.serial = serial;
+    cell.records = std::move(records);
     cell.trees.reserve(trees.size());
     for (TreeSpot& s : trees) {
         Tree& t = cell.trees.emplace_back();
@@ -225,6 +262,8 @@ void Forest::set_cell(world::CellCoord coord, u64 serial, std::vector<TreeSpot> 
         Tree& t = cell.trees[k];
         t.fallen = true;
         t.laid = kp.laid;
+        t.kept = kp.record;
+        if (kp.record) ++m_kept;
         t.body = kp.body;
         if (kp.body != k_no_body) m_by_body[kp.body] = {coord, static_cast<u32>(k)};
         ++cell.fallen;
@@ -338,7 +377,7 @@ usize Forest::topple(std::vector<Topple>& topples) {
         Tree& tree = cell.trees[t.index];
         if (tree.fallen || tree.body == k_no_body) continue;
         if (descs.size() >= m_settings.topples_per_step || m_falling.size() + descs.size() >= m_settings.max_falling ||
-            m_fallen_count + descs.size() >= m_settings.max_fallen) {
+            m_fallen_count - m_kept + descs.size() >= m_settings.max_fallen) {
             ++m_shrugged;
             continue;
         }
@@ -401,7 +440,7 @@ usize Forest::lay(std::vector<Topple>& lays) {
         Cell& cell = m_cells.at(t.cell);
         Tree& tree = cell.trees[t.index];
         if (tree.fallen || tree.body != k_no_body) continue;
-        if (laid >= m_settings.lays_per_impact || m_fallen_count >= m_settings.max_fallen) {
+        if (laid >= m_settings.lays_per_impact || m_fallen_count - m_kept >= m_settings.max_fallen) {
             ++m_shrugged;
             continue;
         }
@@ -553,8 +592,13 @@ void Forest::reset() {
     std::vector<BodyId> moving;
     for (auto& [coord, cell] : m_cells) {
         if (cell.fallen == 0) continue;
+        u32 left = 0; // kept damage: stays down
         for (Tree& t : cell.trees) {
             if (!t.fallen) continue;
+            if (t.kept) {
+                ++left;
+                continue;
+            }
             if (t.body != k_no_body) {
                 m_by_body.erase(t.body);
                 // Moving ones go now (a trunk made where one moves would
@@ -563,17 +607,27 @@ void Forest::reset() {
                 (m_falling.contains(t.body) || (st && st->active) ? moving : m_doomed).push_back(t.body);
                 t.body = k_no_body;
             }
+            if (t.laid) --m_laid;
             t.fallen = false;
             t.laid = false;
         }
-        cell.fallen = 0;
+        m_fallen_count -= cell.fallen - left;
+        cell.fallen = left;
         cell.next = 0; // trunks made again where they stood
+        if (const auto f = m_fallen.find(coord); f != m_fallen.end()) {
+            redraw(coord);
+            if (left == 0) {
+                m_fallen.erase(f);
+            } else {
+                std::erase_if(f->second.trees, [&](const FallenTree& ft) {
+                    const auto t = std::lower_bound(cell.trees.begin(), cell.trees.end(), ft.point,
+                                                    [](const Tree& x, u32 p) { return x.spot.point < p; });
+                    return t == cell.trees.end() || t->spot.point != ft.point || !t->kept;
+                });
+            }
+        }
     }
     m_falling.clear();
-    for (const auto& [coord, f] : m_fallen) redraw(coord);
-    m_fallen.clear();
-    m_fallen_count = 0;
-    m_laid = 0;
     std::sort(moving.begin(), moving.end());
     m_physics.remove_many(moving);
 }
@@ -589,6 +643,7 @@ usize Forest::forget() {
     m_trunks = 0;
     m_fallen_count = 0;
     m_laid = 0;
+    m_kept = 0;
     return bodies;
 }
 
@@ -625,6 +680,45 @@ BodyId Forest::body_of(world::CellCoord coord, u32 point) const {
     return t == trees.end() || t->spot.point != point ? k_no_body : t->body;
 }
 
+const std::vector<world::KeptTree>* Forest::records(world::CellCoord cell) const {
+    const auto it = m_cells.find(cell);
+    return it == m_cells.end() ? nullptr : &it->second.records;
+}
+
+std::vector<std::pair<world::CellCoord, std::vector<world::KeptTree>>> Forest::damage() const {
+    std::vector<std::pair<world::CellCoord, std::vector<world::KeptTree>>> out;
+    for (const auto& [coord, cell] : m_cells) {
+        std::vector<world::KeptTree> trees;
+        if (const auto f = m_fallen.find(coord); f != m_fallen.end()) {
+            for (const FallenTree& ft : f->second.trees) {
+                const auto t = std::lower_bound(cell.trees.begin(), cell.trees.end(), ft.point,
+                                                [](const Tree& x, u32 p) { return x.spot.point < p; });
+                if (t == cell.trees.end() || t->spot.point != ft.point) continue;
+                world::KeptTree& k = trees.emplace_back();
+                k.x = t->spot.at.position.x;
+                k.z = t->spot.at.position.z;
+                k.height = t->spot.height;
+                k.trunk_radius = t->spot.trunk_radius;
+                k.position = ft.at.position;
+                k.rotation = ft.at.rotation;
+                k.scale = ft.at.scale;
+            }
+        }
+        // Records that found no tree now (a placement cut short by its
+        // budget, say): kept as they are, for when it comes back.
+        for (const world::KeptTree& r : cell.records) {
+            const bool matched = std::any_of(trees.begin(), trees.end(), [&](const world::KeptTree& k) {
+                return std::fabs(k.x - r.x) <= 0.01 && std::fabs(k.z - r.z) <= 0.01 && k.height == r.height &&
+                       k.trunk_radius == r.trunk_radius;
+            });
+            if (!matched) trees.push_back(r);
+        }
+        out.push_back({coord, std::move(trees)});
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return before(a.first, b.first); });
+    return out;
+}
+
 ForestStats Forest::stats() const {
     ForestStats s;
     s.cells = static_cast<u32>(m_cells.size());
@@ -642,6 +736,7 @@ ForestStats Forest::stats() const {
     s.refused = m_refused;
     s.shrugged = m_shrugged;
     s.laid = m_laid;
+    s.kept = m_kept;
     return s;
 }
 

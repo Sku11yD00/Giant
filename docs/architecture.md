@@ -833,7 +833,69 @@ stretch is at most 200 m: about 1.4 million samples at the finest
 spacing, a one-off), and keeps a copy of only the tiles it changes.
 
 Known limits: rubble (no body) stays at the height it was laid; stopping
-puts every dented tile back in one frame; damage is not saved yet (part 8).
+puts every dented tile back in one frame; damage is kept only by
+keep_damage (part 8).
+
+### Kept damage (N4 part 8)
+
+Simulating is view state; `keep_damage` makes what it broke part of the
+world. `world::CellDamage` (damage.h) is a cell's kept damage, beside what
+was authored there: `KeptKit` records (a breakable kit placement's id,
+kit and transform as they were, and each piece down with its world
+transform) by the cell of the placement, and `KeptTree` records (a scatter
+tree's foot x and z and size, and its lying transform) by the cell of the
+foot. Craters are not records: `GroundDamage::keep` leaves the dented
+tiles as they are, now the ground as authored (the command records their
+heights and versions before and after, so undo puts each back exactly).
+
+`Scene::set_damage(cell, damage)` holds it (copied with the scene, saved in
+scene files as `damage`, in cell files as their `damage` key) and marks the
+placements its records name as changed, so `ScenePhysics` re-syncs them: a
+placement whose record still matches it (`kept_of`: same id, kit and
+transform, a breakable kit) is made with those pieces down where the
+record says, with no bodies (`Broken::Piece::kept`), and the rest standing
+as one body (`standing_body`, shared with `loosen`). That holds whether
+simulating or not; `reset_poses` leaves a placement broken only as kept,
+and remakes one broken further back to its kept state. A real edit (moved,
+resized, another kit) no longer matches: it stands whole, and the next
+`keep_damage` drops the record. `Forest::set_cell` takes the cell's tree
+records: the tree standing at the same x and z (to the centimetre), as
+big, lies where its record says, with no body, and stays down through
+`reset`; one fallen there now gives its place to the record. The editor's
+`PhysicsState::follow_kept` gives the forest a cell it knows again at
+once whenever the scene's kept trees there differ from what it was given
+(`damage_edits` says when to look); a cell it does not know yet (streamed
+in, wherever it is) waits until the placer has placed it and is given
+within the feed's budget. Kept trees never count against `max_fallen`, and
+a record that finds no tree now (a placement cut short) is kept for when
+it comes back.
+
+An undo or redo sets a cell's damage with `hold_empty`: an empty entry
+held in the scene says "none here", so for a cell streamed out since, the
+scene's side wins over the file's when it comes back, as an entity put back
+by an undo does. Two cells may name one placement (a stale record kept
+before it moved): `kept_kit(id, &placed)` finds the one made where it is.
+
+Streaming treats kept damage as it does the terrain tile: read with the
+cell (`load_cell`'s damage) and set into the scene on insert (one the
+scene already holds, put back by an undo, is newer), compared with what
+the file holds for unsaved and unload (`same_damage`: a cell with unsaved
+damage never unloads), taken out of the scene on unload, and written with
+the cell (a cell with only damage keeps its file; cleared, the file goes).
+
+Rotations read back exactly when already unit (normalized again they would
+move by a rounding, and a record would no longer be what was kept).
+
+Cost: applying a record is the same work as making the placement (its
+pieces counted against the sync budget). `keep_damage` walks the broken
+placements and the forest's fallen trees once; follow_kept walks the
+forest's cells and the scene's damaged cells only when the damage changed.
+
+Known limits: `clear_damage` leaves kept craters (they are ground); a
+record's placement deleted keeps its record (harmless: it applies to
+nothing) until `clear_damage`; a kept piece has no body (the player walks
+through rubble, as through far rubble); a kit's pieces changed since make
+the record's piece indices the new kit's.
 
 ## Window events (known limit)
 

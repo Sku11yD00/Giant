@@ -722,3 +722,113 @@ GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable"
     GIANT_CHECK(!f.run("remove_scatter_layer", {{"name", "stones"}}).ok);
     GIANT_CHECK(f.run("undo").ok && f.state.scene.scatter.size() == 2 && f.state.scene.scatter[0].name == "stones");
 }
+
+GIANT_TEST("keep_damage: what simulating broke stays through stopping, undo takes it back, clear_damage stands it up") {
+    PhysicsState physics;
+    EditorState state;
+    state.physics = &physics;
+    ai::CommandRegistry commands;
+    register_scene_commands(commands, state);
+    register_physics_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args = Json::object()) { return commands.execute(name, args, {}); };
+    world::Scene& scene = state.scene;
+    flat(scene.terrain, 0, 0, 3, 0, 0.0f);
+    world::ScatterLayer l = stones(16.0f);
+    l.name = "pines";
+    l.jitter = 0.0f;
+    l.items[0].shape = world::Shape::cube;
+    l.items[0].tree = world::ScatterTree{};
+    l.area = world::ScatterArea{128.0, 0.0, 256.0, 64.0}; // cells 2 and 3
+    scene.scatter.push_back(l);
+    world::Kit tower;
+    tower.name = "tower";
+    tower.breakable = true;
+    for (int i = 0; i < 3; ++i) {
+        world::KitPiece p;
+        p.transform.position = {0.0, 0.5 + i, 0.0};
+        tower.pieces.push_back(p);
+    }
+    scene.kits.push_back(tower);
+    world::Entity e;
+    e.shape = world::Shape::kit;
+    e.kit = "tower";
+    e.transform.position = {32.0, 0.0, 32.0};
+    const world::EntityId t = scene.add(e);
+    ScatterPlacer p;
+    place(p, scene);
+    const DVec3 camera{3000.0, 10.0, 32.0}; // far off: rubble and laid trees, no bodies
+    const auto frame = [&] {
+        physics.feed_forest(scene, p, camera);
+        physics.update(scene, scene.take_changes(), 1.0 / 60.0);
+    };
+    frame();
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    ai::CommandResult r = run("impact", {{"point", {32.6, 1.5, 32.0}}, {"radius", 0.3}, {"impulse", 6000.0}});
+    GIANT_CHECK(r.ok && r.value["loosened"] == 2 && r.value["rubble"] == 2);
+    r = run("impact", {{"point", {160.0, 1.0, 32.0}}, {"radius", 20.0}, {"impulse", 1e6}});
+    const u64 felled = r.value["felled"].get<u64>();
+    GIANT_CHECK(r.ok && felled > 2);
+    GIANT_CHECK(run("dent_ground", {{"point", {100.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}}).ok);
+    const u64 dented = scene.terrain.version({1, 0});
+    // Kept.
+    r = run("keep_damage");
+    GIANT_CHECK(r.ok && r.value["kits"] == 1 && r.value["pieces"] == 2 && r.value["trees"] == felled && r.value["tiles"] == 1);
+    GIANT_CHECK(r.value["kept"]["kits"] == 1 && r.value["ground"]["dents"] == 0);
+    GIANT_CHECK(scene.damage_in({0, 0}) != nullptr && scene.kept_kit(t) != nullptr);
+    frame();
+    r = run("get_physics");
+    GIANT_CHECK(r.value["kept"]["pieces_down"] == 2 && r.value["kept"]["trees_down"] == felled && r.value["rubble"] == 0);
+    // Stopped: it all stays (the pieces down, the trees down, the crater).
+    GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+    frame();
+    r = run("get_physics");
+    GIANT_CHECK(r.value["broken_kits"] == 1 && r.value["kept"]["pieces_down"] == 2);
+    GIANT_CHECK(r.value["trees"]["fallen"] == felled && r.value["kept"]["trees_down"] == felled);
+    GIANT_CHECK(scene.terrain.height_at(100.0, 32.0).value() < -2.0 && scene.terrain.version({1, 0}) == dented);
+    GIANT_CHECK(physics.piece_poses().count(t) == 1);
+    // A scene file keeps it.
+    world::Scene loaded;
+    GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value() && loaded.damage() == scene.damage());
+    // Opened again (a fresh editor), far from the camera: the kept trees
+    // are given to the forest once placed, and lie; the building is broken.
+    {
+        PhysicsState fresh;
+        ScatterPlacer p2;
+        place(p2, loaded);
+        for (int i = 0; i < 3; ++i) {
+            fresh.feed_forest(loaded, p2, camera);
+            fresh.update(loaded, loaded.take_changes(), 1.0 / 60.0);
+        }
+        fresh.flush(loaded);
+        GIANT_CHECK(fresh.forest().stats().kept == felled && fresh.bodies().stats().kept_pieces == 2);
+    }
+    // Keeping again with nothing new changes nothing.
+    r = run("keep_damage");
+    GIANT_CHECK(r.ok && r.value["cells"] == 0 && r.value["tiles"] == 0);
+    // Undone: whole, standing, the ground as it was; redone: kept again.
+    GIANT_CHECK(run("undo").ok); // (the second keep recorded nothing)
+    frame();
+    r = run("get_physics");
+    GIANT_CHECK(r.value["kept"]["cells"] == 0 && r.value["broken_kits"] == 0 && r.value["trees"]["fallen"] == 0);
+    GIANT_CHECK(scene.terrain.height_at(100.0, 32.0).value() == 0.0);
+    GIANT_CHECK(run("redo").ok);
+    frame();
+    r = run("get_physics");
+    GIANT_CHECK(r.value["kept"]["pieces_down"] == 2 && r.value["trees"]["fallen"] == felled);
+    GIANT_CHECK(scene.terrain.version({1, 0}) == dented);
+    // Moved, the building stands whole; keeping drops its record.
+    scene.modify(t)->transform.position.x = 34.0;
+    frame();
+    GIANT_CHECK(run("get_physics").value["broken_kits"] == 0);
+    r = run("keep_damage");
+    GIANT_CHECK(r.ok && r.value["kits"] == 0 && scene.kept_kit(t) == nullptr);
+    scene.modify(t)->transform.position.x = 32.0;
+    // Cleared: the trees stand; undone, down again.
+    r = run("clear_damage");
+    GIANT_CHECK(r.ok && r.value["cells"].get<u64>() >= 1 && r.value["kept"]["cells"] == 0);
+    frame();
+    GIANT_CHECK(run("get_physics").value["trees"]["fallen"] == 0);
+    GIANT_CHECK(run("undo").ok);
+    frame();
+    GIANT_CHECK(run("get_physics").value["trees"]["fallen"] == felled);
+}
