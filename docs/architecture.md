@@ -862,9 +862,19 @@ resized, another kit) no longer matches: it stands whole, and the next
 records: the tree standing at the same x and z (to the centimetre), as
 big, lies where its record says, with no body, and stays down through
 `reset`; one fallen there now gives its place to the record. The editor's
-`PhysicsState::follow_kept` gives the forest a cell again whenever the
-scene's kept trees there differ from what it was given (`damage_edits`
-says when to look).
+`PhysicsState::follow_kept` gives the forest a cell it knows again at
+once whenever the scene's kept trees there differ from what it was given
+(`damage_edits` says when to look); a cell it does not know yet (streamed
+in, wherever it is) waits until the placer has placed it and is given
+within the feed's budget. Kept trees never count against `max_fallen`, and
+a record that finds no tree now (a placement cut short) is kept for when
+it comes back.
+
+An undo or redo sets a cell's damage with `hold_empty`: an empty entry
+held in the scene says "none here", so for a cell streamed out since, the
+scene's side wins over the file's when it comes back, as an entity put back
+by an undo does. Two cells may name one placement (a stale record kept
+before it moved): `kept_kit(id, &placed)` finds the one made where it is.
 
 Streaming treats kept damage as it does the terrain tile: read with the
 cell (`load_cell`'s damage) and set into the scene on insert (one the

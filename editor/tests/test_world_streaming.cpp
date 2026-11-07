@@ -1079,6 +1079,17 @@ GIANT_TEST("world streaming: kept damage is saved in its cell's file, streams wi
     GIANT_CHECK(w.scene.damage_in({40, 0}) == nullptr); // saved: it may go now
     w.settle(2570.0, 10.0);
     GIANT_CHECK(w.scene.damage_in({40, 0}) != nullptr && *w.scene.damage_in({40, 0}) == more);
+    // An undo while the cell is on disk ("none here", held): when the cell
+    // comes back the scene's side wins over its file's, and saving writes it.
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.damage_in({40, 0}) == nullptr);
+    w.scene.set_damage({40, 0}, {}, true);
+    GIANT_CHECK(w.scene.damage_in({40, 0}) != nullptr && w.scene.damage_in({40, 0})->empty());
+    w.settle(10.0, 10.0); // loaded wherever it is (the scene holds something of it)
+    GIANT_CHECK(w.scene.damage_in({40, 0}) != nullptr && w.scene.damage_in({40, 0})->empty());
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 1);
+    w.scene.set_damage({40, 0}, more); // (redone)
+    w.settle(2570.0, 10.0);
     // Taken away, the file of a cell with nothing else goes on saving.
     w.scene.set_damage({40, 0}, {});
     GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 1);

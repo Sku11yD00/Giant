@@ -42,7 +42,9 @@ Json kept_json(const world::Scene& scene, const sim::ScenePhysicsStats& s, const
         for (const world::KeptKit& k : d.kits) pieces += k.pieces.size();
         trees += d.trees.size();
     }
-    return {{"cells", scene.damage().size()}, {"kits", kits}, {"pieces", pieces}, {"trees", trees},
+    usize cells = 0;
+    for (const auto& [c, d] : scene.damage()) cells += d.empty() ? 0u : 1u;
+    return {{"cells", cells}, {"kits", kits}, {"pieces", pieces}, {"trees", trees},
             {"pieces_down", s.kept_pieces}, {"trees_down", f.kept}};
 }
 
@@ -273,7 +275,8 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
                      const world::Damage& to = after ? kept->after : kept->before;
                      for (const world::CellCoord c : cells) {
                          const auto it = to.find(c);
-                         state.scene.set_damage(c, it != to.end() ? it->second : world::CellDamage{});
+                         // (Held when empty: the cell may have streamed out since, its file holding the other side.)
+                         state.scene.set_damage(c, it != to.end() ? it->second : world::CellDamage{}, true);
                      }
                      for (const world::GroundDamage::Kept& g : kept->ground) {
                          state.scene.terrain.restore(g.cell, after ? g.after : g.before,
@@ -304,16 +307,18 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          false,
          [&state](const Json&, CommandContext& context) {
              if (state.physics == nullptr) return no_physics();
-             auto before = std::make_shared<const world::Damage>(state.scene.damage());
-             for (const auto& [c, d] : *before) state.scene.set_damage(c, {});
+             world::Damage had = state.scene.damage();
+             std::erase_if(had, [](const auto& d) { return d.second.empty(); });
+             auto before = std::make_shared<const world::Damage>(std::move(had));
+             for (const auto& [c, d] : *before) state.scene.set_damage(c, {}, true);
              if (!before->empty()) {
                  context.record(scene_change(
                      state,
                      [&state, before] {
-                         for (const auto& [c, d] : *before) state.scene.set_damage(c, d);
+                         for (const auto& [c, d] : *before) state.scene.set_damage(c, d, true);
                      },
                      [&state, before] {
-                         for (const auto& [c, d] : *before) state.scene.set_damage(c, {});
+                         for (const auto& [c, d] : *before) state.scene.set_damage(c, {}, true);
                      }));
              }
              Json out = physics_json(state);

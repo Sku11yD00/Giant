@@ -112,7 +112,9 @@ public:
     // The records the cell was last given (null: not known).
     const std::vector<world::KeptTree>* records(world::CellCoord cell) const;
     // Every known cell's fallen trees as kept damage (keep_damage), by cell
-    // (x then z; a cell with none fallen listed with none).
+    // (x then z; a cell with none fallen listed with none), with the records
+    // it was given that found no tree (kept for when the tree is placed
+    // again). Kept trees never count against max_fallen.
     std::vector<std::pair<world::CellCoord, std::vector<world::KeptTree>>> damage() const;
     // A cell gone (its placements left): its trunks, fallen or not, go.
     void remove_cell(world::CellCoord cell);

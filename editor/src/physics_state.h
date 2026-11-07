@@ -25,6 +25,7 @@
 
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace giant::editor {
@@ -135,9 +136,11 @@ private:
     static std::vector<sim::TreeSpot> trees_of(const ScatterPlacer::Cell& placed);
     // The cell's placement given to the forest, with the scene's kept trees there.
     void give(world::CellCoord cell, const ScatterPlacer::Cell& placed);
-    // When the scene's kept damage changed: the cells whose kept trees the
-    // forest was given otherwise are given again (wherever they are).
-    void follow_kept(const world::Scene& scene);
+    // When the scene's kept damage changed: the cells the forest knows whose
+    // kept trees it was given otherwise are given again now; others with
+    // kept trees wait until placed, then are given within the feed's budget
+    // (`looked`: points looked at this feed; null: no budget).
+    void follow_kept(const world::Scene& scene, u64* looked);
 
     JobSystem m_jobs; // first: outlives the physics world
     sim::Dust m_dust; // before what emits into it
@@ -149,6 +152,7 @@ private:
     u64 m_scene = 0;
     const world::Scene* m_scene_at = nullptr; // as last noticed (the editor's scene outlives this)
     u64 m_damage_edits = ~u64{0};             // the scene's kept damage the forest follows
+    std::unordered_set<world::CellCoord, world::CellCoordHash> m_kept_waiting; // cells with kept trees not given yet
     DVec3 m_camera{}; // as last fed
     const ScatterPlacer* m_scatter = nullptr; // as last fed (it outlives this)
     bool m_on = false;

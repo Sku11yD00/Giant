@@ -958,7 +958,7 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
 
 const world::KeptKit* ScenePhysics::kept_of(const world::Scene& scene, const world::Entity& e) const {
     if (e.shape != world::Shape::kit) return nullptr;
-    const world::KeptKit* k = scene.kept_kit(e.id);
+    const world::KeptKit* k = scene.kept_kit(e.id, &e.transform);
     if (k == nullptr || k->kit != e.kit || !(k->position == e.transform.position) ||
         !(k->rotation == e.transform.rotation) || !(k->scale == e.transform.scale)) {
         return nullptr; // moved, resized or another kit since: it stands whole

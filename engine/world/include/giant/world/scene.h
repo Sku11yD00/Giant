@@ -322,9 +322,15 @@ public:
     const Damage& damage() const { return m_damage; }
     const CellDamage* damage_in(CellCoord cell) const;
     // Replaces the cell's damage (empty: none), sorted (sort_damage).
-    void set_damage(CellCoord cell, CellDamage damage);
-    // The kept record of a kit placement (null: none).
-    const KeptKit* kept_kit(EntityId id) const;
+    // `hold_empty`: an empty one is held as an entry of its own, saying
+    // "none here" (an undo for a cell streamed out: what the cell's file
+    // holds then gives way to it when the cell comes back, as an entity
+    // put back by an undo does).
+    void set_damage(CellCoord cell, CellDamage damage, bool hold_empty = false);
+    // The kept record of a kit placement (null: none); with `placed`, the
+    // one made where it is placed now (two cells' files may name it: one
+    // kept before it moved, stale).
+    const KeptKit* kept_kit(EntityId id, const Transform* placed = nullptr) const;
     // Counts every set_damage (a follower looks over the damage only when it moved).
     u64 damage_edits() const { return m_damage_edits; }
 
@@ -349,7 +355,7 @@ private:
     std::unordered_map<EntityId, usize> m_index; // id -> place in m_entities
     EntityId m_next_id = 1;
     Damage m_damage;
-    std::unordered_map<EntityId, CellCoord> m_kept_kits; // the cell whose damage holds each kit record
+    std::unordered_multimap<EntityId, CellCoord> m_kept_kits; // the cells whose damage holds each kit's records
     u64 m_damage_edits = 0;
     SceneChanges m_changes{{}, true};
     Identity m_identity;

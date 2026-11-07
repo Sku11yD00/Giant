@@ -536,6 +536,30 @@ GIANT_TEST("world: kept damage saves and loads exactly in cells and scenes, sort
     GIANT_CHECK(loaded_scene.damage().size() == 1 && *loaded_scene.damage_in(c) == d && loaded_scene.kept_kit(7) != nullptr);
     const Scene copy = scene;
     GIANT_CHECK(copy.damage() == scene.damage() && copy.kept_kit(7) != nullptr);
+    // Two cells naming one placement (a stale record kept before it moved):
+    // asked where it is placed, the record made there.
+    CellDamage stale = some_damage();
+    stale.trees.clear();
+    stale.kits[0].position = {10.0, 0.0, 10.0};
+    scene.set_damage({0, 0}, stale);
+    Transform placed;
+    placed.position = d.kits[0].position;
+    placed.rotation = d.kits[0].rotation;
+    placed.scale = d.kits[0].scale;
+    GIANT_CHECK(scene.kept_kit(7, &placed) != nullptr && scene.kept_kit(7, &placed)->position == d.kits[0].position);
+    placed.position = {10.0, 0.0, 10.0};
+    GIANT_CHECK(scene.kept_kit(7, &placed) != nullptr && scene.kept_kit(7, &placed)->position.x == 10.0);
+    placed.position.x = 11.0;
+    GIANT_CHECK(scene.kept_kit(7, &placed) == nullptr);
+    scene.set_damage({0, 0}, {});
+    placed.position = d.kits[0].position;
+    GIANT_CHECK(scene.kept_kit(7, &placed) != nullptr); // the other still found
+    // An empty one held says "none here"; it is never saved.
+    scene.set_damage({3, 3}, {}, true);
+    GIANT_CHECK(scene.damage_in({3, 3}) != nullptr && scene.damage_in({3, 3})->empty());
+    scene.set_damage({3, 3}, {});
+    GIANT_CHECK(scene.damage_in({3, 3}) == nullptr);
+    (void)scene.take_changes();
     scene.set_damage(c, {});
     GIANT_CHECK(scene.damage().empty() && scene.kept_kit(7) == nullptr && scene.take_changes().ids.size() == 1);
     GIANT_CHECK(!contains(save_scene(scene), "damage"));

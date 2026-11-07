@@ -331,37 +331,53 @@ const CellDamage* Scene::damage_in(CellCoord cell) const {
     return it == m_damage.end() ? nullptr : &it->second;
 }
 
-void Scene::set_damage(CellCoord cell, CellDamage damage) {
+void Scene::set_damage(CellCoord cell, CellDamage damage, bool hold_empty) {
     sort_damage(damage);
     const auto it = m_damage.find(cell);
-    if (it == m_damage.end() ? damage.empty() : it->second == damage) return;
+    if (it == m_damage.end() ? damage.empty() : it->second == damage) {
+        // (Nothing to see changes: only whether "none here" is held.)
+        if (it == m_damage.end() && hold_empty) m_damage[cell];
+        if (it != m_damage.end() && damage.empty() && !hold_empty) m_damage.erase(it);
+        return;
+    }
     ++m_damage_edits;
     if (it != m_damage.end()) {
         for (const KeptKit& k : it->second.kits) {
-            const auto at = m_kept_kits.find(k.entity);
-            if (at != m_kept_kits.end() && at->second == cell) m_kept_kits.erase(at);
+            const auto [from, to] = m_kept_kits.equal_range(k.entity);
+            for (auto at = from; at != to; ++at) {
+                if (at->second == cell) {
+                    m_kept_kits.erase(at);
+                    break;
+                }
+            }
             changed(k.entity);
         }
     }
     for (const KeptKit& k : damage.kits) {
-        m_kept_kits[k.entity] = cell;
+        m_kept_kits.emplace(k.entity, cell);
         changed(k.entity);
     }
-    if (damage.empty()) {
+    if (damage.empty() && !hold_empty) {
         m_damage.erase(cell);
     } else {
         m_damage[cell] = std::move(damage);
     }
 }
 
-const KeptKit* Scene::kept_kit(EntityId id) const {
-    const auto at = m_kept_kits.find(id);
-    if (at == m_kept_kits.end()) return nullptr;
-    const auto cell = m_damage.find(at->second);
-    if (cell == m_damage.end()) return nullptr;
-    const std::vector<KeptKit>& records = cell->second.kits;
-    const auto it = std::lower_bound(records.begin(), records.end(), id, [](const KeptKit& k, EntityId v) { return k.entity < v; });
-    return it != records.end() && it->entity == id ? &*it : nullptr;
+const KeptKit* Scene::kept_kit(EntityId id, const Transform* placed) const {
+    const auto [from, to] = m_kept_kits.equal_range(id);
+    const KeptKit* found = nullptr;
+    for (auto at = from; at != to; ++at) {
+        const auto cell = m_damage.find(at->second);
+        if (cell == m_damage.end()) continue;
+        const std::vector<KeptKit>& records = cell->second.kits;
+        const auto it = std::lower_bound(records.begin(), records.end(), id,
+                                         [](const KeptKit& k, EntityId v) { return k.entity < v; });
+        if (it == records.end() || it->entity != id) continue;
+        if (placed == nullptr) return &*it;
+        if (it->position == placed->position && it->rotation == placed->rotation && it->scale == placed->scale) return &*it;
+    }
+    return found;
 }
 
 void Scene::reindex(usize from) {
@@ -618,9 +634,11 @@ std::string save_scene(const Scene& scene) {
         entities.push_back(entity_json(e));
     }
     out["entities"] = std::move(entities);
-    if (!scene.damage().empty()) {
+    if (std::any_of(scene.damage().begin(), scene.damage().end(), [](const auto& d) { return !d.second.empty(); })) {
         std::vector<CellCoord> cells;
-        for (const auto& [c, d] : scene.damage()) cells.push_back(c);
+        for (const auto& [c, d] : scene.damage()) {
+            if (!d.empty()) cells.push_back(c);
+        }
         std::sort(cells.begin(), cells.end(), [](CellCoord a, CellCoord b) { return a.z != b.z ? a.z < b.z : a.x < b.x; });
         Json damage = Json::array();
         for (const CellCoord c : cells) {
@@ -976,13 +994,15 @@ std::optional<CellCoord> read_cell(const Json& v) {
 }
 
 // A transform's "position" (metres, within 1e8), "rotation" and "scale" (all required).
+// (Scales as small or big as a piece's within a scaled placement can be:
+// the two limits multiplied.)
 void read_transform(Reader& r, DVec3& position, Quat& rotation, Vec3& scale) {
     for (const char* key : {"position", "rotation", "scale"}) {
         if (r.get(key, true) == nullptr) return;
     }
     r.vec3("position", position, -1e8, 1e8);
     r.quat("rotation", rotation);
-    r.vec3("scale", scale, 0.0001, 1e6);
+    r.vec3("scale", scale, 1e-8, 1e12);
 }
 
 // A cell's damage (`json`: its "kits" and "trees", with `extra` keys
@@ -1048,8 +1068,9 @@ void read_damage(Reader& r, const std::string& path, CellCoord cell, CellDamage&
                     }
                 }
             }
-            if (tr.get("height", true) != nullptr) tr.number("height", t.height, 0.01, 10000);
-            if (tr.get("trunk_radius", true) != nullptr) tr.number("trunk_radius", t.trunk_radius, 0.001, 1000);
+            // (A layer's sizes times a point's scale, at their limits.)
+            if (tr.get("height", true) != nullptr) tr.number("height", t.height, 1e-8, 1e8);
+            if (tr.get("trunk_radius", true) != nullptr) tr.number("trunk_radius", t.trunk_radius, 1e-8, 1e8);
             read_transform(tr, t.position, t.rotation, t.scale);
             if (tr.ok() && !(cell_of({t.x, 0.0, t.z}) == cell)) tr.fail("x", where);
             tr.finish();

@@ -542,7 +542,7 @@ bool WorldStreaming::unload(world::Scene& scene, const DVec3& camera, const Scen
             scene.terrain.remove(coord);
             ++m_totals.tiles_unloaded;
         }
-        if (!cell.saved_damage.empty()) scene.set_damage(coord, {});
+        if (scene.damage_in(coord) != nullptr) scene.set_damage(coord, {}); // (an empty entry held too)
         set_state(coord, cell, State::on_disk);
         cell.saved = {};
         cell.saved_tile = false;
@@ -851,6 +851,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
             const auto kept = kept_damage.find(coord);
             if (kept != kept_damage.end()) damage = &kept->second;
         }
+        if (damage != nullptr && damage->empty()) damage = nullptr; // "none here": none written
         if (list.empty() && heights == nullptr && damage == nullptr) {
             if (it != m_cells.end()) {
                 std::error_code error;

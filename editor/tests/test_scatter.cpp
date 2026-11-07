@@ -789,6 +789,19 @@ GIANT_TEST("keep_damage: what simulating broke stays through stopping, undo take
     // A scene file keeps it.
     world::Scene loaded;
     GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value() && loaded.damage() == scene.damage());
+    // Opened again (a fresh editor), far from the camera: the kept trees
+    // are given to the forest once placed, and lie; the building is broken.
+    {
+        PhysicsState fresh;
+        ScatterPlacer p2;
+        place(p2, loaded);
+        for (int i = 0; i < 3; ++i) {
+            fresh.feed_forest(loaded, p2, camera);
+            fresh.update(loaded, loaded.take_changes(), 1.0 / 60.0);
+        }
+        fresh.flush(loaded);
+        GIANT_CHECK(fresh.forest().stats().kept == felled && fresh.bodies().stats().kept_pieces == 2);
+    }
     // Keeping again with nothing new changes nothing.
     r = run("keep_damage");
     GIANT_CHECK(r.ok && r.value["cells"] == 0 && r.value["tiles"] == 0);
@@ -796,7 +809,7 @@ GIANT_TEST("keep_damage: what simulating broke stays through stopping, undo take
     GIANT_CHECK(run("undo").ok); // (the second keep recorded nothing)
     frame();
     r = run("get_physics");
-    GIANT_CHECK(scene.damage().empty() && r.value["broken_kits"] == 0 && r.value["trees"]["fallen"] == 0);
+    GIANT_CHECK(r.value["kept"]["cells"] == 0 && r.value["broken_kits"] == 0 && r.value["trees"]["fallen"] == 0);
     GIANT_CHECK(scene.terrain.height_at(100.0, 32.0).value() == 0.0);
     GIANT_CHECK(run("redo").ok);
     frame();
@@ -812,7 +825,7 @@ GIANT_TEST("keep_damage: what simulating broke stays through stopping, undo take
     scene.modify(t)->transform.position.x = 32.0;
     // Cleared: the trees stand; undone, down again.
     r = run("clear_damage");
-    GIANT_CHECK(r.ok && r.value["cells"].get<u64>() >= 1 && scene.damage().empty());
+    GIANT_CHECK(r.ok && r.value["cells"].get<u64>() >= 1 && r.value["kept"]["cells"] == 0);
     frame();
     GIANT_CHECK(run("get_physics").value["trees"]["fallen"] == 0);
     GIANT_CHECK(run("undo").ok);

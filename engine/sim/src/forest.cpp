@@ -377,7 +377,7 @@ usize Forest::topple(std::vector<Topple>& topples) {
         Tree& tree = cell.trees[t.index];
         if (tree.fallen || tree.body == k_no_body) continue;
         if (descs.size() >= m_settings.topples_per_step || m_falling.size() + descs.size() >= m_settings.max_falling ||
-            m_fallen_count + descs.size() >= m_settings.max_fallen) {
+            m_fallen_count - m_kept + descs.size() >= m_settings.max_fallen) {
             ++m_shrugged;
             continue;
         }
@@ -440,7 +440,7 @@ usize Forest::lay(std::vector<Topple>& lays) {
         Cell& cell = m_cells.at(t.cell);
         Tree& tree = cell.trees[t.index];
         if (tree.fallen || tree.body != k_no_body) continue;
-        if (laid >= m_settings.lays_per_impact || m_fallen_count >= m_settings.max_fallen) {
+        if (laid >= m_settings.lays_per_impact || m_fallen_count - m_kept >= m_settings.max_fallen) {
             ++m_shrugged;
             continue;
         }
@@ -703,6 +703,15 @@ std::vector<std::pair<world::CellCoord, std::vector<world::KeptTree>>> Forest::d
                 k.rotation = ft.at.rotation;
                 k.scale = ft.at.scale;
             }
+        }
+        // Records that found no tree now (a placement cut short by its
+        // budget, say): kept as they are, for when it comes back.
+        for (const world::KeptTree& r : cell.records) {
+            const bool matched = std::any_of(trees.begin(), trees.end(), [&](const world::KeptTree& k) {
+                return std::fabs(k.x - r.x) <= 0.01 && std::fabs(k.z - r.z) <= 0.01 && k.height == r.height &&
+                       k.trunk_radius == r.trunk_radius;
+            });
+            if (!matched) trees.push_back(r);
         }
         out.push_back({coord, std::move(trees)});
     }
