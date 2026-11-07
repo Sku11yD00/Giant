@@ -255,8 +255,11 @@ Milestone **N5, photoreal characters** (in progress; gate: close-ups hold up bes
 - Part 1a: skinned characters, the data. A glTF/GLB file with a skin
   imports its skeleton, each vertex's joints and weights and every
   animation clip (a walk cycle); the new `anim` module samples clips,
-  cross-fades and blends them, and works out the skinning. Drawing them
-  animated (1b) and playing them from the editor (1c) come next.
+  cross-fades and blends them, and works out the skinning.
+- Part 1b: skinned characters drawn animated. The GPU poses each
+  character's vertices when its pose changes and refits its clusters'
+  culling spheres, so culling, shadows and shading see the pose as they
+  see everything else. Playing them from the editor (1c) comes next.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

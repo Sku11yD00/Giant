@@ -17,6 +17,7 @@ giant_shaders(render
     shaders/cull.slang:cs_instances:compute:cull_instances_cs
     shaders/cull.slang:cs_traverse:compute:cull_traverse_cs
     shaders/cull.slang:cs_retest:compute:cull_retest_cs
+    shaders/skin.slang:cs_skin:compute:skin_cs
     shaders/hzb.slang:cs_first:compute:hzb_first_cs
     shaders/hzb.slang:cs_down:compute:hzb_down_cs
     shaders/raster.slang:ms_main:mesh:raster_ms
@@ -56,6 +57,7 @@ giant_module_tests(render
     tests/test_shadow_pages.cpp
     tests/test_voxel_light.cpp
     tests/test_instance_store.cpp
+    tests/test_skin.cpp
 )
 if(GIANT_BUILD_TESTS)
   # The streaming tests check the module's own streamer directly.

@@ -100,8 +100,8 @@ struct Cluster {
     u32 group;
     u32 refined; // k_no_group for original triangles
     u32 level;
-    u32 pad;
-    float bounds[4];
+    u32 skin_first; // skinned meshes: its first vertex in the skin source (skin.slang); else 0
+    float bounds[4]; // skinned meshes: refit to the pose by skin.slang
 };
 static_assert(sizeof(Cluster) == 48);
 
@@ -198,6 +198,29 @@ struct CullPush {
     u32 pad[2];
 };
 static_assert(sizeof(CullPush) == 112);
+
+// skin.slang's SkinPush: poses one skinned mesh.
+struct SkinPush {
+    u32 source;    // read descriptor: SkinVertex each
+    u32 clusters;  // write descriptor: the mesh's clusters
+    u32 residency; // read descriptor: the mesh's residency table
+    u32 pool;      // write descriptor: the geometry pool
+    u32 matrices;  // read descriptor (transient): 3 rows of float4 per joint
+    u32 matrix_offset;
+    u32 cluster_count;
+    u32 joint_count;
+};
+static_assert(sizeof(SkinPush) == 32);
+
+// A skinned mesh's vertex at bind, in the skin source.
+struct SkinVertex {
+    float position[3];
+    float normal[3];
+    u16 joints[4];
+    u8 weights[4]; // 255ths, summing to 255
+};
+static_assert(sizeof(SkinVertex) == 36);
+inline constexpr u32 k_skin_dispatch_width = 65535; // cluster groups along x (skin.slang)
 
 struct HzbPush {
     u32 depth;

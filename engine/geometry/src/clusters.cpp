@@ -30,7 +30,13 @@ Vec3 to_view(const LodView& view, const Vec3& p) {
 
 } // namespace
 
-ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locked) {
+namespace {
+
+// build_clusters, and with `weights` (one per source vertex) the skinned
+// form: vertices told apart by their weights too (`out_weights` gets one
+// per output vertex), and the original triangles alone (base_only).
+ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const SkinWeights* weights,
+                  std::vector<SkinWeights>* out_weights) {
     ClusterMesh out;
     if (source.indices.size() < 3 || source.vertices.empty()) {
         return out;
@@ -44,9 +50,20 @@ ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locke
     // Merge duplicate vertices (exporters write many), so clusters and the
     // simplifier see the real connectivity.
     std::vector<u32> remap(source.vertices.size());
-    const usize unique = meshopt_generateVertexRemap(remap.data(), source.indices.data(), index_count,
-                                                     source.vertices.data(), source.vertices.size(),
-                                                     sizeof(Vertex));
+    usize unique = 0;
+    if (weights == nullptr) {
+        unique = meshopt_generateVertexRemap(remap.data(), source.indices.data(), index_count, source.vertices.data(),
+                                             source.vertices.size(), sizeof(Vertex));
+    } else {
+        static_assert(sizeof(SkinWeights) == 12);
+        const meshopt_Stream streams[2] = {{source.vertices.data(), sizeof(Vertex), sizeof(Vertex)},
+                                           {weights, sizeof(SkinWeights), sizeof(SkinWeights)}};
+        unique = meshopt_generateVertexRemapMulti(remap.data(), source.indices.data(), index_count,
+                                                  source.vertices.size(), streams, 2);
+        out_weights->resize(unique);
+        meshopt_remapVertexBuffer(out_weights->data(), weights, source.vertices.size(), sizeof(SkinWeights),
+                                  remap.data());
+    }
     out.vertices.resize(unique);
     meshopt_remapVertexBuffer(out.vertices.data(), source.vertices.data(), source.vertices.size(),
                               sizeof(Vertex), remap.data());
@@ -65,6 +82,14 @@ ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locke
     clodConfig config = clodDefaultConfig(k_cluster_max_triangles);
     config.max_vertices = k_cluster_max_vertices;
     config.optimize_bounds = true; // tight culling spheres
+    const bool base_only = weights != nullptr;
+    if (base_only) {
+        // Every first group counts as stuck: nothing is simplified (a ratio
+        // of 1 makes the attempt cheap), so the original triangles are the
+        // only level.
+        config.simplify_ratio = 1.0f;
+        config.simplify_threshold = 0.0f;
+    }
 
     // Normals take part in simplification, as in meshoptimizer's own demo.
     const float normal_weights[3] = {0.5f, 0.5f, 0.5f};
@@ -82,6 +107,12 @@ ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locke
 
     std::vector<clodGroup> groups;
     clodBuild(config, mesh, [&](clodGroup group, const clodCluster* clusters, usize count) -> int {
+        if (base_only && group.depth > 0) {
+            return -1; // (not expected: every first group is terminal) only the original triangles
+        }
+        if (base_only) {
+            group.simplified.error = k_terminal_error;
+        }
         ClusterGroup g;
         g.depth = static_cast<u32>(group.depth);
         g.first_cluster = static_cast<u32>(out.clusters.size());
@@ -124,6 +155,24 @@ ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locke
     const meshopt_Bounds all = meshopt_computeSphereBounds(
         &out.vertices[0].position.x, out.vertices.size(), sizeof(Vertex), nullptr, 0);
     out.bounds = {{all.center[0], all.center[1], all.center[2]}, all.radius};
+    return out;
+}
+
+} // namespace
+
+ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locked) {
+    return build(source, locked, nullptr, nullptr);
+}
+
+SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& source) {
+    SkinnedClusterMesh out;
+    if (source.weights.size() != source.mesh.vertices.size()) {
+        return out; // one weight per vertex, or nothing
+    }
+    out.mesh = build(source.mesh, {}, source.weights.data(), &out.weights);
+    if (out.mesh.empty()) {
+        out.weights.clear();
+    }
     return out;
 }
 

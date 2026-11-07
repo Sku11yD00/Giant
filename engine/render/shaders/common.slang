@@ -210,7 +210,7 @@ struct Cluster {
     uint group;
     uint refined;        // the group it was simplified from; ~0 for original triangles
     uint level;          // depth of its group: 0 holds the original triangles
-    uint pad;
+    uint skin_first;     // skinned meshes: its first vertex in the skin source (skin.slang)
     float4 bounds;       // centre, radius
 };
 static const uint k_cluster_bytes = 48;
@@ -228,7 +228,7 @@ Cluster load_cluster(ByteAddressBuffer b, uint index) {
     c.group = d.x;
     c.refined = d.y;
     c.level = d.z;
-    c.pad = d.w;
+    c.skin_first = d.w;
     c.bounds = load4(b, at + 32);
     return c;
 }
