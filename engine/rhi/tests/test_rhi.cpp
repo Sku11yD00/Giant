@@ -2,6 +2,7 @@
 
 #include "giant/core/assert.h"
 #include "giant_test.h"
+#include "heap_ranges.h"
 #include "rhi_test_shaders.h"
 
 #include <array>
@@ -1302,6 +1303,52 @@ GIANT_TEST("rhi: d3d12 frames keep going while resources are destroyed mid-fligh
     GIANT_CHECK(device->validation_errors() == 0);
 }
 
+GIANT_TEST("rhi: d3d12 places small buffers in shared heaps, reuses their room, and counts what it makes") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    const DeviceCounts start = device->counts();
+    GIANT_CHECK(start.heaps >= 1); // made at init
+    const auto make = [&](u32 words, u32 seed) {
+        std::vector<u32> values(words);
+        for (u32 i = 0; i < words; ++i) values[i] = seed + i;
+        BufferDesc desc;
+        desc.size = words * 4;
+        desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
+        return std::pair{device->create_buffer(desc, {reinterpret_cast<const u8*>(values.data()), desc.size}), values};
+    };
+    // Made inside frames (staged, copied by the upload list), destroyed,
+    // and made again in the room they left once the GPU is done.
+    for (u32 round = 0; round < 3; ++round) {
+        CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd == nullptr) return;
+        auto [small, values] = make(1024, round * 10'000);           // 4 KiB: placed
+        auto [large, large_values] = make(1'200'000, round * 7);      // 4.6 MiB: committed
+        device->end_frame();
+        device->wait_idle();
+        GIANT_CHECK(as_u32(device->read_buffer(small)) == values);
+        GIANT_CHECK(as_u32(device->read_buffer(large)) == large_values);
+        device->destroy(small);
+        device->destroy(large);
+        for (u32 i = 0; i <= Device::k_frames_in_flight; ++i) {
+            if (device->begin_frame(nullptr) != nullptr) device->end_frame();
+        }
+    }
+    device->wait_idle();
+    const DeviceCounts end = device->counts();
+    GIANT_CHECK(end.created - start.created >= 6);
+    GIANT_CHECK(end.released - start.released >= 6);
+    // The small ones took no memory of their own (the heaps had room); the
+    // large ones did, one each.
+    GIANT_CHECK(end.heaps == start.heaps);
+    GIANT_CHECK(end.allocations - start.allocations >= 3);
+    GIANT_CHECK(end.allocations - start.allocations < 6);
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
 GIANT_TEST("rhi: d3d12 keeps a resource used this frame alive past a mid-frame upload") {
     auto device = warp_device();
     if (device == nullptr) {
@@ -1576,3 +1623,44 @@ GIANT_TEST("rhi: d3d12 refuses a swap chain without a window") {
     }
 }
 #endif
+
+GIANT_TEST("rhi: small buffers' heap ranges fit best, join when freed, and never overlap") {
+    using giant::rhi::HeapRanges;
+    HeapRanges r(16);
+    GIANT_CHECK(!r.allocate(1).valid()); // no heap yet
+    GIANT_CHECK(r.add_heap() == 0);
+    GIANT_CHECK(!r.allocate(0).valid() && !r.allocate(17).valid());
+    const HeapRanges::Range a = r.allocate(4); // [0, 4)
+    const HeapRanges::Range b = r.allocate(4); // [4, 8)
+    const HeapRanges::Range c = r.allocate(8); // [8, 16)
+    GIANT_CHECK(a.valid() && b.valid() && c.valid() && r.used() == 16);
+    GIANT_CHECK(a.offset == 0 && b.offset == 4 && c.offset == 8);
+    GIANT_CHECK(!r.allocate(1).valid()); // full
+    r.free(b);
+    r.free(a); // joins with b's room: [0, 8) free
+    const HeapRanges::Range d = r.allocate(8);
+    GIANT_CHECK(d.valid() && d.heap == 0 && d.offset == 0 && r.used() == 16);
+    // A second heap; best fit takes the tightest room anywhere.
+    GIANT_CHECK(r.add_heap() == 1 && r.heaps() == 2);
+    r.free(c); // heap 0: [8, 16) free
+    const HeapRanges::Range e = r.allocate(8);
+    GIANT_CHECK(e.heap == 0 && e.offset == 8); // exact fit in heap 0, not heap 1's 16
+    const HeapRanges::Range f = r.allocate(3);
+    GIANT_CHECK(f.heap == 1 && f.offset == 0);
+    r.free(d);
+    r.free(e);
+    r.free(f);
+    GIANT_CHECK(r.used() == 0);
+    // Everything joined again: a whole heap fits in each.
+    const HeapRanges::Range g = r.allocate(16);
+    const HeapRanges::Range h = r.allocate(16);
+    GIANT_CHECK(g.valid() && h.valid() && g.heap != h.heap);
+    // A range freed between two free ones joins all three.
+    r.free(g);
+    const HeapRanges::Range x = r.allocate(4), y = r.allocate(4), z = r.allocate(4);
+    GIANT_CHECK(x.heap == y.heap && y.heap == z.heap && x.offset == 0 && y.offset == 4 && z.offset == 8);
+    r.free(x);
+    r.free(z);
+    r.free(y);
+    GIANT_CHECK(r.allocate(16).valid());
+}

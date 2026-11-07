@@ -90,15 +90,29 @@ inline std::string frame_phase_name(usize i) {
 // The last few seconds of frame times, for get_engine_info (performance
 // checks such as the N1 gate run over MCP), with each frame's phases and
 // the main thread's CPU time.
+// What the GPU device did in a frame that can hold the GPU up without
+// being GPU work (rhi::FrameStats): memory made and freed, and how long
+// begin_frame waited for an earlier frame.
+struct FrameDevice {
+    u32 created = 0;
+    u32 allocations = 0;
+    u32 released = 0;
+    float wait_ms = 0.0f;
+    float release_ms = 0.0f; // begin_frame then freeing what the GPU was done with
+};
+
 struct FrameTimes {
     static constexpr usize k_frames = 240;
     std::array<float, k_frames> ms{};
     std::array<FramePhaseMs, k_frames> phase_ms{}; // the same frames' phases
     std::array<float, k_frames> cpu_ms{};          // and the main thread's CPU time
+    std::array<FrameDevice, k_frames> device{};    // and the device's
     usize count = 0; // frames recorded, ever
-    void add(float frame_ms, const FramePhaseMs& phases = {}, float thread_cpu_ms = 0.0f) {
+    void add(float frame_ms, const FramePhaseMs& phases = {}, float thread_cpu_ms = 0.0f,
+             const FrameDevice& device_stats = {}) {
         phase_ms[count % k_frames] = phases;
         cpu_ms[count % k_frames] = thread_cpu_ms;
+        device[count % k_frames] = device_stats;
         ms[count++ % k_frames] = frame_ms;
     }
     usize size() const { return std::min(count, k_frames); }

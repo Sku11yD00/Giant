@@ -37,6 +37,20 @@ def main():
     # A spike in render outside its sections: render/rest, not a section.
     rest = slow_frames(times, [frame(40.0, 39.0, render=38.0, render__voxels=2.0)], typicals)
     check("inside render, most over: render/rest 1" in rest, f"the rest of render: {rest}")
+    # The device around the hitches: allocations beside a typical frame's.
+    typical_device = {"created": 1, "allocations": 0, "released": 1, "wait_ms": 0.5}
+    waited = [dict(frame(40.0, 8.0, begin_frame=30.0), typical_device=typical_device,
+                   device={"created": 4, "allocations": 3, "released": 2, "wait_ms": 29.0},
+                   device_before={"created": 10, "allocations": 9, "released": 6, "wait_ms": 0.0}),
+              dict(frame(45.0, 8.0, begin_frame=35.0), typical_device=typical_device,
+                   device={"created": 0, "allocations": 0, "released": 0, "wait_ms": 34.0},
+                   device_before={"created": 2, "allocations": 2, "released": 1, "wait_ms": 0.0})]
+    text = slow_frames(times, waited, typicals)
+    check("allocations 9 (typical 0)" in text and "created 10 (typical 2)" in text, f"device counts: {text}")
+    quiet = [dict(f, device={"wait_ms": 0.0}, device_before={}) for f in waited]
+    check("the GPU device" not in slow_frames(times, quiet, typicals), "nothing counted: no device line")
+    check("begin_frame waited for the GPU 34.0 ms (worst 34.0), then freed for 0.0 ms" in text, f"the waits: {text}")
+    check("the GPU device" not in slow_frames(times, slow, typicals), "older editors: no device line")
     # No hitches, or no samples: nothing to say.
     check(slow_frames([10.0] * 50, [frame(20.0, 19.0, render=18.0)], typicals) is None, "no hitches")
     check(slow_frames(times, slow, []) is None, "no samples")

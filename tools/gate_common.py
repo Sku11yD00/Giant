@@ -145,7 +145,37 @@ def slow_frames(times, slow, typicals):
     if any(blamed.get(n) for n in ("begin_frame", "end_frame")):
         lines.append("  (begin_frame or end_frame: waiting on the GPU, the driver or the display, "
                      "not the CPU's own work)")
+    device = device_line(hitches)
+    if device:
+        lines.append(device)
     return "\n".join(lines)
+
+
+def device_line(hitches):
+    """What the GPU device did before the hitches (editors that report it).
+    begin_frame waits for the frame two back, so memory made or freed in the
+    two frames before a hitch is what the GPU may have been held up by:
+    resources created, new memory allocations and resources released over
+    those two frames (median over the hitches) beside two typical frames',
+    and how long begin_frame waited. None when there is nothing to tell."""
+    with_device = [f for f in hitches if f.get("device") is not None]
+    if not with_device:
+        return None
+    typical = [f["typical_device"] for f in with_device if f.get("typical_device")]
+
+    def typical2(key):
+        return 2 * _median([t.get(key, 0) for t in typical]) if typical else 0.0
+
+    keys = ("allocations", "created", "released")
+    before = {k: _median([(f.get("device_before") or {}).get(k, 0) for f in with_device]) for k in keys}
+    waits = [f["device"].get("wait_ms", 0.0) for f in with_device]
+    releases = [f["device"].get("release_ms", 0.0) for f in with_device]
+    if not any(before.values()) and not any(waits) and not any(releases):
+        return None  # (the null device counts nothing)
+    parts = [f"{k} {before[k]:.0f} (typical {typical2(k):.0f})" for k in keys]
+    return ("  the GPU device in the two frames before a hitch (median): " + ", ".join(parts) +
+            f"; begin_frame waited for the GPU {_median(waits):.1f} ms (worst {max(waits):.1f}), "
+            f"then freed for {_median(releases):.1f} ms (worst {max(releases):.1f})")
 
 
 def describe(times):
@@ -229,7 +259,8 @@ class Editor:
                     times += now["recent_ms"][-new:]
                 phases = now.get("phases")
                 if phases and phases["frames"] > 0:
-                    self.slow += [dict(frame, stop=stop) for frame in phases["slow"]]
+                    self.slow += [dict(frame, stop=stop, typical_device=phases.get("typical_device"))
+                                  for frame in phases["slow"]]
                     self.typicals.append((phases["frames"], phases["typical"], phases["typical_cpu_ms"]))
                 if stop in marks:
                     self.marked[stop] = len(times)

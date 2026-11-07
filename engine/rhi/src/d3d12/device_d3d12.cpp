@@ -3,9 +3,10 @@
 // Layout: one global root signature (128 bytes of root constants at b0, and
 // direct indexing into one shader-visible CBV/SRV/UAV heap and one sampler
 // heap), so every pipeline shares it and draws only push indices.
-// Resources are committed allocations for now; placed allocation from
-// larger heaps arrives with streaming (N1 part 4).
+// Small buffers made with all their contents are placed in shared heaps
+// (heap_ranges.h); everything else is a committed allocation.
 #include "../backends.h"
+#include "../heap_ranges.h"
 #include "../pool.h"
 
 #include "rhi_shaders.h"
@@ -27,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -236,6 +238,7 @@ private:
 
 struct DxBuffer {
     ComPtr<ID3D12Resource> resource;
+    HeapRanges::Range placed; // in a shared heap (small gpu buffers), or none: committed
     BufferDesc desc;
     ResourceState state = ResourceState::common;
     u32 read = k_no_descriptor;
@@ -267,6 +270,7 @@ struct DxPipeline {
 struct Retired {
     u64 fence = 0;
     ComPtr<ID3D12Resource> resource;
+    HeapRanges::Range placed; // its range of a shared heap, freed with it
     ComPtr<ID3D12PipelineState> pipeline;
     std::array<u32, 3> shader_slots{k_no_descriptor, k_no_descriptor, k_no_descriptor};
     std::array<u32, 2> rtv_slots{k_no_descriptor, k_no_descriptor};
@@ -436,6 +440,7 @@ public:
     CommandList* begin_frame(SwapChain* swap_chain) override;
     void end_frame() override;
     const FrameStats& last_frame_stats() const override { return m_last_stats; }
+    DeviceCounts counts() const override { return m_counts; }
     std::span<const GpuTiming> gpu_timings() const override { return m_gpu_timings; }
     float gpu_frame_ms() const override { return m_gpu_frame_ms; }
     std::vector<u8> read_texture(TextureHandle texture) override;
@@ -509,6 +514,11 @@ private:
     ComPtr<ID3D12Resource> create_committed_buffer(D3D12_HEAP_TYPE heap, u64 size,
                                                    D3D12_RESOURCE_STATES state,
                                                    D3D12_RESOURCE_FLAGS flags, const char* name);
+    // A small gpu buffer placed in a shared heap (heap_ranges.h); null when
+    // none could be made (the caller falls back to a committed one).
+    ComPtr<ID3D12Resource> create_placed_buffer(u64 size, D3D12_RESOURCE_FLAGS flags, const char* name,
+                                                HeapRanges::Range& range);
+    bool add_buffer_heap();
 
     AdapterInfo m_info;
     ComPtr<IDXGIFactory6> m_factory;
@@ -532,6 +542,18 @@ private:
     DescriptorHeap m_rtv_heap;
     DescriptorHeap m_dsv_heap;
 
+    // Shared heaps for small gpu buffers: made a few at a time and kept
+    // (declared before the buffers, so they outlive what is placed in them).
+    static constexpr u64 k_heap_unit = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; // 64 KiB
+    static constexpr u64 k_heap_bytes = 64ull << 20;
+    static constexpr u64 k_placed_max = 4ull << 20; // larger buffers are committed
+    static constexpr u32 k_initial_heaps = 4;
+    std::vector<ComPtr<ID3D12Heap>> m_buffer_heaps;
+    HeapRanges m_heap_ranges{k_heap_bytes / k_heap_unit};
+    bool m_heaps_failed = false; // CreateHeap failed once: committed buffers only (logged)
+    DeviceCounts m_counts;  // running totals (counts())
+    float m_wait_ms = 0.0f; // the last begin_frame's (FrameStats)
+    float m_release_ms = 0.0f;
     Pool<DxBuffer, BufferTag> m_buffers;
     Pool<DxTexture, TextureTag> m_textures;
     Pool<DxPipeline, PipelineTag> m_pipelines;
@@ -747,6 +769,18 @@ bool D3D12Device::init(const DeviceDesc& desc) {
                 return false;
             }
             frame.chunks.push_back({buffer, k_transient_chunk_bytes, 0});
+        }
+    }
+    // The small buffers' first heaps, made now rather than while streaming.
+    // GIANT_D3D12_COMMITTED=1 keeps every buffer committed (to compare).
+    char committed[8] = {};
+    if (GetEnvironmentVariableA("GIANT_D3D12_COMMITTED", committed, sizeof(committed)) > 0 && committed[0] == '1') {
+        m_heaps_failed = true;
+        log_info("rhi", "d3d12: GIANT_D3D12_COMMITTED: every buffer is its own allocation");
+    }
+    for (u32 i = 0; i < k_initial_heaps && !m_heaps_failed; ++i) {
+        if (!add_buffer_heap()) {
+            break;
         }
     }
     return true;
@@ -998,6 +1032,11 @@ void D3D12Device::free_retired() {
     const u64 done = m_lost ? 0 : m_fence->GetCompletedValue();
     while (!m_retired.empty() && m_retired.front().fence <= done) {
         Retired& r = m_retired.front();
+        if (r.resource != nullptr) {
+            ++m_counts.released;
+        }
+        r.resource.Reset(); // before its heap range is handed out again
+        m_heap_ranges.free(r.placed);
         for (u32 slot : r.shader_slots) {
             m_shader_heap.free(slot);
         }
@@ -1054,6 +1093,8 @@ StagingChunk* D3D12Device::add_staging_chunk(Frame& frame, u64 size, bool kept) 
         return nullptr;
     }
     chunk.mapped = static_cast<u8*>(mapped);
+    ++m_counts.created;
+    ++m_counts.allocations;
     frame.staging.push_back(std::move(chunk));
     return &frame.staging.back();
 }
@@ -1196,6 +1237,71 @@ ComPtr<ID3D12Resource> D3D12Device::create_committed_buffer(D3D12_HEAP_TYPE heap
     return buffer;
 }
 
+bool D3D12Device::add_buffer_heap() {
+    if (m_heaps_failed) {
+        return false;
+    }
+    D3D12_HEAP_DESC desc{};
+    desc.SizeInBytes = k_heap_bytes;
+    desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    // Not zeroed (all its buffers are made with their data); a runtime
+    // without the flag (the Windows one, no Agility SDK) gets zeroed heaps.
+    desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED;
+    ComPtr<ID3D12Heap> heap;
+    if (FAILED(m_device->CreateHeap(&desc, IID_PPV_ARGS(&heap)))) {
+        desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+        if (!check_gpu(m_device->CreateHeap(&desc, IID_PPV_ARGS(&heap)), "CreateHeap(small buffers)")) {
+            m_heaps_failed = true;
+            log_warning("rhi", "d3d12: could not make a buffer heap; small buffers are committed from now on");
+            return false;
+        }
+    }
+    heap->SetName(L"small buffers");
+    m_buffer_heaps.push_back(std::move(heap));
+    m_heap_ranges.add_heap();
+    ++m_counts.allocations;
+    ++m_counts.heaps;
+    return true;
+}
+
+ComPtr<ID3D12Resource> D3D12Device::create_placed_buffer(u64 size, D3D12_RESOURCE_FLAGS flags, const char* name,
+                                                         HeapRanges::Range& range) {
+    const u64 units = (size + k_heap_unit - 1) / k_heap_unit;
+    range = m_heap_ranges.allocate(units);
+    if (!range.valid()) {
+        // Every heap is full: another (rare: 64 MiB at a time, never
+        // given back, so a burst's room is there for the next).
+        if (!add_buffer_heap()) {
+            return nullptr;
+        }
+        range = m_heap_ranges.allocate(units);
+        if (!range.valid()) {
+            return nullptr;
+        }
+    }
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Flags = flags;
+    ComPtr<ID3D12Resource> buffer;
+    if (!check_gpu(m_device->CreatePlacedResource(m_buffer_heaps[range.heap].Get(), range.offset * k_heap_unit, &desc,
+                                                  D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&buffer)),
+                   name)) {
+        m_heap_ranges.free(range);
+        range = {};
+        return nullptr;
+    }
+    buffer->SetName(widen(name).c_str());
+    return buffer;
+}
+
 BufferHandle D3D12Device::create_buffer(const BufferDesc& desc, std::span<const u8> initial) {
     GIANT_ASSERT(desc.size > 0 && desc.size % 4 == 0, "buffer size must be a positive multiple of 4");
     GIANT_ASSERT(initial.size() <= desc.size, "initial data larger than the buffer");
@@ -1218,10 +1324,23 @@ BufferHandle D3D12Device::create_buffer(const BufferDesc& desc, std::span<const 
     const D3D12_RESOURCE_FLAGS flags = has(desc.usage, BufferUsage::shader_write)
                                            ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
                                            : D3D12_RESOURCE_FLAG_NONE;
-    b.resource = create_committed_buffer(heap, desc.size, state, flags, desc.name);
+    // Placed only when its contents are all given: a heap range is reused
+    // memory (and the heaps are not zeroed), while a committed buffer comes
+    // zeroed, which buffers made without data may count on. Streaming's
+    // buffers (meshes, tiles, tables) are made with their data.
+    if (desc.memory == Memory::gpu && desc.size <= k_placed_max && initial.size() == desc.size) {
+        b.resource = create_placed_buffer(desc.size, flags, desc.name, b.placed);
+    }
+    if (b.resource == nullptr) {
+        b.resource = create_committed_buffer(heap, desc.size, state, flags, desc.name);
+        if (b.resource != nullptr) {
+            ++m_counts.allocations;
+        }
+    }
     if (b.resource == nullptr) {
         return {};
     }
+    ++m_counts.created;
     if (desc.memory != Memory::gpu) {
         void* mapped = nullptr;
         const D3D12_RANGE no_read{0, 0};
@@ -1325,6 +1444,7 @@ void D3D12Device::destroy(BufferHandle handle) {
     DxBuffer b = m_buffers.take(handle);
     Retired r;
     r.resource = std::move(b.resource);
+    r.placed = b.placed;
     r.shader_slots = {b.read, b.write, k_no_descriptor};
     retire(std::move(r));
 }
@@ -1387,6 +1507,8 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
                    "CreateCommittedResource(texture)")) {
         return {};
     }
+    ++m_counts.created;
+    ++m_counts.allocations;
     t.resource->SetName(widen(desc.name).c_str());
 
     if (!initial.empty()) {
@@ -1823,7 +1945,10 @@ CommandList* D3D12Device::begin_frame(SwapChain* swap_chain) {
     }
     Frame& frame = m_frame_slots[m_frame_index % k_frames];
     // This slot's allocator and transient memory may still be in use.
+    const auto wait_start = std::chrono::steady_clock::now();
     wait_for(frame.fence);
+    const auto waited = std::chrono::steady_clock::now();
+    m_wait_ms = std::chrono::duration<float, std::milli>(waited - wait_start).count();
     if (m_lost) {
         return nullptr;
     }
@@ -1838,9 +1963,10 @@ CommandList* D3D12Device::begin_frame(SwapChain* swap_chain) {
     // Chunks grown past the ones made at init stay for reuse; only those
     // unused for a long while go (rarely: after a burst, not per frame).
     const u64 now = m_frame_index;
-    std::erase_if(frame.staging, [now](const StagingChunk& chunk) {
+    m_counts.released += std::erase_if(frame.staging, [now](const StagingChunk& chunk) {
         return !chunk.kept && now - chunk.last_used > k_staging_trim_frames;
     });
+    m_release_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - waited).count();
     frame.timed_frame = 0;
     frame.upload_timed = false;
     frame.timings.clear();
@@ -1926,6 +2052,8 @@ void D3D12Device::end_frame() {
     }
     m_retired_this_frame.clear();
     m_swap_chain = nullptr;
+    m_stats.wait_ms = m_wait_ms;
+    m_stats.release_ms = m_release_ms;
     m_last_stats = m_stats;
     ++m_frames;
 }

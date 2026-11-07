@@ -32,6 +32,10 @@ if(GIANT_BUILD_TESTS AND GIANT_REQUIRE_VALIDATION)
   target_compile_definitions(giant_rhi_tests PRIVATE GIANT_REQUIRE_VALIDATION=1)
 endif()
 if(GIANT_BUILD_TESTS)
+  # The heap ranges are private bookkeeping, tested directly.
+  target_include_directories(giant_rhi_tests PRIVATE src)
+endif()
+if(GIANT_BUILD_TESTS)
   giant_shaders(rhi_test TARGET giant_rhi_tests
     SHADERS
       tests/shaders/test_compute.slang:cs_fill:compute:test_fill_cs

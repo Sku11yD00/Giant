@@ -318,6 +318,20 @@ struct FrameStats {
     u32 barriers = 0;
     u64 transient_bytes = 0;
     u64 upload_bytes = 0; // initial data of resources created inside the frame
+    float wait_ms = 0.0f;    // begin_frame waiting for the GPU to finish an earlier frame
+    float release_ms = 0.0f; // and then freeing what the GPU was done with (on the CPU)
+};
+
+// Running totals since the device was made (take differences for a span of
+// frames): resources created (buffers and textures), new memory of their
+// own made for them or their heaps (d3d12: committed resources, heaps,
+// staging chunks), and resources freed once the GPU was done with them.
+// Making and freeing video memory is work the GPU's queue waits behind.
+struct DeviceCounts {
+    u64 created = 0;
+    u64 allocations = 0;
+    u64 released = 0;
+    u64 heaps = 0; // d3d12: shared heaps for small buffers made (0: none, all committed)
 };
 
 // GPU time of one CommandList::begin_timing scope.
@@ -475,6 +489,7 @@ public:
     virtual CommandList* begin_frame(SwapChain* swap_chain) = 0;
     virtual void end_frame() = 0;
     virtual const FrameStats& last_frame_stats() const = 0;
+    virtual DeviceCounts counts() const { return {}; } // (the null device keeps none)
 
     // GPU times of the newest frame the GPU has finished (usually two
     // frames back; never waited for): each begin_timing scope in the order
