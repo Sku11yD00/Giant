@@ -2,6 +2,9 @@
 
 #include <cgltf.h>
 
+#include <algorithm>
+#include <array>
+
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -10,6 +13,7 @@
 #include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace giant::geometry {
 
@@ -120,9 +124,9 @@ struct NodeTransform {
     }
 };
 
-NodeTransform node_transform(const cgltf_node* node) {
+NodeTransform matrix_transform(const float* m) {
     NodeTransform t;
-    cgltf_node_transform_world(node, t.m);
+    std::copy_n(m, 16, t.m);
     // a(r, c) = element at row r, column c.
     const auto a = [&t](int r, int c) { return t.m[c * 4 + r]; };
     const float det = a(0, 0) * (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1)) -
@@ -140,6 +144,36 @@ NodeTransform node_transform(const cgltf_node* node) {
     return t;
 }
 
+NodeTransform node_transform(const cgltf_node* node) {
+    float m[16];
+    cgltf_node_transform_world(node, m);
+    return matrix_transform(m);
+}
+
+Mat4 world_matrix(const cgltf_node* node) {
+    Mat4 m;
+    if (node != nullptr) cgltf_node_transform_world(node, m.m);
+    return m;
+}
+
+// An accessor the skin and clip readers may unpack: it has data in the
+// file (so the work is bounded by the file's size), and no sparse values on
+// an interleaved view (cgltf 1.15 reads those with the wrong stride).
+bool readable(const cgltf_accessor* a) {
+    return a != nullptr && a->buffer_view != nullptr &&
+           (!a->is_sparse || a->stride == cgltf_calc_size(a->type, a->component_type));
+}
+
+// Where a primitive's vertices go: the mesh, and (skinned) their weights:
+// all on one joint (`rigid`), or read from the primitive's own joints and
+// weights, which index `skin_joints` (the skin's joints, as skeleton joints).
+struct Target {
+    TriangleMesh* mesh = nullptr;
+    std::vector<SkinWeights>* weights = nullptr;
+    i32 rigid = -1;
+    const std::vector<u16>* skin_joints = nullptr;
+};
+
 class Importer {
 public:
     explicit Importer(ImportResult& result) : m_result(result) {}
@@ -148,20 +182,27 @@ public:
         if (node->mesh == nullptr) {
             return true;
         }
-        if (node->skin != nullptr) {
-            warn_once(m_warned_skin, "skins are not imported yet: meshes are placed in their bind pose");
-        }
-        const NodeTransform transform = node_transform(node);
+        Target target;
+        target.mesh = &m_result.mesh;
+        return mesh(node, node_transform(node), target);
+    }
+
+    // Its mesh's primitives into `target`, placed by `transform`.
+    bool mesh(const cgltf_node* node, const NodeTransform& transform, const Target& target) {
         m_unpacked.clear();
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
-            if (!primitive(node->mesh->primitives[i], transform)) {
+            if (!primitive(node->mesh->primitives[i], transform, target)) {
                 return false;
             }
         }
         return true;
     }
 
-private:
+    bool fail(std::string text) {
+        m_result.error = std::move(text);
+        return false;
+    }
+
     void warn_once(bool& flag, const char* text) {
         if (!flag) {
             flag = true;
@@ -169,9 +210,105 @@ private:
         }
     }
 
-    bool fail(std::string text) {
-        m_result.error = std::move(text);
-        return false;
+private:
+    // A vertex's joints and weights from up to two sets: the four heaviest,
+    // in 255ths summing to 255.
+    bool vertex_weights(const std::array<const std::vector<Vec4>*, 2>& joints,
+                        const std::array<const std::vector<Vec4>*, 2>& weights, usize v,
+                        const std::vector<u16>& skin_joints, SkinWeights& out) {
+        std::array<std::pair<float, u32>, 8> found{};
+        usize count = 0;
+        for (usize set = 0; set < 2; ++set) {
+            if (joints[set] == nullptr || weights[set] == nullptr) continue;
+            const Vec4 j = (*joints[set])[v];
+            const Vec4 w = (*weights[set])[v];
+            const float js[4] = {j.x, j.y, j.z, j.w};
+            const float ws[4] = {w.x, w.y, w.z, w.w};
+            for (usize k = 0; k < 4; ++k) {
+                if (!std::isfinite(ws[k]) || ws[k] < 0.0f) return fail("a vertex weight is negative or not a number");
+                if (ws[k] == 0.0f) continue;
+                if (!(js[k] >= 0.0f) || js[k] >= static_cast<float>(skin_joints.size())) {
+                    return fail("a vertex names a joint the skin does not have");
+                }
+                const u32 joint = skin_joints[static_cast<usize>(js[k])];
+                bool merged = false;
+                for (usize i = 0; i < count; ++i) {
+                    if (found[i].second == joint) {
+                        found[i].first += ws[k];
+                        merged = true;
+                    }
+                }
+                if (!merged) found[count++] = {ws[k], joint};
+            }
+        }
+        out = {};
+        if (count == 0) {
+            // No weight at all: on the first joint it lists.
+            warn_once(m_warned_unweighted, "vertices with no joint weights were bound to their first joint");
+            const float j0 = joints[0] != nullptr ? (*joints[0])[v].x : 0.0f;
+            const usize index = j0 >= 0.0f && j0 < static_cast<float>(skin_joints.size()) ? static_cast<usize>(j0) : 0;
+            out.joints[0] = skin_joints.empty() ? 0 : skin_joints[index];
+            out.weights[0] = 255;
+            return true;
+        }
+        // Heaviest first (an insertion sort: at most eight).
+        for (usize i = 1; i < count; ++i) {
+            for (usize k = i; k > 0; --k) {
+                const auto& x = found[k - 1];
+                const auto& y = found[k];
+                if (y.first > x.first || (y.first == x.first && y.second < x.second)) {
+                    std::swap(found[k - 1], found[k]);
+                } else {
+                    break;
+                }
+            }
+        }
+        if (count > 4) {
+            warn_once(m_warned_weights, "vertices moved by more than four joints keep the four heaviest");
+            count = 4;
+        }
+        float total = 0.0f;
+        for (usize i = 0; i < count; ++i) total += found[i].first;
+        if (!std::isfinite(total) || !(total > 0.0f)) return fail("a vertex's weights are too large to add up");
+        // 255ths by largest remainder, so they sum to 255 exactly.
+        std::array<float, 4> rest{};
+        u32 given = 0;
+        for (usize i = 0; i < count; ++i) {
+            const float share = found[i].first / total * 255.0f;
+            const float whole = std::floor(share);
+            out.joints[i] = static_cast<u16>(found[i].second);
+            out.weights[i] = static_cast<u8>(whole);
+            rest[i] = share - whole;
+            given += static_cast<u32>(whole);
+        }
+        while (given < 255) {
+            usize best = 0;
+            for (usize i = 1; i < count; ++i) {
+                if (rest[i] > rest[best]) best = i;
+            }
+            ++out.weights[best];
+            rest[best] = -1.0f;
+            ++given;
+        }
+        return true;
+    }
+
+    // A vec4 accessor as floats (joints and weights), for one primitive.
+    bool unpack4(const cgltf_accessor* accessor, usize count, std::vector<Vec4>& out, bool joints) {
+        out.assign(count, Vec4{});
+        if (accessor->type != cgltf_type_vec4 || accessor->count != count) {
+            return fail("a skinned mesh's joints or weights do not match its vertices");
+        }
+        if (!readable(accessor)) return fail("a skinned mesh's joints or weights have no data, or are sparse and interleaved");
+        if (joints && ((accessor->component_type != cgltf_component_type_r_8u &&
+                        accessor->component_type != cgltf_component_type_r_16u) ||
+                       accessor->normalized)) {
+            return fail("a skinned mesh's joint indices are not unsigned bytes or shorts");
+        }
+        if (count > 0 && cgltf_accessor_unpack_floats(accessor, &out[0].x, count * 4) != count * 4) {
+            return fail("could not read joints or weights");
+        }
+        return true;
     }
 
     // A vec3 accessor as floats, read once per node (primitives often share
@@ -196,7 +333,7 @@ private:
         return &out;
     }
 
-    bool primitive(const cgltf_primitive& prim, const NodeTransform& transform) {
+    bool primitive(const cgltf_primitive& prim, const NodeTransform& transform, const Target& target) {
         if (prim.type != cgltf_primitive_type_triangles &&
             prim.type != cgltf_primitive_type_triangle_strip &&
             prim.type != cgltf_primitive_type_triangle_fan) {
@@ -270,10 +407,42 @@ private:
         }
         const std::vector<u32> triangles = to_triangle_list(prim.type, indices, transform.mirrored);
 
-        TriangleMesh& mesh = m_result.mesh;
+        TriangleMesh& mesh = *target.mesh;
         if ((mesh.indices.size() + triangles.size()) / 3 > k_max_import_triangles) {
             return fail("the mesh has more than 16 million triangles");
         }
+        // Skinned: each vertex's joints and weights, read like its position.
+        std::array<std::vector<Vec4>, 4> skin_data; // JOINTS_0, WEIGHTS_0, JOINTS_1, WEIGHTS_1
+        std::array<const std::vector<Vec4>*, 2> joint_sets{};
+        std::array<const std::vector<Vec4>*, 2> weight_sets{};
+        if (target.weights != nullptr && target.rigid < 0) {
+            for (cgltf_int set = 0; set < 2; ++set) {
+                const cgltf_accessor* j = cgltf_find_accessor(&prim, cgltf_attribute_type_joints, set);
+                const cgltf_accessor* w = cgltf_find_accessor(&prim, cgltf_attribute_type_weights, set);
+                if (j == nullptr || w == nullptr) continue;
+                const usize s2 = static_cast<usize>(set) * 2;
+                if (!unpack4(j, vertex_count, skin_data[s2], true) || !unpack4(w, vertex_count, skin_data[s2 + 1], false)) {
+                    return false;
+                }
+                joint_sets[static_cast<usize>(set)] = &skin_data[s2];
+                weight_sets[static_cast<usize>(set)] = &skin_data[s2 + 1];
+            }
+            if (cgltf_find_accessor(&prim, cgltf_attribute_type_joints, 2) != nullptr) {
+                warn_once(m_warned_weights, "vertices moved by more than four joints keep the four heaviest");
+            }
+        }
+        const auto weigh = [&](u32 v) {
+            if (target.weights == nullptr) return true;
+            SkinWeights w;
+            if (target.rigid >= 0) {
+                w.joints[0] = static_cast<u16>(target.rigid);
+                w.weights[0] = 255;
+            } else if (!vertex_weights(joint_sets, weight_sets, v, *target.skin_joints, w)) {
+                return false;
+            }
+            target.weights->push_back(w);
+            return true;
+        };
         // Only the vertices that triangles use are kept, so the mesh stays
         // bounded by its triangle count.
         constexpr u32 unused = ~u32{0};
@@ -297,6 +466,7 @@ private:
                         d = {0, 1, 0};
                     }
                     mesh.vertices.push_back({m_points[i], d});
+                    if (!weigh(i)) return false;
                 }
                 mesh.indices.push_back(m_remap[i] - 1);
             }
@@ -313,6 +483,9 @@ private:
                 mesh.vertices.push_back({a, face});
                 mesh.vertices.push_back({b, face});
                 mesh.vertices.push_back({c, face});
+                for (usize k = 0; k < 3; ++k) {
+                    if (!weigh(triangles[t + k])) return false;
+                }
                 mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2});
             }
         }
@@ -351,7 +524,8 @@ private:
     }
 
     ImportResult& m_result;
-    bool m_warned_skin = false;
+    bool m_warned_unweighted = false;
+    bool m_warned_weights = false;
     bool m_warned_type = false;
     bool m_warned_morph = false;
     bool m_warned_positions = false;
@@ -361,6 +535,281 @@ private:
     std::vector<u32> m_remap;  // per primitive: 0 used, else output index + 1
     std::vector<Vec3> m_points; // per primitive: transformed positions
 };
+
+// --- Skins ---------------------------------------------------------------
+
+// The skin's skeleton: its joints and any nodes between two of them, parents
+// first. `joint_of` maps each such node to its joint; `skin_joints` each of
+// the skin's joints (as JOINTS_0 indexes them) to its joint.
+bool build_skeleton(const cgltf_skin& skin, anim::Skeleton& out,
+                    std::unordered_map<const cgltf_node*, u32>& joint_of, std::vector<u16>& skin_joints,
+                    std::string& error) {
+    if (skin.joints_count == 0) {
+        error = "the skin has no joints";
+        return false;
+    }
+    std::unordered_map<const cgltf_node*, usize> in_skin;
+    for (cgltf_size i = 0; i < skin.joints_count; ++i) {
+        if (!in_skin.emplace(skin.joints[i], i).second) {
+            error = "the skin lists a joint twice";
+            return false;
+        }
+    }
+    std::vector<const cgltf_node*> members(skin.joints, skin.joints + skin.joints_count);
+    std::unordered_map<const cgltf_node*, bool> member;
+    for (const cgltf_node* j : members) member[j] = true;
+    bool root_seen = false;
+    const cgltf_node* root_parent = nullptr;
+    for (cgltf_size i = 0; i < skin.joints_count; ++i) {
+        std::vector<const cgltf_node*> path;
+        const cgltf_node* p = skin.joints[i]->parent;
+        while (p != nullptr && in_skin.count(p) == 0) {
+            path.push_back(p);
+            p = p->parent;
+            if (path.size() > 100000) {
+                error = "the node hierarchy has a cycle";
+                return false;
+            }
+        }
+        if (p != nullptr) {
+            for (const cgltf_node* between : path) {
+                if (member.emplace(between, true).second) members.push_back(between);
+            }
+        } else {
+            if (root_seen && skin.joints[i]->parent != root_parent) {
+                error = "the skin's root joints hang under different nodes; give them one parent";
+                return false;
+            }
+            root_seen = true;
+            root_parent = skin.joints[i]->parent;
+        }
+    }
+    if (members.size() > anim::k_max_joints) {
+        error = "the skeleton has more than 1024 joints";
+        return false;
+    }
+    // Parents first: by depth among the members, else as listed.
+    const auto member_parent = [&member](const cgltf_node* n) -> const cgltf_node* {
+        for (const cgltf_node* p = n->parent; p != nullptr; p = p->parent) {
+            if (member.count(p) != 0) return p;
+        }
+        return nullptr;
+    };
+    std::vector<usize> depth(members.size(), 0);
+    for (usize i = 0; i < members.size(); ++i) {
+        for (const cgltf_node* p = member_parent(members[i]); p != nullptr; p = member_parent(p)) ++depth[i];
+    }
+    std::vector<usize> order(members.size());
+    for (usize i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&depth](usize a, usize b) { return depth[a] < depth[b]; });
+    for (usize i = 0; i < order.size(); ++i) joint_of[members[order[i]]] = static_cast<u32>(i);
+
+    std::vector<Mat4> inverse_bind(skin.joints_count);
+    if (skin.inverse_bind_matrices != nullptr) {
+        const cgltf_accessor* a = skin.inverse_bind_matrices;
+        if (a->type != cgltf_type_mat4 || a->count != skin.joints_count || !readable(a)) {
+            error = "the skin's inverse bind matrices do not match its joints";
+            return false;
+        }
+        if (cgltf_accessor_unpack_floats(a, inverse_bind[0].m, skin.joints_count * 16) != skin.joints_count * 16) {
+            error = "could not read the skin's inverse bind matrices";
+            return false;
+        }
+    }
+    const usize n = members.size();
+    out.names.resize(n);
+    out.parents.resize(n);
+    out.rest.resize(n);
+    out.inverse_bind.resize(n);
+    for (usize i = 0; i < n; ++i) {
+        const cgltf_node* node = members[order[i]];
+        out.names[i] = node->name != nullptr && node->name[0] != '\0' ? node->name : "joint " + std::to_string(i);
+        const cgltf_node* parent = member_parent(node);
+        out.parents[i] = parent != nullptr ? static_cast<i32>(joint_of[parent]) : -1;
+        anim::JointTransform& r = out.rest[i];
+        if (node->has_matrix) {
+            Mat4 local;
+            std::copy_n(node->matrix, 16, local.m);
+            r = anim::decompose(local);
+        } else {
+            if (node->has_translation) r.translation = {node->translation[0], node->translation[1], node->translation[2]};
+            if (node->has_rotation) {
+                r.rotation = normalize(Quat{node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]});
+            }
+            if (node->has_scale) r.scale = {node->scale[0], node->scale[1], node->scale[2]};
+        }
+        const auto it = in_skin.find(node);
+        // Between two joints (nothing bound to it): its own place.
+        out.inverse_bind[i] = it != in_skin.end() ? inverse_bind[it->second] : anim::affine_inverse(world_matrix(node));
+    }
+    out.root = world_matrix(root_parent);
+    skin_joints.resize(skin.joints_count);
+    for (cgltf_size i = 0; i < skin.joints_count; ++i) skin_joints[i] = static_cast<u16>(joint_of[skin.joints[i]]);
+    error = anim::validate(out);
+    return error.empty();
+}
+
+anim::Interpolation interpolation(cgltf_interpolation_type t) {
+    switch (t) {
+    case cgltf_interpolation_type_step: return anim::Interpolation::step;
+    case cgltf_interpolation_type_cubic_spline: return anim::Interpolation::cubic;
+    default: return anim::Interpolation::linear;
+    }
+}
+
+// Every animation's joint channels, as clips.
+bool read_clips(const cgltf_data& data, const anim::Skeleton& skeleton,
+                const std::unordered_map<const cgltf_node*, u32>& joint_of, Importer& importer,
+                std::vector<anim::Clip>& clips) {
+    bool warned_morph = false;
+    bool warned_other = false;
+    usize keys = 0;
+    if (data.animations_count > anim::k_max_clips) {
+        return importer.fail("the file has more than 4096 animations");
+    }
+    std::unordered_set<std::string> names;
+    for (cgltf_size a = 0; a < data.animations_count; ++a) {
+        const cgltf_animation& animation = data.animations[a];
+        anim::Clip clip;
+        std::string name = animation.name != nullptr && animation.name[0] != '\0' ? animation.name
+                                                                                  : "clip " + std::to_string(a + 1);
+        std::string unique = name;
+        for (int k = 2; names.count(unique) != 0; ++k) unique = name + " (" + std::to_string(k) + ")";
+        names.insert(unique);
+        clip.name = unique;
+        for (cgltf_size c = 0; c < animation.channels_count; ++c) {
+            const cgltf_animation_channel& ch = animation.channels[c];
+            if (ch.target_path == cgltf_animation_path_type_weights) {
+                importer.warn_once(warned_morph, "morph target animation is not imported yet");
+                continue;
+            }
+            const auto joint = joint_of.find(ch.target_node);
+            if (ch.target_node == nullptr || joint == joint_of.end() || ch.sampler == nullptr ||
+                (ch.target_path != cgltf_animation_path_type_translation &&
+                 ch.target_path != cgltf_animation_path_type_rotation &&
+                 ch.target_path != cgltf_animation_path_type_scale)) {
+                importer.warn_once(warned_other, "animation of nodes that are not joints is skipped");
+                continue;
+            }
+            const cgltf_animation_sampler& sampler = *ch.sampler;
+            anim::Channel out;
+            out.joint = joint->second;
+            out.path = ch.target_path == cgltf_animation_path_type_translation ? anim::Path::translation
+                       : ch.target_path == cgltf_animation_path_type_rotation  ? anim::Path::rotation
+                                                                               : anim::Path::scale;
+            out.interpolation = interpolation(sampler.interpolation);
+            const cgltf_accessor* in = sampler.input;
+            const cgltf_accessor* values = sampler.output;
+            const usize per = out.interpolation == anim::Interpolation::cubic ? 3 : 1;
+            const cgltf_type want = out.path == anim::Path::rotation ? cgltf_type_vec4 : cgltf_type_vec3;
+            if (!readable(in) || !readable(values) || in->type != cgltf_type_scalar || values->type != want ||
+                in->count > anim::k_max_keys || values->count != in->count * per) {
+                return importer.fail("the clip " + clip.name + " has a channel whose values do not match its keys");
+            }
+            keys += in->count * per;
+            if (keys > anim::k_max_keys) {
+                return importer.fail("the file's animations have more than 8 million keys");
+            }
+            out.times.resize(in->count);
+            if (in->count > 0 && cgltf_accessor_unpack_floats(in, out.times.data(), in->count) != in->count) {
+                return importer.fail("could not read the clip " + clip.name);
+            }
+            const usize width = want == cgltf_type_vec4 ? 4 : 3;
+            std::vector<float> raw(values->count * width);
+            if (!raw.empty() && cgltf_accessor_unpack_floats(values, raw.data(), raw.size()) != raw.size()) {
+                return importer.fail("could not read the clip " + clip.name);
+            }
+            out.values.resize(values->count);
+            for (usize v = 0; v < values->count; ++v) {
+                out.values[v] = {raw[v * width], raw[v * width + 1], raw[v * width + 2], width == 4 ? raw[v * width + 3] : 0.0f};
+            }
+            if (out.times.empty()) continue;
+            clip.duration = std::max(clip.duration, out.times.back());
+            clip.channels.push_back(std::move(out));
+        }
+        const std::string error = anim::validate(clip, skeleton);
+        if (!error.empty()) return importer.fail(error);
+        clips.push_back(std::move(clip));
+    }
+    return true;
+}
+
+// A skinned file: its meshes in bind space with their weights, the
+// skeleton, the clips, and `mesh` as the skin has it at rest.
+bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::vector<const cgltf_node*>& shown,
+                    Importer& importer, ImportResult& result) {
+    SkinnedImport& out = result.skinned.emplace();
+    std::unordered_map<const cgltf_node*, u32> joint_of;
+    std::vector<u16> skin_joints;
+    std::string error;
+    if (!build_skeleton(skin, out.skeleton, joint_of, skin_joints, error)) return importer.fail(error);
+    const anim::Skeleton& skeleton = out.skeleton;
+    // The rest pose's skin matrices.
+    std::vector<Mat4> model(skeleton.size());
+    std::vector<Mat4> rest(skeleton.size());
+    anim::model_matrices(skeleton, skeleton.rest, model);
+    anim::skin_matrices(skeleton, model, rest);
+    std::unordered_set<const cgltf_mesh*> skinned_meshes; // each once: bind space ignores the node
+    for (const cgltf_node* node : shown) {
+        if (node->mesh == nullptr) continue;
+        Target target;
+        target.mesh = &out.mesh.mesh;
+        target.weights = &out.mesh.weights;
+        if (node->skin == &skin) {
+            if (!skinned_meshes.insert(node->mesh).second) continue;
+            // In bind space as written: a skinned mesh's node does not place it.
+            target.skin_joints = &skin_joints;
+            float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            if (!importer.mesh(node, matrix_transform(identity), target)) return false;
+            continue;
+        }
+        // Not skinned: carried by the joint above it (else the first root),
+        // where it is now.
+        i32 joint = -1;
+        for (const cgltf_node* p = node; p != nullptr && joint < 0; p = p->parent) {
+            if (const auto it = joint_of.find(p); it != joint_of.end()) joint = static_cast<i32>(it->second);
+        }
+        if (joint < 0) joint = 0; // (joint 0 is a root: parents come first)
+        target.rigid = joint;
+        const Mat4 bind = anim::affine_inverse(rest[static_cast<usize>(joint)]) * world_matrix(node);
+        if (!importer.mesh(node, matrix_transform(bind.m), target)) return false;
+    }
+    if (!read_clips(data, skeleton, joint_of, importer, out.clips)) return false;
+    // At rest, for whatever draws it unanimated; and each joint's reach.
+    const TriangleMesh& bound = out.mesh.mesh;
+    result.mesh.indices = bound.indices;
+    result.mesh.vertices.resize(bound.vertices.size());
+    out.joint_radius.assign(skeleton.size(), 0.0f);
+    std::vector<Vec3> origin(skeleton.size());
+    for (usize j = 0; j < skeleton.size(); ++j) {
+        const Mat4 at = anim::affine_inverse(skeleton.inverse_bind[j]);
+        origin[j] = {at.at(0, 3), at.at(1, 3), at.at(2, 3)};
+    }
+    for (usize v = 0; v < bound.vertices.size(); ++v) {
+        const SkinWeights& w = out.mesh.weights[v];
+        Vertex& to = result.mesh.vertices[v];
+        to.position = anim::skin_point(rest, w.joints, w.weights, bound.vertices[v].position);
+        to.normal = anim::skin_direction(rest, w.joints, w.weights, bound.vertices[v].normal);
+        if (length_squared(to.normal) == 0.0f) to.normal = {0, 1, 0};
+        if (!finite(to.position)) return importer.fail("the skin's rest pose places a vertex at infinity");
+        for (usize k = 0; k < 4; ++k) {
+            if (w.weights[k] == 0) continue;
+            float& r = out.joint_radius[w.joints[k]];
+            r = std::max(r, length(bound.vertices[v].position - origin[w.joints[k]]));
+        }
+    }
+    // Triangles whose joints mirror them at rest are turned back to face out.
+    for (usize t = 0; t + 2 < result.mesh.indices.size(); t += 3) {
+        const SkinWeights& w = out.mesh.weights[result.mesh.indices[t]];
+        const Mat4& m = rest[w.joints[0]];
+        const auto a = [&m](int r, int c) { return m.at(r, c); };
+        const float det = a(0, 0) * (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1)) -
+                          a(0, 1) * (a(1, 0) * a(2, 2) - a(1, 2) * a(2, 0)) +
+                          a(0, 2) * (a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0));
+        if (det < 0.0f) std::swap(result.mesh.indices[t + 1], result.mesh.indices[t + 2]);
+    }
+    return true;
+}
 
 ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, bool allow_files) {
     ImportResult result;
@@ -427,26 +876,48 @@ ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, boo
         result.warnings.emplace_back(
             "materials and textures are not imported yet; set the entity's material instead");
     }
-    Importer importer(result);
-    // cgltf_validate rejects cycles; the visit count bounds a bad file anyway.
-    usize visits = 0;
+    // The nodes shown, in order. cgltf_validate rejects cycles; the visit
+    // count bounds a bad file anyway.
+    std::vector<const cgltf_node*> shown;
     while (!stack.empty()) {
         const cgltf_node* node = stack.back();
         stack.pop_back();
-        if (++visits > data->nodes_count + 1) {
+        if (shown.size() > data->nodes_count) {
             result.error = "the node hierarchy has a cycle";
             return result;
         }
-        if (!importer.node(node)) {
-            result.mesh = {};
-            return result;
-        }
+        shown.push_back(node);
         for (cgltf_size i = node->children_count; i > 0; --i) {
             stack.push_back(node->children[i - 1]);
         }
     }
+    const cgltf_skin* skin = nullptr;
+    for (const cgltf_node* node : shown) {
+        if (node->mesh == nullptr || node->skin == nullptr) continue;
+        if (skin != nullptr && node->skin != skin) {
+            result.error = "the file has more than one skin; export one character per file";
+            return result;
+        }
+        skin = node->skin;
+    }
+    Importer importer(result);
+    if (skin != nullptr) {
+        if (!import_skinned(*data, *skin, shown, importer, result)) {
+            result.mesh = {};
+            result.skinned.reset();
+            return result;
+        }
+    } else {
+        for (const cgltf_node* node : shown) {
+            if (!importer.node(node)) {
+                result.mesh = {};
+                return result;
+            }
+        }
+    }
     if (result.mesh.indices.empty()) {
         result.error = "the file has no triangles";
+        result.skinned.reset();
     }
     return result;
 }

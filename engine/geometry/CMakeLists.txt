@@ -3,7 +3,7 @@ giant_module(geometry
     src/clusters.cpp
     src/gltf.cpp
     src/shapes.cpp
-  DEPENDS core
+  DEPENDS core anim
 )
 # Third-party code stays private: the geometry API is plain C++ types.
 target_link_libraries(giant_geometry PRIVATE third_party::meshoptimizer third_party::cgltf)

@@ -178,6 +178,150 @@ u32 cut_triangles(const ClusterMesh& mesh, const std::vector<u32>& cut) {
     return n;
 }
 
+// --- A skinned arm ----------------------------------------------------------
+//
+// Two joints (a shoulder at the origin, an elbow 1 m up), listed in the skin
+// elbow first. A strip of quads 0.2 m wide from y = 0 to 2: the bottom row on
+// the shoulder, the middle shared, the top on the elbow; its node is moved
+// 5 m (skinned meshes ignore that). A sword triangle hangs under the elbow,
+// not skinned. Clips: "bend" (the elbow a quarter turn about z over 1 s),
+// "hop" (the shoulder stepping 1 m along x at 0.5 s, and the mesh node moved:
+// not a joint, skipped), and a second "bend".
+struct SkinOptions {
+    u16 bad_joint = 0;          // a vertex's joint index, when not 0
+    u32 ibm_count = 2;
+    float second_key = 1.0f;    // bend's second key time
+    bool second_skin = false;   // another mesh node with a skin of its own
+    bool weights_1 = false;     // a second joint/weight set
+    u16 weights_1_joint = 0;    // its one weight, on the bottom-left vertex
+    float weights_1_value = 0.1f;
+    bool joints_normalized = false;
+    float weight_scale = 1.0f;
+    bool two_nodes = false;     // the arm's mesh shown twice
+    bool bogus_clip = false;    // a cubic clip claiming ~6e18 keys with no data
+    usize clip_copies = 0;      // more clips all named "a"
+    bool sparse_weights = false; // weights sparse over an interleaved view
+};
+
+std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
+    std::vector<u8> bin;
+    std::vector<std::string> views;
+    std::vector<std::string> accessors;
+    const auto add = [&](const auto& values, const std::string& accessor) {
+        const usize at = bin.size();
+        append(bin, values);
+        views.push_back(R"({"buffer":0,"byteOffset":)" + std::to_string(at) + R"(,"byteLength":)" +
+                        std::to_string(bin.size() - at) + "}");
+        accessors.push_back(R"({"bufferView":)" + std::to_string(views.size() - 1) + "," + accessor + "}");
+        return accessors.size() - 1;
+    };
+    std::vector<float> positions;
+    for (int r = 0; r < 3; ++r) positions.insert(positions.end(), {-0.1f, float(r), 0.0f, 0.1f, float(r), 0.0f});
+    std::vector<float> normals;
+    for (int i = 0; i < 6; ++i) normals.insert(normals.end(), {0.0f, 0.0f, 1.0f});
+    // Skin indices: 0 the elbow, 1 the shoulder.
+    std::vector<u16> joints{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    if (o.bad_joint != 0) joints[0] = o.bad_joint;
+    std::vector<float> weights{1, 0, 0, 0, 1, 0, 0, 0, 0.5f, 0.5f, 0, 0, 0.5f, 0.5f, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+    for (float& w : weights) w *= o.weight_scale;
+    const usize pos = add(positions, R"("componentType":5126,"count":6,"type":"VEC3","min":[-0.1,0,0],"max":[0.1,2,0])");
+    const usize nrm = add(normals, R"("componentType":5126,"count":6,"type":"VEC3")");
+    const usize jnt = add(joints, std::string(R"("componentType":5123,"count":6,"type":"VEC4")") +
+                                      (o.joints_normalized ? R"(,"normalized":true)" : ""));
+    usize wgt = add(weights, R"("componentType":5126,"count":6,"type":"VEC4")");
+    if (o.sparse_weights) {
+        // A base view of 6 weights with a 32-byte stride (twice what it
+        // holds) and one sparse value on top: cgltf would read the sparse
+        // value with the stride, past its view.
+        std::vector<float> base(6 * 8, 0.0f);
+        const usize at = bin.size();
+        append(bin, base);
+        views.push_back(R"({"buffer":0,"byteOffset":)" + std::to_string(at) + R"(,"byteLength":)" +
+                        std::to_string(bin.size() - at) + R"(,"byteStride":32})");
+        const usize base_view = views.size() - 1;
+        const usize ia = bin.size();
+        append(bin, std::vector<u32>{0});
+        views.push_back(R"({"buffer":0,"byteOffset":)" + std::to_string(ia) + R"(,"byteLength":4})");
+        const usize index_view = views.size() - 1;
+        const usize va = bin.size();
+        append(bin, std::vector<float>{1, 0, 0, 0});
+        views.push_back(R"({"buffer":0,"byteOffset":)" + std::to_string(va) + R"(,"byteLength":16})");
+        const usize value_view = views.size() - 1;
+        accessors.push_back(R"({"bufferView":)" + std::to_string(base_view) +
+                            R"(,"componentType":5126,"count":6,"type":"VEC4","sparse":{"count":1,"indices":{"bufferView":)" +
+                            std::to_string(index_view) + R"(,"componentType":5125},"values":{"bufferView":)" +
+                            std::to_string(value_view) + "}}}");
+        wgt = accessors.size() - 1;
+    }
+    const usize idx = add(std::vector<u32>{0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4}, R"("componentType":5125,"count":12,"type":"SCALAR")");
+    std::vector<float> ibm{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1, // elbow: 1 m down
+                           1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    ibm.resize(16 * o.ibm_count);
+    const usize inv = add(ibm, R"("componentType":5126,"count":)" + std::to_string(o.ibm_count) + R"(,"type":"MAT4")");
+    const float s = std::sqrt(0.5f);
+    const usize bt = add(std::vector<float>{0.0f, o.second_key}, R"("componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1])");
+    const usize br = add(std::vector<float>{0, 0, 0, 1, 0, 0, s, s}, R"("componentType":5126,"count":2,"type":"VEC4")");
+    const usize ht = add(std::vector<float>{0.0f, 0.5f}, R"("componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[0.5])");
+    const usize hv = add(std::vector<float>{0, 0, 0, 1, 0, 0}, R"("componentType":5126,"count":2,"type":"VEC3")");
+    const usize sp = add(std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0}, R"("componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0])");
+    const usize si = add(std::vector<u32>{0, 1, 2}, R"("componentType":5125,"count":3,"type":"SCALAR")");
+    std::string extra_weights;
+    if (o.weights_1) {
+        // A second set: a little of the elbow (skin index 0) on the bottom-left vertex.
+        std::vector<u16> j1(24, 0);
+        std::vector<float> w1(24, 0.0f);
+        j1[0] = o.weights_1_joint;
+        w1[0] = o.weights_1_value;
+        const usize j1a = add(j1, R"("componentType":5123,"count":6,"type":"VEC4")");
+        const usize w1a = add(w1, R"("componentType":5126,"count":6,"type":"VEC4")");
+        extra_weights = R"(,"JOINTS_1":)" + std::to_string(j1a) + R"(,"WEIGHTS_1":)" + std::to_string(w1a);
+    }
+    const auto n = [](usize i) { return std::to_string(i); };
+    std::string more_clips;
+    if (o.bogus_clip) {
+        accessors.push_back(R"({"componentType":5126,"count":6148914691236517206,"type":"SCALAR"})");
+        accessors.push_back(R"({"componentType":5126,"count":2,"type":"VEC3"})");
+        more_clips += R"(,{"name":"bogus","samplers":[{"input":)" + n(accessors.size() - 2) + R"(,"output":)" +
+                      n(accessors.size() - 1) +
+                      R"(,"interpolation":"CUBICSPLINE"}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]})";
+    }
+    for (usize i = 0; i < o.clip_copies; ++i) {
+        more_clips += R"(,{"name":"a","samplers":[{"input":)" + n(bt) + R"(,"output":)" + n(br) +
+                      R"(}],"channels":[{"sampler":0,"target":{"node":1,"path":"rotation"}}]})";
+    }
+    std::string json = R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,2)" +
+                       std::string(o.second_skin || o.two_nodes ? ",4" : "") + R"(]}],"nodes":[)" +
+                       R"({"name":"shoulder","children":[1]},)" +
+                       R"({"name":"elbow","translation":[0,1,0],"children":[3]},)" +
+                       R"({"name":"body","mesh":0,"skin":0,"translation":[5,0,0]},)" +
+                       R"({"name":"sword","mesh":1,"translation":[0,0.5,0]})" +
+                       std::string(o.second_skin ? R"(,{"mesh":0,"skin":1})" : "") +
+                       std::string(o.two_nodes ? R"(,{"mesh":0,"skin":0,"translation":[9,0,0]})" : "") + "]," +
+                       R"("meshes":[{"primitives":[{"attributes":{"POSITION":)" + n(pos) + R"(,"NORMAL":)" + n(nrm) +
+                       R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" + n(wgt) + extra_weights + R"(},"indices":)" + n(idx) +
+                       R"(}]},{"primitives":[{"attributes":{"POSITION":)" + n(sp) + R"(},"indices":)" + n(si) + "}]}]," +
+                       R"("skins":[{"joints":[1,0],"inverseBindMatrices":)" + n(inv) + "}" +
+                       std::string(o.second_skin ? R"(,{"joints":[0]})" : "") + "]," +
+                       R"("animations":[)" +
+                       R"({"name":"bend","samplers":[{"input":)" + n(bt) + R"(,"output":)" + n(br) +
+                       R"(}],"channels":[{"sampler":0,"target":{"node":1,"path":"rotation"}}]},)" +
+                       R"({"name":"hop","samplers":[{"input":)" + n(ht) + R"(,"output":)" + n(hv) +
+                       R"(,"interpolation":"STEP"}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}},)" +
+                       R"({"sampler":0,"target":{"node":2,"path":"translation"}}]},)" +
+                       R"({"name":"bend","samplers":[{"input":)" + n(bt) + R"(,"output":)" + n(br) +
+                       R"(}],"channels":[{"sampler":0,"target":{"node":1,"path":"rotation"}}]})" + more_clips + "]," +
+                       R"("buffers":[{"byteLength":)" + n(bin.size()) + R"(}],"bufferViews":[)";
+    for (usize i = 0; i < views.size(); ++i) json += (i ? "," : "") + views[i];
+    json += R"(],"accessors":[)";
+    for (usize i = 0; i < accessors.size(); ++i) json += (i ? "," : "") + accessors[i];
+    json += "]}";
+    return make_glb(json, bin);
+}
+
+bool near3(const Vec3& a, const Vec3& b, float tolerance = 1e-4f) {
+    return std::fabs(a.x - b.x) <= tolerance && std::fabs(a.y - b.y) <= tolerance && std::fabs(a.z - b.z) <= tolerance;
+}
+
 } // namespace
 
 GIANT_TEST("geometry: built-in meshes face outwards with unit normals") {
@@ -432,6 +576,134 @@ GIANT_TEST("geometry: sparse data on an interleaved buffer is refused") {
         R"({"bufferView":0,"byteOffset":12,"componentType":5126,"count":3,"type":"VEC3"}]})";
     const ImportResult r = import_gltf_memory(make_glb(json, bin));
     GIANT_CHECK(!r.ok() && r.error.find("sparse") != std::string::npos);
+}
+
+GIANT_TEST("geometry: a skinned glTF imports its skeleton, weights, rigid parts and clips") {
+    const ImportResult r = import_gltf_memory(skinned_arm());
+    GIANT_CHECK(r.ok());
+    GIANT_CHECK(r.skinned.has_value());
+    if (!r.ok() || !r.skinned) return;
+    const SkinnedImport& s = *r.skinned;
+    // Parents first, whatever the skin's order.
+    GIANT_CHECK(s.skeleton.size() == 2 && s.skeleton.names[0] == "shoulder" && s.skeleton.names[1] == "elbow");
+    GIANT_CHECK(s.skeleton.parents == (std::vector<i32>{-1, 0}));
+    GIANT_CHECK(near3(s.skeleton.rest[1].translation, {0.0f, 1.0f, 0.0f}));
+    GIANT_CHECK(std::fabs(s.skeleton.inverse_bind[1].at(1, 3) + 1.0f) < 1e-6f);
+    // 6 arm vertices + 3 sword ones; the arm in bind space (its node's 5 m ignored).
+    GIANT_CHECK(s.mesh.mesh.vertices.size() == 9 && s.mesh.weights.size() == 9 && s.mesh.mesh.indices.size() == 15);
+    const auto find = [&s](const Vec3& p) {
+        for (usize v = 0; v < s.mesh.mesh.vertices.size(); ++v) {
+            if (near3(s.mesh.mesh.vertices[v].position, p)) return v;
+        }
+        return usize{99};
+    };
+    const usize bottom = find({-0.1f, 0.0f, 0.0f}), middle = find({-0.1f, 1.0f, 0.0f}), top = find({0.1f, 2.0f, 0.0f});
+    GIANT_CHECK(bottom < 9 && middle < 9 && top < 9);
+    if (bottom >= 9 || middle >= 9 || top >= 9) return;
+    // Weights: the bottom row on the shoulder, the middle split, the top on the elbow.
+    GIANT_CHECK(s.mesh.weights[bottom] == (SkinWeights{{0, 0, 0, 0}, {255, 0, 0, 0}}));
+    GIANT_CHECK(s.mesh.weights[middle].weights[0] + s.mesh.weights[middle].weights[1] == 255);
+    GIANT_CHECK(s.mesh.weights[middle].joints[0] != s.mesh.weights[middle].joints[1]);
+    GIANT_CHECK(s.mesh.weights[top] == (SkinWeights{{1, 0, 0, 0}, {255, 0, 0, 0}}));
+    // The sword: all on the elbow, bound where it hangs (1.5 m up).
+    const usize hilt = find({0.0f, 1.5f, 0.0f}), tip = find({1.0f, 1.5f, 0.0f});
+    GIANT_CHECK(hilt < 9 && tip < 9);
+    if (hilt >= 9 || tip >= 9) return;
+    GIANT_CHECK(s.mesh.weights[hilt] == (SkinWeights{{1, 0, 0, 0}, {255, 0, 0, 0}}));
+    // At rest (bound as it stands): the same places.
+    GIANT_CHECK(r.mesh.vertices.size() == 9);
+    for (usize v = 0; v < 9; ++v) GIANT_CHECK(near3(r.mesh.vertices[v].position, s.mesh.mesh.vertices[v].position));
+    // Clips: names made unique; the mesh node's channel skipped with a warning.
+    GIANT_CHECK(s.clips.size() == 3 && s.clips[0].name == "bend" && s.clips[1].name == "hop" &&
+                s.clips[2].name == "bend (2)");
+    GIANT_CHECK(s.clips[1].channels.size() == 1 && s.clips[1].channels[0].interpolation == anim::Interpolation::step);
+    GIANT_CHECK(std::fabs(s.clips[0].duration - 1.0f) < 1e-6f && std::fabs(s.clips[1].duration - 0.5f) < 1e-6f);
+    GIANT_CHECK(std::any_of(r.warnings.begin(), r.warnings.end(),
+                            [](const std::string& w) { return w.find("not joints") != std::string::npos; }));
+    // Joint reach: the shoulder's farthest vertex is the middle row's, the elbow's the sword's tip.
+    GIANT_CHECK(std::fabs(s.joint_radius[0] - std::sqrt(1.01f)) < 1e-4f);
+    GIANT_CHECK(std::fabs(s.joint_radius[1] - 1.5f) < 1e-4f);
+    // Bent a quarter at the elbow: the arm's top right corner and the sword's tip swing round it.
+    std::vector<anim::JointTransform> local(2);
+    std::vector<Mat4> model(2), skin(2);
+    anim::sample(s.skeleton, s.clips[0], 1.0f, local);
+    anim::model_matrices(s.skeleton, local, model);
+    anim::skin_matrices(s.skeleton, model, skin);
+    const auto at = [&](usize v) {
+        return anim::skin_point(skin, s.mesh.weights[v].joints, s.mesh.weights[v].weights, s.mesh.mesh.vertices[v].position);
+    };
+    GIANT_CHECK(near3(at(top), {-1.0f, 1.1f, 0.0f}));
+    GIANT_CHECK(near3(at(bottom), {-0.1f, 0.0f, 0.0f})); // the shoulder's rows stay
+    GIANT_CHECK(near3(at(tip), {-0.5f, 2.0f, 0.0f}));    // the sword's (1, 1.5) corner
+}
+
+GIANT_TEST("geometry: a skinned mesh shown by two nodes is read once") {
+    SkinOptions o;
+    o.two_nodes = true;
+    const ImportResult r = import_gltf_memory(skinned_arm(o));
+    // Bind space ignores the node, so a second copy would lie on the first.
+    GIANT_CHECK(r.ok() && r.skinned && r.skinned->mesh.mesh.vertices.size() == 9 && r.mesh.indices.size() == 15);
+}
+
+GIANT_TEST("geometry: bad skins are refused; extra weights are cut to four") {
+    SkinOptions o;
+    o.bad_joint = 7;
+    ImportResult r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("joint") != std::string::npos && !r.skinned && r.mesh.vertices.empty());
+    o = {};
+    o.ibm_count = 1;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("inverse bind") != std::string::npos);
+    o = {};
+    o.second_key = 0.0f; // keys not increasing
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("increasing") != std::string::npos);
+    o = {};
+    o.second_skin = true;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("more than one skin") != std::string::npos);
+    o = {};
+    o.weights_1 = true;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned.has_value());
+    if (r.skinned) {
+        // The bottom-left vertex: 1 on the shoulder and 0.1 on the elbow, in 255ths.
+        for (usize v = 0; v < r.skinned->mesh.mesh.vertices.size(); ++v) {
+            if (near3(r.skinned->mesh.mesh.vertices[v].position, {-0.1f, 0.0f, 0.0f})) {
+                GIANT_CHECK(r.skinned->mesh.weights[v] == (SkinWeights{{0, 1, 0, 0}, {232, 23, 0, 0}}));
+            }
+        }
+    }
+    // Unskinned files are as before.
+    GIANT_CHECK(!import_triangle(true).skinned.has_value());
+    // Files that would read past their data, claim huge counts, or misuse types.
+    o = {};
+    o.sparse_weights = true;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("sparse") != std::string::npos);
+    o = {};
+    o.bogus_clip = true;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("bogus") != std::string::npos);
+    o = {};
+    o.joints_normalized = true;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("joint indices") != std::string::npos);
+    o = {};
+    o.weight_scale = 3e38f; // the bottom-left vertex's shoulder weight, twice over: too large to add
+    o.weights_1 = true;
+    o.weights_1_joint = 1;
+    o.weights_1_value = 3e38f;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("too large") != std::string::npos);
+    // Many clips of one name: unique names, quickly; too many: refused.
+    o = {};
+    o.clip_copies = 1500;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned && r.skinned->clips.size() == 1503 && r.skinned->clips.back().name == "a (1500)");
+    o.clip_copies = 4100;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(!r.ok() && r.error.find("4096") != std::string::npos);
 }
 
 GIANT_TEST("geometry: clusters cover the mesh and stay within limits") {
