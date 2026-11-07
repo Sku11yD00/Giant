@@ -14,7 +14,11 @@
 // a ball (an ellipsoid when scaled unevenly), a plane a slab whose top is
 // the plane, a kit one compound of its cube, sphere and plane pieces. Meshes
 // and decals do not collide yet. A kit entity is fixed whatever its body
-// says (a house breaks, rather than falls over, from N4 part 4).
+// says: a house breaks rather than falls over. A breakable kit's pieces
+// (world::Kit::breakable) come loose when struck hard enough (a contact,
+// or impact()), and so do the pieces no longer standing on the ground
+// through pieces they touch; loose pieces fall as bodies of their own,
+// drawn where they are (piece_poses), until reset_poses puts them back.
 //
 // A sync does a bounded amount of work (rule 9): at most
 // `entities_per_sync` entities are looked at and `tiles_per_sync` ground
@@ -54,6 +58,14 @@ struct ScenePhysicsStats {
     u32 waiting = 0;        // entities waiting to be looked at
     u32 tiles_waiting = 0;  // ground tiles waiting to be copied out or for their shape
     u32 posed = 0;          // dynamic entities drawn where the simulation moved them
+    u32 broken_kits = 0;    // breakable kit placements with pieces loose
+    u32 loose_pieces = 0;   // their pieces falling (or fallen) as bodies of their own
+};
+
+// A breakable kit's piece, come loose: where it is (its world transform).
+struct PiecePose {
+    u32 piece = 0; // its index in the kit
+    world::Transform at;
 };
 
 class ScenePhysics {
@@ -86,8 +98,17 @@ public:
     // simulation stopping).
     void reset_poses();
     // The entities whose pose changed or went since the last call (to draw
-    // again), each once.
+    // again), each once (a kit whose pieces moved among them).
     std::vector<world::EntityId> take_redraw();
+
+    // Breakable kits' loose pieces, by placement, in piece order; the rest
+    // of a kit's pieces are where the scene puts them.
+    const std::unordered_map<world::EntityId, std::vector<PiecePose>>& piece_poses() const { return m_piece_poses; }
+    // A blow at `point`: the breakable kits' pieces within `radius` metres
+    // take `impulse` (N s; less toward the edge) pushing them away, and
+    // those it is enough for come loose. Returns how many came loose
+    // (with what they held up). A giantess's footstep, an explosion.
+    usize impact(const DVec3& point, float radius, float impulse);
 
     // Where the scene had the entity when its body was last brought in line
     // (null: not tracked). A pose is stale while the scene's transform differs.
@@ -104,11 +125,13 @@ public:
     void clear();
 
 private:
+    struct Broken; // a breakable kit placement with pieces loose
     struct Tracked {
-        BodyId body = k_no_body;
+        BodyId body = k_no_body; // a broken kit's: the pieces still standing (k_no_body: none)
         world::Entity look; // what the body was made from, where the scene put it
         bool dynamic = false;
         bool remake = false; // its kit changed: made again whatever else
+        std::shared_ptr<Broken> broken;
     };
     struct Build; // a tile's shape being made
     struct Tile {
@@ -129,8 +152,15 @@ private:
     void sync_entities(const world::Scene& scene, u32 budget);
     void sync_tiles(world::Terrain& terrain, u32 budget);
     void finish_tiles(bool wait);
-    BodyDesc entity_body(const world::Scene& scene, const world::Entity& e) const;
     void drop_pose(world::EntityId id);
+    const world::Kit* find_kit(const std::string& name) const;
+    BodyDesc entity_body(const world::Kit* kit, const world::Entity& e) const;
+    // A broken kit's bodies gone (into `gone`), its pieces drawn whole again.
+    void mend(world::EntityId id, Tracked& t, std::vector<BodyId>& gone);
+    // Pieces of a breakable kit come loose (with what they held up), each
+    // pushed by its `pushes` entry (m/s). Returns how many came loose.
+    usize loosen(world::EntityId id, Tracked& t, const std::vector<std::pair<u32, Vec3>>& pushes);
+    void break_from_hits();
 
     PhysicsWorld& m_physics;
     ScenePhysicsSettings m_settings;
@@ -140,6 +170,13 @@ private:
     std::unordered_map<BodyId, world::EntityId> m_by_body;
     std::unordered_map<world::EntityId, world::Transform> m_poses;
     std::vector<world::EntityId> m_redraw;
+    std::unordered_map<world::EntityId, std::vector<PiecePose>> m_piece_poses;
+    struct PieceOf {
+        world::EntityId entity = 0;
+        u32 piece = 0;
+    };
+    std::unordered_map<BodyId, PieceOf> m_piece_bodies; // loose pieces' bodies
+    std::unordered_set<world::EntityId> m_broken;       // placements with pieces loose
     // Entities to look at: those changed (queued once), then the scene's in
     // turn after an "all"; new dynamic ones go to their own queue to wait
     // for what they could land on.

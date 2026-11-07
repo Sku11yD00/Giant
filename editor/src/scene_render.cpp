@@ -255,8 +255,19 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
         if (kit == nullptr) {
             continue;
         }
-        for (const world::KitPiece& p : kit->pieces) {
-            emit(p.shape, p.mesh, place(at, p.transform), p.material, p.decal, renderer, meshes, out, cell);
+        // Loose pieces (breaking) where they fell; the rest where they stand.
+        const std::vector<sim::PiecePose>* loose = nullptr;
+        if (out.piece_poses != nullptr) {
+            const auto l = out.piece_poses->find(id);
+            if (l != out.piece_poses->end()) loose = &l->second;
+        }
+        usize next = 0;
+        for (u32 i = 0; i < kit->pieces.size(); ++i) {
+            const world::KitPiece& p = kit->pieces[i];
+            while (loose != nullptr && next < loose->size() && (*loose)[next].piece < i) ++next;
+            const bool fell = loose != nullptr && next < loose->size() && (*loose)[next].piece == i;
+            emit(p.shape, p.mesh, fell ? (*loose)[next].at : place(at, p.transform), p.material, p.decal, renderer,
+                 meshes, out, cell);
         }
     }
     cell.scattered = false;
@@ -486,9 +497,11 @@ world::Transform place(const world::Transform& parent, const world::Transform& c
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain, FarGround* far, ScatterPlacer* scatter,
                  const std::unordered_map<world::EntityId, world::Transform>* poses,
-                 std::span<const world::EntityId> redraw) {
+                 std::span<const world::EntityId> redraw,
+                 const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses) {
     out.cells_rebuilt = 0;
     out.poses = poses;
+    out.piece_poses = piece_poses;
     world::SceneChanges changes = scene.take_changes();
     if (!out.for_followers.all) {
         if (changes.all || out.for_followers.ids.size() + changes.ids.size() > (usize{1} << 20)) {
@@ -640,6 +653,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         });
     }
     out.poses = nullptr; // the cells are built
+    out.piece_poses = nullptr;
     if (!layout && out.cells_rebuilt == 0) {
         return; // as last frame
     }

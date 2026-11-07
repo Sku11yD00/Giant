@@ -228,6 +228,12 @@ Milestone **N4, first playable slice** (in progress; gate: a growing giantess wr
   up steps, stops at walls, slides off slopes too steep, rides what it
   stands on and pushes crates; stopping gives the camera back. Over MCP,
   `set_player_input`, `step_player` and `get_player` drive and read it.
+- Part 4: breakable buildings. A kit marked breakable (`set_kit_breakable`)
+  breaks where it is hit hard enough: the piece struck comes loose, and so
+  does everything that stood only on it, so a wall knocked out drops the
+  roof it held. A heavy ball, a falling crate or `impact` over MCP (a blow
+  at a point, as a giant's foot will strike) does it; stopping simulating
+  puts every building back whole, and the scene is never changed.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

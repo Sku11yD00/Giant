@@ -87,6 +87,9 @@ struct BodyDesc {
     Vec3 angular_velocity{}; // radians a second
     // The game's own tag (an entity id): handed back by queries.
     u64 user = 0;
+    // Contacts name the part hit exactly (hits(): a building's pieces),
+    // at the cost of a little more contact work.
+    bool report_parts = false;
 };
 
 // A body's handle. 0 is none; a removed body's id is not reused at once
@@ -110,6 +113,20 @@ struct RayHit {
     double distance = 0.0;
 };
 
+// Something struck something (a contact begun this step, hard enough):
+// what breaks buildings. `normal` points from a to b; `impulse` (N s) is
+// about how much the blow would take to stop (the closing speed times the
+// pair's reduced mass).
+struct ContactHit {
+    BodyId a = 0;
+    BodyId b = 0;
+    u32 part_a = 0; // which of a compound's parts (0 for one shape)
+    u32 part_b = 0;
+    float impulse = 0.0f;
+    DVec3 point{};
+    Vec3 normal{};
+};
+
 struct PhysicsSettings {
     u32 max_bodies = 1u << 18;
     u32 max_body_pairs = 1u << 18;
@@ -118,6 +135,8 @@ struct PhysicsSettings {
     // so a long frame slows the world down rather than freezing the game).
     u32 max_steps_per_call = 4;
     Vec3 gravity{0.0f, -9.81f, 0.0f};
+    // Hits under this (N s) are not reported (resting, rolling, a nudge).
+    float min_hit_impulse = 50.0f;
 };
 
 struct PhysicsStats {
@@ -238,6 +257,9 @@ public:
     // Bodies that moved in the last step() call (dynamic and kinematic ones
     // awake in any of its fixed steps, characters' bodies too), in id order.
     const std::vector<BodyId>& moved() const { return m_moved; }
+    // Contacts begun in the last step() call at least min_hit_impulse
+    // hard, in a fixed order.
+    const std::vector<ContactHit>& hits() const { return m_hits; }
     // How far time is into the next fixed step (0 to 1): the share of the
     // way from where things were to where they are to draw them at.
     double step_fraction() const;
@@ -272,6 +294,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     std::vector<BodyId> m_moved;
+    std::vector<ContactHit> m_hits;
     // Cleared worlds being let go, each on a thread of its own (joined once
     // done, or when this world goes).
     struct Disposal;
