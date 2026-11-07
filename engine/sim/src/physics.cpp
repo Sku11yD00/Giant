@@ -579,10 +579,11 @@ struct PhysicsWorld::Impl {
 
     // A ray for a character's own looks (a wall, a ledge): what it meets
     // first but the character's own body (and other characters').
+    // (Plain types, not Jolt's SIMD ones: no alignment padding.)
     struct Hit {
         float distance = 0.0f;
-        JPH::RVec3 point;
-        JPH::Vec3 normal;
+        DVec3 point{};
+        Vec3 normal{};
         JPH::BodyID body;
         bool dynamic = false; // pushed about: nothing to hold on to
     };
@@ -597,11 +598,12 @@ struct PhysicsWorld::Impl {
         if (!system.GetNarrowPhaseQuery().CastRay(ray, result, {}, {}, filter)) return std::nullopt;
         Hit hit;
         hit.distance = result.mFraction * length;
-        hit.point = ray.GetPointOnRay(result.mFraction);
+        const JPH::RVec3 point = ray.GetPointOnRay(result.mFraction);
+        hit.point = from_jolt_r(point);
         hit.body = result.mBodyID;
         const JPH::BodyLockRead lock(system.GetBodyLockInterface(), result.mBodyID);
         if (!lock.Succeeded()) return std::nullopt;
-        hit.normal = lock.GetBody().GetWorldSpaceSurfaceNormal(result.mSubShapeID2, hit.point);
+        hit.normal = from_jolt(lock.GetBody().GetWorldSpaceSurfaceNormal(result.mSubShapeID2, point));
         hit.dynamic = lock.GetBody().IsDynamic();
         return hit;
     }
@@ -696,8 +698,8 @@ struct PhysicsWorld::Impl {
             const JPH::Vec3 dir = want.Normalized();
             const std::optional<Hit> wall = look(chest, dir, r + 0.35f);
             if (!wall || wall->dynamic) return false; // (a crate walked into is pushed)
-            JPH::Vec3 flat(wall->normal.GetX(), 0.0f, wall->normal.GetZ());
-            if (std::fabs(wall->normal.GetY()) >= steep || flat.LengthSq() < 1e-4f) return false;
+            JPH::Vec3 flat(wall->normal.x, 0.0f, wall->normal.z);
+            if (std::fabs(wall->normal.y) >= steep || flat.LengthSq() < 1e-4f) return false;
             flat = flat.Normalized();
             if (flat.Dot(dir) > -0.5f) return false; // along it, not into it
             c.climbing = true;
@@ -734,8 +736,8 @@ struct PhysicsWorld::Impl {
         if (wall && !wall->dynamic && climb > 0.0f && !look(feet + up * (h + 0.05f), -n, r + 0.6f)) {
             const JPH::RVec3 above = feet + up * (h + 0.6f) - n * (r + 0.4f);
             const std::optional<Hit> ledge = look(above, -up, h + 0.6f);
-            if (ledge && ledge->normal.GetY() >= steep && ledge->point.GetY() > feet.GetY() + 0.3f) {
-                const JPH::RVec3 to = ledge->point + up * 0.02f;
+            if (ledge && ledge->normal.y >= steep && ledge->point.y > feet.GetY() + 0.3) {
+                const JPH::RVec3 to = to_jolt(ledge->point) + up * 0.02f;
                 // Room on the way: risen beside the wall, halfway over, and there.
                 const JPH::RVec3 risen(feet.GetX(), to.GetY(), feet.GetZ());
                 if (clear_at(c, risen) && clear_at(c, (risen + to) * 0.5) && clear_at(c, to)) {
@@ -757,13 +759,13 @@ struct PhysicsWorld::Impl {
                 }
             }
         }
-        if (!wall || wall->dynamic || std::fabs(wall->normal.GetY()) >= steep) {
+        if (!wall || wall->dynamic || std::fabs(wall->normal.y) >= steep) {
             // Nothing to hold: past an edge, onto ground it can walk, or what
             // it held came loose (a wall knocked down).
             c.climbing = false;
             return false;
         }
-        JPH::Vec3 flat(wall->normal.GetX(), 0.0f, wall->normal.GetZ());
+        JPH::Vec3 flat(wall->normal.x, 0.0f, wall->normal.z);
         if (flat.LengthSq() > 1e-4f) c.wall_normal = from_jolt(flat.Normalized());
         c.wall = wall->body;
         // Down on the ground, climbing down: lets go.
@@ -774,7 +776,7 @@ struct PhysicsWorld::Impl {
         // Kept just off the wall, moving with it.
         const float gap = wall->distance - r;
         const JPH::Vec3 hold = -n * std::clamp((gap - 0.05f) * 10.0f, -1.0f, 3.0f);
-        JPH::Vec3 out = up * climb + across * side + hold + surface_velocity(wall->body, wall->point);
+        JPH::Vec3 out = up * climb + across * side + hold + surface_velocity(wall->body, to_jolt(wall->point));
         const float fast = out.Length();
         if (!(fast <= k_max_character_speed)) out = fast > 0.0f ? out * (k_max_character_speed / fast) : JPH::Vec3::sZero();
         cv.SetLinearVelocity(out);
