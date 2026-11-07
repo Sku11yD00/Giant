@@ -629,10 +629,14 @@ it moves smoothly at 144 Hz as at 60, and eased up steps; the window's
 relative mouse mode gives the look, and the panels get no mouse and only
 key releases meanwhile. Starting never flushes the bodies (a stall in a
 world just opened): it queues a frame's share and holds the player at the
-camera until nothing waits (`ScenePhysics::busy`, five seconds at most),
+camera until no entity waits and the ground under it is in
+(`ScenePhysics::entities_waiting`, `ground_waiting`; five seconds at most),
 then stands it on what is under the camera. It also holds it
 (`hold_character`) while the ground tile under it is still being made
 (`ScenePhysics::ground_waiting`), so streaming in never drops it through.
+Only the camera is drawn between steps: bodies are drawn where the last
+step left them, so a platform it rides can lag the view by up to a step
+(16 ms) until poses are blended too.
 Like simulating it is view state: stopping removes the character and puts
 the camera and simulating back as they were.
 

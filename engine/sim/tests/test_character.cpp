@@ -308,6 +308,17 @@ GIANT_TEST("character: walks with a crate on its head; its body is its own; huge
     physics.clear();
     run(physics, 20.0);
     GIANT_CHECK(state(physics, player).velocity.y >= -100.01f);
+    // Held: it stays put; a jump pressed then is gone by the time it is let go.
+    physics.add(ground());
+    physics.set_character_position(player, {0.0, 0.0, 0.0});
+    run(physics, 0.3);
+    physics.hold_character(player, true);
+    physics.jump(player, 5.0f);
+    run(physics, 1.0);
+    GIANT_CHECK(state(physics, player).held && std::fabs(state(physics, player).position.y) < 0.03);
+    physics.hold_character(player, false);
+    run(physics, 0.5);
+    GIANT_CHECK(state(physics, player).position.y < 0.03);
     // A step as high as itself: refused.
     desc.step_height = 1.0f;
     GIANT_CHECK(physics.add_character(desc) == k_no_character);

@@ -164,7 +164,7 @@ struct CharacterState {
     // Where it was before the last fixed step: draw it at
     // lerp(previous, position, step_fraction()) so it moves smoothly at any frame rate.
     DVec3 previous{};
-    bool held = false;
+    bool held = false; // see hold_character
     Vec3 velocity{};
     bool on_ground = false; // stands on ground it can walk on
     bool on_steep = false;  // on a slope too steep: sliding
@@ -255,7 +255,7 @@ public:
     // Puts it somewhere at once, still.
     void set_character_position(CharacterId id, const DVec3& position);
     // Held: left where it is by the steps (the ground under it on its way),
-    // keeping its speed and a jump asked for until let go.
+    // keeping its speed (a jump asked for still lasts a fifth of a second).
     void hold_character(CharacterId id, bool held);
     std::optional<CharacterState> character_state(CharacterId id) const;
     // The body standing for the character (raycasts hit it; falling things

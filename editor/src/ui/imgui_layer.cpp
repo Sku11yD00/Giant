@@ -164,8 +164,10 @@ void ImGuiLayer::begin_frame(float delta_seconds, const std::vector<InputEvent>&
     }
     for (const InputEvent& e : input) {
         // Captured: no hover or clicks from the hidden cursor, no keys
-        // pressed (a release still lets go of one held before).
-        if (m_captured && e.type != InputEvent::Type::focus && !(e.type == InputEvent::Type::key && !e.down)) {
+        // pressed (a release, of a key or a button, still lets go of one
+        // held before).
+        const bool release = (e.type == InputEvent::Type::key || e.type == InputEvent::Type::mouse_button) && !e.down;
+        if (m_captured && e.type != InputEvent::Type::focus && !release) {
             continue;
         }
         switch (e.type) {

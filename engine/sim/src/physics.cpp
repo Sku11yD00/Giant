@@ -737,7 +737,12 @@ u32 PhysicsWorld::step(double seconds) {
         m_impl->carried -= k_step_seconds;
         for (auto& [id, c] : m_impl->characters) {
             c.previous = c.body->GetPosition();
-            if (!c.held) m_impl->step_character(c, static_cast<float>(k_step_seconds));
+            if (!c.held) {
+                m_impl->step_character(c, static_cast<float>(k_step_seconds));
+            } else {
+                // A jump pressed while held still lasts only its fifth of a second.
+                c.jump_wait = std::max(0.0f, c.jump_wait - static_cast<float>(k_step_seconds));
+            }
         }
         const JPH::EPhysicsUpdateError error =
             m_impl->system.Update(static_cast<float>(k_step_seconds), 1, &m_impl->temp, &m_impl->jobs);

@@ -80,6 +80,8 @@ private:
     void apply_input();
     // On what is under `eye` (within a kilometre), else hanging from it.
     DVec3 spawn_at(const DVec3& eye) const;
+    // Starting waits for this: entities to make, or the ground under `eye`.
+    bool placing_waits(const world::Scene& scene, const DVec3& eye) const;
 
     PhysicsState& m_physics;
     PlayerSettings m_settings;

@@ -264,9 +264,8 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
     return cost;
 }
 
-bool ScenePhysics::busy() const {
-    return !m_queue.empty() || !m_dynamic_queue.empty() || m_scan_at < m_scan.size() || !m_tile_queued.empty() ||
-           !m_building.empty();
+bool ScenePhysics::entities_waiting() const {
+    return !m_queue.empty() || !m_dynamic_queue.empty() || m_scan_at < m_scan.size();
 }
 
 bool ScenePhysics::ground_waiting(const world::Terrain& terrain, const DVec3& at) const {

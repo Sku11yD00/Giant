@@ -24,6 +24,10 @@ DVec3 PlayState::spawn_at(const DVec3& eye) const {
     return hit ? hit->point + DVec3(0.0, 0.02, 0.0) : eye - DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0);
 }
 
+bool PlayState::placing_waits(const world::Scene& scene, const DVec3& eye) const {
+    return m_physics.bodies().entities_waiting() || m_physics.bodies().ground_waiting(scene.terrain, eye);
+}
+
 bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_generation) {
     if (playing()) return true;
     m_physics.catch_up(scene); // a frame's share: never a stall
@@ -39,7 +43,7 @@ bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_gener
     m_keys = {};
     m_shift = m_space = m_stop = m_from_keys = false;
     m_waiting = false;
-    m_placing = m_physics.bodies().busy();
+    m_placing = placing_waits(scene, camera.position);
     m_placing_for = 0.0;
     m_physics.world().hold_character(m_player, m_placing);
     m_yaw = camera.yaw_degrees;
@@ -147,7 +151,7 @@ bool PlayState::before_step(const world::Scene& scene, EditorCamera& camera, u64
     if (m_placing) {
         // Just started: held until what it could stand on is in, then put on it.
         m_placing_for += std::max(seconds, 0.0);
-        if (m_physics.bodies().busy() && m_placing_for < 5.0) return true;
+        if (placing_waits(scene, m_saved_camera.position) && m_placing_for < 5.0) return true;
         m_placing = false;
         const DVec3 at = spawn_at(m_saved_camera.position);
         world.set_character_position(m_player, at);

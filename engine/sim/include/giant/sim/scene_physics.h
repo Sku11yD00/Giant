@@ -98,9 +98,8 @@ public:
     // True while ground near `at` (its tile and those round it) is still on
     // its way: what walks or falls there would go through.
     bool ground_waiting(const world::Terrain& terrain, const DVec3& at) const;
-    // True while anything is still waiting: entities to look at, ground
-    // tiles to copy out or whose shape is being made.
-    bool busy() const;
+    // True while entities are still waiting to be looked at (bodies to make).
+    bool entities_waiting() const;
     // Lets every body go (the physics world is left empty of the scene's).
     void clear();
 
