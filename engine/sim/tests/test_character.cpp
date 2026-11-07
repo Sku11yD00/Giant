@@ -323,3 +323,244 @@ GIANT_TEST("character: walks with a crate on its head; its body is its own; huge
     desc.step_height = 1.0f;
     GIANT_CHECK(physics.add_character(desc) == k_no_character);
 }
+
+GIANT_TEST("character: climbs a wall walked into, pulls itself up onto its top; not when told not to") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground());
+    // A 4 m block (top y = 4) from x = 2 to x = 6.
+    const BodyId block = physics.add(box({4.0, 2.0, 0.0}, {2.0f, 2.0f, 3.0f}));
+    CharacterDesc desc;
+    desc.position = {0.0, 0.0, 0.0};
+    const CharacterId walker = physics.add_character(desc);
+    run(physics, 0.3);
+    // Not climbing: it stops at the wall.
+    physics.set_character_input(walker, {{1.5f, 0.0f, 0.0f}});
+    run(physics, 2.0);
+    CharacterState s = state(physics, walker);
+    GIANT_CHECK(!s.climbing && s.on_ground && std::fabs(s.position.y) < 0.05 && s.position.x < 1.75);
+    // Climbing: up the wall at climb speed (2 m/s), held against it.
+    CharacterInput in{{1.5f, 0.0f, 0.0f}};
+    in.climb = true;
+    physics.set_character_input(walker, in);
+    run(physics, 0.5);
+    s = state(physics, walker);
+    GIANT_CHECK(s.climbing && s.wall == block && s.wall_normal.x < -0.99f && !s.mantling);
+    GIANT_CHECK(s.position.y > 0.4 && s.position.y < 1.2 && s.position.x > 1.6 && s.position.x < 1.75);
+    // On to the top: up over the edge, standing on the block.
+    bool mantled = false;
+    for (int i = 0; i < 2 * 60; ++i) {
+        physics.step(1.0 / 60.0);
+        mantled = mantled || state(physics, walker).mantling;
+    }
+    s = state(physics, walker);
+    GIANT_CHECK(mantled && !s.climbing && !s.mantling);
+    GIANT_CHECK(std::fabs(s.position.y - 4.0) < 0.05 && s.position.x > 2.2 && s.on_ground && s.ground == block);
+    // Walking along the top on (climb still asked): it walks, it does not climb anything.
+    run(physics, 1.0);
+    s = state(physics, walker);
+    GIANT_CHECK(s.position.x > 3.5 && std::fabs(s.position.y - 4.0) < 0.05 && !s.climbing);
+}
+
+GIANT_TEST("character: climbs across and down a wall; lets go on the ground, jumping off, or told to") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground());
+    // A 20 m wall (no top in reach) facing -x at x = 2.
+    physics.add(box({2.5, 10.0, 0.0}, {0.5f, 10.0f, 20.0f}));
+    CharacterDesc desc;
+    const CharacterId climber = physics.add_character(desc);
+    run(physics, 0.3);
+    CharacterInput in{{1.5f, 0.0f, 0.0f}};
+    in.climb = true;
+    physics.set_character_input(climber, in);
+    run(physics, 3.0); // to the wall (x = 1.7) in a second, then up 1.5 m/s
+    CharacterState s = state(physics, climber);
+    GIANT_CHECK(s.climbing && s.position.y > 2.0 && s.position.y < 3.5);
+    const double high = s.position.y;
+    // Across (along z) at climb speed, holding its height.
+    in.velocity = {0.0f, 0.0f, 3.0f};
+    physics.set_character_input(climber, in);
+    run(physics, 1.0);
+    s = state(physics, climber);
+    GIANT_CHECK(s.climbing && std::fabs(s.position.y - high) < 0.05 && std::fabs(s.position.z - 2.0) < 0.15);
+    GIANT_CHECK(s.position.x > 1.6 && s.position.x < 1.75);
+    // Still (no input): hangs there.
+    in.velocity = {};
+    physics.set_character_input(climber, in);
+    run(physics, 1.0);
+    s = state(physics, climber);
+    GIANT_CHECK(s.climbing && std::fabs(s.position.y - high) < 0.05);
+    // Down (away from it) to the ground: lets go there, standing.
+    in.velocity = {-1.5f, 0.0f, 0.0f};
+    physics.set_character_input(climber, in);
+    run(physics, 0.5);
+    GIANT_CHECK(state(physics, climber).climbing && state(physics, climber).position.y < high - 0.5);
+    run(physics, 3.0);
+    s = state(physics, climber);
+    GIANT_CHECK(!s.climbing && s.on_ground && std::fabs(s.position.y) < 0.05 && s.position.x < 1.0);
+    // Back up, then a jump: pushed off, away from the wall, falling to the ground.
+    in.velocity = {1.5f, 0.0f, 0.0f};
+    physics.set_character_input(climber, in);
+    run(physics, 3.0);
+    GIANT_CHECK(state(physics, climber).climbing);
+    physics.jump(climber, 5.0f);
+    physics.step(1.0 / 60.0);
+    s = state(physics, climber);
+    GIANT_CHECK(!s.climbing && s.velocity.x < -1.0f);
+    in.velocity = {};
+    physics.set_character_input(climber, in);
+    run(physics, 3.0);
+    s = state(physics, climber);
+    GIANT_CHECK(!s.climbing && s.on_ground && std::fabs(s.position.y) < 0.05 && s.position.x < 1.4);
+    // Up again, then told not to climb: it lets go and falls.
+    in.velocity = {1.5f, 0.0f, 0.0f};
+    physics.set_character_input(climber, in);
+    run(physics, 2.0);
+    GIANT_CHECK(state(physics, climber).climbing && state(physics, climber).position.y > 2.0);
+    in.climb = false;
+    physics.set_character_input(climber, in);
+    run(physics, 0.1);
+    GIANT_CHECK(!state(physics, climber).climbing);
+    run(physics, 2.0);
+    GIANT_CHECK(state(physics, climber).on_ground && std::fabs(state(physics, climber).position.y) < 0.05);
+}
+
+GIANT_TEST("character: carried by a moving body (a hand), released falls; the body gone lets it go") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground());
+    const BodyId hand = physics.add(box({0.0, -0.1, 0.0}, {0.6f, 0.1f, 0.6f}, Motion::kinematic));
+    CharacterDesc desc;
+    desc.position = {0.0, 0.0, 0.0};
+    const CharacterId player = physics.add_character(desc);
+    run(physics, 0.2);
+    // Refused: no such character, no such body, a character's own body.
+    GIANT_CHECK(!physics.carry_character(player + 100, hand));
+    GIANT_CHECK(!physics.carry_character(player, BodyId{0x00ff0001u}));
+    const CharacterId other = physics.add_character([&] {
+        CharacterDesc d = desc;
+        d.position = {5.0, 0.0, 0.0};
+        return d;
+    }());
+    GIANT_CHECK(!physics.carry_character(player, physics.character_body(other)));
+    GIANT_CHECK(physics.carry_character(player, hand));
+    GIANT_CHECK(state(physics, player).carrier == hand);
+    // Lifted 30 m and turned a quarter about y, the player 2 m off the hand's
+    // middle along x: held where it was against the hand.
+    physics.set_character_position(player, {2.0, 0.0, 0.0});
+    GIANT_CHECK(state(physics, player).carrier == k_no_body); // put somewhere: no longer carried
+    GIANT_CHECK(physics.carry_character(player, hand));
+    // Its input is left aside while carried.
+    physics.set_character_input(player, {{3.0f, 0.0f, 0.0f}});
+    physics.jump(player, 5.0f);
+    const double turn = 0.5 * std::numbers::pi;
+    for (int i = 1; i <= 120; ++i) {
+        const double t = i / 120.0;
+        const double a = 0.5 * turn * t;
+        physics.move_kinematic(hand, {0.0, -0.1 + 30.0 * t, 0.0},
+                               {0.0f, static_cast<float>(std::sin(a)), 0.0f, static_cast<float>(std::cos(a))});
+        physics.step(1.0 / 60.0);
+    }
+    // The hand held still (a kinematic body keeps the speed it was last moved at).
+    const Quat held{0.0f, static_cast<float>(std::sin(0.5 * turn)), 0.0f, static_cast<float>(std::cos(0.5 * turn))};
+    for (int i = 0; i < 6; ++i) {
+        physics.move_kinematic(hand, {0.0, 29.9, 0.0}, held);
+        physics.step(1.0 / 60.0);
+    }
+    CharacterState s = state(physics, player);
+    // A quarter turn about y takes +x to -z; held up in the air, not on the ground.
+    GIANT_CHECK(s.carrier == hand && std::fabs(s.position.y - 30.0) < 0.05 && !s.on_ground);
+    GIANT_CHECK(std::fabs(s.position.x) < 0.05 && std::fabs(s.position.z + 2.0) < 0.05);
+    GIANT_CHECK(std::fabs(s.velocity.y) < 0.05f);
+    // Released: falls to the ground.
+    physics.release_character(player);
+    GIANT_CHECK(state(physics, player).carrier == k_no_body);
+    physics.set_character_input(player, {});
+    run(physics, 4.0);
+    s = state(physics, player);
+    GIANT_CHECK(s.on_ground && std::fabs(s.position.y) < 0.05);
+    // Carried again, the hand rising; the hand removed: let go, falling.
+    for (int i = 0; i < 6; ++i) { // back down under it, held there
+        physics.move_kinematic(hand, {0.0, -0.1, 0.0}, {});
+        physics.step(1.0 / 60.0);
+    }
+    GIANT_CHECK(physics.carry_character(player, hand));
+    for (int i = 1; i <= 60; ++i) {
+        physics.move_kinematic(hand, {0.0, -0.1 + 10.0 * i / 60.0, 0.0}, {});
+        physics.step(1.0 / 60.0);
+    }
+    GIANT_CHECK(state(physics, player).position.y > 9.0);
+    physics.remove(hand);
+    physics.step(1.0 / 60.0);
+    GIANT_CHECK(state(physics, player).carrier == k_no_body && state(physics, player).velocity.y > 9.0f);
+    run(physics, 4.0); // up on its way (it was carried up), then down
+    s = state(physics, player);
+    GIANT_CHECK(s.on_ground && std::fabs(s.position.y) < 0.05);
+}
+
+GIANT_TEST("character: a jump into a wall is a jump; no room over a ledge, no pulling up; a moving ledge is followed") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground());
+    // A 4 m wall at x = 2 (top y = 4).
+    physics.add(box({4.0, 2.0, 0.0}, {2.0f, 2.0f, 3.0f}));
+    CharacterDesc desc;
+    desc.position = {1.0, 0.0, 0.0};
+    const CharacterId jumper = physics.add_character(desc);
+    CharacterInput in{{1.5f, 0.0f, 0.0f}};
+    in.climb = true;
+    physics.set_character_input(jumper, in);
+    physics.step(1.0 / 60.0);
+    // Walking into it and jumping in the same step: up about 1.3 m, never pushed back.
+    physics.jump(jumper, 5.0f);
+    double top = 0.0;
+    double least_x = 10.0;
+    for (int i = 0; i < 30; ++i) {
+        physics.step(1.0 / 60.0);
+        top = std::max(top, state(physics, jumper).position.y);
+        least_x = std::min(least_x, state(physics, jumper).position.x);
+    }
+    GIANT_CHECK(top > 0.9 && least_x > 0.95);
+    physics.remove_character(jumper);
+
+    // A lid over the ledge, set back 0.5 m from its edge (0.5 m of room on
+    // top; a ray up from where it would stand misses it, its body would
+    // not): it climbs up but never pulls itself up into it.
+    physics.add(box({4.25, 4.75, -20.0}, {1.75f, 0.25f, 3.0f}));
+    physics.add(box({4.0, 2.0, -20.0}, {2.0f, 2.0f, 3.0f}));
+    desc.position = {0.5, 0.0, -20.0};
+    const CharacterId blocked = physics.add_character(desc);
+    physics.set_character_input(blocked, in);
+    bool mantled = false;
+    for (int i = 0; i < 5 * 60; ++i) {
+        physics.step(1.0 / 60.0);
+        mantled = mantled || state(physics, blocked).mantling;
+    }
+    GIANT_CHECK(!mantled && state(physics, blocked).position.y < 3.5);
+    physics.remove_character(blocked);
+
+    // A kinematic block (top y = 3) sliding along z at 1 m/s: climbed and
+    // pulled up onto, the character ends standing on it.
+    const BodyId moving = physics.add(box({4.0, 1.5, 40.0}, {2.0f, 1.5f, 4.0f}, Motion::kinematic));
+    desc.position = {1.0, 0.0, 40.0};
+    const CharacterId rider = physics.add_character(desc);
+    physics.set_character_input(rider, in);
+    DVec3 at{4.0, 1.5, 40.0};
+    mantled = false;
+    for (int i = 0; i < 3 * 60; ++i) {
+        at.z += 1.0 / 60.0;
+        physics.move_kinematic(moving, at, {});
+        physics.step(1.0 / 60.0);
+        mantled = mantled || state(physics, rider).mantling;
+    }
+    physics.set_character_input(rider, {});
+    for (int i = 0; i < 30; ++i) {
+        at.z += 1.0 / 60.0;
+        physics.move_kinematic(moving, at, {});
+        physics.step(1.0 / 60.0);
+    }
+    const CharacterState s = state(physics, rider);
+    GIANT_CHECK(mantled && s.on_ground && s.ground == moving && std::fabs(s.position.y - 3.0) < 0.05);
+    GIANT_CHECK(std::fabs(s.position.z - at.z) < 1.0 && s.position.x > 2.1);
+}

@@ -162,6 +162,7 @@ struct CharacterDesc {
     float step_height = 0.4f;        // steps it walks up (and down without leaving the ground); at most half its height
     float mass = 80.0f;              // kilograms: how hard what it stands on is pressed
     float strength = 500.0f;         // newtons it pushes dynamic bodies with
+    float climb_speed = 2.0f;        // metres a second up, down or across a wall
     DVec3 position{};
     u64 user = 0; // handed back by queries that hit it
 };
@@ -178,6 +179,12 @@ struct CharacterInput {
     Vec3 velocity{};
     float acceleration = 60.0f;     // metres a second squared, on the ground
     float air_acceleration = 6.0f;  // and in the air
+    // Climbs what is too steep to walk (a wall, a cliff, a giant's leg)
+    // when walked into: then `velocity` into the wall climbs up, away
+    // from it climbs down, across it along it (at climb_speed). At the top
+    // it pulls itself up onto the ledge; a jump pushes off; down on the
+    // ground, or told not to climb, it lets go.
+    bool climb = false;
 };
 
 struct CharacterState {
@@ -191,6 +198,11 @@ struct CharacterState {
     bool on_steep = false;  // on a slope too steep: sliding
     Vec3 ground_normal{0.0f, 1.0f, 0.0f};
     BodyId ground = k_no_body; // the body stood on (or touched, sliding)
+    bool climbing = false;     // on a wall (`wall`: the body, `wall_normal`: out of it)
+    bool mantling = false;     // pulling itself up onto a ledge
+    BodyId wall = k_no_body;
+    Vec3 wall_normal{};
+    BodyId carrier = k_no_body; // carried by this body (carry_character)
 };
 
 struct PreparedShapeData;
@@ -278,6 +290,14 @@ public:
     void jump(CharacterId id, float speed);
     // Puts it somewhere at once, still.
     void set_character_position(CharacterId id, const DVec3& position);
+    // Carried by `carrier` (a hand that picks it up, a platform it is
+    // strapped to): from now it goes wherever the body takes it, held where
+    // it is against it (in the body's frame), its input left aside, until
+    // released (or the body goes). False (nothing changed) when either is
+    // not there, or the body is a character's.
+    bool carry_character(CharacterId id, BodyId carrier);
+    // Let go, moving as it was carried (it falls from there).
+    void release_character(CharacterId id);
     // Held: left where it is by the steps (the ground under it on its way),
     // keeping its speed (a jump asked for still lasts a fifth of a second).
     void hold_character(CharacterId id, bool held);

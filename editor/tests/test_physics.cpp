@@ -183,6 +183,79 @@ GIANT_TEST("play commands: the player stands under the camera, walks where it lo
     GIANT_CHECK(f.run("get_player").value["playing"] == false);
 }
 
+GIANT_TEST("play commands: the player climbs a wall and onto its top; an entity carries it; crates are pushed, not climbed") {
+    Fixture f;
+    f.create({{"shape", "plane"}, {"scale", {200, 1, 200}}});
+    // A 4 m wall block, its face at z = -2.5, its top y = 4, 4 m deep.
+    const world::EntityId wall = f.create({{"shape", "cube"}, {"position", {0, 2, -4.5}}, {"scale", {6, 4, 4}}});
+    f.state.camera.position = {0.0, 10.0, 0.0};
+    f.state.camera.yaw_degrees = 0.0f; // looking down -z, at the wall
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    ai::CommandResult r = f.run("step_player", {{"seconds", 0.3}});
+    GIANT_CHECK(r.value["climbing"] == false && r.value["input"]["climb"] == true && r.value["wall"].is_null());
+    GIANT_CHECK(r.value["carried_by"].is_null());
+    // Into it: up it.
+    GIANT_CHECK(f.run("set_player_input", {{"forward", 1}}).ok);
+    r = f.run("step_player", {{"seconds", 1.5}});
+    DVec3 p = triple(r.value["position"]);
+    GIANT_CHECK(r.value["climbing"] == true && r.value["wall"] == wall && p.y > 1.0 && p.y < 3.0 && p.z > -2.3);
+    // On over the top, standing on it.
+    r = f.run("step_player", {{"seconds", 1.5}});
+    p = triple(r.value["position"]);
+    GIANT_CHECK(r.value["climbing"] == false && r.value["mantling"] == false && r.value["standing_on"] == wall);
+    GIANT_CHECK(std::fabs(p.y - 4.0) < 0.05 && p.z < -2.6);
+    // Told not to climb, it stops at the wall.
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    GIANT_CHECK(f.run("set_player_input", {{"forward", 1}, {"climb", false}}).ok);
+    r = f.run("step_player", {{"seconds", 2}});
+    p = triple(r.value["position"]);
+    GIANT_CHECK(r.value["climbing"] == false && std::fabs(p.y) < 0.05 && p.z < -2.0); // at the wall
+    GIANT_CHECK(r.value["input"]["climb"] == false);
+    // A crate walked into is pushed, never climbed.
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+    const world::EntityId crate =
+        f.create({{"shape", "cube"}, {"position", {30, 0.75, -3}}, {"scale", {1.5, 1.5, 1.5}}, {"body", "dynamic"}, {"mass", 20}});
+    f.state.camera.position = {30.0, 10.0, 0.0};
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    GIANT_CHECK(f.run("set_player_input", {{"forward", 1}}).ok);
+    r = f.run("step_player", {{"seconds", 3}});
+    GIANT_CHECK(r.value["climbing"] == false && std::fabs(triple(r.value["position"]).y) < 0.05 && f.at(crate).z < -4.0);
+    // Carried: a platform it stands on, lifted 10 m (put there at once), takes it along.
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+    const world::EntityId platform =
+        f.create({{"shape", "cube"}, {"position", {-30, 0.25, 0}}, {"scale", {2, 0.5, 2}}});
+    f.state.camera.position = {-30.0, 10.0, 0.0};
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    GIANT_CHECK(f.run("step_player", {{"seconds", 0.3}}).value["standing_on"] == platform);
+    GIANT_CHECK(!f.run("carry_player").ok);                                          // neither
+    GIANT_CHECK(!f.run("carry_player", {{"entity", platform}, {"release", true}}).ok); // both
+    GIANT_CHECK(!f.run("carry_player", {{"entity", 999999}}).ok);                    // no such entity
+    r = f.run("carry_player", {{"entity", platform}});
+    GIANT_CHECK(r.ok && r.value["carried_by"] == platform);
+    GIANT_CHECK(f.run("set_entity", {{"id", platform}, {"position", {-30, 10.25, 0}}}).ok);
+    r = f.run("step_player", {{"seconds", 0.1}});
+    p = triple(r.value["position"]);
+    GIANT_CHECK(r.value["carried_by"] == platform && std::fabs(p.y - 10.5) < 0.05 && std::fabs(p.x + 30.0) < 0.05);
+    // Carried away sideways (put there at once), then let go: it falls.
+    GIANT_CHECK(f.run("set_entity", {{"id", platform}, {"position", {-40, 10.25, 0}}}).ok);
+    r = f.run("step_player", {{"seconds", 0.1}});
+    GIANT_CHECK(std::fabs(triple(r.value["position"]).x + 40.0) < 0.05);
+    GIANT_CHECK(f.run("set_entity", {{"id", platform}, {"position", {-30, 0.25, 0}}}).ok); // out from under it
+    r = f.run("carry_player", {{"release", true}});
+    GIANT_CHECK(r.ok && r.value["carried_by"].is_null());
+    r = f.run("step_player", {{"seconds", 3}});
+    p = triple(r.value["position"]);
+    GIANT_CHECK(r.value["on_ground"] == true && std::fabs(p.y) < 0.05 && std::fabs(p.x + 40.0) < 0.05);
+    // Carried again (it need not stand on what carries it), the platform removed: let go.
+    GIANT_CHECK(f.run("carry_player", {{"entity", platform}}).value["carried_by"] == platform);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {platform}}}).ok);
+    r = f.run("step_player", {{"seconds", 0.1}});
+    GIANT_CHECK(r.value["carried_by"].is_null());
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+    GIANT_CHECK(!f.run("carry_player", {{"release", true}}).ok); // not playing
+}
+
 GIANT_TEST("play commands: Esc stops, a new scene stops, simulate off stops; simulating kept as it was") {
     Fixture f;
     f.create({{"shape", "plane"}, {"scale", {100, 1, 100}}});
