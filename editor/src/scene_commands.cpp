@@ -386,6 +386,8 @@ void swap_scene(EditorState& state, world::Scene next, CommandContext& context,
     // (outside the history) is not this side's.
     const auto leave = [&state, world](Side& side) {
         if (state.scene_generation != side.generation) return;
+        // Kept as authored: never the dents of simulating (they would come back for good).
+        const PhysicsState::GroundAsSaved as_authored(state.physics, state.scene);
         side.memo = world != nullptr && world->active(state.scene_generation) ? world->memo(state.scene) : nullptr;
         side.scene = state.scene;
         side.generation = state.scene_generation;
@@ -805,11 +807,17 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
 ai::Change scene_change(EditorState& state, std::function<void()> undo,
                         std::function<void()> redo) {
     const u64 generation = state.scene_generation;
+    // Undone and redone on the ground as authored (the dents of simulating
+    // lifted meanwhile): a snapshot never holds a dent, nor brings one back.
     return {[&state, generation, undo = std::move(undo)] {
-                if (state.scene_generation == generation) undo();
+                if (state.scene_generation != generation) return;
+                const PhysicsState::GroundAsSaved as_authored(state.physics, state.scene);
+                undo();
             },
             [&state, generation, redo = std::move(redo)] {
-                if (state.scene_generation == generation) redo();
+                if (state.scene_generation != generation) return;
+                const PhysicsState::GroundAsSaved as_authored(state.physics, state.scene);
+                redo();
             }};
 }
 
@@ -1094,7 +1102,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          false,
          [&state](const Json& args, CommandContext&) {
              const std::filesystem::path path = utf8_path(args["path"].get<std::string>());
-             const std::string text = world::save_scene(state.scene);
+             std::string text;
+             {
+                 const PhysicsState::GroundAsSaved as_saved(state.physics, state.scene); // not the dents of simulating
+                 text = world::save_scene(state.scene);
+             }
              std::ofstream file(path, std::ios::binary);
              file.write(text.data(), static_cast<std::streamsize>(text.size()));
              file.close();
@@ -1157,6 +1169,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure("worlds are not available in this editor");
              }
              WorldStreaming& w = *state.world;
+             // The dents of simulating are not edits (back as they were for the check).
+             const PhysicsState::GroundAsSaved as_saved(state.physics, state.scene);
              if (!args.value("discard_unsaved", false)) {
                  if (w.active(state.scene_generation)) {
                      if (const u32 n = w.unsaved_cells(state.scene); n > 0) {
@@ -1210,6 +1224,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              }
              WorldStreaming& w = *state.world;
              const bool active = w.active(state.scene_generation);
+             const PhysicsState::GroundAsSaved as_saved(state.physics, state.scene); // not the dents of simulating
              WorldStreaming::Saved saved;
              if (args.contains("folder")) {
                  const std::filesystem::path folder = utf8_path(args["folder"].get<std::string>());

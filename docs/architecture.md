@@ -795,6 +795,46 @@ ignores shadows (a puff in a building's shade is lit as in the sun) and is
 drawn over the fog rather than in it; pieces still break whole (no
 splintering); craters and footprints are part 7.
 
+### Craters and footprints (N4 part 7)
+
+`world::Dent` is a dent pressed into the terrain: a smooth bowl,
+`-depth (1 - e²)²` for the elliptical distance e under 1, with a rim
+`depth × rim × (1 - t²)²` out to 1.5 (`apply_dent`, `dent_offset`); a
+footprint is the same stretched along a yaw. While simulating,
+`PhysicsState::dent` (the `dent_ground` command) presses it into the
+scene's terrain itself, so everything that follows the ground follows
+with its own budgets: the terrain meshes, the physics tiles (a resting body
+wakes as its tile is swapped), the voxel world, scatter (re-placed onto the
+new ground). It is still view state: `world::GroundDamage` keeps each
+dented tile's heights and version as they were before its first dent, and
+stopping puts them back with `Terrain::restore` (the same versions, so
+nothing reads as edited or unsaved and every cache stays good). Every
+terrain command, every undo and redo of a scene change, a new scene's
+copy for its undo, `save_world`, `save_scene` and `open_world`'s unsaved
+check run on the ground as authored (`PhysicsState::GroundAsSaved`: the
+dents lifted, then put back with their own versions, so nothing that
+follows the ground sees a change); a tile such an edit changes loses its
+dents, so a snapshot never holds one and nothing brings one back for good.
+`simulate off` puts the ground back at once. A dented cell reads as
+unsaved meanwhile, so it never unloads.
+
+A cell placed again keeps its fallen trees that stand where they stood
+(`Forest::set_cell`: the same x and z to the centimetre, size and model,
+whatever their point numbers now: a dent adds or takes other layers'
+points). A dent re-places the scatter of the cells it touches; the editor
+gives the forest those cells as soon as the placer swaps them in
+(`PhysicsState::refresh_forest`, the same frame, so felled trees are
+never drawn standing), wherever they are, and the trees felled there stay
+down (their bodies wake and settle into the dent; laid ones move with the
+ground under their foot).
+
+Cost: a dent walks the samples in its own turned bounds once (radius times
+stretch is at most 200 m: about 1.4 million samples at the finest
+spacing, a one-off), and keeps a copy of only the tiles it changes.
+
+Known limits: rubble (no body) stays at the height it was laid; stopping
+puts every dented tile back in one frame; damage is not saved yet (part 8).
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

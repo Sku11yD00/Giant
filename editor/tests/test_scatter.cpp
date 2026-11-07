@@ -14,6 +14,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <thread>
 
 using namespace giant;
@@ -509,7 +512,8 @@ GIANT_TEST("scatter trees: the commands report them, cells come a share a frame,
     GIANT_CHECK(std::fabs(top.y - lying.position.y) < 1.5 && drawn_at(top));
     GIANT_CHECK(!drawn_at(place(foot, pine.pieces[1].transform).position));
     // The cell placed again (another serial): its old fallen list is not
-    // drawn on the new placement, and feeding stands the tree up.
+    // drawn on the new placement; fed, the tree stands where it stood, so it
+    // stays fallen (the new placement's), drawn where it lies again.
     scene.scatter[0].items[0].material.roughness = 0.75f;
     place(p, scene);
     scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees());
@@ -517,7 +521,10 @@ GIANT_TEST("scatter trees: the commands report them, cells come a share a frame,
     GIANT_CHECK(drawn_at(place(foot, pine.pieces[1].transform).position) && !drawn_at(top));
     physics.points_per_feed = 1u << 15;
     physics.feed_forest(scene, p, camera);
-    GIANT_CHECK(physics.fallen_trees().empty());
+    GIANT_CHECK(physics.fallen_trees().at(cell).serial == p.find(cell)->serial);
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees(),
+                physics.take_tree_redraw());
+    GIANT_CHECK(drawn_at(top) && !drawn_at(place(foot, pine.pieces[1].transform).position));
 }
 
 GIANT_TEST("scatter trees: a blow far from the camera lays its trees down, with dust; stopping clears it") {
@@ -566,6 +573,91 @@ GIANT_TEST("scatter trees: a blow far from the camera lays its trees down, with 
     GIANT_CHECK(run("simulate", {{"on", false}}).ok);
     r = run("get_physics");
     GIANT_CHECK(r.value["dust"]["puffs"] == 0 && r.value["trees"]["fallen"] == 0 && r.value["trees"]["laid"] == 0);
+}
+
+GIANT_TEST("dent_ground: a crater while simulating, the bodies follow, saving sees the ground as it was, stopping puts it back") {
+    PhysicsState physics;
+    EditorState state;
+    state.physics = &physics;
+    ai::CommandRegistry commands;
+    register_scene_commands(commands, state);
+    register_physics_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args = Json::object()) { return commands.execute(name, args, {}); };
+    world::Scene& scene = state.scene;
+    flat(scene.terrain, 0, 0, 1, 0, 2.0f);
+    const u64 version = scene.terrain.version({0, 0});
+    GIANT_CHECK(!run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}}).ok); // not simulating
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    ai::CommandResult r = run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}});
+    GIANT_CHECK(r.ok && r.value["tiles"] == 1 && r.value["ground"]["dents"] == 1 && r.value["dust"]["puffs"] == 1);
+    GIANT_CHECK(std::fabs(scene.terrain.height_at(32.0, 32.0).value() + 1.0) < 1e-4);
+    // The ground's body follows: a ray down finds the crater's floor.
+    r = run("raycast", {{"origin", {32.0, 20.0, 32.0}}, {"direction", {0, -1, 0}}});
+    GIANT_CHECK(r.ok && r.value["hit"] == true && std::fabs(r.value["point"][1].get<double>() + 1.0) < 0.05);
+    // A footprint, stretched.
+    r = run("dent_ground", {{"point", {80.0, 0.0, 20.0}}, {"radius", 2.0}, {"depth", 0.5}, {"stretch", 3.0}, {"yaw", 90}});
+    GIANT_CHECK(r.ok && r.value["tiles"] == 1 && r.value["ground"]["dents"] == 2);
+    GIANT_CHECK(scene.terrain.height_at(80.0, 24.0).value() < 2.0 && scene.terrain.height_at(84.0, 20.0).value() == 2.0);
+    // Saving: the ground as it was; then dented again.
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "giant_dent_test.scene.json";
+    GIANT_CHECK(run("save_scene", {{"path", path.string()}}).ok);
+    std::ifstream file(path, std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+    world::Scene saved;
+    GIANT_CHECK(!world::load_scene(text, saved).has_value());
+    GIANT_CHECK(saved.terrain.height_at(32.0, 32.0).value() == 2.0);
+    GIANT_CHECK(scene.terrain.height_at(32.0, 32.0).value() < 0.0);
+    std::filesystem::remove(path);
+    // Stopping: back exactly, the same version (nothing reads as edited).
+    GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+    physics.update(scene, {}, 0.0);
+    GIANT_CHECK(scene.terrain.height_at(32.0, 32.0).value() == 2.0 && scene.terrain.version({0, 0}) == version);
+    r = run("get_physics");
+    GIANT_CHECK(r.value["ground"]["dents"] == 0 && r.value["ground"]["tiles"] == 0);
+}
+
+GIANT_TEST("dent_ground: terrain edits, their undo and a new scene's undo never keep a dent for good") {
+    PhysicsState physics;
+    EditorState state;
+    state.physics = &physics;
+    ai::CommandRegistry commands;
+    register_scene_commands(commands, state);
+    register_terrain_commands(commands, state);
+    register_physics_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args = Json::object()) { return commands.execute(name, args, {}); };
+    world::Scene& scene = state.scene;
+    flat(scene.terrain, 0, 0, 1, 0, 2.0f);
+    const auto at = [&](double x, double z) { return state.scene.terrain.height_at(x, z).value(); };
+    // A sculpt on a dented tile is made to the ground as authored; it takes the dent off that tile.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}}).ok);
+    GIANT_CHECK(at(32.0, 32.0) < 0.0);
+    GIANT_CHECK(run("sculpt_terrain", {{"op", "raise"}, {"points", {{4.0, 4.0}}}, {"radius", 3.0}, {"strength", 1.0}}).ok);
+    GIANT_CHECK(at(32.0, 32.0) == 2.0 && at(4.0, 4.0) > 2.0);
+    // Stopped, then undone: the sculpt goes, and no crater comes back.
+    GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+    GIANT_CHECK(run("undo").ok);
+    GIANT_CHECK(at(32.0, 32.0) == 2.0 && at(4.0, 4.0) == 2.0);
+    // A dent, and a sculpt elsewhere (another tile): the dent stays, and stopping takes it away.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}}).ok);
+    GIANT_CHECK(run("sculpt_terrain", {{"op", "raise"}, {"points", {{100.0, 32.0}}}, {"radius", 3.0}, {"strength", 1.0}}).ok);
+    GIANT_CHECK(at(32.0, 32.0) < 0.0 && at(100.0, 32.0) > 2.0);
+    GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+    GIANT_CHECK(at(32.0, 32.0) == 2.0 && at(100.0, 32.0) > 2.0); // at once, in the same batch
+    GIANT_CHECK(run("undo").ok && at(100.0, 32.0) == 2.0 && at(32.0, 32.0) == 2.0);
+    // A new scene while dented, then undone: the scene comes back as authored.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}}).ok);
+    GIANT_CHECK(run("new_scene").ok);
+    physics.update(state.scene, {}, 0.0);
+    GIANT_CHECK(run("undo").ok);
+    physics.update(state.scene, {}, 0.0);
+    GIANT_CHECK(at(32.0, 32.0) == 2.0);
+    // Too long a footprint is refused.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(!run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 100.0}, {"depth", 1.0}, {"stretch", 3.0}}).ok);
 }
 
 GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable") {

@@ -28,7 +28,9 @@
 // (the hardest struck first), max_falling are falling at once and
 // max_fallen lie fallen; blows past that are shrugged off. A fallen tree
 // belongs to its cell's placement: a cell placed again (another serial)
-// stands all its trees up afresh.
+// stands its trees up afresh, but for those standing where they stood (the
+// same point, x and z: the ground dented, another layer changed), which
+// stay fallen where they lie.
 #pragma once
 
 #include "giant/sim/dust.h"
@@ -97,12 +99,15 @@ public:
 
     // A cell's trees, placed afresh (`serial`: the placement's, never 0;
     // `trees` in point order, maybe none): its old trunks go (in the next
-    // syncs) and its fallen trees stand again (drawn again).
+    // syncs) and its fallen trees stand again (drawn again), but for those
+    // whose point stands at the same x and z, kept fallen with their bodies.
     void set_cell(world::CellCoord cell, u64 serial, std::vector<TreeSpot> trees);
     // A cell gone (its placements left): its trunks, fallen or not, go.
     void remove_cell(world::CellCoord cell);
     // The placement a cell's trees are of (0: not known).
     u64 serial(world::CellCoord cell) const;
+    // Its trees fallen now (0: none, or not known).
+    u32 fallen_in(world::CellCoord cell) const;
     // Whether set_cell should be given the cell's trees (it is in reach of `camera`).
     bool wants(world::CellCoord cell, const DVec3& camera) const;
     std::vector<world::CellCoord> cells() const;

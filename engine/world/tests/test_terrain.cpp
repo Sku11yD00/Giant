@@ -488,3 +488,122 @@ GIANT_TEST("height maps: 16-bit RAW and PGM read as 0 to 1, bilinear between sam
     }
     GIANT_CHECK(untouched.width == 0);
 }
+
+GIANT_TEST("terrain dent: a crater's bowl with a rim, a footprint stretched along its yaw, across tiles") {
+    Dent d;
+    d.radius = 8.0;
+    d.depth = 2.0f;
+    d.rim = 0.25f;
+    GIANT_CHECK(dent_offset(d, 0.0, 0.0) == -2.0f);
+    GIANT_CHECK(dent_offset(d, 8.0, 0.0) == 0.0f);                        // the bowl's edge
+    GIANT_CHECK(std::fabs(dent_offset(d, 10.0, 0.0) - 0.5f) < 1e-5f);      // the rim's top (1.25 radius)
+    GIANT_CHECK(dent_offset(d, 12.0, 0.0) == 0.0f && dent_offset(d, 30.0, 0.0) == 0.0f);
+    GIANT_CHECK(dent_reach(d) == 12.0);
+    Terrain t;
+    t.set_samples(32); // 2 m apart
+    t.set({0, 0}, Terrain::Heights(1024, 5.0f));
+    t.set({1, 0}, Terrain::Heights(1024, 5.0f));
+    std::vector<CellCoord> changed;
+    apply_dent(t, d, 64.0, 32.0, changed); // on the border of the two tiles
+    GIANT_CHECK(changed.size() == 2);
+    GIANT_CHECK(std::fabs(t.height_at(64.0, 32.0).value() - 3.0) < 1e-5);
+    GIANT_CHECK(std::fabs(t.height_at(54.0, 32.0).value() - 5.5) < 1e-5); // the rim, 10 m west
+    GIANT_CHECK(t.height_at(64.0, 50.0).value() == 5.0);                  // 18 m away: untouched
+    // A footprint 3 m long (half 1.5) and 1 m wide (half 0.5), its length along +z.
+    Dent foot;
+    foot.radius = 2.0;
+    foot.depth = 1.0f;
+    foot.rim = 0.0f;
+    foot.stretch = 3.0f;
+    foot.yaw = 0.5f * 3.14159265f;
+    changed.clear();
+    apply_dent(t, foot, 20.0, 20.0, changed);
+    GIANT_CHECK(changed.size() == 1 && changed[0] == (CellCoord{0, 0}));
+    GIANT_CHECK(t.height_at(20.0, 24.0).value() < 5.0);  // along its length: pressed in
+    GIANT_CHECK(t.height_at(24.0, 20.0).value() == 5.0); // as far across: not
+    // Bad numbers change nothing.
+    changed.clear();
+    Dent bad = d;
+    bad.depth = NAN;
+    apply_dent(t, bad, 64.0, 32.0, changed);
+    apply_dent(t, d, INFINITY, 32.0, changed);
+    GIANT_CHECK(changed.empty());
+}
+
+#include "giant/world/ground_damage.h"
+
+GIANT_TEST("ground damage: dents follow in the terrain; restore puts every tile back with its version") {
+    Terrain t;
+    t.set_samples(32);
+    t.set({0, 0}, Terrain::Heights(1024, 5.0f));
+    t.set({1, 0}, Terrain::Heights(1024, 5.0f));
+    t.set({3, 0}, Terrain::Heights(1024, 5.0f));
+    const u64 v0 = t.version({0, 0}), v1 = t.version({1, 0}), v3 = t.version({3, 0});
+    GroundDamage damage;
+    Dent d;
+    d.radius = 8.0;
+    d.depth = 2.0f;
+    std::vector<CellCoord> changed;
+    damage.dent(t, d, 64.0, 32.0, changed);
+    damage.dent(t, d, 66.0, 32.0, changed); // again, deeper
+    damage.dent(t, d, 200.0, 32.0, changed); // tile 3
+    GIANT_CHECK(damage.tiles() == 3 && damage.dents() == 3);
+    GIANT_CHECK(t.height_at(65.0, 32.0).value() < 2.0);
+    // A save: the ground as it was meanwhile, then dented again.
+    damage.lift(t);
+    GIANT_CHECK(t.version({0, 0}) == v0 && t.version({1, 0}) == v1 && t.height_at(65.0, 32.0).value() == 5.0);
+    const u64 dented = t.version({1, 0});
+    damage.put_back(t);
+    // Put back as exactly as it was: the same version (nothing that follows it sees a change).
+    GIANT_CHECK(t.height_at(65.0, 32.0).value() < 2.0 && t.version({1, 0}) != v1);
+    GIANT_CHECK(t.version({1, 0}) != dented); // (lifted, it was v1)
+    damage.lift(t);
+    damage.put_back(t);
+    const u64 again = t.version({1, 0});
+    damage.lift(t);
+    damage.put_back(t);
+    GIANT_CHECK(t.version({1, 0}) == again);
+    // Tile 3 edited otherwise (a sculpt): kept as that made it.
+    Terrain::Heights* h = t.modify({3, 0});
+    (*h)[0] = 9.0f;
+    GIANT_CHECK(damage.restore(t) == 2);
+    GIANT_CHECK(t.version({0, 0}) == v0 && t.version({1, 0}) == v1 && t.version({3, 0}) != v3);
+    GIANT_CHECK(t.height_at(65.0, 32.0).value() == 5.0 && t.height_at(200.0, 32.0).value() < 5.0);
+    GIANT_CHECK(damage.tiles() == 0 && damage.dents() == 0);
+    // Out of every tile: nothing kept, no dent counted. Over a tile's
+    // corner of the bounds but not its ground: not kept either.
+    damage.dent(t, d, 2000.0, 32.0, changed);
+    GIANT_CHECK(damage.tiles() == 0 && damage.dents() == 0);
+    Dent small;
+    small.radius = 2.0;
+    small.depth = 1.0f;
+    small.rim = 0.0f;
+    damage.dent(t, small, 62.0, 32.0, changed); // within tile 0 (reaches x 59 to 65: tile 1 too by its box)
+    GIANT_CHECK(damage.tiles() == 1 && damage.dents() == 1);
+    damage.restore(t);
+}
+
+GIANT_TEST("terrain dent: turned, its length runs from +x toward +z; past the farthest reach, nothing") {
+    Terrain t;
+    t.set_samples(32);
+    t.set({0, 0}, Terrain::Heights(1024, 5.0f));
+    Dent foot;
+    foot.radius = 2.0;
+    foot.depth = 1.0f;
+    foot.rim = 0.0f;
+    foot.stretch = 4.0f;
+    foot.yaw = 0.25f * 3.14159265f; // 45 degrees
+    std::vector<CellCoord> changed;
+    apply_dent(t, foot, 32.0, 32.0, changed);
+    GIANT_CHECK(t.height_at(36.0, 36.0).value() < 5.0);  // along (+x, +z)
+    GIANT_CHECK(t.height_at(36.0, 28.0).value() == 5.0); // across it
+    Dent huge;
+    huge.radius = 1e300;
+    GIANT_CHECK(dent_reach(huge) == 0.0);
+    huge.radius = INFINITY;
+    GIANT_CHECK(dent_offset(huge, 0.0, 0.0) == 0.0f);
+    changed.clear();
+    huge.radius = 1e300;
+    apply_dent(t, huge, 32.0, 32.0, changed);
+    GIANT_CHECK(changed.empty());
+}

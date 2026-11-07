@@ -3,6 +3,7 @@ giant_module(world
     src/scene.cpp
     src/terrain.cpp
     src/far_ground.cpp
+  src/ground_damage.cpp
   src/terrain_brush.cpp
   src/height_map.cpp
   src/scatter.cpp

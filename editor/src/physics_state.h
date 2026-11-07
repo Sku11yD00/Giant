@@ -19,6 +19,7 @@
 #include "giant/sim/forest.h"
 #include "giant/sim/physics.h"
 #include "giant/sim/scene_physics.h"
+#include "giant/world/ground_damage.h"
 #include "giant/world/scene.h"
 #include "scatter_placer.h"
 
@@ -76,6 +77,31 @@ public:
     // the weather's, set each frame) while simulating; stopping clears it.
     const sim::Dust& dust() const { return m_dust; }
     Vec3 wind{};
+    // A dent pressed into the ground at `at` (x, z) while simulating: a
+    // crater (with dust), a footprint. The scene's terrain changes, so all
+    // that follows the ground follows; stopping puts it back exactly (the
+    // next update), and saving saves the ground as it was (GroundAsSaved).
+    // Returns the tiles it changed.
+    usize dent(world::Scene& scene, const world::Dent& dent, const DVec3& at);
+    const world::GroundDamage& ground() const { return m_ground; }
+    // Stopped: the dented ground put back now (else the next update does).
+    void restore_ground(world::Scene& scene);
+    // Each frame once the placer swapped in new placements: the cells the
+    // forest knows that were placed again, given to it now (so their fallen
+    // trees are drawn as they lie this frame, never standing).
+    void refresh_forest(const world::Scene& scene, const ScatterPlacer& scatter);
+    // While one lives, the dented ground is as it was (a save in between).
+    class GroundAsSaved {
+    public:
+        GroundAsSaved(PhysicsState* physics, world::Scene& scene);
+        ~GroundAsSaved();
+        GroundAsSaved(const GroundAsSaved&) = delete;
+        GroundAsSaved& operator=(const GroundAsSaved&) = delete;
+
+    private:
+        PhysicsState* m_physics;
+        world::Scene& m_scene;
+    };
     // Fallen scatter trees (drawn where they lie), and the cells to draw again (taken by the frame).
     const sim::FallenTrees& fallen_trees() const { return m_forest.fallen(); }
     std::vector<world::CellCoord> take_tree_redraw() { return m_forest.take_redraw(); }
@@ -93,6 +119,8 @@ private:
 
     JobSystem m_jobs; // first: outlives the physics world
     sim::Dust m_dust; // before what emits into it
+    world::GroundDamage m_ground;
+    bool m_restore_ground = false;
     sim::PhysicsWorld m_physics;
     sim::ScenePhysics m_bodies;
     sim::Forest m_forest; // after the world: its trunks go first

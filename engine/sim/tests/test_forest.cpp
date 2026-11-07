@@ -417,3 +417,44 @@ GIANT_TEST("forest: at most lays_per_impact trees are laid down by one blow, the
     // The nearest three (struck hardest).
     for (u32 i = 0; i < 8; ++i) GIANT_CHECK((fallen(forest, {0, 0}, i) != nullptr) == (i < 3));
 }
+
+GIANT_TEST("forest: a cell placed again keeps the fallen trees that stand where they stood (the ground dented)") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ground(physics);
+    Forest forest(physics);
+    forest.set_cell({0, 0}, 1, {tree(0, {10.0, 0.0, 10.0}), tree(1, {30.0, 0.0, 10.0}), tree(2, {50.0, 0.0, 10.0})});
+    forest.flush({0.0, 0.0, 0.0});
+    GIANT_CHECK(forest.impact({10.0, 1.0, 9.0}, 3.0f, 1e5f) == 1);
+    GIANT_CHECK(forest.impact({30.0, 1.0, 9.0}, 3.0f, 1e5f) == 1);
+    run(physics, forest, 300);
+    const BodyId body = forest.body_of({0, 0}, 0);
+    GIANT_CHECK(body != k_no_body);
+    const world::Transform lying = fallen(forest, {0, 0}, 0)->at;
+    forest.take_redraw();
+    // Placed again: point 0 where it stood (lower: a dent), point 1 moved, point 2 as it was.
+    forest.set_cell({0, 0}, 2, {tree(0, {10.0, -1.0, 10.0}), tree(1, {31.0, 0.0, 10.0}), tree(2, {50.0, 0.0, 10.0})});
+    GIANT_CHECK(forest.fallen().at({0, 0}).serial == 2);
+    GIANT_CHECK(forest.fallen().at({0, 0}).trees.size() == 1);
+    GIANT_CHECK(fallen(forest, {0, 0}, 0) != nullptr && fallen(forest, {0, 0}, 0)->at == lying);
+    GIANT_CHECK(fallen(forest, {0, 0}, 1) == nullptr);
+    GIANT_CHECK(forest.body_of({0, 0}, 0) == body && forest.tree_of(body)->fallen);
+    GIANT_CHECK(forest.stats().fallen == 1);
+    GIANT_CHECK(forest.take_redraw().size() == 1);
+    // Its point renumbered (a dent took other points before it): kept by where it stands.
+    forest.set_cell({0, 0}, 3, {tree(1, {10.0, -1.0, 10.0}), tree(2, {50.0, 0.0, 10.0})});
+    GIANT_CHECK(fallen(forest, {0, 0}, 1) != nullptr && fallen(forest, {0, 0}, 0) == nullptr);
+    GIANT_CHECK(forest.body_of({0, 0}, 1) == body && forest.tree_of(body)->point == 1);
+    GIANT_CHECK(forest.stats().fallen == 1 && forest.fallen_in({0, 0}) == 1);
+    // Another model there (bigger): stands up anew.
+    TreeSpot big = tree(1, {10.0, -1.0, 10.0});
+    big.height = 20.0f;
+    forest.set_cell({0, 0}, 4, {big, tree(2, {50.0, 0.0, 10.0})});
+    GIANT_CHECK(forest.stats().fallen == 0 && forest.fallen().empty());
+    // Still a body of its own: what falls on goes on (reset stands it up and lets it go).
+    forest.reset();
+    forest.flush({0.0, 0.0, 0.0});
+    GIANT_CHECK(forest.stats().fallen == 0 && forest.stats().trunks == 2);
+    forest.clear();
+    GIANT_CHECK(physics.size() == 1);
+}
