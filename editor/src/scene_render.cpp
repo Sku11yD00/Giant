@@ -232,6 +232,9 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
     cell.instances.clear();
     cell.decals.clear();
     emit_ground(scene, terrain, far, coord, out, cell);
+    cell.ground_count = static_cast<u32>(cell.instances.size());
+    cell.ground_dirty = false;
+    cell.prev_version = 0;
     std::sort(cell.ids.begin(), cell.ids.end());
     for (const world::EntityId id : cell.ids) {
         const world::Entity* e = scene.find(id);
@@ -271,6 +274,36 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             return false;
         }
     }
+    return true;
+}
+
+// Makes a cell's ground instances again in place when their count is as
+// before (the rest of the cell kept, its place too); false when it needs a
+// full rebuild. `compact`: a material lost its last user.
+bool rebuild_ground(const world::Scene& scene, const TerrainMeshes* terrain, const FarGround* far,
+                    world::CellCoord coord, SceneFrame& out, SceneFrame::Cell& cell, bool& compact) {
+    if (cell.version == 0 || !cell.placed || cell.ground_count > cell.instances.size()) {
+        return false;
+    }
+    SceneFrame::Cell fresh;
+    emit_ground(scene, terrain, far, coord, out, fresh); // counts its materials' users
+    if (fresh.instances.size() != cell.ground_count || !fresh.decals.empty()) {
+        for (const render::Instance& i : fresh.instances) {
+            if (i.material < out.users.size()) --out.users[i.material]; // not used after all
+        }
+        return false;
+    }
+    for (u32 k = 0; k < cell.ground_count; ++k) {
+        const u32 m = cell.instances[k].material;
+        if (m < out.users.size() && --out.users[m] == 0) compact = true;
+        cell.instances[k] = fresh.instances[k];
+        out.instances[cell.first + k] = fresh.instances[k];
+    }
+    cell.ground = fresh.ground;
+    cell.prev_version = cell.version;
+    cell.version = new_version();
+    cell.ground_dirty = false;
+    ++out.cells_rebuilt;
     return true;
 }
 
@@ -478,11 +511,11 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     } else {
         // Terrain tiles whose mesh came, went or changed; all of them for a new look.
         for (const world::CellCoord c : ground) {
-            out.grid[c].dirty = true;
+            out.grid[c].ground_dirty = true; // (a new cell is dirty anyway)
         }
         if (!(scene.terrain.material == out.terrain_material)) {
             out.terrain_material = scene.terrain.material;
-            for (auto& [coord, cell] : out.grid) cell.dirty = cell.dirty || cell.ground;
+            for (auto& [coord, cell] : out.grid) cell.ground_dirty = cell.ground_dirty || cell.ground;
         }
         // Entities added, removed, changed or moved to another cell.
         for (const world::EntityId id : changes.ids) {
@@ -555,6 +588,12 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     rebuilt.clear();
     for (auto it = out.grid.begin(); it != out.grid.end();) {
         SceneFrame::Cell& cell = it->second;
+        if (!cell.dirty && cell.ground_dirty) {
+            // Only the ground: in place if it can be, else the whole cell.
+            bool lost = false;
+            cell.dirty = !rebuild_ground(scene, terrain, far, it->first, out, cell, lost);
+            compact = compact || lost;
+        }
         if (cell.dirty) {
             const bool fresh = cell.version == 0; // not laid out yet, even with no instances
             compact = !rebuild(scene, renderer, meshes, terrain, far, scatter, it->first, out, cell) || compact;
@@ -636,7 +675,14 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     }
     out.cells.clear();
     for (const auto& [coord, cell] : out.grid) {
-        out.cells.push_back({cell.first, cell.capacity, cell.version}); // empty ones too (decals only)
+        render::CellRange range{cell.first, cell.capacity, cell.version}; // empty ones too (decals only)
+        if (cell.prev_version != 0) {
+            // Changed from prev_version in its ground alone.
+            range.prev_version = cell.prev_version;
+            range.changed_first = 0;
+            range.changed_count = cell.ground_count;
+        }
+        out.cells.push_back(range);
     }
     for (const auto& [first, piece] : out.pieces) {
         out.cells.push_back({first, piece.count, piece.version});

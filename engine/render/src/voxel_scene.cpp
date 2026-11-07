@@ -28,10 +28,15 @@ constexpr usize k_max_jobs = 64;
 // eighth of the instances), and every window is rebuilt instead.
 constexpr usize k_max_backlog = 4096;
 constexpr usize k_bulk = 256;
+// Waiting changes are gathered in squares of this many metres; a box wider
+// than two of them waits on its own.
+constexpr double k_region = 64.0;
 // Marks (cheap set inserts) between looks at the clock.
 constexpr u64 k_marks_per_check = 256;
 
 DVec3 to_d(const Vec3& v) { return {v.x, v.y, v.z}; }
+DVec3 lower(const DVec3& a, const DVec3& b) { return {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)}; }
+DVec3 upper(const DVec3& a, const DVec3& b) { return {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)}; }
 
 bool overlaps(const DVec3& amin, const DVec3& amax, const DVec3& bmin, const DVec3& bmax) {
     return amin.x <= bmax.x && amax.x >= bmin.x && amin.y <= bmax.y && amax.y >= bmin.y && amin.z <= bmax.z &&
@@ -221,6 +226,7 @@ void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Materia
                           const MeshLookup& meshes) {
     Copy& c = m_copies[index];
     c.instance = in;
+    m_copy_mesh[index] = in.mesh;
     c.color = color_of(in, materials);
     c.box = bounds_of(in, meshes);
     c.large = false;
@@ -280,7 +286,12 @@ void VoxelScene::grid_insert(u32 index) {
     for (i32 z = lo.z; z <= hi.z; ++z) {
         for (i32 y = lo.y; y <= hi.y; ++y) {
             for (i32 x = lo.x; x <= hi.x; ++x) {
-                m_grid[Cell{x, y, z}].push_back(index);
+                const Cell cell{x, y, z};
+                const auto [it, added] = m_grid.try_emplace(cell);
+                if (added) {
+                    m_coarse[coarse_of(cell)].push_back({cell, &it->second});
+                }
+                it->second.push_back(index);
             }
         }
     }
@@ -311,6 +322,21 @@ void VoxelScene::grid_erase(u32 index) {
                 if (it != m_grid.end()) {
                     drop(it->second);
                     if (it->second.empty()) {
+                        const Cell cell = it->first;
+                        const auto co = m_coarse.find(coarse_of(cell));
+                        if (co != m_coarse.end()) {
+                            std::vector<Fine>& fine = co->second;
+                            for (usize k = 0; k < fine.size(); ++k) {
+                                if (fine[k].cell == cell) {
+                                    fine[k] = fine.back();
+                                    fine.pop_back();
+                                    break;
+                                }
+                            }
+                            if (fine.empty()) {
+                                m_coarse.erase(co);
+                            }
+                        }
                         m_grid.erase(it);
                     }
                 }
@@ -324,6 +350,7 @@ void VoxelScene::grid_rebuild() {
     // little; dropped when far more cells than instances piled up.
     if (m_grid.size() > 4 * m_copies.size() + 1024) {
         m_grid.clear();
+        m_coarse.clear();
     } else {
         for (auto& [cell, list] : m_grid) {
             list.clear();
@@ -357,13 +384,38 @@ void VoxelScene::find(const Box& q) {
     const Cell lo{cell_of(q.min.x), cell_of(q.min.y), cell_of(q.min.z)};
     const Cell hi{cell_of(q.max.x), cell_of(q.max.y), cell_of(q.max.z)};
     const u64 cells = u64(hi.x - lo.x + 1) * u64(hi.y - lo.y + 1) * u64(hi.z - lo.z + 1);
-    if (cells > m_grid.size()) {
-        // A big box (a coarse brick, a whole window): every occupied cell.
-        for (const auto& [cell, list] : m_grid) {
-            if (cell.x >= lo.x && cell.x <= hi.x && cell.y >= lo.y && cell.y <= hi.y && cell.z >= lo.z &&
-                cell.z <= hi.z) {
-                for (const u32 i : list) {
-                    look(i);
+    if (cells > 64) {
+        // A big box (a coarse brick, a whole window): the occupied cells of
+        // the coarse cells it covers (or of every coarse cell, if fewer).
+        const Cell clo = coarse_of(lo);
+        const Cell chi = coarse_of(hi);
+        const auto fine = [&](const std::vector<Fine>& cells_in) {
+            for (const Fine& f : cells_in) {
+                const Cell& cell = f.cell;
+                if (cell.x >= lo.x && cell.x <= hi.x && cell.y >= lo.y && cell.y <= hi.y && cell.z >= lo.z &&
+                    cell.z <= hi.z) {
+                    for (const u32 i : *f.list) {
+                        look(i);
+                    }
+                }
+            }
+        };
+        const u64 coarse = u64(chi.x - clo.x + 1) * u64(chi.y - clo.y + 1) * u64(chi.z - clo.z + 1);
+        if (coarse > m_coarse.size()) {
+            for (const auto& [c, cells_in] : m_coarse) {
+                if (c.x >= clo.x && c.x <= chi.x && c.y >= clo.y && c.y <= chi.y && c.z >= clo.z && c.z <= chi.z) {
+                    fine(cells_in);
+                }
+            }
+        } else {
+            for (i32 z = clo.z; z <= chi.z; ++z) {
+                for (i32 y = clo.y; y <= chi.y; ++y) {
+                    for (i32 x = clo.x; x <= chi.x; ++x) {
+                        const auto it = m_coarse.find(Cell{x, y, z});
+                        if (it != m_coarse.end()) {
+                            fine(it->second);
+                        }
+                    }
                 }
             }
         }
@@ -388,28 +440,68 @@ void VoxelScene::find(const Box& q) {
 
 // --- Seeing changes -------------------------------------------------------
 
+VoxelScene::Region& VoxelScene::region_for(const Box& box) {
+    u64 key = 0;
+    if (box.max.x - box.min.x > 2.0 * k_region || box.max.z - box.min.z > 2.0 * k_region) {
+        key = (u64{1} << 63) | m_next_own_region++; // on its own: merged, it would widen its neighbours'
+    } else {
+        const auto at = [](double v) {
+            return static_cast<u64>(static_cast<u32>(static_cast<i32>(std::floor(v / k_region))));
+        };
+        key = at(0.5 * (box.min.x + box.max.x)) | at(0.5 * (box.min.z + box.max.z)) << 32;
+        key &= ~(u64{1} << 63);
+    }
+    const auto [it, added] = m_regions.try_emplace(key);
+    if (added) {
+        m_region_order.push_back(key);
+    }
+    return it->second;
+}
+
+void VoxelScene::queue_old(const Box& box) {
+    if (box.empty()) {
+        return;
+    }
+    Region& r = region_for(box);
+    if (r.old.empty() || !(r.old.back().min == box.min && r.old.back().max == box.max)) {
+        r.old.push_back(box); // (the same box again, as one instance changes frame after frame: once)
+    }
+}
+
+void VoxelScene::queue_changed(u32 index) {
+    const Box& box = m_copies[index].box;
+    // An empty box (nothing to voxelize) still waits, for holds().
+    Region& r = region_for(box.empty() ? Box{DVec3{}, DVec3{}} : box);
+    if (!r.changed.empty() && r.changed.back() == index) {
+        return; // changing again, frame after frame, while it waits: once
+    }
+    r.changed.push_back(index); // (twice if it changes twice apart: harmless, counted twice)
+    if (index >= m_changed.size()) {
+        m_changed.resize(usize{index} + 1, 0);
+    }
+    m_changed_count += m_changed[index]++ == 0 ? 1u : 0u;
+}
+
 void VoxelScene::change(u32 index, const Instance& in, std::span<const Material> materials,
                         const MeshLookup& meshes) {
     if (index < m_copies.size()) {
         grid_erase(index);
-        if (!m_copies[index].box.empty()) {
-            m_old.push_back(m_copies[index].box); // its bricks there are built again
-        }
+        queue_old(m_copies[index].box); // its bricks there are built again
     } else {
         m_copies.resize(usize{index} + 1);
+        m_copy_mesh.resize(m_copies.size(), k_no_mesh);
     }
     touch_building(m_copies[index].box); // where it was (empty if new)
     set_copy(index, in, materials, meshes);
     touch_building(m_copies[index].box);
     grid_insert(index);
-    if (m_changed.insert(index).second) {
-        m_changed_order.push_back(index);
-    }
+    queue_changed(index);
 }
 
 void VoxelScene::copy_all(std::span<const Instance> instances, std::span<const Material> materials,
                           const MeshLookup& meshes) {
     m_copies.resize(instances.size());
+    m_copy_mesh.resize(instances.size(), k_no_mesh);
     for (u32 i = 0; i < instances.size(); ++i) {
         set_copy(i, instances[i], materials, meshes);
     }
@@ -423,25 +515,26 @@ void VoxelScene::copy_all(std::span<const Instance> instances, std::span<const M
 
 void VoxelScene::remove_range(u32 first, u32 count) {
     for (u32 i = first; i < first + count; ++i) {
-        if (!m_copies[i].box.empty()) {
-            m_old.push_back(m_copies[i].box);
-        }
+        queue_old(m_copies[i].box);
     }
     m_copies.erase(m_copies.begin() + first, m_copies.begin() + first + count);
+    m_copy_mesh.erase(m_copy_mesh.begin() + first, m_copy_mesh.begin() + first + count);
     grid_rebuild();
     // Indices past the run shift down.
-    std::deque<u32> order;
-    m_changed.clear();
-    for (const u32 i : m_changed_order) {
-        if (i >= first && i < first + count) {
-            continue;
+    m_changed.assign(m_copies.size(), 0);
+    m_changed_count = 0;
+    for (auto& [key, region] : m_regions) {
+        std::vector<u32> kept;
+        for (const u32 i : region.changed) {
+            if (i >= first && i < first + count) {
+                continue;
+            }
+            const u32 j = i < first ? i : i - count;
+            kept.push_back(j);
+            m_changed_count += m_changed[j]++ == 0 ? 1u : 0u;
         }
-        const u32 j = i < first ? i : i - count;
-        if (m_changed.insert(j).second) {
-            order.push_back(j);
-        }
+        region.changed = std::move(kept);
     }
-    m_changed_order = std::move(order);
     // Find lists under way drop the removed run and shift the rest down,
     // keeping their place (restarting them would starve them under
     // constant removals).
@@ -474,6 +567,19 @@ void VoxelScene::remove_range(u32 first, u32 count) {
     for (Job& job : m_jobs) {
         if (job.kind == JobKind::find && job.started) {
             remap(job.found, job.next, &job.cursor);
+        } else if (job.kind == JobKind::region) {
+            // Its changed instances too (each job its own copy now).
+            Region r = *job.region;
+            const u32 olds = static_cast<u32>(r.old.size());
+            if (job.next < olds) {
+                u32 none = 0;
+                remap(r.changed, none, nullptr);
+            } else {
+                u32 next = job.next - olds;
+                remap(r.changed, next, &job.cursor);
+                job.next = olds + next;
+            }
+            job.region = std::make_shared<const Region>(std::move(r));
         }
     }
     if (m_building.active) {
@@ -504,8 +610,20 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
             }
         }
         if (!stale.empty()) {
-            for (u32 i = 0; i < m_copies.size(); ++i) {
-                if (stale.count(m_copies[i].instance.mesh) != 0) {
+            // By mesh id (a flag each), not a set lookup per instance.
+            MeshId top = 0;
+            for (const MeshId id : stale) {
+                top = std::max(top, id == k_no_mesh ? 0 : id);
+            }
+            std::vector<u8> is_stale(usize{top} + 1, 0);
+            for (const MeshId id : stale) {
+                if (id != k_no_mesh) {
+                    is_stale[id] = 1;
+                }
+            }
+            for (u32 i = 0; i < m_copy_mesh.size(); ++i) {
+                const MeshId id = m_copy_mesh[i];
+                if (id <= top && is_stale[id] != 0) {
                     forced.push_back(i);
                 }
             }
@@ -535,7 +653,7 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
         for (const u32 i : changed) {
             change(i, instances[i], materials, meshes);
         }
-        if (m_old.size() + m_changed.size() > k_max_backlog) {
+        if (m_regions.size() > k_max_backlog) {
             request_rebuild();
         }
         return;
@@ -579,16 +697,18 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
     for (const u32 i : changed) {
         change(i, instances[i], materials, meshes);
     }
-    if (m_old.size() + m_changed.size() > k_max_backlog) {
+    if (m_regions.size() > k_max_backlog) {
         request_rebuild(); // changing faster than they are worked through
     }
 }
 
 void VoxelScene::request_rebuild() {
+    ++m_stats.rebuilds;
     // A full rebuild covers every change made before it starts.
-    m_old.clear();
-    m_changed.clear();
-    m_changed_order.clear();
+    m_regions.clear();
+    m_region_order.clear();
+    std::fill(m_changed.begin(), m_changed.end(), 0u);
+    m_changed_count = 0;
     if (m_rebuild_jobs > 0) {
         m_rebuild_again = true; // after the one under way (restarting it would never finish)
     } else {
@@ -598,9 +718,10 @@ void VoxelScene::request_rebuild() {
 
 void VoxelScene::push_rebuild() {
     m_rebuild_again = false;
-    m_old.clear();
-    m_changed.clear();
-    m_changed_order.clear();
+    m_regions.clear();
+    m_region_order.clear();
+    std::fill(m_changed.begin(), m_changed.end(), 0u);
+    m_changed_count = 0;
     const i32 n = m_clipmap.desc().bricks_per_axis;
     const u32 slots = m_clipmap.slots_per_level();
     for (u32 level = m_clipmap.levels(); level-- > 0;) {
@@ -714,6 +835,41 @@ bool VoxelScene::run_job(Job& job, const OutOfTime& out_of_time) {
     }
     const u32 slots = m_clipmap.slots_per_level();
     const u64 count = box.count();
+    if (job.kind == JobKind::region) {
+        // Each old box's bricks in the pool, then every brick under each
+        // changed instance where it is now (within the job's box).
+        const Region& r = *job.region;
+        const usize total = r.old.size() + r.changed.size();
+        while (job.next < total) {
+            const bool old = job.next < r.old.size();
+            Box b;
+            if (old) {
+                b = r.old[job.next];
+            } else {
+                const u32 i = r.changed[job.next - r.old.size()];
+                b = i < m_copies.size() ? m_copies[i].box : Box{};
+            }
+            const voxel::BrickBox under =
+                b.empty() ? voxel::BrickBox{} : voxel::intersect(m_clipmap.bricks_touching(level, b.min, b.max), box);
+            const u64 bricks = under.count();
+            while (job.cursor < bricks) {
+                const voxel::BrickCoord brick = brick_of(under, job.cursor++);
+                const u32 s = level * slots + m_clipmap.slot(level, brick);
+                if (!old || (m_slots[s] < gpu::k_unbuilt && m_slot_bricks[s] == brick)) {
+                    mark(level, brick);
+                }
+                if (job.cursor % k_marks_per_check == 0 && out_of_time()) {
+                    return false;
+                }
+            }
+            job.cursor = 0;
+            ++job.next;
+            if (job.next % 64 == 0 && out_of_time()) {
+                return false;
+            }
+        }
+        return true;
+    }
     if (job.kind == JobKind::find) {
         while (job.next < job.found.size()) {
             const u32 i = job.found[job.next];
@@ -1046,17 +1202,41 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells);
     see_changes(instances, materials, only ? &m_changed_cells : nullptr, meshes_version, meshes);
     // Waiting changes become jobs while the queue is short.
-    while (m_jobs.size() < k_max_jobs && (!m_old.empty() || !m_changed_order.empty())) {
-        if (!m_old.empty()) {
-            const Box box = m_old.front();
-            m_old.pop_front();
-            add_jobs(box, JobKind::present);
-        } else {
-            const u32 i = m_changed_order.front();
-            m_changed_order.pop_front();
-            m_changed.erase(i);
-            if (i < m_copies.size()) {
-                add_jobs(m_copies[i].box, JobKind::all);
+    while (m_jobs.size() < k_max_jobs && !m_region_order.empty()) {
+        const u64 key = m_region_order.front();
+        m_region_order.pop_front();
+        const auto it = m_regions.find(key);
+        if (it == m_regions.end()) {
+            continue;
+        }
+        auto region = std::make_shared<Region>(std::move(it->second));
+        m_regions.erase(it);
+        Box around; // the old boxes and where the changed instances are now
+        for (const Box& b : region->old) {
+            around.min = lower(around.min, b.min);
+            around.max = upper(around.max, b.max);
+        }
+        for (const u32 i : region->changed) {
+            if (i < m_changed.size() && m_changed[i] > 0 && --m_changed[i] == 0) {
+                --m_changed_count;
+            }
+            if (i < m_copies.size() && !m_copies[i].box.empty()) {
+                around.min = lower(around.min, m_copies[i].box.min);
+                around.max = upper(around.max, m_copies[i].box.max);
+            }
+        }
+        if (around.empty()) {
+            continue;
+        }
+        const std::shared_ptr<const Region> shared = std::move(region);
+        for (u32 level = m_clipmap.levels(); level-- > 0;) {
+            const voxel::BrickBox bricks = m_clipmap.bricks_touching(level, around.min, around.max);
+            if (bricks.count() > 0) {
+                Job job;
+                job.box = bricks;
+                job.kind = JobKind::region;
+                job.region = shared;
+                m_jobs.push_back(std::move(job));
             }
         }
     }
@@ -1183,7 +1363,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     }
 
     m_stats.bricks = m_used;
-    m_stats.pending = static_cast<u32>(m_pending.size() + m_jobs.size() + m_old.size() + m_changed.size() +
+    m_stats.pending = static_cast<u32>(m_pending.size() + m_jobs.size() + m_regions.size() + m_changed_count +
                                        (m_rebuild_again ? 1 : 0) + (m_building.active ? 1 : 0));
     m_stats.missing = static_cast<u32>(m_retry.size());
     m_stats.overflow = m_stats.missing > 0;
@@ -1246,7 +1426,8 @@ VoxelProbe VoxelScene::probe(u32 level, const DVec3& position) const {
 }
 
 bool VoxelScene::holds(u32 index) const {
-    if (!m_clipmap.placed() || index >= m_copies.size() || m_rebuild_again || m_changed.count(index) != 0) {
+    if (!m_clipmap.placed() || index >= m_copies.size() || m_rebuild_again ||
+        (index < m_changed.size() && m_changed[index] != 0)) {
         return false;
     }
     if (!m_copies[index].stand_in) {

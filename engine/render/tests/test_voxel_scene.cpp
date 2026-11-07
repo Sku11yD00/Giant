@@ -279,6 +279,38 @@ GIANT_TEST("voxel scene: many changes at once rebuild everything, and it settles
     GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -7.0}) == VoxelProbe::empty);
 }
 
+// Scatter arrives a cell at a time: thousands of placements over a few
+// frames, each frame under the bulk limit. They wait gathered by region, so
+// the backlog never overflows into rebuilding every window.
+GIANT_TEST("voxel scene: thousands of placements arriving wait by region, no rebuild") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    b.step();
+    const u32 rebuilds = b.voxels->stats().rebuilds;
+    for (int f = 0; f < 40; ++f) {
+        for (int i = 0; i < 200; ++i) {
+            Instance cube;
+            cube.mesh = 0;
+            cube.scale = {0.05f, 0.05f, 0.05f};
+            const int k = f * 200 + i;
+            cube.position = {static_cast<double>(k % 90) * 0.13 - 6.0, 0.6 + 0.01 * (k % 7),
+                             static_cast<double>((k / 90) % 90) * 0.13 - 6.0};
+            b.instances.push_back(cube);
+        }
+        b.step(0.2f);
+    }
+    GIANT_CHECK(b.voxels->stats().rebuilds == rebuilds); // 8000 changes, never over the backlog
+    // A run from the middle goes while its region's jobs are still queued:
+    // the indices after it shift down under them.
+    b.instances.erase(b.instances.begin() + 7000, b.instances.begin() + 7400);
+    b.step(0.2f);
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    // The last one placed is in the voxel world.
+    const Instance& last = b.instances.back();
+    GIANT_CHECK(b.voxels->probe(0, last.position) == VoxelProbe::solid);
+}
+
 GIANT_TEST("voxel scene: removing one from the middle keeps the rest") {
     Bench b;
     GIANT_CHECK(b.voxels->init());

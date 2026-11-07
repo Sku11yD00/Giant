@@ -70,6 +70,12 @@ struct SceneFrame {
         std::vector<render::Decal> decals;
         u64 version = 0; // new each rebuild, unique in the process (0: never built)
         bool dirty = true;
+        // Only its ground changed (a terrain tile's or far ground's mesh, the
+        // ground's look): its first ground_count instances are made again
+        // in place, the rest kept, and the renderer told only they changed.
+        bool ground_dirty = false;
+        u32 ground_count = 0;
+        u64 prev_version = 0; // what the ground-only change was made from (0: a full rebuild)
         bool ground = false; // it draws a terrain tile (so it stays without entities)
         bool scattered = false; // it draws scatter placements (so it stays too)
         // Its place in `instances`: capacity instances from first, the
