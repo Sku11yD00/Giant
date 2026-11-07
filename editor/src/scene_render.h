@@ -9,6 +9,7 @@
 #include "giant/world/scene.h"
 
 #include <map>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -35,7 +36,19 @@ struct SceneFrame {
     std::vector<render::Material> materials;
     std::vector<render::Decal> decals;
     u32 cells_rebuilt = 0; // by the last scene_frame
+    // What scene_frame took from the scene (it takes them all), kept for the
+    // other followers of its changes (the physics), who take it in turn
+    // with take_for_followers. Past a million ids it says "all" instead.
+    world::SceneChanges for_followers;
+    world::SceneChanges take_for_followers() {
+        world::SceneChanges out = std::move(for_followers);
+        for_followers = {};
+        return out;
+    }
     usize scatter_room = 0; // instances reserved once for scatter to grow into (0: not yet)
+    // Where entities are drawn instead of where the scene has them (the
+    // physics' poses), during a scene_frame call.
+    const std::unordered_map<world::EntityId, world::Transform>* poses = nullptr;
 
     struct MaterialKey {
         u32 bits[8];
@@ -100,9 +113,14 @@ struct SceneFrame {
 // With `scatter` (updated first), each cell's scatter placements draw after
 // its entities, as their items (kits expanded); a cell is rebuilt when its
 // placements change (ScatterPlacer::take_changed) or a kit changes.
+// With `poses`, an entity in it is drawn there (position and rotation; it
+// stays in the cell the scene puts it in), and the cells of the entities in
+// `redraw` (whose pose changed or went) are rebuilt.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
-                 ScatterPlacer* scatter = nullptr);
+                 ScatterPlacer* scatter = nullptr,
+                 const std::unordered_map<world::EntityId, world::Transform>* poses = nullptr,
+                 std::span<const world::EntityId> redraw = {});
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

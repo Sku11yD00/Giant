@@ -96,6 +96,58 @@ target_include_directories(cgltf_lib SYSTEM PUBLIC ${cgltf_SOURCE_DIR})
 set_target_properties(cgltf_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(third_party::cgltf ALIAS cgltf_lib)
 
+# Jolt Physics: rigid bodies and collision for sim (MIT licence). Double
+# precision, so bodies keep millimetres across a 30 km world. Built from its
+# own CMake project with its extras (samples, tests, GPU compute, debug
+# renderer, profiler, object streams) off and its own warning flags off.
+set(DOUBLE_PRECISION ON CACHE BOOL "" FORCE)
+set(USE_ASSERTS OFF CACHE BOOL "" FORCE)
+set(GENERATE_DEBUG_SYMBOLS OFF CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+set(FLOATING_POINT_EXCEPTIONS_ENABLED OFF CACHE BOOL "" FORCE)
+set(CPP_EXCEPTIONS_ENABLED ON CACHE BOOL "" FORCE)
+set(CPP_RTTI_ENABLED ON CACHE BOOL "" FORCE)
+set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
+set(ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)
+set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
+set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
+set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(jolt
+  GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+  # Shallow clone of the release tag (commit e77f175595e64cb44218cc9d9d56fc365ad0e36a).
+  GIT_TAG v5.6.0
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR Build
+)
+FetchContent_MakeAvailable(jolt)
+set_target_properties(Jolt PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Under the sanitizers Jolt is instrumented too: its threads hand bodies to
+# ours through its own atomics, which a sanitizer must see.
+giant_apply_sanitizers(Jolt)
+if(GIANT_SANITIZE_THREAD AND NOT MSVC)
+  # Jolt swaps its fences for acq_rel atomics under TSan, which it detects
+  # with __has_feature or __SANITIZE_THREAD__. GCC's sanitizer headers
+  # define __has_feature as 0, so a file including them first would see no
+  # TSan (fences TSan cannot follow, and inline code differing from the
+  # library's). Said once, for Jolt and everything using it.
+  target_compile_definitions(Jolt PUBLIC JPH_TSAN_ENABLED=)
+endif()
+get_target_property(jolt_includes Jolt INTERFACE_INCLUDE_DIRECTORIES)
+set_target_properties(Jolt PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${jolt_includes}")
+add_library(third_party::jolt ALIAS Jolt)
+
 # --- GPU toolchain -----------------------------------------------------------
 # NuGet packages are zip files; DOWNLOAD_NAME lets CMake unpack them.
 

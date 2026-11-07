@@ -672,6 +672,50 @@ def weather_gate(tool, call, check):
     tool("new_scene")
 
 
+def physics_gate(tool, call, check):
+    """N4 part 1: physics. Entities with bodies collide; simulating (a play button) lets the
+    dynamic ones fall in real time, drawn where they are while the scene keeps where they were
+    put; edits are followed, and stopping puts them back."""
+    tool("new_scene")
+    tool("create_entity", {"name": "Ground", "shape": "plane", "scale": [200, 1, 200]})
+    ball = tool("create_entity", {"name": "Ball", "shape": "sphere", "position": [0, 20, 0], "body": "dynamic"})["id"]
+    hit = tool("raycast", {"origin": [0, 50, 0], "direction": [0, -1, 0]})
+    check(hit["hit"] and hit["entity"] == ball and abs(hit["point"][1] - 20.5) < 0.01, f"a ray meets the ball, got {hit}")
+    tool("simulate", {"on": True})
+
+    def where(entity):
+        e = tool("get_entity", {"id": entity})
+        return e["simulated"]["position"] if "simulated" in e else e["position"]
+
+    def fall(entity, rest_y, what):
+        # Frames move it (no step_physics): about 2 s of falling. Judged by the clock, so a
+        # slow software GPU only takes longer, and a frame rate with no vsync cannot run out.
+        started = time.monotonic()
+        y = None
+        while time.monotonic() - started < 120:
+            call("ping")
+            y = where(entity)[1]
+            if abs(y - rest_y) < 0.03 and tool("get_physics")["active"] == 0:
+                return
+        check(False, f"{what}: comes to rest at y {rest_y} in real time, at {y}")
+
+    fall(ball, 0.5, "the ball")
+    state = tool("get_physics")
+    check(state["simulating"] and state["dynamic_bodies"] == 1 and state["steps"] > 0 and state["refused"] == 0
+          and state["moved"] == 1, f"physics while simulating, got {state}")
+    check(tool("get_entity", {"id": ball})["position"] == [0, 20, 0], "the scene keeps where the ball was put")
+    tool("set_entity", {"id": ball, "position": [5, 10, 0]})  # an edit: falls from there
+    fall(ball, 0.5, "the moved ball")
+    check(abs(where(ball)[0] - 5) < 0.05, "the moved ball falls straight down")
+    tool("simulate", {"on": False})
+    for _ in range(3):
+        call("ping")
+    e = tool("get_entity", {"id": ball})
+    check(e["position"] == [5, 10, 0] and "simulated" not in e, f"stopping puts the ball back, got {e}")
+    check(not tool("get_physics")["simulating"], "stopped")
+    tool("new_scene")
+
+
 def gi_gate(tool, call, check):
     """N2 part 5: global illumination. The voxel world is lit a budgeted number of bricks a
     frame (new ones first, then all in turn), in the lit views and the voxel view."""
@@ -870,7 +914,7 @@ def main() -> int:
         # renderer's own d3d12 tests check them), on in gi_gate.
         tool("set_render_settings", {"gi": False, "screen_space_reflections": False})
         for gate in (build_scene, world_gate, lod_gate, kit_gate, voxel_gate, far_field_gate,
-                     terrain_gate, shadow_gate, weather_gate, gi_gate, n1_gate):
+                     terrain_gate, shadow_gate, weather_gate, physics_gate, gi_gate, n1_gate):
             # Each gate's time, so a run near the timeout shows which one grew.
             started = time.monotonic()
             frames = tool("get_engine_info")["frames_completed"]

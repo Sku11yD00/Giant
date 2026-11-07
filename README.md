@@ -131,7 +131,7 @@ Milestone **N2, voxel world and GI** (done in code; gate: a 20 km view that stay
 
       python tools/n2_gate.py giant_editor.exe
 
-Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rolls over an edited valley, and the fly-through has no hitches):
+Milestone **N3, weather, landscape and scatter** (done in code; gate: a storm rolls over an edited valley, and the fly-through has no hitches):
 
 - Part 1: world cells. The world is cut into 64 m squares, and the editor
   and renderer keep their work by square: moving, recolouring or deleting
@@ -211,6 +211,17 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   scatter keep up, and the storm arrives with rain and wet ground:
 
       python tools/n3_gate.py giant_editor.exe
+
+Milestone **N4, first playable slice** (in progress; gate: a growing giantess wrecks a town and a forest at 60 fps):
+
+- Part 1: physics (Jolt). Entities collide as they are drawn (cubes,
+  spheres, planes, kits, the ground's tiles); an entity's body is fixed,
+  dynamic or none. Simulate (the menu bar, or `simulate` over MCP) lets
+  dynamic entities fall and come to rest, follows edits, and puts them
+  back when stopped (the scene, its undo and its saves keep where things
+  were put); `raycast` finds what a ray meets. Bodies are built a share
+  each frame, the ground's in the background, so big worlds open without
+  a stall.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

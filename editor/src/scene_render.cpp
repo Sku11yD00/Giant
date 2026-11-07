@@ -238,8 +238,14 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
         if (e == nullptr || !e->visible) {
             continue;
         }
+        const world::Transform* posed = nullptr;
+        if (out.poses != nullptr) {
+            const auto p = out.poses->find(id);
+            if (p != out.poses->end()) posed = &p->second;
+        }
+        const world::Transform& at = posed != nullptr ? *posed : e->transform;
         if (e->shape != world::Shape::kit) {
-            emit(e->shape, e->mesh, e->transform, e->material, e->decal, renderer, meshes, out, cell);
+            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell);
             continue;
         }
         const world::Kit* kit = scene.find_kit(e->kit);
@@ -247,8 +253,7 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             continue;
         }
         for (const world::KitPiece& p : kit->pieces) {
-            emit(p.shape, p.mesh, place(e->transform, p.transform), p.material, p.decal, renderer, meshes, out,
-                 cell);
+            emit(p.shape, p.mesh, place(at, p.transform), p.material, p.decal, renderer, meshes, out, cell);
         }
     }
     cell.scattered = false;
@@ -446,9 +451,21 @@ world::Transform place(const world::Transform& parent, const world::Transform& c
 }
 
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
-                 SceneFrame& out, TerrainMeshes* terrain, FarGround* far, ScatterPlacer* scatter) {
+                 SceneFrame& out, TerrainMeshes* terrain, FarGround* far, ScatterPlacer* scatter,
+                 const std::unordered_map<world::EntityId, world::Transform>* poses,
+                 std::span<const world::EntityId> redraw) {
     out.cells_rebuilt = 0;
+    out.poses = poses;
     world::SceneChanges changes = scene.take_changes();
+    if (!out.for_followers.all) {
+        if (changes.all || out.for_followers.ids.size() + changes.ids.size() > (usize{1} << 20)) {
+            out.for_followers.ids.clear();
+            out.for_followers.ids.shrink_to_fit();
+            out.for_followers.all = true;
+        } else {
+            out.for_followers.ids.insert(out.for_followers.ids.end(), changes.ids.begin(), changes.ids.end());
+        }
+    }
     const std::vector<world::CellCoord> ground = far != nullptr       ? far->take_changed()
                                                  : terrain != nullptr ? terrain->take_changed()
                                                                       : std::vector<world::CellCoord>{};
@@ -488,6 +505,11 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                 now.dirty = true;
                 out.where[id] = c;
             }
+        }
+        // Drawn somewhere else now (a pose moved, or went).
+        for (const world::EntityId id : redraw) {
+            const auto was = out.where.find(id);
+            if (was != out.where.end()) out.grid[was->second].dirty = true;
         }
         // Scatter placements changed.
         if (scatter != nullptr) {
@@ -578,6 +600,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             return a.z != b.z ? a.z < b.z : a.x < b.x;
         });
     }
+    out.poses = nullptr; // the cells are built
     if (!layout && out.cells_rebuilt == 0) {
         return; // as last frame
     }

@@ -314,3 +314,24 @@ GIANT_TEST("scene cells: a small cell taking part of a big hole re-sends at most
     GIANT_CHECK(looked > 0 && looked <= 1024);
     GIANT_CHECK(c.live().size() == 41);
 }
+
+GIANT_TEST("scene cells: entities drawn at their poses, the posed one's cell rebuilt alone") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    const world::EntityId a = c.add(10.0, 10.0);
+    c.add(100.0, 10.0);
+    c.build();
+    const std::vector<render::CellRange> before = c.frame.cells;
+    std::unordered_map<world::EntityId, world::Transform> poses;
+    poses[a].position = {12.0, 3.0, 11.0}; // where the physics has it
+    const std::vector<world::EntityId> redraw{a};
+    scene_frame(c.scene, *c.renderer, *c.meshes, c.frame, nullptr, nullptr, nullptr, &poses, redraw);
+    GIANT_CHECK(c.frame.cells_rebuilt == 1 && c.frame.cells[1].version == before[1].version);
+    GIANT_CHECK(c.live()[0].position.y == 3.0 && c.live()[0].position.x == 12.0);
+    GIANT_CHECK(c.scene.find(a)->transform.position.y == 0.0); // the scene keeps where it was put
+    // The pose gone: drawn where the scene has it again.
+    poses.clear();
+    scene_frame(c.scene, *c.renderer, *c.meshes, c.frame, nullptr, nullptr, nullptr, &poses, redraw);
+    GIANT_CHECK(c.frame.cells_rebuilt == 1 && c.live()[0].position.y == 0.0);
+    GIANT_CHECK(c.frame.poses == nullptr);
+}

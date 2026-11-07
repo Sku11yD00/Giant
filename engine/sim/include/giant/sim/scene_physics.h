@@ -1,0 +1,159 @@
+// The scene in the physics world: a body for each entity that collides
+// (world::Entity::body), the ground's tiles as height fields, kept in step
+// with edits; and where the dynamic bodies have moved to, as poses beside
+// the scene (the scene keeps where things were put: what undo, saving and
+// stopping a simulation go by).
+//
+//   ScenePhysics follow(physics);
+//   follow.sync(scene, changed.ids, changed.all); // each frame, what the scene changed
+//   physics.step(delta);
+//   follow.update_poses();                        // where the dynamic entities are now
+//   draw(follow.poses(), follow.take_redraw());
+//
+// Bodies are made from what the renderer draws: a cube is a box, a sphere
+// a ball (an ellipsoid when scaled unevenly), a plane a slab whose top is
+// the plane, a kit one compound of its cube, sphere and plane pieces. Meshes
+// and decals do not collide yet. A kit entity is fixed whatever its body
+// says (a house breaks, rather than falls over, from N4 part 4).
+//
+// A sync does a bounded amount of work (rule 9): at most
+// `entities_per_sync` entities are looked at and `tiles_per_sync` ground
+// tiles copied out, the rest wait for the next; a tile's height field is
+// made on a worker of its own and swapped in when ready (the old one holds
+// the ground meanwhile). A dynamic entity's body waits until the fixed
+// bodies waiting are made and the ground round it is in, so nothing falls
+// through ground still being built. flush() does all of it at once.
+#pragma once
+
+#include "giant/core/jobs.h"
+#include "giant/sim/physics.h"
+#include "giant/world/scene.h"
+
+#include <deque>
+#include <memory>
+#include <span>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace giant::sim {
+
+struct ScenePhysicsSettings {
+    // Entities looked at (bodies made, remade, moved or let go) per sync,
+    // a body made counting each of its parts (a kit of 40 pieces counts 40).
+    u32 entities_per_sync = 1024;
+    u32 tiles_per_sync = 16;      // ground tiles copied out per sync (their shapes are made on a worker)
+};
+
+struct ScenePhysicsStats {
+    u32 entity_bodies = 0;
+    u32 dynamic_bodies = 0;
+    u32 tile_bodies = 0;
+    u32 not_colliding = 0;  // entities whose shape does not collide (meshes, decals) or body is none
+    u32 refused = 0;        // entities the physics world refused (bad numbers, or full)
+    u32 waiting = 0;        // entities waiting to be looked at
+    u32 tiles_waiting = 0;  // ground tiles waiting to be copied out or for their shape
+    u32 posed = 0;          // dynamic entities drawn where the simulation moved them
+};
+
+class ScenePhysics {
+public:
+    explicit ScenePhysics(PhysicsWorld& physics, const ScenePhysicsSettings& settings = {});
+    ~ScenePhysics();
+    ScenePhysics(const ScenePhysics&) = delete;
+    ScenePhysics& operator=(const ScenePhysics&) = delete;
+
+    // Brings the bodies in line with the scene, within the budgets.
+    // `changed`: the ids the scene handed out since the last sync
+    // (SceneChanges::ids); `all`: look at every entity. A new scene (another
+    // identity), changed kits and the ground's tiles (it takes
+    // Terrain::take_physics_changes) are noticed here. An entity moved by an
+    // edit is put there, at rest (and drawn there again).
+    void sync(world::Scene& scene, std::span<const world::EntityId> changed, bool all);
+    // A sync with no budget: every entity waiting (and in `changed`) looked
+    // at, every tile's shape made and in (a command's answer: a raycast,
+    // step_physics).
+    void flush(world::Scene& scene, std::span<const world::EntityId> changed = {}, bool all = false);
+
+    // After a step: the dynamic entities whose bodies moved get their pose
+    // (and are to be drawn again). Returns how many.
+    usize update_poses();
+    // Where the simulation has moved dynamic entities to (position and
+    // rotation; the scale is the entity's). Entities not in it are where
+    // the scene puts them.
+    const std::unordered_map<world::EntityId, world::Transform>& poses() const { return m_poses; }
+    // Every moved body back where its entity is, at rest; no poses (a
+    // simulation stopping).
+    void reset_poses();
+    // The entities whose pose changed or went since the last call (to draw
+    // again), each once.
+    std::vector<world::EntityId> take_redraw();
+
+    // Where the scene had the entity when its body was last brought in line
+    // (null: not tracked). A pose is stale while the scene's transform differs.
+    const world::Transform* placed(world::EntityId entity) const;
+    world::EntityId entity_of(BodyId body) const;
+    BodyId body_of(world::EntityId entity) const;
+    ScenePhysicsStats stats() const;
+    // Lets every body go (the physics world is left empty of the scene's).
+    void clear();
+
+private:
+    struct Tracked {
+        BodyId body = k_no_body;
+        world::Entity look; // what the body was made from, where the scene put it
+        bool dynamic = false;
+        bool remake = false; // its kit changed: made again whatever else
+    };
+    struct Build; // a tile's shape being made
+    struct Tile {
+        BodyId body = k_no_body;
+        u64 versions[4] = {}; // of the body: the tile's and its +x, +z and +x+z neighbours'
+        std::shared_ptr<Build> building; // the shape on its way, with the versions it is of
+    };
+    struct Made {
+        world::EntityId id = 0;
+        BodyDesc desc;
+        bool dynamic = false;
+    };
+
+    void enqueue(const world::Scene& scene, world::EntityId id);
+    void enqueue_tile(world::CellCoord cell);
+    // Returns its cost against the budget.
+    u32 sync_entity(const world::Scene& scene, world::EntityId id, std::vector<Made>& made, std::vector<BodyId>& gone);
+    void sync_entities(const world::Scene& scene, u32 budget);
+    void sync_tiles(world::Terrain& terrain, u32 budget);
+    void finish_tiles(bool wait);
+    bool ground_waiting(const world::Terrain& terrain, const DVec3& at) const;
+    BodyDesc entity_body(const world::Scene& scene, const world::Entity& e) const;
+    void drop_pose(world::EntityId id);
+
+    PhysicsWorld& m_physics;
+    ScenePhysicsSettings m_settings;
+    u64 m_scene = 0;
+    std::vector<world::Kit> m_kits;
+    std::unordered_map<world::EntityId, Tracked> m_entities;
+    std::unordered_map<BodyId, world::EntityId> m_by_body;
+    std::unordered_map<world::EntityId, world::Transform> m_poses;
+    std::vector<world::EntityId> m_redraw;
+    // Entities to look at: those changed (queued once), then the scene's in
+    // turn after an "all"; new dynamic ones go to their own queue to wait
+    // for what they could land on.
+    std::deque<world::EntityId> m_queue;
+    std::unordered_set<world::EntityId> m_queued;
+    std::vector<world::EntityId> m_scan;
+    usize m_scan_at = 0;
+    std::deque<world::EntityId> m_dynamic_queue;
+    std::unordered_set<world::EntityId> m_dynamic_queued;
+    std::unordered_set<world::EntityId> m_edited; // moved by an edit not yet seen: no pose from the old body
+    bool m_closing = false;                        // going: no fresh physics world to clear into
+    // Ground tiles to look at, and those whose shape is being made.
+    std::unordered_map<world::CellCoord, Tile, world::CellCoordHash> m_tiles;
+    std::deque<world::CellCoord> m_tile_queue;
+    std::unordered_set<world::CellCoord, world::CellCoordHash> m_tile_queued;
+    std::vector<world::CellCoord> m_building;
+    WaitGroup m_builds;
+    JobSystem m_builder{1}; // last: its jobs end before the rest goes
+};
+
+} // namespace giant::sim

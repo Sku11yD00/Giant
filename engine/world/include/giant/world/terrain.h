@@ -111,10 +111,17 @@ public:
     // Hands over what changed since the last call. A terrain made, copied
     // or assigned starts as "all changed".
     TerrainChanges take_changes();
+    // The same, kept apart for a second follower (the physics, which must
+    // not take the meshes' changes).
+    TerrainChanges take_physics_changes();
     // About how many tiles changed since then (all of them after "all").
     usize untaken_changes() const { return m_changes.all ? m_tiles.size() : m_changes.tiles.size(); }
     // Tells terrains apart (a copy or an assignment is a new one).
     u64 identity() const { return m_identity.value; }
+    // Counts every change (a tile set, modified, restored or removed, or all
+    // cleared): a follower that does not take_changes (they go to one
+    // follower) looks over the tiles only when it moved, with identity().
+    u64 edits() const { return m_edits; }
 
     TerrainMaterial material;
 
@@ -134,6 +141,8 @@ private:
     std::unordered_map<CellCoord, Heights, CellCoordHash> m_tiles;
     std::unordered_map<CellCoord, u64, CellCoordHash> m_versions; // the same cells
     TerrainChanges m_changes{{}, true};
+    TerrainChanges m_physics_changes{{}, true};
+    u64 m_edits = 0;
     Identity m_identity;
 };
 
