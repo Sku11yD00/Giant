@@ -28,8 +28,9 @@ falls, the ground wets. It passes when:
   short;
 - the weather (the sky passes: atmosphere, clouds, their shadows, the
   cover map; and what rain, wet ground and cover add to shading) takes
-  under 3 ms of GPU time in the full storm, by the river, in the street
-  and up in the clouds, each caught up first;
+  under 1.5 ms of GPU time (its share of the frame budget) in the full
+  storm, by the river, in the street and up in the clouds, each caught up
+  first;
 - the storm arrived (the view shows it, rain falls, the sky drew clouds,
   their shadows, rain, wet surfaces and the cover map) and the ground has
   begun to wet;
@@ -65,7 +66,9 @@ CLIMB_TO = 1000.0        # metres over the town: up into the storm's deck (base 
 CLIMB_OUT = 900.0        # metres the climb spirals out from the town
 LOW_END, STREET_END = 0.45, 0.6  # the legs' ends, as fractions of the flight
 STORM_SECONDS = 20.0     # how long the storm takes to blend in
-WEATHER_BUDGET_MS = 3.0  # GPU: the weather in the full storm
+# GPU: the weather in the full storm (the frame budget's "Weather, clouds,
+# particles", docs/architecture.md).
+WEATHER_BUDGET_MS = 1.5
 WEATHER_OFF = {"clouds": False, "cloud_shadows": False, "precipitation": False, "wet_surfaces": False,
                "weather_cover": False}
 WEATHER_ON = {k: True for k in WEATHER_OFF}
