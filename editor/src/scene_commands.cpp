@@ -3,6 +3,7 @@
 // the camera is view state and is not.
 #include "editor_commands.h"
 #include "mesh_library.h"
+#include "physics_state.h"
 #include "far_ground.h"
 #include "world_streaming.h"
 
@@ -65,7 +66,11 @@ Json entity_json(const Entity& e) {
             {"roughness", e.material.roughness},
             {"metallic", e.material.metallic},
             {"emissive", vec3_json(e.material.emissive)},
-            {"visible", e.visible}};
+            {"visible", e.visible},
+            {"body", world::to_string(e.body)}};
+    if (e.mass != 0.0f) {
+        j["mass"] = e.mass; // kept for a dynamic body (a fixed one keeps it for when it is made dynamic)
+    }
     if (!e.mesh.empty()) {
         j["mesh"] = e.mesh;
     }
@@ -159,6 +164,14 @@ Json entity_properties() {
         {"metallic", number(0, 1, "0 for non-metals, 1 for metals. Default 0.")},
         {"emissive", triple(0, 1000, "Linear RGB light it gives off. Default none.")},
         {"visible", {{"type", "boolean"}}},
+        {"body",
+         {{"enum", {"fixed", "dynamic", "none"}},
+          {"description", "Physics: fixed collides and never moves (the default), dynamic falls and is "
+                          "pushed while simulating (a crate, a boulder), none does not collide. Cubes, "
+                          "spheres, planes and kits collide; meshes and decals do not yet. A kit stays "
+                          "fixed."}}},
+        {"mass", number(0, world::k_max_body_mass,
+                        "Kilograms, for a dynamic body. Default 0: from its size, as water.")},
     };
 }
 
@@ -201,6 +214,10 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("metallic")) e.material.metallic = args["metallic"].get<float>();
     if (args.contains("emissive")) e.material.emissive = vec3_from(args["emissive"]);
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
+    if (args.contains("body")) {
+        e.body = world::body_from_string(args["body"].get<std::string>()).value_or(e.body);
+    }
+    if (args.contains("mass")) e.mass = args["mass"].get<float>();
     if (e.shape == world::Shape::kit && (args.contains("shape") || args.contains("kit"))) {
         if (e.kit.empty()) {
             return "shape kit needs a kit: give kit, e.g. \"house\" (list_kits shows them)";
@@ -908,7 +925,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          }});
 
     add(registry,
-        {"get_entity", "Returns every field of one entity.",
+        {"get_entity",
+         "Returns every field of one entity; while simulating has moved it, also `simulated`: its "
+         "position and rotation now (the fields are where the scene puts it, and where it goes back to).",
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["id"],
              "properties": {"id": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}}})"),
          true,
@@ -918,7 +937,19 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              if (e == nullptr) {
                  return CommandResult::failure("no entity with id " + std::to_string(id));
              }
-             return CommandResult::success(entity_json(*e));
+             Json out = entity_json(*e);
+             if (state.physics != nullptr) {
+                 // Not after an edit the physics has yet to see (it puts it there).
+                 const auto pose = state.physics->poses().find(id);
+                 const world::Transform* placed = state.physics->bodies().placed(id);
+                 if (pose != state.physics->poses().end() && placed != nullptr &&
+                     placed->position == e->transform.position && placed->rotation == e->transform.rotation) {
+                     const EulerDegrees r = euler_from_quat(pose->second.rotation);
+                     out["simulated"] = {{"position", dvec3_json(pose->second.position)},
+                                         {"rotation", {{"pitch", r.pitch}, {"yaw", r.yaw}, {"roll", r.roll}}}};
+                 }
+             }
+             return CommandResult::success(out);
          }});
 
     add(registry,

@@ -17,6 +17,7 @@
 #include "viewport_camera.h"
 #include "far_ground.h"
 #include "scatter_placer.h"
+#include "physics_state.h"
 #include "weather_state.h"
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
@@ -294,6 +295,8 @@ int run(const Options& options) {
     state.scatter = &scatter;
     editor::WeatherState weather;
     state.weather = &weather;
+    editor::PhysicsState physics;
+    state.physics = &physics;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -323,11 +326,13 @@ int run(const Options& options) {
     if (ui == nullptr) {
         return 1;
     }
+    // Before the scripts: their OnStop may run commands (a raycast reads it).
+    editor::SceneFrame scene_frame; // reused every frame
+    physics.take_frame_changes = [&scene_frame] { return scene_frame.take_for_followers(); };
     editor::EditorPanels panels(commands, state, log_history);
     // After the registry, so scripts' OnStop can still run commands.
     ScriptRunner scripts(commands, state);
     state.scripts_to_load = options.scripts;
-    editor::SceneFrame scene_frame; // reused every frame
     editor::TerrainBrushTool terrain_brush;
     // Records the scene and the panels into `target` (an sRGB image).
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
@@ -336,7 +341,9 @@ int run(const Options& options) {
                           state.scene.terrain);
         scatter.camera = state.camera.position;
         scatter.update(state.scene, terrain_meshes.last_changes());
-        editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter);
+        const std::vector<world::EntityId> redraw = physics.take_redraw();
+        editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
+                            &physics.poses(), redraw);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
         input.lighting = editor::weather_lighting(state.scene.lighting, weather.shown());
@@ -428,6 +435,9 @@ int run(const Options& options) {
         panels.draw(frame_info);
         ui->end_frame();
         weather.update(state.scene.weather, delta, state.camera.position, state.scene_generation); // after the panels' changes
+        // What the last frame took from the scene; dynamic entities move
+        // while simulating (drawn there this frame).
+        physics.update(state.scene, scene_frame.take_for_followers(), delta);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }

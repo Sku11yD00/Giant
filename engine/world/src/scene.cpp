@@ -47,6 +47,24 @@ std::optional<Shape> shape_from_string(std::string_view name) {
     return std::nullopt;
 }
 
+const char* to_string(BodyKind body) {
+    switch (body) {
+    case BodyKind::fixed: return "fixed";
+    case BodyKind::dynamic: return "dynamic";
+    case BodyKind::none: return "none";
+    }
+    return "fixed";
+}
+
+std::optional<BodyKind> body_from_string(std::string_view name) {
+    for (const BodyKind b : {BodyKind::fixed, BodyKind::dynamic, BodyKind::none}) {
+        if (name == to_string(b)) {
+            return b;
+        }
+    }
+    return std::nullopt;
+}
+
 const char* to_string(DecalShape shape) {
     switch (shape) {
     case DecalShape::disc: return "disc";
@@ -466,6 +484,9 @@ Json terrain_json(const Terrain& t) {
 Json entity_json(const Entity& e) {
     Json entity = {{"id", e.id}, {"name", e.name}, {"visible", e.visible}};
     write_look(entity, e.shape, e.mesh, e.kit, e.transform, e.material, e.decal);
+    // Only when not the default, so older scenes read and write the same.
+    if (e.body != BodyKind::fixed) entity["body"] = to_string(e.body);
+    if (e.mass != 0.0f) entity["mass"] = e.mass;
     return entity;
 }
 
@@ -783,6 +804,15 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
     r.string("name", e.name, false, k_max_name_bytes);
     r.boolean("visible", e.visible);
     read_look(r, path, e.shape, e.mesh, &e.kit, e.transform, e.material, e.decal, error);
+    if (const Json* v = r.get("body", false); v != nullptr && r.ok()) {
+        const std::optional<BodyKind> body = v->is_string() ? body_from_string(v->get<std::string>()) : std::nullopt;
+        if (body) {
+            e.body = *body;
+        } else {
+            r.fail("body", "must be fixed, dynamic or none");
+        }
+    }
+    r.number("mass", e.mass, 0, k_max_body_mass);
     r.finish();
 }
 

@@ -72,6 +72,7 @@ Terrain& Terrain::operator=(Terrain&& other) noexcept {
         m_tiles = std::move(other.m_tiles);
         m_versions = std::move(other.m_versions);
         m_changes = {{}, true};
+        m_physics_changes = {{}, true};
         m_identity = Identity();
         other.clear();
     }
@@ -140,25 +141,34 @@ void Terrain::clear() {
     m_tiles.clear();
     m_versions.clear();
     m_changes = {{}, true};
+    m_physics_changes = {{}, true};
+    ++m_edits;
 }
 
 void Terrain::changed(CellCoord cell) {
-    if (m_changes.all) {
-        return;
+    ++m_edits;
+    for (TerrainChanges* log : {&m_changes, &m_physics_changes}) {
+        if (log->all) continue;
+        // Nobody may be taking them: past a point "everything" says it in less memory.
+        if (log->tiles.size() >= 4096 + m_tiles.size()) {
+            log->tiles.clear();
+            log->tiles.shrink_to_fit();
+            log->all = true;
+            continue;
+        }
+        log->tiles.push_back(cell);
     }
-    // Nobody may be taking them: past a point "everything" says it in less memory.
-    if (m_changes.tiles.size() >= 4096 + m_tiles.size()) {
-        m_changes.tiles.clear();
-        m_changes.tiles.shrink_to_fit();
-        m_changes.all = true;
-        return;
-    }
-    m_changes.tiles.push_back(cell);
 }
 
 TerrainChanges Terrain::take_changes() {
     TerrainChanges out = std::move(m_changes);
     m_changes = {};
+    return out;
+}
+
+TerrainChanges Terrain::take_physics_changes() {
+    TerrainChanges out = std::move(m_physics_changes);
+    m_physics_changes = {};
     return out;
 }
 

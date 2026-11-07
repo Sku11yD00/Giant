@@ -70,6 +70,17 @@ struct Material {
     bool operator==(const Material&) const = default;
 };
 
+// How an entity takes part in physics (giant/sim): fixed collides and
+// never moves (the ground's rocks, a standing house: the default), dynamic
+// falls and is pushed (a crate, debris), none does not collide (decor).
+// Decals and meshes never collide yet.
+enum class BodyKind { fixed, dynamic, none };
+const char* to_string(BodyKind body);
+std::optional<BodyKind> body_from_string(std::string_view name);
+
+// Heaviest a dynamic body may be (kilograms): a city block's worth.
+constexpr float k_max_body_mass = 1.0e9f;
+
 struct Entity {
     EntityId id = 0;
     std::string name;
@@ -84,6 +95,8 @@ struct Entity {
     Material material; // unused by kits (their pieces have their own)
     DecalSettings decal; // used when shape is `decal`
     bool visible = true;
+    BodyKind body = BodyKind::fixed;
+    float mass = 0.0f; // kilograms, when dynamic; 0: from its size (as water)
     bool operator==(const Entity&) const = default;
 };
 
@@ -251,6 +264,9 @@ public:
     // meshes entities name are not tracked: compare those). A scene
     // made, copied or assigned starts as "all changed".
     SceneChanges take_changes();
+    // What the next take_changes() would hand over, left there (for a
+    // follower that must catch up between frames: a command's answer).
+    const SceneChanges& untaken_changes() const { return m_changes; }
     // Tells apart scenes (a copy or an assignment is a new scene), so a
     // follower of take_changes knows when to start over.
     u64 identity() const { return m_identity.value; }

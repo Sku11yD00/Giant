@@ -567,6 +567,46 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   `weather_cover`. Not yet: ripples, splashes, drips, wet voxel colours for
   GI, snow depth (it is a coat, not a volume).
 
+## Physics (N4 part 1)
+
+`giant::sim` holds the physics world (`sim/physics.h`), Jolt underneath
+and kept private: callers see plain types (`BodyDesc` of box, sphere,
+capsule, convex hull and height-field parts; `BodyId`; `RayHit`). Jolt is
+built in double precision, so bodies sit at world positions tens of
+kilometres out without a moving origin. Steps are fixed at 1/60 s, at most
+four a call (the rest is dropped and counted, so a slow frame never
+snowballs into more work), and run on a `JobSystem` of their own: the
+editor gives physics half the cores, two to four, so it never waits on
+the voxel, scatter or terrain workers.
+
+`ScenePhysics` (`sim/scene_physics.h`) keeps the physics world in step
+with a `world::Scene`: each entity whose shape collides gets a body made
+from what the renderer draws (a cube a box, a sphere a ball or, scaled
+unevenly, a hull, a plane a 0.5 m slab whose top is the plane, a kit one
+fixed compound of its pieces; sizes under a millimetre count as one), and
+each terrain tile a height field of its own samples plus its +x and +z
+neighbours' edge (the same triangles the mesh draws). It reads the change
+list the frame took (`SceneFrame::take_for_followers`) and the terrain's
+own second change log (`Terrain::take_physics_changes`), so a frame looks
+at what changed, not the scene's size; a moved entity is teleported, a
+resized one remade, and a body that goes or moves wakes what slept on it.
+`Entity::body` says how an entity collides (`fixed`, `dynamic`, `none`)
+and `Entity::mass` its weight (0: from its size, water's density); both
+are saved only when not the default. Meshes and decals do not collide
+yet, and kits stay fixed whatever their body (they break rather than
+fall, N4 part 4).
+
+Simulated motion never goes into the scene. The dynamic bodies' places
+are poses beside it (`ScenePhysics::poses`), and the editor draws those
+entities there (`scene_frame`'s `poses`, rebuilding the cells of the ones
+that moved); the scene keeps where things were put, which is what undo,
+saving and streaming see. Simulating in the editor
+(`editor/src/physics_state.h`) is view state, like a play button: stopping
+drops the poses and puts the bodies back where the scene has them. The
+bodies follow the scene while stopped too, so starting costs nothing and a
+raycast answers at once. A body remade while simulating (its size, body
+or mass edited) starts again from where the scene has the entity.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops
@@ -938,6 +978,27 @@ over the target frame time). Where it stands:
   read on a worker and meshed on each level's two workers; what draws is
   worked out for changed chunks only (a level-2 chunk looks at its 64
   children, a level-1 chunk at its 64 cells: hash lookups).
+  Physics (N4 part 1): at most four fixed steps a frame on physics' own
+  workers (the main thread waits for them). A frame's sync looks at no
+  more than 1024 entities, a body counting each of its parts (1024 cubes
+  or 25 kit placements of 40 pieces, about a millisecond, made in one
+  batch; an eighth kept for dynamic entities, so an edit to one never
+  waits behind a stream of fixed ones), and copies out no more than 16
+  terrain tiles, whose height fields (0.2 to 0.8 ms each at 64 to 128
+  samples) are made on a worker of their own (one thread, kept) and
+  swapped in when ready, the old tile holding the ground meanwhile; the
+  rest waits for the next frame, so opening a big world builds its bodies
+  over a few seconds, not in one frame. A new dynamic entity's body waits
+  until no fixed one is waiting and the ground round it is in, so nothing
+  falls through. A new scene (new, load, open, and their undo) starts a
+  fresh physics world and lets the old one's bodies go on a thread of its
+  own (tens of milliseconds for 60,000 bodies, off the frame). Every body
+  that moved rebuilds its cell's instances that frame (as any edit does;
+  cost grows with what else is in the cell). Kits are compared whole each
+  frame (as the renderer does). `raycast` and `step_physics` finish
+  whatever waits first (commands, not frames; `step_physics` of a minute
+  runs 3600 steps, about half a second among 50,000 fixed bodies), and
+  `get_physics` counts every body (a few milliseconds in a big world).
 
 | GPU work | Budget |
 | --- | --- |

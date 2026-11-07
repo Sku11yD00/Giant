@@ -1,6 +1,7 @@
 #include "panels.h"
 
 #include "../mesh_library.h"
+#include "../physics_state.h"
 #include "../weather_state.h"
 
 #include "giant/core/log.h"
@@ -137,6 +138,13 @@ void EditorPanels::draw_menu_bar() {
             run("redo");
         }
         ImGui::EndMenu();
+    }
+    if (m_state.physics != nullptr) {
+        // A play button: dynamic entities fall while on, and go back when off.
+        bool on = m_state.physics->simulating();
+        if (ImGui::MenuItem(on ? "Stop simulating" : "Simulate", nullptr, on)) {
+            run("simulate", {{"on", !on}});
+        }
     }
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem(k_scene, nullptr, &m_show_scene);
@@ -361,6 +369,14 @@ void EditorPanels::draw_properties() {
             }
         } else {
             set("shape", std::string(chosen));
+        }
+    }
+    {
+        // How it collides: fixed, falls (while simulating), or not at all.
+        const char* bodies[] = {"fixed", "dynamic", "none"};
+        int body = static_cast<int>(e->body);
+        if (ImGui::Combo("Body", &body, bodies, IM_ARRAYSIZE(bodies))) {
+            set("body", std::string(bodies[body]));
         }
     }
     if (e->shape == world::Shape::kit) {
