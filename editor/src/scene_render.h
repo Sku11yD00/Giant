@@ -47,6 +47,14 @@ struct SceneFrame {
         for_followers = {};
         return out;
     }
+    // The same changes kept again for the animation (AnimationState), taken
+    // apart from the physics' (which may take its own early).
+    world::SceneChanges for_animation;
+    world::SceneChanges take_for_animation() {
+        world::SceneChanges out = std::move(for_animation);
+        for_animation = {};
+        return out;
+    }
     // Cells rebuilt whole a frame for fallen trees coming or going (the rest
     // wait for the next frames; moving ones are made again in place).
     u32 fallen_rebuilds_per_frame = 8;
@@ -58,6 +66,9 @@ struct SceneFrame {
     const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr;
     // Fallen scatter trees, drawn where they lie (likewise).
     const sim::FallenTrees* fallen = nullptr;
+    // Animated skinned entities' own posed meshes, drawn instead of their
+    // files' (likewise).
+    const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr;
 
     struct MaterialKey {
         u32 bits[8];
@@ -142,14 +153,17 @@ struct SceneFrame {
 // kit's loose pieces are drawn where they are (world transforms), the rest
 // of it where it stands. With `fallen`, a cell's fallen scatter trees (of
 // the placement it draws: the same serial) are drawn where they lie, and
-// the cells in `redraw_cells` are rebuilt.
+// the cells in `redraw_cells` are rebuilt. With `skinned`, a mesh entity in
+// it draws that mesh (its animated copy) instead of its file's; entities
+// that came or went from it are in `redraw`.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
                  const std::unordered_map<world::EntityId, world::Transform>* poses = nullptr,
                  std::span<const world::EntityId> redraw = {},
                  const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr,
-                 const sim::FallenTrees* fallen = nullptr, std::span<const world::CellCoord> redraw_cells = {});
+                 const sim::FallenTrees* fallen = nullptr, std::span<const world::CellCoord> redraw_cells = {},
+                 const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

@@ -267,6 +267,37 @@ GIANT_TEST("world: imported meshes are saved by path") {
     GIANT_CHECK(load_scene(too_long, bad).has_value());
 }
 
+GIANT_TEST("world: a mesh entity's animation saves and loads, and only when set") {
+    Scene scene;
+    Entity walker = named("Walker");
+    walker.shape = Shape::mesh;
+    walker.mesh = "assets/giantess.glb";
+    walker.animation = {"walk", -2.5f, false};
+    scene.add(walker);
+    Entity still = named("Still");
+    still.shape = Shape::mesh;
+    still.mesh = "assets/giantess.glb";
+    scene.add(still);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(contains(text, "\"walk\"") && text.find("animation") == text.rfind("animation")); // the still one writes none
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->animation == walker.animation);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->animation == EntityAnimation{});
+    GIANT_CHECK(save_scene(loaded) == text);
+    const auto refused = [](const std::string& animation, const char* expected) {
+        const std::string json = R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "animation": )" +
+                                 animation + "}]}";
+        Scene bad;
+        const auto error = load_scene(json, bad);
+        GIANT_CHECK(error.has_value() && contains(error->message, expected));
+    };
+    refused(R"({"clip": "a", "speed": 101})", "speed must be from -100 to 100");
+    refused(R"({"clip": "a", "pace": 1})", "pace is not a known key");
+    refused(R"({"clip": 3})", "clip must be a string");
+    refused(R"("walk")", "must be an object");
+}
+
 GIANT_TEST("world: kits and decals save and load") {
     Scene scene;
     Kit kit;

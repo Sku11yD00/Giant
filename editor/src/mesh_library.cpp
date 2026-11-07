@@ -24,6 +24,13 @@ std::string to_utf8(const std::filesystem::path& path) {
 
 } // namespace
 
+u32 MeshLibrary::Skinned::find_clip(std::string_view name) const {
+    for (u32 i = 0; i < clips.size(); ++i) {
+        if (clips[i].name == name) return i;
+    }
+    return anim::k_no_clip;
+}
+
 MeshLibrary::~MeshLibrary() {
     if (m_renderer != nullptr) {
         for (const auto& mesh : m_meshes) {
@@ -73,7 +80,20 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     if (clusters.empty()) {
         return {nullptr, path + ": the file has no usable triangles"};
     }
+    std::shared_ptr<Skinned> skinned;
+    if (imported.skinned) {
+        skinned = std::make_shared<Skinned>();
+        skinned->clusters = geometry::build_skinned_clusters(imported.skinned->mesh);
+        imported.skinned->mesh = {};
+        if (skinned->clusters.mesh.empty() || imported.skinned->skeleton.size() > render::k_max_skin_joints) {
+            return {nullptr, path + ": the file's skinned mesh could not be made into clusters"};
+        }
+        skinned->skeleton = std::move(imported.skinned->skeleton);
+        skinned->clips = std::move(imported.skinned->clips);
+        skinned->joint_radius = std::move(imported.skinned->joint_radius);
+    }
     auto mesh = std::make_unique<Mesh>();
+    mesh->skinned = std::move(skinned);
     mesh->path = path;
     mesh->triangles = clusters.source_triangles;
     mesh->clusters = static_cast<u32>(clusters.clusters.size());
@@ -96,7 +116,10 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     std::snprintf(seconds, sizeof(seconds), "%.2f", static_cast<double>(mesh->import_seconds));
     log_info("editor", "imported " + path + ": " + std::to_string(mesh->triangles) + " triangles, " +
                            std::to_string(mesh->clusters) + " clusters in " +
-                           std::to_string(mesh->levels) + " levels (" + seconds + " s)");
+                           std::to_string(mesh->levels) + " levels (" + seconds + " s)" +
+                           (mesh->skinned ? ", skinned: " + std::to_string(mesh->skinned->skeleton.size()) +
+                                                " joints, " + std::to_string(mesh->skinned->clips.size()) + " clips"
+                                          : std::string()));
     for (const std::string& w : mesh->warnings) {
         log_warning("editor", path + ": " + w);
     }

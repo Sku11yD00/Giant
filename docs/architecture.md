@@ -1015,6 +1015,28 @@ voxel world does not hold them (they bounce no light yet: a known gap,
 until a coarse pose is voxelized). Later: levels of detail for skinned
 meshes (refitting group bounds too) and morph targets.
 
+Playing them (editor). `MeshLibrary` keeps a skinned file's skeleton,
+clips and bind-space clusters beside its rest-pose mesh, which every
+entity drawing it shows until it animates. An entity animates when it
+draws a skinned file and has something to play: its saved
+`Entity::animation` (clip, speed, loop; `set_animation`, undoable, saved
+in scene and cell files) or a clip a command plays in the view
+(`play_animation`, `blend_animations`: view state, until `set_animation`,
+the entity hidden or drawing another file, or a new scene). `AnimationState` follows the scene's
+changes (its own copy of them, kept by the scene frame beside the
+physics', and what the scene has not handed out yet just before the scene
+frame is built, so no cell is built with a copy it should not draw), gives each animated entity its own copy of the character in the
+renderer (a few a frame, so loading many never stalls a frame), moves
+their `AnimationPlayer`s on by the frame's time (its own `animation`
+phase, after physics; a clip started this frame starts at its start),
+works out the poses on two workers (`parallel_for`) and hands the renderer
+only poses that differ from the last one sent (a same pose would redraw
+its shadows for nothing). The
+scene frame draws an entity's copy instead of the file's mesh once it is
+loaded and posed. At most 64 animate at once: those animating keep their
+place, a free one goes to the lowest id waiting, and the rest stand frozen
+in the rest pose.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

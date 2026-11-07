@@ -82,6 +82,18 @@ std::optional<BodyKind> body_from_string(std::string_view name);
 // Heaviest a dynamic body may be (kilograms): a city block's worth.
 constexpr float k_max_body_mass = 1.0e9f;
 
+// The animation a skinned mesh entity plays (its file's clip, by name),
+// looping or once, at a speed (1 normal; negative plays back). No clip:
+// it stands in its rest pose. The editor plays it (view state may play
+// something else for a while: play_animation).
+constexpr float k_max_animation_speed = 100.0f;
+struct EntityAnimation {
+    std::string clip;
+    float speed = 1.0f; // -k_max_animation_speed to k_max_animation_speed
+    bool loop = true;
+    bool operator==(const EntityAnimation&) const = default;
+};
+
 struct Entity {
     EntityId id = 0;
     std::string name;
@@ -98,6 +110,7 @@ struct Entity {
     bool visible = true;
     BodyKind body = BodyKind::fixed;
     float mass = 0.0f; // kilograms, when dynamic; 0: from its size (as water)
+    EntityAnimation animation; // when shape is `mesh` and the file is skinned (kept otherwise)
     bool operator==(const Entity&) const = default;
 };
 

@@ -673,8 +673,20 @@ bool read_clips(const cgltf_data& data, const anim::Skeleton& skeleton,
         anim::Clip clip;
         std::string name = animation.name != nullptr && animation.name[0] != '\0' ? animation.name
                                                                                   : "clip " + std::to_string(a + 1);
+        // At most k_max_clip_name_bytes (the editor saves clips by name), cut
+        // on a UTF-8 character's start; a repeat's " (k)" fits within it too.
+        const auto cut = [](std::string text, usize bytes) {
+            if (text.size() <= bytes) return text;
+            while (bytes > 0 && (static_cast<u8>(text[bytes]) & 0xC0) == 0x80) --bytes;
+            text.resize(bytes);
+            return text;
+        };
+        name = cut(std::move(name), anim::k_max_clip_name_bytes);
         std::string unique = name;
-        for (int k = 2; names.count(unique) != 0; ++k) unique = name + " (" + std::to_string(k) + ")";
+        for (int k = 2; names.count(unique) != 0; ++k) {
+            const std::string suffix = " (" + std::to_string(k) + ")";
+            unique = cut(name, anim::k_max_clip_name_bytes - suffix.size()) + suffix;
+        }
         names.insert(unique);
         clip.name = unique;
         for (cgltf_size c = 0; c < animation.channels_count; ++c) {

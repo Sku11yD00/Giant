@@ -74,6 +74,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     register_scatter_commands(registry, state);
     register_weather_commands(registry, state);
     register_physics_commands(registry, state);
+    register_animation_commands(registry, state);
     add(registry,
         {"get_engine_info",
          "Describes the running editor: version, graphics backend and adapter, whether the GPU "
