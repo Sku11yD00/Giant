@@ -49,6 +49,7 @@ class ScatterPlacer;
 class WeatherState;
 class PhysicsState;
 class PlayState;
+class AnimationState;
 class WorldStreaming;
 
 // Where the main thread's time went in a frame, for finding what makes a
@@ -60,6 +61,7 @@ enum class FramePhase : u8 {
     ui,          // panels
     weather,     // weather and the player's input
     physics,     // bodies following the scene, stepping
+    animation,   // skinned entities' clips moving on, their poses
     begin_frame, // waiting for a frame in flight to finish
     terrain,     // terrain meshes
     far_ground,  // far ground levels
@@ -74,8 +76,8 @@ enum class FramePhase : u8 {
     count
 };
 inline constexpr std::array<const char*, static_cast<usize>(FramePhase::count)> k_frame_phase_names = {
-    "events",  "mcp",   "scripts", "ui",      "weather",   "physics",   "begin_frame", "terrain", "far_ground",
-    "scatter", "scene", "render",  "ui_draw", "end_frame", "streaming", "tail",        "other"};
+    "events",     "mcp",     "scripts", "ui",     "weather", "physics",   "animation", "begin_frame", "terrain",
+    "far_ground", "scatter", "scene",   "render", "ui_draw", "end_frame", "streaming", "tail",        "other"};
 static_assert(k_frame_phase_names.back() != nullptr, "a name for every phase");
 static_assert(render::k_cpu_section_names.back() != nullptr, "a name for every section");
 // Then the renderer's own (render::CpuSection, within `render`), named
@@ -209,6 +211,9 @@ struct EditorState {
     // Walking the scene as the player (play mode, on the physics); set by
     // main (and tests). Null: play is not available.
     PlayState* play = nullptr;
+    // Skinned entities playing their clips; set by main (and tests). Null:
+    // animation is not available.
+    AnimationState* animation = nullptr;
     // LOD error and debug view: view state, not undoable.
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
@@ -247,6 +252,8 @@ void register_scatter_commands(ai::CommandRegistry& registry, EditorState& state
 void register_weather_commands(ai::CommandRegistry& registry, EditorState& state);
 // The physics commands (physics_commands.cpp).
 void register_physics_commands(ai::CommandRegistry& registry, EditorState& state);
+// The animation commands (animation_commands.cpp).
+void register_animation_commands(ai::CommandRegistry& registry, EditorState& state);
 
 // What the AI is told when it connects over MCP.
 const char* mcp_instructions();

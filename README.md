@@ -259,7 +259,13 @@ Milestone **N5, photoreal characters** (in progress; gate: close-ups hold up bes
 - Part 1b: skinned characters drawn animated. The GPU poses each
   character's vertices when its pose changes and refits its clusters'
   culling spheres, so culling, shadows and shading see the pose as they
-  see everything else. Playing them from the editor (1c) comes next.
+  see everything else.
+- Part 1c: playing them in the editor. A skinned mesh entity plays a clip
+  saved with the scene (`set_animation`: clip, speed, loop), and the AI
+  can play, cross-fade and blend clips live, pause and step time
+  (`play_animation`, `blend_animations`, `step_animation`,
+  `get_animation`, `list_animations`). Up to 64 characters animate at
+  once.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

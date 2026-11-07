@@ -61,7 +61,7 @@ render::DecalShape decal_shape(world::DecalShape s) {
 // One drawable thing (an entity, or a piece of a placed kit).
 void emit(world::Shape shape, const std::string& mesh_path, const world::Transform& t, const world::Material& m,
           const world::DecalSettings& d, const render::Renderer& renderer, const MeshLibrary& meshes,
-          SceneFrame& out, SceneFrame::Cell& cell) {
+          SceneFrame& out, SceneFrame::Cell& cell, render::MeshId own = render::k_no_mesh) {
     if (shape == world::Shape::decal) {
         render::Decal decal;
         decal.position = t.position;
@@ -79,7 +79,9 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
         return;
     }
     render::MeshId mesh = render::k_no_mesh;
-    if (shape == world::Shape::mesh) {
+    if (shape == world::Shape::mesh && own != render::k_no_mesh) {
+        mesh = own; // an animated copy
+    } else if (shape == world::Shape::mesh) {
         const MeshLibrary::Mesh* found = meshes.find_normalized(mesh_path);
         if (found == nullptr || found->id == render::k_no_mesh) {
             return;
@@ -266,7 +268,12 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
         }
         const world::Transform& at = posed != nullptr ? *posed : e->transform;
         if (e->shape != world::Shape::kit) {
-            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell);
+            render::MeshId own = render::k_no_mesh;
+            if (out.skinned != nullptr && e->shape == world::Shape::mesh) {
+                const auto s = out.skinned->find(id);
+                if (s != out.skinned->end()) own = s->second;
+            }
+            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own);
             continue;
         }
         const world::Kit* kit = scene.find_kit(e->kit);
@@ -574,19 +581,22 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, world::Transform>* poses,
                  std::span<const world::EntityId> redraw,
                  const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses,
-                 const sim::FallenTrees* fallen, std::span<const world::CellCoord> redraw_cells) {
+                 const sim::FallenTrees* fallen, std::span<const world::CellCoord> redraw_cells,
+                 const std::unordered_map<world::EntityId, render::MeshId>* skinned) {
     out.cells_rebuilt = 0;
     out.poses = poses;
+    out.skinned = skinned;
     out.piece_poses = piece_poses;
     out.fallen = fallen;
     world::SceneChanges changes = scene.take_changes();
-    if (!out.for_followers.all) {
-        if (changes.all || out.for_followers.ids.size() + changes.ids.size() > (usize{1} << 20)) {
-            out.for_followers.ids.clear();
-            out.for_followers.ids.shrink_to_fit();
-            out.for_followers.all = true;
+    for (world::SceneChanges* follower : {&out.for_followers, &out.for_animation}) {
+        if (follower->all) continue;
+        if (changes.all || follower->ids.size() + changes.ids.size() > (usize{1} << 20)) {
+            follower->ids.clear();
+            follower->ids.shrink_to_fit();
+            follower->all = true;
         } else {
-            out.for_followers.ids.insert(out.for_followers.ids.end(), changes.ids.begin(), changes.ids.end());
+            follower->ids.insert(follower->ids.end(), changes.ids.begin(), changes.ids.end());
         }
     }
     const std::vector<world::CellCoord> ground = far != nullptr       ? far->take_changed()
@@ -751,6 +761,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     }
     out.poses = nullptr; // the cells are built
     out.piece_poses = nullptr;
+    out.skinned = nullptr;
     out.fallen = nullptr;
     if (!layout && out.cells_rebuilt == 0) {
         return; // as last frame

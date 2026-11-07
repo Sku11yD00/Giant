@@ -567,6 +567,9 @@ Json entity_json(const Entity& e) {
     // Only when not the default, so older scenes read and write the same.
     if (e.body != BodyKind::fixed) entity["body"] = to_string(e.body);
     if (e.mass != 0.0f) entity["mass"] = e.mass;
+    if (!(e.animation == EntityAnimation{})) {
+        entity["animation"] = {{"clip", e.animation.clip}, {"speed", e.animation.speed}, {"loop", e.animation.loop}};
+    }
     return entity;
 }
 
@@ -949,6 +952,13 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         }
     }
     r.number("mass", e.mass, 0, k_max_body_mass);
+    if (const Json* a = r.get("animation", false); a != nullptr && r.ok()) {
+        Reader ar(*a, path + ".animation", error);
+        ar.string("clip", e.animation.clip, false, k_max_name_bytes);
+        ar.number("speed", e.animation.speed, -k_max_animation_speed, k_max_animation_speed);
+        ar.boolean("loop", e.animation.loop);
+        ar.finish();
+    }
     r.finish();
 }
 

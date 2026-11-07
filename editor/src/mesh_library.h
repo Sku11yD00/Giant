@@ -4,9 +4,16 @@
 //
 // Importing is an asset load, not a scene change: it is not undoable and
 // the mesh stays loaded for the session (until reload).
+//
+// A skinned file (a character) is also kept as one: its skeleton, clips and
+// bind-space clusters, which the animation state copies to the renderer for
+// each entity it animates (AnimationState). The mesh itself is the file in
+// its rest pose, as any other (what entities not animated draw).
 #pragma once
 
+#include "giant/anim/player.h"
 #include "giant/core/types.h"
+#include "giant/geometry/clusters.h"
 #include "giant/render/renderer.h"
 
 #include <memory>
@@ -19,6 +26,16 @@ namespace giant::editor {
 
 class MeshLibrary {
 public:
+    // A skinned file's character, shared by every entity animating it (and
+    // kept by them while a reload replaces it).
+    struct Skinned {
+        anim::Skeleton skeleton;
+        std::vector<anim::Clip> clips; // names unique
+        std::vector<float> joint_radius; // per joint, for anim::pose_bounds
+        geometry::SkinnedClusterMesh clusters; // bind space, base level
+        // The clip of that name, or anim::k_no_clip.
+        u32 find_clip(std::string_view name) const;
+    };
     struct Mesh {
         std::string path;                      // normalised, as entities store it
         render::MeshId id = render::k_no_mesh; // k_no_mesh without a renderer
@@ -28,6 +45,7 @@ public:
         u32 coarsest_triangles = 0; // drawn when the whole mesh is tiny
         float import_seconds = 0.0f;
         std::vector<std::string> warnings;
+        std::shared_ptr<const Skinned> skinned; // null: not skinned
     };
     struct Loaded {
         const Mesh* mesh = nullptr; // null on failure

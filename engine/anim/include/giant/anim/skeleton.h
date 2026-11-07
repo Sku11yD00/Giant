@@ -26,6 +26,7 @@ inline constexpr usize k_max_joints = 1024;          // joint indices fit u16
 inline constexpr float k_max_clip_seconds = 3600.0f; // an hour
 inline constexpr usize k_max_keys = 8'000'000;       // over all of a file's clips
 inline constexpr usize k_max_clips = 4096;           // a file's animations
+inline constexpr usize k_max_clip_name_bytes = 128;  // longer names are cut at import (world::k_max_name_bytes)
 
 struct JointTransform {
     Vec3 translation{};

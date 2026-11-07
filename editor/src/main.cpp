@@ -17,6 +17,7 @@
 #include "viewport_camera.h"
 #include "far_ground.h"
 #include "scatter_placer.h"
+#include "animation_state.h"
 #include "physics_state.h"
 #include "play_state.h"
 #include "weather_state.h"
@@ -302,6 +303,8 @@ int run(const Options& options) {
     state.physics = &physics;
     editor::PlayState play(physics);
     state.play = &play;
+    editor::AnimationState animation(renderer.get()); // after the renderer: its copies leave first
+    state.animation = &animation;
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -369,10 +372,16 @@ int run(const Options& options) {
         scatter.update(state.scene, terrain_meshes.last_changes());
         physics.refresh_forest(state.scene, scatter); // fallen trees of cells placed again, drawn lying this frame
         mark(editor::FramePhase::scatter);
-        const std::vector<world::EntityId> redraw = physics.take_redraw();
+        // Edits since the animation last looked (commands, panels): followed
+        // first, so no cell is built with a copy its entity should no longer draw.
+        animation.follow_now(state.scene, meshes, state.scene.untaken_changes());
+        std::vector<world::EntityId> redraw = physics.take_redraw();
+        const std::vector<world::EntityId> animation_redraw = animation.take_redraw();
+        redraw.insert(redraw.end(), animation_redraw.begin(), animation_redraw.end());
         const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
-                            &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw);
+                            &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
+                            &animation.copies());
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
@@ -532,6 +541,8 @@ int run(const Options& options) {
         physics.update(state.scene, scene_frame.take_for_followers(), delta);
         if (playing) play.after_step(state.camera, delta); // the camera at its eyes
         mark(editor::FramePhase::physics);
+        animation.update(state.scene, meshes, scene_frame.take_for_animation(), delta);
+        mark(editor::FramePhase::animation);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }
