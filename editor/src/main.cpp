@@ -345,6 +345,9 @@ int run(const Options& options) {
     using clock = std::chrono::steady_clock;
     // A screenshot (taken by a command) is the command's time.
     editor::FramePhaseMs phase_ms{};
+    rhi::DeviceCounts device_mark = device->counts(); // the device's totals when the last frame was timed
+    float frame_wait_ms = 0.0f;      // the frame being timed: begin_frame's wait for the GPU
+    float frame_release_ms = 0.0f;   // and its freeing
     auto phase_mark = clock::now();
     bool in_screenshot = false;
     const auto mark = [&](editor::FramePhase phase) {
@@ -463,6 +466,9 @@ int run(const Options& options) {
             window->wait_events(100);
             last_frame = std::chrono::steady_clock::now();
             phase_ms = {}; // minimised time is no frame's
+            device_mark = device->counts();
+            frame_wait_ms = 0.0f;
+            frame_release_ms = 0.0f;
             phase_mark = last_frame;
             cpu_mark = thread_cpu_ms();
             continue;
@@ -474,7 +480,19 @@ int run(const Options& options) {
         // The phases since the last frame began: the same span as delta.
         mark(editor::FramePhase::other);
         const double cpu_now = thread_cpu_ms();
-        state.frame_times.add(frame_info.frame_ms, phase_ms, static_cast<float>(cpu_now - cpu_mark));
+        {
+            // The device's work over the same span (its running totals'
+            // difference: loads between frames count too).
+            const rhi::DeviceCounts counts = device->counts();
+            const editor::FrameDevice frame_device{static_cast<u32>(counts.created - device_mark.created),
+                                                   static_cast<u32>(counts.allocations - device_mark.allocations),
+                                                   static_cast<u32>(counts.released - device_mark.released),
+                                                   frame_wait_ms, frame_release_ms};
+            state.frame_times.add(frame_info.frame_ms, phase_ms, static_cast<float>(cpu_now - cpu_mark), frame_device);
+            device_mark = counts;
+            frame_wait_ms = 0.0f;
+            frame_release_ms = 0.0f;
+        }
         cpu_mark = cpu_now;
         phase_ms = {};
 
@@ -546,6 +564,8 @@ int run(const Options& options) {
             state.selected = 0;
         }
         frame_info.ui_draw_calls = device->last_frame_stats().ui_draws;
+        frame_wait_ms = device->last_frame_stats().wait_ms;
+        frame_release_ms = device->last_frame_stats().release_ms;
         skipped_in_a_row = 0;
         if (pace_null) {
             window->wait_events(16);

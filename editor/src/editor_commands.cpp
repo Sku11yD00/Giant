@@ -82,7 +82,9 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
          "and each of its passes (gpu: frame_ms and passes, from GPU timestamps; 0 ms on the "
          "null backend) and the window size in pixels. With phases_since, frame_times.phases: where the main "
          "thread's time went in the frames since then (each phase's median, and the phases of those over "
-         "phases_over_ms), for finding what makes a frame slow.",
+         "phases_over_ms), for finding what makes a frame slow; with each slow frame, the GPU device's counts "
+         "(device: resources created, new memory allocations, resources released, begin_frame's wait for the GPU "
+         "in ms and its freeing after (release_ms); device_before: the two frames before, counts summed), and typical_device the median frame's.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "properties": {
              "phases_since": {"type": "integer", "minimum": 0,
                               "description": "The frames from this one on (frame_times.recorded counts them; those still kept, the last 240)."},

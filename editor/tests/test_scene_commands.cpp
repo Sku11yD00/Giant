@@ -232,7 +232,10 @@ GIANT_TEST("editor: frame phases name the slow frames' parts") {
             phases[at(FramePhase::scatter)] = 30.0f;
             ms = 40.01f;
         }
-        t.add(ms, phases, i == 290 ? 39.0f : 9.0f);
+        // The device: one resource made a frame; frames 288 and 289 made
+        // memory, and 290 waited on the GPU.
+        FrameDevice device{1, i == 288 || i == 289 ? 5u : 0u, 1, i == 290 ? 28.0f : 0.5f};
+        t.add(ms, phases, i == 290 ? 39.0f : 9.0f, device);
     }
     usize slot = 0;
     GIANT_CHECK(t.slot_of(299, slot) && slot == 299 % FrameTimes::k_frames);
@@ -247,6 +250,10 @@ GIANT_TEST("editor: frame phases name the slow frames' parts") {
     GIANT_CHECK(slow["frame"] == 290 && slow["ms"] == 40.01 && slow["cpu_ms"] == 39.0);
     GIANT_CHECK(slow["phases"]["scatter"] == 30.0 && slow["phases"]["render/voxels"] == 4.0);
     GIANT_CHECK(!slow["phases"].contains("mcp") && !slow["phases"].contains("ui"));
+    GIANT_CHECK(slow["device"]["wait_ms"] == 28.0 && slow["device"]["allocations"] == 0);
+    GIANT_CHECK(slow["device_before"]["allocations"] == 10 && slow["device_before"]["created"] == 2);
+    GIANT_CHECK(all["typical_device"]["created"] == 1 && all["typical_device"]["allocations"] == 0 &&
+                all["typical_device"]["wait_ms"] == 0.5);
     // Since frame 295: five frames, none slow; past the newest: none.
     const ai::Json recent = frame_phases(t, 295, 25.0f);
     GIANT_CHECK(recent["since"] == 295 && recent["frames"] == 5 && recent["slow"].empty());

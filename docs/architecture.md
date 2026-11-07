@@ -75,6 +75,23 @@ follow without touching the renderer.
   Outside a frame (load time) the copy is still waited for.
   `FrameStats::upload_bytes` counts what a frame staged; the caller keeps
   it within its budget.
+- **Small buffers share heaps.** A buffer that is its own allocation (a
+  committed resource) is new video memory: Windows finds, zeroes and maps
+  it, and unmaps it when it goes, on the GPU's timeline, and the queue
+  waits behind that work. Streaming makes and drops thousands of small
+  buffers (terrain tiles, meshes), so on D3D12 a gpu-memory buffer up to
+  4 MiB made with all its contents is placed in one of a few 64 MiB heaps
+  instead (four made at init, 256 MiB, more when they fill, none given
+  back), a range of 64 KiB units each (src/heap_ranges.h; a tiny buffer
+  takes a whole unit, as a committed one does). The heaps are not zeroed
+  and their ranges are reused, so a buffer made without its contents stays
+  committed (it comes zeroed). Larger buffers and textures are committed
+  too; if a heap cannot be made, small buffers are committed from then on.
+  `Device::counts()` keeps running totals of resources created, new memory
+  allocations and resources released, and `FrameStats::wait_ms` is
+  begin_frame's wait for the GPU; the editor keeps both per frame and the
+  gates print them for the two frames before each hitch (begin_frame
+  waits for the frame two back).
 - **GPU timing (N2 part 1).** `CommandList::begin_timing(name)` /
   `end_timing()` (nestable, up to 32 per frame) put timestamps around GPU
   work; `Device::gpu_timings()` and `gpu_frame_ms()` give the newest
