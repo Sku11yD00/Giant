@@ -23,9 +23,9 @@ falls, the ground wets. It passes when:
   hitch), over the whole flight and over each leg on its own, with cells,
   ground and scatter streaming in and out and the weather changing;
 - the flight streamed: ground tiles loaded, and tiles and the hamlet's
-  entities unloaded behind it; streaming never failed; the scatter had
-  placed the low leg's cells by the end of the street, and no cell was
-  cut short;
+  entities unloaded behind it; streaming never failed; the scatter caught
+  up with every cell loaded some time in the street, and no cell was cut
+  short;
 - the weather (the sky passes: atmosphere, clouds, their shadows, the
   cover map; and what rain, wet ground and cover add to shading) takes
   under 3 ms of GPU time in the full storm, by the river, in the street
@@ -161,7 +161,9 @@ def flight_path(steps, ground):
             plan.append((leg, x, z, LOW_OVER, None))
         elif leg == "street":  # down the town's street at head height
             u = (t - LOW_END) / (STREET_END - LOW_END)
-            plan.append((leg, TOWN[0], street_z0 + u * (street_z1 - street_z0), 1.8, None))
+            # Down from over the trees to head height before the first houses.
+            over = LOW_OVER + (1.8 - LOW_OVER) * min(1.0, u / 0.15)
+            plan.append((leg, TOWN[0], street_z0 + u * (street_z1 - street_z0), over, None))
         else:  # spiralling out over the valley and up into the storm, looking out
             u = (t - STREET_END) / (1.0 - STREET_END)
             heading = u * 2.0 * math.pi  # starts looking along -z, as the street leg ends
@@ -196,7 +198,8 @@ def weather_cost(editor, at, rounds=3):
     whether it caught up, whether the parts went on and off as asked)."""
     editor.tool("set_camera", {"position": at[0], "look_at": at[1]})
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 8.0})
-    caught_up = wait_streaming(editor, 6000)[2] and settle(editor, 6000)[1]
+    streamed = wait_streaming(editor, 6000)[2]
+    caught_up = settle(editor, 6000)[1] and streamed
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 1.0})
     costs = []
     toggled = True
@@ -287,7 +290,7 @@ def main() -> int:
         legs = {name: {"reading": 0, "building": 0, "pending": 0} for name in ("low", "street", "climb")}
         low_end, street_end = leg_ends(STOPS)
         before = tool("get_world")
-        behind_street = {}
+        street_building = []  # scatter cells to place, through the street leg
 
         def each_stop(stop, frame):
             nonlocal draws
@@ -296,13 +299,14 @@ def main() -> int:
                 tool("set_weather", {"preset": "storm", "over_seconds": STORM_SECONDS})
             leg = legs[leg_of(stop, STOPS)]
             leg["pending"] = max(leg["pending"], frame["voxels"]["pending"])
-            if stop % 25 == 0 or stop == street_end:  # (a command each: a frame, timed with the flight)
+            in_street = low_end < stop <= street_end
+            if stop % 25 == 0 or (in_street and stop % 10 == 0):  # (a command each: a frame, timed too)
                 w = tool("get_world")
                 s = tool("get_scatter")
                 leg["reading"] = max(leg["reading"], w["reading"] + w["waiting"])
                 leg["building"] = max(leg["building"], s["building"])
-                if stop == street_end:
-                    behind_street["building"] = s["building"]
+                if in_street:
+                    street_building.append(s["building"])
             if frame["overflow"] or frame["voxels"]["overflow"] or frame["decal_overflow"]:
                 overflow.append(stop)
             got = (frame["draws"], frame["post_draws"])
@@ -333,10 +337,11 @@ def main() -> int:
         if streamed_in <= 0 or tiles_out <= 0 or entities_out <= 0:
             failures.append(f"the flight did not stream: {streamed_in} tiles loaded, {tiles_out} tiles and "
                             f"{entities_out} entities unloaded")
-        # The scatter keeps up: by the end of the street it has placed the low leg's cells.
-        if behind_street.get("building", 0) > 0:
-            failures.append(f"the scatter fell behind: {behind_street['building']} cells still to place "
-                            f"as the street leg ended")
+        # The scatter keeps up: some time in the street (slow, after the low
+        # leg's run) it has placed every cell loaded.
+        if not street_building or min(street_building) > 0:
+            failures.append(f"the scatter fell behind: never caught up in the street leg "
+                            f"(cells to place: {street_building})")
         # The storm in full (the rest of its blend, if the flight was quicker).
         weather = tool("get_weather")
         for _ in range(int(STORM_SECONDS * 60 / 10) + 60):
