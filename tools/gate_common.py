@@ -98,11 +98,14 @@ class Editor:
         for _ in range(frames):
             self.call("ping")
 
-    def fly(self, path, each_stop):
+    def fly(self, path, each_stop, marks=()):
         """Flies the camera along `path` ((position, look_at) per stop), calling
         each_stop(stop, last_frame) after each; returns the frame times (ms) of
-        the whole flight. The editor keeps its last 240: they are read every 110
-        stops (two commands a stop, a frame each, plus the read)."""
+        the whole flight. The editor keeps its last 240: they are read every 100
+        stops (two commands a stop, a frame each, plus the read; room for a few
+        more each_stop makes). Also read at each stop in `marks`: then
+        self.marked[stop] is how many of the times came before it ended."""
+        self.marked = {}
         # Hover first so the 240 recorded frame times hold none of what
         # came before (a scene build is one long frame).
         self.tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
@@ -112,7 +115,7 @@ class Editor:
         for stop, (position, look_at) in enumerate(path):
             self.tool("set_camera", {"position": position, "look_at": look_at})
             each_stop(stop, self.last_frame())
-            if stop % 110 == 109 or stop == len(path) - 1:
+            if stop % 100 == 99 or stop == len(path) - 1 or stop in marks:
                 now = self.tool("get_engine_info")["frame_times"]
                 new = now["recorded"] - recorded
                 recorded = now["recorded"]
@@ -120,6 +123,8 @@ class Editor:
                     raise RuntimeError(f"{new} frames passed between samples: some were not timed")
                 if new > 0:
                     times += now["recent_ms"][-new:]
+                if stop in marks:
+                    self.marked[stop] = len(times)
         return times
 
     def gpu_passes(self, frames):
