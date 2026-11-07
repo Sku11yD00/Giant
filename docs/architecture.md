@@ -682,7 +682,7 @@ kit change) mends it too, while a colour change keeps the break.
 Known limits: `impact` walks every entity (fine for a town; a cell index
 later); loose pieces stay in their kit's render cell however far they roll;
 mesh and decal pieces never come loose (only cubes, spheres and planes
-collide, and none thinner than a centimetre); the part index assumes every piece built a shape; damage is not
+collide, and no sphere flattened under a centimetre); the part index assumes every piece built a shape; damage is not
 saved (N4 part 8); pieces break whole, never into smaller bits (the
 destruction rings, N4 part 6).
 

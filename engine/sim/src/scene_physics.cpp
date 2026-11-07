@@ -49,15 +49,12 @@ Vec3 mul3(const Vec3& a, const Vec3& b) { return {a.x * b.x, a.y * b.y, a.z * b.
 bool add_part(world::Shape shape, const Vec3& scale, const Vec3& offset, const Quat& rotation,
               std::vector<Part>& parts) {
     const Vec3 s = abs3(scale);
-    // Thinner than a centimetre (flattened to nothing): no shape Jolt can
-    // give mass, so it does not collide (left out here, it is left out of
-    // every list of a kit's parts alike).
-    constexpr float k_min_extent = 0.01f;
-    const bool flat = shape == world::Shape::plane ? std::min(s.x, s.z) < k_min_extent
-                                                   : std::min({s.x, s.y, s.z}) < k_min_extent;
-    if (flat && (shape == world::Shape::cube || shape == world::Shape::sphere || shape == world::Shape::plane)) {
-        return false;
-    }
+    // A sphere flattened under a centimetre makes a hull Jolt cannot build
+    // (or give mass): it does not collide, left out here so it is left out
+    // of every list of a kit's parts alike. (Thin boxes are fine: their
+    // half extents are kept to a millimetre at least.)
+    constexpr float k_min_sphere = 0.01f;
+    if (shape == world::Shape::sphere && std::min({s.x, s.y, s.z}) < k_min_sphere) return false;
     switch (shape) {
     case world::Shape::cube:
         parts.push_back({BoxShape{{0.5f * s.x, 0.5f * s.y, 0.5f * s.z}}, offset, rotation});
@@ -786,6 +783,9 @@ void ScenePhysics::mend(world::EntityId id, Tracked& t, std::vector<BodyId>& gon
 usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std::pair<u32, Vec3>>& pushes) {
     const world::Kit* kit = find_kit(t.look.kit);
     if (kit == nullptr || !kit->breakable || t.look.shape != world::Shape::kit) return 0;
+    // Its kit changed and it waits to be made again: its pieces (and parts)
+    // are the old kit's, not `kit`'s.
+    if (t.remake) return 0;
     if (t.broken == nullptr) {
         if (t.body == k_no_body) return 0; // never made (refused): nothing to break
         t.broken = std::make_shared<Broken>(*kit, t.look.transform);
@@ -868,9 +868,9 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
         const float tall = std::max(0.5f, 0.5f * (b.pieces[i].hi.y - b.pieces[i].lo.y));
         const Vec3 tip{push[i].z, 0.0f, -push[i].x}; // up x push
         d.angular_velocity = tip * (1.0f / tall);
-        // A hair smaller than drawn (2 cm across at most, never under the
-        // centimetre a part needs), so it comes out of the gap it filled
-        // rather than wedge in it.
+        // A hair smaller than drawn (2 cm across at most, and never under a
+        // centimetre: a sphere needs that), so it comes out of the gap it
+        // filled rather than wedge in it.
         const auto shrink = [](float v) {
             const float m = std::fabs(v);
             const float to = std::max({0.9f * m, m - 0.02f, std::min(m, 0.01f)});
@@ -962,7 +962,7 @@ usize ScenePhysics::impact(const DVec3& point, float radius, float impulse) {
     for (const world::EntityId id : ids) {
         Tracked& t = m_entities[id];
         const world::Kit* kit = find_kit(t.look.kit);
-        if (kit == nullptr || !kit->breakable || t.body == k_no_body) continue;
+        if (kit == nullptr || !kit->breakable || t.body == k_no_body || t.remake) continue;
         const float strength = kit->strength > 0.0f ? kit->strength : world::k_default_kit_strength;
         const Broken pieces = t.broken != nullptr ? *t.broken : Broken(*kit, t.look.transform);
         // The blow in the placement's frame.

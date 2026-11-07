@@ -240,3 +240,33 @@ GIANT_TEST("breakage: a flattened piece never collides, the rest still break tru
     GIANT_CHECK(s.refused == 0 && s.entity_bodies == 2 && s.loose_pieces == 2);
     run(physics, follow, scene, 30); // and they fall without trouble
 }
+
+GIANT_TEST("breakage: placements waiting to be made again after their kit changed do not break by the old pieces") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ScenePhysicsSettings settings;
+    settings.entities_per_sync = 1; // one tower made a sync
+    ScenePhysics follow(physics, settings);
+    Scene scene;
+    ground(scene);
+    scene.kits.push_back(tower(true));
+    place(scene, "tower", {0.0, 0.0, 0.0});
+    place(scene, "tower", {10.0, 0.0, 0.0});
+    run(physics, follow, scene, 4);
+    GIANT_CHECK(follow.impact({0.6, 2.5, 0.0}, 0.3f, 6000.0f) == 1);
+    GIANT_CHECK(follow.impact({10.6, 2.5, 0.0}, 0.3f, 6000.0f) == 1);
+    // The kit is cut to its bottom block; one placement is made again a sync.
+    scene.kits[0].pieces.resize(1);
+    run(physics, follow, scene, 1);
+    GIANT_CHECK(follow.stats().broken_kits == 1); // the other still waits, broken
+    // The one made again has no middle block now; the one waiting holds the
+    // old pieces, so a blow waits for it (it must not break by them).
+    GIANT_CHECK(follow.impact({0.6, 1.5, 0.0}, 0.3f, 6000.0f) == 0);
+    GIANT_CHECK(follow.impact({10.6, 1.5, 0.0}, 0.3f, 6000.0f) == 0);
+    run(physics, follow, scene, 4);
+    // Both made again from the new kit: they break as it is now.
+    follow.reset_poses();
+    run(physics, follow, scene, 1);
+    GIANT_CHECK(follow.impact({0.6, 1.5, 0.0}, 0.3f, 6000.0f) == 0); // nothing there now
+    GIANT_CHECK(follow.impact({0.6, 0.5, 0.0}, 0.3f, 6000.0f) == 1); // the one block
+}
