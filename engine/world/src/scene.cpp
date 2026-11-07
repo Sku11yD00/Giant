@@ -434,6 +434,11 @@ Json scatter_json(std::span<const ScatterLayer> layers) {
             item["scale"] = Json::array({i.scale_min, i.scale_max});
             item["align"] = i.align;
             item["sink"] = i.sink;
+            if (i.tree) {
+                item["tree"] = {{"trunk_radius", i.tree->trunk_radius},
+                                {"height", i.tree->height},
+                                {"strength", i.tree->strength}};
+            }
             items.push_back(std::move(item));
         }
         layer["items"] = std::move(items);
@@ -1083,6 +1088,15 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
             }
             ir.number("align", item.align, 0, 1);
             ir.number("sink", item.sink, -1000, 1000);
+            if (const Json* tr = ir.get("tree", false); tr != nullptr && ir.ok() && !tr->is_null()) {
+                Reader tree_reader(*tr, at + ".tree", error);
+                ScatterTree tree;
+                tree_reader.number("trunk_radius", tree.trunk_radius, 0.01, 100);
+                tree_reader.number("height", tree.height, 0.1, 1000);
+                tree_reader.number("strength", tree.strength, 0, 1e9);
+                tree_reader.finish();
+                item.tree = tree;
+            }
             ir.finish();
             l.items.push_back(std::move(item));
         }

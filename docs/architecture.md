@@ -655,8 +655,9 @@ the camera and simulating back as they were.
 A kit marked `breakable` (with a `strength` in N·s, default 1500) is still
 one fixed compound body while whole, but its contacts are reported piece by
 piece: `PhysicsWorld` keeps a contact listener that, for each new contact,
-records the two bodies, the parts struck and the impulse (closing speed over
-the two inverse masses), keeping hits of at least `min_hit_impulse` (50
+records the two bodies, the parts struck and the impulse (closing speed at
+the point over the two bodies' inverse effective masses there: inverse mass
+plus the turning share, (r × n) · I⁻¹ (r × n)), keeping hits of at least `min_hit_impulse` (50
 N·s). Manifold reduction is off for those bodies (`BodyDesc::report_parts`)
 so the part struck is the one named.
 
@@ -685,6 +686,62 @@ mesh and decal pieces never come loose (only cubes, spheres and planes
 collide, and no sphere flattened under a centimetre); the part index assumes every piece built a shape; damage is not
 saved (N4 part 8); pieces break whole, never into smaller bits (the
 destruction rings, N4 part 6).
+
+### Falling trees (N4 part 5)
+
+A scatter item can be a tree (`ScatterItem::tree`: trunk radius and height
+at scale 1, and a strength, N·s, default 8000, grown with the scale
+squared). `sim::Forest` holds the trees of the scatter cells near the
+camera: the editor's `PhysicsState::feed_forest` hands it each cell's tree
+points whenever the placer swaps in a new placement
+(`ScatterPlacer::Cell::serial`), at most 32768 points looked at a frame (or
+one cell), nearest cells first. Within `radius` (384 m, plus a cell) every
+tree stands as a fixed capsule from half a radius above its foot (past what
+is sunk) to its top, at most 65536 of them (a nearer cell takes them from
+the farthest); past a cell more the standing trunks go, and a cell without
+fallen trees is forgotten. Trunks are made and removed 1024 a sync at most
+(about a millisecond; rule 9): the bodies of trees let go (far, evicted, a
+cell placed again or gone) wait in a queue for that budget.
+
+After each step `Forest::after_step` reads the same contact hits as the
+breakable kits: a standing trunk struck at least its strength is removed and
+made again as a dynamic capsule (wood, 700 kg a cubic metre) turning about
+its foot away from the blow, faster for a harder one (0.4 to 1.5 rad/s).
+Falling, it is an ordinary body: a tree it strikes hard enough falls in
+turn, and a breakable kit's pieces it strikes come loose (`ScenePhysics`
+sees the hit too). A hit's impulse counts the struck point's effective
+mass (`PhysicsWorld` hits: mass and inertia), so a falling trunk's tip
+strikes far softer than its whole mass, and the default strength keeps a
+tree of the same size from felling its neighbour: no chain through a whole
+forest. `impact` reaches trees as well (the distance is to the trunk's
+segment, foot to top). At most 64 trees start falling a step, the hardest
+struck first, 512 move at once and 16384 lie fallen; blows past that are
+shrugged off (counted). A fallen tree at rest sleeps (costing the steps
+nothing) and wakes, falling on, when what it rests on goes (a tree it leant
+on felled, a building's piece come loose).
+
+Fallen trees are view state like loose pieces: `Forest::fallen()` gives,
+per cell, the placement serial and the fallen points' foot transforms (the
+body's pose with the point's scale). `emit_scatter` draws a cell's fallen
+trees after all its other points, so while the same trees are falling only
+their instances are made again, in place (`rebuild_fallen`, telling the
+renderer only that range changed, as a ground-only change does); a tree
+starting to fall or standing up again rebuilds the cell once, at most 8
+cells a frame (`SceneFrame::fallen_rebuilds_per_frame`; the rest wait for
+the next frames, drawn as they were). A stale list
+(another serial) is never drawn. Stopping simulating stands every tree up
+again; a cell placed again does so for its trees; a new scene forgets the
+forest's ids as the scene's bodies clear the world whole
+(`ScenePhysics::clear(others)`).
+
+Known limits: a tree falls whole from its foot (no stump, no splintering;
+the destruction rings are N4 part 6), and the foot can slide a little as it
+tips since nothing pins it; fallen trees are not saved (N4 part 8) and
+stand again when their cell is placed again (a ground edit, the camera
+leaving the placer's radius); trunks stand only near the camera, so a tree
+farther than about 450 m never falls; the player's and a giant's kinematic
+bodies make no contacts with fixed trunks (as with buildings: `impact` is
+the way in).
 
 ## Window events (known limit)
 

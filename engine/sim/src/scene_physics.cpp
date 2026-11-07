@@ -223,7 +223,7 @@ ScenePhysics::~ScenePhysics() {
     clear();
 }
 
-void ScenePhysics::clear() {
+bool ScenePhysics::clear(usize others) {
     std::vector<BodyId> gone;
     gone.reserve(m_entities.size() + m_tiles.size());
     for (const auto& [id, t] : m_entities) {
@@ -235,8 +235,10 @@ void ScenePhysics::clear() {
         if (tile.body != k_no_body) gone.push_back(tile.body);
         if (tile.building != nullptr) tile.building->superseded.store(true, std::memory_order_relaxed);
     }
-    if (!m_closing && !gone.empty() && gone.size() == m_physics.size()) {
-        m_physics.clear(); // all of them ours: a fresh world, the old let go off the frame
+    bool whole = false;
+    if (!m_closing && gone.size() + others > 0 && gone.size() + others == m_physics.size()) {
+        m_physics.clear(); // all of them ours (and the others'): a fresh world, the old let go off the frame
+        whole = true;
     } else {
         m_physics.remove_many(gone, false); // all of ours: nothing left to wake
     }
@@ -271,6 +273,7 @@ void ScenePhysics::clear() {
     m_building.clear();
     m_kits.clear();
     m_scene = 0;
+    return whole;
 }
 
 void ScenePhysics::drop_pose(world::EntityId id) {

@@ -132,6 +132,24 @@ struct Kit {
 
 // Scatter layers (rules for strewing things over the ground; see
 // giant/world/scatter.h for how they place).
+
+// A scatter item that is a tree: while simulating, its trunk stands as a
+// body things bump into, and struck hard enough (or by impact) it snaps at
+// its foot and topples, falling as a body of its own onto what is there
+// (other trees it knocks down in turn; buildings it is heavy enough to break).
+// N s: a tree of its own size falling on it does not fell it (no chain through
+// a whole forest); one much bigger, a building's wall, a giant's foot do.
+constexpr float k_default_tree_strength = 8000.0f;
+struct ScatterTree {
+    float trunk_radius = 0.25f; // metres, at scale 1
+    float height = 10.0f;       // metres, at scale 1: the trunk, foot to top (what falls)
+    // The blow it takes before it snaps (newton seconds, at scale 1;
+    // 0: k_default_tree_strength), grown with the trunk's cross-section
+    // (the scale squared).
+    float strength = 0.0f;
+    bool operator==(const ScatterTree&) const = default;
+};
+
 // One kind of thing a layer places.
 struct ScatterItem {
     Shape shape = Shape::cube; // not decal
@@ -143,6 +161,7 @@ struct ScatterItem {
     float scale_max = 1.0f;
     float align = 0.0f; // 0: upright; 1: along the ground's normal (rocks)
     float sink = 0.0f;  // metres into the ground, at scale 1 (roots on a slope)
+    std::optional<ScatterTree> tree; // none: it never falls (rocks, grass)
     bool operator==(const ScatterItem&) const = default;
 };
 

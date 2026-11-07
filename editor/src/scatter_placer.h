@@ -40,6 +40,7 @@ public:
         std::shared_ptr<const Layers> layers;
         std::vector<world::ScatterPoint> points;
         u64 instances = 0; // what they draw
+        u64 serial = 0;    // another for each placement swapped in (never 0)
     };
     // A cell's instances at most (one swaps in whole, in a frame: about
     // 1.5 ms; a layer at 0.5 m spacing fills one).

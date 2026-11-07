@@ -63,7 +63,17 @@ Json item_schema() {
               {"weight", number(1e-6, 1e6, "How often it is picked, against the layer's other items. Default 1.")},
               {"scale", pair(0.0001, 10000, "[min, max] uniform scale, picked evenly. Default [1, 1].")},
               {"align", number(0, 1, "0 upright (trees), 1 along the ground's slope (rocks). Default 0.")},
-              {"sink", number(-1000, 1000, "Metres into the ground at scale 1. Default 0.")}}}};
+              {"sink", number(-1000, 1000, "Metres into the ground at scale 1. Default 0.")},
+              {"tree", {{"type", {"object", "null"}},
+                        {"additionalProperties", false},
+                        {"properties",
+                         {{"trunk_radius", number(0.01, 100, "Metres at scale 1. Default 0.25.")},
+                          {"height", number(0.1, 1000, "Metres at scale 1, foot to top: what falls. Default 10.")},
+                          {"strength", number(0, 1e9, "The blow (N s, at scale 1; grows with scale squared) that "
+                                                      "snaps it. 0 (default): 8000, more than a tree its own size falling on it.")}}},
+                        {"description", "A tree: while simulating its trunk stands as a body, and struck hard "
+                                        "enough (or by impact) it snaps and topples onto what is there. "
+                                        "Null or left out: it never falls."}}}}}};
 }
 
 // Every field a layer has (all optional on set; name and items needed on add).
@@ -126,6 +136,14 @@ std::string apply_layer(const Json& args, ScatterLayer& l, EditorState& state) {
             }
             i.align = j.value("align", i.align);
             i.sink = j.value("sink", i.sink);
+            if (j.contains("tree") && !j["tree"].is_null()) {
+                const Json& t = j["tree"];
+                world::ScatterTree tree;
+                tree.trunk_radius = t.value("trunk_radius", tree.trunk_radius);
+                tree.height = t.value("height", tree.height);
+                tree.strength = t.value("strength", tree.strength);
+                i.tree = tree;
+            }
             if (i.shape == world::Shape::kit && state.scene.find_kit(i.kit) == nullptr) {
                 return "no kit named \"" + i.kit + "\"; list_kits shows them, create_kit makes one";
             }
@@ -179,6 +197,10 @@ Json layer_json(const ScatterLayer& l) {
         j["scale"] = {i.scale_min, i.scale_max};
         j["align"] = i.align;
         j["sink"] = i.sink;
+        j["tree"] = i.tree ? Json{{"trunk_radius", i.tree->trunk_radius},
+                                  {"height", i.tree->height},
+                                  {"strength", i.tree->strength}}
+                           : Json(nullptr);
         items.push_back(std::move(j));
     }
     Json out = {{"name", l.name},

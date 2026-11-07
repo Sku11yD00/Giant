@@ -239,6 +239,7 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
             } else {
                 m_freed = m_freed || r.placed.instances < was;
                 m_instances = m_instances - was + r.placed.instances;
+                r.placed.serial = r.serial;
                 m_cells[r.cell] = {std::move(r.placed), r.key};
                 m_changed.push_back(r.cell);
             }

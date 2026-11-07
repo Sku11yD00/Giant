@@ -6,6 +6,7 @@
 #include "terrain_meshes.h"
 
 #include "giant/render/renderer.h"
+#include "giant/sim/forest.h"
 #include "giant/sim/scene_physics.h"
 #include "giant/world/scene.h"
 
@@ -46,12 +47,17 @@ struct SceneFrame {
         for_followers = {};
         return out;
     }
+    // Cells rebuilt whole a frame for fallen trees coming or going (the rest
+    // wait for the next frames; moving ones are made again in place).
+    u32 fallen_rebuilds_per_frame = 8;
     usize scatter_room = 0; // instances reserved once for scatter to grow into (0: not yet)
     // Where entities are drawn instead of where the scene has them (the
     // physics' poses), during a scene_frame call.
     const std::unordered_map<world::EntityId, world::Transform>* poses = nullptr;
     // Breakable kits' loose pieces, drawn where they are (likewise).
     const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr;
+    // Fallen scatter trees, drawn where they lie (likewise).
+    const sim::FallenTrees* fallen = nullptr;
 
     struct MaterialKey {
         u32 bits[8];
@@ -78,7 +84,15 @@ struct SceneFrame {
         // in place, the rest kept, and the renderer told only they changed.
         bool ground_dirty = false;
         u32 ground_count = 0;
-        u64 prev_version = 0; // what the ground-only change was made from (0: a full rebuild)
+        // Only its fallen trees moved (the same ones): the instances drawing
+        // them, from fallen_first (after every other), are made again in place.
+        bool fallen_dirty = false;
+        u32 fallen_first = 0;
+        u32 fallen_decals = 0;          // its decals before the fallen trees'
+        std::vector<u32> fallen_points; // the fallen points drawn, in order
+        u64 prev_version = 0; // what an in-place change was made from (0: a full rebuild)
+        u32 changed_first = 0; // and the instances it changed
+        u32 changed_count = 0;
         bool ground = false; // it draws a terrain tile (so it stays without entities)
         bool scattered = false; // it draws scatter placements (so it stays too)
         // Its place in `instances`: capacity instances from first, the
@@ -126,13 +140,16 @@ struct SceneFrame {
 // stays in the cell the scene puts it in), and the cells of the entities in
 // `redraw` (whose pose changed or went) are rebuilt. With `piece_poses`, a
 // kit's loose pieces are drawn where they are (world transforms), the rest
-// of it where it stands.
+// of it where it stands. With `fallen`, a cell's fallen scatter trees (of
+// the placement it draws: the same serial) are drawn where they lie, and
+// the cells in `redraw_cells` are rebuilt.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
                  const std::unordered_map<world::EntityId, world::Transform>* poses = nullptr,
                  std::span<const world::EntityId> redraw = {},
-                 const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr);
+                 const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr,
+                 const sim::FallenTrees* fallen = nullptr, std::span<const world::CellCoord> redraw_cells = {});
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

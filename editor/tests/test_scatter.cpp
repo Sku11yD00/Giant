@@ -2,6 +2,7 @@
 // with their cells, changed by undoable commands.
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
+#include "../src/physics_state.h"
 #include "../src/scatter_placer.h"
 #include "../src/scene_render.h"
 #include "../src/terrain_meshes.h"
@@ -286,6 +287,239 @@ GIANT_TEST("scatter: placements draw with their cell, as their items, and follow
     GIANT_CHECK(live == 0);
 }
 
+GIANT_TEST("scatter trees: trunks stand near the camera, an impact fells one, drawn where it lies; stopping stands it up") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    if (renderer == nullptr) return;
+    MeshLibrary meshes(renderer.get());
+    world::Scene scene;
+    flat(scene.terrain, 0, 0, 1, 0, 2.0f);
+    world::ScatterLayer l = stones(16.0f);
+    l.name = "trees";
+    l.jitter = 0.0f;
+    l.items[0].tree = world::ScatterTree{};
+    world::ScatterItem rock; // not a tree: never a trunk
+    rock.weight = 1.0f;
+    l.items.push_back(rock);
+    scene.scatter.push_back(l);
+    ScatterPlacer p;
+    place(p, scene);
+    PhysicsState physics;
+    const DVec3 camera{64.0, 10.0, 32.0};
+    physics.feed_forest(scene, p, camera);
+    physics.flush(scene);
+    usize trees = 0;
+    CellCoord cell{};
+    u32 point = 0;
+    world::Transform foot;
+    for (const CellCoord c : p.cells()) {
+        const ScatterPlacer::Cell* placed = p.find(c);
+        GIANT_CHECK(physics.forest().serial(c) == placed->serial);
+        for (u32 k = 0; k < placed->points.size(); ++k) {
+            if (placed->points[k].item != 0) continue;
+            const DVec3 at = placed->points[k].transform.position;
+            // The westmost (and then northmost): it falls east onto the ground.
+            if (trees++ == 0 || at.x < foot.position.x || (at.x == foot.position.x && at.z < foot.position.z)) {
+                cell = c;
+                point = k;
+                foot = placed->points[k].transform;
+            }
+        }
+    }
+    GIANT_CHECK(trees > 4);
+    GIANT_CHECK(physics.forest().stats().trunks == trees && physics.forest().stats().waiting == 0);
+    // A ray at a trunk names its tree.
+    GIANT_CHECK(physics.forest().tree_of(physics.forest().body_of(cell, point)).has_value());
+    // Fed again unchanged: nothing made again.
+    const sim::BodyId body = physics.forest().body_of(cell, point);
+    physics.feed_forest(scene, p, camera);
+    GIANT_CHECK(physics.forest().body_of(cell, point) == body);
+    SceneFrame frame;
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p);
+    const auto drawn_at = [&](const DVec3& at) {
+        for (const render::Instance& i : frame.instances) {
+            if (i.mesh != render::k_no_mesh && i.position == at) return true;
+        }
+        return false;
+    };
+    GIANT_CHECK(drawn_at(foot.position));
+    physics.set_simulating(true);
+    const DVec3 blow = foot.position + DVec3{-1.0, 1.0, 0.0};
+    const PhysicsState::Impact hit = physics.impact(blow, 1.5f, 1e5f);
+    GIANT_CHECK(hit.felled == 1 && hit.loosened == 0);
+    // Falling: the first frame draws it fallen (the cell rebuilt), the next
+    // ones only move it (its instance made again in place, the renderer
+    // told only it changed).
+    physics.run_steps(10);
+    std::vector<CellCoord> moving = physics.take_tree_redraw();
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees(),
+                moving);
+    GIANT_CHECK(frame.cells_rebuilt == 1);
+    physics.run_steps(10);
+    moving = physics.take_tree_redraw();
+    GIANT_CHECK(moving.size() == 1 && moving[0] == cell);
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees(),
+                moving);
+    GIANT_CHECK(frame.cells_rebuilt == 1);
+    usize in_place = 0;
+    for (const render::CellRange& c : frame.cells) {
+        if (c.prev_version != 0 && c.changed_count == 1) ++in_place;
+    }
+    GIANT_CHECK(in_place == 1);
+    GIANT_CHECK(drawn_at(physics.fallen_trees().at(cell).trees[0].at.position));
+    physics.run_steps(220);
+    const auto f = physics.fallen_trees().find(cell);
+    GIANT_CHECK(f != physics.fallen_trees().end() && f->second.trees.size() == 1);
+    if (f == physics.fallen_trees().end() || f->second.trees.empty()) return;
+    const world::Transform lying = f->second.trees[0].at;
+    GIANT_CHECK(f->second.trees[0].point == point && rotate(lying.rotation, Vec3{0.0f, 1.0f, 0.0f}).x > 0.8f);
+    std::vector<CellCoord> redraw = physics.take_tree_redraw();
+    GIANT_CHECK(redraw.size() == 1 && redraw[0] == cell);
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees(),
+                redraw);
+    GIANT_CHECK(frame.cells_rebuilt == 1 && drawn_at(lying.position) && !drawn_at(foot.position));
+    // Stopping: standing again, drawn where it stood, its trunk back. Past
+    // the frame's share of whole-cell rebuilds, a cell waits for the next.
+    physics.set_simulating(false);
+    GIANT_CHECK(physics.fallen_trees().empty());
+    redraw = physics.take_tree_redraw();
+    frame.fallen_rebuilds_per_frame = 0;
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees(),
+                redraw);
+    GIANT_CHECK(frame.cells_rebuilt == 0 && drawn_at(lying.position));
+    frame.fallen_rebuilds_per_frame = 8;
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees());
+    GIANT_CHECK(frame.cells_rebuilt == 1 && drawn_at(foot.position));
+    physics.flush(scene);
+    GIANT_CHECK(physics.forest().stats().trunks == trees && physics.forest().stats().fallen == 0);
+    // The layer's trees gone: placed again with none, no trunks.
+    scene.scatter[0].items[0].tree.reset();
+    place(p, scene);
+    physics.feed_forest(scene, p, camera);
+    physics.flush(scene);
+    GIANT_CHECK(physics.forest().stats().trunks == 0);
+    // A new scene: the forest starts afresh.
+    scene.scatter[0].items[0].tree = world::ScatterTree{};
+    place(p, scene);
+    physics.feed_forest(scene, p, camera);
+    physics.flush(scene);
+    GIANT_CHECK(physics.forest().stats().trunks == trees);
+    physics.set_simulating(true);
+    GIANT_CHECK(physics.impact(blow, 1.5f, 1e5f).felled == 1);
+    world::Scene other;
+    ScatterPlacer none; // the new scene's: nothing placed yet
+    physics.feed_forest(other, none, camera);
+    GIANT_CHECK(physics.forest().cells().empty() && physics.forest().stats().trunks == 0);
+    GIANT_CHECK(physics.fallen_trees().empty() && physics.forest().bodies() == 0);
+    GIANT_CHECK(physics.world().size() == 0); // cleared whole: the old scene's ground and trunks gone
+    physics.set_simulating(false);
+}
+
+GIANT_TEST("scatter trees: the commands report them, cells come a share a frame, a kit tree falls whole") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    if (renderer == nullptr) return;
+    MeshLibrary meshes(renderer.get());
+    PhysicsState physics;
+    EditorState state;
+    state.meshes = &meshes;
+    state.physics = &physics;
+    ai::CommandRegistry commands;
+    register_scene_commands(commands, state);
+    register_physics_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args = Json::object()) { return commands.execute(name, args, {}); };
+    world::Scene& scene = state.scene;
+    flat(scene.terrain, 0, 0, 3, 0, 0.0f);
+    world::Kit pine;
+    pine.name = "pine";
+    pine.pieces.resize(2);
+    pine.pieces[0].shape = world::Shape::cube;
+    pine.pieces[0].transform.position = {0.0, 1.0, 0.0};
+    pine.pieces[0].transform.scale = {0.4f, 2.0f, 0.4f};
+    pine.pieces[1].shape = world::Shape::sphere;
+    pine.pieces[1].transform.position = {0.0, 6.0, 0.0};
+    scene.kits.push_back(pine);
+    world::ScatterLayer l = stones(16.0f);
+    l.name = "pines";
+    l.jitter = 0.0f;
+    l.items[0].shape = world::Shape::kit;
+    l.items[0].kit = "pine";
+    l.items[0].tree = world::ScatterTree{};
+    scene.scatter.push_back(l);
+    ScatterPlacer p;
+    place(p, scene);
+    GIANT_CHECK(p.cells().size() == 4);
+    // One cell a feed (the budget, one cell at least), nearest first.
+    physics.points_per_feed = 1;
+    const DVec3 camera{100.0, 10.0, 32.0};
+    physics.feed_forest(scene, p, camera);
+    GIANT_CHECK(physics.forest().cells().size() == 1 && physics.forest().serial({1, 0}) == p.find({1, 0})->serial);
+    physics.feed_forest(scene, p, camera);
+    GIANT_CHECK(physics.forest().cells().size() == 2 && physics.forest().serial({2, 0}) != 0); // 60 m against 68
+    for (int i = 0; i < 4; ++i) physics.feed_forest(scene, p, camera);
+    GIANT_CHECK(physics.forest().cells().size() == 4);
+    u64 trees = 0;
+    world::Transform foot;
+    CellCoord cell{};
+    for (const CellCoord c : p.cells()) {
+        const ScatterPlacer::Cell* placed = p.find(c);
+        for (const world::ScatterPoint& pt : placed->points) {
+            const DVec3 at = pt.transform.position;
+            if (trees++ == 0 || at.x < foot.position.x || (at.x == foot.position.x && at.z < foot.position.z)) {
+                foot = pt.transform;
+                cell = c;
+            }
+        }
+    }
+    ai::CommandResult r = run("get_physics");
+    GIANT_CHECK(r.ok && r.value["trees"]["trunks"] == 0 && r.value["trees"]["fallen"] == 0);
+    // A raycast finishes the trunks first, and names the tree it hits.
+    r = run("raycast", {{"origin", {foot.position.x - 5.0, 3.0, foot.position.z}}, {"direction", {1, 0, 0}}});
+    GIANT_CHECK(r.ok && r.value["hit"] == true && r.value["entity"] == 0 && r.value.contains("tree"));
+    GIANT_CHECK(r.value["tree"]["cell"][0] == cell.x && r.value["tree"]["fallen"] == false);
+    GIANT_CHECK(std::fabs(r.value["point"][0].get<double>() - (foot.position.x - 0.25)) < 0.01);
+    r = run("get_physics");
+    GIANT_CHECK(r.value["trees"]["trunks"] == trees && r.value["trees"]["waiting"] == 0);
+    // Felled by impact; at rest within a few seconds, fixed where it lies.
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    r = run("impact", {{"point", {foot.position.x - 1.0, 1.0, foot.position.z}}, {"radius", 1.5}, {"impulse", 1e5}});
+    GIANT_CHECK(r.ok && r.value["felled"] == 1 && r.value["loosened"] == 0 && r.value["trees"]["falling"] == 1);
+    r = run("step_physics", {{"seconds", 6}});
+    GIANT_CHECK(r.ok && r.value["trees"]["fallen"] == 1 && r.value["trees"]["falling"] == 0);
+    const auto f = physics.fallen_trees().find(cell);
+    GIANT_CHECK(f != physics.fallen_trees().end() && f->second.trees.size() == 1);
+    if (f == physics.fallen_trees().end() || f->second.trees.empty()) return;
+    const world::Transform lying = f->second.trees[0].at;
+    // Drawn whole where it lies: the kit's pieces placed from its foot.
+    SceneFrame frame;
+    std::vector<CellCoord> redraw = physics.take_tree_redraw();
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees(),
+                redraw);
+    const auto drawn_at = [&](const DVec3& at) {
+        for (const render::Instance& i : frame.instances) {
+            if (i.mesh != render::k_no_mesh && length(i.position - at) < 1e-6) return true;
+        }
+        return false;
+    };
+    const DVec3 top = place(lying, pine.pieces[1].transform).position;
+    GIANT_CHECK(std::fabs(top.y - lying.position.y) < 1.5 && drawn_at(top));
+    GIANT_CHECK(!drawn_at(place(foot, pine.pieces[1].transform).position));
+    // The cell placed again (another serial): its old fallen list is not
+    // drawn on the new placement, and feeding stands the tree up.
+    scene.scatter[0].items[0].material.roughness = 0.75f;
+    place(p, scene);
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &p, nullptr, {}, nullptr, &physics.fallen_trees());
+    GIANT_CHECK(physics.fallen_trees().at(cell).serial != p.find(cell)->serial);
+    GIANT_CHECK(drawn_at(place(foot, pine.pieces[1].transform).position) && !drawn_at(top));
+    physics.points_per_feed = 1u << 15;
+    physics.feed_forest(scene, p, camera);
+    GIANT_CHECK(physics.fallen_trees().empty());
+}
+
 GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable") {
     Fixture f;
     GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 1}}).ok);
@@ -318,6 +552,15 @@ GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable"
     GIANT_CHECK(!f.run("set_scatter_layer", {{"name", "nope"}, {"density", 1}}).ok);
     GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "x"}, {"items", {{{"mesh", "no/such/file.glb"}}}}}).ok);
     GIANT_CHECK(f.state.scene.scatter.size() == 1 && f.state.scene.scatter[0].density == 0.5f);
+    // A tree item: its trunk given, shown, checked.
+    r = f.run("add_scatter_layer", {{"name", "pines"}, {"items", {{{"shape", "cube"}, {"tree", {{"height", 12}}}}}}, {"spacing", 16}});
+    GIANT_CHECK(r.ok && r.value["items"][0]["tree"]["height"] == 12.0 && r.value["items"][0]["tree"]["trunk_radius"] == 0.25);
+    GIANT_CHECK(f.state.scene.scatter.back().items[0].tree.has_value());
+    GIANT_CHECK(!f.run("set_scatter_layer", {{"name", "pines"}, {"items", {{{"tree", {{"height", 0.2}, {"trunk_radius", 1}}}}}}}).ok);
+    r = f.run("set_scatter_layer", {{"name", "pines"}, {"items", {{{"shape", "cube"}, {"tree", nullptr}}}}});
+    GIANT_CHECK(r.ok && r.value["items"][0]["tree"].is_null() && !f.state.scene.scatter.back().items[0].tree);
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.scatter.back().items[0].tree.has_value());
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.scatter.size() == 1);
     // A kit item.
     GIANT_CHECK(f.run("create_kit", {{"name", "oak"}, {"pieces", {{{"shape", "cube"}}}}}).ok);
     GIANT_CHECK(f.run("add_scatter_layer", {{"name", "trees"}, {"items", {{{"kit", "oak"}}}}, {"spacing", 16}}).ok);
