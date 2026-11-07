@@ -1653,8 +1653,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (lit_view && !frame.dust.empty()) {
         std::array<gpu::GpuDustPuff, k_max_dust_puffs> puffs{};
         u32 count = 0;
-        for (const DustPuff& d : frame.dust) {
-            if (count == k_max_dust_puffs) break;
+        // The first k_max_dust_puffs given (a bad one uses up its place).
+        for (const DustPuff& d : frame.dust.first(std::min<usize>(frame.dust.size(), k_max_dust_puffs))) {
             const Vec3 c = to_camera_relative(d.center, frame.view.position);
             if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) || !std::isfinite(d.radius) ||
                 !std::isfinite(d.density) || !(d.radius > 0.0f) || !(d.density > 0.0f)) {
@@ -1664,7 +1664,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             g.center[0] = c.x;
             g.center[1] = c.y;
             g.center[2] = c.z;
-            g.radius = d.radius;
+            g.radius = std::min(d.radius, 1.0e5f);
             g.color[0] = std::isfinite(d.color.x) ? std::clamp(d.color.x, 0.0f, 1.0f) : 0.5f;
             g.color[1] = std::isfinite(d.color.y) ? std::clamp(d.color.y, 0.0f, 1.0f) : 0.5f;
             g.color[2] = std::isfinite(d.color.z) ? std::clamp(d.color.z, 0.0f, 1.0f) : 0.5f;

@@ -912,7 +912,13 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
     for (const u32 i : bodied) {
         const BodyId body = ids[k++];
         b.pieces[i].body = body;
-        if (body != k_no_body) m_piece_bodies[body] = {id, i};
+        if (body != k_no_body) {
+            m_piece_bodies[body] = {id, i};
+        } else {
+            // Refused (the world full, bad numbers): rubble rather than hang where it stood.
+            std::erase_if(poses, [i](const PiecePose& pp) { return pp.piece == i; });
+            rubbled.push_back(i);
+        }
     }
     m_physics.remove_many(gone); // what rested on the old standing body wakes
     // Rubble laid on what is under it now (the standing pieces' new body in).
@@ -967,25 +973,24 @@ world::Transform ScenePhysics::rubble_at(world::EntityId id, const world::KitPie
     h ^= h >> 29;
     const float yaw = static_cast<float>(h % 6283u) * 0.001f;
     out.rotation = normalize(quat_from_axis_angle({0.0f, 1.0f, 0.0f}, yaw) * lay);
-    // On what is under it: not its own building's standing pieces nor its
-    // falling ones (they go), at most a few looks down.
-    DVec3 from = at.position + DVec3{thrown.x, 0.0, thrown.z};
+    // On what is under it for good: fixed bodies only (what falls would
+    // leave it in the air), not its own building's standing pieces (they may
+    // go); within the rays a blow may cast (rule 9), else on its building's foot.
+    const DVec3 from = at.position + DVec3{thrown.x, 0.0, thrown.z};
     out.position = {from.x, std::min(from.y, base + half), from.z};
-    for (int look = 0; look < 8; ++look) {
-        const std::optional<RayHit> hit = m_physics.raycast(from, {0.0f, -1.0f, 0.0f}, 1000.0);
-        if (!hit) break;
-        const auto piece_of = m_piece_bodies.find(hit->body);
-        const bool own = hit->user == id || (piece_of != m_piece_bodies.end() && piece_of->second.entity == id);
-        if (!own) {
-            out.position.y = hit->point.y + half;
-            break;
-        }
-        from = hit->point - DVec3{0.0, 0.01, 0.0};
+    if (m_rays_left == 0) return out;
+    --m_rays_left;
+    PhysicsWorld::RayFilter filter;
+    filter.fixed_only = true;
+    filter.accept = [id](BodyId, u64 user) { return user != id; };
+    if (const std::optional<RayHit> hit = m_physics.raycast(from, {0.0f, -1.0f, 0.0f}, 1000.0, filter)) {
+        out.position.y = hit->point.y + half;
     }
     return out;
 }
 
 void ScenePhysics::break_from_hits() {
+    m_rays_left = m_settings.rubble_rays;
     // The blows on breakable kits' standing bodies, by placement.
     std::vector<std::pair<world::EntityId, std::vector<std::pair<u32, Vec3>>>> blows;
     const auto struck = [&](BodyId body, u32 part, BodyId by, float impulse, const Vec3& away) {
@@ -1032,6 +1037,7 @@ void ScenePhysics::break_from_hits() {
 }
 
 usize ScenePhysics::impact(const DVec3& point, float radius, float impulse) {
+    m_rays_left = m_settings.rubble_rays;
     if (!std::isfinite(radius) || radius <= 0.0f || !std::isfinite(impulse) || impulse <= 0.0f ||
         !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
         return 0;

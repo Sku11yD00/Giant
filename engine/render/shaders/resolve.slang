@@ -414,9 +414,13 @@ float dust_integral(float s, float a, float k) {
     return s * (a * a - s2k * (2.0 * a / 3.0 - s2k / 5.0));
 }
 
-float3 apply_dust(Extras e, Frame f, float3 color, float3 dir, float scene_t, inout float through) {
+// The dust's part along a ray: `trans` of what is behind comes through,
+// and `scatter` (radiance) is added over it.
+void dust_along(Extras e, Frame f, float3 dir, float scene_t, out float trans, out float3 scatter) {
+    trans = 1.0;
+    scatter = float3(0.0, 0.0, 0.0);
     if (e.dust_count == 0u) {
-        return color;
+        return;
     }
     ByteAddressBuffer puffs = read_buffer(e.dust_puffs);
     float depth = 0.0;
@@ -428,7 +432,8 @@ float3 apply_dust(Extras e, Frame f, float3 color, float3 dir, float scene_t, in
         const float4 cd = asfloat(puffs.Load4(at + 16u));
         const float r2 = cr.w * cr.w;
         const float tc = dot(cr.xyz, dir);
-        const float b2 = max(dot(cr.xyz, cr.xyz) - tc * tc, 0.0);
+        const float3 across = cr.xyz - dir * tc; // (not |c|^2 - tc^2: that cancels far off)
+        const float b2 = dot(across, across);
         if (b2 >= r2) {
             continue;
         }
@@ -444,15 +449,22 @@ float3 apply_dust(Extras e, Frame f, float3 color, float3 dir, float scene_t, in
         depth += d;
         tint += cd.rgb * d;
     }
-    if (depth <= 1e-5) {
-        return color;
+    if (!(depth > 1e-5)) {
+        return;
     }
-    const float trans = exp(-min(depth, 60.0));
+    trans = exp(-min(depth, 60.0));
     const float mu = dot(dir, f.sun_direction.xyz);
     const float phase = (1.0 + 0.5 * mu) / (4.0 * k_pi);
     const float3 light = f.sun_light.rgb * (2.0 * phase) + lerp(f.ground_light.rgb, f.sky_light.rgb, 0.6);
+    scatter = (tint / depth) * light * (1.0 - trans);
+}
+
+float3 apply_dust(Extras e, Frame f, float3 color, float3 dir, float scene_t, inout float through) {
+    float trans;
+    float3 scatter;
+    dust_along(e, f, dir, scene_t, trans, scatter);
     through *= trans;
-    return color * trans + (tint / depth) * light * (1.0 - trans);
+    return color * trans + scatter;
 }
 
 Output shade_pixel(float4 position) {
@@ -538,6 +550,14 @@ Output shade_pixel(float4 position) {
             float through;
             const float3 behind = under_sky(sky, sky_background(sky, view_dir), view_dir, 3.0e38, pixel, through);
             return lit_output(apply_dust(extras, f, behind, view_dir, 3.0e38, through));
+        }
+        if (lit_path && extras.dust_count != 0u) {
+            // The flat background is shown as it is (not exposed): the
+            // dust over it exposed and tone mapped alike.
+            float trans;
+            float3 scatter;
+            dust_along(extras, f, view_dir, 3.0e38, trans, scatter);
+            return plain_output(push.background.rgb * trans + tone_map(scatter * f.exposure));
         }
         return plain_output(push.background.rgb);
     }

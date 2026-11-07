@@ -4,6 +4,7 @@
 #include "giant_test.h"
 
 #include <cmath>
+#include <cstdio>
 
 using namespace giant;
 using namespace giant::sim;
@@ -80,4 +81,21 @@ GIANT_TEST("dust: bounded: at most max_puffs (the faintest give way) and emits_p
     GIANT_CHECK(dust.puffs().empty());
     dust.nearest({}, 3, near);
     GIANT_CHECK(near.empty());
+}
+
+GIANT_TEST("dust: emits into one puff step after step swell it smoothly, never past what they cover") {
+    Dust dust;
+    dust.emit({0.0, 0.0, 0.0}, 4.0f, 0.4f);
+    float last = dust.puffs()[0].radius;
+    for (int i = 0; i < 50; ++i) { // a second of trees landing in it, one a step
+        dust.step(1.0f / 60.0f, {});
+        dust.emit({0.5, 0.0, 0.0}, 2.0f, 0.4f);
+        const float r = dust.puffs()[0].radius;
+        GIANT_CHECK(i < 3 || r < last * 1.02f); // no pop (past its first, fastest growth)
+        if (i >= 3 && r >= last * 1.02f) std::printf("dust step %d: %f -> %f\n", i, last, r);
+        last = r;
+    }
+    GIANT_CHECK(dust.puffs().size() == 1);
+    GIANT_CHECK(last < 8.0f); // 4 m grown for about a second, not compounded
+    GIANT_CHECK(dust.puffs()[0].density > 0.1f);
 }

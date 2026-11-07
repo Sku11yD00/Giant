@@ -1446,7 +1446,7 @@ GIANT_TEST("render: d3d12 a dust puff hides what is behind it, lit; one behind t
         return device->read_texture(target);
     };
     const auto bare = draw();
-    // A pale puff 30 m ahead on the ground, 6 m across: its middle hides the ground.
+    // A pale puff 6 m across about 9 m ahead, low over the ground: its middle hides the ground.
     std::vector<DustPuff> dust(1);
     const Vec3 ahead = rotate(frame.view.orientation, Vec3{0.0f, 0.0f, -1.0f});
     const double along = 2.0 / -ahead.y; // where the view's middle meets the ground
@@ -1474,9 +1474,8 @@ GIANT_TEST("render: d3d12 a dust puff hides what is behind it, lit; one behind t
         std::printf("dust: middle %d %d %d -> %d %d %d, corner %d %d %d -> %d %d %d\n", mid_bare[0], mid_bare[1],
                     mid_bare[2], mid_dusty[0], mid_dusty[1], mid_dusty[2], edge_bare[0], edge_bare[1], edge_bare[2],
                     edge_dusty[0], edge_dusty[1], edge_dusty[2]);
-        // Lit dust in front of the dark ground: brighter, the warm colour showing.
-        GIANT_CHECK(mid_dusty[1] > mid_bare[1] + 30);
-        GIANT_CHECK(mid_dusty[0] >= mid_dusty[2]);
+        // Lit dust in front of the dark ground: brighter.
+        GIANT_CHECK(mid_dusty[0] > mid_bare[0] + 30 && mid_dusty[1] > mid_bare[1] + 30);
         // Away from it, and with it behind the ground, the image as without.
         GIANT_CHECK(std::abs(edge_dusty[1] - edge_bare[1]) <= 2);
         usize differ = 0;

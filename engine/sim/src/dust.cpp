@@ -39,8 +39,12 @@ void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color)
         const float dust = p.density * p.radius * p.radius + density * radius * radius;
         p.density = std::min(10.0f, std::max(p.density, dust / r2));
         p.radius = reach;
-        p.start_radius = reach; // as if it had started this big
-        p.start_density = p.density;
+        // Its growth goes on from here: as if it had started as big as
+        // this needs at its age (not grown again on top of it).
+        const float t = std::clamp(p.age / std::max(p.life, 1e-3f), 0.0f, 1.0f);
+        p.start_radius = reach / (1.0f + m_settings.grow * std::sqrt(t));
+        const float spread = p.start_radius / reach;
+        p.start_density = p.density / std::max(spread * spread, 1e-6f);
         p.life = std::max(p.life, std::clamp(6.0f + reach, 8.0f, 30.0f));
         ++m_merged;
         return;
@@ -99,8 +103,8 @@ void Dust::clear() {
 void Dust::nearest(const DVec3& camera, u32 count, std::vector<DustPuff>& out) const {
     out.clear();
     if (count == 0 || m_puffs.empty()) return;
-    std::vector<std::pair<double, u32>> by;
-    by.reserve(m_puffs.size());
+    std::vector<std::pair<double, u32>>& by = m_by; // kept: no allocation a frame
+    by.clear();
     for (u32 i = 0; i < m_puffs.size(); ++i) {
         const DVec3 d = m_puffs[i].position - camera;
         by.push_back({std::max(0.0, std::sqrt(dot(d, d)) - static_cast<double>(m_puffs[i].radius)), i});

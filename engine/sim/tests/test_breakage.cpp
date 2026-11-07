@@ -339,3 +339,48 @@ GIANT_TEST("breakage: near the camera at most max_loose pieces fall as bodies, t
     GIANT_CHECK(s.loose_pieces == 2 && s.rubble == 8 && s.broken_kits == 2);
     GIANT_CHECK(loose(follow, h2, 4) != nullptr);
 }
+
+GIANT_TEST("breakage: rubble lies on fixed things under it, never on its own building's pieces nor on falling ones") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ScenePhysics follow(physics);
+    follow.set_camera({3000.0, 10.0, 0.0});
+    Scene scene;
+    ground(scene);
+    // A shed 3 m tall (fixed, not breakable) and a dynamic crate resting by it.
+    Entity shed;
+    shed.shape = world::Shape::cube;
+    shed.transform.position = {0.0, 1.5, 0.0};
+    shed.transform.scale = {6.0f, 3.0f, 6.0f};
+    scene.add(shed);
+    Entity crate;
+    crate.shape = world::Shape::cube;
+    crate.body = world::BodyKind::dynamic;
+    crate.transform.position = {20.0, 0.5, 0.0};
+    scene.add(crate);
+    // The tower stood over the shed (its foot on the shed's roof), and one over the crate.
+    scene.kits.push_back(tower(true));
+    const EntityId on_shed = place(scene, "tower", {0.0, 3.0, 0.0});
+    const EntityId on_crate = place(scene, "tower", {20.0, 1.0, 0.0});
+    for (int i = 0; i < 4; ++i) {
+        const world::SceneChanges c = scene.take_changes();
+        follow.flush(scene, c.ids, c.all);
+    }
+    // Straight down (a blow from above pushes nothing sideways much): all three blocks as rubble.
+    GIANT_CHECK(follow.impact({0.0, 6.2, 0.0}, 0.6f, 1e6f) >= 1);
+    GIANT_CHECK(follow.impact({20.0, 4.2, 0.0}, 0.6f, 1e6f) >= 1);
+    for (u32 i = 0; i < 3; ++i) {
+        const PiecePose* a = loose(follow, on_shed, i);
+        const PiecePose* b = loose(follow, on_crate, i);
+        if (a != nullptr) {
+            // On the shed's roof (y 3) or, thrown off it, on the ground; never inside it.
+            const bool over = std::fabs(a->at.position.x) < 3.0 && std::fabs(a->at.position.z) < 3.0;
+            GIANT_CHECK(std::fabs(a->at.position.y - (over ? 3.5 : 0.5)) < 0.05);
+        }
+        if (b != nullptr) {
+            // The crate is dynamic: the rubble goes through to the ground.
+            GIANT_CHECK(std::fabs(b->at.position.y - 0.5) < 0.05);
+        }
+    }
+    GIANT_CHECK(follow.stats().rubble >= 2);
+}

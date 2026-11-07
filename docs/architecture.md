@@ -753,12 +753,15 @@ What breaks costs by distance from the camera, in rings:
   rubble with no body (`ScenePhysics::rubble_at`): thrown along its push as
   far as half a second carries it (10 m at most), laid with its thinnest
   side down, turned about the up axis by a hash of its placement and index,
-  on what a ray down finds (past its own building's standing and falling
-  pieces, at most 8 looks; the building's foot when nothing). A tree whose
+  on the first fixed body a ray down finds that is not its own building
+  (what is falling, or may yet fall, would leave it in the air); at most
+  `rubble_rays` (4096) rays a blow, past them, or when nothing is found,
+  at its building's foot. A piece the physics world refuses a body comes
+  down as rubble too. A tree whose
   trunk has no body (beyond about 450 m, or still waiting for it) struck
   by `impact` is laid down at once (`Forest::lay`): tipped about its foot
-  away from the blow until its top meets what a ray down finds there (past
-  standing trunks; 45 to 108 degrees over), at most `lays_per_impact`
+  away from the blow until its top meets the first fixed body a ray down
+  finds there that is not a standing trunk (45 to 108 degrees over), at most `lays_per_impact`
   (2048) a blow, hardest first. The editor gives the forest the scatter
   cells the blow reaches first (`PhysicsState::impact`, nearest first, at
   most 65536 points), and keeps a far cell only while trees in it lie.
@@ -778,11 +781,16 @@ instead (a street falling is one cloud). The renderer draws the 32 nearest
 density (1 − r²/R²)² is integrated along the pixel's ray exactly, clipped
 to what the pixel shows, lit by the sun (a mildly forward phase, doubled
 for light scattered inside the cloud) and the sky and ground, over the
-fog and clouds, thinning the screen reflection's weight alike. No history
+fog and clouds (over the flat background, without the sky, exposed and
+tone mapped as it is not), thinning the screen reflection's weight alike.
+A puff emitted into a young one swells it with its growth carried on, not
+compounded. No history
 (rule 2). Dust is view state: stopping or a new scene clears it.
 
 Known limits: rubble and laid trees have no bodies (the player walks
-through them, and they stay as laid when what is under them goes); dust
+through them, and they stay as laid when what is under them goes); rubble
+lies flat to world up (half sunk on a slope); a far cell placed again (a
+ground edit) stands its laid trees up, as near ones do; dust
 ignores shadows (a puff in a building's shade is lit as in the sun) and is
 drawn over the fog rather than in it; pieces still break whole (no
 splintering); craters and footprints are part 7.

@@ -19,6 +19,7 @@
 #include "giant/core/math.h"
 #include "giant/core/types.h"
 
+#include <utility>
 #include <vector>
 
 namespace giant::sim {
@@ -77,6 +78,7 @@ public:
 private:
     DustSettings m_settings;
     std::vector<DustPuff> m_puffs;
+    mutable std::vector<std::pair<double, u32>> m_by; // nearest()'s scratch
     u32 m_emits = 0; // since the last step
     u32 m_emitted = 0;
     u32 m_merged = 0;

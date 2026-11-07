@@ -26,6 +26,7 @@
 #include "giant/core/types.h"
 
 #include <memory>
+#include <functional>
 #include <optional>
 #include <span>
 #include <thread>
@@ -288,6 +289,15 @@ public:
     usize characters() const;
 
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance) const;
+    // Only bodies `accept` takes (called with each candidate's id and user
+    // value, under the body's lock: it must not call back into the world),
+    // and with fixed_only only fixed ones: what something can rest on for good.
+    struct RayFilter {
+        bool fixed_only = false;
+        std::function<bool(BodyId, u64)> accept;
+    };
+    std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance,
+                                  const RayFilter& filter) const;
 
     PhysicsStats stats() const;
 

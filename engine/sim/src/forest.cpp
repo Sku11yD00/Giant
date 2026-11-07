@@ -331,14 +331,12 @@ usize Forest::lay(std::vector<Topple>& lays) {
         // flatter than a little past level and no steeper than half up.
         float tip = 0.5f * k_pi;
         const Vec3 over = across * (0.95f * h) + Vec3{0.0f, h, 0.0f};
-        DVec3 from = foot.position + DVec3{over.x, over.y, over.z};
-        for (int look = 0; look < 4; ++look) {
-            const std::optional<RayHit> hit = m_physics.raycast(from, {0.0f, -1.0f, 0.0f}, 2.0 * h + 50.0);
-            if (!hit) break;
-            if (m_by_body.contains(hit->body)) {
-                from = hit->point - DVec3{0.0, 0.01, 0.0};
-                continue;
-            }
+        const DVec3 from = foot.position + DVec3{over.x, over.y, over.z};
+        // Fixed bodies only (what falls would leave it in the air), past standing trunks.
+        PhysicsWorld::RayFilter filter;
+        filter.fixed_only = true;
+        filter.accept = [this](BodyId body, u64) { return !m_by_body.contains(body); };
+        if (const std::optional<RayHit> hit = m_physics.raycast(from, {0.0f, -1.0f, 0.0f}, 2.0 * h + 50.0, filter)) {
             const DVec3 d = hit->point - foot.position;
             const Vec3 v = Vec3{static_cast<float>(d.x), static_cast<float>(d.y), static_cast<float>(d.z)} +
                            Vec3{0.0f, tree.spot.trunk_radius, 0.0f};
@@ -347,7 +345,6 @@ usize Forest::lay(std::vector<Topple>& lays) {
             if (std::isfinite(a) && std::isfinite(c) && (a != 0.0f || c != 0.0f)) {
                 tip = std::clamp(std::atan2(c, a), 0.25f * k_pi, 0.6f * k_pi);
             }
-            break;
         }
         Vec3 turn = normalize_or_zero(cross(axis, across));
         if (turn == Vec3{}) turn = Vec3{0.0f, 0.0f, 1.0f};

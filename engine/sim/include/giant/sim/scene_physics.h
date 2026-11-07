@@ -59,6 +59,9 @@ struct ScenePhysicsSettings {
     // the blow threw them), at once. Without a camera all are bodies.
     double simulate_radius = 600.0;
     u32 max_loose = 4096;
+    // Rays a blow (an impact, a step's hits) casts at most to lay rubble on
+    // what is under it; past them rubble lies at its building's foot.
+    u32 rubble_rays = 4096;
 };
 
 struct ScenePhysicsStats {
@@ -216,6 +219,7 @@ private:
     std::optional<DVec3> m_camera;
     Dust* m_dust = nullptr;
     u32 m_rubble = 0;
+    mutable u32 m_rays_left = 0; // rubble_rays left in this blow
     // Ground tiles to look at, and those whose shape is being made.
     std::unordered_map<world::CellCoord, Tile, world::CellCoordHash> m_tiles;
     std::deque<world::CellCoord> m_tile_queue;
