@@ -994,7 +994,11 @@ over the target frame time). Where it stands:
   fresh physics world (about 4 ms on the main thread, sized for 262,144
   bodies) and lets the old one's bodies and the follower's tables go on
   threads of their own (tens of milliseconds for 60,000 bodies, off the
-  frame); the scene's entities are then looked at a share a frame. Every body
+  frame; at most two old worlds at once); with the follower's own
+  clear-up and first scan that frame takes 10 to 20 ms in all for a
+  50,000-entity scene on 4 cores (a scene swap: the renderer rebuilds
+  everything that frame too), and the scene's entities are then looked
+  at a share a frame. Every body
   that moved rebuilds its cell's instances that frame (as any edit does;
   cost grows with what else is in the cell). Kits are compared whole each
   frame (as the renderer does). `raycast` and `step_physics` finish

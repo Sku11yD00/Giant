@@ -450,6 +450,12 @@ void PhysicsWorld::clear() {
         d->thread.join(); // finished: at once
         return true;
     });
+    // At most two old worlds in memory (a script loading scenes in a loop
+    // waits here instead of piling them up).
+    while (m_disposals.size() >= 2) {
+        m_disposals.front()->thread.join();
+        m_disposals.erase(m_disposals.begin());
+    }
     auto disposal = std::make_unique<Disposal>();
     Disposal* d = disposal.get();
     d->thread = std::thread([d, old = std::move(fresh)]() mutable {

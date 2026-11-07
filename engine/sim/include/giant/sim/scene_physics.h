@@ -145,6 +145,8 @@ private:
     usize m_scan_at = 0;
     std::deque<world::EntityId> m_dynamic_queue;
     std::unordered_set<world::EntityId> m_dynamic_queued;
+    std::unordered_set<world::EntityId> m_edited; // moved by an edit not yet seen: no pose from the old body
+    bool m_closing = false;                        // going: no fresh physics world to clear into
     // Ground tiles to look at, and those whose shape is being made.
     std::unordered_map<world::CellCoord, Tile, world::CellCoordHash> m_tiles;
     std::deque<world::CellCoord> m_tile_queue;

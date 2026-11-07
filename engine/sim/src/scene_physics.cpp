@@ -107,6 +107,7 @@ ScenePhysics::ScenePhysics(PhysicsWorld& physics, const ScenePhysicsSettings& se
 
 ScenePhysics::~ScenePhysics() {
     m_builder.wait(m_builds);
+    m_closing = true;
     clear();
 }
 
@@ -120,7 +121,7 @@ void ScenePhysics::clear() {
         if (tile.body != k_no_body) gone.push_back(tile.body);
         if (tile.building != nullptr) tile.building->superseded.store(true, std::memory_order_relaxed);
     }
-    if (!gone.empty() && gone.size() == m_physics.size()) {
+    if (!m_closing && !gone.empty() && gone.size() == m_physics.size()) {
         m_physics.clear(); // all of them ours: a fresh world, the old let go off the frame
     } else {
         m_physics.remove_many(gone, false); // all of ours: nothing left to wake
@@ -143,6 +144,7 @@ void ScenePhysics::clear() {
     m_queue.clear();
     m_dynamic_queue.clear();
     m_dynamic_queued.clear();
+    m_edited.clear();
     m_queued = {};
     m_scan.clear();
     m_scan_at = 0;
@@ -194,6 +196,7 @@ void ScenePhysics::enqueue(const world::Scene& scene, world::EntityId id) {
         if (e == nullptr || it == m_entities.end() || !(e->transform.position == it->second.look.transform.position) ||
             !(e->transform.rotation == it->second.look.transform.rotation)) {
             drop_pose(id);
+            m_edited.insert(id);
         }
     }
     // A dynamic one (now, or as its body was made) goes to its own queue,
@@ -216,6 +219,7 @@ void ScenePhysics::enqueue_tile(world::CellCoord cell) {
 
 u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std::vector<Made>& made,
                               std::vector<BodyId>& gone) {
+    m_edited.erase(id);
     const world::Entity* e = scene.find(id);
     const auto it = m_entities.find(id);
     if (e == nullptr) {
@@ -510,7 +514,7 @@ usize ScenePhysics::update_poses() {
         const auto it = m_entities.find(owner->second);
         if (it == m_entities.end() || !it->second.dynamic) continue;
         // An edit waiting to be seen: its old body is not where it is drawn.
-        if (m_dynamic_queued.count(owner->second) != 0) continue;
+        if (m_edited.count(owner->second) != 0) continue;
         const std::optional<BodyState> s = m_physics.state(body);
         if (!s) continue;
         world::Transform& pose = m_poses[owner->second];
