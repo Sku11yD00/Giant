@@ -77,6 +77,11 @@ if(GIANT_BUILD_TESTS)
         list(APPEND gate_env "SDL_VIDEO_DRIVER=dummy")
       endif()
       set_tests_properties(editor_n2_gate PROPERTIES TIMEOUT 900 ENVIRONMENT "${gate_env}")
+      # The N3 gate: the storm over the edited valley, streamed from disk.
+      add_test(NAME editor_n3_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/n3_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set_tests_properties(editor_n3_gate PROPERTIES TIMEOUT 1500 ENVIRONMENT "${gate_env}")
     endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")

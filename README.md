@@ -200,13 +200,23 @@ Milestone **N3, weather, landscape and scatter** (in progress; gate: a storm rol
   bridge or a tree it stays dry: a map from above made from the voxel world
   says what is sheltered. Presets `rain`, `snow` and `blizzard`;
   `wetness` and `snow_cover` set how the ground starts.
+- Part 9: the N3 gate. A 4 km valley edited with the terrain brushes (a
+  river cut down it, ridges raised either side, a flat site with a town),
+  a forest and stones strewn by scatter rules, saved as a world and
+  streamed back from disk. It flies low up the river, down the town's
+  street and up 1 km into the clouds while a storm rolls in over 20
+  seconds. It passes when the flight holds 60 fps without stutter, the
+  weather takes under 3 ms of GPU time in the full storm, streaming and
+  scatter keep up, and the storm arrives with rain and wet ground:
+
+      python tools/n3_gate.py giant_editor.exe
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
 close the window to exit. Keep the `D3D12` folder next to the exe. The
 performance gates come with it: in that folder, run
-`python n1_gate.py giant_editor.exe` and `python n2_gate.py giant_editor.exe`
-(Python 3; keep `gate_common.py` beside them). C# scripts need the .NET 10 runtime
+`python n1_gate.py giant_editor.exe`, `python n2_gate.py giant_editor.exe` and
+`python n3_gate.py giant_editor.exe` (Python 3; keep `gate_common.py` beside them). C# scripts need the .NET 10 runtime
 (https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
 The earlier Godot-based work is archived on the branches
