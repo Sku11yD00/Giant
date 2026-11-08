@@ -80,6 +80,10 @@ public:
     };
     Impact impact(const DVec3& point, float radius, float impulse);
     u32 points_per_impact = 1u << 16;
+    // Told of each blow (impact) and of the shots' hits as they are taken
+    // (pushes, wear): what else they move (swinging things, cloth:
+    // connect_blows). Null: nothing else.
+    std::function<void(const DVec3& point, float radius, float impulse)> on_impact;
     // The dust in the air (drawn by the renderer), moved by `wind` (m/s:
     // the weather's, set each frame) while simulating; stopping clears it.
     const sim::Dust& dust() const { return m_dust; }
@@ -162,6 +166,7 @@ public:
     // The latest hits (at most k_kept_hits), oldest first.
     static constexpr usize k_kept_hits = 256;
     const std::deque<ShotHit>& recent_hits() const { return m_recent; }
+    std::function<void(std::span<const ShotHit>)> on_hits;
     float blow_per_joule = 0.1f; // N s of wear each joule a bullet leaves in a kit piece
 
     sim::PhysicsWorld& world() { return m_physics; }

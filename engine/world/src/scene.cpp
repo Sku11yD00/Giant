@@ -67,6 +67,23 @@ std::optional<ClothPin> cloth_pin_from_string(std::string_view name) {
     return std::nullopt;
 }
 
+const char* to_string(SwingHinge hinge) {
+    switch (hinge) {
+    case SwingHinge::free: return "free";
+    case SwingHinge::x: return "x";
+    }
+    return "free";
+}
+
+std::optional<SwingHinge> swing_hinge_from_string(std::string_view name) {
+    for (const SwingHinge h : {SwingHinge::free, SwingHinge::x}) {
+        if (name == to_string(h)) {
+            return h;
+        }
+    }
+    return std::nullopt;
+}
+
 const char* to_string(BodyKind body) {
     switch (body) {
     case BodyKind::fixed: return "fixed";
@@ -623,6 +640,11 @@ Json entity_json(const Entity& e) {
         entity["cloth"] = {{"width", c.width},   {"height", c.height},       {"pin", to_string(c.pin)},
                            {"weight", c.weight}, {"stiffness", c.stiffness}};
     }
+    if (!(e.swing == SwingSettings{})) {
+        const SwingSettings& w = e.swing;
+        entity["swing"] = {{"on", w.on},         {"length", w.length}, {"hinge", to_string(w.hinge)},
+                           {"weight", w.weight}, {"limit", w.limit}};
+    }
     // Only when not the default, so older scenes read and write the same.
     if (e.body != BodyKind::fixed) entity["body"] = to_string(e.body);
     if (e.mass != 0.0f) entity["mass"] = e.mass;
@@ -1035,6 +1057,23 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         cr.number("weight", e.cloth.weight, 0.02, 5);
         cr.number("stiffness", e.cloth.stiffness, 0, 1);
         cr.finish();
+    }
+    if (const Json* w = r.get("swing", false); w != nullptr && r.ok()) {
+        Reader wr(*w, path + ".swing", error);
+        wr.boolean("on", e.swing.on);
+        wr.number("length", e.swing.length, 0.02, 20);
+        std::string hinge = to_string(e.swing.hinge);
+        wr.string("hinge", hinge);
+        if (wr.ok()) {
+            if (const auto parsed = swing_hinge_from_string(hinge)) {
+                e.swing.hinge = *parsed;
+            } else {
+                wr.fail("hinge", "must be free or x");
+            }
+        }
+        wr.number("weight", e.swing.weight, 0.05, 1000);
+        wr.number("limit", e.swing.limit, 5, 175);
+        wr.finish();
     }
     if (const Json* v = r.get("body", false); v != nullptr && r.ok()) {
         const std::optional<BodyKind> body = v->is_string() ? body_from_string(v->get<std::string>()) : std::nullopt;

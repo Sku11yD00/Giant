@@ -19,6 +19,7 @@
 #include "scatter_placer.h"
 #include "animation_state.h"
 #include "cloth_state.h"
+#include "swing_state.h"
 #include "hit_targets.h"
 #include "physics_state.h"
 #include "play_state.h"
@@ -312,6 +313,9 @@ int run(const Options& options) {
     state.animation = &animation;
     editor::ClothState cloth(renderer.get()); // likewise
     state.cloth = &cloth;
+    editor::SwingState swing(renderer.get(), &meshes);
+    state.swing = &swing;
+    editor::connect_blows(state); // shots and blasts reach the swings and the cloth
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -383,15 +387,19 @@ int run(const Options& options) {
         // first, so no cell is built with a copy its entity should no longer draw.
         animation.follow_now(state.scene, meshes, state.scene.untaken_changes());
         cloth.follow(state.scene, state.scene.untaken_changes());
-        std::vector<world::EntityId> redraw = physics.take_redraw();
-        const std::vector<world::EntityId> animation_redraw = animation.take_redraw();
-        redraw.insert(redraw.end(), animation_redraw.begin(), animation_redraw.end());
+        swing.follow(state.scene, state.scene.untaken_changes());
+        // Drawn with other meshes now: their cells rebuilt.
+        std::vector<world::EntityId> redraw = animation.take_redraw();
         const std::vector<world::EntityId> cloth_redraw = cloth.take_redraw();
         redraw.insert(redraw.end(), cloth_redraw.begin(), cloth_redraw.end());
+        // Only drawn elsewhere: moved in place where they can be.
+        std::vector<world::EntityId> moved = physics.take_redraw();
+        const std::vector<world::EntityId> swung = swing.take_moved();
+        moved.insert(moved.end(), swung.begin(), swung.end());
         const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
-                            &animation.copies(), &cloth.meshes());
+                            &animation.copies(), &cloth.meshes(), moved, &swing.poses());
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
@@ -555,6 +563,7 @@ int run(const Options& options) {
         animation.update(state.scene, meshes, scene_frame.take_for_animation(), delta);
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
         cloth.update(weather.wind(), state.camera.position, delta); // drawn as it moved next frame
+        swing.update(weather.wind(), state.camera.position, delta);
         mark(editor::FramePhase::animation);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());

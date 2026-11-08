@@ -134,6 +134,20 @@ def build_valley(tool):
                 "base_color": [0.55, 0.06, 0.05] if i % 3 else [0.1, 0.15, 0.5], "roughness": 0.85}
                for i in range(40)]
     tool("create_entities", {"entities": banners})
+    # Lanterns on the house fronts and hinged signs over the street, swung by the wind (moved in place).
+    swings = [{"name": f"Lantern {i}", "shape": "cube",
+               "position": [TOWN[0] + (3.2 if i % 2 else -3.2), town_h + 3.2,
+                            round(TOWN[1] + (i // 2 - 15.5) * (HOUSES_Z * SPACING / 32), 2)],
+               "scale": [0.25, 0.35, 0.25], "base_color": [0.2, 0.15, 0.08], "metallic": 1.0, "roughness": 0.5,
+               "emissive": [2.0, 1.4, 0.6], "swing": {"on": True, "length": 0.5, "weight": 1.5}}
+              for i in range(64)]
+    swings += [{"name": f"Sign {i}", "shape": "cube",
+                "position": [TOWN[0] + (1.4 if i % 2 else -1.4), town_h + 3.6,
+                             round(TOWN[1] + (i // 2 - 7.5) * (HOUSES_Z * SPACING / 16), 2)],
+                "rotation": {"yaw": 90}, "scale": [0.9, 0.5, 0.05], "base_color": [0.35, 0.22, 0.1],
+                "surface": "wood", "swing": {"on": True, "length": 0.35, "hinge": "x", "weight": 4.0}}
+               for i in range(32)]
+    tool("create_entities", {"entities": swings})
     # The forest on the slopes, above the valley floor; stones by the river (below the town).
     tool("add_scatter_layer", {"name": "forest", "items": [{"kit": "tree", "scale": [0.8, 1.3]}],
                                "spacing": 9, "density": 0.7, "clump_size": 60, "clumping": 0.6,

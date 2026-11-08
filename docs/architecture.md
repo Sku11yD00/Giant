@@ -1224,9 +1224,67 @@ swapped in before the next cells are built, and a mesh the renderer
 refuses is tried again only when its entity changes. `get_cloth` and
 `push_cloth` follow the scene's latest edits first. `Cloths::push` (the `push_cloth`
 command) gives every point near a place a change of speed, less towards
-the edge: blasts and shots, wired to them with the hanging objects (E1
-part 3). Known limits: cloth passes through what it hangs against (no
-collision yet), and a far sheet holds still rather than waving.
+the edge; `Cloths::blast` throws the points away from a place, the blow's
+impulse over the sheet's weight (at most 30 m/s): the `impact` command
+does that (E1 part 3, below). Known limits: cloth passes through what it
+hangs against (no collision yet), bullets pass through it untouched, and a
+far sheet holds still rather than waving.
+
+## Swinging things (E1 part 3)
+
+Lanterns, signs, bells, lamps on chains: any cube, sphere, plane, mesh or
+kit entity with `SwingSettings::on` hangs from a pivot `length` metres
+straight above its origin and swings about it (`hinge` free, any way; or
+`x`, only about its own x axis made level: a sign on two hooks), at most
+`limit` degrees from hanging straight, weighing `weight` kg. Saved with
+the entity (only when set); kit pieces and scatter items do not swing
+(the kit entity swings whole).
+
+`giant/sim/swing.h` moves them: each is a pendulum, its origin on a rod
+from the pivot. Each fixed step (1/60 s, at most 4 a frame) gravity pulls
+it, the wind where it hangs (`wind_at`, so the gusts the trees show)
+pushes on its box as it is turned now (`size`: the area it shows the
+relative wind, a box's drag, growing with the speed squared, never past
+the wind's own speed in a step: a light thing in a storm stays stable),
+its pivot slows it, then the rod puts it back (its length, the hinge's
+plane, the limit) and its speed is what the rod let it do. So a storm
+leans a lantern far over and throws it about in the gusts, a breeze barely
+stirs it, and a sign swings only across its face. Shots (`knock`: the
+bullet's momentum lost in it, over its weight, at most 20 m/s), pushes and
+blasts (away from the blast, the impulse over its weight) change its
+speed. Work is bounded (rule 9): the nearest `max_simulated` (512) within
+`distance` (100 m) move; the rest hold their pose. One that moved under
+0.02 mm a step for a second sleeps until the wind about it changes (by
+0.05 m/s) or something knocks it, so steady wind costs nothing.
+
+They have no meshes of their own: each is drawn turned about its pivot.
+The editor's `SwingState` follows the scene's changes (as the cloth
+does; the box is the entity's scale for primitives, its pieces' bounds
+for a kit, its mesh's size once loaded), steps after the weather and
+lists those whose pose moved more than 0.1 mm. `scene_frame` takes those
+(and the physics' moved bodies) as `moved`: each cell keeps what each
+entity drew (`Slot`: its instances in the cell), so only the moved
+entities' instances are written again in place and the renderer is told
+of that range alone (`CellRange::prev_version`, joined with the cell's
+ground change in place that frame, if any; decals moved with them), and
+the instance store uploads just that range at the cell's kept anchor; a
+cell with anything else changed, or an entity drawing other than it did
+(a piece's mesh not loaded), is rebuilt whole as before. The nearest four
+times `max_simulated` are looked at a frame (sleepers waking), the rest
+wait. Swinging entities' instances are marked
+`render::Instance::moves`: the voxel world does not hold them (no brick
+work as they move; they bounce no light, as skinned meshes, even far ones
+holding still) and the far field never stands in for them. Their shadows move with them (the shadow
+pages under moved instances are drawn again). While the physics poses an
+entity (a dynamic body, simulating), its pose wins over the swing's.
+
+`PhysicsState::on_hits` and `on_impact` (set by `connect_blows`) carry the
+shots' hits and the `impact` command's blows out: a hit on a swinging
+entity knocks it; a blow throws the swings and cloth in reach. The
+commands `get_swing` and `push_swing` follow the scene's latest edits
+first. Known limits: a swing does not collide with what it hangs by (the
+wall behind a lantern), it does not spin about its rod, its physics body
+(if any) stays where it hangs at rest, and chains are one rigid rod.
 
 ## Window events (known limit)
 

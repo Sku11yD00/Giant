@@ -7,6 +7,7 @@ giant_module(sim
     src/ballistics.cpp
     src/physics.cpp
     src/scene_physics.cpp
+    src/swing.cpp
   DEPENDS core world
 )
 # Jolt stays private: the physics API is plain C++ types.
@@ -23,6 +24,7 @@ giant_module_tests(sim
     tests/test_ballistics.cpp
     tests/test_physics.cpp
     tests/test_scene_physics.cpp
+    tests/test_swing.cpp
 )
 if(GIANT_BUILD_TESTS)
   # Jolt in an unoptimized MSVC build is slow: the character tests alone take

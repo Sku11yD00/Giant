@@ -71,6 +71,18 @@ struct SceneFrame {
     const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr;
     // Cloth entities' meshes (likewise).
     const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr;
+    // Where swinging entities are drawn when the physics does not pose them (likewise).
+    const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr;
+
+    // What an entity drew in its cell (instances from `first`, decals from
+    // `decal_first`, within the cell's), so moving it can be done in place.
+    struct Slot {
+        world::EntityId id = 0;
+        u32 first = 0;
+        u32 count = 0;
+        u32 decal_first = 0;
+        u32 decals = 0;
+    };
 
     struct MaterialKey {
         u32 bits[10];
@@ -103,6 +115,10 @@ struct SceneFrame {
         u32 fallen_first = 0;
         u32 fallen_decals = 0;          // its decals before the fallen trees'
         std::vector<u32> fallen_points; // the fallen points drawn, in order
+        // Its entities by id, as last built, and those only moved since
+        // (posed or swung: moved again in place, if they can be).
+        std::vector<Slot> slots;
+        std::vector<world::EntityId> moved;
         u64 prev_version = 0; // what an in-place change was made from (0: a full rebuild)
         u32 changed_first = 0; // and the instances it changed
         u32 changed_count = 0;
@@ -158,7 +174,13 @@ struct SceneFrame {
 // the cells in `redraw_cells` are rebuilt. With `skinned`, a mesh entity in
 // it draws that mesh (its animated copy) instead of its file's; entities
 // that came or went from it are in `redraw`. With `cloth`, a cloth entity
-// in it draws that mesh (ClothState); one not in it draws nothing.
+// in it draws that mesh (ClothState); one not in it draws nothing. The
+// entities in `moved` are drawn elsewhere now (a pose moved or went) and
+// nothing else about them changed: they are moved in place where they can
+// be (the renderer told only of those instances), else their cells are
+// rebuilt. With `swings`, a swinging entity the physics does not pose is
+// drawn there (SwingState); swinging entities' instances are marked
+// render::Instance::moves (kept out of the voxel world).
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
@@ -167,7 +189,9 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr,
                  const sim::FallenTrees* fallen = nullptr, std::span<const world::CellCoord> redraw_cells = {},
                  const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr,
-                 const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr);
+                 const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr,
+                 std::span<const world::EntityId> moved = {},
+                 const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

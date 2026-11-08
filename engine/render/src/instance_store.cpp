@@ -142,10 +142,19 @@ bool InstanceStore::update(rhi::CommandList& cmd, std::span<const Instance> inst
             const CellRange& c = layout[i];
             while (j < m_previous.size() && m_previous[j].first < c.first) ++j;
             for (usize k = j; k < m_previous.size() && m_previous[k].first == c.first; ++k) {
-                if (m_claimed[k] == 0 && m_previous[k].count == c.count && m_previous[k].version == c.version) {
+                if (m_claimed[k] != 0 || m_previous[k].count != c.count) continue;
+                if (m_previous[k].version == c.version) {
                     m_claimed[k] = 1;
                     m_slots[i] = m_previous_slots[k];
                     m_kept[i] = 1;
+                    break;
+                }
+                // Changed in part from what was uploaded (CellRange::prev_version):
+                // its slot and anchor kept, only that part uploaded again.
+                if (c.prev_version != 0 && m_previous[k].version == c.prev_version && c.changed_first <= c.count) {
+                    m_claimed[k] = 1;
+                    m_slots[i] = m_previous_slots[k];
+                    m_kept[i] = 2;
                     break;
                 }
             }
@@ -194,9 +203,16 @@ bool InstanceStore::update(rhi::CommandList& cmd, std::span<const Instance> inst
             ok = upload(cmd, instances, layout[i], m_slots[i], material_count);
         }
     } else {
-        // The cells not as before (m_changed): uploaded, at their slot.
+        // The cells not as before (m_changed): uploaded, at their slot;
+        // those changed in part, only that part (from the anchor they have).
         for (u32 i = 0; i < count && ok; ++i) {
-            if (m_kept[i] != 0) continue;
+            if (m_kept[i] == 1) continue;
+            if (m_kept[i] == 2) {
+                const CellRange& c = layout[i];
+                CellRange part{c.first + c.changed_first, std::min(c.changed_count, c.count - c.changed_first), 0};
+                ok = upload(cmd, instances, part, m_slots[i], material_count);
+                continue;
+            }
             m_anchors[m_slots[i]] = anchor_of(layout[i]);
             ok = upload(cmd, instances, layout[i], m_slots[i], material_count);
         }

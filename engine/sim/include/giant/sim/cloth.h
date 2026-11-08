@@ -150,6 +150,10 @@ public:
     // (world) gains `velocity` (m/s, world), less towards the edge. Wakes
     // what it reaches.
     void push(const DVec3& at, float radius, const Vec3& velocity);
+    // A blast: the same, but each point gains speed away from `at`: the
+    // blow's `impulse` (N s) over the sheet's weight (at most 30 m/s), less
+    // towards the edge.
+    void blast(const DVec3& at, float radius, float impulse);
 
     const Sheet* find(world::EntityId id) const;
     const std::map<world::EntityId, Sheet>& sheets() const { return m_sheets; }
