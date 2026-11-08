@@ -112,6 +112,7 @@ struct RayHit {
     DVec3 point{};
     Vec3 normal{};
     double distance = 0.0;
+    u32 part = 0; // which of a compound's parts (0 for one shape), as ContactHit's
 };
 
 // Something struck something (a contact begun this step, hard enough):
@@ -261,6 +262,10 @@ public:
     // on a fixed body where it was).
     void set_transform(BodyId id, const DVec3& position, const Quat& rotation);
     void set_velocity(BodyId id, const Vec3& linear, const Vec3& angular);
+    // A dynamic body pushed by `impulse` (N s) at `point` (a bullet's
+    // blow: it may turn as well as move); wakes it. Other bodies (and
+    // characters') are left alone.
+    void add_impulse(BodyId id, const Vec3& impulse, const DVec3& point);
     // A kinematic body reaches this place by the end of the next fixed
     // step, pushing what is in the way.
     void move_kinematic(BodyId id, const DVec3& position, const Quat& rotation);
@@ -307,14 +312,20 @@ public:
     // set_velocity and move_kinematic leave it alone. k_no_body when not a character.
     BodyId character_body(CharacterId id) const;
     usize characters() const;
+    // Whether the body stands for a character (character_body of one).
+    bool is_character_body(BodyId id) const;
 
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance) const;
     // Only bodies `accept` takes (called with each candidate's id and user
     // value, under the body's lock: it must not call back into the world),
     // and with fixed_only only fixed ones: what something can rest on for good.
+    // With `body`, only that body; and with `part` too, only that part of
+    // it (a compound's: RayHit::part), the others passed through.
     struct RayFilter {
         bool fixed_only = false;
         std::function<bool(BodyId, u64)> accept;
+        BodyId body = k_no_body;
+        std::optional<u32> part;
     };
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance,
                                   const RayFilter& filter) const;

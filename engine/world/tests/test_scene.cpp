@@ -267,6 +267,44 @@ GIANT_TEST("world: imported meshes are saved by path") {
     GIANT_CHECK(load_scene(too_long, bad).has_value());
 }
 
+GIANT_TEST("world: a material's surface saves and loads by name, and only when set") {
+    for (usize i = 0; i < k_surface_count; ++i) {
+        const Surface s = static_cast<Surface>(i);
+        GIANT_CHECK(surface_from_string(to_string(s)) == s);
+    }
+    GIANT_CHECK(!surface_from_string("steel").has_value());
+    Scene scene;
+    Entity crate = named("Crate");
+    crate.material.surface = Surface::wood;
+    scene.add(crate);
+    scene.add(named("Plain"));
+    Kit kit;
+    kit.name = "wall";
+    KitPiece pane;
+    pane.material.surface = Surface::glass;
+    kit.pieces.push_back(pane);
+    scene.kits.push_back(kit);
+    ScatterLayer layer;
+    layer.name = "rocks";
+    ScatterItem rock;
+    rock.material.surface = Surface::concrete;
+    layer.items.push_back(rock);
+    scene.scatter.push_back(layer);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(contains(text, "\"wood\"") && contains(text, "\"glass\"") && contains(text, "\"concrete\""));
+    GIANT_CHECK(!contains(text, "\"standard\"")); // the plain one writes none
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->material.surface == Surface::wood);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->material.surface == Surface::standard);
+    GIANT_CHECK(loaded.find_kit("wall") && loaded.find_kit("wall")->pieces[0].material.surface == Surface::glass);
+    GIANT_CHECK(loaded.scatter.size() == 1 && loaded.scatter[0].items[0].material.surface == Surface::concrete);
+    GIANT_CHECK(save_scene(loaded) == text);
+    Scene bad;
+    const auto error = load_scene(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"surface": "steel"}}]})", bad);
+    GIANT_CHECK(error.has_value() && contains(error->message, "surface must be standard, flesh"));
+}
+
 GIANT_TEST("world: a mesh entity's animation saves and loads, and only when set") {
     Scene scene;
     Entity walker = named("Walker");

@@ -7,8 +7,10 @@
 
 #include "giant/core/assert.h"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <unordered_set>
 
 namespace giant::editor {
@@ -87,6 +89,66 @@ CommandResult no_physics() { return CommandResult::failure("physics is not avail
 
 Json vec(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
 Json vec(const Vec3& v) { return Json::array({v.x, v.y, v.z}); }
+
+Json shot_hit_json(const PhysicsState::ShotHit& s) {
+    const sim::BulletHit& h = s.hit;
+    Json out{{"bullet", h.bullet},
+             {"outcome", sim::to_string(h.outcome)},
+             {"entity", s.entity},
+             {"surface", world::to_string(h.surface)},
+             {"point", vec(h.point)},
+             {"normal", vec(h.normal)},
+             {"speed_in", h.speed_in},
+             {"speed_out", h.speed_out},
+             {"energy", h.energy},
+             {"thickness", h.thickness},
+             {"distance", h.distance}};
+    if (s.piece) out["piece"] = *s.piece;
+    if (s.tree) out["tree"] = true;
+    if (s.character) out["character"] = true;
+    if (h.outcome != sim::HitOutcome::stopped) out["exit"] = vec(h.exit);
+    if (s.loosened > 0) out["loosened"] = s.loosened;
+    return out;
+}
+
+Json surfaces_json(const sim::BallisticsSettings& settings) {
+    Json out = Json::object();
+    for (usize i = 0; i < world::k_surface_count; ++i) {
+        const sim::SurfaceBallistics& b = settings.surfaces[i];
+        out[world::to_string(static_cast<world::Surface>(i))] = {
+            {"resistance", b.resistance}, {"ricochet_degrees", b.ricochet_degrees}, {"ricochet_keep", b.ricochet_keep}};
+    }
+    return out;
+}
+
+Json ballistics_json(const PhysicsState& p, usize hits) {
+    const sim::Ballistics& b = p.ballistics();
+    const sim::BallisticsStats s = b.stats();
+    Json flying = Json::array();
+    for (const sim::BulletState& bullet : b.bullets()) {
+        if (flying.size() >= 64) break;
+        flying.push_back({{"bullet", bullet.id},
+                          {"position", vec(bullet.position)},
+                          {"velocity", vec(bullet.velocity)},
+                          {"distance", bullet.distance},
+                          {"seconds", bullet.seconds}});
+    }
+    Json recent = Json::array();
+    const auto& kept = p.recent_hits();
+    for (usize i = kept.size() - std::min(hits, kept.size()); i < kept.size(); ++i) recent.push_back(shot_hit_json(kept[i]));
+    return {{"simulating", p.simulating()},
+            {"flying", s.flying},
+            {"fired", s.fired},
+            {"refused", s.refused},
+            {"hits", s.hits},
+            {"rays", s.rays},
+            {"last_step_ms", s.last_step_ms},
+            {"bullets", std::move(flying)},
+            {"recent_hits", std::move(recent)},
+            {"drag", b.settings().drag},
+            {"blow_per_joule", p.blow_per_joule},
+            {"surfaces", surfaces_json(b.settings())}};
+}
 
 Json player_json(const EditorState& state) {
     const PlayState& play = *state.play;
@@ -220,7 +282,8 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
                       {"entity", state.physics->bodies().entity_of(hit->body)},
                       {"point", vec(hit->point)},
                       {"normal", vec(hit->normal)},
-                      {"distance", hit->distance}};
+                      {"distance", hit->distance},
+                      {"surface", world::to_string(state.physics->surface_of(*hit))}};
              if (state.play != nullptr && state.play->playing() && hit->body == state.play->player_body()) {
                  out["player"] = true;
              }
@@ -260,6 +323,142 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              out["loosened"] = hit.loosened;
              out["felled"] = hit.felled;
              return CommandResult::success(out);
+         }});
+
+    add(registry,
+        {"fire",
+         "Fires a bullet from `origin` along `direction` at `speed` m/s (default 880, a rifle; a pistol is "
+         "about 360) weighing `mass` kg (default 0.008). It falls and slows as it flies (drag), and what it "
+         "meets is made of a surface (set_entity's `surface`: wood, metal, concrete...; the ground is dirt, "
+         "trees wood, characters flesh): it goes through what its energy takes it through (each surface "
+         "takes so many joules a metre: get_ballistics; `penetration` 2 goes through twice as much, armour "
+         "piercing), glances off hard surfaces struck at a shallow angle, or stops (the terrain always stops it). What it meets is pushed "
+         "(dynamic bodies), and a breakable kit's piece shot enough (the energy left in it, times "
+         "blow_per_joule, adding up to the kit's strength) is shot out with what it held up. While playing, "
+         "the player is not hit by its own shots. Needs simulating: the bullet flies with the steps (its "
+         "hits show in get_ballistics); `resolve` flies it to its end now and returns its `hits` in order "
+         "(each: outcome stopped, passed or ricochet; entity, piece, surface, point, speeds in and out, the "
+         "energy left there, thickness gone through, distance flown). Not simulating, `resolve` only "
+         "reports (nothing is pushed or broken).",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"origin", "direction"}},
+              {"properties",
+               {{"origin", triple(1e8, "World metres.")},
+                {"direction", triple(1e6, "Need not be unit length; not zero.")},
+                {"speed", {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 5000}, {"description", "m/s. Default 880."}}},
+                {"mass", {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 100}, {"description", "Kilograms. Default 0.008."}}},
+                {"penetration",
+                 {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 100}, {"description", "Default 1."}}},
+                {"resolve", {{"type", "boolean"}, {"description", "Fly it to its end now. Default false."}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.physics == nullptr) return no_physics();
+             const bool resolve = args.value("resolve", false);
+             if (!resolve && !state.physics->simulating()) {
+                 return CommandResult::failure("not simulating (simulate on first, or resolve the shot)");
+             }
+             const Json& o = args["origin"];
+             const Json& d = args["direction"];
+             const double dx = d[0].get<double>();
+             const double dy = d[1].get<double>();
+             const double dz = d[2].get<double>();
+             const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+             if (!(length > 1e-9)) return CommandResult::failure("direction is zero");
+             const double speed = args.value("speed", 880.0);
+             const float mass = args.value("mass", 0.008f);
+             const float penetration = args.value("penetration", 1.0f);
+             if (!(static_cast<float>(speed) >= 1e-3f) || !(mass >= 1e-9f) || !(penetration >= 1e-6f)) {
+                 return CommandResult::failure("speed, mass and penetration must be above 0");
+             }
+             sim::Shot shot;
+             shot.origin = {o[0].get<double>(), o[1].get<double>(), o[2].get<double>()};
+             shot.velocity = {static_cast<float>(dx / length * speed), static_cast<float>(dy / length * speed),
+                              static_cast<float>(dz / length * speed)};
+             shot.mass = mass;
+             shot.penetration = penetration;
+             if (state.play != nullptr && state.play->playing()) shot.ignore = state.play->player_body();
+             if (resolve) {
+                 // The world exactly as it is now (bodies still waiting made at once).
+                 state.physics->flush(state.scene);
+                 Json hits = Json::array();
+                 for (const PhysicsState::ShotHit& h : state.physics->resolve(shot)) hits.push_back(shot_hit_json(h));
+                 return CommandResult::success(Json{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}});
+             }
+             const sim::BulletId id = state.physics->fire(shot);
+             if (id == sim::k_no_bullet) return CommandResult::failure("too many bullets flying");
+             return CommandResult::success(Json{{"bullet", id}});
+         }});
+
+    add(registry,
+        {"get_ballistics",
+         "Reports the bullets: how many are flying (up to 64 listed: position, velocity, distance flown, "
+         "seconds), fired and refused in all, `hits` (the count, in all), the latest `recent_hits` (`hits` "
+         "argument: how many, default 16, at most 256; as fire's), the "
+         "drag, blow_per_joule and each surface's `resistance` (joules a metre), `ricochet_degrees` (glances "
+         "off under this angle to the surface; 0 never) and `ricochet_keep` (the share of speed kept).",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"properties",
+               {{"hits", {{"type", "integer"}, {"minimum", 0}, {"maximum", 256}, {"description", "Default 16."}}}}}},
+         true,
+         [&state](const Json& args, CommandContext&) {
+             if (state.physics == nullptr) return no_physics();
+             return CommandResult::success(ballistics_json(*state.physics, args.value("hits", 16u)));
+         }});
+
+    add(registry,
+        {"set_ballistics",
+         "Tunes the bullets (view state, as the simulation: not saved or undoable; the editor starts with "
+         "the defaults): `drag` (1/m, slowing of drag times speed squared; default 0.0007), `blow_per_joule` "
+         "(N s of wear on a kit piece each joule left in it; default 0.1: a 3000 J rifle round stopped in a piece wears it by 300 N s, a fifth of the default strength) and `surfaces`, by name, each with "
+         "any of resistance (joules a metre, > 0), ricochet_degrees (0 to 90) and ricochet_keep (0 to 1). "
+         "Returns get_ballistics (with no recent hits).",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"properties",
+               {{"drag", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
+                {"blow_per_joule", {{"type", "number"}, {"minimum", 0}, {"maximum", 1e6}}},
+                {"surfaces",
+                 {{"type", "object"},
+                  {"additionalProperties",
+                   {{"type", "object"},
+                    {"additionalProperties", false},
+                    {"properties",
+                     {{"resistance", {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 1e9}}},
+                      {"ricochet_degrees", {{"type", "number"}, {"minimum", 0}, {"maximum", 90}}},
+                      {"ricochet_keep", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}}}}}}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.physics == nullptr) return no_physics();
+             sim::BallisticsSettings settings = state.physics->ballistics().settings();
+             if (const auto it = args.find("surfaces"); it != args.end()) {
+                 for (const auto& [name, values] : it->items()) {
+                     const std::optional<world::Surface> surface = world::surface_from_string(name);
+                     if (!surface) return CommandResult::failure("surfaces." + name + ": no such surface");
+                     if (!values.is_object()) return CommandResult::failure("surfaces." + name + ": must be an object");
+                     sim::SurfaceBallistics& b = settings.surfaces[static_cast<usize>(*surface)];
+                     for (const auto& [key, value] : values.items()) {
+                         const std::string at = "surfaces." + name + "." + key;
+                         float* field = key == "resistance"         ? &b.resistance
+                                        : key == "ricochet_degrees" ? &b.ricochet_degrees
+                                        : key == "ricochet_keep"    ? &b.ricochet_keep
+                                                                    : nullptr;
+                         if (field == nullptr) return CommandResult::failure(at + ": is not a known argument");
+                         if (!value.is_number()) return CommandResult::failure(at + ": must be a number");
+                         const double v = value.get<double>();
+                         const double hi = key == "resistance" ? 1e9 : key == "ricochet_degrees" ? 90.0 : 1.0;
+                         if (!(v >= 0.0 && v <= hi) || (key == "resistance" && !(v > 0.0))) {
+                             return CommandResult::failure(at + ": out of range");
+                         }
+                         *field = static_cast<float>(v);
+                     }
+                 }
+             }
+             settings.drag = args.value("drag", settings.drag);
+             state.physics->ballistics().settings() = settings;
+             state.physics->blow_per_joule = args.value("blow_per_joule", state.physics->blow_per_joule);
+             return CommandResult::success(ballistics_json(*state.physics, 0));
          }});
 
     add(registry,

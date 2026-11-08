@@ -19,9 +19,94 @@ u32 physics_workers() {
 } // namespace
 
 PhysicsState::PhysicsState()
-    : m_jobs(physics_workers()), m_physics(m_jobs), m_bodies(m_physics), m_forest(m_physics) {
+    : m_jobs(physics_workers()), m_physics(m_jobs), m_bodies(m_physics), m_forest(m_physics),
+      m_ballistics(m_physics) {
     m_bodies.set_dust(&m_dust);
     m_forest.set_dust(&m_dust);
+    m_ballistics.target_of = [this](const sim::RayHit& hit) { return target_of(hit); };
+}
+
+sim::Ballistics::Target PhysicsState::target_of(const sim::RayHit& hit) const {
+    sim::Ballistics::Target out;
+    const sim::ScenePhysics::Owner owner = m_bodies.owner_of(hit.body, hit.part);
+    if (owner.entity != 0) {
+        out.owner = owner.entity;
+        out.piece = owner.piece;
+        const world::Entity* e = m_scene_at != nullptr ? m_scene_at->find(owner.entity) : nullptr;
+        if (e == nullptr) return out;
+        if (e->shape != world::Shape::kit) {
+            out.surface = e->material.surface;
+            return out;
+        }
+        const world::Kit* kit = m_scene_at->find_kit(e->kit);
+        if (kit != nullptr && owner.piece && *owner.piece < kit->pieces.size()) {
+            out.surface = kit->pieces[*owner.piece].material.surface;
+        }
+        return out;
+    }
+    if (const auto tree = m_forest.tree_of(hit.body)) {
+        // The tree item's own surface, while the forest has the placement
+        // the placer draws (else wood).
+        out.surface = world::Surface::wood;
+        const ScatterPlacer::Cell* placed = m_scatter != nullptr ? m_scatter->find(tree->cell) : nullptr;
+        if (placed != nullptr && placed->serial == m_forest.serial(tree->cell) && tree->point < placed->points.size()) {
+            const world::ScatterPoint& p = placed->points[tree->point];
+            const ScatterPlacer::Layers& layers = *placed->layers;
+            if (p.layer < layers.size() && p.item < layers[p.layer].items.size()) {
+                const world::Surface own = layers[p.layer].items[p.item].material.surface;
+                if (own != world::Surface::standard) out.surface = own;
+            }
+        }
+        return out;
+    }
+    out.surface = m_physics.is_character_body(hit.body) ? world::Surface::flesh
+                                                        : world::Surface::dirt; // the ground's tiles
+    return out;
+}
+
+world::Surface PhysicsState::surface_of(const sim::RayHit& hit) const { return target_of(hit).surface; }
+
+std::vector<PhysicsState::ShotHit> PhysicsState::take(std::span<const sim::BulletHit> hits, bool apply) {
+    // Each hit named as it happened (sim::BulletHit::owner, piece): a piece
+    // shot out by one changes the bodies the next ones met.
+    std::vector<ShotHit> out;
+    out.reserve(hits.size());
+    std::vector<sim::ScenePhysics::Strike> strikes;
+    std::vector<usize> struck_by;
+    for (const sim::BulletHit& hit : hits) {
+        ShotHit& s = out.emplace_back();
+        s.hit = hit;
+        s.entity = hit.owner;
+        s.piece = hit.piece;
+        s.tree = m_forest.tree_of(hit.body).has_value();
+        s.character = m_physics.is_character_body(hit.body);
+        if (!apply) continue;
+        m_physics.add_impulse(hit.body, hit.impulse, hit.point); // dynamic bodies only
+        if (hit.owner != 0 && hit.piece && hit.energy > 0.0f) {
+            strikes.push_back({hit.owner, *hit.piece, hit.energy * blow_per_joule, hit.direction});
+            struck_by.push_back(out.size() - 1);
+        }
+    }
+    if (!strikes.empty()) {
+        const std::vector<usize> loosened = m_bodies.strike(strikes);
+        for (usize k = 0; k < loosened.size(); ++k) out[struck_by[k]].loosened = loosened[k];
+    }
+    for (const ShotHit& s : out) m_recent.push_back(s);
+    while (m_recent.size() > k_kept_hits) m_recent.pop_front();
+    return out;
+}
+
+void PhysicsState::take_hits() {
+    if (!m_ballistics.hits().empty()) take(m_ballistics.hits(), true);
+}
+
+sim::BulletId PhysicsState::fire(const sim::Shot& shot) {
+    if (!m_on) return sim::k_no_bullet;
+    return m_ballistics.fire(shot);
+}
+
+std::vector<PhysicsState::ShotHit> PhysicsState::resolve(const sim::Shot& shot) {
+    return take(m_ballistics.resolve(shot), m_on);
 }
 
 std::vector<sim::TreeSpot> PhysicsState::trees_of(const ScatterPlacer::Cell& placed) {
@@ -96,6 +181,8 @@ void PhysicsState::notice_scene(const world::Scene& scene) {
     m_damage_edits = ~u64{0};
     m_kept_waiting.clear();
     m_dust.clear();
+    m_ballistics.clear();
+    m_recent.clear();
     m_ground.forget(); // another scene's ground
     m_restore_ground = false;
     // The scene's bodies and the trunks all go: the world cleared whole
@@ -114,6 +201,7 @@ void PhysicsState::set_simulating(bool on) {
         m_bodies.reset_poses();
         m_forest.reset();
         m_dust.clear();
+        m_ballistics.clear();
         m_restore_ground = true; // with the scene, at the next update
     }
 }
@@ -290,6 +378,8 @@ void PhysicsState::update(world::Scene& scene, const world::SceneChanges& change
     m_physics.step(seconds);
     m_bodies.update_poses();
     m_forest.after_step();
+    m_ballistics.step(seconds);
+    take_hits();
     m_dust.step(static_cast<float>(seconds), wind);
 }
 
@@ -359,6 +449,8 @@ u32 PhysicsState::run_steps(u32 steps) {
         m_physics.step(sim::PhysicsWorld::k_step_seconds);
         m_bodies.update_poses();
         m_forest.after_step();
+        m_ballistics.step(sim::PhysicsWorld::k_step_seconds);
+        take_hits();
         m_dust.step(static_cast<float>(sim::PhysicsWorld::k_step_seconds), wind);
     }
     return steps;

@@ -67,6 +67,7 @@ Json entity_json(const Entity& e) {
             {"roughness", e.material.roughness},
             {"metallic", e.material.metallic},
             {"emissive", vec3_json(e.material.emissive)},
+            {"surface", world::to_string(e.material.surface)},
             {"visible", e.visible},
             {"body", world::to_string(e.body)}};
     if (e.mass != 0.0f) {
@@ -167,6 +168,11 @@ Json entity_properties() {
         {"roughness", number(0, 1, "0 mirror-smooth, 1 matte. Default 0.5.")},
         {"metallic", number(0, 1, "0 for non-metals, 1 for metals. Default 0.")},
         {"emissive", triple(0, 1000, "Linear RGB light it gives off. Default none.")},
+        {"surface",
+         {{"enum", {"standard", "flesh", "wood", "glass", "dirt", "foliage", "brick", "concrete", "metal"}},
+          {"description", "What bullets meet (how far they go through, whether they glance off: "
+                          "get_ballistics); not drawn. Default standard, a middling solid. A kit's pieces "
+                          "keep the surfaces of the entities it was made from."}}},
         {"visible", {{"type", "boolean"}}},
         {"body",
          {{"enum", {"fixed", "dynamic", "none"}},
@@ -217,6 +223,9 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("roughness")) e.material.roughness = args["roughness"].get<float>();
     if (args.contains("metallic")) e.material.metallic = args["metallic"].get<float>();
     if (args.contains("emissive")) e.material.emissive = vec3_from(args["emissive"]);
+    if (args.contains("surface")) {
+        e.material.surface = world::surface_from_string(args["surface"].get<std::string>()).value_or(e.material.surface);
+    }
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
     if (args.contains("body")) {
         e.body = world::body_from_string(args["body"].get<std::string>()).value_or(e.body);

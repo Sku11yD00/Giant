@@ -60,6 +60,9 @@ Json item_schema() {
               {"roughness", number(0, 1, "Default 0.5.")},
               {"metallic", number(0, 1, "Default 0.")},
               {"emissive", triple(0, 1000, "Default none.")},
+              {"surface",
+               {{"enum", {"standard", "flesh", "wood", "glass", "dirt", "foliage", "brick", "concrete", "metal"}},
+                {"description", "What bullets meet (set_entity's surface). Default standard; trees are wood."}}},
               {"weight", number(1e-6, 1e6, "How often it is picked, against the layer's other items. Default 1.")},
               {"scale", pair(0.0001, 10000, "[min, max] uniform scale, picked evenly. Default [1, 1].")},
               {"align", number(0, 1, "0 upright (trees), 1 along the ground's slope (rocks). Default 0.")},
@@ -129,6 +132,10 @@ std::string apply_layer(const Json& args, ScatterLayer& l, EditorState& state) {
             i.material.roughness = j.value("roughness", i.material.roughness);
             i.material.metallic = j.value("metallic", i.material.metallic);
             if (j.contains("emissive")) i.material.emissive = vec3_from(j["emissive"]);
+            if (j.contains("surface")) {
+                i.material.surface =
+                    world::surface_from_string(j["surface"].get<std::string>()).value_or(i.material.surface);
+            }
             i.weight = j.value("weight", i.weight);
             if (j.contains("scale")) {
                 i.scale_min = j["scale"][0].get<float>();
@@ -193,6 +200,7 @@ Json layer_json(const ScatterLayer& l) {
             j["metallic"] = i.material.metallic;
             j["emissive"] = {i.material.emissive.x, i.material.emissive.y, i.material.emissive.z};
         }
+        if (i.material.surface != world::Surface::standard) j["surface"] = world::to_string(i.material.surface);
         j["weight"] = i.weight;
         j["scale"] = {i.scale_min, i.scale_max};
         j["align"] = i.align;

@@ -338,3 +338,96 @@ GIANT_TEST("breakage commands: a breakable house, an impact knocks a wall out, s
     // Undo the breakable setting.
     GIANT_CHECK(f.run("undo").ok && !f.state.scene.find_kit("hut")->breakable);
 }
+
+GIANT_TEST("ballistics commands: shots go through wood, stop in concrete, push crates and shoot out kit pieces") {
+    Fixture f;
+    f.create({{"shape", "plane"}, {"scale", {100, 1, 100}}});
+    const world::EntityId board =
+        f.create({{"shape", "cube"}, {"position", {5, 1, 0}}, {"scale", {0.1, 2, 2}}, {"surface", "wood"}});
+    const world::EntityId block =
+        f.create({{"shape", "cube"}, {"position", {10, 1, 0}}, {"scale", {1, 2, 2}}, {"surface", "concrete"}});
+    GIANT_CHECK(f.run("get_entity", {{"id", board}}).value["surface"] == "wood");
+    ai::CommandResult r = f.run("raycast", {{"origin", {0, 1, 0}}, {"direction", {1, 0, 0}}});
+    GIANT_CHECK(r.ok && r.value["entity"] == board && r.value["surface"] == "wood");
+    r = f.run("raycast", {{"origin", {0, 5, 0}}, {"direction", {0, -1, 0}}});
+    GIANT_CHECK(r.ok && r.value["surface"] == "standard"); // the plane: an entity, as it is set
+    // Not simulating: only a resolved shot, and it only reports.
+    const Json pistol = {{"origin", {0, 1, 0}}, {"direction", {1, 0, 0}}, {"speed", 360}, {"mass", 0.008}};
+    GIANT_CHECK(!f.run("fire", pistol).ok);
+    Json resolved = pistol;
+    resolved["resolve"] = true;
+    r = f.run("fire", resolved);
+    GIANT_CHECK(r.ok && r.value["hits"].size() == 2);
+    if (r.ok && r.value["hits"].size() == 2) {
+        const Json& h = r.value["hits"];
+        GIANT_CHECK(h[0]["entity"] == board && h[0]["outcome"] == "passed" && h[0]["surface"] == "wood");
+        GIANT_CHECK(h[1]["entity"] == block && h[1]["outcome"] == "stopped" && h[1]["surface"] == "concrete");
+        GIANT_CHECK(h[0]["speed_out"].get<double>() < h[0]["speed_in"].get<double>());
+    }
+    GIANT_CHECK(!f.run("fire", {{"origin", {0, 1, 0}}, {"direction", {0, 0, 0}}, {"resolve", true}}).ok);
+    GIANT_CHECK(!f.run("fire", {{"origin", {0, 1, 0}}, {"direction", {1, 0, 0}}, {"mass", 0}, {"resolve", true}}).ok);
+
+    // A crate is pushed by what it stops.
+    const world::EntityId crate = f.create(
+        {{"shape", "cube"}, {"position", {0, 0.5, 8}}, {"body", "dynamic"}, {"mass", 1}, {"surface", "metal"}});
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(f.run("step_physics", {{"seconds", 1}}).ok);
+    const DVec3 before = f.at(crate);
+    r = f.run("fire", {{"origin", {0, 0.5, 0}}, {"direction", {0, 0, 1}}, {"mass", 0.05}, {"speed", 600}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["hits"].size() == 1 && r.value["hits"][0]["entity"] == crate);
+    GIANT_CHECK(f.run("step_physics", {{"seconds", 0.5}}).ok);
+    GIANT_CHECK(f.at(crate).z > before.z + 0.5);
+
+    // A wooden hut wall worn through by shots: out once the energy left in it comes to its strength.
+    const Json wall = {{"shape", "cube"}, {"position", {0, 1.5, 0}}, {"scale", {0.3, 3, 3}}, {"surface", "wood"}};
+    const Json roof = {{"shape", "cube"}, {"position", {0, 3.1, 0}}, {"scale", {1, 0.2, 3}}, {"surface", "metal"}};
+    GIANT_CHECK(f.run("create_kit", {{"name", "hut"}, {"pieces", {wall, roof}}}).ok);
+    const world::EntityId hut = f.create({{"kit", "hut"}, {"position", {-20, 0, 0}}});
+    GIANT_CHECK(f.run("set_kit_breakable", {{"name", "hut"}, {"breakable", true}, {"strength", 60}}).ok);
+    const Json at_wall = {{"origin", {-25, 1.5, 0}}, {"direction", {1, 0, 0}}, {"speed", 360}, {"resolve", true}};
+    r = f.run("fire", at_wall); // ~518 J stopped in 0.3 m of wood: 52 N s of wear, short of 60
+    GIANT_CHECK(r.ok && r.value["hits"].size() >= 1 && r.value["hits"][0]["entity"] == hut &&
+                r.value["hits"][0]["piece"] == 0 && r.value["hits"][0]["outcome"] == "stopped" &&
+                !r.value["hits"][0].contains("loosened"));
+    r = f.run("fire", at_wall);
+    GIANT_CHECK(r.ok && r.value["hits"].size() >= 1 && r.value["hits"][0]["loosened"] == 2); // and the roof on it
+    GIANT_CHECK(f.run("get_physics").value["loose_pieces"] == 2);
+    // Through two panes of one building, 2 m apart: a hit on each, each its own piece and surface; a
+    // shot that brings the first down still names the second.
+    const Json pane_a = {{"shape", "cube"}, {"position", {0, 1, 0}}, {"scale", {0.02, 1, 1}}, {"surface", "glass"}};
+    const Json pane_b = {{"shape", "cube"}, {"position", {2, 1, 0}}, {"scale", {0.02, 1, 1}}, {"surface", "glass"}};
+    GIANT_CHECK(f.run("create_kit", {{"name", "panes"}, {"pieces", {pane_a, pane_b}}}).ok);
+    const world::EntityId panes = f.create({{"kit", "panes"}, {"position", {-20, 0, 20}}});
+    GIANT_CHECK(f.run("set_kit_breakable", {{"name", "panes"}, {"breakable", true}, {"strength", 0.3}}).ok);
+    r = f.run("fire", {{"origin", {-25, 1, 20}}, {"direction", {1, 0, 0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["hits"].size() >= 2);
+    if (r.ok && r.value["hits"].size() >= 2) {
+        const Json& h = r.value["hits"];
+        GIANT_CHECK(h[0]["entity"] == panes && h[0]["piece"] == 0 && h[0]["outcome"] == "passed" &&
+                    h[0]["surface"] == "glass" && std::fabs(h[0]["thickness"].get<double>() - 0.02) < 0.005);
+        GIANT_CHECK(h[1]["entity"] == panes && h[1]["piece"] == 1 && h[1]["outcome"] == "passed");
+        GIANT_CHECK(h[0]["loosened"] == 2); // both shot out by the one batch (6 J each, 0.6 N s of wear)
+    }
+
+    // A bullet in flight: it hits in the steps, shown in get_ballistics.
+    r = f.run("fire", {{"origin", {0, 1, 0}}, {"direction", {1, 0, 0}}});
+    GIANT_CHECK(r.ok && r.value["bullet"].get<u32>() != 0);
+    GIANT_CHECK(f.run("get_ballistics").value["flying"] == 1);
+    GIANT_CHECK(f.run("step_physics", {{"seconds", 0.1}}).ok);
+    r = f.run("get_ballistics", {{"hits", 2}});
+    GIANT_CHECK(r.ok && r.value["flying"] == 0 && r.value["recent_hits"].size() == 2);
+    GIANT_CHECK(r.ok && r.value["recent_hits"][1]["entity"] == block && r.value["surfaces"]["wood"]["resistance"] == 3000.0);
+    // Tuned: wood that takes almost nothing; a surface not known is refused.
+    r = f.run("set_ballistics", {{"surfaces", {{"concrete", {{"resistance", 10}}}}}});
+    GIANT_CHECK(r.ok && r.value["surfaces"]["concrete"]["resistance"] == 10.0);
+    GIANT_CHECK(!f.run("set_ballistics", {{"surfaces", {{"steel", {{"resistance", 10}}}}}}).ok);
+    GIANT_CHECK(!f.run("set_ballistics", {{"surfaces", {{"wood", {{"resistance", 0}}}}}}).ok);
+    GIANT_CHECK(!f.run("set_ballistics", {{"surfaces", {{"wood", {{"hardness", 1}}}}}}).ok);
+    r = f.run("fire", resolved);
+    GIANT_CHECK(r.ok && r.value["hits"].size() >= 2 && r.value["hits"][1]["outcome"] == "passed");
+    // Stopping: no bullets left, pieces back.
+    GIANT_CHECK(f.run("fire", {{"origin", {0, 50, 0}}, {"direction", {0, 1, 0}}}).ok);
+    GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
+    r = f.run("get_ballistics");
+    GIANT_CHECK(r.value["flying"] == 0 && f.run("get_physics").value["loose_pieces"] == 0);
+}

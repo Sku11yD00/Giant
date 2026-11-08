@@ -15,6 +15,7 @@
 #pragma once
 
 #include "giant/core/jobs.h"
+#include "giant/sim/ballistics.h"
 #include "giant/sim/dust.h"
 #include "giant/sim/forest.h"
 #include "giant/sim/physics.h"
@@ -23,7 +24,10 @@
 #include "giant/world/scene.h"
 #include "scatter_placer.h"
 
+#include <deque>
 #include <functional>
+#include <optional>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -125,6 +129,35 @@ public:
     std::vector<world::CellCoord> take_tree_redraw() { return m_forest.take_redraw(); }
     const sim::Forest& forest() const { return m_forest; }
 
+    // Bullets (sim::Ballistics): fired while simulating, they fly with the
+    // steps and meet what is made of what (the entity's material surface,
+    // a kit piece's own; trees are wood, characters flesh, the ground dirt).
+    // What they meet is pushed (dynamic bodies, by the momentum they lose)
+    // and a breakable kit's pieces wear (blow_per_joule of the energy they
+    // leave there, as N s, adding up to the kit's strength: then the piece
+    // is shot out). Stopping clears them.
+    struct ShotHit {
+        sim::BulletHit hit;
+        world::EntityId entity = 0;   // the entity met (0: none of the scene's)
+        std::optional<u32> piece;     // a kit placement's piece
+        bool tree = false;            // a scatter tree's trunk
+        bool character = false;       // a character (the player)
+        usize loosened = 0;           // kit pieces it shot out
+    };
+    // What a ray met is made of (the scene as last noticed).
+    world::Surface surface_of(const sim::RayHit& hit) const;
+    // k_no_bullet when refused (not simulating, bad numbers, too many flying).
+    sim::BulletId fire(const sim::Shot& shot);
+    // A shot flown to its end now, its hits returned (and taken: pushes,
+    // wear) while simulating; not simulating, only reported.
+    std::vector<ShotHit> resolve(const sim::Shot& shot);
+    const sim::Ballistics& ballistics() const { return m_ballistics; }
+    sim::Ballistics& ballistics() { return m_ballistics; }
+    // The latest hits (at most k_kept_hits), oldest first.
+    static constexpr usize k_kept_hits = 256;
+    const std::deque<ShotHit>& recent_hits() const { return m_recent; }
+    float blow_per_joule = 0.1f; // N s of wear each joule a bullet leaves in a kit piece
+
     sim::PhysicsWorld& world() { return m_physics; }
     const sim::PhysicsWorld& world() const { return m_physics; }
     const sim::ScenePhysics& bodies() const { return m_bodies; }
@@ -133,6 +166,10 @@ private:
     // A new scene: the forest's trunks go before the scene's bodies clear the world.
     void notice_scene(const world::Scene& scene);
     // The trees of a cell's placement, in point order.
+    sim::Ballistics::Target target_of(const sim::RayHit& hit) const;
+    // Hits described (what they met), and taken when `apply` (pushes, wear).
+    std::vector<ShotHit> take(std::span<const sim::BulletHit> hits, bool apply);
+    void take_hits();
     static std::vector<sim::TreeSpot> trees_of(const ScatterPlacer::Cell& placed);
     // The cell's placement given to the forest, with the scene's kept trees there.
     void give(world::CellCoord cell, const ScatterPlacer::Cell& placed);
@@ -149,6 +186,8 @@ private:
     sim::PhysicsWorld m_physics;
     sim::ScenePhysics m_bodies;
     sim::Forest m_forest; // after the world: its trunks go first
+    sim::Ballistics m_ballistics;
+    std::deque<ShotHit> m_recent;
     u64 m_scene = 0;
     const world::Scene* m_scene_at = nullptr; // as last noticed (the editor's scene outlives this)
     u64 m_damage_edits = ~u64{0};             // the scene's kept damage the forest follows

@@ -62,12 +62,21 @@ struct Transform {
     bool operator==(const Transform&) const = default;
 };
 
+// What a thing is made of, as a bullet meets it (giant/sim/ballistics.h):
+// how hard it is to go through, whether shots glance off it. `standard`
+// is a middling solid (unset); the ground is dirt.
+enum class Surface : u8 { standard, flesh, wood, glass, dirt, foliage, brick, concrete, metal };
+constexpr usize k_surface_count = 9;
+const char* to_string(Surface surface);
+std::optional<Surface> surface_from_string(std::string_view name);
+
 // A physically based material (metal/roughness, as artists know it).
 struct Material {
     Vec3 base_color{0.8f, 0.8f, 0.8f}; // linear, 0 to 1
     float roughness = 0.5f;             // 0 mirror to 1 matte
     float metallic = 0.0f;              // 0 or 1 for real materials
     Vec3 emissive{};                    // linear, added light; may exceed 1
+    Surface surface = Surface::standard; // what bullets meet (not drawn)
     bool operator==(const Material&) const = default;
 };
 
