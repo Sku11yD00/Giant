@@ -17,7 +17,7 @@ struct AudioOutput::Impl {
     static void SDLCALL pull(void* user, SDL_AudioStream* stream, int additional, int) {
         Impl& self = *static_cast<Impl*>(user);
         if (additional <= 0) return;
-        const u32 frames = static_cast<u32>(additional) / (2 * sizeof(float));
+        const u32 frames = static_cast<u32>(static_cast<usize>(additional) / (2 * sizeof(float)));
         if (frames == 0) return;
         if (self.buffer.size() < static_cast<usize>(frames) * 2) self.buffer.resize(static_cast<usize>(frames) * 2);
         self.render(self.buffer.data(), frames);
