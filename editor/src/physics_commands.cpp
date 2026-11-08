@@ -92,7 +92,7 @@ CommandResult no_physics() { return CommandResult::failure("physics is not avail
 Json vec(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
 Json vec(const Vec3& v) { return Json::array({v.x, v.y, v.z}); }
 
-Json shot_hit_json(const EditorState& state, const PhysicsState::ShotHit& s) {
+Json shot_hit_json(const PhysicsState::ShotHit& s) {
     const sim::BulletHit& h = s.hit;
     Json out{{"bullet", h.bullet},
              {"outcome", sim::to_string(h.outcome)},
@@ -110,9 +110,8 @@ Json shot_hit_json(const EditorState& state, const PhysicsState::ShotHit& s) {
     if (s.character) out["character"] = true;
     if (h.character) {
         // A skinned character's bone capsule: which bone, in which zone.
-        const std::string zone = state.hits != nullptr ? state.hits->zone_name(s.entity, h.zone) : std::string{};
-        out["zone"] = zone.empty() ? Json(nullptr) : Json(zone);
-        out["bone"] = state.hits != nullptr ? state.hits->bone_name(s.entity, h.bone) : std::string{};
+        out["zone"] = s.zone.empty() ? Json(nullptr) : Json(s.zone);
+        out["bone"] = s.bone;
     }
     if (h.outcome != sim::HitOutcome::stopped) out["exit"] = vec(h.exit);
     if (s.loosened > 0) out["loosened"] = s.loosened;
@@ -158,7 +157,7 @@ Json ballistics_json(const EditorState& state, usize hits) {
     }
     Json recent = Json::array();
     const auto& kept = p.recent_hits();
-    for (usize i = kept.size() - std::min(hits, kept.size()); i < kept.size(); ++i) recent.push_back(shot_hit_json(state, kept[i]));
+    for (usize i = kept.size() - std::min(hits, kept.size()); i < kept.size(); ++i) recent.push_back(shot_hit_json(kept[i]));
     return {{"simulating", p.simulating()},
             {"flying", s.flying},
             {"fired", s.fired},
@@ -406,7 +405,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
                  state.physics->flush(state.scene);
                  catch_up_hits(state);
                  Json hits = Json::array();
-                 for (const PhysicsState::ShotHit& h : state.physics->resolve(shot)) hits.push_back(shot_hit_json(state, h));
+                 for (const PhysicsState::ShotHit& h : state.physics->resolve(shot)) hits.push_back(shot_hit_json(h));
                  return CommandResult::success(Json{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}});
              }
              const sim::BulletId id = state.physics->fire(shot);

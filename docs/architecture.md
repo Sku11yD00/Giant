@@ -1087,8 +1087,14 @@ bodies every frame would cost far more). Bullets test it along each step
 with an analytic ray-capsule test (the union of two balls and a cylinder:
 in where it first enters one, out where it last leaves one) behind a
 bounding sphere per character, and the nearer of it and the physics ray is
-met. A capsule's far side is known exactly, so a bullet goes through a limb
-into the torso behind as two layers. Zones are named by rules on bone names
+met. A character is one solid: its capsules overlap at the joints, so the
+way out is where the ray leaves the last capsule it is still inside of (one
+hit, named by the capsule it went in by). Only what changed is posed again
+(nothing skinned changed: `HitTargets::update` returns at once), and an
+animated entity is met in its pose once its copy is drawn (the rest pose
+until then, as shown). Decor (`body` none) is not hit. Known limit:
+`HitShapes::raycast` looks at every character's bounding sphere per ray (a
+grid comes with crowds). Zones are named by rules on bone names
 (`sim::HitZoneMap`, per file). Bullets meet the pose of the frame before
 (the animation runs after the physics step).
 

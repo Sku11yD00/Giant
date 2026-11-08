@@ -120,3 +120,25 @@ GIANT_TEST("hit shapes: a bullet goes through a torso and a wall behind is met n
     hits = bullets.resolve(pistol);
     GIANT_CHECK(!hits.empty() && hits[0].zone == 0 && hits[0].outcome == HitOutcome::stopped);
 }
+
+GIANT_TEST("hit shapes: a character's overlapping capsules are one solid: one hit, out where the last one ends") {
+    HitShapes shapes;
+    HitCharacter c;
+    c.capsules.push_back({{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 0.1f, 0, 0});
+    c.capsules.push_back({{0.0, 0.95, 0.0}, {0.0, 2.0, 0.0}, 0.1f, 1, 0});
+    c.capsules.push_back({{0.0, 5.0, 0.0}, {0.0, 6.0, 0.0}, 0.1f, 2, 0}); // apart: a solid of its own
+    shapes.set(1, c);
+    const auto hit = shapes.raycast({0.0, -1.0, 0.0}, {0.0f, 1.0f, 0.0f}, 100.0);
+    GIANT_CHECK(hit && hit->capsule == 0 && near(hit->distance, 0.9, 1e-6) && near(hit->exit, 3.1, 1e-6));
+    JobSystem jobs(1);
+    PhysicsWorld physics(jobs);
+    Ballistics bullets(physics);
+    bullets.hit_shapes = &shapes;
+    bullets.settings().surfaces[static_cast<usize>(world::Surface::flesh)].resistance = 100.0f; // through all 2.2 m
+    Shot shot;
+    shot.origin = {0.0, -1.0, 0.0};
+    shot.velocity = {0.0f, 880.0f, 0.0f};
+    shot.mass = 0.008f;
+    const std::vector<BulletHit> hits = bullets.resolve(shot);
+    GIANT_CHECK(hits.size() == 2 && hits[0].bone == 0 && near(hits[0].thickness, 2.2, 0.01) && hits[1].bone == 2);
+}

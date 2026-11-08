@@ -304,7 +304,7 @@ int run(const Options& options) {
     state.hits = &hit_targets;
     editor::PhysicsState physics;
     state.physics = &physics;
-    physics.set_hit_shapes(&hit_targets.shapes());
+    physics.set_hit_targets(&hit_targets);
     editor::PlayState play(physics);
     state.play = &play;
     editor::AnimationState animation(renderer.get()); // after the renderer: its copies leave first

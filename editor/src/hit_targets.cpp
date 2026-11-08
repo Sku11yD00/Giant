@@ -64,7 +64,12 @@ void HitTargets::update(const world::Scene& scene, const MeshLibrary& meshes, co
         m_scene = scene.identity();
         m_shapes.clear();
         m_fed.clear();
+        m_seen = ~u64{0};
     }
+    // Nothing skinned changed (no pose, edit or file): nothing to do.
+    if (animation.serial() == m_seen && m_zone_edits == m_seen_zones) return;
+    m_seen = animation.serial();
+    m_seen_zones = m_zone_edits;
     const auto& skinned = animation.skinned();
     // Gone (or no longer skinned, visible): their shapes go.
     std::vector<world::EntityId> gone;
@@ -77,11 +82,16 @@ void HitTargets::update(const world::Scene& scene, const MeshLibrary& meshes, co
     }
     for (const auto& [id, serial] : skinned) {
         const world::Entity* e = scene.find(id);
-        if (e == nullptr) continue;
+        if (e == nullptr || e->body == world::BodyKind::none) { // decor is not hit
+            if (m_fed.erase(id) != 0) m_shapes.remove(id);
+            continue;
+        }
         const MeshLibrary::Mesh* mesh = meshes.find_normalized(e->mesh);
         if (mesh == nullptr || mesh->skinned == nullptr) continue;
         const AnimationState::Animated* a = animation.find(id);
-        const bool posed = a != nullptr && a->posed && a->skinned == mesh->skinned && a->model.size() == mesh->skinned->skeleton.size();
+        // As drawn: its pose once its copy shows (the rest pose until then).
+        const bool posed = a != nullptr && a->posed && (a->drawn || !animation.draws()) && a->skinned == mesh->skinned &&
+                           a->model.size() == mesh->skinned->skeleton.size();
         const u64 pose = posed ? a->pose_serial : 0;
         Fed& fed = m_fed[id];
         if (fed.serial == serial && fed.pose == pose && fed.skinned == mesh->skinned && fed.zones == m_zone_edits) continue;
@@ -102,7 +112,9 @@ void HitTargets::update(const world::Scene& scene, const MeshLibrary& meshes, co
             h.radius = b.radius * stretch(m) * scale;
             h.bone = b.joint;
             h.zone = b.joint < s.skeleton.names.size() ? map.zone_of(s.skeleton.names[b.joint]) : sim::k_no_zone;
-            if (std::isfinite(h.radius) && h.radius > 0.0f) c.capsules.push_back(h);
+            const bool finite = std::isfinite(h.a.x) && std::isfinite(h.a.y) && std::isfinite(h.a.z) &&
+                                std::isfinite(h.b.x) && std::isfinite(h.b.y) && std::isfinite(h.b.z);
+            if (finite && std::isfinite(h.radius) && h.radius > 0.0f) c.capsules.push_back(h);
         }
         m_shapes.set(id, std::move(c));
         ++m_updates;

@@ -123,6 +123,11 @@ public:
     // nothing to play), with a serial that changes whenever it does (its
     // transform, its file): what hit shapes follow.
     const std::unordered_map<world::EntityId, u64>& skinned() const { return m_skinned; }
+    // Moves on whenever skinned() or a pose_serial does (nothing changed: the same).
+    u64 serial() const { return m_serial; }
+    // Whether copies are drawn (a renderer): an animated entity shows its
+    // pose once `drawn`, the file's rest pose until then.
+    bool draws() const { return m_renderer != nullptr; }
     // Entities that would animate past the limit (standing in the rest pose).
     usize frozen() const;
     usize waiting() const; // to be copied (within the limit), a few a frame

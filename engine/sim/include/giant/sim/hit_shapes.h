@@ -41,10 +41,11 @@ struct HitZoneMap {
     u16 zone_of(std::string_view bone) const;
     bool operator==(const HitZoneMap&) const = default;
 };
-// Rules for the usual rigs (Mixamo, Unreal, Blender's Rigify): head, neck,
-// torso (spine, chest, hips, pelvis, shoulders), arm (arms, hands,
-// fingers), leg (legs, thighs, knees, calves, feet, toes); anything else
-// is in no zone.
+// Rules for the usual rigs (Mixamo's and Unreal's names): head, neck, torso
+// (spine, chest, hips, pelvis, shoulders), arm (arms, hands, fingers), leg
+// (legs, thighs, knees, calves, feet, toes); anything else is in no zone.
+// Rigs that number their spine into the neck and head (Rigify's
+// DEF-spine.004 and up) need a map of their own (set_hit_zones).
 HitZoneMap default_hit_zones();
 
 // A capsule in the world: the segment a to b, `radius` round it.
@@ -65,7 +66,7 @@ struct ShapeHit {
     u64 owner = 0;          // as set()
     u32 capsule = 0;        // which of its capsules
     double distance = 0.0;  // along the ray to where it goes in (0: it starts inside)
-    double exit = 0.0;      // and to where it comes out
+    double exit = 0.0;      // and to where it comes out of the character (its capsules as one solid)
     DVec3 point{};
     Vec3 normal{};          // out of the capsule there
 };

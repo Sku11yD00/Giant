@@ -431,7 +431,7 @@ GIANT_TEST("hit zones: a skinned arm's bones have capsules, named by zone, posed
     Fixture f;
     HitTargets hits;
     PhysicsState physics;
-    physics.set_hit_shapes(&hits.shapes());
+    physics.set_hit_targets(&hits);
     f.state.hits = &hits;
     f.state.physics = &physics;
     register_physics_commands(f.commands, f.state);
@@ -459,6 +459,9 @@ GIANT_TEST("hit zones: a skinned arm's bones have capsules, named by zone, posed
     r = f.run("fire", {{"origin", {0, 1.8, 0}}, {"direction", {1, 0, 0}}, {"resolve", true}});
     GIANT_CHECK(r.ok && !r.value["hits"].empty() && r.value["hits"][0]["zone"] == "limb");
     GIANT_CHECK(f.run("set_hit_zones", {{"mesh", f.arm}, {"reset", true}}).ok);
+    // The hits kept keep the names they had when they happened.
+    r = f.run("get_ballistics", {{"hits", 1}});
+    GIANT_CHECK(r.ok && r.value["recent_hits"].size() == 1 && r.value["recent_hits"][0]["zone"] == "limb");
     GIANT_CHECK(!f.run("set_hit_zones", {{"mesh", f.arm}}).ok);
     // Bent: the elbow's capsule swings over toward x = 2 (the top at -1 from the elbow, 1 m up).
     GIANT_CHECK(f.run("play_animation", {{"id", arm}, {"clip", "bend"}, {"blend_seconds", 0}, {"loop", false}}).ok);
@@ -472,6 +475,11 @@ GIANT_TEST("hit zones: a skinned arm's bones have capsules, named by zone, posed
     }
     r = f.run("fire", {{"origin", {3, 5, 0}}, {"direction", {0, -1, 0}}, {"resolve", true}});
     GIANT_CHECK(r.ok && !r.value["hits"].empty() && r.value["hits"][0]["bone"] == "shoulder");
+    // Decor (no body): not hit.
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"body", "none"}}).ok);
+    GIANT_CHECK(!f.run("get_hit_zones", {{"id", arm}}).ok);
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"body", "fixed"}}).ok);
+    GIANT_CHECK(f.run("get_hit_zones", {{"id", arm}}).ok);
     // Hidden: no hit shapes.
     GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"visible", false}}).ok);
     GIANT_CHECK(!f.run("get_hit_zones", {{"id", arm}}).ok);

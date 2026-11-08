@@ -44,8 +44,8 @@ void AnimationState::follow(const world::Scene& scene, const MeshLibrary& meshes
     // Every entity drawing a skinned file, animated or not (its hit shapes).
     if (e != nullptr && skinned_mesh(*e, meshes) != nullptr) {
         m_skinned[id] = ++m_serial;
-    } else {
-        m_skinned.erase(id);
+    } else if (m_skinned.erase(id) != 0) {
+        ++m_serial;
     }
     if (const auto r = m_refused.find(id); r != m_refused.end()) {
         const MeshLibrary::Mesh* mesh = e != nullptr ? skinned_mesh(*e, meshes) : nullptr;
@@ -308,6 +308,7 @@ void AnimationState::pose() {
         for (const auto& [id, a] : m_animated) {
             if (!a->drawn && a->posed && m_renderer->mesh_ready(a->copy)) {
                 a->drawn = true;
+                a->pose_serial = ++m_serial; // drawn posed from now: what is hit
                 m_copies[id] = a->copy;
                 m_redraw.push_back(id);
             }

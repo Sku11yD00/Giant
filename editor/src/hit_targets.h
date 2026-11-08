@@ -51,6 +51,8 @@ private:
     sim::HitZoneMap m_default = sim::default_hit_zones();
     u64 m_zone_edits = 0;
     u64 m_scene = 0;
+    u64 m_seen = ~u64{0};   // the animation's serial as last followed
+    u64 m_seen_zones = ~u64{0};
     u64 m_updates = 0;
 };
 

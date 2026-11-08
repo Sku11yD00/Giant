@@ -54,9 +54,9 @@ HitZoneMap default_hit_zones() {
     // In order: the first rule a bone's name matches names it.
     m.rules.push_back({"head", {"head", "skull", "jaw", "eye"}});
     m.rules.push_back({"neck", {"neck"}});
-    m.rules.push_back({"arm", {"arm", "hand", "finger", "thumb", "index", "middle", "ring", "pinky", "wrist", "elbow"}});
-    m.rules.push_back({"leg", {"leg", "thigh", "knee", "calf", "shin", "foot", "toe", "ankle"}});
-    m.rules.push_back({"torso", {"spine", "chest", "hips", "pelvis", "shoulder", "clavicle", "torso", "root", "body"}});
+    m.rules.push_back({"arm", {"arm", "hand", "finger", "thumb", "index", "middle", "pinky", "wrist", "elbow"}});
+    m.rules.push_back({"leg", {"leg", "thigh", "knee", "calf", "shin", "foot", "toe", "ankle", "ball_"}});
+    m.rules.push_back({"torso", {"spine", "chest", "hip", "pelvis", "shoulder", "clavicle", "torso", "root", "body"}});
     return m;
 }
 
@@ -169,6 +169,22 @@ std::optional<ShapeHit> HitShapes::raycast(const DVec3& origin, const Vec3& dire
                                         static_cast<float>(n.z / nl)}
                                  : -direction;
             best = h;
+        }
+    }
+    if (best) {
+        // The character is one solid: its capsules overlap at the joints, so
+        // the way out is where the ray leaves the last capsule it is still
+        // inside of (a bullet through an arm into the torso is one hit).
+        const Entry& e = m_characters.at(best->owner);
+        std::vector<std::pair<double, double>> spans;
+        for (const HitCapsule& c : e.character.capsules) {
+            if (const Interval in = ray_capsule(origin, direction, c.a, c.b, c.radius); in && in->second >= best->distance) {
+                spans.push_back(*in);
+            }
+        }
+        std::sort(spans.begin(), spans.end());
+        for (const auto& [in, out] : spans) {
+            if (in <= best->exit + 1e-6) best->exit = std::max(best->exit, out);
         }
     }
     return best;
