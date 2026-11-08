@@ -41,6 +41,9 @@ public:
     PhysicsState();
 
     bool simulating() const { return m_on; }
+    // Counts starts: a walker made in another run (stopped and started
+    // since, even within a frame) is let go.
+    u64 runs() const { return m_runs; }
     // Starts, or stops (every moved entity drawn where the scene has it again).
     void set_simulating(bool on);
     // Each frame before update, once the placer is updated: the scatter
@@ -199,6 +202,7 @@ private:
     world::GroundDamage m_ground;
     bool m_restore_ground = false;
     sim::PhysicsWorld m_physics;
+    u64 m_runs = 0;
     sim::ScenePhysics m_bodies;
     sim::Forest m_forest; // after the world: its trunks go first
     sim::Ballistics m_ballistics;

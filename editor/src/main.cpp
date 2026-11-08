@@ -322,7 +322,6 @@ int run(const Options& options) {
     editor::WalkerState walkers(physics, nav); // after both: its characters and searches go first
     state.walkers = &walkers;
     editor::connect_walkers(state);
-    std::unordered_map<world::EntityId, world::Transform> walked; // the swings' poses and the walkers'
     editor::connect_blows(state); // shots and blasts reach the swings and the cloth
     state.window = window.get();
     state.device = device.get();
@@ -409,16 +408,10 @@ int run(const Options& options) {
         moved.insert(moved.end(), swung.begin(), swung.end());
         const std::vector<world::EntityId> walked_ids = walkers.take_moved();
         moved.insert(moved.end(), walked_ids.begin(), walked_ids.end());
-        const std::unordered_map<world::EntityId, world::Transform>* drawn_moving = &swing.poses();
-        if (!walkers.poses().empty()) {
-            walked = swing.poses();
-            for (const auto& [id, t] : walkers.poses()) walked[id] = t;
-            drawn_moving = &walked;
-        }
         const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
-                            &animation.copies(), &cloth.meshes(), moved, drawn_moving);
+                            &animation.copies(), &cloth.meshes(), moved, &swing.poses(), &walkers.poses());
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
@@ -576,6 +569,12 @@ int run(const Options& options) {
         mark(editor::FramePhase::weather);
         physics.wind = weather.shown() ? world::wind_velocity(*weather.shown()) : Vec3{};
         physics.feed_forest(state.scene, scatter, state.camera.position);
+        walkers.others.clear(); // the player kept clear of
+        if (play.playing()) {
+            if (const auto p = play.player()) {
+                walkers.others.push_back({p->position, p->velocity, play.settings().body.radius});
+            }
+        }
         walkers.before_step(state.scene, delta); // steered towards their paths' corners
         physics.update(state.scene, scene_frame.take_for_followers(), delta);
         walkers.after_step(); // drawn where they walked

@@ -66,9 +66,12 @@ GIANT_TEST("walkers: walk_to walks round a wall on a floor and stops there, draw
 
     ai::CommandResult r = f.run("walk_to", {{"id", p}, {"to", {40.0, 0.0, 32.0}}});
     GIANT_CHECK(r.ok);
+    GIANT_CHECK(f.walkers.take_redraw().empty()); // drawn as moving once it has a pose (not before)
     GIANT_CHECK(r.value["phase"] == "walking"); // the way found at once
     GIANT_CHECK(r.value["path"].size() >= 3);
     // Walked: halfway, it is off the straight line (round the wall), moving at a walk.
+    GIANT_CHECK(f.run("step_physics", {{"seconds", 0.1}}).ok);
+    GIANT_CHECK(f.walkers.take_redraw() == std::vector<world::EntityId>{p});
     double widest = 0.0;
     for (int k = 0; k < 40 && f.run("get_walker", {{"id", p}}).value["walker"]["phase"] == "walking"; ++k) {
         GIANT_CHECK(f.run("step_physics", {{"seconds", 0.5}}).ok);
@@ -111,8 +114,22 @@ GIANT_TEST("walkers: two crossing keep apart and both arrive; stopping the simul
     }
     const Json all = f.run("get_walker").value;
     GIANT_CHECK(all["walkers"] == 2 && all["arrived"] == 2);
-    GIANT_CHECK(closest > 0.5);
+    GIANT_CHECK(closest > 0.85); // stepped aside: more than touching (0.5 m: their characters are 0.25 m round)
+
+    // A ray at one names it.
+    const Json wa = f.run("get_walker", {{"id", a}}).value["walker"];
+    const ai::CommandResult hit = f.run("raycast", {{"origin", {wa["feet"][0].get<double>(), 5.0, wa["feet"][2].get<double>()}},
+                                                    {"direction", {0.0, -1.0, 0.0}}});
+    GIANT_CHECK(hit.ok && hit.value["entity"] == a);
+    // Off and on again at once: let go all the same.
+    GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    f.walkers.before_step(f.state.scene, 1.0 / 60.0);
+    GIANT_CHECK(f.walkers.size() == 0 && f.walkers.poses().empty());
+    GIANT_CHECK(f.physics.world().stats().characters == 0);
+    GIANT_CHECK(f.run("walk_to", {{"id", a}, {"to", {30.0, 0.0, 32.0}}}).ok);
     GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
     f.walkers.before_step(f.state.scene, 1.0 / 60.0);
     GIANT_CHECK(f.walkers.size() == 0 && f.walkers.poses().empty());
+    GIANT_CHECK(f.physics.world().stats().characters == 0);
 }

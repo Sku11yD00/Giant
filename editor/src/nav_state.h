@@ -75,6 +75,9 @@ public:
     using SearchId = u32;
     SearchId find_path(const DVec3& from, const DVec3& to);
     const nav::PathSearch* search(SearchId id) const;
+    // Found (and not waiting for stale tiles under its path to be searched
+    // again) or failed: its answer stands.
+    bool settled(SearchId id) const;
     void cancel(SearchId id);
     usize searches() const { return m_searches.size(); }
     // At once (a command): the tiles it needs built here (at most

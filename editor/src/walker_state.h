@@ -9,8 +9,11 @@
 // An entity walks with no body of its own (body "none": else its body
 // would stand where it was, and the map would count it in the way). Its
 // feet are its origin for meshes and kits, its bottom for cubes and
-// spheres. One stuck (moving under 0.3 m in 2 s) looks for the way again
-// (three times; then it has failed). Stopping the simulation (or another
+// spheres; its character is as wide as it (0.2 to 0.45 m round) and, for
+// a cube or sphere, as tall. One stuck (moving under a third of what it
+// was steered to in 2 s of simulated time) looks for the way again (three
+// times; then it has failed). A shot or a ray that meets one names its
+// entity (its character's body carries it). Stopping the simulation (or another
 // scene) lets every walker go.
 //
 // View state: nothing of it is saved or undone.
@@ -39,6 +42,7 @@ public:
     static const char* to_string(Phase phase);
 
     struct Walker {
+        world::EntityId entity = 0;
         sim::CharacterId character = sim::k_no_character;
         NavState::SearchId search = 0; // while searching
         nav::PathFollower follow;
@@ -53,7 +57,9 @@ public:
         Vec3 velocity{};    // as steered
         DVec3 feet{};       // where its feet are (last step)
         DVec3 stuck_from{};
-        double stuck_for = 0.0;
+        double stuck_for = 0.0;   // simulated seconds since stuck_from
+        double expected = 0.0;    // metres it was steered to walk meanwhile
+        float height = 1.8f;      // its character's
         u32 searches = 0; // the way looked for (1 + times stuck)
     };
 
@@ -87,6 +93,10 @@ public:
     std::vector<world::EntityId> take_moved();
     std::vector<world::EntityId> take_redraw();
 
+    // Others to keep clear of besides the walkers (the player), set each
+    // frame by its owner.
+    std::vector<nav::Neighbour> others;
+
 private:
     void drop(world::EntityId id);
     bool make_character(Walker& w);
@@ -94,6 +104,8 @@ private:
     PhysicsState& m_physics;
     NavState& m_nav;
     u64 m_scene = 0;
+    u64 m_run = 0;   // the physics' run they were made in
+    u64 m_steps = 0; // the physics' fixed steps, as last seen
     std::unordered_map<world::EntityId, Walker> m_walkers;
     std::unordered_map<world::EntityId, world::Transform> m_poses;
     std::vector<world::EntityId> m_moved;

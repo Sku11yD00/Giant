@@ -67,8 +67,8 @@ void register_walker_commands(ai::CommandRegistry& registry, EditorState& state)
          "where it goes, walking up steps and slopes, stepping round other walkers, and stopping at the end. "
          "The entity must have body \"none\" (it walks as a character, not as its own body); a cube's or "
          "sphere's feet are its bottom, a mesh's or kit's its origin. Drawn where it walks; the scene keeps "
-         "where it was put. Sending a walker again sends it on from where it is. View state, not undoable. "
-         "Returns get_walker's report for it.",
+         "where it was put. Sending a walker again sends it on from where it is. A shot or raycast that meets "
+         "it names its entity. View state, not undoable. Returns the walker as get_walker's `walker` gives it.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", Json::array({"id", "to"})},
@@ -90,8 +90,9 @@ void register_walker_commands(ai::CommandRegistry& registry, EditorState& state)
              std::vector<DVec3> path;
              const std::optional<DVec3> feet = state.walkers->feet_of(state.scene, id);
              if (feet && state.physics->simulating()) {
-                 const std::unique_ptr<nav::PathSearch> s = state.nav->find_path_now(state.scene, *feet, to, 64);
-                 if (s->state() == nav::SearchState::found) path = s->path();
+                 bool stale = false;
+                 const std::unique_ptr<nav::PathSearch> s = state.nav->find_path_now(state.scene, *feet, to, 64, nullptr, &stale);
+                 if (s->state() == nav::SearchState::found && !stale) path = s->path(); // (stale: searched over frames)
                  if (s->state() == nav::SearchState::failed) {
                      return CommandResult::failure(std::string("no way there: ") + s->reason());
                  }

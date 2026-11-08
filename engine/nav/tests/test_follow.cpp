@@ -67,3 +67,44 @@ GIANT_TEST("follow: two meeting head on pass each other, kept apart, and both ar
     GIANT_CHECK(closest > 2.0 * s.radius); // never walked into each other
     GIANT_CHECK(flat(pa, {20, 0, 0}) < 0.5 && flat(pb, {0, 0, 0}) < 0.5);
 }
+
+GIANT_TEST("follow: a hairpin is walked round, not cut; two sent to one spot both come to rest there") {
+    PathFollower f;
+    f.set_path({{0, 0, 0}, {10, 0, 0}, {0, 0, 1.5}});
+    FollowSettings s;
+    const Steering first = f.steer({0, 0, 0}, {}, s);
+    GIANT_CHECK(f.corner() == 1 && first.velocity.x > 1.0f); // along the first leg, not at the wall
+    DVec3 at{0, 0, 0};
+    bool turned = false;
+    for (int k = 0; k < 3000; ++k) {
+        const Steering st = f.steer(at, {}, s);
+        if (st.arrived) break;
+        if (f.corner() == 2) {
+            turned = true;
+            GIANT_CHECK(at.x > 9.0); // turned at the far end
+            break;
+        }
+        at = at + DVec3{st.velocity.x, 0.0, st.velocity.z} * (1.0 / 60.0);
+    }
+    GIANT_CHECK(turned);
+
+    PathFollower a, b;
+    a.set_path({{0, 0, 0}, {10, 0, 0}});
+    b.set_path({{0, 0, 3}, {10, 0, 0}});
+    DVec3 pa{0, 0, 0}, pb{0, 0, 3};
+    Vec3 va{}, vb{};
+    bool da = false, db = false;
+    for (int k = 0; k < 6000 && !(da && db); ++k) {
+        const Neighbour nb{pb, vb, s.radius}, na{pa, va, s.radius};
+        const Steering sa = da ? Steering{{}, true} : a.steer(pa, {&nb, 1}, s);
+        const Steering sb = db ? Steering{{}, true} : b.steer(pb, {&na, 1}, s);
+        da = sa.arrived;
+        db = sb.arrived;
+        va = sa.velocity;
+        vb = sb.velocity;
+        pa = pa + DVec3{va.x, 0.0, va.z} * (1.0 / 60.0);
+        pb = pb + DVec3{vb.x, 0.0, vb.z} * (1.0 / 60.0);
+    }
+    GIANT_CHECK(da && db);
+    GIANT_CHECK(std::hypot(pa.x - 10.0, pa.z) < 1.5 && std::hypot(pb.x - 10.0, pb.z) < 1.5);
+}

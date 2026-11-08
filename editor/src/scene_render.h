@@ -73,6 +73,7 @@ struct SceneFrame {
     const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr;
     // Where swinging entities are drawn when the physics does not pose them (likewise).
     const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr;
+    const std::unordered_map<world::EntityId, world::Transform>* walkers = nullptr;
 
     // What an entity drew in its cell (instances from `first`, decals from
     // `decal_first`, within the cell's), so moving it can be done in place.
@@ -180,7 +181,8 @@ struct SceneFrame {
 // be (the renderer told only of those instances), else their cells are
 // rebuilt. With `swings`, a swinging entity the physics does not pose is
 // drawn there (SwingState); swinging entities' instances are marked
-// render::Instance::moves (kept out of the voxel world).
+// render::Instance::moves (kept out of the voxel world). With `walkers`,
+// a walking entity (WalkerState) is drawn there, marked moving too.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
@@ -191,7 +193,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr,
                  const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr,
                  std::span<const world::EntityId> moved = {},
-                 const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr);
+                 const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr,
+                 const std::unordered_map<world::EntityId, world::Transform>* walkers = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

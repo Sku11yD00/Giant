@@ -509,6 +509,14 @@ const nav::PathSearch* NavState::search(SearchId id) const {
     return it != m_searches.end() ? it->second.search.get() : nullptr;
 }
 
+bool NavState::settled(SearchId id) const {
+    const auto it = m_searches.find(id);
+    if (it == m_searches.end()) return false;
+    const nav::SearchState st = it->second.search->state();
+    if (st == nav::SearchState::failed) return true;
+    return st == nav::SearchState::found && it->second.waits.empty() && (it->second.checked || it->second.redone >= 4);
+}
+
 void NavState::cancel(SearchId id) { m_searches.erase(id); }
 
 const nav::NavTile* NavState::tile_now(const world::Scene& scene, world::CellCoord cell) {

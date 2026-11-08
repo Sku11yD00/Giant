@@ -39,11 +39,13 @@ Steering PathFollower::steer(const DVec3& at, std::span<const Neighbour> near, c
         out.arrived = m_path.empty();
         return out;
     }
-    // On to the next corner once near this one (or past it: nearer the next).
+    // On to the next corner once near this one, or past it (beyond it
+    // along the way it was walked to: a hairpin is walked round, not cut).
     while (m_corner + 1 < m_path.size()) {
         const DVec3& c = m_path[m_corner];
-        const DVec3& next = m_path[m_corner + 1];
-        if (flat_distance(at, c) <= corner || flat_distance(at, next) < flat_distance(c, next) * 0.5) {
+        const DVec3& prev = m_corner > 0 ? m_path[m_corner - 1] : c;
+        const double past = (at.x - c.x) * (c.x - prev.x) + (at.z - c.z) * (c.z - prev.z);
+        if (flat_distance(at, c) <= corner || past > 0.0) {
             ++m_corner;
         } else {
             break;
@@ -52,9 +54,30 @@ Steering PathFollower::steer(const DVec3& at, std::span<const Neighbour> near, c
     const DVec3& target = m_path[m_corner];
     const double left = remaining(at);
     const bool last = m_corner + 1 == m_path.size();
-    if (last && flat_distance(at, target) <= arrive) {
+    const double to_end = flat_distance(at, m_path.back());
+    if (last && to_end <= arrive) {
         out.arrived = true;
         return out;
+    }
+    // Another at the end (standing there, or crowding it too): as near as it lets it come.
+    if (last) {
+        for (const Neighbour& n : near) {
+            if (!std::isfinite(n.position.x) || !std::isfinite(n.position.z)) continue;
+            const float touching = radius + clean(n.radius, 0.0f, 5.0f, d.radius);
+            const double gap = flat_distance(n.position, m_path.back());
+            // Both crowding the end: both there (else each holds the other off).
+            if (gap <= touching + arrive && to_end <= touching + arrive) {
+                out.arrived = true;
+                return out;
+            }
+            if (length(n.velocity) > 0.1f) continue;
+            // It stands on the end, and this one is as near as its push allows.
+            if (gap <= touching + arrive && to_end <= arrive + touching + avoid &&
+                flat_distance(at, n.position) <= touching + avoid) {
+                out.arrived = true;
+                return out;
+            }
+        }
     }
     const double tx = target.x - at.x, tz = target.z - at.z;
     const double tl = std::hypot(tx, tz);
