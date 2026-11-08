@@ -26,7 +26,7 @@ Sound synth_tone(float hz, float seconds, float level = 0.5f);
 // (resampled to k_sample_rate). nullopt: not one it reads.
 std::optional<Sound> decode_wav(std::span<const u8> bytes);
 std::optional<Sound> load_wav(const std::string& path);
-// Interleaved float frames as 16-bit PCM at k_sample_rate.
+// Interleaved float frames as 16-bit PCM at k_sample_rate (1 to 8 channels; else empty).
 std::vector<u8> encode_wav(std::span<const float> interleaved, u32 channels);
 bool save_wav(const std::string& path, std::span<const float> interleaved, u32 channels);
 

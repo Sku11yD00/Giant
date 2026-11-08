@@ -8,6 +8,7 @@
 #include "giant_test.h"
 
 #include <atomic>
+#include <cstring>
 #include <cmath>
 #include <thread>
 #include <vector>
@@ -121,7 +122,7 @@ GIANT_TEST("audio mixer: past k_max_voices the quietest go; the limiter keeps it
     m.play({tone, {Tap{0.0, 4.0f}, Tap{0.01, 4.0f}}, 0.0f, 1.0f});
     m.play({tone, {Tap{0.0, 0.001f}}, 0.0f, 1.0f});
     out = render(m, 0.2);
-    GIANT_CHECK(m.stats().dropped == 2);
+    GIANT_CHECK(m.stats().stolen == 1 && m.stats().dropped == 1);
     GIANT_CHECK(m.stats().voices == k_max_voices);
     GIANT_CHECK(m.stats().peak > 1.5f); // loud before the limiter...
     for (float x : out) GIANT_CHECK(std::fabs(x) <= 1.0f); // ...not after
@@ -129,6 +130,47 @@ GIANT_TEST("audio mixer: past k_max_voices the quietest go; the limiter keeps it
     out = render(m, 0.05);
     GIANT_CHECK(m.stats().voices == 0);
     GIANT_CHECK(first_over(out, 0, 1e-6f) == -1);
+}
+
+GIANT_TEST("audio mixer: voices whose loud part is over give way to new ones (sustained fire keeps sounding)") {
+    Mixer m;
+    const SoundId click = m.add_sound(synth_click());
+    // Each a loud direct click now and a faint echo 15 s on: their loud part is soon over.
+    for (usize k = 0; k < k_max_voices; ++k) m.play({click, {Tap{0.0, 1.0f}, Tap{15.0, 0.01f}}, 0.0f, 1.0f});
+    render(m, 0.1);
+    GIANT_CHECK(m.stats().voices == k_max_voices);
+    m.play({click, {Tap{0.0, 1.0f, 20000.0f, {1, 0, 0}}}, 0.0f, 1.0f});
+    const std::vector<float> out = render(m, 0.05);
+    GIANT_CHECK(m.stats().stolen == 1 && m.stats().dropped == 0);
+    GIANT_CHECK(first_over(out, 1, 0.5f) >= 0); // heard
+}
+
+GIANT_TEST("audio mixer: a huge sample never makes the output NaN; a dry play leaves the tail's length") {
+    Mixer m;
+    Sound huge;
+    huge.samples = {3e38f, -3e38f, 1.0f};
+    const SoundId h = m.add_sound(std::move(huge));
+    GIANT_CHECK(m.sound(h)->samples[0] == 4.0f); // bounded on the way in
+    const SoundId click = m.add_sound(synth_click());
+    m.play({h, {Tap{0.0, 4.0f}}, 4.0f, 8.0f});
+    std::vector<float> out = render(m, 0.5);
+    m.play({click, {Tap{0.0, 0.5f}}, 0.0f, 1.0f}); // dry: the tail stays 8 s
+    out = render(m, 1.5);
+    for (float x : out) GIANT_CHECK(std::isfinite(x) && std::fabs(x) <= 1.0f);
+    GIANT_CHECK(m.stats().reverb_seconds > 7.9f);
+    // Many voices too loud at once: limited, finite.
+    Sound tone = synth_tone(100.0f, 0.2f, 1e30f);
+    GIANT_CHECK(std::fabs(tone.samples[5000]) <= 4.0f);
+}
+
+GIANT_TEST("audio mixer: a long tail dies to silence (no endless denormals)") {
+    Mixer m;
+    const SoundId shot = m.add_sound(synth_gunshot());
+    m.play({shot, {Tap{0.0, 1.0f}}, 1.0f, 0.5f});
+    std::vector<float> out = render(m, 20.0);
+    usize nonzero = 0;
+    for (usize k = out.size() - 9600; k < out.size(); ++k) nonzero += out[k] != 0.0f ? 1 : 0;
+    GIANT_CHECK(nonzero == 0); // the last 0.1 s exactly 0
 }
 
 GIANT_TEST("audio mixer: the reverb send rings on after the sound, longer for a longer tail") {
@@ -157,7 +199,7 @@ GIANT_TEST("audio mixer: played from one thread, rendered on another") {
     std::atomic<bool> done{false};
     std::thread audio([&] {
         std::vector<float> out(512 * 2);
-        while (!done.load()) m.render(out.data(), 512);
+        while (!done.load() || m.stats().frames == 0) m.render(out.data(), 512);
     });
     for (int k = 0; k < 2000; ++k) {
         m.play({click, {Tap{0.001 * (k % 10), 0.1f, 8000.0f, {0, 0, 1}}}, 0.1f, 1.5f});
@@ -220,6 +262,22 @@ GIANT_TEST("audio propagation: a cliff 343 m off answers 2 s later from its side
     GIANT_CHECK(m.taps[0].lowpass <= s.occluded_lowpass);
 }
 
+GIANT_TEST("audio propagation: near echoes group by the first of them; too loud a play is scaled down alike") {
+    // A wall 20 m off and a rifle at 5 m (loudness 100): direct and echo keep their balance.
+    PlaneWorld w;
+    w.planes.push_back({{1, 0, 0}, 20.0, 0.9f});
+    const Heard h = trace({5, 0, 0}, {0, 0, 0}, w.cast(), {});
+    GIANT_CHECK(h.taps.size() >= 2);
+    const Play p = to_play(1, h, 100.0f);
+    float loudest = 0;
+    for (const Tap& t : p.taps) loudest = std::max(loudest, t.gain);
+    GIANT_CHECK(std::fabs(loudest - 4.0f) < 1e-4f);
+    GIANT_CHECK(std::fabs(p.taps[1].gain / p.taps[0].gain - h.taps[1].gain / h.taps[0].gain) < 1e-4f);
+    // No two kept echoes closer than the merge window... and none wider than it.
+    for (usize a = 1; a < h.taps.size(); ++a)
+        for (usize b = a + 1; b < h.taps.size(); ++b) GIANT_CHECK(std::fabs(h.taps[a].delay - h.taps[b].delay) > 0.0);
+}
+
 GIANT_TEST("audio propagation: a hard small room rings longer and louder than a big open valley") {
     auto room = [](double half, float hardness) {
         PlaneWorld w;
@@ -232,6 +290,11 @@ GIANT_TEST("audio propagation: a hard small room rings longer and louder than a 
         return w;
     };
     const PlaneWorld hall = room(10.0, 0.9f), padded = room(10.0, 0.2f), big = room(100.0, 0.9f);
+    PlaneWorld valley; // open: ground and one far slope
+    valley.planes.push_back({{0, 1, 0}, -1.7, 0.3f});
+    valley.planes.push_back({{0.7071, 0.7071, 0}, 300.0, 0.7f, {200, -2, -300}, {500, 300, 300}});
+    const Heard v = trace({1, 0, 0}, {-1, 0, 0}, valley.cast(), {});
+    GIANT_CHECK(v.openness > 0.2f);
     const Heard a = trace({1, 0, 0}, {-1, 0, 0}, hall.cast(), {});
     const Heard b = trace({1, 0, 0}, {-1, 0, 0}, padded.cast(), {});
     const Heard c = trace({1, 0, 0}, {-1, 0, 0}, big.cast(), {});
@@ -240,6 +303,7 @@ GIANT_TEST("audio propagation: a hard small room rings longer and louder than a 
     GIANT_CHECK(a.reverb_seconds > b.reverb_seconds);
     GIANT_CHECK(c.reverb_seconds > a.reverb_seconds);
     GIANT_CHECK(a.reverb_send > b.reverb_send);
+    GIANT_CHECK(a.reverb_send > v.reverb_send * 3.0f);
     GIANT_CHECK(a.reverb_seconds >= 0.5f);
     // A play from it: the loudness scales every tap and the send.
     const Play p = to_play(1, a, 2.0f);
@@ -286,6 +350,37 @@ GIANT_TEST("audio sounds: made sounds peak where they should; WAV round trips an
     }
     const std::optional<Sound> up = decode_wav(half);
     GIANT_CHECK(up.has_value() && up->samples.size() == 2000 && std::fabs(up->samples[777] - 0.3f) < 1e-3f);
+    // 32-bit float, after an odd-sized chunk (padded to even): read, its values bounded.
+    {
+        std::vector<u8> f;
+        auto put32 = [&](u32 v) { for (int k = 0; k < 4; ++k) f.push_back(static_cast<u8>(v >> (8 * k))); };
+        auto put16 = [&](u16 v) { f.push_back(static_cast<u8>(v)); f.push_back(static_cast<u8>(v >> 8)); };
+        const std::vector<float> values{0.25f, -0.5f, 1e30f};
+        f.insert(f.end(), {'R', 'I', 'F', 'F'});
+        put32(0);
+        f.insert(f.end(), {'W', 'A', 'V', 'E', 'L', 'I', 'S', 'T'});
+        put32(3);
+        f.insert(f.end(), {'a', 'b', 'c', 0}); // 3 bytes and the pad
+        f.insert(f.end(), {'f', 'm', 't', ' '});
+        put32(16);
+        put16(3);
+        put16(1);
+        put32(k_sample_rate);
+        put32(k_sample_rate * 4);
+        put16(4);
+        put16(32);
+        f.insert(f.end(), {'d', 'a', 't', 'a'});
+        put32(12);
+        for (float v : values) {
+            u32 raw;
+            std::memcpy(&raw, &v, 4);
+            put32(raw);
+        }
+        const std::optional<Sound> got = decode_wav(f);
+        GIANT_CHECK(got.has_value() && got->samples.size() == 3);
+        GIANT_CHECK(got && got->samples[0] == 0.25f && got->samples[1] == -0.5f && got->samples[2] == 4.0f);
+    }
+    GIANT_CHECK(encode_wav(stereo, 9).empty() && encode_wav(stereo, 0).empty());
     // Not WAV, or cut short.
     GIANT_CHECK(!decode_wav(std::vector<u8>{1, 2, 3}).has_value());
     const std::vector<u8> cut(bytes.begin(), bytes.begin() + 30);

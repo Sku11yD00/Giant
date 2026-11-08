@@ -11,12 +11,15 @@ namespace giant::audio {
 namespace {
 
 constexpr usize k_max_pending = 256;         // plays waiting for the audio thread
-constexpr double k_max_delay = 60.0;         // seconds: 20 km away
 constexpr u32 k_chunk = 1024;                // frames rendered at a time
 constexpr usize k_sound_reserve = 4096;      // sounds the audio thread holds before it must grow
 constexpr float k_min_reverb = 0.1f, k_max_reverb = 12.0f;
+constexpr u32 k_fade_frames = 240;           // 5 ms: a voice cut short fades out over this
+constexpr usize k_max_fading = 8;
+constexpr float k_tiny = 1e-20f;             // below this a decaying state is 0 (no denormals)
 
 float lowpass_coefficient(float hz) {
+    if (!(hz < 18000.0f)) return 1.0f; // open: the filter passes all
     const float fc = std::clamp(hz, 20.0f, 20000.0f);
     return 1.0f - std::exp(-2.0f * k_pi * fc / static_cast<float>(k_sample_rate));
 }
@@ -55,7 +58,9 @@ struct Mixer::Shared {
 struct Mixer::Voice {
     struct TapState {
         u64 start = 0; // the clock frame its first sample plays at
-        float left = 0.0f, right = 0.0f;
+        float left = 0.0f, right = 0.0f;           // pan gains wanted
+        float was_left = 0.0f, was_right = 0.0f;   // at the last render's end (ramped from)
+        bool panned = false;
         float a = 1.0f; // lowpass coefficient
         float z = 0.0f; // lowpass state
         Vec3 direction{0, 0, 1};
@@ -68,7 +73,18 @@ struct Mixer::Voice {
     u64 reverb_start = 0; // the direct tap's start
     float reverb_send = 0.0f;
     float loudness = 0.0f;
-    u64 end = 0; // the frame after its last tap's last sample
+    u64 started = 0; // the clock when it was started
+    u64 end = 0;     // the frame after its last tap's last sample
+    u64 fade_end = 0; // fading out (cut short for another): silent from here
+    // How loud what it has still to play is: its loudest tap not over, and the tail it still feeds.
+    float remaining(u64 clock) const {
+        const u64 len = sound->samples.size();
+        float r = 0.0f;
+        for (u32 k = 0; k < count; ++k)
+            if (taps[k].start + len > clock) r = std::max(r, taps[k].gain);
+        if (reverb_start + len > clock) r = std::max(r, reverb_send);
+        return r;
+    }
 };
 
 // A Schroeder-Moorer tail: four damped combs into two allpasses, a pair
@@ -82,7 +98,9 @@ struct Mixer::Reverb {
         float process(float x, float damping) {
             const float y = line[at];
             damp_state = y * (1.0f - damping) + damp_state * damping;
-            line[at] = x + damp_state * feedback;
+            if (std::fabs(damp_state) < k_tiny) damp_state = 0.0f;
+            const float in = x + damp_state * feedback;
+            line[at] = std::fabs(in) < k_tiny ? 0.0f : in;
             at = at + 1 == line.size() ? 0 : at + 1;
             return y;
         }
@@ -93,7 +111,8 @@ struct Mixer::Reverb {
         float process(float x) {
             const float b = line[at];
             const float y = b - x;
-            line[at] = x + b * 0.5f;
+            const float in = x + b * 0.5f;
+            line[at] = std::fabs(in) < k_tiny ? 0.0f : in;
             at = at + 1 == line.size() ? 0 : at + 1;
             return y;
         }
@@ -143,17 +162,25 @@ struct Mixer::Reverb {
     }
     void process(float x, float& left, float& right) {
         constexpr float k_gain = 0.015f; // the combs ring up loud; this sets the tail level near the dry one
+        std::array<float, 2> sums{};
         for (usize ear = 0; ear < 2; ++ear) {
             float sum = 0.0f;
             for (Comb& c : combs[ear]) sum += c.process(x * k_gain, damp);
             for (Allpass& a : allpasses[ear]) sum = a.process(sum);
-            (ear == 0 ? left : right) += sum;
+            sums[ear] = sum;
         }
+        if (!std::isfinite(sums[0]) || !std::isfinite(sums[1])) {
+            clear(); // gone wrong (it never should: samples are bounded): heard as silence, not for good
+            return;
+        }
+        left += sums[0];
+        right += sums[1];
     }
 };
 
 Mixer::Mixer()
-    : m_shared(std::make_unique<Shared>()), m_voices(k_max_voices), m_reverb(std::make_unique<Reverb>()),
+    : m_shared(std::make_unique<Shared>()), m_voices(k_max_voices), m_fading(k_max_fading),
+      m_reverb(std::make_unique<Reverb>()),
       m_send(k_chunk, 0.0f) {
     m_audio_sounds.reserve(k_sound_reserve);
     m_shared->added.reserve(64);
@@ -162,8 +189,7 @@ Mixer::Mixer()
 Mixer::~Mixer() = default;
 
 SoundId Mixer::add_sound(Sound sound) {
-    for (float& s : sound.samples)
-        if (!std::isfinite(s)) s = 0.0f;
+    for (float& s : sound.samples) s = std::isfinite(s) ? std::clamp(s, -4.0f, 4.0f) : 0.0f;
     auto shared = std::make_shared<const Sound>(std::move(sound));
     m_sounds.push_back(shared);
     {
@@ -189,15 +215,18 @@ void Mixer::play(Play play) {
     });
     std::sort(play.taps.begin(), play.taps.end(), [](const Tap& a, const Tap& b) { return a.gain > b.gain; });
     p.count = static_cast<u32>(std::min(play.taps.size(), k_max_taps));
+    // Too loud as a whole: all of it scaled alike (the taps keep their balance).
+    const float loudest = p.count > 0 ? play.taps[0].gain : 0.0f;
+    const float scale = loudest > 4.0f ? 4.0f / loudest : 1.0f;
     for (u32 k = 0; k < p.count; ++k) {
         Tap t = play.taps[k];
-        t.gain = std::min(t.gain, 4.0f);
+        t.gain = std::min(t.gain * scale, 4.0f);
         const float len = finite(t.direction) ? length(t.direction) : 0.0f;
         t.direction = len > 1e-6f ? t.direction / len : Vec3{0, 0, 1};
         p.taps[k] = t;
         p.loudness = std::max(p.loudness, t.gain);
     }
-    p.reverb_send = std::isfinite(play.reverb_send) ? std::clamp(play.reverb_send, 0.0f, 4.0f) : 0.0f;
+    p.reverb_send = std::isfinite(play.reverb_send) ? std::clamp(play.reverb_send * scale, 0.0f, 4.0f) : 0.0f;
     p.reverb_seconds = std::isfinite(play.reverb_seconds) ? std::clamp(play.reverb_seconds, k_min_reverb, k_max_reverb)
                                                           : 1.0f;
     if (p.count == 0 && p.reverb_send <= 0.0f) return;
@@ -233,6 +262,7 @@ void Mixer::take_work() {
     if (s.stop) {
         s.stop = false;
         for (Voice& v : m_voices) v.active = false;
+        for (Voice& v : m_fading) v.active = false;
         m_reverb->clear();
     }
     m_stat_dropped.fetch_add(s.refused, std::memory_order_relaxed);
@@ -251,11 +281,29 @@ void Mixer::start(const Pending& p) {
             break;
         }
     if (slot == nullptr) {
-        Voice* quietest = &m_voices[0];
-        for (Voice& v : m_voices)
-            if (v.loudness < quietest->loudness) quietest = &v;
-        m_stat_dropped.fetch_add(1, std::memory_order_relaxed);
-        if (quietest->loudness >= p.loudness) return;
+        // The one with the least still to play (the oldest of those alike), if no louder than this.
+        Voice* quietest = nullptr;
+        float least = 0.0f;
+        for (Voice& v : m_voices) {
+            const float r = v.remaining(m_clock);
+            if (quietest == nullptr || r < least || (r == least && v.started < quietest->started)) {
+                quietest = &v;
+                least = r;
+            }
+        }
+        if (least > p.loudness) {
+            m_stat_dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        m_stat_stolen.fetch_add(1, std::memory_order_relaxed);
+        // It fades out over 5 ms rather than stopping (a click).
+        Voice* fade = &m_fading[0];
+        for (Voice& f : m_fading)
+            if (!f.active || f.fade_end < fade->fade_end) fade = &f;
+        *fade = *quietest;
+        fade->fade_end = m_clock + k_fade_frames;
+        fade->end = std::min(fade->end, fade->fade_end);
+        fade->reverb_send = 0.0f;
         slot = quietest;
     }
     Voice& v = *slot;
@@ -264,6 +312,8 @@ void Mixer::start(const Pending& p) {
     v.count = p.count;
     v.loudness = p.loudness;
     v.reverb_send = p.reverb_send;
+    v.started = m_clock;
+    v.fade_end = 0;
     const u64 length_frames = v.sound->samples.size();
     v.end = m_clock;
     double first = p.count > 0 ? k_max_delay : 0.0;
@@ -275,12 +325,43 @@ void Mixer::start(const Pending& p) {
         ts.z = 0.0f;
         ts.direction = t.direction;
         ts.gain = t.gain;
+        ts.panned = false;
         v.end = std::max(v.end, ts.start + length_frames);
         first = std::min(first, t.delay);
     }
     v.reverb_start = m_clock + static_cast<u64>(std::llround(first * k_sample_rate));
     v.end = std::max(v.end, v.reverb_start + length_frames);
-    m_reverb->target = p.reverb_seconds;
+    if (p.reverb_send > 0.0f) m_reverb->target = p.reverb_seconds; // only what feeds the tail sets its length
+}
+
+void Mixer::mix(Voice& v, u64 from, u64 to, u64 render_from, u32 render_frames, float* chunk) {
+    const std::vector<float>& samples = v.sound->samples;
+    const u64 len = samples.size();
+    const float span = static_cast<float>(std::max<u32>(render_frames, 1));
+    for (u32 k = 0; k < v.count; ++k) {
+        Voice::TapState& t = v.taps[k];
+        if (t.start >= to || t.start + len <= from) continue;
+        const u64 a = std::max(from, t.start), b = std::min({to, t.start + len, v.fade_end ? v.fade_end : to});
+        for (u64 c = a; c < b; ++c) {
+            t.z += t.a * (samples[c - t.start] - t.z);
+            // The pan ramped across the render from where it was (turning is heard smooth).
+            const float f = static_cast<float>(c - render_from + 1) / span;
+            float l = t.was_left + (t.left - t.was_left) * f, r = t.was_right + (t.right - t.was_right) * f;
+            if (v.fade_end != 0) {
+                const float g = static_cast<float>(v.fade_end - c) / static_cast<float>(k_fade_frames);
+                l *= g;
+                r *= g;
+            }
+            const usize i = static_cast<usize>(c - from) * 2;
+            chunk[i] += t.z * l;
+            chunk[i + 1] += t.z * r;
+        }
+    }
+    if (v.reverb_send > 0.0f && v.reverb_start < to && v.reverb_start + len > from) {
+        const u64 a = std::max(from, v.reverb_start), b = std::min(to, v.reverb_start + len);
+        for (u64 c = a; c < b; ++c) m_send[c - from] += samples[c - v.reverb_start] * v.reverb_send;
+    }
+    if (v.end <= to) v.active = false;
 }
 
 void Mixer::render(float* out, u32 frames) {
@@ -292,10 +373,23 @@ void Mixer::render(float* out, u32 frames) {
             Voice::TapState& t = v.taps[k];
             const float side = std::clamp(dot(t.direction, m_right), -1.0f, 1.0f);
             const float angle = (side + 1.0f) * (k_pi / 4.0f);
+            t.was_left = t.left;
+            t.was_right = t.right;
             t.left = std::cos(angle) * t.gain;
             t.right = std::sin(angle) * t.gain;
+            if (!t.panned) {
+                t.was_left = t.left;
+                t.was_right = t.right;
+                t.panned = true;
+            }
         }
     }
+    for (Voice& v : m_fading)
+        for (u32 k = 0; k < v.count; ++k) {
+            v.taps[k].was_left = v.taps[k].left;
+            v.taps[k].was_right = v.taps[k].right;
+        }
+    const u64 render_from = m_clock;
     const float volume_read = volume.load(std::memory_order_relaxed);
     const float volume_now = std::isfinite(volume_read) ? std::clamp(volume_read, 0.0f, 4.0f) : 0.0f;
     float peak = 0.0f;
@@ -305,27 +399,10 @@ void Mixer::render(float* out, u32 frames) {
         std::fill(chunk, chunk + static_cast<usize>(n) * 2, 0.0f);
         std::fill(m_send.begin(), m_send.begin() + n, 0.0f);
         const u64 from = m_clock, to = m_clock + n;
-        for (Voice& v : m_voices) {
-            if (!v.active) continue;
-            const std::vector<float>& samples = v.sound->samples;
-            const u64 len = samples.size();
-            for (u32 k = 0; k < v.count; ++k) {
-                Voice::TapState& t = v.taps[k];
-                if (t.start >= to || t.start + len <= from) continue;
-                const u64 a = std::max(from, t.start), b = std::min(to, t.start + len);
-                for (u64 c = a; c < b; ++c) {
-                    t.z += t.a * (samples[c - t.start] - t.z);
-                    const usize i = static_cast<usize>(c - from) * 2;
-                    chunk[i] += t.z * t.left;
-                    chunk[i + 1] += t.z * t.right;
-                }
-            }
-            if (v.reverb_send > 0.0f && v.reverb_start < to && v.reverb_start + len > from) {
-                const u64 a = std::max(from, v.reverb_start), b = std::min(to, v.reverb_start + len);
-                for (u64 c = a; c < b; ++c) m_send[c - from] += samples[c - v.reverb_start] * v.reverb_send;
-            }
-            if (v.end <= to) v.active = false;
-        }
+        for (Voice& v : m_voices)
+            if (v.active) mix(v, from, to, render_from, frames, chunk);
+        for (Voice& v : m_fading)
+            if (v.active) mix(v, from, to, render_from, frames, chunk);
         m_reverb->follow(n);
         for (u32 c = 0; c < n; ++c) {
             float& l = chunk[c * 2];
@@ -357,6 +434,7 @@ MixerStats Mixer::stats() const {
     s.taps = m_stat_taps.load(std::memory_order_relaxed);
     s.frames = m_stat_frames.load(std::memory_order_relaxed);
     s.dropped = m_stat_dropped.load(std::memory_order_relaxed);
+    s.stolen = m_stat_stolen.load(std::memory_order_relaxed);
     s.peak = m_stat_peak.load(std::memory_order_relaxed);
     s.reverb_seconds = m_stat_reverb.load(std::memory_order_relaxed);
     return s;

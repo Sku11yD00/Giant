@@ -116,6 +116,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
              std::string error;
              const std::optional<PlayArgs> p = play_args(args, *state.audio, &error);
              if (!p) return CommandResult::failure(error);
+             state.audio->update(state.camera, 0.0); // heard where the camera is now
              if (state.physics != nullptr) state.physics->flush(state.scene);
              const audio::Heard heard =
                  state.audio->play(state.scene, state.physics, p->sound, p->at, p->loudness, p->settings);
@@ -145,6 +146,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
              std::string error;
              const std::optional<PlayArgs> p = play_args(args, *state.audio, &error);
              if (!p) return CommandResult::failure(error);
+             state.audio->update(state.camera, 0.0); // heard where the camera is now
              if (state.physics != nullptr) state.physics->flush(state.scene);
              const AudioState::Recording r = state.audio->record(state.scene, state.physics, p->sound, p->at,
                                                                  p->loudness, p->settings, args.value("seconds", 4.0));
@@ -190,7 +192,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
         {"get_audio",
          "The sound: `device` (the speakers' driver; empty: none, the mix runs silent), the sounds by name, "
          "the listener (the camera), the mixer (`voices` playing, `taps` in them, `frames` rendered, "
-         "`dropped` plays, `peak` of the last render before the limiter, `reverb_seconds`), sounds `played` "
+         "`dropped` plays, voices `stolen` (cut short for a louder play), `peak` of the last render before the limiter, `reverb_seconds`), sounds `played` "
          "and the last one's `heard` (as play_sound returns).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}}, false,
          [&state](const Json&, CommandContext&) {
@@ -204,6 +206,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
                          {"taps", s.taps},
                          {"frames", s.frames},
                          {"dropped", s.dropped},
+                         {"stolen", s.stolen},
                          {"peak", s.peak},
                          {"reverb_seconds", s.reverb_seconds},
                          {"played", a.played()},

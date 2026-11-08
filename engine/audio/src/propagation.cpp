@@ -78,7 +78,7 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
             direct.lowpass = std::min(direct.lowpass, settings.occluded_lowpass);
         }
     }
-    if (direct.gain > 0.0f) out.taps.push_back(direct);
+    if (direct.gain > 0.0f && direct.delay <= k_max_delay) out.taps.push_back(direct);
 
     // Echoes: rays from the source; each hit is heard where the listener can see it.
     const u32 rays = cast ? std::min<u32>(settings.rays, 256) : 0;
@@ -114,6 +114,7 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
         ++out.casts;
         if (usable(seen, r2 - k_lift) && seen.distance < r2 - k_lift - 0.5) continue; // hidden from the listener
         const double path = h.distance + r2;
+        if (path / k_speed_of_sound > k_max_delay) continue; // too late to be played
         const float gain = static_cast<float>(std::sqrt(energy_at_unit)) * distance_gain(r2, settings.reference);
         if (!(gain > 0.0f)) continue;
         Echo e;
@@ -127,8 +128,10 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
     // Near ones heard as one (their energies add), then the loudest kept.
     std::sort(echoes.begin(), echoes.end(), [](const Echo& a, const Echo& b) { return a.delay < b.delay; });
     std::vector<Echo> merged;
+    double first = 0.0;
     for (const Echo& e : echoes) {
-        if (!merged.empty() && e.delay - merged.back().delay < k_merge_seconds) {
+        // Against the group's first (so a run of near ones never chains into one long group).
+        if (!merged.empty() && e.delay - first < k_merge_seconds) {
             Echo& m = merged.back();
             m.delay = (m.delay * m.energy + e.delay * e.energy) / (m.energy + e.energy);
             m.energy += e.energy;
@@ -136,6 +139,7 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
             m.lowpass += e.lowpass;
         } else {
             merged.push_back(e);
+            first = e.delay;
         }
     }
     std::sort(merged.begin(), merged.end(), [](const Echo& a, const Echo& b) { return a.energy > b.energy; });
@@ -172,8 +176,15 @@ Play to_play(SoundId sound, const Heard& heard, float loudness) {
     p.sound = sound;
     const float l = std::isfinite(loudness) ? std::max(loudness, 0.0f) : 0.0f;
     p.taps = heard.taps;
-    for (Tap& t : p.taps) t.gain *= l;
-    p.reverb_send = heard.reverb_send * l;
+    float loudest = 0.0f;
+    for (Tap& t : p.taps) {
+        t.gain *= l;
+        loudest = std::max(loudest, t.gain);
+    }
+    // Past the mixer's 4 the whole of it is scaled down alike (so near, the echoes keep their balance).
+    const float scale = loudest > 4.0f ? 4.0f / loudest : 1.0f;
+    for (Tap& t : p.taps) t.gain *= scale;
+    p.reverb_send = heard.reverb_send * l * scale;
     p.reverb_seconds = heard.reverb_seconds;
     // The tail starts with the first sound heard (the mixer starts it at the earliest tap).
     return p;

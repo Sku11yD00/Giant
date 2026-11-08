@@ -32,6 +32,7 @@ namespace giant::audio {
 
 inline constexpr double k_speed_of_sound = 343.0; // metres a second, in air at 20 C
 inline constexpr u32 k_sample_rate = 48000;
+inline constexpr double k_max_delay = 60.0; // seconds a tap may be late (about 20 km): later ones are not played
 
 // A mono sound at k_sample_rate, -1 to 1.
 struct Sound {
@@ -63,7 +64,8 @@ struct MixerStats {
     u32 voices = 0;      // playing now (or waiting for their first tap)
     u32 taps = 0;        // in those
     u64 frames = 0;      // rendered, ever
-    u64 dropped = 0;     // plays refused: too many voices (the quietest goes first)
+    u64 dropped = 0;     // plays refused: every voice had more still to play, or the queue was full
+    u64 stolen = 0;      // voices cut short (faded over 5 ms) for a play no quieter than what they had left
     float peak = 0.0f;   // of the last render, before the limiter
     float reverb_seconds = 0.0f;
 };
@@ -96,11 +98,13 @@ private:
     void take_work();
     struct Pending;
     void start(const Pending& p);
+    void mix(Voice& v, u64 from, u64 to, u64 render_from, u32 render_frames, float* chunk);
 
     std::unique_ptr<Shared> m_shared; // game thread -> audio thread
     std::vector<std::shared_ptr<const Sound>> m_sounds; // game thread's (index = id - 1)
     // Audio thread's.
     std::vector<Voice> m_voices; // k_max_voices, made up front (no allocation on the audio thread)
+    std::vector<Voice> m_fading; // voices cut short, fading out
     std::vector<std::shared_ptr<const Sound>> m_audio_sounds;
     Vec3 m_right{1, 0, 0}, m_up{0, 1, 0};
     u64 m_clock = 0; // frames rendered
@@ -108,7 +112,7 @@ private:
     std::vector<float> m_send; // scratch: the reverb's input, per frame
     // Stats, written by the audio thread.
     std::atomic<u32> m_stat_voices{0}, m_stat_taps{0};
-    std::atomic<u64> m_stat_frames{0}, m_stat_dropped{0};
+    std::atomic<u64> m_stat_frames{0}, m_stat_dropped{0}, m_stat_stolen{0};
     std::atomic<float> m_stat_peak{0.0f}, m_stat_reverb{0.0f};
 };
 

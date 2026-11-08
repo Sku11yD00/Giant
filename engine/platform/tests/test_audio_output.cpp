@@ -23,8 +23,8 @@ GIANT_TEST("platform audio: the device pulls frames from the render callback; cl
         GIANT_CHECK(!out->device().empty());
         for (int k = 0; k < 2000 && rendered.load() == 0; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         GIANT_CHECK(rendered.load() > 0);
-        const u64 pulled = out->frames(); // counted after each render
-        GIANT_CHECK(pulled <= rendered.load());
+        for (int k = 0; k < 2000 && out->frames() == 0; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        GIANT_CHECK(out->frames() > 0); // counted as pulled
     }
     GIANT_CHECK(AudioOutput::open(48000, {}) == nullptr); // nothing to render
 }

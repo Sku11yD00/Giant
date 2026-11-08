@@ -13,7 +13,7 @@ namespace giant::editor {
 
 namespace {
 
-constexpr u32 k_march_steps = 512;
+constexpr u32 k_march_steps = 1536;
 constexpr double k_lift = 0.05; // a terrain sample this far under the ray still counts as under it
 
 DVec3 along(const DVec3& from, const Vec3& d, double t) { return from + DVec3{d.x, d.y, d.z} * t; }
@@ -26,14 +26,30 @@ float slope_hardness(float base, const Vec3& normal) {
 
 Vec3 terrain_normal(const world::Terrain& terrain, double x, double z) {
     const double e = std::max(terrain.spacing(), 0.25);
-    const auto h = [&](double px, double pz, double fallback) { return terrain.height_at(px, pz).value_or(fallback); };
-    const double c = h(x, z, 0.0);
-    const double dx = h(x + e, z, c) - h(x - e, z, c);
-    const double dz = h(x, z + e, c) - h(x, z - e, c);
-    DVec3 n{-dx, 2.0 * e, -dz};
-    const double l = std::sqrt(dot(n, n));
-    n = n / l;
+    // A slope from the sides there are (one-sided at the terrain's edge; flat with neither).
+    const auto slope = [&](double ax, double az, double bx, double bz) {
+        const std::optional<double> a = terrain.height_at(ax, az), b = terrain.height_at(bx, bz);
+        const std::optional<double> c = terrain.height_at(x, z);
+        if (a && b) return (*b - *a) / (2.0 * e);
+        if (b && c) return (*b - *c) / e;
+        if (a && c) return (*c - *a) / e;
+        return 0.0;
+    };
+    const double dx = slope(x - e, z, x + e, z), dz = slope(x, z - e, x, z + e);
+    DVec3 n{-dx, 1.0, -dz};
+    n = n / std::sqrt(dot(n, n));
     return {static_cast<float>(n.x), static_cast<float>(n.y), static_cast<float>(n.z)};
+}
+
+audio::RayHit ground_hit(const world::Terrain& terrain, const DVec3& from, const Vec3& direction, double t) {
+    const DVec3 p = along(from, direction, t);
+    audio::RayHit hit;
+    hit.hit = true;
+    hit.distance = t;
+    hit.normal = terrain_normal(terrain, p.x, p.z);
+    if (dot(hit.normal, direction) > 0.0f && t > 0.0) hit.normal = -hit.normal;
+    hit.hardness = slope_hardness(hardness_of(world::Surface::dirt), hit.normal);
+    return hit;
 }
 
 } // namespace
@@ -66,41 +82,37 @@ std::optional<audio::RayHit> march_terrain(const world::Terrain& terrain, const 
     const double base_step = std::max(terrain.spacing(), 0.5);
     double t = 0.0;
     std::optional<double> prev = above(0.0);
-    if (prev && *prev < -k_lift) {
-        // Starting under the ground: it is met at once.
-        audio::RayHit hit;
-        hit.hit = true;
-        hit.distance = 0.0;
-        hit.normal = terrain_normal(terrain, from.x, from.z);
-        hit.hardness = slope_hardness(hardness_of(world::Surface::dirt), hit.normal);
-        return hit;
-    }
+    // Starting under the ground: met at once. Just under (rounding): as on it.
+    if (prev && *prev < -k_lift) return ground_hit(terrain, from, direction, 0.0);
+    if (prev && *prev < 0.0) prev = 0.0;
     for (u32 k = 0; k < k_march_steps && t < max_distance; ++k) {
-        // Steps grow with the distance (2% of it): fine near, coarse far, bounded in number.
-        const double step = std::max(base_step, t * 0.02);
+        // Steps grow with the distance (0.5% of it, up to 2% high over the ground) and with the
+        // height over the ground (half of it: slopes to 63 degrees are not stepped over).
+        const double clear = prev ? std::max(*prev, 0.0) : 0.0;
+        const double step = std::clamp(std::max(clear * 0.5, t * 0.005), base_step, std::max(base_step, t * 0.02));
         const double next_t = std::min(t + step, max_distance);
         const std::optional<double> next = above(next_t);
-        if (next && *next < 0.0 && prev && *prev >= 0.0) {
-            // Crossed between t and next_t: halve onto it.
+        if (next && *next < 0.0) {
             double lo = t, hi = next_t;
-            for (int i = 0; i < 12; ++i) {
-                const double mid = 0.5 * (lo + hi);
-                const std::optional<double> m = above(mid);
-                if (m && *m < 0.0) hi = mid;
-                else lo = mid;
+            if (prev) {
+                // Crossed between t and next_t: halve onto it.
+                for (int i = 0; i < 16; ++i) {
+                    const double mid = 0.5 * (lo + hi);
+                    const std::optional<double> m = above(mid);
+                    if (m && *m < 0.0) hi = mid;
+                    else lo = mid;
+                }
+            } else {
+                // Into a tile, under its ground, from where there was none: met at the tile's edge.
+                for (int i = 0; i < 16; ++i) {
+                    const double mid = 0.5 * (lo + hi);
+                    if (above(mid)) hi = mid;
+                    else lo = mid;
+                }
             }
-            const DVec3 p = along(from, direction, hi);
-            audio::RayHit hit;
-            hit.hit = true;
-            hit.distance = hi;
-            hit.normal = terrain_normal(terrain, p.x, p.z);
-            if (dot(hit.normal, direction) > 0.0f) hit.normal = -hit.normal;
-            hit.hardness = slope_hardness(hardness_of(world::Surface::dirt), hit.normal);
-            return hit;
+            return ground_hit(terrain, from, direction, hi);
         }
-        // Into a tile from where there was none, under its ground: met at its edge (the next step halves onto it).
         prev = next;
-        if (prev && *prev < 0.0) prev = 0.0;
         t = next_t;
     }
     return std::nullopt;
@@ -167,7 +179,11 @@ audio::RayCast AudioState::ray_cast(const world::Scene& scene, const PhysicsStat
     return [&scene, physics, reach](const DVec3& from, const Vec3& dir, double max_distance) {
         audio::RayHit best;
         if (physics != nullptr) {
-            const auto hit = physics->world().raycast(from, dir, std::min(max_distance, reach));
+            // Characters are let through: the listener stands in the player's capsule, a shot is made in it.
+            const sim::PhysicsWorld& w = physics->world();
+            sim::PhysicsWorld::RayFilter filter;
+            filter.accept = [&w](sim::BodyId id, u64) { return !w.is_character_body(id); };
+            const auto hit = w.raycast(from, dir, std::min(max_distance, reach), filter);
             if (hit) {
                 best.hit = true;
                 best.distance = hit->distance;

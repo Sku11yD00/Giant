@@ -1392,8 +1392,13 @@ play. It renders on the audio thread; the game thread hands it work
 (plays, sounds, the listener) under a lock the audio thread only tries
 (if it cannot have it, it renders with what it has), and nothing is
 allocated there once its sounds are in. 64 voices of 16 taps at most:
-past that the quietest goes (or a quieter new one is refused); a soft
-limiter keeps the output under 1.
+past that the one with the least still to play (its loudest tap not
+over, or the tail it still feeds) fades out over 5 ms for a new one no
+quieter, else the new one is refused; a play louder than 4 at the ear
+is scaled down as a whole (its echoes keep their balance); samples are
+bounded to 4, decaying states flush to 0 (no denormals), and a soft
+limiter keeps the output under 1. Only a play that feeds the tail sets
+its length.
 
 `trace` (propagation.h) works out how a sound made at a point is heard at
 the listener through a ray cast the caller gives (the world as sound
@@ -1406,7 +1411,8 @@ cast from the listener meets something first, is quieter and duller
 over the sphere (64 by default); each spot they hit that faces the
 listener and that the listener can see sends back its diffuse (Lambert)
 share, so a big cliff answers loud however far it is; echoes within 12 ms
-are merged (one wall, not a flutter) and the loudest kept. The tail
+are merged (one wall, not a flutter: grouped by the first of them) and
+the loudest kept; nothing later than 60 s is kept. The tail
 follows from the rays too: those that hit nothing are sky (absorbed),
 their mean path is the place's size (Eyring's formula gives its length,
 0.1 to 8 s) and its level grows with the hardness and the reflected
@@ -1424,12 +1430,15 @@ The editor's `AudioState` (editor/src/audio_state.h) holds the mixer
 (on the speakers when the editor is shown; hidden runs stay silent and
 render the mix with the frames), the listener at the camera (the
 player's eyes in play), named sounds, and the world as sound meets it:
-the physics' ray within 1 km (bodies, kits, the ground made near; each
+the physics' ray within 1 km (bodies, kits, the ground made near, but
+not characters: the listener stands in the player's capsule; each
 surface as hard as it is made: concrete 0.9, wood 0.5, dirt 0.3, leaves
 0.1, the ground harder the steeper) and the terrain marched past it
-(steps growing with the distance, halved onto the surface: a cliff 2 km
-off answers). `play_sound`, `record_audio` (the sound alone into a WAV),
-`load_sound`, `stop_sounds`, `get_audio`. Known limits: echoes are first
+(steps of half the height over the ground, 0.5% to 2% of the distance,
+halved onto the surface: a cliff 2 km off answers; the listener is the
+camera as each command runs). `play_sound`, `record_audio` (the sound alone into a WAV),
+`load_sound`, `stop_sounds`, `get_audio`. Known limits: a crest narrower than the march's step there (about 5 m
+a km off, near the ground) can be stepped over; echoes are first
 order only (no flutter between two walls, no echo of an echo); sound does
 not bend round an edge yet (diffraction), and an occluded way is muffled
 the same whatever is between; the far ground past the terrain's tiles is

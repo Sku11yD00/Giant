@@ -12,6 +12,8 @@
 
 #include <cmath>
 #include <filesystem>
+#include <random>
+#include <string>
 
 using namespace giant;
 using namespace giant::editor;
@@ -66,6 +68,26 @@ GIANT_TEST("editor audio: the terrain is met where it rises; nothing where there
     // Under the ground: met at once.
     const auto under = march_terrain(t, {100.0, -5.0, 32.0}, {1, 0, 0}, 1000.0);
     GIANT_CHECK(under && under->distance == 0.0);
+    // Just under it (rounding), heading down: met at once, not a step on.
+    const auto just = march_terrain(t, {100.0, -0.03, 32.0}, {0.7071f, -0.7071f, 0}, 1000.0);
+    GIANT_CHECK(just && just->distance < 0.1);
+    // A narrow ridge 1 km off (one sample, 16 m across its foot, 50 m high): met from any start.
+    {
+        world::Terrain ridge;
+        ridge.set_samples(8);
+        for (int x = 0; x < 20; ++x) {
+            world::Terrain::Heights h(64, 0.0f);
+            if (x == 16)
+                for (int j = 0; j < 8; ++j) h[static_cast<usize>(j * 8 + 4)] = 50.0f; // x = 1056 (from 1048, met at 10 m high near 1049.6)
+            ridge.set({x, 0}, h);
+        }
+        int met = 0;
+        for (int k = 0; k < 40; ++k) {
+            const auto r = march_terrain(ridge, {k * 0.5, 10.0, 32.0}, {1, 0, 0}, 1500.0);
+            if (r && std::fabs(r->distance + k * 0.5 - 1049.6) < 0.1) ++met;
+        }
+        GIANT_CHECK(met == 40);
+    }
 
     // A concrete wall through the physics: hard, met first.
     Fixture g(true);
@@ -118,12 +140,56 @@ GIANT_TEST("editor audio: a shot in the valley is heard late from its side, the 
     GIANT_CHECK(r.value["taps"][0]["lowpass"].get<double>() <= 900.0);
 }
 
+GIANT_TEST("editor audio: the player's capsule round the listener neither muffles nor swallows the echoes") {
+    Fixture f(true);
+    f.valley();
+    f.state.camera.position = {50.0, 1.65, 32.0};
+    f.physics.world().add_character({.position = {50.0, 0.0, 32.0}}); // the eyes inside it
+    f.physics.flush(f.state.scene);
+    ai::CommandResult r = f.run("play_sound", {{"at", {100.0, 1.65, 32.0}}, {"rays", 0}});
+    GIANT_CHECK(r.ok && r.value["occluded"] == false);
+    // A shot made at the eyes: its rays leave the capsule and meet the valley.
+    r = f.run("play_sound", {{"at", {50.0, 1.6, 32.0}}, {"rays", 64}});
+    GIANT_CHECK(r.ok && r.value["openness"].get<double>() > 0.2 && r.value["mean_free_path"].get<double>() > 1.0);
+}
+
+GIANT_TEST("editor audio: heard from the right in the right ear, as the camera turns") {
+    Fixture f;
+    f.state.camera.position = {0.0, 1.7, 0.0};
+    const auto ears = [&](float yaw) {
+        f.state.camera.yaw_degrees = yaw;
+        const std::string path = (std::filesystem::temp_directory_path() /
+                                  ("giant_audio_pan_" + std::to_string(std::random_device{}()) + ".wav")).string();
+        const ai::CommandResult r = f.run("record_audio", {{"at", {20.0, 1.7, 0.0}}, {"seconds", 0.3}, {"path", path},
+                                                           {"rays", 0}, {"loudness", 20.0}});
+        GIANT_CHECK(r.ok);
+        const std::optional<audio::Sound> mono = audio::load_wav(path); // (read back only to see it is there)
+        GIANT_CHECK(mono.has_value());
+        std::filesystem::remove(path);
+        const AudioState::Recording rec =
+            f.audio.record(f.state.scene, nullptr, *f.audio.find("gunshot"), {20.0, 1.7, 0.0}, 20.0f, {}, 0.3);
+        double l = 0, rr = 0;
+        for (usize k = 0; k + 1 < rec.frames.size(); k += 2) {
+            l += rec.frames[k] * rec.frames[k];
+            rr += rec.frames[k + 1] * rec.frames[k + 1];
+        }
+        return std::pair{l, rr};
+    };
+    const auto [l0, r0] = ears(0.0f);    // looking -Z: +X is right
+    GIANT_CHECK(r0 > l0 * 100.0);
+    const auto [l1, r1] = ears(180.0f);  // looking +Z: +X is left
+    GIANT_CHECK(l1 > r1 * 100.0);
+    const auto [l2, r2] = ears(90.0f);   // looking -X, at it: both alike
+    GIANT_CHECK(std::fabs(l2 - r2) < 0.05 * (l2 + r2));
+}
+
 GIANT_TEST("editor audio: record_audio writes what arrives when; load_sound reads it back; bad names refused") {
     Fixture f;
     f.valley();
     f.state.camera.position = {50.0, 1.7, 32.0};
     f.audio.update(f.state.camera, 0.0);
-    const std::string path = (std::filesystem::temp_directory_path() / "giant_audio_test.wav").string();
+    const std::string path =
+        (std::filesystem::temp_directory_path() / ("giant_audio_test_" + std::to_string(std::random_device{}()) + ".wav")).string();
     ai::CommandResult r = f.run("record_audio", {{"at", {150.0, 1.7, 32.0}}, {"loudness", 100.0}, {"seconds", 2.0},
                                                  {"path", path}});
     GIANT_CHECK(r.ok);

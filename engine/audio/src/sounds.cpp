@@ -16,7 +16,7 @@ namespace {
 // Small deterministic noise, -1 to 1.
 struct Noise {
     u32 state;
-    explicit Noise(u32 seed) : state(seed * 747796405u + 2891336453u) {}
+    explicit Noise(u32 seed) : state((seed * 747796405u + 2891336453u) | 1u) {} // never 0 (xorshift stays there)
     float next() {
         state ^= state << 13;
         state ^= state >> 17;
@@ -100,6 +100,7 @@ Sound synth_tone(float hz, float seconds, float level) {
     const usize n = static_cast<usize>(len * k_sample_rate);
     s.samples.resize(n);
     const float f = std::isfinite(hz) ? std::clamp(hz, 1.0f, 20000.0f) : 440.0f;
+    level = std::isfinite(level) ? std::clamp(level, -4.0f, 4.0f) : 0.0f;
     const usize fade = k_sample_rate / 200;
     for (usize i = 0; i < n; ++i) {
         const float ramp = std::min({1.0f, static_cast<float>(i) / fade, static_cast<float>(n - i) / fade});
@@ -143,7 +144,9 @@ std::optional<Sound> decode_wav(std::span<const u8> b) {
     const bool pcm16 = format == 1 && bits == 16, float32 = format == 3 && bits == 32;
     if (!pcm16 && !float32) return std::nullopt;
     const usize frame_bytes = static_cast<usize>(channels) * (bits / 8);
-    const usize frames = data.size() / frame_bytes;
+    // Past ten minutes (at its own rate) is never read: not allocated either.
+    const usize cap = static_cast<usize>(std::ceil(static_cast<double>(k_max_wav_frames) * rate / k_sample_rate)) + 1;
+    const usize frames = std::min(data.size() / frame_bytes, cap);
     std::vector<float> mono(frames);
     for (usize f = 0; f < frames; ++f) {
         float sum = 0.0f;
@@ -155,7 +158,7 @@ std::optional<Sound> decode_wav(std::span<const u8> b) {
                 const u32 raw = read_u32(data, at);
                 float v;
                 std::memcpy(&v, &raw, 4);
-                sum += std::isfinite(v) ? v : 0.0f;
+                sum += std::isfinite(v) ? std::clamp(v, -4.0f, 4.0f) : 0.0f;
             }
         }
         mono[f] = sum / channels;
@@ -186,9 +189,11 @@ std::optional<Sound> load_wav(const std::string& path) {
 }
 
 std::vector<u8> encode_wav(std::span<const float> interleaved, u32 channels) {
-    const u32 ch = std::clamp<u32>(channels, 1, 8);
-    const usize samples = interleaved.size() / ch * ch;
-    const u32 data_bytes = static_cast<u32>(std::min<usize>(samples * 2, 0xFFFFFFFFu - 64));
+    if (channels < 1 || channels > 8) return {};
+    const u32 ch = channels;
+    const usize frame_bytes = 2 * ch;
+    const usize most = (0xFFFFFFFFu - 64) / frame_bytes * frame_bytes;
+    const u32 data_bytes = static_cast<u32>(std::min(interleaved.size() / ch * frame_bytes, most));
     std::vector<u8> b;
     b.reserve(44 + data_bytes);
     b.insert(b.end(), {'R', 'I', 'F', 'F'});
@@ -212,6 +217,7 @@ std::vector<u8> encode_wav(std::span<const float> interleaved, u32 channels) {
 
 bool save_wav(const std::string& path, std::span<const float> interleaved, u32 channels) {
     const std::vector<u8> bytes = encode_wav(interleaved, channels);
+    if (bytes.empty()) return false;
     std::ofstream out(path, std::ios::binary);
     if (!out) return false;
     out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
