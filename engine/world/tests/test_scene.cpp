@@ -305,6 +305,33 @@ GIANT_TEST("world: a material's surface saves and loads by name, and only when s
     GIANT_CHECK(error.has_value() && contains(error->message, "surface must be standard, flesh"));
 }
 
+GIANT_TEST("world: a material's wind saves and loads, and only when set") {
+    Scene scene;
+    Entity tree = named("Tree");
+    tree.material.sway = 1.0f;
+    tree.material.flutter = 2.5f;
+    scene.add(tree);
+    scene.add(named("Rock"));
+    ScatterLayer layer;
+    layer.name = "grass";
+    ScatterItem blade;
+    blade.material.sway = 3.0f;
+    layer.items.push_back(blade);
+    scene.scatter.push_back(layer);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(text.find("\"sway\"") != text.rfind("\"sway\"")); // the tree's and the grass's
+    GIANT_CHECK(text.find("\"flutter\"") == text.rfind("\"flutter\"")); // the tree's alone
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->material.sway == 1.0f && loaded.find(1)->material.flutter == 2.5f);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->material.sway == 0.0f);
+    GIANT_CHECK(loaded.scatter.size() == 1 && loaded.scatter[0].items[0].material.sway == 3.0f);
+    GIANT_CHECK(save_scene(loaded) == text);
+    Scene bad;
+    const auto error = load_scene(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"sway": 9}}]})", bad);
+    GIANT_CHECK(error.has_value() && contains(error->message, "sway must be from 0 to 4"));
+}
+
 GIANT_TEST("world: a mesh entity's animation saves and loads, and only when set") {
     Scene scene;
     Entity walker = named("Walker");

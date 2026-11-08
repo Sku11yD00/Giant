@@ -55,6 +55,7 @@ struct ShadowStats {
     u32 drawn = 0;       // pages drawn this frame
     u32 waiting = 0;     // pages asked for or dirty, not drawn yet
     u32 missing = 0;     // pages asked for that found no room (pool full of pages in use)
+    u32 swayed = 0;      // of drawn, pages drawn again for what sways on them (plan's sway budget)
 };
 
 // Each level's window (its minimum page).
@@ -114,9 +115,17 @@ public:
     // under it (on every level) are drawn again.
     void invalidate(const DVec3& min, const DVec3& max);
     void invalidate_all();
+    // Something in this world box sways in the wind this frame, by up to
+    // `reach` metres: its pages on the levels fine enough to show that (a
+    // texel under `reach`) are drawn again in turn, longest drawn first, at
+    // most plan's sway budget a frame, so its shadow sways with it. Call
+    // each frame (after begin_frame) for what sways then.
+    void sway(const DVec3& min, const DVec3& max, float reach);
 
     // What to draw this frame, at most `budget` pages (at least one if any
-    // wait): marks them drawn. Call once a frame, after the requests.
+    // wait), and besides those at most `sway_budget` drawn pages again for
+    // what sways on them: marks them drawn. Call once a frame, after the
+    // requests.
     struct Draw {
         u32 level = 0;
         u32 slot = 0;
@@ -124,7 +133,7 @@ public:
         i32 page_x = 0; // absolute page coordinate in the level's grid
         i32 page_y = 0;
     };
-    std::vector<Draw> plan(u32 budget);
+    std::vector<Draw> plan(u32 budget, u32 sway_budget = 0);
 
     // For the GPU: levels() * k_slots table entries (k_no_page, or the
     // physical page with flags), and per level its window.
@@ -161,6 +170,8 @@ private:
         bool draw = false;  // drawn this frame
         u64 used = 0;       // the frame it was last asked for
         u64 dirty_since = 0; // the frame it became dirty
+        u64 drawn_at = 0;    // the frame it was last drawn
+        u64 sways = ~u64{0}; // the frame something swaying was last on it
     };
     struct Window {
         i32 x = 0;
@@ -178,6 +189,10 @@ private:
     const Page& page(u32 level, u32 slot) const { return m_pages[level * k_slots + slot]; }
     void free_page(Page& p);
     void mark_dirty(Page& p);
+    // Calls visit(level, page) for each resident page under a world box, on
+    // levels [0, levels); false when the box is not finite.
+    template <typename Visit>
+    bool for_pages_under(const DVec3& min, const DVec3& max, u32 levels, Visit&& visit);
     // Dirty pages not asked for within this many frames wait to be asked again.
     static constexpr u64 k_recent_frames = 30;
     bool in_window(u32 level, i32 x, i32 y) const;
@@ -216,6 +231,7 @@ private:
     std::vector<u32> m_asked;
     std::vector<u32> m_victims;
     std::vector<u32> m_waiting;
+    std::vector<u32> m_swaying;
     // Boxes to dirty this frame, gathered by 32 m square (thousands of
     // scatter placements arriving are a few invalidations, not thousands).
     std::unordered_map<u64, std::pair<DVec3, DVec3>> m_boxes;

@@ -1,5 +1,6 @@
 // Weather: presets, blending, checks, saving, and the light it gives.
 #include "giant/world/weather.h"
+#include "giant/world/wind.h"
 
 #include "giant_test.h"
 
@@ -166,4 +167,19 @@ GIANT_TEST("weather: rain or snow by temperature; the ground wets, dries, is cov
     scene.weather->wetness = 0.25f;
     Scene loaded;
     GIANT_CHECK(!load_scene(save_scene(scene), loaded).has_value() && loaded.weather == scene.weather);
+}
+
+GIANT_TEST("weather: the wind near the ground it blows half the clouds' wind, gustier in a storm") {
+    const Wind calm = ground_wind(*weather_preset("clear"));
+    const Wind storm = ground_wind(*weather_preset("storm"));
+    GIANT_CHECK(std::abs(length(calm.velocity) - 0.5f * weather_preset("clear")->wind_speed) < 1e-4f);
+    GIANT_CHECK(length(storm.velocity) > 3.0f * length(calm.velocity));
+    GIANT_CHECK(storm.gustiness > calm.gustiness && storm.gustiness <= 1.0f);
+    // Along the clouds' wind (east here).
+    Weather east;
+    east.wind_direction_degrees = 90.0f;
+    GIANT_CHECK(ground_wind(east).velocity.x > 0.0f && std::abs(ground_wind(east).velocity.z) < 1e-4f);
+    Weather broken;
+    broken.wind_speed = NAN;
+    GIANT_CHECK(ground_wind(broken).velocity == Vec3{});
 }

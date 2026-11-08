@@ -63,6 +63,9 @@ Json item_schema() {
               {"surface",
                {{"enum", {"standard", "flesh", "wood", "glass", "dirt", "foliage", "brick", "concrete", "metal"}},
                 {"description", "What bullets meet (set_entity's surface). Default standard; trees are wood."}}},
+              {"sway", number(0, 4, "How it bends in the wind (set_entity's sway): 1 a tree, 2 to 3 grass. "
+                                    "Default 0.")},
+              {"flutter", number(0, 4, "How its tips shake in the wind (set_entity's flutter). Default 0.")},
               {"weight", number(1e-6, 1e6, "How often it is picked, against the layer's other items. Default 1.")},
               {"scale", pair(0.0001, 10000, "[min, max] uniform scale, picked evenly. Default [1, 1].")},
               {"align", number(0, 1, "0 upright (trees), 1 along the ground's slope (rocks). Default 0.")},
@@ -136,6 +139,8 @@ std::string apply_layer(const Json& args, ScatterLayer& l, EditorState& state) {
                 i.material.surface =
                     world::surface_from_string(j["surface"].get<std::string>()).value_or(i.material.surface);
             }
+            i.material.sway = j.value("sway", i.material.sway);
+            i.material.flutter = j.value("flutter", i.material.flutter);
             i.weight = j.value("weight", i.weight);
             if (j.contains("scale")) {
                 i.scale_min = j["scale"][0].get<float>();
@@ -201,6 +206,8 @@ Json layer_json(const ScatterLayer& l) {
             j["emissive"] = {i.material.emissive.x, i.material.emissive.y, i.material.emissive.z};
         }
         if (i.material.surface != world::Surface::standard) j["surface"] = world::to_string(i.material.surface);
+        if (i.material.sway != 0.0f) j["sway"] = i.material.sway;
+        if (i.material.flutter != 0.0f) j["flutter"] = i.material.flutter;
         j["weight"] = i.weight;
         j["scale"] = {i.scale_min, i.scale_max};
         j["align"] = i.align;

@@ -223,9 +223,17 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     ByteAddressBuffer pool = read_buffer(f.pool);
     const uint geometry = group_offset(mesh, cluster.group);
     const uint3 corners = cluster_triangle(pool, geometry, cluster, vis.y);
-    const float3 a = to_world(inst, cluster_position(pool, geometry, cluster, corners.x));
-    const float3 b = to_world(inst, cluster_position(pool, geometry, cluster, corners.y));
-    const float3 c = to_world(inst, cluster_position(pool, geometry, cluster, corners.z));
+    float3 a = to_world(inst, cluster_position(pool, geometry, cluster, corners.x));
+    float3 b = to_world(inst, cluster_position(pool, geometry, cluster, corners.y));
+    float3 c = to_world(inst, cluster_position(pool, geometry, cluster, corners.z));
+    // Moved by the wind as raster.slang drew them (the normals are left
+    // as they rest: the bend is gentle).
+    const Swayer sway = swayer_of(f, inst, mesh);
+    if (sway.height > 0.0) {
+        a += wind_offset(f, sway, a);
+        b += wind_offset(f, sway, b);
+        c += wind_offset(f, sway, c);
+    }
 
     const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
     const float3 dir = f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz;

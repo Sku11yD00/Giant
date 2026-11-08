@@ -1127,6 +1127,53 @@ numbers are and what they mean.
   load is light, heavy or overloaded, and the player controller will slow
   down by it. Saved as text (`"format": "giant-inventory"`), items by id.
 
+## Wind (E1 part 1)
+
+`giant/core/wind.h` is the wind and how things move in it, shared by the
+renderer, the editor and (later) the simulation. `world::ground_wind`
+takes it from the weather: half the clouds' wind (the ground slows it),
+gustiness 0.2 plus a fiftieth of the clouds' speed (a storm gusts at 0.8).
+`WindClock` moves it on each frame (the editor's `WeatherState::wind`,
+handed over as `FrameInput::wind`; without a weather, the default
+weather's breeze): the gust pattern drifts at 0.8 of the wind and the sway
+and flutter clocks run faster as it blows harder. Gusts are a sum of three
+waves over a 64 m tile; the clocks wrap every 256 turns, and every
+frequency used is a whole number of turns in that (rocking rates in
+sixteenths), so nothing jumps when they wrap and floats keep their
+precision for ever. The shader works camera-relative with the camera's
+place modulo 64 m (`FrameConstants::wind_camera`); every phase is a whole
+number of waves per 64 m, so the pattern at a place is the same from any
+origin.
+
+A thing sways when its material has `sway` or `flutter` (0 to 4 each,
+`Material` in world and render). Its origin is its foot; `MeshEntry::top`
+(the mesh's highest vertex) times its scale is its height. A point at
+height fraction h moves along the wind by `height * h^2 * lean` (the lean
+grows with the gusted speed and its square, rocks about itself at a rate
+that falls with height, and is held to 0.3), a little across it, and drops
+so it bends rather than stretches; `flutter` adds a small fast shake that
+grows from the trunk outwards (leaves at the tips). `sway_offset` (C++) and
+`wind_offset` (common.slang) are the same function, line for line;
+`max_sway_offset`/`wind_reach` bound it. raster.slang moves each vertex as
+it draws it and resolve.slang moves the three corners it finds the hit on
+the same way, so the visibility buffer and shading agree; normals stay as
+they rest (the bend is gentle). Culling (instances, clusters, the retest,
+and the CPU's cut) grows each swaying instance's spheres by its reach.
+Skinned meshes never sway (their `top` is 0).
+
+Sway fades out over the last third of `RenderSettings::wind_distance`
+(150 m), so the far field and the voxel world, which hold things at rest,
+match what stands still out there, and cached shadow pages far off stay
+valid. Near the camera, the renderer gathers swaying instances into 32 m
+squares each frame (`sway_shadows`) and `ShadowPages::sway` marks the
+pages under them on the levels whose texels are finer than the motion;
+`plan` draws up to `wind_shadow_pages_per_frame` (32) of those again a
+frame, longest drawn first, besides the usual budget, so the shadows sway
+too, at a lower rate when many pages do. Known limits: that gathering
+walks the frame's instances (a byte per material says which sway, so still
+ones cost a load and a test); a kit's pieces each sway about their own
+origin, so a tree should be one mesh with its foot at its origin.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

@@ -207,3 +207,37 @@ GIANT_TEST("weather state: the ground wets in rain, snows over in the cold, and 
     // Out of range is refused.
     GIANT_CHECK(!f.run("set_weather", {{"temperature", 99}}).ok);
 }
+
+GIANT_TEST("weather: the wind near the ground follows it, gusting harder in a storm, and swaying materials are set") {
+    Fixture f;
+    // No weather: the default's light breeze.
+    f.weather.update(f.state.scene.weather, 0.1);
+    const float breeze = length(f.weather.wind().velocity);
+    GIANT_CHECK(std::fabs(breeze - 0.5f * world::Weather{}.wind_speed) < 1e-4f);
+    GIANT_CHECK(f.run("set_weather", {{"preset", "storm"}}).ok);
+    f.weather.update(f.state.scene.weather, 0.1);
+    const WindState storm = f.weather.wind();
+    GIANT_CHECK(length(storm.velocity) > 2.0f * breeze && storm.gustiness > 0.5f);
+    // Its clocks run on.
+    f.weather.update(f.state.scene.weather, 0.5);
+    GIANT_CHECK(f.weather.wind().sway_clock != storm.sway_clock && f.weather.wind().gust_x != storm.gust_x);
+    const ai::CommandResult r = f.run("get_weather");
+    GIANT_CHECK(r.ok && r.value.contains("wind") &&
+                std::fabs(r.value["wind"]["speed"].get<float>() - length(storm.velocity)) < 1e-3f &&
+                r.value["wind"]["gustiness"].get<float>() == storm.gustiness);
+    // Materials sway and flutter by command, kept by the scene, undoable.
+    ai::CommandResult made = f.run("create_entity", {{"name", "Tree"}, {"sway", 1.0}, {"flutter", 2.0}});
+    GIANT_CHECK(made.ok);
+    const world::EntityId id = made.value["id"].get<world::EntityId>();
+    GIANT_CHECK(f.state.scene.find(id) && f.state.scene.find(id)->material.sway == 1.0f &&
+                f.state.scene.find(id)->material.flutter == 2.0f);
+    GIANT_CHECK(!f.run("set_entity", {{"id", id}, {"sway", 5}}).ok);
+    GIANT_CHECK(f.run("set_entity", {{"id", id}, {"sway", 3}}).ok && f.state.scene.find(id)->material.sway == 3.0f);
+    GIANT_CHECK(f.run("get_entity", {{"id", id}}).value["sway"].get<float>() == 3.0f);
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.find(id)->material.sway == 1.0f);
+    // How far out things sway, and the shadow pages kept up for them.
+    GIANT_CHECK(f.run("set_render_settings", {{"wind_distance", 80}, {"wind_shadow_pages_per_frame", 0}}).ok);
+    GIANT_CHECK(f.state.render_settings.wind_distance == 80.0f && f.state.render_settings.wind_shadow_pages_per_frame == 0);
+    GIANT_CHECK(f.run("get_render_settings").value["wind_distance"].get<float>() == 80.0f);
+    GIANT_CHECK(!f.run("set_render_settings", {{"wind_distance", -1}}).ok);
+}

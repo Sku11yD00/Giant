@@ -68,6 +68,8 @@ Json entity_json(const Entity& e) {
             {"metallic", e.material.metallic},
             {"emissive", vec3_json(e.material.emissive)},
             {"surface", world::to_string(e.material.surface)},
+            {"sway", e.material.sway},
+            {"flutter", e.material.flutter},
             {"visible", e.visible},
             {"body", world::to_string(e.body)}};
     if (e.mass != 0.0f) {
@@ -173,6 +175,11 @@ Json entity_properties() {
           {"description", "What bullets meet (how far they go through, whether they glance off: "
                           "get_ballistics); not drawn. Default standard, a middling solid. A kit's pieces "
                           "keep the surfaces of the entities it was made from."}}},
+        {"sway", number(0, 4, "How it bends in the wind from its foot (its origin) up: 0 still (the default), "
+                              "1 a tree, 2 to 3 bushes and grass. Harder the harder the weather's wind blows; "
+                              "only within the render setting wind_distance of the camera.")},
+        {"flutter", number(0, 4, "How its tips shake in the wind (leaves, needles: what stands out from its "
+                                 "middle). Default 0.")},
         {"visible", {{"type", "boolean"}}},
         {"body",
          {{"enum", {"fixed", "dynamic", "none"}},
@@ -226,6 +233,8 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("surface")) {
         e.material.surface = world::surface_from_string(args["surface"].get<std::string>()).value_or(e.material.surface);
     }
+    if (args.contains("sway")) e.material.sway = args["sway"].get<float>();
+    if (args.contains("flutter")) e.material.flutter = args["flutter"].get<float>();
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
     if (args.contains("body")) {
         e.body = world::body_from_string(args["body"].get<std::string>()).value_or(e.body);
@@ -334,6 +343,8 @@ Json render_settings_json(const EditorState& state) {
             {"cloud_shadows", state.render_settings.cloud_shadows},
             {"precipitation", state.render_settings.precipitation},
             {"wet_surfaces", state.render_settings.wet_surfaces},
+            {"wind_distance", state.render_settings.wind_distance},
+            {"wind_shadow_pages_per_frame", state.render_settings.wind_shadow_pages_per_frame},
             {"weather_cover", state.render_settings.weather_cover},
             {"last_frame",
              {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
@@ -354,7 +365,7 @@ Json render_settings_json(const EditorState& state) {
               {"far_field", {{"on", s.far_field}, {"culled", s.far_culled}}},
               {"shadows",
                {{"on", s.shadows}, {"pages", s.shadow_pages}, {"capacity", s.shadow_capacity},
-                {"drawn", s.shadow_drawn}, {"waiting", s.shadow_waiting}, {"missing", s.shadow_missing},
+                {"drawn", s.shadow_drawn}, {"swayed", s.shadow_swayed}, {"waiting", s.shadow_waiting}, {"missing", s.shadow_missing},
                 {"draws", s.shadow_draws}}},
               {"gi",
                {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting}}},
@@ -1479,7 +1490,14 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"cloud_shadows", {{"type", "boolean"}}},
                 {"precipitation", {{"type", "boolean"}}},
                 {"wet_surfaces", {{"type", "boolean"}}},
-                {"weather_cover", {{"type", "boolean"}}}}}},
+                {"weather_cover", {{"type", "boolean"}}},
+                {"wind_distance", number(0, 100000, "Metres from the camera that swaying materials move in the "
+                                                    "wind, fading out over the last third. 0: nothing sways. "
+                                                    "Default 150.")},
+                {"wind_shadow_pages_per_frame",
+                 {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096},
+                  {"description", "Shadow pages under swaying things drawn again a frame at most, so their "
+                                  "shadows sway too (besides shadow_pages_per_frame). Default 32."}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              render::RenderSettings& r = state.render_settings;
@@ -1509,6 +1527,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.precipitation = args.value("precipitation", r.precipitation);
              r.wet_surfaces = args.value("wet_surfaces", r.wet_surfaces);
              r.weather_cover = args.value("weather_cover", r.weather_cover);
+             r.wind_distance = args.value("wind_distance", r.wind_distance);
+             r.wind_shadow_pages_per_frame = args.value("wind_shadow_pages_per_frame", r.wind_shadow_pages_per_frame);
              return CommandResult::success(render_settings_json(state));
          }});
 

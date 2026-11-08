@@ -262,10 +262,8 @@ void ShadowPages::mark_dirty(Page& p) {
     }
 }
 
-void ShadowPages::invalidate(const DVec3& min, const DVec3& max) {
-    if (!m_placed || !(min.x <= max.x && min.y <= max.y && min.z <= max.z)) {
-        return; // empty (or NaN)
-    }
+template <typename Visit>
+bool ShadowPages::for_pages_under(const DVec3& min, const DVec3& max, u32 levels, Visit&& visit) {
     // The box's footprint across the light.
     double lx0 = std::numeric_limits<double>::infinity(), ly0 = lx0;
     double lx1 = -lx0, ly1 = -lx0;
@@ -278,10 +276,9 @@ void ShadowPages::invalidate(const DVec3& min, const DVec3& max) {
         ly1 = std::max(ly1, l.y);
     }
     if (!std::isfinite(lx0) || !std::isfinite(ly0) || !std::isfinite(lx1) || !std::isfinite(ly1)) {
-        invalidate_all();
-        return;
+        return false;
     }
-    for (u32 level = 0; level < m_desc.levels; ++level) {
+    for (u32 level = 0; level < std::min(levels, m_desc.levels); ++level) {
         const double size = page_size(level);
         const Window& w = m_window[level];
         const i32 n = i32(k_pages_per_axis);
@@ -293,11 +290,35 @@ void ShadowPages::invalidate(const DVec3& min, const DVec3& max) {
             for (i32 x = x0; x <= x1; ++x) {
                 Page& p = page(level, slot_of(x, y));
                 if (p.physical != k_no_page) {
-                    mark_dirty(p);
+                    visit(p);
                 }
             }
         }
     }
+    return true;
+}
+
+void ShadowPages::invalidate(const DVec3& min, const DVec3& max) {
+    if (!m_placed || !(min.x <= max.x && min.y <= max.y && min.z <= max.z)) {
+        return; // empty (or NaN)
+    }
+    if (!for_pages_under(min, max, m_desc.levels, [this](Page& p) { mark_dirty(p); })) {
+        invalidate_all();
+    }
+}
+
+void ShadowPages::sway(const DVec3& min, const DVec3& max, float reach) {
+    if (!m_placed || !(reach > 0.0f) || !std::isfinite(reach) ||
+        !(min.x <= max.x && min.y <= max.y && min.z <= max.z)) {
+        return;
+    }
+    // Levels whose texels are smaller than the motion (finer levels first).
+    u32 levels = 0;
+    while (levels < m_desc.levels && page_size(levels) / double(k_page_texels) < double(reach)) {
+        ++levels;
+    }
+    const DVec3 grow{reach, reach, reach};
+    for_pages_under(min - grow, max + grow, levels, [this](Page& p) { p.sways = m_frame; });
 }
 
 void ShadowPages::invalidate_all() {
@@ -308,7 +329,7 @@ void ShadowPages::invalidate_all() {
     }
 }
 
-std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget) {
+std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget, u32 sway_budget) {
     // Drawn pages only if shading asked for them lately (the rest stay
     // dirty, drawn once asked for again); pages not drawn (new, or after a
     // new sun or depth anchor) always, so coarse fallbacks come back.
@@ -347,17 +368,51 @@ std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget) {
     const size_t count = std::min<size_t>(m_waiting.size(), std::max<u32>(budget, 1u));
     std::partial_sort(m_waiting.begin(), m_waiting.begin() + std::ptrdiff_t(count), m_waiting.end(), order);
     std::vector<Draw> out;
-    out.reserve(count);
+    out.reserve(count + sway_budget);
     for (size_t k = 0; k < count; ++k) {
         const u32 i = m_waiting[k];
         Page& p = m_pages[i];
         p.dirty = false;
         p.drawn = true;
         p.draw = true;
+        p.drawn_at = m_frame;
         out.push_back({i / k_slots, i % k_slots, p.physical, p.x, p.y});
     }
     m_stats.drawn = u32(count);
     m_stats.waiting = u32(m_waiting.size() - count);
+    // Then pages under swaying things, drawn longest ago first (those
+    // shading asks for: the rest wait until asked again).
+    m_stats.swayed = 0;
+    if (sway_budget > 0) {
+        m_swaying.clear();
+        for (u32 i = 0; i < m_pages.size(); ++i) {
+            const Page& p = m_pages[i];
+            if (p.physical != k_no_page && p.drawn && !p.draw && p.sways == m_frame &&
+                p.used + k_recent_frames >= m_frame) {
+                m_swaying.push_back(i);
+            }
+        }
+        const size_t more = std::min<size_t>(m_swaying.size(), sway_budget);
+        std::partial_sort(m_swaying.begin(), m_swaying.begin() + std::ptrdiff_t(more), m_swaying.end(),
+                          [this](u32 a, u32 b) {
+                              const Page& pa = m_pages[a];
+                              const Page& pb = m_pages[b];
+                              return pa.drawn_at != pb.drawn_at ? pa.drawn_at < pb.drawn_at : a < b;
+                          });
+        for (size_t k = 0; k < more; ++k) {
+            const u32 i = m_swaying[k];
+            Page& p = m_pages[i];
+            if (p.dirty && m_stats.waiting > 0) {
+                --m_stats.waiting; // it was waiting too: drawn now
+            }
+            p.dirty = false;
+            p.draw = true;
+            p.drawn_at = m_frame;
+            out.push_back({i / k_slots, i % k_slots, p.physical, p.x, p.y});
+        }
+        m_stats.swayed = u32(more);
+        m_stats.drawn += u32(more);
+    }
     return out;
 }
 

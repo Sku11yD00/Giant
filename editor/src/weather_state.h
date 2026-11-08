@@ -8,6 +8,7 @@
 #include "giant/render/renderer.h"
 #include "giant/world/scene.h"
 #include "giant/world/weather.h"
+#include "giant/world/wind.h"
 
 #include <optional>
 
@@ -44,6 +45,10 @@ public:
     void set_ground(const world::Ground& ground);
     // Seconds the weather has been shown (what falls moves with it).
     double time() const { return m_time; }
+    // The wind near the ground under the shown weather (without one, the
+    // default weather's light breeze), its gusts and clocks moved on:
+    // what sways moves in it (FrameInput::wind).
+    WindState wind() const { return m_wind.state(); }
 
 private:
     std::optional<world::Weather> m_target; // the scene's, as last seen
@@ -59,6 +64,7 @@ private:
     bool m_ground_on = false; // m_ground follows a weather (else it starts at the next update)
     u64 m_scene = 0;          // the scene generation last seen
     double m_time = 0.0;
+    WindClock m_wind;
 };
 
 // Metres the cloud pattern repeats over.

@@ -71,7 +71,7 @@ struct SceneFrame {
     const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr;
 
     struct MaterialKey {
-        u32 bits[8];
+        u32 bits[10];
         bool operator==(const MaterialKey&) const = default;
     };
     struct MaterialHash {

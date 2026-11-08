@@ -109,7 +109,7 @@ def build_valley(tool):
         {"name": "trunk", "shape": "cube", "position": [0, 1.5, 0], "scale": [0.35, 3, 0.35],
          "base_color": [0.35, 0.25, 0.15], "roughness": 0.9},
         {"name": "canopy", "shape": "sphere", "position": [0, 4.2, 0], "scale": [3, 3.4, 3],
-         "base_color": [0.15, 0.4, 0.12], "roughness": 0.8},
+         "base_color": [0.15, 0.4, 0.12], "roughness": 0.8, "sway": 0.3, "flutter": 1.5},  # moves in the wind
     ]})
     town = [{"kit": "house", "position": [round(TOWN[0] + (x - (HOUSES_X - 1) / 2) * SPACING, 2),
                                           town_h,

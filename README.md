@@ -280,6 +280,18 @@ Combat for open-world games (general systems any game on the engine can use):
   them as flesh and report the bone and its zone (head, neck, torso, arm,
   leg by default, from the bones' names; `get_hit_zones`, `set_hit_zones`).
 
+Open-world systems:
+
+- E1a: wind. The weather's wind blows near the ground at half its speed,
+  in gusts that roll over the land in waves, gustier the harder it blows.
+  Materials given `sway` bend from their foot along it (trees, bushes,
+  grass: further, and rocking faster, in a storm) and `flutter` shakes
+  their tips (leaves). It is worked out in the shader as they are drawn, no
+  state per thing, so whole forests move; it fades out by
+  `wind_distance` (150 m), and the shadow pages under what sways are
+  drawn again in turn so the shadows move too (`get_weather` shows the
+  wind).
+
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
 close the window to exit. Keep the `D3D12` folder next to the exe. The

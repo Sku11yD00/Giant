@@ -8,6 +8,7 @@ giant_module(core
     src/image.cpp
     src/png.cpp
     src/thread_time.cpp
+    src/wind.cpp
 )
 
 find_package(Threads REQUIRED)
@@ -22,4 +23,5 @@ giant_module_tests(core
     tests/test_math.cpp
     tests/test_png.cpp
     tests/test_thread_time.cpp
+    tests/test_wind.cpp
 )

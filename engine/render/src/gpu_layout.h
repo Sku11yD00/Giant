@@ -38,8 +38,16 @@ struct FrameConstants {
     u32 frame_number; // marks the groups a frame used
     u32 skip_offset;  // instance buffer byte offset of the not-drawn bits (InstanceStore)
     u32 frame_pad[3];
+    // Wind (giant/core/wind.h; common.slang's wind_offset).
+    float wind[4];        // velocity xyz (m/s), w: gustiness
+    float wind_clock[4];  // the gusts' drift (x, z metres), the sway and flutter clocks
+    float wind_camera[4]; // the camera's place modulo 64 m (xyz), w: RenderSettings::wind_distance (0: none sway)
+    u32 wind_table;       // read descriptor of per-material (sway, flutter), the default last
+    u32 wind_table_offset;
+    u32 wind_table_count; // materials before the default
+    u32 wind_pad;
 };
-static_assert(sizeof(FrameConstants) == 448);
+static_assert(sizeof(FrameConstants) == 512);
 
 // 64 bytes, kept on the GPU from frame to frame (InstanceStore). The
 // normal matrix is worked out in the shader (the cofactors of the model's
@@ -61,6 +69,13 @@ struct Material {
 };
 static_assert(sizeof(Material) == 32);
 
+// A material's wind (FrameConstants::wind_table), one per material.
+struct MaterialWind {
+    float sway;
+    float flutter;
+};
+static_assert(sizeof(MaterialWind) == 8);
+
 // A decal: camera-relative positions to its unit box ([-0.5, 0.5] on each
 // axis; it stamps from +Y).
 struct Decal {
@@ -77,7 +92,7 @@ static_assert(sizeof(Decal) == 96);
 struct MeshEntry {
     u32 residency;  // u32 per group: its geometry's byte offset in the pool, or k_not_resident
     u32 group_base; // first of its groups in the global numbering (usage)
-    u32 pad0;
+    float top;      // its highest vertex's y (swaying things bend from y = 0 to this)
     u32 clusters;
     u32 groups;
     u32 nodes;

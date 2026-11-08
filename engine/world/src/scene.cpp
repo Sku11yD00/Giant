@@ -416,6 +416,12 @@ namespace {
 Json vec3_json(const Vec3& v) { return Json::array({v.x, v.y, v.z}); }
 Json dvec3_json(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
 
+// A material's wind (written only when it moves).
+void write_wind(Json& material, const Material& m) {
+    if (m.sway != 0.0f) material["sway"] = m.sway;
+    if (m.flutter != 0.0f) material["flutter"] = m.flutter;
+}
+
 } // namespace
 
 namespace {
@@ -435,6 +441,7 @@ void write_look(Json& out, Shape shape, const std::string& mesh, const std::stri
         {"emissive", vec3_json(m.emissive)},
     };
     if (m.surface != Surface::standard) out["material"]["surface"] = to_string(m.surface);
+    write_wind(out["material"], m);
     if (!mesh.empty()) {
         out["mesh"] = mesh;
     }
@@ -527,6 +534,7 @@ Json scatter_json(std::span<const ScatterLayer> layers) {
                                 {"metallic", i.material.metallic},
                                 {"emissive", vec3_json(i.material.emissive)}};
             if (i.material.surface != Surface::standard) item["material"]["surface"] = to_string(i.material.surface);
+            write_wind(item["material"], i.material);
             item["weight"] = i.weight;
             item["scale"] = Json::array({i.scale_min, i.scale_max});
             item["align"] = i.align;
@@ -947,6 +955,8 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
         mr.number("metallic", material.metallic, 0, 1);
         mr.vec3("emissive", material.emissive, 0, 1000);
         read_surface(mr, material.surface);
+        mr.number("sway", material.sway, 0, 4);
+        mr.number("flutter", material.flutter, 0, 4);
         mr.finish();
     }
     if (const Json* d = r.get("decal", false); d != nullptr && r.ok()) {
@@ -1338,6 +1348,8 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
                 mr.number("metallic", item.material.metallic, 0, 1);
                 mr.vec3("emissive", item.material.emissive, 0, 1000);
                 read_surface(mr, item.material.surface);
+                mr.number("sway", item.material.sway, 0, 4);
+                mr.number("flutter", item.material.flutter, 0, 4);
                 mr.finish();
             }
             ir.number("weight", item.weight, 1e-6, 1e6);
