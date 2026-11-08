@@ -38,20 +38,28 @@ Json triple(double limit, const char* description) {
             {"description", description}};
 }
 
-// The scene's kept damage, and what of it is applied now.
+// A game's damage shown: the world's kept damage is not what the bodies and trees show, so not kept or cleared now.
+constexpr const char* k_game_shown =
+    "a game's damage is shown over the world's (a game save loaded): keeping or clearing it now would mix "
+    "the two; stop the game first";
+
+// The scene's kept damage (and the game's, shown over it), and what of it is applied now.
 Json kept_json(const world::Scene& scene, const sim::ScenePhysicsStats& s, const sim::ForestStats& f) {
-    usize kits = 0;
-    usize pieces = 0;
-    usize trees = 0;
-    for (const auto& [c, d] : scene.damage()) {
-        kits += d.kits.size();
-        for (const world::KeptKit& k : d.kits) pieces += k.pieces.size();
-        trees += d.trees.size();
-    }
-    usize cells = 0;
-    for (const auto& [c, d] : scene.damage()) cells += d.empty() ? 0u : 1u;
-    return {{"cells", cells}, {"kits", kits}, {"pieces", pieces}, {"trees", trees},
-            {"pieces_down", s.kept_pieces}, {"trees_down", f.kept}};
+    const auto totals = [](const world::Damage& layer) {
+        usize cells = 0, kits = 0, pieces = 0, trees = 0;
+        for (const auto& [c, d] : layer) {
+            cells += d.empty() ? 0u : 1u;
+            kits += d.kits.size();
+            for (const world::KeptKit& k : d.kits) pieces += k.pieces.size();
+            trees += d.trees.size();
+        }
+        return Json{{"cells", cells}, {"kits", kits}, {"pieces", pieces}, {"trees", trees}};
+    };
+    Json out = totals(scene.damage());
+    out["game"] = totals(scene.game_damage());
+    out["pieces_down"] = s.kept_pieces;
+    out["trees_down"] = f.kept;
+    return out;
 }
 
 Json physics_json(const EditorState& state) {
@@ -608,6 +616,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          false,
          [&state](const Json&, CommandContext& context) {
              if (state.physics == nullptr) return no_physics();
+             if (!state.scene.game_damage().empty()) return CommandResult::failure(k_game_shown);
              auto kept = std::make_shared<PhysicsState::KeptDamage>(state.physics->keep_damage(state.scene));
              if (!kept->before.empty() || !kept->after.empty() || !kept->ground.empty()) {
                  const auto put = [&state, kept](bool after) {
@@ -649,6 +658,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          false,
          [&state](const Json&, CommandContext& context) {
              if (state.physics == nullptr) return no_physics();
+             if (!state.scene.game_damage().empty()) return CommandResult::failure(k_game_shown);
              world::Damage had = state.scene.damage();
              std::erase_if(had, [](const auto& d) { return d.second.empty(); });
              auto before = std::make_shared<const world::Damage>(std::move(had));

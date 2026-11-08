@@ -200,16 +200,19 @@ Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
       weather(other.weather), m_entities(other.m_entities), m_index(other.m_index),
       m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
-      m_damage_edits(other.m_damage_edits) {}
+      m_game(other.m_game), m_game_kits(other.m_game_kits), m_damage_edits(other.m_damage_edits) {}
 
 Scene::Scene(Scene&& other) noexcept
     : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
       scatter(std::move(other.scatter)), weather(other.weather), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
-      m_kept_kits(std::move(other.m_kept_kits)), m_damage_edits(other.m_damage_edits) {
+      m_kept_kits(std::move(other.m_kept_kits)), m_game(std::move(other.m_game)),
+      m_game_kits(std::move(other.m_game_kits)), m_damage_edits(other.m_damage_edits) {
     other.clear();
     other.m_damage.clear();
     other.m_kept_kits.clear();
+    other.m_game.clear();
+    other.m_game_kits.clear();
 }
 
 Scene& Scene::operator=(const Scene& other) {
@@ -231,9 +234,13 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         m_next_id = other.m_next_id;
         m_damage = std::move(other.m_damage);
         m_kept_kits = std::move(other.m_kept_kits);
+        m_game = std::move(other.m_game);
+        m_game_kits = std::move(other.m_game_kits);
         m_damage_edits = other.m_damage_edits + 1;
         other.m_damage.clear();
         other.m_kept_kits.clear();
+        other.m_game.clear();
+        other.m_game_kits.clear();
         m_changes = {{}, true};
         m_identity = Identity();
         other.clear();
@@ -392,21 +399,67 @@ const CellDamage* Scene::damage_in(CellCoord cell) const {
 }
 
 void Scene::set_damage(CellCoord cell, CellDamage damage, bool hold_empty) {
+    set_layer(m_damage, m_kept_kits, cell, std::move(damage), hold_empty);
+}
+
+void Scene::set_game_damage(CellCoord cell, CellDamage damage) {
+    const u64 edits = m_damage_edits;
+    const auto named = [](const CellDamage* d, EntityId id) {
+        if (d == nullptr) return false;
+        const auto it = std::lower_bound(d->kits.begin(), d->kits.end(), id,
+                                         [](const KeptKit& k, EntityId v) { return k.entity < v; });
+        return it != d->kits.end() && it->entity == id;
+    };
+    const CellDamage* had = game_damage_in(cell);
+    std::vector<EntityId> was;
+    if (had != nullptr)
+        for (const KeptKit& k : had->kits) was.push_back(k.entity);
+    set_layer(m_game, m_game_kits, cell, std::move(damage), false);
+    // The kept records of the cell are hidden or shown by it: their placements changed too (once each).
+    if (m_damage_edits != edits) {
+        if (const CellDamage* kept = damage_in(cell)) {
+            const CellDamage* now = game_damage_in(cell);
+            for (const KeptKit& k : kept->kits) {
+                if (!named(now, k.entity) && !std::binary_search(was.begin(), was.end(), k.entity)) changed(k.entity);
+            }
+        }
+    }
+}
+
+void Scene::clear_game_damage() {
+    std::vector<CellCoord> cells;
+    cells.reserve(m_game.size());
+    for (const auto& [c, d] : m_game) cells.push_back(c);
+    for (const CellCoord c : cells) set_game_damage(c, {});
+}
+
+const CellDamage* Scene::game_damage_in(CellCoord cell) const {
+    const auto it = m_game.find(cell);
+    return it == m_game.end() ? nullptr : &it->second;
+}
+
+const CellDamage* Scene::shown_damage_in(CellCoord cell) const {
+    const CellDamage* game = game_damage_in(cell);
+    return game != nullptr ? game : damage_in(cell);
+}
+
+void Scene::set_layer(Damage& layer, std::unordered_multimap<EntityId, CellCoord>& index, CellCoord cell,
+                      CellDamage damage, bool hold_empty) {
     sort_damage(damage);
-    const auto it = m_damage.find(cell);
-    if (it == m_damage.end() ? damage.empty() : it->second == damage) {
+    const auto it = layer.find(cell);
+    if (it == layer.end() ? damage.empty() : it->second == damage) {
         // (Nothing to see changes: only whether "none here" is held.)
-        if (it == m_damage.end() && hold_empty) m_damage[cell];
-        if (it != m_damage.end() && damage.empty() && !hold_empty) m_damage.erase(it);
+        if (it == layer.end() && hold_empty) layer[cell];
+        if (it != layer.end() && damage.empty() && !hold_empty) layer.erase(it);
         return;
     }
     ++m_damage_edits;
-    if (it != m_damage.end()) {
+    if (it != layer.end()) {
         for (const KeptKit& k : it->second.kits) {
-            const auto [from, to] = m_kept_kits.equal_range(k.entity);
+            const auto [from, to] = index.equal_range(k.entity);
             for (auto at = from; at != to; ++at) {
                 if (at->second == cell) {
-                    m_kept_kits.erase(at);
+                    index.erase(at);
                     break;
                 }
             }
@@ -414,30 +467,36 @@ void Scene::set_damage(CellCoord cell, CellDamage damage, bool hold_empty) {
         }
     }
     for (const KeptKit& k : damage.kits) {
-        m_kept_kits.emplace(k.entity, cell);
+        index.emplace(k.entity, cell);
         changed(k.entity);
     }
     if (damage.empty() && !hold_empty) {
-        m_damage.erase(cell);
+        layer.erase(cell);
     } else {
-        m_damage[cell] = std::move(damage);
+        layer[cell] = std::move(damage);
     }
 }
 
 const KeptKit* Scene::kept_kit(EntityId id, const Transform* placed) const {
-    const auto [from, to] = m_kept_kits.equal_range(id);
-    const KeptKit* found = nullptr;
-    for (auto at = from; at != to; ++at) {
-        const auto cell = m_damage.find(at->second);
-        if (cell == m_damage.end()) continue;
-        const std::vector<KeptKit>& records = cell->second.kits;
-        const auto it = std::lower_bound(records.begin(), records.end(), id,
-                                         [](const KeptKit& k, EntityId v) { return k.entity < v; });
-        if (it == records.end() || it->entity != id) continue;
-        if (placed == nullptr) return &*it;
-        if (it->position == placed->position && it->rotation == placed->rotation && it->scale == placed->scale) return &*it;
+    // The game's records first; the kept ones only of cells the game holds nothing of.
+    for (const bool game : {true, false}) {
+        const auto& index = game ? m_game_kits : m_kept_kits;
+        const Damage& layer = game ? m_game : m_damage;
+        const auto [from, to] = index.equal_range(id);
+        for (auto at = from; at != to; ++at) {
+            if (!game && m_game.count(at->second) != 0) continue;
+            const auto cell = layer.find(at->second);
+            if (cell == layer.end()) continue;
+            const std::vector<KeptKit>& records = cell->second.kits;
+            const auto it = std::lower_bound(records.begin(), records.end(), id,
+                                             [](const KeptKit& k, EntityId v) { return k.entity < v; });
+            if (it == records.end() || it->entity != id) continue;
+            if (placed == nullptr) return &*it;
+            if (it->position == placed->position && it->rotation == placed->rotation && it->scale == placed->scale)
+                return &*it;
+        }
     }
-    return found;
+    return nullptr;
 }
 
 void Scene::reindex(usize from) {
@@ -1943,6 +2002,34 @@ std::optional<LoadError> load_far_chunk(std::string_view text, u32 level, CellCo
         return LoadError{std::move(error)};
     }
     out = std::move(heights);
+    return std::nullopt;
+}
+
+std::string save_cell_damage(const CellDamage& damage) { return damage_json(damage).dump(1) + "\n"; }
+
+std::optional<LoadError> load_cell_damage(std::string_view text, CellCoord cell, CellDamage& out) {
+    Json json;
+    if (auto bad = parse(text, json)) return bad;
+    std::string error;
+    Reader root(json, "", error);
+    CellDamage damage;
+    read_damage(root, "", cell, damage, error);
+    root.finish();
+    if (!error.empty()) return LoadError{std::move(error)};
+    out = std::move(damage);
+    return std::nullopt;
+}
+
+std::string save_weather(const Weather& weather) { return weather_json(weather).dump(1) + "\n"; }
+
+std::optional<LoadError> load_weather(std::string_view text, Weather& out) {
+    Json json;
+    if (auto bad = parse(text, json)) return bad;
+    std::string error;
+    std::optional<Weather> w;
+    read_weather(json, w, error);
+    if (!error.empty() || !w) return LoadError{error.empty() ? std::string("no weather") : std::move(error)};
+    out = *w;
     return std::nullopt;
 }
 

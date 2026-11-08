@@ -400,12 +400,27 @@ public:
     // holds then gives way to it when the cell comes back, as an entity
     // put back by an undo does).
     void set_damage(CellCoord cell, CellDamage damage, bool hold_empty = false);
-    // The kept record of a kit placement (null: none); with `placed`, the
+    // The record of a kit placement shown (null: none): the game's, else the
+    // kept one (of a cell the game holds nothing of); with `placed`, the
     // one made where it is placed now (two cells' files may name it: one
     // kept before it moved, stale).
     const KeptKit* kept_kit(EntityId id, const Transform* placed = nullptr) const;
-    // Counts every set_damage (a follower looks over the damage only when it moved).
+    // Counts every set_damage and set_game_damage (a follower looks over the damage only when it moved).
     u64 damage_edits() const { return m_damage_edits; }
+
+    // The game's damage (a game save's, loaded), by cell: shown over the
+    // kept damage (a cell the game holds is the game's, whole), never saved
+    // with the scene or the world (save_world's files stay as authored),
+    // copied and moved with the scene. Kit placements it names, and those
+    // the cell's kept records name (hidden or shown again), are marked
+    // changed. Empty: not held (the kept damage shows; a game can break
+    // more than the world kept, never less).
+    const Damage& game_damage() const { return m_game; }
+    const CellDamage* game_damage_in(CellCoord cell) const;
+    void set_game_damage(CellCoord cell, CellDamage damage);
+    void clear_game_damage();
+    // What a cell shows: the game's, else the kept (null: none).
+    const CellDamage* shown_damage_in(CellCoord cell) const;
 
     // The id the next new entity gets.
     EntityId next_id() const { return m_next_id; }
@@ -415,6 +430,8 @@ public:
 private:
     void reindex(usize from);
     void changed(EntityId id);
+    void set_layer(Damage& layer, std::unordered_multimap<EntityId, CellCoord>& index, CellCoord cell,
+                   CellDamage damage, bool hold_empty);
 
     // A new value on construction, copy and assignment.
     struct Identity {
@@ -429,6 +446,8 @@ private:
     EntityId m_next_id = 1;
     Damage m_damage;
     std::unordered_multimap<EntityId, CellCoord> m_kept_kits; // the cells whose damage holds each kit's records
+    Damage m_game;
+    std::unordered_multimap<EntityId, CellCoord> m_game_kits;
     u64 m_damage_edits = 0;
     SceneChanges m_changes{{}, true};
     Identity m_identity;
@@ -436,6 +455,9 @@ private:
 
 // JSON text, stable key order, with a trailing newline.
 std::string save_scene(const Scene& scene);
+// A cell's damage on its own (a game save's chunk), and the weather.
+std::string save_cell_damage(const CellDamage& damage);
+std::string save_weather(const Weather& weather);
 
 struct LoadError {
     std::string message; // what is wrong and where, for people and the AI
@@ -443,6 +465,9 @@ struct LoadError {
 // Replaces `out` only on success. Unknown keys are errors (typos must not
 // silently drop data); missing optional keys take their defaults.
 std::optional<LoadError> load_scene(std::string_view text, Scene& out);
+// Every kit placement and tree foot must be in `cell`.
+std::optional<LoadError> load_cell_damage(std::string_view text, CellCoord cell, CellDamage& out);
+std::optional<LoadError> load_weather(std::string_view text, Weather& out);
 
 // --- Worlds streamed by cell ----------------------------------------------------
 //

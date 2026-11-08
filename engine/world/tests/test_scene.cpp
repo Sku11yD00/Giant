@@ -1,4 +1,5 @@
 #include "giant/world/scene.h"
+#include "giant/world/weather.h"
 
 #include "giant_test.h"
 
@@ -724,6 +725,84 @@ GIANT_TEST("world: kept damage saves and loads exactly in cells and scenes, sort
     scene.set_damage(c, {});
     GIANT_CHECK(scene.damage().empty() && scene.kept_kit(7) == nullptr && scene.take_changes().ids.size() == 1);
     GIANT_CHECK(!contains(save_scene(scene), "damage"));
+}
+
+GIANT_TEST("world: the game's damage shows over the kept, is never saved, and its text round trips") {
+    const CellCoord c{1, 0};
+    Scene scene;
+    Entity house;
+    house.id = 7;
+    house.shape = Shape::kit;
+    house.kit = "house";
+    house.transform.position = {70.5, 2.0, 10.25};
+    Kit kit;
+    kit.name = "house";
+    kit.pieces.resize(4);
+    scene.kits.push_back(kit);
+    scene.add(house);
+    scene.set_damage(c, some_damage());
+    (void)scene.take_changes();
+    // The game's: one piece down more than kept, the trees standing again (as the game has them).
+    CellDamage game = some_damage();
+    game.kits[0].pieces.push_back({2, {71.0, 0.2, 10.0}, Quat{}, {1.0f, 1.0f, 1.0f}});
+    game.trees.clear();
+    const u64 edits = scene.damage_edits();
+    scene.set_game_damage(c, game);
+    sort_damage(game);
+    GIANT_CHECK(scene.damage_edits() == edits + 1 && scene.take_changes().ids == std::vector<EntityId>{7});
+    GIANT_CHECK(scene.shown_damage_in(c) != nullptr && *scene.shown_damage_in(c) == game);
+    GIANT_CHECK(scene.kept_kit(7) != nullptr && scene.kept_kit(7)->pieces.size() == 3);
+    CellDamage kept = some_damage();
+    sort_damage(kept);
+    GIANT_CHECK(*scene.damage_in(c) == kept); // the kept stays as it was
+    GIANT_CHECK(scene.shown_damage_in({4, 4}) == nullptr);
+    // Never in the scene's (or a cell's) file; copied and moved with the scene.
+    Scene loaded;
+    GIANT_CHECK(!load_scene(save_scene(scene), loaded).has_value());
+    GIANT_CHECK(loaded.game_damage().empty() && loaded.kept_kit(7)->pieces.size() == 2);
+    Scene copy = scene;
+    GIANT_CHECK(copy.game_damage() == scene.game_damage() && copy.kept_kit(7)->pieces.size() == 3);
+    const Scene moved = std::move(copy);
+    GIANT_CHECK(moved.kept_kit(7)->pieces.size() == 3);
+    // The game's emptied: the kept shows again. A game record in another cell is found first.
+    (void)scene.take_changes();
+    scene.set_game_damage(c, {});
+    GIANT_CHECK(scene.game_damage().empty() && scene.kept_kit(7)->pieces.size() == 2);
+    GIANT_CHECK(scene.take_changes().ids == std::vector<EntityId>{7});
+    // Held with only trees: the kept house record is hidden, and its placement marked changed.
+    CellDamage only_trees = some_damage();
+    only_trees.kits.clear();
+    scene.set_game_damage(c, only_trees);
+    GIANT_CHECK(scene.kept_kit(7) == nullptr && scene.take_changes().ids == std::vector<EntityId>{7});
+    scene.set_game_damage(c, {});
+    GIANT_CHECK(scene.kept_kit(7) != nullptr && scene.take_changes().ids == std::vector<EntityId>{7});
+    CellDamage elsewhere = game;
+    elsewhere.trees.clear();
+    elsewhere.kits[0].position = {10.0, 0.0, 10.0};
+    scene.set_game_damage({0, 0}, elsewhere);
+    GIANT_CHECK(scene.kept_kit(7)->position.x == 10.0);
+    Transform placed;
+    placed.position = kept.kits[0].position;
+    placed.rotation = kept.kits[0].rotation;
+    placed.scale = kept.kits[0].scale;
+    GIANT_CHECK(scene.kept_kit(7, &placed) != nullptr && scene.kept_kit(7, &placed)->pieces.size() == 2);
+    (void)scene.take_changes();
+    scene.clear_game_damage();
+    GIANT_CHECK(scene.game_damage().empty() && scene.take_changes().ids.size() == 1);
+    scene.clear_game_damage(); // nothing
+    GIANT_CHECK(scene.take_changes().ids.empty());
+
+    // A cell's damage as text on its own, and the weather.
+    CellDamage back;
+    GIANT_CHECK(!load_cell_damage(save_cell_damage(some_damage()), c, back).has_value() && back == kept);
+    GIANT_CHECK(load_cell_damage(save_cell_damage(some_damage()), {2, 0}, back).has_value() && back == kept);
+    GIANT_CHECK(load_cell_damage("{\"kits\": [], \"oops\": 1}", c, back).has_value());
+    GIANT_CHECK(load_cell_damage("nope", c, back).has_value());
+    GIANT_CHECK(!load_cell_damage("{}", c, back).has_value() && back.empty());
+    const Weather rain = *weather_preset("rain");
+    Weather w;
+    GIANT_CHECK(!load_weather(save_weather(rain), w).has_value() && w == rain);
+    GIANT_CHECK(load_weather("{\"cloud_cover\": 7}", w).has_value() && w == rain);
 }
 
 GIANT_TEST("world: bad kept damage says what is wrong") {

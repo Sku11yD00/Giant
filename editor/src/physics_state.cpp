@@ -146,14 +146,14 @@ std::vector<sim::TreeSpot> PhysicsState::trees_of(const ScatterPlacer::Cell& pla
 }
 
 void PhysicsState::give(world::CellCoord cell, const ScatterPlacer::Cell& placed) {
-    const world::CellDamage* kept = m_scene_at != nullptr ? m_scene_at->damage_in(cell) : nullptr;
+    const world::CellDamage* kept = m_scene_at != nullptr ? m_scene_at->shown_damage_in(cell) : nullptr;
     m_forest.set_cell(cell, placed.serial, trees_of(placed), kept != nullptr ? kept->trees : std::vector<world::KeptTree>{});
 }
 
 void PhysicsState::follow_kept(const world::Scene& scene, u64* looked) {
     if (m_scatter == nullptr) return;
     const auto differs = [&](world::CellCoord c) {
-        const world::CellDamage* kept = scene.damage_in(c);
+        const world::CellDamage* kept = scene.shown_damage_in(c);
         const std::vector<world::KeptTree>* had = m_forest.records(c);
         const usize now = kept != nullptr ? kept->trees.size() : 0;
         if (had == nullptr) return now > 0;
@@ -172,8 +172,10 @@ void PhysicsState::follow_kept(const world::Scene& scene, u64* looked) {
             }
         }
         // Others (streamed in, or not placed yet): within the feed's budget, when placed.
-        for (const auto& [c, d] : scene.damage()) {
-            if (!d.trees.empty() && m_forest.records(c) == nullptr) m_kept_waiting.insert(c);
+        for (const world::Damage* layer : {&scene.damage(), &scene.game_damage()}) {
+            for (const auto& [c, d] : *layer) {
+                if (!d.trees.empty() && m_forest.records(c) == nullptr) m_kept_waiting.insert(c);
+            }
         }
     }
     std::erase_if(m_kept_waiting, [&](world::CellCoord c) {

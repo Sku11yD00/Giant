@@ -7,7 +7,7 @@ game        C# scripts, levels, materials, scatter graphs, weather presets
 editor      panels, play-in-editor, undo; uses everything below
 ai          command layer, MCP server, rule checks
 gameplay    game rules: items, inventories, weapon parts, crafting, loot (docs/game-plan.md)
-sim nav audio world  giants, destruction, NPCs, animation | walkable ground, paths | sound through the world | cells, streaming, landscape, scatter, weather
+sim nav audio save world  giants, destruction, NPCs, animation | walkable ground, paths | sound through the world | game save slots | cells, streaming, landscape, scatter, weather
 render      virtual geometry, voxel world, GI, materials, hair, clouds
 rhi geometry voxel  thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only) | voxel bricks, clipmap
 platform    windows, input, files (SDL3 underneath)
@@ -31,6 +31,7 @@ This table is the source of truth for `tools/check_architecture.py`.
 | sim | core, world |
 | nav | core, world |
 | audio | core |
+| save | core |
 | gameplay | core, world, sim |
 | script | core, world, sim |
 | ai | core, platform, rhi, anim, geometry, render, world, sim, script |
@@ -1482,6 +1483,64 @@ flying shot's flight is cut at the first thing its aim meets (a thin
 board it would go through, or a glance off, are not followed; a resolved
 shot is); the far ground past the terrain's tiles is not met; there is no
 Doppler, and wind does not carry sound.
+
+## Game saves (E4 part 1a)
+
+A game save is what a play made of the world, kept apart from the world:
+save_world's files (world.json, cells, kept damage) are never written by
+it. `engine/save` (core only) keeps slots; it knows nothing of the world,
+only text chunks by section name and by cell.
+
+A slot is a folder. `save.json`, its manifest, names the world it is of
+(its name and a 64-bit FNV-1a hash of its index), when it was saved, the
+play's own seconds, its generation G, and a chunk file for each section
+(`sections/<name>.<G>.json`: the player, the weather) and for each cell
+that holds anything (`cells/<x>_<z>.<G>.json`). A big world's save holds
+only the cells play reached, and a save after a load or a save writes only
+the chunks that changed; the rest are carried by name.
+
+A commit writes its chunks under a generation past every one the folder
+holds (so no name a manifest uses is ever written again), keeps the old
+manifest as `save.prev.json`, then writes `save.json` beside and renames
+it over: the rename is the commit. A crash at any point leaves the last
+whole save (with only partial or unnamed files more). Each file is
+flushed to the disk before it is renamed (fsync, FlushFileBuffers and a
+write-through move), and the folders after, so a power loss cannot leave
+a manifest naming chunks the disk never got. The manifest is read back
+before anything is written: a commit never writes one its own loader
+refuses. Opening falls back to `save.prev.json` when `save.json` is
+missing or bad, but never past a newer engine's save, which is not
+written over either. After the commit,
+files neither manifest names are cleaned away, and so are partial files.
+A base older than the slot (a stale writer) is refused, and so is a base
+from another slot (its files are not there). The manifest is strict:
+unknown keys, a newer format, numbers that are not whole or not in
+range, bad names (lowercase letters, digits, '-' and '_', so folders that
+ignore case cannot make two one, and no Windows device names), and file
+names outside the
+slot's folders or naming another cell are errors, so a save from
+elsewhere can never reach outside its folder. Commits, opens and reads
+block on the disk: the caller runs them on a job (rule 9). Limits: 2^20
+cells and 256 sections a slot, 64 MiB a chunk.
+
+The world's side is the game's damage layer (`Scene::set_game_damage`,
+`game_damage_in`, `clear_game_damage`, `shown_damage_in`): damage by cell,
+shown over the kept damage (a cell the game holds is the game's, whole),
+never saved with the scene or a world, copied and moved with the scene.
+`kept_kit` finds the game's records first, then the kept records of cells
+the game holds nothing of; the forest's feed and its follower read
+`shown_damage_in`, so a game's felled trees lie and its broken buildings
+stand broken exactly as kept damage does, within the same budgets.
+Holding or freeing a cell marks its kept records' placements changed too
+(they are hidden or shown again). An empty cell is not held: a game breaks
+more than the world kept, never less. Streaming is untouched: it reads and
+compares the kept damage only, so a cell with game damage unloads as usual
+and the game's stays held. keep_damage and clear_damage are refused while
+a game's damage is shown (what the bodies and trees show is not the
+world's then); get_physics counts the game's apart (`kept.game`).
+`save_cell_damage` / `load_cell_damage` and `save_weather` /
+`load_weather` give a cell's damage and the weather as text of their own
+(a save's chunks). Part 1b brings the editor's save_game and load_game.
 
 ## Window events (known limit)
 
