@@ -317,7 +317,8 @@ public:
 
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance) const;
     // Only bodies `accept` takes (called with each candidate's id and user
-    // value, under the body's lock: it must not call back into the world),
+    // value, under the body's lock: it must not call back into the world, but for
+    // is_character_body, a plain lookup),
     // and with fixed_only only fixed ones: what something can rest on for good.
     // With `body`, only that body; and with `part` too, only that part of
     // it (a compound's: RayHit::part), the others passed through.

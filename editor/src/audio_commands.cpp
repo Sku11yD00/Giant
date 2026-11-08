@@ -192,7 +192,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
         {"get_audio",
          "The sound: `device` (the speakers' driver; empty: none, the mix runs silent), the sounds by name, "
          "the listener (the camera), the mixer (`voices` playing, `taps` in them, `frames` rendered, "
-         "`dropped` plays, voices `stolen` (cut short for a louder play), `peak` of the last render before the limiter, `reverb_seconds`), sounds `played` "
+         "`dropped` plays, voices `stolen` (cut short for a play no quieter than what they had left), `peak` of the last render before the limiter, `reverb_seconds`), sounds `played` "
          "and the last one's `heard` (as play_sound returns).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}}, false,
          [&state](const Json&, CommandContext&) {

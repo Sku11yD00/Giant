@@ -145,6 +145,36 @@ GIANT_TEST("audio mixer: voices whose loud part is over give way to new ones (su
     GIANT_CHECK(first_over(out, 1, 0.5f) >= 0); // heard
 }
 
+GIANT_TEST("audio mixer: a voice cut short before it was heard makes no sound; many cut at once all fade") {
+    Mixer m;
+    m.set_listener({1, 0, 0}, {0, 1, 0});
+    const SoundId tone = m.add_sound(synth_tone(300.0f, 1.0f, 0.5f));
+    m.play({tone, {Tap{0.0, 4.0f, 20000.0f, {-1, 0, 0}}}, 0.0f, 1.0f}); // hard left, loud, then over
+    render(m, 1.1);
+    // 65 at once (one batch), hard right: the 65th takes a voice none has heard yet.
+    for (usize k = 0; k <= k_max_voices; ++k) m.play({tone, {Tap{0.0, 0.5f, 20000.0f, {1, 0, 0}}}, 0.0f, 1.0f});
+    std::vector<float> out = render(m, 0.05);
+    float left = 0.0f;
+    for (usize f = 0; f < out.size() / 2; ++f) left = std::max(left, std::fabs(out[f * 2]));
+    GIANT_CHECK(left < 1e-3f);
+    // A batch cutting 12 short (heard ones), of a steady level: it falls smoothly, never by a voice at once.
+    Mixer d;
+    d.set_listener({1, 0, 0}, {0, 1, 0});
+    Sound level;
+    level.samples.assign(k_sample_rate, 0.01f);
+    const SoundId steady = d.add_sound(std::move(level));
+    for (usize k = 0; k < k_max_voices; ++k) d.play({steady, {Tap{0.0, 0.5f, 20000.0f, {1, 0, 0}}}, 0.0f, 1.0f});
+    render(d, 0.05);
+    // Their own sound starts 10 ms on, once the cut ones have faded.
+    for (usize k = 0; k < 12; ++k) d.play({steady, {Tap{0.01, 0.6f, 20000.0f, {1, 0, 0}}}, 0.0f, 1.0f});
+    out = render(d, 0.008);
+    GIANT_CHECK(d.stats().stolen == 12);
+    GIANT_CHECK(std::fabs(out[1] - 0.32f) < 1e-3f && std::fabs(out[out.size() - 1] - 0.26f) < 1e-3f);
+    float step = 0.0f;
+    for (usize f = 1; f < out.size() / 2; ++f) step = std::max(step, std::fabs(out[f * 2 + 1] - out[f * 2 - 1]));
+    GIANT_CHECK(step < 0.001f); // a cut voice would step by 0.005
+}
+
 GIANT_TEST("audio mixer: a huge sample never makes the output NaN; a dry play leaves the tail's length") {
     Mixer m;
     Sound huge;
@@ -169,7 +199,7 @@ GIANT_TEST("audio mixer: a long tail dies to silence (no endless denormals)") {
     m.play({shot, {Tap{0.0, 1.0f}}, 1.0f, 0.5f});
     std::vector<float> out = render(m, 20.0);
     usize nonzero = 0;
-    for (usize k = out.size() - 9600; k < out.size(); ++k) nonzero += out[k] != 0.0f ? 1 : 0;
+    for (usize k = out.size() - 9600; k < out.size(); ++k) nonzero += out[k] != 0.0f ? 1u : 0u;
     GIANT_CHECK(nonzero == 0); // the last 0.1 s exactly 0
 }
 
@@ -273,9 +303,27 @@ GIANT_TEST("audio propagation: near echoes group by the first of them; too loud 
     for (const Tap& t : p.taps) loudest = std::max(loudest, t.gain);
     GIANT_CHECK(std::fabs(loudest - 4.0f) < 1e-4f);
     GIANT_CHECK(std::fabs(p.taps[1].gain / p.taps[0].gain - h.taps[1].gain / h.taps[0].gain) < 1e-4f);
-    // No two kept echoes closer than the merge window... and none wider than it.
-    for (usize a = 1; a < h.taps.size(); ++a)
-        for (usize b = a + 1; b < h.taps.size(); ++b) GIANT_CHECK(std::fabs(h.taps[a].delay - h.taps[b].delay) > 0.0);
+
+    // Eight echoes 5 ms apart, each twice as loud as the one before: grouped by the first of each
+    // 12 ms (three groups), not chained after the loudest into one.
+    const DVec3 here{0, 0, 0};
+    u32 echo_rays = 0;
+    const RayCast staircase = [&](const DVec3& from, const Vec3& dir, double) {
+        RayHit r;
+        if (!(from == here)) return r; // the listener sees every spot
+        const u32 k = echo_rays++;
+        const double d = 10.0 + 0.8575 * k, d7 = 10.0 + 0.8575 * 7;
+        r.hit = true;
+        r.distance = d;
+        r.normal = -dir;
+        r.hardness = static_cast<float>(std::pow(2.0, static_cast<double>(k) - 7.0) * (d / d7) * (d / d7));
+        return r;
+    };
+    EchoSettings eight;
+    eight.rays = 8;
+    const Heard g = trace(here, here, staircase, eight);
+    GIANT_CHECK(echo_rays == 8);
+    GIANT_CHECK(g.taps.size() == 1 + 3);
 }
 
 GIANT_TEST("audio propagation: a hard small room rings longer and louder than a big open valley") {

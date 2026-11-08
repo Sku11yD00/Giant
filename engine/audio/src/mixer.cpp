@@ -15,7 +15,7 @@ constexpr u32 k_chunk = 1024;                // frames rendered at a time
 constexpr usize k_sound_reserve = 4096;      // sounds the audio thread holds before it must grow
 constexpr float k_min_reverb = 0.1f, k_max_reverb = 12.0f;
 constexpr u32 k_fade_frames = 240;           // 5 ms: a voice cut short fades out over this
-constexpr usize k_max_fading = 8;
+constexpr usize k_max_fading = k_max_voices; // as many as one batch of plays can cut short
 constexpr float k_tiny = 1e-20f;             // below this a decaying state is 0 (no denormals)
 
 float lowpass_coefficient(float hz) {
@@ -229,6 +229,7 @@ void Mixer::play(Play play) {
     p.reverb_send = std::isfinite(play.reverb_send) ? std::clamp(play.reverb_send * scale, 0.0f, 4.0f) : 0.0f;
     p.reverb_seconds = std::isfinite(play.reverb_seconds) ? std::clamp(play.reverb_seconds, k_min_reverb, k_max_reverb)
                                                           : 1.0f;
+    p.loudness = std::max(p.loudness, p.reverb_send); // as Voice::remaining weighs it
     if (p.count == 0 && p.reverb_send <= 0.0f) return;
     std::lock_guard<std::mutex> lock(m_shared->mutex);
     if (m_shared->pending_count == k_max_pending) {
@@ -296,14 +297,15 @@ void Mixer::start(const Pending& p) {
             return;
         }
         m_stat_stolen.fetch_add(1, std::memory_order_relaxed);
-        // It fades out over 5 ms rather than stopping (a click).
-        Voice* fade = &m_fading[0];
-        for (Voice& f : m_fading)
-            if (!f.active || f.fade_end < fade->fade_end) fade = &f;
-        *fade = *quietest;
-        fade->fade_end = m_clock + k_fade_frames;
-        fade->end = std::min(fade->end, fade->fade_end);
-        fade->reverb_send = 0.0f;
+        // It fades out over 5 ms rather than stopping (a click); one not heard yet just goes.
+        if (quietest->started != m_clock) {
+            Voice* fade = &m_fading[0];
+            for (Voice& f : m_fading)
+                if (!f.active || (fade->active && f.fade_end < fade->fade_end)) fade = &f;
+            *fade = *quietest;
+            fade->fade_end = m_clock + k_fade_frames;
+            fade->end = std::min(fade->end, fade->fade_end);
+        }
         slot = quietest;
     }
     Voice& v = *slot;
@@ -326,6 +328,7 @@ void Mixer::start(const Pending& p) {
         ts.direction = t.direction;
         ts.gain = t.gain;
         ts.panned = false;
+        ts.left = ts.right = ts.was_left = ts.was_right = 0.0f;
         v.end = std::max(v.end, ts.start + length_frames);
         first = std::min(first, t.delay);
     }
@@ -358,8 +361,12 @@ void Mixer::mix(Voice& v, u64 from, u64 to, u64 render_from, u32 render_frames, 
         }
     }
     if (v.reverb_send > 0.0f && v.reverb_start < to && v.reverb_start + len > from) {
-        const u64 a = std::max(from, v.reverb_start), b = std::min(to, v.reverb_start + len);
-        for (u64 c = a; c < b; ++c) m_send[c - from] += samples[c - v.reverb_start] * v.reverb_send;
+        const u64 a = std::max(from, v.reverb_start),
+                  b = std::min({to, v.reverb_start + len, v.fade_end ? v.fade_end : to});
+        for (u64 c = a; c < b; ++c) {
+            const float g = v.fade_end != 0 ? static_cast<float>(v.fade_end - c) / static_cast<float>(k_fade_frames) : 1.0f;
+            m_send[c - from] += samples[c - v.reverb_start] * v.reverb_send * g;
+        }
     }
     if (v.end <= to) v.active = false;
 }

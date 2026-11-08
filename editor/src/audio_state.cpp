@@ -109,6 +109,17 @@ std::optional<audio::RayHit> march_terrain(const world::Terrain& terrain, const 
                     if (above(mid)) hi = mid;
                     else lo = mid;
                 }
+                // Over the ground at the edge: it rises after it; halve onto it there.
+                if (const std::optional<double> edge = above(hi); edge && *edge >= 0.0) {
+                    lo = hi;
+                    hi = next_t;
+                    for (int i = 0; i < 16; ++i) {
+                        const double mid = 0.5 * (lo + hi);
+                        const std::optional<double> h = above(mid);
+                        if (h && *h < 0.0) hi = mid;
+                        else lo = mid;
+                    }
+                }
             }
             return ground_hit(terrain, from, direction, hi);
         }
