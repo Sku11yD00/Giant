@@ -31,7 +31,10 @@ constexpr EntityId k_max_entity_id = (u64{1} << 53) - 1;
 // square plane facing +Y. `mesh` draws the imported file in Entity::mesh.
 // `kit` places every piece of the kit named in Entity::kit. `decal` stamps
 // its material onto the surfaces inside its box (1 m, scaled), from above.
-enum class Shape { cube, sphere, plane, mesh, kit, decal };
+// `cloth` hangs a sheet of cloth (Entity::cloth) from its origin, which the
+// wind blows about (giant/sim/cloth.h); entities only, not kit pieces or
+// scatter items.
+enum class Shape { cube, sphere, plane, mesh, kit, decal, cloth };
 
 // Longest Entity::mesh path, in bytes of UTF-8.
 constexpr usize k_max_mesh_path_bytes = 1024;
@@ -53,6 +56,25 @@ struct DecalSettings {
     float softness = 0.1f; // edge fade, 0 (crisp) to 1, a fraction of the stamp
     u32 seed = 0;          // varies splat and cracks
     bool operator==(const DecalSettings&) const = default;
+};
+
+// A hanging sheet of cloth (Shape::cloth): a flag, a banner, a curtain, a
+// sail, washing on a line. It hangs in its entity's x-y plane from the
+// entity's origin, `width` across (x) and `height` down (-y), its scale
+// unused; what holds it is `pin`: its top edge (a banner, a curtain), its
+// two top corners (washing on a line, an awning) or its left edge (a flag
+// on a pole). Lighter cloth blows about more; stiffer cloth folds less.
+enum class ClothPin { top, corners, left };
+const char* to_string(ClothPin pin);
+std::optional<ClothPin> cloth_pin_from_string(std::string_view name);
+
+struct ClothSettings {
+    float width = 1.0f;     // metres, 0.05 to 20
+    float height = 1.5f;    // metres, 0.05 to 20
+    ClothPin pin = ClothPin::top;
+    float weight = 0.3f;    // kilograms per square metre, 0.02 (silk) to 5 (heavy canvas)
+    float stiffness = 0.5f; // 0 (hangs in soft folds) to 1 (stiff)
+    bool operator==(const ClothSettings&) const = default;
 };
 
 struct Transform {
@@ -121,6 +143,7 @@ struct Entity {
     std::string kit;
     Material material; // unused by kits (their pieces have their own)
     DecalSettings decal; // used when shape is `decal`
+    ClothSettings cloth; // used when shape is `cloth` (kept when the shape changes)
     bool visible = true;
     BodyKind body = BodyKind::fixed;
     float mass = 0.0f; // kilograms, when dynamic; 0: from its size (as water)

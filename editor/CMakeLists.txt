@@ -2,6 +2,8 @@ add_executable(giant_editor
   src/main.cpp
   src/animation_commands.cpp
   src/animation_state.cpp
+  src/cloth_commands.cpp
+  src/cloth_state.cpp
   src/hit_targets.cpp
   src/editor_commands.cpp
   src/frame_times.cpp
@@ -100,11 +102,12 @@ endif()
 # The editor's commands without a window or GPU.
 if(GIANT_BUILD_TESTS)
   add_executable(giant_editor_tests tests/test_scene_commands.cpp tests/test_kits.cpp tests/test_scene_cells.cpp
-                 tests/test_world_streaming.cpp tests/test_terrain.cpp tests/test_far_ground.cpp tests/test_scatter.cpp tests/test_weather.cpp tests/test_physics.cpp tests/test_animation.cpp
+                 tests/test_world_streaming.cpp tests/test_terrain.cpp tests/test_far_ground.cpp tests/test_scatter.cpp tests/test_weather.cpp tests/test_physics.cpp tests/test_animation.cpp tests/test_cloth.cpp
                  src/scene_commands.cpp src/terrain_commands.cpp src/terrain_meshes.cpp src/far_ground.cpp src/terrain_brush_tool.cpp src/viewport_camera.cpp
                  src/scatter_placer.cpp src/scatter_commands.cpp src/weather_state.cpp src/weather_commands.cpp src/physics_state.cpp src/physics_commands.cpp src/play_state.cpp
                  src/mesh_library.cpp src/scene_render.cpp src/world_streaming.cpp src/frame_times.cpp
-                 src/animation_state.cpp src/animation_commands.cpp src/hit_targets.cpp)
+                 src/animation_state.cpp src/animation_commands.cpp src/hit_targets.cpp src/cloth_state.cpp
+                 src/cloth_commands.cpp)
   target_link_libraries(giant_editor_tests PRIVATE giant::core giant::platform giant::rhi giant::geometry
                         giant::render giant::world giant::sim giant::ai giant::test_main)
   target_include_directories(giant_editor_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/geometry/tests) # gltf_test_files.h

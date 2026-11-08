@@ -1174,6 +1174,52 @@ walks the frame's instances (a byte per material says which sway, so still
 ones cost a load and a test); a kit's pieces each sway about their own
 origin, so a tree should be one mesh with its foot at its origin.
 
+## Cloth (E1 part 2)
+
+`world::Shape::cloth` hangs a sheet from its entity's origin, in the
+entity's x-y plane (`ClothSettings`: `width` across, `height` down, `pin`
+top edge, top corners or left edge, `weight` per square metre,
+`stiffness`); kit pieces and scatter items cannot be cloth, and the
+entity's scale is unused. `giant/sim/cloth.h` moves it: a grid of points
+about 0.15 m apart (3 to 32 a side, so at most 1024: the skinned meshes'
+joint limit) joined by springs along the grid, across each square and over
+two points (softer as `stiffness` falls), with position-based dynamics:
+a Verlet step under gravity and the wind, then the springs' lengths put
+back 6 times. Each sheet is simulated in its own space (wind and gravity
+turned into it), so moving its entity moves it whole. The wind is
+`wind_at` where it hangs (the gusts the trees show); it pushes each point
+along its normal with the relative wind's normal part squared (a flat
+plate), a little along its face, and in ripples that run away from what
+holds it on the flutter clock, so a storm throws it far harder and faster
+than a breeze and heavier cloth moves less. No point moves more than half
+the grid's spacing a step, so even a 60 m/s storm never tears the grid
+through itself; a sheet whose numbers stop being finite is put back at
+rest (`resets`).
+
+Work is bounded (rule 9): the nearest `max_simulated` (32) sheets within
+`distance` (60 m) of the camera move, at most `max_points` (8192) points
+between them (the nearest always), in fixed 1/60 s steps, at most 4 a
+frame; the rest hold their last pose. A sheet that has moved less than
+0.02 mm a step for a second with no wind sleeps until wind, a push or its
+entity moves it. 32 banners of 112 points cost about 1 ms of one core a
+frame; the editor spreads sheets over three workers.
+
+The editor's `ClothState` follows the scene's changes before the scene
+frame is built (as the animation does), makes each sheet its own skinned
+mesh (`cloth_mesh`: the grid's points at rest, front and back faces, each
+vertex weighted wholly to its point, so the joints are the points; at most
+256, a few a frame) and, after the weather, steps the sheets and hands
+the renderer the pose of each that moved: per point, a matrix from where
+it rests to where it is, turned to its patch's frame (along the grid and
+its normal). The renderer draws it as any skinned mesh: posed on the GPU,
+culling spheres refit, shadows drawn again where it moved; it is never
+left to the far field and the voxel world does not hold it. A cloth entity
+draws nothing until its mesh is loaded. `Cloths::push` (the `push_cloth`
+command) gives every point near a place a change of speed, less towards
+the edge: blasts and shots, wired to them with the hanging objects (E1
+part 3). Known limits: cloth passes through what it hangs against (no
+collision yet), and a far sheet holds still rather than waving.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

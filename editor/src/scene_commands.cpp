@@ -89,6 +89,11 @@ Json entity_json(const Entity& e) {
         e.decal.softness != none.softness || e.decal.seed != none.seed) {
         j["decal"] = decal_json(e.decal); // kept when the shape changes, as mesh and kit are
     }
+    if (e.shape == world::Shape::cloth || !(e.cloth == world::ClothSettings{})) {
+        const world::ClothSettings& c = e.cloth; // kept when the shape changes, as the decal is
+        j["cloth"] = {{"width", c.width},   {"height", c.height},       {"pin", world::to_string(c.pin)},
+                      {"weight", c.weight}, {"stiffness", c.stiffness}};
+    }
     return j;
 }
 
@@ -121,12 +126,13 @@ Json entity_properties() {
     return {
         {"name", {{"type", "string"}, {"maxLength", 128}}},
         {"shape",
-         {{"enum", {"cube", "sphere", "plane", "mesh", "kit", "decal"}},
+         {{"enum", {"cube", "sphere", "plane", "mesh", "kit", "decal", "cloth"}},
           {"description", "cube (1 m), sphere (1 m wide), plane (1 m square facing up), mesh "
                           "(the file in `mesh`), kit (every piece of the kit named in `kit`; "
-                          "create_kit makes kits), or decal (stamps its colour and roughness "
+                          "create_kit makes kits), decal (stamps its colour and roughness "
                           "onto the surfaces inside its 1 m box, scaled, from above; see "
-                          "`decal`). Default cube."}}},
+                          "`decal`), or cloth (a sheet hanging from its origin that the wind "
+                          "blows about: a flag, banner, curtain, washing; see `cloth`). Default cube."}}},
         {"kit",
          {{"type", "string"},
           {"minLength", 1},
@@ -149,6 +155,23 @@ Json entity_properties() {
           {"description", "Decal settings (shape decal). The box's scale is its size: x and z "
                           "the stamp, y how deep it reaches. Rotate it to stamp walls. Uses "
                           "base_color, roughness, metallic and emissive."}}},
+        {"cloth",
+         {{"type", "object"},
+          {"additionalProperties", false},
+          {"properties",
+           {{"width", number(0.05, 20, "Metres across (its x). Default 1.")},
+            {"height", number(0.05, 20, "Metres down from its origin (its -y). Default 1.5.")},
+            {"pin",
+             {{"enum", {"top", "corners", "left"}},
+              {"description", "What holds it: its top edge (a banner, a curtain; the default), its two top "
+                              "corners (washing on a line, an awning) or its left edge (a flag on a pole)."}}},
+            {"weight", number(0.02, 5, "Kilograms per square metre: 0.05 silk, 0.3 a flag (the default), 1 to 2 "
+                                       "canvas, 5 heavy tarpaulin. Lighter blows about more.")},
+            {"stiffness", number(0, 1, "0 hangs in soft folds, 1 stiff. Default 0.5.")}}},
+          {"description", "Cloth settings (shape cloth). It hangs in the entity's x-y plane from its origin, "
+                          "rotated with it; scale is unused. The weather's wind blows it (harder and faster in a "
+                          "storm) within 60 m of the camera; farther off it holds still. Uses base_color, "
+                          "roughness and metallic; seen from both sides."}}},
         {"mesh",
          {{"type", "string"},
           {"minLength", 1},
@@ -214,6 +237,16 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         e.decal.opacity = d.value("opacity", e.decal.opacity);
         e.decal.softness = d.value("softness", e.decal.softness);
         e.decal.seed = d.value("seed", e.decal.seed);
+    }
+    if (args.contains("cloth")) {
+        const Json& c = args["cloth"];
+        e.cloth.width = c.value("width", e.cloth.width);
+        e.cloth.height = c.value("height", e.cloth.height);
+        if (c.contains("pin")) {
+            e.cloth.pin = world::cloth_pin_from_string(c["pin"].get<std::string>()).value_or(e.cloth.pin);
+        }
+        e.cloth.weight = c.value("weight", e.cloth.weight);
+        e.cloth.stiffness = c.value("stiffness", e.cloth.stiffness);
     }
     if (args.contains("position")) e.transform.position = dvec3_from(args["position"]);
     if (args.contains("rotation")) {
@@ -569,6 +602,7 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
     Json piece = entity_props;
     piece.erase("kit");
     piece.erase("visible");
+    piece.erase("cloth");
     piece["shape"]["enum"] = {"cube", "sphere", "plane", "mesh", "decal"};
     piece["shape"]["description"] = "As for entities; kits do not nest.";
     piece["position"]["description"] = "Relative to the kit's origin, metres.";
@@ -659,6 +693,10 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
                      if (e->shape == world::Shape::kit) {
                          return CommandResult::failure("entity " + std::to_string(id) +
                                                        " is a kit placement; kits do not nest");
+                     }
+                     if (e->shape == world::Shape::cloth) {
+                         return CommandResult::failure("entity " + std::to_string(id) +
+                                                       " is cloth, which hangs from entities alone");
                      }
                      if (std::find(sources.begin(), sources.end(), id) == sources.end()) {
                          sources.push_back(id);

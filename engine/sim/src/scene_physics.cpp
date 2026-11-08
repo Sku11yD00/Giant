@@ -95,6 +95,7 @@ bool add_part(world::Shape shape, const Vec3& scale, const Vec3& offset, const Q
     case world::Shape::mesh:
     case world::Shape::kit:
     case world::Shape::decal:
+    case world::Shape::cloth: // moved by the wind, not bodies (giant/sim/cloth.h)
         return false;
     }
     return false;
@@ -861,7 +862,7 @@ ScenePhysicsStats ScenePhysics::stats() const {
             ++s.entity_bodies;
             s.dynamic_bodies += t.dynamic ? 1u : 0u;
         } else if (t.look.body == world::BodyKind::none || t.look.shape == world::Shape::mesh ||
-                   t.look.shape == world::Shape::decal) {
+                   t.look.shape == world::Shape::decal || t.look.shape == world::Shape::cloth) {
             ++s.not_colliding;
         } else {
             ++s.refused;

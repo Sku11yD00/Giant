@@ -125,7 +125,7 @@ GIANT_TEST("world: loading reports what is wrong and changes nothing") {
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"name": "x"}]})",
                 "entities[0].id is missing");
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shape": "cone"}]})",
-                "entities[0].shape must be cube, sphere, plane, mesh, kit or decal");
+                "entities[0].shape must be cube, sphere, plane, mesh, kit, decal or cloth");
     check_error(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1}, {"id": 1}]})",
                 "entities[1].id 1 is used twice");
     check_error(R"({"format": "giant-scene", "version": 1,
@@ -330,6 +330,38 @@ GIANT_TEST("world: a material's wind saves and loads, and only when set") {
     Scene bad;
     const auto error = load_scene(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"sway": 9}}]})", bad);
     GIANT_CHECK(error.has_value() && contains(error->message, "sway must be from 0 to 4"));
+}
+
+GIANT_TEST("world: cloth saves and loads, only when set, and hangs from entities alone") {
+    Scene scene;
+    Entity flag = named("Flag");
+    flag.shape = Shape::cloth;
+    flag.cloth.width = 2.0f;
+    flag.cloth.height = 1.25f;
+    flag.cloth.pin = ClothPin::left;
+    flag.cloth.weight = 0.1f;
+    flag.cloth.stiffness = 0.2f;
+    scene.add(flag);
+    Entity plain = named("Banner");
+    plain.shape = Shape::cloth; // the default sheet: still written (it is cloth)
+    scene.add(plain);
+    scene.add(named("Rock"));
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(text.find("\"cloth\": {") != text.rfind("\"cloth\": {")); // the flag's and the banner's
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->shape == Shape::cloth && loaded.find(1)->cloth == flag.cloth);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->cloth == ClothSettings{});
+    GIANT_CHECK(loaded.find(3) && loaded.find(3)->cloth == ClothSettings{});
+    GIANT_CHECK(save_scene(loaded) == text);
+    for (const char* bad_scene :
+         {R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shape": "cloth", "cloth": {"pin": "bottom"}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "shape": "cloth", "cloth": {"width": 50}}]})",
+          R"({"format": "giant-scene", "version": 1, "kits": [{"name": "k", "pieces": [{"shape": "cloth"}]}]})",
+          R"({"format": "giant-scene", "version": 1, "scatter": [{"name": "s", "items": [{"shape": "cloth"}]}]})"}) {
+        Scene bad;
+        GIANT_CHECK(load_scene(bad_scene, bad).has_value());
+    }
 }
 
 GIANT_TEST("world: a mesh entity's animation saves and loads, and only when set") {

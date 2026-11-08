@@ -34,14 +34,34 @@ const char* to_string(Shape shape) {
     case Shape::mesh: return "mesh";
     case Shape::kit: return "kit";
     case Shape::decal: return "decal";
+    case Shape::cloth: return "cloth";
     }
     return "cube";
 }
 
 std::optional<Shape> shape_from_string(std::string_view name) {
-    for (const Shape s : {Shape::cube, Shape::sphere, Shape::plane, Shape::mesh, Shape::kit, Shape::decal}) {
+    for (const Shape s : {Shape::cube, Shape::sphere, Shape::plane, Shape::mesh, Shape::kit, Shape::decal,
+                          Shape::cloth}) {
         if (name == to_string(s)) {
             return s;
+        }
+    }
+    return std::nullopt;
+}
+
+const char* to_string(ClothPin pin) {
+    switch (pin) {
+    case ClothPin::top: return "top";
+    case ClothPin::corners: return "corners";
+    case ClothPin::left: return "left";
+    }
+    return "top";
+}
+
+std::optional<ClothPin> cloth_pin_from_string(std::string_view name) {
+    for (const ClothPin p : {ClothPin::top, ClothPin::corners, ClothPin::left}) {
+        if (name == to_string(p)) {
+            return p;
         }
     }
     return std::nullopt;
@@ -597,6 +617,12 @@ Json terrain_json(const Terrain& t) {
 Json entity_json(const Entity& e) {
     Json entity = {{"id", e.id}, {"name", e.name}, {"visible", e.visible}};
     write_look(entity, e.shape, e.mesh, e.kit, e.transform, e.material, e.decal);
+    // Kept when the shape changes (as the decal is), so written whenever set.
+    if (e.shape == Shape::cloth || !(e.cloth == ClothSettings{})) {
+        const ClothSettings& c = e.cloth;
+        entity["cloth"] = {{"width", c.width},   {"height", c.height},       {"pin", to_string(c.pin)},
+                           {"weight", c.weight}, {"stiffness", c.stiffness}};
+    }
     // Only when not the default, so older scenes read and write the same.
     if (e.body != BodyKind::fixed) entity["body"] = to_string(e.body);
     if (e.mass != 0.0f) entity["mass"] = e.mass;
@@ -924,11 +950,13 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
     std::string name = to_string(shape);
     r.string("shape", name);
     if (r.ok()) {
-        if (const auto parsed = shape_from_string(name); parsed && (kit != nullptr || *parsed != Shape::kit)) {
+        if (const auto parsed = shape_from_string(name);
+            parsed && (kit != nullptr || (*parsed != Shape::kit && *parsed != Shape::cloth))) {
             shape = *parsed;
         } else {
-            r.fail("shape", kit != nullptr ? "must be cube, sphere, plane, mesh, kit or decal"
-                                           : "must be cube, sphere, plane, mesh or decal (kits do not nest)");
+            r.fail("shape", kit != nullptr ? "must be cube, sphere, plane, mesh, kit, decal or cloth"
+                                           : "must be cube, sphere, plane, mesh or decal (kits do not nest, "
+                                             "and cloth hangs from entities alone)");
         }
     }
     r.string("mesh", mesh, false, k_max_mesh_path_bytes);
@@ -991,6 +1019,23 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
     r.string("name", e.name, false, k_max_name_bytes);
     r.boolean("visible", e.visible);
     read_look(r, path, e.shape, e.mesh, &e.kit, e.transform, e.material, e.decal, error);
+    if (const Json* c = r.get("cloth", false); c != nullptr && r.ok()) {
+        Reader cr(*c, path + ".cloth", error);
+        cr.number("width", e.cloth.width, 0.05, 20);
+        cr.number("height", e.cloth.height, 0.05, 20);
+        std::string pin = to_string(e.cloth.pin);
+        cr.string("pin", pin);
+        if (cr.ok()) {
+            if (const auto parsed = cloth_pin_from_string(pin)) {
+                e.cloth.pin = *parsed;
+            } else {
+                cr.fail("pin", "must be top, corners or left");
+            }
+        }
+        cr.number("weight", e.cloth.weight, 0.02, 5);
+        cr.number("stiffness", e.cloth.stiffness, 0, 1);
+        cr.finish();
+    }
     if (const Json* v = r.get("body", false); v != nullptr && r.ok()) {
         const std::optional<BodyKind> body = v->is_string() ? body_from_string(v->get<std::string>()) : std::nullopt;
         if (body) {
@@ -1333,7 +1378,7 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
             ir.string("shape", shape);
             if (ir.ok()) {
                 const auto parsed = shape_from_string(shape);
-                if (parsed && *parsed != Shape::decal) {
+                if (parsed && *parsed != Shape::decal && *parsed != Shape::cloth) {
                     item.shape = *parsed;
                 } else {
                     ir.fail("shape", "must be cube, sphere, plane, mesh or kit");

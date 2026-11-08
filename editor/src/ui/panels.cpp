@@ -279,6 +279,11 @@ void EditorPanels::draw_outliner() {
                       {"decal", {{"shape", "splat"}}}});
     }
     ImGui::SameLine();
+    if (ImGui::SmallButton("+ Cloth")) {
+        // A red banner hanging from its top edge.
+        create_ahead({{"shape", "cloth"}, {"base_color", {0.6, 0.08, 0.06}}, {"roughness", 0.8}});
+    }
+    ImGui::SameLine();
     ImGui::BeginDisabled(m_state.scene.find(m_state.selected) == nullptr);
     if (ImGui::SmallButton("Delete")) {
         run("delete_entities", {{"ids", {m_state.selected}}});
@@ -364,6 +369,7 @@ void EditorPanels::draw_properties() {
     std::vector<const char*> shapes = {"cube", "sphere", "plane", "mesh"};
     if (kits) shapes.push_back("kit");
     shapes.push_back("decal");
+    shapes.push_back("cloth");
     const char* current = world::to_string(e->shape);
     int shape = 0;
     for (usize i = 0; i < shapes.size(); ++i) {
@@ -418,6 +424,29 @@ void EditorPanels::draw_properties() {
         const u32 step = 1;
         if (ImGui::InputScalar("Seed", ImGuiDataType_U32, &seed, &step)) {
             set("decal", {{"seed", seed}});
+        }
+    }
+    if (e->shape == world::Shape::cloth) {
+        float width = e->cloth.width;
+        if (ImGui::DragFloat("Width", &width, 0.01f, 0.05f, 20.0f, "%.2f m")) {
+            set("cloth", {{"width", std::clamp(width, 0.05f, 20.0f)}});
+        }
+        float height = e->cloth.height;
+        if (ImGui::DragFloat("Height", &height, 0.01f, 0.05f, 20.0f, "%.2f m")) {
+            set("cloth", {{"height", std::clamp(height, 0.05f, 20.0f)}});
+        }
+        int pin = static_cast<int>(e->cloth.pin);
+        const char* const pins[] = {"top", "corners", "left"};
+        if (ImGui::Combo("Held by", &pin, pins, IM_ARRAYSIZE(pins))) {
+            set("cloth", {{"pin", pins[pin]}});
+        }
+        float weight = e->cloth.weight;
+        if (ImGui::SliderFloat("Weight", &weight, 0.02f, 5.0f, "%.2f kg/m2", ImGuiSliderFlags_Logarithmic)) {
+            set("cloth", {{"weight", std::clamp(weight, 0.02f, 5.0f)}});
+        }
+        float stiffness = e->cloth.stiffness;
+        if (ImGui::SliderFloat("Stiffness", &stiffness, 0.0f, 1.0f)) {
+            set("cloth", {{"stiffness", std::clamp(stiffness, 0.0f, 1.0f)}});
         }
     }
     if (e->shape == world::Shape::mesh || !e->mesh.empty()) {

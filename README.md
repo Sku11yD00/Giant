@@ -291,6 +291,14 @@ Open-world systems:
   `wind_distance` (150 m), and the shadow pages under what sways are
   drawn again in turn so the shadows move too (`get_weather` shows the
   wind).
+- E1b: cloth. A `cloth` entity hangs a sheet (a flag, banner, curtain,
+  washing on a line) from its top edge, its top corners or its left edge;
+  the same gusty wind blows it about, pushing on its face with the speed
+  squared, so a storm throws it far harder and faster than a breeze, and
+  ripples run away from what holds it. The nearest 32 within 60 m move
+  (spread over worker threads); farther ones hold still, and calm ones
+  sleep. Each is drawn as its own skinned mesh whose joints are its
+  points, with its shadow (`get_cloth`, `push_cloth`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

@@ -81,7 +81,13 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
         return;
     }
     render::MeshId mesh = render::k_no_mesh;
-    if (shape == world::Shape::mesh && own != render::k_no_mesh) {
+    render::Instance i;
+    if (shape == world::Shape::cloth) {
+        if (own == render::k_no_mesh) {
+            return; // its sheet's mesh not made or loaded yet
+        }
+        mesh = own; // sized by its own settings: the entity's scale is unused (stays 1)
+    } else if (shape == world::Shape::mesh && own != render::k_no_mesh) {
         mesh = own; // an animated copy
     } else if (shape == world::Shape::mesh) {
         const MeshLibrary::Mesh* found = meshes.find_normalized(mesh_path);
@@ -94,10 +100,9 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     } else {
         mesh = renderer.builtin(builtin(shape));
     }
-    render::Instance i;
+    if (shape != world::Shape::cloth) i.scale = t.scale;
     i.position = t.position;
     i.rotation = t.rotation;
-    i.scale = t.scale;
     i.mesh = mesh;
     i.material = material_index(m, out);
     cell.instances.push_back(i);
@@ -274,6 +279,10 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             if (out.skinned != nullptr && e->shape == world::Shape::mesh) {
                 const auto s = out.skinned->find(id);
                 if (s != out.skinned->end()) own = s->second;
+            }
+            if (out.cloth != nullptr && e->shape == world::Shape::cloth) {
+                const auto c = out.cloth->find(id);
+                if (c != out.cloth->end()) own = c->second;
             }
             emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own);
             continue;
@@ -585,10 +594,12 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  std::span<const world::EntityId> redraw,
                  const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses,
                  const sim::FallenTrees* fallen, std::span<const world::CellCoord> redraw_cells,
-                 const std::unordered_map<world::EntityId, render::MeshId>* skinned) {
+                 const std::unordered_map<world::EntityId, render::MeshId>* skinned,
+                 const std::unordered_map<world::EntityId, render::MeshId>* cloth) {
     out.cells_rebuilt = 0;
     out.poses = poses;
     out.skinned = skinned;
+    out.cloth = cloth;
     out.piece_poses = piece_poses;
     out.fallen = fallen;
     world::SceneChanges changes = scene.take_changes();
@@ -765,6 +776,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.poses = nullptr; // the cells are built
     out.piece_poses = nullptr;
     out.skinned = nullptr;
+    out.cloth = nullptr;
     out.fallen = nullptr;
     if (!layout && out.cells_rebuilt == 0) {
         return; // as last frame
