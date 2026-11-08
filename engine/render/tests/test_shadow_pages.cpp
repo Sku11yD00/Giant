@@ -225,8 +225,8 @@ GIANT_TEST("shadow pages: pages under swaying things are drawn again in turn, on
         s.request(r.bits);
         draws = s.plan(16, 1);
         GIANT_CHECK(draws.size() == 1);
-        a_drawn += has(s.entry_at(0, a), ShadowPages::k_draw_bit) ? 1 : 0;
-        b_drawn += has(s.entry_at(0, b), ShadowPages::k_draw_bit) ? 1 : 0;
+        a_drawn += has(s.entry_at(0, a), ShadowPages::k_draw_bit) ? 1u : 0u;
+        b_drawn += has(s.entry_at(0, b), ShadowPages::k_draw_bit) ? 1u : 0u;
     }
     GIANT_CHECK(a_drawn == 3 && b_drawn == 3);
     // A page dirty for another reason is drawn once, not twice.

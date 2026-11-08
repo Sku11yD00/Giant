@@ -1273,7 +1273,7 @@ void Renderer::sway_shadows(const FrameInput& frame) {
     bool any = false;
     for (usize i = 0; i < material_limit; ++i) {
         const gpu::MaterialWind w = wind_of(frame.materials[i]);
-        m_material_sways[i] = (w.sway > 0.0f || w.flutter > 0.0f) ? 1 : 0;
+        m_material_sways[i] = (w.sway > 0.0f || w.flutter > 0.0f) ? u8{1} : u8{0};
         any = any || m_material_sways[i] != 0;
     }
     if (!any) {
