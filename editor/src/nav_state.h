@@ -155,6 +155,7 @@ private:
         DVec3 from{}, to{};
         u32 redone = 0; // searched again, found over a stale tile
         std::vector<world::CellCoord> waits; // found over these stale tiles: searched again once they are built
+        bool checked = false; // its path looked over for stale tiles (once, when found)
     };
     std::unordered_map<SearchId, Search> m_searches;
     // Entities to look at again (their kit or mesh changed), a share a frame.
@@ -162,6 +163,7 @@ private:
     std::unordered_set<world::EntityId> m_refollowing;
     u32 refollows_per_frame = 256;
     bool stale_at(const world::Scene& scene, world::CellCoord cell) const;
+    void refollow(const world::Scene& scene, usize count);
     SearchId m_next_search = 1;
 };
 

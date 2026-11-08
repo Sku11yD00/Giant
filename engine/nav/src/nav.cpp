@@ -15,6 +15,7 @@ constexpr u32 k_lookahead = 64; // samples a straight run is looked along when p
 // end is looked at first (far fewer samples on open ground), at most 0.1%
 // longer than the shortest.
 constexpr float k_tie_break = 1.001f;
+constexpr u32 k_max_restarts = 16; // started again after a tile it read changed, at most
 
 u64 new_version() {
     static std::atomic<u64> next{1};
@@ -292,9 +293,9 @@ bool PathSearch::snap(const DVec3& p, i64& oi, i64& oj, bool& missing, u64& work
 
 bool PathSearch::unchanged() {
     if (m_map.version() == m_checked_version) return true;
-    for (const auto& [cell, block] : m_block_of) {
+    for (const auto& [cell, version] : m_read) {
         const NavTile* t = m_map.find(cell);
-        if ((t != nullptr ? t->version : 0) != m_block_tile[block]) return false;
+        if (t == nullptr || t->version != version) return false;
     }
     m_checked_version = m_map.version();
     return true;
@@ -302,11 +303,12 @@ bool PathSearch::unchanged() {
 
 void PathSearch::restart() {
     ++m_restarts;
+    m_nodes = 0;
+    m_read.clear();
     m_started = false;
     m_phase = Phase::search;
     m_open = {};
     m_blocks.clear();
-    m_block_tile.clear();
     m_block_of.clear();
     m_last_block = ~0u;
     m_cells.clear();
@@ -326,7 +328,14 @@ SearchState PathSearch::advance(u32 nodes) {
     u64 looked = 0;
     // A tile it read rebuilt (a wall put down, the ground dug) or dropped:
     // what it knows is stale, so it starts again.
-    if (m_started && !unchanged()) restart();
+    if (m_started && !unchanged()) {
+        restart();
+        if (m_restarts > k_max_restarts) {
+            m_state = SearchState::failed;
+            m_reason = "the ground kept changing under it";
+            return m_state;
+        }
+    }
     const auto spent = [&] {
         m_work += looked;
         return m_state;
@@ -427,11 +436,7 @@ PathSearch::Seen& PathSearch::seen(i64 i, i64 j) {
     const world::CellCoord c = NavMap::cell_of_sample(i, j);
     if (m_last_block == ~0u || !(c == m_last_cell)) {
         const auto [it, added] = m_block_of.try_emplace(c, static_cast<u32>(m_blocks.size()));
-        if (added) {
-            m_blocks.emplace_back(usize{k_nav_side} * k_nav_side);
-            const NavTile* t = m_map.find(c);
-            m_block_tile.push_back(t != nullptr ? t->version : 0);
-        }
+        if (added) m_blocks.emplace_back(usize{k_nav_side} * k_nav_side);
         m_last_cell = c;
         m_last_block = it->second;
     }
@@ -446,6 +451,7 @@ NavMap::Sample PathSearch::at(i64 i, i64 j) {
         m_tile = m_map.find(c);
         m_tile_cell = c;
         m_tile_version = m_map.version();
+        if (m_tile != nullptr) m_read.try_emplace(c, m_tile->version);
     }
     if (m_tile == nullptr) return {};
     const i64 li = i - i64{c.x} * k_nav_side, lj = j - i64{c.z} * k_nav_side;
@@ -549,8 +555,8 @@ bool PathSearch::finish(u64& looked, u64 budget) {
     looked += m_path.size();
     m_path = std::move(merged);
     m_cells = {};
+    m_read.clear();
     m_blocks.clear();
-    m_block_tile.clear();
     m_block_of.clear();
     m_last_block = ~0u;
     m_open = {};

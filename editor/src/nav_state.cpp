@@ -372,16 +372,19 @@ bool NavState::stale_at(const world::Scene& scene, world::CellCoord cell) const 
     return m_map.find(cell) != nullptr && (in == m_inputs.end() || !(in->second == inputs_of(scene, cell)));
 }
 
+void NavState::refollow(const world::Scene& scene, usize count) {
+    if (scene.identity() != m_scene) return; // (follow starts over first)
+    for (usize n = 0; n < count && !m_refollow.empty(); ++n) {
+        const world::EntityId id = m_refollow.front();
+        m_refollow.pop_front();
+        m_refollowing.erase(id);
+        follow_one(scene, id);
+    }
+}
+
 void NavState::update(const world::Scene& scene) {
     ++m_frame;
-    if (scene.identity() == m_scene) {
-        for (u32 n = 0; n < refollows_per_frame && !m_refollow.empty(); ++n) {
-            const world::EntityId id = m_refollow.front();
-            m_refollow.pop_front();
-            m_refollowing.erase(id);
-            follow_one(scene, id);
-        }
-    }
+    refollow(scene, refollows_per_frame);
     // Tiles finished: kept (a tile whose inputs changed meanwhile is kept
     // for now and built again).
     for (usize k = 0; k < m_building.size();) {
@@ -438,6 +441,7 @@ void NavState::update(const world::Scene& scene) {
             });
             if (fresh) {
                 entry.waits.clear();
+                entry.checked = false;
                 ++entry.redone;
                 entry.search = std::make_unique<nav::PathSearch>(m_map, entry.from, entry.to);
             } else {
@@ -468,6 +472,8 @@ void NavState::update(const world::Scene& scene) {
         if (search.state() != nav::SearchState::found) continue;
         // Found over a tile older than what it is built from (a wall put
         // down there, not built in yet): searched again once it is.
+        if (entry.checked) continue;
+        entry.checked = true;
         if (entry.redone >= 4) continue; // as found (the map keeps changing under it)
         const std::vector<DVec3>& path = search.path();
         for (usize k = 0; k + 1 < path.size(); ++k) {
@@ -506,6 +512,7 @@ const nav::PathSearch* NavState::search(SearchId id) const {
 void NavState::cancel(SearchId id) { m_searches.erase(id); }
 
 const nav::NavTile* NavState::tile_now(const world::Scene& scene, world::CellCoord cell) {
+    refollow(scene, m_refollow.size());
     m_used[cell] = m_frame;
     const nav::NavTile* have = m_map.find(cell);
     const auto in = m_inputs.find(cell);
@@ -519,6 +526,7 @@ const nav::NavTile* NavState::tile_now(const world::Scene& scene, world::CellCoo
 
 std::unique_ptr<nav::PathSearch> NavState::find_path_now(const world::Scene& scene, const DVec3& from, const DVec3& to,
                                                          u32 max_tiles_now, u32* built, bool* stale) {
+    refollow(scene, m_refollow.size()); // a kit or mesh changed just now: its users as they are (a command)
     u32 made = 0;
     bool stale_left = false;
     const auto stale_tile = [&](world::CellCoord c) { return stale_at(scene, c); };
@@ -547,7 +555,8 @@ std::unique_ptr<nav::PathSearch> NavState::find_path_now(const world::Scene& sce
     for (;;) {
         search = std::make_unique<nav::PathSearch>(m_map, from, to);
         for (;;) {
-            const nav::SearchState state = search->advance(1u << 20);
+            nav::SearchState state = search->advance(1u << 20);
+            while (state == nav::SearchState::searching) state = search->advance(1u << 20); // to the end (max_nodes bounds it)
             if (state != nav::SearchState::missing || made >= max_tiles_now) break;
             tile_now(scene, search->missing_tile());
             ++made;

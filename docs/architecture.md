@@ -1326,7 +1326,8 @@ tiles they wait for first; the oldest unused tiles go past `max_tiles`
 (512, about 40 MB; a rebuild is not a use). A search found over a tile
 older than what it is built from is searched again once that tile is
 built. A search that read a tile since rebuilt or dropped starts again
-(`PathSearch` checks the versions of the tiles it read), and making a
+(`PathSearch` checks the versions of the tiles it read; at most 16
+times, then it fails), and making a
 found path (walking back, pulling straight) is spread over `advance`
 calls like the search. A kit or mesh change looks at the entities using
 it again, 256 a frame; a new scene drops every tile. The `find_path`

@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <functional>
+#include <string>
 
 using namespace giant;
 using namespace giant::nav;
@@ -292,4 +293,19 @@ GIANT_TEST("nav: far-off places fail; stacked low things are stood on whatever t
     PathSearch s(edge, {63.5, 0.0, 30.0}, {10.0, 0.0, 30.0});
     GIANT_CHECK(s.advance(100) == SearchState::missing);
     GIANT_CHECK(s.missing_tile() == (world::CellCoord{1, 0}) || s.missing_tile().z != 0);
+}
+
+GIANT_TEST("nav: a search spent on max_nodes fails as too far, though one call's budget ran out first") {
+    const world::Terrain t = ground(0, 0, 0, 0, flat);
+    // The end walled in.
+    const Obstacle ring[] = {box(40.0, 11.0, 36.0, 4.0f, 2.0f, 0.3f), box(40.0, 11.0, 44.0, 4.0f, 2.0f, 0.3f),
+                             box(36.0, 11.0, 40.0, 0.3f, 2.0f, 4.0f), box(44.0, 11.0, 40.0, 0.3f, 2.0f, 4.0f)};
+    NavMap map;
+    build(map, t, ring, 0, 0, 0, 0);
+    SearchLimits limits;
+    limits.max_nodes = 5000;
+    PathSearch s(map, {10.0, 0.0, 10.0}, {40.0, 0.0, 40.0}, limits);
+    GIANT_CHECK(s.advance(5000) == SearchState::searching); // the snaps took some of it
+    while (s.state() == SearchState::searching) s.advance(5000);
+    GIANT_CHECK(s.state() == SearchState::failed && std::string(s.reason()).find("too far") != std::string::npos);
 }

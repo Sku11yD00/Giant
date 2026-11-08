@@ -136,7 +136,8 @@ public:
     // Does up to about `nodes` samples' worth of work: samples looked at
     // while searching, then the path walked back and pulled straight (a
     // found path spreads over calls too). If a tile it read was rebuilt
-    // or dropped since, it starts again. Returns the state after.
+    // or dropped since, it starts again (at most 16 times; then it fails).
+    // Returns the state after.
     SearchState advance(u32 nodes);
     SearchState state() const { return m_state; }
     world::CellCoord missing_tile() const { return m_missing; }
@@ -190,8 +191,10 @@ private:
     u64 m_tile_version = ~u64{0}; // the map's, when m_tile was found
     std::unordered_map<world::CellCoord, u32, world::CellCoordHash> m_block_of; // cell -> into m_blocks
     std::vector<std::vector<Seen>> m_blocks;
-    std::vector<u64> m_block_tile; // each block's tile's version, as it was read (0: none)
-    u64 m_checked_version = 0;     // the map's, when the blocks' tiles were last found unchanged
+    // Each tile read, its version as read (tiles not there are not kept:
+    // their coming is what a missing search waits for).
+    std::unordered_map<world::CellCoord, u64, world::CellCoordHash> m_read;
+    u64 m_checked_version = 0; // the map's, when the tiles read were last found unchanged
     world::CellCoord m_last_cell{};
     u32 m_last_block = ~0u;
     u32 m_nodes = 0;
