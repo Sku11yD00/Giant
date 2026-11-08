@@ -9,6 +9,7 @@ namespace {
 
 constexpr double k_grid = 2.0;          // metres a side of the squares others are looked for in
 constexpr double k_stuck_seconds = 2.0; // looked at this often while walking
+constexpr double k_near_end_seconds = 10.0; // within 3 m of the end this long: as near as it comes
 constexpr double k_stuck_share = 0.33;  // moved less than this share of what it was steered to: stuck
 
 world::CellCoord square_of(const DVec3& p) {
@@ -101,9 +102,11 @@ std::string WalkerState::walk_to(const world::Scene& scene, world::EntityId id, 
         w.feet = e->transform.position - DVec3{0.0, w.lift, 0.0};
         // As wide as it is (within what the map keeps clear), as tall as a cube or sphere is.
         const float wide = 0.5f * std::max(std::fabs(e->transform.scale.x), std::fabs(e->transform.scale.z));
-        w.settings.radius = std::clamp(wide, 0.2f, 0.45f);
+        const nav::NavSettings& map = m_nav.settings();
+        w.settings.radius = std::clamp(wide, 0.2f, std::max(0.2f, map.agent_radius));
         if (e->shape == world::Shape::cube || e->shape == world::Shape::sphere) {
-            w.height = std::clamp(std::fabs(e->transform.scale.y), 2.0f * w.settings.radius + 0.1f, 4.0f);
+            w.height = std::clamp(std::fabs(e->transform.scale.y), 2.0f * w.settings.radius + 0.1f,
+                                  std::max(2.0f * w.settings.radius + 0.1f, map.clearance));
         }
         if (!make_character(w)) return "the physics refused its character";
         // Facing as placed: its +z turned about y.
@@ -123,6 +126,7 @@ std::string WalkerState::walk_to(const world::Scene& scene, world::EntityId id, 
     w.searches = 1;
     w.stuck_for = 0.0;
     w.expected = 0.0;
+    w.near_end_for = 0.0;
     w.stuck_from = w.feet;
     w.search = 0;
     if (path != nullptr && !path->empty()) {
@@ -226,7 +230,7 @@ void WalkerState::before_step(const world::Scene& scene, double seconds) {
             m_near.clear();
             const world::CellCoord c = square_of(w.feet);
             constexpr usize k_most = 4 * nav::PathFollower::k_max_neighbours;
-            for (int ring = 0; ring < 9 && m_near.size() < k_most; ++ring) {
+            for (int ring = 0; ring < 10 && m_near.size() < k_most; ++ring) {
                 const i32 dx = ring == 0 ? 0 : (ring - 1) % 3 - 1, dz = ring == 0 ? 0 : (ring - 1) / 3 - 1;
                 if (ring > 0 && dx == 0 && dz == 0) continue;
                 const auto in = m_grid.find({c.x + dx, c.z + dz});
@@ -240,7 +244,10 @@ void WalkerState::before_step(const world::Scene& scene, double seconds) {
             }
             m_near.insert(m_near.end(), others.begin(), others.end());
             const nav::Steering st = w.follow.steer(w.feet, m_near, w.settings);
-            if (st.arrived) {
+            // Circling a crowded end (nothing holds it, nothing lets it in): there, after a while.
+            const bool near_end = w.follow.remaining(w.feet) < 3.0;
+            w.near_end_for = near_end ? w.near_end_for + simulated : 0.0;
+            if (st.arrived || w.near_end_for > k_near_end_seconds) {
                 w.phase = Phase::arrived;
             } else {
                 velocity = st.velocity;

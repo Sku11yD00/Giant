@@ -59,21 +59,15 @@ Steering PathFollower::steer(const DVec3& at, std::span<const Neighbour> near, c
         out.arrived = true;
         return out;
     }
-    // Another at the end (standing there, or crowding it too): as near as it lets it come.
+    // Another standing still nearer the end, touching this one (as near as
+    // its push lets it come): as near as it can come. (A crowd sent to one
+    // spot packs round it; one walking past holds nothing up.)
     if (last) {
         for (const Neighbour& n : near) {
-            if (!std::isfinite(n.position.x) || !std::isfinite(n.position.z)) continue;
+            if (!std::isfinite(n.position.x) || !std::isfinite(n.position.z) || length(n.velocity) > 0.1f) continue;
             const float touching = radius + clean(n.radius, 0.0f, 5.0f, d.radius);
             const double gap = flat_distance(n.position, m_path.back());
-            // Both crowding the end: both there (else each holds the other off).
-            if (gap <= touching + arrive && to_end <= touching + arrive) {
-                out.arrived = true;
-                return out;
-            }
-            if (length(n.velocity) > 0.1f) continue;
-            // It stands on the end, and this one is as near as its push allows.
-            if (gap <= touching + arrive && to_end <= arrive + touching + avoid &&
-                flat_distance(at, n.position) <= touching + avoid) {
+            if (gap < to_end && flat_distance(at, n.position) <= touching + 0.6) {
                 out.arrived = true;
                 return out;
             }
@@ -121,6 +115,9 @@ Steering PathFollower::steer(const DVec3& at, std::span<const Neighbour> near, c
             if (closing > -0.1f) push = push + right * (w * ahead);
         }
     }
+    // Near the end, others are pushed off less (else two crowding it each
+    // hold the other off; their bodies keep them apart).
+    if (last && slow > 0.0f) push = push * std::clamp(static_cast<float>(to_end / slow), 0.3f, 1.0f);
     Vec3 v = dir * want + push * std::max(want, 0.5f);
     const float vl = length(v);
     if (vl > speed && vl > 0.0f) v = v * (speed / vl);

@@ -1367,8 +1367,9 @@ else NavState searches over the next frames. A walker that moved under a third o
 what it was steered to over 2 s of simulated time looks for the way again
 (four searches in all, then it has failed); it takes a search's answer
 only once NavState has settled it (not waiting on stale tiles). Its
-character is as wide as the entity (0.2 to 0.45 m round) and, for a cube
-or sphere, as tall; it carries the entity's id, so shots and raycasts name
+character is as wide as the entity (0.2 m round up to the map's agent
+radius) and, for a cube
+or sphere, as tall (up to the map's clearance); it carries the entity's id, so shots and raycasts name
 it (it is hit as its capsule: no hit zones yet). Others it keeps clear of
 are the walkers in the 2 m squares round it (its own first) and the
 player. Stopping the simulation (even started again before the next

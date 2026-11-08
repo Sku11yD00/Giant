@@ -108,3 +108,23 @@ GIANT_TEST("follow: a hairpin is walked round, not cut; two sent to one spot bot
     GIANT_CHECK(da && db);
     GIANT_CHECK(std::hypot(pa.x - 10.0, pa.z) < 1.5 && std::hypot(pb.x - 10.0, pb.z) < 1.5);
 }
+
+GIANT_TEST("follow: one walking past the end holds nothing up; one standing beside it is walked up to") {
+    FollowSettings s;
+    PathFollower f;
+    f.set_path({{0, 0, 0}, {10, 0, 0}});
+    // Someone crossing the end, moving: no stop short.
+    const Neighbour passing{{10.0, 0.0, 0.5}, {0.0f, 0.0f, 1.4f}, s.radius};
+    const Steering st = f.steer({9.5, 0, 0}, {&passing, 1}, s);
+    GIANT_CHECK(!st.arrived);
+    // Someone standing a metre beside the end: not in the way, walked on to the end.
+    const Neighbour beside{{10.0, 0.0, 1.2}, {}, s.radius};
+    DVec3 at{0, 0, 0};
+    bool arrived = false;
+    for (int k = 0; k < 3000 && !arrived; ++k) {
+        const Steering x = f.steer(at, {&beside, 1}, s);
+        arrived = x.arrived;
+        at = at + DVec3{x.velocity.x, 0.0, x.velocity.z} * (1.0 / 60.0);
+    }
+    GIANT_CHECK(arrived && std::hypot(at.x - 10.0, at.z) < 0.6);
+}

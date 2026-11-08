@@ -9,7 +9,8 @@
 // An entity walks with no body of its own (body "none": else its body
 // would stand where it was, and the map would count it in the way). Its
 // feet are its origin for meshes and kits, its bottom for cubes and
-// spheres; its character is as wide as it (0.2 to 0.45 m round) and, for
+// spheres; its character is as wide as it (0.2 m round up to the map's
+// agent radius) and, for
 // a cube or sphere, as tall. One stuck (moving under a third of what it
 // was steered to in 2 s of simulated time) looks for the way again (three
 // times; then it has failed). A shot or a ray that meets one names its
@@ -59,6 +60,7 @@ public:
         DVec3 stuck_from{};
         double stuck_for = 0.0;   // simulated seconds since stuck_from
         double expected = 0.0;    // metres it was steered to walk meanwhile
+        double near_end_for = 0.0; // simulated seconds within 3 m of the end
         float height = 1.8f;      // its character's
         u32 searches = 0; // the way looked for (1 + times stuck)
     };
