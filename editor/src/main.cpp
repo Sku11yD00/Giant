@@ -30,6 +30,7 @@
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
 #include "world_streaming.h"
+#include "game_saves.h"
 #include "ui/panels.h"
 
 #include "giant/ai/mcp_server.h"
@@ -326,6 +327,8 @@ int run(const Options& options) {
     editor::AudioState audio; // the speakers when shown (hidden runs: tests, gates, stay silent)
     if (!options.hidden) audio.open_device();
     state.audio = &audio;
+    editor::GameSaves saves; // beside the open world; its job waited for before what it reads goes
+    state.saves = &saves;
     editor::connect_blows(state); // shots and blasts reach the swings and the cloth
     editor::connect_sounds(state); // after connect_blows: hits knock and are heard
     state.window = window.get();
@@ -565,10 +568,12 @@ int run(const Options& options) {
         panels.draw(frame_info);
         ui->end_frame();
         mark(editor::FramePhase::ui);
+        saves.update(state, delta); // a save or load's result, a load's cells a share a frame (before play)
         // The player's wanted motion (or play stopped: Esc, a new scene).
         const bool playing = play.before_step(state.scene, state.camera, state.scene_generation, delta);
         window->set_relative_mouse(playing); // mouse look, the cursor held in the window
-        weather.update(state.scene.weather, delta, state.camera.position, state.scene_generation); // after the panels' changes
+        weather.update(saves.weather() != nullptr ? *saves.weather() : state.scene.weather, delta, state.camera.position,
+                       state.scene_generation); // after the panels' changes (a loaded game's shown over the scene's)
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
         mark(editor::FramePhase::weather);

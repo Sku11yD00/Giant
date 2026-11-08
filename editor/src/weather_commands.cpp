@@ -3,6 +3,7 @@
 // (saved, undoable); a change can blend in over seconds (view only: the
 // scene holds where it is going).
 #include "editor_commands.h"
+#include "game_saves.h"
 #include "weather_state.h"
 
 #include "giant/core/assert.h"
@@ -114,6 +115,7 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
              if (const auto bad = world::check_weather(w)) return CommandResult::failure(*bad);
              const std::optional<Weather> before = state.scene.weather;
              state.scene.weather = w;
+             if (state.saves != nullptr) state.saves->drop_weather(); // a loaded game's gives way
              if (state.weather != nullptr) {
                  state.weather->transition(args.value("over_seconds", 0.0));
                  // The ground's start values given: the ground is there now
@@ -138,7 +140,12 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          false,
          [&state](const Json&, CommandContext& context) {
-             if (!state.scene.weather) return CommandResult::failure("the scene has no weather");
+             const bool overridden = state.saves != nullptr && state.saves->weather() != nullptr;
+             if (state.saves != nullptr) state.saves->drop_weather(); // a loaded game's gives way
+             if (!state.scene.weather) {
+                 if (overridden) return CommandResult::success({{"weather", nullptr}});
+                 return CommandResult::failure("the scene has no weather");
+             }
              const std::optional<Weather> before = state.scene.weather;
              state.scene.weather.reset();
              record(state, context, before, std::nullopt);

@@ -1540,7 +1540,40 @@ a game's damage is shown (what the bodies and trees show is not the
 world's then); get_physics counts the game's apart (`kept.game`).
 `save_cell_damage` / `load_cell_damage` and `save_weather` /
 `load_weather` give a cell's damage and the weather as text of their own
-(a save's chunks). Part 1b brings the editor's save_game and load_game.
+(a save's chunks).
+
+Part 1b: the editor's `GameSaves` (editor/src/game_saves.h) keeps slots
+beside the open world, in `<world>/saves/<slot>/`; streaming never reads
+there. A save gathers at once, as copies, what to keep: by cell, the
+damage shown (`PhysicsState::game_damage_now`: the game's layer with what
+the bodies broke and the forest felled now, gathered as keep_damage
+gathers them, touching nothing; a cell they add to starts from what it
+shows, so the world's kept records there are kept with it, and records
+whose placement moved since go), and sections `camera` (where it is,
+where it looks, and whether play is on) and `weather` (the weather it is
+going to, not a blend under way, and the ground now). Its job makes the
+text and commits it; a save to the slot last saved or loaded (the same
+world session and scene) writes only the cells whose damage changed, and
+drops the cells that hold none now; after a failed save, or the base slot
+deleted, the next is whole. A world is named by its folder and a hash of
+what the records depend on (its kits, scatter and ground samples, not its
+lighting, weather, cells or next id), so a save of a world whose kits or
+scatter changed is refused unless forced. A load's job opens the slot and
+reads and checks every chunk (cells must hold only what is in them); then
+play and simulating stop (what they broke since goes), the game's damage
+is cleared and the save's set, 64 cells a frame, and last the camera
+(where it was and looked; the fly speed stays), the weather (shown over
+the scene's own until set_weather, clear_weather, an undo of them, or
+close_game) and its ground come back, and play starts again if it was
+on. One save, load or delete runs at a time, each on the job; a result
+begun for another scene or world session is dropped, and a new scene or
+another world forgets the game (and its play seconds). Known limits
+(part 2): the player's own state (velocity, climbing, carrying), dents in
+the ground, dynamic bodies, walkers and inventories are not saved; damage
+in a cell that streamed out while playing is not in the save (the
+simulation lets it go there too); a save gathers every cell the forest
+knows at once (a frame's cost grows with the cells loaded); list_saves
+reads each slot's manifest on the frame.
 
 ## Window events (known limit)
 

@@ -308,6 +308,53 @@ usize PhysicsState::dent(world::Scene& scene, const world::Dent& dent, const DVe
     return changed.size();
 }
 
+world::Damage PhysicsState::game_damage_now(world::Scene& scene) {
+    notice_scene(scene);
+    follow_kept(scene, nullptr); // the forest holds the shown trees as they are
+    world::Damage next = scene.game_damage();
+    // A cell the bodies or the forest add to starts as it shows now (a game cell is shown whole:
+    // the kept records the bodies or the forest do not report must not be lost).
+    const auto cell = [&](world::CellCoord c) -> world::CellDamage& {
+        const auto it = next.find(c);
+        if (it != next.end()) return it->second;
+        const world::CellDamage* kept = scene.damage_in(c);
+        return next.emplace(c, kept != nullptr ? *kept : world::CellDamage{}).first->second;
+    };
+    const auto placed_as = [&](const world::KeptKit& k) {
+        const world::Entity* e = scene.find(k.entity);
+        return e != nullptr && e->shape == world::Shape::kit && e->kit == k.kit && e->transform.position == k.position &&
+               e->transform.rotation == k.rotation && e->transform.scale == k.scale;
+    };
+    // The broken placements as the bodies have them (only those in the scene as they are placed now).
+    for (world::KeptKit& k : m_bodies.damage()) {
+        if (!placed_as(k)) continue;
+        std::vector<world::KeptKit>& kits = cell(world::cell_of(k.position)).kits;
+        const auto same = std::find_if(kits.begin(), kits.end(), [&](const world::KeptKit& x) { return x.entity == k.entity; });
+        if (same != kits.end()) {
+            *same = std::move(k);
+        } else {
+            kits.push_back(std::move(k));
+        }
+    }
+    // The fallen trees of every cell the forest knows (those in the scene now).
+    for (auto& [c, trees] : m_forest.damage()) {
+        if (scene.terrain.find(c) == nullptr) continue;
+        std::erase_if(trees, [c](const world::KeptTree& t) { return !(world::cell_of({t.x, 0.0, t.z}) == c); });
+        if (trees.empty() && next.find(c) == next.end() && scene.damage_in(c) == nullptr) continue;
+        cell(c).trees = std::move(trees);
+    }
+    for (auto it = next.begin(); it != next.end();) {
+        // Records whose placement is there but moved or changed since apply no more.
+        std::erase_if(it->second.kits, [&](const world::KeptKit& k) { return scene.find(k.entity) != nullptr && !placed_as(k); });
+        world::sort_damage(it->second);
+        // A cell not the game's that shows only what the world keeps there is the world's: not saved.
+        const world::CellDamage* kept = scene.game_damage_in(it->first) == nullptr ? scene.damage_in(it->first) : nullptr;
+        const bool only_kept = kept != nullptr && *kept == it->second;
+        it = it->second.empty() || only_kept ? next.erase(it) : std::next(it);
+    }
+    return next;
+}
+
 PhysicsState::KeptDamage PhysicsState::keep_damage(world::Scene& scene) {
     notice_scene(scene);
     restore_ground(scene); // (stopped since: that ground is not this simulation's)

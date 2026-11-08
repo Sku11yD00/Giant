@@ -56,6 +56,7 @@ class SwingState;
 class NavState;
 class WalkerState;
 class AudioState;
+class GameSaves;
 class HitTargets;
 class WorldStreaming;
 
@@ -235,6 +236,9 @@ struct EditorState {
     // Sounds played in the scene, heard at the camera; set by main (and
     // tests). Null: no sound.
     AudioState* audio = nullptr;
+    // Game saves beside the open world (save_game, load_game); set by main
+    // (and tests). Null: no game saves.
+    GameSaves* saves = nullptr;
     // Characters' hit shapes (bone capsules) for bullets; set by main (and
     // tests). Null: characters are not hit.
     HitTargets* hits = nullptr;
@@ -288,6 +292,8 @@ void register_nav_commands(ai::CommandRegistry& registry, EditorState& state);
 void register_walker_commands(ai::CommandRegistry& registry, EditorState& state);
 // The sound commands (audio_commands.cpp).
 void register_audio_commands(ai::CommandRegistry& registry, EditorState& state);
+// save_game, load_game, list_saves, delete_save, get_save, close_game (game_saves.h).
+void register_save_commands(ai::CommandRegistry& registry, EditorState& state);
 // The walkers steered and posed around step_physics's fixed steps
 // (state.physics's before_fixed_step and after_fixed_step). Once both are set.
 void connect_walkers(EditorState& state);
