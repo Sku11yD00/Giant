@@ -288,7 +288,8 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             continue;
         }
         const world::Transform& at = drawn_at(out, *e);
-        const bool moves = e->swing.on && sim::can_swing(e->shape);
+        // Swinging, or walking (a walker's pose is handed in with the swings').
+        const bool moves = (e->swing.on && sim::can_swing(e->shape)) || (out.swings != nullptr && out.swings->contains(id));
         // What it draws, for moving it in place later (rebuild_moved).
         const u32 first = static_cast<u32>(cell.instances.size());
         const usize decals = cell.decals.size();

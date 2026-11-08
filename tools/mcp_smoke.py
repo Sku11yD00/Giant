@@ -927,7 +927,7 @@ def main() -> int:
 
         names = {t["name"] for t in call("tools/list")["tools"]}
         for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation",
-                         "get_swing", "find_path", "get_nav"):
+                         "get_swing", "find_path", "get_nav", "walk_to", "get_walker"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")
@@ -936,6 +936,7 @@ def main() -> int:
         way = tool("find_path", {"from": [0, 0, 0], "to": [5, 0, 0]})
         check(way["state"] in ("found", "failed"), "find_path answers")
         check(tool("get_nav")["settings"]["agent_radius"] > 0, "get_nav answers")
+        check(tool("get_walker")["walkers"] == 0, "get_walker answers")
 
         before = tool("get_clear_color")
         tool("set_clear_color", {"r": 0.5, "g": 0.25, "b": 1.0})

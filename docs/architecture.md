@@ -1344,6 +1344,30 @@ scatter trees still block until their cell is placed again;
 a mesh is a box (not its shape); one storey a sample where there is
 terrain (a bridge over ground is stood on only if within a step).
 
+### Walkers
+
+`giant/nav/follow.h`'s `PathFollower` steers along a found path: towards
+the next corner (turning for the one after within 0.6 m, or once nearer
+it), slowing over the last 1.2 m and stopping within 0.25 m of the end.
+Others near (the nearest 8 within 1.5 m past touching) push it away, the
+closer the harder, and one ahead coming at it makes it step to its right,
+so two meeting pass left side to left side. Pure: the caller moves it.
+
+The editor's `WalkerState` (editor/src/walker_state.h) makes an entity
+sent walking (`walk_to`, body `none`, while simulating) a physics
+character, steers each before the physics steps (others found by 2 m
+squares) and poses each after (between the last two fixed steps, turned
+to face where it goes). Poses go to the scene's drawing with the swings'
+(moved in place, kept out of the voxel world); the scene keeps where it
+was put. `walk_to` finds the way at once when it takes at most 64 tiles,
+else NavState searches over the next frames. A walker moving under 0.3 m
+in 2 s looks for the way again (four searches in all, then it has
+failed). Stopping the simulation or another scene lets every walker go;
+`step_physics` steers them before each fixed step. Known limits: a
+walker is drawn in the cell the scene puts it in (one walking far may be
+culled with that cell); no animation is chosen for its pace yet; a stuck
+walker's new search waits for frames (not step_physics).
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

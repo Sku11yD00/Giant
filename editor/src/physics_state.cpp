@@ -458,12 +458,14 @@ void PhysicsState::catch_up(world::Scene& scene) {
 
 u32 PhysicsState::run_steps(u32 steps) {
     for (u32 i = 0; i < steps; ++i) {
+        if (before_fixed_step) before_fixed_step(sim::PhysicsWorld::k_step_seconds);
         m_physics.step(sim::PhysicsWorld::k_step_seconds);
         m_bodies.update_poses();
         m_forest.after_step();
         m_ballistics.step(sim::PhysicsWorld::k_step_seconds);
         take_hits();
         m_dust.step(static_cast<float>(sim::PhysicsWorld::k_step_seconds), wind);
+        if (after_fixed_step) after_fixed_step();
     }
     return steps;
 }

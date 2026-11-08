@@ -78,6 +78,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     register_cloth_commands(registry, state);
     register_swing_commands(registry, state);
     register_nav_commands(registry, state);
+    register_walker_commands(registry, state);
     add(registry,
         {"get_engine_info",
          "Describes the running editor: version, graphics backend and adapter, whether the GPU "
