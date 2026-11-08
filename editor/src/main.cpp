@@ -20,6 +20,7 @@
 #include "animation_state.h"
 #include "cloth_state.h"
 #include "swing_state.h"
+#include "nav_state.h"
 #include "hit_targets.h"
 #include "physics_state.h"
 #include "play_state.h"
@@ -315,6 +316,8 @@ int run(const Options& options) {
     state.cloth = &cloth;
     editor::SwingState swing(renderer.get(), &meshes);
     state.swing = &swing;
+    editor::NavState nav(renderer.get(), &meshes, &scatter); // after what it reads
+    state.nav = &nav;
     editor::connect_blows(state); // shots and blasts reach the swings and the cloth
     state.window = window.get();
     state.device = device.get();
@@ -388,6 +391,7 @@ int run(const Options& options) {
         animation.follow_now(state.scene, meshes, state.scene.untaken_changes());
         cloth.follow(state.scene, state.scene.untaken_changes());
         swing.follow(state.scene, state.scene.untaken_changes());
+        nav.follow(state.scene, state.scene.untaken_changes());
         // Drawn with other meshes now: their cells rebuilt.
         std::vector<world::EntityId> redraw = animation.take_redraw();
         const std::vector<world::EntityId> cloth_redraw = cloth.take_redraw();
@@ -564,6 +568,7 @@ int run(const Options& options) {
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
         cloth.update(weather.wind(), state.camera.position, delta); // drawn as it moved next frame
         swing.update(weather.wind(), state.camera.position, delta);
+        nav.update(state.scene); // tiles taken and started, searches moved on (bounded)
         mark(editor::FramePhase::animation);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
