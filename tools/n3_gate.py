@@ -125,6 +125,15 @@ def build_valley(tool):
     tool("create_entity", {"name": "Street", "shape": "cube", "position": [TOWN[0], town_h + 0.01, TOWN[1]],
                            "scale": [4, 0.02, HOUSES_Z * SPACING + 20], "base_color": [0.08, 0.08, 0.09],
                            "roughness": 0.5})
+    # Banners hung down both sides of the street, blown about by the wind (cloth: the nearest move).
+    banners = [{"name": f"Banner {i}", "shape": "cloth",
+                "position": [TOWN[0] + (2.6 if i % 2 else -2.6), town_h + 4.5,
+                             round(TOWN[1] + (i // 2 - 9.5) * (HOUSES_Z * SPACING / 20), 2)],
+                "rotation": {"yaw": 90 if i % 2 else -90},
+                "cloth": {"width": 1.0, "height": 2.0, "weight": 0.3},
+                "base_color": [0.55, 0.06, 0.05] if i % 3 else [0.1, 0.15, 0.5], "roughness": 0.85}
+               for i in range(40)]
+    tool("create_entities", {"entities": banners})
     # The forest on the slopes, above the valley floor; stones by the river (below the town).
     tool("add_scatter_layer", {"name": "forest", "items": [{"kit": "tree", "scale": [0.8, 1.3]}],
                                "spacing": 9, "density": 0.7, "clump_size": 60, "clumping": 0.6,

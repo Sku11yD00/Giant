@@ -69,6 +69,8 @@ struct SceneFrame {
     // Animated skinned entities' own posed meshes, drawn instead of their
     // files' (likewise).
     const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr;
+    // Cloth entities' meshes (likewise).
+    const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr;
 
     struct MaterialKey {
         u32 bits[10];
@@ -155,7 +157,8 @@ struct SceneFrame {
 // the placement it draws: the same serial) are drawn where they lie, and
 // the cells in `redraw_cells` are rebuilt. With `skinned`, a mesh entity in
 // it draws that mesh (its animated copy) instead of its file's; entities
-// that came or went from it are in `redraw`.
+// that came or went from it are in `redraw`. With `cloth`, a cloth entity
+// in it draws that mesh (ClothState); one not in it draws nothing.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
@@ -163,7 +166,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  std::span<const world::EntityId> redraw = {},
                  const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr,
                  const sim::FallenTrees* fallen = nullptr, std::span<const world::CellCoord> redraw_cells = {},
-                 const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr);
+                 const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr,
+                 const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

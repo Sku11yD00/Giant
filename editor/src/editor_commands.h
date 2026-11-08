@@ -50,6 +50,7 @@ class WeatherState;
 class PhysicsState;
 class PlayState;
 class AnimationState;
+class ClothState;
 class HitTargets;
 class WorldStreaming;
 
@@ -62,7 +63,7 @@ enum class FramePhase : u8 {
     ui,          // panels
     weather,     // weather and the player's input
     physics,     // bodies following the scene, stepping
-    animation,   // skinned entities' clips moving on, their poses
+    animation,   // skinned entities' clips moving on, their poses; cloth
     begin_frame, // waiting for a frame in flight to finish
     terrain,     // terrain meshes
     far_ground,  // far ground levels
@@ -215,6 +216,9 @@ struct EditorState {
     // Skinned entities playing their clips; set by main (and tests). Null:
     // animation is not available.
     AnimationState* animation = nullptr;
+    // Cloth entities blowing in the wind; set by main (and tests). Null:
+    // cloth is not available.
+    ClothState* cloth = nullptr;
     // Characters' hit shapes (bone capsules) for bullets; set by main (and
     // tests). Null: characters are not hit.
     HitTargets* hits = nullptr;
@@ -258,6 +262,8 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
 void register_physics_commands(ai::CommandRegistry& registry, EditorState& state);
 // The animation commands (animation_commands.cpp).
 void register_animation_commands(ai::CommandRegistry& registry, EditorState& state);
+// The cloth commands (cloth_commands.cpp).
+void register_cloth_commands(ai::CommandRegistry& registry, EditorState& state);
 
 // What the AI is told when it connects over MCP.
 const char* mcp_instructions();

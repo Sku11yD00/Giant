@@ -172,7 +172,7 @@ std::optional<std::string> check_scatter_layer(const ScatterLayer& l) {
         if (a.from_x > a.to_x || a.from_z > a.to_z) return "an area's `from` is its lowest x and z";
     }
     for (const ScatterItem& i : l.items) {
-        if (i.shape == Shape::decal) return "items are cube, sphere, plane, mesh or kit";
+        if (i.shape == Shape::decal || i.shape == Shape::cloth) return "items are cube, sphere, plane, mesh or kit";
         if (i.shape == Shape::mesh && (i.mesh.empty() || i.mesh.size() > k_max_mesh_path_bytes)) {
             return "a mesh item names its file (at most 1024 bytes)";
         }
