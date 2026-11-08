@@ -802,6 +802,31 @@ GIANT_TEST("keep_damage: what simulating broke stays through stopping, undo take
         fresh.flush(loaded);
         GIANT_CHECK(fresh.forest().stats().kept == felled && fresh.bodies().stats().kept_pieces == 2);
     }
+    // The same as the game's damage (a game save's) over an unbroken world: shown alike; cleared, whole.
+    {
+        world::Scene game = loaded;
+        for (const auto& [c, d] : loaded.damage()) {
+            game.set_game_damage(c, d);
+            game.set_damage(c, {});
+        }
+        GIANT_CHECK(game.damage().empty() && !game.game_damage().empty());
+        PhysicsState fresh;
+        ScatterPlacer p2;
+        place(p2, game);
+        const auto frames = [&] {
+            for (int i = 0; i < 3; ++i) {
+                fresh.feed_forest(game, p2, camera);
+                fresh.update(game, game.take_changes(), 1.0 / 60.0);
+            }
+            fresh.flush(game);
+        };
+        frames();
+        GIANT_CHECK(fresh.forest().stats().kept == felled && fresh.bodies().stats().kept_pieces == 2);
+        game.clear_game_damage();
+        frames();
+        GIANT_CHECK(fresh.forest().stats().kept == 0 && fresh.bodies().stats().kept_pieces == 0);
+        GIANT_CHECK(fresh.forest().fallen_in({2, 0}) + fresh.forest().fallen_in({3, 0}) == 0);
+    }
     // Keeping again with nothing new changes nothing.
     r = run("keep_damage");
     GIANT_CHECK(r.ok && r.value["cells"] == 0 && r.value["tiles"] == 0);
@@ -831,4 +856,15 @@ GIANT_TEST("keep_damage: what simulating broke stays through stopping, undo take
     GIANT_CHECK(run("undo").ok);
     frame();
     GIANT_CHECK(run("get_physics").value["trees"]["fallen"] == felled);
+    // A game's damage shown: counted apart; keeping or clearing refused.
+    GIANT_CHECK(!scene.damage().empty());
+    const world::CellCoord held = scene.damage().begin()->first;
+    const world::CellDamage game = scene.damage().begin()->second;
+    scene.set_game_damage(held, game);
+    frame();
+    r = run("get_physics");
+    GIANT_CHECK(r.value["kept"]["game"]["cells"] == 1 && r.value["kept"]["game"]["trees"] == game.trees.size());
+    GIANT_CHECK(!run("keep_damage").ok && !run("clear_damage").ok && scene.damage_in(held) != nullptr);
+    scene.clear_game_damage();
+    GIANT_CHECK(run("get_physics").value["kept"]["game"]["cells"] == 0);
 }

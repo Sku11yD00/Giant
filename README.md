@@ -336,6 +336,10 @@ Open-world systems:
   they strike. Sound bends over walls and ridges (quieter and duller the
   longer the detour), and rain, snow and fog take its highs sooner while
   snow on the ground deadens echoes.
+- E4a: game save slots. A save keeps what play made of the world apart
+  from the world itself, cell by cell (only the cells play reached, and
+  only those that changed since), committed so a crash never loses the
+  last save.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
