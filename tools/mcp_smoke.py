@@ -942,6 +942,8 @@ def main() -> int:
         check(len(heard["taps"]) >= 1 and abs(heard["taps"][0]["delay"] - heard["distance"] / 343.0) < 1e-6,
               "play_sound is heard late by its distance")
         check(tool("get_audio")["played"] == 1, "get_audio answers")
+        shot = tool("fire", {"origin": [0, 2, -200], "direction": [0, 0, 1], "resolve": True})
+        check("heard" in shot and len(shot["heard"]["report"]["taps"]) >= 1, "a shot is heard")
 
         before = tool("get_clear_color")
         tool("set_clear_color", {"r": 0.5, "g": 0.25, "b": 1.0})

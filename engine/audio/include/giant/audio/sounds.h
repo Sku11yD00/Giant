@@ -19,6 +19,8 @@ Sound synth_gunshot(u32 seed = 1);
 Sound synth_crack();
 // A short tick (for tests and timing: its edge is one sample).
 Sound synth_click();
+// A bullet striking: a short knock of noise (about 40 ms).
+Sound synth_impact(u32 seed = 7);
 // A sine of `hz` for `seconds`, faded in and out over 5 ms.
 Sound synth_tone(float hz, float seconds, float level = 0.5f);
 

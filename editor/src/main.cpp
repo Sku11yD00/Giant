@@ -327,6 +327,7 @@ int run(const Options& options) {
     if (!options.hidden) audio.open_device();
     state.audio = &audio;
     editor::connect_blows(state); // shots and blasts reach the swings and the cloth
+    editor::connect_sounds(state); // after connect_blows: hits knock and are heard
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -589,6 +590,7 @@ int run(const Options& options) {
         cloth.update(weather.wind(), state.camera.position, delta); // drawn as it moved next frame
         swing.update(weather.wind(), state.camera.position, delta);
         nav.update(state.scene); // tiles taken and started, searches moved on (bounded)
+        audio.set_weather(weather.shown() ? &*weather.shown() : nullptr, weather.ground());
         audio.update(state.camera, delta); // heard from the camera (where the player's eyes are in play)
         mark(editor::FramePhase::animation);
         if (window->take_resized()) {

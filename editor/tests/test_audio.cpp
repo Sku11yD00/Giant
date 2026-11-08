@@ -219,3 +219,104 @@ GIANT_TEST("editor audio: record_audio writes what arrives when; load_sound read
     register_audio_commands(commands, none);
     GIANT_CHECK(!commands.execute("get_audio", Json::object(), ai::ExecuteOptions{}).ok);
 }
+
+GIANT_TEST("editor audio: a rifle shot past the camera cracks before its report; a pistol's only bangs; hits knock") {
+    Fixture f(true);
+    f.state.camera.position = {300.0, 1.7, 20.0};
+    register_physics_commands(f.commands, f.state);
+    connect_sounds(f.state);
+    // Fired along +x from the origin, passing 20 m off the camera 300 m down range.
+    ai::CommandResult r = f.run("fire", {{"origin", {0.0, 1.7, 0.0}}, {"direction", {1.0, 0.0, 0.0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value.contains("heard"));
+    const Json& heard = r.value["heard"];
+    GIANT_CHECK(heard["crack"]["heard"] == true);
+    const double report = heard["report"]["taps"][0]["delay"].get<double>();
+    GIANT_CHECK(std::fabs(report - std::hypot(300.0, 20.0) / audio::k_speed_of_sound) < 1e-6);
+    GIANT_CHECK(heard["crack"]["delay"].get<double>() < report - 0.3);
+    GIANT_CHECK(heard["crack"]["direction"][2].get<double>() < -0.5); // from the flight's side
+    GIANT_CHECK(std::fabs(heard["report_loudness"].get<double>() - 100.0) < 3.0);
+    GIANT_CHECK(f.audio.shots() == 1);
+    // A subsonic pistol round (300 m/s): the bang, no crack.
+    r = f.run("fire", {{"origin", {0.0, 1.7, 0.0}}, {"direction", {1.0, 0.0, 0.0}}, {"speed", 300.0}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["heard"]["crack"]["heard"] == false);
+    GIANT_CHECK(r.value["heard"]["report_loudness"].get<double>() < 50.0);
+    // A wall in the way at 50 m: the flight is cut there, so no crack reaches the camera at 300 m.
+    GIANT_CHECK(f.run("create_entity", {{"shape", "cube"}, {"position", {50.0, 2.0, 0.0}}, {"scale", {1.0, 4.0, 4.0}},
+                                       {"body", "fixed"}, {"surface", "concrete"}}).ok);
+    r = f.run("fire", {{"origin", {0.0, 1.7, 0.0}}, {"direction", {1.0, 0.0, 0.0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["heard"]["crack"]["heard"] == false);
+    GIANT_CHECK(std::fabs(r.value["heard"]["range"].get<double>() - 49.5) < 0.1);
+    // Simulating, its hit on the wall knocks (heard).
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    const u64 before = f.audio.impacts();
+    r = f.run("fire", {{"origin", {0.0, 1.7, 0.0}}, {"direction", {1.0, 0.0, 0.0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["hits"].size() >= 1);
+    GIANT_CHECK(f.audio.impacts() > before);
+    r = f.run("get_audio");
+    GIANT_CHECK(r.value["shots"] == 4 && r.value["impacts"].get<u64>() >= 1);
+    // Flying (not resolved): a wall made this frame at 30 m is met by the aim, so the flight ends there.
+    GIANT_CHECK(f.run("create_entity", {{"shape", "cube"}, {"position", {30.0, 2.0, 5.0}}, {"scale", {1.0, 4.0, 4.0}},
+                                       {"body", "fixed"}, {"surface", "concrete"}}).ok);
+    r = f.run("fire", {{"origin", {0.0, 1.7, 5.0}}, {"direction", {1.0, 0.0, 0.0}}});
+    GIANT_CHECK(r.ok && std::fabs(r.value["heard"]["range"].get<double>() - 29.5) < 0.1);
+    GIANT_CHECK(r.value["heard"]["crack"]["heard"] == false);
+}
+
+GIANT_TEST("editor audio: a resolved shot through a thin board still cracks past the camera") {
+    Fixture f(true);
+    f.state.camera.position = {300.0, 1.7, 20.0};
+    register_physics_commands(f.commands, f.state);
+    connect_sounds(f.state);
+    // A 2 cm wooden board at 50 m: a rifle round goes through it, and on past the camera.
+    GIANT_CHECK(f.run("create_entity", {{"shape", "cube"}, {"position", {50.0, 2.0, 0.0}}, {"scale", {0.02, 4.0, 4.0}},
+                                       {"body", "fixed"}, {"surface", "wood"}}).ok);
+    const ai::CommandResult r =
+        f.run("fire", {{"origin", {0.0, 1.7, 0.0}}, {"direction", {1.0, 0.0, 0.0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["hits"].size() >= 1);
+    GIANT_CHECK(r.value["hits"][0]["outcome"] == "passed");
+    GIANT_CHECK(r.value["heard"]["crack"]["heard"] == true);
+    GIANT_CHECK(r.value["heard"]["range"].get<double>() > 300.0);
+}
+
+GIANT_TEST("editor audio: knocks and full shots are bounded a frame; a knock past 1 km is not made") {
+    Fixture f;
+    f.valley();
+    f.state.camera.position = {60.0, 1.7, 0.0};
+    f.audio.update(f.state.camera, 0.0);
+    for (u32 k = 0; k < 20; ++k) f.audio.impact(f.state.scene, nullptr, {40.0, 0.0, 0.0}, 100.0f);
+    GIANT_CHECK(f.audio.impacts() == AudioState::k_max_impacts);
+    f.audio.update(f.state.camera, 1.0 / 60.0); // the next frame
+    f.audio.impact(f.state.scene, nullptr, {40.0, 0.0, 0.0}, 100.0f);
+    GIANT_CHECK(f.audio.impacts() == AudioState::k_max_impacts + 1);
+    f.audio.impact(f.state.scene, nullptr, {2000.0, 0.0, 0.0}, 100.0f);
+    GIANT_CHECK(f.audio.impacts() == AudioState::k_max_impacts + 1);
+    // Shots: the first k_full_shots traced in full (echoes), the rest with the direct way only.
+    f.audio.update(f.state.camera, 1.0 / 60.0);
+    for (u32 k = 0; k < AudioState::k_full_shots + 2; ++k) {
+        const AudioState::ShotHeard h =
+            f.audio.shot(f.state.scene, nullptr, {0.0, 1.7, 0.0}, {300.0f, 0.0f, 0.0f}, 0.008f, 0.0f, 100.0);
+        if (k < AudioState::k_full_shots) GIANT_CHECK(h.report.casts > 8);
+        else GIANT_CHECK(h.report.casts <= 1 && h.report.taps.size() == 1);
+    }
+}
+
+GIANT_TEST("editor audio: snow and fog take the highs sooner; snow on the ground deadens its echo") {
+    Fixture f;
+    f.valley();
+    world::Weather w;
+    GIANT_CHECK(f.audio.air() == 1.0f);
+    w.fog_density = 1.0f;
+    w.precipitation = 1.0f;
+    w.temperature = -10.0f; // snow
+    f.audio.set_weather(&w, world::Ground{0.0f, 1.0f});
+    GIANT_CHECK(f.audio.air() > 3.5f && f.audio.snow_cover() == 1.0f);
+    const audio::RayHit snowy = f.audio.ray_cast(f.state.scene, nullptr)({100.0, 50.0, 32.0}, {0, -1, 0}, 100.0);
+    GIANT_CHECK(snowy.hit && snowy.hardness < 0.1f);
+    f.state.camera.position = {50.0, 1.7, 32.0};
+    ai::CommandResult r = f.run("play_sound", {{"at", {230.0, 1.7, 32.0}}, {"rays", 0}});
+    const double dull = r.value["taps"][0]["lowpass"].get<double>();
+    f.audio.set_weather(nullptr, world::Ground{});
+    r = f.run("play_sound", {{"at", {230.0, 1.7, 32.0}}, {"rays", 0}});
+    GIANT_CHECK(r.value["taps"][0]["lowpass"].get<double>() > dull * 2.0);
+    GIANT_CHECK(f.run("get_audio").value["air"] == 1.0);
+}

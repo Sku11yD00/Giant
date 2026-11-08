@@ -3,6 +3,7 @@
 // what the rays hit; made sounds and WAV files.
 #include "giant/audio/mixer.h"
 #include "giant/audio/propagation.h"
+#include "giant/audio/shot.h"
 #include "giant/audio/sounds.h"
 
 #include "giant_test.h"
@@ -10,6 +11,7 @@
 #include <atomic>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -283,13 +285,63 @@ GIANT_TEST("audio propagation: a cliff 343 m off answers 2 s later from its side
     GIANT_CHECK(h.openness > 0.2f && h.openness < 0.8f); // the sky, over half the ground and cliff
     GIANT_CHECK(h.reverb_send > 0.0f);
 
-    // A wall between: muffled, quieter.
+    // A wall 4 m high between: heard over its top, later by the detour, quieter, duller, from above.
     PlaneWorld walled = w;
     walled.planes.push_back({{0, 0, 1}, 1.0, 0.9f, {-5, 0, 0.5}, {5, 4, 1.5}});
     const Heard m = trace({0.0, 1.7, 2.0}, here, walled.cast(), s);
-    GIANT_CHECK(m.occluded);
+    GIANT_CHECK(m.occluded && m.diffracted);
+    GIANT_CHECK(m.detour > 0.5 && m.detour < 8.0);
+    GIANT_CHECK(std::fabs(m.taps[0].delay - (2.0 + m.detour) / k_speed_of_sound) < 1e-9);
     GIANT_CHECK(m.taps[0].gain < h.taps[0].gain * 0.5f);
-    GIANT_CHECK(m.taps[0].lowpass <= s.occluded_lowpass);
+    GIANT_CHECK(m.taps[0].lowpass < 3000.0f);
+    GIANT_CHECK(m.taps[0].direction.y > 0.3f || std::fabs(m.taps[0].direction.x) > 0.3f);
+    // A higher wall: a longer detour, quieter yet.
+    PlaneWorld high = w;
+    high.planes.push_back({{0, 0, 1}, 1.0, 0.9f, {-100, 0, 0.5}, {100, 30, 1.5}});
+    const Heard hi = trace({0.0, 1.7, 2.0}, here, high.cast(), s);
+    GIANT_CHECK(hi.occluded && hi.taps[0].gain < m.taps[0].gain);
+    // ...so long a way over (about 57 m round) that through it is louder: heard through, not bent.
+    GIANT_CHECK(!hi.diffracted && hi.taps[0].lowpass <= s.occluded_lowpass);
+    GIANT_CHECK(std::fabs(hi.taps[0].gain - h.taps[0].gain * s.occluded_gain) < 1e-6f);
+    // A wall just grazing the line (its top 10 cm over it): bent round by a hair, nearly as loud as open.
+    PlaneWorld low = w;
+    low.planes.push_back({{0, 0, 1}, 1.0, 0.9f, {-5, 0, 0.5}, {5, 1.8, 1.5}});
+    const Heard g = trace({0.0, 1.7, 2.0}, here, low.cast(), s);
+    GIANT_CHECK(g.occluded && g.diffracted && g.detour < 0.1);
+    GIANT_CHECK(g.taps[0].gain > m.taps[0].gain && g.taps[0].gain > h.taps[0].gain * 0.2f);
+    GIANT_CHECK(g.taps[0].direction.y > 0.0f);
+    // No way round (a wall across everything): heard through it.
+    PlaneWorld sealed = w;
+    sealed.planes.push_back({{0, 0, 1}, 1.0, 0.9f});
+    const Heard t = trace({0.0, 1.7, 2.0}, here, sealed.cast(), s);
+    GIANT_CHECK(t.occluded && !t.diffracted && t.taps[0].lowpass <= s.occluded_lowpass);
+    GIANT_CHECK(t.casts <= 1 + 84 + 2 * s.rays);
+    EchoSettings flat = s;
+    flat.diffract = false;
+    GIANT_CHECK(!trace({0.0, 1.7, 2.0}, here, walled.cast(), flat).diffracted);
+    GIANT_CHECK(diffraction_db(0.0) > 4.7f && diffraction_db(0.0) < 4.8f && diffraction_db(1e9) == 30.0f);
+
+    // Wet air (air 3): the far cliff's answer duller, quieter.
+    EchoSettings wet = s;
+    wet.air = 3.0f;
+    const Heard r = trace({0.0, 1.7, 2.0}, here, w.cast(), wet);
+    GIANT_CHECK(r.taps[0].lowpass < h.taps[0].lowpass);
+    bool wet_cliff = false;
+    for (usize k = 1; k < r.taps.size(); ++k) {
+        const Tap& e = r.taps[k];
+        if (e.delay > 1.9 && e.delay < 2.3 && e.direction.x > 0.8f) {
+            for (usize j = 1; j < h.taps.size(); ++j) {
+                const Tap& dry = h.taps[j];
+                if (std::fabs(dry.delay - e.delay) < 1e-6) {
+                    wet_cliff = true;
+                    GIANT_CHECK(e.lowpass < dry.lowpass && e.gain < dry.gain);
+                }
+            }
+        }
+    }
+    GIANT_CHECK(wet_cliff);
+    GIANT_CHECK(air_lowpass(1000.0, 3.0f) == air_lowpass(3000.0));
+    GIANT_CHECK(distance_gain(1000.0, 1.0, 2.0f) < distance_gain(1000.0));
 }
 
 GIANT_TEST("audio propagation: near echoes group by the first of them; too loud a play is scaled down alike") {
@@ -435,4 +487,45 @@ GIANT_TEST("audio sounds: made sounds peak where they should; WAV round trips an
     GIANT_CHECK(!decode_wav(cut).has_value());
     const std::vector<u8> short_data(bytes.begin(), bytes.begin() + 44 + 400);
     GIANT_CHECK(decode_wav(short_data).has_value() && decode_wav(short_data)->samples.size() == 100);
+}
+
+GIANT_TEST("audio shot: a rifle round passing 20 m off at 300 m cracks well before the report, from upstream") {
+    // Fired along +x from the origin at 880 m/s; the listener 300 m down range, 20 m to the side.
+    const Flight f{{0, 0, 0}, {880, 0, 0}, 0.0007f, 4000.0};
+    const DVec3 here{300, 0, 20};
+    const Crack c = trace_crack(f, here);
+    GIANT_CHECK(c.heard);
+    const double report = std::hypot(300.0, 20.0) / k_speed_of_sound;
+    GIANT_CHECK(c.delay < report - 0.3);
+    // The bullet reached x = 300 at about 0.37 s; the crack comes a little after, from upstream.
+    GIANT_CHECK(c.distance < 300.0 && c.distance > 250.0);
+    GIANT_CHECK(c.direction.x < -0.3f && c.direction.z < -0.5f);
+    GIANT_CHECK(c.speed > k_speed_of_sound && c.miss > 20.0 && c.miss < 60.0);
+    // The Mach angle holds where it left: cos = c / v between the flight and the way to the listener.
+    const double cosine = (here.x - c.from.x) / c.miss;
+    GIANT_CHECK(std::fabs(cosine - k_speed_of_sound / c.speed) < 1e-3);
+    // Nearer passes crack louder.
+    GIANT_CHECK(trace_crack(f, {300, 0, 2}).gain > c.gain * 4.0f);
+
+    // Behind the shooter, a subsonic round, one stopped short (a wall at 100 m): no crack.
+    GIANT_CHECK(!trace_crack(f, {-50, 0, 5}).heard);
+    GIANT_CHECK(!trace_crack({{0, 0, 0}, {300, 0, 0}}, here).heard);
+    GIANT_CHECK(!trace_crack({{0, 0, 0}, {880, 0, 0}, 0.0007f, 100.0}, here).heard);
+    const Flight draggy{{0, 0, 0}, {880, 0, 0}, 0.002f, 4000.0};
+    // Drag 0.002: supersonic for 471 m. Far past that, ahead, the shock comes from where it slowed under
+    // sound. Far out to the side near the muzzle (wider than the Mach cone there): none reaches.
+    GIANT_CHECK(std::fabs(supersonic_range(draggy) - std::log(880.0 / k_speed_of_sound) / 0.002) < 0.5);
+    const Crack ahead = trace_crack(draggy, {900, 0, 20});
+    GIANT_CHECK(ahead.heard && ahead.distance > supersonic_range(draggy) - 10.0);
+    GIANT_CHECK(!trace_crack(draggy, {100, 0, 400}).heard);
+    GIANT_CHECK(trace_crack(draggy, {300, 0, 20}).heard);
+    GIANT_CHECK(!trace_crack({{0, 0, 0}, {std::nanf(""), 0, 0}}, here).heard);
+    // No end to the flight: as far as it stays fast (1000 km with no drag); a NaN end: none.
+    const double inf = std::numeric_limits<double>::infinity();
+    GIANT_CHECK(supersonic_range({{0, 0, 0}, {880, 0, 0}, 0.0f, inf}) == 1e6);
+    GIANT_CHECK(std::fabs(supersonic_range({{0, 0, 0}, {880, 0, 0}, 0.002f, inf}) - supersonic_range(draggy)) < 1e-9);
+    GIANT_CHECK(supersonic_range({{0, 0, 0}, {880, 0, 0}, 0.0f, std::nan("")}) == 0.0);
+    // Stood on the line downrange: the crack from back up it.
+    const Crack on = trace_crack(f, {200, 0, 0});
+    GIANT_CHECK(on.heard && on.direction.x < -0.99f);
 }

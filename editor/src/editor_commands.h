@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -294,6 +295,14 @@ void connect_walkers(EditorState& state);
 // and the cloth near (state.physics's on_hits and on_impact, reading
 // state.swing and state.cloth when they come). Once the physics is set.
 void connect_blows(EditorState& state);
+// Bullets' hits heard where they strike (state.physics's on_hits, after what
+// connect_blows set; state.audio). Once both are set, after connect_blows.
+void connect_sounds(EditorState& state);
+// A shot fired from `origin` at `velocity` heard (state.audio): its report and
+// crack as play_sound's JSON reports them; null without audio. `range`: where
+// the bullet stopped or glanced off, when known (else a ray along the aim).
+ai::Json hear_shot(EditorState& state, const DVec3& origin, const Vec3& velocity, float mass,
+                   std::optional<double> range = std::nullopt);
 
 // What the AI is told when it connects over MCP.
 const char* mcp_instructions();

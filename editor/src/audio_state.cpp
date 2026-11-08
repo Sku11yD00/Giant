@@ -132,6 +132,7 @@ std::optional<audio::RayHit> march_terrain(const world::Terrain& terrain, const 
 AudioState::AudioState() {
     m_names["gunshot"] = m_mixer.add_sound(audio::synth_gunshot());
     m_names["crack"] = m_mixer.add_sound(audio::synth_crack());
+    m_names["impact"] = m_mixer.add_sound(audio::synth_impact());
     m_names["click"] = m_mixer.add_sound(audio::synth_click());
     m_names["tone"] = m_mixer.add_sound(audio::synth_tone(440.0f, 1.0f));
     m_scratch.resize(static_cast<usize>(audio::k_sample_rate / 4) * 2);
@@ -178,6 +179,7 @@ void AudioState::update(const EditorCamera& camera, double seconds) {
     m_right = {std::cos(yaw), 0.0f, -std::sin(yaw)}; // yaw 0 looks down -Z: right is +X
     m_up = {0.0f, 1.0f, 0.0f};
     m_mixer.set_listener(m_right, m_up);
+    if (seconds > 0.0) m_impacts_this_frame = m_shots_this_frame = 0; // a frame on (commands pass 0)
     if (m_output != nullptr) return;
     // No speakers: the mix moves on with the frames (and is dropped).
     const double s = std::isfinite(seconds) ? std::clamp(seconds, 0.0, 0.25) : 0.0;
@@ -187,7 +189,8 @@ void AudioState::update(const EditorCamera& camera, double seconds) {
 
 audio::RayCast AudioState::ray_cast(const world::Scene& scene, const PhysicsState* physics) const {
     const double reach = physics_reach;
-    return [&scene, physics, reach](const DVec3& from, const Vec3& dir, double max_distance) {
+    const float snow = m_snow;
+    return [&scene, physics, reach, snow](const DVec3& from, const Vec3& dir, double max_distance) {
         audio::RayHit best;
         if (physics != nullptr) {
             // Characters are let through: the listener stands in the player's capsule, a shot is made in it.
@@ -209,24 +212,118 @@ audio::RayCast AudioState::ray_cast(const world::Scene& scene, const PhysicsStat
         const double terrain_reach = best.hit ? best.distance : max_distance;
         if (const auto ground = march_terrain(scene.terrain, from, dir, terrain_reach))
             if (!best.hit || ground->distance < best.distance) best = *ground;
+        // Snow lying on the ground (and what stands on it, but for walls) takes the echo.
+        if (best.hit && snow > 0.0f && best.normal.y > 0.5f) best.hardness *= 1.0f - 0.8f * snow;
         return best;
     };
 }
 
 audio::Heard AudioState::play(const world::Scene& scene, const PhysicsState* physics, audio::SoundId sound,
                               const DVec3& at, float loudness, const audio::EchoSettings& settings) {
-    const audio::Heard heard = audio::trace(at, m_listener, ray_cast(scene, physics), settings);
+    const audio::Heard heard = trace_only(scene, physics, at, settings);
     m_mixer.play(audio::to_play(sound, heard, loudness));
     ++m_played;
     m_last = heard;
     return heard;
 }
 
+void AudioState::set_weather(const world::Weather* shown, const world::Ground& ground) {
+    float air = 1.0f;
+    if (shown != nullptr) {
+        const world::Falling f = world::falling(*shown);
+        const auto unit = [](float v) { return std::isfinite(v) ? std::clamp(v, 0.0f, 1.0f) : 0.0f; };
+        // Wet air and what falls through it take the highs: rain a little, snow more, thick fog too.
+        air += 1.0f * unit(f.rain) + 2.0f * unit(f.snow) + 1.0f * unit(shown->fog_density);
+    }
+    m_air = air;
+    m_snow = std::isfinite(ground.snow_cover) ? std::clamp(ground.snow_cover, 0.0f, 1.0f) : 0.0f;
+}
+
+AudioState::ShotHeard AudioState::shot(const world::Scene& scene, const PhysicsState* physics, const DVec3& origin,
+                                       const Vec3& velocity, float mass, float drag, std::optional<double> range) {
+    ShotHeard out;
+    const float speed = length(velocity);
+    if (!std::isfinite(speed) || speed <= 0.0f || !(mass > 0.0f)) return out;
+    ++m_shots;
+    // The report: louder with the round's energy (a rifle's 3100 J about 100 at 1 m).
+    const double energy = 0.5 * static_cast<double>(mass) * static_cast<double>(speed) * speed;
+    out.report_loudness = static_cast<float>(std::clamp(100.0 * std::sqrt(energy / 3100.0), 5.0, 400.0));
+    const std::optional<audio::SoundId> report = find("gunshot");
+    audio::EchoSettings settings;
+    if (++m_shots_this_frame > k_full_shots) {
+        settings.rays = 0;
+        settings.diffract = false;
+    }
+    if (report) out.report = play(scene, physics, *report, origin, out.report_loudness, settings);
+    // The crack: the flight to where it stopped, when known; else straight along the aim to where a ray meets something.
+    audio::Flight flight{origin, velocity, drag, 4000.0};
+    const double supersonic = audio::supersonic_range(flight);
+    if (supersonic <= 0.0) return out;
+    const audio::RayCast cast = ray_cast(scene, physics);
+    const Vec3 aim = velocity / speed;
+    if (range && !std::isnan(*range)) { // infinite: it flew on as far as it stays fast
+        flight.range = std::clamp(*range, 0.0, supersonic);
+    } else {
+        const audio::RayHit met = cast(origin, aim, supersonic);
+        flight.range = met.hit ? met.distance : supersonic;
+    }
+    out.range = flight.range;
+    out.crack = audio::trace_crack(flight, m_listener, m_air);
+    if (!out.crack.heard) return out;
+    out.crack_loudness = static_cast<float>(std::clamp(60.0 * std::sqrt(static_cast<double>(mass) / 0.008), 5.0, 200.0));
+    audio::Tap tap;
+    tap.delay = out.crack.delay;
+    tap.gain = out.crack.gain * out.crack_loudness;
+    tap.lowpass = audio::air_lowpass(out.crack.miss, m_air);
+    tap.direction = out.crack.direction;
+    if (out.crack.miss > 0.2) {
+        const audio::RayHit seen = cast(m_listener, out.crack.direction, out.crack.miss - 0.1);
+        if (seen.hit) {
+            out.crack_occluded = true;
+            const audio::EchoSettings wall; // through it as the report would be
+            tap.gain *= wall.occluded_gain;
+            tap.lowpass = std::min(tap.lowpass, wall.occluded_lowpass);
+        }
+    }
+    const std::optional<audio::SoundId> crack = find("crack");
+    if (crack) {
+        audio::Play p;
+        p.sound = *crack;
+        p.taps = {tap};
+        p.reverb_send = out.report.reverb_send * out.crack_loudness * 0.3f;
+        p.reverb_seconds = out.report.reverb_seconds;
+        m_mixer.play(std::move(p));
+    }
+    return out;
+}
+
+void AudioState::impact(const world::Scene& scene, const PhysicsState* physics, const DVec3& point, float energy) {
+    if (m_impacts_this_frame >= k_max_impacts || !std::isfinite(energy) || energy <= 0.0f) return;
+    const DVec3 to = point - m_listener;
+    if (!(dot(to, to) <= 1000.0 * 1000.0)) return; // too far to hear a knock
+    const std::optional<audio::SoundId> knock = find("impact");
+    if (!knock) return;
+    ++m_impacts_this_frame;
+    ++m_impacts;
+    audio::EchoSettings s;
+    s.rays = 16; // a knock: few echoes, near, no bending
+    s.max_distance = 300.0;
+    s.diffract = false;
+    const audio::Heard heard = trace_only(scene, physics, point, s);
+    m_mixer.play(audio::to_play(*knock, heard, std::clamp(0.6f * std::sqrt(energy), 0.5f, 60.0f)));
+}
+
+audio::Heard AudioState::trace_only(const world::Scene& scene, const PhysicsState* physics, const DVec3& at,
+                                    audio::EchoSettings settings) const {
+    settings.air *= m_air;
+    return audio::trace(at, m_listener, ray_cast(scene, physics), settings);
+}
+
 AudioState::Recording AudioState::record(const world::Scene& scene, const PhysicsState* physics, audio::SoundId sound,
                                          const DVec3& at, float loudness, const audio::EchoSettings& settings,
                                          double seconds) {
     Recording out;
-    out.heard = audio::trace(at, m_listener, ray_cast(scene, physics), settings);
+    out.heard = trace_only(scene, physics, at, settings);
     const audio::Sound* source = m_mixer.sound(sound);
     if (source == nullptr) return out;
     audio::Mixer alone;

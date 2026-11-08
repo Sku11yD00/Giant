@@ -9,6 +9,8 @@
 #include "giant/core/assert.h"
 
 #include <cmath>
+#include <span>
+#include <functional>
 #include <string>
 
 namespace giant::editor {
@@ -95,6 +97,42 @@ const char* k_heard_doc =
     "`hardness`, `reverb_send` and `reverb_seconds` (the tail's level and length) and `casts`.";
 
 } // namespace
+
+void connect_sounds(EditorState& state) {
+    if (state.physics == nullptr || state.audio == nullptr || state.audio->sounds_connected) return;
+    state.audio->sounds_connected = true;
+    std::function<void(std::span<const PhysicsState::ShotHit>)> before = state.physics->on_hits;
+    state.physics->on_hits = [&state, before](std::span<const PhysicsState::ShotHit> hits) {
+        if (before) before(hits);
+        if (state.audio == nullptr) return;
+        for (const PhysicsState::ShotHit& h : hits)
+            state.audio->impact(state.scene, state.physics, h.hit.point, h.hit.energy);
+    };
+}
+
+Json hear_shot(EditorState& state, const DVec3& origin, const Vec3& velocity, float mass, std::optional<double> range) {
+    if (state.audio == nullptr) return nullptr;
+    state.audio->update(state.camera, 0.0);
+    const float drag = state.physics != nullptr ? state.physics->ballistics().settings().drag : 0.0007f;
+    const AudioState::ShotHeard h = state.audio->shot(state.scene, state.physics, origin, velocity, mass, drag, range);
+    Json out = {{"report", heard_json(h.report, origin, state.audio->listener())},
+                {"report_loudness", h.report_loudness},
+                {"crack", {{"heard", h.crack.heard}}}};
+    if (h.crack.heard) {
+        out["crack"] = {{"heard", true},
+                        {"delay", h.crack.delay},
+                        {"miss", h.crack.miss},
+                        {"from", dvec(h.crack.from)},
+                        {"direction", vec(h.crack.direction)},
+                        {"speed", h.crack.speed},
+                        {"distance", h.crack.distance},
+                        {"gain", h.crack.gain},
+                        {"loudness", h.crack_loudness},
+                        {"occluded", h.crack_occluded}};
+    }
+    out["range"] = h.range;
+    return out;
+}
 
 void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
@@ -192,7 +230,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
         {"get_audio",
          "The sound: `device` (the speakers' driver; empty: none, the mix runs silent), the sounds by name, "
          "the listener (the camera), the mixer (`voices` playing, `taps` in them, `frames` rendered, "
-         "`dropped` plays, voices `stolen` (cut short for a play no quieter than what they had left), `peak` of the last render before the limiter, `reverb_seconds`), sounds `played` "
+         "`dropped` plays, voices `stolen` (cut short for a play no quieter than what they had left), `peak` of the last render before the limiter, `reverb_seconds`), sounds `played`, `shots` heard (fire), bullet `impacts` heard, the weather's `air` (1 dry; rain, snow and fog take the highs sooner) and `snow_cover` (deadening echoes off the ground), "
          "and the last one's `heard` (as play_sound returns).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}}, false,
          [&state](const Json&, CommandContext&) {
@@ -210,6 +248,10 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
                          {"peak", s.peak},
                          {"reverb_seconds", s.reverb_seconds},
                          {"played", a.played()},
+                         {"shots", a.shots()},
+                         {"impacts", a.impacts()},
+                         {"air", a.air()},
+                         {"snow_cover", a.snow_cover()},
                          {"speed_of_sound", audio::k_speed_of_sound}};
              if (a.last()) {
                  out["heard"] = heard_json(*a.last(), a.listener(), a.listener());

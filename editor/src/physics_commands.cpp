@@ -2,6 +2,7 @@
 // state, not undoable), walking it as the player (play mode) and asking the
 // physics world what is where.
 #include "editor_commands.h"
+#include "audio_state.h"
 #include "physics_state.h"
 #include "hit_targets.h"
 #include "mesh_library.h"
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <unordered_set>
@@ -363,7 +365,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "hits show in get_ballistics); `resolve` flies it to its end now and returns its `hits` in order "
          "(each: outcome stopped, passed or ricochet; entity, piece, surface, point, speeds in and out, the "
          "energy left there, thickness gone through, distance flown). Not simulating, `resolve` only "
-         "reports (nothing is pushed or broken).",
+         "reports (nothing is pushed or broken). With audio, `heard`: the report from the muzzle, a "
+         "supersonic round's crack where its shock cone sweeps over the camera, and the `range` its flight "
+         "was taken to.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"origin", "direction"}},
@@ -407,12 +411,27 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
                  state.physics->flush(state.scene);
                  catch_up_hits(state);
                  Json hits = Json::array();
-                 for (const PhysicsState::ShotHit& h : state.physics->resolve(shot)) hits.push_back(shot_hit_json(h));
-                 return CommandResult::success(Json{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}});
+                 if (state.audio != nullptr) state.audio->update(state.camera, 0.0); // its knocks heard from here
+                 const std::vector<PhysicsState::ShotHit> met = state.physics->resolve(shot);
+                 std::optional<double> range; // where it stopped or glanced off: its crack ends there
+                 for (const PhysicsState::ShotHit& h : met) {
+                     hits.push_back(shot_hit_json(h));
+                     if (!range && h.hit.outcome != sim::HitOutcome::passed) range = h.hit.distance;
+                 }
+                 // Nothing stopped it: it flew on through whatever it passed, as far as it stays fast.
+                 if (!range) range = std::numeric_limits<double>::infinity();
+                 Json heard = hear_shot(state, shot.origin, shot.velocity, shot.mass, range);
+                 Json out{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}};
+                 if (!heard.is_null()) out["heard"] = std::move(heard);
+                 return CommandResult::success(std::move(out));
              }
              const sim::BulletId id = state.physics->fire(shot);
              if (id == sim::k_no_bullet) return CommandResult::failure("too many bullets flying");
-             return CommandResult::success(Json{{"bullet", id}});
+             Json out{{"bullet", id}};
+             if (state.audio != nullptr) state.physics->flush(state.scene); // its crack meets what it will
+             Json heard = hear_shot(state, shot.origin, shot.velocity, shot.mass);
+             if (!heard.is_null()) out["heard"] = std::move(heard);
+             return CommandResult::success(std::move(out));
          }});
 
     add(registry,
