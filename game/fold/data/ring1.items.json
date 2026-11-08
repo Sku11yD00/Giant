@@ -1,0 +1,24 @@
+{
+  "format": "giant-items",
+  "version": 1,
+  "items": [
+    {"id": "pm_pistol", "name": "PM pistol", "kind": "weapon", "weight_kg": 0.73, "value": 900, "worn": true},
+    {"id": "sawn_off", "name": "Sawn-off shotgun", "kind": "weapon", "weight_kg": 2.1, "value": 1400, "worn": true},
+    {"id": "hunting_rifle", "name": "Bolt-action hunting rifle", "kind": "weapon", "weight_kg": 3.6, "value": 4200, "worn": true},
+    {"id": "pistol_barrel", "name": "Pistol barrel", "kind": "part", "weight_kg": 0.12, "value": 300, "worn": true},
+    {"id": "pistol_slide", "name": "Pistol slide", "kind": "part", "weight_kg": 0.18, "value": 260, "worn": true},
+    {"id": "shotgun_barrel", "name": "Shotgun barrel", "kind": "part", "weight_kg": 0.9, "value": 420, "worn": true},
+    {"id": "rifle_bolt", "name": "Rifle bolt", "kind": "part", "weight_kg": 0.35, "value": 900, "worn": true},
+    {"id": "trigger_group", "name": "Trigger group", "kind": "part", "weight_kg": 0.15, "value": 350, "worn": true},
+    {"id": "spring_set", "name": "Spring set", "kind": "part", "weight_kg": 0.05, "value": 80, "max_stack": 10},
+    {"id": "ammo_9x18", "name": "9x18 rounds", "kind": "ammo", "weight_kg": 0.01, "value": 6, "max_stack": 120},
+    {"id": "ammo_12g_buck", "name": "12 gauge buckshot", "kind": "ammo", "weight_kg": 0.04, "value": 14, "max_stack": 40},
+    {"id": "leather_jacket", "name": "Leather jacket", "kind": "armour", "weight_kg": 2.5, "value": 1100, "worn": true},
+    {"id": "basic_tools", "name": "Basic tool set", "kind": "tool", "weight_kg": 2.0, "value": 3000, "worn": true},
+    {"id": "gun_oil", "name": "Gun oil", "kind": "tool", "weight_kg": 0.2, "value": 250, "max_stack": 5},
+    {"id": "bandage", "name": "Bandage", "kind": "consumable", "weight_kg": 0.05, "value": 60, "max_stack": 10},
+    {"id": "canned_meat", "name": "Canned meat", "kind": "consumable", "weight_kg": 0.35, "value": 90, "max_stack": 5},
+    {"id": "water_bottle", "name": "Bottle of water", "kind": "consumable", "weight_kg": 0.5, "value": 40, "max_stack": 5},
+    {"id": "stash_note", "name": "Note with stash directions", "kind": "misc", "weight_kg": 0.0, "value": 0}
+  ]
+}
