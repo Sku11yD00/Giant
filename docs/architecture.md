@@ -7,7 +7,7 @@ game        C# scripts, levels, materials, scatter graphs, weather presets
 editor      panels, play-in-editor, undo; uses everything below
 ai          command layer, MCP server, rule checks
 gameplay    game rules: items, inventories, weapon parts, crafting, loot (docs/game-plan.md)
-sim world   giants, destruction, NPCs, animation | cells, streaming, landscape, scatter, weather
+sim nav world  giants, destruction, NPCs, animation | walkable ground, paths | cells, streaming, landscape, scatter, weather
 render      virtual geometry, voxel world, GI, materials, hair, clouds
 rhi geometry voxel  thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only) | voxel bricks, clipmap
 platform    windows, input, files (SDL3 underneath)
@@ -29,6 +29,7 @@ This table is the source of truth for `tools/check_architecture.py`.
 | render | core, rhi, geometry, voxel |
 | world | core, voxel |
 | sim | core, world |
+| nav | core, world |
 | gameplay | core, world, sim |
 | script | core, world, sim |
 | ai | core, platform, rhi, anim, geometry, render, world, sim, script |
