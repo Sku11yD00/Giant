@@ -44,9 +44,10 @@ void register_cloth_commands(ai::CommandRegistry& registry, EditorState& state) 
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"id", {{"type", "integer"}, {"minimum", 1}, {"maximum", 9007199254740991.0}}}}}},
-         true,
+         false, // follows the scene's latest edits first (view state)
          [&state](const Json& args, CommandContext&) {
              if (state.cloth == nullptr) return CommandResult::failure("cloth is not available");
+             state.cloth->catch_up(state.scene, state.scene.untaken_changes()); // the latest edits first
              const sim::Cloths& cloths = state.cloth->cloths();
              const sim::ClothStats s = cloths.stats();
              const sim::ClothSettingsSim& settings = cloths.settings();
@@ -94,6 +95,7 @@ void register_cloth_commands(ai::CommandRegistry& registry, EditorState& state) 
          false,
          [&state](const Json& args, CommandContext&) {
              if (state.cloth == nullptr) return CommandResult::failure("cloth is not available");
+             state.cloth->catch_up(state.scene, state.scene.untaken_changes()); // a sheet made just now too
              const Json& p = args["position"];
              const Json& v = args["velocity"];
              state.cloth->cloths().push({p[0].get<double>(), p[1].get<double>(), p[2].get<double>()},

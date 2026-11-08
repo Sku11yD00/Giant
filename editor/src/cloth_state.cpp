@@ -40,19 +40,26 @@ ClothState::ClothState(render::Renderer* renderer) : m_renderer(renderer) {}
 
 ClothState::~ClothState() {
     if (m_renderer == nullptr) return;
-    for (const auto& [id, d] : m_made) m_renderer->remove_mesh(d.mesh);
+    for (const auto& [id, m] : m_made) {
+        m_renderer->remove_mesh(m.current.mesh);
+        if (m.replacement.mesh != render::k_no_mesh) m_renderer->remove_mesh(m.replacement.mesh);
+    }
 }
 
 void ClothState::drop(world::EntityId id) {
     const auto it = m_made.find(id);
     if (it != m_made.end()) {
-        if (m_renderer != nullptr) m_renderer->remove_mesh(it->second.mesh);
+        if (m_renderer != nullptr) {
+            m_renderer->remove_mesh(it->second.current.mesh);
+            if (it->second.replacement.mesh != render::k_no_mesh) m_renderer->remove_mesh(it->second.replacement.mesh);
+        }
         m_made.erase(it);
     }
     m_drawn.erase(id);
 }
 
 void ClothState::follow_one(const world::Scene& scene, world::EntityId id) {
+    m_refused.erase(id); // changed: tried again
     const world::Entity* e = scene.find(id);
     if (e == nullptr || !e->visible || e->shape != world::Shape::cloth) {
         m_wanted.erase(id);
@@ -62,19 +69,29 @@ void ClothState::follow_one(const world::Scene& scene, world::EntityId id) {
     }
     m_wanted.insert(id);
     m_cloths.set(id, e->cloth, e->transform);
-    // A sheet of another size needs another mesh (its points rest elsewhere).
-    const auto it = m_made.find(id);
-    const sim::Cloths::Sheet* sheet = m_cloths.find(id);
-    if (it != m_made.end() && sheet != nullptr &&
-        (it->second.width != sheet->settings().width || it->second.height != sheet->settings().height)) {
-        drop(id);
-        m_redraw.push_back(id); // drawn with nothing until the new mesh is loaded
-    }
 }
 
 void ClothState::follow(const world::Scene& scene, const world::SceneChanges& changed) {
+    // Replacements loaded since: drawn instead of the old meshes from this
+    // frame's cells on (their cells are built after this).
+    for (const world::EntityId id : m_swaps) {
+        const auto it = m_made.find(id);
+        if (it == m_made.end() || !it->second.replacement.ready) continue;
+        Made& m = it->second;
+        if (m_renderer != nullptr) m_renderer->remove_mesh(m.current.mesh);
+        m.current = m.replacement;
+        m.replacement = {};
+        m_drawn[id] = m.current.mesh;
+        m_redraw.push_back(id);
+    }
+    m_swaps.clear();
+    catch_up(scene, changed);
+}
+
+void ClothState::catch_up(const world::Scene& scene, const world::SceneChanges& changed) {
     if (scene.identity() != m_scene || changed.all) {
         m_scene = scene.identity();
+        m_refused.clear();
         std::vector<world::EntityId> ids(m_wanted.begin(), m_wanted.end());
         for (const world::Entity& e : scene.entities()) {
             if (e.shape == world::Shape::cloth) ids.push_back(e.id);
@@ -87,44 +104,81 @@ void ClothState::follow(const world::Scene& scene, const world::SceneChanges& ch
     for (const world::EntityId id : changed.ids) follow_one(scene, id);
 }
 
+ClothState::Drawn ClothState::make(world::EntityId id, const sim::Cloths::Sheet& sheet) {
+    Drawn d;
+    d.mesh = m_renderer->add_skinned_mesh(geometry::build_skinned_clusters(cloth_mesh(sheet)),
+                                          static_cast<u32>(sheet.points().size()));
+    if (d.mesh == render::k_no_mesh) {
+        log_warning("editor", "cloth " + std::to_string(id) + ": the renderer refused its mesh (tried again when it changes)");
+        m_refused.insert(id);
+        return d;
+    }
+    d.width = sheet.settings().width;
+    d.height = sheet.settings().height;
+    return d;
+}
+
+void ClothState::pose(Drawn& d, const sim::Cloths::Sheet& sheet) {
+    if (d.mesh == render::k_no_mesh || d.width != sheet.settings().width || d.height != sheet.settings().height ||
+        sheet.version() == d.sent) {
+        return; // made for another size (its old pose stays), or as last posed
+    }
+    sheet.skin(m_skin);
+    const geometry::Sphere bounds{sheet.bounds_center(), sheet.bounds_radius()};
+    if (m_renderer->set_pose(d.mesh, m_skin, bounds)) {
+        d.sent = sheet.version();
+        ++m_poses;
+    }
+}
+
 void ClothState::update(const WindState& wind, const DVec3& camera, double seconds) {
     m_cloths.step(seconds, wind, camera, &m_jobs);
     if (m_renderer == nullptr) return;
-    // Meshes for the lowest ids waiting, a few a frame, within the limit.
+    // Meshes for the lowest ids waiting (or resized), a few a frame, within the limit.
     u32 made = 0;
     for (const world::EntityId id : m_wanted) {
-        if (made >= meshes_per_frame || m_made.size() >= k_max_cloths) break;
-        if (m_made.count(id) != 0) continue;
+        if (made >= meshes_per_frame) break;
+        if (m_refused.count(id) != 0) continue;
         const sim::Cloths::Sheet* sheet = m_cloths.find(id);
         if (sheet == nullptr) continue;
-        geometry::SkinnedClusterMesh clusters = geometry::build_skinned_clusters(cloth_mesh(*sheet));
-        ++made;
-        Drawn d;
-        d.mesh = m_renderer->add_skinned_mesh(std::move(clusters), static_cast<u32>(sheet->points().size()));
-        if (d.mesh == render::k_no_mesh) {
-            log_warning("editor", "cloth " + std::to_string(id) + ": the renderer refused its mesh");
-            continue; // tried again next frame
+        const float w = sheet->settings().width, h = sheet->settings().height;
+        const auto it = m_made.find(id);
+        if (it == m_made.end()) {
+            if (m_made.size() >= k_max_cloths) continue;
+            ++made;
+            const Drawn d = make(id, *sheet);
+            if (d.mesh != render::k_no_mesh) m_made[id].current = d;
+            continue;
         }
-        d.width = sheet->settings().width;
-        d.height = sheet->settings().height;
-        m_made[id] = d;
+        Made& m = it->second;
+        const bool current_fits = m.current.width == w && m.current.height == h;
+        Drawn& r = m.replacement;
+        const bool replacement_fits = r.mesh != render::k_no_mesh && r.width == w && r.height == h;
+        if (current_fits) {
+            if (r.mesh != render::k_no_mesh) m_renderer->remove_mesh(r.mesh); // resized back: never drawn
+            r = {};
+            continue;
+        }
+        if (replacement_fits) continue;
+        if (r.mesh != render::k_no_mesh) m_renderer->remove_mesh(r.mesh); // for a size it no longer has: never drawn
+        ++made;
+        r = make(id, *sheet);
     }
     // Those that moved posed; those loaded and posed drawn.
-    for (auto& [id, d] : m_made) {
+    for (auto& [id, m] : m_made) {
         const sim::Cloths::Sheet* sheet = m_cloths.find(id);
         if (sheet == nullptr) continue;
-        if (sheet->version() != d.sent) {
-            sheet->skin(m_skin);
-            const geometry::Sphere bounds{sheet->bounds_center(), sheet->bounds_radius()};
-            if (m_renderer->set_pose(d.mesh, m_skin, bounds)) {
-                d.sent = sheet->version();
-                ++m_poses;
-            }
-        }
-        if (!d.ready && d.sent != 0 && m_renderer->mesh_ready(d.mesh)) {
-            d.ready = true;
-            m_drawn[id] = d.mesh;
+        pose(m.current, *sheet);
+        pose(m.replacement, *sheet);
+        if (!m.current.ready && m.current.sent != 0 && m_renderer->mesh_ready(m.current.mesh)) {
+            m.current.ready = true;
+            m_drawn[id] = m.current.mesh;
             m_redraw.push_back(id);
+        }
+        Drawn& r = m.replacement;
+        if (r.mesh != render::k_no_mesh && !r.ready && r.sent != 0 && m_renderer->mesh_ready(r.mesh)) {
+            r.ready = true;
+            m_swaps.push_back(id);
         }
     }
 }

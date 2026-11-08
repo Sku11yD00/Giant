@@ -48,8 +48,13 @@ public:
     // (Scene::untaken_changes), so no cell is built with a mesh its entity
     // should no longer draw.
     void follow(const world::Scene& scene, const world::SceneChanges& changed);
+    // The same, but leaving the meshes drawn as they are (commands: the
+    // scene's latest edits seen before reading or pushing the sheets).
+    void catch_up(const world::Scene& scene, const world::SceneChanges& changed);
     // Each frame: time moves on under `wind`, meshes are made (at most
-    // meshes_per_frame) and those that moved posed.
+    // meshes_per_frame) and those that moved posed. A sheet given a new
+    // size keeps showing its old mesh (still, in its last pose) until the
+    // new one is loaded.
     void update(const WindState& wind, const DVec3& camera, double seconds);
     u32 meshes_per_frame = 4;
 
@@ -69,16 +74,25 @@ private:
         float width = 0.0f;  // the sheet it was made for
         float height = 0.0f;
         u64 sent = 0;        // the sheet's version last posed
-        bool ready = false;  // loaded and posed: drawn
+        bool ready = false;  // loaded and posed
+    };
+    struct Made {
+        Drawn current;     // drawn once ready
+        Drawn replacement; // for a new size, made while `current` still shows; swapped in once ready
     };
     void follow_one(const world::Scene& scene, world::EntityId id);
     void drop(world::EntityId id);
+    // A mesh for the sheet as it is now, or k_no_mesh (refused: noted).
+    Drawn make(world::EntityId id, const sim::Cloths::Sheet& sheet);
+    void pose(Drawn& d, const sim::Cloths::Sheet& sheet);
 
     render::Renderer* m_renderer;
     JobSystem m_jobs{3};
     sim::Cloths m_cloths;
     std::set<world::EntityId> m_wanted;           // cloth entities shown
-    std::map<world::EntityId, Drawn> m_made;      // with a mesh (made, maybe not loaded yet)
+    std::map<world::EntityId, Made> m_made;       // with a mesh (made, maybe not loaded yet)
+    std::set<world::EntityId> m_refused;          // the renderer refused its mesh: not tried again until it changes
+    std::vector<world::EntityId> m_swaps;         // replacements ready, swapped in at the next follow
     std::unordered_map<world::EntityId, render::MeshId> m_drawn;
     std::vector<world::EntityId> m_redraw;
     std::vector<Mat4> m_skin; // scratch

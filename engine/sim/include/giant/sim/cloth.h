@@ -102,6 +102,11 @@ public:
             float share_a = 0.5f;
             float share_b = 0.5f;
         };
+        struct Tether {
+            u32 pin = 0;   // a pinned point
+            u32 point = 0; // a free one, kept within `length` (a hair over) of it
+            float length = 0.0f;
+        };
         // One fixed step under gravity and wind (both in the sheet's space).
         // Returns the most any point moved.
         float advance(float dt, const Vec3& gravity, const Vec3& wind, float ripple_clock, float air_density,
@@ -122,6 +127,7 @@ public:
         std::vector<float> m_inverse_mass;
         std::vector<float> m_from_pin; // metres from what holds it (ripples run away from it)
         std::vector<Spring> m_springs;
+        std::vector<Tether> m_tethers;
         Vec3 m_center{};
         float m_radius = 0.0f;
         u64 m_version = 1;

@@ -4,7 +4,9 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 using namespace giant;
 using namespace giant::sim;
@@ -239,4 +241,59 @@ GIANT_TEST("cloth: a blast throws it, new settings make it again, moving it wake
     GIANT_CHECK(cloths.find(1)->points() == cloths.find(1)->rest());
     cloths.remove(1);
     GIANT_CHECK(cloths.find(1) == nullptr && cloths.stats().sheets == 0);
+}
+
+GIANT_TEST("cloth: a storm never stretches a sheet far, however it is held") {
+    // The worst stretch between neighbours on the grid, against their rest.
+    const auto worst = [](const Cloths::Sheet& sheet) {
+        float most = 0.0f;
+        const u32 w = sheet.columns();
+        for (u32 i = 0; i < sheet.points().size(); ++i) {
+            for (const u32 j : {i + 1, i + w}) {
+                if (j >= sheet.points().size() || (j == i + 1 && j % w == 0)) continue;
+                const float rest = length(sheet.rest()[j] - sheet.rest()[i]);
+                most = std::max(most, length(sheet.points()[j] - sheet.points()[i]) / rest);
+            }
+        }
+        return most;
+    };
+    for (const world::ClothPin pin : {world::ClothPin::top, world::ClothPin::corners, world::ClothPin::left}) {
+        for (const float speed : {15.0f, 60.0f}) {
+            for (const bool face_on : {true, false}) {
+                Cloths cloths;
+                world::ClothSettings s;
+                s.width = 4.0f;
+                s.height = 6.0f;
+                s.pin = pin;
+                s.weight = 0.1f;
+                world::Transform t;
+                if (face_on) t.rotation = quat_from_axis_angle({0.0f, 1.0f, 0.0f}, -1.5707963f);
+                cloths.set(1, s, t);
+                WindState w = blowing(speed);
+                w.gustiness = 1.0f;
+                float most = 0.0f;
+                for (int i = 0; i < 600; ++i) {
+                    w.flutter_clock = std::fmod(w.flutter_clock + (1.0f + 0.15f * speed) / 60.0f, 256.0f);
+                    w.gust_x = std::fmod(w.gust_x + speed * 0.8f / 60.0f, 64.0f);
+                    cloths.step(1.0 / 60.0, w, {});
+                    if (i > 300) most = std::max(most, worst(*cloths.find(1)));
+                }
+                std::printf("    pin %s, %.0f m/s %s: stretched at most %.2fx\n", world::to_string(pin), speed,
+                            face_on ? "face-on" : "along it", most);
+                GIANT_CHECK(most < 1.45f);
+                GIANT_CHECK(cloths.stats().resets == 0);
+            }
+        }
+    }
+}
+
+GIANT_TEST("cloth: a sheet made again keeps counting its versions on") {
+    Cloths cloths;
+    cloths.set(1, {}, {});
+    cloths.step(1.0 / 60.0, blowing(5.0f), {});
+    const u64 before = cloths.find(1)->version();
+    world::ClothSettings s;
+    s.weight = 1.0f; // the same size: the editor keeps its mesh, and must pose it again
+    cloths.set(1, s, {});
+    GIANT_CHECK(cloths.find(1)->version() > before);
 }

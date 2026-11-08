@@ -137,13 +137,22 @@ GIANT_TEST("cloth: a cloth entity is drawn as its own mesh once loaded, moving i
     GIANT_CHECK(got.value["sheet"]["columns"] == 14 && got.value["sheet"]["rows"] == 8);
     GIANT_CHECK(got.value["sheet"]["points"].size() == 14 * 8);
     GIANT_CHECK(f.cloth->poses() > 1);
-    // A new size makes a new mesh; hiding it takes it away.
+    // A new size makes a new mesh, the old one showing until it is loaded
+    // (resized again meanwhile, as a drag does, it still shows); hiding it
+    // takes it away.
     const render::MeshId first = f.cloth->meshes().at(id);
-    GIANT_CHECK(f.run("set_entity", {{"id", id}, {"cloth", {{"height", 2.0}}}}).ok);
+    for (int i = 0; i < 3; ++i) {
+        GIANT_CHECK(f.run("set_entity", {{"id", id}, {"cloth", {{"height", 2.0 + 0.1 * i}}}}).ok);
+        f.frame_step();
+        GIANT_CHECK(f.cloth->meshes().count(id) == 1 && f.cloth->meshes().at(id) == first);
+        GIANT_CHECK(f.drawing(first) != nullptr);
+    }
+    for (int i = 0; i < 20 && f.cloth->meshes().at(id) == first; ++i) f.frame_step();
+    const render::MeshId second = f.cloth->meshes().at(id);
+    GIANT_CHECK(second != first);
     f.frame_step();
-    GIANT_CHECK(f.cloth->meshes().count(id) == 0 || f.cloth->meshes().at(id) != first);
-    for (int i = 0; i < 20 && f.cloth->meshes().count(id) == 0; ++i) f.frame_step();
-    GIANT_CHECK(f.cloth->meshes().count(id) == 1);
+    GIANT_CHECK(f.drawing(second) != nullptr && f.renderer->skinned(second));
+    GIANT_CHECK(f.run("get_cloth", {{"id", id}}).value["sheet"]["rows"] == 16); // 2.2 m
     GIANT_CHECK(f.run("set_entity", {{"id", id}, {"visible", false}}).ok);
     f.frame_step();
     GIANT_CHECK(f.cloth->meshes().empty() && f.cloth->cloths().stats().sheets == 0);
@@ -174,4 +183,12 @@ GIANT_TEST("cloth: push_cloth wakes and throws a sheet; cloth is never a kit pie
     const auto kit = f.run("create_kit", {{"name", "k"}, {"from_entities", {id}}});
     GIANT_CHECK(!kit.ok && kit.error.find("cloth") != std::string::npos);
     GIANT_CHECK(!f.run("get_cloth", {{"id", id + 100}}).ok);
+    // Commands see the scene's latest edits before a frame has.
+    const auto other = f.run("create_entity", {{"shape", "cloth"}, {"position", {10.0, 0.0, 0.0}}});
+    GIANT_CHECK(other.ok);
+    const world::EntityId second = other.value["id"].get<world::EntityId>();
+    GIANT_CHECK(f.run("get_cloth", {{"id", second}}).ok);
+    GIANT_CHECK(f.run("push_cloth", {{"position", {10.0, -0.75, 0.5}}, {"radius", 1.0}, {"velocity", {0.0, 0.0, -5.0}}}).ok);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {second}}}).ok);
+    GIANT_CHECK(!f.run("get_cloth", {{"id", second}}).ok);
 }

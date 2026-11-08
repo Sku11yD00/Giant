@@ -1192,17 +1192,21 @@ along its normal with the relative wind's normal part squared (a flat
 plate), a little along its face, and in ripples that run away from what
 holds it on the flutter clock, so a storm throws it far harder and faster
 than a breeze and heavier cloth moves less. No point moves more than half
-the grid's spacing a step, so even a 60 m/s storm never tears the grid
-through itself; a sheet whose numbers stop being finite is put back at
-rest (`resets`).
+the grid's spacing a step; after the springs, tethers keep each free
+point within 1.05 times its rest distance of the pins holding it (its
+column's top, its row's pole, or both corners) and a last pass shortens
+any spring over 1.1 times its length, so a 60 m/s storm stretches a 4 by
+6 m sheet at most about 1.4 times between neighbours (blowing along its
+face; about 1.1 face-on). A sheet whose numbers stop being finite is put
+back at rest (`resets`).
 
 Work is bounded (rule 9): the nearest `max_simulated` (32) sheets within
 `distance` (60 m) of the camera move, at most `max_points` (8192) points
 between them (the nearest always), in fixed 1/60 s steps, at most 4 a
 frame; the rest hold their last pose. A sheet that has moved less than
 0.02 mm a step for a second with no wind sleeps until wind, a push or its
-entity moves it. 32 banners of 112 points cost about 1 ms of one core a
-frame; the editor spreads sheets over three workers.
+entity moves it. 32 banners 1 by 2 m (112 points each) cost about 1 ms of
+one core a frame; the editor spreads sheets over three workers.
 
 The editor's `ClothState` follows the scene's changes before the scene
 frame is built (as the animation does), makes each sheet its own skinned
@@ -1214,7 +1218,11 @@ it rests to where it is, turned to its patch's frame (along the grid and
 its normal). The renderer draws it as any skinned mesh: posed on the GPU,
 culling spheres refit, shadows drawn again where it moved; it is never
 left to the far field and the voxel world does not hold it. A cloth entity
-draws nothing until its mesh is loaded. `Cloths::push` (the `push_cloth`
+draws nothing until its mesh is loaded; one given a new size (a drag in
+the panel) keeps its old mesh, still, until the new one is loaded and
+swapped in before the next cells are built, and a mesh the renderer
+refuses is tried again only when its entity changes. `get_cloth` and
+`push_cloth` follow the scene's latest edits first. `Cloths::push` (the `push_cloth`
 command) gives every point near a place a change of speed, less towards
 the edge: blasts and shots, wired to them with the hanging objects (E1
 part 3). Known limits: cloth passes through what it hangs against (no

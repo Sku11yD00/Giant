@@ -15,6 +15,8 @@ constexpr float k_damping = 0.01f;    // share of the speed lost a step (besides
 constexpr float k_still = 2e-5f;      // metres a step: not moving
 constexpr u32 k_still_steps = 60;     // steps that still before it sleeps
 constexpr float k_calm = 0.05f;       // m/s: wind this light lets it sleep
+constexpr float k_spring_slack = 1.1f;  // and no spring ends a step longer than this, if it can be helped
+constexpr float k_tether_slack = 1.05f; // a point strays at most this far over its rest distance from a pin
 
 bool finite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 
@@ -93,6 +95,29 @@ Cloths::Sheet::Sheet(const world::ClothSettings& settings) : m_settings(clean(se
             if (c > 0) spring(c, r, c - 1, r + 1, shear);
             spring(c, r, c + 2, r, bend);
             spring(c, r, c, r + 2, bend);
+        }
+    }
+    // Tethers: each free point stays within its rest distance (a hair
+    // over) of the pins holding it (its column's top, its row's pole, or
+    // both corners), so however hard it blows the sheet never stretches far
+    // from what holds it; the springs alone give way under a storm.
+    std::vector<u32> pins;
+    for (u32 i = 0; i < n; ++i) {
+        if (m_inverse_mass[i] == 0.0f) pins.push_back(i);
+    }
+    for (u32 i = 0; i < n; ++i) {
+        if (m_inverse_mass[i] == 0.0f) continue;
+        const u32 r = i / m_columns, c = i % m_columns;
+        switch (s.pin) {
+        case world::ClothPin::top: m_tethers.push_back({c, i, length(m_rest[i] - m_rest[c])}); break;
+        case world::ClothPin::left: {
+            const u32 at = r * m_columns;
+            m_tethers.push_back({at, i, length(m_rest[i] - m_rest[at])});
+            break;
+        }
+        case world::ClothPin::corners:
+            for (const u32 at : pins) m_tethers.push_back({at, i, length(m_rest[i] - m_rest[at])});
+            break;
         }
     }
     reset();
@@ -178,6 +203,26 @@ float Cloths::Sheet::advance(float dt, const Vec3& gravity, const Vec3& wind, fl
             p[s.a] = p[s.a] + fix * s.share_a;
             p[s.b] = p[s.b] - fix * s.share_b;
         }
+        for (const Tether& t : m_tethers) {
+            const Vec3 d = p[t.point] - p[t.pin];
+            const float len2 = length_squared(d);
+            const float most = t.length * k_tether_slack;
+            if (len2 > most * most) p[t.point] = p[t.pin] + d * (most / std::sqrt(len2));
+        }
+    }
+    // Last, no spring left much longer than it is (a storm along the face
+    // pulls the grid out sideways, past what the tethers hold).
+    for (u32 k = 0; k < 2; ++k) {
+        for (const Spring& s : m_springs) {
+            const Vec3 d = p[s.b] - p[s.a];
+            const float len2 = length_squared(d);
+            const float most = s.length * k_spring_slack;
+            if (len2 <= most * most) continue;
+            const float sum = s.share_a + s.share_b;
+            const Vec3 fix = d * (1.0f - most / std::sqrt(len2));
+            p[s.a] = p[s.a] + fix * (s.share_a / sum);
+            p[s.b] = p[s.b] - fix * (s.share_b / sum);
+        }
     }
     float most = 0.0f;
     for (usize i = 0; i < n; ++i) {
@@ -229,7 +274,10 @@ void Cloths::set(world::EntityId id, const world::ClothSettings& settings, const
     const world::ClothSettings s = clean(settings);
     auto it = m_sheets.find(id);
     if (it == m_sheets.end() || !(it->second.settings() == s)) {
-        m_sheets.insert_or_assign(id, Sheet(s));
+        Sheet fresh(s);
+        // Its version moves on from the sheet it replaces: never the same twice.
+        if (it != m_sheets.end()) fresh.m_version = it->second.m_version + 1;
+        m_sheets.insert_or_assign(id, std::move(fresh));
         it = m_sheets.find(id);
     }
     world::Transform t = place;
@@ -279,8 +327,12 @@ void Cloths::step(double seconds, const WindState& wind, const DVec3& camera, Jo
     m_down.clear();
     u32 points = 0;
     for (const auto& [d2, id] : m_near) {
-        if (m_moving.size() >= m_settings.max_simulated) break;
         Sheet& s = m_sheets.at(id);
+        if (s.m_asleep && m_moving.size() >= m_settings.max_simulated) {
+            ++m_stats.asleep;
+            continue;
+        }
+        if (m_moving.size() >= m_settings.max_simulated) continue;
         const world::Transform& place = m_places.at(id);
         const Quat back = conjugate(place.rotation);
         // The wind where the sheet hangs, in its space.
@@ -314,9 +366,13 @@ void Cloths::step(double seconds, const WindState& wind, const DVec3& camera, Jo
             s.m_time = std::min(s.m_time + added, most);
             float moved = 0.0f;
             u32 taken = 0;
+            // The steps end now (the wind's clock): the last one at the
+            // clock, those before it a step's worth earlier each.
+            const u32 due = static_cast<u32>(s.m_time / dt);
             while (s.m_time >= dt) {
                 s.m_time -= dt;
-                const float clock = wind.flutter_clock + ripple_rate * dt * static_cast<float>(taken);
+                const float ahead = static_cast<float>(due > taken + 1 ? due - taken - 1 : 0u);
+                const float clock = wind.flutter_clock - ripple_rate * dt * ahead;
                 const float m = s.advance(dt, m_down[k], m_wind[k], clock, air, iterations);
                 ++taken;
                 if (m < 0.0f) {
