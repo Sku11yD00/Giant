@@ -76,7 +76,7 @@ i64 cell_floor(double metres) { return static_cast<i64>(std::floor(metres / worl
 
 void nav_obstacles(const world::Scene& scene, const world::Entity& e, const render::Renderer* renderer,
                    const MeshLibrary* meshes, std::vector<nav::Obstacle>& out) {
-    if (!e.visible || e.body != world::BodyKind::fixed || e.swing.on) return;
+    if (e.body != world::BodyKind::fixed || e.swing.on) return; // (hidden ones collide too)
     if (e.shape == world::Shape::mesh && !e.animation.clip.empty()) return; // a character, moving
     const world::Transform& t = e.transform;
     const Quat rot = normalize(t.rotation);
@@ -88,11 +88,15 @@ void nav_obstacles(const world::Scene& scene, const world::Entity& e, const rend
     const world::Kit* kit = scene.find_kit(e.kit);
     if (kit == nullptr) return;
     const world::KeptKit* kept = scene.kept_kit(e.id, &t);
-    for (u32 i = 0; i < kit->pieces.size(); ++i) {
-        if (kept != nullptr && std::any_of(kept->pieces.begin(), kept->pieces.end(),
-                                           [&](const world::KeptPiece& p) { return p.piece == i; })) {
-            continue; // knocked loose: lying elsewhere, as rubble
+    std::vector<u8> loose;
+    if (kept != nullptr) {
+        loose.assign(kit->pieces.size(), 0);
+        for (const world::KeptPiece& p : kept->pieces) {
+            if (p.piece < loose.size()) loose[p.piece] = 1;
         }
+    }
+    for (u32 i = 0; i < kit->pieces.size(); ++i) {
+        if (!loose.empty() && loose[i] != 0) continue; // knocked loose: lying elsewhere, as rubble
         const world::KitPiece& p = kit->pieces[i];
         // Where the renderer puts it.
         const Vec3 scaled{static_cast<float>(p.transform.position.x) * t.scale.x,
@@ -192,33 +196,59 @@ void NavState::follow_all(const world::Scene& scene) {
 
 void NavState::follow(const world::Scene& scene, const world::SceneChanges& changed) {
     if (scene.identity() != m_scene) {
-        // Another scene: what was known of the last one goes (its tiles
-        // stay, checked against this one's inputs and built again).
+        // Another scene: what was known of the last one goes, its tiles
+        // too (built again as they are asked for; tiles being built are
+        // taken stale and built again).
         m_scene = scene.identity();
         m_placed.clear();
         m_in_cell.clear();
         m_large.clear();
         m_large_stamp = m_next_stamp++;
-        for (auto& [c, stamp] : m_stamp) stamp = m_next_stamp++;
-        for (const auto& [c, in] : m_inputs) m_dirty.insert({c.x, c.z});
+        m_stamp.clear();
+        m_map.clear();
+        m_inputs.clear();
+        m_used.clear();
+        m_dirty.clear();
+        m_check.clear();
+        m_check_next = 0;
+        m_refollow.clear();
+        m_refollowing.clear();
         m_kits = scene.kits;
         if (m_meshes != nullptr) m_meshes_version = m_meshes->version();
         follow_all(scene);
         return;
     }
-    const bool kits = !(scene.kits == m_kits);
+    // Kits changed (by name: their pieces differ, or they came or went).
+    std::unordered_set<std::string> kits;
+    if (!(scene.kits == m_kits)) {
+        const auto find = [](const std::vector<world::Kit>& in, const std::string& name) -> const world::Kit* {
+            for (const world::Kit& k : in) {
+                if (k.name == name) return &k;
+            }
+            return nullptr;
+        };
+        for (const world::Kit& k : scene.kits) {
+            const world::Kit* was = find(m_kits, k.name);
+            if (was == nullptr || !(was->pieces == k.pieces)) kits.insert(k.name);
+        }
+        for (const world::Kit& k : m_kits) {
+            if (find(scene.kits, k.name) == nullptr) kits.insert(k.name);
+        }
+        m_kits = scene.kits;
+    }
     const bool meshes = m_meshes != nullptr && m_meshes->version() != m_meshes_version;
-    if (kits) m_kits = scene.kits;
     if (meshes) m_meshes_version = m_meshes->version();
     if (changed.all) {
         follow_all(scene);
         return;
     }
-    if (kits || meshes) {
-        // The entities whose size depends on them, looked at again.
+    if (!kits.empty() || meshes) {
+        // The entities whose size depends on them: looked at again, a
+        // share a frame (update).
         for (const world::Entity& e : scene.entities()) {
-            if ((kits && e.shape == world::Shape::kit) || (meshes && (e.shape == world::Shape::mesh || e.shape == world::Shape::kit))) {
-                follow_one(scene, e.id);
+            const bool kit = e.shape == world::Shape::kit && (meshes || kits.contains(e.kit));
+            if ((kit || (meshes && e.shape == world::Shape::mesh)) && m_refollowing.insert(e.id).second) {
+                m_refollow.push_back(e.id);
             }
         }
     }
@@ -303,7 +333,7 @@ void NavState::start(const world::Scene& scene, world::CellCoord cell) {
 void NavState::keep(nav::NavTile tile, const Inputs& inputs) {
     const world::CellCoord c = tile.cell;
     m_inputs[c] = inputs;
-    m_used[c] = m_frame;
+    m_used.try_emplace(c, m_frame); // a rebuild is not a use
     m_map.set_tile(std::move(tile));
     ++m_built;
 }
@@ -337,8 +367,21 @@ void NavState::evict() {
     }
 }
 
+bool NavState::stale_at(const world::Scene& scene, world::CellCoord cell) const {
+    const auto in = m_inputs.find(cell);
+    return m_map.find(cell) != nullptr && (in == m_inputs.end() || !(in->second == inputs_of(scene, cell)));
+}
+
 void NavState::update(const world::Scene& scene) {
     ++m_frame;
+    if (scene.identity() == m_scene) {
+        for (u32 n = 0; n < refollows_per_frame && !m_refollow.empty(); ++n) {
+            const world::EntityId id = m_refollow.front();
+            m_refollow.pop_front();
+            m_refollowing.erase(id);
+            follow_one(scene, id);
+        }
+    }
     // Tiles finished: kept (a tile whose inputs changed meanwhile is kept
     // for now and built again).
     for (usize k = 0; k < m_building.size();) {
@@ -371,7 +414,8 @@ void NavState::update(const world::Scene& scene) {
     while (m_building.size() < tiles_in_flight && !m_wanted.empty()) {
         const world::CellCoord c = m_wanted.front();
         m_wanted.pop_front();
-        if (building(c) || (m_map.find(c) != nullptr && !m_dirty.contains({c.x, c.z}))) continue;
+        if (building(c)) continue; // (asked for again if still stale once built)
+        if (m_map.find(c) != nullptr && !m_dirty.contains({c.x, c.z})) continue;
         m_dirty.erase({c.x, c.z});
         start(scene, c);
     }
@@ -385,27 +429,60 @@ void NavState::update(const world::Scene& scene) {
         start(scene, c);
     }
     // Searches moved on, sharing the budget.
-    u32 budget = nodes_per_frame;
-    for (auto& [id, s] : m_searches) {
-        if (budget == 0) break;
-        nav::PathSearch& search = *s;
+    u64 budget = nodes_per_frame;
+    for (auto& [id, entry] : m_searches) {
+        if (!entry.waits.empty()) {
+            const bool fresh = std::none_of(entry.waits.begin(), entry.waits.end(), [&](world::CellCoord c) {
+                return m_dirty.contains({c.x, c.z}) ||
+                       std::any_of(m_building.begin(), m_building.end(), [&](const Building& b) { return b.cell == c; });
+            });
+            if (fresh) {
+                entry.waits.clear();
+                ++entry.redone;
+                entry.search = std::make_unique<nav::PathSearch>(m_map, entry.from, entry.to);
+            } else {
+                for (const world::CellCoord c : entry.waits) want(c);
+                continue;
+            }
+        }
+        if (entry.search->state() == nav::SearchState::found || entry.search->state() == nav::SearchState::failed) continue;
+        // Its ends' tiles kept (and those it waits for).
+        for (const DVec3& end : {entry.from, entry.to}) {
+            if (std::fabs(end.x) <= nav::k_max_nav_coordinate && std::fabs(end.z) <= nav::k_max_nav_coordinate) {
+                m_used[world::cell_of(end)] = m_frame;
+            }
+        }
+        if (budget == 0) continue;
+        nav::PathSearch& search = *entry.search;
         for (int tries = 0; tries < 4 && budget > 0; ++tries) {
-            if (search.state() == nav::SearchState::missing) {
-                if (m_map.find(search.missing_tile()) == nullptr) {
-                    want(search.missing_tile());
-                    break;
-                }
-            } else if (search.state() != nav::SearchState::searching) {
+            if (search.state() == nav::SearchState::missing && m_map.find(search.missing_tile()) == nullptr) {
+                want(search.missing_tile());
                 break;
             }
-            const u32 before = search.nodes();
-            search.advance(budget);
-            const u32 spent = std::max<u32>(1, search.nodes() - before);
+            if (search.state() != nav::SearchState::searching && search.state() != nav::SearchState::missing) break;
+            const u64 before = search.work();
+            search.advance(static_cast<u32>(budget));
+            const u64 spent = std::max<u64>(1, search.work() - before);
             budget = spent >= budget ? 0 : budget - spent;
         }
-        if (search.state() == nav::SearchState::found) {
-            for (const DVec3& p : search.path()) {
-                m_used[{static_cast<i32>(cell_floor(p.x)), static_cast<i32>(cell_floor(p.z))}] = m_frame;
+        if (search.state() != nav::SearchState::found) continue;
+        // Found over a tile older than what it is built from (a wall put
+        // down there, not built in yet): searched again once it is.
+        if (entry.redone >= 4) continue; // as found (the map keeps changing under it)
+        const std::vector<DVec3>& path = search.path();
+        for (usize k = 0; k + 1 < path.size(); ++k) {
+            const double d = std::hypot(path[k + 1].x - path[k].x, path[k + 1].z - path[k].z);
+            const int steps = static_cast<int>(std::ceil(d / 8.0)) + 1;
+            for (int t = 0; t <= steps; ++t) {
+                const DVec3 p = path[k] + (path[k + 1] - path[k]) * (static_cast<double>(t) / steps);
+                const world::CellCoord c = world::cell_of(p);
+                m_used[c] = m_frame;
+                const bool building_here = std::any_of(m_building.begin(), m_building.end(), [&](const Building& b) { return b.cell == c; });
+                if ((building_here || m_dirty.contains({c.x, c.z})) &&
+                    std::find(entry.waits.begin(), entry.waits.end(), c) == entry.waits.end()) {
+                    entry.waits.push_back(c);
+                    want(c);
+                }
             }
         }
     }
@@ -414,17 +491,16 @@ void NavState::update(const world::Scene& scene) {
 
 NavState::SearchId NavState::find_path(const DVec3& from, const DVec3& to) {
     const SearchId id = m_next_search++;
-    m_searches[id] = std::make_unique<nav::PathSearch>(m_map, from, to);
-    if (std::isfinite(from.x) && std::isfinite(from.z) && std::isfinite(to.x) && std::isfinite(to.z)) {
-        m_used[{static_cast<i32>(std::clamp<i64>(cell_floor(from.x), std::numeric_limits<i32>::min(), std::numeric_limits<i32>::max())),
-                static_cast<i32>(std::clamp<i64>(cell_floor(from.z), std::numeric_limits<i32>::min(), std::numeric_limits<i32>::max()))}] = m_frame;
-    }
+    Search& s = m_searches[id];
+    s.search = std::make_unique<nav::PathSearch>(m_map, from, to);
+    s.from = from;
+    s.to = to;
     return id;
 }
 
 const nav::PathSearch* NavState::search(SearchId id) const {
     const auto it = m_searches.find(id);
-    return it != m_searches.end() ? it->second.get() : nullptr;
+    return it != m_searches.end() ? it->second.search.get() : nullptr;
 }
 
 void NavState::cancel(SearchId id) { m_searches.erase(id); }
@@ -442,12 +518,10 @@ const nav::NavTile* NavState::tile_now(const world::Scene& scene, world::CellCoo
 }
 
 std::unique_ptr<nav::PathSearch> NavState::find_path_now(const world::Scene& scene, const DVec3& from, const DVec3& to,
-                                                         u32 max_tiles_now, u32* built) {
+                                                         u32 max_tiles_now, u32* built, bool* stale) {
     u32 made = 0;
-    const auto stale_tile = [&](world::CellCoord c) {
-        const auto in = m_inputs.find(c);
-        return m_map.find(c) != nullptr && (in == m_inputs.end() || !(in->second == inputs_of(scene, c)));
-    };
+    bool stale_left = false;
+    const auto stale_tile = [&](world::CellCoord c) { return stale_at(scene, c); };
     const auto cell_at = [](const DVec3& p) {
         return world::CellCoord{static_cast<i32>(std::clamp<i64>(cell_floor(p.x), std::numeric_limits<i32>::min(),
                                                                  std::numeric_limits<i32>::max())),
@@ -483,22 +557,27 @@ std::unique_ptr<nav::PathSearch> NavState::find_path_now(const world::Scene& sce
         // that tile built again, and searched again.
         bool again = false;
         const std::vector<DVec3>& path = search->path();
-        for (usize k = 0; k + 1 < path.size() && made < max_tiles_now; ++k) {
+        for (usize k = 0; k + 1 < path.size(); ++k) {
             const double d = std::hypot(path[k + 1].x - path[k].x, path[k + 1].z - path[k].z);
-            const int steps = static_cast<int>(std::ceil(d / (0.25 * world::k_cell_size))) + 1;
-            for (int t = 0; t <= steps && made < max_tiles_now; ++t) {
+            const int steps = static_cast<int>(std::ceil(d / 8.0)) + 1;
+            for (int t = 0; t <= steps; ++t) {
                 const DVec3 p = path[k] + (path[k + 1] - path[k]) * (static_cast<double>(t) / steps);
                 const world::CellCoord c = cell_at(p);
-                if (stale_tile(c)) {
-                    tile_now(scene, c);
-                    ++made;
-                    again = true;
+                if (!stale_tile(c)) continue;
+                if (made >= max_tiles_now) {
+                    stale_left = true;
+                    continue;
                 }
+                tile_now(scene, c);
+                ++made;
+                again = true;
             }
         }
         if (!again) break;
+        stale_left = false;
     }
     if (built != nullptr) *built = made;
+    if (stale != nullptr) *stale = stale_left;
     return search;
 }
 

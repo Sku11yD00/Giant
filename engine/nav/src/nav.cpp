@@ -120,6 +120,9 @@ NavTile build_tile(world::CellCoord cell, const world::Terrain& terrain, std::sp
                         static_cast<u32>(std::min(hi_i, n - 1.0)), static_cast<u32>(std::max(lo_j, 0.0)),
                         static_cast<u32>(std::min(hi_j, n - 1.0))});
     }
+    // Lowest top first: a stack of low things is stepped up one by one,
+    // whatever order they come in.
+    std::stable_sort(near.begin(), near.end(), [](const Near& a, const Near& b) { return a.top < b.top; });
     // Where there is no ground, the ground is the lowest top over a sample
     // with no lid too low over it (a floor, a deck with no terrain under it;
     // not a footing under the floor). What stands on it (its bottom within a
@@ -243,36 +246,42 @@ const char* to_string(SearchState state) {
 
 PathSearch::PathSearch(const NavMap& map, const DVec3& from, const DVec3& to, const SearchLimits& limits)
     : m_map(map), m_from(from), m_to(to), m_limits(limits) {
-    if (!std::isfinite(from.x) || !std::isfinite(from.z) || !std::isfinite(to.x) || !std::isfinite(to.z)) {
+    const auto place = [](const DVec3& p) {
+        return std::fabs(p.x) <= k_max_nav_coordinate && std::fabs(p.z) <= k_max_nav_coordinate; // (false for NaN)
+    };
+    if (!place(from) || !place(to)) {
         m_state = SearchState::failed;
         m_reason = "not a place";
     }
 }
 
-bool PathSearch::snap(const DVec3& p, i64& oi, i64& oj, bool& missing) {
+bool PathSearch::snap(const DVec3& p, i64& oi, i64& oj, bool& missing, u64& work) {
     missing = false;
     const i64 ci = NavMap::sample_of(p.x), cj = NavMap::sample_of(p.z);
     const float reach = std::isfinite(m_limits.snap_distance) ? std::clamp(m_limits.snap_distance, 0.0f, 20.0f) : 2.0f;
     const i64 r = static_cast<i64>(std::ceil(reach / k_nav_spacing));
-    double best = std::numeric_limits<double>::infinity();
+    work += static_cast<u64>((2 * r + 1) * (2 * r + 1));
+    double best = std::numeric_limits<double>::infinity(), best_dy = 0.0;
     for (i64 dj = -r; dj <= r; ++dj) {
         for (i64 di = -r; di <= r; ++di) {
-            const NavMap::Sample s = m_map.sample(ci + di, cj + dj);
-            if (!s.built) {
-                if (di == 0 && dj == 0) {
-                    missing = true;
-                    m_missing = NavMap::cell_of_sample(ci, cj);
-                    return false;
-                }
-                continue;
-            }
-            if (!s.walkable) continue;
             const double x = (static_cast<double>(ci + di) + 0.5) * k_nav_spacing - p.x;
             const double z = (static_cast<double>(cj + dj) + 0.5) * k_nav_spacing - p.z;
             const double d = x * x + z * z;
+            if (d > (reach + k_nav_spacing) * (reach + k_nav_spacing)) continue;
+            const NavMap::Sample s = at(ci + di, cj + dj);
+            if (!s.built) {
+                // A tile within reach not built yet: waited for (the nearest
+                // ground may be there).
+                missing = true;
+                m_missing = NavMap::cell_of_sample(ci + di, cj + dj);
+                return false;
+            }
+            if (!s.walkable) continue;
             // Nearest; among equals, the one nearest in height.
-            if (d < best && d <= (reach + k_nav_spacing) * (reach + k_nav_spacing)) {
+            const double dy = std::isfinite(p.y) ? std::fabs(s.height - p.y) : 0.0;
+            if (d < best || (d == best && dy < best_dy)) {
                 best = d;
+                best_dy = dy;
                 oi = ci + di;
                 oj = cj + dj;
             }
@@ -281,30 +290,68 @@ bool PathSearch::snap(const DVec3& p, i64& oi, i64& oj, bool& missing) {
     return std::isfinite(best);
 }
 
+bool PathSearch::unchanged() {
+    if (m_map.version() == m_checked_version) return true;
+    for (const auto& [cell, block] : m_block_of) {
+        const NavTile* t = m_map.find(cell);
+        if ((t != nullptr ? t->version : 0) != m_block_tile[block]) return false;
+    }
+    m_checked_version = m_map.version();
+    return true;
+}
+
+void PathSearch::restart() {
+    ++m_restarts;
+    m_started = false;
+    m_phase = Phase::search;
+    m_open = {};
+    m_blocks.clear();
+    m_block_tile.clear();
+    m_block_of.clear();
+    m_last_block = ~0u;
+    m_cells.clear();
+    m_path.clear();
+}
+
 DVec3 PathSearch::point(i64 i, i64 j) const {
     return {(static_cast<double>(i) + 0.5) * k_nav_spacing, m_map.sample(i, j).height,
             (static_cast<double>(j) + 0.5) * k_nav_spacing};
 }
 
-SearchState PathSearch::advance(u32 budget) {
+SearchState PathSearch::advance(u32 nodes) {
     if (m_state == SearchState::found || m_state == SearchState::failed) return m_state;
     m_state = SearchState::searching;
     const float step = m_map.settings().step_height;
+    const u64 budget = std::max<u32>(nodes, 1);
+    u64 looked = 0;
+    // A tile it read rebuilt (a wall put down, the ground dug) or dropped:
+    // what it knows is stale, so it starts again.
+    if (m_started && !unchanged()) restart();
+    const auto spent = [&] {
+        m_work += looked;
+        return m_state;
+    };
     if (!m_started) {
         bool missing = false;
-        if (!snap(m_from, m_si, m_sj, missing)) {
+        if (!snap(m_from, m_si, m_sj, missing, looked)) {
             m_state = missing ? SearchState::missing : SearchState::failed;
             m_reason = missing ? "" : "no walkable ground near the start";
-            return m_state;
+            return spent();
         }
-        if (!snap(m_to, m_gi, m_gj, missing)) {
+        if (!snap(m_to, m_gi, m_gj, missing, looked)) {
             m_state = missing ? SearchState::missing : SearchState::failed;
             m_reason = missing ? "" : "no walkable ground near the end";
-            return m_state;
+            return spent();
         }
         m_started = true;
+        m_checked_version = m_map.version();
+        seen(m_gi, m_gj); // the end's tile watched too
         seen(m_si, m_sj).g = 0.0f;
         m_open.push({0.0f, m_si, m_sj});
+    }
+    if (m_phase != Phase::search) {
+        if (finish(looked, budget)) m_state = SearchState::found;
+        return spent();
     }
     const auto heuristic = [&](i64 i, i64 j) {
         const double dx = static_cast<double>(std::llabs(i - m_gi)), dz = static_cast<double>(std::llabs(j - m_gj));
@@ -312,9 +359,8 @@ SearchState PathSearch::advance(u32 budget) {
     };
     static constexpr int k_di[8] = {1, -1, 0, 0, 1, 1, -1, -1};
     static constexpr int k_dj[8] = {0, 0, 1, -1, 1, -1, 1, -1};
-    u32 looked = 0;
     while (!m_open.empty()) {
-        if (looked >= budget) return m_state;
+        if (looked >= budget) return spent();
         const Node n = m_open.top();
         Seen& here = seen(n.i, n.j);
         if (here.closed != 0) {
@@ -322,8 +368,12 @@ SearchState PathSearch::advance(u32 budget) {
             continue;
         }
         if (n.i == m_gi && n.j == m_gj) {
-            finish();
-            return m_state;
+            m_phase = Phase::walk;
+            m_wi = m_gi;
+            m_wj = m_gj;
+            m_cells.clear();
+            if (finish(looked, budget)) m_state = SearchState::found;
+            return spent();
         }
         const NavMap::Sample hs = at(n.i, n.j);
         // Every neighbour's tile there first (else wait for it, this node
@@ -335,7 +385,7 @@ SearchState PathSearch::advance(u32 budget) {
             if (!s.built) {
                 m_missing = NavMap::cell_of_sample(n.i + k_di[d], n.j + k_dj[d]);
                 m_state = SearchState::missing;
-                return m_state;
+                return spent();
             }
         }
         m_open.pop();
@@ -345,7 +395,7 @@ SearchState PathSearch::advance(u32 budget) {
         if (++m_nodes > m_limits.max_nodes) {
             m_state = SearchState::failed;
             m_reason = "too far (searched max_nodes samples)";
-            return m_state;
+            return spent();
         }
         for (int d = 0; d < 8; ++d) {
             const i64 i = n.i + k_di[d], j = n.j + k_dj[d];
@@ -370,14 +420,18 @@ SearchState PathSearch::advance(u32 budget) {
     }
     m_state = SearchState::failed;
     m_reason = "no way there";
-    return m_state;
+    return spent();
 }
 
 PathSearch::Seen& PathSearch::seen(i64 i, i64 j) {
     const world::CellCoord c = NavMap::cell_of_sample(i, j);
     if (m_last_block == ~0u || !(c == m_last_cell)) {
         const auto [it, added] = m_block_of.try_emplace(c, static_cast<u32>(m_blocks.size()));
-        if (added) m_blocks.emplace_back(usize{k_nav_side} * k_nav_side);
+        if (added) {
+            m_blocks.emplace_back(usize{k_nav_side} * k_nav_side);
+            const NavTile* t = m_map.find(c);
+            m_block_tile.push_back(t != nullptr ? t->version : 0);
+        }
         m_last_cell = c;
         m_last_block = it->second;
     }
@@ -436,52 +490,71 @@ bool PathSearch::clear_line(i64 ai, i64 aj, i64 bi, i64 bj) const {
     return true;
 }
 
-void PathSearch::finish() {
-    // The samples from the end back to the start.
+bool PathSearch::finish(u64& looked, u64 budget) {
     static constexpr int k_di[8] = {1, -1, 0, 0, 1, 1, -1, -1};
     static constexpr int k_dj[8] = {0, 0, 1, -1, 1, -1, 1, -1};
-    std::vector<std::pair<i64, i64>> cells;
-    i64 i = m_gi, j = m_gj;
-    for (u32 guard = 0; guard <= m_nodes + 1; ++guard) {
-        cells.push_back({i, j});
-        const u8 from = seen(i, j).from;
-        if (from > 7) break; // the start
-        i -= k_di[from];
-        j -= k_dj[from];
-    }
-    std::reverse(cells.begin(), cells.end());
-    // Pulled straight: from each corner, as far along as the way is clear.
-    m_path.clear();
-    usize anchor = 0;
-    m_path.push_back(point(cells[0].first, cells[0].second));
-    while (anchor + 1 < cells.size()) {
-        usize best = anchor + 1;
-        for (usize k = anchor + 2; k < cells.size() && k <= anchor + k_lookahead; ++k) {
-            if (!clear_line(cells[anchor].first, cells[anchor].second, cells[k].first, cells[k].second)) break;
-            best = k;
+    if (m_phase == Phase::walk) {
+        // The samples from the end back to the start.
+        while (looked < budget) {
+            m_cells.push_back({m_wi, m_wj});
+            ++looked;
+            const u8 from = seen(m_wi, m_wj).from;
+            if (from > 7 || m_cells.size() > usize{m_nodes} + 1) { // the start (or, never, a loop)
+                std::reverse(m_cells.begin(), m_cells.end());
+                m_path.clear();
+                m_path.push_back(point(m_cells[0].first, m_cells[0].second));
+                m_anchor = 0;
+                m_best = 1;
+                m_k = 2;
+                m_phase = Phase::pull;
+                break;
+            }
+            m_wi -= k_di[from];
+            m_wj -= k_dj[from];
         }
-        m_path.push_back(point(cells[best].first, cells[best].second));
-        anchor = best;
+        if (m_phase == Phase::walk) return false;
+    }
+    // Pulled straight: from each corner, as far along as the way is clear
+    // (each line looked along costs its length).
+    while (m_anchor + 1 < m_cells.size()) {
+        if (looked >= budget) return false;
+        if (m_k < m_cells.size() && m_k <= m_anchor + k_lookahead) {
+            const auto [ai, aj] = m_cells[m_anchor];
+            const auto [bi, bj] = m_cells[m_k];
+            looked += static_cast<u64>(std::llabs(bi - ai) + std::llabs(bj - aj)) + 1;
+            if (clear_line(ai, aj, bi, bj)) {
+                m_best = m_k++;
+                continue;
+            }
+        }
+        m_path.push_back(point(m_cells[m_best].first, m_cells[m_best].second));
+        m_anchor = m_best;
+        m_best = m_anchor + 1;
+        m_k = m_anchor + 2;
     }
     // Collinear corners left by the lookahead's limit: merged.
+    const float step = m_map.settings().step_height;
     std::vector<DVec3> merged;
     for (const DVec3& p : m_path) {
         if (merged.size() >= 2) {
             const DVec3 a = merged[merged.size() - 2], b = merged.back();
             const double cross = (b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x);
-            if (std::fabs(cross) < 1e-9 && std::fabs(b.y - a.y) <= m_map.settings().step_height && std::fabs(p.y - b.y) <= m_map.settings().step_height) {
+            if (std::fabs(cross) < 1e-9 && std::fabs(b.y - a.y) <= step && std::fabs(p.y - b.y) <= step) {
                 merged.back() = p;
                 continue;
             }
         }
         merged.push_back(p);
     }
+    looked += m_path.size();
     m_path = std::move(merged);
+    m_cells = {};
     m_blocks.clear();
+    m_block_tile.clear();
     m_block_of.clear();
     m_last_block = ~0u;
     m_open = {};
-    m_state = SearchState::found;
+    return true;
 }
 
 double PathSearch::length() const {

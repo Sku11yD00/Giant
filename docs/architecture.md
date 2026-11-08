@@ -1313,7 +1313,8 @@ advance again. A path found is pulled straight where the way is clear
 planned.
 
 The editor's `NavState` (editor/src/nav_state.h) keeps the map for the
-scene: it follows the scene's changes (each fixed, visible entity's boxes:
+scene: it follows the scene's changes (each fixed entity's boxes, shown or
+not, as the physics collides with hidden ones:
 cubes, spheres, planes as a slab under their top, meshes as a box inside
 their bounding sphere, kit pieces not knocked loose; scatter trees'
 trunks) by cell, and a built tile's inputs (the terrain's tile versions and
@@ -1322,11 +1323,22 @@ frame: tiles whose inputs changed are built again, two at a time on its own
 two workers, from copies, so the scene changes freely meanwhile. Searches
 (`find_path`) move on within `nodes_per_frame` a frame, asking for the
 tiles they wait for first; the oldest unused tiles go past `max_tiles`
-(512, about 40 MB). The `find_path` command builds what it needs now
-(bounded), rebuilding a stale tile it walked over and searching again.
+(512, about 40 MB; a rebuild is not a use). A search found over a tile
+older than what it is built from is searched again once that tile is
+built. A search that read a tile since rebuilt or dropped starts again
+(`PathSearch` checks the versions of the tiles it read), and making a
+found path (walking back, pulling straight) is spread over `advance`
+calls like the search. A kit or mesh change looks at the entities using
+it again, 256 a frame; a new scene drops every tile. The `find_path`
+command builds what it needs now (bounded), rebuilding a stale tile its
+path crosses and searching again (`stale` says one was left).
 Dynamic bodies, swinging things, animated meshes, cloth and decals are not
 in the map: what moves is avoided by what walks, not by the map. Known
-limits: felled scatter trees still block until their cell is placed again;
+limits: scatter trunks count only where the scatter is placed (within its
+radius of the camera), so a far path ignores forests and tiles there are
+built again as the camera nears; an entity covering more than 64 cells (a
+floor under a town) makes every built tile stale when it changes; felled
+scatter trees still block until their cell is placed again;
 a mesh is a box (not its shape); one storey a sample where there is
 terrain (a bridge over ground is stood on only if within a step).
 

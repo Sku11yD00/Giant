@@ -139,14 +139,14 @@ GIANT_TEST("editor nav: a search over frames waits for its tiles; edits make bui
     f.settle();
     GIANT_CHECK(f.nav.map().at(100.0, 20.0).walkable);
 
-    // Dynamic bodies and hidden things stand in nobody's way.
+    // Dynamic bodies stand in nobody's way; hidden fixed ones do (they collide).
     f.create({{"shape", "cube"}, {"position", {110.0, 6.0, 20.0}}, {"scale", {2.0, 2.0, 2.0}}, {"body", "dynamic"}});
     f.create({{"shape", "cube"}, {"position", {120.0, 6.0, 20.0}}, {"scale", {2.0, 2.0, 2.0}}, {"visible", false}});
     f.settle();
-    GIANT_CHECK(f.nav.map().at(110.0, 20.0).walkable && f.nav.map().at(120.0, 20.0).walkable);
+    GIANT_CHECK(f.nav.map().at(110.0, 20.0).walkable && !f.nav.map().at(120.0, 20.0).walkable);
 }
 
-GIANT_TEST("editor nav: the oldest unused tiles go past max_tiles; a new scene's tiles are built again") {
+GIANT_TEST("editor nav: the oldest unused tiles go past max_tiles; a new scene's tiles go") {
     Fixture f;
     world::Scene& scene = f.state.scene;
     scene.terrain.set_samples(8);
@@ -157,12 +157,44 @@ GIANT_TEST("editor nav: the oldest unused tiles go past max_tiles; a new scene's
     for (int k = 0; k < 300; ++k) f.nav.update(scene); // past the recent-use guard
     GIANT_CHECK(f.nav.map().size() == 4);
 
-    // Another scene: what was built is checked against it and built again.
-    f.settle();
-    const u64 before = f.nav.tiles_built();
+    // Another scene: the tiles go, built again from it as asked for.
     world::Scene other = scene;
     other.terrain.set({0, 0}, world::Terrain::Heights(64, 3.0f));
     f.state.scene = other;
     f.settle();
-    GIANT_CHECK(f.nav.tiles_built() > before);
+    GIANT_CHECK(f.nav.map().size() == 0);
+    GIANT_CHECK(std::fabs(f.nav.tile_now(f.state.scene, {0, 0})->height[0] - 3.0f) < 1e-4f);
+}
+
+GIANT_TEST("editor nav: a search found over a tile not yet rebuilt is searched again; a new scene drops the tiles") {
+    Fixture f;
+    world::Scene& scene = f.state.scene;
+    scene.terrain.set_samples(8);
+    for (int x = 0; x < 3; ++x) scene.terrain.set({x, 0}, world::Terrain::Heights(64, 2.0f));
+    f.settle();
+    for (int x = 0; x < 3; ++x) f.nav.tile_now(scene, {x, 0});
+    f.nav.tiles_in_flight = 0; // nothing rebuilt for now
+    // A wall across the way, its tile stale: the search finds the old way...
+    f.create({{"shape", "cube"}, {"position", {100.0, 3.0, 32.0}}, {"scale", {1.0, 4.0, 64.0}}});
+    f.nav.follow(scene, scene.take_changes());
+    const NavState::SearchId id = f.nav.find_path({10.0, 0.0, 32.0}, {170.0, 0.0, 32.0});
+    for (int k = 0; k < 50; ++k) f.nav.update(scene);
+    // ...and is searched again once the tile is built: no way through.
+    f.nav.tiles_in_flight = 2;
+    for (int k = 0; k < 3000; ++k) {
+        f.nav.update(scene);
+        const nav::SearchState st = f.nav.search(id)->state();
+        if ((st == nav::SearchState::found || st == nav::SearchState::failed) && f.nav.building() == 0 && f.nav.stale() == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const nav::PathSearch* s = f.nav.search(id);
+    GIANT_CHECK(s->state() == nav::SearchState::failed); // the wall spans the tiles there are
+    // find_path builds the stale tile now: the wall is there.
+    ai::CommandResult r = f.run("find_path", {{"from", {10.0, 0.0, 32.0}}, {"to", {170.0, 0.0, 32.0}}, {"max_tiles", 16}});
+    GIANT_CHECK(r.value["state"] == "failed");
+
+    world::Scene other = scene;
+    f.state.scene = other;
+    f.nav.follow(f.state.scene, f.state.scene.take_changes());
+    GIANT_CHECK(f.nav.map().size() == 0);
 }

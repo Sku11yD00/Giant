@@ -12,7 +12,7 @@
 // placements, the entities in and around them), and those changed are
 // built again; the oldest unused go past max_tiles.
 //
-// Obstacles: visible entities with a fixed body (cube, sphere, plane,
+// Obstacles: entities with a fixed body (shown or not, as the physics has them) (cube, sphere, plane,
 // mesh, kit pieces: boxes of their size, turned as they are; spheres and
 // meshes the box around them; a kit's pieces knocked loose left out), and
 // scatter trees' trunks. Dynamic bodies, swinging things, animated meshes,
@@ -69,7 +69,9 @@ public:
     u32 checks_per_frame = 32;   // built tiles looked at for changed inputs
     usize max_tiles = 512;       // about 40 MB
 
-    // A search, run over frames; its handle.
+    // A search, run over frames; its handle. One found over a tile older
+    // than what it is built from is searched again once that tile is built
+    // (search() then shows the new one, searching: a few times at most).
     using SearchId = u32;
     SearchId find_path(const DVec3& from, const DVec3& to);
     const nav::PathSearch* search(SearchId id) const;
@@ -77,8 +79,10 @@ public:
     usize searches() const { return m_searches.size(); }
     // At once (a command): the tiles it needs built here (at most
     // max_tiles_now), then searched to the end (at most `nodes`).
+    // `stale`: the path found crosses a tile older than what it is built
+    // from that it could not build again (past max_tiles_now).
     std::unique_ptr<nav::PathSearch> find_path_now(const world::Scene& scene, const DVec3& from, const DVec3& to,
-                                                   u32 max_tiles_now = 64, u32* built = nullptr);
+                                                   u32 max_tiles_now = 64, u32* built = nullptr, bool* stale = nullptr);
     // The tile of `cell` built now if it is not (or is stale).
     const nav::NavTile* tile_now(const world::Scene& scene, world::CellCoord cell);
 
@@ -146,7 +150,18 @@ private:
     usize m_check_next = 0;
     u64 m_frame = 0;
     u64 m_built = 0;
-    std::unordered_map<SearchId, std::unique_ptr<nav::PathSearch>> m_searches;
+    struct Search {
+        std::unique_ptr<nav::PathSearch> search;
+        DVec3 from{}, to{};
+        u32 redone = 0; // searched again, found over a stale tile
+        std::vector<world::CellCoord> waits; // found over these stale tiles: searched again once they are built
+    };
+    std::unordered_map<SearchId, Search> m_searches;
+    // Entities to look at again (their kit or mesh changed), a share a frame.
+    std::deque<world::EntityId> m_refollow;
+    std::unordered_set<world::EntityId> m_refollowing;
+    u32 refollows_per_frame = 256;
+    bool stale_at(const world::Scene& scene, world::CellCoord cell) const;
     SearchId m_next_search = 1;
 };
 

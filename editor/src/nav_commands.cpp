@@ -42,8 +42,10 @@ void register_nav_commands(ai::CommandRegistry& registry, EditorState& state) {
          "planes, meshes, kit pieces, scatter tree trunks); steps up to 0.4 m are walked up. The tiles it "
          "needs (64 m cells) are built now, at most `max_tiles` (default 64). Returns `state` (found, "
          "failed with a `reason`, or missing: it needed more tiles than it may build, `missing` the cell), "
-         "`path` (corners [x, y, z] where one stands, start to end), `length` (metres along it), `nodes` "
-         "(samples looked at) and `tiles_built`.",
+         "`path` (corners [x, y, z] where one stands, start to end), `length` (metres along it), `stale` "
+         "(true: it crosses a tile older than the scene there that it could not build again within "
+         "max_tiles), `nodes` (samples looked at) and `tiles_built`. Hidden fixed bodies stand in the way "
+         "(they collide); scatter trees count only where the scatter is placed (near the camera).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", Json::array({"from", "to"})},
@@ -58,8 +60,9 @@ void register_nav_commands(ai::CommandRegistry& registry, EditorState& state) {
              state.nav->follow(state.scene, state.scene.untaken_changes());
              const u32 max_tiles = args.contains("max_tiles") ? args["max_tiles"].get<u32>() : 64u;
              u32 built = 0;
-             const std::unique_ptr<nav::PathSearch> search =
-                 state.nav->find_path_now(state.scene, point_of(args["from"]), point_of(args["to"]), max_tiles, &built);
+             bool stale = false;
+             const std::unique_ptr<nav::PathSearch> search = state.nav->find_path_now(
+                 state.scene, point_of(args["from"]), point_of(args["to"]), max_tiles, &built, &stale);
              Json out = {{"state", nav::to_string(search->state())},
                          {"nodes", search->nodes()},
                          {"tiles_built", built}};
@@ -68,6 +71,7 @@ void register_nav_commands(ai::CommandRegistry& registry, EditorState& state) {
                  for (const DVec3& p : search->path()) path.push_back(dvec(p));
                  out["path"] = std::move(path);
                  out["length"] = search->length();
+                 out["stale"] = stale;
              } else if (search->state() == nav::SearchState::failed) {
                  out["reason"] = search->reason();
              } else if (search->state() == nav::SearchState::missing) {

@@ -235,3 +235,61 @@ GIANT_TEST("nav: with no terrain, a floor is the ground; walls on it block, a cr
     GIANT_CHECK(s.state() == SearchState::found);
     GIANT_CHECK(clear_of(s.path(), wall, 0.3));
 }
+
+GIANT_TEST("nav: a tile rebuilt mid-search starts it again; a long path is made over calls, each bounded") {
+    const world::Terrain t = ground(0, 2, 0, 0, flat);
+    NavMap map;
+    build(map, t, {}, 0, 2, 0, 0);
+    PathSearch s(map, {60.0, 0.0, 32.0}, {190.0, 0.0, 32.0});
+    s.advance(80);
+    GIANT_CHECK(s.state() == SearchState::searching);
+    // A wall across the start's tile now: the search must not walk through it.
+    const Obstacle wall = box(62.0, 11.0, 32.0, 0.5f, 2.0f, 40.0f);
+    const Obstacle walls[] = {wall};
+    map.set_tile(build_tile({0, 0}, t, walls, map.settings()));
+    GIANT_CHECK(run(s) == SearchState::failed); // the wall spans the tile (no way round inside the map)
+    GIANT_CHECK(s.restarts() == 1);
+
+    // A zig-zag of walls: a long path, made in slices no bigger than the budget (and one line's look).
+    std::vector<Obstacle> zig;
+    for (int k = 0; k < 9; ++k) {
+        const double x = 8.0 + k * 20.0;
+        zig.push_back(box(x, 11.0, k % 2 == 0 ? 26.0 : 38.0, 0.5f, 2.0f, 26.0f));
+    }
+    NavMap m2;
+    build(m2, t, zig, 0, 2, 0, 0);
+    PathSearch z(m2, {2.0, 0.0, 32.0}, {190.0, 0.0, 32.0});
+    u64 worst = 0;
+    for (int k = 0; k < 100000 && (z.state() == SearchState::searching); ++k) {
+        const u64 before = z.work();
+        z.advance(256);
+        worst = std::max(worst, z.work() - before);
+    }
+    GIANT_CHECK(z.state() == SearchState::found);
+    GIANT_CHECK(z.path().size() >= 10);
+    GIANT_CHECK(worst <= 256 + 2 * 64 + 2);
+}
+
+GIANT_TEST("nav: far-off places fail; stacked low things are stood on whatever their order; an end waits for tiles within reach") {
+    const world::Terrain t = ground(0, 1, 0, 0, flat);
+    NavMap map;
+    build(map, t, {}, 0, 0, 0, 0);
+    PathSearch far(map, {1e20, 0.0, 0.0}, {10.0, 0.0, 10.0});
+    GIANT_CHECK(far.advance(100) == SearchState::failed);
+
+    const Obstacle a = box(20.0, 10.15, 20.0, 1.0f, 0.15f, 1.0f); // 10 to 10.3
+    const Obstacle b = box(20.0, 10.5, 20.0, 1.0f, 0.15f, 1.0f);  // 10.35 to 10.65
+    const Obstacle ab[] = {a, b};
+    const Obstacle ba[] = {b, a};
+    const NavTile t1 = build_tile({0, 0}, t, ab, {});
+    const NavTile t2 = build_tile({0, 0}, t, ba, {});
+    const usize k = 40 * k_nav_side + 40; // (20.25, 20.25)
+    GIANT_CHECK(std::fabs(t1.height[k] - 10.65f) < 1e-4f && t1.height[k] == t2.height[k] && t1.walkable == t2.walkable);
+
+    // An end at the edge of the built tile: the tile beyond is waited for.
+    NavMap edge;
+    edge.set_tile(build_tile({0, 0}, t, {}, {}));
+    PathSearch s(edge, {63.5, 0.0, 30.0}, {10.0, 0.0, 30.0});
+    GIANT_CHECK(s.advance(100) == SearchState::missing);
+    GIANT_CHECK(s.missing_tile() == (world::CellCoord{1, 0}) || s.missing_tile().z != 0);
+}

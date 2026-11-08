@@ -98,7 +98,11 @@ public:
         float height = 0.0f;
     };
     Sample sample(i64 gi, i64 gj) const;
-    static i64 sample_of(double metres) { return static_cast<i64>(std::floor(metres / k_nav_spacing)); }
+    // (Clamped to +-1e12 m: far past any world, inside i64.)
+    static i64 sample_of(double metres) {
+        const double m = metres >= -1e12 ? (metres <= 1e12 ? metres : 1e12) : -1e12; // NaN: -1e12
+        return static_cast<i64>(std::floor(m / k_nav_spacing));
+    }
     static world::CellCoord cell_of_sample(i64 gi, i64 gj);
     // Whether one can stand at (x, z), and the height there.
     Sample at(double x, double z) const { return sample(sample_of(x), sample_of(z)); }
@@ -117,6 +121,9 @@ enum class SearchState : u8 {
 };
 const char* to_string(SearchState state);
 
+// Farthest from the origin (x or z, metres) a search's ends may be.
+inline constexpr double k_max_nav_coordinate = 1e9;
+
 struct SearchLimits {
     float snap_distance = 2.0f; // metres an end may be moved to stand on walkable ground
     u32 max_nodes = 1u << 20;   // samples looked at in all, before it gives up (about 0.8 km x 0.8 km of open ground)
@@ -126,7 +133,10 @@ class PathSearch {
 public:
     PathSearch(const NavMap& map, const DVec3& from, const DVec3& to, const SearchLimits& limits = {});
 
-    // Looks at up to `nodes` more samples. Returns the state after.
+    // Does up to about `nodes` samples' worth of work: samples looked at
+    // while searching, then the path walked back and pulled straight (a
+    // found path spreads over calls too). If a tile it read was rebuilt
+    // or dropped since, it starts again. Returns the state after.
     SearchState advance(u32 nodes);
     SearchState state() const { return m_state; }
     world::CellCoord missing_tile() const { return m_missing; }
@@ -136,6 +146,8 @@ public:
     const std::vector<DVec3>& path() const { return m_path; }
     double length() const; // metres along it
     u32 nodes() const { return m_nodes; } // looked at so far
+    u64 work() const { return m_work; }   // samples' worth of work so far (what advance's budget counts)
+    u32 restarts() const { return m_restarts; } // started again after a tile it read changed
 
 private:
     struct Node {
@@ -144,8 +156,12 @@ private:
         i64 j = 0;
         bool operator>(const Node& o) const { return f > o.f; }
     };
-    bool snap(const DVec3& p, i64& i, i64& j, bool& missing);
-    void finish();
+    bool snap(const DVec3& p, i64& i, i64& j, bool& missing, u64& work);
+    // Whether the tiles it has read are as they were (else start again).
+    bool unchanged();
+    void restart();
+    // The found path made, within the budget left (false: not yet).
+    bool finish(u64& looked, u64 budget);
     bool clear_line(i64 ai, i64 aj, i64 bi, i64 bj) const;
     DVec3 point(i64 i, i64 j) const;
 
@@ -174,9 +190,19 @@ private:
     u64 m_tile_version = ~u64{0}; // the map's, when m_tile was found
     std::unordered_map<world::CellCoord, u32, world::CellCoordHash> m_block_of; // cell -> into m_blocks
     std::vector<std::vector<Seen>> m_blocks;
+    std::vector<u64> m_block_tile; // each block's tile's version, as it was read (0: none)
+    u64 m_checked_version = 0;     // the map's, when the blocks' tiles were last found unchanged
     world::CellCoord m_last_cell{};
     u32 m_last_block = ~0u;
     u32 m_nodes = 0;
+    u64 m_work = 0;
+    u32 m_restarts = 0;
+    // Making the path once the end is reached: walking back, then pulling straight.
+    enum class Phase : u8 { search, walk, pull };
+    Phase m_phase = Phase::search;
+    std::vector<std::pair<i64, i64>> m_cells;
+    i64 m_wi = 0, m_wj = 0;
+    usize m_anchor = 0, m_best = 0, m_k = 0;
     std::vector<DVec3> m_path;
 };
 
