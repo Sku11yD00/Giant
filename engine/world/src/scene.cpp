@@ -56,6 +56,29 @@ const char* to_string(BodyKind body) {
     return "fixed";
 }
 
+const char* to_string(Surface surface) {
+    switch (surface) {
+    case Surface::standard: return "standard";
+    case Surface::flesh: return "flesh";
+    case Surface::wood: return "wood";
+    case Surface::glass: return "glass";
+    case Surface::dirt: return "dirt";
+    case Surface::foliage: return "foliage";
+    case Surface::brick: return "brick";
+    case Surface::concrete: return "concrete";
+    case Surface::metal: return "metal";
+    }
+    return "standard";
+}
+
+std::optional<Surface> surface_from_string(std::string_view name) {
+    for (usize i = 0; i < k_surface_count; ++i) {
+        const Surface s = static_cast<Surface>(i);
+        if (name == to_string(s)) return s;
+    }
+    return std::nullopt;
+}
+
 std::optional<BodyKind> body_from_string(std::string_view name) {
     for (const BodyKind b : {BodyKind::fixed, BodyKind::dynamic, BodyKind::none}) {
         if (name == to_string(b)) {
@@ -411,6 +434,7 @@ void write_look(Json& out, Shape shape, const std::string& mesh, const std::stri
         {"metallic", m.metallic},
         {"emissive", vec3_json(m.emissive)},
     };
+    if (m.surface != Surface::standard) out["material"]["surface"] = to_string(m.surface);
     if (!mesh.empty()) {
         out["mesh"] = mesh;
     }
@@ -502,6 +526,7 @@ Json scatter_json(std::span<const ScatterLayer> layers) {
                                 {"roughness", i.material.roughness},
                                 {"metallic", i.material.metallic},
                                 {"emissive", vec3_json(i.material.emissive)}};
+            if (i.material.surface != Surface::standard) item["material"]["surface"] = to_string(i.material.surface);
             item["weight"] = i.weight;
             item["scale"] = Json::array({i.scale_min, i.scale_max});
             item["align"] = i.align;
@@ -873,6 +898,18 @@ void read_weather(const Json& json, std::optional<Weather>& out, std::string& er
     if (error.empty()) out = w;
 }
 
+// A material's "surface" (what bullets meet), by name.
+void read_surface(Reader& r, Surface& out) {
+    std::string name = to_string(out);
+    r.string("surface", name, false, 64);
+    if (!r.ok()) return;
+    if (const auto parsed = surface_from_string(name)) {
+        out = *parsed;
+    } else {
+        r.fail("surface", "must be standard, flesh, wood, glass, dirt, foliage, brick, concrete or metal");
+    }
+}
+
 // Shape, files, transform, material and decal of an entity or kit piece.
 void read_look(Reader& r, const std::string& path, Shape& shape, std::string& mesh, std::string* kit,
                Transform& t, Material& material, DecalSettings& decal, std::string& error) {
@@ -909,6 +946,7 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
         mr.number("roughness", material.roughness, 0, 1);
         mr.number("metallic", material.metallic, 0, 1);
         mr.vec3("emissive", material.emissive, 0, 1000);
+        read_surface(mr, material.surface);
         mr.finish();
     }
     if (const Json* d = r.get("decal", false); d != nullptr && r.ok()) {
@@ -1299,6 +1337,7 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
                 mr.number("roughness", item.material.roughness, 0, 1);
                 mr.number("metallic", item.material.metallic, 0, 1);
                 mr.vec3("emissive", item.material.emissive, 0, 1000);
+                read_surface(mr, item.material.surface);
                 mr.finish();
             }
             ir.number("weight", item.weight, 1e-6, 1e6);

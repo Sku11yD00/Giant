@@ -156,6 +156,8 @@ constexpr float k_touching = 0.02f;
 constexpr float k_footing = 0.05f;
 // Fastest a blow sends a piece flying (m/s).
 constexpr float k_max_push = 15.0f;
+// How fast a piece shot out (strike) is sent the way the shots went (m/s).
+constexpr float k_bullet_push = 1.5f;
 
 } // namespace
 
@@ -269,6 +271,7 @@ bool ScenePhysics::clear(usize others) {
     m_piece_poses.clear();
     m_piece_bodies.clear();
     m_broken.clear();
+    m_worn.clear();
     m_rubble = 0;
     m_kept = 0;
     m_queue.clear();
@@ -380,6 +383,7 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
             }
             m_entities.erase(it);
         }
+        m_worn.erase(id);
         m_poses.erase(id); // gone from the scene: nothing to draw
         return 1;
     }
@@ -394,6 +398,8 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
             if (t.dynamic) m_physics.set_velocity(t.body, {}, {});
         }
         t.look.transform = e->transform;
+        t.wear.clear();
+        m_worn.erase(id);
         drop_pose(id);
         return 1;
     }
@@ -404,6 +410,7 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
     drop_pose(id);
     Tracked& t = m_entities[id];
     t = Tracked{};
+    m_worn.erase(id);
     t.look = *e;
     const world::Kit* kit = e->shape == world::Shape::kit ? find_kit(e->kit) : nullptr;
     // Kept damage: the pieces it says came down lie where it says (no
@@ -697,6 +704,10 @@ usize ScenePhysics::update_poses() {
 }
 
 void ScenePhysics::reset_poses() {
+    for (const world::EntityId id : m_worn) {
+        if (const auto it = m_entities.find(id); it != m_entities.end()) it->second.wear.clear();
+    }
+    m_worn.clear();
     // Broken kits whole again: their loose pieces back, as one body.
     std::vector<BodyId> gone;
     std::vector<world::EntityId> mended(m_broken.begin(), m_broken.end());
@@ -758,6 +769,57 @@ world::EntityId ScenePhysics::entity_of(BodyId body) const {
     return it == m_by_body.end() ? 0 : it->second;
 }
 
+ScenePhysics::Owner ScenePhysics::owner_of(BodyId body, u32 part) const {
+    if (body == k_no_body) return {};
+    if (const auto loose = m_piece_bodies.find(body); loose != m_piece_bodies.end()) {
+        return {loose->second.entity, loose->second.piece};
+    }
+    const auto owner = m_by_body.find(body);
+    if (owner == m_by_body.end()) return {};
+    Owner out{owner->second, std::nullopt};
+    const auto it = m_entities.find(owner->second);
+    if (it == m_entities.end() || it->second.body != body || it->second.look.shape != world::Shape::kit) return out;
+    const Tracked& t = it->second;
+    if (t.broken != nullptr) {
+        if (part < t.broken->standing_parts.size()) out.piece = t.broken->standing_parts[part];
+    } else if (const world::Kit* kit = find_kit(t.look.kit); kit != nullptr && !t.remake) {
+        const std::vector<u32> parts = kit_parts(*kit, t.look.transform.scale);
+        if (part < parts.size()) out.piece = parts[part];
+    }
+    return out;
+}
+
+usize ScenePhysics::strike(world::EntityId entity, u32 piece, float blow, const Vec3& direction) {
+    if (!std::isfinite(blow) || blow <= 0.0f || !std::isfinite(direction.x) || !std::isfinite(direction.y) ||
+        !std::isfinite(direction.z)) {
+        return 0;
+    }
+    const auto it = m_entities.find(entity);
+    if (it == m_entities.end()) return 0;
+    Tracked& t = it->second;
+    if (t.look.shape != world::Shape::kit || t.body == k_no_body || t.remake) return 0;
+    const world::Kit* kit = find_kit(t.look.kit);
+    if (kit == nullptr || !kit->breakable || piece >= kit->pieces.size()) return 0;
+    if (t.broken != nullptr && (!t.broken->pieces[piece].collides || t.broken->pieces[piece].loose)) return 0;
+    const float strength = kit->strength > 0.0f ? kit->strength : world::k_default_kit_strength;
+    float* worn = nullptr;
+    for (auto& [p, w] : t.wear) {
+        if (p == piece) worn = &w;
+    }
+    if (worn == nullptr) {
+        t.wear.push_back({piece, 0.0f});
+        worn = &t.wear.back().second;
+        m_worn.insert(entity);
+    }
+    *worn += blow;
+    if (*worn < strength) return 0;
+    std::erase_if(t.wear, [piece](const std::pair<u32, float>& w) { return w.first == piece; });
+    // Shot out: it drops from where it was, nudged the way the shots went.
+    const Vec3 away = normalize_or_zero(direction);
+    m_rays_left = m_settings.rubble_rays;
+    return loosen(entity, t, {{piece, away * k_bullet_push}});
+}
+
 BodyId ScenePhysics::body_of(world::EntityId entity) const {
     const auto it = m_entities.find(entity);
     return it == m_entities.end() ? k_no_body : it->second.body;
@@ -807,6 +869,8 @@ void ScenePhysics::mend(world::EntityId id, Tracked& t, std::vector<BodyId>& gon
     }
     t.broken.reset();
     t.kept.clear();
+    t.wear.clear();
+    m_worn.erase(id);
     m_piece_poses.erase(id);
     m_broken.erase(id);
     m_redraw.push_back(id);

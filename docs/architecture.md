@@ -1037,6 +1037,34 @@ loaded and posed. At most 64 animate at once: those animating keep their
 place, a free one goes to the lowest id waiting, and the rest stand frozen
 in the rest pose.
 
+## Ballistics (W1a)
+
+`sim::Ballistics` flies bullets through the physics world as point masses:
+fixed steps of 1/240 s (the same flight at any frame rate), quadratic drag
+(exact over a step for drag alone) then gravity, and one ray along each
+step's chord. What a ray meets is a `world::Surface` (on `Material`: an
+entity's, a kit piece's; the editor calls trees wood, characters flesh and
+the ground's tiles dirt), and each surface has a resistance (joules a metre),
+a ricochet angle and the share of speed a ricochet keeps (text-tunable,
+`set_ballistics`). Under the ricochet angle it is mirrored off the surface;
+otherwise its energy says how far it could go in (`reach = energy /
+resistance`, at most 4 m), and a ray cast back at the same body from that far
+in finds the far side: found, it comes out there with the energy left; not
+found (it would end inside the body, which a convex shape reports as a hit at
+once, or the ground's height field, which has no far side) it stops. A far
+side as near as the entry is the entry seen from behind and does not count.
+So a body is "thick" by the line through it, and two parts of one compound
+within reach count as one (a known approximation). One step's ray goes
+through at most 8 surfaces; at most 4096 bullets fly. Every meeting is a
+`BulletHit` (speeds in and out, energy left there, the blow given), which
+the editor turns into effects: dynamic bodies pushed by the momentum lost
+(`PhysicsWorld::add_impulse`), and a breakable kit's piece worn
+(`ScenePhysics::strike`: `blow_per_joule` of the energy, adding up to the
+kit's strength, then shot out with what it held up). `ScenePhysics::owner_of`
+names the entity and kit piece behind a body and its part (`RayHit::part`).
+Bullets fly with the simulation (after its step, so they meet the bodies
+where they are now) and are cleared when it stops.
+
 ## Window events (known limit)
 
 `Window::poll_events` drains SDL's single, process-wide event queue and drops

@@ -1039,6 +1039,13 @@ void PhysicsWorld::set_velocity(BodyId id, const Vec3& linear, const Vec3& angul
     m_impl->bodies_interface().SetLinearAndAngularVelocity(from_id(id), to_jolt(linear), to_jolt(angular));
 }
 
+void PhysicsWorld::add_impulse(BodyId id, const Vec3& impulse, const DVec3& point) {
+    if (!contains(id) || !finite(impulse) || !finite(point) || m_impl->is_character_body(from_id(id))) return;
+    JPH::BodyInterface& bodies = m_impl->bodies_interface();
+    if (bodies.GetMotionType(from_id(id)) != JPH::EMotionType::Dynamic) return;
+    bodies.AddImpulse(from_id(id), to_jolt(impulse), to_jolt(point));
+}
+
 void PhysicsWorld::move_kinematic(BodyId id, const DVec3& position, const Quat& rotation) {
     if (!contains(id) || !finite(position) || !finite(rotation) || m_impl->is_character_body(from_id(id))) return;
     m_impl->bodies_interface().MoveKinematic(from_id(id), to_jolt(position), to_jolt(rotation),
@@ -1213,6 +1220,10 @@ BodyId PhysicsWorld::character_body(CharacterId id) const {
 
 usize PhysicsWorld::characters() const { return m_impl->characters.size(); }
 
+bool PhysicsWorld::is_character_body(BodyId id) const {
+    return id != k_no_body && m_impl->is_character_body(from_id(id));
+}
+
 std::optional<RayHit> PhysicsWorld::raycast(const DVec3& origin, const Vec3& direction, double max_distance) const {
     return raycast(origin, direction, max_distance, RayFilter{});
 }
@@ -1247,6 +1258,7 @@ std::optional<RayHit> PhysicsWorld::raycast(const DVec3& origin, const Vec3& dir
         const JPH::Body& body = lock.GetBody();
         hit.user = body.GetUserData();
         hit.normal = from_jolt(body.GetWorldSpaceSurfaceNormal(result.mSubShapeID2, point));
+        hit.part = part_of(body, result.mSubShapeID2);
     }
     return hit;
 }

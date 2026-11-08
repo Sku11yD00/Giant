@@ -267,6 +267,16 @@ Milestone **N5, photoreal characters** (in progress; gate: close-ups hold up bes
   `get_animation`, `list_animations`). Up to 64 characters animate at
   once.
 
+The game on the engine (an open-world survival shooter: docs/game-plan.md)
+needs weapons and hits first:
+
+- W1a: ballistics. Bullets fly with drop and drag, go through what their
+  energy takes them through (each material's surface takes so many joules a
+  metre: wood, glass and flesh let rounds through, concrete and metal stop
+  them), glance off hard surfaces at shallow angles, push what they hit and
+  shoot out the pieces of breakable buildings (`fire`, `get_ballistics`,
+  `set_ballistics`; `surface` on materials).
+
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
 close the window to exit. Keep the `D3D12` folder next to the exe. The

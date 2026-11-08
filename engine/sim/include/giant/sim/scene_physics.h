@@ -126,6 +126,21 @@ public:
     // those it is enough for come loose. Returns how many came loose
     // (with what they held up). A giantess's footstep, an explosion.
     usize impact(const DVec3& point, float radius, float impulse);
+    // What a body is in the scene (what a ray or a bullet met; `part` the
+    // RayHit's): an entity's, and for a kit placement which of the kit's
+    // pieces (its standing body's part, or a loose piece's own body). 0: not
+    // an entity's (the ground, a tree, a character).
+    struct Owner {
+        world::EntityId entity = 0;
+        std::optional<u32> piece; // a kit placement's piece, as its index in the kit
+    };
+    Owner owner_of(BodyId body, u32 part) const;
+    // A bullet's blow (N s) on a breakable kit placement's standing piece:
+    // a piece's blows add up (wear), and once they come to the kit's
+    // strength it comes loose, pushed along `direction`, with what it held
+    // up. Returns how many came loose. Wear is forgotten when the placement
+    // is moved or made again, and by reset_poses.
+    usize strike(world::EntityId entity, u32 piece, float blow, const Vec3& direction);
     // Where the camera is (the near ring: loose pieces within
     // simulate_radius of it fall as bodies).
     void set_camera(const DVec3& camera) { m_camera = camera; }
@@ -165,6 +180,7 @@ private:
         bool remake = false; // its kit changed: made again whatever else
         std::shared_ptr<Broken> broken;
         std::vector<world::KeptPiece> kept; // the scene's kept damage it was made with (none: none)
+        std::vector<std::pair<u32, float>> wear; // blows taken by standing pieces (strike), by piece
     };
     struct Build; // a tile's shape being made
     struct Tile {
@@ -221,6 +237,7 @@ private:
     };
     std::unordered_map<BodyId, PieceOf> m_piece_bodies; // loose pieces' bodies
     std::unordered_set<world::EntityId> m_broken;       // placements with pieces loose
+    std::unordered_set<world::EntityId> m_worn;         // placements with wear (strike)
     // Entities to look at: those changed (queued once), then the scene's in
     // turn after an "all"; new dynamic ones go to their own queue to wait
     // for what they could land on.
