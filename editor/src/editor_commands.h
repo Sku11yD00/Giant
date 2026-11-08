@@ -52,6 +52,7 @@ class PlayState;
 class AnimationState;
 class ClothState;
 class SwingState;
+class NavState;
 class HitTargets;
 class WorldStreaming;
 
@@ -223,6 +224,9 @@ struct EditorState {
     // Swinging entities (lanterns, signs) in the wind; set by main (and
     // tests). Null: nothing swings.
     SwingState* swing = nullptr;
+    // Where people can walk and paths over it; set by main (and tests).
+    // Null: no navigation.
+    NavState* nav = nullptr;
     // Characters' hit shapes (bone capsules) for bullets; set by main (and
     // tests). Null: characters are not hit.
     HitTargets* hits = nullptr;
@@ -270,6 +274,8 @@ void register_animation_commands(ai::CommandRegistry& registry, EditorState& sta
 void register_cloth_commands(ai::CommandRegistry& registry, EditorState& state);
 // The swing commands (swing_commands.cpp).
 void register_swing_commands(ai::CommandRegistry& registry, EditorState& state);
+// The navigation commands (nav_commands.cpp).
+void register_nav_commands(ai::CommandRegistry& registry, EditorState& state);
 // Shots knock the swinging things they hit and blows (impact) throw them
 // and the cloth near (state.physics's on_hits and on_impact, reading
 // state.swing and state.cloth when they come). Once the physics is set.

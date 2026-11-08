@@ -308,6 +308,14 @@ Open-world systems:
   moved in place in its cell (never rebuilt) and kept out of the voxel
   world, so a town full of them costs next to nothing (`get_swing`,
   `push_swing`).
+- E2a: navigation (`engine/nav`). Where people can walk, as a grid of
+  0.5 m samples per 64 m cell built from the terrain, the fixed bodies
+  and the scatter trees' trunks (slopes past 40 degrees, walls and low
+  ceilings block; kerbs and steps up to 0.4 m are walked up; floors with
+  no terrain under them count), built on two workers near what asks and
+  rebuilt when what it was built from changes. Paths are searched in
+  bounded slices a frame (A*, pulled straight), so a long one never
+  stutters a frame (`find_path`, `get_nav`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
@@ -348,7 +356,8 @@ the modules it is allowed to (CI runs it on every push).
 | `engine/voxel` | Voxel bricks, voxelizing triangles, the camera-centred clipmap (plain data) |
 | `engine/render` | Virtual geometry, voxel world, GI, shadows, materials, hair, sky and clouds |
 | `engine/world` | Cells, streaming, landscape, scatter, weather simulation |
-| `engine/sim` | Physics glue (Jolt), destruction, giants, animation, NPC simulation, navigation |
+| `engine/sim` | Physics glue (Jolt), destruction, giants, animation, NPC simulation |
+| `engine/nav` | Navigation: walkable tiles per cell, path searches in bounded slices |
 | `engine/script` | .NET host, C# game framework |
 | `engine/ai` | Command layer, MCP server, rule checks |
 | `editor` | Editor app |

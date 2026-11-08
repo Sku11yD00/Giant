@@ -7,7 +7,7 @@ game        C# scripts, levels, materials, scatter graphs, weather presets
 editor      panels, play-in-editor, undo; uses everything below
 ai          command layer, MCP server, rule checks
 gameplay    game rules: items, inventories, weapon parts, crafting, loot (docs/game-plan.md)
-sim world   giants, destruction, NPCs, animation | cells, streaming, landscape, scatter, weather
+sim nav world  giants, destruction, NPCs, animation | walkable ground, paths | cells, streaming, landscape, scatter, weather
 render      virtual geometry, voxel world, GI, materials, hair, clouds
 rhi geometry voxel  thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only) | voxel bricks, clipmap
 platform    windows, input, files (SDL3 underneath)
@@ -29,6 +29,7 @@ This table is the source of truth for `tools/check_architecture.py`.
 | render | core, rhi, geometry, voxel |
 | world | core, voxel |
 | sim | core, world |
+| nav | core, world |
 | gameplay | core, world, sim |
 | script | core, world, sim |
 | ai | core, platform, rhi, anim, geometry, render, world, sim, script |
@@ -1285,6 +1286,63 @@ commands `get_swing` and `push_swing` follow the scene's latest edits
 first. Known limits: a swing does not collide with what it hangs by (the
 wall behind a lantern), it does not spin about its rod, its physics body
 (if any) stays where it hangs at rest, and chains are one rigid rod.
+
+## Navigation
+
+`giant/nav/nav.h` says where people can walk and finds the way. The
+walkable ground is a grid per world cell (64 m): 128 x 128 samples 0.5 m
+apart, each with the height one stands at and whether one can. A sample is
+walkable where the ground is no steeper than `max_slope_degrees` (40),
+nothing is in the way from `step_height` (0.4 m) above it up to
+`clearance` (1.8 m), and it is `agent_radius` (0.35 m) from what is
+(obstacles, oriented boxes, grow by it). Low things (a kerb, a slab) are
+stood on: their top is the height there. Where there is no terrain, the
+ground is the lowest obstacle top with no lid too low over it (a floor
+plane, a deck, not a footing under the floor). `build_tile` is pure (any
+thread): about 1.6 ms a tile, sampling the terrain once on a grid a sample
+wider than the tile for the slopes at its edges.
+
+`PathSearch` is A* over the samples of the tiles there are (8 ways, no
+step higher than `step_height`, no corner cut past a blocked sample), in
+slices of `advance(nodes)` (rule 9: about 0.45 us a sample, so a frame's
+1536 cost about 0.7 ms), from and to the nearest walkable samples within
+`snap_distance`. What it knows of each sample is kept densely per tile.
+Reaching a tile not built it stops in `missing` (that cell): build it and
+advance again. A path found is pulled straight where the way is clear
+(corners only where it turns). It gives up at `max_nodes` samples (about
+0.8 km of open ground across); a hierarchy of tiles for longer ways is
+planned.
+
+The editor's `NavState` (editor/src/nav_state.h) keeps the map for the
+scene: it follows the scene's changes (each fixed entity's boxes, shown or
+not, as the physics collides with hidden ones:
+cubes, spheres, planes as a slab under their top, meshes as a box inside
+their bounding sphere, kit pieces not knocked loose; scatter trees'
+trunks) by cell, and a built tile's inputs (the terrain's tile versions and
+the scatter serials around it, its cell's entity stamp) are checked a few a
+frame: tiles whose inputs changed are built again, two at a time on its own
+two workers, from copies, so the scene changes freely meanwhile. Searches
+(`find_path`) move on within `nodes_per_frame` a frame, asking for the
+tiles they wait for first; the oldest unused tiles go past `max_tiles`
+(512, about 40 MB; a rebuild is not a use). A search found over a tile
+older than what it is built from is searched again once that tile is
+built. A search that read a tile since rebuilt or dropped starts again
+(`PathSearch` checks the versions of the tiles it read; at most 16
+times, then it fails), and making a
+found path (walking back, pulling straight) is spread over `advance`
+calls like the search. A kit or mesh change looks at the entities using
+it again, 256 a frame; a new scene drops every tile. The `find_path`
+command builds what it needs now (bounded), rebuilding a stale tile its
+path crosses and searching again (`stale` says one was left).
+Dynamic bodies, swinging things, animated meshes, cloth and decals are not
+in the map: what moves is avoided by what walks, not by the map. Known
+limits: scatter trunks count only where the scatter is placed (within its
+radius of the camera), so a far path ignores forests and tiles there are
+built again as the camera nears; an entity covering more than 64 cells (a
+floor under a town) makes every built tile stale when it changes; felled
+scatter trees still block until their cell is placed again;
+a mesh is a box (not its shape); one storey a sample where there is
+terrain (a bridge over ground is stood on only if within a step).
 
 ## Window events (known limit)
 
