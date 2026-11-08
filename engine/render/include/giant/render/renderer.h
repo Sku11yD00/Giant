@@ -28,6 +28,7 @@
 
 #include "giant/core/math.h"
 #include "giant/core/types.h"
+#include "giant/core/wind.h"
 #include "giant/geometry/clusters.h"
 #include "giant/rhi/rhi.h"
 #include "giant/voxel/clipmap.h"
@@ -42,6 +43,7 @@ namespace giant::render {
 namespace gpu {
 struct MeshEntry; // src/gpu_layout.h
 struct Material;
+struct MaterialWind;
 struct VoxelLevel;
 struct ShadowLevel;
 struct FrameConstants;
@@ -74,6 +76,10 @@ struct Material {
     float roughness = 0.5f;
     float metallic = 0.0f;
     Vec3 emissive{}; // linear
+    // How it moves in FrameInput::wind (giant/core/wind.h; 0 to 4 each):
+    // bending from its base (trees, grass) and shaking at its tips (leaves).
+    float sway = 0.0f;
+    float flutter = 0.0f;
 };
 
 struct Instance {
@@ -250,6 +256,15 @@ struct RenderSettings {
     bool precipitation = true;
     bool wet_surfaces = true;
     bool weather_cover = true;
+    // Swaying (materials with sway or flutter, in FrameInput::wind): out to
+    // wind_distance metres from the camera, fading out over its last
+    // third; further away they stand still (and the far field and the
+    // voxel world, which never sway, match them). 0: nothing sways. Sun
+    // shadow pages under swaying things that far are drawn again in turn,
+    // at most wind_shadow_pages_per_frame a frame (besides
+    // shadow_pages_per_frame), so their shadows sway too.
+    float wind_distance = 150.0f;
+    u32 wind_shadow_pages_per_frame = 32;
 };
 
 // A run of FrameInput::instances that changes together (a world cell).
@@ -287,6 +302,8 @@ struct FrameInput {
     std::span<const Decal> decals;
     // Dust in the air, nearest first (lit views; past k_max_dust_puffs left out).
     std::span<const DustPuff> dust;
+    // What swaying materials move in (WindClock::state).
+    WindState wind;
 };
 
 struct RenderStats {
@@ -331,6 +348,7 @@ struct RenderStats {
     u32 shadow_pages = 0;     // pages with room in the pool
     u32 shadow_capacity = 0;  // the pool, pages
     u32 shadow_drawn = 0;     // pages drawn this frame
+    u32 shadow_swayed = 0;    // of them, drawn again for what sways on them (RenderSettings::wind_shadow_pages_per_frame)
     u32 shadow_waiting = 0;   // pages asked for or changed, not drawn yet
     u32 shadow_missing = 0;   // pages asked for that found no room
     u32 shadow_draws = 0;     // raster passes for them (one per level with pages to draw)
@@ -492,6 +510,7 @@ private:
         rhi::BufferHandle groups;     // gpu::Group
         rhi::BufferHandle nodes;      // gpu::Node
         u32 tree_levels = 0;          // deepest node, plus one
+        float top = 0.0f;             // the highest vertex's y (wind: what sways bends from 0 to this)
         bool live = false;
     };
     // Buffers the GPU culling passes work in, made on first use.
@@ -533,6 +552,7 @@ private:
     bool ensure_shadow_buffers(u32 instance_count);
     // Sun shadows: which pages this frame, then drawing them.
     void plan_shadows(const FrameInput& frame, bool on);
+    void sway_shadows(const FrameInput& frame);
     // Uploads the page table and levels into `data` (shading reads them).
     void draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame,
                       const gpu::FrameConstants& base);
@@ -683,6 +703,15 @@ private:
     std::vector<u32> m_touched;  // CPU culling: loaded groups it used
     std::vector<gpu::MeshEntry> m_table; // the mesh table
     std::vector<gpu::Material> m_gpu_materials;
+    std::vector<gpu::MaterialWind> m_gpu_wind; // per material, the default last
+    std::vector<u8> m_material_sways;          // per material (the default last): 1 if it sways
+    struct SwayBox {
+        u64 square = 0; // the 32 m square of its centre
+        DVec3 min{};
+        DVec3 max{};
+        float reach = 0.0f;
+    };
+    std::vector<SwayBox> m_sway_boxes; // this frame's swaying instances near the camera (scratch)
     std::vector<bool> m_used;            // meshes drawn this frame
     RenderStats m_stats;
     CpuSectionMs m_cpu_ms{};

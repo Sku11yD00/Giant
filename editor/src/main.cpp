@@ -402,6 +402,7 @@ int run(const Options& options) {
         dust_frame.clear();
         for (const sim::DustPuff& d : dust_near) dust_frame.push_back({d.position, d.radius, d.density, d.color});
         input.dust = dust_frame;
+        input.wind = weather.wind();
         renderer->render(cmd, target, input);
         mark(editor::FramePhase::render);
         if (!in_screenshot) {

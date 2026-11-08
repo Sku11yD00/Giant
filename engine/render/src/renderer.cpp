@@ -67,6 +67,32 @@ gpu::Material to_gpu(const Material& m) {
 
 void set_bounds(float* out, const Vec3& center, float radius) { set4(out, center, radius); }
 
+float wind_value(float v) { return std::isfinite(v) ? std::clamp(v, 0.0f, 4.0f) : 0.0f; }
+
+gpu::MaterialWind wind_of(const Material& m) { return {wind_value(m.sway), wind_value(m.flutter)}; }
+
+// How far an instance can sway past its bounds this frame (common.slang's
+// wind_reach with swayer_of): 0 for still ones and past wind_distance.
+float wind_reach(const FrameInput& frame, const Instance& in, float top) {
+    const float distance = frame.settings.wind_distance;
+    if (!(distance > 0.0f) || !std::isfinite(distance) || !(top > 0.0f)) return 0.0f;
+    const Material m = in.material < frame.materials.size() && in.material < k_max_materials
+                           ? frame.materials[in.material]
+                           : Material{};
+    const gpu::MaterialWind w = wind_of(m);
+    if (!(w.sway > 0.0f || w.flutter > 0.0f)) return 0.0f;
+    const DVec3 rel = in.position - frame.view.position;
+    const double away2 = rel.x * rel.x + rel.y * rel.y + rel.z * rel.z;
+    if (!(away2 < static_cast<double>(distance) * static_cast<double>(distance))) return 0.0f; // still out there
+    const float away = static_cast<float>(std::sqrt(away2));
+    const float fade = std::clamp((distance - away) / (distance / 3.0f), 0.0f, 1.0f);
+    const float scale = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
+    WindState wind = frame.wind;
+    wind.velocity.y = 0.0f;
+    wind.gustiness = std::isfinite(wind.gustiness) ? std::clamp(wind.gustiness, 0.0f, 1.0f) : 0.0f;
+    return max_sway_offset(wind, top * scale, w.sway, w.flutter) * fade;
+}
+
 } // namespace
 
 // This frame's uploads, shared by the passes.
@@ -520,6 +546,10 @@ MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::Ski
         }
     }
     mesh.tree_levels = tree_levels;
+    mesh.top = 0.0f;
+    for (const geometry::Vertex& v : data.vertices) {
+        if (std::isfinite(v.position.y)) mesh.top = std::max(mesh.top, v.position.y);
+    }
     mesh.data = std::move(data);
     mesh.live = true;
     if (mesh.skin != nullptr) {
@@ -899,6 +929,19 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
                 geometry::select_clusters(data, lod, m_selected, &residency);
                 lod.frustum = &frustum;
             }
+        } else if (const float reach = wind_reach(frame, in, mesh.top); reach > 0.0f) {
+            // Swaying: the CPU's cluster spheres are at rest, so the mesh's
+            // sphere grown by how far it can sway decides, then every
+            // cluster of the cut is drawn.
+            const geometry::Sphere& b = data.bounds;
+            const Vec3 c = lod.position + rotate(in.rotation, Vec3{b.center.x * in.scale.x, b.center.y * in.scale.y,
+                                                                    b.center.z * in.scale.z});
+            const float s = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
+            if (geometry::sphere_in_frustum(frustum, c, b.radius * s + reach)) {
+                lod.frustum = nullptr;
+                geometry::select_clusters(data, lod, m_selected, &residency);
+                lod.frustum = &frustum;
+            }
         } else {
             geometry::select_clusters(data, lod, m_selected, &residency);
         }
@@ -1197,6 +1240,7 @@ void Renderer::plan_shadows(const FrameInput& frame, bool on) {
         m_casts[i] = 1;
     }
     m_shadows->track(frame.instances, frame.cells, m_casts, m_meshes_version, [this](MeshId id) { return mesh(id); });
+    sway_shadows(frame);
     // The newest requests the GPU is done with, taken once.
     const u64 now = m_device.frames_completed();
     u32 best = 3;
@@ -1218,10 +1262,71 @@ void Renderer::plan_shadows(const FrameInput& frame, bool on) {
     }
 }
 
+// What sways near the camera, gathered in 32 m squares (a few boxes for a
+// forest): the shadow pages under it are drawn again in turn.
+void Renderer::sway_shadows(const FrameInput& frame) {
+    if (!(frame.settings.wind_distance > 0.0f) || frame.settings.wind_shadow_pages_per_frame == 0) {
+        return;
+    }
+    const usize material_limit = std::min<usize>(frame.materials.size(), k_max_materials);
+    m_material_sways.assign(material_limit + 1, 0);
+    bool any = false;
+    for (usize i = 0; i < material_limit; ++i) {
+        const gpu::MaterialWind w = wind_of(frame.materials[i]);
+        m_material_sways[i] = (w.sway > 0.0f || w.flutter > 0.0f) ? 1 : 0;
+        any = any || m_material_sways[i] != 0;
+    }
+    if (!any) {
+        return;
+    }
+    constexpr double k_square = 32.0;
+    m_sway_boxes.clear(); // a vector: keeps its room from frame to frame
+    for (const u32 i : m_valid) {
+        const Instance& in = frame.instances[i];
+        if (m_material_sways[std::min<usize>(in.material, material_limit)] == 0) {
+            continue;
+        }
+        const Mesh& mesh = m_meshes[in.mesh];
+        if (mesh.skin != nullptr) {
+            continue;
+        }
+        const float reach = wind_reach(frame, in, mesh.top);
+        if (!(reach > 0.0f)) {
+            continue;
+        }
+        const geometry::Sphere& b = mesh.data.bounds;
+        const Vec3 c = rotate(in.rotation, Vec3{b.center.x * in.scale.x, b.center.y * in.scale.y, b.center.z * in.scale.z});
+        const double r = static_cast<double>(b.radius) *
+                         std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
+        const DVec3 centre = in.position + DVec3{c.x, c.y, c.z};
+        const DVec3 lo = centre - DVec3{r, r, r}, hi = centre + DVec3{r, r, r};
+        const i64 sx = static_cast<i64>(std::floor(centre.x / k_square));
+        const i64 sz = static_cast<i64>(std::floor(centre.z / k_square));
+        const u64 key = (static_cast<u64>(sx) << 32) ^ (static_cast<u64>(sz) & 0xFFFF'FFFFu);
+        m_sway_boxes.push_back({key, lo, hi, reach});
+    }
+    // One box per square: sorted by square, then merged.
+    std::sort(m_sway_boxes.begin(), m_sway_boxes.end(),
+              [](const SwayBox& a, const SwayBox& b) { return a.square < b.square; });
+    for (usize i = 0; i < m_sway_boxes.size();) {
+        SwayBox box = m_sway_boxes[i];
+        usize j = i + 1;
+        for (; j < m_sway_boxes.size() && m_sway_boxes[j].square == box.square; ++j) {
+            const SwayBox& b = m_sway_boxes[j];
+            box.min = {std::min(box.min.x, b.min.x), std::min(box.min.y, b.min.y), std::min(box.min.z, b.min.z)};
+            box.max = {std::max(box.max.x, b.max.x), std::max(box.max.y, b.max.y), std::max(box.max.z, b.max.z)};
+            box.reach = std::max(box.reach, b.reach);
+        }
+        m_shadows->sway(box.min, box.max, box.reach);
+        i = j;
+    }
+}
+
 void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame,
                             const gpu::FrameConstants& base) {
     const u32 budget = std::clamp<u32>(frame.settings.shadow_pages_per_frame, 1u, 4096u);
-    const std::vector<ShadowPages::Draw> draws = m_shadows->plan(budget);
+    const u32 sway_budget = std::min<u32>(frame.settings.wind_shadow_pages_per_frame, 4096u);
+    const std::vector<ShadowPages::Draw> draws = m_shadows->plan(budget, sway_budget);
     // The table and levels as they are now, drawn pages marked: shading and
     // the page raster read them.
     m_shadow_table.resize(size_t{m_shadows->levels()} * ShadowPages::k_slots);
@@ -1605,6 +1710,36 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     k.occlusion = occlusion ? 1u : 0u;
     k.pool = m_device.read_descriptor(m_streamer->pool());
     k.frame_number = frame_number;
+    // Wind: what each material does in it, and the wind itself.
+    const usize material_limit = std::min<usize>(frame.materials.size(), k_max_materials);
+    m_gpu_wind.clear();
+    bool any_sway = false;
+    for (usize i = 0; i < material_limit; ++i) {
+        m_gpu_wind.push_back(wind_of(frame.materials[i]));
+        any_sway = any_sway || m_gpu_wind.back().sway > 0.0f || m_gpu_wind.back().flutter > 0.0f;
+    }
+    m_gpu_wind.push_back(gpu::MaterialWind{});
+    // Nothing that sways: the shaders skip the wind altogether.
+    const rhi::TransientMemory wind_table = any_sway ? cmd.upload(bytes_of(m_gpu_wind)) : rhi::TransientMemory{};
+    const WindState& wind = frame.wind;
+    const bool blowing = any_sway && wind_table.data != nullptr && settings.wind_distance > 0.0f && std::isfinite(settings.wind_distance) &&
+                         std::isfinite(wind.velocity.x) && std::isfinite(wind.velocity.z) &&
+                         length(Vec3{wind.velocity.x, 0.0f, wind.velocity.z}) > 1e-4f;
+    const float gustiness = std::isfinite(wind.gustiness) ? std::clamp(wind.gustiness, 0.0f, 1.0f) : 0.0f;
+    set4(k.wind, blowing ? Vec3{wind.velocity.x, 0.0f, wind.velocity.z} : Vec3{}, gustiness);
+    const auto clock = [](float v) { return std::isfinite(v) ? v : 0.0f; };
+    k.wind_clock[0] = clock(wind.gust_x);
+    k.wind_clock[1] = clock(wind.gust_z);
+    k.wind_clock[2] = clock(wind.sway_clock);
+    k.wind_clock[3] = clock(wind.flutter_clock);
+    const auto modulo = [](double v) { return static_cast<float>(v - k_gust_tile * std::floor(v / k_gust_tile)); };
+    k.wind_camera[0] = modulo(frame.view.position.x);
+    k.wind_camera[1] = modulo(frame.view.position.y);
+    k.wind_camera[2] = modulo(frame.view.position.z);
+    k.wind_camera[3] = blowing ? std::min(settings.wind_distance, 100000.0f) : 0.0f;
+    k.wind_table = wind_table.descriptor;
+    k.wind_table_offset = wind_table.offset;
+    k.wind_table_count = static_cast<u32>(material_limit);
 
     FrameData data;
     data.frame = cmd.upload(bytes_of_one(k));
@@ -1618,7 +1753,6 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     data.use_mesh_shaders = settings.mesh_shaders && m_raster_mesh.valid();
 
     // The material table, with the default appended (out-of-range indices).
-    const usize material_limit = std::min<usize>(frame.materials.size(), k_max_materials);
     if (frame.materials.size() > material_limit && !m_materials_logged) {
         m_materials_logged = true;
         log_error("render", "more than " + std::to_string(k_max_materials) +
@@ -1681,6 +1815,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         e.groups = m_device.read_descriptor(m.groups);
         e.nodes = m_device.read_descriptor(m.nodes);
         e.levels = m.data.levels;
+        e.top = m.skin != nullptr ? 0.0f : m.top; // characters do not sway
         const geometry::Sphere& bounds = m.skin != nullptr ? m.skin->posed_bounds : m.data.bounds;
         set_bounds(e.bounds, bounds.center, bounds.radius);
         if (used[id]) {
@@ -2093,6 +2228,7 @@ void Renderer::copy_streaming_stats() {
     m_stats.shadow_pages = m_shadows_on ? sh.resident : 0u;
     m_stats.shadow_capacity = sh.capacity;
     m_stats.shadow_drawn = m_shadows_on ? sh.drawn : 0u;
+    m_stats.shadow_swayed = m_shadows_on ? sh.swayed : 0u;
     m_stats.shadow_waiting = m_shadows_on ? sh.waiting : 0u;
     m_stats.shadow_missing = m_shadows_on ? sh.missing : 0u;
     m_stats.shadow_draws = m_shadow_draws;

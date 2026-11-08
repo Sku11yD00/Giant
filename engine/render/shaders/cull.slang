@@ -165,7 +165,8 @@ void cs_instances(uint3 id : SV_DispatchThreadID) {
         return;
     }
     const float3 c = to_world(inst, mesh.bounds.xyz);
-    const float r = mesh.bounds.w * inst.max_scale;
+    // Swaying things reach past their bounds by up to this.
+    const float r = mesh.bounds.w * inst.max_scale + wind_reach(f, swayer_of(f, inst, mesh));
     if (push.pass == 0 && !sphere_in_frustum(f, c, r)) {
         return;
     }
@@ -199,7 +200,7 @@ void request_group(uint mesh, uint group) {
 // One cluster of a group whose replacement is too coarse: drawn if its
 // own detail is enough (or cannot get finer, or the finer version is not
 // loaded yet), in view and not hidden.
-void test_cluster(Frame f, uint instance, Instance inst, MeshEntry mesh, uint index) {
+void test_cluster(Frame f, uint instance, Instance inst, MeshEntry mesh, uint index, float reach) {
     const Cluster c = load_cluster(read_buffer_nonuniform(mesh.clusters), index);
     if (c.refined != k_no_group && group_offset(mesh, c.refined) != k_not_resident) {
         const Group finer = load_group(read_buffer_nonuniform(mesh.groups), c.refined);
@@ -208,7 +209,7 @@ void test_cluster(Frame f, uint instance, Instance inst, MeshEntry mesh, uint in
         }
     }
     const float3 centre = to_world(inst, c.bounds.xyz);
-    const float radius = c.bounds.w * inst.max_scale;
+    const float radius = c.bounds.w * inst.max_scale + reach;
     if (!sphere_in_frustum(f, centre, radius)) {
         return;
     }
@@ -270,8 +271,9 @@ void cs_traverse(uint3 id : SV_DispatchThreadID) {
         return;
     }
     write_buffer(push.usage).Store((mesh.group_base + node.group) * 4, f.frame_number);
+    const float reach = wind_reach(f, swayer_of(f, inst, mesh));
     for (uint i = 0; i < group.cluster_count; ++i) {
-        test_cluster(f, item.x, inst, mesh, group.first_cluster + i);
+        test_cluster(f, item.x, inst, mesh, group.first_cluster + i, reach);
     }
 }
 
@@ -288,7 +290,8 @@ void cs_retest(uint3 id : SV_DispatchThreadID) {
     const MeshEntry mesh = mesh_of(inst);
     const Cluster c = load_cluster(read_buffer_nonuniform(mesh.clusters), entry.y);
     const float3 centre = to_world(inst, c.bounds.xyz);
-    if (!occluded(f, read_buffer(push.hzb), centre, c.bounds.w * inst.max_scale, false)) {
+    const float radius = c.bounds.w * inst.max_scale + wind_reach(f, swayer_of(f, inst, mesh));
+    if (!occluded(f, read_buffer(push.hzb), centre, radius, false)) {
         append_visible(entry.x, entry.y, c.triangle_count);
     }
 }

@@ -934,6 +934,110 @@ GIANT_TEST("render: d3d12 casts sun shadows from shadow pages") {
     device->destroy(target);
 }
 
+GIANT_TEST("render: d3d12 sways what the wind moves, as the CPU works it out, near the camera only") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) {
+        return; // not on Windows
+    }
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    constexpr u32 k_w = 96, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+
+    // Grey ground and a red pole 4 m tall (a cube: its middle is its
+    // origin, so its top 2 m bend), seen from 8 m straight down (screen
+    // right is +X), far from the origin.
+    const DVec3 origin{-40'000.0, 120.0, 70'000.0};
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = origin;
+    instances[0].scale = {40.0f, 1.0f, 40.0f};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = origin + DVec3{0.0, 2.0, 0.0};
+    instances[1].scale = {0.3f, 4.0f, 0.3f};
+    instances[1].material = 1;
+    std::vector<Material> materials(2);
+    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[1].base_color = {0.9f, 0.05f, 0.05f};
+    materials[1].sway = 4.0f;
+    FrameInput frame;
+    frame.view.position = origin + DVec3{0.0, 8.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.0f, 1.0f, 0.2f});
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.3f, 0.3f, 0.3f};
+    frame.lighting.ground_light = {0.1f, 0.1f, 0.1f};
+    frame.settings.antialiasing = false;
+    frame.settings.gi = false;
+    frame.settings.shadows = false;
+    // A steady gale along +X: the pole's top leans the most it can, 30%
+    // of the 2 m that bend.
+    WindClock clock;
+    clock.advance({{30.0f, 0.0f, 0.0f}, 0.0f}, 0.5);
+    const auto draw = [&](const WindState& wind) {
+        frame.wind = wind;
+        for (int i = 0; i < 8; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    // The red pixels' rightmost column (the pole's top, seen from above).
+    const auto right_edge = [&](const std::vector<u8>& p) {
+        int edge = -1;
+        if (p.size() != k_w * k_h * 4) return edge;
+        for (u32 y = 0; y < k_h; ++y) {
+            for (u32 x = 0; x < k_w; ++x) {
+                const u8* c = &p[(static_cast<usize>(y) * k_w + x) * 4];
+                if (c[0] > 2 * c[1] + 20) edge = std::max(edge, static_cast<int>(x));
+            }
+        }
+        return edge;
+    };
+    const int still = right_edge(draw(WindState{}));
+    const int blown = right_edge(draw(clock.state()));
+    // About 0.072 m a pixel at the top (4 m away): 0.6 m is 8 pixels.
+    const Vec3 expect = sway_offset(clock.state(), instances[1].position, 2.0f,
+                                    instances[1].position + DVec3{0.15, 2.0, 0.0}, 4.0f, 0.0f);
+    GIANT_CHECK(std::abs(expect.x - 0.6f) < 0.01f);
+    GIANT_CHECK(still > static_cast<int>(k_w / 2) && blown >= still + 6 && blown <= still + 10);
+    // The CPU's cut grows its sphere the same way: the same image.
+    frame.settings.gpu_culling = false;
+    GIANT_CHECK(right_edge(draw(clock.state())) == blown);
+    frame.settings.gpu_culling = true;
+    // Past wind_distance (or with it 0) it stands still.
+    frame.settings.wind_distance = 0.0f;
+    GIANT_CHECK(right_edge(draw(clock.state())) == still);
+    frame.settings.wind_distance = 3.0f;
+    GIANT_CHECK(right_edge(draw(clock.state())) == still);
+    // A still material does not move in the gale.
+    frame.settings.wind_distance = 150.0f;
+    materials[1].sway = 0.0f;
+    GIANT_CHECK(right_edge(draw(clock.state())) == still);
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: d3d12 global illumination bounces colour and shuts out the sky") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::d3d12;

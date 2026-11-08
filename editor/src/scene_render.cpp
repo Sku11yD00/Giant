@@ -30,8 +30,8 @@ render::BuiltinMesh builtin(world::Shape shape) {
 // The material's index in the table, adding it if new, and one more user.
 u32 material_index(const world::Material& m, SceneFrame& out) {
     SceneFrame::MaterialKey key{};
-    const float values[8] = {m.base_color.x, m.base_color.y, m.base_color.z, m.roughness,
-                             m.metallic,     m.emissive.x,   m.emissive.y,   m.emissive.z};
+    const float values[10] = {m.base_color.x, m.base_color.y, m.base_color.z, m.roughness, m.metallic,
+                              m.emissive.x,   m.emissive.y,   m.emissive.z,   m.sway,      m.flutter};
     std::memcpy(key.bits, values, sizeof(values));
     const auto [it, added] = out.lookup.try_emplace(key, static_cast<u32>(out.materials.size()));
     if (added) {
@@ -40,6 +40,8 @@ u32 material_index(const world::Material& m, SceneFrame& out) {
         r.roughness = m.roughness;
         r.metallic = m.metallic;
         r.emissive = m.emissive;
+        r.sway = m.sway;
+        r.flutter = m.flutter;
         out.materials.push_back(r);
         out.users.push_back(0);
     }
@@ -523,6 +525,7 @@ bool same_kit(const world::Kit& a, const world::Kit& b) {
             !(p.transform.rotation == q.transform.rotation) || !same3(p.transform.scale, q.transform.scale) ||
             !same3(p.material.base_color, q.material.base_color) || p.material.roughness != q.material.roughness ||
             p.material.metallic != q.material.metallic || !same3(p.material.emissive, q.material.emissive) ||
+            p.material.sway != q.material.sway || p.material.flutter != q.material.flutter ||
             p.decal.shape != q.decal.shape || p.decal.opacity != q.decal.opacity ||
             p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed) {
             return false;

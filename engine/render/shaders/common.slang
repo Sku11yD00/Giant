@@ -38,8 +38,15 @@ struct Frame {
     uint pool;            // read descriptor of the geometry pool (streamed cluster data)
     uint frame_number;    // marks the groups a frame used (streaming)
     uint skip_offset;     // byte offset, in the instance buffer, of the bits of instances not drawn this frame
+    // Wind (wind_offset below).
+    float4 wind;          // velocity xyz (m/s), w: gustiness
+    float4 wind_clock;    // the gusts' drift (x, z metres), the sway and flutter clocks (turns)
+    float4 wind_camera;   // the camera's place modulo 64 m, w: how far out things sway (0: none)
+    uint wind_table;      // read descriptor of per-material (sway, flutter), the default last
+    uint wind_table_offset;
+    uint wind_table_count;
 };
-static const uint k_frame_bytes = 448;
+static const uint k_frame_bytes = 512;
 
 float4 load4(ByteAddressBuffer b, uint at) { return asfloat(b.Load4(at)); }
 
@@ -71,7 +78,7 @@ Frame load_frame(uint descriptor, uint offset) {
     const float4 p1 = load4(b, at); at += 16;
     const float4 p2 = load4(b, at); at += 16;
     const uint4 p3 = b.Load4(at); at += 16;
-    const uint4 p4 = b.Load4(at);
+    const uint4 p4 = b.Load4(at); at += 16;
     f.exposure = p0.x;
     f.debug_view = asuint(p0.y);
     f.threshold = p0.z;
@@ -89,6 +96,13 @@ Frame load_frame(uint descriptor, uint offset) {
     f.pool = p3.z;
     f.frame_number = p3.w;
     f.skip_offset = p4.x;
+    f.wind = load4(b, at); at += 16;
+    f.wind_clock = load4(b, at); at += 16;
+    f.wind_camera = load4(b, at); at += 16;
+    const uint4 w = b.Load4(at);
+    f.wind_table = w.x;
+    f.wind_table_offset = w.y;
+    f.wind_table_count = w.z;
     return f;
 }
 
@@ -171,7 +185,7 @@ static const uint k_not_resident = 0xFFFFFFFFu;
 struct MeshEntry {
     uint residency;
     uint group_base;
-    uint pad0;
+    float top; // its highest vertex's y (0 for meshes that never sway)
     uint clusters;
     uint groups;
     uint nodes;
@@ -187,7 +201,7 @@ MeshEntry load_mesh(ByteAddressBuffer b, uint at) {
     const uint4 c = b.Load4(at + 16);
     m.residency = a.x;
     m.group_base = a.y;
-    m.pad0 = a.z;
+    m.top = asfloat(a.z);
     m.clusters = a.w;
     m.groups = c.x;
     m.nodes = c.y;
@@ -401,6 +415,128 @@ bool occluded(Frame f, ByteAddressBuffer hzb, float3 c, float r, bool previous) 
     // nearest point is hidden when it is farther than everything there.
     const float nearest = f.near_plane / (v.z - r);
     return nearest < farthest;
+}
+
+// --- Wind (giant/core/wind.h: the same numbers in the same order) ---------------
+
+static const float k_tau = 6.28318530717958647692;
+static const float k_gust_tile = 64.0;
+static const float k_max_sway_lean = 0.3;
+
+// What one instance does in the wind.
+struct Swayer {
+    float3 base;   // its origin, camera-relative
+    float height;  // metres above it that bend (0: it stands still)
+    float sway;
+    float flutter;
+    float fade;    // 1 near the camera, 0 at wind_distance and past it
+};
+
+float wind_wrap(float v) { return v - k_gust_tile * floor(v / k_gust_tile); }
+
+// 0 (a lull) to 1 at a place (any multiple of 64 m off: the same).
+float wind_gust(Frame f, float2 xz) {
+    const float u = wind_wrap(xz.x - f.wind_clock.x);
+    const float v = wind_wrap(xz.y - f.wind_clock.y);
+    const float k = k_tau / k_gust_tile;
+    return saturate(0.5 + 0.25 * sin(k * (2.0 * u + v)) + 0.15 * sin(k * (-3.0 * u + 5.0 * v) + 1.0) +
+                    0.1 * sin(k * (7.0 * u + 4.0 * v) + 2.0));
+}
+
+float wind_lean(float sway, float speed) { return sway * (0.004 * speed + 0.00018 * speed * speed); }
+
+float wind_shake(float flutter, float speed) {
+    return min(flutter * (0.002 * speed + 0.00008 * speed * speed), 0.12 * flutter);
+}
+
+float wind_rock_rate(float height) {
+    return clamp(round(16.0 * 2.0 / sqrt(max(height, 0.25))) / 16.0, 0.25, 4.0);
+}
+
+Swayer swayer_of(Frame f, Instance i, MeshEntry m) {
+    Swayer w;
+    w.base = float3(i.model[0].w, i.model[1].w, i.model[2].w);
+    w.height = 0.0;
+    w.sway = 0.0;
+    w.flutter = 0.0;
+    w.fade = 0.0;
+    const float out_to = f.wind_camera.w;
+    if (out_to <= 0.0 || !(m.top > 0.0)) {
+        return w;
+    }
+    w.fade = saturate((out_to - length(w.base)) / (out_to / 3.0));
+    if (w.fade <= 0.0) {
+        return w;
+    }
+    const float2 values = asfloat(read_buffer(f.wind_table).Load2(
+        f.wind_table_offset + min(i.material, f.wind_table_count) * 8));
+    w.sway = values.x;
+    w.flutter = values.y;
+    if (w.sway > 0.0 || w.flutter > 0.0) {
+        w.height = m.top * i.max_scale;
+    }
+    return w;
+}
+
+// How far a point of it (camera-relative, at rest) moves: world::sway_offset.
+float3 wind_offset(Frame f, Swayer w, float3 rest) {
+    const float speed0 = length(f.wind.xyz);
+    if (!(w.height > 0.0) || speed0 <= 1e-4) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    const float3 dir = f.wind.xyz / speed0;
+    const float3 side = float3(-dir.z, 0.0, dir.x);
+    const float3 base = w.base + f.wind_camera.xyz; // the same modulo 64 m as the world's
+    const float3 at = rest + f.wind_camera.xyz;
+    const float gust = wind_gust(f, base.xz);
+    const float speed = speed0 * (1.0 + f.wind.w * (gust - 0.5) * 1.2);
+    const float3 rel = rest - w.base;
+    const float h = saturate(rel.y / w.height);
+    const float bend = h * h;
+
+    const float phase = k_tau * (7.0 * base.x + 13.0 * base.z) / k_gust_tile;
+    const float lean = wind_lean(w.sway, speed);
+    const float rock = lean * (0.3 + 0.6 * f.wind.w);
+    const float m = wind_rock_rate(w.height);
+    const float t = f.wind_clock.z;
+    const float swing = sin(k_tau * m * t + phase) + 0.3 * sin(k_tau * 2.0 * m * t + 2.0 * phase);
+    float along = clamp(lean + rock * swing, -k_max_sway_lean, k_max_sway_lean);
+    float across = rock * 0.35 * sin(k_tau * 1.5 * m * t + 3.0 * phase);
+    const float bent = sqrt(along * along + across * across);
+    const float hold = bent > k_max_sway_lean ? k_max_sway_lean / bent : 1.0;
+    along *= hold;
+    across *= hold;
+    float3 offset = (dir * along + side * across) * (w.height * bend);
+    const float up = max(rel.y, 0.0);
+    offset.y = -min(dot(offset, offset) / (2.0 * max(up, 0.01)), 0.5 * up);
+
+    if (w.flutter > 0.0) {
+        const float shake = wind_shake(w.flutter, speed);
+        const float spread = length(rel.xz);
+        const float weight = h * saturate(spread / (0.25 * w.height + 0.01));
+        const float k = k_tau / k_gust_tile;
+        const float c = f.wind_clock.w;
+        const float3 n = float3(sin(k_tau * 3.0 * c + k * (37.0 * at.x + 41.0 * at.y + 23.0 * at.z)),
+                                0.5 * sin(k_tau * 4.0 * c + k * (-29.0 * at.x + 43.0 * at.y + 17.0 * at.z)),
+                                sin(k_tau * 5.0 * c + k * (19.0 * at.x - 31.0 * at.y + 47.0 * at.z)));
+        offset += n * (shake * weight);
+    }
+    return offset * w.fade;
+}
+
+// The most wind_offset can move any point of it: world::max_sway_offset
+// (its bounds grow by this).
+float wind_reach(Frame f, Swayer w) {
+    const float speed0 = length(f.wind.xyz);
+    if (!(w.height > 0.0) || speed0 <= 1e-4) {
+        return 0.0;
+    }
+    const float speed = speed0 * (1.0 + 0.6 * f.wind.w);
+    const float lean = wind_lean(w.sway, speed);
+    const float rock = lean * (0.3 + 0.6 * f.wind.w);
+    const float along = min(lean + 1.3 * rock, k_max_sway_lean);
+    const float across = 0.35 * rock;
+    return (w.height * min(sqrt(along * along + across * across), k_max_sway_lean) * 1.05 + 1.5 * wind_shake(w.flutter, speed)) * w.fade;
 }
 
 // --- Debug colours -------------------------------------------------------------------

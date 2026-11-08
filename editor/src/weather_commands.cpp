@@ -148,7 +148,7 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
         {"get_weather",
          "The scene's weather (null: none, the flat sky), what the view shows now (mid-blend it differs), "
          "how far a blend has come (1: done), what is falling (rain, snow), the ground now (wetness, "
-         "snow_cover), the presets, and what the last frame drew (sky: the sky, clouds, their shadows, "
+         "snow_cover), the wind near the ground that swaying materials move in (velocity m/s, speed, gustiness 0 to 1: half the clouds' wind, gustier the harder it blows), the presets, and what the last frame drew (sky: the sky, clouds, their shadows, "
          "falling rain or snow, wet or snowy surfaces, the cover map).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
@@ -171,6 +171,10 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
                  out["cloud_offset"] = {o.x, o.z};
                  const world::Ground g = state.weather->ground();
                  out["ground"] = {{"wetness", g.wetness}, {"snow_cover", g.snow_cover}};
+                 const WindState wind = state.weather->wind();
+                 out["wind"] = {{"velocity", {wind.velocity.x, wind.velocity.y, wind.velocity.z}},
+                                {"speed", length(wind.velocity)},
+                                {"gustiness", wind.gustiness}};
              }
              const render::RenderStats& s = state.scene_stats;
              out["sky"] = {{"on", s.sky},

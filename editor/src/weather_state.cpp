@@ -45,6 +45,7 @@ void WeatherState::update(const std::optional<world::Weather>& target, double se
         m_requested = false;
     }
     if (!m_target) {
+        m_wind.advance(world::ground_wind(world::Weather{}), seconds);
         m_shown.reset();
         m_from.reset();
         m_duration = 0.0;
@@ -78,6 +79,7 @@ void WeatherState::update(const std::optional<world::Weather>& target, double se
     const Vec3 wind = world::wind_velocity(*m_shown);
     m_offset = m_offset + DVec3{wind.x, 0.0, wind.z} * seconds; // doubles: exact for centuries of wind
     m_time += seconds;
+    m_wind.advance(world::ground_wind(*m_shown), seconds);
     // The ground starts from the scene's start values when weather first
     // shows or the scene is replaced; after that it goes on under what is
     // shown (a new weather blends in over a dry or wet ground as it is).

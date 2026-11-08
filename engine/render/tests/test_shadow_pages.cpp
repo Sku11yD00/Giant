@@ -190,6 +190,69 @@ GIANT_TEST("shadow pages: a change dirties the pages under it, on every level") 
     GIANT_CHECK(s.plan(16).empty());
 }
 
+GIANT_TEST("shadow pages: pages under swaying things are drawn again in turn, on levels fine enough") {
+    ShadowPages s;
+    const DVec3 camera{0.0, 2.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    const DVec3 a{-3.5, 0.0, -3.5};
+    const DVec3 b{3.5, 0.0, 3.5};
+    Requests r(s);
+    r.ask(s, 0, a);
+    r.ask(s, 0, b);
+    r.ask(s, 6, a);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16).size() == 3);
+    const DVec3 tall{0.1, 50.0, 0.1};
+    // Swaying 10 cm: level 0's texels (8 mm) show it, level 6's (half a
+    // metre) do not. No sway budget: nothing.
+    s.begin_frame(camera, k_up_sun);
+    s.sway(a - tall, a + tall, 0.1f);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16).empty());
+    s.begin_frame(camera, k_up_sun);
+    s.sway(a - tall, a + tall, 0.1f);
+    s.request(r.bits);
+    std::vector<ShadowPages::Draw> draws = s.plan(16, 8);
+    GIANT_CHECK(draws.size() == 1 && draws[0].level == 0);
+    GIANT_CHECK(s.stats().swayed == 1 && s.stats().drawn == 1);
+    GIANT_CHECK(has(s.entry_at(0, a), ShadowPages::k_draw_bit) && !has(s.entry_at(6, a), ShadowPages::k_draw_bit));
+    // Two pages sway, one a frame: they take turns, longest drawn first.
+    u32 a_drawn = 0, b_drawn = 0;
+    for (int frame = 0; frame < 6; ++frame) {
+        s.begin_frame(camera, k_up_sun);
+        s.sway(a - tall, a + tall, 0.1f);
+        s.sway(b - tall, b + tall, 0.1f);
+        s.request(r.bits);
+        draws = s.plan(16, 1);
+        GIANT_CHECK(draws.size() == 1);
+        a_drawn += has(s.entry_at(0, a), ShadowPages::k_draw_bit) ? 1 : 0;
+        b_drawn += has(s.entry_at(0, b), ShadowPages::k_draw_bit) ? 1 : 0;
+    }
+    GIANT_CHECK(a_drawn == 3 && b_drawn == 3);
+    // A page dirty for another reason is drawn once, not twice.
+    s.begin_frame(camera, k_up_sun);
+    s.invalidate(a - tall, a + tall);
+    s.sway(a - tall, a + tall, 0.1f);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16, 8).size() == 2); // a's two pages, by the change
+    // Swaying a metre reaches level 6 too; bad boxes and reaches do nothing.
+    s.begin_frame(camera, k_up_sun);
+    s.sway(a - tall, a + tall, 1.0f);
+    s.sway(DVec3{1.0, 1.0, 1.0}, DVec3{0.0, 0.0, 0.0}, 1.0f);
+    s.sway(b - tall, b + tall, std::nanf(""));
+    s.sway(b - tall, b + tall, 0.0f);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(16, 8).size() == 2);
+    // Pages shading stopped asking for are not drawn again for swaying.
+    for (int frame = 0; frame < 40; ++frame) {
+        s.begin_frame(camera, k_up_sun);
+        s.plan(16);
+    }
+    s.begin_frame(camera, k_up_sun);
+    s.sway(a - tall, a + tall, 1.0f);
+    GIANT_CHECK(s.plan(16, 8).empty());
+}
+
 GIANT_TEST("shadow pages: a new sun direction dirties everything") {
     ShadowPages s;
     const DVec3 camera{0.0, 0.0, 0.0};

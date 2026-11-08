@@ -77,6 +77,11 @@ struct Material {
     float metallic = 0.0f;              // 0 or 1 for real materials
     Vec3 emissive{};                    // linear, added light; may exceed 1
     Surface surface = Surface::standard; // what bullets meet (not drawn)
+    // How it moves in the wind (world/wind.h), each 0 to 4: `sway` bends it
+    // from its base (1: a tree, 2 to 3: bushes and grass), `flutter` shakes
+    // what stands out from its middle (leaves, needles). 0: still.
+    float sway = 0.0f;
+    float flutter = 0.0f;
     bool operator==(const Material&) const = default;
 };
 

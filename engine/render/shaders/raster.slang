@@ -79,10 +79,12 @@ Drawn drawn_cluster(uint id) {
     return d;
 }
 
-float4 clip_position(Frame f, Drawn d, uint local_vertex) {
-    const float3 p = cluster_position(read_buffer(f.pool), d.base, d.cluster, local_vertex);
-    return transform(f.view_proj[0], f.view_proj[1], f.view_proj[2], f.view_proj[3],
-                     float4(to_world(d.inst, p), 1.0));
+// Where a vertex is drawn: swayed by the wind (resolve.slang moves it the
+// same way, so the triangle it finds is the one drawn).
+float4 clip_position(Frame f, Drawn d, Swayer w, uint local_vertex) {
+    const float3 p = to_world(d.inst, cluster_position(read_buffer(f.pool), d.base, d.cluster, local_vertex));
+    const float3 moved = p + wind_offset(f, w, p);
+    return transform(f.view_proj[0], f.view_proj[1], f.view_proj[2], f.view_proj[3], float4(moved, 1.0));
 }
 
 struct MsVertex {
@@ -105,7 +107,7 @@ void ms_main(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID,
     const Frame f = load_frame(push.frame, push.frame_offset);
     if (tid < vertex_count) {
         MsVertex v;
-        v.position = clip_position(f, d, tid);
+        v.position = clip_position(f, d, swayer_of(f, d.inst, d.mesh), tid);
         verts[tid] = v;
     }
     if (tid < triangle_count) {
@@ -135,7 +137,7 @@ VsOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
     const uint3 corners = cluster_triangle(read_buffer(f.pool), d.base, d.cluster, triangle);
     const uint corner = vertex_id % 3;
     const uint local = corner == 0 ? corners.x : corner == 1 ? corners.y : corners.z;
-    o.position = clip_position(f, d, local);
+    o.position = clip_position(f, d, swayer_of(f, d.inst, d.mesh), local);
     o.vis = uint2(d.entry + 1, triangle);
     return o;
 }
