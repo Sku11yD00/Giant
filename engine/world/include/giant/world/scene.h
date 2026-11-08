@@ -77,6 +77,28 @@ struct ClothSettings {
     bool operator==(const ClothSettings&) const = default;
 };
 
+// A hanging thing that swings (SwingSettings::on): a lantern, a sign, a
+// bell, a lamp on a chain. It hangs from a pivot `length` metres straight
+// above its origin and swings about it as a pendulum: pushed by the
+// weather's wind on its sides (its scale, as a box, for primitives and
+// kits; its mesh's size for a mesh), knocked by shots and blasts, pulled
+// back by gravity. `hinge` free swings any way (on a rope or a chain);
+// `x` only about its own x axis (a sign on two hooks: it swings across its
+// face). It goes at most `limit` degrees from hanging straight. View
+// state as it moves: the scene keeps where it hangs at rest.
+enum class SwingHinge { free, x };
+const char* to_string(SwingHinge hinge);
+std::optional<SwingHinge> swing_hinge_from_string(std::string_view name);
+
+struct SwingSettings {
+    bool on = false;
+    float length = 0.5f;  // metres, 0.02 to 20: the pivot above the origin
+    SwingHinge hinge = SwingHinge::free;
+    float weight = 2.0f;  // kilograms, 0.05 to 1000
+    float limit = 80.0f;  // degrees, 5 to 175
+    bool operator==(const SwingSettings&) const = default;
+};
+
 struct Transform {
     DVec3 position{};  // metres; doubles so a 20 km world keeps millimetres
     Quat rotation{};   // unit quaternion
@@ -144,6 +166,7 @@ struct Entity {
     Material material; // unused by kits (their pieces have their own)
     DecalSettings decal; // used when shape is `decal`
     ClothSettings cloth; // used when shape is `cloth` (kept when the shape changes)
+    SwingSettings swing; // when on: cube, sphere, plane, mesh and kit entities swing (kept otherwise)
     bool visible = true;
     BodyKind body = BodyKind::fixed;
     float mass = 0.0f; // kilograms, when dynamic; 0: from its size (as water)

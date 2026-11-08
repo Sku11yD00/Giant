@@ -6,6 +6,7 @@
 #include "../weather_state.h"
 
 #include "giant/core/log.h"
+#include "giant/sim/swing.h"
 #include "giant/world/weather.h"
 
 #include <imgui.h>
@@ -284,6 +285,17 @@ void EditorPanels::draw_outliner() {
         create_ahead({{"shape", "cloth"}, {"base_color", {0.6, 0.08, 0.06}}, {"roughness", 0.8}});
     }
     ImGui::SameLine();
+    if (ImGui::SmallButton("+ Lantern")) {
+        // A lantern hanging half a metre below its hook, swinging in the wind.
+        create_ahead({{"shape", "cube"},
+                      {"scale", {0.25, 0.35, 0.25}},
+                      {"base_color", {0.2, 0.15, 0.08}},
+                      {"metallic", 1.0},
+                      {"roughness", 0.5},
+                      {"emissive", {2.0, 1.4, 0.6}},
+                      {"swing", {{"on", true}, {"length", 0.5}, {"weight", 1.5}}}});
+    }
+    ImGui::SameLine();
     ImGui::BeginDisabled(m_state.scene.find(m_state.selected) == nullptr);
     if (ImGui::SmallButton("Delete")) {
         run("delete_entities", {{"ids", {m_state.selected}}});
@@ -447,6 +459,31 @@ void EditorPanels::draw_properties() {
         float stiffness = e->cloth.stiffness;
         if (ImGui::SliderFloat("Stiffness", &stiffness, 0.0f, 1.0f)) {
             set("cloth", {{"stiffness", std::clamp(stiffness, 0.0f, 1.0f)}});
+        }
+    }
+    if (sim::can_swing(e->shape)) {
+        bool swings = e->swing.on;
+        if (ImGui::Checkbox("Swings", &swings)) {
+            set("swing", {{"on", swings}});
+        }
+        if (e->swing.on) {
+            float length = e->swing.length;
+            if (ImGui::DragFloat("Hangs below", &length, 0.01f, 0.02f, 20.0f, "%.2f m")) {
+                set("swing", {{"length", std::clamp(length, 0.02f, 20.0f)}});
+            }
+            int hinge = static_cast<int>(e->swing.hinge);
+            const char* const hinges[] = {"free", "x"};
+            if (ImGui::Combo("Hinge", &hinge, hinges, IM_ARRAYSIZE(hinges))) {
+                set("swing", {{"hinge", hinges[hinge]}});
+            }
+            float weight = e->swing.weight;
+            if (ImGui::SliderFloat("Swing weight", &weight, 0.05f, 1000.0f, "%.2f kg", ImGuiSliderFlags_Logarithmic)) {
+                set("swing", {{"weight", std::clamp(weight, 0.05f, 1000.0f)}});
+            }
+            float limit = e->swing.limit;
+            if (ImGui::SliderFloat("Swing limit", &limit, 5.0f, 175.0f, "%.0f deg")) {
+                set("swing", {{"limit", std::clamp(limit, 5.0f, 175.0f)}});
+            }
         }
     }
     if (e->shape == world::Shape::mesh || !e->mesh.empty()) {

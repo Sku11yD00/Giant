@@ -297,3 +297,19 @@ GIANT_TEST("cloth: a sheet made again keeps counting its versions on") {
     cloths.set(1, s, {});
     GIANT_CHECK(cloths.find(1)->version() > before);
 }
+
+GIANT_TEST("cloth: a blast throws a sheet away from where it went off, and wakes it") {
+    for (const double side : {1.0, -1.0}) {
+        Cloths cloths;
+        cloths.set(1, {}, {});
+        run(cloths, blowing(0.0f), 6.0f);
+        GIANT_CHECK(cloths.find(1)->asleep());
+        cloths.blast({0.0, -0.75, side}, 3.0f, 7.0f); // in front of its face, or behind: 15 m/s for 0.45 kg
+        GIANT_CHECK(!cloths.find(1)->asleep());
+        cloths.step(1.0 / 60.0, blowing(0.0f), {});
+        GIANT_CHECK(middle(*cloths.find(1)).z * static_cast<float>(side) < -0.01f);
+        cloths.blast({100.0, 0.0, 0.0}, 1.0f, 50.0f); // out of reach
+        cloths.blast({0.0, 0.0, 0.0}, 1.0f, std::nanf(""));
+        GIANT_CHECK(finite(middle(*cloths.find(1))));
+    }
+}

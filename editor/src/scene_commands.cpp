@@ -94,6 +94,11 @@ Json entity_json(const Entity& e) {
         j["cloth"] = {{"width", c.width},   {"height", c.height},       {"pin", world::to_string(c.pin)},
                       {"weight", c.weight}, {"stiffness", c.stiffness}};
     }
+    if (!(e.swing == world::SwingSettings{})) {
+        const world::SwingSettings& w = e.swing;
+        j["swing"] = {{"on", w.on},         {"length", w.length}, {"hinge", world::to_string(w.hinge)},
+                      {"weight", w.weight}, {"limit", w.limit}};
+    }
     return j;
 }
 
@@ -172,6 +177,26 @@ Json entity_properties() {
                           "rotated with it; scale is unused. The weather's wind blows it (harder and faster in a "
                           "storm) within 60 m of the camera; farther off it holds still. Uses base_color, "
                           "roughness and metallic; seen from both sides."}}},
+        {"swing",
+         {{"type", "object"},
+          {"additionalProperties", false},
+          {"properties",
+           {{"on", {{"type", "boolean"}, {"description", "It swings (cube, sphere, plane, mesh, kit). Default off."}}},
+            {"length", number(0.02, 20, "Metres from the pivot straight above its origin down to it. Default 0.5.")},
+            {"hinge",
+             {{"enum", {"free", "x"}},
+              {"description", "free swings any way (a lantern on a chain, a lamp on a rope; the default); x "
+                              "only about its own x axis, made level (a sign on two hooks: it swings across "
+                              "its face)."}}},
+            {"weight", number(0.05, 1000, "Kilograms. Lighter swings further. Default 2.")},
+            {"limit", number(5, 175, "Degrees from hanging straight it can go at most. Default 80.")}}},
+          {"description", "Swinging (a lantern, a sign, a bell, a lamp on a chain): it hangs from a pivot "
+                          "`length` above its origin, and the weather's wind swings it (further and faster "
+                          "in a storm; its scale is the box the wind pushes on, its mesh's size for a mesh), "
+                          "shots knock it and blasts (impact) throw it, within 100 m of the camera; farther "
+                          "off it holds still. Put its origin at its middle. View state: the scene keeps "
+                          "where it hangs at rest, and so does its body (shots and collisions meet it "
+                          "there). Kept when the shape changes."}}},
         {"mesh",
          {{"type", "string"},
           {"minLength", 1},
@@ -247,6 +272,16 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         }
         e.cloth.weight = c.value("weight", e.cloth.weight);
         e.cloth.stiffness = c.value("stiffness", e.cloth.stiffness);
+    }
+    if (args.contains("swing")) {
+        const Json& w = args["swing"];
+        e.swing.on = w.value("on", e.swing.on);
+        e.swing.length = w.value("length", e.swing.length);
+        if (w.contains("hinge")) {
+            e.swing.hinge = world::swing_hinge_from_string(w["hinge"].get<std::string>()).value_or(e.swing.hinge);
+        }
+        e.swing.weight = w.value("weight", e.swing.weight);
+        e.swing.limit = w.value("limit", e.swing.limit);
     }
     if (args.contains("position")) e.transform.position = dvec3_from(args["position"]);
     if (args.contains("rotation")) {
@@ -603,6 +638,7 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
     piece.erase("kit");
     piece.erase("visible");
     piece.erase("cloth");
+    piece.erase("swing"); // the kit entity swings, whole
     piece["shape"]["enum"] = {"cube", "sphere", "plane", "mesh", "decal"};
     piece["shape"]["description"] = "As for entities; kits do not nest.";
     piece["position"]["description"] = "Relative to the kit's origin, metres.";

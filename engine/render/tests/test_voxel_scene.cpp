@@ -256,6 +256,32 @@ GIANT_TEST("voxel scene: instances moving every frame never stall the rest") {
     GIANT_CHECK(b.voxel_at({-2.5, 1.0, -3.0}, packed));    // the other one, untouched
 }
 
+GIANT_TEST("voxel scene: an instance that moves is never held, so moving it costs nothing") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    Instance cube;
+    cube.mesh = 0;
+    cube.position = {0.3, 1.1, 0.2};
+    b.instances = {cube, cube};
+    b.instances[1].position = {-3.0, 1.1, -3.0};
+    b.instances[0].moves = true;
+    b.step();
+    u32 packed = 0;
+    GIANT_CHECK(!b.voxel_at({0.8, 1.0, 0.2}, packed));  // not held
+    GIANT_CHECK(b.voxel_at({-2.5, 1.0, -3.0}, packed)); // the still one is
+    const u32 bricks = b.voxels->stats().bricks;
+    for (int i = 0; i < 30; ++i) {
+        b.instances[0].position.x = 0.3 + 0.05 * i;
+        b.step(0.0f); // no budget: nothing would be built anyway
+        GIANT_CHECK(b.voxels->stats().pending == 0);
+    }
+    GIANT_CHECK(b.voxels->stats().bricks == bricks);
+    // Still again, it is held.
+    b.instances[0].moves = false;
+    for (int i = 0; i < 20 && (i == 0 || b.voxels->stats().pending > 0); ++i) b.step();
+    GIANT_CHECK(b.voxel_at({b.instances[0].position.x + 0.5, 1.0, 0.2}, packed));
+}
+
 GIANT_TEST("voxel scene: many changes at once rebuild everything, and it settles") {
     Bench b(4096);
     GIANT_CHECK(b.voxels->init());

@@ -3,6 +3,8 @@
 #include "far_ground.h"
 #include "scatter_placer.h"
 
+#include "giant/sim/swing.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -63,7 +65,7 @@ render::DecalShape decal_shape(world::DecalShape s) {
 // One drawable thing (an entity, or a piece of a placed kit).
 void emit(world::Shape shape, const std::string& mesh_path, const world::Transform& t, const world::Material& m,
           const world::DecalSettings& d, const render::Renderer& renderer, const MeshLibrary& meshes,
-          SceneFrame& out, SceneFrame::Cell& cell, render::MeshId own = render::k_no_mesh) {
+          SceneFrame& out, SceneFrame::Cell& cell, render::MeshId own = render::k_no_mesh, bool moves = false) {
     if (shape == world::Shape::decal) {
         render::Decal decal;
         decal.position = t.position;
@@ -105,6 +107,7 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     i.rotation = t.rotation;
     i.mesh = mesh;
     i.material = material_index(m, out);
+    i.moves = moves;
     cell.instances.push_back(i);
 }
 
@@ -242,6 +245,20 @@ void emit_ground(const world::Scene& scene, const TerrainMeshes* terrain, const 
     }
 }
 
+// Where an entity is drawn: the physics' pose, else its swing's, else
+// where the scene has it.
+const world::Transform& drawn_at(const SceneFrame& out, const world::Entity& e) {
+    if (out.poses != nullptr) {
+        const auto p = out.poses->find(e.id);
+        if (p != out.poses->end()) return p->second;
+    }
+    if (out.swings != nullptr) {
+        const auto p = out.swings->find(e.id);
+        if (p != out.swings->end()) return p->second;
+    }
+    return e.transform;
+}
+
 // Rebuilds a cell's instances and decals from its entities (and its
 // terrain tile). False if a material lost its last user (the table should
 // be compacted).
@@ -262,18 +279,23 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
     cell.ground_count = static_cast<u32>(cell.instances.size());
     cell.ground_dirty = false;
     cell.prev_version = 0;
+    cell.slots.clear();
+    cell.moved.clear();
     std::sort(cell.ids.begin(), cell.ids.end());
     for (const world::EntityId id : cell.ids) {
         const world::Entity* e = scene.find(id);
         if (e == nullptr || !e->visible) {
             continue;
         }
-        const world::Transform* posed = nullptr;
-        if (out.poses != nullptr) {
-            const auto p = out.poses->find(id);
-            if (p != out.poses->end()) posed = &p->second;
-        }
-        const world::Transform& at = posed != nullptr ? *posed : e->transform;
+        const world::Transform& at = drawn_at(out, *e);
+        const bool moves = e->swing.on && sim::can_swing(e->shape);
+        // What it draws, for moving it in place later (rebuild_moved).
+        const u32 first = static_cast<u32>(cell.instances.size());
+        const usize decals = cell.decals.size();
+        const auto slot = [&] {
+            cell.slots.push_back({id, first, static_cast<u32>(cell.instances.size()) - first, static_cast<u32>(decals),
+                                  static_cast<u32>(cell.decals.size() - decals)});
+        };
         if (e->shape != world::Shape::kit) {
             render::MeshId own = render::k_no_mesh;
             if (out.skinned != nullptr && e->shape == world::Shape::mesh) {
@@ -284,11 +306,13 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
                 const auto c = out.cloth->find(id);
                 if (c != out.cloth->end()) own = c->second;
             }
-            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own);
+            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own, moves);
+            slot();
             continue;
         }
         const world::Kit* kit = scene.find_kit(e->kit);
         if (kit == nullptr) {
+            slot();
             continue;
         }
         // Loose pieces (breaking) where they fell; the rest where they stand.
@@ -303,8 +327,9 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             while (loose != nullptr && next < loose->size() && (*loose)[next].piece < i) ++next;
             const bool fell = loose != nullptr && next < loose->size() && (*loose)[next].piece == i;
             emit(p.shape, p.mesh, fell ? (*loose)[next].at : place(at, p.transform), p.material, p.decal, renderer,
-                 meshes, out, cell);
+                 meshes, out, cell, render::k_no_mesh, moves);
         }
+        slot();
     }
     cell.scattered = false;
     cell.fallen_points.clear();
@@ -407,6 +432,107 @@ bool rebuild_fallen(const world::Scene& scene, const render::Renderer& renderer,
     cell.changed_first = cell.fallen_first;
     cell.changed_count = static_cast<u32>(count);
     cell.fallen_dirty = false;
+    ++out.cells_rebuilt;
+    return true;
+}
+
+// Moves a cell's entities in `cell.moved` (only where they are drawn
+// changed: a pose, a swing) in place, the rest of the cell kept, its place
+// too; false when it needs a full rebuild (one draws other than it did).
+// `in_place`: the cell already changed in place this frame (its ground,
+// its fallen trees): the range the renderer is told of grows to hold both.
+bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell& cell, bool in_place) {
+    if (cell.version == 0 || !cell.placed) {
+        return false;
+    }
+    u32 lo = ~u32{0};
+    u32 hi = 0;
+    bool decals_moved = false;
+    const auto put = [](render::Instance& i, const world::Transform& t, bool scaled) {
+        i.position = t.position;
+        i.rotation = t.rotation;
+        if (scaled) i.scale = t.scale;
+    };
+    const auto put_decal = [](render::Decal& d, const world::Transform& t) {
+        d.position = t.position;
+        d.rotation = t.rotation;
+        d.size = t.scale;
+    };
+    for (const world::EntityId id : cell.moved) {
+        const auto slot = std::lower_bound(cell.slots.begin(), cell.slots.end(), id,
+                                           [](const SceneFrame::Slot& s, world::EntityId v) { return s.id < v; });
+        const world::Entity* e = scene.find(id);
+        if (slot == cell.slots.end() || slot->id != id) {
+            if (e == nullptr || !e->visible) continue; // drew nothing, draws nothing
+            return false;
+        }
+        if (e == nullptr || !e->visible || slot->first + slot->count > cell.instances.size() ||
+            slot->decal_first + slot->decals > cell.decals.size()) {
+            return false;
+        }
+        const world::Transform& at = drawn_at(out, *e);
+        if (e->shape == world::Shape::kit) {
+            const world::Kit* kit = scene.find_kit(e->kit);
+            if (kit == nullptr) {
+                if (slot->count == 0 && slot->decals == 0) continue;
+                return false;
+            }
+            // Each piece drew one instance or one decal, in order (else some
+            // draw nothing: rebuilt whole); loose ones where they fell.
+            u32 decal_pieces = 0;
+            for (const world::KitPiece& p : kit->pieces) decal_pieces += p.shape == world::Shape::decal ? 1u : 0u;
+            if (slot->decals != decal_pieces || slot->count + slot->decals != kit->pieces.size()) return false;
+            const std::vector<sim::PiecePose>* loose = nullptr;
+            if (out.piece_poses != nullptr) {
+                const auto l = out.piece_poses->find(id);
+                if (l != out.piece_poses->end()) loose = &l->second;
+            }
+            usize next = 0;
+            u32 instance = slot->first;
+            u32 decal = slot->decal_first;
+            for (u32 k = 0; k < kit->pieces.size(); ++k) {
+                const world::KitPiece& p = kit->pieces[k];
+                while (loose != nullptr && next < loose->size() && (*loose)[next].piece < k) ++next;
+                const bool fell = loose != nullptr && next < loose->size() && (*loose)[next].piece == k;
+                const world::Transform t = fell ? (*loose)[next].at : place(at, p.transform);
+                if (p.shape == world::Shape::decal) {
+                    put_decal(cell.decals[decal++], t);
+                } else {
+                    put(cell.instances[instance++], t, true);
+                }
+            }
+        } else {
+            if (slot->count + slot->decals == 0) continue; // draws nothing (a mesh not loaded, a cloth with no mesh yet)
+            if (slot->count + slot->decals != 1) return false;
+            if (slot->decals == 1) {
+                put_decal(cell.decals[slot->decal_first], at);
+            } else {
+                put(cell.instances[slot->first], at, e->shape != world::Shape::cloth);
+            }
+        }
+        decals_moved = decals_moved || slot->decals > 0;
+        if (slot->count > 0) {
+            lo = std::min(lo, slot->first);
+            hi = std::max(hi, slot->first + slot->count);
+        }
+    }
+    cell.moved.clear();
+    if (decals_moved) ++out.cells_rebuilt; // the frame's decals gathered again
+    if (lo >= hi) {
+        return true; // no instance moved
+    }
+    for (u32 k = lo; k < hi; ++k) out.instances[cell.first + k] = cell.instances[k];
+    if (in_place && cell.prev_version != 0) {
+        // Changed from the same version as the other in-place change: one range holding both.
+        const u32 end = std::max(hi, cell.changed_first + cell.changed_count);
+        cell.changed_first = std::min(lo, cell.changed_first);
+        cell.changed_count = end - cell.changed_first;
+    } else {
+        cell.prev_version = cell.version;
+        cell.version = new_version();
+        cell.changed_first = lo;
+        cell.changed_count = hi - lo;
+    }
     ++out.cells_rebuilt;
     return true;
 }
@@ -595,9 +721,12 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses,
                  const sim::FallenTrees* fallen, std::span<const world::CellCoord> redraw_cells,
                  const std::unordered_map<world::EntityId, render::MeshId>* skinned,
-                 const std::unordered_map<world::EntityId, render::MeshId>* cloth) {
+                 const std::unordered_map<world::EntityId, render::MeshId>* cloth,
+                 std::span<const world::EntityId> moved,
+                 const std::unordered_map<world::EntityId, world::Transform>* swings) {
     out.cells_rebuilt = 0;
     out.poses = poses;
+    out.swings = swings;
     out.skinned = skinned;
     out.cloth = cloth;
     out.piece_poses = piece_poses;
@@ -657,6 +786,15 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         for (const world::EntityId id : redraw) {
             const auto was = out.where.find(id);
             if (was != out.where.end()) out.grid[was->second].dirty = true;
+        }
+        // Drawn somewhere else now, and nothing else about them changed:
+        // moved in place where they can be.
+        for (const world::EntityId id : moved) {
+            const auto was = out.where.find(id);
+            if (was != out.where.end()) {
+                SceneFrame::Cell& c = out.grid[was->second];
+                if (!c.dirty) c.moved.push_back(id);
+            }
         }
         // Fallen trees moved, came or went.
         for (const world::CellCoord c : redraw_cells) {
@@ -725,8 +863,15 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                     cell.dirty = true;
                     ++fallen_rebuilds;
                 }
+            } else {
+                in_place = true;
             }
             compact = compact || lost;
+        }
+        if (!cell.dirty && !cell.moved.empty()) {
+            // Only where things are drawn: in place if it can be, else the
+            // whole cell.
+            cell.dirty = !rebuild_moved(scene, out, cell, in_place);
         }
         if (cell.dirty) {
             const bool fresh = cell.version == 0; // not laid out yet, even with no instances
@@ -774,6 +919,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         });
     }
     out.poses = nullptr; // the cells are built
+    out.swings = nullptr;
     out.piece_poses = nullptr;
     out.skinned = nullptr;
     out.cloth = nullptr;

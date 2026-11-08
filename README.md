@@ -299,6 +299,15 @@ Open-world systems:
   (spread over worker threads); farther ones hold still, and calm ones
   sleep. Each is drawn as its own skinned mesh whose joints are its
   points, with its shadow (`get_cloth`, `push_cloth`).
+- E1c: swinging things. Any shape or kit with `swing` on (a lantern, a
+  sign on two hooks, a bell) hangs from a pivot above it and swings as a
+  pendulum in the same gusty wind, pushed on its sides with the speed
+  squared: a storm leans it far over and throws it about, a breeze barely
+  stirs it. Shots knock it and blasts (`impact`) throw it and the cloth
+  near. The nearest 512 within 100 m move and still ones sleep; each is
+  moved in place in its cell (never rebuilt) and kept out of the voxel
+  world, so a town full of them costs next to nothing (`get_swing`,
+  `push_swing`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

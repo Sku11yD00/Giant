@@ -98,6 +98,7 @@ std::vector<PhysicsState::ShotHit> PhysicsState::take(std::span<const sim::Bulle
     }
     for (const ShotHit& s : out) m_recent.push_back(s);
     while (m_recent.size() > k_kept_hits) m_recent.pop_front();
+    if (apply && on_hits && !out.empty()) on_hits(out);
     return out;
 }
 
@@ -428,6 +429,7 @@ PhysicsState::Impact PhysicsState::impact(const DVec3& point, float radius, floa
     }
     out.loosened = m_bodies.impact(point, radius, impulse);
     out.felled = m_forest.impact(point, radius, impulse);
+    if (on_impact) on_impact(point, radius, impulse);
     return out;
 }
 

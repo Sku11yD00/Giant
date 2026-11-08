@@ -85,6 +85,30 @@ GIANT_TEST("instance store: only cells that changed are uploaded; anchors follow
     GIANT_CHECK(s.store->uploaded() == 0);
 }
 
+GIANT_TEST("instance store: a cell changed in part uploads that part alone, from the anchor it has") {
+    Store s;
+    std::vector<Instance> in;
+    for (int i = 0; i < 100; ++i) in.push_back(at(5000.0 + i, 0.0));
+    std::vector<CellRange> cells{{0, 100, 1}};
+    GIANT_CHECK(s.update(in, cells, {5000.0, 0.0, 0.0}, {}));
+    GIANT_CHECK(s.store->uploaded() == 100);
+    // Instances 40 and 41 move (a swinging lantern, say), the first too.
+    in[0].position.z = 2.0;
+    in[40].position.z = 3.0;
+    in[41].position.z = 4.0;
+    cells[0] = {0, 100, 2, 1, 40, 2};
+    GIANT_CHECK(s.update(in, cells, {5000.0, 0.0, 0.0}, {}));
+    GIANT_CHECK(s.store->uploaded() == 2);
+    GIANT_CHECK(std::fabs(s.translation(40).z - 3.0f) < 1e-4f && std::fabs(s.translation(41).z - 4.0f) < 1e-4f);
+    GIANT_CHECK(std::fabs(s.translation(41).x - 41.0f) < 1e-4f);
+    GIANT_CHECK(std::fabs(s.translation(0).z) < 1e-4f); // outside the part: as uploaded
+    // Seen at another version than the part was made from: all of it.
+    cells[0] = {0, 100, 4, 3, 0, 1};
+    GIANT_CHECK(s.update(in, cells, {5000.0, 0.0, 0.0}, {}));
+    GIANT_CHECK(s.store->uploaded() == 100);
+    GIANT_CHECK(std::fabs(s.translation(0).z - 2.0f) < 1e-4f);
+}
+
 GIANT_TEST("instance store: without cells everything goes up every frame; it grows") {
     Store s;
     std::vector<Instance> in{at(5.0, 0.0), at(6.0, 0.0)};

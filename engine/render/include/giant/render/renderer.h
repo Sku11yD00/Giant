@@ -93,6 +93,11 @@ struct Instance {
     // it, however small (terrain tiles: each is small, together they are
     // the ground and the skyline). It is still in the voxel world.
     bool always_mesh = false;
+    // Moves often (a swinging lantern): kept out of the voxel world (as
+    // skinned meshes are), so moving it each frame costs the voxels
+    // nothing, and so drawn as a mesh at every distance (the far field
+    // never stands in for it). It bounces no light.
+    bool moves = false;
 };
 
 // The mask a decal stamps (shapes for now; image stamps arrive with textures).

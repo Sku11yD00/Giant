@@ -926,7 +926,8 @@ def main() -> int:
         editor.stdin.flush()
 
         names = {t["name"] for t in call("tools/list")["tools"]}
-        for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation"):
+        for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation",
+                         "get_swing"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")

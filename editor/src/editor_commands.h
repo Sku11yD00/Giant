@@ -51,6 +51,7 @@ class PhysicsState;
 class PlayState;
 class AnimationState;
 class ClothState;
+class SwingState;
 class HitTargets;
 class WorldStreaming;
 
@@ -219,6 +220,9 @@ struct EditorState {
     // Cloth entities blowing in the wind; set by main (and tests). Null:
     // cloth is not available.
     ClothState* cloth = nullptr;
+    // Swinging entities (lanterns, signs) in the wind; set by main (and
+    // tests). Null: nothing swings.
+    SwingState* swing = nullptr;
     // Characters' hit shapes (bone capsules) for bullets; set by main (and
     // tests). Null: characters are not hit.
     HitTargets* hits = nullptr;
@@ -264,6 +268,12 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
 void register_animation_commands(ai::CommandRegistry& registry, EditorState& state);
 // The cloth commands (cloth_commands.cpp).
 void register_cloth_commands(ai::CommandRegistry& registry, EditorState& state);
+// The swing commands (swing_commands.cpp).
+void register_swing_commands(ai::CommandRegistry& registry, EditorState& state);
+// Shots knock the swinging things they hit and blows (impact) throw them
+// and the cloth near (state.physics's on_hits and on_impact, reading
+// state.swing and state.cloth when they come). Once the physics is set.
+void connect_blows(EditorState& state);
 
 // What the AI is told when it connects over MCP.
 const char* mcp_instructions();

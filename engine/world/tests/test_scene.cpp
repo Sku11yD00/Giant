@@ -364,6 +364,39 @@ GIANT_TEST("world: cloth saves and loads, only when set, and hangs from entities
     }
 }
 
+GIANT_TEST("world: swing settings save and load, only when set, within their ranges") {
+    Scene scene;
+    Entity sign = named("Sign");
+    sign.swing.on = true;
+    sign.swing.length = 0.3f;
+    sign.swing.hinge = SwingHinge::x;
+    sign.swing.weight = 6.0f;
+    sign.swing.limit = 45.0f;
+    scene.add(sign);
+    Entity off = named("Off");
+    off.swing.length = 2.0f; // kept while off
+    scene.add(off);
+    scene.add(named("Rock"));
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(text.find("\"swing\": {") != text.rfind("\"swing\": {")); // the sign's and the off one's, not the rock's
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->swing == sign.swing);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->swing == off.swing && !loaded.find(2)->swing.on);
+    GIANT_CHECK(loaded.find(3) && loaded.find(3)->swing == SwingSettings{});
+    GIANT_CHECK(save_scene(loaded) == text);
+    GIANT_CHECK(swing_hinge_from_string("x") == SwingHinge::x && !swing_hinge_from_string("y"));
+    for (const char* bad_scene :
+         {R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "swing": {"hinge": "y"}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "swing": {"length": 0}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "swing": {"limit": 180}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "swing": {"on": 1}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "swing": {"spin": true}}]})"}) {
+        Scene bad;
+        GIANT_CHECK(load_scene(bad_scene, bad).has_value());
+    }
+}
+
 GIANT_TEST("world: a mesh entity's animation saves and loads, and only when set") {
     Scene scene;
     Entity walker = named("Walker");

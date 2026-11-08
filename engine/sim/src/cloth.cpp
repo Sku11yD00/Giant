@@ -17,6 +17,7 @@ constexpr u32 k_still_steps = 60;     // steps that still before it sleeps
 constexpr float k_calm = 0.05f;       // m/s: wind this light lets it sleep
 constexpr float k_spring_slack = 1.1f;  // and no spring ends a step longer than this, if it can be helped
 constexpr float k_tether_slack = 1.05f; // a point strays at most this far over its rest distance from a pin
+constexpr float k_max_blast_speed = 30.0f; // m/s a blast gives a sheet at most
 
 bool finite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 
@@ -430,6 +431,36 @@ void Cloths::push(const DVec3& at, float radius, const Vec3& velocity) {
             const float share = 1.0f - dist / radius;
             // A change of speed is a change of where it was a step ago.
             s.m_previous[i] = s.m_previous[i] - dv * (share * dt);
+            any = true;
+        }
+        if (any) s.wake();
+    }
+}
+
+void Cloths::blast(const DVec3& at, float radius, float impulse) {
+    if (!std::isfinite(radius) || radius <= 0.0f || !std::isfinite(impulse) || impulse <= 0.0f || !std::isfinite(at.x) ||
+        !std::isfinite(at.y) || !std::isfinite(at.z)) {
+        return;
+    }
+    const float dt = std::clamp(m_settings.step_seconds, 1.0f / 480.0f, 1.0f / 15.0f);
+    for (auto& [id, s] : m_sheets) {
+        const world::Transform& place = m_places.at(id);
+        const Quat back = conjugate(place.rotation);
+        const DVec3 d = at - place.position;
+        const Vec3 local = rotate(back, Vec3{static_cast<float>(d.x), static_cast<float>(d.y), static_cast<float>(d.z)});
+        if (length(local - s.m_center) > s.m_radius + radius) continue;
+        const Vec3 up = rotate(back, Vec3{0.0f, 1.0f, 0.0f}); // at the very centre: upwards
+        const world::ClothSettings& c = s.m_settings;
+        const float speed = std::min(impulse / (c.weight * c.width * c.height), k_max_blast_speed);
+        bool any = false;
+        for (usize i = 0; i < s.m_points.size(); ++i) {
+            if (s.m_inverse_mass[i] == 0.0f) continue;
+            const Vec3 away = s.m_points[i] - local;
+            const float dist = length(away);
+            if (dist >= radius) continue;
+            const float share = 1.0f - dist / radius;
+            const Vec3 dir = dist > 1e-4f ? away * (1.0f / dist) : up;
+            s.m_previous[i] = s.m_previous[i] - dir * (speed * share * dt);
             any = true;
         }
         if (any) s.wake();

@@ -194,9 +194,9 @@ VoxelScene::MeshCache* VoxelScene::mesh_cache(MeshId id, const MeshLookup& meshe
 VoxelScene::Box VoxelScene::bounds_of(const Instance& in, const MeshLookup& meshes) {
     constexpr double inf = std::numeric_limits<double>::infinity();
     const Box none{{inf, inf, inf}, {-inf, -inf, -inf}}; // empty: overlaps nothing
-    const MeshCache* m = mesh_cache(in.mesh, meshes);
+    const MeshCache* m = in.moves ? nullptr : mesh_cache(in.mesh, meshes);
     if (m == nullptr) {
-        return none;
+        return none; // no mesh, or not held (it moves)
     }
     Box box = none;
     for (u32 corner = 0; corner < 8; ++corner) {
@@ -218,7 +218,12 @@ Vec3 VoxelScene::color_of(const Instance& in, std::span<const Material> material
 
 bool VoxelScene::differs(const Instance& in, std::span<const Material> materials, const Copy& copy) const {
     const Instance& c = copy.instance;
-    return !(in.position == c.position && in.rotation == c.rotation && in.scale == c.scale && in.mesh == c.mesh &&
+    if (in.moves && c.moves) {
+        // Not held either way: where it is does not matter.
+        return !(in.scale == c.scale && in.mesh == c.mesh && in.material == c.material &&
+                 in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color);
+    }
+    return in.moves != c.moves || !(in.position == c.position && in.rotation == c.rotation && in.scale == c.scale && in.mesh == c.mesh &&
              in.material == c.material && in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color);
 }
 
