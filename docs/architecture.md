@@ -7,7 +7,7 @@ game        C# scripts, levels, materials, scatter graphs, weather presets
 editor      panels, play-in-editor, undo; uses everything below
 ai          command layer, MCP server, rule checks
 gameplay    game rules: items, inventories, weapon parts, crafting, loot (docs/game-plan.md)
-sim nav world  giants, destruction, NPCs, animation | walkable ground, paths | cells, streaming, landscape, scatter, weather
+sim nav audio world  giants, destruction, NPCs, animation | walkable ground, paths | sound through the world | cells, streaming, landscape, scatter, weather
 render      virtual geometry, voxel world, GI, materials, hair, clouds
 rhi geometry voxel  thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only) | voxel bricks, clipmap
 platform    windows, input, files (SDL3 underneath)
@@ -30,6 +30,7 @@ This table is the source of truth for `tools/check_architecture.py`.
 | world | core, voxel |
 | sim | core, world |
 | nav | core, world |
+| audio | core |
 | gameplay | core, world, sim |
 | script | core, world, sim |
 | ai | core, platform, rhi, anim, geometry, render, world, sim, script |
@@ -1379,6 +1380,62 @@ own (`scene_frame`'s `walkers`). Known limits: a
 walker is drawn in the cell the scene puts it in (one walking far may be
 culled with that cell); no animation is chosen for its pace yet; a stuck
 walker's new search waits for frames (not step_physics).
+
+## Sound
+
+`engine/audio` (core only) hears the world. `Mixer` (mixer.h) plays a
+sound as taps: copies of it each late by a delay, scaled, through a
+one-pole lowpass and panned (equal power) from the side it is heard
+from, plus a share into one reverb tail (four damped combs into two
+allpasses an ear, Freeverb's lengths) whose length follows the latest
+play. It renders on the audio thread; the game thread hands it work
+(plays, sounds, the listener) under a lock the audio thread only tries
+(if it cannot have it, it renders with what it has), and nothing is
+allocated there once its sounds are in. 64 voices of 16 taps at most:
+past that the quietest goes (or a quieter new one is refused); a soft
+limiter keeps the output under 1.
+
+`trace` (propagation.h) works out how a sound made at a point is heard at
+the listener through a ray cast the caller gives (the world as sound
+meets it: a hit's distance, normal and hardness, 0 to 1). The direct way
+is late by its length over 343 m/s, falls as 1 / distance (and 0.5 dB a
+100 m the air takes), loses its highs with distance (a lowpass falling to
+about 4 kHz at 1 km, 1.5 kHz at 3 km: far shots rumble) and, when the
+cast from the listener meets something first, is quieter and duller
+(occluded). Echoes are first-order: rays from the source spread evenly
+over the sphere (64 by default); each spot they hit that faces the
+listener and that the listener can see sends back its diffuse (Lambert)
+share, so a big cliff answers loud however far it is; echoes within 12 ms
+are merged (one wall, not a flutter) and the loudest kept. The tail
+follows from the rays too: those that hit nothing are sky (absorbed),
+their mean path is the place's size (Eyring's formula gives its length,
+0.1 to 8 s) and its level grows with the hardness and the reflected
+energy near the listener. Cost: the rays, plus one cast for each that
+hits and one for the direct way (at most 513).
+
+`sounds.h` makes sounds until there are recorded ones (a rifle's report,
+a supersonic crack's N-wave, a click, a tone) and reads and writes WAV
+(16-bit PCM or 32-bit float, any rate, resampled; mixed to mono).
+`platform::AudioOutput` opens the speakers (SDL3, stereo float 48 kHz)
+and pulls the mix from its own thread; with no device the caller renders
+it itself.
+
+The editor's `AudioState` (editor/src/audio_state.h) holds the mixer
+(on the speakers when the editor is shown; hidden runs stay silent and
+render the mix with the frames), the listener at the camera (the
+player's eyes in play), named sounds, and the world as sound meets it:
+the physics' ray within 1 km (bodies, kits, the ground made near; each
+surface as hard as it is made: concrete 0.9, wood 0.5, dirt 0.3, leaves
+0.1, the ground harder the steeper) and the terrain marched past it
+(steps growing with the distance, halved onto the surface: a cliff 2 km
+off answers). `play_sound`, `record_audio` (the sound alone into a WAV),
+`load_sound`, `stop_sounds`, `get_audio`. Known limits: echoes are first
+order only (no flutter between two walls, no echo of an echo); sound does
+not bend round an edge yet (diffraction), and an occluded way is muffled
+the same whatever is between; the far ground past the terrain's tiles is
+not met; there is no Doppler; shots do not make sounds yet (part 2: the
+muzzle's report and a supersonic bullet's crack, which arrives first);
+weather does not damp it yet.
 
 ## Window events (known limit)
 

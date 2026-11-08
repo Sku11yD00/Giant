@@ -927,7 +927,8 @@ def main() -> int:
 
         names = {t["name"] for t in call("tools/list")["tools"]}
         for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation",
-                         "get_swing", "find_path", "get_nav", "walk_to", "get_walker"):
+                         "get_swing", "find_path", "get_nav", "walk_to", "get_walker", "play_sound",
+                         "record_audio", "get_audio"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")
@@ -937,6 +938,10 @@ def main() -> int:
         check(way["state"] in ("found", "failed"), "find_path answers")
         check(tool("get_nav")["settings"]["agent_radius"] > 0, "get_nav answers")
         check(tool("get_walker")["walkers"] == 0, "get_walker answers")
+        heard = tool("play_sound", {"at": [30, 2, 0], "loudness": 100})
+        check(len(heard["taps"]) >= 1 and abs(heard["taps"][0]["delay"] - heard["distance"] / 343.0) < 1e-6,
+              "play_sound is heard late by its distance")
+        check(tool("get_audio")["played"] == 1, "get_audio answers")
 
         before = tool("get_clear_color")
         tool("set_clear_color", {"r": 0.5, "g": 0.25, "b": 1.0})
