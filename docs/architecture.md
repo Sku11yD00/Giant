@@ -6,6 +6,7 @@ Five layers. Each layer only uses the layers below it.
 game        C# scripts, levels, materials, scatter graphs, weather presets
 editor      panels, play-in-editor, undo; uses everything below
 ai          command layer, MCP server, rule checks
+gameplay    game rules: items, inventories, weapon parts, crafting, loot (docs/game-plan.md)
 sim world   giants, destruction, NPCs, animation | cells, streaming, landscape, scatter, weather
 render      virtual geometry, voxel world, GI, materials, hair, clouds
 rhi geometry voxel  thin graphics layer (D3D12 first) | meshes, import, cluster LOD (CPU only) | voxel bricks, clipmap
@@ -28,6 +29,7 @@ This table is the source of truth for `tools/check_architecture.py`.
 | render | core, rhi, geometry, voxel |
 | world | core, voxel |
 | sim | core, world |
+| gameplay | core, world, sim |
 | script | core, world, sim |
 | ai | core, platform, rhi, anim, geometry, render, world, sim, script |
 | editor | everything |
@@ -1036,6 +1038,35 @@ scene frame draws an entity's copy instead of the file's mesh once it is
 loaded and posed. At most 64 animate at once: those animating keep their
 place, a free one goes to the lowest id waiting, and the rest stand frozen
 in the rest pose.
+
+## Gameplay rules (G1 part 1)
+
+`gameplay` holds the rules of the game being built (FOLD, see
+`docs/game-plan.md`): what items there are and what happens to them. It is
+plain C++ data and functions with no GPU state, tested in ctest; the
+engine decides how things move, render and get hit, `gameplay` what the
+numbers are and what they mean.
+
+- **Items** (`items.h`). An `ItemCatalog` holds every kind of item once
+  (`ItemDef`: a stable id, a name, a kind, weight, base value, how many
+  stack, whether it is worn, that is, has a condition from 0 to 1). It is
+  loaded from text files (`"format": "giant-items"`), several into one
+  catalog, all or nothing per file; an unknown field or a key given twice
+  is an error, so a typo never passes as a default. Item indices follow the
+  order of loading, so the game loads its files sorted by name; files and
+  saves use ids. Numbers are written as the shortest decimal that reads back
+  the same (0.73, not 0.7300000190734863), so files stay diffable. The game's files are `game/fold/data/*.items.json`
+  and the tests load every one.
+- **Inventories** (`inventory.h`). A backpack, a body, a crate or a stash
+  is a list of stacks: an item, a count, a condition. Stackable items fill
+  their stacks up to `max_stack`; worn items never stack, each keeps its own
+  condition. Each stack has an id unique in its inventory and never reused
+  (saves keep the next id too), so the UI and later rules can point at one
+  stack. `set_condition` is the hook for repairs and wear. `remove`
+  takes the worst condition first; `move` carries a stack's condition
+  across. Weight is no hard limit, as in GAMMA: `burden` says whether the
+  load is light, heavy or overloaded, and the player controller will slow
+  down by it. Saved as text (`"format": "giant-inventory"`), items by id.
 
 ## Window events (known limit)
 

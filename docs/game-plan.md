@@ -23,6 +23,27 @@ part engineers and agents need.
    the start. Each ring raises enemy gear, creatures, hazard strength,
    weather and loot tier together.
 
+## A-life and static NPCs
+
+The whole valley is simulated all the time, as in GAMMA.
+
+- **A-life squads.** Every squad is a record (faction, members, loadouts,
+  inventories, goal, place). Offline (far from the player) squads travel a
+  coarse map of the valley, pick goals (scavenge, hunt, trade, raid, guard,
+  go home), meet and fight by a quick roll weighted by gear and numbers, and
+  leave bodies with their real loot. Online (within about 300 m) a squad
+  becomes real characters with navigation, perception and gunfights, and
+  turns back into a record when the player leaves. Squads respawn at
+  faction bases; each ring has its own population. Repeatable missions
+  target real squads.
+- **Static NPCs.** Traders, technicians, medics, barmen, guides, faction
+  bosses and story characters at fixed posts, with schedules inside their
+  base, their own stock and goodwill, and safe-zone rules.
+- **Split.** The A-life brain (squad records, goals, offline fights,
+  factions, population, schedules) is `engine/gameplay`, G3. The engine
+  thread builds the online body: navigation over streamed cells that
+  rebuilds after destruction, perception, locomotion.
+
 ## Setting (default until the owner picks)
 
 "The Fold": a sealed northern valley, about 16 x 16 km. Ring 1 farms and a
