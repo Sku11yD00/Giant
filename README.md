@@ -330,6 +330,12 @@ Open-world systems:
   open, big and hard the place is. The mix runs on its own thread with
   fixed voice and tap budgets (`play_sound`, `record_audio` to a WAV,
   `load_sound`, `get_audio`).
+- E3b: shots heard. A shot's report leaves the muzzle like any sound; a
+  supersonic round's crack reaches you first, from where its shock cone
+  swept over you (upstream of where it passed), and hits knock where
+  they strike. Sound bends over walls and ridges (quieter and duller the
+  longer the detour), and rain, snow and fog take its highs sooner while
+  snow on the ground deadens echoes.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

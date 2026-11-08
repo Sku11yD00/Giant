@@ -1437,14 +1437,42 @@ surface as hard as it is made: concrete 0.9, wood 0.5, dirt 0.3, leaves
 (steps of half the height over the ground, 0.5% to 2% of the distance,
 halved onto the surface: a cliff 2 km off answers; the listener is the
 camera as each command runs). `play_sound`, `record_audio` (the sound alone into a WAV),
-`load_sound`, `stop_sounds`, `get_audio`. Known limits: a crest narrower than the march's step there (about 5 m
-a km off, near the ground) can be stepped over; echoes are first
-order only (no flutter between two walls, no echo of an echo); sound does
-not bend round an edge yet (diffraction), and an occluded way is muffled
-the same whatever is between; the far ground past the terrain's tiles is
-not met; there is no Doppler; shots do not make sounds yet (part 2: the
-muzzle's report and a supersonic bullet's crack, which arrives first);
-weather does not damp it yet.
+`load_sound`, `stop_sounds`, `get_audio`.
+
+Part 2. A blocked direct way bends over or round what blocks it: from a
+little short of where the listener's ray met it, points 1 m to 256 m up
+or to either side (doubling) are tried until one sees both ends (at most
+54 casts), and the shortest found is heard from there, later by the
+detour and quieter by Maekawa's screen (about 5 dB grazing, 13 dB at a
+0.3 m detour, 23 dB at 3.4 m, at most 30) and duller the longer it is
+(only the lows bend far); with no way found it is heard through
+(occluded). `EchoSettings::air` counts distances that many times over for
+what the air takes: the editor sets it from the weather shown (1 dry, +1
+in full rain, +2 in full snow, +1 in thick fog), and snow lying on the
+ground takes up to 80% of what upward-facing surfaces give back.
+
+`shot.h` hears a shot's crack. The flight is taken straight along the aim,
+slowing by the bullets' quadratic drag (v = v0 e^(-drag s), so a rifle
+round stays supersonic for about 1.3 km), cut where a ray along it meets
+something. The shock left at each point reaches the listener at its time
+of flight plus the way from there over the speed of sound; the first of
+those (a narrowed search: the arrival is convex along the flight) is the
+crack, from where the Mach angle holds (cos = c / v): before the report,
+and from upstream of where the bullet passed. None when that is at either
+end (behind the shooter, outside the cone, or past where the flight was
+cut). It falls as distance^-3/4 (an N-wave) and with the air. The
+editor's `fire` (resolved or not) is heard: the report at the muzzle
+(loudness 100 x sqrt(energy / 3100 J): a rifle 100, a pistol about 40)
+and the crack (60 x sqrt(mass / 8 g), muffled when the listener cannot
+see where it left the flight), both reported in its result; each hit
+taken (on_hits, after connect_blows's) knocks where it struck (at most 8
+a frame, 16 echo rays each). Known limits: a crest narrower than the
+march's step there (about 5 m a km off, near the ground) can be stepped
+over; echoes are first order only (no flutter between two walls, no echo
+of an echo); diffraction takes one edge (not a way over two ridges) and
+the crack does not bend; the flight's drop under gravity is left out of
+the crack; the far ground past the terrain's tiles is not met; there is
+no Doppler, and wind does not carry sound.
 
 ## Window events (known limit)
 

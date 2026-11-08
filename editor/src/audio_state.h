@@ -7,8 +7,10 @@
 
 #include "giant/audio/mixer.h"
 #include "giant/audio/propagation.h"
+#include "giant/audio/shot.h"
 #include "giant/platform/audio_output.h"
 #include "giant/world/scene.h"
+#include "giant/world/weather.h"
 
 #include <map>
 #include <memory>
@@ -23,7 +25,7 @@ class PhysicsState;
 
 class AudioState {
 public:
-    AudioState(); // the made sounds added: gunshot, crack, click, tone
+    AudioState(); // the made sounds added: gunshot, crack, impact, click, tone
     ~AudioState();
     AudioState(const AudioState&) = delete;
     AudioState& operator=(const AudioState&) = delete;
@@ -48,6 +50,13 @@ public:
     void update(const EditorCamera& camera, double seconds);
     const DVec3& listener() const { return m_listener; }
 
+    // Each frame: the weather shown (null: none) and the ground under it. Rain, snow and fog take the
+    // highs sooner (air: 1 dry, up to about 5 in a blizzard in fog); snow lying on the ground deadens
+    // its echoes (up to 80% less given back).
+    void set_weather(const world::Weather* shown, const world::Ground& ground);
+    float air() const { return m_air; }
+    float snow_cover() const { return m_snow; }
+
     // The scene as a sound meets it: the physics' ray (null: none) within
     // physics_reach, the terrain marched past it, the nearer hit taken.
     audio::RayCast ray_cast(const world::Scene& scene, const PhysicsState* physics) const;
@@ -58,6 +67,26 @@ public:
                       float loudness, const audio::EchoSettings& settings);
     u64 played() const { return m_played; }
     const std::optional<audio::Heard>& last() const { return m_last; }
+
+    // A shot fired (sim::Shot; `drag` the bullets'): the report from the muzzle (loudness from its
+    // energy: a rifle's 3100 J about 100), and, when the bullet is faster than sound and its shock
+    // cone sweeps over the listener, the crack from where it left the flight (the flight cut where a
+    // ray along the aim meets something; muffled when the listener cannot see that point).
+    struct ShotHeard {
+        audio::Heard report;
+        float report_loudness = 0.0f;
+        audio::Crack crack;
+        float crack_loudness = 0.0f;
+        bool crack_occluded = false;
+        double range = 0.0; // metres the flight was taken to (where it was met, or spent)
+    };
+    ShotHeard shot(const world::Scene& scene, const PhysicsState* physics, const DVec3& origin, const Vec3& velocity,
+                   float mass, float drag);
+    u64 shots() const { return m_shots; }
+    // Where bullets struck (energy left there, joules): a knock each, at most k_max_impacts a frame.
+    void impact(const world::Scene& scene, const PhysicsState* physics, const DVec3& point, float energy);
+    static constexpr u32 k_max_impacts = 8;
+    u64 impacts() const { return m_impacts; }
 
     // The same heard alone, rendered for `seconds` into stereo frames (not the speakers).
     struct Recording {
@@ -70,12 +99,18 @@ public:
                      float loudness, const audio::EchoSettings& settings, double seconds);
 
 private:
+    audio::Heard trace_only(const world::Scene& scene, const PhysicsState* physics, const DVec3& at,
+                            audio::EchoSettings settings) const;
+
     audio::Mixer m_mixer;
     std::unique_ptr<platform::AudioOutput> m_output; // after the mixer: closed first
     std::map<std::string, audio::SoundId> m_names;
     DVec3 m_listener{};
     Vec3 m_right{1, 0, 0}, m_up{0, 1, 0};
     u64 m_played = 0;
+    u64 m_shots = 0, m_impacts = 0;
+    u32 m_impacts_this_frame = 0;
+    float m_air = 1.0f, m_snow = 0.0f;
     std::optional<audio::Heard> m_last;
     std::vector<float> m_scratch; // headless renders
 };

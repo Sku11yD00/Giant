@@ -407,12 +407,18 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
                  state.physics->flush(state.scene);
                  catch_up_hits(state);
                  Json hits = Json::array();
+                 Json heard = hear_shot(state, shot.origin, shot.velocity, shot.mass); // (before its hits knock)
                  for (const PhysicsState::ShotHit& h : state.physics->resolve(shot)) hits.push_back(shot_hit_json(h));
-                 return CommandResult::success(Json{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}});
+                 Json out{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}};
+                 if (!heard.is_null()) out["heard"] = std::move(heard);
+                 return CommandResult::success(std::move(out));
              }
              const sim::BulletId id = state.physics->fire(shot);
              if (id == sim::k_no_bullet) return CommandResult::failure("too many bullets flying");
-             return CommandResult::success(Json{{"bullet", id}});
+             Json out{{"bullet", id}};
+             Json heard = hear_shot(state, shot.origin, shot.velocity, shot.mass);
+             if (!heard.is_null()) out["heard"] = std::move(heard);
+             return CommandResult::success(std::move(out));
          }});
 
     add(registry,

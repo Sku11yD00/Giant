@@ -4,6 +4,7 @@
 #include "giant/audio/propagation.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace giant::audio {
@@ -41,18 +42,27 @@ struct Echo {
 
 } // namespace
 
-float air_lowpass(double metres) {
+float air_lowpass(double metres, float air) {
+    const double a = std::isfinite(air) ? std::clamp(static_cast<double>(air), 0.0, 100.0) : 1.0;
+    metres *= a;
     if (!std::isfinite(metres) || metres <= 0.0) return 20000.0f;
     // About 4 kHz at 1 km, 1.5 kHz at 3 km.
     return static_cast<float>(std::clamp(20000.0 / (1.0 + metres / 250.0), 80.0, 20000.0));
 }
 
-float distance_gain(double metres, double reference) {
+float distance_gain(double metres, double reference, float air) {
+    const double a = std::isfinite(air) ? std::clamp(static_cast<double>(air), 0.0, 100.0) : 1.0;
     const double ref = std::max(reference, 1e-3);
     const double d = std::isfinite(metres) ? std::max(metres, ref) : 1e12;
     // Spreading, and 0.5 dB a 100 m for what the air takes on the whole.
-    const double air_db = 0.005 * (d - ref);
+    const double air_db = 0.005 * (d - ref) * a;
     return static_cast<float>(ref / d * std::pow(10.0, -air_db / 20.0));
+}
+
+float diffraction_db(double detour) {
+    if (!std::isfinite(detour)) return 30.0f;
+    const double n = 2.0 * std::max(detour, 0.0) / (k_speed_of_sound / 500.0); // Fresnel number at 500 Hz
+    return static_cast<float>(std::min(10.0 * std::log10(3.0 + 20.0 * n), 30.0));
 }
 
 Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, const EchoSettings& settings) {
@@ -66,16 +76,62 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
     // The direct way, cast from the listener towards the source.
     Tap direct;
     direct.delay = d / k_speed_of_sound;
-    direct.gain = distance_gain(d, settings.reference);
-    direct.lowpass = air_lowpass(d);
+    const float air = settings.air;
+    direct.gain = distance_gain(d, settings.reference, air);
+    direct.lowpass = air_lowpass(d, air);
     direct.direction = d > 1e-6 ? to_f(-to_listener / d) : Vec3{0, 0, 1};
     if (d > 0.1 && cast) {
         const RayHit h = cast(listener, direct.direction, d - 0.1);
         ++out.casts;
         if (usable(h, d - 0.1)) {
             out.occluded = true;
-            direct.gain *= std::clamp(settings.occluded_gain, 0.0f, 1.0f);
-            direct.lowpass = std::min(direct.lowpass, settings.occluded_lowpass);
+            const auto clear = [&](const DVec3& a, const DVec3& b) {
+                const DVec3 ab = b - a;
+                const double l = dlength(ab);
+                if (l < 0.2) return true;
+                ++out.casts;
+                return !usable(cast(a, to_f(ab / l), l - 0.1), l - 0.1);
+            };
+            // Over the top, or round either side, of what it met: the shortest way found at the least reach.
+            bool found = false;
+            if (settings.diffract) {
+                // (A little short of where it met it: a corner on the surface itself would see through it.)
+                const DVec3 met = listener + to_d(direct.direction) * std::max(h.distance - 0.05, 0.0);
+                const DVec3 up{0, 1, 0};
+                DVec3 side = cross(to_d(direct.direction), up);
+                const double sl = dlength(side);
+                std::array<DVec3, 3> axes{up, sl > 1e-6 ? side / sl : DVec3{1, 0, 0}, sl > 1e-6 ? -side / sl : DVec3{-1, 0, 0}};
+                double best = 0.0;
+                DVec3 corner{};
+                for (double reach = 1.0; reach <= 256.0 && !found; reach *= 2.0)
+                    for (const DVec3& axis : axes) {
+                        const DVec3 p = met + axis * reach;
+                        const double path = dlength(p - listener) + dlength(source - p);
+                        if (found && path >= best) continue;
+                        if (clear(listener, p) && clear(p, source)) {
+                            found = true;
+                            best = path;
+                            corner = p;
+                        }
+                    }
+                if (found) {
+                    out.diffracted = true;
+                    out.detour = std::max(best - d, 0.0);
+                    const DVec3 toward = corner - listener;
+                    const double tl = dlength(toward);
+                    direct.delay = best / k_speed_of_sound;
+                    direct.gain = distance_gain(best, settings.reference, air) *
+                                  static_cast<float>(std::pow(10.0, -diffraction_db(out.detour) / 20.0));
+                    // The longer the detour, the more only the lows bend round.
+                    const float bend = static_cast<float>(std::clamp(1500.0 / std::sqrt(std::max(out.detour, 0.05)), 250.0, 10000.0));
+                    direct.lowpass = std::min(air_lowpass(best, air), bend);
+                    if (tl > 1e-6) direct.direction = to_f(toward / tl);
+                }
+            }
+            if (!found) {
+                direct.gain *= std::clamp(settings.occluded_gain, 0.0f, 1.0f);
+                direct.lowpass = std::min(direct.lowpass, settings.occluded_lowpass);
+            }
         }
     }
     if (direct.gain > 0.0f && direct.delay <= k_max_delay) out.taps.push_back(direct);
@@ -115,13 +171,14 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
         if (usable(seen, r2 - k_lift) && seen.distance < r2 - k_lift - 0.5) continue; // hidden from the listener
         const double path = h.distance + r2;
         if (path / k_speed_of_sound > k_max_delay) continue; // too late to be played
-        const float gain = static_cast<float>(std::sqrt(energy_at_unit)) * distance_gain(r2, settings.reference);
+        const float gain = static_cast<float>(std::sqrt(energy_at_unit)) * distance_gain(r2, settings.reference, air) *
+                           static_cast<float>(std::pow(10.0, -0.005 * h.distance * std::clamp(static_cast<double>(air), 0.0, 100.0) / 20.0)); // the air on the way out
         if (!(gain > 0.0f)) continue;
         Echo e;
         e.delay = path / k_speed_of_sound;
         e.energy = static_cast<double>(gain) * gain;
         e.direction = -back_dir * e.energy;
-        e.lowpass = air_lowpass(path) * (0.4 + 0.6 * hardness) * e.energy;
+        e.lowpass = air_lowpass(path, air) * (0.4 + 0.6 * hardness) * e.energy;
         echoes.push_back(e);
     }
 

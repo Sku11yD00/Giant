@@ -40,11 +40,20 @@ struct EchoSettings {
     float occluded_gain = 0.3f; // the direct way through something
     float occluded_lowpass = 900.0f;
     u32 echoes = k_max_taps - 1; // kept (the loudest, near ones merged)
+    // How much the air takes (1: dry still air; rain, snow and fog more): distances count this many times
+    // over for what the air takes (its highs and its 0.5 dB a 100 m), not for spreading or delay.
+    float air = 1.0f;
+    // The direct way blocked: a way over or round what blocks it is looked for (up, then either side,
+    // 1 m to 256 m past where the ray met it, doubling: at most 54 casts) and heard bent over its edge
+    // (later by the detour, quieter and duller the longer that is). None: heard through it (occluded_gain).
+    bool diffract = true;
 };
 
 struct Heard {
     std::vector<Tap> taps;     // the direct one first (when it is heard), then echoes, loudest first
     bool occluded = false;     // something stands on the direct way
+    bool diffracted = false;   // ...and it is heard bent over (or round) its edge
+    double detour = 0.0;       // metres that way is longer than the straight one
     float openness = 1.0f;     // of the rays, those that hit nothing (sky)
     double mean_free_path = 0; // metres, of those that hit
     float hardness = 0.0f;     // mean of what they hit
@@ -54,9 +63,12 @@ struct Heard {
 };
 
 // The cut-off the air leaves after `metres` (it takes the highs first: far thunder rumbles).
-float air_lowpass(double metres);
+float air_lowpass(double metres, float air = 1.0f);
 // Amplitude after `metres` from `reference` (spreading, and a little the air takes).
-float distance_gain(double metres, double reference = 1.0);
+float distance_gain(double metres, double reference = 1.0, float air = 1.0f);
+// Maekawa's screen: how much a way bent over an edge `detour` metres longer than the straight one loses
+// (dB at 500 Hz: about 5 at a grazing edge, 13 at 0.3 m, 23 at 3.4 m, at most 30).
+float diffraction_db(double detour);
 
 Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, const EchoSettings& settings);
 

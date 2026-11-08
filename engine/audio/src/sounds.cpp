@@ -86,6 +86,21 @@ Sound synth_crack() {
     return s;
 }
 
+Sound synth_impact(u32 seed) {
+    Sound s;
+    const usize n = k_sample_rate / 25; // 40 ms
+    s.samples.resize(n);
+    Noise noise(seed);
+    float low = 0.0f;
+    for (usize i = 0; i < n; ++i) {
+        const float t = static_cast<float>(i) / k_sample_rate;
+        low += 0.35f * (noise.next() - low);
+        s.samples[i] = (low * 1.5f + std::sin(2.0f * k_pi * 180.0f * t) * 0.6f) * std::exp(-t / 0.008f);
+    }
+    normalize(s, 1.0f);
+    return s;
+}
+
 Sound synth_click() {
     Sound s;
     s.samples.assign(k_sample_rate / 100, 0.0f); // 10 ms

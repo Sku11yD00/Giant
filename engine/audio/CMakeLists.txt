@@ -3,6 +3,7 @@ giant_module(audio
     src/mixer.cpp
     src/propagation.cpp
     src/sounds.cpp
+    src/shot.cpp
   DEPENDS core
 )
 
