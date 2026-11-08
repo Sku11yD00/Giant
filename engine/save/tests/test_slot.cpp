@@ -267,8 +267,12 @@ GIANT_TEST("save slot: a newer engine's save is never fallen back from or writte
     const Committed d = commit(slot, a.manifest, c, meta());
     GIANT_CHECK(!d.error.empty() && d.written == 0);
     GIANT_CHECK(!commit(slot, {}, c, meta()).error.empty());
-    std::ifstream f(slot / "save.json");
-    const std::string now((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::string now;
+    {
+        // Closed before the rename below: Windows will not rename a file held open.
+        std::ifstream f(slot / "save.json");
+        now.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
     GIANT_CHECK(now == newer && read_chunk(slot, b.manifest.sections.at("player")) == "p2");
     // Only the one before newer (save.json lost): still not written over, its chunks kept.
     fs::rename(slot / "save.json", slot / "save.prev.json");
