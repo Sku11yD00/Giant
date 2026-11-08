@@ -18,7 +18,7 @@ double supersonic_range(const Flight& f) {
     const double v0 = std::sqrt(static_cast<double>(dot(f.velocity, f.velocity)));
     if (!std::isfinite(v0) || v0 <= k_speed_of_sound) return 0.0;
     const double k = std::isfinite(f.drag) ? std::max(static_cast<double>(f.drag), 0.0) : 0.0;
-    const double range = std::isfinite(f.range) ? std::clamp(f.range, 0.0, 1e6) : 0.0;
+    const double range = std::isnan(f.range) ? 0.0 : std::clamp(f.range, 0.0, 1e6); // unbounded: 1000 km
     if (k <= 1e-12) return range;
     return std::min(std::log(v0 / k_speed_of_sound) / k, range);
 }
@@ -64,6 +64,8 @@ Crack trace_crack(const Flight& f, const DVec3& listener, float air) {
     if (out.miss > 1e-6)
         out.direction = {static_cast<float>(to.x / out.miss), static_cast<float>(to.y / out.miss),
                          static_cast<float>(to.z / out.miss)};
+    else // on the line itself: from back up it
+        out.direction = {static_cast<float>(-dir.x), static_cast<float>(-dir.y), static_cast<float>(-dir.z)};
     const double m = std::max(out.miss, 1.0);
     const double a = std::isfinite(air) ? std::clamp(static_cast<double>(air), 0.0, 100.0) : 1.0;
     out.gain = static_cast<float>(std::pow(m, -0.75) * std::pow(10.0, -0.005 * m * a / 20.0));

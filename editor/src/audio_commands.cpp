@@ -99,20 +99,22 @@ const char* k_heard_doc =
 } // namespace
 
 void connect_sounds(EditorState& state) {
-    if (state.physics == nullptr || state.audio == nullptr) return;
+    if (state.physics == nullptr || state.audio == nullptr || state.audio->sounds_connected) return;
+    state.audio->sounds_connected = true;
     std::function<void(std::span<const PhysicsState::ShotHit>)> before = state.physics->on_hits;
     state.physics->on_hits = [&state, before](std::span<const PhysicsState::ShotHit> hits) {
         if (before) before(hits);
+        if (state.audio == nullptr) return;
         for (const PhysicsState::ShotHit& h : hits)
             state.audio->impact(state.scene, state.physics, h.hit.point, h.hit.energy);
     };
 }
 
-Json hear_shot(EditorState& state, const DVec3& origin, const Vec3& velocity, float mass) {
+Json hear_shot(EditorState& state, const DVec3& origin, const Vec3& velocity, float mass, std::optional<double> range) {
     if (state.audio == nullptr) return nullptr;
     state.audio->update(state.camera, 0.0);
     const float drag = state.physics != nullptr ? state.physics->ballistics().settings().drag : 0.0007f;
-    const AudioState::ShotHeard h = state.audio->shot(state.scene, state.physics, origin, velocity, mass, drag);
+    const AudioState::ShotHeard h = state.audio->shot(state.scene, state.physics, origin, velocity, mass, drag, range);
     Json out = {{"report", heard_json(h.report, origin, state.audio->listener())},
                 {"report_loudness", h.report_loudness},
                 {"crack", {{"heard", h.crack.heard}}}};
@@ -123,6 +125,7 @@ Json hear_shot(EditorState& state, const DVec3& origin, const Vec3& velocity, fl
                         {"from", dvec(h.crack.from)},
                         {"direction", vec(h.crack.direction)},
                         {"speed", h.crack.speed},
+                        {"distance", h.crack.distance},
                         {"gain", h.crack.gain},
                         {"loudness", h.crack_loudness},
                         {"occluded", h.crack_occluded}};

@@ -13,6 +13,7 @@ namespace {
 
 constexpr double k_merge_seconds = 0.012; // echoes closer than this are heard as one
 constexpr double k_lift = 0.05;           // metres off a surface before casting from it
+constexpr int k_edge_halvings = 6;        // the corner found, brought nearer the edge
 
 DVec3 to_d(const Vec3& v) { return {v.x, v.y, v.z}; }
 Vec3 to_f(const DVec3& v) { return {static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z)}; }
@@ -76,7 +77,7 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
     // The direct way, cast from the listener towards the source.
     Tap direct;
     direct.delay = d / k_speed_of_sound;
-    const float air = settings.air;
+    const float air = std::isfinite(settings.air) ? std::clamp(settings.air, 0.0f, 100.0f) : 1.0f;
     direct.gain = distance_gain(d, settings.reference, air);
     direct.lowpass = air_lowpass(d, air);
     direct.direction = d > 1e-6 ? to_f(-to_listener / d) : Vec3{0, 0, 1};
@@ -85,52 +86,76 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
         ++out.casts;
         if (usable(h, d - 0.1)) {
             out.occluded = true;
-            const auto clear = [&](const DVec3& a, const DVec3& b) {
-                const DVec3 ab = b - a;
+            // Through it: what the wall lets by.
+            Tap through = direct;
+            through.gain *= std::clamp(settings.occluded_gain, 0.0f, 1.0f);
+            through.lowpass = std::min(through.lowpass, settings.occluded_lowpass);
+            direct = through;
+            // Each leg cast out from the corner (its far ends may lie on surfaces; the corner may not).
+            const auto clear = [&](const DVec3& from, const DVec3& to) {
+                const DVec3 ab = to - from;
                 const double l = dlength(ab);
                 if (l < 0.2) return true;
                 ++out.casts;
-                return !usable(cast(a, to_f(ab / l), l - 0.1), l - 0.1);
+                return !usable(cast(from, to_f(ab / l), l - 0.1), l - 0.1);
             };
-            // Over the top, or round either side, of what it met: the shortest way found at the least reach.
-            bool found = false;
+            const auto sees_both = [&](const DVec3& p) { return clear(p, listener) && clear(p, source); };
             if (settings.diffract) {
-                // (A little short of where it met it: a corner on the surface itself would see through it.)
-                const DVec3 met = listener + to_d(direct.direction) * std::max(h.distance - 0.05, 0.0);
+                // Off the face where the ray met it (along its normal, a little), so a corner is never in it.
+                const float nl = length(h.normal);
+                const DVec3 off = nl > 1e-6f ? to_d(h.normal / nl) * 0.05 : -to_d(direct.direction) * 0.05;
+                const DVec3 met = listener + to_d(direct.direction) * h.distance + off;
                 const DVec3 up{0, 1, 0};
                 DVec3 side = cross(to_d(direct.direction), up);
                 const double sl = dlength(side);
-                std::array<DVec3, 3> axes{up, sl > 1e-6 ? side / sl : DVec3{1, 0, 0}, sl > 1e-6 ? -side / sl : DVec3{-1, 0, 0}};
-                double best = 0.0;
-                DVec3 corner{};
-                for (double reach = 1.0; reach <= 256.0 && !found; reach *= 2.0)
-                    for (const DVec3& axis : axes) {
-                        const DVec3 p = met + axis * reach;
+                const std::array<DVec3, 3> axes{up, sl > 1e-6 ? side / sl : DVec3{1, 0, 0},
+                                                sl > 1e-6 ? -side / sl : DVec3{-1, 0, 0}};
+                // The least reach (doubling from 1/8 m) with a corner that sees both ends; the shortest such.
+                bool found = false;
+                double best = 0.0, at = 0.0, below = 0.0;
+                usize axis = 0;
+                for (double reach = 0.125; reach <= 256.0 && !found; reach *= 2.0) {
+                    for (usize a = 0; a < axes.size(); ++a) {
+                        const DVec3 p = met + axes[a] * reach;
                         const double path = dlength(p - listener) + dlength(source - p);
                         if (found && path >= best) continue;
-                        if (clear(listener, p) && clear(p, source)) {
+                        if (sees_both(p)) {
                             found = true;
                             best = path;
-                            corner = p;
+                            at = reach;
+                            axis = a;
                         }
                     }
+                    if (!found) below = reach;
+                }
                 if (found) {
-                    out.diffracted = true;
-                    out.detour = std::max(best - d, 0.0);
+                    // Then nearer the edge: halved between the last reach that did not see and the first that did.
+                    double lo = below, hi = at;
+                    for (int k = 0; k < k_edge_halvings && hi - lo > 0.02; ++k) {
+                        const double mid = 0.5 * (lo + hi);
+                        if (sees_both(met + axes[axis] * mid)) hi = mid;
+                        else lo = mid;
+                    }
+                    const DVec3 corner = met + axes[axis] * hi;
+                    best = dlength(corner - listener) + dlength(source - corner);
+                    Tap bent = direct;
+                    const double detour = std::max(best - d, 0.0);
+                    bent.delay = best / k_speed_of_sound;
+                    bent.gain = distance_gain(best, settings.reference, air) *
+                                static_cast<float>(std::pow(10.0, -diffraction_db(detour) / 20.0));
+                    // The longer the detour, the more only the lows bend round.
+                    const float bend = static_cast<float>(std::clamp(1500.0 / std::sqrt(std::max(detour, 0.05)), 250.0, 10000.0));
+                    bent.lowpass = std::min(air_lowpass(best, air), bend);
                     const DVec3 toward = corner - listener;
                     const double tl = dlength(toward);
-                    direct.delay = best / k_speed_of_sound;
-                    direct.gain = distance_gain(best, settings.reference, air) *
-                                  static_cast<float>(std::pow(10.0, -diffraction_db(out.detour) / 20.0));
-                    // The longer the detour, the more only the lows bend round.
-                    const float bend = static_cast<float>(std::clamp(1500.0 / std::sqrt(std::max(out.detour, 0.05)), 250.0, 10000.0));
-                    direct.lowpass = std::min(air_lowpass(best, air), bend);
-                    if (tl > 1e-6) direct.direction = to_f(toward / tl);
+                    if (tl > 1e-6) bent.direction = to_f(toward / tl);
+                    // Heard the louder way: bent round, or through.
+                    if (bent.gain > through.gain) {
+                        direct = bent;
+                        out.diffracted = true;
+                        out.detour = detour;
+                    }
                 }
-            }
-            if (!found) {
-                direct.gain *= std::clamp(settings.occluded_gain, 0.0f, 1.0f);
-                direct.lowpass = std::min(direct.lowpass, settings.occluded_lowpass);
             }
         }
     }
@@ -172,7 +197,7 @@ Heard trace(const DVec3& source, const DVec3& listener, const RayCast& cast, con
         const double path = h.distance + r2;
         if (path / k_speed_of_sound > k_max_delay) continue; // too late to be played
         const float gain = static_cast<float>(std::sqrt(energy_at_unit)) * distance_gain(r2, settings.reference, air) *
-                           static_cast<float>(std::pow(10.0, -0.005 * h.distance * std::clamp(static_cast<double>(air), 0.0, 100.0) / 20.0)); // the air on the way out
+                           static_cast<float>(std::pow(10.0, -0.005 * h.distance * static_cast<double>(air) / 20.0)); // the air on the way out
         if (!(gain > 0.0f)) continue;
         Echo e;
         e.delay = path / k_speed_of_sound;

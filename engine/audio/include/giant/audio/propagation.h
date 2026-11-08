@@ -10,7 +10,8 @@
 //   mixer.play(audio::to_play(shot, heard, 1.0f));
 //
 // Cost: settings.rays casts from the source, and one more for each that
-// hits (can the listener see that spot?), plus one for the direct way:
+// hits (can the listener see that spot?), plus one for the direct way, and
+// up to 84 more to find a way round when that is blocked (diffract):
 // bounded by the settings (rule 9).
 #pragma once
 
@@ -37,15 +38,16 @@ struct EchoSettings {
     u32 rays = 64;              // cast from the source (at most 256)
     double max_distance = 3000; // metres an echo's surface may be from the source
     double reference = 1.0;     // metres: the distance a sound is heard at its own level
-    float occluded_gain = 0.3f; // the direct way through something
+    float occluded_gain = 0.02f; // the direct way through something (about 34 dB lost, a solid wall's)
     float occluded_lowpass = 900.0f;
     u32 echoes = k_max_taps - 1; // kept (the loudest, near ones merged)
     // How much the air takes (1: dry still air; rain, snow and fog more): distances count this many times
     // over for what the air takes (its highs and its 0.5 dB a 100 m), not for spreading or delay.
     float air = 1.0f;
     // The direct way blocked: a way over or round what blocks it is looked for (up, then either side,
-    // 1 m to 256 m past where the ray met it, doubling: at most 54 casts) and heard bent over its edge
-    // (later by the detour, quieter and duller the longer that is). None: heard through it (occluded_gain).
+    // 1/8 m to 256 m past where the ray met it, doubling, then halved nearer the edge: at most 84 casts)
+    // and heard bent over its edge (later by the detour, quieter and duller the longer that is), when
+    // that is louder than through it (occluded_gain).
     bool diffract = true;
 };
 

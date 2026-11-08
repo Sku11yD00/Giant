@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -298,13 +299,23 @@ GIANT_TEST("audio propagation: a cliff 343 m off answers 2 s later from its side
     PlaneWorld high = w;
     high.planes.push_back({{0, 0, 1}, 1.0, 0.9f, {-100, 0, 0.5}, {100, 30, 1.5}});
     const Heard hi = trace({0.0, 1.7, 2.0}, here, high.cast(), s);
-    GIANT_CHECK(hi.diffracted && hi.detour > m.detour && hi.taps[0].gain < m.taps[0].gain);
+    GIANT_CHECK(hi.occluded && hi.taps[0].gain < m.taps[0].gain);
+    // ...so long a way over (about 57 m round) that through it is louder: heard through, not bent.
+    GIANT_CHECK(!hi.diffracted && hi.taps[0].lowpass <= s.occluded_lowpass);
+    GIANT_CHECK(std::fabs(hi.taps[0].gain - h.taps[0].gain * s.occluded_gain) < 1e-6f);
+    // A wall just grazing the line (its top 10 cm over it): bent round by a hair, nearly as loud as open.
+    PlaneWorld low = w;
+    low.planes.push_back({{0, 0, 1}, 1.0, 0.9f, {-5, 0, 0.5}, {5, 1.8, 1.5}});
+    const Heard g = trace({0.0, 1.7, 2.0}, here, low.cast(), s);
+    GIANT_CHECK(g.occluded && g.diffracted && g.detour < 0.1);
+    GIANT_CHECK(g.taps[0].gain > m.taps[0].gain && g.taps[0].gain > h.taps[0].gain * 0.2f);
+    GIANT_CHECK(g.taps[0].direction.y > 0.0f);
     // No way round (a wall across everything): heard through it.
     PlaneWorld sealed = w;
     sealed.planes.push_back({{0, 0, 1}, 1.0, 0.9f});
     const Heard t = trace({0.0, 1.7, 2.0}, here, sealed.cast(), s);
     GIANT_CHECK(t.occluded && !t.diffracted && t.taps[0].lowpass <= s.occluded_lowpass);
-    GIANT_CHECK(t.casts <= 1 + 54 + 2 * s.rays);
+    GIANT_CHECK(t.casts <= 1 + 84 + 2 * s.rays);
     EchoSettings flat = s;
     flat.diffract = false;
     GIANT_CHECK(!trace({0.0, 1.7, 2.0}, here, walled.cast(), flat).diffracted);
@@ -315,6 +326,20 @@ GIANT_TEST("audio propagation: a cliff 343 m off answers 2 s later from its side
     wet.air = 3.0f;
     const Heard r = trace({0.0, 1.7, 2.0}, here, w.cast(), wet);
     GIANT_CHECK(r.taps[0].lowpass < h.taps[0].lowpass);
+    bool wet_cliff = false;
+    for (usize k = 1; k < r.taps.size(); ++k) {
+        const Tap& e = r.taps[k];
+        if (e.delay > 1.9 && e.delay < 2.3 && e.direction.x > 0.8f) {
+            for (usize j = 1; j < h.taps.size(); ++j) {
+                const Tap& dry = h.taps[j];
+                if (std::fabs(dry.delay - e.delay) < 1e-6) {
+                    wet_cliff = true;
+                    GIANT_CHECK(e.lowpass < dry.lowpass && e.gain < dry.gain);
+                }
+            }
+        }
+    }
+    GIANT_CHECK(wet_cliff);
     GIANT_CHECK(air_lowpass(1000.0, 3.0f) == air_lowpass(3000.0));
     GIANT_CHECK(distance_gain(1000.0, 1.0, 2.0f) < distance_gain(1000.0));
 }
@@ -495,4 +520,12 @@ GIANT_TEST("audio shot: a rifle round passing 20 m off at 300 m cracks well befo
     GIANT_CHECK(!trace_crack(draggy, {100, 0, 400}).heard);
     GIANT_CHECK(trace_crack(draggy, {300, 0, 20}).heard);
     GIANT_CHECK(!trace_crack({{0, 0, 0}, {std::nanf(""), 0, 0}}, here).heard);
+    // No end to the flight: as far as it stays fast (1000 km with no drag); a NaN end: none.
+    const double inf = std::numeric_limits<double>::infinity();
+    GIANT_CHECK(supersonic_range({{0, 0, 0}, {880, 0, 0}, 0.0f, inf}) == 1e6);
+    GIANT_CHECK(std::fabs(supersonic_range({{0, 0, 0}, {880, 0, 0}, 0.002f, inf}) - supersonic_range(draggy)) < 1e-9);
+    GIANT_CHECK(supersonic_range({{0, 0, 0}, {880, 0, 0}, 0.0f, std::nan("")}) == 0.0);
+    // Stood on the line downrange: the crack from back up it.
+    const Crack on = trace_crack(f, {200, 0, 0});
+    GIANT_CHECK(on.heard && on.direction.x < -0.99f);
 }

@@ -254,6 +254,50 @@ GIANT_TEST("editor audio: a rifle shot past the camera cracks before its report;
     GIANT_CHECK(f.audio.impacts() > before);
     r = f.run("get_audio");
     GIANT_CHECK(r.value["shots"] == 4 && r.value["impacts"].get<u64>() >= 1);
+    // Flying (not resolved): a wall made this frame at 30 m is met by the aim, so the flight ends there.
+    GIANT_CHECK(f.run("create_entity", {{"shape", "cube"}, {"position", {30.0, 2.0, 5.0}}, {"scale", {1.0, 4.0, 4.0}},
+                                       {"body", "fixed"}, {"surface", "concrete"}}).ok);
+    r = f.run("fire", {{"origin", {0.0, 1.7, 5.0}}, {"direction", {1.0, 0.0, 0.0}}});
+    GIANT_CHECK(r.ok && std::fabs(r.value["heard"]["range"].get<double>() - 29.5) < 0.1);
+    GIANT_CHECK(r.value["heard"]["crack"]["heard"] == false);
+}
+
+GIANT_TEST("editor audio: a resolved shot through a thin board still cracks past the camera") {
+    Fixture f(true);
+    f.state.camera.position = {300.0, 1.7, 20.0};
+    register_physics_commands(f.commands, f.state);
+    connect_sounds(f.state);
+    // A 2 cm wooden board at 50 m: a rifle round goes through it, and on past the camera.
+    GIANT_CHECK(f.run("create_entity", {{"shape", "cube"}, {"position", {50.0, 2.0, 0.0}}, {"scale", {0.02, 4.0, 4.0}},
+                                       {"body", "fixed"}, {"surface", "wood"}}).ok);
+    const ai::CommandResult r =
+        f.run("fire", {{"origin", {0.0, 1.7, 0.0}}, {"direction", {1.0, 0.0, 0.0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["hits"].size() >= 1);
+    GIANT_CHECK(r.value["hits"][0]["outcome"] == "passed");
+    GIANT_CHECK(r.value["heard"]["crack"]["heard"] == true);
+    GIANT_CHECK(r.value["heard"]["range"].get<double>() > 300.0);
+}
+
+GIANT_TEST("editor audio: knocks and full shots are bounded a frame; a knock past 1 km is not made") {
+    Fixture f;
+    f.valley();
+    f.state.camera.position = {60.0, 1.7, 0.0};
+    f.audio.update(f.state.camera, 0.0);
+    for (u32 k = 0; k < 20; ++k) f.audio.impact(f.state.scene, nullptr, {40.0, 0.0, 0.0}, 100.0f);
+    GIANT_CHECK(f.audio.impacts() == AudioState::k_max_impacts);
+    f.audio.update(f.state.camera, 1.0 / 60.0); // the next frame
+    f.audio.impact(f.state.scene, nullptr, {40.0, 0.0, 0.0}, 100.0f);
+    GIANT_CHECK(f.audio.impacts() == AudioState::k_max_impacts + 1);
+    f.audio.impact(f.state.scene, nullptr, {2000.0, 0.0, 0.0}, 100.0f);
+    GIANT_CHECK(f.audio.impacts() == AudioState::k_max_impacts + 1);
+    // Shots: the first k_full_shots traced in full (echoes), the rest with the direct way only.
+    f.audio.update(f.state.camera, 1.0 / 60.0);
+    for (u32 k = 0; k < AudioState::k_full_shots + 2; ++k) {
+        const AudioState::ShotHeard h =
+            f.audio.shot(f.state.scene, nullptr, {0.0, 1.7, 0.0}, {300.0f, 0.0f, 0.0f}, 0.008f, 0.0f, 100.0);
+        if (k < AudioState::k_full_shots) GIANT_CHECK(h.report.casts > 8);
+        else GIANT_CHECK(h.report.casts <= 1 && h.report.taps.size() == 1);
+    }
 }
 
 GIANT_TEST("editor audio: snow and fog take the highs sooner; snow on the ground deadens its echo") {
