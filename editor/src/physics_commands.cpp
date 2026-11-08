@@ -301,7 +301,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              const auto hit = state.physics->world().raycast(origin, direction, args.value("max_distance", 10000.0));
              if (!hit) return CommandResult::success(Json{{"hit", false}});
              Json out{{"hit", true},
-                      {"entity", state.physics->bodies().entity_of(hit->body)},
+                      {"entity", state.physics->world().is_character_body(hit->body)
+                                     ? state.physics->world().user(hit->body) // a walker's entity (the player: 0)
+                                     : state.physics->bodies().entity_of(hit->body)},
                       {"point", vec(hit->point)},
                       {"normal", vec(hit->normal)},
                       {"distance", hit->distance},

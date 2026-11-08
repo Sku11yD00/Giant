@@ -53,6 +53,7 @@ class AnimationState;
 class ClothState;
 class SwingState;
 class NavState;
+class WalkerState;
 class HitTargets;
 class WorldStreaming;
 
@@ -227,6 +228,8 @@ struct EditorState {
     // Where people can walk and paths over it; set by main (and tests).
     // Null: no navigation.
     NavState* nav = nullptr;
+    // Entities sent walking (walk_to); set by main (and tests). Null: none walk.
+    WalkerState* walkers = nullptr;
     // Characters' hit shapes (bone capsules) for bullets; set by main (and
     // tests). Null: characters are not hit.
     HitTargets* hits = nullptr;
@@ -276,6 +279,11 @@ void register_cloth_commands(ai::CommandRegistry& registry, EditorState& state);
 void register_swing_commands(ai::CommandRegistry& registry, EditorState& state);
 // The navigation commands (nav_commands.cpp).
 void register_nav_commands(ai::CommandRegistry& registry, EditorState& state);
+// The walker commands (walker_commands.cpp).
+void register_walker_commands(ai::CommandRegistry& registry, EditorState& state);
+// The walkers steered and posed around step_physics's fixed steps
+// (state.physics's before_fixed_step and after_fixed_step). Once both are set.
+void connect_walkers(EditorState& state);
 // Shots knock the swinging things they hit and blows (impact) throw them
 // and the cloth near (state.physics's on_hits and on_impact, reading
 // state.swing and state.cloth when they come). Once the physics is set.

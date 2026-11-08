@@ -316,6 +316,11 @@ Open-world systems:
   rebuilt when what it was built from changes. Paths are searched in
   bounded slices a frame (A*, pulled straight), so a long one never
   stutters a frame (`find_path`, `get_nav`).
+- E2b: walkers. An entity sent walking (`walk_to`, while simulating)
+  becomes a physics character that follows the way: corners in turn,
+  facing where it goes, slowing to stop at the end, stepping to its right
+  of anyone coming at it and away from anyone too close, and looking for
+  the way again when stuck (`get_walker`, `stop_walker`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

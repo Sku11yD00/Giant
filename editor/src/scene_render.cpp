@@ -245,12 +245,16 @@ void emit_ground(const world::Scene& scene, const TerrainMeshes* terrain, const 
     }
 }
 
-// Where an entity is drawn: the physics' pose, else its swing's, else
-// where the scene has it.
+// Where an entity is drawn: the physics' pose, else its walker's, else its
+// swing's, else where the scene has it.
 const world::Transform& drawn_at(const SceneFrame& out, const world::Entity& e) {
     if (out.poses != nullptr) {
         const auto p = out.poses->find(e.id);
         if (p != out.poses->end()) return p->second;
+    }
+    if (out.walkers != nullptr) {
+        const auto p = out.walkers->find(e.id);
+        if (p != out.walkers->end()) return p->second;
     }
     if (out.swings != nullptr) {
         const auto p = out.swings->find(e.id);
@@ -288,7 +292,8 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             continue;
         }
         const world::Transform& at = drawn_at(out, *e);
-        const bool moves = e->swing.on && sim::can_swing(e->shape);
+        // Swinging, or walking.
+        const bool moves = (e->swing.on && sim::can_swing(e->shape)) || (out.walkers != nullptr && out.walkers->contains(id));
         // What it draws, for moving it in place later (rebuild_moved).
         const u32 first = static_cast<u32>(cell.instances.size());
         const usize decals = cell.decals.size();
@@ -723,10 +728,12 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, render::MeshId>* skinned,
                  const std::unordered_map<world::EntityId, render::MeshId>* cloth,
                  std::span<const world::EntityId> moved,
-                 const std::unordered_map<world::EntityId, world::Transform>* swings) {
+                 const std::unordered_map<world::EntityId, world::Transform>* swings,
+                 const std::unordered_map<world::EntityId, world::Transform>* walkers) {
     out.cells_rebuilt = 0;
     out.poses = poses;
     out.swings = swings;
+    out.walkers = walkers;
     out.skinned = skinned;
     out.cloth = cloth;
     out.piece_poses = piece_poses;
@@ -920,6 +927,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     }
     out.poses = nullptr; // the cells are built
     out.swings = nullptr;
+    out.walkers = nullptr;
     out.piece_poses = nullptr;
     out.skinned = nullptr;
     out.cloth = nullptr;

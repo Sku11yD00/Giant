@@ -41,6 +41,9 @@ public:
     PhysicsState();
 
     bool simulating() const { return m_on; }
+    // Counts starts: a walker made in another run (stopped and started
+    // since, even within a frame) is let go.
+    u64 runs() const { return m_runs; }
     // Starts, or stops (every moved entity drawn where the scene has it again).
     void set_simulating(bool on);
     // Each frame before update, once the placer is updated: the scatter
@@ -61,8 +64,12 @@ public:
     // As flush, within the budgets of a frame (starting play): what the
     // scene changed is queued and a share made; the rest follows.
     void catch_up(world::Scene& scene);
-    // `steps` fixed steps at once (step_physics); the poses follow.
+    // `steps` fixed steps at once (step_physics); the poses follow. Around
+    // each, `before_fixed_step` and `after_fixed_step` (when set) steer
+    // what walks and pose it (WalkerState).
     u32 run_steps(u32 steps);
+    std::function<void(double seconds)> before_fixed_step;
+    std::function<void()> after_fixed_step;
 
     // Where simulating has moved dynamic entities to (the renderer draws
     // them there); and which to draw again (taken by the frame).
@@ -195,6 +202,7 @@ private:
     world::GroundDamage m_ground;
     bool m_restore_ground = false;
     sim::PhysicsWorld m_physics;
+    u64 m_runs = 0;
     sim::ScenePhysics m_bodies;
     sim::Forest m_forest; // after the world: its trunks go first
     sim::Ballistics m_ballistics;

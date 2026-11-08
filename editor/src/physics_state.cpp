@@ -59,8 +59,12 @@ sim::Ballistics::Target PhysicsState::target_of(const sim::RayHit& hit) const {
         }
         return out;
     }
-    out.surface = m_physics.is_character_body(hit.body) ? world::Surface::flesh
-                                                        : world::Surface::dirt; // the ground's tiles
+    if (m_physics.is_character_body(hit.body)) {
+        out.owner = m_physics.user(hit.body); // a walker's entity (the player: 0)
+        out.surface = world::Surface::flesh;
+        return out;
+    }
+    out.surface = world::Surface::dirt; // the ground's tiles
     return out;
 }
 
@@ -208,6 +212,7 @@ void PhysicsState::notice_scene(const world::Scene& scene) {
 void PhysicsState::set_simulating(bool on) {
     if (on == m_on) return;
     m_on = on;
+    if (on) ++m_runs;
     if (!on) {
         m_bodies.reset_poses();
         m_forest.reset();
@@ -458,12 +463,14 @@ void PhysicsState::catch_up(world::Scene& scene) {
 
 u32 PhysicsState::run_steps(u32 steps) {
     for (u32 i = 0; i < steps; ++i) {
+        if (before_fixed_step) before_fixed_step(sim::PhysicsWorld::k_step_seconds);
         m_physics.step(sim::PhysicsWorld::k_step_seconds);
         m_bodies.update_poses();
         m_forest.after_step();
         m_ballistics.step(sim::PhysicsWorld::k_step_seconds);
         take_hits();
         m_dust.step(static_cast<float>(sim::PhysicsWorld::k_step_seconds), wind);
+        if (after_fixed_step) after_fixed_step();
     }
     return steps;
 }
