@@ -22,6 +22,7 @@
 #include "swing_state.h"
 #include "nav_state.h"
 #include "walker_state.h"
+#include "audio_state.h"
 #include "hit_targets.h"
 #include "physics_state.h"
 #include "play_state.h"
@@ -322,6 +323,9 @@ int run(const Options& options) {
     editor::WalkerState walkers(physics, nav); // after both: its characters and searches go first
     state.walkers = &walkers;
     editor::connect_walkers(state);
+    editor::AudioState audio; // the speakers when shown (hidden runs: tests, gates, stay silent)
+    if (!options.hidden) audio.open_device();
+    state.audio = &audio;
     editor::connect_blows(state); // shots and blasts reach the swings and the cloth
     state.window = window.get();
     state.device = device.get();
@@ -585,6 +589,7 @@ int run(const Options& options) {
         cloth.update(weather.wind(), state.camera.position, delta); // drawn as it moved next frame
         swing.update(weather.wind(), state.camera.position, delta);
         nav.update(state.scene); // tiles taken and started, searches moved on (bounded)
+        audio.update(state.camera, delta); // heard from the camera (where the player's eyes are in play)
         mark(editor::FramePhase::animation);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());

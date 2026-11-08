@@ -54,6 +54,7 @@ class ClothState;
 class SwingState;
 class NavState;
 class WalkerState;
+class AudioState;
 class HitTargets;
 class WorldStreaming;
 
@@ -230,6 +231,9 @@ struct EditorState {
     NavState* nav = nullptr;
     // Entities sent walking (walk_to); set by main (and tests). Null: none walk.
     WalkerState* walkers = nullptr;
+    // Sounds played in the scene, heard at the camera; set by main (and
+    // tests). Null: no sound.
+    AudioState* audio = nullptr;
     // Characters' hit shapes (bone capsules) for bullets; set by main (and
     // tests). Null: characters are not hit.
     HitTargets* hits = nullptr;
@@ -281,6 +285,8 @@ void register_swing_commands(ai::CommandRegistry& registry, EditorState& state);
 void register_nav_commands(ai::CommandRegistry& registry, EditorState& state);
 // The walker commands (walker_commands.cpp).
 void register_walker_commands(ai::CommandRegistry& registry, EditorState& state);
+// The sound commands (audio_commands.cpp).
+void register_audio_commands(ai::CommandRegistry& registry, EditorState& state);
 // The walkers steered and posed around step_physics's fixed steps
 // (state.physics's before_fixed_step and after_fixed_step). Once both are set.
 void connect_walkers(EditorState& state);

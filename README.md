@@ -321,6 +321,15 @@ Open-world systems:
   facing where it goes, slowing to stop at the end, stepping to its right
   of anyone coming at it and away from anyone too close, and looking for
   the way again when stuck (`get_walker`, `stop_walker`).
+- E3a: sound (`engine/audio`). A sound is heard late by its distance
+  over the speed of sound, quieter and duller the farther it is (far
+  shots rumble), muffled through what stands between, and echoed by
+  what is round it: rays from it meet bodies, kits and the terrain, and
+  a cliff 500 m off answers about 3 s later from its side, rock and
+  concrete louder than soil and leaves. A reverb tail follows from how
+  open, big and hard the place is. The mix runs on its own thread with
+  fixed voice and tap budgets (`play_sound`, `record_audio` to a WAV,
+  `load_sound`, `get_audio`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
