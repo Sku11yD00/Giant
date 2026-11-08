@@ -367,3 +367,33 @@ GIANT_TEST("anim: starting a clip mid-fade or from a blend never jumps; starts w
     player.play(s, clips, 9);
     GIANT_CHECK(player.main().clip == k_no_clip && x(player) == 0.0f);
 }
+
+GIANT_TEST("anim: bone capsules fit round the vertices each joint moves most, along the way to its child") {
+    const Skeleton s = arm(); // shoulder at 0, elbow at 1 m up
+    std::vector<Vec3> points;
+    std::vector<u16> dominant;
+    // A tube 0.2 m round: the shoulder's from 0 to 1 m, the elbow's from 1 to 1.6 m.
+    for (int k = 0; k <= 20; ++k) {
+        const float y = static_cast<float>(k) * 0.08f;
+        for (int a = 0; a < 8; ++a) {
+            const float t = static_cast<float>(a) * k_pi / 4.0f;
+            points.push_back({0.2f * std::cos(t), y, 0.2f * std::sin(t)});
+            dominant.push_back(y < 1.0f ? 0 : 1);
+        }
+    }
+    points.push_back({5.0f, 5.0f, 5.0f});
+    dominant.push_back(9); // past the skeleton: no joint
+    const std::vector<BoneCapsule> c = fit_capsules(s, points, dominant);
+    GIANT_CHECK(c.size() == 2);
+    if (c.size() != 2) return;
+    // The shoulder's along +y to the elbow, its ends a radius in from the tube's.
+    GIANT_CHECK(c[0].joint == 0 && std::fabs(c[0].radius - 0.2f) < 1e-3f);
+    GIANT_CHECK(std::fabs(c[0].a.y - 0.2f) < 0.01f && std::fabs(c[0].b.y - (0.96f - 0.2f)) < 0.01f);
+    GIANT_CHECK(std::fabs(c[0].a.x) < 1e-4f && std::fabs(c[0].b.z) < 1e-4f);
+    // The elbow, an end joint, in its own space (from its joint): along its vertices, 0 to 0.6 m.
+    GIANT_CHECK(c[1].joint == 1 && std::fabs(c[1].radius - 0.2f) < 1e-3f);
+    GIANT_CHECK(c[1].a.y > 0.15f && c[1].b.y < 0.45f && c[1].b.y > c[1].a.y);
+    // Too few vertices: none; mismatched sizes: none.
+    GIANT_CHECK(fit_capsules(s, points, dominant, 1000).empty());
+    GIANT_CHECK(fit_capsules(s, points, std::span<const u16>(dominant.data(), 3)).empty());
+}

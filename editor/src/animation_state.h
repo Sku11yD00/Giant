@@ -109,6 +109,7 @@ public:
         std::vector<Mat4> sent; // the pose last handed to the renderer
         geometry::Sphere sent_bounds;
         u64 poses = 0;         // handed to the renderer
+        u64 pose_serial = 0;   // when it last changed (as skinned()'s serials: never the same twice)
     };
     // The animated entity, or null (frozen, or not animated at all).
     const Animated* find(world::EntityId id) const;
@@ -118,6 +119,15 @@ public:
     std::vector<world::EntityId> take_redraw();
 
     usize animated() const { return m_animated.size(); }
+    // Every visible entity drawing a skinned file (animated, frozen or with
+    // nothing to play), with a serial that changes whenever it does (its
+    // transform, its file): what hit shapes follow.
+    const std::unordered_map<world::EntityId, u64>& skinned() const { return m_skinned; }
+    // Moves on whenever skinned() or a pose_serial does (nothing changed: the same).
+    u64 serial() const { return m_serial; }
+    // Whether copies are drawn (a renderer): an animated entity shows its
+    // pose once `drawn`, the file's rest pose until then.
+    bool draws() const { return m_renderer != nullptr; }
     // Entities that would animate past the limit (standing in the rest pose).
     usize frozen() const;
     usize waiting() const; // to be copied (within the limit), a few a frame
@@ -162,6 +172,8 @@ private:
         std::string error;
     };
     std::unordered_map<world::EntityId, Refusal> m_refused;
+    std::unordered_map<world::EntityId, u64> m_skinned;
+    u64 m_serial = 0;              // skinned() and pose_serial
     u64 m_scene = 0;               // identity as last followed
     u64 m_meshes_version = ~u64{0};
     bool m_paused = false;

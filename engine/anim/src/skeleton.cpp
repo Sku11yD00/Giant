@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace giant::anim {
 
@@ -295,5 +296,76 @@ JointTransform decompose(const Mat4& m) {
 }
 
 Mat4 to_matrix(const JointTransform& t) { return mat4_from_transform(t.translation, t.rotation, t.scale); }
+
+namespace {
+
+// The value `share` (0 to 1) of the way through `values` (reordered).
+float percentile(std::vector<float>& values, float share) {
+    const usize k = std::min(values.size() - 1, static_cast<usize>(share * static_cast<float>(values.size() - 1) + 0.5f));
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(k), values.end());
+    return values[k];
+}
+
+} // namespace
+
+std::vector<BoneCapsule> fit_capsules(const Skeleton& skeleton, std::span<const Vec3> bind_positions,
+                                      std::span<const u16> dominant, usize min_vertices) {
+    std::vector<BoneCapsule> out;
+    const usize n = skeleton.size();
+    if (n == 0 || skeleton.inverse_bind.size() != n || dominant.size() != bind_positions.size()) return out;
+    std::vector<std::vector<Vec3>> points(n);
+    for (usize v = 0; v < bind_positions.size(); ++v) {
+        if (dominant[v] < n) points[dominant[v]].push_back(bind_positions[v]);
+    }
+    // Each joint's origin in bind (model) space.
+    std::vector<Vec3> origin(n);
+    for (usize j = 0; j < n; ++j) origin[j] = transform_point(affine_inverse(skeleton.inverse_bind[j]), {});
+    std::vector<float> along;
+    std::vector<float> across;
+    for (usize j = 0; j < n; ++j) {
+        if (points[j].size() < std::max<usize>(min_vertices, 2)) continue;
+        const Mat4& to_joint = skeleton.inverse_bind[j];
+        std::vector<Vec3>& local = points[j];
+        for (Vec3& p : local) p = transform_point(to_joint, p);
+        // Its way: to its children, else to its vertices.
+        Vec3 toward{};
+        usize children = 0;
+        for (usize c = j + 1; c < n; ++c) {
+            if (skeleton.parents[c] != static_cast<i32>(j)) continue;
+            toward += transform_point(to_joint, origin[c]);
+            ++children;
+        }
+        if (children > 0) toward = toward * (1.0f / static_cast<float>(children));
+        if (!(length(toward) > 1e-4f)) {
+            toward = {};
+            for (const Vec3& p : local) toward += p;
+            toward = toward * (1.0f / static_cast<float>(local.size()));
+        }
+        const Vec3 axis = length(toward) > 1e-4f ? normalize_or_zero(toward) : Vec3{0.0f, 1.0f, 0.0f};
+        along.clear();
+        across.clear();
+        for (const Vec3& p : local) {
+            const float t = dot(p, axis);
+            along.push_back(t);
+            across.push_back(length(p - axis * t));
+        }
+        const float lo = percentile(along, 0.02f);
+        const float hi = percentile(along, 0.98f);
+        const float radius = percentile(across, 0.7f);
+        if (!(radius > 0.0f) || !std::isfinite(radius) || !std::isfinite(lo) || !std::isfinite(hi)) continue;
+        BoneCapsule c;
+        c.joint = static_cast<u32>(j);
+        c.radius = radius;
+        if (hi - lo > 2.0f * radius) {
+            c.a = axis * (lo + radius);
+            c.b = axis * (hi - radius);
+        } else {
+            c.a = c.b = axis * ((lo + hi) * 0.5f);
+            c.radius = std::max(radius, (hi - lo) * 0.5f);
+        }
+        out.push_back(c);
+    }
+    return out;
+}
 
 } // namespace giant::anim

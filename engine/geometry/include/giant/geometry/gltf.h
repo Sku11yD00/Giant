@@ -45,6 +45,8 @@ struct SkinnedImport {
     // Per joint: how far the vertices it moves lie from it when bound (0:
     // it moves none), for anim::pose_bounds.
     std::vector<float> joint_radius;
+    // Hit shapes round the bones (anim::fit_capsules): what bullets meet.
+    std::vector<anim::BoneCapsule> capsules;
 };
 
 struct ImportResult {

@@ -267,8 +267,7 @@ Milestone **N5, photoreal characters** (in progress; gate: close-ups hold up bes
   `get_animation`, `list_animations`). Up to 64 characters animate at
   once.
 
-The game on the engine (an open-world survival shooter: docs/game-plan.md)
-needs weapons and hits first:
+Combat for open-world games (general systems any game on the engine can use):
 
 - W1a: ballistics. Bullets fly with drop and drag, go through what their
   energy takes them through (each material's surface takes so many joules a
@@ -276,6 +275,10 @@ needs weapons and hits first:
   them), glance off hard surfaces at shallow angles, push what they hit and
   wear through the pieces of breakable buildings until they are shot out (`fire`, `get_ballistics`,
   `set_ballistics`; `surface` on materials).
+- W1b: hit zones. Every skinned character gets a capsule round each bone,
+  fitted to its mesh at import and posed with its animation; bullets meet
+  them as flesh and report the bone and its zone (head, neck, torso, arm,
+  leg by default, from the bones' names; `get_hit_zones`, `set_hit_zones`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

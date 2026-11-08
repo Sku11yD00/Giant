@@ -79,7 +79,12 @@ std::vector<PhysicsState::ShotHit> PhysicsState::take(std::span<const sim::Bulle
         s.entity = hit.owner;
         s.piece = hit.piece;
         s.tree = m_forest.tree_of(hit.body).has_value();
-        s.character = m_physics.is_character_body(hit.body);
+        s.character = hit.character || m_physics.is_character_body(hit.body);
+        if (hit.character && m_targets != nullptr) {
+            // Named now: the map or the file may change before it is read.
+            s.zone = m_targets->zone_name(hit.owner, hit.zone);
+            s.bone = m_targets->bone_name(hit.owner, hit.bone);
+        }
         if (!apply) continue;
         m_physics.add_impulse(hit.body, hit.impulse, hit.point); // dynamic bodies only
         if (hit.owner != 0 && hit.piece && hit.energy > 0.0f) {
@@ -98,6 +103,11 @@ std::vector<PhysicsState::ShotHit> PhysicsState::take(std::span<const sim::Bulle
 
 void PhysicsState::take_hits() {
     if (!m_ballistics.hits().empty()) take(m_ballistics.hits(), true);
+}
+
+void PhysicsState::set_hit_targets(const HitTargets* targets) {
+    m_targets = targets;
+    m_ballistics.hit_shapes = targets != nullptr ? &targets->shapes() : nullptr;
 }
 
 sim::BulletId PhysicsState::fire(const sim::Shot& shot) {

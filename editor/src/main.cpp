@@ -18,6 +18,7 @@
 #include "far_ground.h"
 #include "scatter_placer.h"
 #include "animation_state.h"
+#include "hit_targets.h"
 #include "physics_state.h"
 #include "play_state.h"
 #include "weather_state.h"
@@ -299,8 +300,11 @@ int run(const Options& options) {
     state.scatter = &scatter;
     editor::WeatherState weather;
     state.weather = &weather;
+    editor::HitTargets hit_targets; // before the physics, which reads its shapes
+    state.hits = &hit_targets;
     editor::PhysicsState physics;
     state.physics = &physics;
+    physics.set_hit_targets(&hit_targets);
     editor::PlayState play(physics);
     state.play = &play;
     editor::AnimationState animation(renderer.get()); // after the renderer: its copies leave first
@@ -542,6 +546,7 @@ int run(const Options& options) {
         if (playing) play.after_step(state.camera, delta); // the camera at its eyes
         mark(editor::FramePhase::physics);
         animation.update(state.scene, meshes, scene_frame.take_for_animation(), delta);
+        hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
         mark(editor::FramePhase::animation);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());

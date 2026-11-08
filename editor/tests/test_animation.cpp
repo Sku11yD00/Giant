@@ -2,6 +2,8 @@
 // commands, the limit on how many animate, and their own posed copies drawn.
 #include "../src/animation_state.h"
 #include "../src/editor_commands.h"
+#include "../src/hit_targets.h"
+#include "../src/physics_state.h"
 #include "../src/mesh_library.h"
 #include "../src/scene_render.h"
 
@@ -423,4 +425,64 @@ GIANT_TEST("animation: copies on the renderer: frozen ones draw the rest pose, e
     const AnimationState::Animated* a = f.animation->find(ids[10]);
     GIANT_CHECK(a != nullptr && a->drawn && a->skinned == f.meshes->find(f.arm)->skinned &&
                 mesh_of(ids[10]) == a->copy && f.renderer->skinned(a->copy));
+}
+
+GIANT_TEST("hit zones: a skinned arm's bones have capsules, named by zone, posed as drawn; bullets report them") {
+    Fixture f;
+    HitTargets hits;
+    PhysicsState physics;
+    physics.set_hit_targets(&hits);
+    f.state.hits = &hits;
+    f.state.physics = &physics;
+    register_physics_commands(f.commands, f.state);
+    const world::EntityId arm = f.add_arm(3.0);
+    // Standing in the rest pose: the shoulder's capsule up from the origin, the elbow's above.
+    ai::CommandResult r = f.run("get_hit_zones", {{"id", arm}});
+    GIANT_CHECK(r.ok && r.value["default"] == true && r.value["capsules"].size() == 2);
+    if (r.ok && r.value["capsules"].size() == 2) {
+        const Json& c = r.value["capsules"];
+        GIANT_CHECK(c[0]["bone"] == "shoulder" && c[0]["zone"] == "torso");
+        GIANT_CHECK(c[1]["bone"] == "elbow" && c[1]["zone"] == "arm");
+        GIANT_CHECK(near(c[0]["a"][0].get<double>(), 3.0, 0.01) && near(c[0]["radius"].get<double>(), 0.1, 0.01));
+    }
+    // A shot across the forearm (1.8 m up) meets the elbow's capsule: flesh, zone arm.
+    r = f.run("fire", {{"origin", {0, 1.8, 0}}, {"direction", {1, 0, 0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && !r.value["hits"].empty());
+    if (r.ok && !r.value["hits"].empty()) {
+        const Json& h = r.value["hits"][0];
+        GIANT_CHECK(h["entity"] == arm && h["character"] == true && h["zone"] == "arm" && h["bone"] == "elbow" &&
+                    h["surface"] == "flesh" && h["outcome"] == "passed");
+    }
+    // Zones named otherwise for this file; reset back.
+    r = f.run("set_hit_zones", {{"mesh", f.arm}, {"zones", {{{"zone", "limb"}, {"match", {"ELBOW", "shoulder"}}}}}});
+    GIANT_CHECK(r.ok && r.value["zones"].size() == 1);
+    r = f.run("fire", {{"origin", {0, 1.8, 0}}, {"direction", {1, 0, 0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && !r.value["hits"].empty() && r.value["hits"][0]["zone"] == "limb");
+    GIANT_CHECK(f.run("set_hit_zones", {{"mesh", f.arm}, {"reset", true}}).ok);
+    // The hits kept keep the names they had when they happened.
+    r = f.run("get_ballistics", {{"hits", 1}});
+    GIANT_CHECK(r.ok && r.value["recent_hits"].size() == 1 && r.value["recent_hits"][0]["zone"] == "limb");
+    GIANT_CHECK(!f.run("set_hit_zones", {{"mesh", f.arm}}).ok);
+    // Bent: the elbow's capsule swings over toward x = 2 (the top at -1 from the elbow, 1 m up).
+    GIANT_CHECK(f.run("play_animation", {{"id", arm}, {"clip", "bend"}, {"blend_seconds", 0}, {"loop", false}}).ok);
+    GIANT_CHECK(f.run("step_animation", {{"seconds", 1.0}}).ok);
+    r = f.run("get_hit_zones", {{"id", arm}});
+    GIANT_CHECK(r.ok && r.value["capsules"].size() == 2);
+    if (r.ok && r.value["capsules"].size() == 2) {
+        const Json& elbow = r.value["capsules"][1];
+        GIANT_CHECK(elbow["a"][0].get<double>() < 2.5 && elbow["b"][0].get<double>() < 2.5);
+        GIANT_CHECK(elbow["a"][1].get<double>() < 1.4 && elbow["b"][1].get<double>() < 1.4);
+    }
+    r = f.run("fire", {{"origin", {3, 5, 0}}, {"direction", {0, -1, 0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && !r.value["hits"].empty() && r.value["hits"][0]["bone"] == "shoulder");
+    // Decor (no body): not hit.
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"body", "none"}}).ok);
+    GIANT_CHECK(!f.run("get_hit_zones", {{"id", arm}}).ok);
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"body", "fixed"}}).ok);
+    GIANT_CHECK(f.run("get_hit_zones", {{"id", arm}}).ok);
+    // Hidden: no hit shapes.
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"visible", false}}).ok);
+    GIANT_CHECK(!f.run("get_hit_zones", {{"id", arm}}).ok);
+    r = f.run("fire", {{"origin", {0, 1.0, 0}}, {"direction", {1, 0, 0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["hits"].empty());
 }

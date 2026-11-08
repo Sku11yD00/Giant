@@ -22,12 +22,14 @@
 #include "giant/sim/scene_physics.h"
 #include "giant/world/ground_damage.h"
 #include "giant/world/scene.h"
+#include "hit_targets.h"
 #include "scatter_placer.h"
 
 #include <deque>
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -141,8 +143,10 @@ public:
         world::EntityId entity = 0;   // the entity met (0: none of the scene's)
         std::optional<u32> piece;     // a kit placement's piece
         bool tree = false;            // a scatter tree's trunk
-        bool character = false;       // a character (the player)
+        bool character = false;       // a character (the player, a skinned one's capsule)
         usize loosened = 0;           // kit pieces it shot out
+        std::string zone;             // a skinned character's capsule: its zone (empty: none) and bone, as hit
+        std::string bone;
     };
     // What a ray met is made of (the scene as last noticed).
     world::Surface surface_of(const sim::RayHit& hit) const;
@@ -151,6 +155,8 @@ public:
     // A shot flown to its end now, its hits returned (and taken: pushes,
     // wear) while simulating; not simulating, only reported.
     std::vector<ShotHit> resolve(const sim::Shot& shot);
+    // Characters' capsules the bullets meet (null: none). Not owned.
+    void set_hit_targets(const HitTargets* targets);
     const sim::Ballistics& ballistics() const { return m_ballistics; }
     sim::Ballistics& ballistics() { return m_ballistics; }
     // The latest hits (at most k_kept_hits), oldest first.
@@ -188,6 +194,7 @@ private:
     sim::Forest m_forest; // after the world: its trunks go first
     sim::Ballistics m_ballistics;
     std::deque<ShotHit> m_recent;
+    const HitTargets* m_targets = nullptr;
     u64 m_scene = 0;
     const world::Scene* m_scene_at = nullptr; // as last noticed (the editor's scene outlives this)
     u64 m_damage_edits = ~u64{0};             // the scene's kept damage the forest follows

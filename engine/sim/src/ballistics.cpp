@@ -161,7 +161,24 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
     while (left > 1e-6) {
         if (layers >= m_settings.max_layers) break; // the rest of this step's way dropped
         ++m_stats.rays;
-        const std::optional<RayHit> hit = m_physics.raycast(from, dir, left, any);
+        std::optional<RayHit> hit = m_physics.raycast(from, dir, left, any);
+        // Characters' capsules, nearer than what the physics met.
+        std::optional<ShapeHit> shape;
+        const HitCharacter* character = nullptr;
+        if (hit_shapes != nullptr && hit_shapes->size() > 0) {
+            shape = hit_shapes->raycast(from, dir, hit ? hit->distance : left, b.shot.ignore_owner);
+            if (shape && (!hit || shape->distance <= hit->distance)) {
+                character = hit_shapes->find(shape->owner);
+                RayHit as;
+                as.point = shape->point;
+                as.normal = shape->normal;
+                as.distance = shape->distance;
+                as.part = shape->capsule;
+                hit = as;
+            } else {
+                shape.reset();
+            }
+        }
         if (!hit) {
             from = along(from, dir, left);
             b.distance += left;
@@ -173,7 +190,13 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
         b.distance += hit->distance;
         const float speed = length(b.velocity);
         const float energy = 0.5f * mass * speed * speed;
-        const Target target = target_of ? target_of(*hit) : Target{};
+        Target target;
+        if (shape) {
+            target.surface = character != nullptr ? character->surface : world::Surface::flesh;
+            target.owner = shape->owner;
+        } else if (target_of) {
+            target = target_of(*hit);
+        }
         const world::Surface surface = target.surface;
         const usize index = static_cast<usize>(surface) < world::k_surface_count ? static_cast<usize>(surface) : 0;
         const SurfaceBallistics& props = m_settings.surfaces[index];
@@ -194,6 +217,11 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
         h.surface = surface;
         h.speed_in = speed;
         h.distance = b.distance;
+        if (shape && character != nullptr && shape->capsule < character->capsules.size()) {
+            h.zone = character->capsules[shape->capsule].zone;
+            h.bone = character->capsules[shape->capsule].bone;
+            h.character = true;
+        }
 
         // Glancing off: the angle between its way and the surface. A ray
         // that starts inside (met at once, or a face it is leaving) is in
@@ -230,7 +258,11 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
         const float resistance = std::max(props.resistance / b.shot.penetration, 1e-3f);
         const float reach = std::min(energy / resistance, m_settings.max_thickness);
         float thickness = -1.0f;
-        if (reach > 1e-4f) {
+        if (shape) {
+            // A capsule's far side is known: where the ray leaves it.
+            const float through = static_cast<float>(shape->exit - shape->distance);
+            if (through > k_min_thickness && through <= reach) thickness = through;
+        } else if (reach > 1e-4f) {
             const double probe = static_cast<double>(reach) + k_clear;
             PhysicsWorld::RayFilter same;
             same.body = hit->body;

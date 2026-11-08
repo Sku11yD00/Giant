@@ -810,6 +810,23 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
             r = std::max(r, length(bound.vertices[v].position - origin[w.joints[k]]));
         }
     }
+    // Each vertex's main joint, for the bones' hit capsules.
+    {
+        std::vector<Vec3> bind(bound.vertices.size());
+        std::vector<u16> dominant(bound.vertices.size(), 0xFFFF);
+        for (usize v = 0; v < bound.vertices.size(); ++v) {
+            bind[v] = bound.vertices[v].position;
+            const SkinWeights& w = out.mesh.weights[v];
+            u8 best = 0;
+            for (usize k = 0; k < 4; ++k) {
+                if (w.weights[k] > best) {
+                    best = w.weights[k];
+                    dominant[v] = w.joints[k];
+                }
+            }
+        }
+        out.capsules = anim::fit_capsules(skeleton, bind, dominant, 2);
+    }
     // Triangles whose joints mirror them at rest are turned back to face out.
     for (usize t = 0; t + 2 < result.mesh.indices.size(); t += 3) {
         const SkinWeights& w = out.mesh.weights[result.mesh.indices[t]];

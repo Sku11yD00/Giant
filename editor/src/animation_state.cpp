@@ -41,6 +41,12 @@ bool AnimationState::wants(const world::Entity& e, const MeshLibrary& meshes) co
 void AnimationState::follow(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
                             bool changed) {
     const world::Entity* e = scene.find(id);
+    // Every entity drawing a skinned file, animated or not (its hit shapes).
+    if (e != nullptr && skinned_mesh(*e, meshes) != nullptr) {
+        m_skinned[id] = ++m_serial;
+    } else if (m_skinned.erase(id) != 0) {
+        ++m_serial;
+    }
     if (const auto r = m_refused.find(id); r != m_refused.end()) {
         const MeshLibrary::Mesh* mesh = e != nullptr ? skinned_mesh(*e, meshes) : nullptr;
         if (changed || mesh == nullptr || mesh->skinned != r->second.skinned) m_refused.erase(r);
@@ -73,6 +79,7 @@ void AnimationState::follow(const world::Scene& scene, const MeshLibrary& meshes
 void AnimationState::follow_all(const world::Scene& scene, const MeshLibrary& meshes) {
     std::vector<world::EntityId> ids(m_wanted.begin(), m_wanted.end());
     for (const auto& [id, a] : m_animated) ids.push_back(id);
+    for (const auto& [id, serial] : m_skinned) ids.push_back(id);
     for (const world::Entity& e : scene.entities()) {
         if (e.shape == world::Shape::mesh) ids.push_back(e.id);
     }
@@ -293,6 +300,7 @@ void AnimationState::pose() {
             a->sent_bounds = a->bounds;
             ++a->poses;
             ++m_poses;
+            a->pose_serial = ++m_serial;
         }
     }
     // Copies loaded and posed are drawn instead of the file's mesh.
@@ -300,6 +308,7 @@ void AnimationState::pose() {
         for (const auto& [id, a] : m_animated) {
             if (!a->drawn && a->posed && m_renderer->mesh_ready(a->copy)) {
                 a->drawn = true;
+                a->pose_serial = ++m_serial; // drawn posed from now: what is hit
                 m_copies[id] = a->copy;
                 m_redraw.push_back(id);
             }
@@ -319,6 +328,7 @@ void AnimationState::update(const world::Scene& scene, const MeshLibrary& meshes
         for (const world::EntityId id : ids) stop(id);
         m_wanted.clear();
         m_refused.clear();
+        m_skinned.clear();
         follow_all(scene, meshes);
     } else if (changed.all || meshes.version() != m_meshes_version) {
         m_meshes_version = meshes.version();
