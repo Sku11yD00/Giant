@@ -186,9 +186,11 @@ endif()
 # GitHub release downloads (Slang ships its compiler only as release assets)
 # fail with 504s for minutes at a time on CI runners, so fetch them here with
 # retries and a growing pause before handing the local file to FetchContent.
+# They land in .downloads/ at the top of the tree, shared by every build
+# folder (CI caches it).
 function(giant_fetch_release name url sha256)
   get_filename_component(file ${url} NAME)
-  set(path ${CMAKE_BINARY_DIR}/_downloads/${file})
+  set(path ${PROJECT_SOURCE_DIR}/.downloads/${file})
   set(have "")
   if(EXISTS ${path})
     file(SHA256 ${path} have)

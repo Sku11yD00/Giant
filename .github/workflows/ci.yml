@@ -43,6 +43,13 @@ jobs:
             echo "CC=gcc" >> "$GITHUB_ENV"
             echo "CXX=g++" >> "$GITHUB_ENV"
           fi
+      # Release downloads (the Slang compiler) kept between runs: GitHub's
+      # release asset downloads fail with 504s for long stretches.
+      - uses: actions/cache@v4
+        with:
+          path: .downloads
+          key: downloads-${{ runner.os }}-${{ hashFiles('third_party/CMakeLists.txt') }}
+          restore-keys: downloads-${{ runner.os }}-
       # One job also compiles every shader with Slang (to HLSL, as a check),
       # so shader errors show on Linux too.
       - run: >
@@ -62,6 +69,13 @@ jobs:
       - name: Install the D3D12 validation layer (Graphics Tools)
         shell: pwsh
         run: Add-WindowsCapability -Online -Name "Tools.Graphics.DirectX~~~~0.0.1.0"
+      # Release downloads (the Slang compiler) kept between runs: GitHub's
+      # release asset downloads fail with 504s for long stretches.
+      - uses: actions/cache@v4
+        with:
+          path: .downloads
+          key: downloads-${{ runner.os }}-${{ hashFiles('third_party/CMakeLists.txt') }}
+          restore-keys: downloads-${{ runner.os }}-
       - run: cmake --preset msvc -DGIANT_REQUIRE_VALIDATION=ON -DGIANT_REQUIRE_DOTNET=ON
       - run: cmake --build --preset msvc
       - run: ctest --preset msvc

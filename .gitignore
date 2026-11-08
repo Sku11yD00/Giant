@@ -10,3 +10,4 @@ bin/
 obj/
 /screenshots/
 giant_editor_layout.ini
+/.downloads/
