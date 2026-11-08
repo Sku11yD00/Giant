@@ -183,16 +183,51 @@ if(WIN32)
   add_library(third_party::d3d12_headers ALIAS d3d12_agility_headers)
 endif()
 
+# GitHub release downloads (Slang ships its compiler only as release assets)
+# fail with 504s for minutes at a time on CI runners, so fetch them here with
+# retries and a growing pause before handing the local file to FetchContent.
+function(giant_fetch_release name url sha256)
+  get_filename_component(file ${url} NAME)
+  set(path ${CMAKE_BINARY_DIR}/_downloads/${file})
+  set(have "")
+  if(EXISTS ${path})
+    file(SHA256 ${path} have)
+  endif()
+  foreach(pause 0 10 30 60 120)
+    if(have STREQUAL sha256)
+      break()
+    endif()
+    if(pause GREATER 0)
+      message(STATUS "Download of ${file} failed; trying again in ${pause} s")
+      execute_process(COMMAND ${CMAKE_COMMAND} -E sleep ${pause})
+    endif()
+    # No EXPECTED_HASH here: a failed download with one is a configure error.
+    file(DOWNLOAD ${url} ${path} STATUS status)
+    list(GET status 0 code)
+    set(have "")
+    if(code EQUAL 0)
+      file(SHA256 ${path} have)
+    endif()
+  endforeach()
+  if(NOT have STREQUAL sha256)
+    file(REMOVE ${path})
+    message(FATAL_ERROR "Could not download ${url}")
+  endif()
+  FetchContent_Declare(${name}
+    URL ${path}
+    URL_HASH SHA256=${sha256}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+endfunction()
+
 # Slang, the shader language (Apache 2.0 with LLVM exception), as the
 # official prebuilt compiler. Shaders compile at build time; DXIL output
 # needs Microsoft's DXC (NCSA licence), which Slang loads from its own folder.
 if(GIANT_COMPILE_SHADERS)
   if(WIN32)
-    FetchContent_Declare(slang
-      URL https://github.com/shader-slang/slang/releases/download/v2026.19/slang-2026.19-windows-x86_64.zip
-      URL_HASH SHA256=fc922f214b5d115f663932e59e80e0f6b6cc6fae140979cf307da6459b6f8f33
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
+    giant_fetch_release(slang
+      https://github.com/shader-slang/slang/releases/download/v2026.19/slang-2026.19-windows-x86_64.zip
+      fc922f214b5d115f663932e59e80e0f6b6cc6fae140979cf307da6459b6f8f33)
     FetchContent_Declare(dxc
       URL https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.dxc/1.9.2609.5/microsoft.direct3d.dxc.1.9.2609.5.nupkg
       URL_HASH SHA256=73cfa082245918c2cc1ec6740250eb7377e83a757b3b3a3e16e0d71535bfbfc3
@@ -205,11 +240,9 @@ if(GIANT_COMPILE_SHADERS)
     endforeach()
     set(GIANT_SLANGC ${slang_SOURCE_DIR}/bin/slangc.exe CACHE INTERNAL "")
   else()
-    FetchContent_Declare(slang
-      URL https://github.com/shader-slang/slang/releases/download/v2026.19/slang-2026.19-linux-x86_64.tar.gz
-      URL_HASH SHA256=bd6cfc47b7353b2cffa36a866b1584749f76f4b2dbebf6dda26bc3fb40dc3c0e
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
+    giant_fetch_release(slang
+      https://github.com/shader-slang/slang/releases/download/v2026.19/slang-2026.19-linux-x86_64.tar.gz
+      bd6cfc47b7353b2cffa36a866b1584749f76f4b2dbebf6dda26bc3fb40dc3c0e)
     FetchContent_MakeAvailable(slang)
     set(GIANT_SLANGC ${slang_SOURCE_DIR}/bin/slangc CACHE INTERNAL "")
   endif()
