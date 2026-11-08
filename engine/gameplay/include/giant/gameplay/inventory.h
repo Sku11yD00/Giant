@@ -17,12 +17,16 @@ namespace giant::gameplay {
 class Inventory;
 
 // An inventory as text: {"format": "giant-inventory", "version": 1,
-// "next_id": 5, "stacks": [{"id": 3, "item": "makarov", "count": 1,
-// "condition": 0.42}]}, items by their catalog id. "count" (1) and
-// "condition" (1) may be left out.
+// "next_id": 5, "stacks": [{"id": 3, "item": "makarov", "condition": 0.42,
+// "parts": [{"item": "pistol_barrel", "condition": 0.5}]}]}, items by their
+// catalog id. "count" (1), "condition" (1) and "parts" (none) may be left
+// out.
 std::string save_inventory(const Inventory& inventory, const ItemCatalog& catalog);
 // Replaces `out` only on success; strict: an unknown item or field, a stack
-// over its item's max_stack, a worn count above 1, a repeated id are errors.
+// over its item's max_stack, a worn count above 1, a repeated id, parts on
+// an item that is not a weapon or parts that are not worn parts are errors.
+// Whether the parts fit their weapons is checked against the weapon
+// catalog afterwards (weapons.h, check_inventory_weapons).
 [[nodiscard]] std::optional<std::string> load_inventory(std::string_view text,
                                                         const ItemCatalog& catalog, Inventory& out);
 
@@ -32,6 +36,15 @@ inline constexpr u32 k_max_stack_id = 1u << 30;
 // The most one call to Inventory::add takes.
 inline constexpr u32 k_max_add_count = 1u << 20;
 
+// A part fitted in a weapon (or later, armour): the part's item and its
+// own condition. Taking the weapon apart gives these back as items.
+struct FittedPart {
+    ItemIndex item = 0;
+    float condition = 1.0f;
+
+    bool operator==(const FittedPart&) const = default;
+};
+
 struct ItemStack {
     // Unique in its inventory and never reused there (also across saves),
     // so the UI and other rules can point at one stack.
@@ -40,6 +53,8 @@ struct ItemStack {
     u32 count = 1;
     // 0 (broken) to 1 (new); 1 for items that are not worn.
     float condition = 1.0f;
+    // The parts fitted in it (only a weapon has any).
+    std::vector<FittedPart> parts;
 
     bool operator==(const ItemStack&) const = default;
 };
@@ -59,16 +74,25 @@ public:
     // Takes up to `count` out of one stack; returns what it took (all zero
     // when there is no such stack or `count` is 0). An emptied stack goes.
     ItemStack take(u32 stack_id, u32 count);
+    // Puts back what `take` (here or in another inventory) gave: its count,
+    // condition and parts, under a new id (a stackable item may join
+    // stacks already here). Returns the id as `add` does.
+    u32 put(const ItemCatalog& catalog, const ItemStack& stack);
 
     // Moves up to `count` from the stack `stack_id` of `from` into `to`,
-    // keeping its condition; returns how many moved (0 when `from` and `to`
-    // are the same inventory).
+    // keeping its condition and parts; returns how many moved (0 when
+    // `from` and `to` are the same inventory).
     static u32 move(const ItemCatalog& catalog, Inventory& from, u32 stack_id, u32 count,
                     Inventory& to);
 
     // Sets a worn item's condition (repairs and wear), clamped to 0..1;
     // false when there is no such stack or its item is not worn.
     bool set_condition(const ItemCatalog& catalog, u32 stack_id, float condition);
+
+    // Sets the parts fitted in a weapon's stack (conditions clamped to
+    // 0..1); false when there is no such stack or it is not a weapon. The
+    // caller checks they fit (weapons.h, check_weapon_parts).
+    bool set_parts(const ItemCatalog& catalog, u32 stack_id, std::vector<FittedPart> parts);
 
     const ItemStack* find(u32 stack_id) const;
     // How many of `item` there are, in all stacks.
@@ -78,7 +102,8 @@ public:
     // Empties it; ids already used stay used.
     void clear();
 
-    // The weight of everything in it.
+    // The weight of everything in it (a weapon weighs its item, the frame,
+    // plus its fitted parts).
     float weight_kg(const ItemCatalog& catalog) const;
 
     bool operator==(const Inventory&) const = default;

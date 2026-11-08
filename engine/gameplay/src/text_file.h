@@ -151,6 +151,17 @@ public:
         }
     }
 
+    // The array under `name` (none when it is missing and not required, or
+    // not an array, which fails).
+    const Json* array(const char* name, bool required) {
+        const Json* j = get(name, required);
+        if (j != nullptr && !j->is_array()) {
+            fail(name, "must be an array");
+            return nullptr;
+        }
+        return j;
+    }
+
     // Fails on a field nothing read.
     void finish() {
         if (error_) {

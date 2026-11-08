@@ -1039,7 +1039,7 @@ loaded and posed. At most 64 animate at once: those animating keep their
 place, a free one goes to the lowest id waiting, and the rest stand frozen
 in the rest pose.
 
-## Gameplay rules (G1 part 1)
+## Gameplay rules (G1)
 
 `gameplay` holds the rules of the game being built (FOLD, see
 `docs/game-plan.md`): what items there are and what happens to them. It is
@@ -1067,6 +1067,24 @@ numbers are and what they mean.
   across. Weight is no hard limit, as in GAMMA: `burden` says whether the
   load is light, heavy or overloaded, and the player controller will slow
   down by it. Saved as text (`"format": "giant-inventory"`), items by id.
+
+- **Weapons made of parts (G1 part 2, `weapons.h`).** As in GAMMA, a gun
+  is its frame (the weapon item, with its own condition) and a part in each
+  slot, each part with its own condition (`ItemStack::parts`). Weapon kinds
+  come from text files (`"format": "giant-weapons"`): slots by name and the
+  part items that fit each; a part fits one slot of a weapon at most, so a
+  fitted part needs no slot name in saves. A gun's condition is the mean of
+  its frame and slots (an empty slot counts 0) and it fires only complete.
+  Only weapons hold parts; `load_inventory` checks that, and
+  `check_inventory_weapons` (run after it) that each part fits its gun, one
+  per slot. `add_weapon` makes a found gun from a seed (every part within
+  0.15 of the wanted condition); `disassemble` leaves the bare frame in its
+  stack (same id) and gives the parts back as items, wearing each by up to
+  0.1 times the lack of tool quality and scrapping any below 0.1;
+  `fit_part` swaps a part in (the old one comes out) and `strip_part` takes
+  one out. Rolls use `src/random.h`, a seeded splitmix64, and the module is
+  built without fused multiply-add, so a seed gives the same gun on every
+  platform (a test pins the values).
 
 ## Window events (known limit)
 

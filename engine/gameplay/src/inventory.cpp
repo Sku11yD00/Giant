@@ -25,7 +25,7 @@ u32 Inventory::new_stack(ItemIndex item, u32 count, float condition) {
     // more ids: running out is a bug (something adding stacks in a loop).
     GIANT_ASSERT(next_id_ != std::numeric_limits<u32>::max(), "inventory ran out of stack ids");
     const u32 id = next_id_++;
-    stacks_.push_back({id, item, count, condition});
+    stacks_.push_back({id, item, count, condition, {}});
     return id;
 }
 
@@ -82,7 +82,7 @@ ItemStack Inventory::take(u32 stack_id, u32 count) {
     const auto it = std::find_if(stacks_.begin(), stacks_.end(),
                                  [&](const ItemStack& s) { return s.id == stack_id; });
     if (it == stacks_.end() || count == 0) {
-        return {0, 0, 0, 1.0f};
+        return {0, 0, 0, 1.0f, {}};
     }
     ItemStack out = *it;
     out.count = std::min(count, it->count);
@@ -93,6 +93,18 @@ ItemStack Inventory::take(u32 stack_id, u32 count) {
     return out;
 }
 
+u32 Inventory::put(const ItemCatalog& catalog, const ItemStack& stack) {
+    const u32 id = add(catalog, stack.item, stack.count, stack.condition);
+    if (!stack.parts.empty()) {
+        // A worn item came back as one new stack per item; a taken worn
+        // stack holds one, so the parts go to that one.
+        GIANT_ASSERT(stack.count == 1, "a stack with parts holds one weapon");
+        const bool ok = set_parts(catalog, id, stack.parts);
+        GIANT_ASSERT(ok, "only weapons have parts");
+    }
+    return id;
+}
+
 u32 Inventory::move(const ItemCatalog& catalog, Inventory& from, u32 stack_id, u32 count,
                     Inventory& to) {
     if (&from == &to) {
@@ -100,9 +112,26 @@ u32 Inventory::move(const ItemCatalog& catalog, Inventory& from, u32 stack_id, u
     }
     const ItemStack taken = from.take(stack_id, count);
     if (taken.count > 0) {
-        to.add(catalog, taken.item, taken.count, taken.condition);
+        to.put(catalog, taken);
     }
     return taken.count;
+}
+
+bool Inventory::set_parts(const ItemCatalog& catalog, u32 stack_id, std::vector<FittedPart> parts) {
+    for (ItemStack& s : stacks_) {
+        if (s.id == stack_id) {
+            const ItemDef& def = catalog.get(s.item);
+            if (def.kind != ItemKind::weapon || !def.worn) {
+                return false;
+            }
+            for (FittedPart& p : parts) {
+                p.condition = clamp_condition(p.condition);
+            }
+            s.parts = std::move(parts);
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Inventory::set_condition(const ItemCatalog& catalog, u32 stack_id, float condition) {
@@ -142,6 +171,9 @@ float Inventory::weight_kg(const ItemCatalog& catalog) const {
     double kg = 0.0;
     for (const ItemStack& s : stacks_) {
         kg += static_cast<double>(catalog.get(s.item).weight_kg) * s.count;
+        for (const FittedPart& p : s.parts) {
+            kg += static_cast<double>(catalog.get(p.item).weight_kg);
+        }
     }
     return static_cast<float>(kg);
 }
@@ -162,6 +194,17 @@ std::string save_inventory(const Inventory& inventory, const ItemCatalog& catalo
         }
         if (s.condition != 1.0f) {
             j["condition"] = short_float(s.condition);
+        }
+        if (!s.parts.empty()) {
+            Json parts = Json::array();
+            for (const FittedPart& p : s.parts) {
+                Json pj = {{"item", catalog.get(p.item).id}};
+                if (p.condition != 1.0f) {
+                    pj["condition"] = short_float(p.condition);
+                }
+                parts.push_back(std::move(pj));
+            }
+            j["parts"] = std::move(parts);
         }
         stacks.push_back(std::move(j));
     }
@@ -198,6 +241,7 @@ std::optional<std::string> load_inventory(std::string_view text, const ItemCatal
         r.string("item", item, true);
         r.whole("count", s.count, false);
         r.number("condition", s.condition, false);
+        const Json* parts = r.array("parts", false);
         r.finish();
         if (r.error()) {
             return r.error();
@@ -218,6 +262,33 @@ std::optional<std::string> load_inventory(std::string_view text, const ItemCatal
             return where + ".condition must be 0 to 1 (and 1 for an item that is not worn)";
         }
         s.condition += 0.0f; // -0 is 0
+        if (parts != nullptr && !parts->empty()) {
+            if (def.kind != ItemKind::weapon || !def.worn) {
+                return where + ".parts: only a weapon can have parts";
+            }
+            for (usize k = 0; k < parts->size(); ++k) {
+                const std::string part_where = where + ".parts[" + std::to_string(k) + "]";
+                FieldReader pr((*parts)[k], part_where);
+                std::string part_item;
+                FittedPart p;
+                pr.string("item", part_item, true);
+                pr.number("condition", p.condition, false);
+                pr.finish();
+                if (pr.error()) {
+                    return pr.error();
+                }
+                const std::optional<ItemIndex> part = catalog.find(part_item);
+                if (!part || catalog.get(*part).kind != ItemKind::part || !catalog.get(*part).worn) {
+                    return part_where + ".item \"" + part_item + "\" must be a worn part in the item catalog";
+                }
+                if (!(p.condition >= 0.0f && p.condition <= 1.0f)) {
+                    return part_where + ".condition must be 0 to 1";
+                }
+                p.item = *part;
+                p.condition += 0.0f;
+                s.parts.push_back(p);
+            }
+        }
         result.stacks_.push_back(s);
         result.next_id_ = std::max(result.next_id_, s.id + 1);
     }

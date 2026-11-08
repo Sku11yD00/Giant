@@ -1,0 +1,20 @@
+{
+  "format": "giant-weapons",
+  "version": 1,
+  "weapons": [
+    {"item": "pm_pistol", "slots": [
+      {"name": "barrel", "parts": ["pistol_barrel"]},
+      {"name": "slide", "parts": ["pistol_slide"]},
+      {"name": "trigger", "parts": ["trigger_group"]}
+    ]},
+    {"item": "sawn_off", "slots": [
+      {"name": "barrel", "parts": ["shotgun_barrel"]},
+      {"name": "trigger", "parts": ["trigger_group"]}
+    ]},
+    {"item": "hunting_rifle", "slots": [
+      {"name": "barrel", "parts": ["rifle_barrel"]},
+      {"name": "bolt", "parts": ["rifle_bolt"]},
+      {"name": "trigger", "parts": ["trigger_group"]}
+    ]}
+  ]
+}
