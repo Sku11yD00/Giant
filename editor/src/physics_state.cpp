@@ -79,7 +79,7 @@ std::vector<PhysicsState::ShotHit> PhysicsState::take(std::span<const sim::Bulle
         s.entity = hit.owner;
         s.piece = hit.piece;
         s.tree = m_forest.tree_of(hit.body).has_value();
-        s.character = m_physics.is_character_body(hit.body);
+        s.character = hit.character || m_physics.is_character_body(hit.body);
         if (!apply) continue;
         m_physics.add_impulse(hit.body, hit.impulse, hit.point); // dynamic bodies only
         if (hit.owner != 0 && hit.piece && hit.energy > 0.0f) {

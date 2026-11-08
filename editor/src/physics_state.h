@@ -151,6 +151,8 @@ public:
     // A shot flown to its end now, its hits returned (and taken: pushes,
     // wear) while simulating; not simulating, only reported.
     std::vector<ShotHit> resolve(const sim::Shot& shot);
+    // Characters' capsules the bullets meet (HitTargets'; null: none). Not owned.
+    void set_hit_shapes(const sim::HitShapes* shapes) { m_ballistics.hit_shapes = shapes; }
     const sim::Ballistics& ballistics() const { return m_ballistics; }
     sim::Ballistics& ballistics() { return m_ballistics; }
     // The latest hits (at most k_kept_hits), oldest first.

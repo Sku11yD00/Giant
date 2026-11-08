@@ -38,6 +38,7 @@
 
 #include "giant/core/math.h"
 #include "giant/core/types.h"
+#include "giant/sim/hit_shapes.h"
 #include "giant/sim/physics.h"
 #include "giant/world/scene.h"
 
@@ -90,6 +91,7 @@ struct Shot {
     float penetration = 1.0f;
     u64 tag = 0;           // the game's own (who fired): handed back with its hits
     BodyId ignore = k_no_body; // the shooter's body: passed through
+    u64 ignore_owner = 0;      // and the shooter's hit shapes (HitShapes owner; 0: none)
 };
 
 using BulletId = u32;
@@ -107,6 +109,11 @@ struct BulletHit {
     // What target_of named, as the hit happened (bodies may change after).
     u64 owner = 0;
     std::optional<u32> piece;
+    // A character's capsule (hit_shapes): body none, part the capsule, owner
+    // the character's; its zone (in its HitZoneMap) and bone.
+    bool character = false;
+    u16 zone = k_no_zone;
+    u32 bone = 0;
     DVec3 point{};           // where it went in (or glanced off)
     Vec3 normal{};           // the surface's there, outwards
     Vec3 direction{};        // its way in, unit
@@ -157,6 +164,9 @@ public:
         std::optional<u32> piece;
     };
     std::function<Target(const RayHit&)> target_of;
+    // Characters' capsules, met as surfaces of their own (flesh, or the
+    // character's), their far side found along the ray (null: none). Not owned.
+    const HitShapes* hit_shapes = nullptr;
 
     // k_no_bullet when refused (bad numbers, or max_bullets flying).
     BulletId fire(const Shot& shot);

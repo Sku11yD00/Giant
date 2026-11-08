@@ -3,6 +3,8 @@
 // physics world what is where.
 #include "editor_commands.h"
 #include "physics_state.h"
+#include "hit_targets.h"
+#include "mesh_library.h"
 #include "play_state.h"
 
 #include "giant/core/assert.h"
@@ -90,7 +92,7 @@ CommandResult no_physics() { return CommandResult::failure("physics is not avail
 Json vec(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
 Json vec(const Vec3& v) { return Json::array({v.x, v.y, v.z}); }
 
-Json shot_hit_json(const PhysicsState::ShotHit& s) {
+Json shot_hit_json(const EditorState& state, const PhysicsState::ShotHit& s) {
     const sim::BulletHit& h = s.hit;
     Json out{{"bullet", h.bullet},
              {"outcome", sim::to_string(h.outcome)},
@@ -106,8 +108,28 @@ Json shot_hit_json(const PhysicsState::ShotHit& s) {
     if (s.piece) out["piece"] = *s.piece;
     if (s.tree) out["tree"] = true;
     if (s.character) out["character"] = true;
+    if (h.character) {
+        // A skinned character's bone capsule: which bone, in which zone.
+        const std::string zone = state.hits != nullptr ? state.hits->zone_name(s.entity, h.zone) : std::string{};
+        out["zone"] = zone.empty() ? Json(nullptr) : Json(zone);
+        out["bone"] = state.hits != nullptr ? state.hits->bone_name(s.entity, h.bone) : std::string{};
+    }
     if (h.outcome != sim::HitOutcome::stopped) out["exit"] = vec(h.exit);
     if (s.loosened > 0) out["loosened"] = s.loosened;
+    return out;
+}
+
+// Characters' hit shapes brought in line with the scene now (a command's
+// answer: an entity just made or moved is met where it is).
+void catch_up_hits(EditorState& state) {
+    if (state.hits == nullptr || state.animation == nullptr || state.meshes == nullptr) return;
+    state.animation->follow_now(state.scene, *state.meshes, state.scene.untaken_changes());
+    state.hits->update(state.scene, *state.meshes, *state.animation);
+}
+
+Json zone_map_json(const sim::HitZoneMap& map) {
+    Json out = Json::array();
+    for (const sim::HitZoneRule& r : map.rules) out.push_back({{"zone", r.zone}, {"match", r.match}});
     return out;
 }
 
@@ -121,7 +143,8 @@ Json surfaces_json(const sim::BallisticsSettings& settings) {
     return out;
 }
 
-Json ballistics_json(const PhysicsState& p, usize hits) {
+Json ballistics_json(const EditorState& state, usize hits) {
+    const PhysicsState& p = *state.physics;
     const sim::Ballistics& b = p.ballistics();
     const sim::BallisticsStats s = b.stats();
     Json flying = Json::array();
@@ -135,7 +158,7 @@ Json ballistics_json(const PhysicsState& p, usize hits) {
     }
     Json recent = Json::array();
     const auto& kept = p.recent_hits();
-    for (usize i = kept.size() - std::min(hits, kept.size()); i < kept.size(); ++i) recent.push_back(shot_hit_json(kept[i]));
+    for (usize i = kept.size() - std::min(hits, kept.size()); i < kept.size(); ++i) recent.push_back(shot_hit_json(state, kept[i]));
     return {{"simulating", p.simulating()},
             {"flying", s.flying},
             {"fired", s.fired},
@@ -381,8 +404,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              if (resolve) {
                  // The world exactly as it is now (bodies still waiting made at once).
                  state.physics->flush(state.scene);
+                 catch_up_hits(state);
                  Json hits = Json::array();
-                 for (const PhysicsState::ShotHit& h : state.physics->resolve(shot)) hits.push_back(shot_hit_json(h));
+                 for (const PhysicsState::ShotHit& h : state.physics->resolve(shot)) hits.push_back(shot_hit_json(state, h));
                  return CommandResult::success(Json{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}});
              }
              const sim::BulletId id = state.physics->fire(shot);
@@ -404,7 +428,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          true,
          [&state](const Json& args, CommandContext&) {
              if (state.physics == nullptr) return no_physics();
-             return CommandResult::success(ballistics_json(*state.physics, args.value("hits", 16u)));
+             return CommandResult::success(ballistics_json(state, args.value("hits", 16u)));
          }});
 
     add(registry,
@@ -458,7 +482,96 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              settings.drag = args.value("drag", settings.drag);
              state.physics->ballistics().settings() = settings;
              state.physics->blow_per_joule = args.value("blow_per_joule", state.physics->blow_per_joule);
-             return CommandResult::success(ballistics_json(*state.physics, 0));
+             return CommandResult::success(ballistics_json(state, 0));
+         }});
+
+    add(registry,
+        {"get_hit_zones",
+         "What bullets meet on a skinned character (an entity drawing a skinned glTF file): a capsule "
+         "round each bone, fitted to the vertices the bone moves most when the file is imported, posed as "
+         "the entity is drawn (its animation, or the rest pose) and named by zone from its file's zone map "
+         "(the first rule with a word the bone's name holds, ignoring case; default rules: head, neck, arm, "
+         "leg, torso for the usual rigs). Returns `zones` (the map), `default` (whether it is the default) "
+         "and `capsules` (bone, zone or null, a, b, radius in world metres). A shot (fire) reports the "
+         "`zone` and `bone` it met; capsules are flesh.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"id"}},
+              {"properties", {{"id", {{"type", "integer"}, {"minimum", 1}}}}}},
+        false, // brings the animation in line first, as get_animation
+         [&state](const Json& args, CommandContext&) {
+             if (state.hits == nullptr) return CommandResult::failure("hit shapes are not available");
+             const world::EntityId id = args["id"].get<world::EntityId>();
+             const world::Entity* e = state.scene.find(id);
+             if (e == nullptr) return CommandResult::failure("no entity " + std::to_string(id));
+             catch_up_hits(state);
+             const sim::HitCharacter* c = state.hits->shapes().find(id);
+             if (c == nullptr) {
+                 return CommandResult::failure("entity " + std::to_string(id) +
+                                               " has no hit shapes (not a visible skinned mesh, or not loaded yet)");
+             }
+             Json capsules = Json::array();
+             for (const sim::HitCapsule& h : c->capsules) {
+                 const std::string zone = state.hits->zone_name(id, h.zone);
+                 capsules.push_back({{"bone", state.hits->bone_name(id, h.bone)},
+                                     {"zone", zone.empty() ? Json(nullptr) : Json(zone)},
+                                     {"a", vec(h.a)},
+                                     {"b", vec(h.b)},
+                                     {"radius", h.radius}});
+             }
+             const sim::HitZoneMap& map = state.hits->zones(e->mesh);
+             return CommandResult::success(Json{{"id", id},
+                                                {"zones", zone_map_json(map)},
+                                                {"default", map == sim::default_hit_zones()},
+                                                {"capsules", std::move(capsules)}});
+         }});
+
+    add(registry,
+        {"set_hit_zones",
+         "Names the hit zones of a skinned file's characters (every entity drawing `mesh`): `zones` is a "
+         "list of rules in order, each a `zone` name and the words (`match`) a bone's name may hold, "
+         "ignoring case; the first rule that matches names the bone, and a bone no rule matches is in no "
+         "zone. `reset` true goes back to the default rules. View state: not saved or undoable (the "
+         "editor starts with the defaults). Returns the map.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"mesh"}},
+              {"properties",
+               {{"mesh", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_mesh_path_bytes}}},
+                {"reset", {{"type", "boolean"}}},
+                {"zones",
+                 {{"type", "array"},
+                  {"maxItems", 256},
+                  {"items",
+                   {{"type", "object"},
+                    {"additionalProperties", false},
+                    {"required", {"zone", "match"}},
+                    {"properties",
+                     {{"zone", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes}}},
+                      {"match",
+                       {{"type", "array"},
+                        {"minItems", 1},
+                        {"maxItems", 64},
+                        {"items", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}}}}}}}}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.hits == nullptr) return CommandResult::failure("hit shapes are not available");
+             const std::string mesh = MeshLibrary::normalize(args["mesh"].get<std::string>());
+             if (args.value("reset", false)) {
+                 if (args.contains("zones")) return CommandResult::failure("give zones or reset, not both");
+                 state.hits->reset_zones(mesh);
+             } else {
+                 if (!args.contains("zones")) return CommandResult::failure("zones (or reset) is needed");
+                 sim::HitZoneMap map;
+                 for (const Json& r : args["zones"]) {
+                     sim::HitZoneRule rule;
+                     rule.zone = r["zone"].get<std::string>();
+                     for (const Json& w : r["match"]) rule.match.push_back(w.get<std::string>());
+                     map.rules.push_back(std::move(rule));
+                 }
+                 state.hits->set_zones(mesh, std::move(map));
+             }
+             return CommandResult::success(Json{{"mesh", mesh}, {"zones", zone_map_json(state.hits->zones(mesh))}});
          }});
 
     add(registry,

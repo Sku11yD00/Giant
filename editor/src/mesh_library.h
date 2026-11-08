@@ -32,6 +32,8 @@ public:
         anim::Skeleton skeleton;
         std::vector<anim::Clip> clips; // names unique
         std::vector<float> joint_radius; // per joint, for anim::pose_bounds
+        std::vector<anim::BoneCapsule> capsules; // hit shapes round the bones (joint space)
+        std::vector<Mat4> rest_model;            // each joint's model matrix in the rest pose
         geometry::SkinnedClusterMesh clusters; // bind space, base level
         // The clip of that name, or anim::k_no_clip.
         u32 find_clip(std::string_view name) const;

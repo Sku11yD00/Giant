@@ -1074,6 +1074,24 @@ names the entity and kit piece behind a body and its part (`RayHit::part`).
 Bullets fly with the simulation (after its step, so they meet the bodies
 where they are now) and are cleared when it stops.
 
+Characters (W1b) are met by their bones, not a body in the physics world:
+at import `anim::fit_capsules` fits a capsule round the vertices each joint
+moves most (in the joint's space: along the way to its children, or to its
+vertices for an end joint; from the 2nd to the 98th percentile along it, as
+thick as 70% of them lie from it). Each frame after the animation,
+`editor::HitTargets` poses the capsules of every visible skinned entity
+whose pose or placement changed (the animation's model matrices, or the rest
+pose; `AnimationState::skinned` and `pose_serial` say what changed) into a
+`sim::HitShapes`, a plain list beside the physics world (remaking Jolt
+bodies every frame would cost far more). Bullets test it along each step
+with an analytic ray-capsule test (the union of two balls and a cylinder:
+in where it first enters one, out where it last leaves one) behind a
+bounding sphere per character, and the nearer of it and the physics ray is
+met. A capsule's far side is known exactly, so a bullet goes through a limb
+into the torso behind as two layers. Zones are named by rules on bone names
+(`sim::HitZoneMap`, per file). Bullets meet the pose of the frame before
+(the animation runs after the physics step).
+
 ## Gameplay rules (G1 part 1)
 
 `gameplay` holds the rules of the game being built (FOLD, see

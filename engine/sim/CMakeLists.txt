@@ -2,6 +2,7 @@ giant_module(sim
   SOURCES
     src/dust.cpp
     src/forest.cpp
+    src/hit_shapes.cpp
     src/ballistics.cpp
     src/physics.cpp
     src/scene_physics.cpp
@@ -16,6 +17,7 @@ giant_module_tests(sim
     tests/test_character.cpp
     tests/test_dust.cpp
     tests/test_forest.cpp
+    tests/test_hit_shapes.cpp
     tests/test_ballistics.cpp
     tests/test_physics.cpp
     tests/test_scene_physics.cpp

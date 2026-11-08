@@ -50,6 +50,7 @@ class WeatherState;
 class PhysicsState;
 class PlayState;
 class AnimationState;
+class HitTargets;
 class WorldStreaming;
 
 // Where the main thread's time went in a frame, for finding what makes a
@@ -214,6 +215,9 @@ struct EditorState {
     // Skinned entities playing their clips; set by main (and tests). Null:
     // animation is not available.
     AnimationState* animation = nullptr;
+    // Characters' hit shapes (bone capsules) for bullets; set by main (and
+    // tests). Null: characters are not hit.
+    HitTargets* hits = nullptr;
     // LOD error and debug view: view state, not undoable.
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.

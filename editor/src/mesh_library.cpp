@@ -91,6 +91,9 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
         skinned->skeleton = std::move(imported.skinned->skeleton);
         skinned->clips = std::move(imported.skinned->clips);
         skinned->joint_radius = std::move(imported.skinned->joint_radius);
+        skinned->capsules = std::move(imported.skinned->capsules);
+        skinned->rest_model.resize(skinned->skeleton.size());
+        anim::model_matrices(skinned->skeleton, skinned->skeleton.rest, skinned->rest_model);
     }
     auto mesh = std::make_unique<Mesh>();
     mesh->skinned = std::move(skinned);

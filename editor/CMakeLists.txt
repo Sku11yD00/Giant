@@ -2,6 +2,7 @@ add_executable(giant_editor
   src/main.cpp
   src/animation_commands.cpp
   src/animation_state.cpp
+  src/hit_targets.cpp
   src/editor_commands.cpp
   src/frame_times.cpp
   src/mesh_library.cpp
@@ -103,7 +104,7 @@ if(GIANT_BUILD_TESTS)
                  src/scene_commands.cpp src/terrain_commands.cpp src/terrain_meshes.cpp src/far_ground.cpp src/terrain_brush_tool.cpp src/viewport_camera.cpp
                  src/scatter_placer.cpp src/scatter_commands.cpp src/weather_state.cpp src/weather_commands.cpp src/physics_state.cpp src/physics_commands.cpp src/play_state.cpp
                  src/mesh_library.cpp src/scene_render.cpp src/world_streaming.cpp src/frame_times.cpp
-                 src/animation_state.cpp src/animation_commands.cpp)
+                 src/animation_state.cpp src/animation_commands.cpp src/hit_targets.cpp)
   target_link_libraries(giant_editor_tests PRIVATE giant::core giant::platform giant::rhi giant::geometry
                         giant::render giant::world giant::sim giant::ai giant::test_main)
   target_include_directories(giant_editor_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/geometry/tests) # gltf_test_files.h

@@ -109,6 +109,23 @@ struct Bounds {
 // and uneven scales are covered).
 Bounds pose_bounds(std::span<const Mat4> model, std::span<const Mat4> skin, std::span<const float> joint_radius);
 
+// A bone's hit shape: a capsule in its joint's space (posed by the
+// joint's model matrix), round the vertices the joint moves most.
+struct BoneCapsule {
+    u32 joint = 0;
+    Vec3 a{}; // the segment's ends
+    Vec3 b{};
+    float radius = 0.0f;
+    bool operator==(const BoneCapsule&) const = default;
+};
+// Capsules fitted to a skinned mesh in its bind space: `dominant` is each
+// vertex's joint with the most weight (a value past the skeleton: none).
+// A joint with at least `min_vertices` of them gets one, along the way to
+// its children (or its vertices, for an end joint: a head), as long as
+// nearly all of them reach and as thick as most of them lie from that line.
+std::vector<BoneCapsule> fit_capsules(const Skeleton& skeleton, std::span<const Vec3> bind_positions,
+                                      std::span<const u16> dominant, usize min_vertices = 8);
+
 // The inverse of an affine matrix (its last row 0 0 0 1); the identity when
 // it has none (a zero scale).
 Mat4 affine_inverse(const Mat4& m);
