@@ -3,7 +3,7 @@
 // glancing off hard things struck at a shallow angle.
 //
 //   Ballistics bullets(physics);
-//   bullets.surface_of = [&](const RayHit& hit) { return what_it_is(hit); };
+//   bullets.target_of = [&](const RayHit& hit) { return what_it_is(hit); };
 //   bullets.fire({.origin = muzzle, .velocity = aim * 880.0f, .mass = 0.0095f});
 //   bullets.step(delta);                 // each frame, after the physics step
 //   for (const BulletHit& h : bullets.hits()) apply(h); // blows, decals, damage
@@ -11,23 +11,29 @@
 // Each bullet moves in fixed steps of 1/240 s (the same flight at any frame
 // rate: a remainder waits for the next call) under gravity and quadratic
 // drag (slowing by `drag` times its speed squared), and casts a ray along
-// each step. What a ray meets is a surface (surface_of; world::Surface):
+// each step. What a ray meets is a surface (target_of; world::Surface):
 //
 //   - Struck at a shallow angle (under the surface's ricochet angle), a
 //     hard surface sends it on mirrored off it, slower (a ricochet).
 //   - Otherwise it goes in as far as its energy takes it: each metre of the
-//     surface takes `resistance` joules. Where the body ends along its
-//     path (a ray cast back at it from that far in) is how thick it is
-//     there: if the bullet gets through it comes out the far side with the
-//     energy left, on the same line (penetration); if not it stops inside.
-//     The ground (no far side to find) always stops it.
+//     surface takes `resistance` joules. Where the part of the body it went
+//     into ends along its path (a ray cast back at that part from that far
+//     in) is how thick it is there: if the bullet gets through it comes out
+//     the far side with the energy left, on the same line (penetration),
+//     and meets whatever is next (another part of the same body, its own
+//     surface) as a new layer; if not it stops inside. The terrain (a height
+//     field: no far side to find) always stops it. A ray that starts inside
+//     something (a muzzle in a wall) is inside it: it never glances off.
 //
 // Every meeting is a BulletHit: where, what, how fast in and out, the
 // energy it left there and the blow (N s) it gave the body, which the game
 // turns into pushes, broken pieces and wounds. A bullet's flight ends when
 // it stops, slows under min_speed, goes past max_range or flies max_seconds.
 // Work is bounded (rule 9): at most max_bullets fly at once (more are
-// refused) and each step's ray goes through at most max_layers surfaces.
+// refused), each step's ray goes through at most max_layers surfaces (the
+// rest of that step's way is dropped), and a step() call casts about
+// max_rays_per_call rays at most (the fixed steps past them wait for the
+// next call: bullets fall behind rather than stall the frame).
 #pragma once
 
 #include "giant/core/math.h"
@@ -98,6 +104,9 @@ struct BulletHit {
     BodyId body = k_no_body;
     u64 user = 0;
     u32 part = 0; // of the body (RayHit::part)
+    // What target_of named, as the hit happened (bodies may change after).
+    u64 owner = 0;
+    std::optional<u32> piece;
     DVec3 point{};           // where it went in (or glanced off)
     Vec3 normal{};           // the surface's there, outwards
     Vec3 direction{};        // its way in, unit
@@ -139,8 +148,15 @@ public:
     // `physics` must outlive this.
     explicit Ballistics(const PhysicsWorld& physics, const BallisticsSettings& settings = {});
 
-    // What a ray met is made of (none: world::Surface::standard).
-    std::function<world::Surface(const RayHit&)> surface_of;
+    // What a ray met: what it is made of, and the game's own names for it
+    // (an entity, a piece of it), handed back in BulletHit. None: standard,
+    // nothing named.
+    struct Target {
+        world::Surface surface = world::Surface::standard;
+        u64 owner = 0;
+        std::optional<u32> piece;
+    };
+    std::function<Target(const RayHit&)> target_of;
 
     // k_no_bullet when refused (bad numbers, or max_bullets flying).
     BulletId fire(const Shot& shot);
@@ -152,6 +168,7 @@ public:
     // steps run (at most max_steps_per_call: time past them is dropped).
     u32 step(double seconds);
     u32 max_steps_per_call = 16;
+    u32 max_rays_per_call = 16384;
     // The hits of the last step() call, in the order they happened (bullet
     // by bullet within a fixed step).
     const std::vector<BulletHit>& hits() const { return m_hits; }

@@ -454,6 +454,15 @@ GIANT_TEST("breakage: kept damage stands a placement with its pieces down where 
     GIANT_CHECK(follow.stats().kept_pieces == 0 && follow.stats().broken_kits == 0);
 }
 
+namespace {
+
+usize shoot(ScenePhysics& follow, EntityId t, u32 piece, float blow) {
+    const ScenePhysics::Strike s{t, piece, blow, {-1.0f, 0.0f, 0.0f}};
+    return follow.strike(std::span<const ScenePhysics::Strike>(&s, 1)).at(0);
+}
+
+} // namespace
+
 GIANT_TEST("breakage: a ray names the kit piece it met; shots wear a piece until it comes loose; reset forgets wear") {
     JobSystem jobs(2);
     PhysicsWorld physics(jobs);
@@ -475,24 +484,33 @@ GIANT_TEST("breakage: a ray names the kit piece it met; shots wear a piece until
     GIANT_CHECK(floor && !follow.owner_of(floor->body, floor->part).piece.has_value());
     GIANT_CHECK(follow.owner_of(k_no_body, 0).entity == 0);
     // Blows under the strength add up; the third brings it (and the top) down.
-    GIANT_CHECK(follow.strike(t, 2, 400.0f, {-1.0f, 0.0f, 0.0f}) == 0);
-    GIANT_CHECK(follow.strike(t, 2, 400.0f, {-1.0f, 0.0f, 0.0f}) == 0 && follow.stats().broken_kits == 0);
-    GIANT_CHECK(follow.strike(t, 0, 5000.0f, {-1.0f, 0.0f, 0.0f}) == 0); // the decal: nothing to break
-    GIANT_CHECK(follow.strike(t, 2, 400.0f, {-1.0f, 0.0f, 0.0f}) == 2 && loose(follow, t, 2) && loose(follow, t, 3));
+    GIANT_CHECK(shoot(follow, t, 2, 400.0f) == 0);
+    GIANT_CHECK(shoot(follow, t, 2, 400.0f) == 0 && follow.stats().broken_kits == 0);
+    GIANT_CHECK(shoot(follow, t, 0, 5000.0f) == 0); // the decal: nothing to break
+    GIANT_CHECK(shoot(follow, t, 2, 400.0f) == 2 && loose(follow, t, 2) && loose(follow, t, 3));
     // A loose piece's own body names it; struck again it is already down.
     const PiecePose* down = loose(follow, t, 2);
     GIANT_CHECK(down != nullptr);
-    GIANT_CHECK(follow.strike(t, 2, 5000.0f, {-1.0f, 0.0f, 0.0f}) == 0);
+    GIANT_CHECK(shoot(follow, t, 2, 5000.0f) == 0);
     // Wear is forgotten by a reset: two blows again do not break it.
-    follow.strike(t, 1, 600.0f, {-1.0f, 0.0f, 0.0f});
+    shoot(follow, t, 1, 600.0f);
     follow.reset_poses();
-    GIANT_CHECK(follow.strike(t, 1, 600.0f, {-1.0f, 0.0f, 0.0f}) == 0 && follow.stats().broken_kits == 0);
+    GIANT_CHECK(shoot(follow, t, 1, 600.0f) == 0 && follow.stats().broken_kits == 0);
     // And by a move.
     scene.modify(t)->transform.position.x = 0.5;
     run(physics, follow, scene, 1);
-    GIANT_CHECK(follow.strike(t, 1, 600.0f, {-1.0f, 0.0f, 0.0f}) == 0 && follow.stats().broken_kits == 0);
+    GIANT_CHECK(shoot(follow, t, 1, 600.0f) == 0 && follow.stats().broken_kits == 0);
+    // A batch: blows on two pieces in one frame bring both (and the top) down once, counted on the first.
+    follow.reset_poses();
+    const std::vector<ScenePhysics::Strike> burst{{t, 1, 600.0f, {-1.0f, 0.0f, 0.0f}},
+                                                  {t, 1, 600.0f, {-1.0f, 0.0f, 0.0f}},
+                                                  {t, 3, 2000.0f, {-1.0f, 0.0f, 0.0f}},
+                                                  {t, 3, 2000.0f, {-1.0f, 0.0f, 0.0f}}};
+    const std::vector<usize> came = follow.strike(burst);
+    GIANT_CHECK(came.size() == 4 && came[0] == 0 && came[1] == 3 && came[2] == 0 && came[3] == 0);
+    GIANT_CHECK(follow.stats().loose_pieces == 3);
     // A kit not breakable is never worn down.
     scene.kits[0].breakable = false;
     run(physics, follow, scene, 1);
-    GIANT_CHECK(follow.strike(t, 1, 1e6f, {-1.0f, 0.0f, 0.0f}) == 0);
+    GIANT_CHECK(shoot(follow, t, 1, 1e6f) == 0);
 }

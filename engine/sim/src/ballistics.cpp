@@ -104,14 +104,26 @@ u32 Ballistics::step(double seconds) {
     }
     m_carried += seconds;
     u32 run = 0;
+    const u64 rays_before = m_stats.rays;
+    bool over_rays = false;
     while (m_carried >= k_step_seconds && run < max_steps_per_call) {
+        if (m_stats.rays - rays_before >= max_rays_per_call) {
+            over_rays = true;
+            break;
+        }
         m_carried -= k_step_seconds;
         ++run;
         for (Bullet& b : m_bullets) advance(b, m_hits);
         std::erase_if(m_bullets, [](const Bullet& b) { return b.done; });
         ++m_stats.steps;
     }
-    if (m_carried >= k_step_seconds) m_carried = 0.0; // past the cap: dropped
+    // Past the ray budget the steps owed wait (at most a call's worth);
+    // past the step cap they are dropped.
+    if (over_rays) {
+        m_carried = std::min(m_carried, k_step_seconds * max_steps_per_call);
+    } else if (m_carried >= k_step_seconds) {
+        m_carried = 0.0;
+    }
     m_stats.hits += m_hits.size();
     m_stats.last_step_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     return run;
@@ -147,7 +159,7 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
     const float mass = b.shot.mass;
     u32 layers = 0;
     while (left > 1e-6) {
-        if (layers >= m_settings.max_layers) break; // the rest of the way next step
+        if (layers >= m_settings.max_layers) break; // the rest of this step's way dropped
         ++m_stats.rays;
         const std::optional<RayHit> hit = m_physics.raycast(from, dir, left, any);
         if (!hit) {
@@ -161,7 +173,8 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
         b.distance += hit->distance;
         const float speed = length(b.velocity);
         const float energy = 0.5f * mass * speed * speed;
-        const world::Surface surface = surface_of ? surface_of(*hit) : world::Surface::standard;
+        const Target target = target_of ? target_of(*hit) : Target{};
+        const world::Surface surface = target.surface;
         const usize index = static_cast<usize>(surface) < world::k_surface_count ? static_cast<usize>(surface) : 0;
         const SurfaceBallistics& props = m_settings.surfaces[index];
         Vec3 normal = hit->normal;
@@ -173,6 +186,8 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
         h.body = hit->body;
         h.user = hit->user;
         h.part = hit->part;
+        h.owner = target.owner;
+        h.piece = target.piece;
         h.point = hit->point;
         h.normal = normal;
         h.direction = dir;
@@ -180,10 +195,13 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
         h.speed_in = speed;
         h.distance = b.distance;
 
-        // Glancing off: the angle between its way and the surface.
+        // Glancing off: the angle between its way and the surface. A ray
+        // that starts inside (met at once, or a face it is leaving) is in
+        // it already: it never glances off.
+        const bool inside = hit->distance < 1e-6 || dot(dir, normal) >= 0.0f;
         const float facing = std::clamp(-dot(dir, normal), 0.0f, 1.0f);
         const float grazing = radians_to_degrees(std::asin(facing));
-        if (props.ricochet_degrees > 0.0f && grazing < props.ricochet_degrees) {
+        if (!inside && props.ricochet_degrees > 0.0f && grazing < props.ricochet_degrees) {
             Vec3 away = normalize_or_zero(dir + normal * (2.0f * facing));
             if (!(length(away) > 0.5f)) away = normal;
             const float keep = std::clamp(props.ricochet_keep, 0.0f, 1.0f);
@@ -205,17 +223,18 @@ void Ballistics::fly(Bullet& b, DVec3 from, Vec3 dir, double left, std::vector<B
             continue;
         }
 
-        // Going in: as far as its energy takes it, and whether the body
-        // ends before that (a ray back at it, from that far in, finds its
-        // far side; one starting inside the body, or none, means it goes on).
+        // Going in: as far as its energy takes it, and whether the part it
+        // went into ends before that (a ray back at that part alone, from
+        // that far in, finds its far side; one starting inside the part, or
+        // none, means it goes on further than the bullet can).
         const float resistance = std::max(props.resistance / b.shot.penetration, 1e-3f);
         const float reach = std::min(energy / resistance, m_settings.max_thickness);
         float thickness = -1.0f;
         if (reach > 1e-4f) {
             const double probe = static_cast<double>(reach) + k_clear;
-            const BodyId body = hit->body;
             PhysicsWorld::RayFilter same;
-            same.accept = [body](BodyId candidate, u64) { return candidate == body; };
+            same.body = hit->body;
+            same.part = hit->part;
             ++m_stats.rays;
             const std::optional<RayHit> back = m_physics.raycast(along(hit->point, dir, probe), -dir, probe, same);
             // A far side as near as the entry is the entry seen from

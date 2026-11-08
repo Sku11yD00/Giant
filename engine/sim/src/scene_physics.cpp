@@ -783,41 +783,70 @@ ScenePhysics::Owner ScenePhysics::owner_of(BodyId body, u32 part) const {
     if (t.broken != nullptr) {
         if (part < t.broken->standing_parts.size()) out.piece = t.broken->standing_parts[part];
     } else if (const world::Kit* kit = find_kit(t.look.kit); kit != nullptr && !t.remake) {
-        const std::vector<u32> parts = kit_parts(*kit, t.look.transform.scale);
-        if (part < parts.size()) out.piece = parts[part];
+        if (t.part_pieces.empty()) t.part_pieces = kit_parts(*kit, t.look.transform.scale);
+        if (part < t.part_pieces.size()) out.piece = t.part_pieces[part];
     }
     return out;
 }
 
-usize ScenePhysics::strike(world::EntityId entity, u32 piece, float blow, const Vec3& direction) {
-    if (!std::isfinite(blow) || blow <= 0.0f || !std::isfinite(direction.x) || !std::isfinite(direction.y) ||
-        !std::isfinite(direction.z)) {
-        return 0;
+std::vector<usize> ScenePhysics::strike(std::span<const Strike> strikes) {
+    std::vector<usize> out(strikes.size(), 0);
+    // The pieces worn through, by placement (in the order first struck), and
+    // the strike that wore each placement's first one through.
+    struct Through {
+        world::EntityId entity = 0;
+        usize by = 0;
+        std::vector<std::pair<u32, Vec3>> pushes;
+    };
+    std::vector<Through> through;
+    for (usize k = 0; k < strikes.size(); ++k) {
+        const Strike& s = strikes[k];
+        if (!std::isfinite(s.blow) || s.blow <= 0.0f || !std::isfinite(s.direction.x) ||
+            !std::isfinite(s.direction.y) || !std::isfinite(s.direction.z)) {
+            continue;
+        }
+        const auto it = m_entities.find(s.entity);
+        if (it == m_entities.end()) continue;
+        Tracked& t = it->second;
+        if (t.look.shape != world::Shape::kit || t.body == k_no_body || t.remake) continue;
+        const world::Kit* kit = find_kit(t.look.kit);
+        if (kit == nullptr || !kit->breakable || s.piece >= kit->pieces.size()) continue;
+        if (t.broken != nullptr && (!t.broken->pieces[s.piece].collides || t.broken->pieces[s.piece].loose)) continue;
+        Through* mine = nullptr;
+        for (Through& th : through) {
+            if (th.entity == s.entity) mine = &th;
+        }
+        if (mine != nullptr && std::any_of(mine->pushes.begin(), mine->pushes.end(),
+                                           [&](const auto& p) { return p.first == s.piece; })) {
+            continue; // already coming down in this batch
+        }
+        const float strength = kit->strength > 0.0f ? kit->strength : world::k_default_kit_strength;
+        float* worn = nullptr;
+        for (auto& [p, w] : t.wear) {
+            if (p == s.piece) worn = &w;
+        }
+        if (worn == nullptr) {
+            t.wear.push_back({s.piece, 0.0f});
+            worn = &t.wear.back().second;
+            m_worn.insert(s.entity);
+        }
+        *worn += s.blow;
+        if (*worn < strength) continue;
+        const u32 piece = s.piece;
+        std::erase_if(t.wear, [piece](const std::pair<u32, float>& w) { return w.first == piece; });
+        if (mine == nullptr) {
+            through.push_back({s.entity, k, {}});
+            mine = &through.back();
+        }
+        // Shot out: it drops from where it was, nudged the way the shots went.
+        mine->pushes.push_back({piece, normalize_or_zero(s.direction) * k_bullet_push});
     }
-    const auto it = m_entities.find(entity);
-    if (it == m_entities.end()) return 0;
-    Tracked& t = it->second;
-    if (t.look.shape != world::Shape::kit || t.body == k_no_body || t.remake) return 0;
-    const world::Kit* kit = find_kit(t.look.kit);
-    if (kit == nullptr || !kit->breakable || piece >= kit->pieces.size()) return 0;
-    if (t.broken != nullptr && (!t.broken->pieces[piece].collides || t.broken->pieces[piece].loose)) return 0;
-    const float strength = kit->strength > 0.0f ? kit->strength : world::k_default_kit_strength;
-    float* worn = nullptr;
-    for (auto& [p, w] : t.wear) {
-        if (p == piece) worn = &w;
-    }
-    if (worn == nullptr) {
-        t.wear.push_back({piece, 0.0f});
-        worn = &t.wear.back().second;
-        m_worn.insert(entity);
-    }
-    *worn += blow;
-    if (*worn < strength) return 0;
-    std::erase_if(t.wear, [piece](const std::pair<u32, float>& w) { return w.first == piece; });
-    // Shot out: it drops from where it was, nudged the way the shots went.
-    const Vec3 away = normalize_or_zero(direction);
     m_rays_left = m_settings.rubble_rays;
-    return loosen(entity, t, {{piece, away * k_bullet_push}});
+    for (const Through& th : through) {
+        const auto it = m_entities.find(th.entity);
+        if (it != m_entities.end()) out[th.by] = loosen(th.entity, it->second, th.pushes);
+    }
+    return out;
 }
 
 BodyId ScenePhysics::body_of(world::EntityId entity) const {

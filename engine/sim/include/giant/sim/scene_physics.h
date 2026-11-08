@@ -135,12 +135,21 @@ public:
         std::optional<u32> piece; // a kit placement's piece, as its index in the kit
     };
     Owner owner_of(BodyId body, u32 part) const;
-    // A bullet's blow (N s) on a breakable kit placement's standing piece:
+    // Bullets' blows (N s) on breakable kit placements' standing pieces:
     // a piece's blows add up (wear), and once they come to the kit's
     // strength it comes loose, pushed along `direction`, with what it held
-    // up. Returns how many came loose. Wear is forgotten when the placement
-    // is moved or made again, and by reset_poses.
-    usize strike(world::EntityId entity, u32 piece, float blow, const Vec3& direction);
+    // up. A batch (a frame's hits) loosens each placement once, within one
+    // blow's rubble rays. Returns how many pieces came loose by each strike
+    // (counted on the strike that brought its placement's pieces down).
+    // Wear is forgotten when the placement is moved or made again, and by
+    // reset_poses.
+    struct Strike {
+        world::EntityId entity = 0;
+        u32 piece = 0;
+        float blow = 0.0f;
+        Vec3 direction{};
+    };
+    std::vector<usize> strike(std::span<const Strike> strikes);
     // Where the camera is (the near ring: loose pieces within
     // simulate_radius of it fall as bodies).
     void set_camera(const DVec3& camera) { m_camera = camera; }
@@ -181,6 +190,7 @@ private:
         std::shared_ptr<Broken> broken;
         std::vector<world::KeptPiece> kept; // the scene's kept damage it was made with (none: none)
         std::vector<std::pair<u32, float>> wear; // blows taken by standing pieces (strike), by piece
+        mutable std::vector<u32> part_pieces;    // unbroken kit body: which piece each part is (owner_of's, made on first use)
     };
     struct Build; // a tile's shape being made
     struct Tile {

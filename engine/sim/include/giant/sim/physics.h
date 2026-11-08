@@ -319,9 +319,13 @@ public:
     // Only bodies `accept` takes (called with each candidate's id and user
     // value, under the body's lock: it must not call back into the world),
     // and with fixed_only only fixed ones: what something can rest on for good.
+    // With `body`, only that body; and with `part` too, only that part of
+    // it (a compound's: RayHit::part), the others passed through.
     struct RayFilter {
         bool fixed_only = false;
         std::function<bool(BodyId, u64)> accept;
+        BodyId body = k_no_body;
+        std::optional<u32> part;
     };
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance,
                                   const RayFilter& filter) const;

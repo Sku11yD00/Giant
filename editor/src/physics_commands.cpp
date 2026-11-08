@@ -329,10 +329,10 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
         {"fire",
          "Fires a bullet from `origin` along `direction` at `speed` m/s (default 880, a rifle; a pistol is "
          "about 360) weighing `mass` kg (default 0.008). It falls and slows as it flies (drag), and what it "
-         "meets is made of a surface (set_material's `surface`: wood, metal, concrete...; the ground is dirt, "
+         "meets is made of a surface (set_entity's `surface`: wood, metal, concrete...; the ground is dirt, "
          "trees wood, characters flesh): it goes through what its energy takes it through (each surface "
          "takes so many joules a metre: get_ballistics; `penetration` 2 goes through twice as much, armour "
-         "piercing), glances off hard surfaces struck at a shallow angle, or stops. What it meets is pushed "
+         "piercing), glances off hard surfaces struck at a shallow angle, or stops (the terrain always stops it). What it meets is pushed "
          "(dynamic bodies), and a breakable kit's piece shot enough (the energy left in it, times "
          "blow_per_joule, adding up to the kit's strength) is shot out with what it held up. While playing, "
          "the player is not hit by its own shots. Needs simulating: the bullet flies with the steps (its "
@@ -368,7 +368,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              const double speed = args.value("speed", 880.0);
              const float mass = args.value("mass", 0.008f);
              const float penetration = args.value("penetration", 1.0f);
-             if (!(speed > 0.0) || !(mass > 0.0f) || !(penetration > 0.0f)) {
+             if (!(static_cast<float>(speed) >= 1e-3f) || !(mass >= 1e-9f) || !(penetration >= 1e-6f)) {
                  return CommandResult::failure("speed, mass and penetration must be above 0");
              }
              sim::Shot shot;
@@ -378,8 +378,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              shot.mass = mass;
              shot.penetration = penetration;
              if (state.play != nullptr && state.play->playing()) shot.ignore = state.play->player_body();
-             state.physics->flush(state.scene);
              if (resolve) {
+                 // The world exactly as it is now (bodies still waiting made at once).
+                 state.physics->flush(state.scene);
                  Json hits = Json::array();
                  for (const PhysicsState::ShotHit& h : state.physics->resolve(shot)) hits.push_back(shot_hit_json(h));
                  return CommandResult::success(Json{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}});
@@ -392,7 +393,8 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"get_ballistics",
          "Reports the bullets: how many are flying (up to 64 listed: position, velocity, distance flown, "
-         "seconds), fired and refused in all, the latest `hits` (default 16, at most 256; as fire's), the "
+         "seconds), fired and refused in all, `hits` (the count, in all), the latest `recent_hits` (`hits` "
+         "argument: how many, default 16, at most 256; as fire's), the "
          "drag, blow_per_joule and each surface's `resistance` (joules a metre), `ricochet_degrees` (glances "
          "off under this angle to the surface; 0 never) and `ricochet_keep` (the share of speed kept).",
          Json{{"type", "object"},
@@ -409,9 +411,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
         {"set_ballistics",
          "Tunes the bullets (view state, as the simulation: not saved or undoable; the editor starts with "
          "the defaults): `drag` (1/m, slowing of drag times speed squared; default 0.0007), `blow_per_joule` "
-         "(N s of wear on a kit piece each joule left in it; default 0.5) and `surfaces`, by name, each with "
+         "(N s of wear on a kit piece each joule left in it; default 0.1: a 3000 J rifle round stopped in a piece wears it by 300 N s, a fifth of the default strength) and `surfaces`, by name, each with "
          "any of resistance (joules a metre, > 0), ricochet_degrees (0 to 90) and ricochet_keep (0 to 1). "
-         "Returns get_ballistics.",
+         "Returns get_ballistics (with no recent hits).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",

@@ -27,6 +27,7 @@
 #include <deque>
 #include <functional>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -155,7 +156,7 @@ public:
     // The latest hits (at most k_kept_hits), oldest first.
     static constexpr usize k_kept_hits = 256;
     const std::deque<ShotHit>& recent_hits() const { return m_recent; }
-    float blow_per_joule = 0.5f; // N s of wear each joule a bullet leaves in a kit piece
+    float blow_per_joule = 0.1f; // N s of wear each joule a bullet leaves in a kit piece
 
     sim::PhysicsWorld& world() { return m_physics; }
     const sim::PhysicsWorld& world() const { return m_physics; }
@@ -165,8 +166,9 @@ private:
     // A new scene: the forest's trunks go before the scene's bodies clear the world.
     void notice_scene(const world::Scene& scene);
     // The trees of a cell's placement, in point order.
-    // A hit described (what it met), and taken when `take` (pushes, wear).
-    ShotHit take(const sim::BulletHit& hit, bool take);
+    sim::Ballistics::Target target_of(const sim::RayHit& hit) const;
+    // Hits described (what they met), and taken when `apply` (pushes, wear).
+    std::vector<ShotHit> take(std::span<const sim::BulletHit> hits, bool apply);
     void take_hits();
     static std::vector<sim::TreeSpot> trees_of(const ScatterPlacer::Cell& placed);
     // The cell's placement given to the forest, with the scene's kept trees there.

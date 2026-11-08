@@ -1242,11 +1242,42 @@ std::optional<RayHit> PhysicsWorld::raycast(const DVec3& origin, const Vec3& dir
         const RayFilter* f = nullptr;
         bool ShouldCollideLocked(const JPH::Body& body) const override {
             if (f->fixed_only && !body.IsStatic()) return false;
+            if (f->body != k_no_body && to_id(body.GetID()) != f->body) return false;
             return !f->accept || f->accept(to_id(body.GetID()), body.GetUserData());
         }
     } body_filter;
     body_filter.f = &filter;
-    if (!m_impl->system.GetNarrowPhaseQuery().CastRay(ray, result, {}, {}, body_filter)) return std::nullopt;
+    // One part of a compound: its shape, held while the ray goes (the
+    // filter is asked about each part with the id leading to it).
+    JPH::RefConst<JPH::Shape> root;
+    if (filter.body != k_no_body && filter.part) {
+        if (!contains(filter.body)) return std::nullopt;
+        const JPH::BodyLockRead lock(m_impl->system.GetBodyLockInterface(), from_id(filter.body));
+        if (lock.Succeeded() && lock.GetBody().GetShape()->GetType() == JPH::EShapeType::Compound) {
+            root = lock.GetBody().GetShape();
+        }
+    }
+    if (root != nullptr) {
+        struct PartFilter final : JPH::ShapeFilter {
+            using JPH::ShapeFilter::ShouldCollide;
+            const JPH::CompoundShape* compound = nullptr;
+            u32 part = 0;
+            bool ShouldCollide(const JPH::Shape* shape, const JPH::SubShapeID& id) const override {
+                if (shape == compound) return true;
+                JPH::SubShapeID rest;
+                return compound->GetSubShapeIndexFromID(id, rest) == part;
+            }
+        } part_filter;
+        part_filter.compound = static_cast<const JPH::CompoundShape*>(root.GetPtr());
+        part_filter.part = *filter.part;
+        JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> closest;
+        m_impl->system.GetNarrowPhaseQuery().CastRay(ray, JPH::RayCastSettings{}, closest, {}, {}, body_filter,
+                                                     part_filter);
+        if (!closest.HadHit()) return std::nullopt;
+        result = closest.mHit;
+    } else if (!m_impl->system.GetNarrowPhaseQuery().CastRay(ray, result, {}, {}, body_filter)) {
+        return std::nullopt;
+    }
     RayHit hit;
     hit.body = to_id(result.mBodyID);
     hit.distance = static_cast<double>(result.mFraction) * max_distance;

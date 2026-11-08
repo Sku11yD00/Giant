@@ -274,7 +274,7 @@ needs weapons and hits first:
   energy takes them through (each material's surface takes so many joules a
   metre: wood, glass and flesh let rounds through, concrete and metal stop
   them), glance off hard surfaces at shallow angles, push what they hit and
-  shoot out the pieces of breakable buildings (`fire`, `get_ballistics`,
+  wear through the pieces of breakable buildings until they are shot out (`fire`, `get_ballistics`,
   `set_ballistics`; `surface` on materials).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).

@@ -28,9 +28,13 @@ struct Range {
     std::unordered_map<BodyId, world::Surface> surfaces;
 
     Range() {
-        bullets.surface_of = [this](const RayHit& hit) {
+        bullets.target_of = [this](const RayHit& hit) {
             const auto it = surfaces.find(hit.body);
-            return it == surfaces.end() ? world::Surface::standard : it->second;
+            Ballistics::Target t;
+            t.surface = it == surfaces.end() ? world::Surface::standard : it->second;
+            t.owner = hit.body;
+            t.piece = hit.part;
+            return t;
         };
     }
     BodyId add(const BodyDesc& d, world::Surface s) {
@@ -214,4 +218,49 @@ GIANT_TEST("ballistics: a ray names the compound part it met; an impulse pushes 
     GIANT_CHECK(!physics.is_character_body(crate));
     const CharacterId ch = physics.add_character({});
     GIANT_CHECK(physics.is_character_body(physics.character_body(ch)));
+}
+
+GIANT_TEST("ballistics: each part of one body is a layer of its own; a ray starting inside never glances off") {
+    Range r;
+    // Two 10 cm panes 1 m apart, one compound body.
+    BodyDesc panes;
+    panes.parts.push_back({BoxShape{{0.05f, 1.0f, 1.0f}}, {5.0f, 0.0f, 0.0f}});
+    panes.parts.push_back({BoxShape{{0.05f, 1.0f, 1.0f}}, {6.0f, 0.0f, 0.0f}});
+    const BodyId glass = r.add(panes, world::Surface::glass);
+    std::vector<BulletHit> hits = r.bullets.resolve(pistol({0.0, 0.0, 0.0}, {1.0f, 0.0f, 0.0f}));
+    GIANT_CHECK(hits.size() == 2);
+    if (hits.size() == 2) {
+        GIANT_CHECK(hits[0].body == glass && hits[0].part == 0 && near(hits[0].thickness, 0.1, 0.01));
+        GIANT_CHECK(hits[1].body == glass && hits[1].part == 1 && near(hits[1].thickness, 0.1, 0.01));
+        GIANT_CHECK(hits[0].owner == glass && hits[1].piece == 1u); // as target_of named them
+    }
+    // A 5 cm board with a slab 12 cm behind it in one body: through the board, then into the slab.
+    BodyDesc pair;
+    pair.position = {0.0, 0.0, 10.0};
+    pair.parts.push_back({BoxShape{{0.025f, 1.0f, 1.0f}}, {5.0f, 0.0f, 0.0f}});
+    pair.parts.push_back({BoxShape{{0.5f, 1.0f, 1.0f}}, {5.645f, 0.0f, 0.0f}});
+    r.add(pair, world::Surface::wood);
+    Shot rifle = pistol({0.0, 0.0, 10.0}, {1.0f, 0.0f, 0.0f});
+    rifle.velocity = {880.0f, 0.0f, 0.0f};
+    hits = r.bullets.resolve(rifle);
+    GIANT_CHECK(hits.size() == 2 && hits[0].outcome == HitOutcome::passed && near(hits[0].thickness, 0.05, 0.005));
+    if (hits.size() == 2) GIANT_CHECK(hits[1].part == 1 && near(hits[1].point.x, 5.145, 0.01));
+    // Fired from inside a metal block: one stop, no ricochets off its inside faces.
+    BodyDesc block;
+    block.position = {0.0, 0.0, -10.0};
+    block.parts.push_back({BoxShape{{0.5f, 0.5f, 0.5f}}});
+    r.add(block, world::Surface::metal);
+    Shot inside = rifle;
+    inside.origin = {0.4, 0.0, -10.0};
+    hits = r.bullets.resolve(inside);
+    GIANT_CHECK(hits.size() == 1 && hits[0].outcome == HitOutcome::stopped);
+}
+
+GIANT_TEST("ballistics: a step() call keeps to its ray budget; the steps past it wait") {
+    Range r;
+    r.bullets.max_rays_per_call = 10;
+    for (int i = 0; i < 4; ++i) r.bullets.fire(pistol({0.0, 100.0 + i, 0.0}, {1.0f, 0.0f, 0.0f}));
+    // A frame's worth (4 fixed steps): 4 rays a step, so 3 steps run (12 rays), one waits.
+    GIANT_CHECK(r.bullets.step(4.0 / 240.0) == 3);
+    GIANT_CHECK(r.bullets.step(1.0 / 240.0) == 2); // the one owed, and this one
 }

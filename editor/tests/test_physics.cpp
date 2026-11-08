@@ -383,15 +383,31 @@ GIANT_TEST("ballistics commands: shots go through wood, stop in concrete, push c
     const Json roof = {{"shape", "cube"}, {"position", {0, 3.1, 0}}, {"scale", {1, 0.2, 3}}, {"surface", "metal"}};
     GIANT_CHECK(f.run("create_kit", {{"name", "hut"}, {"pieces", {wall, roof}}}).ok);
     const world::EntityId hut = f.create({{"kit", "hut"}, {"position", {-20, 0, 0}}});
-    GIANT_CHECK(f.run("set_kit_breakable", {{"name", "hut"}, {"breakable", true}, {"strength", 300}}).ok);
+    GIANT_CHECK(f.run("set_kit_breakable", {{"name", "hut"}, {"breakable", true}, {"strength", 60}}).ok);
     const Json at_wall = {{"origin", {-25, 1.5, 0}}, {"direction", {1, 0, 0}}, {"speed", 360}, {"resolve", true}};
-    r = f.run("fire", at_wall); // ~518 J stopped in 0.3 m of wood: 259 N s of wear, short of 300
+    r = f.run("fire", at_wall); // ~518 J stopped in 0.3 m of wood: 52 N s of wear, short of 60
     GIANT_CHECK(r.ok && r.value["hits"].size() >= 1 && r.value["hits"][0]["entity"] == hut &&
                 r.value["hits"][0]["piece"] == 0 && r.value["hits"][0]["outcome"] == "stopped" &&
                 !r.value["hits"][0].contains("loosened"));
     r = f.run("fire", at_wall);
     GIANT_CHECK(r.ok && r.value["hits"].size() >= 1 && r.value["hits"][0]["loosened"] == 2); // and the roof on it
     GIANT_CHECK(f.run("get_physics").value["loose_pieces"] == 2);
+    // Through two panes of one building, 2 m apart: a hit on each, each its own piece and surface; a
+    // shot that brings the first down still names the second.
+    const Json pane_a = {{"shape", "cube"}, {"position", {0, 1, 0}}, {"scale", {0.02, 1, 1}}, {"surface", "glass"}};
+    const Json pane_b = {{"shape", "cube"}, {"position", {2, 1, 0}}, {"scale", {0.02, 1, 1}}, {"surface", "glass"}};
+    GIANT_CHECK(f.run("create_kit", {{"name", "panes"}, {"pieces", {pane_a, pane_b}}}).ok);
+    const world::EntityId panes = f.create({{"kit", "panes"}, {"position", {-20, 0, 20}}});
+    GIANT_CHECK(f.run("set_kit_breakable", {{"name", "panes"}, {"breakable", true}, {"strength", 0.3}}).ok);
+    r = f.run("fire", {{"origin", {-25, 1, 20}}, {"direction", {1, 0, 0}}, {"resolve", true}});
+    GIANT_CHECK(r.ok && r.value["hits"].size() >= 2);
+    if (r.ok && r.value["hits"].size() >= 2) {
+        const Json& h = r.value["hits"];
+        GIANT_CHECK(h[0]["entity"] == panes && h[0]["piece"] == 0 && h[0]["outcome"] == "passed" &&
+                    h[0]["surface"] == "glass" && std::fabs(h[0]["thickness"].get<double>() - 0.02) < 0.005);
+        GIANT_CHECK(h[1]["entity"] == panes && h[1]["piece"] == 1 && h[1]["outcome"] == "passed");
+        GIANT_CHECK(h[0]["loosened"] == 2); // both shot out by the one batch (6 J each, 0.6 N s of wear)
+    }
 
     // A bullet in flight: it hits in the steps, shown in get_ballistics.
     r = f.run("fire", {{"origin", {0, 1, 0}}, {"direction", {1, 0, 0}}});
