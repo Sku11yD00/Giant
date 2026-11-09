@@ -6,7 +6,7 @@
 // designer must write.
 //
 // Units are UI units: pixels at 1080 lines high (times `scale`). The root
-// fills the screen (its size and stretch are not used). A wrapped text
+// fills the screen (its anchor, pivot, offset, size and stretch are not used). A wrapped text
 // wraps at its own width if it has one, else its parent's inside: in a
 // row, give it a size. Filled-in text is at most 4096 bytes a widget and
 // k_max_text_bytes a screen (the rest not shown).
@@ -53,10 +53,12 @@ using Value = std::variant<double, std::string, bool>;
 
 class Values {
 public:
+    Values();
     void set(const std::string& name, Value value);
     void erase(const std::string& name);
     void clear();
-    // Changes each time a value may have (screens lay out again only then).
+    // Changes each time a value may have (screens lay out again only then);
+    // unique among all Values (a copy keeps its source's).
     u64 generation() const { return m_generation; }
     const Value* find(std::string_view name) const;
     double number(std::string_view name, double otherwise = 0.0) const; // a flag as 0 or 1; text read as a number if it is one
@@ -123,9 +125,10 @@ public:
     // Laid out over `size` pixels (a frame's: the values read, text filled
     // in and measured), only if the values, size or scale changed since it
     // last was (or `font`). Its text, filled in, is cut to `text_budget`
-    // bytes in all (counted down: share one budget across screens a frame).
+    // bytes in all (counted down by each text's template or what it made,
+    // the larger: share one budget across screens a frame).
     void lay_out(const Font& font, const Values& values, Vec2 size, float scale, usize* text_budget = nullptr);
-    // Bytes of text it shows as last laid out.
+    // Bytes of text work as last laid out (each text's template or what it made, the larger).
     usize text_bytes() const { return m_text_bytes; }
     // At most this much text, filled in, a screen (or all a frame shares).
     static constexpr usize k_max_text_bytes = 64 * 1024;

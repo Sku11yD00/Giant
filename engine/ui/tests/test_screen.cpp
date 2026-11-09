@@ -387,7 +387,7 @@ GIANT_TEST("ui screen: laid out again only when something changed; text cut to a
     v.set("word", std::string("Hello"));
     s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f);
     const Rect t = s->find("t")->rect;
-    GIANT_CHECK(near(t.x + t.w, 1920.0f) && near(t.y + t.h, 1080.0f) && s->text_bytes() == 5 + 42);
+    GIANT_CHECK(near(t.x + t.w, 1920.0f) && near(t.y + t.h, 1080.0f) && s->text_bytes() == 6 + 42);
     // Stretched with a size: what it holds wraps at the width it is (one line here).
     TextStyle one;
     GIANT_CHECK(s->find("wide")->rect.w == 1920.0f && near(s->find("w")->rect.h, measure(font, "a", one).y));
@@ -406,7 +406,7 @@ GIANT_TEST("ui screen: laid out again only when something changed; text cut to a
     v.set("word", std::string("Grüße"));
     usize budget = 3;
     s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &budget);
-    GIANT_CHECK(s->find("t")->shown_text == "Gr" && s->find("w")->shown_text == "a" && budget == 0);
+    GIANT_CHECK(s->find("t")->shown_text == "Gr" && s->find("w")->shown_text.empty() && budget == 0);
     usize plenty = 1000;
     s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &plenty);
     GIANT_CHECK(plenty == 1000 - 7 - 42);
@@ -419,6 +419,32 @@ GIANT_TEST("ui screen: laid out again only when something changed; text cut to a
     if (many != nullptr) {
         many->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f);
         GIANT_CHECK(many->find("m")->shown_text.size() == 4096);
+    }
+    // A template that makes nothing still costs its work: the budget runs out.
+    const auto empty = load(R"({"type": "panel", "children": [{"type": "text", "id": "a", "text": "{}{}{}{}"},
+        {"type": "text", "id": "b", "text": "x"}]})");
+    if (empty != nullptr) {
+        usize small = 8;
+        empty->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &small);
+        GIANT_CHECK(small == 0 && empty->find("b")->shown_text.empty());
+    }
+    // Another Values in its place: laid out again (generations are never shared).
+    {
+        Values other;
+        other.set("word", std::string("Other"));
+        s->lay_out(font, other, {1920.0f, 1080.0f}, 1.0f);
+        GIANT_CHECK(s->find("t")->shown_text == "Other");
+        other = Values{};
+        other.set("word", std::string("Third"));
+        s->lay_out(font, other, {1920.0f, 1080.0f}, 1.0f);
+        GIANT_CHECK(s->find("t")->shown_text == "Third");
+    }
+    // The root fills the screen wherever it is written to be.
+    const auto moved = load(R"({"type": "panel", "anchor": [0.5, 0.5], "pivot": [0, 0], "offset": [10, 20], "size": [100, 100]})");
+    if (moved != nullptr) {
+        moved->lay_out(font, v, {800.0f, 600.0f}, 1.0f);
+        const Rect r = moved->root().rect;
+        GIANT_CHECK(r.x == 0.0f && r.y == 0.0f && r.w == 800.0f && r.h == 600.0f);
     }
     // Covered: a background there.
     GIANT_CHECK(s->covers({50.0f, 50.0f}) && !s->covers({150.0f, 50.0f}));

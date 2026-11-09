@@ -72,8 +72,9 @@ public:
     usize images() const { return m_images.size(); }
 
     // A click at `point` (pixels, as last laid out): the top button shown
-    // there, on the top screen with one, queued as an event (and returned).
-    // Nothing while the UI is not shown.
+    // there, on the top screen with one (a screen showing a background
+    // there takes it from those under it), queued as an event (and
+    // returned). Whoever calls these asks `showing` first.
     std::optional<ui::UiEvent> click(ui::Vec2 point);
     // Pointed at: that button is hovered on its screen.
     void point(ui::Vec2 point);

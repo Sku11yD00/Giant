@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -247,15 +248,19 @@ struct Layouter {
     usize used = 0;
 
     // Filled in, cut to what is left of the budget (at a letter's start).
+    // Charged the larger of the template and what it makes (so a template
+    // that makes nothing still costs its work); none once it is spent.
     std::string fill(const std::string& text) {
+        if (budget == 0 || text.empty()) return {};
         std::string out = fill_text(text, values);
         if (out.size() > budget) {
             usize n = budget;
             while (n > 0 && (static_cast<u8>(out[n]) & 0xC0) == 0x80) --n;
             out.resize(n);
         }
-        budget -= out.size();
-        used += out.size();
+        const usize cost = std::min(std::max(text.size(), out.size()), budget);
+        budget -= cost;
+        used += cost;
         return out;
     }
 
@@ -471,6 +476,14 @@ const Widget* find_in(const Widget& w, std::string_view id) {
 
 // --- Values -----------------------------------------------------------------
 
+namespace {
+// Generations from one count for all Values, so two never share one with different contents.
+std::atomic<u64> g_generations{0};
+u64 next_generation() { return g_generations.fetch_add(1, std::memory_order_relaxed) + 1; }
+} // namespace
+
+Values::Values() : m_generation(next_generation()) {}
+
 void Values::set(const std::string& name, Value value) {
     if (name.empty() || name.size() > 128) return;
     if (const double* d = std::get_if<double>(&value); d != nullptr && !std::isfinite(*d)) value = 0.0;
@@ -479,20 +492,20 @@ void Values::set(const std::string& name, Value value) {
     if (it != m_values.end()) {
         if (it->second == value) return; // (unchanged: the screens need not lay out again)
         it->second = std::move(value);
-        ++m_generation;
+        m_generation = next_generation();
     } else if (m_values.size() < k_max_values) {
         m_values.emplace(name, std::move(value));
-        ++m_generation;
+        m_generation = next_generation();
     }
 }
 
 void Values::erase(const std::string& name) {
-    if (m_values.erase(name) > 0) ++m_generation;
+    if (m_values.erase(name) > 0) m_generation = next_generation();
 }
 
 void Values::clear() {
     m_values.clear();
-    ++m_generation;
+    m_generation = next_generation();
 }
 
 const Value* Values::find(std::string_view name) const {
@@ -583,6 +596,10 @@ std::unique_ptr<Screen> Screen::load(std::string_view json, std::string& error) 
         return nullptr;
     }
     screen->m_count = loader.count;
+    // The root fills the screen: where and how big it is written are not used.
+    Widget& root = screen->m_root;
+    root.anchor = root.pivot = root.offset = root.size = {};
+    root.stretch_x = root.stretch_y = false;
     return screen;
 }
 

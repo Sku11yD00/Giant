@@ -89,7 +89,7 @@ bool GameUi::load_screen(const std::string& name, std::string_view json, int lay
     // Laid out now for the last frame's size, so it is clicked (and hidden) as it will be drawn.
     if (m_font != nullptr && m_width > 0.0f && m_height > 0.0f) loaded->lay_out(*m_font, values, {m_width, m_height}, m_scale);
     if (it != m_screens.end()) {
-        // Replaced: the focus kept where its button still is (shown or not, laid out next frame).
+        // Replaced: the focus kept where its button still is and is shown (none before the first frame).
         const std::string focus = it->second.screen->focused();
         if (!focus.empty() && loaded->find(focus) != nullptr && loaded->find(focus)->type == ui::WidgetType::button)
             loaded->focus(focus);
@@ -160,7 +160,6 @@ void GameUi::queue(const ui::UiEvent& e) {
 }
 
 std::optional<ui::UiEvent> GameUi::click(ui::Vec2 p) {
-    if (!m_shown) return std::nullopt;
     for (auto it = m_order.rbegin(); it != m_order.rend(); ++it) {
         if (const std::optional<std::string> id = it->second->screen->click(p)) {
             const ui::UiEvent e{it->first, *id};
@@ -173,7 +172,6 @@ std::optional<ui::UiEvent> GameUi::click(ui::Vec2 p) {
 }
 
 void GameUi::point(ui::Vec2 p) {
-    if (!m_shown) return;
     for (auto it = m_order.rbegin(); it != m_order.rend(); ++it) {
         if (it->second->screen->button_at(p) != nullptr) {
             it->second->screen->point(p);
