@@ -1708,14 +1708,17 @@ the real mouse and keys to screens.
   Loading is strict: an unknown key, a wrong type, a colour that is not
   `#rrggbb[aa]`, a button with no id or two widgets with one id is
   refused, saying where (`screen.children[2] ("hp"): ...`); at most 4096
-  widgets, 32 deep. Laid out each frame in two passes, both linear in the
-  widgets: sizes up from the leaves (text measured, a row or column the
+  widgets, 32 deep. Laid out (only when the values, size or scale
+  changed since it last was) in two passes, both linear in the widgets: sizes up from the leaves (text measured, a row or column the
   sum of its children with gaps and padding, `size` 0 fitting what it
   holds), then places down from the root: by `anchor` (a point of the
   parent), `pivot` (its own point put there) and `offset`, or stacked in a
   `row` or `column` (across which the anchor still says where, and
-  `stretch` fills). Units are pixels at 1080 lines (times the scale), so a
-  screen fits any window and aspect. `visible` names a value (`!name`:
+  `stretch` fills). The root fills the screen. Units are pixels at 1080
+  lines (times the scale), so a screen fits any window and aspect. Text
+  filled in is at most 4096 bytes a widget and 64 KB a frame across all
+  screens (the rest not shown), which bounds a frame's measuring and
+  drawing however a screen is written. `visible` names a value (`!name`:
   while it is not); a hidden widget hides all it holds (not drawn,
   clicked or focused, and takes no room in a row or column).
 - **Values** (`ui::Values`): numbers, text and flags by name, set by the
@@ -1724,11 +1727,15 @@ the real mouse and keys to screens.
 - **Input**: `click` and `point` find the top button shown (within any
   clipping parents); `move_focus` goes through the buttons shown in the
   order written, round the ends; `activate` says the focused one. A
-  button is drawn in its `hover` colour while pointed at or focused.
+  button is drawn in its `hover` colour while pointed at or focused. A
+  shown widget with a background takes a click from the screens under it
+  (a menu over the HUD).
 - **Editor screens** (`GameUi`): named screens (at most 32, 16384 widgets
   in all), drawn by layer between the crosshair and the toasts, filled
-  in from `GameUi::values`; images by name from textures the game gives
-  (`set_image`). Clicks, presses and activations are queued as events
+  in from `GameUi::values`; images by name from textures game code gives
+  (`set_image`; nothing in the editor gives any yet, so image widgets
+  draw nothing over MCP). A screen loaded after the first frame is laid
+  out at once, so it is clicked as it will be drawn. Clicks, presses and activations are queued as events
   `{screen, id}` (at most 64; the oldest go) for the game to take. Over
   MCP: `ui_load_screen`, `ui_remove_screen`, `ui_set_values`, `ui_click`,
   `ui_key`, `get_ui_events`, `get_ui_screen` (every widget's rect as laid

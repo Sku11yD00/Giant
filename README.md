@@ -355,7 +355,8 @@ Open-world systems:
   fonts, a crosshair and toasts over play.
 - E5 part 2: game screens from data: panels, text, bars, images and
   buttons written as JSON, laid out at any window size, filled in from
-  values the game sets, and clicked or moved through with keys.
+  values the game sets, and clicked or moved through with keys (over MCP
+  until the menus part routes the window's mouse and keys).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

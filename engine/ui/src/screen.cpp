@@ -37,7 +37,7 @@ std::optional<double> as_number(const Value& v) {
 
 std::string format_number(double v, int decimals) {
     if (!std::isfinite(v)) return "?";
-    char buffer[64];
+    char buffer[400]; // (1e308 to 9 places)
     if (decimals >= 0) {
         std::snprintf(buffer, sizeof(buffer), "%.*f", std::min(decimals, 9), v);
         return buffer;
@@ -222,10 +222,12 @@ struct Loader {
                                w.direction) ||
             !text(j, here, "image", w.image, 128) || !color(j, here, "hover", w.hover))
             return false;
-        if (w.visible == "!" ) return fail(here, "visible names a value");
+        if (w.visible == "!" || (w.visible.size() > 128 && w.visible[0] != '!')) return fail(here, "visible names a value");
         if (j.contains("children")) {
             const Json& c = j["children"];
             if (!c.is_array()) return fail(here, "children is a list");
+            if (count + c.size() > Screen::k_max_widgets)
+                return fail(here, "more than " + std::to_string(Screen::k_max_widgets) + " widgets");
             w.children.resize(c.size());
             for (usize i = 0; i < c.size(); ++i) {
                 if (!widget(c[i], w.children[i], here + ".children[" + std::to_string(i) + "]", depth + 1)) return false;
@@ -241,6 +243,21 @@ struct Layouter {
     const Font& font;
     const Values& values;
     float scale;
+    usize budget; // bytes of text left to show
+    usize used = 0;
+
+    // Filled in, cut to what is left of the budget (at a letter's start).
+    std::string fill(const std::string& text) {
+        std::string out = fill_text(text, values);
+        if (out.size() > budget) {
+            usize n = budget;
+            while (n > 0 && (static_cast<u8>(out[n]) & 0xC0) == 0x80) --n;
+            out.resize(n);
+        }
+        budget -= out.size();
+        used += out.size();
+        return out;
+    }
 
     bool visible(const Widget& w) const {
         if (w.visible.empty()) return true;
@@ -268,10 +285,14 @@ struct Layouter {
         }
         const float pad = 2.0f * w.padding * scale;
         Vec2 size{w.size.x * scale, w.size.y * scale};
+        // What it holds is as wide as it will be: its parent's inside if it stretches, else its size (or the parent's).
+        const float inner = std::max((w.stretch_x || size.x <= 0.0f ? wrap_width : size.x) - pad, 1.0f);
+        w.shown_text.clear();
+        if (w.type == WidgetType::text || w.type == WidgetType::button) w.shown_text = fill(w.text);
         if ((w.type == WidgetType::text || w.type == WidgetType::button) && (size.x == 0.0f || size.y == 0.0f)) {
             TextStyle s = style_of(w);
-            if (w.wrap) s.wrap = size.x > 0.0f ? size.x - pad : std::max(wrap_width - pad, 1.0f);
-            const Vec2 t = measure(font, fill_text(w.text, values), s);
+            if (w.wrap) s.wrap = inner;
+            const Vec2 t = measure(font, w.shown_text, s);
             if (size.x == 0.0f) size.x = t.x + pad;
             if (size.y == 0.0f) size.y = t.y + pad;
         }
@@ -279,7 +300,7 @@ struct Layouter {
         Vec2 content{};
         usize n = 0;
         for (Widget& c : w.children) {
-            const Vec2 cs = natural(c, size.x > 0.0f ? size.x - pad : wrap_width - pad);
+            const Vec2 cs = natural(c, inner);
             if (!c.shown) continue;
             if (w.layout == Layout::column) {
                 content.x = std::max(content.x, cs.x);
@@ -301,6 +322,7 @@ struct Layouter {
     static void hide(Widget& w) {
         w.shown = false;
         w.rect = {};
+        w.shown_text.clear();
         for (Widget& c : w.children) hide(c);
     }
 
@@ -357,7 +379,7 @@ void draw_widget(Canvas& canvas, const Font& font, const Values& values, float s
     switch (w.type) {
     case WidgetType::text:
     case WidgetType::button: {
-        if (w.text.empty()) break;
+        if (w.shown_text.empty()) break;
         TextStyle s;
         s.size = w.font_size * scale;
         s.color = w.color;
@@ -365,8 +387,8 @@ void draw_widget(Canvas& canvas, const Font& font, const Values& values, float s
         s.outline_color = w.outline_color;
         s.shadow = w.shadow * scale;
         s.align = w.align;
-        s.wrap = in.w; // aligned within its inside (wrapped there only if it wraps)
-        const std::string shown = fill_text(w.text, values);
+        s.wrap = std::max(in.w, 1.0f); // aligned within its inside (wrapped there only if it wraps)
+        const std::string& shown = w.shown_text;
         if (!w.wrap) {
             // Not wrapped: aligned in the box, one line a line break.
             s.wrap = 0.0f;
@@ -420,6 +442,17 @@ const Widget* button_at(const Widget& w, Vec2 p, bool clipped_out) {
     return nullptr;
 }
 
+// Whether a shown widget with a background (seen: not clipped out) is at `p`.
+bool covers(const Widget& w, Vec2 p, bool clipped_out) {
+    if (!w.shown) return false;
+    if (w.clip && !inside(w.rect, p)) clipped_out = true;
+    if (!clipped_out && (w.background >> 24) != 0 && inside(w.rect, p)) return true;
+    for (const Widget& c : w.children) {
+        if (covers(c, p, clipped_out)) return true;
+    }
+    return false;
+}
+
 void buttons(const Widget& w, std::vector<const Widget*>& out) {
     if (!w.shown) return;
     if (w.type == WidgetType::button) out.push_back(&w);
@@ -444,13 +477,23 @@ void Values::set(const std::string& name, Value value) {
     if (std::string* s = std::get_if<std::string>(&value); s != nullptr && s->size() > k_max_text) s->resize(k_max_text);
     const auto it = m_values.find(name);
     if (it != m_values.end()) {
+        if (it->second == value) return; // (unchanged: the screens need not lay out again)
         it->second = std::move(value);
+        ++m_generation;
     } else if (m_values.size() < k_max_values) {
         m_values.emplace(name, std::move(value));
+        ++m_generation;
     }
 }
 
-void Values::erase(const std::string& name) { m_values.erase(name); }
+void Values::erase(const std::string& name) {
+    if (m_values.erase(name) > 0) ++m_generation;
+}
+
+void Values::clear() {
+    m_values.clear();
+    ++m_generation;
+}
 
 const Value* Values::find(std::string_view name) const {
     const auto it = m_values.find(name);
@@ -510,7 +553,12 @@ std::string fill_text(std::string_view text, const Values& values) {
         }
         out += values.text(name, decimals);
         i = end;
-        if (out.size() > 4 * k_max_text) break; // (a pathological template)
+        if (out.size() >= k_max_text) break; // (a pathological template)
+    }
+    if (out.size() > k_max_text) {
+        usize n = k_max_text;
+        while (n > 0 && (static_cast<u8>(out[n]) & 0xC0) == 0x80) --n;
+        out.resize(n);
     }
     return out;
 }
@@ -538,11 +586,27 @@ std::unique_ptr<Screen> Screen::load(std::string_view json, std::string& error) 
     return screen;
 }
 
-void Screen::lay_out(const Font& font, const Values& values, Vec2 size, float scale) {
+void Screen::lay_out(const Font& font, const Values& values, Vec2 size, float scale, usize* text_budget) {
     if (!finite(size.x) || !finite(size.y) || !finite(scale) || scale <= 0.0f) return;
-    Layouter l{font, values, scale};
+    size = {std::max(size.x, 0.0f), std::max(size.y, 0.0f)};
+    const usize budget = std::min(text_budget != nullptr ? *text_budget : k_max_text_bytes, k_max_text_bytes);
+    // Nothing changed: as it was (its text still counted).
+    if (m_font == &font && m_values == &values && m_generation == values.generation() && m_size.x == size.x &&
+        m_size.y == size.y && m_scale == scale && m_budget == budget) {
+        if (text_budget != nullptr) *text_budget -= std::min(*text_budget, m_text_bytes);
+        return;
+    }
+    Layouter l{font, values, scale, budget};
     l.natural(m_root, size.x);
-    l.place(m_root, {0.0f, 0.0f, std::max(size.x, 0.0f), std::max(size.y, 0.0f)}, Layouter::natural_size(m_root), false, {});
+    l.place(m_root, {0.0f, 0.0f, size.x, size.y}, size, false, {}); // (the root fills the screen)
+    m_text_bytes = l.used;
+    if (text_budget != nullptr) *text_budget -= std::min(*text_budget, m_text_bytes);
+    m_font = &font;
+    m_values = &values;
+    m_generation = values.generation();
+    m_size = size;
+    m_scale = scale;
+    m_budget = budget;
     // The focus on a button no longer shown moves on.
     if (!m_focus.empty()) {
         const Widget* f = find(m_focus);
@@ -556,6 +620,8 @@ void Screen::draw(Canvas& canvas, const Font& font, const Values& values, float 
 }
 
 const Widget* Screen::button_at(Vec2 point) const { return ui::button_at(m_root, point, false); }
+
+bool Screen::covers(Vec2 point) const { return ui::covers(m_root, point, false); }
 
 void Screen::point(Vec2 p) {
     if (const Widget* b = button_at(p)) m_focus = b->id;
@@ -595,7 +661,7 @@ std::optional<std::string> Screen::activate() const {
 
 void Screen::focus(std::string id) {
     const Widget* w = find(id);
-    m_focus = w != nullptr && w->type == WidgetType::button ? std::move(id) : std::string();
+    m_focus = w != nullptr && w->type == WidgetType::button && w->shown ? std::move(id) : std::string();
 }
 
 bool Screen::shown(std::string_view id) const {

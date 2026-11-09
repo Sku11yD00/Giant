@@ -373,3 +373,64 @@ GIANT_TEST("ui screen: what a hidden widget holds is hidden too: not clicked, fo
     s->focus("menu"); // not a button
     GIANT_CHECK(s->focused().empty());
 }
+
+GIANT_TEST("ui screen: laid out again only when something changed; text cut to a budget; big numbers right") {
+    const Font& font = default_font();
+    // The root fills the screen, stretched or not.
+    const auto s = load(R"({"type": "panel", "children": [
+        {"type": "text", "id": "t", "text": "{word}", "anchor": [1, 1], "pivot": [1, 1]},
+        {"type": "panel", "id": "cover", "size": [100, 100], "background": "#00000080"},
+        {"type": "panel", "id": "wide", "size": [100, 0], "stretch": [true, false], "layout": "column", "offset": [0, 200],
+         "children": [{"type": "text", "id": "w", "wrap": true, "text": "a few words that fit across a whole screen"}]}]})");
+    if (s == nullptr) return;
+    Values v;
+    v.set("word", std::string("Hello"));
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f);
+    const Rect t = s->find("t")->rect;
+    GIANT_CHECK(near(t.x + t.w, 1920.0f) && near(t.y + t.h, 1080.0f) && s->text_bytes() == 5 + 42);
+    // Stretched with a size: what it holds wraps at the width it is (one line here).
+    TextStyle one;
+    GIANT_CHECK(s->find("wide")->rect.w == 1920.0f && near(s->find("w")->rect.h, measure(font, "a", one).y));
+    // Unchanged: not laid out again (a rect moved by hand stays).
+    const u64 g = v.generation();
+    v.set("word", std::string("Hello"));
+    GIANT_CHECK(v.generation() == g);
+    const_cast<Widget*>(s->find("t"))->rect.x = -5.0f;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f);
+    GIANT_CHECK(s->find("t")->rect.x == -5.0f);
+    v.set("word", std::string("Hello there"));
+    GIANT_CHECK(v.generation() != g);
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f);
+    GIANT_CHECK(s->find("t")->rect.x > 0.0f && s->find("t")->shown_text == "Hello there");
+    // A budget shared by screens: what is left is shown (cut at a letter), and counted down.
+    v.set("word", std::string("Grüße"));
+    usize budget = 3;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &budget);
+    GIANT_CHECK(s->find("t")->shown_text == "Gr" && s->find("w")->shown_text == "a" && budget == 0);
+    usize plenty = 1000;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &plenty);
+    GIANT_CHECK(plenty == 1000 - 7 - 42);
+    usize again = 1000;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &again); // (unchanged: still counted)
+    GIANT_CHECK(again == plenty);
+    // A filled-in text is at most 4096 bytes.
+    v.set("word", std::string(4000, 'x'));
+    const auto many = load(R"({"type": "text", "id": "m", "text": "{word}{word}{word}"})");
+    if (many != nullptr) {
+        many->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f);
+        GIANT_CHECK(many->find("m")->shown_text.size() == 4096);
+    }
+    // Covered: a background there.
+    GIANT_CHECK(s->covers({50.0f, 50.0f}) && !s->covers({150.0f, 50.0f}));
+    // Big numbers: all their digits.
+    Values big;
+    big.set("n", 1.5e70);
+    big.set("m", -1e300);
+    GIANT_CHECK(big.text("n").size() == 71 && big.text("n")[0] == '1');
+    GIANT_CHECK(big.text("m").size() == 302 && big.text("m", 2).size() == 305);
+    // Many children: refused before they are made.
+    std::string zeros = R"({"type": "panel", "children": [)";
+    for (int i = 0; i < 100000; ++i) zeros += i ? ",0" : "0";
+    GIANT_CHECK(refused(zeros + "]}").find("widgets") != std::string::npos);
+    GIANT_CHECK(refused(R"({"type": "panel", "visible": ")" + std::string(129, 'x') + R"("})").find("visible") != std::string::npos);
+}

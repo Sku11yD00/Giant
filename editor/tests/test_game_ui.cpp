@@ -239,15 +239,39 @@ GIANT_TEST("game ui: screens from JSON over the scene, by layer; values filled i
     GIANT_CHECK(r.ok && r.value["screens"].empty());
     // Values: null forgets one; clear forgets all.
     r = run("ui_set_values", {{"values", {{"ammo", nullptr}}}});
-    GIANT_CHECK(r.ok && !r.value["values"].contains("ammo") && r.value["values"].contains("spare"));
+    GIANT_CHECK(r.ok && r.value["values"]["ammo"].is_null() && r.value["count"] == 3);
     r = run("ui_set_values", {{"clear", true}, {"values", {{"name", "Ana"}}}});
-    GIANT_CHECK(r.ok && r.value["values"].size() == 1 && r.value["values"]["name"] == "Ana");
+    GIANT_CHECK(r.ok && r.value["count"] == 1 && r.value["values"]["name"] == "Ana");
+    // At the most: one forgotten makes room for one more.
+    for (usize i = 1; i < ui::Values::k_max_values; ++i) game_ui.values.set("v" + std::to_string(i), 1.0);
+    GIANT_CHECK(!run("ui_set_values", {{"values", {{"new", 1}}}}).ok);
+    r = run("ui_set_values", {{"values", {{"v1", nullptr}, {"new", 1}}}});
+    GIANT_CHECK(r.ok && r.value["count"] == ui::Values::k_max_values);
+    GIANT_CHECK(run("ui_set_values", {{"clear", true}}).ok && game_ui.values.size() == 0);
     // Not shown: clicks go nowhere.
     GIANT_CHECK(run("ui_load_screen", {{"name", "pause"}, {"screen", menu}}).ok);
     GIANT_CHECK(run("ui_set_values", {{"values", {{"paused", true}}}}).ok);
     game_ui.update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
-    GIANT_CHECK(run("set_game_ui", {{"show", "never"}}).ok);
-    game_ui.update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
+    GIANT_CHECK(run("ui_click", {{"x", rx}, {"y", ry}}).value["event"]["id"] == "resume");
+    GIANT_CHECK(run("set_game_ui", {{"show", "never"}}).ok); // (at once: before a frame)
     GIANT_CHECK(run("ui_click", {{"x", rx}, {"y", ry}}).value["event"].is_null());
+    GIANT_CHECK(run("ui_click", {{"screen", "pause"}, {"id", "resume"}}).value["event"].is_null());
+    GIANT_CHECK(!run("ui_click", {{"x", 1e30}, {"y", 0}}).ok);
     GIANT_CHECK(run("ui_key", {{"screen", "pause"}, {"key", "activate"}}).value["event"].is_null());
+
+    // Loaded after a frame: laid out at once, so what it hides is not pressed before it is drawn.
+    GIANT_CHECK(run("set_game_ui", {{"show", "always"}}).ok);
+    game_ui.update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
+    const std::string hidden = R"({"type": "panel", "stretch": [true, true], "children": [
+        {"type": "button", "id": "secret", "size": [100, 100], "visible": "open"},
+        {"type": "button", "id": "plain", "size": [100, 100], "anchor": [1, 1], "pivot": [1, 1]}]})";
+    GIANT_CHECK(run("ui_load_screen", {{"name", "late"}, {"screen", hidden}, {"layer", 100}}).ok);
+    GIANT_CHECK(run("ui_click", {{"screen", "late"}, {"id", "secret"}}).value["event"].is_null());
+    GIANT_CHECK(run("ui_click", {{"x", 1915}, {"y", 1075}}).value["event"]["id"] == "plain");
+    GIANT_CHECK(run("ui_key", {{"screen", "late"}, {"key", "next"}}).value["focused"] == "plain");
+    // A screen showing a background takes clicks from the screens under it.
+    GIANT_CHECK(run("ui_load_screen", {{"name", "modal"}, {"screen", {{"type", "panel"}, {"background", "#000000c0"}}}, {"layer", 200}}).ok);
+    GIANT_CHECK(run("ui_click", {{"x", 1915}, {"y", 1075}}).value["event"].is_null());
+    GIANT_CHECK(run("ui_remove_screen", {{"name", "modal"}}).ok);
+    GIANT_CHECK(run("ui_click", {{"x", 1915}, {"y", 1075}}).value["event"]["id"] == "plain");
 }

@@ -113,10 +113,10 @@ like late afternoon"; Claude calls the tools, looks at the result with
 | `show_toast` | view only | Shows `text` (UTF-8, at most 256 bytes) at the bottom of the game UI for `seconds` (0.1 to 30, default 3), at most 4 at once. Returns get_game_ui |
 | `ui_load_screen` | view only | Loads a screen of the game UI under `name` (the same name replaced, focus kept), drawn by `layer` (-1000 to 1000; higher on top). `screen` is the JSON (object or text; format in `engine/ui/include/giant/ui/screen.h`); a wrong screen is refused saying where. At most 32 screens, 16384 widgets. Returns get_game_ui |
 | `ui_remove_screen` | view only | Removes screen `name`, or all (`all`: true). Returns get_game_ui |
-| `ui_set_values` | view only | Sets the values screens show: `values` {name: number, text, true/false, or null to forget}; `clear` first forgets all. Returns every value |
-| `ui_click` | view only | Clicks at `x`, `y` (pixels as last laid out; the top button on the top screen with one) or presses button `id` on `screen`. Only while the game UI is shown. Returns `event` {screen, id} or null; queued for get_ui_events |
+| `ui_set_values` | view only | Sets the values screens show: `values` {name (1 to 128 bytes): number, text (at most 4096 bytes), true/false, or null to forget}; `clear` first forgets all; at most 4096. Returns those given as they now are (`values`) and `count` |
+| `ui_click` | view only | Clicks at `x`, `y` (pixels as last laid out; the top button on the top screen with one) or presses button `id` on `screen`. Only while the game UI is shown. A screen showing a background at the point takes the click from those under it. Returns `event` {screen, id} or null; queued for get_ui_events |
 | `ui_key` | view only | `key` "next" / "previous" moves `screen`'s focus through its buttons shown; "activate" presses the focused one. Returns `focused`, `event` |
-| `get_ui_events` | view only | The button clicks and activations since last asked, oldest first (at most 64 kept); taken |
+| `get_ui_events` | view only | The button clicks and activations since last asked, oldest first (at most 64 kept: the oldest go); taken |
 | `get_ui_screen` | read-only | Screen `name` as last laid out: `widgets` (`id`, `type`, `depth`, `shown`, `rect` [x, y, w, h] pixels), `focused`, `layer` |
 | `set_autosave` | view only | While playing, save to slot `autosave` every `seconds` of play (0 to 86400; 0: never; default 300). Never while a save or load is under way; its errors are `autosave_error`; a save to another slot stays a save of changes. Returns get_save |
 | `close_game` | view only | The game's damage, dented ground and weather override go (the world shows as kept); the next save is whole |

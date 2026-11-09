@@ -53,7 +53,7 @@ public:
     // would be more than k_max_screens or k_max_widgets in all.
     bool load_screen(const std::string& name, std::string_view json, int layer, std::string& error);
     bool remove_screen(const std::string& name);
-    void clear_screens() { m_screens.clear(); }
+    void clear_screens();
     const ui::Screen* screen(std::string_view name) const;
     int layer(std::string_view name) const;
     std::vector<std::string> screen_names() const; // drawn first to last
@@ -66,7 +66,8 @@ public:
     ui::Values values;
 
     // Images screens may show by name (`image`): a texture the game owns
-    // (rgba8_unorm, sampled; it must outlive its use here). 0 forgets it.
+    // (rgba8_unorm, sampled). 0 forgets it; forget it (or update) before
+    // destroying it, as the last frame's list may still draw it.
     void set_image(const std::string& name, rhi::TextureId texture);
     usize images() const { return m_images.size(); }
 
@@ -90,6 +91,8 @@ public:
     // Each frame: built for a `width` by `height` pixel target.
     void update(const EditorState& state, double seconds, float width, float height);
     bool shown() const { return m_shown; }
+    // Whether it would be shown now (`show`, and playing), before the next frame says so.
+    bool showing(const EditorState& state) const;
     rhi::UiDrawList list() const { return m_shown ? m_canvas.list() : rhi::UiDrawList{}; }
 
     const ui::Font* font() const { return m_font.get(); }
@@ -105,11 +108,12 @@ private:
         std::unique_ptr<ui::Screen> screen;
         int layer = 0;
     };
-    std::vector<std::pair<std::string, Loaded*>> ordered();
+    void reorder(); // m_order from m_screens
     ui::Screen* find_screen(std::string_view name);
     void queue(const ui::UiEvent& e);
 
     std::map<std::string, Loaded, std::less<>> m_screens;
+    std::vector<std::pair<std::string, Loaded*>> m_order; // drawn first to last
     std::map<std::string, rhi::TextureId, std::less<>> m_images;
     std::deque<ui::UiEvent> m_events;
     struct Toast {
@@ -124,6 +128,7 @@ private:
     std::deque<Toast> m_toasts;
     bool m_shown = false;
     float m_scale = 1.0f;
+    float m_width = 0.0f, m_height = 0.0f; // the last frame's (0: none yet)
     double m_build_ms = 0.0;
     u64 m_saves_seen = 0, m_autosaves_seen = 0; // as last seen
     bool m_saves_known = false;

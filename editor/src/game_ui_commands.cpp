@@ -192,7 +192,7 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
         {"ui_set_values",
          "Sets the values the game UI's screens show: `values` an object of name (1 to 128 bytes) to a number, "
          "text (at most 4096 bytes) or true/false (null forgets it); `clear` first forgets them all. At most "
-         "4096 values. Returns every value.",
+         "4096 values. Returns those given as they are now (`values`) and how many there are (`count`).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"values", {{"type", "object"}}}, {"clear", {{"type", "boolean"}}}}}},
@@ -208,46 +208,58 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
                      if (v.is_string() && v.get_ref<const std::string&>().size() > 4096)
                          return CommandResult::failure("\"" + name + "\" is at most 4096 bytes");
                  }
-                 usize adding = 0;
-                 for (const auto& [name, v] : args["values"].items())
-                     if (!v.is_null() && (args.value("clear", false) || values.find(name) == nullptr)) ++adding;
-                 const usize kept = args.value("clear", false) ? 0 : values.size();
-                 if (kept + adding > ui::Values::k_max_values)
+                 // The count after: what is kept, plus new names, less those forgotten.
+                 const bool clear = args.value("clear", false);
+                 usize after = clear ? 0 : values.size();
+                 for (const auto& [name, v] : args["values"].items()) {
+                     const bool there = !clear && values.find(name) != nullptr;
+                     if (v.is_null() && there) --after;
+                     if (!v.is_null() && !there) ++after;
+                 }
+                 if (after > ui::Values::k_max_values)
                      return CommandResult::failure("at most " + std::to_string(ui::Values::k_max_values) + " values");
              }
              if (args.value("clear", false)) values.clear();
              if (args.contains("values")) {
+                 // Those forgotten first, so they make room.
                  for (const auto& [name, v] : args["values"].items()) {
-                     if (v.is_null()) {
-                         values.erase(name);
-                     } else if (v.is_boolean()) {
+                     if (v.is_null()) values.erase(name);
+                 }
+                 for (const auto& [name, v] : args["values"].items()) {
+                     if (v.is_boolean()) {
                          values.set(name, v.get<bool>());
                      } else if (v.is_number()) {
                          values.set(name, v.get<double>());
-                     } else {
+                     } else if (v.is_string()) {
                          values.set(name, v.get<std::string>());
                      }
                  }
              }
+             // Those given, as they are now (null: not set), and how many in all.
              Json out = Json::object();
-             for (const auto& [name, v] : values.all()) {
-                 if (const double* d = std::get_if<double>(&v)) out[name] = *d;
-                 else if (const bool* b = std::get_if<bool>(&v)) out[name] = *b;
-                 else out[name] = std::get<std::string>(v);
+             if (args.contains("values")) {
+                 for (const auto& [name, given] : args["values"].items()) {
+                     (void)given;
+                     const ui::Value* v = values.find(name);
+                     if (v == nullptr) out[name] = nullptr;
+                     else if (const double* d = std::get_if<double>(v)) out[name] = *d;
+                     else if (const bool* b = std::get_if<bool>(v)) out[name] = *b;
+                     else out[name] = std::get<std::string>(*v);
+                 }
              }
-             return CommandResult::success({{"values", out}});
+             return CommandResult::success({{"values", out}, {"count", values.size()}});
          }});
 
     add(registry,
         {"ui_click",
          "Clicks the game UI: at `x`, `y` (pixels, as last laid out: the top button there, on the top screen "
-         "with one), or the button `id` on `screen` (if shown). Only while the game UI is shown. The click is "
+         "with one; a screen showing a background there takes it from those under it), or the button `id` on `screen` (if shown). Only while the game UI is shown. The click is "
          "queued as an event (get_ui_events) and returned as `event` {screen, id} (null: no button).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
-               {{"x", {{"type", "number"}}},
-                {"y", {{"type", "number"}}},
+               {{"x", {{"type", "number"}, {"minimum", -1e6}, {"maximum", 1e6}}},
+                {"y", {{"type", "number"}, {"minimum", -1e6}, {"maximum", 1e6}}},
                 {"screen", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
                 {"id", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}}}}},
          false,
@@ -256,13 +268,14 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
              GameUi& g = *state.game_ui;
              if (args.contains("x") && args.contains("y")) {
                  if (args.contains("screen") || args.contains("id")) return CommandResult::failure("x and y, or screen and id");
+                 if (!g.showing(state)) return CommandResult::success({{"event", nullptr}});
                  return CommandResult::success({{"event", event_json(g.click({args["x"].get<float>(), args["y"].get<float>()}))}});
              }
              if (args.contains("screen") && args.contains("id")) {
                  if (args.contains("x") || args.contains("y")) return CommandResult::failure("x and y, or screen and id");
                  if (g.screen(args["screen"].get<std::string>()) == nullptr)
                      return CommandResult::failure("no screen \"" + args["screen"].get<std::string>() + "\"");
-                 if (!g.shown()) return CommandResult::success({{"event", nullptr}});
+                 if (!g.showing(state)) return CommandResult::success({{"event", nullptr}});
                  return CommandResult::success(
                      {{"event", event_json(g.press(args["screen"].get<std::string>(), args["id"].get<std::string>()))}});
              }
@@ -272,8 +285,8 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"ui_key",
          "Keys on a screen of the game UI: `key` \"next\" or \"previous\" moves its focus through the buttons shown "
-         "(in the order written, round the ends), \"activate\" presses the focused one (queued as an event, "
-         "returned as `event`). Returns `focused` and `event`.",
+         "(in the order written, round the ends; as last laid out), \"activate\" presses the focused one (queued "
+         "as an event, returned as `event`; null while the game UI is not shown). Returns `focused` and `event`.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", Json::array({"screen", "key"})},
@@ -288,7 +301,7 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
              if (g.screen(name) == nullptr) return CommandResult::failure("no screen \"" + name + "\"");
              std::optional<ui::UiEvent> e;
              if (key == "activate") {
-                 if (g.shown()) e = g.activate(name);
+                 if (g.showing(state)) e = g.activate(name);
              } else {
                  g.move_focus(name, key == "next" ? 1 : -1);
              }

@@ -86,6 +86,8 @@ bool GameUi::load_screen(const std::string& name, std::string_view json, int lay
         error = "at most " + std::to_string(k_max_widgets) + " widgets on all screens";
         return false;
     }
+    // Laid out now for the last frame's size, so it is clicked (and hidden) as it will be drawn.
+    if (m_font != nullptr && m_width > 0.0f && m_height > 0.0f) loaded->lay_out(*m_font, values, {m_width, m_height}, m_scale);
     if (it != m_screens.end()) {
         // Replaced: the focus kept where its button still is (shown or not, laid out next frame).
         const std::string focus = it->second.screen->focused();
@@ -95,10 +97,15 @@ bool GameUi::load_screen(const std::string& name, std::string_view json, int lay
     } else {
         m_screens.emplace(name, Loaded{std::move(loaded), layer});
     }
+    reorder();
     return true;
 }
 
-bool GameUi::remove_screen(const std::string& name) { return m_screens.erase(name) > 0; }
+bool GameUi::remove_screen(const std::string& name) {
+    if (m_screens.erase(name) == 0) return false;
+    reorder();
+    return true;
+}
 
 const ui::Screen* GameUi::screen(std::string_view name) const {
     const auto it = m_screens.find(name);
@@ -115,20 +122,20 @@ int GameUi::layer(std::string_view name) const {
     return it != m_screens.end() ? it->second.layer : 0;
 }
 
-std::vector<std::pair<std::string, GameUi::Loaded*>> GameUi::ordered() {
-    std::vector<std::pair<std::string, Loaded*>> out;
-    out.reserve(m_screens.size());
-    for (auto& [name, loaded] : m_screens) out.emplace_back(name, &loaded);
-    std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second->layer < b.second->layer; });
-    return out;
+void GameUi::reorder() {
+    m_order.clear();
+    for (auto& [name, loaded] : m_screens) m_order.emplace_back(name, &loaded);
+    std::stable_sort(m_order.begin(), m_order.end(), [](const auto& a, const auto& b) { return a.second->layer < b.second->layer; });
+}
+
+void GameUi::clear_screens() {
+    m_screens.clear();
+    m_order.clear();
 }
 
 std::vector<std::string> GameUi::screen_names() const {
     std::vector<std::string> out;
-    for (const auto& [name, loaded] : const_cast<GameUi*>(this)->ordered()) {
-        (void)loaded;
-        out.push_back(name);
-    }
+    for (const auto& entry : m_order) out.push_back(entry.first);
     return out;
 }
 
@@ -154,25 +161,25 @@ void GameUi::queue(const ui::UiEvent& e) {
 
 std::optional<ui::UiEvent> GameUi::click(ui::Vec2 p) {
     if (!m_shown) return std::nullopt;
-    auto screens = ordered();
-    for (auto it = screens.rbegin(); it != screens.rend(); ++it) {
+    for (auto it = m_order.rbegin(); it != m_order.rend(); ++it) {
         if (const std::optional<std::string> id = it->second->screen->click(p)) {
             const ui::UiEvent e{it->first, *id};
             queue(e);
             return e;
         }
+        if (it->second->screen->covers(p)) break; // (over the screens under it)
     }
     return std::nullopt;
 }
 
 void GameUi::point(ui::Vec2 p) {
     if (!m_shown) return;
-    auto screens = ordered();
-    for (auto it = screens.rbegin(); it != screens.rend(); ++it) {
+    for (auto it = m_order.rbegin(); it != m_order.rend(); ++it) {
         if (it->second->screen->button_at(p) != nullptr) {
             it->second->screen->point(p);
             return;
         }
+        if (it->second->screen->covers(p)) return;
     }
 }
 
@@ -210,6 +217,11 @@ std::vector<ui::UiEvent> GameUi::take_events() {
     return out;
 }
 
+bool GameUi::showing(const EditorState& state) const {
+    const bool playing = state.play != nullptr && state.play->playing();
+    return m_font != nullptr && (show == Show::always || (show == Show::playing && playing));
+}
+
 void GameUi::update(const EditorState& state, double seconds, float width, float height) {
     const auto from = std::chrono::steady_clock::now();
     const bool playing = state.play != nullptr && state.play->playing();
@@ -227,7 +239,9 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
     std::erase_if(m_toasts, [](const Toast& t) { return t.left <= 0.0; });
 
     m_scale = std::isfinite(height) ? std::clamp(height / k_lines, 0.25f, 8.0f) : 1.0f;
-    m_shown = m_font != nullptr && (show == Show::always || (show == Show::playing && playing));
+    m_shown = showing(state);
+    m_width = std::isfinite(width) ? width : 0.0f;
+    m_height = std::isfinite(height) ? height : 0.0f;
     if (!m_shown) {
         m_build_ms = 0.0;
         return;
@@ -255,9 +269,10 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
         const auto it = m_images.find(name);
         return it != m_images.end() ? it->second : 0;
     };
-    for (auto& [name, loaded] : ordered()) {
+    usize text = ui::Screen::k_max_text_bytes; // shown in all, a frame
+    for (auto& [name, loaded] : m_order) {
         (void)name;
-        loaded->screen->lay_out(*m_font, values, {width, height}, s);
+        loaded->screen->lay_out(*m_font, values, {width, height}, s, &text);
         loaded->screen->draw(m_canvas, *m_font, values, s, image);
     }
 

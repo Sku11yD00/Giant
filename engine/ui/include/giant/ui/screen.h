@@ -5,7 +5,11 @@
 // through with keys. The AI writes the JSON; nothing here is code a
 // designer must write.
 //
-// Units are UI units: pixels at 1080 lines high (times `scale`).
+// Units are UI units: pixels at 1080 lines high (times `scale`). The root
+// fills the screen (its size and stretch are not used). A wrapped text
+// wraps at its own width if it has one, else its parent's inside: in a
+// row, give it a size. Filled-in text is at most 4096 bytes a widget and
+// k_max_text_bytes a screen (the rest not shown).
 //
 // JSON (every key optional but "type"; unknown keys are refused, so a typo
 // is caught):
@@ -51,7 +55,9 @@ class Values {
 public:
     void set(const std::string& name, Value value);
     void erase(const std::string& name);
-    void clear() { m_values.clear(); }
+    void clear();
+    // Changes each time a value may have (screens lay out again only then).
+    u64 generation() const { return m_generation; }
     const Value* find(std::string_view name) const;
     double number(std::string_view name, double otherwise = 0.0) const; // a flag as 0 or 1; text read as a number if it is one
     bool truthy(std::string_view name) const;                          // true, non-zero, non-empty
@@ -63,6 +69,7 @@ public:
 
 private:
     std::map<std::string, Value, std::less<>> m_values;
+    u64 m_generation = 0;
 };
 
 // "{name}" and "{name:2}" filled in from `values` ("{{" is a brace); an
@@ -95,9 +102,11 @@ struct Widget {
     std::string image;
     std::vector<Widget> children;
 
-    // Laid out (pixels), and whether it is shown.
+    // Laid out (pixels), whether it is shown (not before it is first laid
+    // out), and its text as filled in.
     Rect rect;
-    bool shown = true;
+    bool shown = false;
+    std::string shown_text;
 };
 
 // A click, a key's activation: which button.
@@ -111,14 +120,24 @@ public:
     // Null (and `error` set, saying where) if the JSON is not a screen.
     static std::unique_ptr<Screen> load(std::string_view json, std::string& error);
 
-    // Laid out over `size` pixels (a frame's: the text measured, the values read).
-    void lay_out(const Font& font, const Values& values, Vec2 size, float scale);
+    // Laid out over `size` pixels (a frame's: the values read, text filled
+    // in and measured), only if the values, size or scale changed since it
+    // last was (or `font`). Its text, filled in, is cut to `text_budget`
+    // bytes in all (counted down: share one budget across screens a frame).
+    void lay_out(const Font& font, const Values& values, Vec2 size, float scale, usize* text_budget = nullptr);
+    // Bytes of text it shows as last laid out.
+    usize text_bytes() const { return m_text_bytes; }
+    // At most this much text, filled in, a screen (or all a frame shares).
+    static constexpr usize k_max_text_bytes = 64 * 1024;
     // Drawn as laid out; `images` names to textures (none: no images drawn).
     void draw(Canvas& canvas, const Font& font, const Values& values, float scale,
               const std::function<rhi::TextureId(std::string_view)>& images = {}) const;
 
     // The top button shown at `point` (pixels, as laid out), if any.
     const Widget* button_at(Vec2 point) const;
+    // Whether anything it shows with a background is at `point` (a click
+    // there is not for the screens under it).
+    bool covers(Vec2 point) const;
     // Pointed at: that button is hovered (and focused). A click says which was clicked.
     void point(Vec2 point);
     std::optional<std::string> click(Vec2 point);
@@ -127,7 +146,7 @@ public:
     void move_focus(int step);
     std::optional<std::string> activate() const;
     const std::string& focused() const { return m_focus; }
-    // The focus on that button (none: if it is not one).
+    // The focus on that button (none: if it is not one, or not shown as last laid out).
     void focus(std::string id);
     // Shown as last laid out (it and all that hold it).
     bool shown(std::string_view id) const;
@@ -142,6 +161,14 @@ public:
 private:
     Widget m_root;
     usize m_count = 0;
+    usize m_text_bytes = 0;
+    // As last laid out (so it is not again while nothing changed).
+    const Font* m_font = nullptr;
+    const Values* m_values = nullptr;
+    u64 m_generation = 0;
+    Vec2 m_size{-1.0f, -1.0f};
+    float m_scale = 0.0f;
+    usize m_budget = 0;
     std::string m_focus; // a button's id
 };
 
