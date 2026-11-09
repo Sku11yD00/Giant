@@ -108,7 +108,19 @@ public:
     // forest knows that were placed again, given to it now (so their fallen
     // trees are drawn as they lie this frame, never standing).
     void refresh_forest(const world::Scene& scene, const ScatterPlacer& scatter);
-    // While one lives, the dented ground is as it was (a save in between).
+    // A game save's ground (GameSaves): whole tiles pressed in over the
+    // ground as authored and shown until clear_game_ground (a new scene
+    // forgets it); a simulation's dents go over it and back to it, and
+    // GroundAsSaved lifts it too. False: no such tile now, or another size.
+    bool press_game_ground(world::Scene& scene, world::CellCoord cell, world::Terrain::Heights heights);
+    // The game's ground gone (as authored again; dents simulated over it go too).
+    void clear_game_ground(world::Scene& scene);
+    const world::GroundDamage& game_ground() const { return m_game_ground; }
+    // What a game save keeps of the ground: every tile a game's ground or a
+    // simulation's dents show now, as it is (touching nothing).
+    std::unordered_map<world::CellCoord, world::Terrain::Heights, world::CellCoordHash> ground_now(world::Scene& scene);
+    // While one lives, the dented ground (and a game's) is as it was (a save
+    // in between). They may nest: only the outermost lifts and puts back.
     class GroundAsSaved {
     public:
         GroundAsSaved(PhysicsState* physics, world::Scene& scene);
@@ -207,7 +219,9 @@ private:
     JobSystem m_jobs; // first: outlives the physics world
     sim::Dust m_dust; // before what emits into it
     world::GroundDamage m_ground;
+    world::GroundDamage m_game_ground; // under m_ground's dents
     bool m_restore_ground = false;
+    u32 m_as_saved = 0; // GroundAsSaved alive
     sim::PhysicsWorld m_physics;
     u64 m_runs = 0;
     sim::ScenePhysics m_bodies;

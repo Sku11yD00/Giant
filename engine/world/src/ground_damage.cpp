@@ -29,6 +29,35 @@ void GroundDamage::dent(Terrain& terrain, const Dent& d, double x, double z, std
     if (changed.size() > first) ++m_dents;
 }
 
+bool GroundDamage::press(Terrain& terrain, CellCoord cell, Terrain::Heights heights) {
+    if (terrain.identity() != m_terrain) {
+        forget();
+        m_terrain = terrain.identity();
+    }
+    const Terrain::Heights* now = terrain.find(cell);
+    if (now == nullptr || now->size() != heights.size()) return false;
+    const auto it = m_tiles.find(cell);
+    if (it == m_tiles.end() || it->second.lifted || !ours(terrain, cell, it->second)) {
+        Tile& t = m_tiles[cell];
+        t = Tile{};
+        t.before = *now;
+        t.before_version = terrain.version(cell);
+    }
+    terrain.set(cell, std::move(heights));
+    m_tiles.at(cell).ours = terrain.version(cell);
+    ++m_dents;
+    return true;
+}
+
+std::vector<CellCoord> GroundDamage::ours_tiles(const Terrain& terrain) const {
+    std::vector<CellCoord> out;
+    if (terrain.identity() != m_terrain) return out;
+    for (const auto& [c, t] : m_tiles)
+        if (!t.lifted && ours(terrain, c, t)) out.push_back(c);
+    std::sort(out.begin(), out.end(), [](CellCoord a, CellCoord b) { return a.z != b.z ? a.z < b.z : a.x < b.x; });
+    return out;
+}
+
 usize GroundDamage::restore(Terrain& terrain) {
     usize back = 0;
     if (terrain.identity() == m_terrain) {

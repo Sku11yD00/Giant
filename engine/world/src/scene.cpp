@@ -2005,18 +2005,43 @@ std::optional<LoadError> load_far_chunk(std::string_view text, u32 level, CellCo
     return std::nullopt;
 }
 
-std::string save_cell_damage(const CellDamage& damage) { return damage_json(damage).dump(1) + "\n"; }
+std::string save_cell_damage(const CellDamage& damage, const Terrain::Heights* ground) {
+    Json json = damage_json(damage);
+    if (ground != nullptr) {
+        usize n = 0;
+        while (n * n < ground->size()) ++n;
+        GIANT_ASSERT(n * n == ground->size() && valid_terrain_samples(static_cast<u32>(n)),
+                     "a game's ground must be a whole tile");
+        json["heights"] = heights_json(*ground, n);
+    }
+    return json.dump(1) + "\n";
+}
 
-std::optional<LoadError> load_cell_damage(std::string_view text, CellCoord cell, CellDamage& out) {
+std::optional<LoadError> load_cell_damage(std::string_view text, CellCoord cell, CellDamage& out,
+                                          std::optional<Terrain::Heights>* ground) {
     Json json;
     if (auto bad = parse(text, json)) return bad;
     std::string error;
     Reader root(json, "", error);
     CellDamage damage;
     read_damage(root, "", cell, damage, error);
+    std::optional<Terrain::Heights> heights;
+    if (ground != nullptr) {
+        if (const Json* rows = root.get("heights", false); rows != nullptr && root.ok()) {
+            const usize n = rows->is_array() ? rows->size() : 0;
+            if (n > k_max_terrain_samples || !valid_terrain_samples(static_cast<u32>(n))) {
+                root.fail("heights", "must be 8 to 128 rows (samples, a power of two)");
+            } else {
+                Terrain::Heights h;
+                read_heights(root, "heights", n, h);
+                if (root.ok()) heights = std::move(h);
+            }
+        }
+    }
     root.finish();
     if (!error.empty()) return LoadError{std::move(error)};
     out = std::move(damage);
+    if (ground != nullptr) *ground = std::move(heights);
     return std::nullopt;
 }
 

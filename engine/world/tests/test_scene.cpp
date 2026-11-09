@@ -797,6 +797,28 @@ GIANT_TEST("world: the game's damage shows over the kept, is never saved, and it
     GIANT_CHECK(!load_cell_damage(save_cell_damage(some_damage()), c, back).has_value() && back == kept);
     GIANT_CHECK(load_cell_damage(save_cell_damage(some_damage()), {2, 0}, back).has_value() && back == kept);
     GIANT_CHECK(load_cell_damage("{\"kits\": [], \"oops\": 1}", c, back).has_value());
+    // With a game's ground: its heights exactly, refused where not asked for or not whole.
+    Terrain::Heights ground(64);
+    for (usize i = 0; i < ground.size(); ++i) ground[i] = 0.1f * static_cast<float>(i) - 3.3f;
+    const std::string with = save_cell_damage(some_damage(), &ground);
+    std::optional<Terrain::Heights> heights;
+    GIANT_CHECK(!load_cell_damage(with, c, back, &heights).has_value() && back == kept && heights == ground);
+    GIANT_CHECK(load_cell_damage(with, c, back).has_value());
+    GIANT_CHECK(!load_cell_damage(save_cell_damage(some_damage()), c, back, &heights).has_value() && !heights);
+    GIANT_CHECK(load_cell_damage("{\"heights\": [\"1 2\"]}", c, back, &heights).has_value());
+    GIANT_CHECK(load_cell_damage("{\"heights\": 3}", c, back, &heights).has_value());
+    const auto rows = [](usize n, const std::string& row) {
+        std::string t = "{\"heights\": [";
+        for (usize j = 0; j < n; ++j) t += (j > 0 ? ",\"" : "\"") + row + "\"";
+        return t + "]}";
+    };
+    std::string eight = "0 0 0 0 0 0 0 0";
+    GIANT_CHECK(!load_cell_damage(rows(8, eight), c, back, &heights).has_value() && heights && heights->size() == 64);
+    GIANT_CHECK(load_cell_damage(rows(8, "0 0 0 0 0 0 0"), c, back, &heights).has_value());     // a short row
+    GIANT_CHECK(load_cell_damage(rows(8, eight + " 0"), c, back, &heights).has_value());        // a long one
+    GIANT_CHECK(load_cell_damage(rows(12, eight), c, back, &heights).has_value());              // not a power of two
+    GIANT_CHECK(load_cell_damage(rows(8, "0 0 0 0 0 0 0 nan"), c, back, &heights).has_value());
+    GIANT_CHECK(load_cell_damage(rows(8, "0 0 0 0 0 0 0 20000"), c, back, &heights).has_value());
     GIANT_CHECK(load_cell_damage("nope", c, back).has_value());
     GIANT_CHECK(!load_cell_damage("{}", c, back).has_value() && back.empty());
     const Weather rain = *weather_preset("rain");

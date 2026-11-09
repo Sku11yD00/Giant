@@ -455,8 +455,10 @@ private:
 
 // JSON text, stable key order, with a trailing newline.
 std::string save_scene(const Scene& scene);
-// A cell's damage on its own (a game save's chunk), and the weather.
-std::string save_cell_damage(const CellDamage& damage);
+// A cell's damage on its own (a game save's chunk), with the tile's heights
+// when a game's ground is in it (`ground`: samples x samples, as Terrain's),
+// and the weather.
+std::string save_cell_damage(const CellDamage& damage, const Terrain::Heights* ground = nullptr);
 std::string save_weather(const Weather& weather);
 
 struct LoadError {
@@ -465,8 +467,10 @@ struct LoadError {
 // Replaces `out` only on success. Unknown keys are errors (typos must not
 // silently drop data); missing optional keys take their defaults.
 std::optional<LoadError> load_scene(std::string_view text, Scene& out);
-// Every kit placement and tree foot must be in `cell`.
-std::optional<LoadError> load_cell_damage(std::string_view text, CellCoord cell, CellDamage& out);
+// Every kit placement and tree foot must be in `cell`. `ground` (null: a
+// chunk with heights is refused) is set to the tile's heights, or none.
+std::optional<LoadError> load_cell_damage(std::string_view text, CellCoord cell, CellDamage& out,
+                                          std::optional<Terrain::Heights>* ground = nullptr);
 std::optional<LoadError> load_weather(std::string_view text, Weather& out);
 
 // --- Worlds streamed by cell ----------------------------------------------------

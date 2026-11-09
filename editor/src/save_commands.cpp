@@ -2,6 +2,7 @@
 // get_save, close_game (game_saves.h). View state, not undoable.
 #include "editor_commands.h"
 #include "game_saves.h"
+#include "physics_state.h"
 #include "world_streaming.h"
 
 #include "giant/core/assert.h"
@@ -45,6 +46,10 @@ Json status_json(const EditorState& state) {
                 {"removed", s.removed},
                 {"cells", s.cells},
                 {"applied", s.applied},
+                {"tiles", s.tiles},
+                {"skipped", s.skipped},
+                {"ground_waiting", g.ground_waiting()},
+                {"game_tiles", state.physics != nullptr ? state.physics->game_ground().tiles() : usize{0}},
                 {"play_seconds", g.play_seconds()},
                 {"weather_override", g.weather() != nullptr},
                 {"game_cells", state.scene.game_damage().size()}};
@@ -57,10 +62,12 @@ Json status_json(const EditorState& state) {
 void finish_now(EditorState& state) {
     GameSaves& g = *state.saves;
     g.wait();
-    const usize was = g.cells_per_frame;
+    const usize was = g.cells_per_frame, tiles = g.ground_tiles_per_frame;
     g.cells_per_frame = std::numeric_limits<usize>::max();
+    g.ground_tiles_per_frame = std::numeric_limits<usize>::max();
     g.update(state, 0.0);
     g.cells_per_frame = was;
+    g.ground_tiles_per_frame = tiles;
 }
 
 } // namespace
@@ -70,7 +77,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
         {"save_game",
          "Saves the game to `slot` beside the open world (<world>/saves/<slot>/), never into the world's own "
          "files: by cell, the damage shown (broken buildings' pieces where they lie, felled trees; what "
-         "simulating broke and a loaded save's), and the camera, whether playing, and the weather it is "
+         "simulating broke and a loaded save's) and the ground dented (craters, footprints: each tile whole), and the camera, whether playing, and the weather it is "
          "going to with the ground (wet, snow). A save to the slot last saved or loaded writes only the cells "
          "changed since. Written on a job (a crash never loses the last save): `wait` (default false) "
          "returns once it is on the disk. Returns get_save.",
@@ -93,7 +100,8 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"load_game",
          "Loads the game in `slot` (save_game) over the open world: play and simulating stop (what they "
-         "broke since goes), the save's damage shows over the world's (its cells a share each frame), the "
+         "broke since goes), the save's damage and dented ground show over the world's (a share of cells each frame; "
+         "a tile not streamed in yet is pressed in when it is), the "
          "camera and the weather come back (shown over the scene's own until set_weather, clear_weather or "
          "close_game), and play starts again if it was on. A save of another world, or of the world with "
          "other kits, scatter or ground samples, is refused unless `force`. Read on a job: `wait` (default false) returns once it "
@@ -173,7 +181,9 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
         {"get_save",
          "What the game saves are doing: `doing` (\"\", saving, loading, applying, deleting), `slot`, `error` (the "
          "last one's), `base_slot` (last saved or loaded: a save there writes only changes), `saves`, "
-         "`loads`, the last save's chunk files `written` and `removed`, `cells` and `applied`, "
+         "`loads`, the last save's chunk files `written` and `removed`, `cells` and `applied`, `tiles` (of those, "
+         "with ground), `skipped` (ground not pressed: another sample count), `ground_waiting` (for its tile), "
+         "`game_tiles` (pressed in now), "
          "`play_seconds`, `weather_override`, `game_cells` (cells showing a game's damage) and `folder`.",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
@@ -184,7 +194,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
 
     add(registry,
         {"close_game",
-         "Closes the game shown: its damage goes (the world shows as it is kept), the weather shown is the "
+         "Closes the game shown: its damage and dented ground go (the world shows as it is kept), the weather shown is the "
          "scene's again, and the next save is whole. Saves on the disk are kept. Returns get_save.",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          false,
