@@ -767,6 +767,20 @@ def player_gate(tool, call, check):
     game_ui = tool("get_game_ui")
     check(game_ui["shown"] and game_ui["toasts"] == 1 and game_ui["font"]["glyphs"] > 300 and game_ui["vertices"] > 32
           and game_ui["error"] == "", f"the game UI shows over play, got {game_ui}")
+    screen = {"type": "panel", "stretch": [True, True], "children": [
+        {"type": "text", "id": "ammo", "text": "Ammo {ammo}", "anchor": [1, 1], "offset": [-40, -40]},
+        {"type": "button", "id": "go", "text": "Go", "size": [200, 50], "anchor": [0.5, 0.5]}]}
+    loaded = tool("ui_load_screen", {"name": "hud", "screen": screen})
+    check(loaded["screens"][0]["widgets"] == 3, f"a screen loads, got {loaded}")
+    tool("ui_set_values", {"values": {"ammo": 30}})
+    call("ping")
+    laid = tool("get_ui_screen", {"name": "hud"})
+    go = laid["widgets"][2]
+    check(go["id"] == "go" and go["shown"] and go["rect"][2] > 0, f"the screen is laid out, got {laid}")
+    clicked = tool("ui_click", {"x": go["rect"][0] + 5, "y": go["rect"][1] + 5})
+    check(clicked["event"] == {"screen": "hud", "id": "go"}, f"its button clicks, got {clicked}")
+    check(tool("get_ui_events")["events"] == [{"screen": "hud", "id": "go"}], "the click is an event")
+    tool("ui_remove_screen", {"all": True})
     tool("set_player_input", {"forward": 1, "yaw": 0})  # down -z, onto the step
     started = time.monotonic()
     player = None
@@ -945,7 +959,9 @@ def main() -> int:
         for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation",
                          "get_swing", "find_path", "get_nav", "walk_to", "get_walker", "play_sound",
                          "record_audio", "get_audio", "save_game", "load_game", "list_saves", "get_save",
-                         "set_autosave", "get_game_ui", "set_game_ui", "show_toast"):
+                         "set_autosave", "get_game_ui", "set_game_ui", "show_toast", "ui_load_screen",
+                         "ui_remove_screen", "ui_set_values", "ui_click", "ui_key", "get_ui_events",
+                         "get_ui_screen"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")
