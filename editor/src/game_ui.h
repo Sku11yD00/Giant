@@ -1,9 +1,13 @@
 // The game's own UI in the editor (engine/ui): drawn over the scene, under
-// the editor's panels, while playing (or always, or never: `show`). A
-// crosshair, screens from data (ui::Screen: named, drawn by layer, filled
-// in from `values`, their buttons' clicks queued as events), short messages
-// (toasts: "Saved", or what show_toast asks) over them, and a mark while a
-// save is being written (docs/architecture.md, "Game UI"). Built each frame
+// the editor's panels, while playing (or always, or never: `show`). From
+// the bottom: a crosshair, world markers (at their place or the screen's
+// edge), screens from data (ui::Screen: named, drawn by layer, filled in
+// from `values`, their compasses showing the markers, their buttons'
+// clicks queued as events), short messages (toasts: "Saved", or what
+// show_toast asks), a fade over everything (fade_to), and a mark while a
+// save is being written (docs/architecture.md, "Game UI"). Each frame it
+// sets the values `heading`, `playing` and, while playing, `player.speed`,
+// `player.on_ground` and `player.climbing`. Built each frame
 // after the frame's commands: a command's change shows from the next frame.
 //
 // Sized by the window: 1 UI unit is a pixel at 1080 lines high (scaled by
@@ -15,6 +19,7 @@
 #include "giant/core/types.h"
 #include "giant/rhi/rhi.h"
 #include "giant/ui/canvas.h"
+#include "giant/ui/hud.h"
 #include "giant/ui/screen.h"
 
 #include <deque>
@@ -64,6 +69,16 @@ public:
 
     // What the screens show ("{ammo}", a bar's "health"), set by the game.
     ui::Values values;
+
+    // Markers in the world (ui::Markers): drawn under the screens, on their compasses.
+    ui::Markers markers;
+
+    // The whole UI (and the scene under it) fading to `color` at `alpha`
+    // (0 clear, 1 solid) over `seconds` (0: at once; at most 30).
+    void fade_to(u32 color, float alpha, double seconds);
+    float fade_alpha() const { return m_fade_alpha; }
+    float fade_target() const { return m_fade_target; }
+    u32 fade_color() const { return m_fade_color; }
 
     // Images screens may show by name (`image`): a texture the game owns
     // (rgba8_unorm, sampled). 0 forgets it; forget it (or update) before
@@ -130,6 +145,8 @@ private:
     bool m_shown = false;
     float m_scale = 1.0f;
     float m_width = 0.0f, m_height = 0.0f; // the last frame's (0: none yet)
+    u32 m_fade_color = 0;
+    float m_fade_alpha = 0.0f, m_fade_target = 0.0f, m_fade_rate = 0.0f; // alpha a second
     double m_build_ms = 0.0;
     u64 m_saves_seen = 0, m_autosaves_seen = 0; // as last seen
     bool m_saves_known = false;

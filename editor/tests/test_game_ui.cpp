@@ -239,7 +239,7 @@ GIANT_TEST("game ui: screens from JSON over the scene, by layer; values filled i
     GIANT_CHECK(r.ok && r.value["screens"].empty());
     // Values: null forgets one; clear forgets all.
     r = run("ui_set_values", {{"values", {{"ammo", nullptr}}}});
-    GIANT_CHECK(r.ok && r.value["values"]["ammo"].is_null() && r.value["count"] == 3);
+    GIANT_CHECK(r.ok && r.value["values"]["ammo"].is_null() && r.value["count"] == 3 + 2); // (and heading, playing: the editor's)
     r = run("ui_set_values", {{"clear", true}, {"values", {{"name", "Ana"}}}});
     GIANT_CHECK(r.ok && r.value["count"] == 1 && r.value["values"]["name"] == "Ana");
     // At the most: one forgotten makes room for one more.
@@ -274,4 +274,98 @@ GIANT_TEST("game ui: screens from JSON over the scene, by layer; values filled i
     GIANT_CHECK(run("ui_click", {{"x", 1915}, {"y", 1075}}).value["event"].is_null());
     GIANT_CHECK(run("ui_remove_screen", {{"name", "modal"}}).ok);
     GIANT_CHECK(run("ui_click", {{"x", 1915}, {"y", 1075}}).value["event"]["id"] == "plain");
+}
+
+GIANT_TEST("game ui: HUD pieces: markers in the world, a compass with them on it, a fade, and the player's values") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    const std::unique_ptr<rhi::Device> device = rhi::create_device(desc);
+    GIANT_CHECK(device != nullptr);
+    if (device == nullptr) return;
+    PhysicsState physics;
+    PlayState play{physics};
+    GameUi game_ui(device.get());
+    EditorState state;
+    state.physics = &physics;
+    state.play = &play;
+    state.game_ui = &game_ui;
+    ai::CommandRegistry commands;
+    register_scene_commands(commands, state);
+    register_physics_commands(commands, state);
+    register_game_ui_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args = Json::object()) {
+        return commands.execute(name, args, {});
+    };
+    GIANT_CHECK(run("set_game_ui", {{"show", "always"}}).ok);
+    state.camera.position = {0.0, 2.0, 0.0};
+    state.camera.yaw_degrees = 0.0f; // north
+    state.camera.pitch_degrees = 0.0f;
+
+    // Markers: one ahead (north), one behind, one east and only near.
+    ai::CommandResult r = run("ui_set_marker", {{"id", "camp"}, {"position", {0, 2, -200}}, {"label", "Camp"}});
+    GIANT_CHECK(r.ok && r.value["markers"] == 1);
+    GIANT_CHECK(run("ui_set_marker", {{"id", "home"}, {"position", {0, 2, 300}}, {"color", "#40c0ffff"}}).ok);
+    GIANT_CHECK(run("ui_set_marker", {{"id", "east"}, {"position", {50, 2, 0}}, {"max_distance", 20}}).ok);
+    GIANT_CHECK(!run("ui_set_marker", {{"id", "bad"}, {"position", {0, 0, 0}}, {"color", "red"}}).ok);
+    GIANT_CHECK(!run("ui_set_marker", {{"id", "bad"}, {"position", {0, 0}}}).ok);
+    // A compass across the top, the heading under it.
+    const Json hud = {{"type", "panel"},
+                      {"children",
+                       {{{"type", "compass"}, {"id", "compass"}, {"value", "heading"}, {"size", {640, 44}}, {"anchor", {0.5, 0}},
+                         {"offset", {0, 16}}, {"background", "#00000060"}},
+                        {{"type", "text"}, {"id", "deg"}, {"text", "{heading}"}, {"anchor", {0.5, 0}}, {"offset", {0, 64}}}}}};
+    GIANT_CHECK(run("ui_load_screen", {{"name", "hud"}, {"screen", hud}}).ok);
+    game_ui.update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
+    r = run("get_ui_markers");
+    GIANT_CHECK(r.ok && r.value["markers"].size() == 3);
+    const auto marker = [&](const char* id) {
+        for (const Json& m : r.value["markers"]) {
+            if (m["id"] == id) return m;
+        }
+        return Json();
+    };
+    GIANT_CHECK(marker("camp")["on_screen"] == true && std::fabs(marker("camp")["at"][0].get<double>() - 960.0) < 1.0);
+    GIANT_CHECK(std::fabs(marker("camp")["distance"].get<double>() - 200.0) < 0.1);
+    GIANT_CHECK(marker("home")["shown"] == true && marker("home")["on_screen"] == false); // at the bottom edge
+    GIANT_CHECK(std::fabs(marker("home")["bearing"].get<double>() - 180.0) < 0.1);
+    GIANT_CHECK(marker("east")["shown"] == false); // further than its distance
+    GIANT_CHECK(game_ui.values.number("heading", -1.0) == 0.0 && game_ui.values.truthy("playing") == false);
+    // Turned west: the heading reads 270, and what is shown follows.
+    state.camera.yaw_degrees = 90.0f;
+    game_ui.update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
+    GIANT_CHECK(game_ui.values.number("heading") == 270.0);
+    r = run("get_ui_markers");
+    GIANT_CHECK(marker("camp")["on_screen"] == false && marker("camp")["shown"] == true);
+    GIANT_CHECK(game_ui.screen("hud")->find("deg")->shown_text == "270");
+
+    // The fade: to black over a second, half way after half of it, then clear at once.
+    const usize before = game_ui.vertices();
+    r = run("ui_fade", {{"alpha", 1}, {"seconds", 1}});
+    GIANT_CHECK(r.ok && r.value["fade"]["to"] == 1.0 && r.value["fade"]["alpha"] == 0.0);
+    game_ui.update(state, 0.5, 1920.0f, 1080.0f);
+    GIANT_CHECK(std::fabs(game_ui.fade_alpha() - 0.5f) < 0.01f && game_ui.vertices() == before + 4);
+    bool half = false;
+    for (const rhi::UiVertex& v : game_ui.list().vertices) half = half || v.color == ui::rgba(0, 0, 0, 128);
+    GIANT_CHECK(half);
+    game_ui.update(state, 1.0, 1920.0f, 1080.0f);
+    GIANT_CHECK(game_ui.fade_alpha() == 1.0f);
+    GIANT_CHECK(run("ui_fade", {{"alpha", 0}, {"seconds", 0}}).ok && game_ui.fade_alpha() == 0.0f);
+    GIANT_CHECK(!run("ui_fade", {{"alpha", 2}}).ok && !run("ui_fade", {{"alpha", 0.5}, {"color", "#zzzzzz"}}).ok);
+
+    // Playing: the player's values.
+    world::Entity floor;
+    floor.shape = world::Shape::plane;
+    floor.transform.scale = {40.0f, 1.0f, 40.0f};
+    state.scene.add(floor);
+    GIANT_CHECK(run("play", {{"on", true}}).ok && play.playing());
+    game_ui.update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
+    GIANT_CHECK(game_ui.values.truthy("playing") && game_ui.values.find("player.speed") != nullptr &&
+                game_ui.values.find("player.on_ground") != nullptr && game_ui.values.find("player.climbing") != nullptr);
+    GIANT_CHECK(run("play", {{"on", false}}).ok);
+    game_ui.update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
+    GIANT_CHECK(!game_ui.values.truthy("playing") && game_ui.values.find("player.speed") == nullptr);
+    // Removed.
+    GIANT_CHECK(run("ui_remove_marker", {{"id", "camp"}}).ok && !run("ui_remove_marker", {{"id", "camp"}}).ok);
+    r = run("ui_remove_marker", {{"all", true}});
+    GIANT_CHECK(r.ok && r.value["markers"] == 0 && !run("ui_remove_marker").ok);
 }

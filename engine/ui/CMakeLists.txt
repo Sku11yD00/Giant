@@ -2,6 +2,7 @@ giant_module(ui
   SOURCES
     src/canvas.cpp
     src/font.cpp
+    src/hud.cpp
     src/screen.cpp
   DEPENDS core rhi
 )
@@ -21,4 +22,5 @@ giant_module_tests(ui
   SOURCES
     tests/test_ui.cpp
     tests/test_screen.cpp
+    tests/test_hud.cpp
 )
