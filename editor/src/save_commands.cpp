@@ -85,7 +85,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"save_game",
          "Saves the game to `slot` beside the open world (<world>/saves/<slot>/), never into the world's own "
-         "files: whether simulating and where the dynamic bodies it moved are; by cell, the damage shown (broken buildings' pieces where they lie, felled trees; what "
+         "files: the player (feet, speed, climbing, carried by), whether simulating and where the dynamic bodies it moved are; by cell, the damage shown (broken buildings' pieces where they lie, felled trees; what "
          "simulating broke and a loaded save's) and the ground dented (craters, footprints: each tile whole), and the camera, whether playing, and the weather it is "
          "going to with the ground (wet, snow). A save to the slot last saved or loaded writes only the cells "
          "changed since. Written on a job (a crash never loses the last save): `wait` (default false) "
@@ -112,7 +112,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
          "broke since goes), the save's damage and dented ground show over the world's (a share of cells each frame; "
          "a tile not streamed in yet is pressed in when it is), the "
          "camera and the weather come back (shown over the scene's own until set_weather, clear_weather or "
-         "close_game), and play (or simulating) starts again if it was on, the moved bodies put back where they were (a share a "
+         "close_game), and play (or simulating) starts again if it was on (the player as it was), the moved bodies put back where they were (a share a "
          "frame, after `wait` too: each once its body is made). A save of another world, or of the world with "
          "other kits, scatter or ground samples, is refused unless `force`. Read on a job: `wait` (default false) returns once it "
          "is all shown. Returns get_save.",

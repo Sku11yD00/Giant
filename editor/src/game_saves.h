@@ -178,6 +178,7 @@ private:
     std::optional<world::EntityId> m_poses_from;
     u64 m_poses_run = 0; // the simulation's run they are for
     u32 m_poses_held = 0; // frames held back while bodies are being made
+    std::optional<std::pair<world::EntityId, DVec3>> m_carried_feet; // the player's carrier, waiting, and its feet
     struct Sections;
     std::unique_ptr<Sections> m_sections;
 

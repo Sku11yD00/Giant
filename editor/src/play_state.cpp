@@ -29,29 +29,58 @@ bool PlayState::placing_waits(const world::Scene& scene, const DVec3& eye) const
            m_physics.forest().waiting(); // trunks made later could stand inside the player
 }
 
-bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_generation) {
+bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_generation, const PlayerStart* at) {
     if (playing()) return true;
     m_physics.catch_up(scene); // a frame's share: never a stall
     sim::CharacterDesc desc = m_settings.body;
-    desc.position = spawn_at(camera.position);
+    m_place_eye = at != nullptr ? at->feet + DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0) : camera.position;
+    desc.position = at != nullptr ? at->feet : spawn_at(camera.position);
     m_player = m_physics.world().add_character(desc);
     if (m_player == sim::k_no_character) return false;
     m_generation = scene_generation;
-    m_saved_camera = camera;
-    m_was_simulating = m_physics.simulating();
+    m_saved_camera = at != nullptr ? at->returns_to : camera;
+    m_was_simulating = at != nullptr ? at->was_simulating : m_physics.simulating();
+    if (at != nullptr) {
+        m_start = *at;
+    } else {
+        m_start.reset();
+    }
     m_physics.set_simulating(true);
     m_input = {};
     m_keys = {};
     m_shift = m_space = m_stop = m_from_keys = false;
     m_waiting = false;
-    m_placing = placing_waits(scene, camera.position);
+    m_placing = placing_waits(scene, m_place_eye);
     m_placing_for = 0.0;
     m_physics.world().hold_character(m_player, m_placing);
+    if (!m_placing && m_start) put_down();
     m_yaw = camera.yaw_degrees;
     m_pitch = camera.pitch_degrees;
     m_eye = desc.position.y + m_settings.eye_height;
     after_step(camera, 0.0);
     return true;
+}
+
+void PlayState::put_down() {
+    sim::PhysicsWorld& world = m_physics.world();
+    if (!m_start) {
+        const DVec3 at = spawn_at(m_place_eye);
+        world.set_character_position(m_player, at);
+        m_eye = at.y + m_settings.eye_height;
+        return;
+    }
+    // As the save had it: where it stood (or hung, or fell), how it moved, what it held or was held by.
+    const PlayerStart s = *m_start;
+    m_start.reset();
+    world.set_character_position(m_player, s.feet);
+    world.set_character_velocity(m_player, s.velocity);
+    m_eye = s.feet.y + m_settings.eye_height;
+    if (s.carried_by) {
+        const sim::BodyId body = m_physics.bodies().body_of(*s.carried_by);
+        if (body != sim::k_no_body) world.carry_character(m_player, body);
+    } else if (s.climbing && world.take_hold(m_player, *s.climbing)) {
+        m_input.climb = true;
+    }
 }
 
 void PlayState::stop(EditorCamera& camera) {
@@ -155,11 +184,11 @@ bool PlayState::before_step(const world::Scene& scene, EditorCamera& camera, u64
     if (m_placing) {
         // Just started: held until what it could stand on is in, then put on it.
         m_placing_for += std::max(seconds, 0.0);
-        if (placing_waits(scene, m_saved_camera.position) && m_placing_for < 5.0) return true;
+        if (placing_waits(scene, m_place_eye) && m_placing_for < 5.0) return true;
         m_placing = false;
-        const DVec3 at = spawn_at(m_saved_camera.position);
-        world.set_character_position(m_player, at);
-        m_eye = at.y + m_settings.eye_height;
+        world.hold_character(m_player, false);
+        put_down();
+        apply_input(); // (what put_down asked of it: on a wall, holding on)
     }
     // Ground on its way under it (streamed in, just edited): held where it
     // is until it is there, rather than falling through.
@@ -188,6 +217,13 @@ void PlayState::after_step(EditorCamera& camera, double seconds) {
     camera.position = {at.x, m_eye, at.z};
     camera.yaw_degrees = m_yaw;
     camera.pitch_degrees = m_pitch;
+}
+
+bool PlayState::carry_from(const DVec3& feet, world::EntityId entity) {
+    if (!playing() || m_placing) return false;
+    m_physics.world().release_character(m_player);
+    m_physics.world().set_character_position(m_player, feet);
+    return carry(entity);
 }
 
 bool PlayState::carry(world::EntityId entity) {

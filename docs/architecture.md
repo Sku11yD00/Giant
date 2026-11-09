@@ -1618,8 +1618,23 @@ saved; a save made playing loads playing, and stopping play then stops
 simulating (whether it was on before play comes with the player, 2c); autosave's gathering is the same as a save's (every game cell,
 every dented tile copied on the frame).
 
-Known limits (part 2c): the player's own state (feet, velocity, climbing,
-carrying), walkers and inventories are not saved; damage
+Part 2c: the player. While playing and put down, a section `player` holds
+its `feet`, `velocity`, `climbing` (the wall's normal, or null; not while
+pulling itself up a ledge), `carried_by` (an entity, or null), and what
+stopping goes back to (`returns_to`, the camera, and `was_simulating`).
+Loading starts play with `PlayState::start(..., PlayerStart*)`: held as
+play starting is until what it stands on is in (at its feet, not the
+camera), then put there (`set_character_position`), moving as it was
+(`sim::PhysicsWorld::set_character_velocity`), on its wall again
+(`take_hold`: as walking into it, the wall it faces out of) or carried
+again (the carrier's body, if made by then; a carrier whose saved pose is
+put back later carries it again from its saved feet once it is); stopping
+play after a load goes back where the saved game's play began. A save made
+while a load's player is still being put down holds that load's player. Known limits: a carrier whose body is not made yet is
+not taken hold of again; a jump asked for, the eased eye height and the
+input held (keys, set_player_input) are not saved.
+
+Known limits (part 2d): walkers and inventories are not saved; damage
 in a cell that streamed out while playing is not in the save (the
 simulation lets it go there too); a save gathers every cell the forest
 knows at once (a frame's cost grows with the cells loaded); list_saves
