@@ -15,6 +15,8 @@ ByteAddressBuffer read_buffer_nonuniform(uint descriptor) {
     return ResourceDescriptorHeap[NonUniformResourceIndex(descriptor)];
 }
 Texture2D<float4> read_texture(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
+// A texture with more than one layer (TextureDesc::layers > 1).
+Texture2DArray<float4> read_texture_array(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 RWTexture2D<float4> write_texture(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 // Integer formats (r32_uint, rg32_uint: e.g. a visibility buffer) need
 // integer views; reading them through the float4 helpers is invalid.

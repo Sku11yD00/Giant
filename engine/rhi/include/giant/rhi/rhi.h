@@ -107,10 +107,25 @@ enum class Format {
     r32_uint,
     rg32_uint,     // e.g. a visibility buffer: cluster and triangle ids
     depth32_float, // reverse-Z depth: 1 is near, 0 is infinitely far
+    // Block compressed (4x4 texel blocks; sampled only, made with their
+    // contents): material textures, cooked offline.
+    bc1_unorm, // RGB (and 1-bit alpha), 8 bytes a block
+    bc1_srgb,
+    bc4_unorm, // one channel (roughness, height, a mask), 8 bytes a block
+    bc5_unorm, // two channels (a normal map's x and y), 16 bytes a block
+    bc7_unorm, // RGBA, high quality, 16 bytes a block
+    bc7_srgb,
 };
 
-u32 bytes_per_pixel(Format format);
+u32 bytes_per_pixel(Format format); // 0 for block-compressed formats
 bool is_depth(Format format);
+bool is_block_compressed(Format format);
+u32 block_bytes(Format format); // bytes per 4x4 block (0 for other formats)
+// Bytes of one mip level `width` x `height` texels (blocks rounded up), rows
+// packed tight, and the bytes of one row of it (of blocks: 4 texel rows).
+u64 level_bytes(Format format, u32 width, u32 height);
+u64 level_row_bytes(Format format, u32 width);
+u32 level_rows(Format format, u32 height); // texel rows, or rows of blocks
 
 enum class Memory {
     gpu,      // fastest for the GPU; filled through uploads or by shaders
@@ -163,7 +178,20 @@ struct TextureDesc {
     Format format = Format::rgba8_srgb;
     TextureUsage usage = TextureUsage::sampled;
     const char* name = "texture";
+    // Mip levels (1 to the full chain, each half the last, rounded down, at
+    // least 1) and array layers (1 to 2048; more than 1 reads as a
+    // Texture2DArray). Both above 1 only for sampled textures; block-
+    // compressed ones are sampled only, their size a multiple of 4.
+    u32 mips = 1;
+    u32 layers = 1;
 };
+
+u32 full_mip_count(u32 width, u32 height);
+// Bytes of a texture's contents: every layer, each with its mips from
+// largest to smallest, each level packed as level_bytes.
+u64 texture_bytes(const TextureDesc& desc);
+// Why the device would refuse the description, or nullptr when it is sound.
+const char* texture_desc_problem(const TextureDesc& desc);
 
 // What a resource is used for next. barrier() switches between them.
 enum class ResourceState {
@@ -473,8 +501,11 @@ public:
     // records. Uploads inside a frame are counted in FrameStats::upload_bytes;
     // the caller keeps them within its per-frame budget.
     virtual BufferHandle create_buffer(const BufferDesc& desc, std::span<const u8> initial = {}) = 0;
-    // `initial` (optional): width * height * bytes_per_pixel, rows top to
-    // bottom. Copied like create_buffer's (waited for only outside a frame).
+    // `initial` (optional): texture_bytes(desc), layer after layer, each
+    // mip after mip from the largest, rows top to bottom (of blocks, for
+    // block-compressed formats). Copied like create_buffer's (waited for only
+    // outside a frame). Block-compressed textures need it. A description
+    // texture_desc_problem refuses gives an invalid handle (logged).
     virtual TextureHandle create_texture(const TextureDesc& desc,
                                          std::span<const u8> initial = {}) = 0;
     virtual PipelineHandle create_pipeline(const GraphicsPipelineDesc& desc) = 0;
