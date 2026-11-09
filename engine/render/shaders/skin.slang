@@ -88,7 +88,9 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
         ByteAddressBuffer matrices = read_buffer(push.matrices);
         float3 n = float3(0.0, 0.0, 0.0);
         float3 t = float3(0.0, 0.0, 0.0);
-        float handedness = 1.0; // the first joint mirroring turns the bitangent (as the CPU rest pose does)
+        // The first weighted joint mirroring turns the bitangent (as the CPU
+        // rest pose does with slot 0, which glTF import always weights).
+        float handedness = 0.0;
         for (uint k = 0; k < 4; ++k) {
             const float w = float((weights >> (8 * k)) & 0xFFu) / 255.0;
             const uint joint = ((k < 2 ? joints.x : joints.y) >> (16 * (k & 1))) & 0xFFFFu;
@@ -102,10 +104,11 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
             p += row_apply(r0, r1, r2, bind, 1.0) * w;
             n += row_apply(r0, r1, r2, bind_normal, 0.0) * w;
             t += row_apply(r0, r1, r2, bind_tangent.xyz, 0.0) * w;
-            if (k == 0 && dot(r0.xyz, cross(r1.xyz, r2.xyz)) < 0.0) {
-                handedness = -1.0;
+            if (handedness == 0.0) {
+                handedness = dot(r0.xyz, cross(r1.xyz, r2.xyz)) < 0.0 ? -1.0 : 1.0;
             }
         }
+        handedness = handedness < 0.0 ? -1.0 : 1.0;
         const float len2 = dot(n, n);
         n = len2 > 1e-24 ? n * rsqrt(len2) : float3(0.0, 1.0, 0.0);
         // The tangent stays perpendicular to the posed normal.
