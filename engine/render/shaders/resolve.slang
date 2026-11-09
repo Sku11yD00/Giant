@@ -473,7 +473,10 @@ void dust_along(Extras e, Frame f, float3 dir, float scene_t, out float trans, o
     trans = exp(-min(depth, 60.0));
     const float mu = dot(dir, f.sun_direction.xyz);
     const float phase = (1.0 + 0.5 * mu) / (4.0 * k_pi);
-    const float3 light = f.sun_light.rgb * (2.0 * phase) + lerp(ambient_light(f, float3(0.0, -1.0, 0.0)), ambient_light(f, float3(0.0, 1.0, 0.0)), 0.6);
+    float3 below;
+    float3 above;
+    ambient_light2(f, float3(0.0, -1.0, 0.0), float3(0.0, 1.0, 0.0), below, above);
+    const float3 light = f.sun_light.rgb * (2.0 * phase) + lerp(below, above, 0.6);
     scatter = (tint / depth) * light * (1.0 - trans);
 }
 

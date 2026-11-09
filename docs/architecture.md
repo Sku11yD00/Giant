@@ -572,8 +572,8 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   cloud shadow (screen reflections are added scaled by what of the pixel comes through). A change of cloud size rescales the wind offset about the camera, so the clouds overhead stay put. Settings `clouds`, `cloud_steps` (48) and `cloud_shadows`.
   Not yet: lightning, clouds parting round giants.
 - **Physical sky (photoreal part 1).** With `RenderSettings::physical_sky`
-  (default on), the sky passes add three tables. They run every frame,
-  without history, all inside the "sky" timing:
+  (default on), the sky passes add three tables, without history, all
+  inside the "sky" timing (the last two every frame):
   - **Light scattered many times** (Hillaire 2020). A 32^2 table, indexed
     by the sun's cosine and the square root of height:
     - each texel marches 64 directions with 20 steps;
@@ -610,13 +610,14 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
       takes out;
     - the lower half is the ground (albedo 0.2), lit by the sun through
       the clouds' mean shade and by that sky above;
-    - past dusk (the sun 3 degrees under the horizon) it goes over to
-      the flat `sky_light`/`ground_light` (the night's; no moon or stars
-      yet).
+    - in the dusk (the sun 3 to 6 degrees under the horizon) it goes
+      over to the flat `sky_light`/`ground_light` (the night's; no moon
+      or stars yet).
 
     `ambient_light` / `ambient_light2` (common.slang) evaluate it for
     shading's diffuse and specular ambient, global illumination's sky
-    (cone misses, unlit voxels), the voxel view and dust.
+    (cone misses, unlit voxels) and dust, in lit views (the voxel view
+    keeps the flat colours).
     `sky_light_of`/`ground_light_of` (sky_common.slang) do the same for
     the clouds' light, rain and snow, and the fog's colour. Together they
     replace the flat hemisphere (`FrameConstants::sky_flags` bit 0,

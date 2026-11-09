@@ -1946,6 +1946,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // The sky (lit views): its view table, cloud shadows and clouds, before shading.
     rhi::TransientMemory sky_params{};
     const bool sky = frame.sky.on && lit_view && draw_sky(cmd, data, frame, sky_params);
+    if (!sky) {
+        m_sky_ambient_made = false; // (not kept up: the flat colours until it is filled again)
+    }
     mark(CpuSection::sky);
     cmd.begin_timing("shading");
     // With screen reflections, shading writes radiance before exposure and

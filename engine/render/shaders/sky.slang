@@ -152,9 +152,9 @@ void cs_sky_aerial(uint3 id : SV_DispatchThreadID) {
 // ambient_light) and the sky's other lighting (sky_light_of): the sky view
 // table over the upper half; under the clouds, as they cover the sky, their
 // deck (grey, even: the clear sky's light and half the sunlight the clouds
-// take out); below, the ground lit by the sun and that sky. Past dusk (the
-// sun 3 degrees under the horizon) it goes over to the flat sky_light and
-// ground_light (the night's: no moon or stars yet). Projected onto 9
+// take out); below, the ground lit by the sun and that sky. In the dusk
+// (the sun 3 to 6 degrees under the horizon) it goes over to the flat
+// sky_light and ground_light (the night's: no moon or stars yet). Projected onto 9
 // spherical harmonics, convolved with the cosine and over pi (so a
 // surface's diffuse light is its albedo times the sum). One group: 1024
 // directions even over the sphere, 16 a thread.
@@ -166,7 +166,9 @@ groupshared float3 g_sh[9 * 64];
 void cs_sky_ambient(uint tid : SV_GroupIndex) {
     const Sky s = load_sky(push.params, push.params_offset);
     const float clouded = (s.flags & 1u) != 0u ? saturate(s.cloud_cover) : 0.0;
-    const float day = saturate((s.sun_direction.y + 0.05) * 20.0);
+    // Night: from 3 degrees under the horizon to 6 (sin -0.0523 to -0.1045,
+    // where the flat colours are down to their night floor).
+    const float day = saturate((s.sun_direction.y + 0.1045) / 0.0522);
     const uint rings = 32;
     const uint around = 32;
     const float solid = 4.0 * k_pi_sky / float(rings * around);
@@ -412,7 +414,9 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
         const float3 lum = float3(0.2126, 0.7152, 0.0722);
         const float3 above = sky_light_of(s); // (the physical sky's own, or the flat colours)
         const float3 below = ground_light_of(s);
-        const float deck = dot(above, lum) + dot(s.sun_light, lum) * 0.15 * saturate(s.sun_direction.y * 2.0);
+        // (The physical sky's deck holds the sunlight it scatters already.)
+        const float sun_share = (s.atmosphere & 4u) != 0u ? 0.0 : 0.15;
+        const float deck = dot(above, lum) + dot(s.sun_light, lum) * sun_share * saturate(s.sun_direction.y * 2.0);
         const float3 deck_light = float3(deck, deck, deck);
         float t = enter + ds * dither(id.xy);
         for (uint i = 0; i < steps && transmittance > 0.01; ++i) {
