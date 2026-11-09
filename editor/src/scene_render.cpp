@@ -2,10 +2,12 @@
 
 #include "far_ground.h"
 #include "scatter_placer.h"
+#include "texture_library.h"
 
 #include "giant/sim/swing.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 
@@ -29,12 +31,38 @@ render::BuiltinMesh builtin(world::Shape shape) {
     return render::BuiltinMesh::cube;
 }
 
+// The textures a material's maps ask for (requested from the library),
+// k_no_ref each for none. `textured`: drawn on a mesh (other shapes have no
+// uvs, so draw the plain values).
+std::array<u32, 4> texture_refs(const world::Material& m, bool textured, SceneFrame& out) {
+    std::array<u32, 4> refs{TextureLibrary::k_no_ref, TextureLibrary::k_no_ref, TextureLibrary::k_no_ref,
+                            TextureLibrary::k_no_ref};
+    if (out.textures == nullptr || !textured || m.maps.empty()) return refs;
+    using Slot = TextureLibrary::Slot;
+    const world::MaterialMaps& maps = m.maps;
+    const bool green_down = maps.normal_green_down && !maps.normal.empty();
+    refs[0] = out.textures->request({maps.base_color, Slot::base_color, false, {}});
+    refs[1] = out.textures->request({maps.normal, Slot::normal, green_down, {}});
+    refs[2] = out.textures->request({maps.roughness_metal, Slot::roughness_metal, green_down, maps.normal});
+    refs[3] = out.textures->request({maps.occlusion, Slot::occlusion, false, {}});
+    return refs;
+}
+
+void set_textures(render::Material& r, const std::array<u32, 4>& refs, const TextureLibrary& textures) {
+    r.base_color_texture = textures.id(refs[0]);
+    r.normal_texture = textures.id(refs[1]);
+    r.roughness_metal_texture = textures.id(refs[2]);
+    r.occlusion_texture = textures.id(refs[3]);
+}
+
 // The material's index in the table, adding it if new, and one more user.
-u32 material_index(const world::Material& m, SceneFrame& out) {
+u32 material_index(const world::Material& m, SceneFrame& out, bool textured = false) {
     SceneFrame::MaterialKey key{};
     const float values[10] = {m.base_color.x, m.base_color.y, m.base_color.z, m.roughness, m.metallic,
                               m.emissive.x,   m.emissive.y,   m.emissive.z,   m.sway,      m.flutter};
     std::memcpy(key.bits, values, sizeof(values));
+    const std::array<u32, 4> refs = texture_refs(m, textured, out);
+    std::copy(refs.begin(), refs.end(), key.bits + 10);
     const auto [it, added] = out.lookup.try_emplace(key, static_cast<u32>(out.materials.size()));
     if (added) {
         render::Material r;
@@ -44,7 +72,9 @@ u32 material_index(const world::Material& m, SceneFrame& out) {
         r.emissive = m.emissive;
         r.sway = m.sway;
         r.flutter = m.flutter;
+        if (out.textures != nullptr) set_textures(r, refs, *out.textures);
         out.materials.push_back(r);
+        out.material_textures.push_back(refs);
         out.users.push_back(0);
     }
     ++out.users[it->second];
@@ -106,7 +136,7 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     i.position = t.position;
     i.rotation = t.rotation;
     i.mesh = mesh;
-    i.material = material_index(m, out);
+    i.material = material_index(m, out, shape == world::Shape::mesh);
     i.moves = moves;
     cell.instances.push_back(i);
 }
@@ -167,7 +197,7 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
                             lp.mesh = renderer.builtin(builtin(piece.shape));
                         }
                         if (lp.mesh != render::k_no_mesh) {
-                            lp.material = material_index(piece.material, out);
+                            lp.material = material_index(piece.material, out, piece.shape == world::Shape::mesh);
                             --out.users[lp.material]; // counted per instance below
                         }
                     }
@@ -179,7 +209,7 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
                 look.mesh = renderer.builtin(builtin(item.shape));
             }
             if (look.mesh != render::k_no_mesh) {
-                look.material = material_index(item.material, out);
+                look.material = material_index(item.material, out, item.shape == world::Shape::mesh);
                 --out.users[look.material]; // counted per instance below
             }
         }
@@ -550,6 +580,7 @@ void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const F
     out.where.clear();
     out.lookup.clear();
     out.materials.clear();
+    out.material_textures.clear();
     out.users.clear();
     out.order.clear();
     out.instances.clear(); // laid out afresh
@@ -666,6 +697,7 @@ bool same_kit(const world::Kit& a, const world::Kit& b) {
             !same3(p.material.base_color, q.material.base_color) || p.material.roughness != q.material.roughness ||
             p.material.metallic != q.material.metallic || !same3(p.material.emissive, q.material.emissive) ||
             p.material.sway != q.material.sway || p.material.flutter != q.material.flutter ||
+            !(p.material.maps == q.material.maps) ||
             p.decal.shape != q.decal.shape || p.decal.opacity != q.decal.opacity ||
             p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed) {
             return false;
@@ -932,6 +964,14 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.skinned = nullptr;
     out.cloth = nullptr;
     out.fallen = nullptr;
+    // Textures that came (or changed) since: every material asking for them
+    // draws them from now on.
+    if (out.textures != nullptr && out.textures->version() != out.textures_version) {
+        out.textures_version = out.textures->version();
+        for (usize i = 0; i < out.materials.size(); ++i) {
+            set_textures(out.materials[i], out.material_textures[i], *out.textures);
+        }
+    }
     if (!layout && out.cells_rebuilt == 0) {
         return; // as last frame
     }

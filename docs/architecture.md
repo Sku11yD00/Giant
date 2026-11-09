@@ -248,6 +248,21 @@ an offline cooker can use it without a device.
   specular anti-aliasing measures the bent normal, while shadow lookups,
   bounce light and reflection cones start from the surface's own normal so
   bumps do not shift them. Far-field voxels keep the plain colours.
+- **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
+  names image files (base colour, normal, glTF metallic-roughness, glTF
+  occlusion; `normal_green_down` for DirectX normal maps), saved under
+  `"material": {"maps": ...}` in cells and kits and on scatter items, only
+  when set. The editor's `TextureLibrary` cooks each (file, slot) on two
+  worker threads of its own the first time a material asks for it
+  (roughness with the material's normal map, for Toksvig), keeps the
+  result in `giant_cache/textures/<hash>.gtex` (the hash covers the key and
+  the files' sizes and change times, so an edited file cooks again) and
+  uploads finished ones once a frame under a byte budget (48 MiB, at least
+  one). `SceneFrame` dedupes materials on their values and texture refs,
+  requests textures only for meshes (built-in shapes have no uvs) and
+  fills in renderer ids as they become ready, without rebuilding cells.
+  Until then a material draws its plain values. MCP: `maps` on entities
+  and scatter items, `get_textures`, `reload_textures`.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool

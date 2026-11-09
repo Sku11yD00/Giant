@@ -44,6 +44,7 @@ struct BrushSettings {
 };
 
 class MeshLibrary;
+class TextureLibrary;
 class TerrainMeshes;
 class FarGround;
 class ScatterPlacer;
@@ -203,6 +204,9 @@ struct EditorState {
     // Imported meshes; set by main (and tests). Entities with shape mesh
     // name a file in it.
     MeshLibrary* meshes = nullptr;
+    // Material textures cooked from image files (get_textures); set by main
+    // (and tests). Null: materials draw their plain values.
+    TextureLibrary* textures = nullptr;
     // The world streamed by cell (open_world, save_world); set by main (and
     // tests). Null: worlds are not available.
     WorldStreaming* world = nullptr;

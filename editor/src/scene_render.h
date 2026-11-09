@@ -10,6 +10,7 @@
 #include "giant/sim/scene_physics.h"
 #include "giant/world/scene.h"
 
+#include <array>
 #include <map>
 #include <span>
 #include <unordered_map>
@@ -19,6 +20,7 @@ namespace giant::editor {
 
 class FarGround;
 class ScatterPlacer;
+class TextureLibrary;
 
 // What the renderer draws of a scene, kept from frame to frame by world
 // cell (world::k_cell_size): a frame rebuilds only the cells whose
@@ -85,8 +87,16 @@ struct SceneFrame {
         u32 decals = 0;
     };
 
+    // Material image files are cooked by `textures` (set by the owner; null:
+    // materials draw their plain values), each material's textures kept
+    // beside it (TextureLibrary refs: base colour, normal, roughness-metal,
+    // occlusion) and their renderer ids filled in as they become ready.
+    TextureLibrary* textures = nullptr;
+    std::vector<std::array<u32, 4>> material_textures; // per material
+    u64 textures_version = ~u64{0};
+
     struct MaterialKey {
-        u32 bits[10];
+        u32 bits[14]; // the values, then the texture refs
         bool operator==(const MaterialKey&) const = default;
     };
     struct MaterialHash {
