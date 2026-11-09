@@ -137,6 +137,13 @@ public:
         usize trees = 0;
     };
     KeptDamage keep_damage(world::Scene& scene);
+    // What a game save keeps of the damage shown now, by cell, touching
+    // nothing: the game's damage (world::Scene::game_damage), with what the
+    // bodies have broken and the forest has felled now (as keep_damage
+    // gathers them; the kept damage of the world they show is in it too,
+    // as a game breaks more than the world kept, never less). Cells with
+    // none are left out.
+    world::Damage game_damage_now(world::Scene& scene);
     // Fallen scatter trees (drawn where they lie), and the cells to draw again (taken by the frame).
     const sim::FallenTrees& fallen_trees() const { return m_forest.fallen(); }
     std::vector<world::CellCoord> take_tree_redraw() { return m_forest.take_redraw(); }

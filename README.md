@@ -340,6 +340,9 @@ Open-world systems:
   from the world itself, cell by cell (only the cells play reached, and
   only those that changed since), committed so a crash never loses the
   last save.
+- E4b: save_game and load_game. Broken buildings, felled trees, the
+  camera, play and the weather are saved beside the open world and shown
+  again on loading, without ever touching the world's own files.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

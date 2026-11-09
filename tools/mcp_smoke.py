@@ -190,6 +190,15 @@ def world_gate(tool, call, check):
         ground = tool("get_terrain", {"points": [[5, 5], [6005, 5]]})
         check(ground["tiles"] == 1 and ground["samples"] == 8 and ground["heights"] == [1, None],
               f"the near tile loads with its cell, got {ground}")
+        saved = tool("save_game", {"slot": "smoke", "wait": True})
+        check(saved["saves"] == 1 and saved["error"] == "", f"a game saved beside the world, got {saved}")
+        slots = tool("list_saves")["slots"]
+        check(len(slots) == 1 and slots[0]["name"] == "smoke" and slots[0]["of_this_world"], f"listed, got {slots}")
+        loaded = tool("load_game", {"slot": "smoke", "wait": True})
+        check(loaded["loads"] == 1 and loaded["doing"] == "", f"the game loaded, got {loaded}")
+        tool("close_game")
+        tool("delete_save", {"slot": "smoke", "wait": True})
+        check(tool("list_saves")["slots"] == [], "the save deleted")
         far = {}
         for _ in range(300):
             far = tool("get_world")["far_ground"]
@@ -928,7 +937,7 @@ def main() -> int:
         names = {t["name"] for t in call("tools/list")["tools"]}
         for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation",
                          "get_swing", "find_path", "get_nav", "walk_to", "get_walker", "play_sound",
-                         "record_audio", "get_audio"):
+                         "record_audio", "get_audio", "save_game", "load_game", "list_saves", "get_save"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")
