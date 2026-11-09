@@ -5,6 +5,7 @@
 #include "../src/editor_commands.h"
 #include "../src/game_saves.h"
 #include "../src/physics_state.h"
+#include "../src/play_state.h"
 #include "../src/scatter_placer.h"
 #include "../src/weather_state.h"
 #include "../src/world_streaming.h"
@@ -139,7 +140,7 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
         GIANT_CHECK(r.ok && r.value["saves"] == 1 && r.value["error"] == "" && r.value["base_slot"] == "one");
         const u64 cells = r.value["cells"].get<u64>();
-        GIANT_CHECK(cells >= 2 && r.value["written"] == cells + 2); // the cells and two sections
+        GIANT_CHECK(cells >= 2 && r.value["written"] == cells + 3); // the cells and two sections
         // The world itself is untouched.
         GIANT_CHECK(scene.damage().size() == 1 && scene.game_damage().empty() && world_files(folder) == files);
         GIANT_CHECK(std::filesystem::exists(folder / "saves" / "one" / "save.json"));
@@ -165,7 +166,7 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         GIANT_CHECK(!run("keep_damage").ok); // the game's is not the world's
         // Saved again, nothing changed: only the sections are written.
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == 2 && r.value["cells"] == cells);
+        GIANT_CHECK(r.ok && r.value["written"] == 3 && r.value["cells"] == cells);
         GIANT_CHECK(world_files(folder) == files);
         GIANT_CHECK(scene.game_damage_in({3, 0}) == nullptr); // the world's alone there: not the save's
         // The scene's weather changed: it shows again.
@@ -176,11 +177,11 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         GIANT_CHECK(run("delete_save", {{"slot", "one"}, {"wait", true}}).ok);
         GIANT_CHECK(run("get_save").value["base_slot"] == "");
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == cells + 2);
+        GIANT_CHECK(r.ok && r.value["written"] == cells + 3);
 
         // Another slot (whole), then made to look of another world: refused unless forced.
         r = run("save_game", {{"slot", "two"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == cells + 2);
+        GIANT_CHECK(r.ok && r.value["written"] == cells + 3);
         const std::filesystem::path manifest = folder / "saves" / "two" / "save.json";
         std::string text = read_all(manifest);
         const usize at = text.find("\"hash\": \"");
@@ -374,7 +375,7 @@ GIANT_TEST("game saves: the ground dented is saved and pressed in again, never i
         GIANT_CHECK(physics.dent(scene, crater, {20.0, 1.0, 20.0}) == 1);
         GIANT_CHECK(*scene.terrain.find({0, 0}) != dented0);
         r = run("save_game", {{"slot", "dug"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 3); // tile 0's cell, camera, weather
+        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 4); // tile 0's cell, camera, weather, bodies
         GIANT_CHECK(run("simulate", {{"on", false}}).ok);
         frame();
         GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0);
@@ -401,6 +402,114 @@ GIANT_TEST("game saves: the ground dented is saved and pressed in again, never i
         GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0);
         GIANT_CHECK(run("close_game").ok);
         GIANT_CHECK(*scene.terrain.find({0, 0}) == authored);
+    }
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+}
+
+GIANT_TEST("game saves: the bodies simulating moved are put back where they were; autosave while playing") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        PhysicsState physics;
+        PlayState play{physics};
+        WorldStreaming streaming;
+        GameSaves saves;
+        EditorState state;
+        state.physics = &physics;
+        state.play = &play;
+        state.world = &streaming;
+        state.saves = &saves;
+        ai::CommandRegistry commands;
+        register_scene_commands(commands, state);
+        register_physics_commands(commands, state);
+        register_save_commands(commands, state);
+        const auto run = [&](const char* name, const Json& args = Json::object()) {
+            return commands.execute(name, args, {});
+        };
+        world::Scene& scene = state.scene;
+        world::Entity floor;
+        floor.shape = world::Shape::plane;
+        floor.transform.position = {32.0, 0.0, 32.0};
+        floor.transform.scale = {60.0f, 1.0f, 60.0f};
+        scene.add(floor);
+        world::Entity crate;
+        crate.shape = world::Shape::cube;
+        crate.body = world::BodyKind::dynamic;
+        crate.transform.position = {30.0, 3.0, 30.0};
+        const world::EntityId id = scene.add(crate);
+        GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
+        const auto frame = [&](double seconds = 1.0 / 60.0) {
+            physics.update(scene, scene.take_changes(), 1.0 / 60.0);
+            saves.update(state, seconds);
+        };
+        frame();
+        // Simulating (not playing): the crate falls and is pushed aside.
+        GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+        GIANT_CHECK(run("step_physics", {{"seconds", 2}}).ok);
+        const world::Transform* pose = &physics.bodies().poses().at(id);
+        GIANT_CHECK(std::fabs(pose->position.y - 0.5) < 0.05);
+        const Quat turned = normalize(Quat{0.0f, 0.38268343f, 0.0f, 0.92387953f});
+        GIANT_CHECK(physics.place_body(id, {40.0, 0.5, 25.0}, turned));
+        const DVec3 saved_at{40.0, 0.5, 25.0};
+        ai::CommandResult r = run("save_game", {{"slot", "crate"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["bodies"] == 1);
+        // Stopped: the crate back where the scene has it.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(physics.bodies().poses().empty());
+        // Loaded: simulating again, the crate where it was saved (a share a frame, once its body is made).
+        r = run("load_game", {{"slot", "crate"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["bodies"] == 1 && physics.simulating());
+        for (int i = 0; i < 4 && saves.bodies_waiting() > 0; ++i) frame();
+        GIANT_CHECK(saves.bodies_waiting() == 0 && saves.status().bodies_applied == 1);
+        GIANT_CHECK(physics.bodies().poses().count(id) == 1);
+        const DVec3 now = physics.bodies().poses().at(id).position;
+        GIANT_CHECK(std::fabs(now.x - saved_at.x) < 0.01 && std::fabs(now.z - saved_at.z) < 0.01);
+        // Moved in the world since: not put back (not this save's).
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        GIANT_CHECK(run("set_entity", {{"id", id}, {"position", {20.0, 3.0, 20.0}}}).ok);
+        frame();
+        r = run("load_game", {{"slot", "crate"}, {"wait", true}});
+        GIANT_CHECK(r.ok && saves.bodies_waiting() == 0 && saves.status().bodies_skipped == 1);
+        GIANT_CHECK(physics.bodies().poses().count(id) == 0);
+        // Deleted from the world since: it waits (it may yet stream in) and holds nothing else back.
+        GIANT_CHECK(run("delete_entities", {{"ids", {id}}}).ok);
+        frame();
+        r = run("load_game", {{"slot", "crate"}, {"wait", true}});
+        GIANT_CHECK(r.ok && saves.bodies_waiting() == 1 && physics.simulating());
+        // Autosave: while playing, every autosave_seconds of play, its own base (a user's save stays of changes).
+        r = run("save_game", {{"slot", "mine"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["base_slot"] == "mine");
+        GIANT_CHECK(run("set_autosave", {{"seconds", 10}}).ok && !run("set_autosave", {{"seconds", -1}}).ok);
+        state.camera.position = {32.0, 5.0, 32.0};
+        GIANT_CHECK(run("play", {{"on", true}}).ok);
+        for (int i = 0; i < 30 && play.waiting_for_ground(); ++i) frame();
+        frame(5.0);
+        GIANT_CHECK(saves.status().autosaves == 0 && !saves.busy()); // 5 s of play
+        frame(6.0);
+        saves.wait();
+        frame();
+        GIANT_CHECK(saves.status().autosaves == 1 && saves.status().autosave_error.empty());
+        GIANT_CHECK(saves.status().bodies == 1 && saves.bodies_waiting() == 1); // (the waiting body kept in it)
+        GIANT_CHECK(std::filesystem::exists(folder / "saves" / "autosave" / "save.json"));
+        frame(1.0);
+        GIANT_CHECK(saves.status().autosaves == 1); // not again until 10 s more
+        r = run("save_game", {{"slot", "mine"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["saves"] == 3 && r.value["base_slot"] == "mine");
+        GIANT_CHECK(run("set_autosave", {{"seconds", 0}}).ok);
+        frame(100.0);
+        GIANT_CHECK(saves.status().autosaves == 1 && !saves.busy());
+        // A bad bodies section is refused whole.
+        GIANT_CHECK(run("play", {{"on", false}}).ok);
+        const std::filesystem::path sections = folder / "saves" / "mine" / "sections";
+        for (const auto& e : std::filesystem::directory_iterator(sections)) {
+            if (e.path().filename().string().rfind("bodies.", 0) != 0) continue;
+            std::ofstream(e.path(), std::ios::binary) << "{\"simulating\": true, \"poses\": [{\"entity\": 1, "
+                                                          "\"position\": [0, 0, 0], \"rotation\": [0, 0, 0, 2], "
+                                                          "\"of\": {\"position\": [0, 0, 0], \"rotation\": [0, 0, 0, 1]}}]}";
+        }
+        r = run("load_game", {{"slot", "mine"}, {"wait", true}});
+        GIANT_CHECK(!r.ok);
     }
     std::error_code error;
     std::filesystem::remove_all(folder, error);

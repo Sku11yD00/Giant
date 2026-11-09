@@ -1,5 +1,5 @@
 // Game save commands: save_game, load_game, list_saves, delete_save,
-// get_save, close_game (game_saves.h). View state, not undoable.
+// get_save, close_game, set_autosave (game_saves.h). View state, not undoable.
 #include "editor_commands.h"
 #include "game_saves.h"
 #include "physics_state.h"
@@ -8,6 +8,7 @@
 #include "giant/core/assert.h"
 #include "giant/save/slot.h"
 
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -50,6 +51,14 @@ Json status_json(const EditorState& state) {
                 {"skipped", s.skipped},
                 {"ground_waiting", g.ground_waiting()},
                 {"game_tiles", state.physics != nullptr ? state.physics->game_ground().tiles() : usize{0}},
+                {"bodies", s.bodies},
+                {"bodies_applied", s.bodies_applied},
+                {"bodies_skipped", s.bodies_skipped},
+                {"bodies_waiting", g.bodies_waiting()},
+                {"autosave_seconds", g.autosave_seconds},
+                {"autosaves", s.autosaves},
+                {"autosave_error", s.autosave_error},
+                {"gather_ms", s.gather_ms},
                 {"play_seconds", g.play_seconds()},
                 {"weather_override", g.weather() != nullptr},
                 {"game_cells", state.scene.game_damage().size()}};
@@ -76,7 +85,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"save_game",
          "Saves the game to `slot` beside the open world (<world>/saves/<slot>/), never into the world's own "
-         "files: by cell, the damage shown (broken buildings' pieces where they lie, felled trees; what "
+         "files: whether simulating and where the dynamic bodies it moved are; by cell, the damage shown (broken buildings' pieces where they lie, felled trees; what "
          "simulating broke and a loaded save's) and the ground dented (craters, footprints: each tile whole), and the camera, whether playing, and the weather it is "
          "going to with the ground (wet, snow). A save to the slot last saved or loaded writes only the cells "
          "changed since. Written on a job (a crash never loses the last save): `wait` (default false) "
@@ -103,7 +112,8 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
          "broke since goes), the save's damage and dented ground show over the world's (a share of cells each frame; "
          "a tile not streamed in yet is pressed in when it is), the "
          "camera and the weather come back (shown over the scene's own until set_weather, clear_weather or "
-         "close_game), and play starts again if it was on. A save of another world, or of the world with "
+         "close_game), and play (or simulating) starts again if it was on, the moved bodies put back where they were (a share a "
+         "frame, after `wait` too: each once its body is made). A save of another world, or of the world with "
          "other kits, scatter or ground samples, is refused unless `force`. Read on a job: `wait` (default false) returns once it "
          "is all shown. Returns get_save.",
          Json{{"type", "object"},
@@ -183,12 +193,34 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
          "last one's), `base_slot` (last saved or loaded: a save there writes only changes), `saves`, "
          "`loads`, the last save's chunk files `written` and `removed`, `cells` and `applied`, `tiles` (of those, "
          "with ground), `skipped` (ground not pressed: another sample count), `ground_waiting` (for its tile), "
-         "`game_tiles` (pressed in now), "
+         "`game_tiles` (pressed in now), `bodies` (moved bodies of the last save or load), `bodies_applied`, "
+         "`bodies_skipped` (gone, moved in the world since, or the simulation stopped), `bodies_waiting` (for "
+         "their body), `autosave_seconds`, `autosaves`, `autosave_error`, `gather_ms` (the last save's cost on "
+         "the frame), "
          "`play_seconds`, `weather_override`, `game_cells` (cells showing a game's damage) and `folder`.",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
          [&state](const Json&, CommandContext&) {
              if (state.saves == nullptr) return no_saves();
+             return CommandResult::success(status_json(state));
+         }});
+
+    add(registry,
+        {"set_autosave",
+         "Sets how often the game is saved to the slot \"autosave\" while playing: every `seconds` of play "
+         "(0: never; default 300). Its errors are `autosave_error`, apart from `error`; a save to another slot "
+         "still writes only changes. Returns get_save.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"seconds"}},
+              {"properties", {{"seconds", {{"type", "number"}, {"minimum", 0}, {"maximum", 86400}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.saves == nullptr) return no_saves();
+             const double seconds = args["seconds"].get<double>();
+             if (!std::isfinite(seconds) || seconds < 0.0 || seconds > 86400.0)
+                 return CommandResult::failure("seconds must be from 0 to 86400");
+             state.saves->autosave_seconds = seconds;
              return CommandResult::success(status_json(state));
          }});
 

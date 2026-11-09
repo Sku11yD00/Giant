@@ -299,3 +299,27 @@ GIANT_TEST("scene physics: an edit to a falling crate is seen at once, behind a 
     GIANT_CHECK(follow.stats().waiting > 1000);                    // the stream still going in
     GIANT_CHECK(std::fabs(at(follow, scene, crate).y - 500.0) < 0.1); // but the crate is where it was put
 }
+
+GIANT_TEST("scene physics: a dynamic entity placed where a save had it rests there, posed; others are refused") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ScenePhysics follow(physics);
+    Scene scene;
+    const EntityId floor = scene.add(make(world::Shape::plane, {0.0, 0.0, 0.0}, {100.0f, 1.0f, 100.0f}));
+    const EntityId cube = scene.add(make(world::Shape::cube, {0.0, 4.0, 0.0}, {1.0f, 1.0f, 1.0f},
+                                         world::BodyKind::dynamic));
+    run(physics, follow, scene, 2);
+    (void)follow.take_redraw();
+    const Quat turned = normalize(Quat{0.0f, 0.38268343f, 0.0f, 0.92387953f});
+    GIANT_CHECK(follow.place(cube, {7.0, 0.5, -3.0}, turned));
+    GIANT_CHECK(follow.poses().at(cube).position == DVec3(7.0, 0.5, -3.0) && follow.take_redraw().size() == 1);
+    run(physics, follow, scene, 60); // it rests there (on the plane)
+    GIANT_CHECK(std::fabs(at(follow, scene, cube).x - 7.0) < 0.01 && std::fabs(at(follow, scene, cube).y - 0.5) < 0.02);
+    // Not dynamic, not there, bad numbers: refused.
+    GIANT_CHECK(!follow.place(floor, {0.0, 1.0, 0.0}, Quat{}));
+    GIANT_CHECK(!follow.place(999, {0.0, 1.0, 0.0}, Quat{}));
+    GIANT_CHECK(!follow.place(cube, {std::nan(""), 1.0, 0.0}, Quat{}));
+    GIANT_CHECK(!follow.place(cube, {0.0, 1.0, 0.0}, Quat{0.0f, 0.0f, 0.0f, 2.0f}));
+    follow.reset_poses();
+    GIANT_CHECK(follow.poses().empty());
+}

@@ -11,6 +11,7 @@
 #include "giant/world/scene.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <ctime>
 
@@ -46,6 +47,40 @@ bool finite_in(const Json& j, double lo, double hi, double& out) {
     return std::isfinite(out) && out >= lo && out <= hi;
 }
 
+constexpr usize k_max_saved_poses = 65536;
+
+Json vec_json(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
+Json quat_json(const Quat& q) { return Json::array({q.x, q.y, q.z, q.w}); }
+
+bool read_vec(const Json& j, DVec3& out) {
+    double v[3];
+    if (!j.is_array() || j.size() != 3) return false;
+    for (usize i = 0; i < 3; ++i)
+        if (!finite_in(j[i], -1e8, 1e8, v[i])) return false;
+    out = {v[0], v[1], v[2]};
+    return true;
+}
+
+bool read_quat(const Json& j, Quat& out) {
+    double v[4];
+    if (!j.is_array() || j.size() != 4) return false;
+    for (usize i = 0; i < 4; ++i)
+        if (!finite_in(j[i], -1.01, 1.01, v[i])) return false;
+    const double len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]);
+    if (std::fabs(len - 1.0) > 1e-3) return false;
+    out = {static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2]), static_cast<float>(v[3])};
+    return true;
+}
+
+// Only the keys named (a typo must not silently drop data).
+bool only_keys(const Json& j, std::initializer_list<const char*> keys) {
+    for (const auto& [k, v] : j.items()) {
+        (void)v;
+        if (std::none_of(keys.begin(), keys.end(), [&](const char* n) { return k == n; })) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 // What a save or load gathered (the main thread) and its job's result.
@@ -55,10 +90,14 @@ struct GameSaves::Sections {
     bool has_weather = false; // the section was there
     std::optional<world::Weather> weather;
     world::Ground ground;
+    bool has_bodies = false;
+    bool simulating = false;
+    std::vector<SavedPose> poses;
 };
 
 struct GameSaves::Pending {
     bool load = false;
+    bool autosave = false;
     bool remove = false; // a delete's
     std::string slot;
     fs::path path;
@@ -96,12 +135,19 @@ bool GameSaves::busy() const { return m_in_flight || !m_applying.empty() || m_se
 
 void GameSaves::wait() { m_jobs.wait(m_group); }
 
-std::string GameSaves::begin_save(EditorState& state, const std::string& slot) {
+GameSaves::Base& GameSaves::base_for(const fs::path& slot_path) {
+    return slot_path.filename() == k_autosave_slot ? m_auto_base : m_base;
+}
+
+std::string GameSaves::begin_save(EditorState& state, const std::string& slot) { return save_to(state, slot, false); }
+
+std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool autosave) {
     follow(state);
     if (busy()) return "a save or load is under way";
     if (!save::valid_name(slot)) return "a slot's name is 1 to 64 of lowercase letters, digits, '-' and '_'";
     const fs::path root_path = root(state);
     if (root_path.empty()) return "no world open (game saves are kept beside a world: open_world)";
+    const auto gather_from = std::chrono::steady_clock::now();
     // What to keep, gathered now (copies only).
     world::Damage shown = state.physics != nullptr ? state.physics->game_damage_now(state.scene) : state.scene.game_damage();
     auto cells = std::make_shared<std::map<save::CellKey, GameCell>>();
@@ -120,6 +166,46 @@ std::string GameSaves::begin_save(EditorState& state, const std::string& slot) {
     // The weather it is going to (a blend under way saved as where it ends), and the ground now.
     const std::optional<world::Weather>& target = weather() != nullptr ? *weather() : state.scene.weather;
     sections["weather"] = weather_text(target, state.weather != nullptr ? state.weather->ground() : world::Ground{});
+    // Whether simulating, and the dynamic entities it moved (each with where the scene has it: one
+    // moved in the world since is not this save's), those of a load not put back yet too.
+    usize posed = 0;
+    {
+        Json poses = Json::array();
+        const bool simulating = state.physics != nullptr && state.physics->simulating();
+        const auto add = [&](world::EntityId id, const DVec3& p, const Quat& r, const DVec3& of_p, const Quat& of_r) {
+            if (poses.size() >= k_max_saved_poses) return;
+            // Only what a load reads back (a body fallen out of the world is not kept: it would refuse the save).
+            const auto in = [](const DVec3& v) {
+                return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::fabs(v.x) <= 1e8 &&
+                       std::fabs(v.y) <= 1e8 && std::fabs(v.z) <= 1e8;
+            };
+            const auto unit = [](const Quat& q) {
+                return std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) && std::isfinite(q.w);
+            };
+            if (!in(p) || !in(of_p) || !unit(r) || !unit(of_r)) return;
+            poses.push_back({{"entity", id},
+                             {"position", vec_json(p)},
+                             {"rotation", quat_json(r)},
+                             {"of", {{"position", vec_json(of_p)}, {"rotation", quat_json(of_r)}}}});
+        };
+        if (simulating) {
+            std::vector<world::EntityId> ids;
+            for (const auto& [id, pose] : state.physics->bodies().poses()) ids.push_back(id);
+            std::sort(ids.begin(), ids.end());
+            for (const world::EntityId id : ids) {
+                const world::Transform* placed = state.physics->bodies().placed(id);
+                const world::Entity* e = state.scene.find(id);
+                if (placed == nullptr || e == nullptr || !(e->transform == *placed)) continue; // stale
+                const world::Transform& pose = state.physics->bodies().poses().at(id);
+                add(id, pose.position, pose.rotation, placed->position, placed->rotation);
+            }
+            for (const auto& [id, p] : m_poses_waiting) {
+                if (state.physics->bodies().poses().count(id) == 0) add(id, p.position, p.rotation, p.of_position, p.of_rotation);
+            }
+        }
+        posed = poses.size();
+        sections["bodies"] = Json{{"simulating", simulating}, {"poses", std::move(poses)}}.dump(1) + "\n";
+    }
     save::Meta meta;
     meta.world_name = state.world->folder().filename().string();
     meta.world_hash = world_identity(state.world->index());
@@ -127,22 +213,32 @@ std::string GameSaves::begin_save(EditorState& state, const std::string& slot) {
     meta.play_seconds = m_play_seconds;
     // Against the base when saving to the slot it is of (only what changed), else whole.
     const fs::path path = root_path / slot;
-    const bool same = m_base.generation != 0 && path == m_base_path && m_session == state.world->session();
-    const save::Manifest base = same ? m_base : save::Manifest{};
+    const Base& b = base_for(path);
+    const bool same = b.manifest.generation != 0 && path == b.path && m_session == state.world->session();
+    const save::Manifest base = same ? b.manifest : save::Manifest{};
     std::shared_ptr<const std::map<save::CellKey, GameCell>> was =
-        same && m_base_cells != nullptr ? m_base_cells : std::make_shared<const std::map<save::CellKey, GameCell>>();
+        same && b.cells != nullptr ? b.cells : std::make_shared<const std::map<save::CellKey, GameCell>>();
     const u64 generation = state.scene_generation, session = state.world->session();
 
     m_in_flight = true;
     m_status.doing = "saving";
     m_status.slot = slot;
-    m_status.error.clear();
-    m_jobs.submit(m_group, [this, slot, path, base, meta, generation, session, sections = std::move(sections),
+    if (autosave) {
+        m_status.autosave_error.clear();
+    } else {
+        m_status.error.clear();
+    }
+    m_status.bodies = posed;
+    m_status.gather_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gather_from).count();
+    m_autosaved_at = m_play_seconds;
+    m_jobs.submit(m_group, [this, slot, path, base, meta, generation, session, autosave, sections = std::move(sections),
                             cells = std::shared_ptr<const std::map<save::CellKey, GameCell>>(std::move(cells)),
                             was = std::move(was)]() mutable {
         auto p = std::make_unique<Pending>();
         p->slot = slot;
         p->path = path;
+        p->autosave = autosave;
         p->generation = generation;
         p->session = session;
         save::Changes changes;
@@ -230,6 +326,27 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     if (const auto e = world::load_weather(j["weather"].dump(), w)) return fail(file + ": " + e->message);
                     p->sections.weather = w;
                 }
+            } else if (name == "bodies") {
+                if (!only_keys(j, {"simulating", "poses"}) || !j.value("simulating", Json(false)).is_boolean() ||
+                    !j.value("poses", Json::array()).is_array() || j.value("poses", Json::array()).size() > k_max_saved_poses)
+                    return fail(file + ": bad bodies");
+                p->sections.has_bodies = true;
+                p->sections.simulating = j.value("simulating", false);
+                for (const Json& e : j.value("poses", Json::array())) {
+                    SavedPose pose;
+                    const Json* of = e.is_object() && e.contains("of") ? &e["of"] : nullptr;
+                    if (!e.is_object() || !only_keys(e, {"entity", "position", "rotation", "of"}) || of == nullptr ||
+                        !of->is_object() || !only_keys(*of, {"position", "rotation"}) || !e.contains("entity") ||
+                        !e["entity"].is_number_unsigned() || e["entity"].get<u64>() == 0 ||
+                        e["entity"].get<u64>() > world::k_max_entity_id || !e.contains("position") ||
+                        !read_vec(e["position"], pose.position) || !e.contains("rotation") ||
+                        !read_quat(e["rotation"], pose.rotation) || !of->contains("position") ||
+                        !read_vec((*of)["position"], pose.of_position) || !of->contains("rotation") ||
+                        !read_quat((*of)["rotation"], pose.of_rotation))
+                        return fail(file + ": a bad body");
+                    pose.entity = e["entity"].get<u64>();
+                    p->sections.poses.push_back(pose);
+                }
             } // (another engine's sections: left)
         }
         auto cells = std::make_shared<std::map<save::CellKey, GameCell>>();
@@ -253,9 +370,15 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
 
 void GameSaves::forget_base() {
     m_base = {};
-    m_base_cells.reset();
-    m_base_path.clear();
+    m_auto_base = {};
     m_status.base_slot.clear();
+}
+
+void GameSaves::forget_base(const fs::path& slot) {
+    Base& b = base_for(slot);
+    if (b.path != slot) return;
+    b = {};
+    if (slot.filename().string() == m_status.base_slot) m_status.base_slot.clear();
 }
 
 void GameSaves::clear_ground(EditorState& state) {
@@ -267,12 +390,15 @@ void GameSaves::clear_ground(EditorState& state) {
 void GameSaves::close(EditorState& state) {
     state.scene.clear_game_damage();
     clear_ground(state);
+    m_poses_waiting.clear();
+    m_poses_from.reset();
     drop_weather();
     m_applying.clear();
     m_sections.reset();
     m_generation = 0;
     forget_base();
     m_play_seconds = 0.0;
+    m_autosaved_at = 0.0;
 }
 
 void GameSaves::drop_weather() {
@@ -288,7 +414,7 @@ std::string GameSaves::begin_delete(EditorState& state, const std::string& slot)
     const fs::path root_path = root(state);
     if (root_path.empty()) return "no world open";
     if (!fs::is_directory(root_path / slot)) return "no save '" + slot + "'";
-    if (root_path / slot == m_base_path) forget_base(); // the next save there is whole
+    forget_base(root_path / slot); // the next save there is whole
     m_in_flight = true;
     m_status.doing = "deleting";
     m_status.slot = slot;
@@ -314,27 +440,33 @@ void GameSaves::take(EditorState& state) {
     m_in_flight = false;
     m_status.doing.clear();
     m_status.slot = p->slot;
-    m_status.error = p->error;
+    if (p->autosave) {
+        m_status.autosave_error = p->error;
+    } else {
+        m_status.error = p->error;
+    }
     if (p->remove) return;
     // Begun for this scene and this world session (else it is not this game's).
     const bool same = state.world != nullptr && state.world->active(state.scene_generation) &&
                       p->generation == state.scene_generation && p->session == state.world->session();
     if (!p->load) {
         if (!p->error.empty() || !same) {
-            forget_base(); // (what is on the disk is not known now: the next save is whole)
-            if (p->error.empty()) m_status.error = "the world was closed or replaced while saving";
-            else if (!same) m_status.error += " (and the world was closed or replaced)";
+            forget_base(p->path); // (what is on the disk is not known now: the next save there is whole)
+            std::string& error = p->autosave ? m_status.autosave_error : m_status.error;
+            if (p->error.empty()) error = "the world was closed or replaced while saving";
+            else if (!same) error += " (and the world was closed or replaced)";
             return;
         }
-        ++m_status.saves;
+        ++(p->autosave ? m_status.autosaves : m_status.saves);
         m_status.written = p->committed.written;
         m_status.removed = p->committed.removed;
         m_status.cells = p->cells->size();
         m_status.tiles = static_cast<usize>(
             std::count_if(p->cells->begin(), p->cells->end(), [](const auto& c) { return c.second.ground.has_value(); }));
-        m_base = p->committed.manifest;
-        m_base_cells = std::move(p->cells);
-        m_base_path = p->path;
+        Base& b = base_for(p->path);
+        b.manifest = p->committed.manifest;
+        b.cells = std::move(p->cells);
+        b.path = p->path;
         m_status.base_slot = p->slot;
         m_session = p->session;
         m_generation = p->generation;
@@ -353,6 +485,9 @@ void GameSaves::take(EditorState& state) {
     state.scene.clear_game_damage();
     clear_ground(state);
     drop_weather();
+    m_poses_waiting.clear();
+    m_poses_from.reset();
+    forget_base(); // (another game now: the other base is not of it)
     m_applying = std::move(p->loaded);
     m_sections = std::make_unique<Sections>(std::move(p->sections));
     m_status.doing = "applying";
@@ -361,13 +496,18 @@ void GameSaves::take(EditorState& state) {
     m_status.tiles = static_cast<usize>(
         std::count_if(m_applying.begin(), m_applying.end(), [](const auto& c) { return c.second.ground.has_value(); }));
     m_status.skipped = 0;
-    m_base = p->manifest;
-    m_base_cells = std::move(p->cells);
-    m_base_path = p->path;
+    Base& b = base_for(p->path);
+    b.manifest = p->manifest;
+    b.cells = std::move(p->cells);
+    b.path = p->path;
     m_status.base_slot = p->slot;
     m_session = p->session;
     m_generation = p->generation;
     m_play_seconds = p->manifest.play_seconds;
+    m_autosaved_at = m_play_seconds;
+    m_status.bodies = m_sections->poses.size();
+    m_status.bodies_applied = 0;
+    m_status.bodies_skipped = 0;
     m_play_generation = p->generation;
     m_play_session = p->session;
     ++m_status.loads;
@@ -397,6 +537,60 @@ void GameSaves::finish_load(EditorState& state) {
         if (!state.play->start(state.scene, state.camera, state.scene_generation))
             m_status.error = "loaded, but the player could not be put there";
     }
+    if (state.physics != nullptr && s.has_bodies) {
+        if (s.simulating) state.physics->set_simulating(true);
+        if (state.physics->simulating()) {
+            for (const SavedPose& pose : s.poses) m_poses_waiting[pose.entity] = pose;
+            m_poses_run = state.physics->runs();
+            m_poses_held = 0;
+        } else {
+            m_status.bodies_skipped += s.poses.size();
+        }
+    }
+}
+
+void GameSaves::place_bodies(EditorState& state) {
+    if (m_poses_waiting.empty()) return;
+    // Only for the simulation they were put back for (stopped since: what it moved went back).
+    if (state.physics == nullptr || !state.physics->simulating() || state.physics->runs() != m_poses_run) {
+        m_status.bodies_skipped += m_poses_waiting.size();
+        m_poses_waiting.clear();
+        m_poses_from.reset();
+        return;
+    }
+    // Waiting on what they would rest on: the bodies being made and the ground round them (a game's too).
+    // (Held at most k_hold_frames: streaming may keep some entity waiting anywhere for long.)
+    constexpr u32 k_hold_frames = 120;
+    if (state.physics->bodies().entities_waiting() && m_poses_held++ < k_hold_frames) return;
+    constexpr usize k_looks = 8192;
+    usize budget = std::max<usize>(poses_per_frame, 1);
+    auto it = m_poses_from ? m_poses_waiting.lower_bound(*m_poses_from) : m_poses_waiting.begin();
+    for (usize looked = 0; looked < k_looks && budget > 0 && !m_poses_waiting.empty(); ++looked) {
+        if (it == m_poses_waiting.end()) it = m_poses_waiting.begin();
+        const SavedPose& p = it->second;
+        const world::Entity* e = state.scene.find(p.entity);
+        if (e == nullptr) {
+            ++it; // (its cell not streamed in yet)
+            continue;
+        }
+        // Moved in the world since, or not a dynamic body (a kit stands fixed): not this save's.
+        if (!(e->transform.position == p.of_position) || !(e->transform.rotation == p.of_rotation) ||
+            e->body != world::BodyKind::dynamic || e->shape == world::Shape::kit) {
+            ++m_status.bodies_skipped;
+            it = m_poses_waiting.erase(it);
+            continue;
+        }
+        const world::CellCoord under = world::cell_of(p.position);
+        if (state.physics->bodies().ground_waiting(state.scene.terrain, p.position) ||
+            m_ground_waiting.count(key_of(under)) != 0 || !state.physics->place_body(p.entity, p.position, p.rotation)) {
+            ++it; // (its ground, or its body, not made yet)
+            continue;
+        }
+        --budget;
+        ++m_status.bodies_applied;
+        it = m_poses_waiting.erase(it);
+    }
+    m_poses_from = it != m_poses_waiting.end() ? std::optional<world::EntityId>(it->first) : std::nullopt;
 }
 
 void GameSaves::update(EditorState& state, double seconds) {
@@ -420,8 +614,20 @@ void GameSaves::update(EditorState& state, double seconds) {
     }
     press_waiting(state, tiles);
     if (m_applying.empty() && m_sections != nullptr) finish_load(state);
-    if (state.play != nullptr && state.play->playing() && std::isfinite(seconds) && seconds > 0.0)
+    place_bodies(state);
+    const bool playing = state.play != nullptr && state.play->playing();
+    if (playing && std::isfinite(seconds) && seconds > 0.0)
         m_play_seconds = std::min(m_play_seconds + seconds, save::k_max_play_seconds);
+    // Autosave: while playing (put down), every autosave_seconds of play (bodies still waiting saved as they were).
+    if (playing && autosave_seconds > 0.0 && std::isfinite(autosave_seconds) &&
+        m_play_seconds - m_autosaved_at >= autosave_seconds && !busy() &&
+        !state.play->waiting_for_ground() && !root(state).empty()) {
+        const std::string why = save_to(state, k_autosave_slot, true);
+        if (!why.empty()) {
+            m_status.autosave_error = why;
+            m_autosaved_at = m_play_seconds; // (tried: again the next time round)
+        }
+    }
 }
 
 void GameSaves::apply_ground(EditorState& state, world::CellCoord cell, world::Terrain::Heights heights) {
@@ -465,12 +671,15 @@ void GameSaves::follow(EditorState& state) {
         m_sections.reset();
         drop_weather();
         clear_ground(state);
+        m_poses_waiting.clear();
+        m_poses_from.reset();
         forget_base();
         if (m_status.doing == "applying") m_status.doing.clear();
         m_generation = 0;
     }
     if (m_play_generation != state.scene_generation || m_play_session != session) {
         m_play_seconds = 0.0;
+        m_autosaved_at = 0.0;
         m_play_generation = state.scene_generation;
         m_play_session = session;
     }

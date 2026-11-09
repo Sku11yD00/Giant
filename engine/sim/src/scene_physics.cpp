@@ -704,6 +704,27 @@ usize ScenePhysics::update_poses() {
     return moved;
 }
 
+bool ScenePhysics::place(world::EntityId entity, const DVec3& position, const Quat& rotation) {
+    const auto it = m_entities.find(entity);
+    if (it == m_entities.end() || !it->second.dynamic || it->second.body == k_no_body) return false;
+    if (m_edited.count(entity) != 0) return false;
+    const bool finite = std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z) &&
+                        std::isfinite(rotation.x) && std::isfinite(rotation.y) && std::isfinite(rotation.z) &&
+                        std::isfinite(rotation.w);
+    const auto sq = [](float v) { return static_cast<double>(v) * static_cast<double>(v); };
+    const double len = std::sqrt(sq(rotation.x) + sq(rotation.y) + sq(rotation.z) + sq(rotation.w));
+    if (!finite || std::fabs(len - 1.0) > 1e-3) return false;
+    const Quat q = normalize(rotation);
+    m_physics.set_transform(it->second.body, position, q);
+    m_physics.set_velocity(it->second.body, {}, {});
+    world::Transform& pose = m_poses[entity];
+    pose.position = position;
+    pose.rotation = q;
+    pose.scale = it->second.look.transform.scale;
+    m_redraw.push_back(entity);
+    return true;
+}
+
 void ScenePhysics::reset_poses() {
     for (const world::EntityId id : m_worn) {
         if (const auto it = m_entities.find(id); it != m_entities.end()) it->second.wear.clear();

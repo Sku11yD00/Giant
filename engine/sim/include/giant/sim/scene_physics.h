@@ -111,6 +111,11 @@ public:
     // rotation; the scale is the entity's). Entities not in it are where
     // the scene puts them.
     const std::unordered_map<world::EntityId, world::Transform>& poses() const { return m_poses; }
+    // A dynamic entity's body put at `position` and `rotation` (unit), at
+    // rest, and posed there (a game save's bodies loaded). False, changing
+    // nothing: not a dynamic entity with a body now, an edit of it waiting
+    // to be seen, or bad numbers. reset_poses puts it back as any pose.
+    bool place(world::EntityId entity, const DVec3& position, const Quat& rotation);
     // Every moved body back where its entity is, at rest; no poses (a
     // simulation stopping).
     void reset_poses();

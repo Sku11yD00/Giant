@@ -41,6 +41,11 @@ public:
     PhysicsState();
 
     bool simulating() const { return m_on; }
+    // A game save's dynamic body put back where it was, at rest (while
+    // simulating: sim::ScenePhysics::place). False: not now, not such a body.
+    bool place_body(world::EntityId entity, const DVec3& position, const Quat& rotation) {
+        return m_on && m_bodies.place(entity, position, rotation);
+    }
     // Counts starts: a walker made in another run (stopped and started
     // since, even within a frame) is let go.
     u64 runs() const { return m_runs; }
