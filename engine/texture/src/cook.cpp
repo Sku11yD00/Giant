@@ -288,7 +288,7 @@ std::vector<u8> write_file(const Cooked& texture) {
     for (const FileFormat& f : k_file_formats) {
         if (f.format == texture.desc.format) code = f.code;
     }
-    if (code == 0 || rhi::texture_desc_problem(texture.desc) != nullptr || texture.contents.empty() ||
+    if (code == 0 || !cooks_to(texture.kind, texture.desc.format) || rhi::texture_desc_problem(texture.desc) != nullptr || texture.contents.empty() ||
         rhi::texture_contents_problem(texture.desc, texture.contents.size()) != nullptr) {
         return {};
     }

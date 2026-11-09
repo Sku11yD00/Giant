@@ -397,6 +397,9 @@ GIANT_TEST("texture: .gtex files round trip and bad ones are refused") {
     bad[12] = 7; // BC7 for a normal map: never cooked that way
     GIANT_CHECK(refused(bad));
     bad = file;
+    bad[8] = static_cast<u8>(Kind::roughness_metal); // also BC5: only the hash catches it
+    GIANT_CHECK(refused(bad));
+    bad = file;
     bad[37] = 1; // reserved
     GIANT_CHECK(refused(bad));
     bad = file;
@@ -414,6 +417,9 @@ GIANT_TEST("texture: .gtex files round trip and bad ones are refused") {
     odd.desc.format = rhi::Format::r32_float;
     GIANT_CHECK(write_file(odd).empty());
     GIANT_CHECK(write_file(Cooked{}).empty());
+    odd = cooked;
+    odd.kind = Kind::color; // BC5 is never colour
+    GIANT_CHECK(write_file(odd).empty());
 }
 
 GIANT_TEST("texture: roughness and metallic stay apart when they do not move together") {
