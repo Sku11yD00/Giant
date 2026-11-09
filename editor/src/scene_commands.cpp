@@ -114,6 +114,7 @@ Json mesh_json(const MeshLibrary::Mesh& m) {
             {"levels", m.levels},
             {"coarsest_triangles", m.coarsest_triangles},
             {"import_seconds", m.import_seconds},
+            {"uvs", m.has_uvs},
             {"warnings", m.warnings}};
 }
 
@@ -636,6 +637,30 @@ world::KitPiece piece_from(const Entity& e) {
     p.material = e.material;
     p.decal = e.decal;
     return p;
+}
+
+// Asks the texture library for every map the scene's drawn things name, as
+// drawing them would (built-in shapes, and meshes whose file has uvs).
+void request_scene_textures(EditorState& state) {
+    if (state.textures == nullptr) return;
+    const auto ask = [&](world::Shape shape, const std::string& mesh, const world::Material& m) {
+        if (m.maps.empty()) return;
+        bool uvs = shape == world::Shape::cube || shape == world::Shape::sphere || shape == world::Shape::plane;
+        if (shape == world::Shape::mesh && state.meshes != nullptr) {
+            const MeshLibrary::Mesh* found = state.meshes->find_normalized(mesh);
+            uvs = found != nullptr && found->has_uvs;
+        }
+        if (uvs) state.textures->request(m.maps);
+    };
+    for (const Entity& e : state.scene.entities()) {
+        if (e.visible) ask(e.shape, e.mesh, e.material);
+    }
+    for (const world::Kit& k : state.scene.kits) {
+        for (const world::KitPiece& p : k.pieces) ask(p.shape, p.mesh, p.material);
+    }
+    for (const world::ScatterLayer& l : state.scene.scatter) {
+        for (const world::ScatterItem& i : l.items) ask(i.shape, i.mesh, i.material);
+    }
 }
 
 Json piece_json(const world::KitPiece& p) {
@@ -1514,11 +1539,13 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
 
     add(registry,
         {"get_textures",
-         "Lists the material textures (image files that materials' maps name), each with its "
-         "status: cooking (in the background; materials draw their plain values meanwhile), "
-         "ready (with its size, mips, GPU bytes and whether it came from the cache in "
-         "giant_cache/textures) or failed (with why). wait: true blocks until nothing is "
-         "cooking and all are on the GPU (before a screenshot that must show them).",
+         "Lists the material textures (image files that drawn materials' maps name), each with "
+         "its status: cooking (in the background, two at a time; materials draw their plain "
+         "values meanwhile), ready (with its size, mips, GPU bytes and whether it came from the "
+         "cache in giant_cache/textures), failed (with why) or unloaded (no drawn material used "
+         "it for about 10 s, so it left the GPU; it loads again from the cache when used). "
+         "Cooked at most 4096 texels a side. wait: true asks for every map the scene names and "
+         "blocks until all are cooked and on the GPU (before a screenshot that must show them).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"wait", {{"type", "boolean"}}}}}},
@@ -1527,13 +1554,15 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              Json list = Json::array();
              usize pending = 0;
              if (state.textures != nullptr) {
-                 if (args.value("wait", false)) state.textures->finish();
+                 if (args.value("wait", false)) {
+                     request_scene_textures(state); // what was given since the last frame drew
+                     state.textures->finish();
+                 }
                  pending = state.textures->pending();
                  for (const TextureLibrary::Entry& e : state.textures->entries()) {
-                     static constexpr const char* k_status[] = {"cooking", "ready", "failed"};
                      Json j = {{"path", e.key.path},
                                {"slot", TextureLibrary::to_string(e.key.slot)},
-                               {"status", k_status[static_cast<usize>(e.status)]}};
+                               {"status", TextureLibrary::to_string(e.status)}};
                      if (e.key.green_down) j["normal_green_down"] = true;
                      if (!e.key.normal.empty()) j["normal"] = e.key.normal;
                      if (e.status == TextureLibrary::Status::ready) {

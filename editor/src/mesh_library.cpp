@@ -107,6 +107,7 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
         }
     }
     mesh->warnings = std::move(imported.warnings);
+    mesh->has_uvs = imported.has_uvs;
     if (m_renderer != nullptr) {
         mesh->id = m_renderer->add_mesh(std::move(clusters));
         if (mesh->id == render::k_no_mesh) {

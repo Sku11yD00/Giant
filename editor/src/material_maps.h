@@ -36,10 +36,12 @@ inline ai::Json maps_schema() {
                                      {"description", "The normal map was made for DirectX (green "
                                                      "pointing down the image). Default false."}}}}},
             {"description",
-             "Image files drawn over the mesh's uvs (paths from the editor's working folder; \"\" "
-             "removes one; fields left out are kept). Only meshes show them (built-in shapes have "
-             "no uvs). Cooked in the background the first time they are used, and kept cooked in "
-             "giant_cache/textures; the plain values show until then (get_textures)."}};
+             "Image files drawn over the uvs (paths from the editor's working folder; \"\" "
+             "removes one; fields left out are kept). Built-in shapes and meshes whose file has "
+             "uvs (list_meshes: uvs) show them; others draw the plain values. Cooked in the "
+             "background the first time they are drawn (at most 4096 texels a side) and kept "
+             "cooked in giant_cache/textures under the working folder; the plain values show "
+             "until then (get_textures)."}};
 }
 
 // Applies `json` (maps_schema) to `maps`; returns what is wrong (a file

@@ -47,6 +47,7 @@ public:
         u32 coarsest_triangles = 0; // drawn when the whole mesh is tiny
         float import_seconds = 0.0f;
         std::vector<std::string> warnings;
+        bool has_uvs = false; // the file has texture coordinates (material maps draw only then)
         std::shared_ptr<const Skinned> skinned; // null: not skinned
     };
     struct Loaded {

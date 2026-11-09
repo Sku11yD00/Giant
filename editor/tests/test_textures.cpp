@@ -11,6 +11,7 @@
 #include "giant/geometry/mesh.h"
 #include "giant/rhi/rhi.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -46,15 +47,16 @@ std::string write_png(const std::filesystem::path& path, u32 width, u32 height, 
     return path.generic_string();
 }
 
-// Writes a mesh as a GLB (positions, normals, 32-bit indices).
-void write_glb(const std::filesystem::path& path, const geometry::TriangleMesh& mesh) {
+// Writes a mesh as a GLB (positions, normals, uvs if `uvs`, 32-bit indices).
+void write_glb(const std::filesystem::path& path, const geometry::TriangleMesh& mesh, bool uvs) {
     std::vector<u8> bin(mesh.vertices.size() * sizeof(geometry::Vertex) + mesh.indices.size() * 4);
     std::memcpy(bin.data(), mesh.vertices.data(), mesh.vertices.size() * sizeof(geometry::Vertex));
     std::memcpy(bin.data() + mesh.vertices.size() * sizeof(geometry::Vertex), mesh.indices.data(),
                 mesh.indices.size() * 4);
     const usize vbytes = mesh.vertices.size() * sizeof(geometry::Vertex);
     std::string json = R"({"asset":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
-                       R"("meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]}],)"
+                       R"("meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1)" +
+                       std::string(uvs ? R"(,"TEXCOORD_0":3)" : "") + R"(},"indices":2}]}],)"
                        R"("buffers":[{"byteLength":)" + std::to_string(bin.size()) + "}]," +
                        R"("bufferViews":[{"buffer":0,"byteLength":)" + std::to_string(vbytes) +
                        R"(,"byteStride":)" + std::to_string(sizeof(geometry::Vertex)) +
@@ -65,7 +67,11 @@ void write_glb(const std::filesystem::path& path, const geometry::TriangleMesh& 
                        R"(,"type":"VEC3","min":[-1,-1,-1],"max":[1,1,1]},{"bufferView":0,"byteOffset":12,"componentType":5126,"count":)" +
                        std::to_string(mesh.vertices.size()) +
                        R"(,"type":"VEC3"},{"bufferView":1,"componentType":5125,"count":)" +
-                       std::to_string(mesh.indices.size()) + R"(,"type":"SCALAR"}]})";
+                       std::to_string(mesh.indices.size()) + R"(,"type":"SCALAR"})" +
+                       (uvs ? R"(,{"bufferView":0,"byteOffset":24,"componentType":5126,"count":)" +
+                                  std::to_string(mesh.vertices.size()) + R"(,"type":"VEC2"})"
+                            : std::string()) +
+                       "]}";
     while (json.size() % 4 != 0) json += ' ';
     while (bin.size() % 4 != 0) bin.push_back(0);
     std::vector<u8> out;
@@ -88,7 +94,7 @@ void write_glb(const std::filesystem::path& path, const geometry::TriangleMesh& 
 usize files_in(const std::filesystem::path& dir) {
     usize n = 0;
     std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) n += entry.is_regular_file() ? 1 : 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) n += entry.is_regular_file() ? 1u : 0u;
     return n;
 }
 
@@ -136,7 +142,8 @@ GIANT_TEST("textures: cooked in the background, cached on disk, read back from t
         GIANT_CHECK(textures.pending() == 1);
         textures.finish();
         GIANT_CHECK(e->status == TextureLibrary::Status::ready && !e->from_cache && e->width == 128);
-        GIANT_CHECK(files_in(cache) == 3);
+        GIANT_CHECK(files_in(cache) == 2); // the edited file's older version went
+        GIANT_CHECK(std::filesystem::exists(textures.cache_file(key)));
     }
 }
 
@@ -182,30 +189,96 @@ GIANT_TEST("textures: uploads keep to the budget, at least one a frame") {
     const std::filesystem::path dir = fresh_dir("giant_texture_budget");
     TextureLibrary textures(renderer.get(), {});
     std::vector<TextureLibrary::Ref> refs;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 5; ++i) {
         const std::string path =
-            write_png(dir / ("t" + std::to_string(i) + ".png"), 64, 64, static_cast<u8>(i * 60), 0, 0);
+            write_png(dir / ("t" + std::to_string(i) + ".png"), 64, 64, static_cast<u8>(i * 50), 0, 0);
         refs.push_back(textures.request({path, TextureLibrary::Slot::base_color, false, {}}));
     }
-    textures.upload_bytes_per_update = 1; // one a call
-    // Wait for the cooking alone (finish would upload them all).
-    for (int tries = 0; tries < 2000; ++tries) {
-        usize cooked = 0;
-        textures.update(); // takes what finished, one upload a call
-        for (const auto ref : refs) cooked += textures.entry(ref)->status == TextureLibrary::Status::ready ? 1 : 0;
-        if (cooked == refs.size()) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    usize ready = 0;
+    // Two cook at once (one a worker), the rest wait.
+    GIANT_CHECK(textures.pending() == 5);
+    textures.wait_cooked();
+    GIANT_CHECK(textures.pending() == 5); // all cooked, none uploaded
+    const auto uploaded = [&] {
+        usize n = 0;
+        for (const auto ref : refs) n += textures.id(ref) != render::k_no_texture ? 1u : 0u;
+        return n;
+    };
+    GIANT_CHECK(uploaded() == 0);
+    textures.upload_bytes_per_update = 1; // less than one: still one a call
+    textures.update();
+    GIANT_CHECK(uploaded() == 1);
+    u64 one = 0; // all are the same size: the one uploaded (whichever finished first)
+    for (const auto ref : refs) one = std::max(one, textures.entry(ref)->bytes);
+    GIANT_CHECK(one > 0);
+    textures.upload_bytes_per_update = 2 * one; // exactly two
+    textures.update();
+    GIANT_CHECK(uploaded() == 3);
+    textures.update();
+    GIANT_CHECK(uploaded() == 5 && textures.pending() == 0);
     for (const auto ref : refs) {
-        if (textures.id(ref) != render::k_no_texture) {
-            ++ready;
-            const rhi::TextureDesc* d = renderer->texture(textures.id(ref));
-            GIANT_CHECK(d != nullptr && d->width == 64 && d->format == rhi::Format::bc7_srgb);
-        }
+        const rhi::TextureDesc* d = renderer->texture(textures.id(ref));
+        GIANT_CHECK(d != nullptr && d->width == 64 && d->format == rhi::Format::bc7_srgb);
     }
-    GIANT_CHECK(ready == refs.size());
-    GIANT_CHECK(textures.pending() == 0);
+    // A reload replaces each texture: a new id, the old one gone.
+    const render::TextureId before = textures.id(refs[0]);
+    textures.reload();
+    textures.finish();
+    GIANT_CHECK(textures.id(refs[0]) != render::k_no_texture && textures.id(refs[0]) != before);
+    GIANT_CHECK(renderer->texture(before) == nullptr);
+    // A reload superseded by another while cooking: only the newer answer uploads.
+    textures.reload();
+    textures.reload();
+    textures.finish();
+    GIANT_CHECK(textures.pending() == 0 && uploaded() == 5);
+}
+
+GIANT_TEST("textures: unused ones leave the GPU after a while and come back when used") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    const std::filesystem::path dir = fresh_dir("giant_texture_unload");
+    TextureLibrary textures(renderer.get(), dir / "cache");
+    textures.unload_after_updates = 3;
+    const std::string path = write_png(dir / "a.png", 16, 16, 9, 9, 9);
+    const TextureLibrary::Ref a = textures.request({path, TextureLibrary::Slot::base_color, false, {}});
+    textures.finish();
+    const render::TextureId first = textures.id(a);
+    GIANT_CHECK(first != render::k_no_texture);
+    textures.set_used(std::vector<TextureLibrary::Ref>{a});
+    for (int i = 0; i < 5; ++i) textures.update();
+    GIANT_CHECK(textures.id(a) == first); // used: kept
+    textures.set_used({});
+    textures.update();
+    textures.update();
+    GIANT_CHECK(textures.id(a) == first); // not yet
+    textures.update();
+    GIANT_CHECK(textures.id(a) == render::k_no_texture && textures.entry(a)->status == TextureLibrary::Status::unloaded);
+    GIANT_CHECK(renderer->texture(first) == nullptr);
+    // Used again: loads from the cache.
+    textures.set_used(std::vector<TextureLibrary::Ref>{a});
+    GIANT_CHECK(textures.entry(a)->status == TextureLibrary::Status::cooking);
+    textures.finish();
+    GIANT_CHECK(textures.id(a) != render::k_no_texture && textures.entry(a)->from_cache);
+    // Another spelling of the path finds the same texture.
+    const std::string spelled = (dir / "." / "a.png").string();
+    GIANT_CHECK(textures.request({spelled, TextureLibrary::Slot::base_color, false, {}}) == a);
+}
+
+GIANT_TEST("textures: closing with cooks queued returns without cooking them") {
+    const std::filesystem::path dir = fresh_dir("giant_texture_close");
+    const std::string path = write_png(dir / "big.png", 512, 512, 1, 2, 3);
+    {
+        TextureLibrary textures(nullptr, {}, 1);
+        for (int i = 0; i < 64; ++i) {
+            textures.request({path, i % 2 == 0 ? TextureLibrary::Slot::base_color : TextureLibrary::Slot::normal,
+                              (i / 2) % 2 == 1, std::to_string(i)}); // distinct keys
+        }
+        GIANT_CHECK(textures.pending() == 64);
+    } // at most the one cooking finishes
+    GIANT_CHECK(true);
 }
 
 GIANT_TEST("textures: a mesh's material draws its maps once they are ready; other shapes never do") {
@@ -217,12 +290,15 @@ GIANT_TEST("textures: a mesh's material draws its maps once they are ready; othe
     if (renderer == nullptr) return;
     const std::filesystem::path dir = fresh_dir("giant_texture_scene");
     const std::string glb = (dir / "ball.glb").generic_string();
-    write_glb(glb, geometry::make_sphere(16, 8));
+    write_glb(glb, geometry::make_sphere(16, 8), true);
+    const std::string bare = (dir / "bare.glb").generic_string();
+    write_glb(bare, geometry::make_sphere(16, 8), false);
     const std::string albedo = write_png(dir / "albedo.png", 32, 32, 200, 100, 50);
     const std::string normal = write_png(dir / "normal.png", 32, 32, 128, 128, 255);
     const std::string orm = write_png(dir / "orm.png", 32, 32, 255, 200, 0);
     MeshLibrary meshes(renderer.get());
-    GIANT_CHECK(meshes.load(glb).mesh != nullptr);
+    GIANT_CHECK(meshes.load(glb).mesh != nullptr && meshes.find(glb)->has_uvs);
+    GIANT_CHECK(meshes.load(bare).mesh != nullptr && !meshes.find(bare)->has_uvs);
     TextureLibrary textures(renderer.get(), {});
     SceneFrame frame;
     frame.textures = &textures;
@@ -235,12 +311,28 @@ GIANT_TEST("textures: a mesh's material draws its maps once they are ready; othe
     ball.material.maps.roughness_metal = orm;
     ball.material.maps.normal_green_down = true;
     scene.add(ball);
-    world::Entity cube = ball; // the same look on a cube: no uvs, no textures
-    cube.shape = world::Shape::cube;
-    cube.transform.position = {3.0, 0.0, 0.0};
-    scene.add(cube);
+    world::Entity plain = ball; // the same look on a file without uvs: no textures
+    plain.mesh = bare;
+    plain.transform.position = {3.0, 0.0, 0.0};
+    scene.add(plain);
+    // A kit placed twice whose piece is a cube (built-in shapes have uvs)
+    // with the ball's base colour alone.
+    world::Kit kit;
+    kit.name = "crate";
+    world::KitPiece piece;
+    piece.shape = world::Shape::cube;
+    piece.material.maps.base_color = albedo;
+    kit.pieces.push_back(piece);
+    scene.kits.push_back(kit);
+    for (double x : {10.0, 12.0}) {
+        world::Entity placed;
+        placed.shape = world::Shape::kit;
+        placed.kit = "crate";
+        placed.transform.position = {x, 0.0, 0.0};
+        scene.add(placed);
+    }
     scene_frame(scene, *renderer, meshes, frame);
-    GIANT_CHECK(frame.materials.size() == 2); // the cube's material is not the ball's
+    GIANT_CHECK(frame.materials.size() == 3); // the ball's, the bare file's, the crate's
     GIANT_CHECK(textures.entries().size() == 3);
     for (const render::Material& m : frame.materials) {
         GIANT_CHECK(m.base_color_texture == render::k_no_texture); // cooking still
@@ -261,18 +353,23 @@ GIANT_TEST("textures: a mesh's material draws its maps once they are ready; othe
     for (const render::Material& m : frame.materials) {
         if (m.base_color_texture != render::k_no_texture) {
             ++textured;
-            GIANT_CHECK(m.normal_texture != render::k_no_texture && m.roughness_metal_texture != render::k_no_texture);
+            GIANT_CHECK((m.normal_texture != render::k_no_texture) == (m.roughness_metal_texture != render::k_no_texture));
             GIANT_CHECK(m.occlusion_texture == render::k_no_texture);
             GIANT_CHECK(renderer->texture(m.base_color_texture) != nullptr);
         }
     }
-    GIANT_CHECK(textured == 1);
+    GIANT_CHECK(textured == 2); // the ball's material and the crate's
+    usize crate = 0;
+    for (const render::Material& m : frame.materials) {
+        crate += m.base_color_texture != render::k_no_texture && m.normal_texture == render::k_no_texture ? 1u : 0u;
+    }
+    GIANT_CHECK(crate == 1);
     // Another mesh entity with the same maps shares the material.
     world::Entity twin = ball;
     twin.transform.position = {0.0, 0.0, 3.0};
     scene.add(twin);
     scene_frame(scene, *renderer, meshes, frame);
-    GIANT_CHECK(frame.materials.size() == 2);
+    GIANT_CHECK(frame.materials.size() == 3);
 }
 
 GIANT_TEST("textures: set_entity takes maps, refuses missing files, and get_textures reports them") {
@@ -306,7 +403,9 @@ GIANT_TEST("textures: set_entity takes maps, refuses missing files, and get_text
     const auto cleared = run("set_entity", {{"id", id}, {"maps", {{"base_color", ""}}}});
     GIANT_CHECK(cleared.ok && !cleared.value.contains("maps"));
 
-    textures.request({albedo, TextureLibrary::Slot::base_color, false, {}});
+    // Waiting asks for what the scene names, before any frame has drawn it.
+    GIANT_CHECK(run("create_entity", {{"name", "ball"}, {"shape", "sphere"}, {"maps", {{"base_color", albedo}}}}).ok);
+    GIANT_CHECK(textures.entries().empty());
     const auto listed = run("get_textures", {{"wait", true}});
     GIANT_CHECK(listed.ok && listed.value["pending"] == 0 && listed.value["textures"].size() == 1);
     if (listed.ok && listed.value["textures"].size() == 1) {

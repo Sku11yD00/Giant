@@ -123,8 +123,8 @@ std::optional<Surface> surface_from_string(std::string_view name);
 // roughness_metal is a glTF metallic-roughness image (roughness in G,
 // metallic in B) multiplying roughness and metallic, filtered with the
 // normal map's detail; occlusion is a glTF occlusion image (R), dimming
-// ambient and reflected light. Only meshes have uvs: other shapes draw the
-// plain values.
+// ambient and reflected light. Drawn on built-in shapes and on meshes whose
+// file has uvs; others draw the plain values.
 struct MaterialMaps {
     std::string base_color;
     std::string normal;
@@ -148,7 +148,7 @@ struct Material {
     // what stands out from its middle (leaves, needles). 0: still.
     float sway = 0.0f;
     float flutter = 0.0f;
-    MaterialMaps maps; // entities and kit pieces (kept, not drawn, on other shapes)
+    MaterialMaps maps; // entities, kit pieces and scatter items (kept, not drawn, on decals and cloth)
     bool operator==(const Material&) const = default;
 };
 

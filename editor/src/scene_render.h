@@ -94,6 +94,8 @@ struct SceneFrame {
     TextureLibrary* textures = nullptr;
     std::vector<std::array<u32, 4>> material_textures; // per material
     u64 textures_version = ~u64{0};
+    // Each material's maps' refs, by address, within one scene_frame call.
+    std::unordered_map<const world::MaterialMaps*, std::array<u32, 4>> maps_seen;
 
     struct MaterialKey {
         u32 bits[14]; // the values, then the texture refs
