@@ -774,10 +774,10 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.decals = {};
     frame.settings.antialiasing = false;
     const auto aliased = draw(false, false, false);
-    GIANT_CHECK(renderer->last_stats().post_draws == 1); // the screen reflections pass alone
+    GIANT_CHECK(renderer->last_stats().post_draws == 2); // the screen reflections pass, then tone mapping
     frame.settings.antialiasing = true;
     const auto smoothed = draw(false, false, false);
-    GIANT_CHECK(renderer->last_stats().post_draws == 4);
+    GIANT_CHECK(renderer->last_stats().post_draws == 5);
     if (aliased.size() == k_w * k_h * 4 && smoothed.size() == aliased.size()) {
         const auto luma = [](const std::vector<u8>& p, u32 x, u32 y) {
             const usize i = (static_cast<usize>(y) * k_w + x) * 4;
