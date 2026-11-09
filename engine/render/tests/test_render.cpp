@@ -775,9 +775,33 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.settings.antialiasing = false;
     const auto aliased = draw(false, false, false);
     GIANT_CHECK(renderer->last_stats().post_draws == 2); // the screen reflections pass, then tone mapping
+    const RenderStats aliased_stats = renderer->last_stats();
     frame.settings.antialiasing = true;
     const auto smoothed = draw(false, false, false);
     GIANT_CHECK(renderer->last_stats().post_draws == 5);
+    {
+        // (Diagnostics) the same frame again without anti-aliasing: any
+        // pixel it changes is the scene, not SMAA.
+        const RenderStats smoothed_stats = renderer->last_stats();
+        frame.settings.antialiasing = false;
+        const auto again = draw(false, false, false);
+        frame.settings.antialiasing = true;
+        const RenderStats again_stats = renderer->last_stats();
+        std::printf("aa diagnostics: clusters %u %u %u, triangles %u %u %u\n", aliased_stats.clusters,
+                    smoothed_stats.clusters, again_stats.clusters, aliased_stats.triangles,
+                    smoothed_stats.triangles, again_stats.triangles);
+        usize moved = 0;
+        for (usize i = 0; i + 3 < again.size() && again.size() == aliased.size(); i += 4) {
+            if (again[i] != aliased[i] || again[i + 1] != aliased[i + 1] || again[i + 2] != aliased[i + 2]) {
+                if (moved++ < 8) {
+                    std::printf("aa diagnostics: the scene changed at (%zu, %zu): %u %u %u -> %u %u %u\n", (i / 4) % k_w,
+                                (i / 4) / k_w, aliased[i], aliased[i + 1], aliased[i + 2], again[i], again[i + 1],
+                                again[i + 2]);
+                }
+            }
+        }
+        std::printf("aa diagnostics: %zu pixels changed between two frames alike\n", moved);
+    }
     if (aliased.size() == k_w * k_h * 4 && smoothed.size() == aliased.size()) {
         const auto luma = [](const std::vector<u8>& p, u32 x, u32 y) {
             const usize i = (static_cast<usize>(y) * k_w + x) * 4;

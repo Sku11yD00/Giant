@@ -1096,13 +1096,11 @@ GIANT_TEST("geometry: skinned clusters are the original triangles alone, weights
 GIANT_TEST("geometry: the sphere stays closed at every level of detail") {
     // Its uv seam and poles are duplicated vertices at bit-identical
     // positions, so simplification keeps them together: every edge of any
-    // cut has its twin running the other way (no cracks for pixels to fall
-    // through).
+    // cut, loaded wholly or in part, has its twin running the other way (no
+    // cracks for pixels to fall through).
     const ClusterMesh mesh = build_clusters(make_sphere());
-    usize worst = 0;
-    for (const float d : {1.0f, 3.0f, 10.0f, 30.0f, 100.0f, 1000.0f}) {
-        std::vector<u32> cut;
-        select_clusters(mesh, view_from({0, 0, d}, 1.0f), cut);
+    const GroupLinks links = link_groups(mesh);
+    const auto open_edges = [&mesh](const std::vector<u32>& cut) {
         std::map<std::array<float, 6>, int> open;
         for (const u32 ci : cut) {
             const Cluster& c = mesh.clusters[ci];
@@ -1121,7 +1119,33 @@ GIANT_TEST("geometry: the sphere stays closed at every level of detail") {
                 }
             }
         }
-        worst = std::max(worst, open.size());
+        return open.size();
+    };
+    usize worst = 0;
+    u32 seed = 777;
+    for (int i = 0; i < 400; ++i) {
+        const float d = std::pow(1.03f, static_cast<float>(i % 200)) * 0.8f;
+        const float turn = static_cast<float>(i) * 0.7f;
+        const LodView view =
+            view_from({d * std::sin(turn), d * std::cos(turn * 0.3f) * 0.5f, d * std::cos(turn)}, i < 200 ? 1.0f : 0.37f);
+        std::vector<u32> cut;
+        select_clusters(mesh, view, cut);
+        worst = std::max(worst, open_edges(cut));
+        // Partly loaded: the roots, then some of what is wanted.
+        std::vector<u8> resident(mesh.groups.size(), 0);
+        for (u32 g = 0; g < mesh.groups.size(); ++g) resident[g] = is_root_group(mesh.groups[g]) ? 1 : 0;
+        for (int round = 0; round < 4; ++round) {
+            std::vector<u32> part, wanted;
+            const LodResidency residency{&resident, &wanted, nullptr};
+            select_clusters(mesh, view, part, &residency);
+            worst = std::max(worst, open_edges(part));
+            for (const u32 g : wanted) {
+                seed = seed * 1664525u + 1013904223u;
+                bool parents_in = true;
+                for (const u32 parent : links.parents_of(g)) parents_in = parents_in && resident[parent] != 0;
+                if (parents_in && (seed >> 16) % 2 == 0) resident[g] = 1;
+            }
+        }
     }
     GIANT_CHECK(worst == 0);
 }
