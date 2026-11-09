@@ -38,6 +38,8 @@ struct Frame {
     uint pool;            // read descriptor of the geometry pool (streamed cluster data)
     uint frame_number;    // marks the groups a frame used (streaming)
     uint skip_offset;     // byte offset, in the instance buffer, of the bits of instances not drawn this frame
+    uint sky_ambient;     // read descriptor: the sky's light from all round (9 by 1, sky.slang's cs_sky_ambient)
+    uint sky_flags;       // bit 0: ambient light from sky_ambient (else sky_light and ground_light)
     // Wind (wind_offset below).
     float4 wind;          // velocity xyz (m/s), w: gustiness
     float4 wind_clock;    // the gusts' drift (x, z metres), the sway and flutter clocks (turns)
@@ -57,6 +59,20 @@ float3 safe_normalize(float3 v, float3 fallback) {
     return len2 > 1e-12 ? v * rsqrt(len2) : fallback;
 }
 
+
+// Real spherical harmonics, bands 0 to 2 (`j` 0 to 8; a constant `j`
+// folds to its one term).
+float sh_basis(float3 d, uint j) {
+    if (j == 0u) return 0.282095;
+    if (j == 1u) return 0.488603 * d.y;
+    if (j == 2u) return 0.488603 * d.z;
+    if (j == 3u) return 0.488603 * d.x;
+    if (j == 4u) return 1.092548 * d.x * d.y;
+    if (j == 5u) return 1.092548 * d.y * d.z;
+    if (j == 6u) return 0.315392 * (3.0 * d.z * d.z - 1.0);
+    if (j == 7u) return 1.092548 * d.x * d.z;
+    return 0.546274 * (d.x * d.x - d.y * d.y);
+}
 
 Frame load_frame(uint descriptor, uint offset) {
     ByteAddressBuffer b = read_buffer(descriptor);
@@ -96,6 +112,8 @@ Frame load_frame(uint descriptor, uint offset) {
     f.pool = p3.z;
     f.frame_number = p3.w;
     f.skip_offset = p4.x;
+    f.sky_ambient = p4.y;
+    f.sky_flags = p4.z;
     f.wind = load4(b, at); at += 16;
     f.wind_clock = load4(b, at); at += 16;
     f.wind_camera = load4(b, at); at += 16;
@@ -104,6 +122,47 @@ Frame load_frame(uint descriptor, uint offset) {
     f.wind_table_offset = w.y;
     f.wind_table_count = w.z;
     return f;
+}
+
+// The physical sky's light from all round (sky.slang's cs_sky_ambient, 9
+// texels of spherical harmonics) for a surface facing `n`, over pi.
+float3 sh_irradiance(uint descriptor, float3 n) {
+    Texture2D<float4> t = read_texture(descriptor);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    [unroll] for (uint j = 0; j < 9u; ++j) {
+        sum += t.Load(int3(int(j), 0, 0)).rgb * sh_basis(n, j);
+    }
+    return max(sum, float3(0.0, 0.0, 0.0));
+}
+
+// The ambient light a surface facing `n` gets, over pi (its diffuse light
+// is its albedo times this): the sky's own from all round (the physical
+// sky), or the flat sky and ground colours' hemisphere.
+float3 ambient_light(Frame f, float3 n) {
+    if ((f.sky_flags & 1u) == 0u) {
+        return lerp(f.ground_light.rgb, f.sky_light.rgb, n.y * 0.5 + 0.5);
+    }
+    return sh_irradiance(f.sky_ambient, n);
+}
+
+// The same for two directions (shading's normal and reflection), the
+// table read once.
+void ambient_light2(Frame f, float3 n, float3 r, out float3 along_n, out float3 along_r) {
+    if ((f.sky_flags & 1u) == 0u) {
+        along_n = lerp(f.ground_light.rgb, f.sky_light.rgb, n.y * 0.5 + 0.5);
+        along_r = lerp(f.ground_light.rgb, f.sky_light.rgb, r.y * 0.5 + 0.5);
+        return;
+    }
+    Texture2D<float4> t = read_texture(f.sky_ambient);
+    float3 a = float3(0.0, 0.0, 0.0);
+    float3 b = float3(0.0, 0.0, 0.0);
+    [unroll] for (uint j = 0; j < 9u; ++j) {
+        const float3 c = t.Load(int3(int(j), 0, 0)).rgb;
+        a += c * sh_basis(n, j);
+        b += c * sh_basis(r, j);
+    }
+    along_n = max(a, float3(0.0, 0.0, 0.0));
+    along_r = max(b, float3(0.0, 0.0, 0.0));
 }
 
 // --- Instances (k_instance_bytes each) -----------------------------------------

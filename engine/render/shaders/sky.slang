@@ -1,6 +1,8 @@
-// The sky's passes (sky_common.slang has the model): the sky view table,
-// the clouds' pattern (made once), the cloud shadow map and the clouds
-// themselves at half resolution, every frame and without history (each
+// The sky's passes (sky_common.slang has the model): the physical sky's
+// tables (light scattered many times, the air over the view, the sky's
+// light from all round), the sky view table, the clouds' pattern (made
+// once), the cloud shadow map and the clouds themselves at half
+// resolution, every frame and without history (each
 // frame stands alone, AGENTS.md rule 2: the march's start is dithered by a
 // fixed pattern, not one that changes per frame).
 //
@@ -30,8 +32,219 @@ void cs_sky_view(uint3 id : SV_DispatchThreadID) {
     const Sky s = load_sky(push.params, push.params_offset);
     const float2 uv = (float2(id.xy) + 0.5) / float2(k_sky_view_width, k_sky_view_height);
     const float3 dir = sky_view_dir(uv, s.sun_direction);
-    const float3 c = sky_radiance(dir, max(s.cam_alt, 1.0), s.sun_direction, s.sun_top, s.haze);
+    const float3 c = sky_radiance(s, dir, max(s.cam_alt, 1.0), (s.atmosphere & 1u) != 0u);
     write_texture(push.target)[id.xy] = float4(min(c, float3(60000.0, 60000.0, 60000.0)), 1.0);
+}
+
+// --- The physical sky's tables -----------------------------------------------------
+
+// Light scattered more than once (Hillaire 2020, "A Scalable and
+// Production Ready Sky and Atmosphere Rendering Technique"): from a point
+// `h` up with the sun at cosine mu_s from the zenith, the light scattered
+// once towards it from every way round (evenly, as many orders of
+// scattering spread it), and how much of it the air there scatters again
+// (f_ms): the orders after sum as a geometric series, L2 / (1 - f_ms).
+// Per unit of the sun above the air.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void cs_sky_multi(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= k_multi_size || id.y >= k_multi_size) {
+        return;
+    }
+    const Sky s = load_sky(push.params, push.params_offset);
+    const float2 f = float2(id.xy) / float(k_multi_size - 1); // (multi_uv's inverse)
+    const float mu_s = f.x * 2.0 - 1.0;
+    const float h = max(f.y * f.y * k_atmosphere_top, 1.0);
+    const float3 sun = float3(sqrt(saturate(1.0 - mu_s * mu_s)), mu_s, 0.0);
+    const float uniform_phase = 1.0 / (4.0 * k_pi_sky);
+    float3 second = float3(0.0, 0.0, 0.0);
+    float3 again = float3(0.0, 0.0, 0.0);
+    const uint rings = 8;  // directions: even in the cosine up and round
+    const uint around = 8;
+    const uint steps = 20;
+    for (uint a = 0; a < rings; ++a) {
+        const float cos_t = 1.0 - 2.0 * (float(a) + 0.5) / float(rings);
+        const float sin_t = sqrt(saturate(1.0 - cos_t * cos_t));
+        for (uint b = 0; b < around; ++b) {
+            const float phi = 2.0 * k_pi_sky * (float(b) + 0.5) / float(around);
+            const float3 d = float3(sin_t * cos(phi), cos_t, sin_t * sin(phi));
+            const float2 top = sphere_hits(h, k_atmosphere_top, d.y);
+            const float2 ground = sphere_hits(h, 0.0, d.y);
+            const bool hits = ground.x > 0.0;
+            const float far_end = hits ? min(max(top.y, 0.0), ground.x) : max(top.y, 0.0);
+            const float ds = far_end / float(steps);
+            float3 depth = float3(0.0, 0.0, 0.0);
+            float3 lum = float3(0.0, 0.0, 0.0);
+            float3 scattered = float3(0.0, 0.0, 0.0);
+            for (uint i = 0; i < steps; ++i) {
+                const float hh = height_at(h, d * ((float(i) + 0.5) * ds));
+                const float rho_r = exp(-max(hh, 0.0) / k_rayleigh_height);
+                const float rho_m = exp(-max(hh, 0.0) / k_mie_height);
+                const float3 sigma_s = k_rayleigh * rho_r + k_mie * s.haze * rho_m;
+                const float3 ext = air_extinction(hh, s.haze);
+                const float3 through = exp(-(depth + ext * (0.5 * ds)));
+                lum += through * sun_transmittance(hh, sun, s.haze) * sigma_s * (uniform_phase * ds);
+                scattered += through * sigma_s * ds;
+                depth += ext * ds;
+            }
+            if (hits) {
+                // The sunlit ground under it gives back its share.
+                lum += exp(-depth) * sun_transmittance(0.0, sun, s.haze) * (saturate(mu_s) * k_ground_albedo / k_pi_sky);
+            }
+            second += lum;
+            again += scattered;
+        }
+    }
+    const float count = float(rings * around);
+    second /= count;
+    again /= count;
+    const float3 psi = second / max(1.0 - again, float3(1e-3, 1e-3, 1e-3));
+    write_texture(push.target)[id.xy] = float4(psi, 1.0);
+}
+
+// The air over the view: from each of k_aerial_size^2 rays through the
+// screen, the light scattered in and what comes through, out to the end
+// of each slice (slice k ends aerial_far * ((k + 1) / n)^2 away), the
+// slices side by side across the targets (the light; what comes through,
+// by colour). Two steps a slice.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void cs_sky_aerial(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= k_aerial_size || id.y >= k_aerial_size) {
+        return;
+    }
+    const Sky s = load_sky(push.params, push.params_offset);
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const float n = float(k_aerial_size);
+    const float2 uv = (float2(id.xy) + 0.5) / n;
+    const float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    const float3 dir = safe_normalize(f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz, float3(0.0, 0.0, -1.0));
+    const float alt = max(s.cam_alt, 1.0);
+    const float mu = dot(dir, s.sun_direction);
+    const float pr = rayleigh_phase(mu);
+    const float pm = hg_phase(mu, k_mie_g);
+    const bool multi = (s.atmosphere & 1u) != 0u;
+    const float far_end = max(s.aerial_far, 1.0);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float3 depth = float3(0.0, 0.0, 0.0);
+    float from = 0.0;
+    for (uint k = 0; k < k_aerial_size; ++k) {
+        const float e = (float(k) + 1.0) / n;
+        const float to = far_end * e * e;
+        const float ds = (to - from) * 0.5;
+        for (uint j = 0; j < 2; ++j) {
+            const float t = from + (float(j) + 0.5) * ds;
+            const float h = height_at(alt, dir * t);
+            const float3 ext = air_extinction(h, s.haze);
+            sum += exp(-(depth + ext * (0.5 * ds))) * air_scattering(s, h, pr, pm, multi) * ds;
+            depth += ext * ds;
+        }
+        from = to;
+        const float3 through = exp(-depth);
+        const float3 light = min(sum * s.sun_top, float3(60000.0, 60000.0, 60000.0));
+        const uint2 at = uint2(k * k_aerial_size + id.x, id.y);
+        write_texture(push.target)[at] = float4(light, 1.0);
+        write_texture(push.target_b)[at] = float4(through, 1.0);
+    }
+}
+
+// The sky's light from all round, for surfaces' ambient light (common.slang's
+// ambient_light) and the sky's other lighting (sky_light_of): the sky view
+// table over the upper half; under the clouds, as they cover the sky, their
+// deck (grey, even: the clear sky's light and half the sunlight the clouds
+// take out); below, the ground lit by the sun and that sky. In the dusk
+// (the sun 3 to 6 degrees under the horizon) it goes over to the flat
+// sky_light and ground_light (the night's: no moon or stars yet). Projected onto 9
+// spherical harmonics, convolved with the cosine and over pi (so a
+// surface's diffuse light is its albedo times the sum). One group: 1024
+// directions even over the sphere, 16 a thread.
+groupshared float3 g_up[64];
+groupshared float3 g_sh[9 * 64];
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_sky_ambient(uint tid : SV_GroupIndex) {
+    const Sky s = load_sky(push.params, push.params_offset);
+    const float clouded = (s.flags & 1u) != 0u ? saturate(s.cloud_cover) : 0.0;
+    // Night: from 3 degrees under the horizon to 6 (sin -0.0523 to -0.1045,
+    // where the flat colours are down to their night floor).
+    const float day = saturate((s.sun_direction.y + 0.1045) / 0.0522);
+    const uint rings = 32;
+    const uint around = 32;
+    const float solid = 4.0 * k_pi_sky / float(rings * around);
+    // The clear sky's light on flat ground.
+    float3 up = float3(0.0, 0.0, 0.0);
+    for (uint m = 0; m < 16u; ++m) {
+        const uint k = tid * 16u + m;
+        const float cos_t = 1.0 - 2.0 * (float(k / around) + 0.5) / float(rings);
+        if (cos_t > 0.0) {
+            const float sin_t = sqrt(saturate(1.0 - cos_t * cos_t));
+            const float phi = 2.0 * k_pi_sky * (float(k % around) + 0.5) / float(around);
+            const float3 d = float3(sin_t * cos(phi), cos_t, sin_t * sin(phi));
+            up += sample_sky(s, d) * (cos_t * solid);
+        }
+    }
+    g_up[tid] = up;
+    GroupMemoryBarrierWithGroupSync();
+    float3 clear = float3(0.0, 0.0, 0.0);
+    for (uint i = 0; i < 64u; ++i) {
+        clear += g_up[i];
+    }
+    const float3 lum = float3(0.2126, 0.7152, 0.0722);
+    const float shade = clouded > 0.0 ? 1.0 - 0.65 * clouded * saturate(s.cloud_density) : 1.0;
+    const float3 sun_on_ground = s.sun_light * max(s.sun_direction.y, 0.0);
+    const float deck_value = dot(clear + sun_on_ground * (0.5 * (1.0 - shade)), lum) / k_pi_sky;
+    const float3 deck = float3(deck_value, deck_value, deck_value);
+    const float3 from_above = lerp(clear, deck * k_pi_sky, clouded);
+    const float3 ground = lerp(s.ground_light, (sun_on_ground * shade + from_above) * (k_ground_albedo / k_pi_sky), day);
+    // Projected.
+    float3 c0 = float3(0.0, 0.0, 0.0);
+    float3 c1 = c0;
+    float3 c2 = c0;
+    float3 c3 = c0;
+    float3 c4 = c0;
+    float3 c5 = c0;
+    float3 c6 = c0;
+    float3 c7 = c0;
+    float3 c8 = c0;
+    for (uint m = 0; m < 16u; ++m) {
+        const uint k = tid * 16u + m;
+        const float cos_t = 1.0 - 2.0 * (float(k / around) + 0.5) / float(rings);
+        const float sin_t = sqrt(saturate(1.0 - cos_t * cos_t));
+        const float phi = 2.0 * k_pi_sky * (float(k % around) + 0.5) / float(around);
+        const float3 d = float3(sin_t * cos(phi), cos_t, sin_t * sin(phi));
+        const float3 sky = lerp(s.sky_light, lerp(sample_sky(s, d), deck, clouded), day);
+        const float3 l = (cos_t > 0.0 ? sky : ground) * solid;
+        c0 += l * sh_basis(d, 0u);
+        c1 += l * sh_basis(d, 1u);
+        c2 += l * sh_basis(d, 2u);
+        c3 += l * sh_basis(d, 3u);
+        c4 += l * sh_basis(d, 4u);
+        c5 += l * sh_basis(d, 5u);
+        c6 += l * sh_basis(d, 6u);
+        c7 += l * sh_basis(d, 7u);
+        c8 += l * sh_basis(d, 8u);
+    }
+    g_sh[0u * 64u + tid] = c0;
+    g_sh[1u * 64u + tid] = c1;
+    g_sh[2u * 64u + tid] = c2;
+    g_sh[3u * 64u + tid] = c3;
+    g_sh[4u * 64u + tid] = c4;
+    g_sh[5u * 64u + tid] = c5;
+    g_sh[6u * 64u + tid] = c6;
+    g_sh[7u * 64u + tid] = c7;
+    g_sh[8u * 64u + tid] = c8;
+    GroupMemoryBarrierWithGroupSync();
+    if (tid < 9u) {
+        float3 sum = float3(0.0, 0.0, 0.0);
+        for (uint i = 0; i < 64u; ++i) {
+            sum += g_sh[tid * 64u + i];
+        }
+        // The cosine's convolution over pi: 1 (band 0), 2/3 (band 1), 1/4 (band 2).
+        const float band = tid == 0u ? 1.0 : (tid < 4u ? 2.0 / 3.0 : 0.25);
+        write_texture(push.target)[uint2(tid, 0u)] = float4(clamp(sum * band, float3(-60000.0, -60000.0, -60000.0),
+                                                                  float3(60000.0, 60000.0, 60000.0)), 1.0);
+    }
 }
 
 // --- The clouds' pattern: tiling noise, made once -------------------------------
@@ -199,7 +412,11 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
         // Under a broad deck the light from all round is the deck's own (the
         // sun's, scattered through it many times): grey, not the blue sky's.
         const float3 lum = float3(0.2126, 0.7152, 0.0722);
-        const float deck = dot(s.sky_light, lum) + dot(s.sun_light, lum) * 0.15 * saturate(s.sun_direction.y * 2.0);
+        const float3 above = sky_light_of(s); // (the physical sky's own, or the flat colours)
+        const float3 below = ground_light_of(s);
+        // (The physical sky's deck holds the sunlight it scatters already.)
+        const float sun_share = (s.atmosphere & 4u) != 0u ? 0.0 : 0.15;
+        const float deck = dot(above, lum) + dot(s.sun_light, lum) * sun_share * saturate(s.sun_direction.y * 2.0);
         const float3 deck_light = float3(deck, deck, deck);
         float t = enter + ds * dither(id.xy);
         for (uint i = 0; i < steps && transmittance > 0.01; ++i) {
@@ -212,8 +429,7 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
                 const float sigma = shape * sigma_scale;
                 const float h = saturate((height_at(s.cam_alt, p) - s.cloud_base) /
                                          max(s.cloud_top - s.cloud_base, 1.0));
-                const float3 ambient = lerp(lerp(s.ground_light * 0.5 + s.sky_light * 0.3, s.sky_light, h),
-                                            deck_light, s.cloud_cover);
+                const float3 ambient = lerp(lerp(below * 0.5 + above * 0.3, above, h), deck_light, s.cloud_cover);
                 // The sky's light from all round, scattered evenly (a third reaches the eye).
                 const float2 sun = sun_through_clouds(s, p);
                 const float3 in_light = s.sun_light * (sun.x * phase + sun.y * 0.2) + ambient * 0.33;

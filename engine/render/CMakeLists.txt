@@ -44,6 +44,9 @@ giant_shaders(render
     shaders/sky.slang:cs_cloud_shadow:compute:cloud_shadow_cs
     shaders/sky.slang:cs_weather_cover:compute:weather_cover_cs
     shaders/sky.slang:cs_clouds:compute:clouds_cs
+    shaders/sky.slang:cs_sky_multi:compute:sky_multi_cs
+    shaders/sky.slang:cs_sky_aerial:compute:sky_aerial_cs
+    shaders/sky.slang:cs_sky_ambient:compute:sky_ambient_cs
 )
 # SMAA's precomputed area and search tables (headers only).
 target_link_libraries(giant_render PRIVATE third_party::smaa)

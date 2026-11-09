@@ -316,11 +316,13 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
     const float3 diffuse = (1.0 - fresnel) * diffuse_color / k_pi;
     float3 color = (diffuse + specular) * f.sun_light.rgb * (n_dot_l * sun);
 
-    // Hemisphere ambient: sky above, ground below, for diffuse along the
-    // normal and for specular along the reflection.
+    // Ambient: the sky's light from all round (or the hemisphere of sky
+    // above, ground below), for diffuse along the normal and for specular
+    // along the reflection.
     const float3 r = reflect(-v, n);
-    float3 ambient_diffuse = lerp(f.ground_light.rgb, f.sky_light.rgb, n.y * 0.5 + 0.5);
-    float3 ambient_specular = lerp(f.ground_light.rgb, f.sky_light.rgb, r.y * 0.5 + 0.5);
+    float3 ambient_diffuse;
+    float3 ambient_specular;
+    ambient_light2(f, n, r, ambient_diffuse, ambient_specular);
     if (bounce.w > 0.0) {
         // The bounce light takes the flat colours' place; reflections of
         // the sky dim as much as the sky is hidden from here (until they
@@ -389,18 +391,26 @@ float3 clouds_and_fog(Sky s, float3 color, float3 dir, float distance, uint2 pix
     // The scene fogged over its whole distance, then the clouds over it,
     // themselves fogged only over the distance to the first of them.
     // `through`: how much of the scene's own light comes through.
+    // The clear air first (the physical sky's aerial perspective), then the fog.
+    const Air air = aerial_at(s, pixel, distance < 1.0e30 ? distance : 0.0);
+    color = color * air.through + air.light;
+    const float air_through = (air.through.r + air.through.g + air.through.b) * (1.0 / 3.0);
     const float t = fog_transmittance(s, dir, min(distance, 30000.0));
     const float3 fog = fog_color(s, dir);
     color = color * t + fog * (1.0 - t);
-    through = t;
+    through = air_through * t;
     float first;
     const float4 cloud = clouds_at(s, pixel, distance, first);
     if (cloud.a >= 0.9999) {
         return color;
     }
-    through = t * cloud.a;
+    through = air_through * t * cloud.a;
     const float near_t = fog_transmittance(s, dir, min(first, 30000.0));
-    color = color * cloud.a + cloud.rgb * near_t + fog * ((1.0 - near_t) * (1.0 - cloud.a));
+    // The clouds seen through the air before them (the scene's own air
+    // already holds that part's light, but only as much as the clouds let through).
+    const Air near_air = aerial_at(s, pixel, first);
+    const float3 cloud_light = cloud.rgb * near_air.through + near_air.light * (1.0 - cloud.a);
+    color = color * cloud.a + cloud_light * near_t + fog * ((1.0 - near_t) * (1.0 - cloud.a));
     return color;
 }
 
@@ -463,7 +473,10 @@ void dust_along(Extras e, Frame f, float3 dir, float scene_t, out float trans, o
     trans = exp(-min(depth, 60.0));
     const float mu = dot(dir, f.sun_direction.xyz);
     const float phase = (1.0 + 0.5 * mu) / (4.0 * k_pi);
-    const float3 light = f.sun_light.rgb * (2.0 * phase) + lerp(f.ground_light.rgb, f.sky_light.rgb, 0.6);
+    float3 below;
+    float3 above;
+    ambient_light2(f, float3(0.0, -1.0, 0.0), float3(0.0, 1.0, 0.0), below, above);
+    const float3 light = f.sun_light.rgb * (2.0 * phase) + lerp(below, above, 0.6);
     scatter = (tint / depth) * light * (1.0 - trans);
 }
 

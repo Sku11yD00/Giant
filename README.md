@@ -364,6 +364,9 @@ Open-world systems:
   (resume, save, load, settings, quit to editor), a saves menu listing
   the world's saves with their date and play time, and settings for the
   UI scale, field of view and look speed, all by mouse, keys or MCP.
+- P1 part 1: a physical sky: light scattered many times in the air (a
+  deeper sky, the glow after sunset), far land fading blue through the
+  clear air out to 32 km, and ambient light taken from the sky itself.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

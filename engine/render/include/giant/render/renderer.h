@@ -250,6 +250,15 @@ struct RenderSettings {
     // hidden.
     bool reflections = true;
     bool screen_space_reflections = true;
+    // The physical sky (with FrameInput::sky on): the air's light scattered
+    // many times (a brighter, deeper sky, and the glow after sunset), the
+    // clear air between the camera and what it sees (far hills fade blue
+    // into the distance, out to aerial_distance metres), and the ambient
+    // light taken from the sky itself all round (the clouds' deck as they
+    // cover it, the sunlit ground below) instead of Lighting's flat
+    // sky_light and ground_light. All every frame, without history.
+    bool physical_sky = true;
+    float aerial_distance = 32000.0f; // 1000 to 100000
     // The clouds (with FrameInput::sky on): marched at half resolution,
     // cloud_steps steps a ray (8 to 256), and their shadows on the ground.
     bool clouds = true;
@@ -367,6 +376,7 @@ struct RenderStats {
     bool screen_reflections = false; // screen-space rays on
     // The sky (this frame).
     bool sky = false;           // the atmosphere drawn
+    bool physical_sky = false;  // with light scattered many times, the air over the view and the sky's ambient light
     bool clouds = false;        // clouds marched
     bool cloud_shadows = false; // and their shadows cast
     bool falling = false;       // rain or snow drawn falling
@@ -679,13 +689,22 @@ private:
     rhi::PipelineHandle m_cloud_shadow_pass;
     rhi::PipelineHandle m_cover_pass;
     rhi::PipelineHandle m_clouds_pass;
+    rhi::PipelineHandle m_sky_multi_pass;
+    rhi::PipelineHandle m_sky_aerial_pass;
+    rhi::PipelineHandle m_sky_ambient_pass;
     rhi::TextureHandle m_sky_view;     // rgba16_float, the sky's light by direction
+    rhi::TextureHandle m_sky_multi;    // rgba16_float, light scattered many times (32 square)
+    rhi::TextureHandle m_sky_aerial;   // rgba16_float, the air over the view's light (32 slices of 32 square, side by side)
+    rhi::TextureHandle m_sky_aerial_through; // rgba16_float, and what comes through it, by colour
+    rhi::TextureHandle m_sky_ambient;  // rgba16_float, 9 by 1: the sky's light from all round (spherical harmonics)
     rhi::TextureHandle m_cloud_map;    // rgba8_unorm, the clouds' pattern (made once)
     rhi::TextureHandle m_cloud_shadow; // rgba16_float, sunlight through the clouds over the ground
     rhi::TextureHandle m_cover;        // r32_float, camera-relative height of what is on top (rain and snow)
     rhi::TextureHandle m_clouds_a;     // rgba16_float, half resolution: the clouds' light and transmittance
     rhi::TextureHandle m_clouds_b;     // rgba16_float, half resolution: their distance and the scene's
     bool m_cloud_map_made = false;
+    bool m_sky_ambient_made = false; // filled by a frame before (global illumination reads it before the sky's passes)
+    float m_sky_multi_haze = -1.0f;  // the haze the multiple-scattering table was made for (-1: none; it depends on nothing else)
     bool m_sky_failed = false; // its textures could not be made: tried again when the frame's targets are remade
     bool m_overflow_logged = false;
     bool m_cull_buffers_logged = false;
