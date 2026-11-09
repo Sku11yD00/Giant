@@ -196,6 +196,8 @@ def world_gate(tool, call, check):
         check(len(slots) == 1 and slots[0]["name"] == "smoke" and slots[0]["of_this_world"], f"listed, got {slots}")
         loaded = tool("load_game", {"slot": "smoke", "wait": True})
         check(loaded["loads"] == 1 and loaded["doing"] == "", f"the game loaded, got {loaded}")
+        auto = tool("set_autosave", {"seconds": 0})
+        check(auto["autosave_seconds"] == 0 and auto["autosaves"] == 0, f"autosave off, got {auto}")
         tool("close_game")
         tool("delete_save", {"slot": "smoke", "wait": True})
         check(tool("list_saves")["slots"] == [], "the save deleted")
@@ -937,7 +939,8 @@ def main() -> int:
         names = {t["name"] for t in call("tools/list")["tools"]}
         for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation",
                          "get_swing", "find_path", "get_nav", "walk_to", "get_walker", "play_sound",
-                         "record_audio", "get_audio", "save_game", "load_game", "list_saves", "get_save"):
+                         "record_audio", "get_audio", "save_game", "load_game", "list_saves", "get_save",
+                         "set_autosave"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")

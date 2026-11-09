@@ -1591,8 +1591,35 @@ edit lifts and puts back every game and dented tile; a forced load of a world wi
 samples skips its ground (`skipped`); a tile the world no longer has waits
 until close_game; ground_now copies each dented tile on the frame.
 
-Known limits (part 2b): the player's own state (velocity, climbing, carrying),
-dynamic bodies, walkers and inventories are not saved; damage
+Part 2b: the bodies and autosave. A section `bodies` holds whether it was
+simulating and, while simulating, each dynamic entity the simulation
+moved (`entity`, `position`, `rotation`) with where the scene had it
+(`of`): stale poses (an entity edited since) are not saved, and a
+loaded game's not put back yet are saved as they were. Loading simulates
+again if it was (or plays), then puts them back with
+`sim::ScenePhysics::place` (the body there at rest, posed), 4096 a frame
+round-robin over 8192 looked at, once no bodies wait to be made (at most
+120 frames held so: a body knocked about meanwhile is still put where the
+save had it); one whose
+entity is not in the scene yet, has no body yet, or whose ground (the
+tile, or a game's still waiting) is not in yet waits, one moved in the world since (its transform not
+`of`) or not dynamic any more is skipped, and all of them go if that
+simulation stops. Autosave: while playing, every `autosave_seconds` of
+play (300; set_autosave, 0 off), a save to slot `autosave`, not while a
+save or load is under way or the player is being put down;
+bodies still waiting are saved as they were; it has its own base (a save to
+the user's slot after it is still of changes), it shows in get_save's
+`slot`, `doing` and the last save's numbers as any save, its errors are `autosave_error` (apart from `error`), and each
+save's gathering on the frame is timed (`gather_ms`). Known limits: a
+waiting body's entity that never streams in (or was deleted from the world
+since) waits until the simulation stops, counted in `bodies_waiting`; past 4096 bodies a frame, those put back
+first may land among those not yet; a body fallen past 1e8 m is not
+saved; a save made playing loads playing, and stopping play then stops
+simulating (whether it was on before play comes with the player, 2c); autosave's gathering is the same as a save's (every game cell,
+every dented tile copied on the frame).
+
+Known limits (part 2c): the player's own state (feet, velocity, climbing,
+carrying), walkers and inventories are not saved; damage
 in a cell that streamed out while playing is not in the save (the
 simulation lets it go there too); a save gathers every cell the forest
 knows at once (a frame's cost grows with the cells loaded); list_saves
