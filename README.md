@@ -367,6 +367,9 @@ Open-world systems:
 - P1 part 1: a physical sky: light scattered many times in the air (a
   deeper sky, the glow after sunset), far land fading blue through the
   clear air out to 32 km, and ambient light taken from the sky itself.
+- P1 part 2: auto exposure (the image follows the scene's brightness as
+  eyes adapt, without smearing), bloom round bright light, and a choice of
+  tone mapper (PBR Neutral or AgX).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

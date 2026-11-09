@@ -39,7 +39,7 @@ struct FrameConstants {
     u32 skip_offset;  // instance buffer byte offset of the not-drawn bits (InstanceStore)
     u32 sky_ambient;  // read descriptor: the sky's light from all round (9 spherical harmonics)
     u32 sky_flags;    // bit 0: ambient light from sky_ambient (else sky_light and ground_light)
-    u32 frame_pad;
+    u32 tone_mapper;  // RenderSettings::tone_mapper: 0 PBR Neutral, 1 AgX
     // Wind (giant/core/wind.h; common.slang's wind_offset).
     float wind[4];        // velocity xyz (m/s), w: gustiness
     float wind_clock[4];  // the gusts' drift (x, z metres), the sway and flutter clocks
@@ -447,6 +447,23 @@ struct ReflectPush {
     u32 pad;
 };
 static_assert(sizeof(ReflectPush) == 32);
+
+// post.slang's PostPush (all its passes): the histogram, bloom, exposure
+// and tone mapping.
+struct PostPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 source; // read descriptor: the light, or the bloom level before
+    u32 add;    // read descriptor: the level down at this size (up), the bloom's top (the image)
+    u32 target; // write descriptor: the level made, or the histogram's bins
+    u32 width;  // of what is made (the histogram: the image)
+    u32 height;
+    u32 flags;  // bit 0: the first level down; bit 1: AgX; bit 2: bloom
+    float strength;
+    float levels;
+    u32 pad[2];
+};
+static_assert(sizeof(PostPush) == 48);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {

@@ -8,6 +8,7 @@ giant_module(render
     src/instance_store.cpp
     src/shadow_pages.cpp
     src/voxel_light.cpp
+    src/exposure.cpp
   DEPENDS core rhi geometry voxel
 )
 giant_shaders(render
@@ -47,6 +48,12 @@ giant_shaders(render
     shaders/sky.slang:cs_sky_multi:compute:sky_multi_cs
     shaders/sky.slang:cs_sky_aerial:compute:sky_aerial_cs
     shaders/sky.slang:cs_sky_ambient:compute:sky_ambient_cs
+    shaders/post.slang:cs_histogram_clear:compute:histogram_clear_cs
+    shaders/post.slang:cs_histogram:compute:histogram_cs
+    shaders/post.slang:cs_bloom_down:compute:bloom_down_cs
+    shaders/post.slang:cs_bloom_up:compute:bloom_up_cs
+    shaders/post.slang:vs_main:vertex:post_vs
+    shaders/post.slang:ps_main:pixel:post_ps
 )
 # SMAA's precomputed area and search tables (headers only).
 target_link_libraries(giant_render PRIVATE third_party::smaa)
@@ -61,6 +68,7 @@ giant_module_tests(render
     tests/test_voxel_light.cpp
     tests/test_instance_store.cpp
     tests/test_skin.cpp
+    tests/test_exposure.cpp
 )
 if(GIANT_BUILD_TESTS)
   # The streaming tests check the module's own streamer directly.

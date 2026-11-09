@@ -888,20 +888,22 @@ def n1_gate(tool, call, check):
     for position, look_at in flight_path(6):
         tool("set_camera", {"position": position, "look_at": look_at})
         frame = settle()
-        check(frame["draws"] == 2 and frame["post_draws"] == 3,
-              f"20,000 pieces still take one raster pass, one shading pass and 3 anti-aliasing passes, got {frame}")
+        check(frame["draws"] == 2 and frame["post_draws"] == 4,
+              f"20,000 pieces still take one raster pass, one shading pass, tone mapping and 3 anti-aliasing passes, got {frame}")
         check(frame["materials"] == materials, f"{materials} shared materials, got {frame['materials']}")
         check(not frame["overflow"], f"nothing dropped, got {frame}")
         check(frame["streaming"]["waiting"] == 0, f"all detail in view loaded (no late sharpening), got {frame}")
     tool("set_render_settings", {"antialiasing": False})
     call("ping")
-    check(tool("get_render_settings")["last_frame"]["post_draws"] == 0, "anti-aliasing turns off")
+    check(tool("get_render_settings")["last_frame"]["post_draws"] == 1, "anti-aliasing turns off (tone mapping stays)")
     tool("set_render_settings", {"antialiasing": True, "gpu_culling": True})
     if tool("get_engine_info")["backend"] != "null":
         # Popping: small steps down the street change the image a little each time, evenly.
         # This only catches large jumps (detail switching across much of the view, e.g. a
         # whole level or the pool being flushed); the error bound (under a pixel) and the
         # "nothing left waiting" checks above cover the fine scale.
+        # (A fixed exposure: auto exposure easing between shots would change the whole view.)
+        tool("set_render_settings", {"auto_exposure": False})
         changes, previous = [], None
         for step in range(5):
             z = -20.0 - step * 0.2
@@ -919,6 +921,7 @@ def n1_gate(tool, call, check):
                 changes.append(sum(abs(a - b) for a, b in zip(region, previous)) / len(region))
             previous = region
         check(max(changes) <= 3 * min(changes) + 1.5, f"the view changes evenly while moving, got {changes}")
+        tool("set_render_settings", {"auto_exposure": True})
     tool("new_scene")
 
 

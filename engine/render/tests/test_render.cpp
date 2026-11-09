@@ -84,8 +84,9 @@ GIANT_TEST("render: the scene is one raster draw and one shading pass on the nul
     GIANT_CHECK(renderer->last_stats().instances == 3);
     GIANT_CHECK(renderer->last_stats().clusters >= 3);
     GIANT_CHECK(!renderer->last_stats().from_gpu);
-    GIANT_CHECK(renderer->last_stats().post_draws == 4); // screen reflections; SMAA: edges, weights, blend
-    GIANT_CHECK(device->last_frame_stats().draws == 2 + 4);
+    // Screen reflections; exposure and tone mapping; SMAA: edges, weights, blend.
+    GIANT_CHECK(renderer->last_stats().post_draws == 5);
+    GIANT_CHECK(device->last_frame_stats().draws == 2 + 5);
     // The background is cleared as linear colour: 0.5 is sRGB byte 188.
     const auto pixels = device->read_texture(target);
     GIANT_CHECK(pixels.size() == 64 * 32 * 4 && pixels[0] == 188 && pixels[1] == 0);
@@ -431,13 +432,13 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     };
     frame.settings.gpu_culling = false;
     s.draw(frame);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "shading", "anti-aliasing"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "shading", "post", "anti-aliasing"}));
     frame.settings.gpu_culling = true;
     frame.settings.occlusion_culling = true;
     frame.settings.antialiasing = false;
     s.draw(frame);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "shading"}));
+                                                     "raster", "HZB", "shadows", "shading", "post"}));
 }
 
 GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a pass after shading") {
@@ -455,8 +456,8 @@ GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a p
     frame.settings.antialiasing = false;
     RenderStats st = s.draw(frame);
     GIANT_CHECK(st.reflections && st.screen_reflections);
-    // Shading, then the pass that reflects and tone maps its image.
-    GIANT_CHECK(st.post_draws == 1);
+    // Shading, then the pass that reflects, then exposure and tone mapping.
+    GIANT_CHECK(st.post_draws == 2);
     GIANT_CHECK(s.device->last_frame_stats().draws == st.draws + st.post_draws + st.shadow_draws);
     // Without global illumination, only the screen's.
     frame.settings.gi = false;
@@ -465,7 +466,7 @@ GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a p
     frame.settings.gi = true;
     frame.settings.screen_space_reflections = false;
     st = s.draw(frame);
-    GIANT_CHECK(st.reflections && !st.screen_reflections && st.post_draws == 0); // tone mapped in shading
+    GIANT_CHECK(st.reflections && !st.screen_reflections && st.post_draws == 1); // exposure and tone mapping alone
     frame.settings.screen_space_reflections = true;
     frame.settings.debug_view = DebugView::lighting;
     st = s.draw(frame);
@@ -473,7 +474,7 @@ GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a p
     // Views of the geometry have none.
     frame.settings.debug_view = DebugView::clusters;
     st = s.draw(frame);
-    GIANT_CHECK(!st.reflections && !st.screen_reflections && st.post_draws == 0);
+    GIANT_CHECK(!st.reflections && !st.screen_reflections && st.post_draws == 1); // shown as they are
     frame.settings.debug_view = DebugView::voxels;
     st = s.draw(frame);
     GIANT_CHECK(!st.reflections && !st.screen_reflections && st.post_draws == 0);
@@ -655,6 +656,8 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     instances[1].material = 1;
 
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = camera;
     frame.instances = instances;
     frame.materials = materials;
@@ -738,13 +741,14 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
         GIANT_CHECK(differing(culled) <= pixels.size() / 200); // nothing visible lost
         // The GPU timed each pass of the newest frame (read after the wait).
         const auto timings = device->gpu_timings();
-        GIANT_CHECK(timings.size() == 10); // streaming, voxels, 2 x (culling, raster, HZB), shading, AA
+        GIANT_CHECK(timings.size() == 11); // streaming, voxels, 2 x (culling, raster, HZB), shading, post, AA
         bool timed = true;
         for (const rhi::GpuTiming& t : timings) {
             timed = timed && t.ms >= 0.0f && t.ms <= device->gpu_frame_ms() + 1e-4f;
         }
         GIANT_CHECK(timed && device->gpu_frame_ms() > 0.0f);
-        GIANT_CHECK(timings.size() == 10 && timings[2].name == "culling" && timings[8].name == "shading");
+        GIANT_CHECK(timings.size() == 11 && timings[2].name == "culling" && timings[8].name == "shading" &&
+                    timings[9].name == "post");
     }
     // A glowing red decal stamped on the sphere's front, facing the camera
     // (its +Y turned to +Z), on the CPU and GPU paths alike.
@@ -770,10 +774,10 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     frame.decals = {};
     frame.settings.antialiasing = false;
     const auto aliased = draw(false, false, false);
-    GIANT_CHECK(renderer->last_stats().post_draws == 1); // the screen reflections pass alone
+    GIANT_CHECK(renderer->last_stats().post_draws == 2); // the screen reflections pass, then tone mapping
     frame.settings.antialiasing = true;
     const auto smoothed = draw(false, false, false);
-    GIANT_CHECK(renderer->last_stats().post_draws == 4);
+    GIANT_CHECK(renderer->last_stats().post_draws == 5);
     if (aliased.size() == k_w * k_h * 4 && smoothed.size() == aliased.size()) {
         const auto luma = [](const std::vector<u8>& p, u32 x, u32 y) {
             const usize i = (static_cast<usize>(y) * k_w + x) * 4;
@@ -876,6 +880,8 @@ GIANT_TEST("render: d3d12 casts sun shadows from shadow pages") {
     materials[0].base_color = {0.7f, 0.7f, 0.7f};
     materials[0].roughness = 0.9f;
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = origin + DVec3{0.0, 6.0, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
     frame.instances = instances;
@@ -973,6 +979,8 @@ GIANT_TEST("render: d3d12 sways what the wind moves, as the CPU works it out, ne
     materials[1].base_color = {0.9f, 0.05f, 0.05f};
     materials[1].sway = 4.0f;
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = origin + DVec3{0.0, 8.0, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
     frame.instances = instances;
@@ -1085,6 +1093,8 @@ GIANT_TEST("render: d3d12 global illumination bounces colour and shuts out the s
     materials[1].base_color = {0.9f, 0.05f, 0.05f};
     materials[1].roughness = 0.9f;
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = origin + DVec3{0.0, 6.0, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
     frame.instances = instances;
@@ -1197,6 +1207,8 @@ GIANT_TEST("render: d3d12 reflects a block in a mirror floor, from the voxels an
     materials[1].base_color = {0.05f, 0.8f, 0.05f};
     materials[1].roughness = 0.9f;
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = origin + DVec3{0.0, 1.5, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi / 12.0f);
     frame.instances = instances;
@@ -1303,12 +1315,12 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     frame.sky.on = true;
     st = s.draw(frame); // no cover: the air alone
     GIANT_CHECK(st.sky && st.physical_sky && !st.clouds && !st.cloud_shadows);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "shading"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "shading", "post"}));
     // The physical sky's passes run inside "sky"; off, the single-scattered sky and the flat ambient colours.
     frame.settings.physical_sky = false;
     st = s.draw(frame);
     GIANT_CHECK(st.sky && !st.physical_sky);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "shading"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "shading", "post"}));
     frame.settings.physical_sky = true;
     frame.settings.aerial_distance = NAN; // (kept in range)
     st = s.draw(frame);
@@ -1318,7 +1330,7 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     st = s.draw(frame);
     GIANT_CHECK(st.sky && st.clouds && st.cloud_shadows);
     GIANT_CHECK(names() ==
-                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "clouds", "shading"}));
+                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "clouds", "shading", "post"}));
     // Settings turn them off; a sun below the horizon casts no cloud shadows.
     frame.settings.cloud_shadows = false;
     st = s.draw(frame);
@@ -1374,6 +1386,8 @@ GIANT_TEST("render: d3d12 draws a blue sky, grey under overcast clouds that shad
     materials[0].base_color = {0.5f, 0.5f, 0.5f};
     materials[0].roughness = 0.9f;
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = {1000.0, 2.0, -500.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(10.0f));
     frame.view.vertical_fov_degrees = 70.0f;
@@ -1498,6 +1512,8 @@ GIANT_TEST("render: d3d12 physical sky: a brighter sky, far ground fading blue t
     materials[0].base_color = {0.1f, 0.1f, 0.1f};
     materials[0].roughness = 0.9f;
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = {1000.0, 300.0, -500.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(-10.0f));
     frame.view.vertical_fov_degrees = 70.0f;
@@ -1646,6 +1662,8 @@ GIANT_TEST("render: d3d12 a dust puff hides what is behind it, lit; one behind t
     materials[0].base_color = {0.05f, 0.05f, 0.05f};
     materials[0].roughness = 0.9f;
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = {0.0, 2.0, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(-10.0f));
     frame.instances = instances;
@@ -1750,6 +1768,8 @@ GIANT_TEST("render: d3d12 snow and wet ground under the weather, kept off where 
     materials[0].base_color = {0.35f, 0.35f, 0.35f};
     materials[0].roughness = 0.9f;
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = origin + DVec3{0.0, 1.5, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
     frame.view.vertical_fov_degrees = 50.0f;
@@ -1810,4 +1830,250 @@ GIANT_TEST("render: d3d12 snow and wet ground under the weather, kept off where 
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
     device->destroy(target);
+}
+
+GIANT_TEST("render: exposure, bloom and tone mapping after shading; auto exposure waits for a measurement (null device)") {
+    NullScene s;
+    GIANT_CHECK(s.renderer != nullptr);
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::cube);
+    instances[0].position = {0.0, 0.0, -5.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.lighting.exposure = 2.0f;
+    RenderStats st = s.draw(frame);
+    // On by default; the null device reads nothing back, so Lighting::exposure alone.
+    GIANT_CHECK(st.auto_exposure && st.bloom && !st.exposure_measured && st.exposure == 2.0f);
+    for (int i = 0; i < 4; ++i) {
+        st = s.draw(frame);
+    }
+    GIANT_CHECK(st.auto_exposure && !st.exposure_measured && st.exposure == 2.0f);
+    // Off: the manual exposure; no bloom with it off or at no strength.
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.auto_exposure && !st.bloom && st.exposure == 2.0f);
+    frame.settings.bloom = true;
+    frame.settings.bloom_strength = 0.0f;
+    GIANT_CHECK(!s.draw(frame).bloom);
+    frame.settings.bloom_strength = NAN;
+    GIANT_CHECK(!s.draw(frame).bloom);
+    // Nonsense kept sane.
+    frame.settings.bloom_strength = 0.04f;
+    frame.settings.auto_exposure = true;
+    frame.settings.exposure_compensation = NAN;
+    frame.settings.exposure_min = NAN;
+    frame.settings.exposure_speed_up = -INFINITY;
+    frame.delta_seconds = NAN;
+    frame.lighting.exposure = NAN;
+    st = s.draw(frame);
+    GIANT_CHECK(st.auto_exposure && st.bloom && st.exposure == 1.0f);
+    // Views of the geometry: shown as they are, nothing measured or bloomed.
+    frame.settings.debug_view = DebugView::clusters;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.auto_exposure && !st.bloom && st.post_draws == 1);
+    frame.settings.debug_view = DebugView::voxels;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.auto_exposure && !st.bloom && st.post_draws == 0);
+    // A new size: bloom's levels are made again with the frame's targets.
+    frame.settings.debug_view = DebugView::lit;
+    rhi::TextureDesc t;
+    t.width = 7;
+    t.height = 3;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    s.device->destroy(s.target);
+    s.target = s.device->create_texture(t);
+    st = s.draw(frame);
+    GIANT_CHECK(st.bloom);
+    GIANT_CHECK(s.device->validation_errors() == 0);
+}
+
+namespace {
+// A d3d12 renderer drawing into a small target on the software adapter
+// (nullptr off Windows).
+struct WarpScene {
+    std::unique_ptr<rhi::Device> device;
+    std::unique_ptr<Renderer> renderer;
+    rhi::TextureHandle target;
+    static constexpr u32 k_w = 64, k_h = 48;
+    bool make() {
+        rhi::DeviceDesc desc;
+        desc.backend = rhi::Backend::d3d12;
+        desc.software_adapter = true;
+        desc.debug_layer = true;
+        device = rhi::create_device(desc);
+        if (device == nullptr) {
+            return false;
+        }
+        renderer = Renderer::create(*device);
+        GIANT_CHECK(renderer != nullptr);
+        if (renderer == nullptr) {
+            return false;
+        }
+        rhi::TextureDesc t;
+        t.width = k_w;
+        t.height = k_h;
+        t.format = rhi::Format::rgba8_srgb;
+        t.usage = rhi::TextureUsage::render_target;
+        target = device->create_texture(t);
+        return true;
+    }
+    // `frames` frames, each waited for (so measurements come back), then the image.
+    std::vector<u8> draw(const FrameInput& frame, int frames) {
+        for (int i = 0; i < frames; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            device->wait_idle();
+        }
+        return device->read_texture(target);
+    }
+    static std::array<int, 3> px(const std::vector<u8>& p, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        if (p.size() < i + 4) {
+            return {0, 0, 0};
+        }
+        return {p[i], p[i + 1], p[i + 2]};
+    }
+};
+} // namespace
+
+GIANT_TEST("render: d3d12 auto exposure brings a dim and a bright scene to the same brightness, eased") {
+    WarpScene w;
+    if (!w.make()) {
+        return; // not on Windows
+    }
+    // A grey ground filling the view from 10 m up, lit by the sun alone.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = w.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {200.0f, 1.0f, 200.0f};
+    instances[0].always_mesh = true;
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.view.position = {0.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.shadows = false;
+    frame.settings.antialiasing = false;
+    frame.settings.bloom = false;
+    frame.settings.exposure_speed_up = 100.0f; // (eased at once: a second a frame)
+    frame.settings.exposure_speed_down = 100.0f;
+    frame.delta_seconds = 1.0f;
+    const auto grey = [&](float sun, bool auto_exposure) {
+        frame.lighting.sun_light = {sun, sun, sun};
+        frame.settings.auto_exposure = auto_exposure;
+        return WarpScene::px(w.draw(frame, 5), WarpScene::k_w / 2, WarpScene::k_h / 2)[1];
+    };
+    const int dim_fixed = grey(0.05f, false);
+    const int bright_fixed = grey(5.0f, false);
+    const int dim = grey(0.05f, true);
+    const RenderStats dim_stats = w.renderer->last_stats();
+    const int bright = grey(5.0f, true);
+    const RenderStats bright_stats = w.renderer->last_stats();
+    std::printf("auto exposure: fixed %d / %d, auto %d / %d (scene %.2f / %.2f stops, exposure %.3f / %.3f)\n",
+                dim_fixed, bright_fixed, dim, bright, dim_stats.scene_stops, bright_stats.scene_stops,
+                dim_stats.exposure, bright_stats.exposure);
+    GIANT_CHECK(bright_fixed - dim_fixed > 100);
+    GIANT_CHECK(dim_stats.exposure_measured && bright_stats.exposure_measured);
+    // A hundred times the light: about 6.6 stops brighter measured, as much less exposure.
+    GIANT_CHECK(std::abs((bright_stats.scene_stops - dim_stats.scene_stops) - std::log2(100.0f)) < 0.75f);
+    GIANT_CHECK(std::abs(std::log2(dim_stats.exposure / bright_stats.exposure) - std::log2(100.0f)) < 0.75f);
+    GIANT_CHECK(std::abs(bright - dim) <= 20); // (the histogram's bins are 0.38 stops wide)
+    // Middle grey shows as middle grey does (about sRGB 105 under PBR Neutral).
+    GIANT_CHECK(bright > 80 && bright < 160);
+    // Eased: a slow eye has not caught up a frame after the light drops.
+    frame.settings.exposure_speed_up = 1.0f;
+    frame.delta_seconds = 1.0f / 60.0f;
+    frame.lighting.sun_light = {0.05f, 0.05f, 0.05f};
+    const int caught = WarpScene::px(w.draw(frame, 4), WarpScene::k_w / 2, WarpScene::k_h / 2)[1];
+    GIANT_CHECK(caught < dim - 40);
+    // Compensation: a stop brighter.
+    frame.settings.exposure_speed_up = 100.0f;
+    frame.delta_seconds = 1.0f;
+    frame.settings.exposure_compensation = 1.0f;
+    w.draw(frame, 5);
+    GIANT_CHECK(std::abs(std::log2(w.renderer->last_stats().exposure / dim_stats.exposure) - 1.0f) < 0.1f);
+    GIANT_CHECK(!w.device->device_lost());
+    GIANT_CHECK(w.device->validation_errors() == 0);
+}
+
+GIANT_TEST("render: d3d12 bloom spreads a bright light round it; AgX keeps grey grey") {
+    WarpScene w;
+    if (!w.make()) {
+        return; // not on Windows
+    }
+    // A small blazing ball on a dark ground, seen from above.
+    std::vector<Instance> instances(2);
+    instances[0].mesh = w.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {200.0f, 1.0f, 200.0f};
+    instances[0].always_mesh = true;
+    instances[0].material = 0;
+    instances[1].mesh = w.renderer->builtin(BuiltinMesh::sphere);
+    instances[1].position = {0.0, 0.5, 0.0}; // 1 m wide: about 4 pixels
+    instances[1].scale = {1.0f, 1.0f, 1.0f};
+    instances[1].always_mesh = true;
+    instances[1].material = 1;
+    std::vector<Material> materials(2);
+    materials[0].base_color = {0.18f, 0.18f, 0.18f};
+    materials[0].roughness = 0.9f;
+    materials[1].base_color = {0.0f, 0.0f, 0.0f};
+    materials[1].emissive = {200.0f, 200.0f, 200.0f};
+    FrameInput frame;
+    frame.view.position = {0.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.3f, 0.3f, 0.3f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.shadows = false;
+    frame.settings.antialiasing = false;
+    frame.settings.reflections = false;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    const auto off = w.draw(frame, 2);
+    GIANT_CHECK(!w.renderer->last_stats().bloom);
+    frame.settings.bloom = true;
+    frame.settings.bloom_strength = 0.2f;
+    const auto on = w.draw(frame, 2);
+    GIANT_CHECK(w.renderer->last_stats().bloom);
+    const u32 cx = WarpScene::k_w / 2, cy = WarpScene::k_h / 2;
+    const auto near_off = WarpScene::px(off, cx + 6, cy);
+    const auto near_on = WarpScene::px(on, cx + 6, cy);
+    const auto corner_off = WarpScene::px(off, 2, 2);
+    const auto corner_on = WarpScene::px(on, 2, 2);
+    const auto centre_on = WarpScene::px(on, cx, cy);
+    std::printf("bloom: near %d -> %d, corner %d -> %d, centre %d\n", near_off[1], near_on[1], corner_off[1],
+                corner_on[1], centre_on[1]);
+    GIANT_CHECK(near_on[1] > near_off[1] + 10); // the glow round the ball
+    GIANT_CHECK(near_on[0] == near_on[2] || std::abs(near_on[0] - near_on[2]) <= 2); // white light, white glow
+    GIANT_CHECK(near_on[1] - near_off[1] > corner_on[1] - corner_off[1]); // more near than far
+    GIANT_CHECK(centre_on[1] > 240);                                         // the ball itself still blazes
+    // AgX: different from PBR Neutral, grey kept grey.
+    frame.settings.bloom = false;
+    frame.settings.tone_mapper = ToneMapper::agx;
+    const auto agx = w.draw(frame, 2);
+    const auto ground_agx = WarpScene::px(agx, 2, 2);
+    std::printf("AgX: ground %d %d %d (PBR Neutral %d)\n", ground_agx[0], ground_agx[1], ground_agx[2], corner_off[1]);
+    GIANT_CHECK(std::abs(ground_agx[0] - ground_agx[1]) <= 2 && std::abs(ground_agx[1] - ground_agx[2]) <= 2);
+    GIANT_CHECK(ground_agx[1] != corner_off[1]);
+    GIANT_CHECK(ground_agx[1] > 20 && WarpScene::px(agx, cx, cy)[1] > 220);
+    GIANT_CHECK(!w.device->device_lost());
+    GIANT_CHECK(w.device->validation_errors() == 0);
 }
