@@ -564,3 +564,60 @@ GIANT_TEST("character: a jump into a wall is a jump; no room over a ledge, no pu
     GIANT_CHECK(mantled && s.on_ground && s.ground == moving && std::fabs(s.position.y - 3.0) < 0.05);
     GIANT_CHECK(std::fabs(s.position.z - at.z) < 1.0 && s.position.x > 2.1);
 }
+
+GIANT_TEST("character: put back moving keeps moving; takes hold of a wall it faces, not of the air") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground());
+    const BodyId block = physics.add(box({4.0, 2.0, 0.0}, {2.0f, 2.0f, 3.0f})); // its -x face at x = 2
+    CharacterDesc desc;
+    desc.position = {-10.0, 3.0, 0.0};
+    const CharacterId c = physics.add_character(desc);
+    // Falling at 4 m/s and drifting +z: it goes on so (the next step's speed follows on).
+    physics.set_character_velocity(c, {0.0f, -4.0f, 1.0f});
+    physics.step(1.0 / 60.0);
+    CharacterState s = state(physics, c);
+    GIANT_CHECK(s.position.y < 3.0 - 4.0 / 60.0 + 0.01 && s.position.z > 0.01);
+    physics.set_character_velocity(c, {std::nanf(""), 0.0f, 0.0f}); // bad numbers: nothing
+    physics.set_character_velocity(c, {0.0f, -1e6f, 0.0f});         // past the top speed: at it
+    GIANT_CHECK(state(physics, c).velocity.y > -1e5f);
+    // On the wall it faces: held there, climbing (as walked into).
+    physics.set_character_position(c, {1.65, 1.0, 0.0});
+    GIANT_CHECK(!physics.take_hold(c, {0.0f, 0.0f, 1.0f})); // nothing that way
+    GIANT_CHECK(physics.take_hold(c, {-1.0f, 0.0f, 0.0f}));
+    s = state(physics, c);
+    GIANT_CHECK(s.climbing && s.wall == block && s.wall_normal.x < -0.99f);
+    CharacterInput in;
+    in.climb = true;
+    physics.set_character_input(c, in);
+    run(physics, 0.5);
+    s = state(physics, c);
+    GIANT_CHECK(s.climbing && std::fabs(s.position.y - 1.0) < 0.1); // still on it, not fallen
+    // Out in the open: nothing to hold.
+    physics.set_character_position(c, {-20.0, 1.0, 0.0});
+    GIANT_CHECK(!physics.take_hold(c, {-1.0f, 0.0f, 0.0f}));
+}
+
+GIANT_TEST("character: put back walking up a step with its measured speed, it walks on rather than jumping") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground());
+    CharacterDesc desc;
+    desc.position = {0.0, 0.0, 0.0};
+    const CharacterId c = physics.add_character(desc);
+    run(physics, 0.3);
+    GIANT_CHECK(state(physics, c).on_ground);
+    // A rise as a step up measures (4.5 m/s up) while standing: not thrown up.
+    physics.set_character_velocity(c, {3.0f, 4.5f, 0.0f});
+    physics.set_character_input(c, {{3.0f, 0.0f, 0.0f}});
+    double highest = 0.0;
+    for (int i = 0; i < 30; ++i) {
+        physics.step(1.0 / 60.0);
+        highest = std::max(highest, state(physics, c).position.y);
+    }
+    GIANT_CHECK(highest < 0.05 && state(physics, c).on_ground);
+    // Huge but finite: the top speed, not none.
+    physics.set_character_position(c, {0.0, 20.0, 0.0});
+    physics.set_character_velocity(c, {1e20f, 0.0f, 0.0f});
+    GIANT_CHECK(state(physics, c).velocity.x > 10.0f);
+}

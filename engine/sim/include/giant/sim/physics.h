@@ -295,6 +295,17 @@ public:
     void jump(CharacterId id, float speed);
     // Puts it somewhere at once, still.
     void set_character_position(CharacterId id, const DVec3& position);
+    // Moving at `velocity` (m/s) from now, as if it had been (a fall goes on
+    // falling, a run goes on running until its input says otherwise); at
+    // most the characters' top speed. On the ground, rising (up a step, a
+    // slope) is not taken as a jump. Climbing, pulling up or carried, the
+    // next step sets its own speed. Bad numbers change nothing.
+    void set_character_velocity(CharacterId id, const Vec3& velocity);
+    // Takes hold of the wall it faces out of along `wall_normal` (flat),
+    // as walking into it would: a wall too steep to walk on, not a moving
+    // body, within reach. It keeps hold only while its input says climb (as
+    // climbing does). False (nothing changed): none there, or carried.
+    bool take_hold(CharacterId id, const Vec3& wall_normal);
     // Carried by `carrier` (a hand that picks it up, a platform it is
     // strapped to): from now it goes wherever the body takes it, held where
     // it is against it (in the body's frame), its input left aside, until

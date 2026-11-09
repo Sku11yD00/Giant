@@ -347,6 +347,8 @@ Open-world systems:
   back into the ground on loading, even for tiles that stream in later.
 - E4 part 2b: bodies knocked about while simulating are saved where they
   lie and put back on loading, and the game autosaves while playing.
+- E4 part 2c: the player is saved as they were: where they stood, hung on
+  a wall or fell, how fast, and what carried them.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

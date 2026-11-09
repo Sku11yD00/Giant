@@ -72,6 +72,37 @@ bool read_quat(const Json& j, Quat& out) {
     return true;
 }
 
+bool read_vec3f(const Json& j, double limit, Vec3& out) {
+    double v[3];
+    if (!j.is_array() || j.size() != 3) return false;
+    for (usize i = 0; i < 3; ++i)
+        if (!finite_in(j[i], -limit, limit, v[i])) return false;
+    out = {static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2])};
+    return true;
+}
+
+Json camera_json(const EditorCamera& c) {
+    return {{"position", {c.position.x, c.position.y, c.position.z}},
+            {"yaw_degrees", c.yaw_degrees},
+            {"pitch_degrees", c.pitch_degrees},
+            {"vertical_fov_degrees", c.vertical_fov_degrees}};
+}
+
+bool read_camera(const Json& j, EditorCamera& c) {
+    double v[3];
+    DVec3 p;
+    if (!j.is_object() || !j.contains("position") || !read_vec(j["position"], p) ||
+        !finite_in(j.value("yaw_degrees", Json(0.0)), -1e6, 1e6, v[0]) ||
+        !finite_in(j.value("pitch_degrees", Json(0.0)), -89.0, 89.0, v[1]) ||
+        !finite_in(j.value("vertical_fov_degrees", Json(60.0)), 1.0, 170.0, v[2]))
+        return false;
+    c.position = p;
+    c.yaw_degrees = static_cast<float>(v[0]);
+    c.pitch_degrees = static_cast<float>(v[1]);
+    c.vertical_fov_degrees = static_cast<float>(v[2]);
+    return true;
+}
+
 // Only the keys named (a typo must not silently drop data).
 bool only_keys(const Json& j, std::initializer_list<const char*> keys) {
     for (const auto& [k, v] : j.items()) {
@@ -90,6 +121,7 @@ struct GameSaves::Sections {
     bool has_weather = false; // the section was there
     std::optional<world::Weather> weather;
     world::Ground ground;
+    std::optional<PlayerStart> player;
     bool has_bodies = false;
     bool simulating = false;
     std::vector<SavedPose> poses;
@@ -166,6 +198,36 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
     // The weather it is going to (a blend under way saved as where it ends), and the ground now.
     const std::optional<world::Weather>& target = weather() != nullptr ? *weather() : state.scene.weather;
     sections["weather"] = weather_text(target, state.weather != nullptr ? state.weather->ground() : world::Ground{});
+    // The player as it is (put down: else a load puts it under the camera again, as play starting does).
+    if (playing && state.play->placing() && state.play->pending_start()) {
+        // Still being put down where a load had it: kept as that load had it.
+        const PlayerStart& at = *state.play->pending_start();
+        Json p = {{"feet", vec_json(at.feet)},
+                  {"velocity", Json::array({at.velocity.x, at.velocity.y, at.velocity.z})},
+                  {"climbing", at.climbing ? Json::array({at.climbing->x, at.climbing->y, at.climbing->z}) : Json(nullptr)},
+                  {"carried_by", at.carried_by ? Json(*at.carried_by) : Json(nullptr)},
+                  {"returns_to", camera_json(at.returns_to)},
+                  {"was_simulating", at.was_simulating}};
+        sections["player"] = p.dump(1) + "\n";
+    } else if (playing && !state.play->placing()) {
+        if (const std::optional<sim::CharacterState> c = state.play->player()) {
+            Json p = {{"feet", vec_json(c->position)},
+                      {"velocity", Json::array({c->velocity.x, c->velocity.y, c->velocity.z})},
+                      {"climbing", c->climbing && !c->mantling
+                                       ? Json::array({c->wall_normal.x, c->wall_normal.y, c->wall_normal.z})
+                                       : Json(nullptr)},
+                      {"carried_by", Json(nullptr)},
+                      {"returns_to", camera_json(state.play->returns_to())},
+                      {"was_simulating", state.play->was_simulating()}};
+            if (const std::optional<world::EntityId> by = state.play->carried_by()) p["carried_by"] = *by;
+            const bool finite = std::isfinite(c->position.x) && std::isfinite(c->position.y) &&
+                                std::isfinite(c->position.z) && std::fabs(c->position.y) <= 1e8 &&
+                                std::fabs(c->position.x) <= 1e8 && std::fabs(c->position.z) <= 1e8 &&
+                                std::isfinite(c->velocity.x) && std::isfinite(c->velocity.y) &&
+                                std::isfinite(c->velocity.z);
+            if (finite) sections["player"] = p.dump(1) + "\n";
+        }
+    }
     // Whether simulating, and the dynamic entities it moved (each with where the scene has it: one
     // moved in the world since is not this save's), those of a load not put back yet too.
     usize posed = 0;
@@ -326,6 +388,22 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     if (const auto e = world::load_weather(j["weather"].dump(), w)) return fail(file + ": " + e->message);
                     p->sections.weather = w;
                 }
+            } else if (name == "player") {
+                PlayerStart s;
+                const Json none(nullptr);
+                const Json& climbing = j.contains("climbing") ? j["climbing"] : none;
+                const Json& by = j.contains("carried_by") ? j["carried_by"] : none;
+                if (!only_keys(j, {"feet", "velocity", "climbing", "carried_by", "returns_to", "was_simulating"}) ||
+                    !j.contains("feet") || !read_vec(j["feet"], s.feet) || !j.contains("velocity") ||
+                    !read_vec3f(j["velocity"], 1e4, s.velocity) || !j.contains("returns_to") ||
+                    !read_camera(j["returns_to"], s.returns_to) || !j.value("was_simulating", Json(false)).is_boolean() ||
+                    (!climbing.is_null() && !read_vec3f(climbing, 1.01, s.climbing.emplace())) ||
+                    (!by.is_null() && (!by.is_number_unsigned() || by.get<u64>() == 0 ||
+                                       by.get<u64>() > world::k_max_entity_id)))
+                    return fail(file + ": a bad player");
+                if (!by.is_null()) s.carried_by = by.get<u64>();
+                s.was_simulating = j.value("was_simulating", false);
+                p->sections.player = s;
             } else if (name == "bodies") {
                 if (!only_keys(j, {"simulating", "poses"}) || !j.value("simulating", Json(false)).is_boolean() ||
                     !j.value("poses", Json::array()).is_array() || j.value("poses", Json::array()).size() > k_max_saved_poses)
@@ -392,6 +470,7 @@ void GameSaves::close(EditorState& state) {
     clear_ground(state);
     m_poses_waiting.clear();
     m_poses_from.reset();
+    m_carried_feet.reset();
     drop_weather();
     m_applying.clear();
     m_sections.reset();
@@ -487,6 +566,7 @@ void GameSaves::take(EditorState& state) {
     drop_weather();
     m_poses_waiting.clear();
     m_poses_from.reset();
+    m_carried_feet.reset();
     forget_base(); // (another game now: the other base is not of it)
     m_applying = std::move(p->loaded);
     m_sections = std::make_unique<Sections>(std::move(p->sections));
@@ -534,13 +614,17 @@ void GameSaves::finish_load(EditorState& state) {
         }
     }
     if (s.playing && state.play != nullptr && state.physics != nullptr) {
-        if (!state.play->start(state.scene, state.camera, state.scene_generation))
+        if (!state.play->start(state.scene, state.camera, state.scene_generation,
+                               s.player ? &*s.player : nullptr))
             m_status.error = "loaded, but the player could not be put there";
     }
     if (state.physics != nullptr && s.has_bodies) {
         if (s.simulating) state.physics->set_simulating(true);
         if (state.physics->simulating()) {
             for (const SavedPose& pose : s.poses) m_poses_waiting[pose.entity] = pose;
+            // A carried player's carrier put back later: carried again then, from where the save had it.
+            if (s.player && s.player->carried_by && m_poses_waiting.count(*s.player->carried_by) != 0)
+                m_carried_feet = std::make_pair(*s.player->carried_by, s.player->feet);
             m_poses_run = state.physics->runs();
             m_poses_held = 0;
         } else {
@@ -556,6 +640,7 @@ void GameSaves::place_bodies(EditorState& state) {
         m_status.bodies_skipped += m_poses_waiting.size();
         m_poses_waiting.clear();
         m_poses_from.reset();
+        m_carried_feet.reset();
         return;
     }
     // Waiting on what they would rest on: the bodies being made and the ground round them (a game's too).
@@ -588,6 +673,12 @@ void GameSaves::place_bodies(EditorState& state) {
         }
         --budget;
         ++m_status.bodies_applied;
+        if (m_carried_feet && m_carried_feet->first == p.entity) {
+            // (Only while that player is still held by it: not one started again, let go or dropped since.)
+            if (state.play != nullptr && state.play->carried_by() == p.entity)
+                state.play->carry_from(m_carried_feet->second, p.entity);
+            m_carried_feet.reset();
+        }
         it = m_poses_waiting.erase(it);
     }
     m_poses_from = it != m_poses_waiting.end() ? std::optional<world::EntityId>(it->first) : std::nullopt;
@@ -673,6 +764,7 @@ void GameSaves::follow(EditorState& state) {
         clear_ground(state);
         m_poses_waiting.clear();
         m_poses_from.reset();
+        m_carried_feet.reset();
         forget_base();
         if (m_status.doing == "applying") m_status.doing.clear();
         m_generation = 0;

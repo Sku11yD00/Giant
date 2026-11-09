@@ -42,6 +42,17 @@ struct PlayerSettings {
     sim::CharacterDesc body;   // height, radius, steps and slopes (its position is set on starting)
 };
 
+// Where a game save had the player (GameSaves): put back so, not on what
+// is under the camera.
+struct PlayerStart {
+    DVec3 feet{};
+    Vec3 velocity{};
+    std::optional<Vec3> climbing; // on a wall: its normal (flat, out of it)
+    std::optional<world::EntityId> carried_by;
+    EditorCamera returns_to;      // where stopping puts the camera
+    bool was_simulating = false;  // and simulating as it was
+};
+
 class PlayState {
 public:
     explicit PlayState(PhysicsState& physics, const PlayerSettings& settings = {});
@@ -53,7 +64,17 @@ public:
     // without stalling a frame: the player is held at the camera until
     // they are in (at most five seconds), then put on what is under it.
     // False when it could not be put there (the physics world refused it).
-    bool start(world::Scene& scene, EditorCamera& camera, u64 scene_generation);
+    // `at`: as a game save had it (its feet, speed, wall and carrier; the
+    // camera and simulating to go back to), once what it stands on is in.
+    bool start(world::Scene& scene, EditorCamera& camera, u64 scene_generation, const PlayerStart* at = nullptr);
+    // What stopping goes back to (a game save keeps them).
+    const EditorCamera& returns_to() const { return m_saved_camera; }
+    // A game save's start not put down yet (still placing), else none.
+    const std::optional<PlayerStart>& pending_start() const { return m_start; }
+    // Carried again from `feet` (its carrier just put back where a save had
+    // it: held as the save had it against it, not where it was before).
+    bool carry_from(const DVec3& feet, world::EntityId entity);
+    bool was_simulating() const { return m_was_simulating; }
     // Stops: the camera back where it was, simulating as it was.
     void stop(EditorCamera& camera);
 
@@ -99,6 +120,8 @@ private:
     DVec3 spawn_at(const DVec3& eye) const;
     // Starting waits for this: entities to make, or the ground under `eye`.
     bool placing_waits(const world::Scene& scene, const DVec3& eye) const;
+    // Put down where it is to start: on what is under the eyes, or as a game save had it.
+    void put_down();
 
     PhysicsState& m_physics;
     PlayerSettings m_settings;
@@ -118,6 +141,8 @@ private:
     bool m_waiting = false;
     bool m_placing = false;   // started, waiting for the bodies before standing
     double m_placing_for = 0.0; // seconds of it
+    DVec3 m_place_eye{};        // where its eyes are to start (what placing waits under)
+    std::optional<PlayerStart> m_start; // a game save's, until put down
 };
 
 } // namespace giant::editor

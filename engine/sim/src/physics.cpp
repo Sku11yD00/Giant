@@ -1162,6 +1162,49 @@ void PhysicsWorld::set_character_position(CharacterId id, const DVec3& position)
     m_impl->refresh(*it->second.body);
 }
 
+void PhysicsWorld::set_character_velocity(CharacterId id, const Vec3& velocity) {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end() || !std::isfinite(velocity.x) || !std::isfinite(velocity.y) ||
+        !std::isfinite(velocity.z))
+        return;
+    // (Scaled down first: a huge but finite speed has no finite length.)
+    const float big = std::max({std::fabs(velocity.x), std::fabs(velocity.y), std::fabs(velocity.z)});
+    JPH::Vec3 v = to_jolt(big > k_max_character_speed ? velocity * (k_max_character_speed / big) : velocity);
+    const float speed = v.Length();
+    if (speed > k_max_character_speed) v *= k_max_character_speed / speed;
+    Impl::Character& c = it->second;
+    c.body->SetLinearVelocity(v);
+    c.velocity = from_jolt(v);
+    // The speed up it is given: on the ground, what it moved up by (a step,
+    // a slope) is not a jump, so no more than the ground's own.
+    float vertical = v.GetY();
+    if (c.body->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround) {
+        c.body->UpdateGroundVelocity();
+        vertical = std::min(vertical, c.body->GetGroundVelocity().GetY());
+    }
+    c.vertical = vertical;
+}
+
+bool PhysicsWorld::take_hold(CharacterId id, const Vec3& wall_normal) {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end() || !it->second.carrier.IsInvalid()) return false;
+    Impl::Character& c = it->second;
+    JPH::Vec3 flat(wall_normal.x, 0.0f, wall_normal.z);
+    if (!std::isfinite(flat.GetX()) || !std::isfinite(flat.GetZ()) || flat.LengthSq() < 1e-4f) return false;
+    flat = flat.Normalized();
+    const float steep = std::cos(JPH::DegreesToRadians(c.desc.max_slope_degrees));
+    const JPH::RVec3 chest = c.body->GetPosition() + JPH::Vec3::sAxisY() * (0.5f * c.desc.height);
+    const std::optional<Impl::Hit> wall = m_impl->look(chest, -flat, c.desc.radius + 0.35f);
+    if (!wall || wall->dynamic || std::fabs(wall->normal.y) >= steep) return false;
+    JPH::Vec3 met(wall->normal.x, 0.0f, wall->normal.z);
+    if (met.LengthSq() < 1e-4f || met.Normalized().Dot(flat) < 0.5f) return false; // (another face)
+    c.climbing = true;
+    c.mantling = false;
+    c.wall = wall->body;
+    c.wall_normal = from_jolt(met.Normalized());
+    return true;
+}
+
 bool PhysicsWorld::carry_character(CharacterId id, BodyId carrier) {
     const auto it = m_impl->characters.find(id);
     if (it == m_impl->characters.end() || !contains(carrier) || m_impl->is_character_body(from_id(carrier))) return false;

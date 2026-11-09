@@ -514,3 +514,101 @@ GIANT_TEST("game saves: the bodies simulating moved are put back where they were
     std::error_code error;
     std::filesystem::remove_all(folder, error);
 }
+
+GIANT_TEST("game saves: the player is put back as it was: on a wall, in the air, and where stopping returns to") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        PhysicsState physics;
+        PlayState play{physics};
+        WorldStreaming streaming;
+        GameSaves saves;
+        EditorState state;
+        state.physics = &physics;
+        state.play = &play;
+        state.world = &streaming;
+        state.saves = &saves;
+        ai::CommandRegistry commands;
+        register_scene_commands(commands, state);
+        register_physics_commands(commands, state);
+        register_save_commands(commands, state);
+        const auto run = [&](const char* name, const Json& args = Json::object()) {
+            return commands.execute(name, args, {});
+        };
+        world::Scene& scene = state.scene;
+        world::Entity floor;
+        floor.shape = world::Shape::plane;
+        floor.transform.position = {32.0, 0.0, 32.0};
+        floor.transform.scale = {60.0f, 1.0f, 60.0f};
+        scene.add(floor);
+        world::Entity wall; // a 6 m block, its -x face at x = 38
+        wall.shape = world::Shape::cube;
+        wall.transform.position = {40.0, 3.0, 32.0};
+        wall.transform.scale = {4.0f, 6.0f, 8.0f};
+        scene.add(wall);
+        GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
+        const auto frame = [&] {
+            play.before_step(scene, state.camera, state.scene_generation, 1.0 / 60.0);
+            physics.update(scene, scene.take_changes(), 1.0 / 60.0);
+            play.after_step(state.camera, 1.0 / 60.0);
+            saves.update(state, 1.0 / 60.0);
+        };
+        frame();
+        state.camera.position = {20.0, 5.0, 32.0};
+        const EditorCamera before = state.camera; // where stopping goes back to
+        GIANT_CHECK(run("play", {{"on", true}}).ok);
+        for (int i = 0; i < 30 && play.waiting_for_ground(); ++i) frame();
+        GIANT_CHECK(!play.waiting_for_ground());
+        // On the wall, 2 m up.
+        sim::PhysicsWorld& w = physics.world();
+        const auto character = [&] { return *play.player(); };
+        ai::CommandResult r = run("step_player", {{"seconds", 0.2}});
+        GIANT_CHECK(r.ok);
+        // (The player's handle is PlayState's own: put it there by its character.)
+        const auto put = [&](const DVec3& at) {
+            for (sim::CharacterId c = 1; c < 16; ++c) {
+                if (!w.contains_character(c)) continue;
+                w.set_character_position(c, at);
+                return c;
+            }
+            return sim::k_no_character;
+        };
+        const sim::CharacterId me = put({37.65, 2.0, 32.0});
+        GIANT_CHECK(me != sim::k_no_character && w.take_hold(me, {-1.0f, 0.0f, 0.0f}));
+        GIANT_CHECK(character().climbing);
+        r = run("save_game", {{"slot", "wall"}, {"wait", true}});
+        GIANT_CHECK(r.ok);
+        GIANT_CHECK(run("play", {{"on", false}}).ok);
+        GIANT_CHECK(!play.playing() && !physics.simulating());
+        state.camera.position = {0.0, 50.0, 0.0};
+        r = run("load_game", {{"slot", "wall"}, {"wait", true}});
+        GIANT_CHECK(r.ok && play.playing());
+        for (int i = 0; i < 30 && play.waiting_for_ground(); ++i) frame();
+        sim::CharacterState s = character();
+        GIANT_CHECK(s.climbing && std::fabs(s.position.x - 37.65) < 0.05 && std::fabs(s.position.y - 2.0) < 0.1);
+        // Stopping goes back where the saved game's play began, simulating as it was then.
+        GIANT_CHECK(run("play", {{"on", false}}).ok);
+        GIANT_CHECK(state.camera.position == before.position && !physics.simulating());
+        // In the air, falling: it goes on falling from there.
+        GIANT_CHECK(run("play", {{"on", true}}).ok);
+        for (int i = 0; i < 30 && play.waiting_for_ground(); ++i) frame();
+        const sim::CharacterId me2 = put({25.0, 10.0, 32.0});
+        w.set_character_velocity(me2, {2.0f, -6.0f, 0.0f});
+        r = run("save_game", {{"slot", "air"}, {"wait", true}});
+        GIANT_CHECK(r.ok);
+        GIANT_CHECK(run("play", {{"on", false}}).ok);
+        r = run("load_game", {{"slot", "air"}, {"wait", true}});
+        GIANT_CHECK(r.ok && play.playing());
+        for (int i = 0; i < 30 && play.waiting_for_ground(); ++i) frame();
+        s = character();
+        GIANT_CHECK(!s.on_ground && std::fabs(s.position.y - 10.0) < 0.3 && s.velocity.y < -5.0f && s.velocity.x > 1.5f);
+        // A bad player section is refused whole.
+        GIANT_CHECK(run("play", {{"on", false}}).ok);
+        for (const auto& e : std::filesystem::directory_iterator(folder / "saves" / "air" / "sections")) {
+            if (e.path().filename().string().rfind("player.", 0) == 0)
+                std::ofstream(e.path(), std::ios::binary) << "{\"feet\": [0, 0, 0]}"; // (missing keys: refused)
+        }
+        GIANT_CHECK(!run("load_game", {{"slot", "air"}, {"wait", true}}).ok);
+    }
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+}
