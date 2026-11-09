@@ -48,9 +48,9 @@ uint pack_light(float3 c, bool sun) {
     return m.x | (m.y << 9) | (m.z << 18) | (e << 27) | (sun ? 0x80000000u : 0u);
 }
 
-// The light from the sky along a direction: the hemisphere colours.
+// The light from the sky along a direction: the ambient light (common.slang).
 float3 sky_radiance(Frame f, float3 dir) {
-    return lerp(f.ground_light.rgb, f.sky_light.rgb, dir.y * 0.5 + 0.5);
+    return ambient_light(f, dir);
 }
 
 static const float k_gi_pi = 3.14159265;

@@ -1302,8 +1302,18 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     GIANT_CHECK(!st.sky && !st.clouds); // off: the flat background
     frame.sky.on = true;
     st = s.draw(frame); // no cover: the air alone
-    GIANT_CHECK(st.sky && !st.clouds && !st.cloud_shadows);
+    GIANT_CHECK(st.sky && st.physical_sky && !st.clouds && !st.cloud_shadows);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "shading"}));
+    // The physical sky's passes run inside "sky"; off, the single-scattered sky and the flat ambient colours.
+    frame.settings.physical_sky = false;
+    st = s.draw(frame);
+    GIANT_CHECK(st.sky && !st.physical_sky);
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "shading"}));
+    frame.settings.physical_sky = true;
+    frame.settings.aerial_distance = NAN; // (kept in range)
+    st = s.draw(frame);
+    GIANT_CHECK(st.physical_sky);
+    frame.settings.aerial_distance = 32000.0f;
     frame.sky.cloud_cover = 0.6f;
     st = s.draw(frame);
     GIANT_CHECK(st.sky && st.clouds && st.cloud_shadows);
@@ -1375,6 +1385,7 @@ GIANT_TEST("render: d3d12 draws a blue sky, grey under overcast clouds that shad
     frame.lighting.ground_light = {0.08f, 0.07f, 0.06f};
     frame.sky.on = true;
     frame.sky.sun_top = {3.0f, 3.0f, 3.0f};
+    frame.settings.physical_sky = false; // (the single-scattered sky and flat ambient this was set for; its own test below)
     frame.settings.gi = false;
     frame.settings.voxel_world = false;
     frame.settings.shadows = false;
@@ -1448,6 +1459,114 @@ GIANT_TEST("render: d3d12 draws a blue sky, grey under overcast clouds that shad
         const auto near_clear = px(clear, k_w / 2, k_h - 2);
         const auto near_fog = px(fog, k_w / 2, k_h - 2);
         GIANT_CHECK(std::abs(near_fog[1] - near_clear[1]) < std::abs(far_fog[1] - far_clear[1]));
+    }
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("render: d3d12 physical sky: a brighter sky, far ground fading blue through the air, ambient from the sky") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) {
+        return; // not on Windows
+    }
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    constexpr u32 k_w = 64, k_h = 48;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A grey ground to the horizon (40 km); the camera 300 m up looking 10 degrees down: the sky at
+    // the top, the ground about 7 km off a little under the middle, about 440 m off at the bottom.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {40000.0f, 1.0f, 40000.0f};
+    instances[0].always_mesh = true;
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.view.position = {1000.0, 300.0, -500.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(-10.0f));
+    frame.view.vertical_fov_degrees = 70.0f;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.2f, 0.7f, -0.6f});
+    frame.lighting.sun_light = {2.6f, 2.5f, 2.3f};
+    frame.lighting.sky_light = {0.15f, 0.25f, 0.45f};
+    frame.lighting.ground_light = {0.08f, 0.07f, 0.06f};
+    frame.sky.on = true;
+    frame.sky.sun_top = {3.0f, 3.0f, 3.0f};
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.shadows = false;
+    frame.settings.antialiasing = false;
+    const auto draw = [&] {
+        for (int i = 0; i < 4; ++i) { // (the ambient table is read from the frame after it is first filled)
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    frame.settings.physical_sky = false;
+    const auto flat = draw();
+    GIANT_CHECK(!renderer->last_stats().physical_sky);
+    frame.settings.physical_sky = true;
+    const auto physical = draw();
+    GIANT_CHECK(renderer->last_stats().physical_sky);
+    // The same with no light from the sky at all: the ambient is the sky's, not sky_light's.
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    const auto unlit_flat = draw();
+    const usize size = usize{k_w} * k_h * 4;
+    GIANT_CHECK(flat.size() == size && physical.size() == size && unlit_flat.size() == size);
+    if (flat.size() == size && physical.size() == size && unlit_flat.size() == size) {
+        const auto px = [](const std::vector<u8>& p, u32 x, u32 y) {
+            const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+            return std::array<int, 3>{p[i], p[i + 1], p[i + 2]};
+        };
+        const auto print = [&](const char* what, const std::vector<u8>& p) {
+            const auto up = px(p, k_w / 2, 2);
+            const auto near = px(p, k_w / 2, k_h - 2);
+            const auto far = px(p, k_w / 2, 19);
+            std::printf("physical sky %s: up %d %d %d, ground near %d %d %d, ground far %d %d %d\n", what, up[0], up[1],
+                        up[2], near[0], near[1], near[2], far[0], far[1], far[2]);
+        };
+        print("off", flat);
+        print("on", physical);
+        print("on, no flat colours", unlit_flat);
+        const auto sum = [](const std::array<int, 3>& c) { return c[0] + c[1] + c[2]; };
+        // The sky overhead: still blue, and no darker for the light scattered many times.
+        const auto up_on = px(physical, k_w / 2, 2);
+        const auto up_off = px(flat, k_w / 2, 2);
+        GIANT_CHECK(up_on[2] > up_on[0] + 20);
+        GIANT_CHECK(sum(up_on) >= sum(up_off));
+        // The far ground: bluer than the near ground through the air (more than without it).
+        const auto near_on = px(physical, k_w / 2, k_h - 2);
+        const auto far_on = px(physical, k_w / 2, 19);
+        const auto near_off = px(flat, k_w / 2, k_h - 2);
+        const auto far_off = px(flat, k_w / 2, 19);
+        GIANT_CHECK((far_on[2] - far_on[0]) - (near_on[2] - near_on[0]) >
+                    (far_off[2] - far_off[0]) - (near_off[2] - near_off[0]));
+        // The ambient light is the sky's: without the flat colours the near ground is as lit as with them.
+        const auto near_unlit = px(unlit_flat, k_w / 2, k_h - 2);
+        GIANT_CHECK(std::abs(sum(near_unlit) - sum(near_on)) <= 6);
+        GIANT_CHECK(sum(near_on) > 60);
     }
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
@@ -1639,6 +1758,7 @@ GIANT_TEST("render: d3d12 snow and wet ground under the weather, kept off where 
     frame.lighting.sky_light = {0.4f, 0.4f, 0.45f};
     frame.lighting.ground_light = {0.2f, 0.2f, 0.2f};
     frame.sky.on = true;
+    frame.settings.physical_sky = false; // (the flat ambient these levels were set for)
     frame.settings.antialiasing = false;
     frame.settings.gi = false;
     frame.settings.shadows = false; // the roof's shade is not what this checks

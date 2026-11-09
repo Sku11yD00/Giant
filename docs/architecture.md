@@ -571,6 +571,40 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   fog (exponential in height, capped at 30 km) and darkens the sun by the
   cloud shadow (screen reflections are added scaled by what of the pixel comes through). A change of cloud size rescales the wind offset about the camera, so the clouds overhead stay put. Settings `clouds`, `cloud_steps` (48) and `cloud_shadows`.
   Not yet: lightning, clouds parting round giants.
+- **Physical sky (photoreal part 1).** With `RenderSettings::physical_sky`
+  (default on) the sky passes add three tables, every frame and without
+  history, all inside the "sky" timing:
+  - **Light scattered many times** (Hillaire 2020): a 32^2 table by the
+    sun's cosine and the square root of height. Each texel marches 64
+    directions with 20 steps, collects the light scattered once towards
+    it (an even phase, the sunlit ground's share) and the fraction the air
+    scatters again (f_ms), and stores L2 / (1 - f_ms). The sky view
+    (`sky_radiance`) and the air over the view add it to the single
+    scattering: a deeper, brighter sky and the glow after sunset.
+  - **The air over the view** (aerial perspective): 32^2 rays through the
+    screen, each marched over 32 slices ending `aerial_distance` * ((k +
+    1) / 32)^2 away (default 32 km, two steps a slice), storing the light
+    scattered in and the mean transmittance. They are kept side by side in
+    one 1024x32 texture, read with a half-froxel clamp so no slice bleeds
+    into the next. The resolve puts it over every surface, meshes and
+    far-field voxels alike (`aerial_at`, before the height fog). The sky
+    background has it already. Far land fades blue into the distance.
+  - **The sky's light from all round:** one group projects 1024 directions
+    onto 9 spherical harmonics (convolved with the cosine, over pi). The
+    upper half is the sky view table, lerped to `sky_light` (the clouds'
+    deck) by cloud cover. The lower half is the ground (albedo 0.2) lit by
+    the sun, dimmed by the clouds' mean shade, and by that sky.
+    `ambient_light` (common.slang) evaluates it for shading's diffuse and
+    specular ambient, for global illumination's sky (cone misses, unlit
+    voxels) and for the voxel view, in place of the flat `sky_light` and
+    `ground_light` hemisphere (`FrameConstants::sky_flags` bit 0).
+    Global illumination lights voxels before the frame's sky passes, so
+    it reads the table a frame before filled; the flat colours are used
+    until one has been. Off, or with the sky off, everything is as before.
+
+  Light is still in the engine's relative units (physical units come with
+  exposure, part 2). The air over the view has no shadows (no light
+  shafts yet).
 - **Rain, snow and wet ground (N3 part 8).** `world::falling` splits the
   weather's precipitation into rain and snow by temperature;
   `world::weather_ground` steps the ground's wetness and snow cover
@@ -2042,8 +2076,8 @@ as standing still.
   shading lights a Lambert surface: its colour times the sun over pi
   (when its bit says the sun reaches it) plus its own light word, so
   light bounces once more each time a brick is lit again. What
-  gets through comes from the sky (the sky and ground colours by
-  direction).
+  gets through comes from the sky (`ambient_light`: the physical sky's
+  table, or the sky and ground colours by direction).
 - `VoxelLight` picks the bricks on the CPU: a brick just put in a pool
   index is first cleared to "not lit" (what the index held was another
   brick's), then lit before anything else, as is a brick built again in

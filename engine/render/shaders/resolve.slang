@@ -316,11 +316,12 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
     const float3 diffuse = (1.0 - fresnel) * diffuse_color / k_pi;
     float3 color = (diffuse + specular) * f.sun_light.rgb * (n_dot_l * sun);
 
-    // Hemisphere ambient: sky above, ground below, for diffuse along the
-    // normal and for specular along the reflection.
+    // Ambient: the sky's light from all round (or the hemisphere of sky
+    // above, ground below), for diffuse along the normal and for specular
+    // along the reflection.
     const float3 r = reflect(-v, n);
-    float3 ambient_diffuse = lerp(f.ground_light.rgb, f.sky_light.rgb, n.y * 0.5 + 0.5);
-    float3 ambient_specular = lerp(f.ground_light.rgb, f.sky_light.rgb, r.y * 0.5 + 0.5);
+    float3 ambient_diffuse = ambient_light(f, n);
+    float3 ambient_specular = ambient_light(f, r);
     if (bounce.w > 0.0) {
         // The bounce light takes the flat colours' place; reflections of
         // the sky dim as much as the sky is hidden from here (until they
@@ -389,16 +390,19 @@ float3 clouds_and_fog(Sky s, float3 color, float3 dir, float distance, uint2 pix
     // The scene fogged over its whole distance, then the clouds over it,
     // themselves fogged only over the distance to the first of them.
     // `through`: how much of the scene's own light comes through.
+    // The clear air first (the physical sky's aerial perspective), then the fog.
+    const float4 air = aerial_at(s, pixel, distance < 1.0e30 ? distance : 0.0);
+    color = color * air.a + air.rgb;
     const float t = fog_transmittance(s, dir, min(distance, 30000.0));
     const float3 fog = fog_color(s, dir);
     color = color * t + fog * (1.0 - t);
-    through = t;
+    through = air.a * t;
     float first;
     const float4 cloud = clouds_at(s, pixel, distance, first);
     if (cloud.a >= 0.9999) {
         return color;
     }
-    through = t * cloud.a;
+    through = air.a * t * cloud.a;
     const float near_t = fog_transmittance(s, dir, min(first, 30000.0));
     color = color * cloud.a + cloud.rgb * near_t + fog * ((1.0 - near_t) * (1.0 - cloud.a));
     return color;

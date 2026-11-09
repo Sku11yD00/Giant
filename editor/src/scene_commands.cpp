@@ -406,6 +406,8 @@ Json render_settings_json(const EditorState& state) {
             {"gi_bricks_per_frame", state.render_settings.gi_bricks_per_frame},
             {"reflections", state.render_settings.reflections},
             {"screen_space_reflections", state.render_settings.screen_space_reflections},
+            {"physical_sky", state.render_settings.physical_sky},
+            {"aerial_distance", state.render_settings.aerial_distance},
             {"clouds", state.render_settings.clouds},
             {"cloud_steps", state.render_settings.cloud_steps},
             {"cloud_shadows", state.render_settings.cloud_shadows},
@@ -440,6 +442,7 @@ Json render_settings_json(const EditorState& state) {
               {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}},
               {"sky",
                {{"on", s.sky},
+                {"physical", s.physical_sky},
                 {"clouds", s.clouds},
                 {"cloud_shadows", s.cloud_shadows},
                 {"falling", s.falling},
@@ -1527,6 +1530,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "through the lit voxel world as wide as the highlight (needs gi), and with screen_space_reflections "
          "(default on) a sharp reflection from the image itself where what it meets is on screen; "
          "last_frame.reflections says which are on. "
+         "physical_sky: with a weather set, the air's light scattered many times (a deeper sky, the glow "
+         "after sunset), the clear air between the camera and what it sees (far land fades blue, out to "
+         "aerial_distance metres, default 32000) and the ambient light taken from the sky itself all round "
+         "instead of the flat sky and ground colours (default on). "
          "clouds: with a weather set (set_weather), its clouds marched at half resolution, cloud_steps "
          "steps a ray (default 48; fewer is faster and grainier), and cloud_shadows their shadows on the "
          "ground (both default on; last_frame.sky says what drew). "
@@ -1558,6 +1565,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                          {"description", "Voxel bricks lit a frame at most. Default 256."}}},
                 {"reflections", {{"type", "boolean"}}},
                 {"screen_space_reflections", {{"type", "boolean"}}},
+                {"physical_sky", {{"type", "boolean"}}},
+                {"aerial_distance", number(1000, 100000, "Metres the air over the view is worked out to. Default 32000.")},
                 {"clouds", {{"type", "boolean"}}},
                 {"cloud_steps", {{"type", "integer"}, {"minimum", 8}, {"maximum", 256},
                                  {"description", "Steps a cloud ray. Default 48."}}},
@@ -1595,6 +1604,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.gi_bricks_per_frame = args.value("gi_bricks_per_frame", r.gi_bricks_per_frame);
              r.reflections = args.value("reflections", r.reflections);
              r.screen_space_reflections = args.value("screen_space_reflections", r.screen_space_reflections);
+             r.physical_sky = args.value("physical_sky", r.physical_sky);
+             r.aerial_distance = args.value("aerial_distance", r.aerial_distance);
              r.clouds = args.value("clouds", r.clouds);
              r.cloud_steps = args.value("cloud_steps", r.cloud_steps);
              r.cloud_shadows = args.value("cloud_shadows", r.cloud_shadows);

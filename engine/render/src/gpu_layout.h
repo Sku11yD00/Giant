@@ -37,7 +37,9 @@ struct FrameConstants {
     u32 pool;         // read descriptor of the geometry pool
     u32 frame_number; // marks the groups a frame used
     u32 skip_offset;  // instance buffer byte offset of the not-drawn bits (InstanceStore)
-    u32 frame_pad[3];
+    u32 sky_ambient;  // read descriptor: the sky's light from all round (9 spherical harmonics)
+    u32 sky_flags;    // bit 0: ambient light from sky_ambient (else sky_light and ground_light)
+    u32 frame_pad;
     // Wind (giant/core/wind.h; common.slang's wind_offset).
     float wind[4];        // velocity xyz (m/s), w: gustiness
     float wind_clock[4];  // the gusts' drift (x, z metres), the sway and flutter clocks
@@ -390,10 +392,10 @@ struct SkyParams {
     u32 clouds_a;
     u32 clouds_b;
     u32 depth;
-    u32 pad0;
-    u32 pad1;
+    u32 multi_scatter; // read descriptors: light scattered many times, the air over the view
+    u32 aerial;
     float sun_top[3];
-    float pad2;
+    float aerial_far; // metres the air over the view's last slice ends
     // What falls and the ground under it (N3 part 8).
     float rain;       // 0 to 1
     float snow;       // 0 to 1
@@ -407,7 +409,7 @@ struct SkyParams {
     u32 weather_flags;     // bit 0: falling; bit 1: wet and snowy surfaces; bit 2: the cover map
     float place[2];        // the camera's x, z wrapped at k_weather_wrap metres (patterns on the ground)
     float pixel_angle;     // radians a pixel spans (vertically)
-    u32 pad3;
+    u32 atmosphere;        // bit 0: light scattered many times; bit 1: the air over the view
     // The voxel world, for the cover map (voxel_march.slang's VoxelWorld).
     u32 voxel_pool;
     u32 voxel_table;

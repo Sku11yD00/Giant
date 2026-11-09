@@ -53,7 +53,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
             lit = voxel_radiance(f, packed, write_buffer(push.light).Load(hit_at * 4)) * f.exposure;
         } else {
             const float3 sun = f.sun_light.xyz * max(dot(normal, f.sun_direction.xyz), 0.0);
-            const float3 ambient = lerp(f.ground_light.xyz, f.sky_light.xyz, normal.y * 0.5 + 0.5);
+            const float3 ambient = ambient_light(f, normal);
             lit = albedo * (sun + ambient) * f.exposure;
         }
         return float4(lit / (1.0 + lit), 1.0); // simple tone map: a debug view
