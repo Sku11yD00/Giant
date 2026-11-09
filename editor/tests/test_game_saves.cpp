@@ -4,9 +4,11 @@
 // save refused unless forced; slots listed and deleted; the game closed.
 #include "../src/editor_commands.h"
 #include "../src/game_saves.h"
+#include "../src/nav_state.h"
 #include "../src/physics_state.h"
 #include "../src/play_state.h"
 #include "../src/scatter_placer.h"
+#include "../src/walker_state.h"
 #include "../src/weather_state.h"
 #include "../src/world_streaming.h"
 
@@ -140,7 +142,7 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
         GIANT_CHECK(r.ok && r.value["saves"] == 1 && r.value["error"] == "" && r.value["base_slot"] == "one");
         const u64 cells = r.value["cells"].get<u64>();
-        GIANT_CHECK(cells >= 2 && r.value["written"] == cells + 3); // the cells and two sections
+        GIANT_CHECK(cells >= 2 && r.value["written"] == cells + 4); // the cells and the sections (camera, weather, bodies, walkers)
         // The world itself is untouched.
         GIANT_CHECK(scene.damage().size() == 1 && scene.game_damage().empty() && world_files(folder) == files);
         GIANT_CHECK(std::filesystem::exists(folder / "saves" / "one" / "save.json"));
@@ -166,7 +168,7 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         GIANT_CHECK(!run("keep_damage").ok); // the game's is not the world's
         // Saved again, nothing changed: only the sections are written.
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == 3 && r.value["cells"] == cells);
+        GIANT_CHECK(r.ok && r.value["written"] == 4 && r.value["cells"] == cells);
         GIANT_CHECK(world_files(folder) == files);
         GIANT_CHECK(scene.game_damage_in({3, 0}) == nullptr); // the world's alone there: not the save's
         // The scene's weather changed: it shows again.
@@ -177,11 +179,11 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         GIANT_CHECK(run("delete_save", {{"slot", "one"}, {"wait", true}}).ok);
         GIANT_CHECK(run("get_save").value["base_slot"] == "");
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == cells + 3);
+        GIANT_CHECK(r.ok && r.value["written"] == cells + 4);
 
         // Another slot (whole), then made to look of another world: refused unless forced.
         r = run("save_game", {{"slot", "two"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == cells + 3);
+        GIANT_CHECK(r.ok && r.value["written"] == cells + 4);
         const std::filesystem::path manifest = folder / "saves" / "two" / "save.json";
         std::string text = read_all(manifest);
         const usize at = text.find("\"hash\": \"");
@@ -375,7 +377,7 @@ GIANT_TEST("game saves: the ground dented is saved and pressed in again, never i
         GIANT_CHECK(physics.dent(scene, crater, {20.0, 1.0, 20.0}) == 1);
         GIANT_CHECK(*scene.terrain.find({0, 0}) != dented0);
         r = run("save_game", {{"slot", "dug"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 4); // tile 0's cell, camera, weather, bodies
+        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 5); // tile 0's cell, camera, weather, bodies, walkers
         GIANT_CHECK(run("simulate", {{"on", false}}).ok);
         frame();
         GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0);
@@ -608,6 +610,101 @@ GIANT_TEST("game saves: the player is put back as it was: on a wall, in the air,
                 std::ofstream(e.path(), std::ios::binary) << "{\"feet\": [0, 0, 0]}"; // (missing keys: refused)
         }
         GIANT_CHECK(!run("load_game", {{"slot", "air"}, {"wait", true}}).ok);
+    }
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+}
+
+GIANT_TEST("game saves: walkers walk on from where the save had them; one arrived stays; one moved since is skipped") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        PhysicsState physics;
+        NavState nav{nullptr, nullptr, nullptr};
+        WalkerState walkers{physics, nav};
+        WorldStreaming streaming;
+        GameSaves saves;
+        EditorState state;
+        state.physics = &physics;
+        state.nav = &nav;
+        state.walkers = &walkers;
+        state.world = &streaming;
+        state.saves = &saves;
+        ai::CommandRegistry commands;
+        register_scene_commands(commands, state);
+        register_physics_commands(commands, state);
+        register_nav_commands(commands, state);
+        register_walker_commands(commands, state);
+        register_save_commands(commands, state);
+        connect_walkers(state);
+        const auto run = [&](const char* name, const Json& args = Json::object()) {
+            return commands.execute(name, args, {});
+        };
+        world::Scene& scene = state.scene;
+        world::Entity floor;
+        floor.shape = world::Shape::plane;
+        floor.transform.position = {32.0, 0.0, 32.0};
+        floor.transform.scale = {40.0f, 1.0f, 40.0f};
+        scene.add(floor);
+        const auto person = [&](double x, double z) {
+            world::Entity e;
+            e.shape = world::Shape::cube;
+            e.body = world::BodyKind::none;
+            e.transform.position = {x, 0.9, z};
+            e.transform.scale = {0.5f, 1.8f, 0.5f};
+            return scene.add(e);
+        };
+        const world::EntityId a = person(16.0, 30.0); // walks far
+        const world::EntityId b = person(16.0, 36.0); // arrives near
+        const world::EntityId c = person(16.0, 40.0); // moved in the world after the save
+        GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
+        const auto frame = [&] { // as the editor's frame has them
+            walkers.before_step(scene, 1.0 / 60.0);
+            physics.update(scene, scene.take_changes(), 1.0 / 60.0);
+            walkers.after_step();
+            nav.update(scene);
+            saves.update(state, 1.0 / 60.0);
+        };
+        const auto feet = [&](world::EntityId id) { return *walkers.feet_of(scene, id); };
+        frame();
+        GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+        GIANT_CHECK(run("walk_to", {{"id", a}, {"to", {48.0, 0.0, 30.0}}}).ok);
+        GIANT_CHECK(run("walk_to", {{"id", b}, {"to", {18.0, 0.0, 36.0}}}).ok);
+        GIANT_CHECK(run("walk_to", {{"id", c}, {"to", {30.0, 0.0, 40.0}}}).ok);
+        for (int i = 0; i < 180; ++i) frame(); // 3 s: a about 4 m on, b there
+        GIANT_CHECK(walkers.find(b)->phase == WalkerState::Phase::arrived);
+        GIANT_CHECK(walkers.find(a)->phase == WalkerState::Phase::walking);
+        const DVec3 a_at = feet(a), b_at = feet(b);
+        GIANT_CHECK(a_at.x > 18.0 && a_at.x < 40.0);
+        ai::CommandResult r = run("save_game", {{"slot", "walk"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["walkers"] == 3);
+        // Stopped (all let go), c moved in the world, then loaded.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(walkers.size() == 0);
+        scene.modify(c)->transform.position.z = 41.0;
+        r = run("load_game", {{"slot", "walk"}, {"wait", true}});
+        GIANT_CHECK(r.ok && physics.simulating());
+        // Not at once: each waits a frame after its entity is in (the physics to see its cell).
+        GIANT_CHECK(saves.walkers_waiting() == 3 && walkers.size() == 0);
+        for (int i = 0; i < 4 && saves.walkers_waiting() > 0; ++i) frame();
+        GIANT_CHECK(saves.walkers_waiting() == 0);
+        GIANT_CHECK(saves.status().walkers_applied == 2 && saves.status().walkers_skipped == 1);
+        GIANT_CHECK(walkers.find(c) == nullptr);
+        // b stands where it got to, arrived; a walks on from where it was, not from where the scene has it.
+        GIANT_CHECK(walkers.find(b) != nullptr && walkers.find(b)->phase == WalkerState::Phase::arrived);
+        const DVec3 a_now = feet(a), b_now = feet(b);
+        GIANT_CHECK(std::fabs(a_now.x - a_at.x) < 0.3 && std::fabs(a_now.z - a_at.z) < 0.3);
+        GIANT_CHECK(std::fabs(b_now.x - b_at.x) < 0.1 && std::fabs(b_now.z - b_at.z) < 0.1);
+        for (int i = 0; i < 2400 && walkers.find(a)->phase != WalkerState::Phase::arrived; ++i) frame();
+        GIANT_CHECK(walkers.find(a)->phase == WalkerState::Phase::arrived);
+        GIANT_CHECK(std::hypot(feet(a).x - 48.0, feet(a).z - 30.0) < 0.8);
+        // A bad walkers section is refused whole.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        for (const auto& e : std::filesystem::directory_iterator(folder / "saves" / "walk" / "sections")) {
+            if (e.path().filename().string().rfind("walkers.", 0) == 0)
+                std::ofstream(e.path(), std::ios::binary) << "{\"walkers\": [{\"entity\": 1}]}";
+        }
+        GIANT_CHECK(!run("load_game", {{"slot", "walk"}, {"wait", true}}).ok);
     }
     std::error_code error;
     std::filesystem::remove_all(folder, error);

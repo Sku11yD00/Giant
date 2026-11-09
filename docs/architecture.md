@@ -1634,7 +1634,25 @@ while a load's player is still being put down holds that load's player. Known li
 not taken hold of again; a jump asked for, the eased eye height and the
 input held (keys, set_player_input) are not saved.
 
-Known limits (part 2d): walkers and inventories are not saved; damage
+Part 2d: the walkers. While simulating, a section `walkers` holds each
+walker's entity, `feet`, `yaw`, `velocity` (its character's), `target`,
+`speed`, `phase` (searching, walking, arrived, failed), `reason` and `of`
+(where the scene had its entity: one moved in the world since is not this
+save's). Loading lets every walker go with the simulation, then, once
+simulating again, makes each again where its feet were
+(`WalkerState::resume`), at most `walkers_per_frame` (64) a frame and 1024
+looked at, each once its entity has been in the scene a frame (its cell's
+bodies and ground seen by the physics), the ground under its feet is in
+(a game's too) and no bodies are being made or put back (that held at
+most 120 frames of it being in). A walker that was searching or walking looks for
+its way again from there; one arrived or failed stands there as it was.
+One given a body, hidden, moved in the world or sent walking since is
+skipped; a section naming one twice is refused. Known limits: a walker
+whose feet stand on terrain not streamed in at all is not held for it (as
+walking is not); the path it was following is not saved (looked for
+again: it may take another way round), nor how often it was stuck.
+
+Known limits: inventories and the clock are not saved (neither is in the editor yet); damage
 in a cell that streamed out while playing is not in the save (the
 simulation lets it go there too); a save gathers every cell the forest
 knows at once (a frame's cost grows with the cells loaded); list_saves

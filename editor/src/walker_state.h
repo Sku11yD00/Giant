@@ -17,7 +17,8 @@
 // entity (its character's body carries it). Stopping the simulation (or another
 // scene) lets every walker go.
 //
-// View state: nothing of it is saved or undone.
+// View state: not undone; game saves keep the walkers (GameSaves: where
+// each stands and is going, made again with `resume`).
 #pragma once
 
 #include "nav_state.h"
@@ -73,6 +74,20 @@ public:
     // way NavState finds over the next frames. Empty: done; else why not.
     std::string walk_to(const world::Scene& scene, world::EntityId id, const DVec3& to, float speed,
                         const std::vector<DVec3>* path = nullptr);
+    // A walker as a game save had it: where its feet were, which way it
+    // faced, how it moved, where it was going and how far it had got.
+    struct Resume {
+        DVec3 feet{};
+        float yaw = 0.0f;
+        Vec3 velocity{}; // its character's (falling too)
+        DVec3 target{};
+        float speed = 1.4f;
+        Phase phase = Phase::searching; // searching or walking: the way looked for again from its feet
+        std::string reason;             // failed: why
+    };
+    // Puts `id` back as `r` has it (made again there if it is walking now).
+    // Empty: done; else why not (as walk_to).
+    std::string resume(const world::Scene& scene, world::EntityId id, const Resume& r);
     // Where its feet are now (its character's; else where the scene has it).
     std::optional<DVec3> feet_of(const world::Scene& scene, world::EntityId id) const;
     // Lets it go (drawn where the scene has it again). False: not walking.
@@ -80,6 +95,10 @@ public:
     void clear();
     const Walker* find(world::EntityId id) const;
     usize size() const { return m_walkers.size(); }
+    // Of this scene and the physics' run now (else they are let go on the next step).
+    bool current(const world::Scene& scene) const {
+        return scene.identity() == m_scene && m_physics.runs() == m_run;
+    }
     const std::unordered_map<world::EntityId, Walker>& walkers() const { return m_walkers; }
 
     // Each frame (and fixed step) before the physics steps: searches taken,
@@ -101,6 +120,8 @@ public:
 
 private:
     void drop(world::EntityId id);
+    std::string start(const world::Scene& scene, world::EntityId id, const DVec3& to, float speed,
+                      const std::vector<DVec3>* path, const Resume* from);
     bool make_character(Walker& w);
 
     PhysicsState& m_physics;
