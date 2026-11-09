@@ -30,6 +30,7 @@
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
 #include "world_streaming.h"
+#include "game_menus.h"
 #include "game_saves.h"
 #include "game_ui.h"
 #include "ui/panels.h"
@@ -363,6 +364,9 @@ int run(const Options& options) {
     }
     editor::GameUi game_ui(device.get()); // the game's own UI: its font made and uploaded now, once
     state.game_ui = &game_ui;
+    editor::GameMenus menus(state); // the pause, saves and settings menus, on the game UI
+    state.menus = &menus;
+    play.escape_stops = false; // Esc in play opens the pause menu (its Quit stops play)
     std::vector<rhi::UiDrawList> ui_lists; // the game's UI, then the panels
     // Before the scripts: their OnStop may run commands (a raycast reads it).
     editor::SceneFrame scene_frame; // reused every frame
@@ -551,7 +555,7 @@ int run(const Options& options) {
         cpu_mark = cpu_now;
         phase_ms = {};
 
-        scripts.update(delta);
+        scripts.update(menus.paused() ? 0.0f : delta); // (a menu over play: scripts stand still too)
         mark(editor::FramePhase::scripts);
 
         // Playing: the mouse and keys are the player's (the panels get
@@ -563,9 +567,17 @@ int run(const Options& options) {
         }
         // Build the UI first: what it changes shows in this frame.
         ui->begin_frame(delta, input);
+        // A menu over play takes the mouse and keys (Esc opens the pause menu).
+        const float pixels_per_point = window->point_width() > 0
+                                           ? static_cast<float>(window->pixel_width()) /
+                                                 static_cast<float>(window->point_width())
+                                           : 1.0f;
+        const bool menu_took = menus.update(input, pixels_per_point);
+        // While a menu is open over play, the game stands still.
+        const float game_delta = static_cast<float>(menus.game_seconds(delta));
         if (play.playing()) {
             // The player's keys and mouse, not the editor camera's.
-            play.handle_input(input, ui->wants_keyboard());
+            if (!menu_took) play.handle_input(input, ui->wants_keyboard());
         } else {
             viewport_camera.handle_input(input, ui->wants_mouse());
             terrain_brush.update(input, ui->wants_mouse(), static_cast<float>(window->point_width()),
@@ -575,11 +587,11 @@ int run(const Options& options) {
         panels.draw(frame_info);
         ui->end_frame();
         mark(editor::FramePhase::ui);
-        saves.update(state, delta); // a save or load's result, a load's cells a share a frame (before play)
+        saves.update(state, game_delta); // a save or load's result, a load's cells a share a frame (before play)
         // The player's wanted motion (or play stopped: Esc, a new scene).
-        const bool playing = play.before_step(state.scene, state.camera, state.scene_generation, delta);
-        window->set_relative_mouse(playing); // mouse look, the cursor held in the window
-        weather.update(saves.weather() != nullptr ? *saves.weather() : state.scene.weather, delta, state.camera.position,
+        const bool playing = play.before_step(state.scene, state.camera, state.scene_generation, game_delta);
+        window->set_relative_mouse(playing && !menus.paused()); // mouse look (a menu: the pointer is free)
+        weather.update(saves.weather() != nullptr ? *saves.weather() : state.scene.weather, game_delta, state.camera.position,
                        state.scene_generation); // after the panels' changes (a loaded game's shown over the scene's)
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
@@ -592,15 +604,15 @@ int run(const Options& options) {
                 walkers.others.push_back({p->position, p->velocity, play.settings().body.radius});
             }
         }
-        walkers.before_step(state.scene, delta); // steered towards their paths' corners
-        physics.update(state.scene, scene_frame.take_for_followers(), delta);
+        walkers.before_step(state.scene, game_delta); // steered towards their paths' corners
+        physics.update(state.scene, scene_frame.take_for_followers(), game_delta);
         walkers.after_step(); // drawn where they walked
-        if (playing) play.after_step(state.camera, delta); // the camera at its eyes
+        if (playing) play.after_step(state.camera, game_delta); // the camera at its eyes
         mark(editor::FramePhase::physics);
-        animation.update(state.scene, meshes, scene_frame.take_for_animation(), delta);
+        animation.update(state.scene, meshes, scene_frame.take_for_animation(), game_delta);
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
-        cloth.update(weather.wind(), state.camera.position, delta); // drawn as it moved next frame
-        swing.update(weather.wind(), state.camera.position, delta);
+        cloth.update(weather.wind(), state.camera.position, game_delta); // drawn as it moved next frame
+        swing.update(weather.wind(), state.camera.position, game_delta);
         nav.update(state.scene); // tiles taken and started, searches moved on (bounded)
         audio.set_weather(weather.shown() ? &*weather.shown() : nullptr, weather.ground());
         audio.update(state.camera, delta); // heard from the camera (where the player's eyes are in play)

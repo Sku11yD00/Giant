@@ -130,8 +130,8 @@ void GameUi::reorder() {
 }
 
 void GameUi::clear_screens() {
-    m_screens.clear();
-    m_order.clear();
+    std::erase_if(m_screens, [](const auto& entry) { return !reserved(entry.first); });
+    reorder();
 }
 
 std::vector<std::string> GameUi::screen_names() const {
@@ -210,10 +210,28 @@ std::optional<ui::UiEvent> GameUi::press(std::string_view name, std::string_view
     return e;
 }
 
-std::vector<ui::UiEvent> GameUi::take_events() {
-    std::vector<ui::UiEvent> out(m_events.begin(), m_events.end());
-    m_events.clear();
+std::vector<ui::UiEvent> GameUi::take_events_of(std::string_view prefix) {
+    std::vector<ui::UiEvent> out;
+    std::erase_if(m_events, [&](const ui::UiEvent& e) {
+        if (!e.screen.starts_with(prefix)) return false;
+        out.push_back(e);
+        return true;
+    });
     return out;
+}
+
+std::vector<ui::UiEvent> GameUi::take_events() {
+    std::vector<ui::UiEvent> out;
+    std::erase_if(m_events, [&](const ui::UiEvent& e) {
+        if (reserved(e.screen)) return false;
+        out.push_back(e);
+        return true;
+    });
+    return out;
+}
+
+void GameUi::focus(std::string_view name, std::string id) {
+    if (ui::Screen* s = find_screen(name)) s->focus(std::move(id));
 }
 
 void GameUi::fade_to(u32 color, float alpha, double seconds) {
@@ -244,6 +262,9 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
         const GameSaves::Status& s = state.saves->status();
         if (m_saves_known && s.saves > m_saves_seen) toast("Saved", 2.0);
         if (m_saves_known && s.autosaves > m_autosaves_seen) toast("Autosaved", 2.0);
+        // One that failed on its job (after the menu that began it closed): said so.
+        if (m_saves_known && s.failures > m_failures_seen) toast(s.error, 5.0);
+        m_failures_seen = s.failures;
         m_saves_seen = s.saves;
         m_autosaves_seen = s.autosaves;
         m_saves_known = true;
@@ -270,7 +291,8 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
     for (Toast& t : m_toasts) t.left -= seconds;
     std::erase_if(m_toasts, [](const Toast& t) { return t.left <= 0.0; });
 
-    m_scale = std::isfinite(height) ? std::clamp(height / k_lines, 0.25f, 8.0f) : 1.0f;
+    const float setting = std::isfinite(ui_scale) ? std::clamp(ui_scale, 0.5f, 2.0f) : 1.0f;
+    m_scale = std::isfinite(height) ? std::clamp(height / k_lines * setting, 0.25f, 8.0f) : 1.0f;
     m_shown = showing(state);
     m_width = std::isfinite(width) ? width : 0.0f;
     m_height = std::isfinite(height) ? height : 0.0f;

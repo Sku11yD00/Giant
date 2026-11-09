@@ -56,6 +56,7 @@ class SwingState;
 class NavState;
 class WalkerState;
 class GameUi;
+class GameMenus;
 class AudioState;
 class GameSaves;
 class HitTargets;
@@ -243,6 +244,7 @@ struct EditorState {
     // The game's own UI over the scene (get_game_ui, show_toast); set by main.
     // Null: none.
     GameUi* game_ui = nullptr;
+    GameMenus* menus = nullptr; // the game's menus over play (pause, saves, settings)
     // Characters' hit shapes (bone capsules) for bullets; set by main (and
     // tests). Null: characters are not hit.
     HitTargets* hits = nullptr;

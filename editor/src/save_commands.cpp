@@ -43,6 +43,7 @@ Json status_json(const EditorState& state) {
                 {"base_slot", s.base_slot},
                 {"saves", s.saves},
                 {"loads", s.loads},
+                {"failures", s.failures},
                 {"written", s.written},
                 {"removed", s.removed},
                 {"cells", s.cells},

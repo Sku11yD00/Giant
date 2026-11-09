@@ -4,6 +4,7 @@
 // ui_remove_marker, get_ui_markers, ui_fade (game_ui.h). View state, not
 // undoable.
 #include "editor_commands.h"
+#include "game_menus.h"
 #include "game_ui.h"
 
 #include "giant/core/assert.h"
@@ -171,6 +172,8 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
              const Json& screen = args["screen"];
              const std::string json = screen.is_string() ? screen.get<std::string>() : screen.dump();
              std::string error;
+             if (GameUi::reserved(args["name"].get<std::string>()))
+                 return CommandResult::failure("names starting \"menu.\" are the game's own menus");
              if (!state.game_ui->load_screen(args["name"].get<std::string>(), json, args.value("layer", 0), error))
                  return CommandResult::failure(error);
              return CommandResult::success(status_json(*state.game_ui));
@@ -178,7 +181,7 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
 
     add(registry,
         {"ui_remove_screen",
-         "Removes the game UI's screen `name`, or every screen (`all`: true). Returns get_game_ui.",
+         "Removes the game UI's screen `name`, or every screen (`all`: true) but the game's own menus (\"menu.*\"). Returns get_game_ui.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
@@ -190,6 +193,8 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
                  state.game_ui->clear_screens();
              } else if (!args.contains("name")) {
                  return CommandResult::failure("give a `name`, or `all`: true");
+             } else if (GameUi::reserved(args["name"].get<std::string>())) {
+                 return CommandResult::failure("names starting \"menu.\" are the game's own menus");
              } else if (!state.game_ui->remove_screen(args["name"].get<std::string>())) {
                  return CommandResult::failure("no screen \"" + args["name"].get<std::string>() + "\"");
              }
@@ -201,7 +206,7 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
          "Sets the values the game UI's screens show: `values` an object of name (1 to 128 bytes) to a number, "
          "text (at most 4096 bytes) or true/false (null forgets it); `clear` first forgets them all. At most "
          "4096 values. The editor sets heading, playing and (while playing) player.speed, player.on_ground and "
-         "player.climbing itself each frame: those names are its, and are overwritten. Returns those given as they are now (`values`) and how many there are (`count`).",
+         "player.climbing itself each frame, and the menus menu.*, saves.*, slot.N.* and settings.* (kept through `clear`): those names are its, and are overwritten. Returns those given as they are now (`values`) and how many there are (`count`).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"values", {{"type", "object"}}}, {"clear", {{"type", "boolean"}}}}}},
@@ -256,6 +261,7 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
                      else out[name] = std::get<std::string>(*v);
                  }
              }
+             if (state.menus != nullptr) state.menus->show_values(); // (the menus' own names: theirs again)
              return CommandResult::success({{"values", out}, {"count", values.size()}});
          }});
 
@@ -466,6 +472,80 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
              }
              state.game_ui->fade_to(color, args["alpha"].get<float>(), args.value("seconds", 1.0));
              return CommandResult::success(status_json(*state.game_ui));
+         }});
+
+    const auto menu_json = [&state]() {
+        const GameMenus& m = *state.menus;
+        Json slots = Json::array();
+        for (const GameMenus::Slot& slot : m.slots())
+            slots.push_back({{"name", slot.name}, {"info", slot.info}, {"of_this_world", slot.of_this_world}});
+        const GameMenus::Settings& s = m.settings();
+        return Json{{"menu", GameMenus::to_string(m.menu())},
+                    {"saving", m.saving()},
+                    {"paused", m.paused()},
+                    {"slots", slots},
+                    {"message", m.message()},
+                    {"settings", {{"ui_scale", s.ui_scale}, {"fov", s.fov_degrees}, {"look_sensitivity", s.look_sensitivity}}}};
+    };
+
+    add(registry,
+        {"get_menu",
+         "The game's menus over play: `menu` open (none, pause, saves, settings; Esc in play opens pause), "
+         "`saving` (the saves menu saves, else loads), `paused` (a menu over play: the game stands still), the "
+         "saves menu's `slots` (newest first: `name`, `info` date and play time, `of_this_world`) and "
+         "`message`, and `settings` (`ui_scale`, `fov`, `look_sensitivity`). Its buttons are on the screens "
+         "menu.pause (resume, save, load, settings, quit), menu.saves (slot.0 to slot.7, new, back) and "
+         "menu.settings (ui_scale.down/up, fov.down/up, look.down/up, back): press them with ui_click.",
+         Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
+         true,
+         [&state, menu_json](const Json&, CommandContext&) {
+             if (state.menus == nullptr) return CommandResult::failure("the game's menus are not available");
+             return CommandResult::success(menu_json());
+         }});
+
+    add(registry,
+        {"open_menu",
+         "Opens one of the game's menus (as Esc and its buttons would): `menu` none (closes: play goes on), "
+         "pause, saves (`saving` true to save, default false to load: the slots are read now) or settings. "
+         "Over play it pauses the game. Returns get_menu.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", Json::array({"menu"})},
+              {"properties",
+               {{"menu", {{"type", "string"}, {"enum", Json::array({"none", "pause", "saves", "settings"})}}},
+                {"saving", {{"type", "boolean"}}}}}},
+         false,
+         [&state, menu_json](const Json& args, CommandContext&) {
+             if (state.menus == nullptr) return CommandResult::failure("the game's menus are not available");
+             const std::string m = args["menu"].get<std::string>();
+             state.menus->open(m == "pause"      ? GameMenus::Menu::pause
+                               : m == "saves"    ? GameMenus::Menu::saves
+                               : m == "settings" ? GameMenus::Menu::settings
+                                                 : GameMenus::Menu::none,
+                               args.value("saving", false));
+             return CommandResult::success(menu_json());
+         }});
+
+    add(registry,
+        {"set_game_settings",
+         "The player's settings (as the settings menu sets them; they last while the editor runs): `ui_scale` "
+         "(0.5 to 2, times the window's), `fov` (vertical degrees while playing, 40 to 110), "
+         "`look_sensitivity` (mouse look speed, 0.25 to 4). Returns get_menu.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"properties",
+               {{"ui_scale", {{"type", "number"}, {"minimum", 0.5}, {"maximum", 2}}},
+                {"fov", {{"type", "number"}, {"minimum", 40}, {"maximum", 110}}},
+                {"look_sensitivity", {{"type", "number"}, {"minimum", 0.25}, {"maximum", 4}}}}}},
+         false,
+         [&state, menu_json](const Json& args, CommandContext&) {
+             if (state.menus == nullptr) return CommandResult::failure("the game's menus are not available");
+             GameMenus::Settings s = state.menus->settings();
+             s.ui_scale = args.value("ui_scale", s.ui_scale);
+             s.fov_degrees = args.value("fov", s.fov_degrees);
+             s.look_sensitivity = args.value("look_sensitivity", s.look_sensitivity);
+             state.menus->set_settings(s);
+             return CommandResult::success(menu_json());
          }});
 }
 

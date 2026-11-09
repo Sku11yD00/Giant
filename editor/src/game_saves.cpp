@@ -638,6 +638,7 @@ void GameSaves::take(EditorState& state) {
             std::string& error = p->autosave ? m_status.autosave_error : m_status.error;
             if (p->error.empty()) error = "the world was closed or replaced while saving";
             else if (!same) error += " (and the world was closed or replaced)";
+            if (!p->autosave) ++m_status.failures;
             return;
         }
         ++(p->autosave ? m_status.autosaves : m_status.saves);
@@ -657,6 +658,7 @@ void GameSaves::take(EditorState& state) {
     }
     if (!p->error.empty() || !same) {
         if (p->error.empty()) m_status.error = "the world was closed or replaced while loading";
+        ++m_status.failures;
         return;
     }
     // What play and simulating broke since goes; the save's shows as the game's.
@@ -724,8 +726,10 @@ void GameSaves::finish_load(EditorState& state) {
     }
     if (s.playing && state.play != nullptr && state.physics != nullptr) {
         if (!state.play->start(state.scene, state.camera, state.scene_generation,
-                               s.player ? &*s.player : nullptr))
+                               s.player ? &*s.player : nullptr)) {
             m_status.error = "loaded, but the player could not be put there";
+            ++m_status.failures;
+        }
     }
     if (state.physics != nullptr && s.has_bodies) {
         if (s.simulating) state.physics->set_simulating(true);

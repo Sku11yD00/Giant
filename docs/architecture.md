@@ -1659,7 +1659,7 @@ simulation lets it go there too); a save gathers every cell the forest
 knows at once (a frame's cost grows with the cells loaded); list_saves
 reads each slot's manifest on the frame.
 
-## Game UI (E5 parts 1 to 3)
+## Game UI (E5 parts 1 to 4)
 
 The game's own UI, apart from the editor's ImGui panels: `engine/ui`
 (core, rhi; nlohmann_json privately). Part 1: fonts, text and the canvas.
@@ -1738,8 +1738,8 @@ and load, settings), which also route the real mouse and keys to screens.
   `{screen, id}` (at most 64; the oldest go) for the game to take. Over
   MCP: `ui_load_screen`, `ui_remove_screen`, `ui_set_values`, `ui_click`,
   `ui_key`, `get_ui_events`, `get_ui_screen` (every widget's rect as laid
-  out). Until part 4, only MCP and code click screens: the window's own
-  mouse and keys still drive play.
+  out). In play, the window's mouse and keys reach screens through the
+  menus (part 4); otherwise MCP and code click them.
 
 - **HUD pieces** (part 3, `hud.h`): `ui::View` (the eye: position,
   orientation, fov) and `project` (world to screen pixels, doubles to the
@@ -1766,6 +1766,33 @@ and load, settings), which also route the real mouse and keys to screens.
   as they draw, so a compass turning lays nothing out. Widget fades and
   markers stop while the game UI is hidden; the whole-screen fade goes on
   (drawn when it shows again).
+
+- **Menus** (part 4, editor `game_menus.h`): screens made as JSON in code
+  (`menu.pause`, `menu.saves`, `menu.settings`, layer 900) and driven by
+  values. In play, Esc no longer stops play (`PlayState::escape_stops`
+  off): it opens the pause menu (resume, save, load, settings, quit to
+  editor). While a menu is open over play, `GameMenus::game_seconds` is 0:
+  the frame loop gives that to the player, physics (bullets and dust
+  with it), walkers, animation, cloth, swings, weather, scripts and the
+  play clock (audio and the UI's own fades keep real time), the mouse is
+  released, and the window's input is the menu's: the pointer (points
+  times pixels per point) points and clicks, Up/Down/W/S/Tab move the
+  focus, Enter or Space presses, Esc goes back or resumes. Keys held when
+  a menu opens are let go; a key repeating (`InputEvent::repeat`) does
+  not press, toggle the pause menu or jump again; a menu opens with no
+  focus. Menus take the window's input only over play and only while the
+  game UI is shown (with it hidden, Esc stops play as before). The saves
+  menu reads the slot list on a job when it opens ("Reading saves..."
+  until it is in): slots newest first, at most 8 rows, the autosave left
+  out when saving, a slot of an older world or one that cannot be read
+  not loaded; "New save" takes the next `save-N`. A load or save that
+  fails on its job, after the menu closed, is a toast. Screens named
+  `menu.*` are the menus': MCP cannot load or remove them, clearing all
+  screens keeps them, and `get_ui_events` leaves their presses. Settings (UI scale 0.5 to 2, vertical FOV 40 to 110, look
+  speed 0.25 to 4) apply at once and last while the editor runs. Only
+  the menus' own screens' events are taken; the game's stay queued for
+  `get_ui_events`. MCP: `get_menu`, `open_menu`, `set_game_settings`, and
+  `ui_click` on the menu screens.
 
 Known limits: one font, no scripts beyond Latin (no CJK, Arabic or
 Cyrillic yet: the atlas would grow, or glyphs be made on demand on a

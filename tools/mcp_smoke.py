@@ -789,6 +789,12 @@ def player_gate(tool, call, check):
     check(faded["fade"]["to"] == 1, f"a fade starts, got {faded['fade']}")
     tool("ui_fade", {"alpha": 0, "seconds": 0})
     tool("ui_remove_marker", {"all": True})
+    menu = tool("open_menu", {"menu": "settings"})
+    check(menu["menu"] == "settings" and menu["paused"], f"the settings menu opens over play and pauses it, got {menu}")
+    menu = tool("set_game_settings", {"fov": 80})
+    check(menu["settings"]["fov"] == 80, f"a setting is set, got {menu['settings']}")
+    tool("set_game_settings", {"fov": 70})  # (back to the default for the play below)
+    check(tool("open_menu", {"menu": "none"})["menu"] == "none", "the menu closes")
     tool("set_player_input", {"forward": 1, "yaw": 0})  # down -z, onto the step
     started = time.monotonic()
     player = None
@@ -969,7 +975,8 @@ def main() -> int:
                          "record_audio", "get_audio", "save_game", "load_game", "list_saves", "get_save",
                          "set_autosave", "get_game_ui", "set_game_ui", "show_toast", "ui_load_screen",
                          "ui_remove_screen", "ui_set_values", "ui_click", "ui_key", "get_ui_events",
-                         "get_ui_screen", "ui_set_marker", "ui_remove_marker", "get_ui_markers", "ui_fade"):
+                         "get_ui_screen", "ui_set_marker", "ui_remove_marker", "get_ui_markers", "ui_fade", "get_menu", "open_menu",
+                         "set_game_settings"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")

@@ -45,6 +45,8 @@ public:
     enum class Show : u8 { playing, always, never };
     static const char* to_string(Show show);
     Show show = Show::playing;
+    // Times the window's scale (height / 1080): the player's UI scale setting (0.5 to 2).
+    float ui_scale = 1.0f;
 
     // Shown for `seconds` (at most 30; the last 0.5 s fading), newest
     // lowest; at most k_max_toasts at once (the oldest goes).
@@ -58,7 +60,11 @@ public:
     // would be more than k_max_screens or k_max_widgets in all.
     bool load_screen(const std::string& name, std::string_view json, int layer, std::string& error);
     bool remove_screen(const std::string& name);
-    void clear_screens();
+    void clear_screens(); // (all but the reserved ones)
+    // Names starting "menu." are the editor's own menus (game_menus.h):
+    // MCP may not load or remove them, clearing keeps them, and
+    // take_events leaves their events for the menus.
+    static bool reserved(std::string_view name) { return name.starts_with("menu."); }
     const ui::Screen* screen(std::string_view name) const;
     int layer(std::string_view name) const;
     std::vector<std::string> screen_names() const; // drawn first to last
@@ -97,10 +103,15 @@ public:
     // focused button activated (queued, returned). False / none if no such screen.
     bool move_focus(std::string_view screen, int step);
     std::optional<ui::UiEvent> activate(std::string_view screen);
+    // The focus put on button `id` of that screen ("": none).
+    void focus(std::string_view screen, std::string id);
     // A button pressed by id (as if clicked), if shown on that screen.
     std::optional<ui::UiEvent> press(std::string_view screen, std::string_view id);
-    // The events since last taken, oldest first (at most k_max_events: the oldest go).
+    // The events since last taken, oldest first (at most k_max_events: the oldest go),
+    // but the reserved screens'.
     std::vector<ui::UiEvent> take_events();
+    // Only those of screens named starting with `prefix` (the rest left queued).
+    std::vector<ui::UiEvent> take_events_of(std::string_view prefix);
     usize events() const { return m_events.size(); }
     static constexpr usize k_max_events = 64;
 
@@ -150,6 +161,7 @@ private:
     double m_build_ms = 0.0;
     u64 m_saves_seen = 0, m_autosaves_seen = 0; // as last seen
     bool m_saves_known = false;
+    u64 m_failures_seen = 0;
 };
 
 } // namespace giant::editor

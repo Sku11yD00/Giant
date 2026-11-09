@@ -118,6 +118,7 @@ public:
         std::string error;      // the last one's, if it failed
         std::string base_slot;  // the slot last saved or loaded (the next save there writes only changes)
         u64 saves = 0, loads = 0;
+        u64 failures = 0;              // saves and loads (not autosaves) that failed on their job
         u32 written = 0, removed = 0; // the last save's chunk files written and cleaned
         usize cells = 0;               // the last save's or load's cells
         usize applied = 0;             // a load's cells applied so far
