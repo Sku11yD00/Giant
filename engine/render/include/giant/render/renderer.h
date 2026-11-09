@@ -694,7 +694,8 @@ private:
     rhi::PipelineHandle m_sky_ambient_pass;
     rhi::TextureHandle m_sky_view;     // rgba16_float, the sky's light by direction
     rhi::TextureHandle m_sky_multi;    // rgba16_float, light scattered many times (32 square)
-    rhi::TextureHandle m_sky_aerial;   // rgba16_float, the air over the view (32 slices of 32 square, side by side)
+    rhi::TextureHandle m_sky_aerial;   // rgba16_float, the air over the view's light (32 slices of 32 square, side by side)
+    rhi::TextureHandle m_sky_aerial_through; // rgba16_float, and what comes through it, by colour
     rhi::TextureHandle m_sky_ambient;  // rgba16_float, 9 by 1: the sky's light from all round (spherical harmonics)
     rhi::TextureHandle m_cloud_map;    // rgba8_unorm, the clouds' pattern (made once)
     rhi::TextureHandle m_cloud_shadow; // rgba16_float, sunlight through the clouds over the ground
@@ -703,6 +704,7 @@ private:
     rhi::TextureHandle m_clouds_b;     // rgba16_float, half resolution: their distance and the scene's
     bool m_cloud_map_made = false;
     bool m_sky_ambient_made = false; // filled by a frame before (global illumination reads it before the sky's passes)
+    float m_sky_multi_haze = -1.0f;  // the haze the multiple-scattering table was made for (-1: none; it depends on nothing else)
     bool m_sky_failed = false; // its textures could not be made: tried again when the frame's targets are remade
     bool m_overflow_logged = false;
     bool m_cull_buffers_logged = false;

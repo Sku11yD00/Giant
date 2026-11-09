@@ -159,7 +159,7 @@ Renderer::~Renderer() {
         m_device.destroy(p);
     }
     for (const rhi::TextureHandle t : {m_sky_view, m_cloud_map, m_cloud_shadow, m_clouds_a, m_clouds_b, m_cover, m_sky_multi,
-                                       m_sky_aerial, m_sky_ambient}) {
+                                       m_sky_aerial, m_sky_aerial_through, m_sky_ambient}) {
         m_device.destroy(t);
     }
     m_device.destroy(m_voxel_light);
@@ -1702,8 +1702,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // The physical sky's ambient light: from the table a frame before
     // filled (global illumination lights voxels before this frame's sky;
     // shading, after, reads this frame's), else the flat colours.
-    const bool sky_ambient = frame.sky.on && settings.physical_sky && m_sky_ambient_made && m_sky_ambient.valid() &&
-                             !m_sky_failed;
+    const bool sky_ambient = frame.sky.on && settings.physical_sky && lit_view && m_sky_ambient_made &&
+                             m_sky_ambient.valid() && !m_sky_failed;
     k.sky_ambient = sky_ambient ? m_device.read_descriptor(m_sky_ambient) : 0u;
     k.sky_flags = sky_ambient ? 1u : 0u;
     k.exposure = light.exposure;
@@ -2358,12 +2358,18 @@ bool Renderer::ensure_sky_targets() {
     make(m_clouds_b, hw, hh, rhi::Format::rgba16_float, "clouds: distances");
     make(m_sky_multi, k_multi_size, k_multi_size, rhi::Format::rgba16_float, "sky: light scattered many times");
     make(m_sky_aerial, k_aerial_size * k_aerial_size, k_aerial_size, rhi::Format::rgba16_float, "sky: the air over the view");
+    make(m_sky_aerial_through, k_aerial_size * k_aerial_size, k_aerial_size, rhi::Format::rgba16_float,
+         "sky: what comes through the air over the view");
     if (!m_sky_ambient.valid()) {
         m_sky_ambient_made = false;
     }
+    if (!m_sky_multi.valid()) {
+        m_sky_multi_haze = -1.0f;
+    }
     make(m_sky_ambient, 9, 1, rhi::Format::rgba16_float, "sky: its light from all round");
     if (!m_sky_view.valid() || !m_cloud_map.valid() || !m_cloud_shadow.valid() || !m_cover.valid() || !m_clouds_a.valid() ||
-        !m_clouds_b.valid() || !m_sky_multi.valid() || !m_sky_aerial.valid() || !m_sky_ambient.valid()) {
+        !m_clouds_b.valid() || !m_sky_multi.valid() || !m_sky_aerial.valid() || !m_sky_aerial_through.valid() ||
+        !m_sky_ambient.valid()) {
         m_sky_failed = true;
         log_error("render", "could not create the sky's textures (out of GPU memory?); the flat sky stays");
         return false;
@@ -2451,8 +2457,10 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     const bool physical = settings.physical_sky;
     p.multi_scatter = m_device.read_descriptor(m_sky_multi);
     p.aerial = m_device.read_descriptor(m_sky_aerial);
+    p.aerial_through = m_device.read_descriptor(m_sky_aerial_through);
+    p.sky_ambient = m_device.read_descriptor(m_sky_ambient);
     p.aerial_far = std::clamp(finite(settings.aerial_distance, 32000.0f), 1000.0f, 100000.0f);
-    p.atmosphere = physical ? 3u : 0u;
+    p.atmosphere = physical ? 7u : 0u; // (the ambient table is filled before the clouds and shading read it)
     // Rain and snow, and the ground under them.
     const auto unit = [&finite](float v) { return std::clamp(finite(v, 0.0f), 0.0f, 1.0f); };
     p.rain = unit(sky.rain);
@@ -2514,8 +2522,11 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
         cmd.barrier(m_cloud_map, rhi::ResourceState::shader_read);
         m_cloud_map_made = true;
     }
-    if (physical) {
-        // Light scattered many times first: the sky view and the air over the view read it.
+    if (physical && p.haze != m_sky_multi_haze) {
+        // Light scattered many times first: the sky view and the air over
+        // the view read it. It depends only on the haze: made again when
+        // that changes (a table, not history).
+        m_sky_multi_haze = p.haze;
         cmd.barrier(m_sky_multi, rhi::ResourceState::shader_write);
         cmd.set_pipeline(m_sky_multi_pass);
         push.target = m_device.write_descriptor(m_sky_multi);
@@ -2531,11 +2542,14 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     cmd.barrier(m_sky_view, rhi::ResourceState::shader_read);
     if (physical) {
         cmd.barrier(m_sky_aerial, rhi::ResourceState::shader_write);
+        cmd.barrier(m_sky_aerial_through, rhi::ResourceState::shader_write);
         cmd.set_pipeline(m_sky_aerial_pass);
         push.target = m_device.write_descriptor(m_sky_aerial);
+        push.target_b = m_device.write_descriptor(m_sky_aerial_through);
         cmd.push(push);
         cmd.dispatch(groups(k_aerial_size), groups(k_aerial_size));
         cmd.barrier(m_sky_aerial, rhi::ResourceState::shader_read);
+        cmd.barrier(m_sky_aerial_through, rhi::ResourceState::shader_read);
         // The sky's light from all round, from the view table (one group).
         cmd.barrier(m_sky_ambient, rhi::ResourceState::shader_write);
         cmd.set_pipeline(m_sky_ambient_pass);
@@ -2544,6 +2558,8 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
         cmd.dispatch(1);
         cmd.barrier(m_sky_ambient, rhi::ResourceState::shader_read);
         m_sky_ambient_made = true;
+    } else {
+        m_sky_ambient_made = false; // (on again: the flat colours until it is filled again)
     }
     if (shadows) {
         cmd.barrier(m_cloud_shadow, rhi::ResourceState::shader_write);

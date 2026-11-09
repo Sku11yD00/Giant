@@ -124,6 +124,17 @@ Frame load_frame(uint descriptor, uint offset) {
     return f;
 }
 
+// The physical sky's light from all round (sky.slang's cs_sky_ambient, 9
+// texels of spherical harmonics) for a surface facing `n`, over pi.
+float3 sh_irradiance(uint descriptor, float3 n) {
+    Texture2D<float4> t = read_texture(descriptor);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    [unroll] for (uint j = 0; j < 9u; ++j) {
+        sum += t.Load(int3(int(j), 0, 0)).rgb * sh_basis(n, j);
+    }
+    return max(sum, float3(0.0, 0.0, 0.0));
+}
+
 // The ambient light a surface facing `n` gets, over pi (its diffuse light
 // is its albedo times this): the sky's own from all round (the physical
 // sky), or the flat sky and ground colours' hemisphere.
@@ -131,12 +142,27 @@ float3 ambient_light(Frame f, float3 n) {
     if ((f.sky_flags & 1u) == 0u) {
         return lerp(f.ground_light.rgb, f.sky_light.rgb, n.y * 0.5 + 0.5);
     }
-    Texture2D<float4> t = read_texture(f.sky_ambient);
-    float3 sum = float3(0.0, 0.0, 0.0);
-    [unroll] for (uint j = 0; j < 9u; ++j) {
-        sum += t.Load(int3(int(j), 0, 0)).rgb * sh_basis(n, j);
+    return sh_irradiance(f.sky_ambient, n);
+}
+
+// The same for two directions (shading's normal and reflection), the
+// table read once.
+void ambient_light2(Frame f, float3 n, float3 r, out float3 along_n, out float3 along_r) {
+    if ((f.sky_flags & 1u) == 0u) {
+        along_n = lerp(f.ground_light.rgb, f.sky_light.rgb, n.y * 0.5 + 0.5);
+        along_r = lerp(f.ground_light.rgb, f.sky_light.rgb, r.y * 0.5 + 0.5);
+        return;
     }
-    return max(sum, float3(0.0, 0.0, 0.0));
+    Texture2D<float4> t = read_texture(f.sky_ambient);
+    float3 a = float3(0.0, 0.0, 0.0);
+    float3 b = float3(0.0, 0.0, 0.0);
+    [unroll] for (uint j = 0; j < 9u; ++j) {
+        const float3 c = t.Load(int3(int(j), 0, 0)).rgb;
+        a += c * sh_basis(n, j);
+        b += c * sh_basis(r, j);
+    }
+    along_n = max(a, float3(0.0, 0.0, 0.0));
+    along_r = max(b, float3(0.0, 0.0, 0.0));
 }
 
 // --- Instances (k_instance_bytes each) -----------------------------------------

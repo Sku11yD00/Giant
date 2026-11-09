@@ -69,7 +69,7 @@ struct Sky {
     uint clouds_b;        // x: km to the first cloud (k_no_cloud_km: none); y: km to what the pixel shows z: km where the march ended
     uint depth;
     uint multi_scatter;   // light scattered many times (k_multi_size square)
-    uint aerial;          // the air over the view (k_aerial_size^2 by k_aerial_size)
+    uint aerial;          // the air over the view: the light it scatters in (k_aerial_size^2 by k_aerial_size)
     float3 sun_top;       // the sun above the air (colour times intensity)
     float aerial_far;     // metres the last slice of the air over the view ends
     // What falls and the ground under it.
@@ -85,15 +85,15 @@ struct Sky {
     uint weather_flags;   // bit 0: falling; bit 1: wet and snowy surfaces; bit 2: the cover map
     float2 place;         // the camera's x, z wrapped at k_weather_wrap metres
     float pixel_angle;    // radians a pixel spans
-    uint atmosphere;      // bit 0: light scattered many times; bit 1: the air over the view
+    uint atmosphere;      // bit 0: light scattered many times; bit 1: the air over the view; bit 2: sky_ambient
     uint voxel_pool;      // the voxel world (VoxelWorld), for the cover map
     uint voxel_table;
     uint voxel_levels;
     uint voxel_levels_offset;
     uint voxel_level_count;
     uint voxel_bricks_per_axis;
-    uint pad4;
-    uint pad5;
+    uint aerial_through;  // and what comes through it, by colour
+    uint sky_ambient;     // the sky's light from all round (atmosphere bit 2: filled this frame)
 };
 static const uint k_sky_params_bytes = 272;
 static const uint k_cover_size = 256;       // texels a side (gpu: renderer.cpp k_cover_size)
@@ -168,9 +168,19 @@ Sky load_sky(uint descriptor, uint offset) {
     s.voxel_levels_offset = r15.w;
     s.voxel_level_count = r16.x;
     s.voxel_bricks_per_axis = r16.y;
-    s.pad4 = r16.z;
-    s.pad5 = r16.w;
+    s.aerial_through = r16.z;
+    s.sky_ambient = r16.w;
     return s;
+}
+
+// The ambient light from above and from below (as Lighting's sky_light
+// and ground_light, which they stand for): with the physical sky, its own.
+float3 sky_light_of(Sky s) {
+    return (s.atmosphere & 4u) != 0u ? sh_irradiance(s.sky_ambient, float3(0.0, 1.0, 0.0)) : s.sky_light;
+}
+
+float3 ground_light_of(Sky s) {
+    return (s.atmosphere & 4u) != 0u ? sh_irradiance(s.sky_ambient, float3(0.0, -1.0, 0.0)) : s.ground_light;
 }
 
 // --- Geometry over a round earth ----------------------------------------------
@@ -443,7 +453,7 @@ float fog_transmittance(Sky s, float3 dir, float distance) {
 // The colour fog fades towards, looking along `dir`: the horizon's.
 float3 fog_color(Sky s, float3 dir) {
     const float3 level = normalize(float3(dir.x, max(dir.y, 0.03), dir.z));
-    return sample_sky(s, level) * 0.6 + s.sky_light * 0.4 +
+    return sample_sky(s, level) * 0.6 + sky_light_of(s) * 0.4 +
            s.sun_light * (hg_phase(dot(dir, s.sun_direction), 0.6) * 0.15);
 }
 
@@ -456,32 +466,63 @@ float3 apply_fog(Sky s, float3 color, float3 dir, float distance) {
     return color * t + fog_color(s, dir) * (1.0 - t);
 }
 
+// The air between the camera and what a pixel shows: the light it
+// scatters in and how much of each colour of what lies there comes through.
+struct Air {
+    float3 light;
+    float3 through;
+};
+
 // One slice of the air over the view at `uv` on the screen (kept half a
 // froxel inside the slice, so none bleeds into the next).
-float4 aerial_slice(Sky s, float2 uv, uint k) {
+Air aerial_slice(Sky s, float2 uv, uint k) {
     const float n = float(k_aerial_size);
     const float2 inside = clamp(uv * n, float2(0.5, 0.5), float2(n - 0.5, n - 0.5));
     const float2 at = float2((float(k) * n + inside.x) / (n * n), inside.y / n);
-    return read_texture(s.aerial).SampleLevel(get_sampler(k_sampler_linear_clamp), at, 0.0);
+    Air a;
+    a.light = read_texture(s.aerial).SampleLevel(get_sampler(k_sampler_linear_clamp), at, 0.0).rgb;
+    a.through = read_texture(s.aerial_through).SampleLevel(get_sampler(k_sampler_linear_clamp), at, 0.0).rgb;
+    return a;
 }
 
 // The air between the camera and what a full-resolution pixel shows
-// `distance` metres away: the light it scatters in (rgb) and how much of
-// what lies there comes through (a). Slice k ends aerial_far * ((k + 1) /
-// n)^2 away; nearer than the first, from none at the camera; past the
-// last, the last.
-float4 aerial_at(Sky s, uint2 pixel, float distance) {
+// `distance` metres away. Slice k ends aerial_far * ((k + 1) / n)^2 away;
+// nearer than the first, from none at the camera; past the last, the
+// last's air carried on alike (its transmittance to the power of the
+// distance over aerial_far, the light it scatters in growing as it does).
+Air aerial_at(Sky s, uint2 pixel, float distance) {
+    Air none;
+    none.light = float3(0.0, 0.0, 0.0);
+    none.through = float3(1.0, 1.0, 1.0);
     if ((s.atmosphere & 2u) == 0u || !(distance > 0.0)) {
-        return float4(0.0, 0.0, 0.0, 1.0);
+        return none;
     }
     const float n = float(k_aerial_size);
+    const float far_end = max(s.aerial_far, 1.0);
     const float2 uv = saturate((float2(pixel) + 0.5) / max(s.full_size, float2(1.0, 1.0)));
-    const float k = clamp(sqrt(saturate(distance / max(s.aerial_far, 1.0))) * n - 1.0, -1.0, n - 1.0);
+    if (distance >= far_end) {
+        const Air last = aerial_slice(s, uv, k_aerial_size - 1u);
+        const float times = min(distance / far_end, 1000.0);
+        Air a;
+        a.through = pow(max(last.through, float3(1e-6, 1e-6, 1e-6)), float3(times, times, times));
+        const float3 gone = float3(1.0, 1.0, 1.0) - last.through;
+        // (Thin air, nothing taken out: the light grows with the distance.)
+        a.light = last.light * select(gone > 1e-4, (float3(1.0, 1.0, 1.0) - a.through) / max(gone, float3(1e-4, 1e-4, 1e-4)),
+                                      float3(times, times, times));
+        return a;
+    }
+    const float k = clamp(sqrt(distance / far_end) * n - 1.0, -1.0, n - 1.0);
     const float k0 = floor(k);
     const float t = k - k0;
-    const float4 a = k0 < 0.0 ? float4(0.0, 0.0, 0.0, 1.0) : aerial_slice(s, uv, uint(k0));
-    const float4 b = aerial_slice(s, uv, uint(min(k0 + 1.0, n - 1.0)));
-    return lerp(a, b, t);
+    const Air b = aerial_slice(s, uv, uint(min(k0 + 1.0, n - 1.0)));
+    Air a = none;
+    if (k0 >= 0.0) {
+        a = aerial_slice(s, uv, uint(k0));
+    }
+    Air out_air;
+    out_air.light = lerp(a.light, b.light, t);
+    out_air.through = lerp(a.through, b.through, t);
+    return out_air;
 }
 
 // The clouds in front of a full-resolution pixel `distance` metres away,
@@ -644,7 +685,7 @@ float3 apply_falling(Sky s, float3 color, float3 dir, float distance) {
     const float wind = length(s.wind);
     const float across_wind = wind > 1e-4 ? dot(s.wind / wind, tangent) : 0.0; // -1 to 1 along the cylinder
     const float cycle = fmod(s.time, k_fall_cycle);
-    const float3 lit = s.sky_light * 0.7 + s.sun_light * (0.08 + 0.25 * snowy) * saturate(s.sun_direction.y * 2.0 + 0.2);
+    const float3 lit = sky_light_of(s) * 0.7 + s.sun_light * (0.08 + 0.25 * snowy) * saturate(s.sun_direction.y * 2.0 + 0.2);
     float3 c = color;
     // Far to near, so nearer drops are over farther ones.
     [unroll] for (int k = 4; k >= 0; --k) {

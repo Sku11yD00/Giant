@@ -409,7 +409,7 @@ struct SkyParams {
     u32 weather_flags;     // bit 0: falling; bit 1: wet and snowy surfaces; bit 2: the cover map
     float place[2];        // the camera's x, z wrapped at k_weather_wrap metres (patterns on the ground)
     float pixel_angle;     // radians a pixel spans (vertically)
-    u32 atmosphere;        // bit 0: light scattered many times; bit 1: the air over the view
+    u32 atmosphere;        // bit 0: light scattered many times; bit 1: the air over the view; bit 2: sky_ambient
     // The voxel world, for the cover map (voxel_march.slang's VoxelWorld).
     u32 voxel_pool;
     u32 voxel_table;
@@ -417,8 +417,8 @@ struct SkyParams {
     u32 voxel_levels_offset;
     u32 voxel_level_count;
     u32 voxel_bricks_per_axis;
-    u32 pad4;
-    u32 pad5;
+    u32 aerial_through; // read descriptor: what comes through the air over the view, by colour
+    u32 sky_ambient;    // read descriptor: the sky's light from all round (atmosphere bit 2)
 };
 static_assert(sizeof(SkyParams) == 272);
 

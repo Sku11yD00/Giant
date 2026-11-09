@@ -208,6 +208,13 @@ GIANT_TEST("editor: render settings are view state") {
     GIANT_CHECK(!f.state.render_settings.gpu_culling && !f.state.render_settings.occlusion_culling &&
                 !f.state.render_settings.mesh_shaders);
     GIANT_CHECK(!f.run("set_render_settings", {{"gpu_culling", "yes"}}).ok);
+    // The physical sky: on by default, off and on again, its distance in range.
+    GIANT_CHECK(f.state.render_settings.physical_sky && f.run("get_render_settings").value["physical_sky"] == true);
+    const auto sky = f.run("set_render_settings", {{"physical_sky", false}, {"aerial_distance", 20000}});
+    GIANT_CHECK(sky.ok && sky.value["physical_sky"] == false && sky.value["aerial_distance"] == 20000.0);
+    GIANT_CHECK(!f.state.render_settings.physical_sky && f.state.render_settings.aerial_distance == 20000.0f);
+    GIANT_CHECK(!f.run("set_render_settings", {{"aerial_distance", 500}}).ok);
+    GIANT_CHECK(f.run("set_render_settings", {{"physical_sky", true}}).ok && f.state.render_settings.physical_sky);
     GIANT_CHECK(f.state.render_settings.antialiasing && f.state.render_settings.specular_antialiasing);
     const auto aa = f.run("set_render_settings", {{"antialiasing", false}, {"specular_antialiasing", false}});
     GIANT_CHECK(aa.ok && aa.value["antialiasing"] == false && aa.value["specular_antialiasing"] == false);

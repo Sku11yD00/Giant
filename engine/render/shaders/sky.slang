@@ -105,7 +105,8 @@ void cs_sky_multi(uint3 id : SV_DispatchThreadID) {
 // The air over the view: from each of k_aerial_size^2 rays through the
 // screen, the light scattered in and what comes through, out to the end
 // of each slice (slice k ends aerial_far * ((k + 1) / n)^2 away), the
-// slices side by side across the target. Two steps a slice.
+// slices side by side across the targets (the light; what comes through,
+// by colour). Two steps a slice.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cs_sky_aerial(uint3 id : SV_DispatchThreadID) {
@@ -141,33 +142,35 @@ void cs_sky_aerial(uint3 id : SV_DispatchThreadID) {
         from = to;
         const float3 through = exp(-depth);
         const float3 light = min(sum * s.sun_top, float3(60000.0, 60000.0, 60000.0));
-        write_texture(push.target)[uint2(k * k_aerial_size + id.x, id.y)] =
-            float4(light, (through.r + through.g + through.b) * (1.0 / 3.0));
+        const uint2 at = uint2(k * k_aerial_size + id.x, id.y);
+        write_texture(push.target)[at] = float4(light, 1.0);
+        write_texture(push.target_b)[at] = float4(through, 1.0);
     }
 }
 
 // The sky's light from all round, for surfaces' ambient light (common.slang's
-// ambient_light): the sky view table over the upper half (the clouds' deck
-// over it as they cover the sky), the ground lit by the sun and that sky
-// below, projected onto 9 spherical harmonics, convolved with the cosine
-// and over pi (so a surface's diffuse light is its albedo times the sum).
-// One group: 1024 directions even over the sphere, 16 a thread.
+// ambient_light) and the sky's other lighting (sky_light_of): the sky view
+// table over the upper half; under the clouds, as they cover the sky, their
+// deck (grey, even: the clear sky's light and half the sunlight the clouds
+// take out); below, the ground lit by the sun and that sky. Past dusk (the
+// sun 3 degrees under the horizon) it goes over to the flat sky_light and
+// ground_light (the night's: no moon or stars yet). Projected onto 9
+// spherical harmonics, convolved with the cosine and over pi (so a
+// surface's diffuse light is its albedo times the sum). One group: 1024
+// directions even over the sphere, 16 a thread.
 groupshared float3 g_up[64];
 groupshared float3 g_sh[9 * 64];
-
-float3 upper_light(Sky s, float3 d, float clouded) {
-    return lerp(sample_sky(s, d), s.sky_light, clouded);
-}
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cs_sky_ambient(uint tid : SV_GroupIndex) {
     const Sky s = load_sky(push.params, push.params_offset);
     const float clouded = (s.flags & 1u) != 0u ? saturate(s.cloud_cover) : 0.0;
+    const float day = saturate((s.sun_direction.y + 0.05) * 20.0);
     const uint rings = 32;
     const uint around = 32;
     const float solid = 4.0 * k_pi_sky / float(rings * around);
-    // The light on flat ground from above.
+    // The clear sky's light on flat ground.
     float3 up = float3(0.0, 0.0, 0.0);
     for (uint m = 0; m < 16u; ++m) {
         const uint k = tid * 16u + m;
@@ -176,17 +179,22 @@ void cs_sky_ambient(uint tid : SV_GroupIndex) {
             const float sin_t = sqrt(saturate(1.0 - cos_t * cos_t));
             const float phi = 2.0 * k_pi_sky * (float(k % around) + 0.5) / float(around);
             const float3 d = float3(sin_t * cos(phi), cos_t, sin_t * sin(phi));
-            up += upper_light(s, d, clouded) * (cos_t * solid);
+            up += sample_sky(s, d) * (cos_t * solid);
         }
     }
     g_up[tid] = up;
     GroupMemoryBarrierWithGroupSync();
-    float3 irradiance = float3(0.0, 0.0, 0.0);
+    float3 clear = float3(0.0, 0.0, 0.0);
     for (uint i = 0; i < 64u; ++i) {
-        irradiance += g_up[i];
+        clear += g_up[i];
     }
+    const float3 lum = float3(0.2126, 0.7152, 0.0722);
     const float shade = clouded > 0.0 ? 1.0 - 0.65 * clouded * saturate(s.cloud_density) : 1.0;
-    const float3 ground = (s.sun_light * (max(s.sun_direction.y, 0.0) * shade) + irradiance) * (k_ground_albedo / k_pi_sky);
+    const float3 sun_on_ground = s.sun_light * max(s.sun_direction.y, 0.0);
+    const float deck_value = dot(clear + sun_on_ground * (0.5 * (1.0 - shade)), lum) / k_pi_sky;
+    const float3 deck = float3(deck_value, deck_value, deck_value);
+    const float3 from_above = lerp(clear, deck * k_pi_sky, clouded);
+    const float3 ground = lerp(s.ground_light, (sun_on_ground * shade + from_above) * (k_ground_albedo / k_pi_sky), day);
     // Projected.
     float3 c0 = float3(0.0, 0.0, 0.0);
     float3 c1 = c0;
@@ -203,7 +211,8 @@ void cs_sky_ambient(uint tid : SV_GroupIndex) {
         const float sin_t = sqrt(saturate(1.0 - cos_t * cos_t));
         const float phi = 2.0 * k_pi_sky * (float(k % around) + 0.5) / float(around);
         const float3 d = float3(sin_t * cos(phi), cos_t, sin_t * sin(phi));
-        const float3 l = (cos_t > 0.0 ? upper_light(s, d, clouded) : ground) * solid;
+        const float3 sky = lerp(s.sky_light, lerp(sample_sky(s, d), deck, clouded), day);
+        const float3 l = (cos_t > 0.0 ? sky : ground) * solid;
         c0 += l * sh_basis(d, 0u);
         c1 += l * sh_basis(d, 1u);
         c2 += l * sh_basis(d, 2u);
@@ -401,7 +410,9 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
         // Under a broad deck the light from all round is the deck's own (the
         // sun's, scattered through it many times): grey, not the blue sky's.
         const float3 lum = float3(0.2126, 0.7152, 0.0722);
-        const float deck = dot(s.sky_light, lum) + dot(s.sun_light, lum) * 0.15 * saturate(s.sun_direction.y * 2.0);
+        const float3 above = sky_light_of(s); // (the physical sky's own, or the flat colours)
+        const float3 below = ground_light_of(s);
+        const float deck = dot(above, lum) + dot(s.sun_light, lum) * 0.15 * saturate(s.sun_direction.y * 2.0);
         const float3 deck_light = float3(deck, deck, deck);
         float t = enter + ds * dither(id.xy);
         for (uint i = 0; i < steps && transmittance > 0.01; ++i) {
@@ -414,8 +425,7 @@ void cs_clouds(uint3 id : SV_DispatchThreadID) {
                 const float sigma = shape * sigma_scale;
                 const float h = saturate((height_at(s.cam_alt, p) - s.cloud_base) /
                                          max(s.cloud_top - s.cloud_base, 1.0));
-                const float3 ambient = lerp(lerp(s.ground_light * 0.5 + s.sky_light * 0.3, s.sky_light, h),
-                                            deck_light, s.cloud_cover);
+                const float3 ambient = lerp(lerp(below * 0.5 + above * 0.3, above, h), deck_light, s.cloud_cover);
                 // The sky's light from all round, scattered evenly (a third reaches the eye).
                 const float2 sun = sun_through_clouds(s, p);
                 const float3 in_light = s.sun_light * (sun.x * phase + sun.y * 0.2) + ambient * 0.33;
