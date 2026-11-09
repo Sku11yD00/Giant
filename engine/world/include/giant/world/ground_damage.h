@@ -26,6 +26,12 @@ class GroundDamage {
 public:
     // Presses `dent` in at (x, z); the tiles it changes go into `changed`.
     void dent(Terrain& terrain, const Dent& dent, double x, double z, std::vector<CellCoord>& changed);
+    // A whole tile pressed in as `heights` (a game save's ground, shown over
+    // the ground as authored): kept aside as it is first, as a dent's are.
+    // False (nothing changed) when there is no tile there or its size differs.
+    bool press(Terrain& terrain, CellCoord cell, Terrain::Heights heights);
+    // The tiles still as we left them (not lifted), in cell order.
+    std::vector<CellCoord> ours_tiles(const Terrain& terrain) const;
     // Every dented tile as it was. Returns how many were put back.
     usize restore(Terrain& terrain);
     // The dented tiles as they were for now (a save), their dents kept

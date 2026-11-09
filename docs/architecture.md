@@ -1567,9 +1567,32 @@ the scene's own until set_weather, clear_weather, an undo of them, or
 close_game) and its ground come back, and play starts again if it was
 on. One save, load or delete runs at a time, each on the job; a result
 begun for another scene or world session is dropped, and a new scene or
-another world forgets the game (and its play seconds). Known limits
-(part 2): the player's own state (velocity, climbing, carrying), dents in
-the ground, dynamic bodies, walkers and inventories are not saved; damage
+another world forgets the game (and its play seconds).
+
+Part 2a: the ground a game dented. A save's cell chunk also holds, as
+`heights` (rows of exact text, as terrain tiles have them), the whole tile
+of each cell whose ground a game shows dented (`PhysicsState::ground_now`:
+a simulation's dents and a loaded game's ground). Loading presses each in
+(`PhysicsState::press_game_ground`, a second `GroundDamage` under the
+simulation's: its tiles as authored kept aside), at most 8 tiles a frame
+before that cell's damage; a tile not in the scene yet waits and is pressed
+in as it streams in (256 waiting looked at a frame). Dents simulated over
+the game's ground go back to it on stopping. `GroundAsSaved` lifts both
+layers (dents first) for every write of the world (save_world, save_scene,
+terrain edits and their undo), and nests; a tile edited otherwise since
+(a sculpt, an undo) is the world's again and leaves the game.
+`close_game`, another load, a new scene or world put the ground back as
+authored with its versions. keep_damage and clear_damage are refused while
+a game's ground is shown or waiting. Known limits: a game tile keeps its
+cell loaded, and its far chunk's saved tiles with it (as dents do while
+simulating, but for the whole game); get_world counts game tiles as
+unsaved cells (save_world and open_world's check do not); each terrain
+edit lifts and puts back every game and dented tile; a forced load of a world with other ground
+samples skips its ground (`skipped`); a tile the world no longer has waits
+until close_game; ground_now copies each dented tile on the frame.
+
+Known limits (part 2b): the player's own state (velocity, climbing, carrying),
+dynamic bodies, walkers and inventories are not saved; damage
 in a cell that streamed out while playing is not in the save (the
 simulation lets it go there too); a save gathers every cell the forest
 knows at once (a frame's cost grows with the cells loaded); list_saves

@@ -1,5 +1,7 @@
 #include "physics_state.h"
 
+#include "giant/core/assert.h"
+
 #include <algorithm>
 #include <unordered_set>
 #include <cmath>
@@ -201,6 +203,7 @@ void PhysicsState::notice_scene(const world::Scene& scene) {
     m_ballistics.clear();
     m_recent.clear();
     m_ground.forget(); // another scene's ground
+    m_game_ground.forget();
     m_restore_ground = false;
     // The scene's bodies and the trunks all go: the world cleared whole
     // (off the frame) when they are all it holds, the trunks' ids forgotten.
@@ -306,6 +309,46 @@ usize PhysicsState::dent(world::Scene& scene, const world::Dent& dent, const DVe
         m_dust.emit({at.x, ground.value_or(at.y) + 0.4 * r, at.z}, r, 1.2f / r, sim::k_dust_earth);
     }
     return changed.size();
+}
+
+bool PhysicsState::press_game_ground(world::Scene& scene, world::CellCoord cell, world::Terrain::Heights heights) {
+    notice_scene(scene);
+    restore_ground(scene);
+    GIANT_ASSERT(m_as_saved == 0, "a game's ground pressed while the ground is lifted");
+    const std::vector<world::CellCoord> dented = m_ground.ours_tiles(scene.terrain);
+    if (std::find(dented.begin(), dented.end(), cell) == dented.end()) {
+        return m_game_ground.press(scene.terrain, cell, std::move(heights));
+    }
+    // Dented by the simulation: the game's ground goes under the ground as
+    // authored (never over the dents, which would make them its "before"),
+    // and the dents there go (the game's ground wins the tile).
+    m_ground.lift(scene.terrain);
+    const bool pressed = m_game_ground.press(scene.terrain, cell, std::move(heights));
+    m_ground.put_back(scene.terrain);
+    return pressed;
+}
+
+void PhysicsState::clear_game_ground(world::Scene& scene) {
+    notice_scene(scene);
+    restore_ground(scene);
+    GIANT_ASSERT(m_as_saved == 0, "a game's ground cleared while the ground is lifted");
+    if (m_game_ground.tiles() == 0) return;
+    // The dents lifted over it, the game's ground put back as authored, and
+    // the dents pressed in again where their tile is as they were made over
+    // (those over the game's ground go with it).
+    m_ground.lift(scene.terrain);
+    m_game_ground.restore(scene.terrain);
+    m_ground.put_back(scene.terrain);
+}
+
+std::unordered_map<world::CellCoord, world::Terrain::Heights, world::CellCoordHash> PhysicsState::ground_now(world::Scene& scene) {
+    notice_scene(scene);
+    restore_ground(scene);
+    std::unordered_map<world::CellCoord, world::Terrain::Heights, world::CellCoordHash> out;
+    for (const world::GroundDamage* layer : {&m_game_ground, &m_ground}) {
+        for (const world::CellCoord c : layer->ours_tiles(scene.terrain)) out.emplace(c, *scene.terrain.find(c));
+    }
+    return out;
 }
 
 world::Damage PhysicsState::game_damage_now(world::Scene& scene) {
@@ -426,12 +469,17 @@ PhysicsState::KeptDamage PhysicsState::keep_damage(world::Scene& scene) {
 PhysicsState::GroundAsSaved::GroundAsSaved(PhysicsState* physics, world::Scene& scene)
     : m_physics(physics), m_scene(scene) {
     if (m_physics == nullptr) return;
+    if (m_physics->m_as_saved++ > 0) return; // lifted already
     m_physics->restore_ground(scene);
+    // The dents first (they lie over the game's ground), then the game's.
     m_physics->m_ground.lift(scene.terrain);
+    m_physics->m_game_ground.lift(scene.terrain);
 }
 
 PhysicsState::GroundAsSaved::~GroundAsSaved() {
-    if (m_physics != nullptr) m_physics->m_ground.put_back(m_scene.terrain);
+    if (m_physics == nullptr || --m_physics->m_as_saved > 0) return;
+    m_physics->m_game_ground.put_back(m_scene.terrain);
+    m_physics->m_ground.put_back(m_scene.terrain);
 }
 
 void PhysicsState::update(world::Scene& scene, const world::SceneChanges& changed, double seconds) {

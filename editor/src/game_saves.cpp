@@ -10,6 +10,7 @@
 #include "giant/ai/json.h"
 #include "giant/world/scene.h"
 
+#include <algorithm>
 #include <cmath>
 #include <ctime>
 
@@ -65,10 +66,10 @@ struct GameSaves::Pending {
     u64 generation = 0, session = 0; // the scene's and the world's when it began
     // A save's.
     save::Committed committed;
-    std::shared_ptr<const std::map<save::CellKey, world::CellDamage>> cells;
+    std::shared_ptr<const std::map<save::CellKey, GameCell>> cells;
     // A load's.
     save::Manifest manifest;
-    std::vector<std::pair<world::CellCoord, world::CellDamage>> loaded;
+    std::vector<std::pair<world::CellCoord, GameCell>> loaded;
     Sections sections;
 };
 
@@ -103,8 +104,16 @@ std::string GameSaves::begin_save(EditorState& state, const std::string& slot) {
     if (root_path.empty()) return "no world open (game saves are kept beside a world: open_world)";
     // What to keep, gathered now (copies only).
     world::Damage shown = state.physics != nullptr ? state.physics->game_damage_now(state.scene) : state.scene.game_damage();
-    auto cells = std::make_shared<std::map<save::CellKey, world::CellDamage>>();
-    for (auto& [c, d] : shown) cells->emplace(key_of(c), std::move(d));
+    auto cells = std::make_shared<std::map<save::CellKey, GameCell>>();
+    for (auto& [c, d] : shown) (*cells)[key_of(c)].damage = std::move(d);
+    // The ground a game shows dented (its own and a simulation's), and a loaded game's still waiting for its tile.
+    if (state.physics != nullptr) {
+        for (auto& [c, h] : state.physics->ground_now(state.scene)) (*cells)[key_of(c)].ground = std::move(h);
+    }
+    for (const auto& [k, h] : m_ground_waiting) {
+        GameCell& cell = (*cells)[k];
+        if (!cell.ground) cell.ground = h;
+    }
     const bool playing = state.play != nullptr && state.play->playing();
     std::map<std::string, std::string> sections;
     sections["camera"] = camera_text(state.camera, playing);
@@ -120,8 +129,8 @@ std::string GameSaves::begin_save(EditorState& state, const std::string& slot) {
     const fs::path path = root_path / slot;
     const bool same = m_base.generation != 0 && path == m_base_path && m_session == state.world->session();
     const save::Manifest base = same ? m_base : save::Manifest{};
-    std::shared_ptr<const std::map<save::CellKey, world::CellDamage>> was =
-        same && m_base_cells != nullptr ? m_base_cells : std::make_shared<const std::map<save::CellKey, world::CellDamage>>();
+    std::shared_ptr<const std::map<save::CellKey, GameCell>> was =
+        same && m_base_cells != nullptr ? m_base_cells : std::make_shared<const std::map<save::CellKey, GameCell>>();
     const u64 generation = state.scene_generation, session = state.world->session();
 
     m_in_flight = true;
@@ -129,7 +138,7 @@ std::string GameSaves::begin_save(EditorState& state, const std::string& slot) {
     m_status.slot = slot;
     m_status.error.clear();
     m_jobs.submit(m_group, [this, slot, path, base, meta, generation, session, sections = std::move(sections),
-                            cells = std::shared_ptr<const std::map<save::CellKey, world::CellDamage>>(std::move(cells)),
+                            cells = std::shared_ptr<const std::map<save::CellKey, GameCell>>(std::move(cells)),
                             was = std::move(was)]() mutable {
         auto p = std::make_unique<Pending>();
         p->slot = slot;
@@ -140,7 +149,8 @@ std::string GameSaves::begin_save(EditorState& state, const std::string& slot) {
         changes.sections = std::move(sections);
         for (const auto& [k, d] : *cells) {
             const auto it = was->find(k);
-            if (it == was->end() || !(it->second == d)) changes.cells[k] = world::save_cell_damage(d);
+            if (it == was->end() || !(it->second == d))
+                changes.cells[k] = world::save_cell_damage(d.damage, d.ground ? &*d.ground : nullptr);
         }
         for (const auto& [k, d] : *was) {
             if (cells->count(k) == 0) changes.cells[k] = std::nullopt;
@@ -222,13 +232,14 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                 }
             } // (another engine's sections: left)
         }
-        auto cells = std::make_shared<std::map<save::CellKey, world::CellDamage>>();
+        auto cells = std::make_shared<std::map<save::CellKey, GameCell>>();
         p->loaded.reserve(m.cells.size());
         for (const auto& [k, file] : m.cells) {
             const std::optional<std::string> text = save::read_chunk(path, file);
             if (!text) return fail("cannot read " + file);
-            world::CellDamage d;
-            if (const auto e = world::load_cell_damage(*text, {k.x, k.z}, d)) return fail(file + ": " + e->message);
+            GameCell d;
+            if (const auto e = world::load_cell_damage(*text, {k.x, k.z}, d.damage, &d.ground))
+                return fail(file + ": " + e->message);
             cells->emplace(k, d);
             p->loaded.emplace_back(world::CellCoord{k.x, k.z}, std::move(d));
         }
@@ -247,8 +258,15 @@ void GameSaves::forget_base() {
     m_status.base_slot.clear();
 }
 
+void GameSaves::clear_ground(EditorState& state) {
+    if (state.physics != nullptr) state.physics->clear_game_ground(state.scene);
+    m_ground_waiting.clear();
+    m_waiting_from.reset();
+}
+
 void GameSaves::close(EditorState& state) {
     state.scene.clear_game_damage();
+    clear_ground(state);
     drop_weather();
     m_applying.clear();
     m_sections.reset();
@@ -312,6 +330,8 @@ void GameSaves::take(EditorState& state) {
         m_status.written = p->committed.written;
         m_status.removed = p->committed.removed;
         m_status.cells = p->cells->size();
+        m_status.tiles = static_cast<usize>(
+            std::count_if(p->cells->begin(), p->cells->end(), [](const auto& c) { return c.second.ground.has_value(); }));
         m_base = p->committed.manifest;
         m_base_cells = std::move(p->cells);
         m_base_path = p->path;
@@ -331,12 +351,16 @@ void GameSaves::take(EditorState& state) {
         state.physics->restore_ground(state.scene);
     }
     state.scene.clear_game_damage();
+    clear_ground(state);
     drop_weather();
     m_applying = std::move(p->loaded);
     m_sections = std::make_unique<Sections>(std::move(p->sections));
     m_status.doing = "applying";
     m_status.cells = m_applying.size();
     m_status.applied = 0;
+    m_status.tiles = static_cast<usize>(
+        std::count_if(m_applying.begin(), m_applying.end(), [](const auto& c) { return c.second.ground.has_value(); }));
+    m_status.skipped = 0;
     m_base = p->manifest;
     m_base_cells = std::move(p->cells);
     m_base_path = p->path;
@@ -380,18 +404,57 @@ void GameSaves::update(EditorState& state, double seconds) {
     take(state);
     // The scene's weather changed: it shows again.
     if (m_weather_on && !(state.scene.weather == m_scene_weather)) drop_weather();
-    if (!m_applying.empty()) {
-        const usize n = std::min(std::max<usize>(cells_per_frame, 1), m_applying.size());
-        for (usize i = 0; i < n; ++i) {
-            auto& [c, d] = m_applying[m_applying.size() - 1 - i];
-            state.scene.set_game_damage(c, std::move(d));
+    usize tiles = std::max<usize>(ground_tiles_per_frame, 1);
+    // A share of the cells (each cell's ground first: what lies on it settles on it), the ground's tiles fewer.
+    const usize cells = std::max<usize>(cells_per_frame, 1);
+    for (usize n = 0; n < cells && !m_applying.empty(); ++n) {
+        auto& [c, d] = m_applying.back();
+        if (d.ground) {
+            if (tiles == 0) break;
+            --tiles;
+            apply_ground(state, c, std::move(*d.ground));
         }
-        m_applying.resize(m_applying.size() - n);
-        m_status.applied += n;
+        if (!d.damage.empty()) state.scene.set_game_damage(c, std::move(d.damage));
+        m_applying.pop_back();
+        ++m_status.applied;
     }
+    press_waiting(state, tiles);
     if (m_applying.empty() && m_sections != nullptr) finish_load(state);
     if (state.play != nullptr && state.play->playing() && std::isfinite(seconds) && seconds > 0.0)
         m_play_seconds = std::min(m_play_seconds + seconds, save::k_max_play_seconds);
+}
+
+void GameSaves::apply_ground(EditorState& state, world::CellCoord cell, world::Terrain::Heights heights) {
+    const usize n = state.scene.terrain.samples();
+    if (state.physics == nullptr || heights.size() != n * n) {
+        ++m_status.skipped; // (a forced load of a world with other samples)
+        return;
+    }
+    if (state.scene.terrain.find(cell) == nullptr) {
+        m_ground_waiting[key_of(cell)] = std::move(heights);
+        return;
+    }
+    if (!state.physics->press_game_ground(state.scene, cell, std::move(heights))) ++m_status.skipped;
+}
+
+void GameSaves::press_waiting(EditorState& state, usize& budget) {
+    if (m_ground_waiting.empty() || budget == 0 || state.physics == nullptr) return;
+    // A share looked at each frame, from where the last look ended (round and round).
+    constexpr usize k_looks = 256;
+    auto it = m_waiting_from ? m_ground_waiting.lower_bound(*m_waiting_from) : m_ground_waiting.begin();
+    for (usize looked = 0; looked < k_looks && budget > 0 && !m_ground_waiting.empty(); ++looked) {
+        if (it == m_ground_waiting.end()) it = m_ground_waiting.begin();
+        const world::CellCoord c{it->first.x, it->first.z};
+        if (state.scene.terrain.find(c) == nullptr) {
+            ++it;
+            continue;
+        }
+        --budget;
+        if (!state.physics->press_game_ground(state.scene, c, std::move(it->second))) ++m_status.skipped;
+        it = m_ground_waiting.erase(it);
+    }
+    // (Past the last: the next look starts at the first. No key stands for that: every key is a cell.)
+    m_waiting_from = it != m_ground_waiting.end() ? std::optional<save::CellKey>(it->first) : std::nullopt;
 }
 
 void GameSaves::follow(EditorState& state) {
@@ -401,6 +464,7 @@ void GameSaves::follow(EditorState& state) {
         m_applying.clear();
         m_sections.reset();
         drop_weather();
+        clear_ground(state);
         forget_base();
         if (m_status.doing == "applying") m_status.doing.clear();
         m_generation = 0;

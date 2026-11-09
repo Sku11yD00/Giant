@@ -3,6 +3,7 @@
 // physics world what is where.
 #include "editor_commands.h"
 #include "audio_state.h"
+#include "game_saves.h"
 #include "physics_state.h"
 #include "hit_targets.h"
 #include "mesh_library.h"
@@ -42,6 +43,13 @@ Json triple(double limit, const char* description) {
 constexpr const char* k_game_shown =
     "a game's damage is shown over the world's (a game save loaded): keeping or clearing it now would mix "
     "the two; stop the game first";
+
+// A game's damage or ground shown (or a loaded game's ground waiting for its tile).
+bool game_shown(const EditorState& state) {
+    return !state.scene.game_damage().empty() ||
+           (state.physics != nullptr && !state.physics->game_ground().ours_tiles(state.scene.terrain).empty()) ||
+           (state.saves != nullptr && state.saves->ground_waiting() > 0);
+}
 
 // The scene's kept damage (and the game's, shown over it), and what of it is applied now.
 Json kept_json(const world::Scene& scene, const sim::ScenePhysicsStats& s, const sim::ForestStats& f) {
@@ -92,7 +100,8 @@ Json physics_json(const EditorState& state) {
                        {"laid", f.laid},
                        {"refused", f.refused},
                        {"shrugged", f.shrugged}}},
-            {"ground", {{"dents", p.ground().dents()}, {"tiles", p.ground().tiles()}}},
+            {"ground",
+             {{"dents", p.ground().dents()}, {"tiles", p.ground().tiles()}, {"game", p.game_ground().tiles()}}},
             {"kept", kept_json(state.scene, s, f)},
             {"dust", {{"puffs", d.puffs}, {"emitted", d.emitted}, {"merged", d.merged}, {"dropped", d.dropped}}}};
 }
@@ -616,7 +625,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          false,
          [&state](const Json&, CommandContext& context) {
              if (state.physics == nullptr) return no_physics();
-             if (!state.scene.game_damage().empty()) return CommandResult::failure(k_game_shown);
+             if (game_shown(state)) return CommandResult::failure(k_game_shown);
              auto kept = std::make_shared<PhysicsState::KeptDamage>(state.physics->keep_damage(state.scene));
              if (!kept->before.empty() || !kept->after.empty() || !kept->ground.empty()) {
                  const auto put = [&state, kept](bool after) {
@@ -658,7 +667,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          false,
          [&state](const Json&, CommandContext& context) {
              if (state.physics == nullptr) return no_physics();
-             if (!state.scene.game_damage().empty()) return CommandResult::failure(k_game_shown);
+             if (game_shown(state)) return CommandResult::failure(k_game_shown);
              world::Damage had = state.scene.damage();
              std::erase_if(had, [](const auto& d) { return d.second.empty(); });
              auto before = std::make_shared<const world::Damage>(std::move(had));

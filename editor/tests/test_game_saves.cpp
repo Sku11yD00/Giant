@@ -307,3 +307,101 @@ GIANT_TEST("game saves: a cell's kept trees stay with a new break there; set_wea
     std::error_code error;
     std::filesystem::remove_all(folder, error);
 }
+
+GIANT_TEST("game saves: the ground dented is saved and pressed in again, never into the world's files") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        PhysicsState physics;
+        WorldStreaming streaming;
+        GameSaves saves;
+        EditorState state;
+        state.physics = &physics;
+        state.world = &streaming;
+        state.saves = &saves;
+        ai::CommandRegistry commands;
+        register_scene_commands(commands, state);
+        register_physics_commands(commands, state);
+        register_save_commands(commands, state);
+        const auto run = [&](const char* name, const Json& args = Json::object()) {
+            return commands.execute(name, args, {});
+        };
+        world::Scene& scene = state.scene;
+        scene.terrain.set_samples(16);
+        for (i32 x = 0; x <= 2; ++x) scene.terrain.set({x, 0}, world::Terrain::Heights(256, 1.0f));
+        GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
+        const std::map<std::string, std::string> files = world_files(folder);
+        const world::Terrain::Heights authored = *scene.terrain.find({0, 0});
+        const u64 v0 = scene.terrain.version({0, 0});
+        const auto frame = [&] {
+            physics.update(scene, scene.take_changes(), 1.0 / 60.0);
+            saves.update(state, 1.0 / 60.0);
+        };
+        frame();
+        // A crater over the edge of tiles 0 and 1 while simulating.
+        GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+        world::Dent crater;
+        crater.radius = 6.0;
+        crater.depth = 2.0f;
+        GIANT_CHECK(physics.dent(scene, crater, {64.0, 1.0, 32.0}) == 2);
+        const world::Terrain::Heights dented0 = *scene.terrain.find({0, 0});
+        const world::Terrain::Heights dented1 = *scene.terrain.find({1, 0});
+        GIANT_CHECK(dented0 != authored);
+        ai::CommandResult r = run("save_game", {{"slot", "dug"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["cells"] == 2);
+        GIANT_CHECK(world_files(folder) == files);
+        // Stopped: the ground as authored again.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(*scene.terrain.find({0, 0}) == authored && scene.terrain.version({0, 0}) == v0);
+        // Loaded: the save's ground pressed in, the world's files never written with it.
+        saves.ground_tiles_per_frame = 1;
+        r = run("load_game", {{"slot", "dug"}});
+        GIANT_CHECK(r.ok);
+        saves.wait();
+        frame();
+        GIANT_CHECK(physics.game_ground().tiles() == 1 && saves.busy()); // a tile a frame
+        frame();
+        frame();
+        GIANT_CHECK(!saves.busy() && physics.game_ground().tiles() == 2);
+        GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0 && *scene.terrain.find({1, 0}) == dented1);
+        GIANT_CHECK(!run("keep_damage").ok && !run("clear_damage").ok); // a game's ground is shown
+        r = run("save_world");
+        GIANT_CHECK(r.ok);
+        GIANT_CHECK(world_files(folder) == files);
+        GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0); // (still shown)
+        // Simulating over it: stopping goes back to the game's ground, not the world's.
+        GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+        GIANT_CHECK(physics.dent(scene, crater, {20.0, 1.0, 20.0}) == 1);
+        GIANT_CHECK(*scene.terrain.find({0, 0}) != dented0);
+        r = run("save_game", {{"slot", "dug"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 3); // tile 0's cell, camera, weather
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0);
+        // Sculpted over: that tile's game ground goes (the edit is the world's now), the other stays.
+        scene.terrain.modify({1, 0})->at(0) = 5.0f;
+        r = run("save_game", {{"slot", "dug"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["tiles"] == 1);
+        scene.terrain.restore({1, 0}, dented1, 0);
+        // Closed: the ground as authored, with its versions (nothing reads as edited).
+        GIANT_CHECK(run("close_game").ok);
+        GIANT_CHECK(*scene.terrain.find({0, 0}) == authored && scene.terrain.version({0, 0}) == v0);
+        GIANT_CHECK(physics.game_ground().tiles() == 0 && run("keep_damage").ok);
+        // A tile not in the scene yet waits for it (a first save has tile 0's dents only now).
+        r = run("load_game", {{"slot", "dug"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["tiles"] == 1);
+        GIANT_CHECK(run("close_game").ok);
+        std::optional<world::Terrain::Heights> gone = scene.terrain.remove({0, 0});
+        r = run("load_game", {{"slot", "dug"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["ground_waiting"] == 1 && r.value["game_tiles"] == 0);
+        GIANT_CHECK(!run("keep_damage").ok);
+        scene.terrain.set({0, 0}, std::move(*gone));
+        frame();
+        GIANT_CHECK(saves.ground_waiting() == 0 && physics.game_ground().tiles() == 1);
+        GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0);
+        GIANT_CHECK(run("close_game").ok);
+        GIANT_CHECK(*scene.terrain.find({0, 0}) == authored);
+    }
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+}

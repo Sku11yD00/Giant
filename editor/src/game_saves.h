@@ -2,12 +2,15 @@
 // open world, saved beside it (<world>/saves/<slot>/) and loaded back,
 // never written into the world's own files. A save holds, by cell, the
 // damage shown (the game's, with what the bodies broke and the forest
-// felled, and the world's kept records of the cells those touch), and
+// felled, and the world's kept records of the cells those touch) and the
+// ground a game dented (craters, footprints: each such tile whole), and
 // sections for the camera (where the player's eyes were), whether play was
 // on, and the weather it was going to with its ground. Loading stops play
 // and simulating (what they broke since goes), shows the save's damage as
 // the game's (world::Scene::set_game_damage, a share of cells a frame),
-// puts the camera and the weather back (the weather shown over the scene's
+// presses the save's ground in (PhysicsState::press_game_ground, a few
+// tiles a frame; a tile not streamed in yet waits for it), puts the camera
+// and the weather back (the weather shown over the scene's
 // own until set_weather, clear_weather or close_game) and plays again if
 // it was playing.
 //
@@ -23,6 +26,7 @@
 #include "giant/core/jobs.h"
 #include "giant/save/slot.h"
 #include "giant/world/damage.h"
+#include "giant/world/terrain.h"
 #include "giant/world/weather.h"
 
 #include <filesystem>
@@ -37,6 +41,13 @@ namespace giant::editor {
 
 class GameSaves {
 public:
+    // A cell of a game: its damage shown and its ground (none: as authored).
+    struct GameCell {
+        world::CellDamage damage;
+        std::optional<world::Terrain::Heights> ground;
+        bool operator==(const GameCell&) const = default;
+    };
+
     GameSaves();
     ~GameSaves(); // waits for the job
     GameSaves(const GameSaves&) = delete;
@@ -56,6 +67,7 @@ public:
     // cells_per_frame of them.
     void update(EditorState& state, double seconds);
     usize cells_per_frame = 64;
+    usize ground_tiles_per_frame = 8; // of those, the ones with ground (each a whole tile pressed in)
     // Until the job in flight is done (tests, shutdown, a command that waits).
     void wait();
     // A save or load under way (its job, or a load's cells still being applied).
@@ -67,6 +79,9 @@ public:
     // The game shown closed: its damage, the weather override and what the
     // last save or load was are forgotten (the world shows as it is kept).
     void close(EditorState& state);
+
+    // A loaded game's ground for tiles not in the scene yet (pressed in as they stream in).
+    usize ground_waiting() const { return m_ground_waiting.size(); }
 
     // The weather a load put back no more (set_weather, clear_weather).
     void drop_weather();
@@ -84,6 +99,8 @@ public:
         u32 written = 0, removed = 0; // the last save's chunk files written and cleaned
         usize cells = 0;               // the last save's or load's cells
         usize applied = 0;             // a load's cells applied so far
+        usize tiles = 0;               // of the last save's or load's cells, those with ground
+        usize skipped = 0;             // a loaded tile's ground not pressed (another sample count: forced)
     };
     const Status& status() const { return m_status; }
 
@@ -94,6 +111,12 @@ private:
     // A new scene or world session seen: the game forgotten (each frame, and before each job begins).
     void follow(EditorState& state);
     void finish_load(EditorState& state);
+    // A game's ground: the game ground and what waits for its tile forgotten (the ground as authored).
+    void clear_ground(EditorState& state);
+    // A loaded tile's ground pressed in, or kept waiting for its tile.
+    void apply_ground(EditorState& state, world::CellCoord cell, world::Terrain::Heights heights);
+    // Waiting tiles now in the scene pressed in (at most `budget`; looks at a share a frame).
+    void press_waiting(EditorState& state, usize& budget);
 
     JobSystem m_jobs{1};
     WaitGroup m_group;
@@ -105,12 +128,14 @@ private:
     // The slot last saved or loaded, as it is on the disk, and its cells' damage.
     std::filesystem::path m_base_path;
     save::Manifest m_base;
-    std::shared_ptr<const std::map<save::CellKey, world::CellDamage>> m_base_cells; // shared with a save's job
+    std::shared_ptr<const std::map<save::CellKey, GameCell>> m_base_cells; // shared with a save's job
     u64 m_session = 0;    // the world's (WorldStreaming::session) when the base was made
     u64 m_generation = 0; // the scene's
 
     // A load being applied.
-    std::vector<std::pair<world::CellCoord, world::CellDamage>> m_applying;
+    std::vector<std::pair<world::CellCoord, GameCell>> m_applying;
+    std::map<save::CellKey, world::Terrain::Heights> m_ground_waiting;
+    std::optional<save::CellKey> m_waiting_from; // where the next look at them starts (none: the first)
     struct Sections;
     std::unique_ptr<Sections> m_sections;
 

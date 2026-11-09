@@ -343,6 +343,8 @@ Open-world systems:
 - E4b: save_game and load_game. Broken buildings, felled trees, the
   camera, play and the weather are saved beside the open world and shown
   again on loading, without ever touching the world's own files.
+- E4 part 2a: craters and footprints are saved with the game and pressed
+  back into the ground on loading, even for tiles that stream in later.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

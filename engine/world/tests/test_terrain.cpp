@@ -638,3 +638,42 @@ GIANT_TEST("ground damage: keep leaves the dents as the ground, hands back befor
     t.restore({1, 0}, kept[1].after, kept[1].after_version);
     GIANT_CHECK(t.version({1, 0}) == dented);
 }
+
+GIANT_TEST("ground damage: a pressed tile is kept aside as a dent's; dents over it go back to it; both lift exactly") {
+    Terrain t;
+    t.set_samples(32);
+    t.set({0, 0}, Terrain::Heights(1024, 5.0f));
+    t.set({1, 0}, Terrain::Heights(1024, 5.0f));
+    const u64 v0 = t.version({0, 0});
+    GroundDamage game;
+    GIANT_CHECK(!game.press(t, {2, 0}, Terrain::Heights(1024, 1.0f))); // no tile there
+    GIANT_CHECK(!game.press(t, {0, 0}, Terrain::Heights(16, 1.0f)));   // another size
+    GIANT_CHECK(game.tiles() == 0 && t.version({0, 0}) == v0);
+    GIANT_CHECK(game.press(t, {0, 0}, Terrain::Heights(1024, 3.0f)));
+    const u64 pressed = t.version({0, 0});
+    GIANT_CHECK(pressed != v0 && t.height_at(10.0, 10.0).value() == 3.0);
+    GIANT_CHECK((game.ours_tiles(t) == std::vector<CellCoord>{{0, 0}}));
+    // Pressed again: still kept aside as authored.
+    GIANT_CHECK(game.press(t, {0, 0}, Terrain::Heights(1024, 2.0f)));
+    const u64 game_v = t.version({0, 0});
+    // A simulation's dents over it go back to the game's ground.
+    GroundDamage sim;
+    Dent d;
+    d.radius = 8.0;
+    d.depth = 1.0f;
+    std::vector<CellCoord> changed;
+    sim.dent(t, d, 10.0, 10.0, changed);
+    GIANT_CHECK(t.height_at(10.0, 10.0).value() < 2.0 && game.ours_tiles(t).empty());
+    // A save: both lifted (the simulation's first), the ground as authored, then both put back.
+    sim.lift(t);
+    game.lift(t);
+    GIANT_CHECK(t.version({0, 0}) == v0 && t.height_at(10.0, 10.0).value() == 5.0);
+    game.put_back(t);
+    GIANT_CHECK(t.version({0, 0}) == game_v);
+    sim.put_back(t);
+    GIANT_CHECK(t.height_at(10.0, 10.0).value() < 2.0);
+    GIANT_CHECK(sim.restore(t) == 1 && t.version({0, 0}) == game_v && t.height_at(10.0, 10.0).value() == 2.0);
+    GIANT_CHECK((game.ours_tiles(t) == std::vector<CellCoord>{{0, 0}}));
+    GIANT_CHECK(game.restore(t) == 1 && t.version({0, 0}) == v0 && t.height_at(10.0, 10.0).value() == 5.0);
+    (void)pressed;
+}
