@@ -42,9 +42,13 @@ TriangleMesh make_sphere(u32 segments, u32 rings) {
     for (u32 r = 0; r <= rings; ++r) {
         const float theta = k_pi * static_cast<float>(r) / static_cast<float>(rings);
         for (u32 s = 0; s <= segments; ++s) {
-            const float phi = 2.0f * k_pi * static_cast<float>(s) / static_cast<float>(segments);
-            const Vec3 n{std::sin(theta) * std::cos(phi), std::cos(theta),
-                         -std::sin(theta) * std::sin(phi)};
+            // The seam column repeats the first one's positions exactly, and
+            // the poles are exact, so the vertices there meet bit for bit:
+            // the simplifier takes them for uv seams, not open borders, and
+            // coarser levels keep them closed.
+            const float phi = 2.0f * k_pi * static_cast<float>(s % segments) / static_cast<float>(segments);
+            Vec3 n{std::sin(theta) * std::cos(phi), std::cos(theta), -std::sin(theta) * std::sin(phi)};
+            if (r == 0 || r == rings) n = {0.0f, r == 0 ? 1.0f : -1.0f, 0.0f};
             // The image wraps round once, its top at the north pole.
             mesh.vertices.push_back({n * 0.5f, n,
                                      {static_cast<float>(s) / static_cast<float>(segments),

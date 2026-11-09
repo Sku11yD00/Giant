@@ -14,6 +14,7 @@
 #include <fstream>
 #include <set>
 #include <string>
+#include <map>
 #include <vector>
 
 using namespace giant;
@@ -1090,4 +1091,37 @@ GIANT_TEST("geometry: skinned clusters are the original triangles alone, weights
     twins.weights.pop_back();
     GIANT_CHECK(build_skinned_clusters(twins).mesh.empty());
     GIANT_CHECK(build_skinned_clusters({}).mesh.empty());
+}
+
+GIANT_TEST("geometry: the sphere stays closed at every level of detail") {
+    // Its uv seam and poles are duplicated vertices at bit-identical
+    // positions, so simplification keeps them together: every edge of any
+    // cut has its twin running the other way (no cracks for pixels to fall
+    // through).
+    const ClusterMesh mesh = build_clusters(make_sphere());
+    usize worst = 0;
+    for (const float d : {1.0f, 3.0f, 10.0f, 30.0f, 100.0f, 1000.0f}) {
+        std::vector<u32> cut;
+        select_clusters(mesh, view_from({0, 0, d}, 1.0f), cut);
+        std::map<std::array<float, 6>, int> open;
+        for (const u32 ci : cut) {
+            const Cluster& c = mesh.clusters[ci];
+            for (u32 t = 0; t < c.triangle_count; ++t) {
+                Vec3 p[3];
+                for (u32 k = 0; k < 3; ++k) p[k] = mesh.vertices[mesh.indices[c.first_index + t * 3 + k]].position;
+                for (u32 k = 0; k < 3; ++k) {
+                    const Vec3 a = p[k], b = p[(k + 1) % 3];
+                    if (a == b) continue;
+                    const std::array<float, 6> reverse{b.x, b.y, b.z, a.x, a.y, a.z};
+                    if (const auto it = open.find(reverse); it != open.end()) {
+                        if (--it->second == 0) open.erase(it);
+                    } else {
+                        ++open[{a.x, a.y, a.z, b.x, b.y, b.z}];
+                    }
+                }
+            }
+        }
+        worst = std::max(worst, open.size());
+    }
+    GIANT_CHECK(worst == 0);
 }
