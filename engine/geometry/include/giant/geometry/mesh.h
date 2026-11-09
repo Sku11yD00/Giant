@@ -84,7 +84,9 @@ TriangleMesh make_plane();                                     // 1 m square, y 
 void compute_normals(TriangleMesh& mesh);
 
 // Tangents from the uvs, the MikkTSpace way: each triangle's +u and +v
-// directions, weighted by the corner's angle, summed per vertex and made
+// directions, weighted by the corner's angle, summed per vertex (vertices
+// alike in position, normal and uv summed together; triangles without area
+// left out) and made
 // perpendicular to its normal; the bitangent sign says whether +v follows
 // cross(normal, tangent). A vertex whose triangles disagree on that sign (a
 // mirrored uv seam) is split in two, the copy appended (with its weights,

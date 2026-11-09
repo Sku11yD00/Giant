@@ -364,6 +364,39 @@ GIANT_TEST("geometry: tangents follow the uvs; mirrored uv seams split, kept tan
     }
 }
 
+GIANT_TEST("geometry: duplicated vertices share one tangent frame; flat triangles add nothing") {
+    // The sphere unwelded, three vertices a triangle (as unindexed files
+    // are): alike vertices get one frame, so clustering merges them again.
+    const TriangleMesh welded = make_sphere(32, 16);
+    TriangleMesh loose;
+    for (const u32 i : welded.indices) {
+        Vertex v = welded.vertices[i];
+        v.tangent = {1, 0, 0};
+        v.bitangent_sign = 1.0f;
+        loose.indices.push_back(static_cast<u32>(loose.vertices.size()));
+        loose.vertices.push_back(v);
+    }
+    generate_tangents(loose);
+    bool alike = true;
+    for (usize i = 0; i < loose.vertices.size(); ++i) {
+        const Vertex& v = loose.vertices[i];
+        const Vertex& w = welded.vertices[welded.indices[i]];
+        alike = alike && near3(v.tangent, w.tangent, 1e-5f) && v.bitangent_sign == w.bitangent_sign;
+    }
+    GIANT_CHECK(alike);
+    GIANT_CHECK(build_clusters(loose).vertices.size() == build_clusters(welded).vertices.size());
+    // A collinear triangle (zero area, uvs anything) on a quad's corner
+    // leaves that corner's tangent alone.
+    TriangleMesh quad = make_plane();
+    const Vec3 up{0, 1, 0};
+    quad.vertices.push_back({{0.5f, 0, -1.5f}, up, {1.3f, 1}});
+    quad.vertices.push_back({{0.5f, 0, 2.0f}, up, {0.5f, 1.2f}});
+    quad.indices.insert(quad.indices.end(), {4, 1, 5}); // vertex 1 sits on the line between
+    generate_tangents(quad);
+    GIANT_CHECK(near3(quad.vertices[1].tangent, {1, 0, 0}) && quad.vertices[1].bitangent_sign == 1.0f);
+    GIANT_CHECK(quad.vertices.size() == 6); // and no split from it
+}
+
 GIANT_TEST("geometry: clusters keep each vertex's uv and tangent through simplification") {
     const TriangleMesh sphere = make_sphere(96, 48);
     const ClusterMesh clusters = build_clusters(sphere);

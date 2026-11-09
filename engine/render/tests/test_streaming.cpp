@@ -90,7 +90,7 @@ struct Bench {
     u64 bytes_of_all() const {
         // Every group's geometry, as laid out (a lower bound: rounding to units).
         u64 total = 0;
-        for (const geometry::Cluster& c : mesh.clusters) total += c.vertex_count * 24ull + c.triangle_count * 4ull;
+        for (const geometry::Cluster& c : mesh.clusters) total += c.vertex_count * u64{geometry::k_packed_vertex_bytes} + c.triangle_count * 4ull;
         return total;
     }
     // Every loaded group's parents are loaded (the cut stays whole).

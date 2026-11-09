@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <unordered_map>
 
 namespace giant::geometry {
 
@@ -109,7 +111,33 @@ void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, st
     const usize count = mesh.vertices.size();
     GIANT_ASSERT(keep.empty() || keep.size() == count, "one keep flag per vertex");
     const bool split_weights = weights != nullptr && weights->size() == count;
-    // Per vertex, the angle-weighted tangents of its corners whose uv
+    const auto kept = [&keep](usize v) { return !keep.empty() && keep[v] != 0; };
+    // Vertices alike in position, normal and uv (exporters duplicate many)
+    // share their sums, as MikkTSpace welds them, so they get one frame.
+    std::vector<u32> weld(count);
+    {
+        struct Key {
+            float f[8];
+            bool operator==(const Key& o) const { return std::memcmp(f, o.f, sizeof(f)) == 0; }
+        };
+        struct KeyHash {
+            usize operator()(const Key& k) const {
+                u64 h = 1469598103934665603ull;
+                const auto* b = reinterpret_cast<const u8*>(k.f);
+                for (usize i = 0; i < sizeof(k.f); ++i) h = (h ^ b[i]) * 1099511628211ull;
+                return static_cast<usize>(h);
+            }
+        };
+        std::unordered_map<Key, u32, KeyHash> first;
+        first.reserve(count);
+        for (usize v = 0; v < count; ++v) {
+            const Vertex& x = mesh.vertices[v];
+            Key k{{x.position.x, x.position.y, x.position.z, x.normal.x, x.normal.y, x.normal.z, x.uv.u, x.uv.v}};
+            for (float& f : k.f) f = f == 0.0f ? 0.0f : f; // -0 and +0 alike
+            weld[v] = kept(v) ? static_cast<u32>(v) : first.emplace(k, static_cast<u32>(v)).first->second;
+        }
+    }
+    // Per welded vertex, the angle-weighted tangents of its corners whose uv
     // mapping is direct (0) or mirrored (1).
     struct Sum {
         Vec3 tangent{};
@@ -117,6 +145,7 @@ void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, st
     };
     std::vector<Sum> sums(count * 2);
     std::vector<u8> mirrored(mesh.indices.size(), 0); // per corner
+    std::vector<u8> corners(count, 0);                // per vertex: bit 0 direct, bit 1 mirrored corners
     const usize index_count = mesh.indices.size() - mesh.indices.size() % 3;
     for (usize i = 0; i < index_count; i += 3) {
         const u32 idx[3] = {mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]};
@@ -124,9 +153,15 @@ void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, st
         const Vertex& v0 = mesh.vertices[idx[0]];
         const Vertex& v1 = mesh.vertices[idx[1]];
         const Vertex& v2 = mesh.vertices[idx[2]];
-        // The bitangent points up the image: toward smaller v.
         const Vec3 e1 = v1.position - v0.position;
         const Vec3 e2 = v2.position - v0.position;
+        // Triangles without area (collinear or coincident corners) give no
+        // direction, whatever their uvs.
+        const float area2 = length_squared(cross(e1, e2));
+        if (!std::isfinite(area2) || area2 <= 1e-12f * length_squared(e1) * length_squared(e2)) {
+            continue;
+        }
+        // The bitangent points up the image: toward smaller v.
         const float du1 = v1.uv.u - v0.uv.u, dv1 = v0.uv.v - v1.uv.v;
         const float du2 = v2.uv.u - v0.uv.u, dv2 = v0.uv.v - v2.uv.v;
         const float r = du1 * dv2 - du2 * dv1;
@@ -147,19 +182,22 @@ void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, st
             if (length_squared(tp) == 0.0f || !(angle > 0.0f)) continue;
             const u8 m = dot(cross(n, t), b) < 0.0f ? 1 : 0;
             mirrored[i + k] = m;
-            Sum& s = sums[usize{v} * 2 + m];
+            corners[v] |= static_cast<u8>(1u << m);
+            Sum& s = sums[usize{weld[v]} * 2 + m];
             s.tangent += tp * angle;
             s.used = true;
         }
     }
     std::vector<u32> copy(count, ~0u); // a split vertex's mirrored copy
     for (usize v = 0; v < count; ++v) {
-        if (!keep.empty() && keep[v] != 0) continue;
-        const Sum& direct = sums[v * 2];
-        const Sum& flipped = sums[v * 2 + 1];
+        if (kept(v)) continue;
+        const Sum& direct = sums[usize{weld[v]} * 2];
+        const Sum& flipped = sums[usize{weld[v]} * 2 + 1];
         const Vec3 n = unit_or(mesh.vertices[v].normal, Vec3{0, 1, 0});
         const auto frame = [&n](const Sum& s) { return perpendicular_tangent(n, s.tangent); };
-        if (direct.used && flipped.used) {
+        // A vertex used both ways is split; one used one way takes that frame.
+        const bool mirrored_only = flipped.used && (!direct.used || corners[v] == 2);
+        if (direct.used && flipped.used && corners[v] == 3) {
             Vertex other = mesh.vertices[v];
             other.tangent = frame(flipped);
             other.bitangent_sign = -1.0f;
@@ -168,9 +206,8 @@ void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, st
             if (split_weights) weights->push_back((*weights)[v]);
         }
         Vertex& self = mesh.vertices[v];
-        const bool only_flipped = flipped.used && !direct.used;
-        self.tangent = frame(only_flipped ? flipped : direct);
-        self.bitangent_sign = only_flipped ? -1.0f : 1.0f;
+        self.tangent = frame(mirrored_only ? flipped : direct);
+        self.bitangent_sign = mirrored_only ? -1.0f : 1.0f;
     }
     for (usize i = 0; i < index_count; ++i) {
         const u32 v = mesh.indices[i];

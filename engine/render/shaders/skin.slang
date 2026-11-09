@@ -88,6 +88,7 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
         ByteAddressBuffer matrices = read_buffer(push.matrices);
         float3 n = float3(0.0, 0.0, 0.0);
         float3 t = float3(0.0, 0.0, 0.0);
+        float handedness = 1.0; // the first joint mirroring turns the bitangent (as the CPU rest pose does)
         for (uint k = 0; k < 4; ++k) {
             const float w = float((weights >> (8 * k)) & 0xFFu) / 255.0;
             const uint joint = ((k < 2 ? joints.x : joints.y) >> (16 * (k & 1))) & 0xFFFFu;
@@ -101,6 +102,9 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
             p += row_apply(r0, r1, r2, bind, 1.0) * w;
             n += row_apply(r0, r1, r2, bind_normal, 0.0) * w;
             t += row_apply(r0, r1, r2, bind_tangent.xyz, 0.0) * w;
+            if (k == 0 && dot(r0.xyz, cross(r1.xyz, r2.xyz)) < 0.0) {
+                handedness = -1.0;
+            }
         }
         const float len2 = dot(n, n);
         n = len2 > 1e-24 ? n * rsqrt(len2) : float3(0.0, 1.0, 0.0);
@@ -116,7 +120,7 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
         // The uv (at 20) never moves.
         const uint v = base + vertex_offset + tid * k_mesh_vertex_bytes;
         pool.Store3(v, asuint(p));
-        pool.Store2(v + 12, uint2(pack_vertex_normal(n), pack_vertex_tangent(t, bind_tangent.w)));
+        pool.Store2(v + 12, uint2(pack_vertex_normal(n), pack_vertex_tangent(t, bind_tangent.w * handedness)));
         uint ignored;
         for (uint k = 0; k < 3; ++k) {
             InterlockedMin(g_lo[k], ordered(p[k]), ignored);
