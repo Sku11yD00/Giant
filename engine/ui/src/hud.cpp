@@ -211,6 +211,8 @@ void Markers::draw(Canvas& canvas, const Font& font, const View& view, Vec2 size
         const float gap = 4.0f * scale;
         const bool above = !p.on_screen && dir.y > 0.3f;
         float y = above ? at.y - r - gap - ls.y - ds.y : at.y + r + gap;
+        if (y + ls.y + ds.y > size.y - gap) y = at.y - r - gap - ls.y - ds.y; // (no room under it: over it)
+        y = std::max(y, gap);
         const auto keep_x = [&](float w) { return std::clamp(at.x, 0.5f * w + gap, std::max(size.x - 0.5f * w - gap, 0.5f * w + gap)); };
         if (!m.label.empty()) {
             label.color = faded(k_white, alpha);

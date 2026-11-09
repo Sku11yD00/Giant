@@ -277,3 +277,32 @@ GIANT_TEST("ui hud: fading widgets keep counting their text and taking clicks; m
     markers.draw(canvas, font, view, {80.0f, 80.0f}, 1.0f);
     GIANT_CHECK(markers.placed().empty());
 }
+
+GIANT_TEST("ui screen: a fading widget in a holder hidden at once is not drawn, and gives back its text") {
+    const Font& font = default_font();
+    std::string error;
+    const auto s = Screen::load(R"({"type": "panel", "children": [
+        {"type": "panel", "id": "p", "visible": "p", "background": "#000000ff", "size": [100, 100],
+         "children": [{"type": "text", "id": "c", "text": "{t}", "fade": 1}]},
+        {"type": "text", "id": "s", "text": "{t}", "offset": [0, 200]},
+        {"type": "button", "id": "b", "fade": 1, "size": [10, 10], "offset": [500, 500]}]})",
+                                error);
+    GIANT_CHECK(s != nullptr);
+    if (s == nullptr) return;
+    Values v;
+    v.set("t", std::string(3000, 'x'));
+    v.set("p", true);
+    usize budget = 4000;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &budget);
+    s->advance(0.1);
+    s->focus("b");
+    GIANT_CHECK(s->focused().empty() && s->activate() == std::nullopt); // (fading in: not yet)
+    s->advance(2.0);
+    s->focus("b");
+    GIANT_CHECK(s->focused() == "b" && s->activate() == std::optional<std::string>("b"));
+    v.set("p", false);
+    budget = 4000;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &budget);
+    GIANT_CHECK(s->find("c")->shown_text.empty() && s->find("s")->shown_text.size() == 3000);
+    GIANT_CHECK(!s->covers({50.0f, 50.0f}));
+}

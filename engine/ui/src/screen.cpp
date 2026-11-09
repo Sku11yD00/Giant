@@ -227,6 +227,13 @@ struct Loader {
 
 // --- Layout -----------------------------------------------------------------
 
+// Whether a widget not shown is still drawn: fading out itself (if its own
+// "visible" or a holder hid it), or within a holder fading out and shown by its own.
+bool drawn_hidden(const Widget& w, bool top, bool held) {
+    if (top) return w.fade > 0.0f && w.opacity > 0.0f;
+    return held && (w.fade > 0.0f ? w.opacity > 0.0f : w.own_visible);
+}
+
 struct Layouter {
     const Font& font;
     const Values& values;
@@ -276,7 +283,7 @@ struct Layouter {
         w.own_visible = visible(w);
         w.shown = w.own_visible;
         if (!w.shown) {
-            hide(w, false); // (and all it holds: none of them shown, clicked or focused)
+            hide(w, true, false); // (and all it holds: none of them shown, clicked or focused)
             return {};
         }
         const float pad = 2.0f * w.padding * scale;
@@ -316,10 +323,11 @@ struct Layouter {
     }
 
     // Not shown (nor clicked or focused); still drawn where it was while it fades out.
-    void hide(Widget& w, bool fading) {
+    // `top`: the one its own "visible" hid; `held`: what holds it is still drawn (fading out).
+    void hide(Widget& w, bool top, bool held) {
         w.shown = false;
         w.own_visible = visible(w);
-        fading = fading || (w.fade > 0.0f && w.opacity > 0.0f);
+        const bool fading = drawn_hidden(w, top, held);
         if (!fading) {
             w.rect = {};
             w.shown_text.clear();
@@ -333,7 +341,7 @@ struct Layouter {
             budget -= w.shown_text.size();
             used += w.shown_text.size();
         }
-        for (Widget& c : w.children) hide(c, fading);
+        for (Widget& c : w.children) hide(c, false, fading);
     }
 
     // Placed in `parent` (its inside), from its natural size.
@@ -517,14 +525,13 @@ const Widget* button_at(const Widget& w, Vec2 p, bool clipped_out) {
 
 // Whether a widget drawn with a background (seen: not clipped out) is at
 // `p`: shown, or fading out (what the player sees takes the click).
-bool covers(const Widget& w, Vec2 p, bool clipped_out, bool fading) {
-    fading = fading || (!w.shown && w.fade > 0.0f && w.opacity > 0.0f);
-    if (!w.shown && !fading) return false;
-    if (fading && !w.own_visible && !(w.fade > 0.0f && w.opacity > 0.0f)) return false;
+bool covers(const Widget& w, Vec2 p, bool clipped_out, bool holder_shown, bool holder_drawn) {
+    const bool drawn = w.shown || drawn_hidden(w, holder_shown, holder_drawn);
+    if (!drawn) return false;
     if (w.clip && !inside(w.rect, p)) clipped_out = true;
     if (!clipped_out && (w.background >> 24) != 0 && inside(w.rect, p)) return true;
     for (const Widget& c : w.children) {
-        if (covers(c, p, clipped_out, fading)) return true;
+        if (covers(c, p, clipped_out, w.shown, drawn)) return true;
     }
     return false;
 }
@@ -773,7 +780,7 @@ void Screen::advance(double seconds) {
 
 const Widget* Screen::button_at(Vec2 point) const { return ui::button_at(m_root, point, false); }
 
-bool Screen::covers(Vec2 point) const { return ui::covers(m_root, point, false, false); }
+bool Screen::covers(Vec2 point) const { return ui::covers(m_root, point, false, true, true); }
 
 void Screen::point(Vec2 p) {
     if (const Widget* b = button_at(p)) m_focus = b->id;
@@ -807,13 +814,13 @@ void Screen::move_focus(int step) {
 std::optional<std::string> Screen::activate() const {
     if (m_focus.empty()) return std::nullopt;
     const Widget* f = find(m_focus);
-    if (f == nullptr || !f->shown || f->type != WidgetType::button) return std::nullopt;
+    if (f == nullptr || !live(*f) || f->type != WidgetType::button) return std::nullopt;
     return m_focus;
 }
 
 void Screen::focus(std::string id) {
     const Widget* w = find(id);
-    m_focus = w != nullptr && w->type == WidgetType::button && w->shown ? std::move(id) : std::string();
+    m_focus = w != nullptr && w->type == WidgetType::button && live(*w) ? std::move(id) : std::string();
 }
 
 bool Screen::shown(std::string_view id) const {
