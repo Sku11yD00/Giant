@@ -349,6 +349,8 @@ Open-world systems:
   lie and put back on loading, and the game autosaves while playing.
 - E4 part 2c: the player is saved as they were: where they stood, hung on
   a wall or fell, how fast, and what carried them.
+- E4 part 2d: walkers are saved mid-walk and walk on from where they were
+  on loading.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

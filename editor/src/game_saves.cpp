@@ -4,6 +4,7 @@
 
 #include "physics_state.h"
 #include "play_state.h"
+#include "walker_state.h"
 #include "weather_state.h"
 #include "world_streaming.h"
 
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <set>
 
 namespace giant::editor {
 
@@ -48,6 +50,16 @@ bool finite_in(const Json& j, double lo, double hi, double& out) {
 }
 
 constexpr usize k_max_saved_poses = 65536;
+constexpr usize k_max_reason = 256;
+
+std::optional<WalkerState::Phase> phase_of(const Json& j) {
+    if (!j.is_string()) return std::nullopt;
+    for (const WalkerState::Phase p : {WalkerState::Phase::searching, WalkerState::Phase::walking,
+                                       WalkerState::Phase::arrived, WalkerState::Phase::failed}) {
+        if (j.get<std::string>() == WalkerState::to_string(p)) return p;
+    }
+    return std::nullopt;
+}
 
 Json vec_json(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
 Json quat_json(const Quat& q) { return Json::array({q.x, q.y, q.z, q.w}); }
@@ -125,6 +137,7 @@ struct GameSaves::Sections {
     bool has_bodies = false;
     bool simulating = false;
     std::vector<SavedPose> poses;
+    std::vector<SavedWalker> walkers;
 };
 
 struct GameSaves::Pending {
@@ -268,6 +281,62 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
         posed = poses.size();
         sections["bodies"] = Json{{"simulating", simulating}, {"poses", std::move(poses)}}.dump(1) + "\n";
     }
+    // The walkers (only while simulating: they walk with it), those of a load not walking again yet too.
+    usize walking = 0;
+    {
+        Json walkers = Json::array();
+        const auto in = [](const DVec3& v) {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::fabs(v.x) <= 1e8 &&
+                   std::fabs(v.y) <= 1e8 && std::fabs(v.z) <= 1e8;
+        };
+        const auto add = [&](const SavedWalker& w) {
+            const WalkerState::Resume& r = w.resume;
+            const Vec3& v = r.velocity;
+            const Quat& q = w.of_rotation;
+            const double len = std::sqrt(static_cast<double>(q.x) * q.x + static_cast<double>(q.y) * q.y +
+                                         static_cast<double>(q.z) * q.z + static_cast<double>(q.w) * q.w);
+            // Only what a load reads back (one fallen out of the world is not kept: it would refuse the save).
+            if (walkers.size() >= WalkerState::k_max_walkers || !in(r.feet) || !in(r.target) || !in(w.of_position) ||
+                !(std::fabs(r.yaw) <= 10.0f) || !(std::fabs(v.x) <= 1e4f) || !(std::fabs(v.y) <= 1e4f) ||
+                !(std::fabs(v.z) <= 1e4f) || !(r.speed > 0.0f && r.speed <= 20.0f) || !(std::fabs(len - 1.0) <= 1e-3))
+                return;
+            walkers.push_back({{"entity", w.entity},
+                               {"feet", vec_json(r.feet)},
+                               {"yaw", r.yaw},
+                               {"velocity", Json::array({v.x, v.y, v.z})},
+                               {"target", vec_json(r.target)},
+                               {"speed", r.speed},
+                               {"phase", WalkerState::to_string(r.phase)},
+                               {"reason", r.reason.substr(0, k_max_reason)},
+                               {"of", {{"position", vec_json(w.of_position)}, {"rotation", quat_json(w.of_rotation)}}}});
+        };
+        if (state.physics != nullptr && state.physics->simulating() && state.walkers != nullptr) {
+            std::vector<world::EntityId> ids;
+            // (Of a run stopped since, not this game's: let go on the next step.)
+            if (state.walkers->current(state.scene))
+                for (const auto& [id, w] : state.walkers->walkers()) ids.push_back(id);
+            std::sort(ids.begin(), ids.end());
+            for (const world::EntityId id : ids) {
+                const WalkerState::Walker& w = state.walkers->walkers().at(id);
+                const world::Entity* e = state.scene.find(id);
+                const std::optional<sim::CharacterState> c = state.physics->world().character_state(w.character);
+                if (e == nullptr || !c) continue; // (gone: let go, or its character made again, on the next step)
+                SavedWalker saved;
+                saved.entity = id;
+                saved.resume = {c->position, w.yaw, c->velocity, w.target, w.settings.speed, w.phase, w.reason};
+                saved.of_position = e->transform.position;
+                saved.of_rotation = e->transform.rotation;
+                add(saved);
+            }
+            if (state.physics->runs() == m_walkers_run) {
+                for (const auto& [id, w] : m_walkers_waiting) {
+                    if (!std::binary_search(ids.begin(), ids.end(), id)) add(w);
+                }
+            }
+        }
+        walking = walkers.size();
+        sections["walkers"] = Json{{"walkers", std::move(walkers)}}.dump(1) + "\n";
+    }
     save::Meta meta;
     meta.world_name = state.world->folder().filename().string();
     meta.world_hash = world_identity(state.world->index());
@@ -291,6 +360,7 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
         m_status.error.clear();
     }
     m_status.bodies = posed;
+    m_status.walkers = walking;
     m_status.gather_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gather_from).count();
     m_autosaved_at = m_play_seconds;
@@ -425,6 +495,39 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     pose.entity = e["entity"].get<u64>();
                     p->sections.poses.push_back(pose);
                 }
+            } else if (name == "walkers") {
+                if (!only_keys(j, {"walkers"}) || !j.value("walkers", Json::array()).is_array() ||
+                    j.value("walkers", Json::array()).size() > WalkerState::k_max_walkers)
+                    return fail(file + ": bad walkers");
+                std::set<world::EntityId> ids;
+                for (const Json& e : j.value("walkers", Json::array())) {
+                    SavedWalker w;
+                    WalkerState::Resume& r = w.resume;
+                    const Json* of = e.is_object() && e.contains("of") ? &e["of"] : nullptr;
+                    double yaw = 0.0, speed = 0.0;
+                    std::optional<WalkerState::Phase> phase;
+                    if (!e.is_object() ||
+                        !only_keys(e, {"entity", "feet", "yaw", "velocity", "target", "speed", "phase", "reason", "of"}) ||
+                        of == nullptr || !of->is_object() || !only_keys(*of, {"position", "rotation"}) ||
+                        !e.contains("entity") || !e["entity"].is_number_unsigned() || e["entity"].get<u64>() == 0 ||
+                        e["entity"].get<u64>() > world::k_max_entity_id || !e.contains("feet") ||
+                        !read_vec(e["feet"], r.feet) || !e.contains("yaw") || !finite_in(e["yaw"], -10.0, 10.0, yaw) ||
+                        !e.contains("velocity") || !read_vec3f(e["velocity"], 1e4, r.velocity) ||
+                        !e.contains("target") || !read_vec(e["target"], r.target) || !e.contains("speed") ||
+                        !finite_in(e["speed"], 0.0, 20.0, speed) || !(static_cast<float>(speed) > 0.0f) || !e.contains("phase") ||
+                        !(phase = phase_of(e["phase"])) || !e.value("reason", Json("")).is_string() ||
+                        e.value("reason", std::string()).size() > k_max_reason || !of->contains("position") ||
+                        !read_vec((*of)["position"], w.of_position) || !of->contains("rotation") ||
+                        !read_quat((*of)["rotation"], w.of_rotation))
+                        return fail(file + ": a bad walker");
+                    w.entity = e["entity"].get<u64>();
+                    if (!ids.insert(w.entity).second) return fail(file + ": a walker twice");
+                    r.yaw = static_cast<float>(yaw);
+                    r.speed = static_cast<float>(speed);
+                    r.phase = *phase;
+                    r.reason = e.value("reason", std::string());
+                    p->sections.walkers.push_back(std::move(w));
+                }
             } // (another engine's sections: left)
         }
         auto cells = std::make_shared<std::map<save::CellKey, GameCell>>();
@@ -471,6 +574,7 @@ void GameSaves::close(EditorState& state) {
     m_poses_waiting.clear();
     m_poses_from.reset();
     m_carried_feet.reset();
+    forget_walkers();
     drop_weather();
     m_applying.clear();
     m_sections.reset();
@@ -567,6 +671,8 @@ void GameSaves::take(EditorState& state) {
     m_poses_waiting.clear();
     m_poses_from.reset();
     m_carried_feet.reset();
+    forget_walkers();
+    if (state.walkers != nullptr) state.walkers->clear(); // (walking in the game being left)
     forget_base(); // (another game now: the other base is not of it)
     m_applying = std::move(p->loaded);
     m_sections = std::make_unique<Sections>(std::move(p->sections));
@@ -588,6 +694,9 @@ void GameSaves::take(EditorState& state) {
     m_status.bodies = m_sections->poses.size();
     m_status.bodies_applied = 0;
     m_status.bodies_skipped = 0;
+    m_status.walkers = m_sections->walkers.size();
+    m_status.walkers_applied = 0;
+    m_status.walkers_skipped = 0;
     m_play_generation = p->generation;
     m_play_session = p->session;
     ++m_status.loads;
@@ -631,6 +740,72 @@ void GameSaves::finish_load(EditorState& state) {
             m_status.bodies_skipped += s.poses.size();
         }
     }
+    if (state.physics != nullptr && state.walkers != nullptr && state.physics->simulating()) {
+        for (const SavedWalker& w : s.walkers) m_walkers_waiting[w.entity] = w;
+        m_walkers_run = state.physics->runs();
+    } else {
+        m_status.walkers_skipped += s.walkers.size();
+    }
+}
+
+void GameSaves::forget_walkers() {
+    m_walkers_waiting.clear();
+    m_walkers_from.reset();
+}
+
+void GameSaves::place_walkers(EditorState& state) {
+    if (m_walkers_waiting.empty()) return;
+    // Only for the simulation they were for (stopped since: walkers let go).
+    if (state.physics == nullptr || state.walkers == nullptr || !state.physics->simulating() ||
+        state.physics->runs() != m_walkers_run) {
+        m_status.walkers_skipped += m_walkers_waiting.size();
+        forget_walkers();
+        return;
+    }
+    // Each waits for what it stands on: its entity in the scene a frame (its cell's bodies and ground
+    // seen by the physics), then while bodies are being made or put back (at most k_hold_frames:
+    // streaming may keep some waiting anywhere for long).
+    constexpr u32 k_hold_frames = 120;
+    const bool settling = state.physics->bodies().entities_waiting() || !m_poses_waiting.empty();
+    constexpr usize k_looks = 1024;
+    usize budget = std::max<usize>(walkers_per_frame, 1);
+    auto it = m_walkers_from ? m_walkers_waiting.lower_bound(*m_walkers_from) : m_walkers_waiting.begin();
+    // Each looked at once at most (its `seen` counts frames, not looks).
+    const usize looks = std::min(k_looks, m_walkers_waiting.size());
+    for (usize looked = 0; looked < looks && budget > 0 && !m_walkers_waiting.empty(); ++looked) {
+        if (it == m_walkers_waiting.end()) it = m_walkers_waiting.begin();
+        SavedWalker& w = it->second;
+        const world::Entity* e = state.scene.find(w.entity);
+        if (e == nullptr) {
+            ++it; // (its cell not streamed in yet)
+            continue;
+        }
+        if (w.seen < k_hold_frames) ++w.seen;
+        if (w.seen == 1 || (settling && w.seen < k_hold_frames)) {
+            ++it;
+            continue;
+        }
+        // Moved in the world since, given a body, hidden, or sent walking since: not this save's.
+        if (state.walkers->find(w.entity) != nullptr || !(e->transform.position == w.of_position) || !(e->transform.rotation == w.of_rotation) ||
+            e->body != world::BodyKind::none || !e->visible) {
+            ++m_status.walkers_skipped;
+            it = m_walkers_waiting.erase(it);
+            continue;
+        }
+        if (state.physics->bodies().ground_waiting(state.scene.terrain, w.resume.feet) ||
+            m_ground_waiting.count(key_of(world::cell_of(w.resume.feet))) != 0) {
+            ++it; // (its ground not in yet)
+            continue;
+        }
+        --budget;
+        if (state.walkers->resume(state.scene, w.entity, w.resume).empty()) {
+            ++m_status.walkers_applied;
+        } else {
+            ++m_status.walkers_skipped;
+        }
+        it = m_walkers_waiting.erase(it);
+    }
+    m_walkers_from = it != m_walkers_waiting.end() ? std::optional<world::EntityId>(it->first) : std::nullopt;
 }
 
 void GameSaves::place_bodies(EditorState& state) {
@@ -706,6 +881,7 @@ void GameSaves::update(EditorState& state, double seconds) {
     press_waiting(state, tiles);
     if (m_applying.empty() && m_sections != nullptr) finish_load(state);
     place_bodies(state);
+    place_walkers(state);
     const bool playing = state.play != nullptr && state.play->playing();
     if (playing && std::isfinite(seconds) && seconds > 0.0)
         m_play_seconds = std::min(m_play_seconds + seconds, save::k_max_play_seconds);
@@ -765,6 +941,7 @@ void GameSaves::follow(EditorState& state) {
         m_poses_waiting.clear();
         m_poses_from.reset();
         m_carried_feet.reset();
+        forget_walkers();
         forget_base();
         if (m_status.doing == "applying") m_status.doing.clear();
         m_generation = 0;

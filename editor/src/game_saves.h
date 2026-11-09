@@ -6,7 +6,9 @@
 // ground a game dented (craters, footprints: each such tile whole), and
 // sections for the camera (where the player's eyes were), whether play was
 // on, the weather it was going to with its ground, and the bodies
-// (whether simulating, and where the moved dynamic entities are). Loading stops play
+// (whether simulating, and where the moved dynamic entities are), and the
+// walkers (where each stood, faced and moved, where it was going and how
+// far it had got). Loading stops play
 // and simulating (what they broke since goes), shows the save's damage as
 // the game's (world::Scene::set_game_damage, a share of cells a frame),
 // presses the save's ground in (PhysicsState::press_game_ground, a few
@@ -14,7 +16,9 @@
 // and the weather back (the weather shown over the scene's
 // own until set_weather, clear_weather or close_game), plays (or
 // simulates) again if it was, and puts the bodies back where they were (a
-// share a frame; one not streamed in yet waits while the simulation runs).
+// share a frame; one not streamed in yet waits while the simulation runs),
+// and the walkers walking again from where they were (a share a frame, each
+// once its entity and the ground under it are in; the way looked for again).
 //
 // Autosave: while playing, every autosave_seconds of play, a save to the
 // slot "autosave" (its own base: a save to another slot stays a save of
@@ -28,6 +32,8 @@
 #pragma once
 
 #include "editor_commands.h"
+
+#include "walker_state.h"
 
 #include "giant/core/jobs.h"
 #include "giant/save/slot.h"
@@ -81,6 +87,9 @@ public:
     static constexpr const char* k_autosave_slot = "autosave";
     // Saved bodies not put back yet (their entity's body not made yet).
     usize bodies_waiting() const { return m_poses_waiting.size(); }
+    usize walkers_per_frame = 64; // a loaded game's walkers made again a frame (each a character)
+    // Saved walkers not walking again yet (their entity or the ground under them not in yet).
+    usize walkers_waiting() const { return m_walkers_waiting.size(); }
     // Until the job in flight is done (tests, shutdown, a command that waits).
     void wait();
     // A save or load under way (its job, or a load's cells still being applied).
@@ -117,6 +126,10 @@ public:
         usize bodies = 0;              // the last save's or load's moved bodies
         usize bodies_applied = 0;      // a load's put back so far
         usize bodies_skipped = 0;      // a load's not put back: moved in the world since, not dynamic, or the simulation stopped
+        usize walkers = 0;             // the last save's or load's walkers
+        usize walkers_applied = 0;     // a load's walking again so far
+        usize walkers_skipped = 0;     // a load's not: moved in the world since, given a body, hidden, sent walking
+                                       // since, refused, or the simulation stopped
         u64 autosaves = 0;
         std::string autosave_error;    // the last autosave's (kept apart from `error`)
         double gather_ms = 0.0;        // the last save's gathering on the frame
@@ -139,6 +152,9 @@ private:
     void press_waiting(EditorState& state, usize& budget);
     // A loaded game's bodies put back (a share a frame) while the simulation they were for runs.
     void place_bodies(EditorState& state);
+    // A loaded game's walkers walking again (a share a frame) while the simulation they were for runs.
+    void place_walkers(EditorState& state);
+    void forget_walkers();
     std::string save_to(EditorState& state, const std::string& slot, bool autosave);
 
     JobSystem m_jobs{1};
@@ -173,7 +189,18 @@ public:
         Quat of_rotation{};
     };
 
+    struct SavedWalker {
+        world::EntityId entity = 0;
+        WalkerState::Resume resume;
+        DVec3 of_position{}; // where the scene had it (one moved in the world since is not this save's)
+        Quat of_rotation{};
+        u32 seen = 0; // frames its entity has been in the scene while it waits
+    };
+
 private:
+    std::map<world::EntityId, SavedWalker> m_walkers_waiting;
+    std::optional<world::EntityId> m_walkers_from;
+    u64 m_walkers_run = 0;
     std::map<world::EntityId, SavedPose> m_poses_waiting;
     std::optional<world::EntityId> m_poses_from;
     u64 m_poses_run = 0; // the simulation's run they are for

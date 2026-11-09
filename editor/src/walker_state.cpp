@@ -74,6 +74,21 @@ std::optional<DVec3> WalkerState::feet_of(const world::Scene& scene, world::Enti
 
 std::string WalkerState::walk_to(const world::Scene& scene, world::EntityId id, const DVec3& to, float speed,
                                  const std::vector<DVec3>* path) {
+    return start(scene, id, to, speed, path, nullptr);
+}
+
+std::string WalkerState::resume(const world::Scene& scene, world::EntityId id, const Resume& r) {
+    if (!(std::fabs(r.feet.x) <= nav::k_max_nav_coordinate) || !(std::fabs(r.feet.z) <= nav::k_max_nav_coordinate) ||
+        !(std::fabs(r.feet.y) <= 1e8) || !std::isfinite(r.yaw) || !std::isfinite(r.velocity.x) ||
+        !std::isfinite(r.velocity.y) || !std::isfinite(r.velocity.z)) {
+        return "not a place";
+    }
+    if (m_walkers.contains(id)) drop(id); // (made again where the save had it)
+    return start(scene, id, r.target, r.speed, nullptr, &r);
+}
+
+std::string WalkerState::start(const world::Scene& scene, world::EntityId id, const DVec3& to, float speed,
+                               const std::vector<DVec3>* path, const Resume* from) {
     if (!m_physics.simulating()) return "not simulating (simulate on first): walkers move with the physics";
     const world::Entity* e = scene.find(id);
     if (e == nullptr) return "no entity " + std::to_string(id);
@@ -99,7 +114,7 @@ std::string WalkerState::walk_to(const world::Scene& scene, world::EntityId id, 
         w.lift = lift_of(*e);
         w.rotation = e->transform.rotation;
         w.scale = e->transform.scale;
-        w.feet = e->transform.position - DVec3{0.0, w.lift, 0.0};
+        w.feet = from != nullptr ? from->feet : e->transform.position - DVec3{0.0, w.lift, 0.0};
         // As wide as it is (within what the map keeps clear), as tall as a cube or sphere is.
         const float wide = 0.5f * std::max(std::fabs(e->transform.scale.x), std::fabs(e->transform.scale.z));
         const nav::NavSettings& map = m_nav.settings();
@@ -113,6 +128,7 @@ std::string WalkerState::walk_to(const world::Scene& scene, world::EntityId id, 
         const Vec3 f = rotate(w.rotation, Vec3{0.0f, 0.0f, 1.0f});
         w.yaw = std::atan2(f.x, f.z);
         w.rotation = normalize(quat_from_axis_angle({0.0f, 1.0f, 0.0f}, -w.yaw) * w.rotation); // its turn about y taken out
+        if (from != nullptr) w.yaw = from->yaw;
         it = m_walkers.emplace(id, std::move(w)).first; // (drawn as moving from its first pose)
     }
     Walker& w = it->second;
@@ -129,6 +145,15 @@ std::string WalkerState::walk_to(const world::Scene& scene, world::EntityId id, 
     w.near_end_for = 0.0;
     w.stuck_from = w.feet;
     w.search = 0;
+    if (from != nullptr) {
+        m_physics.world().set_character_velocity(w.character, from->velocity);
+        w.velocity = {from->velocity.x, 0.0f, from->velocity.z};
+        if (from->phase == Phase::arrived || from->phase == Phase::failed) {
+            w.phase = from->phase; // (standing where it got to)
+            w.reason = from->reason;
+            return {};
+        }
+    }
     if (path != nullptr && !path->empty()) {
         w.follow.set_path(*path);
         w.phase = Phase::walking;
