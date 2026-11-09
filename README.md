@@ -351,6 +351,8 @@ Open-world systems:
   a wall or fell, how fast, and what carried them.
 - E4 part 2d: walkers are saved mid-walk and walk on from where they were
   on loading.
+- E5 part 1: the game's own UI: sharp text at any size from distance-field
+  fonts, a crosshair and toasts over play.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

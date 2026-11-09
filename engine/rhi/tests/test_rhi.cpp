@@ -876,6 +876,55 @@ GIANT_TEST("rhi: d3d12 draws UI with clipping and gamma-space blending") {
     GIANT_CHECK(device->validation_errors() == 0);
 }
 
+GIANT_TEST("rhi: d3d12 draws signed distance UI: sharp edge where the distance is a half, and an outline") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    // Distance rising left to right: 0 at the first texel, 1 at the last.
+    TextureDesc desc;
+    desc.width = 8;
+    desc.height = 1;
+    desc.format = Format::rgba8_unorm;
+    desc.usage = TextureUsage::sampled;
+    std::vector<u8> ramp;
+    for (u32 i = 0; i < 8; ++i) {
+        for (const u32 c : {255u, 255u, 255u, i * 255u / 7u}) ramp.push_back(static_cast<u8>(c));
+    }
+    const TextureHandle field = device->create_texture(desc, ramp);
+    UiQuad quad(0, 0, 64, 8, rgba(255, 0, 0, 255), ui_texture_id(field));
+    quad.commands[0].shade = UiShade::sdf;
+    quad.lists = {{quad.vertices, quad.indices, quad.commands}};
+    auto image = render_ui_offscreen(*device, quad.frame(), 64, 8, {0.0f, 0.0f, 1.0f, 1.0f});
+    GIANT_CHECK(image.size() == 64 * 8 * 4);
+    if (image.size() == 64 * 8 * 4) {
+        GIANT_CHECK(near(pixel(image, 64, 4, 4), {0, 0, 255, 255}, 4));  // outside
+        GIANT_CHECK(near(pixel(image, 64, 60, 4), {255, 0, 0, 255}, 4)); // inside
+        GIANT_CHECK(near(pixel(image, 64, 22, 4), {0, 0, 255, 255}, 4)); // just outside (0.33)
+        // The edge is about a pixel wide (the field is 8 texels over 64 pixels).
+        int mixed = 0;
+        for (u32 x = 0; x < 64; ++x) {
+            const auto p = pixel(image, 64, x, 4);
+            if (p[0] > 20 && p[2] > 20) ++mixed;
+        }
+        GIANT_CHECK(mixed <= 3);
+    }
+    // With an outline a quarter of the distance out: green between 0.25 and 0.5.
+    quad.commands[0].outline = 0.25f;
+    quad.commands[0].outline_color = rgba(0, 255, 0, 255);
+    quad.lists = {{quad.vertices, quad.indices, quad.commands}};
+    image = render_ui_offscreen(*device, quad.frame(), 64, 8, {0.0f, 0.0f, 1.0f, 1.0f});
+    GIANT_CHECK(image.size() == 64 * 8 * 4);
+    if (image.size() == 64 * 8 * 4) {
+        GIANT_CHECK(near(pixel(image, 64, 22, 4), {0, 255, 0, 255}, 4)); // in the outline now
+        GIANT_CHECK(near(pixel(image, 64, 4, 4), {0, 0, 255, 255}, 4));
+        GIANT_CHECK(near(pixel(image, 64, 60, 4), {255, 0, 0, 255}, 4));
+    }
+    device->destroy(field);
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
 GIANT_TEST("rhi: d3d12 compute writes a buffer read back through a copy") {
     auto device = warp_device();
     if (device == nullptr) {

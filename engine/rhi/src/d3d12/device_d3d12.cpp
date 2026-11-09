@@ -2587,7 +2587,9 @@ void D3D12CommandList::draw_ui(TextureHandle target, const UiFrame& ui) {
         u32 indices;
         u32 index_base;
         u32 texture;
-        u32 pad[3];
+        u32 shade;
+        float outline;
+        u32 outline_color;
     };
     static_assert(sizeof(UiVertex) == 20, "ui.slang reads 20-byte vertices");
 
@@ -2628,6 +2630,9 @@ void D3D12CommandList::draw_ui(TextureHandle target, const UiFrame& ui) {
             push.index_base =
                 static_cast<u32>(indices.offset + (list_index_base + cmd.first_index) * sizeof(u32));
             push.texture = texture;
+            push.shade = static_cast<u32>(cmd.shade);
+            push.outline = std::isfinite(cmd.outline) ? std::clamp(cmd.outline, 0.0f, 0.5f) : 0.0f;
+            push.outline_color = cmd.outline_color;
             set_push_constants(&push, sizeof(push));
             flush_push(false);
             m_list->DrawInstanced(cmd.index_count, 1, 0, 0);

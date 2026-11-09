@@ -32,6 +32,7 @@ This table is the source of truth for `tools/check_architecture.py`.
 | nav | core, world |
 | audio | core |
 | save | core |
+| ui | core, rhi |
 | gameplay | core, world, sim |
 | script | core, world, sim |
 | ai | core, platform, rhi, anim, geometry, render, world, sim, script |
@@ -1657,6 +1658,54 @@ in a cell that streamed out while playing is not in the save (the
 simulation lets it go there too); a save gathers every cell the forest
 knows at once (a frame's cost grows with the cells loaded); list_saves
 reads each slot's manifest on the frame.
+
+## Game UI (E5 part 1)
+
+The game's own UI, apart from the editor's ImGui panels: `engine/ui`
+(core, rhi). Next: screens from data (a widget tree loaded from JSON,
+bindings, focus and input), HUD pieces (compass, bars, prompts, markers),
+then menus (pause, save and load, settings).
+
+- **Fonts** (`ui::Font`): TrueType bytes (stb_truetype, the copy Dear
+  ImGui ships, compiled static in `font.cpp`) made into signed distance
+  glyphs, packed (stb_rect_pack) into one RGBA8 atlas: white, the alpha a
+  distance, 0.5 on the outline, `spread` pixels (8 at the 40 px it is made
+  at) to 0 or 1. Basic Latin, Latin-1, Latin Extended-A and a few symbols
+  (dashes, quotes, bullet, ellipsis, euro, arrows, minus, times): 330
+  glyphs of the default font, 1024 x 512, about 150 ms, once, when it is
+  loaded (never mid-frame). A character it lacks draws as '?'. Kerning:
+  the font's kern table between the glyphs held, plus GPOS between Basic
+  Latin's. A 4 x 4 solid block in the atlas lets rectangles share the
+  text's draw call. The default font is Roboto Medium (Apache 2.0, from
+  ImGui's misc/fonts), built into the engine (`embed_file.cmake`). Only
+  fonts the project ships are loaded: stb_truetype trusts its input.
+- **Text** (`ui::measure`, `Canvas::text`): UTF-8 read strictly (bad
+  bytes, overlongs and surrogates as U+FFFD), kerned, line breaks, wrap at
+  the last space within a width (a word wider than it broken where it
+  stops fitting), align left, centre or right, line spacing, outline and
+  drop shadow. The baseline is snapped to a pixel.
+- **Canvas** (`ui::Canvas`): rectangles, frames, lines, images and text
+  in pixels into one `rhi::UiDrawList`; consecutive draws with the same
+  texture, shade, outline and clip share a command; a clip stack; at most
+  2^18 vertices a frame.
+- **RHI**: `UiDrawCommand::shade` (`UiShade::plain` or `sdf`), `outline`
+  (distance units, 0 to 0.5) and `outline_color`; ui.slang turns the
+  distance into coverage over `fwidth` of it (an edge about a pixel wide
+  on screen at any size) and lays the outline under the fill.
+- **Editor** (`GameUi`): drawn over the scene, under the panels, while
+  playing (`set_game_ui` "always": in the editor too, for screenshots;
+  "never"). One UI unit is a pixel at 1080 lines high (scaled by height /
+  1080). For now: a crosshair while playing (dark-edged), toasts at the
+  bottom ("Saved" or "Autosaved" when a save is written; `show_toast`), a
+  "Saving…" or "Loading…" mark while one is under way. `get_game_ui`
+  reports vertices, draw calls, build_ms and the font. It is built after
+  the frame's commands, so a command's change (set_game_ui, show_toast)
+  shows from the next frame: a screenshot wants a frame between.
+
+Known limits: one font, no scripts beyond Latin (no CJK, Arabic or
+Cyrillic yet: the atlas would grow, or glyphs be made on demand on a
+job); no colour emoji; text shaping is per character (no ligatures or
+GPOS beyond Basic Latin's kerning).
 
 ## Window events (known limit)
 

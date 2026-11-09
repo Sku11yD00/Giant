@@ -11,9 +11,9 @@ struct UiPush {
     uint indices;       // descriptor of the index memory
     uint index_base;    // byte offset of the command's first index
     uint texture;       // descriptor
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint shade;         // rhi::UiShade: 0 plain, 1 signed distance
+    float outline;      // sdf: distance units the outline reaches out
+    uint outline_color; // sdf: RGBA8
 };
 ConstantBuffer<UiPush> push : register(b0);
 
@@ -40,5 +40,19 @@ VsOut vs_main(uint vertex_id : SV_VertexID) {
 
 [shader("pixel")]
 float4 ps_main(VsOut i) : SV_Target {
-    return i.color * read_texture(push.texture).Sample(get_sampler(k_sampler_linear_clamp), i.uv);
+    const float4 t = read_texture(push.texture).Sample(get_sampler(k_sampler_linear_clamp), i.uv);
+    if (push.shade != 1) return i.color * t;
+    // Distance to coverage over about a pixel on screen, whatever the size drawn.
+    const float d = t.a;
+    const float w = max(fwidth(d), 1e-4);
+    const float fill = saturate((d - 0.5) / w + 0.5);
+    if (push.outline <= 0.0) return float4(i.color.rgb, i.color.a * fill);
+    // (At most a pixel short of the field's reach: else the glyph's box shows.)
+    const float outer = saturate((d - (0.5 - min(push.outline, 0.5 - w))) / w + 0.5);
+    const float4 o = unpack_rgba8(push.outline_color);
+    const float a_fill = i.color.a * fill;
+    const float a_out = o.a * outer * (1.0 - a_fill);
+    const float a = a_fill + a_out;
+    if (a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+    return float4((i.color.rgb * a_fill + o.rgb * a_out) / a, a);
 }
