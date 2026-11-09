@@ -48,6 +48,7 @@ struct InputEvent {
     Key key = Key::unknown;                 // key
     u8 modifiers = 0;                       // key: modifier:: bits held
     bool down = false;                      // mouse_button, key, focus (gained)
+    bool repeat = false;                    // key: down again from being held (the system repeating it)
     std::string text;                       // text: UTF-8 typed text
 };
 

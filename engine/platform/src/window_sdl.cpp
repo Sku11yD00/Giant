@@ -297,6 +297,7 @@ bool Window::poll_events() {
                 input.key = to_key(event.key.key);
                 input.modifiers = to_modifiers(event.key.mod);
                 input.down = event.key.down;
+                input.repeat = event.key.repeat;
                 m_input.push_back(std::move(input));
             }
             break;

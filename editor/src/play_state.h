@@ -77,6 +77,14 @@ public:
     bool was_simulating() const { return m_was_simulating; }
     // Stops: the camera back where it was, simulating as it was.
     void stop(EditorCamera& camera);
+    // Esc: stops play (true), or is kept for the game's menus to take (false).
+    bool escape_stops = true;
+    // Esc pressed since last asked (only kept while escape_stops is false).
+    bool take_escape();
+    // Every key let go of (a menu opened over play: none stays held).
+    void release_keys();
+    // How far the mouse turns the view (1: 0.15 degrees a point).
+    float look_sensitivity = 1.0f;
 
     // The keys and the mouse, while playing (Esc stops on the next update).
     // `ui_has_keyboard`: a panel's text field has the keys.
@@ -135,6 +143,7 @@ private:
     std::array<bool, 4> m_keys{}; // W S A D
     bool m_shift = false;
     bool m_space = false;
+    bool m_escape = false; // Esc pressed, for the menus
     bool m_stop = false; // Esc pressed
     bool m_from_keys = false; // the keys, not set_input, give the input
     double m_eye = 0.0; // the camera's height shown (eased up steps)

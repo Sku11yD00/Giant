@@ -48,7 +48,7 @@ bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_gener
     m_physics.set_simulating(true);
     m_input = {};
     m_keys = {};
-    m_shift = m_space = m_stop = m_from_keys = false;
+    m_shift = m_space = m_stop = m_escape = m_from_keys = false;
     m_waiting = false;
     m_placing = placing_waits(scene, m_place_eye);
     m_placing_for = 0.0;
@@ -96,8 +96,11 @@ void PlayState::handle_input(const std::vector<InputEvent>& events, bool ui_has_
     for (const InputEvent& e : events) {
         switch (e.type) {
         case InputEvent::Type::mouse_move:
-            m_yaw = std::remainder(m_yaw - e.dx * k_degrees_per_point, 360.0f);
-            m_pitch = std::clamp(m_pitch - e.dy * k_degrees_per_point, -89.0f, 89.0f);
+        {
+            const float k = k_degrees_per_point * (std::isfinite(look_sensitivity) ? std::clamp(look_sensitivity, 0.05f, 10.0f) : 1.0f);
+            m_yaw = std::remainder(m_yaw - e.dx * k, 360.0f);
+            m_pitch = std::clamp(m_pitch - e.dy * k, -89.0f, 89.0f);
+        }
             break;
         case InputEvent::Type::key: {
             m_shift = (e.modifiers & platform::modifier::shift) != 0;
@@ -115,11 +118,12 @@ void PlayState::handle_input(const std::vector<InputEvent>& events, bool ui_has_
             case Key::left_shift:
             case Key::right_shift: m_shift = e.down; break;
             case Key::space:
-                if (e.down && !m_space) jump(); // a press, not the key repeating
+                if (e.down && !e.repeat && !m_space) jump(); // a press, not the key repeating
                 m_space = e.down;
                 break;
             case Key::escape:
-                if (e.down) m_stop = true; // even with a text field focused
+                if (e.down && escape_stops) m_stop = true; // even with a text field focused
+                if (e.down && !e.repeat && !escape_stops) m_escape = true; // (held: not again and again)
                 break;
             default: break;
             }
@@ -152,6 +156,18 @@ void PlayState::set_input(const PlayerInput& input) {
 
 void PlayState::jump() {
     if (playing()) m_physics.world().jump(m_player, m_settings.jump_speed);
+}
+
+bool PlayState::take_escape() {
+    const bool e = m_escape;
+    m_escape = false;
+    return e;
+}
+
+void PlayState::release_keys() {
+    m_keys = {};
+    m_shift = m_space = false;
+    if (m_from_keys) m_input = {};
 }
 
 void PlayState::look(float yaw_degrees, float pitch_degrees) {

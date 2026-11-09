@@ -224,7 +224,7 @@ Milestone **N4, first playable slice** (in progress; gate: a growing giantess wr
   a stall.
 - Part 2: play mode. Play (the menu bar, or `play` over MCP) puts a
   player on the ground under the camera and looks through its eyes: the
-  mouse looks, W A S D walk, Shift runs, Space jumps, Esc stops. It walks
+  mouse looks, W A S D walk, Shift runs, Space jumps, Esc pauses (its menu's Quit stops). It walks
   up steps, stops at walls, slides off slopes too steep, rides what it
   stands on and pushes crates; stopping gives the camera back. Over MCP,
   `set_player_input`, `step_player` and `get_player` drive and read it.
@@ -360,6 +360,10 @@ Open-world systems:
 - E5 part 3: HUD pieces: a compass, markers in the world that point the
   way when off screen, prompts and bars that fade in and out, and fades
   to black.
+- E5 part 4: menus over play: Esc pauses the game and opens a pause menu
+  (resume, save, load, settings, quit to editor), a saves menu listing
+  the world's saves with their date and play time, and settings for the
+  UI scale, field of view and look speed, all by mouse, keys or MCP.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
