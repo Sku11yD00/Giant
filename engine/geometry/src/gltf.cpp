@@ -117,6 +117,11 @@ struct NodeTransform {
                 m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13],
                 m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]};
     }
+    // A tangent: carried by the matrix itself (not the normal matrix).
+    Vec3 vector(const Vec3& v) const {
+        return normalize_or_zero(Vec3{m[0] * v.x + m[4] * v.y + m[8] * v.z, m[1] * v.x + m[5] * v.y + m[9] * v.z,
+                                      m[2] * v.x + m[6] * v.y + m[10] * v.z});
+    }
     Vec3 direction(const Vec3& n) const {
         return normalize_or_zero(Vec3{normal[0] * n.x + normal[1] * n.y + normal[2] * n.z,
                                       normal[3] * n.x + normal[4] * n.y + normal[5] * n.z,
@@ -187,9 +192,14 @@ public:
         return mesh(node, node_transform(node), target);
     }
 
+    // Per vertex of the target mesh: non-zero where the file gave its tangent
+    // (generate_tangents makes the others).
+    std::span<const u8> tangents_given() const { return m_given; }
+
     // Its mesh's primitives into `target`, placed by `transform`.
     bool mesh(const cgltf_node* node, const NodeTransform& transform, const Target& target) {
         m_unpacked.clear();
+        m_unpacked_floats.clear();
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
             if (!primitive(node->mesh->primitives[i], transform, target)) {
                 return false;
@@ -311,6 +321,22 @@ private:
         return true;
     }
 
+    // A uv (2) or tangent (4) accessor as floats, read once per node. Its
+    // count matches the positions', so it is not counted again.
+    const std::vector<float>* unpack_floats(const cgltf_accessor* accessor, usize components) {
+        if (const auto it = m_unpacked_floats.find(accessor); it != m_unpacked_floats.end()) {
+            return &it->second;
+        }
+        std::vector<float>& out = m_unpacked_floats[accessor];
+        const usize n = accessor->count * components;
+        out.resize(n);
+        if (n > 0 && cgltf_accessor_unpack_floats(accessor, out.data(), n) != n) {
+            fail("could not read vertex data");
+            return nullptr;
+        }
+        return &out;
+    }
+
     // A vec3 accessor as floats, read once per node (primitives often share
     // one). Positions are counted against the file's vertex budget; normals
     // match them in count, so they are not counted again.
@@ -357,6 +383,19 @@ private:
             normals = nullptr;
             warn_once(m_warned_normals, "unusable normals were replaced by flat ones");
         }
+        // Texture coordinates (floats, or normalised integers), and tangents
+        // (used only with the file's normals, as glTF asks).
+        const cgltf_accessor* uvs = cgltf_find_accessor(&prim, cgltf_attribute_type_texcoord, 0);
+        if (uvs != nullptr && (uvs->type != cgltf_type_vec2 || uvs->count != vertex_count)) {
+            uvs = nullptr;
+            warn_once(m_warned_uvs, "unusable texture coordinates were left at 0");
+        }
+        const cgltf_accessor* tangents = cgltf_find_accessor(&prim, cgltf_attribute_type_tangent, 0);
+        if (tangents != nullptr && (normals == nullptr || tangents->type != cgltf_type_vec4 ||
+                                    tangents->count != vertex_count)) {
+            if (normals != nullptr) warn_once(m_warned_tangents, "unusable tangents were made from the uvs");
+            tangents = nullptr;
+        }
         const cgltf_size index_count = prim.indices != nullptr ? prim.indices->count : vertex_count;
         // Bound the work before allocating: any primitive type makes at
         // most index_count triangles. Vertices are counted over the whole
@@ -374,7 +413,8 @@ private:
         }
         // cgltf 1.15 reads sparse values with the base view's stride, but
         // the spec packs them tightly: refuse rather than read wrong data.
-        for (const cgltf_accessor* a : std::initializer_list<const cgltf_accessor*>{positions, normals, prim.indices}) {
+        for (const cgltf_accessor* a :
+             std::initializer_list<const cgltf_accessor*>{positions, normals, uvs, tangents, prim.indices}) {
             if (a != nullptr && a->is_sparse &&
                 a->stride != cgltf_calc_size(a->type, a->component_type)) {
                 return fail("sparse accessors on interleaved buffers are not supported");
@@ -388,6 +428,16 @@ private:
         if (normals != nullptr && n == nullptr) {
             return false;
         }
+        const std::vector<float>* uv = uvs != nullptr ? unpack_floats(uvs, 2) : nullptr;
+        const std::vector<float>* tan = tangents != nullptr ? unpack_floats(tangents, 4) : nullptr;
+        if ((uvs != nullptr && uv == nullptr) || (tangents != nullptr && tan == nullptr)) {
+            return false;
+        }
+        const auto uv_of = [uv](u32 i) {
+            if (uv == nullptr) return TexCoord{};
+            const float u = (*uv)[usize{i} * 2], v = (*uv)[usize{i} * 2 + 1];
+            return std::isfinite(u) && std::isfinite(v) ? TexCoord{u, v} : TexCoord{};
+        };
         std::vector<u32> indices(index_count);
         if (prim.indices != nullptr) {
             if (index_count > 0 &&
@@ -465,7 +515,20 @@ private:
                     if (!finite(d) || length_squared(d) == 0.0f) {
                         d = {0, 1, 0};
                     }
-                    mesh.vertices.push_back({m_points[i], d});
+                    Vertex vertex{m_points[i], d, uv_of(i)};
+                    u8 given = 0;
+                    if (tan != nullptr) {
+                        const float* t4 = &(*tan)[usize{i} * 4];
+                        const Vec3 t = transform.vector({t4[0], t4[1], t4[2]});
+                        if (finite(t) && length_squared(t) > 0.0f && std::isfinite(t4[3])) {
+                            vertex.tangent = t;
+                            // A mirroring node turns the bitangent the other way.
+                            vertex.bitangent_sign = (t4[3] < 0.0f) != transform.mirrored ? -1.0f : 1.0f;
+                            given = 1;
+                        }
+                    }
+                    mesh.vertices.push_back(vertex);
+                    m_given.push_back(given);
                     if (!weigh(i)) return false;
                 }
                 mesh.indices.push_back(m_remap[i] - 1);
@@ -480,9 +543,10 @@ private:
                     face = {0, 1, 0};
                 }
                 const u32 base = static_cast<u32>(mesh.vertices.size());
-                mesh.vertices.push_back({a, face});
-                mesh.vertices.push_back({b, face});
-                mesh.vertices.push_back({c, face});
+                mesh.vertices.push_back({a, face, uv_of(triangles[t])});
+                mesh.vertices.push_back({b, face, uv_of(triangles[t + 1])});
+                mesh.vertices.push_back({c, face, uv_of(triangles[t + 2])});
+                m_given.insert(m_given.end(), 3, 0);
                 for (usize k = 0; k < 3; ++k) {
                     if (!weigh(triangles[t + k])) return false;
                 }
@@ -530,8 +594,12 @@ private:
     bool m_warned_morph = false;
     bool m_warned_positions = false;
     bool m_warned_normals = false;
+    bool m_warned_uvs = false;
+    bool m_warned_tangents = false;
     u64 m_vertices_read = 0; // over the whole file
     std::unordered_map<const cgltf_accessor*, std::vector<Vec3>> m_unpacked; // this node's
+    std::unordered_map<const cgltf_accessor*, std::vector<float>> m_unpacked_floats; // this node's
+    std::vector<u8> m_given; // per target vertex: the file gave its tangent
     std::vector<u32> m_remap;  // per primitive: 0 used, else output index + 1
     std::vector<Vec3> m_points; // per primitive: transformed positions
 };
@@ -787,6 +855,9 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
         if (!importer.mesh(node, matrix_transform(bind.m), target)) return false;
     }
     if (!read_clips(data, skeleton, joint_of, importer, out.clips)) return false;
+    // Tangents the file did not give, in bind space (split vertices keep
+    // their weights).
+    generate_tangents(out.mesh.mesh, &out.mesh.weights, importer.tangents_given());
     // At rest, for whatever draws it unanimated; and each joint's reach.
     const TriangleMesh& bound = out.mesh.mesh;
     result.mesh.indices = bound.indices;
@@ -803,6 +874,18 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
         to.position = anim::skin_point(rest, w.joints, w.weights, bound.vertices[v].position);
         to.normal = anim::skin_direction(rest, w.joints, w.weights, bound.vertices[v].normal);
         if (length_squared(to.normal) == 0.0f) to.normal = {0, 1, 0};
+        to.uv = bound.vertices[v].uv;
+        to.tangent = anim::skin_direction(rest, w.joints, w.weights, bound.vertices[v].tangent);
+        to.bitangent_sign = bound.vertices[v].bitangent_sign;
+        {
+            // A mirroring joint turns the bitangent the other way.
+            const Mat4& m = rest[w.joints[0]];
+            const auto a = [&m](int r, int c) { return m.at(r, c); };
+            const float det = a(0, 0) * (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1)) -
+                              a(0, 1) * (a(1, 0) * a(2, 2) - a(1, 2) * a(2, 0)) +
+                              a(0, 2) * (a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0));
+            if (det < 0.0f) to.bitangent_sign = -to.bitangent_sign;
+        }
         if (!finite(to.position)) return importer.fail("the skin's rest pose places a vertex at infinity");
         for (usize k = 0; k < 4; ++k) {
             if (w.weights[k] == 0) continue;
@@ -943,6 +1026,7 @@ ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, boo
                 return result;
             }
         }
+        generate_tangents(result.mesh, nullptr, importer.tangents_given());
     }
     if (result.mesh.indices.empty()) {
         result.error = "the file has no triangles";

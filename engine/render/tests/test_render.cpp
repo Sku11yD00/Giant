@@ -779,9 +779,14 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     const auto smoothed = draw(false, false, false);
     GIANT_CHECK(renderer->last_stats().post_draws == 5);
     if (aliased.size() == k_w * k_h * 4 && smoothed.size() == aliased.size()) {
-        const auto luma = [](const std::vector<u8>& p, u32 x, u32 y) {
+        // How far apart two pixels are: their largest channel difference
+        // (luma alone misses a dark grey against the blue background).
+        const auto apart = [&aliased](u32 x, u32 y, u32 x2, u32 y2) {
             const usize i = (static_cast<usize>(y) * k_w + x) * 4;
-            return 0.2126 * p[i] + 0.7152 * p[i + 1] + 0.0722 * p[i + 2];
+            const usize j = (static_cast<usize>(y2) * k_w + x2) * 4;
+            int most = 0;
+            for (usize c = 0; c < 3; ++c) most = std::max(most, std::abs(int{aliased[i + c]} - int{aliased[j + c]}));
+            return static_cast<double>(most);
         };
         usize changed = 0;
         usize off_edge = 0;
@@ -796,10 +801,14 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
                     continue;
                 }
                 ++changed;
-                const double l = luma(aliased, x, y);
-                const double step = std::max({std::abs(l - luma(aliased, x - 1, y)), std::abs(l - luma(aliased, x + 1, y)),
-                                              std::abs(l - luma(aliased, x, y - 1)), std::abs(l - luma(aliased, x, y + 1))});
-                off_edge += step < 8.0 ? 1 : 0;
+                const double step = std::max({apart(x, y, x - 1, y), apart(x, y, x + 1, y), apart(x, y, x, y - 1),
+                                              apart(x, y, x, y + 1)});
+                if (step < 8.0) {
+                    ++off_edge;
+                    std::printf("smaa changed a pixel off the edges: (%u, %u) %u %u %u -> %u %u %u, step %.1f\n", x, y,
+                                aliased[i], aliased[i + 1], aliased[i + 2], smoothed[i], smoothed[i + 1],
+                                smoothed[i + 2], step);
+                }
             }
         }
         GIANT_CHECK(changed > 10);                     // the silhouettes were smoothed

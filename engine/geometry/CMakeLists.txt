@@ -3,6 +3,7 @@ giant_module(geometry
     src/clusters.cpp
     src/gltf.cpp
     src/shapes.cpp
+    src/vertex.cpp
   DEPENDS core anim
 )
 # Third-party code stays private: the geometry API is plain C++ types.

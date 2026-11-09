@@ -186,6 +186,23 @@ an offline cooker can use it without a device.
   counts are copied to a readback ring and reach `RenderStats` a frame or
   two late (`from_gpu`). Full lists set an overflow flag (logged once).
   Slots and layouts shared by C++ and shaders live in `src/gpu_layout.h`.
+- **Vertices (photoreal part 3a-2).** A mesh vertex
+  (`geometry::Vertex`) holds its position, normal, uv (TEXCOORD_0: (0, 0)
+  the image's top-left, v down) and a tangent frame as glTF defines it: the
+  tangent along +u and a bitangent sign, the bitangent `sign *
+  cross(normal, tangent)` pointing up the image. `generate_tangents` makes
+  frames from the uvs the MikkTSpace way (per-corner directions weighted by
+  angle, summed per vertex, made perpendicular to the normal), splitting a
+  vertex whose triangles disagree on the sign (a mirrored uv seam); the
+  glTF importer keeps a file's own TANGENT and makes the rest, and the
+  built-in shapes have uvs and tangents. The GPU reads 28 bytes a vertex
+  (`geometry::PackedVertex`): position floats, normal and tangent as
+  octahedral snorm16 pairs (the sign in the tangent's lowest y bit), uv
+  floats; `cluster_normal`, `cluster_tangent` and `cluster_uv` in
+  common.slang read them. Simplification weighs normals and, lightly, uvs,
+  and only drops vertices, so every level keeps the originals' uvs and
+  tangents. Skinning poses the tangent with the normal and keeps it
+  perpendicular; the uv stays put.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool

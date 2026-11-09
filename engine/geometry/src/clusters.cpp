@@ -6,6 +6,7 @@
 #include <meshoptimizer.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <limits>
 
@@ -91,8 +92,12 @@ ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const 
         config.simplify_threshold = 0.0f;
     }
 
-    // Normals take part in simplification, as in meshoptimizer's own demo.
-    const float normal_weights[3] = {0.5f, 0.5f, 0.5f};
+    // Normals take part in simplification, as in meshoptimizer's own demo,
+    // and uvs lightly (uv seams are kept anyway: the vertices either side
+    // differ). Simplification only drops vertices, so the survivors keep
+    // their uvs and tangents.
+    const float attribute_weights[5] = {0.5f, 0.5f, 0.5f, 0.1f, 0.1f};
+    static_assert(offsetof(Vertex, uv) == offsetof(Vertex, normal) + 12, "normal then uv, 5 floats");
     clodMesh mesh{};
     mesh.indices = indices.data();
     mesh.index_count = indices.size();
@@ -102,8 +107,8 @@ ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const 
     mesh.vertex_lock = locks.empty() ? nullptr : locks.data();
     mesh.vertex_attributes = &out.vertices[0].normal.x;
     mesh.vertex_attributes_stride = sizeof(Vertex);
-    mesh.attribute_weights = normal_weights;
-    mesh.attribute_count = 3;
+    mesh.attribute_weights = attribute_weights;
+    mesh.attribute_count = 5;
 
     std::vector<clodGroup> groups;
     clodBuild(config, mesh, [&](clodGroup group, const clodCluster* clusters, usize count) -> int {

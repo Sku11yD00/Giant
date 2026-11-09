@@ -546,15 +546,12 @@ MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::Ski
             packing.pack(data, ci);
             clusters[ci].skin_first = static_cast<u32>(source.size());
             for (const u32 v : packing.order) {
-                const geometry::Vertex& p = data.vertices[v];
+                const geometry::PackedVertex p = geometry::pack_vertex(data.vertices[v]);
                 const geometry::SkinWeights& w = (*weights)[v];
                 gpu::SkinVertex out{};
-                out.position[0] = p.position.x;
-                out.position[1] = p.position.y;
-                out.position[2] = p.position.z;
-                out.normal[0] = p.normal.x;
-                out.normal[1] = p.normal.y;
-                out.normal[2] = p.normal.z;
+                std::copy_n(p.position, 3, out.position);
+                out.normal = p.normal;
+                out.tangent = p.tangent;
                 for (usize k = 0; k < 4; ++k) {
                     out.joints[k] = w.weights[k] != 0 ? w.joints[k] : u16{0};
                     out.weights[k] = w.weights[k];

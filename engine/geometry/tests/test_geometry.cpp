@@ -14,6 +14,7 @@
 #include <fstream>
 #include <set>
 #include <string>
+#include <map>
 #include <vector>
 
 using namespace giant;
@@ -211,6 +212,207 @@ GIANT_TEST("geometry: a mirrored node keeps triangles facing out") {
     if (!turned.ok()) return;
     GIANT_CHECK_NEAR(turned.mesh.vertices[0].normal.x, 1.0, 1e-5);
     GIANT_CHECK_NEAR(face_normal(turned.mesh, 0).x, 1.0, 1e-5);
+}
+
+namespace {
+// A triangle with uvs mapping +u to +x and up the image to +y, and with
+// TANGENT `tangent` (x, y, z, w) unless it is empty.
+ImportResult import_uv_triangle(const std::vector<float>& tangent, const std::string& node_extra = "") {
+    std::vector<u8> bin;
+    append(bin, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
+    append(bin, std::vector<float>{0, 0, 1, 0, 0, 1, 0, 0, 1});
+    append(bin, std::vector<float>{0, 1, 1, 1, 0, 0});
+    const usize tangent_at = bin.size();
+    std::vector<float> tangents;
+    for (int i = 0; i < 3 && !tangent.empty(); ++i) tangents.insert(tangents.end(), tangent.begin(), tangent.end());
+    if (tangent.empty()) tangents.assign(4, 0.0f); // an unused accessor of 1
+    append(bin, tangents);
+    const usize index_at = bin.size();
+    append(bin, std::vector<u32>{0, 1, 2});
+    const bool t = !tangent.empty();
+    const std::string json =
+        std::string(R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0)") +
+        node_extra + "}]," + R"("meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2)" +
+        (t ? R"(,"TANGENT":3)" : "") + R"(},"indices":4}]}],)" + R"("buffers":[{"byteLength":)" +
+        std::to_string(bin.size()) + "}]," + R"("bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},)" +
+        R"({"buffer":0,"byteOffset":36,"byteLength":36},{"buffer":0,"byteOffset":72,"byteLength":24},)" +
+        R"({"buffer":0,"byteOffset":)" + std::to_string(tangent_at) + R"(,"byteLength":)" +
+        std::to_string(t ? 48 : 16) + "}," + R"({"buffer":0,"byteOffset":)" + std::to_string(index_at) +
+        R"(,"byteLength":12}],)" +
+        R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},)" +
+        R"({"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},)" +
+        R"({"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},)" +
+        R"({"bufferView":3,"componentType":5126,"count":)" + (t ? "3" : "1") + R"(,"type":"VEC4"},)" +
+        R"({"bufferView":4,"componentType":5125,"count":3,"type":"SCALAR"}]})";
+    return import_gltf_memory(make_glb(json, bin));
+}
+Vec3 bitangent(const Vertex& v) { return cross(v.normal, v.tangent) * v.bitangent_sign; }
+} // namespace
+
+GIANT_TEST("geometry: glTF texture coordinates and tangents are read, or tangents made from the uvs") {
+    const ImportResult made = import_uv_triangle({});
+    GIANT_CHECK(made.ok() && made.mesh.vertices.size() == 3);
+    if (!made.ok()) return;
+    GIANT_CHECK(made.mesh.vertices[0].uv == (TexCoord{0, 1}) && made.mesh.vertices[2].uv == (TexCoord{0, 0}));
+    for (const Vertex& v : made.mesh.vertices) {
+        GIANT_CHECK(near3(v.tangent, {1, 0, 0}) && near3(bitangent(v), {0, 1, 0})); // +u, up the image
+    }
+    // The file's own tangent wins, even one the uvs disagree with.
+    const ImportResult given = import_uv_triangle({0, 1, 0, -1});
+    GIANT_CHECK(given.ok());
+    if (!given.ok()) return;
+    GIANT_CHECK(near3(given.mesh.vertices[1].tangent, {0, 1, 0}) && given.mesh.vertices[1].bitangent_sign == -1.0f);
+    // A mirroring node carries the tangent with the matrix and turns the
+    // bitangent sign, so the bitangent is the mirrored one.
+    const ImportResult mirrored = import_uv_triangle({1, 0, 0, 1}, R"(,"scale":[-1,1,1])");
+    GIANT_CHECK(mirrored.ok());
+    if (!mirrored.ok()) return;
+    for (const Vertex& v : mirrored.mesh.vertices) {
+        GIANT_CHECK(near3(v.tangent, {-1, 0, 0}) && v.bitangent_sign == -1.0f && near3(bitangent(v), {0, 1, 0}));
+    }
+    // Made from the uvs under the mirror, the frame matches.
+    const ImportResult mirrored_made = import_uv_triangle({}, R"(,"scale":[-1,1,1])");
+    GIANT_CHECK(mirrored_made.ok());
+    if (!mirrored_made.ok()) return;
+    for (const Vertex& v : mirrored_made.mesh.vertices) {
+        GIANT_CHECK(near3(v.tangent, {-1, 0, 0}) && near3(bitangent(v), {0, 1, 0}));
+    }
+}
+
+GIANT_TEST("geometry: vertices pack to 28 bytes and back within a hair") {
+    // Directions over the sphere, both hemispheres and the axes.
+    std::vector<Vec3> dirs = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (int i = 0; i < 200; ++i) {
+        const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / 200.0f;
+        const float a = static_cast<float>(i) * 2.39996f;
+        const float r = std::sqrt(1.0f - z * z);
+        dirs.push_back({r * std::cos(a), r * std::sin(a), z});
+    }
+    float worst = 1.0f;
+    for (const Vec3& d : dirs) {
+        worst = std::min(worst, dot(unpack_octahedral(pack_octahedral(d)), d));
+    }
+    GIANT_CHECK(worst > 0.99999f); // under about 0.26 degrees... in practice ~0.005
+    for (usize i = 0; i + 1 < dirs.size(); ++i) {
+        Vertex v;
+        v.position = {1.5f, -2.25f, 1e5f};
+        v.normal = dirs[i];
+        v.tangent = dirs[i + 1]; // not perpendicular: packing makes it so
+        v.bitangent_sign = i % 2 == 0 ? 1.0f : -1.0f;
+        v.uv = {0.125f * static_cast<float>(i), -3.5f};
+        const Vertex back = unpack_vertex(pack_vertex(v));
+        GIANT_CHECK(back.position == v.position && back.uv == v.uv && back.bitangent_sign == v.bitangent_sign);
+        GIANT_CHECK(dot(back.normal, v.normal) > 0.99999f);
+        GIANT_CHECK(std::fabs(dot(back.normal, back.tangent)) < 1e-3f && std::fabs(length(back.tangent) - 1.0f) < 1e-4f);
+        const Vec3 expected = normalize_or_zero(v.tangent - v.normal * dot(v.normal, v.tangent));
+        if (length_squared(expected) > 0.0f) GIANT_CHECK(dot(back.tangent, expected) > 0.9999f);
+    }
+    // Broken input still packs to a sound frame.
+    Vertex bad;
+    bad.normal = {};
+    bad.tangent = {0, 1, 0};
+    const Vertex fixed = unpack_vertex(pack_vertex(bad));
+    GIANT_CHECK(near3(fixed.normal, {0, 1, 0}, 1e-4f) && std::fabs(dot(fixed.normal, fixed.tangent)) < 1e-3f);
+    bad.normal = {std::nanf(""), 0, 0};
+    const Vertex nan_fixed = unpack_vertex(pack_vertex(bad));
+    GIANT_CHECK(near3(nan_fixed.normal, {0, 1, 0}, 1e-4f));
+}
+
+GIANT_TEST("geometry: tangents follow the uvs; mirrored uv seams split, kept tangents stay") {
+    // Built-in shapes: the cube's faces run +u along each face's u axis.
+    const TriangleMesh plane = make_plane();
+    for (const Vertex& v : plane.vertices) {
+        GIANT_CHECK(near3(v.tangent, {1, 0, 0}) && near3(bitangent(v), {0, 0, -1})); // the image's top toward -Z
+    }
+    for (const Vertex& v : make_cube().vertices) {
+        GIANT_CHECK(std::fabs(dot(v.tangent, v.normal)) < 1e-5f && v.bitangent_sign == 1.0f);
+    }
+    for (const Vertex& v : make_sphere().vertices) {
+        GIANT_CHECK(std::fabs(dot(v.tangent, v.normal)) < 1e-4f && std::fabs(length(v.tangent) - 1.0f) < 1e-4f);
+    }
+    // Two triangles sharing an edge, the second with its uvs mirrored in u
+    // (a symmetric character's seam): the shared vertices split.
+    TriangleMesh m;
+    const Vec3 up{0, 0, 1};
+    m.vertices = {{{0, 0, 0}, up, {0.5f, 1}}, {{0, 1, 0}, up, {0.5f, 0}}, {{1, 0, 0}, up, {1, 1}},
+                  {{-1, 0, 0}, up, {1, 1}}};
+    m.indices = {0, 2, 1, 0, 1, 3};
+    std::vector<SkinWeights> weights(4);
+    for (usize i = 0; i < 4; ++i) weights[i].joints[0] = static_cast<u16>(i);
+    generate_tangents(m, &weights);
+    GIANT_CHECK(m.vertices.size() == 6 && weights.size() == 6);
+    GIANT_CHECK(weights[4].joints[0] == 0 && weights[5].joints[0] == 1); // the copies keep their weights
+    for (usize t = 0; t < 2; ++t) {
+        const Vertex& a = m.vertices[m.indices[t * 3]];
+        for (usize k = 0; k < 3; ++k) {
+            const Vertex& v = m.vertices[m.indices[t * 3 + k]];
+            GIANT_CHECK(v.bitangent_sign == (t == 0 ? 1.0f : -1.0f) && near3(bitangent(v), {0, 1, 0}));
+            GIANT_CHECK(near3(v.tangent, a.tangent));
+        }
+    }
+    GIANT_CHECK(near3(m.vertices[m.indices[0]].tangent, {1, 0, 0}));
+    GIANT_CHECK(near3(m.vertices[m.indices[3]].tangent, {-1, 0, 0}));
+    // Kept vertices keep theirs; no uvs gives a perpendicular.
+    TriangleMesh flat = make_plane();
+    for (Vertex& v : flat.vertices) v.uv = {};
+    flat.vertices[0].tangent = {0, 0, 1};
+    const std::vector<u8> keep{1, 0, 0, 0};
+    generate_tangents(flat, nullptr, keep);
+    GIANT_CHECK(flat.vertices.size() == 4 && flat.vertices[0].tangent == (Vec3{0, 0, 1}));
+    for (usize i = 1; i < 4; ++i) {
+        GIANT_CHECK(std::fabs(dot(flat.vertices[i].tangent, flat.vertices[i].normal)) < 1e-5f &&
+                    std::fabs(length(flat.vertices[i].tangent) - 1.0f) < 1e-5f);
+    }
+}
+
+GIANT_TEST("geometry: duplicated vertices share one tangent frame; flat triangles add nothing") {
+    // The sphere unwelded, three vertices a triangle (as unindexed files
+    // are): alike vertices get one frame, so clustering merges them again.
+    const TriangleMesh welded = make_sphere(32, 16);
+    TriangleMesh loose;
+    for (const u32 i : welded.indices) {
+        Vertex v = welded.vertices[i];
+        v.tangent = {1, 0, 0};
+        v.bitangent_sign = 1.0f;
+        loose.indices.push_back(static_cast<u32>(loose.vertices.size()));
+        loose.vertices.push_back(v);
+    }
+    generate_tangents(loose);
+    bool alike = true;
+    for (usize i = 0; i < loose.vertices.size(); ++i) {
+        const Vertex& v = loose.vertices[i];
+        const Vertex& w = welded.vertices[welded.indices[i]];
+        alike = alike && near3(v.tangent, w.tangent, 1e-5f) && v.bitangent_sign == w.bitangent_sign;
+    }
+    GIANT_CHECK(alike);
+    GIANT_CHECK(build_clusters(loose).vertices.size() == build_clusters(welded).vertices.size());
+    // A collinear triangle (zero area, uvs anything) on a quad's corner
+    // leaves that corner's tangent alone.
+    TriangleMesh quad = make_plane();
+    const Vec3 up{0, 1, 0};
+    quad.vertices.push_back({{0.5f, 0, -1.5f}, up, {1.3f, 1}});
+    quad.vertices.push_back({{0.5f, 0, 2.0f}, up, {0.5f, 1.2f}});
+    quad.indices.insert(quad.indices.end(), {4, 1, 5}); // vertex 1 sits on the line between
+    generate_tangents(quad);
+    GIANT_CHECK(near3(quad.vertices[1].tangent, {1, 0, 0}) && quad.vertices[1].bitangent_sign == 1.0f);
+    GIANT_CHECK(quad.vertices.size() == 6); // and no split from it
+}
+
+GIANT_TEST("geometry: clusters keep each vertex's uv and tangent through simplification") {
+    const TriangleMesh sphere = make_sphere(96, 48);
+    const ClusterMesh clusters = build_clusters(sphere);
+    GIANT_CHECK(clusters.levels > 1);
+    // Every vertex is one of the source's (simplification only drops some).
+    usize matched = 0;
+    for (const Vertex& v : clusters.vertices) {
+        for (const Vertex& s : sphere.vertices) {
+            if (s.position == v.position && s.uv == v.uv && s.tangent == v.tangent) {
+                ++matched;
+                break;
+            }
+        }
+    }
+    GIANT_CHECK(matched == clusters.vertices.size());
 }
 
 GIANT_TEST("geometry: a file without normals is flat shaded") {
@@ -889,4 +1091,61 @@ GIANT_TEST("geometry: skinned clusters are the original triangles alone, weights
     twins.weights.pop_back();
     GIANT_CHECK(build_skinned_clusters(twins).mesh.empty());
     GIANT_CHECK(build_skinned_clusters({}).mesh.empty());
+}
+
+GIANT_TEST("geometry: the sphere stays closed at every level of detail") {
+    // Its uv seam and poles are duplicated vertices at bit-identical
+    // positions, so simplification keeps them together: every edge of any
+    // cut, loaded wholly or in part, has its twin running the other way (no
+    // cracks for pixels to fall through).
+    const ClusterMesh mesh = build_clusters(make_sphere());
+    const GroupLinks links = link_groups(mesh);
+    const auto open_edges = [&mesh](const std::vector<u32>& cut) {
+        std::map<std::array<float, 6>, int> open;
+        for (const u32 ci : cut) {
+            const Cluster& c = mesh.clusters[ci];
+            for (u32 t = 0; t < c.triangle_count; ++t) {
+                Vec3 p[3];
+                for (u32 k = 0; k < 3; ++k) p[k] = mesh.vertices[mesh.indices[c.first_index + t * 3 + k]].position;
+                for (u32 k = 0; k < 3; ++k) {
+                    const Vec3 a = p[k], b = p[(k + 1) % 3];
+                    if (a == b) continue;
+                    const std::array<float, 6> reverse{b.x, b.y, b.z, a.x, a.y, a.z};
+                    if (const auto it = open.find(reverse); it != open.end()) {
+                        if (--it->second == 0) open.erase(it);
+                    } else {
+                        ++open[{a.x, a.y, a.z, b.x, b.y, b.z}];
+                    }
+                }
+            }
+        }
+        return open.size();
+    };
+    usize worst = 0;
+    u32 seed = 777;
+    for (int i = 0; i < 400; ++i) {
+        const float d = std::pow(1.03f, static_cast<float>(i % 200)) * 0.8f;
+        const float turn = static_cast<float>(i) * 0.7f;
+        const LodView view =
+            view_from({d * std::sin(turn), d * std::cos(turn * 0.3f) * 0.5f, d * std::cos(turn)}, i < 200 ? 1.0f : 0.37f);
+        std::vector<u32> cut;
+        select_clusters(mesh, view, cut);
+        worst = std::max(worst, open_edges(cut));
+        // Partly loaded: the roots, then some of what is wanted.
+        std::vector<u8> resident(mesh.groups.size(), 0);
+        for (u32 g = 0; g < mesh.groups.size(); ++g) resident[g] = is_root_group(mesh.groups[g]) ? 1 : 0;
+        for (int round = 0; round < 4; ++round) {
+            std::vector<u32> part, wanted;
+            const LodResidency residency{&resident, &wanted, nullptr};
+            select_clusters(mesh, view, part, &residency);
+            worst = std::max(worst, open_edges(part));
+            for (const u32 g : wanted) {
+                seed = seed * 1664525u + 1013904223u;
+                bool parents_in = true;
+                for (const u32 parent : links.parents_of(g)) parents_in = parents_in && resident[parent] != 0;
+                if (parents_in && (seed >> 16) % 2 == 0) resident[g] = 1;
+            }
+        }
+    }
+    GIANT_CHECK(worst == 0);
 }

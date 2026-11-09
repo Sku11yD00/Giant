@@ -237,9 +237,11 @@ float3 to_world_normal(Instance i, float3 n) {
 //   nodes:     k_node_bytes each (the LOD tree; roots are nodes 0 to levels - 1)
 // group_base numbers the mesh's groups across all meshes (requests, usage).
 //
-// A loaded group's geometry, in the pool: per cluster, its vertices (24
-// bytes each: position, normal) at vertex_offset, and its triangles (u32
-// each: three cluster-local indices, 8 bits apart) at triangle_offset.
+// A loaded group's geometry, in the pool: per cluster, its vertices
+// (k_mesh_vertex_bytes each: position as floats, normal and tangent as
+// octahedral snorm16 pairs, the tangent's lowest y bit the bitangent sign,
+// uv as floats: geometry::PackedVertex) at vertex_offset, and its triangles
+// (u32 each: three cluster-local indices, 8 bits apart) at triangle_offset.
 
 static const uint k_not_resident = 0xFFFFFFFFu;
 
@@ -308,12 +310,58 @@ Cluster load_cluster(ByteAddressBuffer b, uint index) {
     return c;
 }
 
+// Two snorm16 values in a uint (x low), each in [-1, 1].
+float2 unpack_snorm2x16(uint u) {
+    return max(float2(float(asint(u << 16) >> 16), float(asint(u) >> 16)) / 32767.0, -1.0);
+}
+uint pack_snorm2x16(float2 v) {
+    const int2 q = int2(round(clamp(v, -1.0, 1.0) * 32767.0));
+    return (uint(q.x) & 0xFFFFu) | ((uint(q.y) & 0xFFFFu) << 16);
+}
+// Octahedral coordinates of a unit vector, and back.
+float2 octahedral_encode(float3 n) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    float2 e = n.xy;
+    if (n.z < 0.0) {
+        e = (1.0 - abs(n.yx)) * float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return e;
+}
+float3 octahedral_decode(float2 e) {
+    float3 n = float3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    const float t = max(-n.z, 0.0);
+    n.x += n.x >= 0.0 ? -t : t;
+    n.y += n.y >= 0.0 ? -t : t;
+    return normalize(n);
+}
+float3 unpack_vertex_normal(uint u) { return octahedral_decode(unpack_snorm2x16(u)); }
+// xyz the tangent, w the bitangent sign.
+float4 unpack_vertex_tangent(uint u) {
+    return float4(octahedral_decode(unpack_snorm2x16(u)), (u & 0x10000u) != 0 ? -1.0 : 1.0);
+}
+uint pack_vertex_normal(float3 n) { return pack_snorm2x16(octahedral_encode(n)); }
+uint pack_vertex_tangent(float3 t, float sign) {
+    const uint u = pack_vertex_normal(t);
+    return (u & ~0x10000u) | (sign < 0.0 ? 0x10000u : 0u);
+}
+
+static const uint k_mesh_vertex_bytes = 28;
+
 // A cluster's geometry, from its group's place in the pool (`base`).
+uint cluster_vertex_at(uint base, Cluster c, uint local_vertex) {
+    return base + c.vertex_offset + local_vertex * k_mesh_vertex_bytes;
+}
 float3 cluster_position(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
-    return asfloat(pool.Load3(base + c.vertex_offset + local_vertex * 24));
+    return asfloat(pool.Load3(cluster_vertex_at(base, c, local_vertex)));
 }
 float3 cluster_normal(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
-    return asfloat(pool.Load3(base + c.vertex_offset + local_vertex * 24 + 12));
+    return unpack_vertex_normal(pool.Load(cluster_vertex_at(base, c, local_vertex) + 12));
+}
+float4 cluster_tangent(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
+    return unpack_vertex_tangent(pool.Load(cluster_vertex_at(base, c, local_vertex) + 16));
+}
+float2 cluster_uv(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
+    return asfloat(pool.Load2(cluster_vertex_at(base, c, local_vertex) + 20));
 }
 
 struct Group {

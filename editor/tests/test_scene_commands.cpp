@@ -42,7 +42,7 @@ void write_glb(const std::filesystem::path& path, const geometry::TriangleMesh& 
                        R"("meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]}],)"
                        R"("buffers":[{"byteLength":)" + std::to_string(bin.size()) + "}]," +
                        R"("bufferViews":[{"buffer":0,"byteLength":)" + std::to_string(vbytes) +
-                       R"(,"byteStride":24},{"buffer":0,"byteOffset":)" + std::to_string(vbytes) +
+                       R"(,"byteStride":)" + std::to_string(sizeof(geometry::Vertex)) + R"(},{"buffer":0,"byteOffset":)" + std::to_string(vbytes) +
                        R"(,"byteLength":)" + std::to_string(mesh.indices.size() * 4) + "}]," +
                        R"("accessors":[{"bufferView":0,"componentType":5126,"count":)" +
                        std::to_string(mesh.vertices.size()) +

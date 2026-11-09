@@ -105,8 +105,9 @@ struct MeshEntry {
 inline constexpr u32 k_not_resident = 0xFFFF'FFFFu;
 static_assert(sizeof(MeshEntry) == 48);
 
-// A loaded group's geometry, in the pool: per cluster, its vertices (24
-// bytes: position, normal) at vertex_offset, then its triangles (u32: three
+// A loaded group's geometry, in the pool: per cluster, its vertices
+// (geometry::PackedVertex, 28 bytes: position, octahedral normal and
+// tangent, uv) at vertex_offset, then its triangles (u32: three
 // local indices, 8 bits apart) at triangle_offset; offsets are bytes from
 // the group's start.
 struct Cluster {
@@ -230,13 +231,15 @@ struct SkinPush {
 static_assert(sizeof(SkinPush) == 32);
 
 // A skinned mesh's vertex at bind, in the skin source.
+// Normal and tangent packed as in geometry::PackedVertex.
 struct SkinVertex {
     float position[3];
-    float normal[3];
+    u32 normal;
+    u32 tangent;
     u16 joints[4];
     u8 weights[4]; // 255ths, summing to 255
 };
-static_assert(sizeof(SkinVertex) == 36);
+static_assert(sizeof(SkinVertex) == 32);
 inline constexpr u32 k_skin_dispatch_width = 65535; // cluster groups along x (skin.slang)
 
 struct HzbPush {
