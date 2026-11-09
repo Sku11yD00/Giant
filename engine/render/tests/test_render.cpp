@@ -1486,14 +1486,16 @@ GIANT_TEST("render: d3d12 physical sky: a brighter sky, far ground fading blue t
     target_desc.format = rhi::Format::rgba8_srgb;
     target_desc.usage = rhi::TextureUsage::render_target;
     const rhi::TextureHandle target = device->create_texture(target_desc);
-    // A grey ground 20 km out each way; the camera 300 m up looking 10 degrees down: the sky at
+    // A dark ground 20 km out each way; the camera 300 m up looking 10 degrees down: the sky at
     // the top, the ground about 7 km off a little under the middle, about 440 m off at the bottom.
+    // (Dark, so the air shows as a blue haze over it: a sunlit ground brighter than the horizon sky
+    // would fade toward that dimmer sky, losing as much blue as the air adds.)
     std::vector<Instance> instances(1);
     instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
     instances[0].scale = {40000.0f, 1.0f, 40000.0f};
     instances[0].always_mesh = true;
     std::vector<Material> materials(1);
-    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[0].base_color = {0.1f, 0.1f, 0.1f};
     materials[0].roughness = 0.9f;
     FrameInput frame;
     frame.view.position = {1000.0, 300.0, -500.0};
