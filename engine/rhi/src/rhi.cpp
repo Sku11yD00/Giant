@@ -4,6 +4,7 @@
 
 #include "giant/core/log.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace giant::rhi {
@@ -64,11 +65,113 @@ u32 bytes_per_pixel(Format format) {
     case Format::depth32_float: return 4;
     case Format::rgba16_float:
     case Format::rg32_uint: return 8;
+    case Format::bc1_unorm:
+    case Format::bc1_srgb:
+    case Format::bc4_unorm:
+    case Format::bc5_unorm:
+    case Format::bc7_unorm:
+    case Format::bc7_srgb: return 0;
     }
     return 0;
 }
 
 bool is_depth(Format format) { return format == Format::depth32_float; }
+
+u32 block_bytes(Format format) {
+    switch (format) {
+    case Format::bc1_unorm:
+    case Format::bc1_srgb:
+    case Format::bc4_unorm: return 8;
+    case Format::bc5_unorm:
+    case Format::bc7_unorm:
+    case Format::bc7_srgb: return 16;
+    default: return 0;
+    }
+}
+
+bool is_block_compressed(Format format) { return block_bytes(format) != 0; }
+
+u64 level_row_bytes(Format format, u32 width) {
+    if (is_block_compressed(format)) {
+        return (u64{width} + 3) / 4 * block_bytes(format);
+    }
+    return u64{width} * bytes_per_pixel(format);
+}
+
+u32 level_rows(Format format, u32 height) {
+    return is_block_compressed(format) ? static_cast<u32>((u64{height} + 3) / 4) : height;
+}
+
+u64 level_bytes(Format format, u32 width, u32 height) {
+    return level_row_bytes(format, width) * level_rows(format, height);
+}
+
+u32 full_mip_count(u32 width, u32 height) {
+    u32 n = 1;
+    for (u32 s = std::max(width, height); s > 1; s /= 2) {
+        ++n;
+    }
+    return n;
+}
+
+u64 texture_bytes(const TextureDesc& desc) {
+    u64 layer = 0;
+    for (u32 m = 0; m < std::min(desc.mips, 32u); ++m) {
+        layer += level_bytes(desc.format, std::max(desc.width >> m, 1u), std::max(desc.height >> m, 1u));
+    }
+    return layer * desc.layers;
+}
+
+const char* texture_desc_problem(const TextureDesc& desc) {
+    if (desc.width == 0 || desc.height == 0 || level_row_bytes(desc.format, 1) == 0) {
+        return "a texture needs a size and a known format";
+    }
+    if (desc.width > 16384 || desc.height > 16384) {
+        return "a texture is at most 16384 texels a side";
+    }
+    if (desc.usage == TextureUsage::none ||
+        static_cast<u32>(desc.usage) >= (static_cast<u32>(TextureUsage::depth_target) << 1)) {
+        return "a texture needs a known usage";
+    }
+    if (is_depth(desc.format) != has(desc.usage, TextureUsage::depth_target)) {
+        return "depth formats are for depth targets and depth targets need depth formats";
+    }
+    if (is_depth(desc.format) &&
+        (has(desc.usage, TextureUsage::render_target) || has(desc.usage, TextureUsage::shader_write))) {
+        return "a depth texture cannot be a colour target or shader-written";
+    }
+    if (desc.mips == 0 || desc.mips > full_mip_count(desc.width, desc.height)) {
+        return "a texture's mips run from 1 to its full chain";
+    }
+    if (desc.layers == 0 || desc.layers > 2048) {
+        return "a texture has 1 to 2048 layers";
+    }
+    if (desc.layers > 1 && !desc.array) {
+        return "a texture with more than one layer is an array";
+    }
+    if ((desc.mips > 1 || desc.layers > 1) && desc.usage != TextureUsage::sampled) {
+        return "mips and layers are for sampled textures only";
+    }
+    if (is_block_compressed(desc.format)) {
+        if (desc.usage != TextureUsage::sampled) {
+            return "block-compressed textures are sampled only";
+        }
+        if (desc.width % 4 != 0 || desc.height % 4 != 0) {
+            return "a block-compressed texture's size is a multiple of 4";
+        }
+    }
+    if (texture_bytes(desc) > k_max_texture_bytes) {
+        return "a texture is at most 4 GiB";
+    }
+    return nullptr;
+}
+
+const char* texture_contents_problem(const TextureDesc& desc, u64 contents_bytes) {
+    if (contents_bytes == 0) {
+        return is_block_compressed(desc.format) ? "a block-compressed texture is made with its contents" : nullptr;
+    }
+    return contents_bytes == texture_bytes(desc) ? nullptr : "a texture's contents do not fit its description";
+}
 
 TransientMemory CommandList::upload(std::span<const u8> bytes) {
     TransientMemory memory = allocate(static_cast<u32>(bytes.size()));

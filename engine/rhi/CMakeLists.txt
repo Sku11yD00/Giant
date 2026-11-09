@@ -40,6 +40,7 @@ if(GIANT_BUILD_TESTS)
     SHADERS
       tests/shaders/test_compute.slang:cs_fill:compute:test_fill_cs
       tests/shaders/test_compute.slang:cs_ramp:compute:test_ramp_cs
+      tests/shaders/test_compute.slang:cs_sample:compute:test_sample_cs
       tests/shaders/test_draw.slang:vs_main:vertex:test_draw_vs
       tests/shaders/test_draw.slang:ps_main:pixel:test_draw_ps
       tests/shaders/test_draw.slang:ps_write:pixel:test_draw_write_ps

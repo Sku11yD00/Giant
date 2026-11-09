@@ -81,6 +81,25 @@ follow without touching the renderer.
   Outside a frame (load time) the copy is still waited for.
   `FrameStats::upload_bytes` counts what a frame staged; the caller keeps
   it within its budget.
+- **Texture formats, mips and layers (photoreal part 3a-1).** Besides the
+  plain colour, float and depth formats, textures can be block compressed
+  (`bc1_unorm`/`bc1_srgb` RGB, `bc4_unorm` one channel, `bc5_unorm` two
+  channels for normal maps, `bc7_unorm`/`bc7_srgb` RGBA; 4x4 blocks of 8 or
+  16 bytes), sampled only, sized in multiples of 4 and made with their
+  contents (cooked offline). `TextureDesc::mips` (up to the full chain) and
+  `layers` (up to 2048) are for sampled textures. `TextureDesc::array`
+  makes a texture read as a `Texture2DArray` (`read_texture_array` in
+  bindless.slang) whatever its layer count, so a one-layer array keeps its
+  shader type; more than one layer needs it. A texture is at most 4 GiB.
+  Contents run layer after layer, each mip after mip from the largest, rows
+  of texels (or of blocks) packed tight (`texture_bytes`, `level_bytes`,
+  the D3D12/DDS subresource order); every subresource is copied in one go.
+  `texture_desc_problem` and `texture_contents_problem` cover every rule,
+  so a corrupt cooked file is refused, never asserted: both devices log the
+  reason and return an invalid handle. Compressed textures are made whole
+  for now; mip streaming (part 3b) adds partial uploads and a min-mip
+  clamp at the same descriptor. `read_texture` reads the first layer's
+  largest level of uncompressed textures only (empty for compressed ones).
 - **Small buffers share heaps.** A buffer that is its own allocation (a
   committed resource) is new video memory: Windows finds, zeroes and maps
   it, and unmaps it when it goes, on the GPU's timeline, and the queue

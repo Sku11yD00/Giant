@@ -6,6 +6,7 @@
 #include "rhi_test_shaders.h"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1713,3 +1714,260 @@ GIANT_TEST("rhi: small buffers' heap ranges fit best, join when freed, and never
     r.free(y);
     GIANT_CHECK(r.allocate(16).valid());
 }
+
+GIANT_TEST("rhi: texture sizes count blocks, mips and layers; unsound descriptions are refused") {
+    GIANT_CHECK(is_block_compressed(Format::bc7_srgb) && !is_block_compressed(Format::rgba8_srgb));
+    GIANT_CHECK(block_bytes(Format::bc1_unorm) == 8 && block_bytes(Format::bc4_unorm) == 8 &&
+                block_bytes(Format::bc5_unorm) == 16 && block_bytes(Format::bc7_unorm) == 16);
+    GIANT_CHECK(bytes_per_pixel(Format::bc1_srgb) == 0);
+    // Blocks round up: a 2x2 level is still one block.
+    GIANT_CHECK(level_bytes(Format::bc1_unorm, 8, 8) == 32 && level_bytes(Format::bc1_unorm, 2, 2) == 8);
+    GIANT_CHECK(level_row_bytes(Format::bc7_unorm, 12) == 48 && level_rows(Format::bc7_unorm, 5) == 2);
+    GIANT_CHECK(level_bytes(Format::rgba8_unorm, 3, 2) == 24);
+    GIANT_CHECK(full_mip_count(1, 1) == 1 && full_mip_count(8, 8) == 4 && full_mip_count(1024, 4) == 11);
+    TextureDesc d;
+    d.width = 8;
+    d.height = 8;
+    d.format = Format::bc1_srgb;
+    d.mips = 4; // 8, 4, 2, 1: 4 + 1 + 1 + 1 blocks
+    d.layers = 3;
+    d.array = true;
+    GIANT_CHECK(texture_bytes(d) == 3u * (32 + 8 + 8 + 8));
+    GIANT_CHECK(texture_desc_problem(d) == nullptr);
+    TextureDesc bad = d;
+    bad.mips = 5;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // past the full chain
+    bad = d;
+    bad.width = 6;
+    bad.mips = 1;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // blocks need multiples of 4
+    bad = d;
+    bad.usage = TextureUsage::sampled | TextureUsage::shader_write;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // compressed: sampled only
+    bad = d;
+    bad.format = Format::rgba8_unorm;
+    bad.usage = TextureUsage::sampled | TextureUsage::render_target;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // mips and layers: sampled only
+    bad.mips = 1;
+    bad.layers = 1;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+    bad = d;
+    bad.layers = 0;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.array = false;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // layers need an array
+    bad.layers = 1;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+    bad.array = true; // a one-layer array is fine
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+    bad = d;
+    bad.format = static_cast<Format>(250); // out of range, as from a corrupt file
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.width = 16388;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad.width = 16384;
+    bad.height = 16384;
+    bad.mips = 1;
+    bad.layers = 2048;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // 2048 layers of 128 MiB: past 4 GiB
+    bad.layers = 32;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr); // 4 GiB exactly
+    bad.layers = 2049;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.format = Format::depth32_float;
+    bad.mips = 1;
+    bad.layers = 1;
+    bad.array = false;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // depth formats need depth usage
+    bad.usage = TextureUsage::depth_target | TextureUsage::shader_write;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad.usage = TextureUsage::depth_target | TextureUsage::sampled;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+    bad.format = Format::rgba8_unorm;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // depth usage needs a depth format
+    bad = d;
+    bad.width = 0;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.usage = TextureUsage::none;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    // Contents: empty or whole; compressed ones always whole.
+    GIANT_CHECK(texture_contents_problem(d, texture_bytes(d)) == nullptr);
+    GIANT_CHECK(texture_contents_problem(d, 0) != nullptr);
+    GIANT_CHECK(texture_contents_problem(d, texture_bytes(d) - 8) != nullptr);
+    // A 12x12 chain pads its small levels to whole blocks: 9, 4, 1, 1.
+    TextureDesc odd;
+    odd.width = 12;
+    odd.height = 12;
+    odd.format = Format::bc7_srgb;
+    odd.mips = full_mip_count(12, 12);
+    GIANT_CHECK(odd.mips == 4 && texture_bytes(odd) == (9 + 4 + 1 + 1) * 16u);
+    // The null device refuses them too, and compressed ones without contents.
+    DeviceDesc desc;
+    desc.backend = Backend::null;
+    auto device = create_device(desc);
+    bad = d;
+    bad.mips = 5;
+    std::vector<u8> contents(texture_bytes(d), 0);
+    {
+        // Refused with a log, never an assert: bad loaded data must not abort.
+        CountAsserts asserts;
+        GIANT_CHECK(!device->create_texture(bad, contents).valid());
+        GIANT_CHECK(!device->create_texture(d).valid());
+        GIANT_CHECK(!device->create_texture(d, std::span<const u8>(contents).first(contents.size() - 8)).valid());
+        bad = d;
+        bad.width = 0;
+        GIANT_CHECK(!device->create_texture(bad, contents).valid());
+        bad = d;
+        bad.format = Format::depth32_float;
+        bad.mips = 1;
+        bad.layers = 1;
+        bad.array = false;
+        GIANT_CHECK(!device->create_texture(bad).valid());
+        GIANT_CHECK(asserts.count() == 0);
+    }
+    const TextureHandle t = device->create_texture(d, contents);
+    GIANT_CHECK(t.valid() && device->read_descriptor(t) != k_no_descriptor);
+    GIANT_CHECK(device->read_texture(t).empty()); // compressed: not read back, as on D3D12
+    // An uncompressed texture with mips reads back its largest level.
+    TextureDesc plain;
+    plain.width = 4;
+    plain.height = 2;
+    plain.format = Format::rgba8_unorm;
+    plain.mips = 3;
+    std::vector<u8> levels(texture_bytes(plain));
+    for (usize i = 0; i < levels.size(); ++i) {
+        levels[i] = static_cast<u8>(i);
+    }
+    GIANT_CHECK(levels.size() == (8 + 2 + 1) * 4u);
+    const TextureHandle p = device->create_texture(plain, levels);
+    const auto back = device->read_texture(p);
+    GIANT_CHECK(back.size() == 32 && back[0] == 0 && back[31] == 31);
+}
+
+#if GIANT_RHI_HAS_D3D12
+namespace {
+// A 4x4 block of BC1 in one colour (8-bit RGB rounded to 5:6:5).
+std::array<u8, 8> bc1_solid(u8 r, u8 g, u8 b) {
+    const u16 c = static_cast<u16>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+    return {static_cast<u8>(c & 0xFF), static_cast<u8>(c >> 8), static_cast<u8>(c & 0xFF), static_cast<u8>(c >> 8),
+            0, 0, 0, 0};
+}
+// A 4x4 block of BC4 in one value.
+std::array<u8, 8> bc4_solid(u8 v) { return {v, v, 0, 0, 0, 0, 0, 0}; }
+} // namespace
+
+GIANT_TEST("rhi: d3d12 samples block-compressed texture arrays at each mip and layer") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    // Two layers of BC1, 8x8 with a 4x4 mip: layer 0 red then green, layer 1 blue then white.
+    TextureDesc array;
+    array.width = 8;
+    array.height = 8;
+    array.format = Format::bc1_unorm;
+    array.mips = 2;
+    array.layers = 2;
+    array.array = true;
+    std::vector<u8> contents;
+    const auto add = [&](const std::array<u8, 8>& block, int count) {
+        for (int i = 0; i < count; ++i) contents.insert(contents.end(), block.begin(), block.end());
+    };
+    add(bc1_solid(255, 0, 0), 4);
+    add(bc1_solid(0, 255, 0), 1);
+    add(bc1_solid(0, 0, 255), 4);
+    add(bc1_solid(255, 255, 255), 1);
+    GIANT_CHECK(contents.size() == texture_bytes(array));
+    const TextureHandle colours = device->create_texture(array, contents);
+    GIANT_CHECK(colours.valid());
+    // One BC4 layer, 8x8 with mips down to 1x1: 0.25 at the top, 0.75 below.
+    TextureDesc single;
+    single.width = 8;
+    single.height = 8;
+    single.format = Format::bc4_unorm;
+    single.mips = 4;
+    std::vector<u8> values;
+    for (int i = 0; i < 4; ++i) {
+        const auto b = bc4_solid(64);
+        values.insert(values.end(), b.begin(), b.end());
+    }
+    for (int i = 0; i < 3; ++i) {
+        const auto b = bc4_solid(191);
+        values.insert(values.end(), b.begin(), b.end());
+    }
+    GIANT_CHECK(values.size() == texture_bytes(single));
+    const TextureHandle mask = device->create_texture(single, values);
+    GIANT_CHECK(mask.valid());
+    GIANT_CHECK(device->read_texture(mask).empty()); // compressed: not read back
+    // A one-layer sRGB BC1 array, 12x12 so its small levels are block padded
+    // (12, 6, 3: 9, 4 and 1 blocks): magenta at the top, cyan at mip 2. It
+    // still reads as an array.
+    TextureDesc lone;
+    lone.width = 12;
+    lone.height = 12;
+    lone.format = Format::bc1_srgb;
+    lone.mips = 3;
+    lone.array = true;
+    std::vector<u8> lone_blocks;
+    const auto add_lone = [&](const std::array<u8, 8>& block, int count) {
+        for (int i = 0; i < count; ++i) lone_blocks.insert(lone_blocks.end(), block.begin(), block.end());
+    };
+    add_lone(bc1_solid(255, 0, 255), 9);
+    add_lone(bc1_solid(0, 0, 0), 4);
+    add_lone(bc1_solid(0, 255, 255), 1);
+    GIANT_CHECK(lone_blocks.size() == texture_bytes(lone));
+    const TextureHandle one_layer = device->create_texture(lone, lone_blocks);
+    GIANT_CHECK(one_layer.valid());
+
+    ComputePipelineDesc pd;
+    pd.compute = shaders::test_sample_cs();
+    const PipelineHandle sample = device->create_pipeline(pd);
+    GIANT_CHECK(sample.valid());
+    BufferDesc out_desc;
+    out_desc.size = 8 * 16;
+    out_desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
+    const BufferHandle out = device->create_buffer(out_desc);
+    CommandList* cmd = device->begin_frame(nullptr);
+    GIANT_CHECK(cmd != nullptr);
+    if (cmd != nullptr) {
+        cmd->barrier(colours, ResourceState::shader_read);
+        cmd->barrier(mask, ResourceState::shader_read);
+        cmd->barrier(one_layer, ResourceState::shader_read);
+        cmd->barrier(out, ResourceState::shader_write);
+        cmd->set_pipeline(sample);
+        cmd->push(std::array<u32, 4>{device->write_descriptor(out), device->read_descriptor(colours),
+                                     device->read_descriptor(mask), device->read_descriptor(one_layer)});
+        cmd->dispatch(1);
+        device->end_frame();
+    }
+    const std::vector<u8> bytes = device->read_buffer(out);
+    GIANT_CHECK(bytes.size() == 8 * 16);
+    if (bytes.size() == 8 * 16) {
+        float f[32];
+        std::memcpy(f, bytes.data(), sizeof(f));
+        const auto near = [](float a, float b) { return std::abs(a - b) < 0.02f; };
+        std::printf("bc sample: %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f / %.2f\n",
+                    f[0], f[1], f[2], f[4], f[5], f[6], f[8], f[9], f[10], f[12], f[13], f[14], f[16], f[20]);
+        GIANT_CHECK(near(f[0], 1.0f) && near(f[1], 0.0f) && near(f[2], 0.0f));   // layer 0, mip 0: red
+        GIANT_CHECK(near(f[4], 0.0f) && near(f[5], 1.0f) && near(f[6], 0.0f));   // layer 0, mip 1: green
+        GIANT_CHECK(near(f[8], 0.0f) && near(f[9], 0.0f) && near(f[10], 1.0f));  // layer 1, mip 0: blue
+        GIANT_CHECK(near(f[12], 1.0f) && near(f[13], 1.0f) && near(f[14], 1.0f)); // layer 1, mip 1: white
+        GIANT_CHECK(near(f[16], 64.0f / 255.0f));                                 // BC4, mip 0
+        GIANT_CHECK(near(f[20], 191.0f / 255.0f));                                // BC4, mip 1
+        std::printf("one-layer array: %.2f %.2f %.2f / %.2f %.2f %.2f\n", f[24], f[25], f[26], f[28], f[29], f[30]);
+        GIANT_CHECK(near(f[24], 1.0f) && near(f[25], 0.0f) && near(f[26], 1.0f)); // mip 0: magenta (sRGB view)
+        GIANT_CHECK(near(f[28], 0.0f) && near(f[29], 1.0f) && near(f[30], 1.0f)); // mip 2: cyan
+    }
+    device->destroy(sample);
+    device->destroy(out);
+    device->destroy(colours);
+    device->destroy(mask);
+    device->destroy(one_layer);
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+#endif

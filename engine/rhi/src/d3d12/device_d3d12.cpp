@@ -121,6 +121,12 @@ DXGI_FORMAT resource_format(Format f) {
     case Format::r32_uint: return DXGI_FORMAT_R32_UINT;
     case Format::rg32_uint: return DXGI_FORMAT_R32G32_UINT;
     case Format::depth32_float: return DXGI_FORMAT_R32_TYPELESS;
+    case Format::bc1_unorm:
+    case Format::bc1_srgb: return DXGI_FORMAT_BC1_TYPELESS;
+    case Format::bc4_unorm: return DXGI_FORMAT_BC4_UNORM;
+    case Format::bc5_unorm: return DXGI_FORMAT_BC5_UNORM;
+    case Format::bc7_unorm:
+    case Format::bc7_srgb: return DXGI_FORMAT_BC7_TYPELESS;
     case Format::unknown: break;
     }
     return DXGI_FORMAT_UNKNOWN;
@@ -132,6 +138,10 @@ DXGI_FORMAT view_format(Format f) {
     case Format::rgba8_unorm: return DXGI_FORMAT_R8G8B8A8_UNORM;
     case Format::rgba8_srgb: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     case Format::depth32_float: return DXGI_FORMAT_R32_FLOAT; // for sampling
+    case Format::bc1_unorm: return DXGI_FORMAT_BC1_UNORM;
+    case Format::bc1_srgb: return DXGI_FORMAT_BC1_UNORM_SRGB;
+    case Format::bc7_unorm: return DXGI_FORMAT_BC7_UNORM;
+    case Format::bc7_srgb: return DXGI_FORMAT_BC7_UNORM_SRGB;
     default: return resource_format(f);
     }
 }
@@ -1461,17 +1471,14 @@ BufferHandle D3D12Device::create_transient_chunk(u32 size) {
 // --- Textures ------------------------------------------------------------------------
 
 TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<const u8> initial) {
-    GIANT_ASSERT(desc.width > 0 && desc.height > 0 && desc.format != Format::unknown,
-                 "texture needs a size and a format");
-    GIANT_ASSERT(desc.usage != TextureUsage::none, "texture needs a usage");
-    GIANT_ASSERT(is_depth(desc.format) == has(desc.usage, TextureUsage::depth_target),
-                 "depth formats are for depth targets and depth targets need depth formats");
-    GIANT_ASSERT(!(is_depth(desc.format) && (has(desc.usage, TextureUsage::render_target) ||
-                                             has(desc.usage, TextureUsage::shader_write))),
-                 "a depth texture cannot be a colour target or shader-written");
-    const u32 pixel_bytes = bytes_per_pixel(desc.format);
-    const usize size = static_cast<usize>(desc.width) * desc.height * pixel_bytes;
-    GIANT_ASSERT(initial.empty() || initial.size() == size, "initial pixels have the wrong size");
+    const char* problem = texture_desc_problem(desc);
+    if (problem == nullptr) {
+        problem = texture_contents_problem(desc, initial.size());
+    }
+    if (problem != nullptr) {
+        log_error("rhi", std::string(problem) + " (" + desc.name + ")");
+        return {};
+    }
     if (m_lost) {
         return {};
     }
@@ -1480,8 +1487,8 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
     rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     rd.Width = desc.width;
     rd.Height = desc.height;
-    rd.DepthOrArraySize = 1;
-    rd.MipLevels = 1;
+    rd.DepthOrArraySize = static_cast<UINT16>(desc.layers);
+    rd.MipLevels = static_cast<UINT16>(desc.mips);
     rd.Format = resource_format(desc.format);
     rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -1512,9 +1519,12 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
     t.resource->SetName(widen(desc.name).c_str());
 
     if (!initial.empty()) {
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        // Every subresource (layer after layer, each mip after mip), laid
+        // out in the staging memory as the copy needs.
+        const u32 subresources = desc.mips * desc.layers;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresources);
         UINT64 total = 0;
-        m_device->GetCopyableFootprints(&rd, 0, 1, 0, &footprint, nullptr, nullptr, &total);
+        m_device->GetCopyableFootprints(&rd, 0, subresources, 0, footprints.data(), nullptr, nullptr, &total);
         // Inside a frame: the frame's staging memory and upload list, no
         // wait. Outside: a staging buffer of its own, waited for.
         ComPtr<ID3D12Resource> own_staging;
@@ -1545,10 +1555,18 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
             staging = own_staging.Get();
             data = static_cast<u8*>(mapped);
         }
-        const usize row = static_cast<usize>(desc.width) * pixel_bytes;
-        for (u32 y = 0; y < desc.height; ++y) {
-            std::memcpy(data + footprint.Offset + static_cast<usize>(y) * footprint.Footprint.RowPitch,
-                        initial.data() + static_cast<usize>(y) * row, row);
+        usize from = 0;
+        for (u32 i = 0; i < subresources; ++i) {
+            const u32 mip = i % desc.mips;
+            const u32 w = std::max(desc.width >> mip, 1u);
+            const u32 h = std::max(desc.height >> mip, 1u);
+            const usize row = static_cast<usize>(level_row_bytes(desc.format, w));
+            const u32 rows = level_rows(desc.format, h);
+            for (u32 y = 0; y < rows; ++y) {
+                std::memcpy(data + footprints[i].Offset + static_cast<usize>(y) * footprints[i].Footprint.RowPitch,
+                            initial.data() + from + static_cast<usize>(y) * row, row);
+            }
+            from += row * rows;
         }
         if (own_staging != nullptr) {
             own_staging->Unmap(0, nullptr);
@@ -1558,15 +1576,18 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
         const auto to_copy = transition(t.resource.Get(), D3D12_RESOURCE_STATE_COMMON,
                                         D3D12_RESOURCE_STATE_COPY_DEST);
         list->ResourceBarrier(1, &to_copy);
-        D3D12_TEXTURE_COPY_LOCATION dst{};
-        dst.pResource = t.resource.Get();
-        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        D3D12_TEXTURE_COPY_LOCATION src{};
-        src.pResource = staging;
-        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        src.PlacedFootprint = footprint;
-        src.PlacedFootprint.Offset += staging_offset;
-        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        for (u32 i = 0; i < subresources; ++i) {
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource = t.resource.Get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = i;
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource = staging;
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint = footprints[i];
+            src.PlacedFootprint.Offset += staging_offset;
+            list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
         const auto back = transition(t.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                      D3D12_RESOURCE_STATE_COMMON);
         list->ResourceBarrier(1, &back);
@@ -1582,9 +1603,15 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
         if (ok) {
             D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
             srv.Format = view_format(desc.format);
-            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srv.Texture2D.MipLevels = 1;
+            if (desc.array) {
+                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                srv.Texture2DArray.MipLevels = desc.mips;
+                srv.Texture2DArray.ArraySize = desc.layers;
+            } else {
+                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                srv.Texture2D.MipLevels = desc.mips;
+            }
             m_device->CreateShaderResourceView(t.resource.Get(), &srv, m_shader_heap.cpu(t.read));
         }
     }
@@ -2063,6 +2090,10 @@ std::vector<u8> D3D12Device::read_texture(TextureHandle handle) {
     DxTexture* t = m_textures.get(handle);
     GIANT_ASSERT(t != nullptr, "read_texture: dead texture");
     if (t == nullptr || m_lost) {
+        return {};
+    }
+    if (is_block_compressed(t->desc.format)) {
+        log_error("rhi", "read_texture cannot read block-compressed textures");
         return {};
     }
     wait_idle(); // the texture's last writes must be done
