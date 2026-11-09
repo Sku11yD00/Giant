@@ -219,28 +219,15 @@ public:
     }
 
     TextureHandle create_texture(const TextureDesc& desc, std::span<const u8> initial) override {
-        GIANT_ASSERT(desc.width > 0 && desc.height > 0 && desc.format != Format::unknown,
-                     "texture needs a size and a format");
-        GIANT_ASSERT(desc.usage != TextureUsage::none, "texture needs a usage");
-        GIANT_ASSERT(is_depth(desc.format) == has(desc.usage, TextureUsage::depth_target) ||
-                         (!is_depth(desc.format) && !has(desc.usage, TextureUsage::depth_target)),
-                     "depth formats are for depth targets and depth targets need depth formats");
-        GIANT_ASSERT(!(is_depth(desc.format) && (has(desc.usage, TextureUsage::render_target) ||
-                                                 has(desc.usage, TextureUsage::shader_write))),
-                     "a depth texture cannot be a colour target or shader-written");
-        if (const char* problem = texture_desc_problem(desc)) {
+        const char* problem = texture_desc_problem(desc);
+        if (problem == nullptr) {
+            problem = texture_contents_problem(desc, initial.size());
+        }
+        if (problem != nullptr) {
             log_error("rhi", std::string(problem) + " (" + desc.name + ")");
             return {};
         }
         const usize size = static_cast<usize>(texture_bytes(desc));
-        GIANT_ASSERT(initial.empty() || initial.size() == size, "initial pixels have the wrong size");
-        if (!initial.empty() && initial.size() != size) {
-            return {};
-        }
-        if (is_block_compressed(desc.format) && initial.empty()) {
-            log_error("rhi", std::string("a block-compressed texture is made with its contents (") + desc.name + ")");
-            return {};
-        }
         NullTexture texture;
         texture.desc = desc;
         texture.pixels.assign(size, 0);
@@ -369,6 +356,10 @@ public:
         const NullTexture* t = m_textures.get(h);
         GIANT_ASSERT(t != nullptr, "read_texture: dead texture");
         if (t == nullptr) {
+            return {};
+        }
+        if (is_block_compressed(t->desc.format)) {
+            log_error("rhi", "read_texture cannot read block-compressed textures");
             return {};
         }
         // The first layer's largest level.

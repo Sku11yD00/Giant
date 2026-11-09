@@ -179,19 +179,33 @@ struct TextureDesc {
     TextureUsage usage = TextureUsage::sampled;
     const char* name = "texture";
     // Mip levels (1 to the full chain, each half the last, rounded down, at
-    // least 1) and array layers (1 to 2048; more than 1 reads as a
-    // Texture2DArray). Both above 1 only for sampled textures; block-
-    // compressed ones are sampled only, their size a multiple of 4.
+    // least 1) and array layers (1 to 2048). Both above 1 only for sampled
+    // textures; block-compressed ones are sampled only, their size a
+    // multiple of 4.
     u32 mips = 1;
     u32 layers = 1;
+    // Reads as a Texture2DArray (read_texture_array) whatever its layer
+    // count, so a one-layer array keeps its shader-side type. More than one
+    // layer needs it.
+    bool array = false;
 };
+
+// The largest texture a device makes, all mips and layers counted.
+inline constexpr u64 k_max_texture_bytes = u64{4} << 30;
 
 u32 full_mip_count(u32 width, u32 height);
 // Bytes of a texture's contents: every layer, each with its mips from
-// largest to smallest, each level packed as level_bytes.
+// largest to smallest, each level packed as level_bytes. Meaningful for
+// descriptions texture_desc_problem accepts.
 u64 texture_bytes(const TextureDesc& desc);
 // Why the device would refuse the description, or nullptr when it is sound.
+// Covers every shape rule, so bad loaded data is refused, never asserted.
 const char* texture_desc_problem(const TextureDesc& desc);
+// Why `contents_bytes` of initial contents would be refused for a sound
+// description: neither empty nor texture_bytes, or empty for a
+// block-compressed texture (made whole until streaming adds partial
+// uploads). nullptr when they fit.
+const char* texture_contents_problem(const TextureDesc& desc, u64 contents_bytes);
 
 // What a resource is used for next. barrier() switches between them.
 enum class ResourceState {
@@ -504,8 +518,9 @@ public:
     // `initial` (optional): texture_bytes(desc), layer after layer, each
     // mip after mip from the largest, rows top to bottom (of blocks, for
     // block-compressed formats). Copied like create_buffer's (waited for only
-    // outside a frame). Block-compressed textures need it. A description
-    // texture_desc_problem refuses gives an invalid handle (logged).
+    // outside a frame), all of it at once. Block-compressed textures need it.
+    // A description texture_desc_problem refuses, or contents
+    // texture_contents_problem refuses, give an invalid handle (logged).
     virtual TextureHandle create_texture(const TextureDesc& desc,
                                          std::span<const u8> initial = {}) = 0;
     virtual PipelineHandle create_pipeline(const GraphicsPipelineDesc& desc) = 0;
@@ -543,9 +558,10 @@ public:
     virtual std::span<const GpuTiming> gpu_timings() const = 0;
     virtual float gpu_frame_ms() const = 0;
 
-    // Waits for the GPU, then returns the texture's pixels (width * height *
-    // bytes_per_pixel, rows top to bottom), or empty on failure. For tests
-    // and screenshots; not inside a frame.
+    // Waits for the GPU, then returns the pixels of the first layer's largest
+    // level (width * height * bytes_per_pixel, rows top to bottom), or empty
+    // on failure and for block-compressed textures. For tests and
+    // screenshots; not inside a frame.
     virtual std::vector<u8> read_texture(TextureHandle texture) = 0;
     virtual std::vector<u8> read_buffer(BufferHandle buffer) = 0;
 

@@ -1471,22 +1471,12 @@ BufferHandle D3D12Device::create_transient_chunk(u32 size) {
 // --- Textures ------------------------------------------------------------------------
 
 TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<const u8> initial) {
-    GIANT_ASSERT(desc.width > 0 && desc.height > 0 && desc.format != Format::unknown,
-                 "texture needs a size and a format");
-    GIANT_ASSERT(desc.usage != TextureUsage::none, "texture needs a usage");
-    GIANT_ASSERT(is_depth(desc.format) == has(desc.usage, TextureUsage::depth_target),
-                 "depth formats are for depth targets and depth targets need depth formats");
-    GIANT_ASSERT(!(is_depth(desc.format) && (has(desc.usage, TextureUsage::render_target) ||
-                                             has(desc.usage, TextureUsage::shader_write))),
-                 "a depth texture cannot be a colour target or shader-written");
-    if (const char* problem = texture_desc_problem(desc)) {
-        log_error("rhi", std::string(problem) + " (" + desc.name + ")");
-        return {};
+    const char* problem = texture_desc_problem(desc);
+    if (problem == nullptr) {
+        problem = texture_contents_problem(desc, initial.size());
     }
-    const usize size = static_cast<usize>(texture_bytes(desc));
-    GIANT_ASSERT(initial.empty() || initial.size() == size, "initial pixels have the wrong size");
-    if ((!initial.empty() && initial.size() != size) || (is_block_compressed(desc.format) && initial.empty())) {
-        log_error("rhi", std::string("a texture's contents do not fit its description (") + desc.name + ")");
+    if (problem != nullptr) {
+        log_error("rhi", std::string(problem) + " (" + desc.name + ")");
         return {};
     }
     if (m_lost) {
@@ -1614,7 +1604,7 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
             D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
             srv.Format = view_format(desc.format);
             srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            if (desc.layers > 1) {
+            if (desc.array) {
                 srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
                 srv.Texture2DArray.MipLevels = desc.mips;
                 srv.Texture2DArray.ArraySize = desc.layers;

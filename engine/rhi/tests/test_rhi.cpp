@@ -1731,6 +1731,7 @@ GIANT_TEST("rhi: texture sizes count blocks, mips and layers; unsound descriptio
     d.format = Format::bc1_srgb;
     d.mips = 4; // 8, 4, 2, 1: 4 + 1 + 1 + 1 blocks
     d.layers = 3;
+    d.array = true;
     GIANT_CHECK(texture_bytes(d) == 3u * (32 + 8 + 8 + 8));
     GIANT_CHECK(texture_desc_problem(d) == nullptr);
     TextureDesc bad = d;
@@ -1753,6 +1754,57 @@ GIANT_TEST("rhi: texture sizes count blocks, mips and layers; unsound descriptio
     bad = d;
     bad.layers = 0;
     GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.array = false;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // layers need an array
+    bad.layers = 1;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+    bad.array = true; // a one-layer array is fine
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+    bad = d;
+    bad.format = static_cast<Format>(250); // out of range, as from a corrupt file
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.width = 16388;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad.width = 16384;
+    bad.height = 16384;
+    bad.mips = 1;
+    bad.layers = 2048;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // 2048 layers of 128 MiB: past 4 GiB
+    bad.layers = 32;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr); // 4 GiB exactly
+    bad.layers = 2049;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.format = Format::depth32_float;
+    bad.mips = 1;
+    bad.layers = 1;
+    bad.array = false;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // depth formats need depth usage
+    bad.usage = TextureUsage::depth_target | TextureUsage::shader_write;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad.usage = TextureUsage::depth_target | TextureUsage::sampled;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+    bad.format = Format::rgba8_unorm;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // depth usage needs a depth format
+    bad = d;
+    bad.width = 0;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.usage = TextureUsage::none;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    // Contents: empty or whole; compressed ones always whole.
+    GIANT_CHECK(texture_contents_problem(d, texture_bytes(d)) == nullptr);
+    GIANT_CHECK(texture_contents_problem(d, 0) != nullptr);
+    GIANT_CHECK(texture_contents_problem(d, texture_bytes(d) - 8) != nullptr);
+    // A 12x12 chain pads its small levels to whole blocks: 9, 4, 1, 1.
+    TextureDesc odd;
+    odd.width = 12;
+    odd.height = 12;
+    odd.format = Format::bc7_srgb;
+    odd.mips = full_mip_count(12, 12);
+    GIANT_CHECK(odd.mips == 4 && texture_bytes(odd) == (9 + 4 + 1 + 1) * 16u);
     // The null device refuses them too, and compressed ones without contents.
     DeviceDesc desc;
     desc.backend = Backend::null;
@@ -1760,10 +1812,26 @@ GIANT_TEST("rhi: texture sizes count blocks, mips and layers; unsound descriptio
     bad = d;
     bad.mips = 5;
     std::vector<u8> contents(texture_bytes(d), 0);
-    GIANT_CHECK(!device->create_texture(bad, contents).valid());
-    GIANT_CHECK(!device->create_texture(d).valid());
+    {
+        // Refused with a log, never an assert: bad loaded data must not abort.
+        CountAsserts asserts;
+        GIANT_CHECK(!device->create_texture(bad, contents).valid());
+        GIANT_CHECK(!device->create_texture(d).valid());
+        GIANT_CHECK(!device->create_texture(d, std::span<const u8>(contents).first(contents.size() - 8)).valid());
+        bad = d;
+        bad.width = 0;
+        GIANT_CHECK(!device->create_texture(bad, contents).valid());
+        bad = d;
+        bad.format = Format::depth32_float;
+        bad.mips = 1;
+        bad.layers = 1;
+        bad.array = false;
+        GIANT_CHECK(!device->create_texture(bad).valid());
+        GIANT_CHECK(asserts.count() == 0);
+    }
     const TextureHandle t = device->create_texture(d, contents);
     GIANT_CHECK(t.valid() && device->read_descriptor(t) != k_no_descriptor);
+    GIANT_CHECK(device->read_texture(t).empty()); // compressed: not read back, as on D3D12
     // An uncompressed texture with mips reads back its largest level.
     TextureDesc plain;
     plain.width = 4;
@@ -1804,6 +1872,7 @@ GIANT_TEST("rhi: d3d12 samples block-compressed texture arrays at each mip and l
     array.format = Format::bc1_unorm;
     array.mips = 2;
     array.layers = 2;
+    array.array = true;
     std::vector<u8> contents;
     const auto add = [&](const std::array<u8, 8>& block, int count) {
         for (int i = 0; i < count; ++i) contents.insert(contents.end(), block.begin(), block.end());
@@ -1834,13 +1903,32 @@ GIANT_TEST("rhi: d3d12 samples block-compressed texture arrays at each mip and l
     const TextureHandle mask = device->create_texture(single, values);
     GIANT_CHECK(mask.valid());
     GIANT_CHECK(device->read_texture(mask).empty()); // compressed: not read back
+    // A one-layer sRGB BC1 array, 12x12 so its small levels are block padded
+    // (12, 6, 3: 9, 4 and 1 blocks): magenta at the top, cyan at mip 2. It
+    // still reads as an array.
+    TextureDesc lone;
+    lone.width = 12;
+    lone.height = 12;
+    lone.format = Format::bc1_srgb;
+    lone.mips = 3;
+    lone.array = true;
+    std::vector<u8> lone_blocks;
+    const auto add_lone = [&](const std::array<u8, 8>& block, int count) {
+        for (int i = 0; i < count; ++i) lone_blocks.insert(lone_blocks.end(), block.begin(), block.end());
+    };
+    add_lone(bc1_solid(255, 0, 255), 9);
+    add_lone(bc1_solid(0, 0, 0), 4);
+    add_lone(bc1_solid(0, 255, 255), 1);
+    GIANT_CHECK(lone_blocks.size() == texture_bytes(lone));
+    const TextureHandle one_layer = device->create_texture(lone, lone_blocks);
+    GIANT_CHECK(one_layer.valid());
 
     ComputePipelineDesc pd;
     pd.compute = shaders::test_sample_cs();
     const PipelineHandle sample = device->create_pipeline(pd);
     GIANT_CHECK(sample.valid());
     BufferDesc out_desc;
-    out_desc.size = 6 * 16;
+    out_desc.size = 8 * 16;
     out_desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
     const BufferHandle out = device->create_buffer(out_desc);
     CommandList* cmd = device->begin_frame(nullptr);
@@ -1848,17 +1936,18 @@ GIANT_TEST("rhi: d3d12 samples block-compressed texture arrays at each mip and l
     if (cmd != nullptr) {
         cmd->barrier(colours, ResourceState::shader_read);
         cmd->barrier(mask, ResourceState::shader_read);
+        cmd->barrier(one_layer, ResourceState::shader_read);
         cmd->barrier(out, ResourceState::shader_write);
         cmd->set_pipeline(sample);
         cmd->push(std::array<u32, 4>{device->write_descriptor(out), device->read_descriptor(colours),
-                                     device->read_descriptor(mask), 0});
+                                     device->read_descriptor(mask), device->read_descriptor(one_layer)});
         cmd->dispatch(1);
         device->end_frame();
     }
     const std::vector<u8> bytes = device->read_buffer(out);
-    GIANT_CHECK(bytes.size() == 6 * 16);
-    if (bytes.size() == 6 * 16) {
-        float f[24];
+    GIANT_CHECK(bytes.size() == 8 * 16);
+    if (bytes.size() == 8 * 16) {
+        float f[32];
         std::memcpy(f, bytes.data(), sizeof(f));
         const auto near = [](float a, float b) { return std::abs(a - b) < 0.02f; };
         std::printf("bc sample: %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f / %.2f\n",
@@ -1869,11 +1958,15 @@ GIANT_TEST("rhi: d3d12 samples block-compressed texture arrays at each mip and l
         GIANT_CHECK(near(f[12], 1.0f) && near(f[13], 1.0f) && near(f[14], 1.0f)); // layer 1, mip 1: white
         GIANT_CHECK(near(f[16], 64.0f / 255.0f));                                 // BC4, mip 0
         GIANT_CHECK(near(f[20], 191.0f / 255.0f));                                // BC4, mip 1
+        std::printf("one-layer array: %.2f %.2f %.2f / %.2f %.2f %.2f\n", f[24], f[25], f[26], f[28], f[29], f[30]);
+        GIANT_CHECK(near(f[24], 1.0f) && near(f[25], 0.0f) && near(f[26], 1.0f)); // mip 0: magenta (sRGB view)
+        GIANT_CHECK(near(f[28], 0.0f) && near(f[29], 1.0f) && near(f[30], 1.0f)); // mip 2: cyan
     }
     device->destroy(sample);
     device->destroy(out);
     device->destroy(colours);
     device->destroy(mask);
+    device->destroy(one_layer);
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
 }
