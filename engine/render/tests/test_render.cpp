@@ -799,7 +799,12 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
                 const double l = luma(aliased, x, y);
                 const double step = std::max({std::abs(l - luma(aliased, x - 1, y)), std::abs(l - luma(aliased, x + 1, y)),
                                               std::abs(l - luma(aliased, x, y - 1)), std::abs(l - luma(aliased, x, y + 1))});
-                off_edge += step < 8.0 ? 1 : 0;
+                if (step < 8.0) {
+                    ++off_edge;
+                    std::printf("smaa changed a pixel off the edges: (%u, %u) %u %u %u -> %u %u %u, step %.1f\n", x, y,
+                                aliased[i], aliased[i + 1], aliased[i + 2], smoothed[i], smoothed[i + 1],
+                                smoothed[i + 2], step);
+                }
             }
         }
         GIANT_CHECK(changed > 10);                     // the silhouettes were smoothed
