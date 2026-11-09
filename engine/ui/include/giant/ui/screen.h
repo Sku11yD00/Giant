@@ -33,7 +33,10 @@
 //    "image": "name",              // an image the game has given the UI
 //    "hover": "#...",              // a button's background when pointed at or focused
 //    "span": degrees,              // a compass's width (10 to 360, default 120); its "value" the heading
-//    "fade": seconds,              // eases in and out as "visible" changes (0: at once; at most 10)
+//    "fade": seconds,              // eases in and out as "visible" changes (0: at once; at most 10;
+//                                  // fading in from its first frame; a button is clicked once half in;
+//                                  // fading out it stays where it was laid out, and still takes clicks
+//                                  // with a background, its text still counted)
 //    "children": [ ... ]}
 #pragma once
 
@@ -61,9 +64,11 @@ public:
     void set(const std::string& name, Value value);
     void erase(const std::string& name);
     void clear();
-    // Changes each time a value may have (screens lay out again only then);
-    // unique among all Values (a copy keeps its source's).
+    // Changes each time a value may have; unique among all Values (a copy
+    // keeps its source's). By name: that value's (0: not set). A screen lays
+    // out again only when a value its layout read changed.
     u64 generation() const { return m_generation; }
+    u64 generation(std::string_view name) const;
     const Value* find(std::string_view name) const;
     double number(std::string_view name, double otherwise = 0.0) const; // a flag as 0 or 1; text read as a number if it is one
     bool truthy(std::string_view name) const;                          // true, non-zero, non-empty
@@ -75,12 +80,15 @@ public:
 
 private:
     std::map<std::string, Value, std::less<>> m_values;
+    std::map<std::string, u64, std::less<>> m_generations;
     u64 m_generation = 0;
 };
 
 // "{name}" and "{name:2}" filled in from `values` ("{{" is a brace); an
 // unknown name as empty.
 std::string fill_text(std::string_view text, const Values& values);
+// As fill_text, the names it read added to `read`.
+std::string fill_text(std::string_view text, const Values& values, std::vector<std::string>* read);
 
 // "#rrggbb" or "#rrggbbaa" as RGBA8 (red in the lowest byte), if it is one.
 std::optional<u32> parse_color(std::string_view text);
@@ -183,7 +191,8 @@ private:
     // As last laid out (so it is not again while nothing changed).
     const Font* m_font = nullptr;
     const Values* m_values = nullptr;
-    u64 m_generation = 0;
+    bool m_dirty = false; // a fade out ended: laid out again
+    std::vector<std::pair<std::string, u64>> m_reads; // the values its layout read, and their generations
     Vec2 m_size{-1.0f, -1.0f};
     float m_scale = 0.0f;
     usize m_budget = 0;

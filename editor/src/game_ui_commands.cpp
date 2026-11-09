@@ -200,7 +200,8 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
         {"ui_set_values",
          "Sets the values the game UI's screens show: `values` an object of name (1 to 128 bytes) to a number, "
          "text (at most 4096 bytes) or true/false (null forgets it); `clear` first forgets them all. At most "
-         "4096 values. Returns those given as they are now (`values`) and how many there are (`count`).",
+         "4096 values. The editor sets heading, playing and (while playing) player.speed, player.on_ground and "
+         "player.climbing itself each frame: those names are its, and are overwritten. Returns those given as they are now (`values`) and how many there are (`count`).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"values", {{"type", "object"}}}, {"clear", {{"type", "boolean"}}}}}},
@@ -415,18 +416,21 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
         {"get_ui_markers",
          "The game UI's markers as last drawn: `id`, `position`, `label`, `shown`, `on_screen` (at its place; "
          "else at the edge, or not shown), `at` [x, y] pixels, `distance` metres, `bearing` degrees clockwise "
-         "from north. Drawn only while the game UI is shown.",
+         "from north. Drawn only while the game UI is shown (not shown, none are).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
          [&state](const Json&, CommandContext&) {
              if (state.game_ui == nullptr) return no_ui();
              const ui::Markers& markers = state.game_ui->markers;
              Json out = Json::array();
+             const std::vector<ui::PlacedMarker>& placed = markers.placed(); // (in id order, as all())
+             usize next = 0;
              for (const auto& [id, m] : markers.all()) {
                  Json j = {{"id", id}, {"position", {m.position.x, m.position.y, m.position.z}}, {"label", m.label},
                            {"shown", false}, {"on_screen", false}, {"at", nullptr}, {"distance", nullptr}, {"bearing", nullptr}};
-                 for (const ui::PlacedMarker& p : markers.placed()) {
-                     if (p.id != id) continue;
+                 while (next < placed.size() && placed[next].id < id) ++next;
+                 if (next < placed.size() && placed[next].id == id) {
+                     const ui::PlacedMarker& p = placed[next];
                      j["shown"] = p.shown;
                      j["on_screen"] = p.on_screen;
                      if (p.shown) j["at"] = {p.at.x, p.at.y};
@@ -440,20 +444,21 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
 
     add(registry,
         {"ui_fade",
-         "Fades the game UI (and the scene under it) to `color` \"#rrggbb\" (default black) at `alpha` (0 clear, "
-         "1 solid) over `seconds` (0 to 30, default 1; 0 at once): to black before a load, back to clear after. "
-         "Over the screens and toasts, under the saving mark. Returns get_game_ui.",
+         "Fades the game UI (and the scene under it) to `color` \"#rrggbb\" (default: the colour it is, black at "
+         "first) at `alpha` (0 clear, 1 solid) over `seconds` (0 to 30, default 1; 0 at once): to black before a "
+         "load, back to clear after. Over the screens and toasts, under the saving mark; drawn only while the "
+         "game UI is shown (it goes on fading while hidden). Returns get_game_ui.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", Json::array({"alpha"})},
               {"properties",
                {{"alpha", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
-                {"color", {{"type", "string"}, {"minLength", 7}, {"maxLength", 9}}},
+                {"color", {{"type", "string"}, {"minLength", 7}, {"maxLength", 7}}},
                 {"seconds", {{"type", "number"}, {"minimum", 0}, {"maximum", 30}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              if (state.game_ui == nullptr) return no_ui();
-             u32 color = 0;
+             u32 color = state.game_ui->fade_color(); // (unless given: the colour it fades from)
              if (args.contains("color")) {
                  const std::optional<u32> c = ui::parse_color(args["color"].get<std::string>());
                  if (!c) return CommandResult::failure("color is \"#rrggbb\"");

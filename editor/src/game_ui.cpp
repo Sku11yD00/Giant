@@ -254,7 +254,7 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
     // The values the editor gives the screens (rounded, so a screen lays out again only when they show a change).
     const render::View rv = to_view(state.camera);
     const ui::View view{rv.position, rv.orientation, rv.vertical_fov_degrees};
-    values.set("heading", std::fmod(std::round(static_cast<double>(ui::heading_degrees(view.orientation))), 360.0));
+    values.set("heading", static_cast<double>(ui::heading_degrees(view.orientation))); // (smooth for compasses: show it as {heading:0})
     values.set("playing", playing);
     const std::optional<sim::CharacterState> player = playing ? state.play->player() : std::nullopt;
     if (player) {
@@ -275,6 +275,7 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
     m_width = std::isfinite(width) ? width : 0.0f;
     m_height = std::isfinite(height) ? height : 0.0f;
     if (!m_shown) {
+        markers.clear_placed();
         m_build_ms = 0.0;
         return;
     }

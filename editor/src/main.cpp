@@ -574,8 +574,6 @@ int run(const Options& options) {
         }
         panels.draw(frame_info);
         ui->end_frame();
-        game_ui.update(state, delta, static_cast<float>(window->pixel_width()),
-                       static_cast<float>(window->pixel_height())); // (counted with the panels)
         mark(editor::FramePhase::ui);
         saves.update(state, delta); // a save or load's result, a load's cells a share a frame (before play)
         // The player's wanted motion (or play stopped: Esc, a new scene).
@@ -607,6 +605,10 @@ int run(const Options& options) {
         audio.set_weather(weather.shown() ? &*weather.shown() : nullptr, weather.ground());
         audio.update(state.camera, delta); // heard from the camera (where the player's eyes are in play)
         mark(editor::FramePhase::animation);
+        // The game's UI from this frame's camera (the player's eyes, in play): markers meet the scene drawn.
+        game_ui.update(state, delta, static_cast<float>(window->pixel_width()),
+                       static_cast<float>(window->pixel_height())); // (counted with the panels)
+        mark(editor::FramePhase::ui);
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }

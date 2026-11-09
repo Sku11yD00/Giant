@@ -81,7 +81,8 @@ public:
 
     // Drawn for this frame; their places kept (placed()).
     void draw(Canvas& canvas, const Font& font, const View& view, Vec2 size, float scale);
-    const std::vector<PlacedMarker>& placed() const { return m_placed; }
+    const std::vector<PlacedMarker>& placed() const { return m_placed; } // (in id order, as all())
+    void clear_placed() { m_placed.clear(); } // (not drawn this frame)
     // For compasses: each shown marker that goes on one.
     const std::vector<CompassMark>& compass_marks() const { return m_marks; }
     // Without drawing: the compass marks for a view (as draw would give).

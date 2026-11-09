@@ -193,3 +193,87 @@ GIANT_TEST("ui screen: a compass shows the heading, its letters and markers; wid
     s->draw(canvas, font, v, 1.0f, {}, marks);
     GIANT_CHECK(canvas.vertices() == compass_only);
 }
+
+GIANT_TEST("ui screen: laid out again only for the values its layout reads; bars and compasses read theirs as drawn") {
+    const Font& font = default_font();
+    std::string error;
+    const auto s = Screen::load(R"({"type": "panel", "children": [
+        {"type": "compass", "id": "c", "value": "heading", "size": [600, 40]},
+        {"type": "bar", "id": "b", "value": "hp", "size": [100, 10]},
+        {"type": "text", "id": "t", "text": "{ammo}", "visible": "!dead"}]})",
+                                error);
+    GIANT_CHECK(s != nullptr);
+    if (s == nullptr) return;
+    Values v;
+    v.set("ammo", 3.0);
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f);
+    const auto moved = [&]() {
+        const_cast<Widget*>(s->find("t"))->rect.x = -7.0f;
+        s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f);
+        return s->find("t")->rect.x != -7.0f; // (laid out again: put back)
+    };
+    v.set("heading", 12.5);
+    GIANT_CHECK(!moved());
+    v.set("hp", 0.5);
+    v.set("unrelated", true);
+    GIANT_CHECK(!moved());
+    v.set("ammo", 4.0);
+    GIANT_CHECK(moved());
+    v.set("dead", false); // (set, though it reads the same: a value it reads)
+    GIANT_CHECK(moved());
+    v.erase("dead");
+    GIANT_CHECK(moved());
+    GIANT_CHECK(!moved());
+    v.clear();
+    GIANT_CHECK(moved() && v.generation("ammo") == 0);
+}
+
+GIANT_TEST("ui hud: fading widgets keep counting their text and taking clicks; markers stay finite at any size") {
+    const Font& font = default_font();
+    std::string error;
+    const auto s = Screen::load(R"({"type": "panel", "children": [
+        {"type": "text", "id": "a", "text": "{t}", "visible": "a", "fade": 1, "background": "#000000ff", "size": [200, 50]},
+        {"type": "text", "id": "b", "text": "{t}", "visible": "!a", "fade": 1},
+        {"type": "button", "id": "go", "size": [50, 50], "anchor": [1, 1], "pivot": [1, 1], "fade": 1}]})",
+                                error);
+    GIANT_CHECK(s != nullptr);
+    if (s == nullptr) return;
+    Values v;
+    v.set("t", std::string(3000, 'x'));
+    v.set("a", true);
+    usize budget = 4000;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &budget);
+    s->advance(0.4);
+    GIANT_CHECK(s->button_at({1900.0f, 1060.0f}) == nullptr); // fading in: not yet half way
+    s->advance(0.2);
+    GIANT_CHECK(s->button_at({1900.0f, 1060.0f}) == s->find("go"));
+    s->advance(1.0);
+    // "a" goes, "b" comes: "a" fading out still holds its 3000 bytes, so "b" gets what is left.
+    v.set("a", false);
+    budget = 4000;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &budget);
+    GIANT_CHECK(s->find("a")->shown_text.size() == 3000 && s->find("b")->shown_text.size() == 1000 && budget == 0);
+    GIANT_CHECK(!s->shown("a") && s->covers({100.0f, 25.0f})); // drawn: takes the click
+    s->advance(1.0);
+    budget = 4000;
+    s->lay_out(font, v, {1920.0f, 1080.0f}, 1.0f, &budget);
+    GIANT_CHECK(!s->covers({100.0f, 25.0f}) && s->find("a")->shown_text.empty());
+
+    // A marker ahead on a screen too small for the edge inset; out-of-range positions refused.
+    Markers markers;
+    Marker m;
+    m.id = "x";
+    m.position = {0.0, 0.0, -10.0};
+    GIANT_CHECK(markers.set(m));
+    m.id = "huge";
+    m.position = {1e300, 0.0, 0.0};
+    GIANT_CHECK(!markers.set(m));
+    Canvas canvas;
+    canvas.begin(80.0f, 80.0f, font);
+    View view;
+    markers.draw(canvas, font, view, {80.0f, 80.0f}, 1.0f);
+    GIANT_CHECK(markers.placed().size() == 1 && std::isfinite(markers.placed()[0].at.x) && std::isfinite(markers.placed()[0].at.y));
+    view.position.x = std::nan("");
+    markers.draw(canvas, font, view, {80.0f, 80.0f}, 1.0f);
+    GIANT_CHECK(markers.placed().empty());
+}

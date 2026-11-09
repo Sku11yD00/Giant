@@ -1751,13 +1751,21 @@ and load, settings), which also route the real mouse and keys to screens.
   widget draws the heading (its `value`), ticks every 15 degrees,
   letters at 45, and the markers by bearing (past its `span`: dimmed at
   its edge). Any widget may `fade` in and out over seconds as its
-  `visible` changes (`Screen::advance` each frame; a widget fading out is
-  drawn where it was, not clicked). Health and stamina bars and interact
+  `visible` changes (`Screen::advance` each frame; it fades in from its
+  first frame; a button is clicked once half in; fading out it is drawn
+  where it was last laid out, even if the screen resized, not clicked
+  but still covering what is under it, its text still counted in the
+  budget). Health and stamina bars and interact
   prompts are screens (bars, and text shown by a value). In the editor,
   markers draw under the screens, a whole-screen fade (`fade_to`) over
-  them, and each frame sets `heading`, `playing`, and while playing
-  `player.speed`, `player.on_ground`, `player.climbing` (rounded, so a
-  screen lays out again only when what it shows changes).
+  them, and each frame (after the camera moved, so markers meet the scene
+  drawn) sets `heading` (smooth: show it as `{heading:0}`), `playing`, and
+  while playing `player.speed` (to 0.1), `player.on_ground`,
+  `player.climbing`. A screen lays out again only when a value its layout
+  read (its texts and `visible`s) changed: bars and compasses read theirs
+  as they draw, so a compass turning lays nothing out. Widget fades and
+  markers stop while the game UI is hidden; the whole-screen fade goes on
+  (drawn when it shows again).
 
 Known limits: one font, no scripts beyond Latin (no CJK, Arabic or
 Cyrillic yet: the atlas would grow, or glyphs be made on demand on a

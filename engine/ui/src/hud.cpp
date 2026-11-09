@@ -100,8 +100,8 @@ bool Markers::set(Marker marker) {
         marker.label.resize(n);
     }
     if (!std::isfinite(marker.max_distance) || marker.max_distance < 0.0) marker.max_distance = 0.0;
-    if (!std::isfinite(marker.position.x) || !std::isfinite(marker.position.y) || !std::isfinite(marker.position.z))
-        return false;
+    const auto ok = [](double v) { return std::isfinite(v) && std::fabs(v) <= 1e12; };
+    if (!ok(marker.position.x) || !ok(marker.position.y) || !ok(marker.position.z)) return false;
     const auto it = m_markers.find(marker.id);
     if (it != m_markers.end()) {
         it->second = std::move(marker);
@@ -139,6 +139,10 @@ void Markers::draw(Canvas& canvas, const Font& font, const View& view, Vec2 size
     m_placed.clear();
     update_marks(view);
     if (!(size.x > 0.0f) || !(size.y > 0.0f) || !std::isfinite(scale) || scale <= 0.0f) return;
+    const Quat& q = view.orientation;
+    if (!std::isfinite(view.position.x) || !std::isfinite(view.position.y) || !std::isfinite(view.position.z) ||
+        !std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z) || !std::isfinite(q.w))
+        return;
     const float inset = 48.0f * scale, r = 9.0f * scale, t = std::max(2.0f * scale, 1.0f);
     const Vec2 centre{0.5f * size.x, 0.5f * size.y};
     const u32 edge = rgba(0, 0, 0, 150);
@@ -153,6 +157,10 @@ void Markers::draw(Canvas& canvas, const Font& font, const View& view, Vec2 size
         p.id = id;
         p.distance = length(m.position - view.position);
         p.bearing = bearing_degrees(view.position, m.position);
+        if (!std::isfinite(p.distance)) {
+            m_placed.push_back(std::move(p));
+            continue;
+        }
         float alpha = 1.0f;
         if (m.max_distance > 0.0) {
             if (p.distance > m.max_distance) {
@@ -174,10 +182,10 @@ void Markers::draw(Canvas& canvas, const Font& font, const View& view, Vec2 size
             // The way to it on the screen: from the middle, out to the edge.
             const Vec3 v = rotate(conjugate(normalize(view.orientation)), to_camera_relative(m.position, view.position));
             dir = pr.in_front ? Vec2{pr.at.x - centre.x, pr.at.y - centre.y} : Vec2{v.x, -v.y};
-            if (!pr.in_front && std::fabs(dir.x) < 1e-6f && std::fabs(dir.y) < 1e-6f) dir = {0.0f, 1.0f}; // (right behind)
             if (!pr.in_front && std::fabs(dir.x) < 1e-3f * std::fabs(dir.y)) dir.x = 0.0f;
             const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-            dir = {dir.x / len, dir.y / len};
+            // Right behind (or ahead, on a screen too small to have a middle): down.
+            dir = len > 1e-6f && std::isfinite(len) ? Vec2{dir.x / len, dir.y / len} : Vec2{0.0f, 1.0f};
             const float hx = std::max(centre.x - inset, 1.0f), hy = std::max(centre.y - inset, 1.0f);
             const float k = std::min(std::fabs(dir.x) > 1e-6f ? hx / std::fabs(dir.x) : 1e9f,
                                      std::fabs(dir.y) > 1e-6f ? hy / std::fabs(dir.y) : 1e9f);
@@ -196,18 +204,25 @@ void Markers::draw(Canvas& canvas, const Font& font, const View& view, Vec2 size
             canvas.line({back.x + side.x, back.y + side.y}, tip, t, color);
             canvas.line({back.x - side.x, back.y - side.y}, tip, t, color);
         }
-        float y = at.y + r + 4.0f * scale;
+        // Its label and distance under it (over it when it points down), kept on the screen.
+        const std::string far = m.distance ? distance_text(p.distance) : std::string();
+        const Vec2 ls = m.label.empty() ? Vec2{} : measure(font, m.label, label);
+        const Vec2 ds = far.empty() ? Vec2{} : measure(font, far, small);
+        const float gap = 4.0f * scale;
+        const bool above = !p.on_screen && dir.y > 0.3f;
+        float y = above ? at.y - r - gap - ls.y - ds.y : at.y + r + gap;
+        const auto keep_x = [&](float w) { return std::clamp(at.x, 0.5f * w + gap, std::max(size.x - 0.5f * w - gap, 0.5f * w + gap)); };
         if (!m.label.empty()) {
             label.color = faded(k_white, alpha);
             label.shadow_color = faded(rgba(0, 0, 0, 160), alpha);
-            y += canvas.text({at.x, y}, m.label, label).y;
+            canvas.text({keep_x(ls.x), y}, m.label, label);
+            y += ls.y;
         }
-        if (m.distance) {
+        if (!far.empty()) {
             small.color = faded(rgba(255, 255, 255, 200), alpha);
             small.shadow_color = faded(rgba(0, 0, 0, 160), alpha);
-            canvas.text({at.x, y}, distance_text(p.distance), small);
+            canvas.text({keep_x(ds.x), y}, far, small);
         }
-        (void)font;
         m_placed.push_back(std::move(p));
     }
 }

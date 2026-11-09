@@ -785,6 +785,8 @@ def player_gate(tool, call, check):
     call("ping")
     markers = tool("get_ui_markers")["markers"]
     check(len(markers) == 1 and markers[0]["shown"], f"a marker is drawn, got {markers}")
+    faded = tool("ui_fade", {"alpha": 1, "seconds": 2})
+    check(faded["fade"]["to"] == 1, f"a fade starts, got {faded['fade']}")
     tool("ui_fade", {"alpha": 0, "seconds": 0})
     tool("ui_remove_marker", {"all": True})
     tool("set_player_input", {"forward": 1, "yaw": 0})  # down -z, onto the step

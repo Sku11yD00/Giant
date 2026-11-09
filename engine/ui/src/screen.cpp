@@ -233,13 +233,14 @@ struct Layouter {
     float scale;
     usize budget; // bytes of text left to show
     usize used = 0;
+    mutable std::vector<std::string> read; // the values' names read
 
     // Filled in, cut to what is left of the budget (at a letter's start).
     // Charged the larger of the template and what it makes (so a template
     // that makes nothing still costs its work); none once it is spent.
     std::string fill(const std::string& text) {
         if (budget == 0 || text.empty()) return {};
-        std::string out = fill_text(text, values);
+        std::string out = fill_text(text, values, &read);
         if (out.size() > budget) {
             usize n = budget;
             while (n > 0 && (static_cast<u8>(out[n]) & 0xC0) == 0x80) --n;
@@ -253,8 +254,10 @@ struct Layouter {
 
     bool visible(const Widget& w) const {
         if (w.visible.empty()) return true;
-        if (w.visible[0] == '!') return !values.truthy(std::string_view(w.visible).substr(1));
-        return values.truthy(w.visible);
+        const bool negated = w.visible[0] == '!';
+        const std::string_view name = negated ? std::string_view(w.visible).substr(1) : std::string_view(w.visible);
+        read.emplace_back(name);
+        return values.truthy(name) != negated;
     }
 
     TextStyle style_of(const Widget& w) const {
@@ -320,6 +323,15 @@ struct Layouter {
         if (!fading) {
             w.rect = {};
             w.shown_text.clear();
+        } else if (!w.shown_text.empty()) {
+            // Still drawn: its text still counts (cut to what is left).
+            if (w.shown_text.size() > budget) {
+                usize n = budget;
+                while (n > 0 && (static_cast<u8>(w.shown_text[n]) & 0xC0) == 0x80) --n;
+                w.shown_text.resize(n);
+            }
+            budget -= w.shown_text.size();
+            used += w.shown_text.size();
         }
         for (Widget& c : w.children) hide(c, fading);
     }
@@ -490,30 +502,36 @@ void draw_widget(Canvas& canvas, const Font& font, const Values& values, float s
 bool inside(const Rect& r, Vec2 p) { return p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h; }
 
 // The last (top) shown button at `p`, within its clipping ancestors.
+// Clicked and focused: shown, and if it fades, at least half way in.
+bool live(const Widget& w) { return w.shown && (w.fade <= 0.0f || w.opacity >= 0.5f); }
+
 const Widget* button_at(const Widget& w, Vec2 p, bool clipped_out) {
     if (!w.shown) return nullptr;
     if (w.clip && !inside(w.rect, p)) clipped_out = true;
     for (auto it = w.children.rbegin(); it != w.children.rend(); ++it) {
         if (const Widget* b = button_at(*it, p, clipped_out)) return b;
     }
-    if (!clipped_out && w.type == WidgetType::button && inside(w.rect, p)) return &w;
+    if (!clipped_out && w.type == WidgetType::button && live(w) && inside(w.rect, p)) return &w;
     return nullptr;
 }
 
-// Whether a shown widget with a background (seen: not clipped out) is at `p`.
-bool covers(const Widget& w, Vec2 p, bool clipped_out) {
-    if (!w.shown) return false;
+// Whether a widget drawn with a background (seen: not clipped out) is at
+// `p`: shown, or fading out (what the player sees takes the click).
+bool covers(const Widget& w, Vec2 p, bool clipped_out, bool fading) {
+    fading = fading || (!w.shown && w.fade > 0.0f && w.opacity > 0.0f);
+    if (!w.shown && !fading) return false;
+    if (fading && !w.own_visible && !(w.fade > 0.0f && w.opacity > 0.0f)) return false;
     if (w.clip && !inside(w.rect, p)) clipped_out = true;
     if (!clipped_out && (w.background >> 24) != 0 && inside(w.rect, p)) return true;
     for (const Widget& c : w.children) {
-        if (covers(c, p, clipped_out)) return true;
+        if (covers(c, p, clipped_out, fading)) return true;
     }
     return false;
 }
 
 void buttons(const Widget& w, std::vector<const Widget*>& out) {
     if (!w.shown) return;
-    if (w.type == WidgetType::button) out.push_back(&w);
+    if (w.type == WidgetType::button && live(w)) out.push_back(&w);
     for (const Widget& c : w.children) buttons(c, out);
 }
 
@@ -545,20 +563,31 @@ void Values::set(const std::string& name, Value value) {
     if (it != m_values.end()) {
         if (it->second == value) return; // (unchanged: the screens need not lay out again)
         it->second = std::move(value);
-        m_generation = next_generation();
     } else if (m_values.size() < k_max_values) {
         m_values.emplace(name, std::move(value));
+    } else {
+        return;
+    }
+    m_generation = next_generation();
+    m_generations[name] = m_generation;
+}
+
+void Values::erase(const std::string& name) {
+    if (m_values.erase(name) > 0) {
+        m_generations.erase(name);
         m_generation = next_generation();
     }
 }
 
-void Values::erase(const std::string& name) {
-    if (m_values.erase(name) > 0) m_generation = next_generation();
-}
-
 void Values::clear() {
     m_values.clear();
+    m_generations.clear();
     m_generation = next_generation();
+}
+
+u64 Values::generation(std::string_view name) const {
+    const auto it = m_generations.find(name);
+    return it != m_generations.end() ? it->second : 0;
 }
 
 const Value* Values::find(std::string_view name) const {
@@ -605,7 +634,9 @@ std::optional<u32> parse_color(std::string_view s) {
     return rgba(c[0], c[1], c[2], c[3]);
 }
 
-std::string fill_text(std::string_view text, const Values& values) {
+std::string fill_text(std::string_view text, const Values& values) { return fill_text(text, values, nullptr); }
+
+std::string fill_text(std::string_view text, const Values& values, std::vector<std::string>* read) {
     if (text.find_first_of("{}") == std::string_view::npos) return std::string(text);
     std::string out;
     out.reserve(text.size());
@@ -635,6 +666,7 @@ std::string fill_text(std::string_view text, const Values& values) {
             name = name.substr(0, colon);
         }
         out += values.text(name, decimals);
+        if (read != nullptr) read->emplace_back(name);
         i = end;
         if (out.size() >= k_max_text) break; // (a pathological template)
     }
@@ -678,19 +710,29 @@ void Screen::lay_out(const Font& font, const Values& values, Vec2 size, float sc
     size = {std::max(size.x, 0.0f), std::max(size.y, 0.0f)};
     const usize budget = std::min(text_budget != nullptr ? *text_budget : k_max_text_bytes, k_max_text_bytes);
     // Nothing changed: as it was (its text still counted).
-    if (m_font == &font && m_values == &values && m_generation == values.generation() && m_size.x == size.x &&
-        m_size.y == size.y && m_scale == scale && m_budget == budget) {
+    const bool same_reads = std::all_of(m_reads.begin(), m_reads.end(),
+                                        [&](const auto& r) { return values.generation(r.first) == r.second; });
+    if (!m_dirty && m_font == &font && m_values == &values && same_reads && m_size.x == size.x && m_size.y == size.y &&
+        m_scale == scale && m_budget == budget) {
         if (text_budget != nullptr) *text_budget -= std::min(*text_budget, m_text_bytes);
         return;
     }
-    Layouter l{font, values, scale, budget};
+    Layouter l{font, values, scale, budget, 0, {}};
     l.natural(m_root, size.x);
     l.place(m_root, {0.0f, 0.0f, size.x, size.y}, size, false, {}); // (the root fills the screen)
     m_text_bytes = l.used;
     if (text_budget != nullptr) *text_budget -= std::min(*text_budget, m_text_bytes);
     m_font = &font;
     m_values = &values;
-    m_generation = values.generation();
+    m_dirty = false;
+    std::sort(l.read.begin(), l.read.end());
+    l.read.erase(std::unique(l.read.begin(), l.read.end()), l.read.end());
+    m_reads.clear();
+    m_reads.reserve(l.read.size());
+    for (std::string& name : l.read) {
+        const u64 g = values.generation(name);
+        m_reads.emplace_back(std::move(name), g);
+    }
     m_size = size;
     m_scale = scale;
     m_budget = budget;
@@ -707,26 +749,31 @@ void Screen::draw(Canvas& canvas, const Font& font, const Values& values, float 
 }
 
 namespace {
-void advance_widget(Widget& w, float seconds) {
+// True if a widget fading out has gone (what it kept is let go of at the next layout).
+bool advance_widget(Widget& w, float seconds) {
+    bool gone = false;
     if (w.fade > 0.0f) {
         const float target = w.own_visible ? 1.0f : 0.0f;
         const float step = seconds / w.fade;
+        const float was = w.opacity;
         w.opacity = w.opacity < target ? std::min(w.opacity + step, target) : std::max(w.opacity - step, target);
+        gone = was > 0.0f && w.opacity <= 0.0f && !w.shown;
     } else {
         w.opacity = w.own_visible ? 1.0f : 0.0f;
     }
-    for (Widget& c : w.children) advance_widget(c, seconds);
+    for (Widget& c : w.children) gone = advance_widget(c, seconds) || gone;
+    return gone;
 }
 } // namespace
 
 void Screen::advance(double seconds) {
     if (!std::isfinite(seconds) || seconds < 0.0) seconds = 0.0;
-    advance_widget(m_root, static_cast<float>(std::min(seconds, 10.0)));
+    if (advance_widget(m_root, static_cast<float>(std::min(seconds, 10.0)))) m_dirty = true;
 }
 
 const Widget* Screen::button_at(Vec2 point) const { return ui::button_at(m_root, point, false); }
 
-bool Screen::covers(Vec2 point) const { return ui::covers(m_root, point, false); }
+bool Screen::covers(Vec2 point) const { return ui::covers(m_root, point, false, false); }
 
 void Screen::point(Vec2 p) {
     if (const Widget* b = button_at(p)) m_focus = b->id;
