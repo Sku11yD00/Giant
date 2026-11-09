@@ -762,6 +762,11 @@ def player_gate(tool, call, check):
     camera = tool("get_camera")
     player = tool("play", {"on": True})
     check(player["playing"] and abs(player["position"][1]) < 0.05, f"the player stands on the ground, got {player}")
+    tool("show_toast", {"text": "Smoke test \u2013 caf\u00e9", "seconds": 5})
+    call("ping")
+    game_ui = tool("get_game_ui")
+    check(game_ui["shown"] and game_ui["toasts"] == 1 and game_ui["font"]["glyphs"] > 300 and game_ui["vertices"] > 32
+          and game_ui["error"] == "", f"the game UI shows over play, got {game_ui}")
     tool("set_player_input", {"forward": 1, "yaw": 0})  # down -z, onto the step
     started = time.monotonic()
     player = None
@@ -940,7 +945,7 @@ def main() -> int:
         for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation",
                          "get_swing", "find_path", "get_nav", "walk_to", "get_walker", "play_sound",
                          "record_audio", "get_audio", "save_game", "load_game", "list_saves", "get_save",
-                         "set_autosave"):
+                         "set_autosave", "get_game_ui", "set_game_ui", "show_toast"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")

@@ -31,6 +31,7 @@
 #include "terrain_meshes.h"
 #include "world_streaming.h"
 #include "game_saves.h"
+#include "game_ui.h"
 #include "ui/panels.h"
 
 #include "giant/ai/mcp_server.h"
@@ -360,6 +361,9 @@ int run(const Options& options) {
     if (ui == nullptr) {
         return 1;
     }
+    editor::GameUi game_ui(device.get()); // the game's own UI: its font made and uploaded now, once
+    state.game_ui = &game_ui;
+    std::vector<rhi::UiDrawList> ui_lists; // the game's UI, then the panels
     // Before the scripts: their OnStop may run commands (a raycast reads it).
     editor::SceneFrame scene_frame; // reused every frame
     physics.take_frame_changes = [&scene_frame] { return scene_frame.take_for_followers(); };
@@ -446,7 +450,10 @@ int run(const Options& options) {
         }
         state.scene_stats = renderer->last_stats();
         cmd.begin_timing("UI");
-        cmd.draw_ui(target, ui->frame());
+        ui_lists.clear();
+        if (game_ui.shown()) ui_lists.push_back(game_ui.list()); // under the panels
+        for (const rhi::UiDrawList& l : ui->frame().lists) ui_lists.push_back(l);
+        cmd.draw_ui(target, rhi::UiFrame{ui_lists});
         cmd.end_timing();
         mark(editor::FramePhase::ui_draw);
     };
@@ -567,6 +574,8 @@ int run(const Options& options) {
         }
         panels.draw(frame_info);
         ui->end_frame();
+        game_ui.update(state, delta, static_cast<float>(window->pixel_width()),
+                       static_cast<float>(window->pixel_height())); // (counted with the panels)
         mark(editor::FramePhase::ui);
         saves.update(state, delta); // a save or load's result, a load's cells a share a frame (before play)
         // The player's wanted motion (or play stopped: Esc, a new scene).

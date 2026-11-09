@@ -56,6 +56,14 @@ target_include_directories(imgui_lib SYSTEM PUBLIC ${imgui_SOURCE_DIR})
 target_compile_definitions(imgui_lib PUBLIC "ImDrawIdx=unsigned int")
 set_target_properties(imgui_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(third_party::imgui ALIAS imgui_lib)
+# stb_truetype and stb_rect_pack (public domain / MIT), as ImGui ships them:
+# the game UI's fonts (engine/ui). Header only; one source file there
+# compiles them, static. Its default font, Roboto Medium (Apache 2.0), comes
+# from ImGui's misc/fonts too.
+add_library(stb_truetype INTERFACE)
+target_include_directories(stb_truetype SYSTEM INTERFACE ${imgui_SOURCE_DIR})
+add_library(third_party::stb_truetype ALIAS stb_truetype)
+set(GIANT_DEFAULT_FONT ${imgui_SOURCE_DIR}/misc/fonts/Roboto-Medium.ttf CACHE INTERNAL "The game UI's default font")
 
 # meshoptimizer: cluster building and simplification for virtual geometry
 # (MIT licence), plus its clusterlod.h cluster-LOD builder from demo/, which

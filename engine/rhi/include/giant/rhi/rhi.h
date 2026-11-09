@@ -250,6 +250,16 @@ struct UiVertex {
     u32 color; // RGBA8, red in the lowest byte
 };
 
+// How a UI command's texture is read.
+enum class UiShade : u32 {
+    plain = 0, // colour times the texture
+    // The texture's alpha is a signed distance (0.5 on the edge, more
+    // inside): text and shapes sharp at any size, the edge a pixel wide on
+    // screen. `outline` (in distance units, 0 to 0.5) widens it outward in
+    // `outline_color`.
+    sdf = 1,
+};
+
 struct UiDrawCommand {
     u32 first_index = 0;   // into the list's indices
     u32 index_count = 0;   // a multiple of 3 (triangles)
@@ -257,6 +267,9 @@ struct UiDrawCommand {
     // Pixels outside this rectangle are not drawn.
     float clip_min_x = 0.0f, clip_min_y = 0.0f, clip_max_x = 0.0f, clip_max_y = 0.0f;
     TextureId texture = 0; // a live, sampled rgba8_unorm texture
+    UiShade shade = UiShade::plain;
+    float outline = 0.0f;  // sdf: how far out the outline reaches (distance units, 0 to 0.5)
+    u32 outline_color = 0; // sdf: RGBA8, red in the lowest byte
 };
 
 struct UiDrawList {
