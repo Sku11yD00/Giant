@@ -4,13 +4,14 @@
 // group per cluster, a thread per vertex.
 //
 // The source (k_skin_vertex_bytes each, cluster after cluster from
-// Cluster::skin_first): bind position, bind normal, four joints (u16) and
+// Cluster::skin_first): bind position, bind normal and tangent (packed as in
+// the pool, common.slang), four joints (u16) and
 // four weights (u8, in 255ths summing to 255). The matrices: one per joint,
 // three rows of float4 (a 3x4 affine matrix), bind space to the mesh's.
 // Layouts match engine/render/src/gpu_layout.h (SkinPush, Cluster).
 #include "common.slang"
 
-static const uint k_skin_vertex_bytes = 36;
+static const uint k_skin_vertex_bytes = 32;
 static const uint k_skin_matrix_bytes = 48;
 static const uint k_skin_dispatch_width = 65535; // groups along x
 
@@ -79,11 +80,14 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
         ByteAddressBuffer source = read_buffer(push.source);
         const uint s = (first + tid) * k_skin_vertex_bytes;
         const float3 bind = asfloat(source.Load3(s));
-        const float3 bind_normal = asfloat(source.Load3(s + 12));
-        const uint2 joints = source.Load2(s + 24);
-        const uint weights = source.Load(s + 32);
+        const uint2 frame = source.Load2(s + 12);
+        const float3 bind_normal = unpack_normal(frame.x);
+        const float4 bind_tangent = unpack_tangent(frame.y);
+        const uint2 joints = source.Load2(s + 20);
+        const uint weights = source.Load(s + 28);
         ByteAddressBuffer matrices = read_buffer(push.matrices);
         float3 n = float3(0.0, 0.0, 0.0);
+        float3 t = float3(0.0, 0.0, 0.0);
         for (uint k = 0; k < 4; ++k) {
             const float w = float((weights >> (8 * k)) & 0xFFu) / 255.0;
             const uint joint = ((k < 2 ? joints.x : joints.y) >> (16 * (k & 1))) & 0xFFFFu;
@@ -96,16 +100,23 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
             const float4 r2 = asfloat(matrices.Load4(m + 32));
             p += row_apply(r0, r1, r2, bind, 1.0) * w;
             n += row_apply(r0, r1, r2, bind_normal, 0.0) * w;
+            t += row_apply(r0, r1, r2, bind_tangent.xyz, 0.0) * w;
         }
         const float len2 = dot(n, n);
         n = len2 > 1e-24 ? n * rsqrt(len2) : float3(0.0, 1.0, 0.0);
+        // The tangent stays perpendicular to the posed normal.
+        t -= n * dot(n, t);
+        const float tlen2 = dot(t, t);
+        t = tlen2 > 1e-24 ? t * rsqrt(tlen2) : (abs(n.x) < 0.9 ? normalize(float3(1.0, 0.0, 0.0) - n * n.x)
+                                                                : normalize(float3(0.0, 1.0, 0.0) - n * n.y));
         if (!all(isfinite(p))) {
             p = bind; // a broken matrix: left at bind rather than spread over the screen
         }
         RWByteAddressBuffer pool = write_buffer(push.pool);
-        const uint v = base + vertex_offset + tid * 24;
+        // The uv (at 20) never moves.
+        const uint v = base + vertex_offset + tid * k_vertex_bytes;
         pool.Store3(v, asuint(p));
-        pool.Store3(v + 12, asuint(n));
+        pool.Store2(v + 12, uint2(pack_normal(n), pack_tangent(t, bind_tangent.w)));
         uint ignored;
         for (uint k = 0; k < 3; ++k) {
             InterlockedMin(g_lo[k], ordered(p[k]), ignored);

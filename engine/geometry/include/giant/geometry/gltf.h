@@ -5,8 +5,10 @@
 // rewound, normals transformed (or made flat when the file has none, as the
 // glTF spec asks). Units are metres and +Y is up, as in the engine.
 //
-// Read for now: positions, normals and indices of triangle, strip and fan
-// primitives, and one skin with its skeleton and animation clips.
+// Read for now: positions, normals, texture coordinates (TEXCOORD_0),
+// tangents and indices of triangle, strip and fan primitives, and one skin
+// with its skeleton and animation clips. Tangents the file lacks are made
+// from the uvs (generate_tangents, mesh.h).
 // Materials, textures and morph targets are skipped with a warning;
 // compressed files (Draco, meshopt) are refused.
 //

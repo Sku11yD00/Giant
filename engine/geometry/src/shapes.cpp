@@ -21,14 +21,16 @@ TriangleMesh make_cube() {
     for (const Face& f : faces) {
         const u32 base = static_cast<u32>(mesh.vertices.size());
         const Vec3 c = f.normal * 0.5f;
-        mesh.vertices.push_back({c - f.u * 0.5f - f.v * 0.5f, f.normal});
-        mesh.vertices.push_back({c + f.u * 0.5f - f.v * 0.5f, f.normal});
-        mesh.vertices.push_back({c + f.u * 0.5f + f.v * 0.5f, f.normal});
-        mesh.vertices.push_back({c - f.u * 0.5f + f.v * 0.5f, f.normal});
+        // Each face shows the whole image, its top along +v.
+        mesh.vertices.push_back({c - f.u * 0.5f - f.v * 0.5f, f.normal, {0, 1}});
+        mesh.vertices.push_back({c + f.u * 0.5f - f.v * 0.5f, f.normal, {1, 1}});
+        mesh.vertices.push_back({c + f.u * 0.5f + f.v * 0.5f, f.normal, {1, 0}});
+        mesh.vertices.push_back({c - f.u * 0.5f + f.v * 0.5f, f.normal, {0, 0}});
         for (const u32 i : {0u, 1u, 2u, 0u, 2u, 3u}) {
             mesh.indices.push_back(base + i);
         }
     }
+    generate_tangents(mesh);
     return mesh;
 }
 
@@ -43,7 +45,10 @@ TriangleMesh make_sphere(u32 segments, u32 rings) {
             const float phi = 2.0f * k_pi * static_cast<float>(s) / static_cast<float>(segments);
             const Vec3 n{std::sin(theta) * std::cos(phi), std::cos(theta),
                          -std::sin(theta) * std::sin(phi)};
-            mesh.vertices.push_back({n * 0.5f, n});
+            // The image wraps round once, its top at the north pole.
+            mesh.vertices.push_back({n * 0.5f, n,
+                                     {static_cast<float>(s) / static_cast<float>(segments),
+                                      static_cast<float>(r) / static_cast<float>(rings)}});
         }
     }
     const u32 row = segments + 1;
@@ -61,15 +66,18 @@ TriangleMesh make_sphere(u32 segments, u32 rings) {
             }
         }
     }
+    generate_tangents(mesh);
     return mesh;
 }
 
 TriangleMesh make_plane() {
     TriangleMesh mesh;
     const Vec3 up{0, 1, 0};
-    mesh.vertices = {{{-0.5f, 0, 0.5f}, up}, {{0.5f, 0, 0.5f}, up},
-                     {{0.5f, 0, -0.5f}, up}, {{-0.5f, 0, -0.5f}, up}};
+    // The image's top toward -Z.
+    mesh.vertices = {{{-0.5f, 0, 0.5f}, up, {0, 1}}, {{0.5f, 0, 0.5f}, up, {1, 1}},
+                     {{0.5f, 0, -0.5f}, up, {1, 0}}, {{-0.5f, 0, -0.5f}, up, {0, 0}}};
     mesh.indices = {0, 1, 2, 0, 2, 3};
+    generate_tangents(mesh);
     return mesh;
 }
 
