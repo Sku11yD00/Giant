@@ -14,6 +14,8 @@ pinned to an exact version and listed here before it is used.
 | [Slang](https://github.com/shader-slang/slang) compiler | 2026.19 (release binaries, SHA-256 pinned) | Apache 2.0 with LLVM exception | build time: compiles shaders | N1 part 1 |
 | [Jolt Physics](https://github.com/jrouwe/JoltPhysics) | 5.6.0 (`e77f175`) | MIT | sim (rigid bodies, collision, raycasts; double precision) | N4 part 1 |
 | [DXC](https://github.com/microsoft/DirectXShaderCompiler) | 1.9.2609.5 (NuGet, SHA-256 pinned) | University of Illinois/NCSA (BSD-style) | build time: Slang's DXIL back end, Windows | N1 part 1 |
+| [stb_image](https://github.com/nothings/stb) | 2.30 (`f58f558`, SHA-256 pinned) | public domain or MIT | texture (decodes PNG, JPEG, TGA, BMP for the cooker) | photoreal part 3a-3 |
+| [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo) (rgbcx, bc7enc, bc7decomp only) | `b943862` (SHA-256 pinned) | MIT or public domain | texture (BC1, BC4, BC5, BC7 block encoding; decoding in tests) | photoreal part 3a-3 |
 
 Platform runtimes (Microsoft redistributables, not open source; shipped next
 to the executables like a system component, never compiled into engine code):

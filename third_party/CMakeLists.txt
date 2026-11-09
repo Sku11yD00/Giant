@@ -276,3 +276,48 @@ endforeach()
 add_library(smaa_textures INTERFACE)
 target_include_directories(smaa_textures SYSTEM INTERFACE ${smaa_dir})
 add_library(third_party::smaa ALIAS smaa_textures)
+
+# stb_image: PNG, JPEG, TGA and BMP decoding for the texture cooker (public
+# domain or MIT, you choose; v2.30). One header, pinned by commit and hash;
+# the implementation is compiled here, outside our warning flags, with only
+# the formats the cooker reads.
+set(stb_commit f58f558c120e9b32c217290b80bad1a0729fbb2c)
+set(stb_dir ${CMAKE_BINARY_DIR}/_deps/stb-${stb_commit})
+file(DOWNLOAD https://raw.githubusercontent.com/nothings/stb/${stb_commit}/stb_image.h
+     ${stb_dir}/stb_image.h
+     EXPECTED_HASH SHA256=594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3 TLS_VERIFY ON)
+set(stb_impl ${CMAKE_CURRENT_BINARY_DIR}/stb_image_impl.c)
+file(WRITE ${stb_impl}.in
+  "#define STB_IMAGE_IMPLEMENTATION\n#define STBI_NO_STDIO\n#define STBI_NO_LINEAR\n#define STBI_NO_HDR\n"
+  "#define STBI_ONLY_PNG\n#define STBI_ONLY_JPEG\n#define STBI_ONLY_TGA\n#define STBI_ONLY_BMP\n"
+  "#define STBI_MAX_DIMENSIONS 16384\n#include \"stb_image.h\"\n")
+configure_file(${stb_impl}.in ${stb_impl} COPYONLY)
+add_library(stb_image_lib STATIC ${stb_impl})
+target_include_directories(stb_image_lib SYSTEM PUBLIC ${stb_dir})
+set_target_properties(stb_image_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(third_party::stb_image ALIAS stb_image_lib)
+
+# bc7enc_rdo's block encoders and decoders (MIT or public domain, you
+# choose): rgbcx (BC1, BC4, BC5) and bc7enc (BC7) for the texture cooker,
+# bc7decomp to check its output in tests. Only these files, pinned by commit
+# and hash (the repository's BC7E ISPC encoder is not used).
+set(bc7enc_commit b9438627eef73a1157e84201b6fa6eb2ffd6d9f0)
+set(bc7enc_dir ${CMAKE_BINARY_DIR}/_deps/bc7enc_rdo-${bc7enc_commit})
+foreach(pair "rgbcx.h=111bd4c0211eca172bec9d757e2e597a47c4e4731bb122c9e8761dca85711bba"
+             "rgbcx.cpp=059243ce8e8e3ec634bc1e3da3996115aaf36196a8d75a24d3dbb3c8bfe0ca98"
+             "rgbcx_table4.h=5051cf4ce17cb1f9d011ef788b7c8d174f2270532da0514c9f394830bab72f36"
+             "rgbcx_table4_small.h=d484802656fb7f2249674263bbb14399ab9ccb2a997ac0030e51b17a4bf8595f"
+             "bc7enc.h=f40f4a956ed6a8845b7909e83831de09512424408b32ca29551bf49aee2fecf6"
+             "bc7enc.cpp=b90444a091530a13c61fa6375583fcc9bc9ca47e474fd71f818876de68c1b581"
+             "bc7decomp.h=cbba8778640e0021f55ca686b6bc19e6960032539084c70af698922b05c5b242"
+             "bc7decomp.cpp=cfbe156926ebd96443b4407a9da1b5b7a424fdf989fedca3cf2fd0515e0c368a")
+  string(REPLACE "=" ";" pair "${pair}")
+  list(GET pair 0 bc7enc_file)
+  list(GET pair 1 bc7enc_hash)
+  file(DOWNLOAD https://raw.githubusercontent.com/richgel999/bc7enc_rdo/${bc7enc_commit}/${bc7enc_file}
+       ${bc7enc_dir}/${bc7enc_file} EXPECTED_HASH SHA256=${bc7enc_hash} TLS_VERIFY ON)
+endforeach()
+add_library(bc7enc_lib STATIC ${bc7enc_dir}/rgbcx.cpp ${bc7enc_dir}/bc7enc.cpp ${bc7enc_dir}/bc7decomp.cpp)
+target_include_directories(bc7enc_lib SYSTEM PUBLIC ${bc7enc_dir})
+set_target_properties(bc7enc_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(third_party::bc7enc ALIAS bc7enc_lib)
