@@ -35,7 +35,7 @@ constexpr u32 k_occluded_capacity = 1u << 18; // clusters retested in the second
 // The instances live in the InstanceStore, uploaded in chunks
 // (k_max_instances: renderer.h).
 constexpr u32 k_vertices_per_cluster = geometry::k_cluster_max_triangles * 3;
-constexpr u32 k_max_materials = 1u << 20; // per frame (32 MiB)
+constexpr u32 k_max_materials = 1u << 20; // per frame (48 MiB)
 constexpr u32 k_max_mesh_groups = 65535; // per dimension of a mesh dispatch
 // Mesh groups in one dispatch: whole rows of 65535 under the 2^22 total.
 constexpr u32 k_max_cpu_clusters = 64u * k_max_mesh_groups;
@@ -59,10 +59,17 @@ void set4(float* out, const Vec3& v, float w) {
 
 u32 groups_of(u32 items, u32 per_group) { return (items + per_group - 1) / per_group; }
 
-gpu::Material to_gpu(const Material& m) {
+gpu::Material to_gpu(const Material& m, const rhi::Device& device, std::span<const rhi::TextureHandle> textures) {
     gpu::Material out{};
     set4(out.base_roughness, m.base_color, m.roughness);
     set4(out.emissive_metallic, m.emissive, m.metallic);
+    const TextureId ids[4] = {m.base_color_texture, m.normal_texture, m.roughness_metal_texture,
+                              m.occlusion_texture};
+    for (usize i = 0; i < 4; ++i) {
+        out.textures[i] = ids[i] < textures.size() && textures[ids[i]].valid()
+                              ? device.read_descriptor(textures[ids[i]])
+                              : rhi::k_no_descriptor;
+    }
     return out;
 }
 
@@ -179,6 +186,9 @@ Renderer::~Renderer() {
     m_device.destroy(m_smaa_search);
     for (Mesh& mesh : m_meshes) {
         destroy(mesh);
+    }
+    for (const rhi::TextureHandle t : m_textures) {
+        m_device.destroy(t);
     }
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
@@ -632,6 +642,47 @@ void Renderer::remove_mesh(MeshId id) {
     m_voxels->forget_mesh(id);
     m_free_meshes.push_back(id);
     ++m_meshes_version;
+}
+
+TextureId Renderer::add_texture(const rhi::TextureDesc& desc, std::span<const u8> contents) {
+    const char* problem = rhi::texture_desc_problem(desc);
+    if (problem == nullptr && (desc.array || desc.layers != 1 || desc.usage != rhi::TextureUsage::sampled)) {
+        problem = "a material texture is one sampled layer, not an array";
+    }
+    if (problem == nullptr) {
+        problem = rhi::texture_contents_problem(desc, contents.size());
+    }
+    if (problem != nullptr) {
+        log_error("render", std::string("texture refused: ") + problem);
+        return k_no_texture;
+    }
+    rhi::TextureDesc named = desc;
+    named.name = "material texture";
+    const rhi::TextureHandle handle = m_device.create_texture(named, contents);
+    if (!handle.valid()) {
+        return k_no_texture; // the device logged why
+    }
+    if (!m_free_textures.empty()) {
+        const TextureId id = m_free_textures.back();
+        m_free_textures.pop_back();
+        m_textures[id] = handle;
+        return id;
+    }
+    m_textures.push_back(handle);
+    return static_cast<TextureId>(m_textures.size() - 1);
+}
+
+void Renderer::remove_texture(TextureId id) {
+    if (id >= m_textures.size() || !m_textures[id].valid()) {
+        return;
+    }
+    m_device.destroy(m_textures[id]); // deferred by the device past frames in flight
+    m_textures[id] = {};
+    m_free_textures.push_back(id);
+}
+
+const rhi::TextureDesc* Renderer::texture(TextureId id) const {
+    return id < m_textures.size() && m_textures[id].valid() ? m_device.describe(m_textures[id]) : nullptr;
 }
 
 bool Renderer::mesh_ready(MeshId id) const {
@@ -1865,9 +1916,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     }
     m_gpu_materials.clear();
     for (usize i = 0; i < material_limit; ++i) {
-        m_gpu_materials.push_back(to_gpu(frame.materials[i]));
+        m_gpu_materials.push_back(to_gpu(frame.materials[i], m_device, m_textures));
     }
-    m_gpu_materials.push_back(to_gpu(Material{}));
+    m_gpu_materials.push_back(to_gpu(Material{}, m_device, m_textures));
     data.material_count = static_cast<u32>(material_limit);
     data.materials = cmd.upload(bytes_of(m_gpu_materials));
 

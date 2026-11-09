@@ -68,8 +68,12 @@ inline constexpr u32 k_always_mesh_bit = 0x8000'0000u;
 struct Material {
     float base_roughness[4];
     float emissive_metallic[4];
+    // Read descriptors of its textures (rhi::k_no_descriptor: none): base
+    // colour, normal, roughness and metallic, occlusion.
+    u32 textures[4];
 };
-static_assert(sizeof(Material) == 32);
+static_assert(sizeof(Material) == 48);
+inline constexpr u32 k_material_bytes = 48; // resolve.slang's k_material_bytes
 
 // A material's wind (FrameConstants::wind_table), one per material.
 struct MaterialWind {

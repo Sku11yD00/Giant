@@ -68,6 +68,10 @@ enum class BuiltinMesh {
     plane,  // 1 m square at y = 0, facing +Y
 };
 
+// A texture loaded into the renderer with add_texture.
+using TextureId = u32;
+inline constexpr TextureId k_no_texture = ~0u;
+
 // How a surface looks (metal/roughness PBR). Instances share them by index
 // into FrameInput::materials, so a kit used a thousand times sends its few
 // materials once.
@@ -80,6 +84,17 @@ struct Material {
     // bending from its base (trees, grass) and shaking at its tips (leaves).
     float sway = 0.0f;
     float flutter = 0.0f;
+    // Textures over the mesh's uvs (giant/texture cooks them), each
+    // k_no_texture for none; an unknown or removed id counts as none. As
+    // glTF has them: base colour (sRGB) multiplies base_color; the normal
+    // map (x in R, y in G, green up, z rebuilt) bends the normal in the
+    // mesh's tangent frame; roughness (R) and metallic (G) multiply theirs;
+    // occlusion (R) dims the ambient and bounce light. Only meshes drawn
+    // as meshes show them: the far field's voxels keep the plain colours.
+    TextureId base_color_texture = k_no_texture;
+    TextureId normal_texture = k_no_texture;
+    TextureId roughness_metal_texture = k_no_texture;
+    TextureId occlusion_texture = k_no_texture;
 };
 
 struct Instance {
@@ -512,6 +527,15 @@ public:
     bool skinned(MeshId mesh) const;
     // Built-in meshes stay. Unknown or removed ids are ignored.
     void remove_mesh(MeshId mesh);
+    // Uploads a sampled texture for materials (texture::Cooked's desc and
+    // contents: any format rhi samples, mips and all); k_no_texture (logged)
+    // if rhi refuses it or it is an array. Like meshes, a removed id is
+    // handed out again: stop using it once it is removed. Safe mid-frame.
+    TextureId add_texture(const rhi::TextureDesc& desc, std::span<const u8> contents);
+    // Unknown or removed ids are ignored. Frames in flight finish with it.
+    void remove_texture(TextureId texture);
+    // Null for an unknown or removed id.
+    const rhi::TextureDesc* texture(TextureId texture) const;
     // Its coarsest level is loaded, so instances of it draw (a mesh added
     // this frame may take a frame or more under a busy streaming budget).
     bool mesh_ready(MeshId mesh) const;
@@ -792,6 +816,8 @@ private:
 
     std::vector<Mesh> m_meshes;
     std::vector<u32> m_free_meshes; // removed slots, reused by add_mesh
+    std::vector<rhi::TextureHandle> m_textures; // by TextureId; invalid when removed
+    std::vector<u32> m_free_textures;           // removed slots, reused by add_texture
     std::vector<MeshId> m_builtin; // by BuiltinMesh
     // Per-frame scratch, kept to avoid allocating every frame.
     std::vector<u32> m_valid;    // instances (into frame.instances) with a live mesh, drawn as meshes

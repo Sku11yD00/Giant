@@ -226,6 +226,22 @@ an offline cooker can use it without a device.
   Smaller mips need not be multiples of 4, so streaming (part 3b) keeps
   the full-size resource and limits the sampled levels rather than making
   a smaller one.
+- **Material textures (photoreal part 3a-3b).** `Renderer::add_texture`
+  takes a cooked texture (any sampled single-layer format, mips and all)
+  and returns a `TextureId`; `remove_texture` frees it (frames in flight
+  finish with it) and the id is handed out again. A `Material` names up to
+  four, as glTF combines them: base colour (sRGB, multiplies
+  `base_color`), normal (x, y in R, G; green up; z rebuilt), roughness and
+  metallic (R, G; multiply theirs) and occlusion (R; dims the ambient and
+  bounce light). An unknown or removed id counts as none. gpu::Material is
+  48 bytes: the plain values and four read descriptors. Shading samples
+  them anisotropically with `SampleGrad`, the footprint from ray
+  differentials: the rays of the pixels right of and below this one, met
+  with the triangle's plane, give the uv's change per pixel, so mips are
+  exact on the visibility buffer with no screen derivatives (which a
+  deferred resolve does not have). The normal map bends the shading normal
+  in the interpolated tangent frame, turned with the instance (a mirroring
+  instance flips the bitangent). Far-field voxels keep the plain colours.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool

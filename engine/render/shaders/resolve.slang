@@ -169,7 +169,9 @@ struct Surface {
 // the triangle's corners: Moller-Trumbore, without back-face rejection.
 // Barycentrics are clamped, so pixels whose centre misses the triangle
 // slightly (edges: the rasterizer covers by area) stay on it.
-float3 barycentrics(float3 dir, float3 a, float3 b, float3 c) {
+// Unclamped: where the ray meets the triangle's plane, even outside it
+// (for the uv differentials of neighbouring pixels' rays).
+float3 plane_barycentrics(float3 dir, float3 a, float3 b, float3 c) {
     const float3 e1 = b - a;
     const float3 e2 = c - a;
     const float3 p = cross(dir, e2);
@@ -182,7 +184,11 @@ float3 barycentrics(float3 dir, float3 a, float3 b, float3 c) {
     const float u = dot(s, p) * inv;
     const float3 q = cross(s, e1);
     const float v = dot(dir, q) * inv;
-    const float3 w = max(float3(1.0 - u - v, u, v), float3(0.0, 0.0, 0.0));
+    return float3(1.0 - u - v, u, v);
+}
+
+float3 barycentrics(float3 dir, float3 a, float3 b, float3 c) {
+    const float3 w = max(plane_barycentrics(dir, a, b, c), float3(0.0, 0.0, 0.0));
     return w / max(w.x + w.y + w.z, 1e-12);
 }
 
@@ -190,6 +196,10 @@ float3 barycentrics(float3 dir, float3 a, float3 b, float3 c) {
 struct Hit {
     float3 world;  // camera-relative
     float3 n;      // unit
+    float2 uv;     // the mesh's texture coordinates here
+    float2 uv_dx;  // and their change to the next pixel right and down (ray
+    float2 uv_dy;  // differentials: texture filtering's footprint)
+    float4 tangent; // world tangent (along +u) and bitangent sign
     uint instance; // into the frame's instances
     uint material;
     uint cluster;  // the visible list's cluster index
@@ -203,6 +213,10 @@ Hit no_hit() {
     Hit h;
     h.world = float3(0.0, 0.0, 0.0);
     h.n = float3(0.0, 1.0, 0.0);
+    h.uv = float2(0.0, 0.0);
+    h.uv_dx = float2(0.0, 0.0);
+    h.uv_dy = float2(0.0, 0.0);
+    h.tangent = float4(1.0, 0.0, 0.0, 1.0);
     h.instance = 0xFFFFFFFFu;
     h.material = 0;
     h.cluster = 0;
@@ -244,6 +258,28 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     Hit h;
     h.n = safe_normalize(to_world_normal(inst, object_normal), float3(0.0, 1.0, 0.0));
     h.world = a * w.x + b * w.y + c * w.z;
+    // Texture coordinates, and how far they move to the neighbouring
+    // pixels: their rays met with this triangle's plane (unclamped, so the
+    // footprint stays right at its edges).
+    const float2 uv0 = cluster_uv(pool, geometry, cluster, corners.x);
+    const float2 uv1 = cluster_uv(pool, geometry, cluster, corners.y);
+    const float2 uv2 = cluster_uv(pool, geometry, cluster, corners.z);
+    h.uv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
+    const float3 here = plane_barycentrics(dir, a, b, c);
+    const float3 right = plane_barycentrics(dir + f.ray_x.xyz * (2.0 / f.width), a, b, c);
+    const float3 down = plane_barycentrics(dir - f.ray_y.xyz * (2.0 / f.height), a, b, c);
+    const float2 uv_here = uv0 * here.x + uv1 * here.y + uv2 * here.z;
+    h.uv_dx = uv0 * right.x + uv1 * right.y + uv2 * right.z - uv_here;
+    h.uv_dy = uv0 * down.x + uv1 * down.y + uv2 * down.z - uv_here;
+    // The tangent turns with the mesh (not as a normal does); a mirroring
+    // instance flips the bitangent.
+    const float4 t0 = cluster_tangent(pool, geometry, cluster, corners.x);
+    const float3 object_tangent = t0.xyz * w.x + cluster_tangent(pool, geometry, cluster, corners.y).xyz * w.y +
+                                  cluster_tangent(pool, geometry, cluster, corners.z).xyz * w.z;
+    const float3 world_tangent = float3(dot(inst.model[0].xyz, object_tangent), dot(inst.model[1].xyz, object_tangent),
+                                        dot(inst.model[2].xyz, object_tangent));
+    const float det = dot(inst.model[0].xyz, cross(inst.model[1].xyz, inst.model[2].xyz));
+    h.tangent = float4(world_tangent, det < 0.0 ? -t0.w : t0.w);
     h.instance = entry.x;
     h.material = inst.material;
     h.cluster = entry.y;
@@ -252,6 +288,45 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     h.radius = mesh.bounds.w * inst.max_scale;
     h.always_mesh = inst.always_mesh;
     return h;
+}
+
+// --- Material textures ------------------------------------------------------
+
+static const uint k_material_bytes = 48; // gpu::Material
+static const uint k_no_texture = 0xFFFFFFFFu;
+
+// A material texture at the pixel's uv, filtered over the pixel's
+// footprint (anisotropic, its mip from the ray differentials).
+float4 material_sample(uint descriptor, Hit s) {
+    return read_texture_nonuniform(descriptor)
+        .SampleGrad(get_sampler(k_sampler_anisotropic_wrap), s.uv, s.uv_dx, s.uv_dy);
+}
+
+// The material's textures (gpu::Material::textures: base colour, normal,
+// roughness and metallic, occlusion) over its plain values, as glTF
+// combines them.
+void apply_textures(uint4 textures, Hit s, inout float3 base, inout float rough, inout float metal,
+                    inout float occlusion, inout float3 n) {
+    if (textures.x != k_no_texture) {
+        base *= material_sample(textures.x, s).rgb; // an sRGB view: linear here
+    }
+    if (textures.y != k_no_texture) {
+        // x and y in R and G, z rebuilt; in the frame of the tangent (made
+        // perpendicular to the normal) and the bitangent its sign gives.
+        const float2 xy = material_sample(textures.y, s).rg * 2.0 - 1.0;
+        const float z = sqrt(saturate(1.0 - dot(xy, xy)));
+        const float3 t = safe_normalize(s.tangent.xyz - n * dot(n, s.tangent.xyz), float3(1.0, 0.0, 0.0));
+        const float3 b = cross(n, t) * s.tangent.w;
+        n = safe_normalize(t * xy.x + b * xy.y + n * z, n);
+    }
+    if (textures.z != k_no_texture) {
+        const float2 rm = material_sample(textures.z, s).rg;
+        rough *= rm.x;
+        metal *= rm.y;
+    }
+    if (textures.w != k_no_texture) {
+        occlusion = material_sample(textures.w, s).r;
+    }
 }
 
 // Specular anti-aliasing (Tokuyoshi and Kaplanyan, "Improved Geometric
@@ -291,7 +366,8 @@ float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 // reflection is multiplied by (`spec_weight`) and the reflected light it
 // used (`spec_light`), for the screen's reflections to replace.
 float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
-             float sun, float4 bounce, float4 cone, float cone_weight, out float3 spec_weight, out float3 spec_light) {
+             float sun, float4 bounce, float4 cone, float cone_weight, float occlusion, out float3 spec_weight,
+             out float3 spec_light) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
@@ -331,6 +407,9 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
         ambient_specular *= saturate(luminance(gi) / max(luminance(ambient_diffuse), 1e-4));
         ambient_diffuse = gi;
     }
+    // The material's occlusion: small creases the voxels are too coarse to see.
+    ambient_diffuse *= occlusion;
+    ambient_specular *= occlusion;
     // The voxel cone: what it met, and the dimmed hemisphere past it.
     ambient_specular = lerp(ambient_specular, cone.rgb + (1.0 - cone.a) * ambient_specular, cone_weight);
     const float3 env_fresnel = f0 + (max(1.0 - roughness, f0) - f0) * pow(1.0 - n_dot_v, 5.0);
@@ -557,7 +636,7 @@ Output shade_pixel(float4 position) {
                 float3 spec_weight;
                 float3 spec_light;
                 float3 color = shade(f, world, far_n, albedo, far_rough, far_metal, float3(0.0, 0.0, 0.0), 0.0,
-                                     sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, spec_weight, spec_light);
+                                     sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, 1.0, spec_weight, spec_light);
                 float far_through = 1.0;
                 if (sky_on) {
                     color = under_sky(sky, color, dir, t, pixel, far_through);
@@ -599,13 +678,16 @@ Output shade_pixel(float4 position) {
     // The instance's material (the CPU keeps the index in range), then
     // the decals over this pixel.
     ByteAddressBuffer materials = read_buffer(push.materials);
-    const uint material_at = push.material_offset + min(s.material, push.material_count) * 32;
+    const uint material_at = push.material_offset + min(s.material, push.material_count) * k_material_bytes;
     const float4 base_roughness = load4(materials, material_at);
     const float4 emissive_metallic = load4(materials, material_at + 16);
+    const uint4 textures = materials.Load4(material_at + 32);
     float3 base = base_roughness.rgb;
     float rough = base_roughness.a;
     float metal = emissive_metallic.a;
     float3 emissive = emissive_metallic.rgb;
+    float occlusion = 1.0;
+    apply_textures(textures, s, base, rough, metal, occlusion, n);
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
                  push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
@@ -647,7 +729,7 @@ Output shade_pixel(float4 position) {
     float3 spec_weight;
     float3 spec_light;
     float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
-                         spec_weight, spec_light);
+                         occlusion, spec_weight, spec_light);
     float through = 1.0; // of the reflection, which reflect.slang adds over the fog and clouds
     if (sky_on) {
         color = under_sky(sky, color, view_dir, length(world), pixel, through);

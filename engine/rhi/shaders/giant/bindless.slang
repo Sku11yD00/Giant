@@ -15,6 +15,11 @@ ByteAddressBuffer read_buffer_nonuniform(uint descriptor) {
     return ResourceDescriptorHeap[NonUniformResourceIndex(descriptor)];
 }
 Texture2D<float4> read_texture(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
+// For a texture that differs between threads of a wave (e.g. each pixel's
+// material's).
+Texture2D<float4> read_texture_nonuniform(uint descriptor) {
+    return ResourceDescriptorHeap[NonUniformResourceIndex(descriptor)];
+}
 // A texture with more than one layer (TextureDesc::layers > 1).
 Texture2DArray<float4> read_texture_array(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
 RWTexture2D<float4> write_texture(uint descriptor) { return ResourceDescriptorHeap[descriptor]; }
