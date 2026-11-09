@@ -5,6 +5,7 @@
 #include "giant/geometry/mesh.h"
 #include "cells.h"
 #include "decals.h"
+#include "exposure.h"
 #include "instance_store.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
@@ -155,8 +156,19 @@ Renderer::~Renderer() {
           m_smaa_blend, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
-          m_sky_ambient_pass, m_skin}) {
+          m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post}) {
         m_device.destroy(p);
+    }
+    for (const rhi::TextureHandle t : m_bloom_downs) {
+        m_device.destroy(t);
+    }
+    for (const rhi::TextureHandle t : m_bloom_ups) {
+        m_device.destroy(t);
+    }
+    m_device.destroy(m_scene);
+    for (const rhi::BufferHandle b : {m_histogram_bins, m_histogram_readback[0], m_histogram_readback[1],
+                                      m_histogram_readback[2]}) {
+        m_device.destroy(b);
     }
     for (const rhi::TextureHandle t : {m_sky_view, m_cloud_map, m_cloud_shadow, m_clouds_a, m_clouds_b, m_cover, m_sky_multi,
                                        m_sky_aerial, m_sky_aerial_through, m_sky_ambient}) {
@@ -229,6 +241,10 @@ bool Renderer::init() {
     m_sky_aerial_pass = compute(shaders::sky_aerial_cs(), "sky: the air over the view");
     m_sky_ambient_pass = compute(shaders::sky_ambient_cs(), "sky: its light from all round");
     m_skin = compute(shaders::skin_cs(), "skin: pose meshes");
+    m_histogram_clear = compute(shaders::histogram_clear_cs(), "exposure: clear the histogram");
+    m_histogram = compute(shaders::histogram_cs(), "exposure: histogram");
+    m_bloom_down = compute(shaders::bloom_down_cs(), "bloom: down");
+    m_bloom_up = compute(shaders::bloom_up_cs(), "bloom: up");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     ShadowDesc shadow_desc;
     shadow_desc.pool_pages = m_desc.shadow_pages;
@@ -278,19 +294,26 @@ bool Renderer::init() {
     resolve.cull = rhi::CullMode::none;
     resolve.name = "shade visibility";
     m_resolve = m_device.create_pipeline(resolve);
-    resolve.pixel = shaders::resolve_direct_ps(); // without screen reflections: finished in one pass
+    resolve.pixel = shaders::resolve_direct_ps(); // without screen reflections: the radiance alone
     resolve.color_formats = {};
-    resolve.color_formats[0] = rhi::Format::rgba8_srgb;
+    resolve.color_formats[0] = rhi::Format::rgba16_float;
     resolve.color_count = 1;
     resolve.name = "shade visibility (no screen reflections)";
     m_resolve_direct = m_device.create_pipeline(resolve);
     rhi::GraphicsPipelineDesc reflect;
     reflect.vertex = shaders::reflect_vs();
     reflect.pixel = shaders::reflect_ps();
-    reflect.color_formats[0] = rhi::Format::rgba8_srgb;
+    reflect.color_formats[0] = rhi::Format::rgba16_float;
     reflect.cull = rhi::CullMode::none;
-    reflect.name = "screen reflections and tone mapping";
+    reflect.name = "screen reflections";
     m_reflect = m_device.create_pipeline(reflect);
+    rhi::GraphicsPipelineDesc post;
+    post.vertex = shaders::post_vs();
+    post.pixel = shaders::post_ps();
+    post.color_formats[0] = rhi::Format::rgba8_srgb;
+    post.cull = rhi::CullMode::none;
+    post.name = "bloom, exposure and tone mapping";
+    m_post = m_device.create_pipeline(post);
     rhi::GraphicsPipelineDesc smaa;
     smaa.vertex = shaders::smaa_vs();
     smaa.cull = rhi::CullMode::none;
@@ -317,7 +340,8 @@ bool Renderer::init() {
           m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
-          m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin}) {
+          m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
+          m_bloom_down, m_bloom_up, m_post}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -330,6 +354,25 @@ bool Renderer::init() {
     }
     m_smaa_area = tables.area;
     m_smaa_search = tables.search;
+    // Auto exposure's histogram and its read-back copies (small: made once).
+    {
+        rhi::BufferDesc bins;
+        bins.size = u64{k_exposure_bins} * 4;
+        bins.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
+        bins.name = "exposure histogram";
+        m_histogram_bins = m_device.create_buffer(bins);
+        bins.usage = rhi::BufferUsage::none;
+        bins.memory = rhi::Memory::readback;
+        bins.name = "exposure histogram (read back)";
+        for (rhi::BufferHandle& b : m_histogram_readback) {
+            b = m_device.create_buffer(bins);
+        }
+        if (!m_histogram_bins.valid() || !m_histogram_readback[0].valid() || !m_histogram_readback[1].valid() ||
+            !m_histogram_readback[2].valid()) {
+            log_error("render", "could not create the exposure histogram");
+            return false;
+        }
+    }
     // A finely cut sphere, so its LOD has room to work.
     const geometry::TriangleMesh shapes[] = {geometry::make_cube(), geometry::make_sphere(128, 64),
                                              geometry::make_plane()};
@@ -620,9 +663,9 @@ Mat4 Renderer::view_projection(const View& view, float aspect) {
 
 bool Renderer::ensure_targets(u32 width, u32 height) {
     if (m_depth.valid() && m_vis.valid() && m_hzb.valid() && m_color.valid() && m_edges.valid() &&
-        m_weights.valid() && m_radiance.valid() && m_gloss.valid() && m_fallback.valid() && m_width == width &&
-        m_height == height) {
-        return true;
+        m_weights.valid() && m_radiance.valid() && m_gloss.valid() && m_fallback.valid() && m_scene.valid() &&
+        m_width == width && m_height == height) {
+        return ensure_post_targets();
     }
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
@@ -633,6 +676,15 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_device.destroy(m_radiance);
     m_device.destroy(m_gloss);
     m_device.destroy(m_fallback);
+    m_device.destroy(m_scene);
+    for (rhi::TextureHandle& t : m_bloom_downs) { // sized to the frame: made again below
+        m_device.destroy(t);
+        t = {};
+    }
+    for (rhi::TextureHandle& t : m_bloom_ups) {
+        m_device.destroy(t);
+        t = {};
+    }
     m_device.destroy(m_clouds_a); // half the frame's size: made again with the sky's
     m_device.destroy(m_clouds_b);
     m_clouds_a = {};
@@ -663,6 +715,8 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_radiance = m_device.create_texture(desc);
     desc.name = "reflected light";
     m_fallback = m_device.create_texture(desc);
+    desc.name = "light with screen reflections";
+    m_scene = m_device.create_texture(desc);
     desc.format = rhi::Format::rg32_uint;
     desc.name = "gloss";
     m_gloss = m_device.create_texture(desc);
@@ -683,7 +737,7 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_width = width;
     m_height = height;
     if (!m_depth.valid() || !m_vis.valid() || !m_hzb.valid() || !m_color.valid() || !m_edges.valid() ||
-        !m_weights.valid() || !m_radiance.valid() || !m_gloss.valid() || !m_fallback.valid()) {
+        !m_weights.valid() || !m_radiance.valid() || !m_gloss.valid() || !m_fallback.valid() || !m_scene.valid()) {
         // Half-made targets are not reused: the next frame tries again.
         m_width = 0;
         m_height = 0;
@@ -694,7 +748,42 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     // first frame with weather); a failure is tried again on the next resize.
     m_sky_failed = false;
     ensure_sky_targets();
-    return true;
+    return ensure_post_targets();
+}
+
+bool Renderer::ensure_post_targets() {
+    bool ok = true;
+    u32 w = m_width;
+    u32 h = m_height;
+    for (u32 i = 0; i < k_bloom_levels; ++i) {
+        w = std::max((w + 1) / 2, 1u);
+        h = std::max((h + 1) / 2, 1u);
+        m_bloom_width[i] = w;
+        m_bloom_height[i] = h;
+        const auto make = [&](rhi::TextureHandle& t, const char* name) {
+            if (t.valid()) {
+                return;
+            }
+            rhi::TextureDesc desc;
+            desc.width = w;
+            desc.height = h;
+            desc.format = rhi::Format::rgba16_float;
+            desc.usage = rhi::TextureUsage::sampled | rhi::TextureUsage::shader_write;
+            desc.name = name;
+            t = m_device.create_texture(desc);
+            ok = ok && t.valid();
+        };
+        make(m_bloom_downs[i], "bloom: down");
+        if (i + 1 < k_bloom_levels) {
+            make(m_bloom_ups[i], "bloom: up");
+        }
+    }
+    if (!ok && !m_post_logged) {
+        // The levels made are kept; the rest are tried again next frame.
+        m_post_logged = true;
+        log_error("render", "could not create bloom's textures (out of GPU memory?)");
+    }
+    return ok;
 }
 
 bool Renderer::ensure_cull_buffers(CullBuffers& c, u32 instance_count) {
@@ -1706,7 +1795,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
                              m_sky_ambient.valid() && !m_sky_failed;
     k.sky_ambient = sky_ambient ? m_device.read_descriptor(m_sky_ambient) : 0u;
     k.sky_flags = sky_ambient ? 1u : 0u;
-    k.exposure = light.exposure;
+    k.exposure = update_exposure(frame, lit_view);
     k.debug_view = static_cast<u32>(settings.debug_view);
     k.threshold = std::clamp(settings.lod_error_pixels, 0.01f, 1000.0f);
     k.pixels_per_unit = 0.5f * focal * static_cast<float>(height);
@@ -1951,18 +2040,17 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     }
     mark(CpuSection::sky);
     cmd.begin_timing("shading");
-    // With screen reflections, shading writes radiance before exposure and
-    // the screen reflections pass reflects it and tone maps it into
-    // `shaded`; without, shading tone maps into `shaded` itself.
+    // Shading writes the light before exposure into m_radiance (with
+    // screen reflections, also what they need, and their pass adds them
+    // into m_scene); post() then measures it, blooms it, exposes and tone
+    // maps it into `shaded`.
     rhi::RenderPassDesc pass;
     const Vec3& bg = light.background;
+    pass.colors[0] = {m_radiance, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 0.0f}};
     if (screen_reflections) {
-        pass.colors[0] = {m_radiance, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 0.0f}};
         pass.colors[1] = {m_gloss, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
         pass.colors[2] = {m_fallback, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
         pass.color_count = 3;
-    } else {
-        pass.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
     }
     cmd.begin_render_pass(pass);
     cmd.set_pipeline(screen_reflections ? m_resolve : m_resolve_direct);
@@ -2093,15 +2181,14 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     ++m_stats.draws;
     cmd.end_render_pass();
     if (screen_reflections) {
-        // Screen reflections from this frame's radiance, then exposure and
-        // tone mapping.
+        // Screen reflections from this frame's radiance.
         cmd.barrier(m_radiance, rhi::ResourceState::shader_read);
         cmd.barrier(m_gloss, rhi::ResourceState::shader_read);
         cmd.barrier(m_fallback, rhi::ResourceState::shader_read);
         cmd.barrier(m_depth, rhi::ResourceState::shader_read);
         rhi::RenderPassDesc finish;
         // Cleared all the same: defined where no draw is recorded (the null device).
-        finish.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
+        finish.colors[0] = {m_scene, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 0.0f}};
         cmd.begin_render_pass(finish);
         cmd.set_pipeline(m_reflect);
         gpu::ReflectPush reflect{};
@@ -2118,6 +2205,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.end_render_pass();
     }
     cmd.end_timing();
+    post(cmd, data, frame, screen_reflections ? m_scene : m_radiance, shaded, lit_view);
     m_stats.reflections = voxel_reflections;
     m_stats.screen_reflections = screen_reflections;
     if (shadows) {
@@ -2139,8 +2227,151 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     mark(CpuSection::shading);
 }
 
+float Renderer::update_exposure(const FrameInput& frame, bool lit_view) {
+    const RenderSettings& settings = frame.settings;
+    const float manual = std::isfinite(frame.lighting.exposure) ? std::max(frame.lighting.exposure, 0.0f) : 1.0f;
+    m_measure_exposure = settings.auto_exposure && lit_view;
+    m_bloom_on = false; // until post() blooms
+    if (!settings.auto_exposure) {
+        // Off: measurements from before are not taken when it comes back on.
+        m_exposure_known = false;
+        for (u64& tag : m_histogram_frame) {
+            tag = ~u64{0};
+        }
+        m_frame_exposure = manual;
+        return manual;
+    }
+    // The newest histogram the GPU is done with, taken once.
+    const u64 now = m_device.frames_completed();
+    u32 best = 3;
+    for (u32 i = 0; i < 3; ++i) {
+        const u64 tag = m_histogram_frame[i];
+        if (tag != ~u64{0} && tag + rhi::Device::k_frames_in_flight <= now &&
+            (best == 3 || tag > m_histogram_frame[best])) {
+            best = i;
+        }
+    }
+    if (best < 3 && m_histogram_frame[best] != m_histogram_taken) {
+        m_histogram_taken = m_histogram_frame[best];
+        const u8* bytes = m_device.mapped(m_histogram_readback[best]);
+        if (bytes != nullptr) {
+            std::array<u32, k_exposure_bins> bins{};
+            std::memcpy(bins.data(), bytes, sizeof(bins));
+            float stops = 0.0f;
+            if (histogram_stops(bins, 0.1f, 0.9f, stops)) {
+                m_scene_stops = stops;
+                m_exposure_target = exposure_target(stops, std::clamp(settings.exposure_compensation, -10.0f, 10.0f),
+                                                    std::clamp(settings.exposure_min, -20.0f, 20.0f),
+                                                    std::clamp(settings.exposure_max, -20.0f, 20.0f));
+                if (!m_exposure_known) {
+                    m_exposure_known = true; // the first measurement: at once
+                    m_exposure_stops = m_exposure_target;
+                }
+            }
+        }
+    }
+    if (m_exposure_known) {
+        const float up = std::clamp(settings.exposure_speed_up, 0.0f, 100.0f);
+        const float down = std::clamp(settings.exposure_speed_down, 0.0f, 100.0f);
+        m_exposure_stops = ease_exposure(m_exposure_stops, m_exposure_target, up, down, frame.delta_seconds);
+    }
+    // Until the first measurement: Lighting::exposure alone.
+    m_frame_exposure = m_exposure_known ? manual * std::exp2(m_exposure_stops) : manual;
+    return m_frame_exposure;
+}
+
+void Renderer::post(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame, rhi::TextureHandle light,
+                    rhi::TextureHandle shaded, bool lit_view) {
+    const RenderSettings& settings = frame.settings;
+    cmd.begin_timing("post");
+    cmd.barrier(light, rhi::ResourceState::shader_read);
+    gpu::PostPush push{};
+    push.frame = data.frame.descriptor;
+    push.frame_offset = data.frame.offset;
+    const u32 light_read = m_device.read_descriptor(light);
+    const auto groups = [](u32 n) { return (n + 7) / 8; };
+    // Auto exposure's measurement, copied out once the GPU gets there.
+    if (m_measure_exposure) {
+        cmd.barrier(m_histogram_bins, rhi::ResourceState::shader_write);
+        cmd.set_pipeline(m_histogram_clear);
+        push.target = m_device.write_descriptor(m_histogram_bins);
+        cmd.push(push);
+        cmd.dispatch(1, 1);
+        cmd.barrier(m_histogram_bins, rhi::ResourceState::shader_write); // the clear before the counts
+        cmd.set_pipeline(m_histogram);
+        push.source = light_read;
+        push.width = m_width;
+        push.height = m_height;
+        cmd.push(push);
+        cmd.dispatch((m_width + 15) / 16, (m_height + 15) / 16);
+        const u64 frame_index = m_device.frames_completed();
+        const u32 slot = static_cast<u32>(frame_index % 3);
+        cmd.barrier(m_histogram_bins, rhi::ResourceState::copy_source);
+        cmd.copy_buffer(m_histogram_readback[slot], 0, m_histogram_bins, 0, u64{k_exposure_bins} * 4);
+        m_histogram_frame[slot] = frame_index;
+    }
+    // Bloom: down six times from the light, then back up.
+    const float strength = std::isfinite(settings.bloom_strength) ? std::clamp(settings.bloom_strength, 0.0f, 1.0f) : 0.0f;
+    const bool bloom = settings.bloom && lit_view && strength > 0.0f;
+    if (bloom) {
+        rhi::TextureHandle from = light;
+        for (u32 i = 0; i < k_bloom_levels; ++i) {
+            cmd.barrier(m_bloom_downs[i], rhi::ResourceState::shader_write);
+            cmd.set_pipeline(m_bloom_down);
+            push.source = m_device.read_descriptor(from);
+            push.target = m_device.write_descriptor(m_bloom_downs[i]);
+            push.width = m_bloom_width[i];
+            push.height = m_bloom_height[i];
+            push.flags = i == 0 ? 1u : 0u;
+            cmd.push(push);
+            cmd.dispatch(groups(push.width), groups(push.height));
+            cmd.barrier(m_bloom_downs[i], rhi::ResourceState::shader_read);
+            from = m_bloom_downs[i];
+        }
+        for (u32 i = k_bloom_levels - 1; i-- > 0;) {
+            cmd.barrier(m_bloom_ups[i], rhi::ResourceState::shader_write);
+            cmd.set_pipeline(m_bloom_up);
+            push.source = m_device.read_descriptor(from);
+            push.add = m_device.read_descriptor(m_bloom_downs[i]);
+            push.target = m_device.write_descriptor(m_bloom_ups[i]);
+            push.width = m_bloom_width[i];
+            push.height = m_bloom_height[i];
+            push.flags = 0;
+            cmd.push(push);
+            cmd.dispatch(groups(push.width), groups(push.height));
+            cmd.barrier(m_bloom_ups[i], rhi::ResourceState::shader_read);
+            from = m_bloom_ups[i];
+        }
+    }
+    // Exposure and tone mapping into the image.
+    const Vec3& bg = frame.lighting.background;
+    rhi::RenderPassDesc pass;
+    pass.colors[0] = {shaded, rhi::LoadOp::clear, {bg.x, bg.y, bg.z, 1.0f}};
+    cmd.begin_render_pass(pass);
+    cmd.set_pipeline(m_post);
+    push.source = light_read;
+    push.add = bloom ? m_device.read_descriptor(m_bloom_ups[0]) : light_read;
+    push.target = 0;
+    push.width = m_width;
+    push.height = m_height;
+    push.flags = (settings.tone_mapper == ToneMapper::agx ? 2u : 0u) | (bloom ? 4u : 0u);
+    push.strength = strength;
+    push.levels = static_cast<float>(k_bloom_levels);
+    cmd.push(push);
+    cmd.draw(3);
+    ++m_stats.post_draws;
+    cmd.end_render_pass();
+    cmd.end_timing();
+    m_bloom_on = bloom;
+}
+
 void Renderer::finish_stats(const FrameData& data) {
     copy_streaming_stats();
+    m_stats.auto_exposure = m_measure_exposure;
+    m_stats.exposure = m_frame_exposure;
+    m_stats.exposure_measured = m_exposure_known;
+    m_stats.scene_stops = m_scene_stops;
+    m_stats.bloom = m_bloom_on;
     m_stats.materials = data.material_count;
     m_stats.cells = m_cells_count;
     m_stats.cells_changed = m_cells_changed;

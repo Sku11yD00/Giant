@@ -395,6 +395,7 @@ int run(const Options& options) {
     };
     std::vector<sim::DustPuff> dust_near;
     std::vector<render::DustPuff> dust_frame;
+    float render_seconds = 1.0f / 60.0f; // since the last frame (auto exposure eases over it)
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         mark(editor::FramePhase::other);
         terrain_meshes.update(state.scene.terrain);
@@ -445,6 +446,7 @@ int run(const Options& options) {
         for (const sim::DustPuff& d : dust_near) dust_frame.push_back({d.position, d.radius, d.density, d.color});
         input.dust = dust_frame;
         input.wind = weather.wind();
+        input.delta_seconds = render_seconds;
         renderer->render(cmd, target, input);
         mark(editor::FramePhase::render);
         if (!in_screenshot) {
@@ -535,6 +537,7 @@ int run(const Options& options) {
         const auto frame_start = std::chrono::steady_clock::now();
         const float delta = std::chrono::duration<float>(frame_start - last_frame).count();
         last_frame = frame_start;
+        render_seconds = delta;
         frame_info.frame_ms = 1000.0f * delta;
         // The phases since the last frame began: the same span as delta.
         mark(editor::FramePhase::other);

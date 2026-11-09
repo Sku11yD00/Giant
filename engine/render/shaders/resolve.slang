@@ -3,10 +3,10 @@
 // correct barycentrics, interpolates the normal and lights it once.
 //
 // Lighting: one sun (GGX specular, Lambert diffuse) plus sky/ground ambient,
-// then exposure and the Khronos PBR Neutral tone mapper (tone_map.slang).
-// With screen reflections on, shading writes radiance before exposure and
-// reflect.slang adds the reflections and tone maps (ps_main); off, it tone
-// maps here into the sRGB target (ps_direct).
+// written as the light before exposure (a: 1 to expose and tone map, 0
+// shown as it is). With screen reflections on, also what reflect.slang
+// needs to add them (ps_main); off, the light alone (ps_direct). Either
+// way post.slang then exposes and tone maps it.
 //
 // The far field: pixels past RenderSettings::far_field_distance (with
 // nothing drawn, or a mesh drawn farther) march the voxel world from there
@@ -666,13 +666,8 @@ Output ps_main(float4 position : SV_Position) {
     return shade_pixel(position);
 }
 
-// Without: finished here, exposed and tone mapped into the sRGB target.
+// Without: the light alone, for post.slang.
 [shader("pixel")]
 float4 ps_direct(float4 position : SV_Position) : SV_Target {
-    const Output o = shade_pixel(position);
-    if (o.radiance.a <= 0.0) {
-        return float4(o.radiance.rgb, 1.0); // the background and debug views, as they are
-    }
-    const Frame f = load_frame(push.frame, push.frame_offset);
-    return float4(tone_map(o.radiance.rgb * f.exposure), 1.0);
+    return shade_pixel(position).radiance;
 }

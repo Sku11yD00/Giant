@@ -263,6 +263,8 @@ GIANT_TEST("skin: d3d12 draws the pose, culled by refit clusters, and moves its 
     materials[0].base_color = {0.0f, 0.0f, 0.0f};
     materials[0].emissive = {0.0f, 0.8f, 0.0f};
     FrameInput frame;
+    frame.settings.auto_exposure = false; // (Lighting::exposure alone, no bloom: the colours checked hold)
+    frame.settings.bloom = false;
     frame.view.position = origin + DVec3{3.0, 0.0, 4.0};
     frame.view.vertical_fov_degrees = 30.0f;
     frame.instances = instances;

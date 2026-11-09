@@ -1,7 +1,6 @@
 // Finishes shading (resolve.slang): sharp reflections from the screen on
-// glossy pixels, then exposure and the Khronos PBR Neutral tone mapper,
-// which keeps base colours true until highlights roll off. Written to an
-// sRGB target.
+// glossy pixels, added to the light before exposure (rgba16_float, a as
+// shading's), which post.slang then exposes and tone maps.
 //
 // Screen reflections: a ray along the mirror direction against this
 // frame's depth buffer; where it hits, the light there in this frame's
@@ -11,7 +10,6 @@
 //
 // Layout: ReflectPush in src/gpu_layout.h.
 #include "common.slang"
-#include "tone_map.slang"
 
 struct ReflectPush {
     uint frame;
@@ -137,7 +135,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     Texture2D<float4> radiance = read_texture(push.radiance);
     const float4 shaded = radiance.Load(int3(pixel, 0));
     if (shaded.a <= 0.0) {
-        return float4(shaded.rgb, 1.0); // the background and debug views, as they are
+        return float4(shaded.rgb, 0.0); // the background and debug views, as they are
     }
     const Frame f = load_frame(push.frame, push.frame_offset);
     float3 color = shaded.rgb;
@@ -166,5 +164,5 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
             }
         }
     }
-    return float4(tone_map(max(color, float3(0.0, 0.0, 0.0)) * f.exposure), 1.0);
+    return float4(min(max(color, float3(0.0, 0.0, 0.0)), float3(60000.0, 60000.0, 60000.0)), 1.0);
 }

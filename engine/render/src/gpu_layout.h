@@ -448,6 +448,23 @@ struct ReflectPush {
 };
 static_assert(sizeof(ReflectPush) == 32);
 
+// post.slang's PostPush (all its passes): the histogram, bloom, exposure
+// and tone mapping.
+struct PostPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 source; // read descriptor: the light, or the bloom level before
+    u32 add;    // read descriptor: the level down at this size (up), the bloom's top (the image)
+    u32 target; // write descriptor: the level made, or the histogram's bins
+    u32 width;  // of what is made (the histogram: the image)
+    u32 height;
+    u32 flags;  // bit 0: the first level down; bit 1: AgX; bit 2: bloom
+    float strength;
+    float levels;
+    u32 pad[2];
+};
+static_assert(sizeof(PostPush) == 48);
+
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {
     float metrics[4]; // 1 / width, 1 / height, width, height

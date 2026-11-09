@@ -206,8 +206,8 @@ an offline cooker can use it without a device.
   search) runs after shading in three full-screen passes (edges from luma,
   blend weights from SMAA's area and search tables, then the blend into the
   target); `RenderStats::post_draws` counts them. It is skipped in debug
-  views. Shading's image is finished (screen reflections, tone mapping)
-  into its own sRGB image first. Specular: in the
+  views. Shading's image is finished (screen reflections, then exposure,
+  bloom and tone mapping in `post.slang`) into its own sRGB image first. Specular: in the
   shading pass, the change in normal across each 2x2 pixel quad (same
   instance only) widens the GGX roughness (Kaplanyan-Hoffman style, capped),
   so highlights on tight curves stay stable instead of flickering.
@@ -634,6 +634,49 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   the sun's angle at the camera everywhere along a ray (as single
   scattering always has), so very long horizon rays shift the twilight
   glow slightly.
+- **Exposure, bloom and tone mapping (photoreal part 2, `shaders/post.slang`,
+  `src/exposure.h`).** Shading (and the screen reflections) write the
+  light before exposure into an rgba16 float target (alpha 1 where it is
+  lit, 0 for the background and debug views, which are shown as they
+  are). After them, in the "post" timing (lit views):
+  - **Auto exposure** (`auto_exposure`, default on). A compute pass counts
+    the lit pixels' luminance into 64 bins: bin 0 is black and anything
+    under 2^-16, bins 1 to 63 are even in stops up to 2^8 (0.38 stops
+    each). The counts are copied to a read-back ring of three and read on
+    the CPU once the GPU is done with them (two frames later). The 10th to
+    90th percentiles, averaged in stops, give the scene's brightness; the
+    target exposure brings it to middle grey (0.18), plus
+    `exposure_compensation` stops, within `exposure_min` to `exposure_max`
+    stops. The exposure eases there at `exposure_speed_up` stops a second
+    brightening (default 3) and `exposure_speed_down` darkening (1.5), over
+    `FrameInput::delta_seconds` (the editor passes its real frame time, so
+    eyes adapt while paused too). The first measurement is taken at once;
+    until then, and with it off, `Lighting::exposure` alone. It is always
+    multiplied in. It is one number, eased: no image history, so nothing
+    smears. The light it measures is before exposure, so it never measures
+    itself.
+  - **Bloom** (`bloom`, default on). The light halves six times (Jimenez's
+    13-tap filter; on the first, each tap held to 64 times white once
+    exposed, so a lone blazing pixel cannot flicker it), then comes back up
+    (each level plus a 3x3 tent of the one below). The top level over six
+    (the levels' average) takes the place of `bloom_strength` (default
+    0.04) of each pixel's light, so bloom only moves light about and adds
+    none. It is skipped in debug views.
+  - **Tone mapping** (`tone_mapper`): Khronos PBR Neutral (default: base
+    colours true until highlights roll off) or AgX (Wrensch's fit of
+    Sobotka's: very bright colours go gently over to white). Middle grey
+    (0.18) shows as about sRGB 105 under PBR Neutral, 129 under AgX. It writes the sRGB image SMAA then
+    smooths. The dust over a flat background (no sky) is tone mapped in
+    shading, always with PBR Neutral.
+
+  `RenderStats` (`last_frame.exposure` over MCP) gives the multiplier
+  used, whether a measurement has come back and the scene's brightness in
+  stops. Costs: the histogram is one dispatch over the screen with shared
+  memory bins; bloom is 11 small dispatches at half resolution and below
+  (about 2.7 MB of extra targets at 1440p). The light stays in the
+  engine's relative units (the sun about 3); auto exposure makes the
+  absolute scale not matter, and real units (lux, EV100 cameras) are not
+  done. Not yet: lens flare, local exposure.
 - **Rain, snow and wet ground (N3 part 8).** `world::falling` splits the
   weather's precipitation into rain and snow by temperature;
   `world::weather_ground` steps the ground's wetness and snow cover
@@ -2173,10 +2216,10 @@ reflections are as sharp moving as standing still.
   0.3 m + 2% of their distance thick); where it hits a lit surface, that
   pixel's radiance replaces the reflected light shading used. It fades out
   at the screen's edges, for rays coming back at the camera and from
-  roughness 0.25 to 0.4 (mirror sharp: no blur yet). The same pass applies
-  exposure and tone mapping (`post_draws` counts it); with screen
-  reflections off, shading tone maps in place instead (`ps_direct`), one
-  pass and one target as before.
+  roughness 0.25 to 0.4 (mirror sharp: no blur yet). It adds them to the
+  light before exposure, into a target of its own (`post_draws` counts
+  it); with screen reflections off, shading writes the light alone
+  (`ps_direct`). Either way the post pass then exposes and tone maps.
 - Targets: 24 bytes a pixel (about 88 MB at 1440p). `RenderStats::
   reflections` and `screen_reflections` (`last_frame.reflections.voxel`
   and `.screen` over MCP) say which are on.

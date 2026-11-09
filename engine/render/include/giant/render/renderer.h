@@ -183,6 +183,12 @@ struct View {
     float near_plane = 0.1f; // metres; there is no far plane (reverse-Z)
 };
 
+// How the exposed light is brought into the screen's 0 to 1 (lit views).
+enum class ToneMapper : u32 {
+    pbr_neutral, // Khronos PBR Neutral: base colours kept true until the highlights roll off
+    agx,         // AgX: a filmic curve; bright colours go gently over to white
+};
+
 // What the image shows: the lit scene, or how the geometry is built.
 enum class DebugView : u32 {
     lit,
@@ -259,6 +265,30 @@ struct RenderSettings {
     // sky_light and ground_light. All every frame, without history.
     bool physical_sky = true;
     float aerial_distance = 32000.0f; // 1000 to 100000
+    // Exposure (lit views): how bright the light is made before tone
+    // mapping, Lighting::exposure times, with auto_exposure, the eye's own:
+    // the scene's brightness is measured every frame (a histogram of the
+    // light before exposure, read back once the GPU is done with it, a
+    // frame or two later), its middle (the 10th to 90th percentiles, an
+    // average in stops) brought to middle grey, raised or lowered by
+    // exposure_compensation stops, kept within exposure_min to exposure_max
+    // stops of 1, and eased there by at most exposure_speed_up (brighter)
+    // or exposure_speed_down (darker) stops a second of
+    // FrameInput::delta_seconds, as eyes adapt. One number, no image
+    // history: nothing smears. The first measurement is taken at once.
+    bool auto_exposure = true;
+    float exposure_compensation = 0.0f; // stops, -10 to 10
+    float exposure_min = -16.0f;        // stops, -20 to 20
+    float exposure_max = 16.0f;
+    float exposure_speed_up = 3.0f;     // stops a second, 0 (held) to 100
+    float exposure_speed_down = 1.5f;
+    // Bloom (lit views): light spread round bright things as a lens does,
+    // from the light before exposure blurred over six halvings of the
+    // screen, mixed in as bloom_strength (0 to 1) of every pixel's light
+    // (so it only moves light about: none is added).
+    bool bloom = true;
+    float bloom_strength = 0.04f;
+    ToneMapper tone_mapper = ToneMapper::pbr_neutral;
     // The clouds (with FrameInput::sky on): marched at half resolution,
     // cloud_steps steps a ray (8 to 256), and their shadows on the ground.
     bool clouds = true;
@@ -318,6 +348,9 @@ struct FrameInput {
     std::span<const DustPuff> dust;
     // What swaying materials move in (WindClock::state).
     WindState wind;
+    // Seconds since the last frame, for auto exposure's easing (0: held;
+    // at most 1 counts).
+    float delta_seconds = 1.0f / 60.0f;
 };
 
 struct RenderStats {
@@ -377,6 +410,12 @@ struct RenderStats {
     // The sky (this frame).
     bool sky = false;           // the atmosphere drawn
     bool physical_sky = false;  // with light scattered many times, the air over the view and the sky's ambient light
+    // Exposure and bloom (this frame).
+    bool auto_exposure = false;   // the scene's brightness measured this frame
+    float exposure = 0.0f;        // the light's multiplier before tone mapping (Lighting::exposure included)
+    float scene_stops = 0.0f;     // the brightness auto exposure last read (log2 of the light, before exposure)
+    bool exposure_measured = false; // a measurement has been read back (scene_stops holds it)
+    bool bloom = false;
     bool clouds = false;        // clouds marched
     bool cloud_shadows = false; // and their shadows cast
     bool falling = false;       // rain or snow drawn falling
@@ -586,6 +625,14 @@ private:
     bool draw_sky(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
                   rhi::TransientMemory& params);
     bool ensure_sky_targets();
+    bool ensure_post_targets(); // bloom's levels, sized to the frame
+    // Auto exposure from the newest histogram the GPU is done with, eased;
+    // the multiplier this frame's light gets before tone mapping.
+    float update_exposure(const FrameInput& frame, bool lit_view);
+    // The light before exposure (`light`: rgba16_float, a: 1 lit) measured,
+    // bloomed, exposed and tone mapped into `shaded`.
+    void post(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame, rhi::TextureHandle light,
+              rhi::TextureHandle shaded, bool lit_view);
 
     rhi::Device& m_device;
     RendererDesc m_desc;
@@ -624,8 +671,14 @@ private:
     rhi::PipelineHandle m_smaa_weights;
     rhi::PipelineHandle m_smaa_blend;
     rhi::PipelineHandle m_voxel_view;
-    rhi::PipelineHandle m_reflect; // screen reflections, exposure and tone mapping
-    rhi::PipelineHandle m_resolve_direct; // shading without screen reflections, tone mapped in place
+    rhi::PipelineHandle m_reflect; // screen reflections, into m_scene
+    rhi::PipelineHandle m_resolve_direct; // shading without screen reflections: m_radiance alone
+    // After shading (post.slang): auto exposure's histogram, bloom, exposure and tone mapping.
+    rhi::PipelineHandle m_histogram_clear;
+    rhi::PipelineHandle m_histogram;
+    rhi::PipelineHandle m_bloom_down;
+    rhi::PipelineHandle m_bloom_up;
+    rhi::PipelineHandle m_post;
     rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables
     rhi::TextureHandle m_smaa_search;
     // Targets, sized to the frame.
@@ -642,6 +695,27 @@ private:
     rhi::TextureHandle m_radiance; // rgba16_float
     rhi::TextureHandle m_gloss;    // rg32_uint
     rhi::TextureHandle m_fallback; // rgba16_float
+    rhi::TextureHandle m_scene;    // rgba16_float: the light with screen reflections, before exposure
+    // Bloom: the light halved k_bloom_levels times (down), and back up
+    // (up[i]: down[i] plus up[i + 1] spread; the last level is down's own).
+    static constexpr u32 k_bloom_levels = 6;
+    rhi::TextureHandle m_bloom_downs[k_bloom_levels];
+    rhi::TextureHandle m_bloom_ups[k_bloom_levels - 1];
+    u32 m_bloom_width[k_bloom_levels] = {};
+    u32 m_bloom_height[k_bloom_levels] = {};
+    // Auto exposure: the histogram, read back once the GPU is done with it.
+    rhi::BufferHandle m_histogram_bins; // src/exposure.h's bins
+    rhi::BufferHandle m_histogram_readback[3];
+    u64 m_histogram_frame[3] = {~u64{0}, ~u64{0}, ~u64{0}};
+    u64 m_histogram_taken = ~u64{0};
+    bool m_exposure_known = false; // m_exposure_stops is eased from a measurement
+    float m_exposure_stops = 0.0f; // auto exposure's (log2 of its multiplier)
+    float m_exposure_target = 0.0f;
+    float m_scene_stops = 0.0f;    // the last measurement
+    float m_frame_exposure = 1.0f; // this frame's multiplier (for the stats)
+    bool m_measure_exposure = false; // this frame
+    bool m_bloom_on = false;         // this frame
+    bool m_post_logged = false;      // bloom's textures could not be made (logged once)
     u32 m_width = 0;
     u32 m_height = 0;
     u32 m_hzb_width = 0;

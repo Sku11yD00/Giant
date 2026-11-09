@@ -6,6 +6,7 @@
 
 #include "giant/geometry/mesh.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -215,6 +216,30 @@ GIANT_TEST("editor: render settings are view state") {
     GIANT_CHECK(!f.state.render_settings.physical_sky && f.state.render_settings.aerial_distance == 20000.0f);
     GIANT_CHECK(!f.run("set_render_settings", {{"aerial_distance", 500}}).ok);
     GIANT_CHECK(f.run("set_render_settings", {{"physical_sky", true}}).ok && f.state.render_settings.physical_sky);
+    // Exposure, bloom and the tone mapper.
+    const auto shown = f.run("get_render_settings");
+    GIANT_CHECK(shown.value["auto_exposure"] == true && shown.value["bloom"] == true &&
+                shown.value["tone_mapper"] == "pbr_neutral");
+    GIANT_CHECK(shown.value["last_frame"].contains("exposure"));
+    const auto eye = f.run("set_render_settings", {{"auto_exposure", false},
+                                                   {"exposure_compensation", 1.5},
+                                                   {"exposure_min", -4},
+                                                   {"exposure_max", 6},
+                                                   {"exposure_speed_up", 5},
+                                                   {"exposure_speed_down", 2},
+                                                   {"bloom", false},
+                                                   {"bloom_strength", 0.1},
+                                                   {"tone_mapper", "agx"}});
+    GIANT_CHECK(eye.ok && eye.value["tone_mapper"] == "agx" && eye.value["auto_exposure"] == false);
+    const render::RenderSettings& rs = f.state.render_settings;
+    GIANT_CHECK(!rs.auto_exposure && rs.exposure_compensation == 1.5f && rs.exposure_min == -4.0f &&
+                rs.exposure_max == 6.0f && rs.exposure_speed_up == 5.0f && rs.exposure_speed_down == 2.0f &&
+                !rs.bloom && std::abs(rs.bloom_strength - 0.1f) < 1e-6f && rs.tone_mapper == render::ToneMapper::agx);
+    GIANT_CHECK(!f.run("set_render_settings", {{"tone_mapper", "aces"}}).ok);
+    GIANT_CHECK(!f.run("set_render_settings", {{"bloom_strength", 2}}).ok);
+    GIANT_CHECK(!f.run("set_render_settings", {{"exposure_compensation", 11}}).ok);
+    GIANT_CHECK(f.run("set_render_settings", {{"tone_mapper", "pbr_neutral"}, {"auto_exposure", true}, {"bloom", true}}).ok);
+    GIANT_CHECK(rs.tone_mapper == render::ToneMapper::pbr_neutral && rs.auto_exposure && rs.bloom);
     GIANT_CHECK(f.state.render_settings.antialiasing && f.state.render_settings.specular_antialiasing);
     const auto aa = f.run("set_render_settings", {{"antialiasing", false}, {"specular_antialiasing", false}});
     GIANT_CHECK(aa.ok && aa.value["antialiasing"] == false && aa.value["specular_antialiasing"] == false);

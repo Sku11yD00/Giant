@@ -408,6 +408,15 @@ Json render_settings_json(const EditorState& state) {
             {"screen_space_reflections", state.render_settings.screen_space_reflections},
             {"physical_sky", state.render_settings.physical_sky},
             {"aerial_distance", state.render_settings.aerial_distance},
+            {"auto_exposure", state.render_settings.auto_exposure},
+            {"exposure_compensation", state.render_settings.exposure_compensation},
+            {"exposure_min", state.render_settings.exposure_min},
+            {"exposure_max", state.render_settings.exposure_max},
+            {"exposure_speed_up", state.render_settings.exposure_speed_up},
+            {"exposure_speed_down", state.render_settings.exposure_speed_down},
+            {"bloom", state.render_settings.bloom},
+            {"bloom_strength", state.render_settings.bloom_strength},
+            {"tone_mapper", state.render_settings.tone_mapper == render::ToneMapper::agx ? "agx" : "pbr_neutral"},
             {"clouds", state.render_settings.clouds},
             {"cloud_steps", state.render_settings.cloud_steps},
             {"cloud_shadows", state.render_settings.cloud_shadows},
@@ -440,6 +449,12 @@ Json render_settings_json(const EditorState& state) {
               {"gi",
                {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting}}},
               {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}},
+              {"exposure",
+               {{"auto", s.auto_exposure},
+                {"multiplier", s.exposure},
+                {"measured", s.exposure_measured},
+                {"scene_stops", s.scene_stops},
+                {"bloom", s.bloom}}},
               {"sky",
                {{"on", s.sky},
                 {"physical", s.physical_sky},
@@ -1534,6 +1549,15 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "after sunset), the clear air between the camera and what it sees (far land fades blue, out to "
          "aerial_distance metres, default 32000) and the ambient light taken from the sky itself all round "
          "instead of the flat sky and ground colours (default on). "
+         "auto_exposure: the image's brightness follows the scene's as eyes adapt (default on; lit views): "
+         "measured every frame (read back a frame or two later), its middle brought to middle grey, raised "
+         "by exposure_compensation stops (default 0), kept within exposure_min to exposure_max stops "
+         "(default -16 to 16), eased at exposure_speed_up stops a second brightening (default 3) and "
+         "exposure_speed_down darkening (default 1.5); set_lighting's exposure multiplies it (alone when "
+         "off). bloom: light spread round bright things (default on), bloom_strength of each pixel's light "
+         "(default 0.04). tone_mapper: pbr_neutral (default: base colours true) or agx (filmic: bright colours "
+         "go gently to white). last_frame.exposure has this frame's multiplier and the scene's measured "
+         "brightness in stops. "
          "clouds: with a weather set (set_weather), its clouds marched at half resolution, cloud_steps "
          "steps a ray (default 48; fewer is faster and grainier), and cloud_shadows their shadows on the "
          "ground (both default on; last_frame.sky says what drew). "
@@ -1567,6 +1591,15 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"screen_space_reflections", {{"type", "boolean"}}},
                 {"physical_sky", {{"type", "boolean"}}},
                 {"aerial_distance", number(1000, 100000, "Metres the air over the view is worked out to. Default 32000.")},
+                {"auto_exposure", {{"type", "boolean"}}},
+                {"exposure_compensation", number(-10, 10, "Stops brighter than middle grey. Default 0.")},
+                {"exposure_min", number(-20, 20, "Stops: the least auto exposure goes to. Default -16.")},
+                {"exposure_max", number(-20, 20, "Stops: the most auto exposure goes to. Default 16.")},
+                {"exposure_speed_up", number(0, 100, "Stops a second brightening. Default 3.")},
+                {"exposure_speed_down", number(0, 100, "Stops a second darkening. Default 1.5.")},
+                {"bloom", {{"type", "boolean"}}},
+                {"bloom_strength", number(0, 1, "Share of each pixel's light spread round. Default 0.04.")},
+                {"tone_mapper", {{"enum", {"pbr_neutral", "agx"}}}},
                 {"clouds", {{"type", "boolean"}}},
                 {"cloud_steps", {{"type", "integer"}, {"minimum", 8}, {"maximum", 256},
                                  {"description", "Steps a cloud ray. Default 48."}}},
@@ -1606,6 +1639,18 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.screen_space_reflections = args.value("screen_space_reflections", r.screen_space_reflections);
              r.physical_sky = args.value("physical_sky", r.physical_sky);
              r.aerial_distance = args.value("aerial_distance", r.aerial_distance);
+             r.auto_exposure = args.value("auto_exposure", r.auto_exposure);
+             r.exposure_compensation = args.value("exposure_compensation", r.exposure_compensation);
+             r.exposure_min = args.value("exposure_min", r.exposure_min);
+             r.exposure_max = args.value("exposure_max", r.exposure_max);
+             r.exposure_speed_up = args.value("exposure_speed_up", r.exposure_speed_up);
+             r.exposure_speed_down = args.value("exposure_speed_down", r.exposure_speed_down);
+             r.bloom = args.value("bloom", r.bloom);
+             r.bloom_strength = args.value("bloom_strength", r.bloom_strength);
+             if (args.contains("tone_mapper")) {
+                 r.tone_mapper = args["tone_mapper"].get<std::string>() == "agx" ? render::ToneMapper::agx
+                                                                                 : render::ToneMapper::pbr_neutral;
+             }
              r.clouds = args.value("clouds", r.clouds);
              r.cloud_steps = args.value("cloud_steps", r.cloud_steps);
              r.cloud_shadows = args.value("cloud_shadows", r.cloud_shadows);
