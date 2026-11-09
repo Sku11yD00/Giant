@@ -81,8 +81,8 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
         const uint s = (first + tid) * k_skin_vertex_bytes;
         const float3 bind = asfloat(source.Load3(s));
         const uint2 frame = source.Load2(s + 12);
-        const float3 bind_normal = unpack_normal(frame.x);
-        const float4 bind_tangent = unpack_tangent(frame.y);
+        const float3 bind_normal = unpack_vertex_normal(frame.x);
+        const float4 bind_tangent = unpack_vertex_tangent(frame.y);
         const uint2 joints = source.Load2(s + 20);
         const uint weights = source.Load(s + 28);
         ByteAddressBuffer matrices = read_buffer(push.matrices);
@@ -114,9 +114,9 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
         }
         RWByteAddressBuffer pool = write_buffer(push.pool);
         // The uv (at 20) never moves.
-        const uint v = base + vertex_offset + tid * k_vertex_bytes;
+        const uint v = base + vertex_offset + tid * k_mesh_vertex_bytes;
         pool.Store3(v, asuint(p));
-        pool.Store2(v + 12, uint2(pack_normal(n), pack_tangent(t, bind_tangent.w)));
+        pool.Store2(v + 12, uint2(pack_vertex_normal(n), pack_vertex_tangent(t, bind_tangent.w)));
         uint ignored;
         for (uint k = 0; k < 3; ++k) {
             InterlockedMin(g_lo[k], ordered(p[k]), ignored);

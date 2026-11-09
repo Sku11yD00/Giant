@@ -238,7 +238,7 @@ float3 to_world_normal(Instance i, float3 n) {
 // group_base numbers the mesh's groups across all meshes (requests, usage).
 //
 // A loaded group's geometry, in the pool: per cluster, its vertices
-// (k_vertex_bytes each: position as floats, normal and tangent as
+// (k_mesh_vertex_bytes each: position as floats, normal and tangent as
 // octahedral snorm16 pairs, the tangent's lowest y bit the bitangent sign,
 // uv as floats: geometry::PackedVertex) at vertex_offset, and its triangles
 // (u32 each: three cluster-local indices, 8 bits apart) at triangle_offset.
@@ -334,31 +334,31 @@ float3 octahedral_decode(float2 e) {
     n.y += n.y >= 0.0 ? -t : t;
     return normalize(n);
 }
-float3 unpack_normal(uint u) { return octahedral_decode(unpack_snorm2x16(u)); }
+float3 unpack_vertex_normal(uint u) { return octahedral_decode(unpack_snorm2x16(u)); }
 // xyz the tangent, w the bitangent sign.
-float4 unpack_tangent(uint u) {
+float4 unpack_vertex_tangent(uint u) {
     return float4(octahedral_decode(unpack_snorm2x16(u)), (u & 0x10000u) != 0 ? -1.0 : 1.0);
 }
-uint pack_normal(float3 n) { return pack_snorm2x16(octahedral_encode(n)); }
-uint pack_tangent(float3 t, float sign) {
-    const uint u = pack_normal(t);
+uint pack_vertex_normal(float3 n) { return pack_snorm2x16(octahedral_encode(n)); }
+uint pack_vertex_tangent(float3 t, float sign) {
+    const uint u = pack_vertex_normal(t);
     return (u & ~0x10000u) | (sign < 0.0 ? 0x10000u : 0u);
 }
 
-static const uint k_vertex_bytes = 28;
+static const uint k_mesh_vertex_bytes = 28;
 
 // A cluster's geometry, from its group's place in the pool (`base`).
 uint cluster_vertex_at(uint base, Cluster c, uint local_vertex) {
-    return base + c.vertex_offset + local_vertex * k_vertex_bytes;
+    return base + c.vertex_offset + local_vertex * k_mesh_vertex_bytes;
 }
 float3 cluster_position(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
     return asfloat(pool.Load3(cluster_vertex_at(base, c, local_vertex)));
 }
 float3 cluster_normal(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
-    return unpack_normal(pool.Load(cluster_vertex_at(base, c, local_vertex) + 12));
+    return unpack_vertex_normal(pool.Load(cluster_vertex_at(base, c, local_vertex) + 12));
 }
 float4 cluster_tangent(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
-    return unpack_tangent(pool.Load(cluster_vertex_at(base, c, local_vertex) + 16));
+    return unpack_vertex_tangent(pool.Load(cluster_vertex_at(base, c, local_vertex) + 16));
 }
 float2 cluster_uv(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
     return asfloat(pool.Load2(cluster_vertex_at(base, c, local_vertex) + 20));
