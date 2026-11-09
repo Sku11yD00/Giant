@@ -713,6 +713,7 @@ private:
     float m_exposure_target = 0.0f;
     float m_scene_stops = 0.0f;    // the last measurement
     bool m_scene_measured = false; // m_scene_stops holds one
+    bool m_auto_on = false;        // auto exposure on this frame
     bool m_bloom_ready = false;    // bloom's levels made for this size
     float m_frame_exposure = 1.0f; // this frame's multiplier (for the stats)
     bool m_measure_exposure = false; // this frame

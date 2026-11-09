@@ -2237,12 +2237,15 @@ float Renderer::update_exposure(const FrameInput& frame, bool lit_view) {
     const float manual = std::isfinite(frame.lighting.exposure) ? std::max(frame.lighting.exposure, 0.0f) : 1.0f;
     m_measure_exposure = settings.auto_exposure && lit_view;
     m_bloom_on = false; // until post() blooms
+    m_auto_on = settings.auto_exposure;
     if (!settings.auto_exposure) {
         // Off: measurements from before are not taken when it comes back on
-        // (it eases on from where it was).
+        // (it holds where it was until a new one comes, then eases on).
         for (u64& tag : m_histogram_frame) {
             tag = ~u64{0};
         }
+        m_scene_measured = false;
+        m_auto_on = false;
         m_frame_exposure = manual;
         return manual;
     }
@@ -2377,7 +2380,7 @@ void Renderer::finish_stats(const FrameData& data) {
     copy_streaming_stats();
     m_stats.auto_exposure = m_measure_exposure;
     m_stats.exposure = m_frame_exposure;
-    m_stats.exposure_measured = m_exposure_known;
+    m_stats.exposure_measured = m_auto_on && m_exposure_known;
     m_stats.scene_stops = m_scene_stops;
     m_stats.bloom = m_bloom_on;
     m_stats.materials = data.material_count;
