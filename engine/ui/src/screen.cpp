@@ -1,0 +1,611 @@
+// Screens from data: loaded from JSON (strictly), laid out each frame
+// (sizes up from the leaves, places down from the root), drawn onto a
+// canvas, pointed at and clicked.
+#include "giant/ui/screen.h"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <cstdio>
+#include <initializer_list>
+#include <set>
+
+namespace giant::ui {
+
+using Json = nlohmann::json;
+
+namespace {
+
+constexpr float k_max_units = 100000.0f;
+constexpr usize k_max_text = 4096;
+
+bool finite(float v) { return std::isfinite(v); }
+
+// --- Values -----------------------------------------------------------------
+
+std::optional<double> as_number(const Value& v) {
+    if (const double* d = std::get_if<double>(&v)) return *d;
+    if (const bool* b = std::get_if<bool>(&v)) return *b ? 1.0 : 0.0;
+    const std::string& s = std::get<std::string>(v);
+    double out = 0.0;
+    const auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), out);
+    if (ec != std::errc() || end != s.data() + s.size() || !std::isfinite(out)) return std::nullopt;
+    return out;
+}
+
+std::string format_number(double v, int decimals) {
+    if (!std::isfinite(v)) return "?";
+    char buffer[64];
+    if (decimals >= 0) {
+        std::snprintf(buffer, sizeof(buffer), "%.*f", std::min(decimals, 9), v);
+        return buffer;
+    }
+    // As few places as show it (at most 3).
+    std::snprintf(buffer, sizeof(buffer), "%.3f", v);
+    std::string s = buffer;
+    while (!s.empty() && s.back() == '0') s.pop_back();
+    if (!s.empty() && s.back() == '.') s.pop_back();
+    if (s == "-0") s = "0";
+    return s;
+}
+
+// --- Loading ----------------------------------------------------------------
+
+struct Loader {
+    std::string error;
+    usize count = 0;
+    std::set<std::string, std::less<>> ids;
+
+    bool fail(const std::string& where, const std::string& why) {
+        if (error.empty()) error = where + ": " + why;
+        return false;
+    }
+
+    bool only(const Json& j, const std::string& where, std::initializer_list<const char*> keys) {
+        for (const auto& [k, v] : j.items()) {
+            (void)v;
+            if (std::none_of(keys.begin(), keys.end(), [&](const char* n) { return k == n; }))
+                return fail(where, "no key \"" + k + "\"");
+        }
+        return true;
+    }
+
+    bool number(const Json& j, const std::string& where, const char* key, float lo, float hi, float& out) {
+        if (!j.contains(key)) return true;
+        const Json& v = j[key];
+        if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() < lo || v.get<double>() > hi)
+            return fail(where, std::string(key) + " is a number from " + format_number(lo, -1) + " to " +
+                                   format_number(hi, -1));
+        out = v.get<float>();
+        return true;
+    }
+
+    bool pair(const Json& j, const std::string& where, const char* key, float lo, float hi, Vec2& out) {
+        if (!j.contains(key)) return true;
+        const Json& v = j[key];
+        if (!v.is_array() || v.size() != 2 || !v[0].is_number() || !v[1].is_number())
+            return fail(where, std::string(key) + " is [x, y]");
+        const double x = v[0].get<double>(), y = v[1].get<double>();
+        if (!std::isfinite(x) || !std::isfinite(y) || x < lo || x > hi || y < lo || y > hi)
+            return fail(where, std::string(key) + "'s numbers are from " + format_number(lo, -1) + " to " +
+                                   format_number(hi, -1));
+        out = {static_cast<float>(x), static_cast<float>(y)};
+        return true;
+    }
+
+    bool flag(const Json& j, const std::string& where, const char* key, bool& out) {
+        if (!j.contains(key)) return true;
+        if (!j[key].is_boolean()) return fail(where, std::string(key) + " is true or false");
+        out = j[key].get<bool>();
+        return true;
+    }
+
+    bool text(const Json& j, const std::string& where, const char* key, std::string& out, usize most = k_max_text) {
+        if (!j.contains(key)) return true;
+        if (!j[key].is_string() || j[key].get_ref<const std::string&>().size() > most)
+            return fail(where, std::string(key) + " is text (at most " + std::to_string(most) + " bytes)");
+        out = j[key].get<std::string>();
+        return true;
+    }
+
+    bool color(const Json& j, const std::string& where, const char* key, u32& out) {
+        if (!j.contains(key)) return true;
+        const Json& v = j[key];
+        const auto hex = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        if (v.is_string()) {
+            const std::string& s = v.get_ref<const std::string&>();
+            if ((s.size() == 7 || s.size() == 9) && s[0] == '#') {
+                u8 c[4] = {0, 0, 0, 255};
+                bool ok = true;
+                for (usize i = 0; i + 1 < s.size() && ok; i += 2) {
+                    const int hi = hex(s[i + 1]), lo = hex(s[i + 2]);
+                    ok = hi >= 0 && lo >= 0;
+                    if (ok) c[i / 2] = static_cast<u8>(hi * 16 + lo);
+                }
+                if (ok) {
+                    out = rgba(c[0], c[1], c[2], c[3]);
+                    return true;
+                }
+            }
+        }
+        return fail(where, std::string(key) + " is a colour \"#rrggbb\" or \"#rrggbbaa\"");
+    }
+
+    template <typename E>
+    bool choice(const Json& j, const std::string& where, const char* key,
+                std::initializer_list<std::pair<const char*, E>> options, E& out) {
+        if (!j.contains(key)) return true;
+        if (j[key].is_string()) {
+            for (const auto& [name, e] : options) {
+                if (j[key].get_ref<const std::string&>() == name) {
+                    out = e;
+                    return true;
+                }
+            }
+        }
+        std::string names;
+        for (const auto& [name, e] : options) names += (names.empty() ? "" : ", ") + std::string(name);
+        return fail(where, std::string(key) + " is one of " + names);
+    }
+
+    // A number, or a value's name.
+    bool bound(const Json& j, const std::string& where, const char* key, double& number_out, std::string& name_out) {
+        if (!j.contains(key)) return true;
+        const Json& v = j[key];
+        if (v.is_number() && std::isfinite(v.get<double>())) {
+            number_out = v.get<double>();
+            return true;
+        }
+        if (v.is_string() && !v.get_ref<const std::string&>().empty() && v.get_ref<const std::string&>().size() <= 128) {
+            name_out = v.get<std::string>();
+            return true;
+        }
+        return fail(where, std::string(key) + " is a number or a value's name");
+    }
+
+    bool widget(const Json& j, Widget& w, const std::string& where, usize depth) {
+        if (depth > Screen::k_max_depth) return fail(where, "nested deeper than " + std::to_string(Screen::k_max_depth));
+        if (++count > Screen::k_max_widgets) return fail(where, "more than " + std::to_string(Screen::k_max_widgets) + " widgets");
+        if (!j.is_object()) return fail(where, "a widget is an object");
+        if (!only(j, where,
+                  {"type", "id", "anchor", "pivot", "offset", "size", "stretch", "layout", "gap", "padding", "clip",
+                   "visible", "background", "border", "border_color", "color", "text", "font_size", "align", "wrap",
+                   "outline", "outline_color", "shadow", "value", "max", "direction", "image", "hover", "children"}))
+            return false;
+        if (!j.contains("type")) return fail(where, "no \"type\"");
+        if (!choice<WidgetType>(j, where, "type",
+                                {{"panel", WidgetType::panel},
+                                 {"text", WidgetType::text},
+                                 {"bar", WidgetType::bar},
+                                 {"image", WidgetType::image},
+                                 {"button", WidgetType::button}},
+                                w.type))
+            return false;
+        const std::string here = j.contains("id") && j["id"].is_string() ? where + " (\"" + j["id"].get<std::string>() + "\")" : where;
+        if (!text(j, here, "id", w.id, 128)) return false;
+        if (w.type == WidgetType::button && w.id.empty()) return fail(here, "a button needs an id (its clicks say it)");
+        if (!w.id.empty() && !ids.insert(w.id).second) return fail(here, "another widget has this id");
+        w.anchor = {};
+        if (!pair(j, here, "anchor", -1.0f, 2.0f, w.anchor)) return false;
+        w.pivot = w.anchor;
+        if (!pair(j, here, "pivot", -1.0f, 2.0f, w.pivot) || !pair(j, here, "offset", -k_max_units, k_max_units, w.offset) ||
+            !pair(j, here, "size", 0.0f, k_max_units, w.size))
+            return false;
+        if (j.contains("stretch")) {
+            const Json& s = j["stretch"];
+            if (!s.is_array() || s.size() != 2 || !s[0].is_boolean() || !s[1].is_boolean())
+                return fail(here, "stretch is [bool, bool]");
+            w.stretch_x = s[0].get<bool>();
+            w.stretch_y = s[1].get<bool>();
+        }
+        if (!choice<Layout>(j, here, "layout", {{"none", Layout::none}, {"column", Layout::column}, {"row", Layout::row}},
+                            w.layout) ||
+            !number(j, here, "gap", 0.0f, k_max_units, w.gap) || !number(j, here, "padding", 0.0f, k_max_units, w.padding) ||
+            !flag(j, here, "clip", w.clip) || !text(j, here, "visible", w.visible, 129) ||
+            !color(j, here, "background", w.background) || !number(j, here, "border", 0.0f, 1000.0f, w.border) ||
+            !color(j, here, "border_color", w.border_color) || !color(j, here, "color", w.color) ||
+            !text(j, here, "text", w.text) || !number(j, here, "font_size", 1.0f, 1000.0f, w.font_size) ||
+            !choice<Align>(j, here, "align", {{"left", Align::left}, {"center", Align::center}, {"right", Align::right}},
+                           w.align) ||
+            !flag(j, here, "wrap", w.wrap) || !number(j, here, "outline", 0.0f, 100.0f, w.outline) ||
+            !color(j, here, "outline_color", w.outline_color) || !number(j, here, "shadow", 0.0f, 100.0f, w.shadow) ||
+            !bound(j, here, "value", w.value, w.value_name) || !bound(j, here, "max", w.max, w.max_name) ||
+            !choice<Direction>(j, here, "direction",
+                               {{"right", Direction::right}, {"left", Direction::left}, {"up", Direction::up}, {"down", Direction::down}},
+                               w.direction) ||
+            !text(j, here, "image", w.image, 128) || !color(j, here, "hover", w.hover))
+            return false;
+        if (w.visible == "!" ) return fail(here, "visible names a value");
+        if (j.contains("children")) {
+            const Json& c = j["children"];
+            if (!c.is_array()) return fail(here, "children is a list");
+            w.children.resize(c.size());
+            for (usize i = 0; i < c.size(); ++i) {
+                if (!widget(c[i], w.children[i], here + ".children[" + std::to_string(i) + "]", depth + 1)) return false;
+            }
+        }
+        return true;
+    }
+};
+
+// --- Layout -----------------------------------------------------------------
+
+struct Layouter {
+    const Font& font;
+    const Values& values;
+    float scale;
+
+    bool visible(const Widget& w) const {
+        if (w.visible.empty()) return true;
+        if (w.visible[0] == '!') return !values.truthy(std::string_view(w.visible).substr(1));
+        return values.truthy(w.visible);
+    }
+
+    TextStyle style_of(const Widget& w) const {
+        TextStyle s;
+        s.size = w.font_size * scale;
+        s.color = w.color;
+        s.outline = w.outline * scale;
+        s.outline_color = w.outline_color;
+        s.shadow = w.shadow * scale;
+        s.align = w.align;
+        return s;
+    }
+
+    // The size it would take with nothing stretching it (pixels), its shown flag set.
+    Vec2 natural(Widget& w, float wrap_width) {
+        w.shown = visible(w);
+        if (!w.shown) {
+            hide(w); // (and all it holds: none of them shown, clicked or focused)
+            return {};
+        }
+        const float pad = 2.0f * w.padding * scale;
+        Vec2 size{w.size.x * scale, w.size.y * scale};
+        if ((w.type == WidgetType::text || w.type == WidgetType::button) && (size.x == 0.0f || size.y == 0.0f)) {
+            TextStyle s = style_of(w);
+            if (w.wrap) s.wrap = size.x > 0.0f ? size.x - pad : std::max(wrap_width - pad, 1.0f);
+            const Vec2 t = measure(font, fill_text(w.text, values), s);
+            if (size.x == 0.0f) size.x = t.x + pad;
+            if (size.y == 0.0f) size.y = t.y + pad;
+        }
+        // A row or column: what its children take, with gaps and padding.
+        Vec2 content{};
+        usize n = 0;
+        for (Widget& c : w.children) {
+            const Vec2 cs = natural(c, size.x > 0.0f ? size.x - pad : wrap_width - pad);
+            if (!c.shown) continue;
+            if (w.layout == Layout::column) {
+                content.x = std::max(content.x, cs.x);
+                content.y += cs.y + (n > 0 ? w.gap * scale : 0.0f);
+            } else if (w.layout == Layout::row) {
+                content.x += cs.x + (n > 0 ? w.gap * scale : 0.0f);
+                content.y = std::max(content.y, cs.y);
+            }
+            ++n;
+        }
+        if (w.layout != Layout::none) {
+            if (w.size.x == 0.0f) size.x = std::max(size.x, content.x + pad);
+            if (w.size.y == 0.0f) size.y = std::max(size.y, content.y + pad);
+        }
+        w.rect = {0.0f, 0.0f, size.x, size.y}; // kept for place()
+        return size;
+    }
+
+    static void hide(Widget& w) {
+        w.shown = false;
+        w.rect = {};
+        for (Widget& c : w.children) hide(c);
+    }
+
+    // Placed in `parent` (its inside), from its natural size.
+    void place(Widget& w, const Rect& inside, Vec2 size, bool stacked, Vec2 at) {
+        if (w.stretch_x) size.x = inside.w;
+        if (w.stretch_y) size.y = inside.h;
+        if (stacked) {
+            w.rect = {at.x + w.offset.x * scale, at.y + w.offset.y * scale, size.x, size.y};
+        } else {
+            w.rect = {inside.x + w.anchor.x * inside.w + w.offset.x * scale - w.pivot.x * size.x,
+                      inside.y + w.anchor.y * inside.h + w.offset.y * scale - w.pivot.y * size.y, size.x, size.y};
+        }
+        const float pad = w.padding * scale;
+        const Rect in{w.rect.x + pad, w.rect.y + pad, std::max(w.rect.w - 2.0f * pad, 0.0f),
+                      std::max(w.rect.h - 2.0f * pad, 0.0f)};
+        Vec2 cursor{in.x, in.y};
+        for (Widget& c : w.children) {
+            if (!c.shown) continue;
+            Vec2 cs = natural_size(c);
+            if (w.layout == Layout::column) {
+                // Across a column: stretch fills its width; else the anchor's x says where.
+                Vec2 at_c = cursor;
+                if (!c.stretch_x) at_c.x = in.x + c.anchor.x * in.w - c.pivot.x * cs.x;
+                if (c.stretch_x) cs.x = in.w;
+                place(c, {in.x, cursor.y, in.w, cs.y}, cs, true, at_c);
+                cursor.y += c.rect.h + w.gap * scale;
+            } else if (w.layout == Layout::row) {
+                Vec2 at_c = cursor;
+                if (!c.stretch_y) at_c.y = in.y + c.anchor.y * in.h - c.pivot.y * cs.y;
+                if (c.stretch_y) cs.y = in.h;
+                place(c, {cursor.x, in.y, cs.x, in.h}, cs, true, at_c);
+                cursor.x += c.rect.w + w.gap * scale;
+            } else {
+                place(c, in, cs, false, {});
+            }
+        }
+    }
+
+    // Each widget's natural size, kept from the measuring pass (in `rect`'s w and h until placed).
+    static Vec2 natural_size(const Widget& w) { return {w.rect.w, w.rect.h}; }
+};
+
+void draw_widget(Canvas& canvas, const Font& font, const Values& values, float scale, const Widget& w,
+                 const std::string& focus, const std::string& hovered,
+                 const std::function<rhi::TextureId(std::string_view)>& images) {
+    if (!w.shown) return;
+    const Rect& r = w.rect;
+    const bool lit = w.type == WidgetType::button && !w.id.empty() && (w.id == focus || w.id == hovered);
+    const u32 background = lit && w.hover != 0 ? w.hover : w.background;
+    if ((background >> 24) != 0) canvas.rect(r, background);
+    const float pad = w.padding * scale;
+    const Rect in{r.x + pad, r.y + pad, std::max(r.w - 2.0f * pad, 0.0f), std::max(r.h - 2.0f * pad, 0.0f)};
+    switch (w.type) {
+    case WidgetType::text:
+    case WidgetType::button: {
+        if (w.text.empty()) break;
+        TextStyle s;
+        s.size = w.font_size * scale;
+        s.color = w.color;
+        s.outline = w.outline * scale;
+        s.outline_color = w.outline_color;
+        s.shadow = w.shadow * scale;
+        s.align = w.align;
+        s.wrap = in.w; // aligned within its inside (wrapped there only if it wraps)
+        const std::string shown = fill_text(w.text, values);
+        if (!w.wrap) {
+            // Not wrapped: aligned in the box, one line a line break.
+            s.wrap = 0.0f;
+            const float x = w.align == Align::left ? in.x : w.align == Align::center ? in.x + 0.5f * in.w : in.x + in.w;
+            const Vec2 t = measure(font, shown, s);
+            canvas.text({x, in.y + 0.5f * (in.h - t.y)}, shown, s);
+        } else {
+            const Vec2 t = measure(font, shown, s);
+            canvas.text({in.x, in.y + std::max(0.5f * (in.h - t.y), 0.0f)}, shown, s);
+        }
+        break;
+    }
+    case WidgetType::bar: {
+        const double value = w.value_name.empty() ? w.value : values.number(w.value_name);
+        const double max = w.max_name.empty() ? w.max : values.number(w.max_name);
+        const float f = max > 0.0 && std::isfinite(value / max) ? static_cast<float>(std::clamp(value / max, 0.0, 1.0)) : 0.0f;
+        Rect fill = in;
+        switch (w.direction) {
+        case Direction::right: fill.w = in.w * f; break;
+        case Direction::left: fill.x = in.x + in.w * (1.0f - f); fill.w = in.w * f; break;
+        case Direction::down: fill.h = in.h * f; break;
+        case Direction::up: fill.y = in.y + in.h * (1.0f - f); fill.h = in.h * f; break;
+        }
+        canvas.rect(fill, w.color);
+        break;
+    }
+    case WidgetType::image:
+        if (!w.image.empty() && images) {
+            const rhi::TextureId t = images(w.image);
+            if (t != 0) canvas.image(in, t, {0.0f, 0.0f, 1.0f, 1.0f}, w.color);
+        }
+        break;
+    case WidgetType::panel: break;
+    }
+    if (w.border > 0.0f && (w.border_color >> 24) != 0) canvas.frame(r, std::max(w.border * scale, 1.0f), w.border_color);
+    if (w.clip) canvas.push_clip(r);
+    for (const Widget& c : w.children) draw_widget(canvas, font, values, scale, c, focus, hovered, images);
+    if (w.clip) canvas.pop_clip();
+}
+
+bool inside(const Rect& r, Vec2 p) { return p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h; }
+
+// The last (top) shown button at `p`, within its clipping ancestors.
+const Widget* button_at(const Widget& w, Vec2 p, bool clipped_out) {
+    if (!w.shown) return nullptr;
+    if (w.clip && !inside(w.rect, p)) clipped_out = true;
+    for (auto it = w.children.rbegin(); it != w.children.rend(); ++it) {
+        if (const Widget* b = button_at(*it, p, clipped_out)) return b;
+    }
+    if (!clipped_out && w.type == WidgetType::button && inside(w.rect, p)) return &w;
+    return nullptr;
+}
+
+void buttons(const Widget& w, std::vector<const Widget*>& out) {
+    if (!w.shown) return;
+    if (w.type == WidgetType::button) out.push_back(&w);
+    for (const Widget& c : w.children) buttons(c, out);
+}
+
+const Widget* find_in(const Widget& w, std::string_view id) {
+    if (w.id == id) return &w;
+    for (const Widget& c : w.children) {
+        if (const Widget* f = find_in(c, id)) return f;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+// --- Values -----------------------------------------------------------------
+
+void Values::set(const std::string& name, Value value) {
+    if (name.empty() || name.size() > 128) return;
+    if (const double* d = std::get_if<double>(&value); d != nullptr && !std::isfinite(*d)) value = 0.0;
+    if (std::string* s = std::get_if<std::string>(&value); s != nullptr && s->size() > k_max_text) s->resize(k_max_text);
+    const auto it = m_values.find(name);
+    if (it != m_values.end()) {
+        it->second = std::move(value);
+    } else if (m_values.size() < k_max_values) {
+        m_values.emplace(name, std::move(value));
+    }
+}
+
+void Values::erase(const std::string& name) { m_values.erase(name); }
+
+const Value* Values::find(std::string_view name) const {
+    const auto it = m_values.find(name);
+    return it != m_values.end() ? &it->second : nullptr;
+}
+
+double Values::number(std::string_view name, double otherwise) const {
+    const Value* v = find(name);
+    if (v == nullptr) return otherwise;
+    return as_number(*v).value_or(otherwise);
+}
+
+bool Values::truthy(std::string_view name) const {
+    const Value* v = find(name);
+    if (v == nullptr) return false;
+    if (const bool* b = std::get_if<bool>(v)) return *b;
+    if (const double* d = std::get_if<double>(v)) return *d != 0.0;
+    return !std::get<std::string>(*v).empty();
+}
+
+std::string Values::text(std::string_view name, int decimals) const {
+    const Value* v = find(name);
+    if (v == nullptr) return {};
+    if (const std::string* s = std::get_if<std::string>(v)) return *s;
+    if (const bool* b = std::get_if<bool>(v)) return *b ? "true" : "false";
+    return format_number(std::get<double>(*v), decimals);
+}
+
+std::string fill_text(std::string_view text, const Values& values) {
+    if (text.find_first_of("{}") == std::string_view::npos) return std::string(text);
+    std::string out;
+    out.reserve(text.size());
+    for (usize i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if ((c == '{' || c == '}') && i + 1 < text.size() && text[i + 1] == c) {
+            out.push_back(c);
+            ++i;
+            continue;
+        }
+        if (c != '{') {
+            out.push_back(c);
+            continue;
+        }
+        const usize end = text.find('}', i + 1);
+        if (end == std::string_view::npos) {
+            out.append(text.substr(i));
+            break;
+        }
+        std::string_view name = text.substr(i + 1, end - i - 1);
+        int decimals = -1;
+        if (const usize colon = name.find(':'); colon != std::string_view::npos) {
+            const std::string_view d = name.substr(colon + 1);
+            int n = 0;
+            const auto [p, ec] = std::from_chars(d.data(), d.data() + d.size(), n);
+            if (ec == std::errc() && p == d.data() + d.size() && n >= 0 && n <= 9) decimals = n;
+            name = name.substr(0, colon);
+        }
+        out += values.text(name, decimals);
+        i = end;
+        if (out.size() > 4 * k_max_text) break; // (a pathological template)
+    }
+    return out;
+}
+
+// --- Screen -----------------------------------------------------------------
+
+std::unique_ptr<Screen> Screen::load(std::string_view json, std::string& error) {
+    error.clear();
+    if (json.size() > (8u << 20)) {
+        error = "a screen is at most 8 MB of JSON";
+        return nullptr;
+    }
+    Json j = Json::parse(json, nullptr, false, true);
+    if (j.is_discarded()) {
+        error = "not JSON";
+        return nullptr;
+    }
+    auto screen = std::unique_ptr<Screen>(new Screen());
+    Loader loader;
+    if (!loader.widget(j, screen->m_root, "screen", 0)) {
+        error = loader.error;
+        return nullptr;
+    }
+    screen->m_count = loader.count;
+    return screen;
+}
+
+void Screen::lay_out(const Font& font, const Values& values, Vec2 size, float scale) {
+    if (!finite(size.x) || !finite(size.y) || !finite(scale) || scale <= 0.0f) return;
+    Layouter l{font, values, scale};
+    l.natural(m_root, size.x);
+    l.place(m_root, {0.0f, 0.0f, std::max(size.x, 0.0f), std::max(size.y, 0.0f)}, Layouter::natural_size(m_root), false, {});
+    // The focus on a button no longer shown moves on.
+    if (!m_focus.empty()) {
+        const Widget* f = find(m_focus);
+        if (f == nullptr || !f->shown) m_focus.clear();
+    }
+}
+
+void Screen::draw(Canvas& canvas, const Font& font, const Values& values, float scale,
+                  const std::function<rhi::TextureId(std::string_view)>& images) const {
+    draw_widget(canvas, font, values, scale, m_root, m_focus, m_focus, images);
+}
+
+const Widget* Screen::button_at(Vec2 point) const { return ui::button_at(m_root, point, false); }
+
+void Screen::point(Vec2 p) {
+    if (const Widget* b = button_at(p)) m_focus = b->id;
+}
+
+std::optional<std::string> Screen::click(Vec2 p) {
+    const Widget* b = button_at(p);
+    if (b == nullptr) return std::nullopt;
+    m_focus = b->id;
+    return b->id;
+}
+
+void Screen::move_focus(int step) {
+    std::vector<const Widget*> all;
+    buttons(m_root, all);
+    if (all.empty() || step == 0) return;
+    usize at = all.size(); // (none focused: the first, or the last going back)
+    for (usize i = 0; i < all.size(); ++i) {
+        if (all[i]->id == m_focus) at = i;
+    }
+    const i64 n = static_cast<i64>(all.size());
+    i64 next = 0;
+    if (at == all.size()) {
+        next = step > 0 ? 0 : n - 1;
+    } else {
+        next = ((static_cast<i64>(at) + (step > 0 ? 1 : -1)) % n + n) % n;
+    }
+    m_focus = all[static_cast<usize>(next)]->id;
+}
+
+std::optional<std::string> Screen::activate() const {
+    if (m_focus.empty()) return std::nullopt;
+    const Widget* f = find(m_focus);
+    if (f == nullptr || !f->shown || f->type != WidgetType::button) return std::nullopt;
+    return m_focus;
+}
+
+void Screen::focus(std::string id) {
+    const Widget* w = find(id);
+    m_focus = w != nullptr && w->type == WidgetType::button ? std::move(id) : std::string();
+}
+
+bool Screen::shown(std::string_view id) const {
+    const Widget* w = find(id);
+    return w != nullptr && w->shown;
+}
+
+const Widget* Screen::find(std::string_view id) const {
+    if (id.empty()) return nullptr;
+    return find_in(m_root, id);
+}
+
+} // namespace giant::ui

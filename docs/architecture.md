@@ -1659,12 +1659,13 @@ simulation lets it go there too); a save gathers every cell the forest
 knows at once (a frame's cost grows with the cells loaded); list_saves
 reads each slot's manifest on the frame.
 
-## Game UI (E5 part 1)
+## Game UI (E5 parts 1 and 2)
 
 The game's own UI, apart from the editor's ImGui panels: `engine/ui`
-(core, rhi). Next: screens from data (a widget tree loaded from JSON,
-bindings, focus and input), HUD pieces (compass, bars, prompts, markers),
-then menus (pause, save and load, settings).
+(core, rhi; nlohmann_json privately). Part 1: fonts, text and the canvas.
+Part 2: screens from data. Next: HUD pieces (compass, bars, prompts,
+markers), then menus (pause, save and load, settings), which also route
+the real mouse and keys to screens.
 
 - **Fonts** (`ui::Font`): TrueType bytes (stb_truetype, the copy Dear
   ImGui ships, compiled static in `font.cpp`) made into signed distance
@@ -1701,6 +1702,38 @@ then menus (pause, save and load, settings).
   reports vertices, draw calls, build_ms and the font. It is built after
   the frame's commands, so a command's change (set_game_ui, show_toast)
   shows from the next frame: a screenshot wants a frame between.
+
+- **Screens** (`ui::Screen`, part 2): a tree of widgets loaded from JSON
+  (the format is in `screen.h`): panels, text, bars, images and buttons.
+  Loading is strict: an unknown key, a wrong type, a colour that is not
+  `#rrggbb[aa]`, a button with no id or two widgets with one id is
+  refused, saying where (`screen.children[2] ("hp"): ...`); at most 4096
+  widgets, 32 deep. Laid out each frame in two passes, both linear in the
+  widgets: sizes up from the leaves (text measured, a row or column the
+  sum of its children with gaps and padding, `size` 0 fitting what it
+  holds), then places down from the root: by `anchor` (a point of the
+  parent), `pivot` (its own point put there) and `offset`, or stacked in a
+  `row` or `column` (across which the anchor still says where, and
+  `stretch` fills). Units are pixels at 1080 lines (times the scale), so a
+  screen fits any window and aspect. `visible` names a value (`!name`:
+  while it is not); a hidden widget hides all it holds (not drawn,
+  clicked or focused, and takes no room in a row or column).
+- **Values** (`ui::Values`): numbers, text and flags by name, set by the
+  game; text fills `{name}` and `{name:2}` from them (`{{` a brace), a
+  bar's `value` and `max` are numbers or names. At most 4096.
+- **Input**: `click` and `point` find the top button shown (within any
+  clipping parents); `move_focus` goes through the buttons shown in the
+  order written, round the ends; `activate` says the focused one. A
+  button is drawn in its `hover` colour while pointed at or focused.
+- **Editor screens** (`GameUi`): named screens (at most 32, 16384 widgets
+  in all), drawn by layer between the crosshair and the toasts, filled
+  in from `GameUi::values`; images by name from textures the game gives
+  (`set_image`). Clicks, presses and activations are queued as events
+  `{screen, id}` (at most 64; the oldest go) for the game to take. Over
+  MCP: `ui_load_screen`, `ui_remove_screen`, `ui_set_values`, `ui_click`,
+  `ui_key`, `get_ui_events`, `get_ui_screen` (every widget's rect as laid
+  out). Until part 4, only MCP and code click screens: the window's own
+  mouse and keys still drive play.
 
 Known limits: one font, no scripts beyond Latin (no CJK, Arabic or
 Cyrillic yet: the atlas would grow, or glyphs be made on demand on a
