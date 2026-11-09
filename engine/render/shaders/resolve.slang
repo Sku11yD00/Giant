@@ -578,7 +578,9 @@ Output shade_pixel(float4 position) {
             float trans;
             float3 scatter;
             dust_along(extras, f, view_dir, 3.0e38, trans, scatter);
-            return plain_output(push.background.rgb * trans + tone_map(scatter * f.exposure));
+            const float3 exposed = scatter * f.exposure;
+            return plain_output(push.background.rgb * trans +
+                                (f.tone_mapper == 1u ? tone_map_agx(exposed) : tone_map(exposed)));
         }
         return plain_output(push.background.rgb);
     }

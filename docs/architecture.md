@@ -643,31 +643,38 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
     the lit pixels' luminance into 64 bins: bin 0 is black and anything
     under 2^-16, bins 1 to 63 are even in stops up to 2^8 (0.38 stops
     each). The counts are copied to a read-back ring of three and read on
-    the CPU once the GPU is done with them (two frames later). The 10th to
-    90th percentiles, averaged in stops, give the scene's brightness; the
+    the CPU once the GPU is done with them (two frames later). Black (bin
+    0) is left out; of the rest, the 10th to 90th percentiles, averaged in
+    stops, give the scene's brightness (all black holds the exposure); the
     target exposure brings it to middle grey (0.18), plus
     `exposure_compensation` stops, within `exposure_min` to `exposure_max`
     stops. The exposure eases there at `exposure_speed_up` stops a second
     brightening (default 3) and `exposure_speed_down` darkening (1.5), over
     `FrameInput::delta_seconds` (the editor passes its real frame time, so
-    eyes adapt while paused too). The first measurement is taken at once;
-    until then, and with it off, `Lighting::exposure` alone. It is always
+    eyes adapt while paused too; a screenshot's extra frame passes 0). The
+    first measurement is taken at once; until then, and with it off,
+    `Lighting::exposure` alone. Turned off and on again, it eases on from
+    where it was; settings changes apply at once to the last measurement. It is always
     multiplied in. It is one number, eased: no image history, so nothing
     smears. The light it measures is before exposure, so it never measures
     itself.
   - **Bloom** (`bloom`, default on). The light halves six times (Jimenez's
-    13-tap filter; on the first, each tap held to 64 times white once
-    exposed, so a lone blazing pixel cannot flicker it), then comes back up
-    (each level plus a 3x3 tent of the one below). The top level over six
-    (the levels' average) takes the place of `bloom_strength` (default
-    0.04) of each pixel's light, so bloom only moves light about and adds
-    none. It is skipped in debug views.
+    13-tap filter; on the first, each texel held to 64 times white once
+    exposed, so a lone blazing pixel cannot flicker it, and only lit pixels
+    counted, each by its own alpha, so the flat background never bleeds
+    in), then comes back up (each level plus a 3x3 tent of the one below).
+    Alpha carries how much of each texel was lit, so the top level divided
+    by it is the average of the lit light round a pixel: it takes the place
+    of `bloom_strength` (default 0.04) of each pixel's light, so bloom only
+    moves light about and adds none, even beside the background. It is
+    skipped in debug views. If its textures cannot be made (out of
+    memory), the frame draws without it; they are tried again on a resize.
   - **Tone mapping** (`tone_mapper`): Khronos PBR Neutral (default: base
     colours true until highlights roll off) or AgX (Wrensch's fit of
     Sobotka's: very bright colours go gently over to white). Middle grey
     (0.18) shows as about sRGB 105 under PBR Neutral, 129 under AgX. It writes the sRGB image SMAA then
     smooths. The dust over a flat background (no sky) is tone mapped in
-    shading, always with PBR Neutral.
+    shading, with the same tone mapper (`FrameConstants::tone_mapper`).
 
   `RenderStats` (`last_frame.exposure` over MCP) gives the multiplier
   used, whether a measurement has come back and the scene's brightness in

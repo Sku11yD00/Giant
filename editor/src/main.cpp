@@ -446,7 +446,7 @@ int run(const Options& options) {
         for (const sim::DustPuff& d : dust_near) dust_frame.push_back({d.position, d.radius, d.density, d.color});
         input.dust = dust_frame;
         input.wind = weather.wind();
-        input.delta_seconds = render_seconds;
+        input.delta_seconds = in_screenshot ? 0.0f : render_seconds; // (a screenshot's frame does not ease it again)
         renderer->render(cmd, target, input);
         mark(editor::FramePhase::render);
         if (!in_screenshot) {

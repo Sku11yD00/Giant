@@ -30,7 +30,7 @@ GIANT_TEST("exposure: the histogram's middle is the brightness of the bins it fa
 
 GIANT_TEST("exposure: the darkest and brightest tenth are left out") {
     std::array<u32, k_exposure_bins> bins{};
-    bins[0] = 100;   // a tenth black
+    bins[1] = 100;   // a tenth near black
     bins[30] = 800;  // the middle
     bins[63] = 100;  // a tenth blazing (the sun)
     float stops = 0.0f;
@@ -43,6 +43,16 @@ GIANT_TEST("exposure: the darkest and brightest tenth are left out") {
     GIANT_CHECK(histogram_stops(bins, std::nanf(""), 2.0f, stops));
     GIANT_CHECK(std::isfinite(stops));
     GIANT_CHECK(histogram_stops(bins, 0.5f, 0.5f, stops));
+    GIANT_CHECK(std::abs(stops - exposure_bin_stops(30)) < 1e-3f);
+}
+
+GIANT_TEST("exposure: black pixels do not count; all black holds the exposure") {
+    std::array<u32, k_exposure_bins> bins{};
+    bins[0] = 3000; // most of the screen black (shadow, no ambient)
+    float stops = 0.0f;
+    GIANT_CHECK(!histogram_stops(bins, 0.1f, 0.9f, stops));
+    bins[30] = 100; // the sunlit rest
+    GIANT_CHECK(histogram_stops(bins, 0.1f, 0.9f, stops));
     GIANT_CHECK(std::abs(stops - exposure_bin_stops(30)) < 1e-3f);
 }
 

@@ -902,6 +902,8 @@ def n1_gate(tool, call, check):
         # This only catches large jumps (detail switching across much of the view, e.g. a
         # whole level or the pool being flushed); the error bound (under a pixel) and the
         # "nothing left waiting" checks above cover the fine scale.
+        # (A fixed exposure: auto exposure easing between shots would change the whole view.)
+        tool("set_render_settings", {"auto_exposure": False})
         changes, previous = [], None
         for step in range(5):
             z = -20.0 - step * 0.2
@@ -919,6 +921,7 @@ def n1_gate(tool, call, check):
                 changes.append(sum(abs(a - b) for a, b in zip(region, previous)) / len(region))
             previous = region
         check(max(changes) <= 3 * min(changes) + 1.5, f"the view changes evenly while moving, got {changes}")
+        tool("set_render_settings", {"auto_exposure": True})
     tool("new_scene")
 
 

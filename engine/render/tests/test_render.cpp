@@ -1883,6 +1883,7 @@ GIANT_TEST("render: exposure, bloom and tone mapping after shading; auto exposur
     t.height = 3;
     t.format = rhi::Format::rgba8_srgb;
     t.usage = rhi::TextureUsage::render_target;
+    s.device->destroy(s.target);
     s.target = s.device->create_texture(t);
     st = s.draw(frame);
     GIANT_CHECK(st.bloom);

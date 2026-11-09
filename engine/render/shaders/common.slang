@@ -40,6 +40,7 @@ struct Frame {
     uint skip_offset;     // byte offset, in the instance buffer, of the bits of instances not drawn this frame
     uint sky_ambient;     // read descriptor: the sky's light from all round (9 by 1, sky.slang's cs_sky_ambient)
     uint sky_flags;       // bit 0: ambient light from sky_ambient (else sky_light and ground_light)
+    uint tone_mapper;     // RenderSettings::tone_mapper: 0 PBR Neutral, 1 AgX
     // Wind (wind_offset below).
     float4 wind;          // velocity xyz (m/s), w: gustiness
     float4 wind_clock;    // the gusts' drift (x, z metres), the sway and flutter clocks (turns)
@@ -114,6 +115,7 @@ Frame load_frame(uint descriptor, uint offset) {
     f.skip_offset = p4.x;
     f.sky_ambient = p4.y;
     f.sky_flags = p4.z;
+    f.tone_mapper = p4.w;
     f.wind = load4(b, at); at += 16;
     f.wind_clock = load4(b, at); at += 16;
     f.wind_camera = load4(b, at); at += 16;

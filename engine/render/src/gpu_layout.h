@@ -39,7 +39,7 @@ struct FrameConstants {
     u32 skip_offset;  // instance buffer byte offset of the not-drawn bits (InstanceStore)
     u32 sky_ambient;  // read descriptor: the sky's light from all round (9 spherical harmonics)
     u32 sky_flags;    // bit 0: ambient light from sky_ambient (else sky_light and ground_light)
-    u32 frame_pad;
+    u32 tone_mapper;  // RenderSettings::tone_mapper: 0 PBR Neutral, 1 AgX
     // Wind (giant/core/wind.h; common.slang's wind_offset).
     float wind[4];        // velocity xyz (m/s), w: gustiness
     float wind_clock[4];  // the gusts' drift (x, z metres), the sway and flutter clocks

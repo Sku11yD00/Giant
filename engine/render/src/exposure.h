@@ -25,7 +25,8 @@ inline constexpr float k_middle_grey = 0.18f;
 float exposure_bin_stops(u32 bin);
 
 // The average brightness in stops of the pixels from fraction `low` to
-// `high` of them (0 to 1, darkest first). False with no pixels counted.
+// `high` of them (0 to 1, darkest first), bin 0 (black) left out. False
+// with nothing counted past it (all black: the exposure is held).
 bool histogram_stops(std::span<const u32> bins, float low, float high, float& stops);
 
 // The exposure (in stops: log2 of the multiplier) that brings a scene

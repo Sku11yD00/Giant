@@ -14,6 +14,11 @@ float exposure_bin_stops(u32 bin) {
 }
 
 bool histogram_stops(std::span<const u32> bins, float low, float high, float& stops) {
+    // Bin 0 (black: the unlit, shadows without ambient light, black
+    // materials) is left out: it says nothing of how bright the rest is.
+    if (bins.size() > 0) {
+        bins = bins.subspan(1);
+    }
     double total = 0.0;
     for (const u32 b : bins) {
         total += b;
@@ -32,7 +37,7 @@ bool histogram_stops(std::span<const u32> bins, float low, float high, float& st
         const double after = before + bins[i];
         const double inside = std::min(after, to) - std::max(before, from);
         if (inside > 0.0) {
-            sum += inside * exposure_bin_stops(static_cast<u32>(i));
+            sum += inside * exposure_bin_stops(static_cast<u32>(i + 1));
             weight += inside;
         }
         before = after;
@@ -43,7 +48,7 @@ bool histogram_stops(std::span<const u32> bins, float low, float high, float& st
         for (usize i = 0; i < bins.size(); ++i) {
             before += bins[i];
             if (bins[i] != 0 && before >= from) {
-                stops = exposure_bin_stops(static_cast<u32>(i));
+                stops = exposure_bin_stops(static_cast<u32>(i + 1));
                 return true;
             }
         }

@@ -665,7 +665,7 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     if (m_depth.valid() && m_vis.valid() && m_hzb.valid() && m_color.valid() && m_edges.valid() &&
         m_weights.valid() && m_radiance.valid() && m_gloss.valid() && m_fallback.valid() && m_scene.valid() &&
         m_width == width && m_height == height) {
-        return ensure_post_targets();
+        return true;
     }
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
@@ -748,7 +748,10 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     // first frame with weather); a failure is tried again on the next resize.
     m_sky_failed = false;
     ensure_sky_targets();
-    return ensure_post_targets();
+    // Bloom's levels likewise (without them, no bloom: the frame still draws).
+    m_post_logged = false;
+    ensure_post_targets();
+    return true;
 }
 
 bool Renderer::ensure_post_targets() {
@@ -778,8 +781,9 @@ bool Renderer::ensure_post_targets() {
             make(m_bloom_ups[i], "bloom: up");
         }
     }
+    m_bloom_ready = ok;
     if (!ok && !m_post_logged) {
-        // The levels made are kept; the rest are tried again next frame.
+        // Tried again with the next resize.
         m_post_logged = true;
         log_error("render", "could not create bloom's textures (out of GPU memory?)");
     }
@@ -1795,6 +1799,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
                              m_sky_ambient.valid() && !m_sky_failed;
     k.sky_ambient = sky_ambient ? m_device.read_descriptor(m_sky_ambient) : 0u;
     k.sky_flags = sky_ambient ? 1u : 0u;
+    k.tone_mapper = settings.tone_mapper == ToneMapper::agx ? 1u : 0u;
     k.exposure = update_exposure(frame, lit_view);
     k.debug_view = static_cast<u32>(settings.debug_view);
     k.threshold = std::clamp(settings.lod_error_pixels, 0.01f, 1000.0f);
@@ -2233,8 +2238,8 @@ float Renderer::update_exposure(const FrameInput& frame, bool lit_view) {
     m_measure_exposure = settings.auto_exposure && lit_view;
     m_bloom_on = false; // until post() blooms
     if (!settings.auto_exposure) {
-        // Off: measurements from before are not taken when it comes back on.
-        m_exposure_known = false;
+        // Off: measurements from before are not taken when it comes back on
+        // (it eases on from where it was).
         for (u64& tag : m_histogram_frame) {
             tag = ~u64{0};
         }
@@ -2260,17 +2265,20 @@ float Renderer::update_exposure(const FrameInput& frame, bool lit_view) {
             float stops = 0.0f;
             if (histogram_stops(bins, 0.1f, 0.9f, stops)) {
                 m_scene_stops = stops;
-                m_exposure_target = exposure_target(stops, std::clamp(settings.exposure_compensation, -10.0f, 10.0f),
-                                                    std::clamp(settings.exposure_min, -20.0f, 20.0f),
-                                                    std::clamp(settings.exposure_max, -20.0f, 20.0f));
-                if (!m_exposure_known) {
-                    m_exposure_known = true; // the first measurement: at once
-                    m_exposure_stops = m_exposure_target;
-                }
+                m_scene_measured = true;
             }
         }
     }
-    if (m_exposure_known) {
+    if (m_scene_measured) {
+        // From the last measurement, with this frame's settings.
+        const float target = exposure_target(m_scene_stops, std::clamp(settings.exposure_compensation, -10.0f, 10.0f),
+                                             std::clamp(settings.exposure_min, -20.0f, 20.0f),
+                                             std::clamp(settings.exposure_max, -20.0f, 20.0f));
+        if (!m_exposure_known) {
+            m_exposure_known = true; // the first measurement: at once
+            m_exposure_stops = target;
+        }
+        m_exposure_target = target;
         const float up = std::clamp(settings.exposure_speed_up, 0.0f, 100.0f);
         const float down = std::clamp(settings.exposure_speed_down, 0.0f, 100.0f);
         m_exposure_stops = ease_exposure(m_exposure_stops, m_exposure_target, up, down, frame.delta_seconds);
@@ -2312,7 +2320,7 @@ void Renderer::post(rhi::CommandList& cmd, const FrameData& data, const FrameInp
     }
     // Bloom: down six times from the light, then back up.
     const float strength = std::isfinite(settings.bloom_strength) ? std::clamp(settings.bloom_strength, 0.0f, 1.0f) : 0.0f;
-    const bool bloom = settings.bloom && lit_view && strength > 0.0f;
+    const bool bloom = settings.bloom && lit_view && strength > 0.0f && m_bloom_ready;
     if (bloom) {
         rhi::TextureHandle from = light;
         for (u32 i = 0; i < k_bloom_levels; ++i) {
