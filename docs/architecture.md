@@ -212,15 +212,20 @@ an offline cooker can use it without a device.
   weighted by alpha, so cut-out edges keep their colour; BC7 sRGB, or BC1
   sRGB (`small`) at half the size without alpha. Normal maps (green up;
   `flip_green` for DirectX ones) average their vectors and renormalise;
-  BC5 keeps x and y. Orm textures (glTF occlusion, roughness, metallic)
-  filter roughness as GGX alpha squared and, given the material's normal
-  map, widen it by the normal spread each level averages away (Toksvig),
-  so bumpy surfaces turn rough with distance instead of sparkling; BC7.
-  Masks are one channel in BC4. The top level is resized to sides that are
+  BC5 keeps x and y. Roughness and metallic (from a glTF metallic-roughness
+  image) go to BC5, kept apart because they rarely move together (BC7 would
+  smear hard metal edges into the roughness). Roughness is filtered as GGX
+  alpha squared and, given the material's normal map, widened by the normal
+  spread each level averages away (Toksvig), so bumpy surfaces turn rough
+  with distance instead of sparkling. Masks (any one channel, such as
+  glTF occlusion) are BC4. The top level is resized to sides that are
   multiples of 4 within `max_size`. A `.gtex` file is a 64-byte header
-  (kind, format, size, mips, layers, contents length and hash) and the
-  contents in rhi's layout, so `read_file` hands `create_texture` the
+  (kind, format, size, mips, layers, contents length, and a hash of header
+  and contents) and the contents in rhi's layout, so `read_file` hands `create_texture` the
   bytes as they are and `level_offset` finds any level for streaming.
+  Smaller mips need not be multiples of 4, so streaming (part 3b) keeps
+  the full-size resource and limits the sampled levels rather than making
+  a smaller one.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool

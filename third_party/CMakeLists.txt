@@ -288,7 +288,7 @@ file(DOWNLOAD https://raw.githubusercontent.com/nothings/stb/${stb_commit}/stb_i
      EXPECTED_HASH SHA256=594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3 TLS_VERIFY ON)
 set(stb_impl ${CMAKE_CURRENT_BINARY_DIR}/stb_image_impl.c)
 file(WRITE ${stb_impl}.in
-  "#define STB_IMAGE_IMPLEMENTATION\n#define STBI_NO_STDIO\n#define STBI_NO_LINEAR\n#define STBI_NO_HDR\n"
+  "#define _CRT_SECURE_NO_WARNINGS\n#define STB_IMAGE_IMPLEMENTATION\n#define STBI_NO_STDIO\n#define STBI_NO_LINEAR\n#define STBI_NO_HDR\n"
   "#define STBI_ONLY_PNG\n#define STBI_ONLY_JPEG\n#define STBI_ONLY_TGA\n#define STBI_ONLY_BMP\n"
   "#define STBI_MAX_DIMENSIONS 16384\n#include \"stb_image.h\"\n")
 configure_file(${stb_impl}.in ${stb_impl} COPYONLY)

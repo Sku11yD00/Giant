@@ -28,7 +28,7 @@ rhi::Format format_for(const CookOptions& options) {
     switch (options.kind) {
     case Kind::color: return options.small ? rhi::Format::bc1_srgb : rhi::Format::bc7_srgb;
     case Kind::normal: return rhi::Format::bc5_unorm;
-    case Kind::orm: return rhi::Format::bc7_unorm;
+    case Kind::roughness_metal: return rhi::Format::bc5_unorm;
     case Kind::mask: return rhi::Format::bc4_unorm;
     }
     return rhi::Format::unknown;
@@ -45,7 +45,7 @@ void gather_block(const Image& level, u32 bx, u32 by, u8 out[64]) {
     }
 }
 
-void encode_block(rhi::Format format, Kind kind, const u8 pixels[64], u8* dst) {
+void encode_block(rhi::Format format, const u8 pixels[64], u8* dst) {
     switch (format) {
     case rhi::Format::bc1_srgb:
     case rhi::Format::bc1_unorm:
@@ -60,9 +60,7 @@ void encode_block(rhi::Format format, Kind kind, const u8 pixels[64], u8* dst) {
     case rhi::Format::bc7_srgb:
     case rhi::Format::bc7_unorm: {
         bc7enc_compress_block_params params;
-        bc7enc_compress_block_params_init(&params);
-        // Colour error is judged as the eye sees it; data channels each count alike.
-        if (kind != Kind::color) bc7enc_compress_block_params_init_linear_weights(&params);
+        bc7enc_compress_block_params_init(&params); // colour error judged as the eye sees it
         bc7enc_compress_block(dst, pixels, &params);
         break;
     }
@@ -71,9 +69,22 @@ void encode_block(rhi::Format format, Kind kind, const u8 pixels[64], u8* dst) {
     }
 }
 
-u64 hash_contents(std::span<const u8> bytes) {
+// Whether cooking gives this kind this format: anything else read from a
+// file would be sampled in the wrong colour space or channels.
+bool cooks_to(Kind kind, rhi::Format format) {
+    switch (kind) {
+    case Kind::color: return format == rhi::Format::bc7_srgb || format == rhi::Format::bc1_srgb;
+    case Kind::normal:
+    case Kind::roughness_metal: return format == rhi::Format::bc5_unorm;
+    case Kind::mask: return format == rhi::Format::bc4_unorm;
+    }
+    return false;
+}
+
+constexpr u64 k_fnv_offset = 1469598103934665603ull;
+
+u64 hash_bytes(std::span<const u8> bytes, u64 h = k_fnv_offset) {
     // FNV-1a over 8-byte words, then the tail bytes.
-    u64 h = 1469598103934665603ull;
     const usize words = bytes.size() / 8;
     for (usize i = 0; i < words; ++i) {
         u64 w = 0;
@@ -187,7 +198,7 @@ bool cook(const Image& image, const CookOptions& options, Cooked& out, std::stri
             const u32 blocks_x = (level.width + 3) / 4;
             for (u32 bx = 0; bx < blocks_x; ++bx) {
                 gather_block(level, bx, rows[r].by, pixels);
-                encode_block(out.desc.format, options.kind, pixels, dst + usize{bx} * block);
+                encode_block(out.desc.format, pixels, dst + usize{bx} * block);
             }
         }
     };
@@ -269,10 +280,17 @@ u64 level_offset(const rhi::TextureDesc& desc, u32 layer, u32 mip) {
     return layer_bytes * layer + within;
 }
 
+// The bytes the hash covers: the header up to the hash, then the contents.
+constexpr u32 k_hashed_header_bytes = 48;
+
 std::vector<u8> write_file(const Cooked& texture) {
     u32 code = 0;
     for (const FileFormat& f : k_file_formats) {
         if (f.format == texture.desc.format) code = f.code;
+    }
+    if (code == 0 || rhi::texture_desc_problem(texture.desc) != nullptr || texture.contents.empty() ||
+        rhi::texture_contents_problem(texture.desc, texture.contents.size()) != nullptr) {
+        return {};
     }
     std::vector<u8> file(k_file_header_bytes + texture.contents.size(), 0);
     u8* h = file.data();
@@ -286,10 +304,8 @@ std::vector<u8> write_file(const Cooked& texture) {
     put32(h + 28, texture.desc.layers);
     put32(h + 32, texture.desc.array ? 1u : 0u);
     put64(h + 40, texture.contents.size());
-    put64(h + 48, hash_contents(texture.contents));
-    if (!texture.contents.empty()) {
-        std::memcpy(file.data() + k_file_header_bytes, texture.contents.data(), texture.contents.size());
-    }
+    std::memcpy(file.data() + k_file_header_bytes, texture.contents.data(), texture.contents.size());
+    put64(h + 48, hash_bytes(texture.contents, hash_bytes(std::span<const u8>(h, k_hashed_header_bytes))));
     return file;
 }
 
@@ -318,6 +334,14 @@ bool read_file(std::span<const u8> file, Cooked& out, std::string& error) {
         error = "a .gtex texture of an unknown format";
         return false;
     }
+    if (!cooks_to(static_cast<Kind>(kind), format)) {
+        error = "a .gtex texture whose format does not suit its kind";
+        return false;
+    }
+    if (get32(h + 36) != 0 || get64(h + 56) != 0) {
+        error = "a .gtex texture with reserved header bytes set";
+        return false;
+    }
     Cooked t;
     t.kind = static_cast<Kind>(kind);
     t.desc.width = get32(h + 16);
@@ -342,8 +366,8 @@ bool read_file(std::span<const u8> file, Cooked& out, std::string& error) {
         return false;
     }
     const std::span<const u8> contents = file.subspan(k_file_header_bytes);
-    if (hash_contents(contents) != get64(h + 48)) {
-        error = "a .gtex texture whose contents fail their hash";
+    if (hash_bytes(contents, hash_bytes(file.first(k_hashed_header_bytes))) != get64(h + 48)) {
+        error = "a .gtex texture whose header or contents fail their hash";
         return false;
     }
     t.contents.assign(contents.begin(), contents.end());

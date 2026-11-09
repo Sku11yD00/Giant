@@ -76,7 +76,7 @@ std::vector<std::vector<Tap>> axis_taps(u32 src, u32 dst) {
     return taps;
 }
 
-Plane resample(const Plane& in, u32 width, u32 height) {
+Plane resample(Plane in, u32 width, u32 height) {
     if (in.width == width && in.height == height) return in;
     const auto tx = axis_taps(in.width, width);
     const auto ty = axis_taps(in.height, height);
@@ -164,13 +164,17 @@ bool image_problem(const Image& image, const char* what, std::string& error) {
 
 std::vector<Image> make_mips(const Image& image, const CookOptions& options, std::string& error) {
     if (image_problem(image, "the image", error)) return {};
-    if (options.kind == Kind::orm && options.normal != nullptr &&
+    if (options.kind == Kind::roughness_metal && options.normal != nullptr &&
         image_problem(*options.normal, "the normal map", error)) {
         return {};
     }
-    if (options.kind != Kind::color && options.kind != Kind::normal && options.kind != Kind::orm &&
+    if (options.kind != Kind::color && options.kind != Kind::normal && options.kind != Kind::roughness_metal &&
         options.kind != Kind::mask) {
         error = "unknown texture kind";
+        return {};
+    }
+    if (options.mask_channel > 3) {
+        error = "a mask comes from channel 0 to 3";
         return {};
     }
 
@@ -209,56 +213,51 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
     case Kind::normal:
         source = normal_plane(image, options.flip_green);
         break;
-    case Kind::orm:
-        // Occlusion, GGX alpha squared (roughness^4: what adds up when
-        // surfaces are averaged), metallic.
-        source = Plane(image.width, image.height, 3);
+    case Kind::roughness_metal:
+        // From a glTF metallic-roughness image (G roughness, B metallic):
+        // GGX alpha squared (roughness^4, what adds up when surfaces are
+        // averaged) and metallic.
+        source = Plane(image.width, image.height, 2);
         for (u32 y = 0; y < image.height; ++y) {
             for (u32 x = 0; x < image.width; ++x) {
                 const u8* t = &image.rgba[(usize{y} * image.width + x) * 4];
                 float* p = source.at(x, y);
                 const float r = to_unit(t[1]);
-                p[0] = to_unit(t[0]);
-                p[1] = r * r * r * r;
-                p[2] = to_unit(t[2]);
+                p[0] = r * r * r * r;
+                p[1] = to_unit(t[2]);
             }
         }
         break;
     case Kind::mask:
         source = Plane(image.width, image.height, 1);
-        for (usize i = 0; i < source.v.size(); ++i) source.v[i] = to_unit(image.rgba[i * 4]);
+        for (usize i = 0; i < source.v.size(); ++i) source.v[i] = to_unit(image.rgba[i * 4 + options.mask_channel]);
         break;
     }
 
-    const std::vector<Plane> levels = chain(resample(source, top_w, top_h));
-
-    // The normal map's own chain, to read how much detail each orm level
-    // has lost.
+    // The normal map's own chain, to read how much detail each level has
+    // lost (only these float levels are kept; the texture's own are turned
+    // into bytes one at a time).
     std::vector<Plane> normals;
-    if (options.kind == Kind::orm && options.normal != nullptr) {
-        normals = chain(normal_plane(*options.normal, false));
+    if (options.kind == Kind::roughness_metal && options.normal != nullptr) {
+        normals = chain(normal_plane(*options.normal, options.flip_green));
     }
-    const auto variance_at = [&normals](u32 width, u32 height, u32 x, u32 y) {
-        if (normals.empty()) return 0.0f;
-        // The normal level whose texels are about this level's size.
+    // The normal level whose texels are about the size of a level's.
+    const auto normal_level = [&normals](u32 width, u32 height) -> const Plane* {
+        if (normals.empty()) return nullptr;
         const auto steps = [](u32 normal_side, u32 level_side) {
             return static_cast<int>(std::lround(std::log2(static_cast<double>(normal_side) / level_side)));
         };
         const int k = std::clamp(std::max(steps(normals[0].width, width), steps(normals[0].height, height)), 0,
                                  static_cast<int>(normals.size()) - 1);
-        const Plane& n = normals[static_cast<usize>(k)];
-        const u32 nx = std::min(n.width - 1, static_cast<u32>((x + 0.5) / width * n.width));
-        const u32 ny = std::min(n.height - 1, static_cast<u32>((y + 0.5) / height * n.height));
-        return normal_variance(n.at(nx, ny));
+        return &normals[static_cast<usize>(k)];
     };
 
-    std::vector<Image> out;
-    out.reserve(levels.size());
-    for (const Plane& level : levels) {
+    const auto to_image = [&](const Plane& level) {
         Image img;
         img.width = level.width;
         img.height = level.height;
         img.rgba.resize(usize{level.width} * level.height * 4);
+        const Plane* n = options.kind == Kind::roughness_metal ? normal_level(level.width, level.height) : nullptr;
         for (u32 y = 0; y < level.height; ++y) {
             for (u32 x = 0; x < level.width; ++x) {
                 const float* p = level.at(x, y);
@@ -277,18 +276,24 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
                 }
                 case Kind::normal: {
                     const float len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
-                    const float n[3] = {len > 1e-6f ? p[0] / len : 0.0f, len > 1e-6f ? p[1] / len : 0.0f,
+                    const float u[3] = {len > 1e-6f ? p[0] / len : 0.0f, len > 1e-6f ? p[1] / len : 0.0f,
                                         len > 1e-6f ? p[2] / len : 1.0f};
-                    for (u32 c = 0; c < 3; ++c) t[c] = to_u8(n[c] * 0.5f + 0.5f);
+                    for (u32 c = 0; c < 3; ++c) t[c] = to_u8(u[c] * 0.5f + 0.5f);
                     t[3] = 255;
                     break;
                 }
-                case Kind::orm: {
-                    const float alpha2 =
-                        std::min(1.0f, p[1] + 2.0f * variance_at(level.width, level.height, x, y));
-                    t[0] = to_u8(p[0]);
-                    t[1] = to_u8(std::sqrt(std::sqrt(alpha2)));
-                    t[2] = to_u8(p[2]);
+                case Kind::roughness_metal: {
+                    float variance = 0.0f;
+                    if (n != nullptr) {
+                        const u32 nx = std::min(n->width - 1, static_cast<u32>((x + 0.5) / level.width * n->width));
+                        const u32 ny =
+                            std::min(n->height - 1, static_cast<u32>((y + 0.5) / level.height * n->height));
+                        variance = normal_variance(n->at(nx, ny));
+                    }
+                    const float alpha2 = std::min(1.0f, p[0] + 2.0f * variance);
+                    t[0] = to_u8(std::sqrt(std::sqrt(alpha2)));
+                    t[1] = to_u8(p[1]);
+                    t[2] = 0;
                     t[3] = 255;
                     break;
                 }
@@ -299,7 +304,18 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
                 }
             }
         }
-        out.push_back(std::move(img));
+        return img;
+    };
+
+    // Each float level lives only until the next is made from it.
+    std::vector<Image> out;
+    Plane level = resample(std::move(source), top_w, top_h);
+    out.push_back(to_image(level));
+    while (level.width > 1 || level.height > 1) {
+        const u32 w = std::max(1u, level.width / 2);
+        const u32 h = std::max(1u, level.height / 2);
+        level = resample(std::move(level), w, h);
+        out.push_back(to_image(level));
     }
     return out;
 }

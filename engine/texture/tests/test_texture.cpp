@@ -8,6 +8,7 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <string>
@@ -196,19 +197,21 @@ GIANT_TEST("texture: normal mips are renormalised averages, green flipped on req
 }
 
 GIANT_TEST("texture: roughness widens where smaller mips average away normal detail") {
+    // A glTF metallic-roughness image: roughness in G, metallic in B.
     const Image orm = filled(16, 16, [](u32, u32, u8* t) {
-        t[0] = 200; // occlusion
+        t[0] = 200; // occlusion: not this texture's
         t[1] = 64;  // roughness 0.25
-        t[2] = 0;
+        t[2] = 180; // metallic
         t[3] = 255;
     });
     CookOptions options;
-    options.kind = Kind::orm;
+    options.kind = Kind::roughness_metal;
     std::string error;
     const auto plain = make_mips(orm, options, error);
+    GIANT_CHECK(plain.size() == 5);
     for (const Image& level : plain) {
-        GIANT_CHECK(std::abs(int{at(level, 0, 0)[1]} - 64) <= 1); // no normal map: unchanged
-        GIANT_CHECK(std::abs(int{at(level, 0, 0)[0]} - 200) <= 1);
+        GIANT_CHECK(std::abs(int{at(level, 0, 0)[0]} - 64) <= 1); // no normal map: unchanged
+        GIANT_CHECK(std::abs(int{at(level, 0, 0)[1]} - 180) <= 1);
     }
 
     const Image bumps = bumpy_normals(16, 16);
@@ -216,16 +219,18 @@ GIANT_TEST("texture: roughness widens where smaller mips average away normal det
     const auto widened = make_mips(orm, options, error);
     GIANT_CHECK(widened.size() == plain.size());
     // Full size keeps every bump: roughness as authored.
-    GIANT_CHECK(std::abs(int{at(widened[0], 3, 3)[1]} - 64) <= 1);
-    // Half size averages +-45 degree normals: much rougher, never above 1.
-    GIANT_CHECK(at(widened[1], 1, 1)[1] > 200);
-    GIANT_CHECK(at(widened[0], 3, 3)[0] == at(plain[0], 3, 3)[0]);
+    GIANT_CHECK(std::abs(int{at(widened[0], 3, 3)[0]} - 64) <= 1);
+    // Half size averages normals 45 degrees either way: |mean| = 0.704, so
+    // alpha^2 = 0.25^4 + 2 (1 - 0.704) / 0.704 = 0.843, roughness 0.958.
+    GIANT_CHECK(std::abs(int{at(widened[1], 1, 1)[0]} - 244) <= 2);
+    GIANT_CHECK(at(widened[1], 1, 1)[1] == at(plain[1], 1, 1)[1]); // metallic untouched
 
-    // A normal map at another size is matched by texel size.
+    // A normal map at another size is matched by texel size: here the
+    // texture's texels already span two bumps.
     const Image big_bumps = bumpy_normals(32, 32);
     options.normal = &big_bumps;
     const auto finer = make_mips(orm, options, error);
-    GIANT_CHECK(at(finer[0], 3, 3)[1] > 200); // the orm's texels already span two bumps
+    GIANT_CHECK(std::abs(int{at(finer[0], 3, 3)[0]} - 244) <= 2);
 
     // Flat normals widen nothing.
     const Image flat = filled(16, 16, [](u32, u32, u8* t) {
@@ -234,7 +239,7 @@ GIANT_TEST("texture: roughness widens where smaller mips average away normal det
     });
     options.normal = &flat;
     const auto none = make_mips(orm, options, error);
-    GIANT_CHECK(std::abs(int{at(none.back(), 0, 0)[1]} - 64) <= 1);
+    GIANT_CHECK(std::abs(int{at(none.back(), 0, 0)[0]} - 64) <= 1);
 
     Image broken = flat;
     broken.width = 15;
@@ -258,7 +263,7 @@ GIANT_TEST("texture: cooks each kind into blocks that decode close to their mips
         {Kind::color, false, rhi::Format::bc7_srgb, 4, 3.5, 16},
         {Kind::color, true, rhi::Format::bc1_srgb, 3, 9.0, 32},
         {Kind::normal, false, rhi::Format::bc5_unorm, 2, 4.5, 16},
-        {Kind::orm, false, rhi::Format::bc7_unorm, 3, 3.5, 16},
+        {Kind::roughness_metal, false, rhi::Format::bc5_unorm, 2, 4.5, 16},
         {Kind::mask, false, rhi::Format::bc4_unorm, 1, 5.0, 16},
     };
     const Image image = smooth_image(24, 20);
@@ -385,4 +390,95 @@ GIANT_TEST("texture: .gtex files round trip and bad ones are refused") {
     bad = file;
     bad[8] = 9; // unknown kind
     GIANT_CHECK(refused(bad));
+    bad = file;
+    bad[8] = static_cast<u8>(Kind::color); // a normal map read as colour
+    GIANT_CHECK(refused(bad));
+    bad = file;
+    bad[12] = 7; // BC7 for a normal map: never cooked that way
+    GIANT_CHECK(refused(bad));
+    bad = file;
+    bad[37] = 1; // reserved
+    GIANT_CHECK(refused(bad));
+    bad = file;
+    bad[60] = 1; // reserved
+    GIANT_CHECK(refused(bad));
+    bad = file;
+    bad[32] = 2; // unknown flag
+    GIANT_CHECK(refused(bad));
+
+    // What a file could not take back is not written.
+    Cooked odd = cooked;
+    odd.contents.pop_back();
+    GIANT_CHECK(write_file(odd).empty());
+    odd = cooked;
+    odd.desc.format = rhi::Format::r32_float;
+    GIANT_CHECK(write_file(odd).empty());
+    GIANT_CHECK(write_file(Cooked{}).empty());
+}
+
+GIANT_TEST("texture: roughness and metallic stay apart when they do not move together") {
+    // Smooth roughness beside metallic in hard diagonal bands, as real
+    // metal-and-paint textures are.
+    const Image image = filled(32, 32, [](u32 x, u32 y, u8* t) {
+        t[0] = static_cast<u8>((x * 37 + y * 11) % 256); // occlusion: ignored
+        t[1] = static_cast<u8>(128.0 + 100.0 * std::sin(x * 0.2 + y * 0.07));
+        t[2] = ((x + y) / 3) % 2 == 0 ? 255 : 0;
+        t[3] = 255;
+    });
+    CookOptions options;
+    options.kind = Kind::roughness_metal;
+    std::string error;
+    Cooked cooked;
+    GIANT_CHECK(cook(image, options, cooked, error));
+    GIANT_CHECK(cooked.desc.format == rhi::Format::bc5_unorm);
+    const auto mips = make_mips(image, options, error);
+    const auto decoded = decode_blocks(cooked.desc.format, 32, 32,
+                                       std::span<const u8>(cooked.contents).first(rhi::level_bytes(cooked.desc.format, 32, 32)));
+    GIANT_CHECK(decoded.size() == mips[0].rgba.size());
+    if (decoded.size() == mips[0].rgba.size()) {
+        GIANT_CHECK(largest_difference(decoded, mips[0].rgba, 2) <= 12);
+        GIANT_CHECK(mean_difference(decoded, mips[0].rgba, 2) <= 3.0);
+    }
+}
+
+GIANT_TEST("texture: a mask keeps the channel it is asked for") {
+    const Image image = filled(8, 8, [](u32, u32, u8* t) {
+        t[0] = 10;
+        t[1] = 20;
+        t[2] = 30;
+        t[3] = 40;
+    });
+    CookOptions options;
+    options.kind = Kind::mask;
+    std::string error;
+    for (u8 c = 0; c < 4; ++c) {
+        options.mask_channel = c;
+        const auto mips = make_mips(image, options, error);
+        GIANT_CHECK(!mips.empty() && at(mips[0], 0, 0)[0] == 10 * (c + 1) && at(mips[0], 0, 0)[2] == 10 * (c + 1));
+    }
+    options.mask_channel = 4;
+    GIANT_CHECK(make_mips(image, options, error).empty());
+}
+
+GIANT_TEST("texture: blocks decode as D3D lays them out") {
+    // BC4: red endpoints, then 3-bit indices; index 0 is the first endpoint.
+    const u8 bc4[8] = {200, 40, 0, 0, 0, 0, 0, 0};
+    const auto one = decode_blocks(rhi::Format::bc4_unorm, 4, 4, bc4);
+    GIANT_CHECK(one.size() == 64 && one[0] == 200 && one[60] == 200 && one[63] == 255);
+    // Index 1 everywhere: the second endpoint.
+    const u8 bc4_second[8] = {200, 40, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24};
+    const auto two = decode_blocks(rhi::Format::bc4_unorm, 4, 4, bc4_second);
+    GIANT_CHECK(two.size() == 64 && two[0] == 40 && two[60] == 40);
+    // BC5: the red block, then the green one.
+    const u8 bc5[16] = {200, 40, 0, 0, 0, 0, 0, 0, 70, 30, 0, 0, 0, 0, 0, 0};
+    const auto rg = decode_blocks(rhi::Format::bc5_unorm, 4, 4, bc5);
+    GIANT_CHECK(rg.size() == 64 && rg[0] == 200 && rg[1] == 70 && rg[2] == 0);
+    // BC1: two 565 colours, then 2-bit indices; index 0 is the first colour.
+    const u8 bc1[8] = {0x00, 0xF8, 0x1F, 0x00, 0, 0, 0, 0}; // red 0xF800, blue 0x001F
+    const auto rgb = decode_blocks(rhi::Format::bc1_unorm, 4, 4, bc1);
+    GIANT_CHECK(rgb.size() == 64 && rgb[0] == 255 && rgb[1] == 0 && rgb[2] == 0 && rgb[3] == 255);
+    // BC7 mode 6 (bit 6 set): a whole-block colour; checked as decodable.
+    u8 bc7[16] = {};
+    bc7[0] = 0x40;
+    GIANT_CHECK(decode_blocks(rhi::Format::bc7_unorm, 4, 4, bc7).size() == 64);
 }
