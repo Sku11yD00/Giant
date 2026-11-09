@@ -13,7 +13,7 @@
 //
 // JSON (every key optional but "type"; unknown keys are refused, so a typo
 // is caught):
-//   {"type": "panel" | "text" | "bar" | "image" | "button",
+//   {"type": "panel" | "text" | "bar" | "image" | "button" | "compass",
 //    "id": "name",                 // to find it, and what a button's click says (one widget each)
 //    "anchor": [x, y],             // where in its parent (0 to 1: [0,0] top left, [1,1] bottom right)
 //    "pivot": [x, y],              // which of its own points sits there (default: the anchor)
@@ -32,15 +32,19 @@
 //    "direction": "right" | "left" | "up" | "down",      // a bar's
 //    "image": "name",              // an image the game has given the UI
 //    "hover": "#...",              // a button's background when pointed at or focused
+//    "span": degrees,              // a compass's width (10 to 360, default 120); its "value" the heading
+//    "fade": seconds,              // eases in and out as "visible" changes (0: at once; at most 10)
 //    "children": [ ... ]}
 #pragma once
 
 #include "giant/ui/canvas.h"
+#include "giant/ui/hud.h"
 
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -78,7 +82,10 @@ private:
 // unknown name as empty.
 std::string fill_text(std::string_view text, const Values& values);
 
-enum class WidgetType : u8 { panel, text, bar, image, button };
+// "#rrggbb" or "#rrggbbaa" as RGBA8 (red in the lowest byte), if it is one.
+std::optional<u32> parse_color(std::string_view text);
+
+enum class WidgetType : u8 { panel, text, bar, image, button, compass };
 enum class Layout : u8 { none, column, row };
 enum class Direction : u8 { right, left, up, down };
 
@@ -102,12 +109,16 @@ struct Widget {
     double value = 0.0, max = 1.0;
     Direction direction = Direction::right;
     std::string image;
+    float span = 120.0f; // a compass's, degrees
+    float fade = 0.0f;   // seconds
     std::vector<Widget> children;
 
     // Laid out (pixels), whether it is shown (not before it is first laid
     // out), and its text as filled in.
     Rect rect;
     bool shown = false;
+    bool own_visible = false; // by its own "visible" (its holders aside)
+    float opacity = 0.0f;     // eased (fade): drawn at this times its holders'
     std::string shown_text;
 };
 
@@ -132,9 +143,13 @@ public:
     usize text_bytes() const { return m_text_bytes; }
     // At most this much text, filled in, a screen (or all a frame shares).
     static constexpr usize k_max_text_bytes = 64 * 1024;
-    // Drawn as laid out; `images` names to textures (none: no images drawn).
+    // Fades moved on by `seconds` (each frame, before drawing).
+    void advance(double seconds);
+    // Drawn as laid out; `images` names to textures (none: no images
+    // drawn); `marks` on its compasses (markers by bearing).
     void draw(Canvas& canvas, const Font& font, const Values& values, float scale,
-              const std::function<rhi::TextureId(std::string_view)>& images = {}) const;
+              const std::function<rhi::TextureId(std::string_view)>& images = {},
+              std::span<const CompassMark> marks = {}) const;
 
     // The top button shown at `point` (pixels, as laid out), if any.
     const Widget* button_at(Vec2 point) const;

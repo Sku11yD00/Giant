@@ -357,6 +357,9 @@ Open-world systems:
   buttons written as JSON, laid out at any window size, filled in from
   values the game sets, and clicked or moved through with keys (over MCP
   until the menus part routes the window's mouse and keys).
+- E5 part 3: HUD pieces: a compass, markers in the world that point the
+  way when off screen, prompts and bars that fade in and out, and fades
+  to black.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

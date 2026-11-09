@@ -1659,13 +1659,12 @@ simulation lets it go there too); a save gathers every cell the forest
 knows at once (a frame's cost grows with the cells loaded); list_saves
 reads each slot's manifest on the frame.
 
-## Game UI (E5 parts 1 and 2)
+## Game UI (E5 parts 1 to 3)
 
 The game's own UI, apart from the editor's ImGui panels: `engine/ui`
 (core, rhi; nlohmann_json privately). Part 1: fonts, text and the canvas.
-Part 2: screens from data. Next: HUD pieces (compass, bars, prompts,
-markers), then menus (pause, save and load, settings), which also route
-the real mouse and keys to screens.
+Part 2: screens from data. Part 3: HUD pieces. Next: menus (pause, save
+and load, settings), which also route the real mouse and keys to screens.
 
 - **Fonts** (`ui::Font`): TrueType bytes (stb_truetype, the copy Dear
   ImGui ships, compiled static in `font.cpp`) made into signed distance
@@ -1741,6 +1740,24 @@ the real mouse and keys to screens.
   `ui_key`, `get_ui_events`, `get_ui_screen` (every widget's rect as laid
   out). Until part 4, only MCP and code click screens: the window's own
   mouse and keys still drive play.
+
+- **HUD pieces** (part 3, `hud.h`): `ui::View` (the eye: position,
+  orientation, fov) and `project` (world to screen pixels, doubles to the
+  camera); headings and bearings in degrees clockwise from north (north
+  -Z, east +X). `ui::Markers` (at most 256): a diamond, label and
+  distance at a point in the world; off the screen or behind, clamped 48
+  units inside the edge with an arrow the way (unless `clamp` is off);
+  hidden past `max_distance`, fading over its last tenth. A `compass`
+  widget draws the heading (its `value`), ticks every 15 degrees,
+  letters at 45, and the markers by bearing (past its `span`: dimmed at
+  its edge). Any widget may `fade` in and out over seconds as its
+  `visible` changes (`Screen::advance` each frame; a widget fading out is
+  drawn where it was, not clicked). Health and stamina bars and interact
+  prompts are screens (bars, and text shown by a value). In the editor,
+  markers draw under the screens, a whole-screen fade (`fade_to`) over
+  them, and each frame sets `heading`, `playing`, and while playing
+  `player.speed`, `player.on_ground`, `player.climbing` (rounded, so a
+  screen lays out again only when what it shows changes).
 
 Known limits: one font, no scripts beyond Latin (no CJK, Arabic or
 Cyrillic yet: the atlas would grow, or glyphs be made on demand on a

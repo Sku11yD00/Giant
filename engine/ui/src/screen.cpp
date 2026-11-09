@@ -114,26 +114,10 @@ struct Loader {
     bool color(const Json& j, const std::string& where, const char* key, u32& out) {
         if (!j.contains(key)) return true;
         const Json& v = j[key];
-        const auto hex = [](char c) -> int {
-            if (c >= '0' && c <= '9') return c - '0';
-            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-            return -1;
-        };
         if (v.is_string()) {
-            const std::string& s = v.get_ref<const std::string&>();
-            if ((s.size() == 7 || s.size() == 9) && s[0] == '#') {
-                u8 c[4] = {0, 0, 0, 255};
-                bool ok = true;
-                for (usize i = 0; i + 1 < s.size() && ok; i += 2) {
-                    const int hi = hex(s[i + 1]), lo = hex(s[i + 2]);
-                    ok = hi >= 0 && lo >= 0;
-                    if (ok) c[i / 2] = static_cast<u8>(hi * 16 + lo);
-                }
-                if (ok) {
-                    out = rgba(c[0], c[1], c[2], c[3]);
-                    return true;
-                }
+            if (const std::optional<u32> c = parse_color(v.get_ref<const std::string&>())) {
+                out = *c;
+                return true;
             }
         }
         return fail(where, std::string(key) + " is a colour \"#rrggbb\" or \"#rrggbbaa\"");
@@ -178,7 +162,8 @@ struct Loader {
         if (!only(j, where,
                   {"type", "id", "anchor", "pivot", "offset", "size", "stretch", "layout", "gap", "padding", "clip",
                    "visible", "background", "border", "border_color", "color", "text", "font_size", "align", "wrap",
-                   "outline", "outline_color", "shadow", "value", "max", "direction", "image", "hover", "children"}))
+                   "outline", "outline_color", "shadow", "value", "max", "direction", "image", "hover", "span", "fade",
+                   "children"}))
             return false;
         if (!j.contains("type")) return fail(where, "no \"type\"");
         if (!choice<WidgetType>(j, where, "type",
@@ -186,7 +171,8 @@ struct Loader {
                                  {"text", WidgetType::text},
                                  {"bar", WidgetType::bar},
                                  {"image", WidgetType::image},
-                                 {"button", WidgetType::button}},
+                                 {"button", WidgetType::button},
+                                 {"compass", WidgetType::compass}},
                                 w.type))
             return false;
         const std::string here = j.contains("id") && j["id"].is_string() ? where + " (\"" + j["id"].get<std::string>() + "\")" : where;
@@ -221,7 +207,8 @@ struct Loader {
             !choice<Direction>(j, here, "direction",
                                {{"right", Direction::right}, {"left", Direction::left}, {"up", Direction::up}, {"down", Direction::down}},
                                w.direction) ||
-            !text(j, here, "image", w.image, 128) || !color(j, here, "hover", w.hover))
+            !text(j, here, "image", w.image, 128) || !color(j, here, "hover", w.hover) ||
+            !number(j, here, "span", 10.0f, 360.0f, w.span) || !number(j, here, "fade", 0.0f, 10.0f, w.fade))
             return false;
         if (w.visible == "!" || (w.visible.size() > 128 && w.visible[0] != '!')) return fail(here, "visible names a value");
         if (j.contains("children")) {
@@ -283,9 +270,10 @@ struct Layouter {
 
     // The size it would take with nothing stretching it (pixels), its shown flag set.
     Vec2 natural(Widget& w, float wrap_width) {
-        w.shown = visible(w);
+        w.own_visible = visible(w);
+        w.shown = w.own_visible;
         if (!w.shown) {
-            hide(w); // (and all it holds: none of them shown, clicked or focused)
+            hide(w, false); // (and all it holds: none of them shown, clicked or focused)
             return {};
         }
         const float pad = 2.0f * w.padding * scale;
@@ -324,11 +312,16 @@ struct Layouter {
         return size;
     }
 
-    static void hide(Widget& w) {
+    // Not shown (nor clicked or focused); still drawn where it was while it fades out.
+    void hide(Widget& w, bool fading) {
         w.shown = false;
-        w.rect = {};
-        w.shown_text.clear();
-        for (Widget& c : w.children) hide(c);
+        w.own_visible = visible(w);
+        fading = fading || (w.fade > 0.0f && w.opacity > 0.0f);
+        if (!fading) {
+            w.rect = {};
+            w.shown_text.clear();
+        }
+        for (Widget& c : w.children) hide(c, fading);
     }
 
     // Placed in `parent` (its inside), from its natural size.
@@ -371,13 +364,70 @@ struct Layouter {
     static Vec2 natural_size(const Widget& w) { return {w.rect.w, w.rect.h}; }
 };
 
+u32 faded(u32 color, float alpha) {
+    if (alpha >= 1.0f) return color;
+    const float a = static_cast<float>(color >> 24) * std::clamp(alpha, 0.0f, 1.0f);
+    return (color & 0x00FFFFFFu) | (static_cast<u32>(std::lround(a)) << 24);
+}
+
+// How opaque it is drawn by itself: eased if it fades, else shown or not.
+float own_opacity(const Widget& w) { return w.fade > 0.0f ? w.opacity : (w.own_visible ? 1.0f : 0.0f); }
+
+void draw_compass(Canvas& canvas, const Font& font, const Values& values, float scale, const Widget& w, const Rect& in,
+                  float alpha, std::span<const CompassMark> marks) {
+    if (!(in.w > 0.0f) || !(in.h > 0.0f)) return;
+    const double raw = w.value_name.empty() ? w.value : values.number(w.value_name);
+    const float heading = std::isfinite(raw) ? static_cast<float>(std::fmod(std::fmod(raw, 360.0) + 360.0, 360.0)) : 0.0f;
+    const float span = std::clamp(w.span, 10.0f, 360.0f);
+    const float per = in.w / span, cx = in.x + 0.5f * in.w;
+    const u32 color = faded(w.color, alpha);
+    const float t = std::max(std::round(2.0f * scale), 1.0f);
+    canvas.push_clip(in);
+    static constexpr const char* k_names[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    TextStyle s;
+    s.color = color;
+    s.align = Align::center;
+    s.outline = w.outline * scale;
+    s.outline_color = faded(w.outline_color, alpha);
+    s.shadow = w.shadow * scale;
+    s.shadow_color = faded(rgba(0, 0, 0, 160), alpha);
+    // Ticks every 15 degrees (taller at 45), letters at 45.
+    const float from = std::ceil((heading - 0.5f * span) / 15.0f) * 15.0f;
+    for (float d = from; d <= heading + 0.5f * span + 0.01f; d += 15.0f) {
+        const float x = std::round(cx + (d - heading) * per);
+        const int at = static_cast<int>(std::lround(d)) % 360;
+        const int deg = at < 0 ? at + 360 : at;
+        if (deg % 45 == 0) {
+            s.size = (deg % 90 == 0 ? 1.0f : 0.75f) * w.font_size * scale;
+            canvas.text({x, in.y + 0.42f * in.h}, k_names[deg / 45], s);
+            canvas.rect({x - 0.5f * t, in.y, t, 0.35f * in.h}, color);
+        } else {
+            canvas.rect({x - 0.5f * t, in.y, t, 0.2f * in.h}, faded(color, 0.7f));
+        }
+    }
+    // Markers by bearing: on it where they are, at its edge (dimmer) past it.
+    const float r = std::max(std::round(0.12f * in.h), 2.0f);
+    for (const CompassMark& m : marks) {
+        const float off = turn_degrees(heading, m.bearing);
+        const bool past = std::fabs(off) > 0.5f * span;
+        const float x = std::round(cx + std::clamp(off, -0.5f * span, 0.5f * span) * per - (past ? std::copysign(r, off) : 0.0f));
+        canvas.rect({x - r, in.y + in.h - 2.0f * r - t, 2.0f * r, 2.0f * r}, faded(m.color, alpha * (past ? 0.5f : 1.0f)));
+    }
+    // Where it looks: a mark in the middle.
+    canvas.rect({std::round(cx) - t, in.y, 2.0f * t, in.h}, faded(color, 0.35f));
+    canvas.pop_clip();
+    (void)font;
+}
+
 void draw_widget(Canvas& canvas, const Font& font, const Values& values, float scale, const Widget& w,
                  const std::string& focus, const std::string& hovered,
-                 const std::function<rhi::TextureId(std::string_view)>& images) {
-    if (!w.shown) return;
+                 const std::function<rhi::TextureId(std::string_view)>& images, float alpha,
+                 std::span<const CompassMark> marks) {
+    alpha *= own_opacity(w);
+    if (alpha <= 0.0f || (!w.shown && w.rect.w <= 0.0f && w.rect.h <= 0.0f)) return;
     const Rect& r = w.rect;
-    const bool lit = w.type == WidgetType::button && !w.id.empty() && (w.id == focus || w.id == hovered);
-    const u32 background = lit && w.hover != 0 ? w.hover : w.background;
+    const bool lit = w.shown && w.type == WidgetType::button && !w.id.empty() && (w.id == focus || w.id == hovered);
+    const u32 background = faded(lit && w.hover != 0 ? w.hover : w.background, alpha);
     if ((background >> 24) != 0) canvas.rect(r, background);
     const float pad = w.padding * scale;
     const Rect in{r.x + pad, r.y + pad, std::max(r.w - 2.0f * pad, 0.0f), std::max(r.h - 2.0f * pad, 0.0f)};
@@ -387,10 +437,11 @@ void draw_widget(Canvas& canvas, const Font& font, const Values& values, float s
         if (w.shown_text.empty()) break;
         TextStyle s;
         s.size = w.font_size * scale;
-        s.color = w.color;
+        s.color = faded(w.color, alpha);
         s.outline = w.outline * scale;
-        s.outline_color = w.outline_color;
+        s.outline_color = faded(w.outline_color, alpha);
         s.shadow = w.shadow * scale;
+        s.shadow_color = faded(s.shadow_color, alpha);
         s.align = w.align;
         s.wrap = std::max(in.w, 1.0f); // aligned within its inside (wrapped there only if it wraps)
         const std::string& shown = w.shown_text;
@@ -417,20 +468,22 @@ void draw_widget(Canvas& canvas, const Font& font, const Values& values, float s
         case Direction::down: fill.h = in.h * f; break;
         case Direction::up: fill.y = in.y + in.h * (1.0f - f); fill.h = in.h * f; break;
         }
-        canvas.rect(fill, w.color);
+        canvas.rect(fill, faded(w.color, alpha));
         break;
     }
     case WidgetType::image:
         if (!w.image.empty() && images) {
             const rhi::TextureId t = images(w.image);
-            if (t != 0) canvas.image(in, t, {0.0f, 0.0f, 1.0f, 1.0f}, w.color);
+            if (t != 0) canvas.image(in, t, {0.0f, 0.0f, 1.0f, 1.0f}, faded(w.color, alpha));
         }
         break;
+    case WidgetType::compass: draw_compass(canvas, font, values, scale, w, in, alpha, marks); break;
     case WidgetType::panel: break;
     }
-    if (w.border > 0.0f && (w.border_color >> 24) != 0) canvas.frame(r, std::max(w.border * scale, 1.0f), w.border_color);
+    if (w.border > 0.0f && (w.border_color >> 24) != 0)
+        canvas.frame(r, std::max(w.border * scale, 1.0f), faded(w.border_color, alpha));
     if (w.clip) canvas.push_clip(r);
-    for (const Widget& c : w.children) draw_widget(canvas, font, values, scale, c, focus, hovered, images);
+    for (const Widget& c : w.children) draw_widget(canvas, font, values, scale, c, focus, hovered, images, alpha, marks);
     if (w.clip) canvas.pop_clip();
 }
 
@@ -535,6 +588,23 @@ std::string Values::text(std::string_view name, int decimals) const {
     return format_number(std::get<double>(*v), decimals);
 }
 
+std::optional<u32> parse_color(std::string_view s) {
+    const auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    if ((s.size() != 7 && s.size() != 9) || s[0] != '#') return std::nullopt;
+    u8 c[4] = {0, 0, 0, 255};
+    for (usize i = 1; i + 1 < s.size(); i += 2) {
+        const int hi = hex(s[i]), lo = hex(s[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        c[i / 2] = static_cast<u8>(hi * 16 + lo);
+    }
+    return rgba(c[0], c[1], c[2], c[3]);
+}
+
 std::string fill_text(std::string_view text, const Values& values) {
     if (text.find_first_of("{}") == std::string_view::npos) return std::string(text);
     std::string out;
@@ -632,8 +702,26 @@ void Screen::lay_out(const Font& font, const Values& values, Vec2 size, float sc
 }
 
 void Screen::draw(Canvas& canvas, const Font& font, const Values& values, float scale,
-                  const std::function<rhi::TextureId(std::string_view)>& images) const {
-    draw_widget(canvas, font, values, scale, m_root, m_focus, m_focus, images);
+                  const std::function<rhi::TextureId(std::string_view)>& images, std::span<const CompassMark> marks) const {
+    draw_widget(canvas, font, values, scale, m_root, m_focus, m_focus, images, 1.0f, marks);
+}
+
+namespace {
+void advance_widget(Widget& w, float seconds) {
+    if (w.fade > 0.0f) {
+        const float target = w.own_visible ? 1.0f : 0.0f;
+        const float step = seconds / w.fade;
+        w.opacity = w.opacity < target ? std::min(w.opacity + step, target) : std::max(w.opacity - step, target);
+    } else {
+        w.opacity = w.own_visible ? 1.0f : 0.0f;
+    }
+    for (Widget& c : w.children) advance_widget(c, seconds);
+}
+} // namespace
+
+void Screen::advance(double seconds) {
+    if (!std::isfinite(seconds) || seconds < 0.0) seconds = 0.0;
+    advance_widget(m_root, static_cast<float>(std::min(seconds, 10.0)));
 }
 
 const Widget* Screen::button_at(Vec2 point) const { return ui::button_at(m_root, point, false); }

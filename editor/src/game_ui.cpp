@@ -3,6 +3,7 @@
 #include "editor_commands.h"
 #include "game_saves.h"
 #include "play_state.h"
+#include "viewport_camera.h"
 
 #include "giant/core/log.h"
 
@@ -215,6 +216,20 @@ std::vector<ui::UiEvent> GameUi::take_events() {
     return out;
 }
 
+void GameUi::fade_to(u32 color, float alpha, double seconds) {
+    if (!std::isfinite(alpha)) alpha = 0.0f;
+    if (!std::isfinite(seconds) || seconds < 0.0) seconds = 0.0;
+    m_fade_color = color & 0x00FFFFFFu;
+    m_fade_target = std::clamp(alpha, 0.0f, 1.0f);
+    seconds = std::min(seconds, 30.0);
+    if (seconds <= 0.0) {
+        m_fade_alpha = m_fade_target;
+        m_fade_rate = 0.0f;
+    } else {
+        m_fade_rate = std::max(std::fabs(m_fade_target - m_fade_alpha) / static_cast<float>(seconds), 1e-4f);
+    }
+}
+
 bool GameUi::showing(const EditorState& state) const {
     const bool playing = state.play != nullptr && state.play->playing();
     return m_font != nullptr && (show == Show::always || (show == Show::playing && playing));
@@ -232,6 +247,25 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
         m_saves_seen = s.saves;
         m_autosaves_seen = s.autosaves;
         m_saves_known = true;
+    }
+    // The fade, eased towards where it is going.
+    if (m_fade_alpha < m_fade_target) m_fade_alpha = std::min(m_fade_alpha + m_fade_rate * static_cast<float>(seconds), m_fade_target);
+    if (m_fade_alpha > m_fade_target) m_fade_alpha = std::max(m_fade_alpha - m_fade_rate * static_cast<float>(seconds), m_fade_target);
+    // The values the editor gives the screens (rounded, so a screen lays out again only when they show a change).
+    const render::View rv = to_view(state.camera);
+    const ui::View view{rv.position, rv.orientation, rv.vertical_fov_degrees};
+    values.set("heading", std::fmod(std::round(static_cast<double>(ui::heading_degrees(view.orientation))), 360.0));
+    values.set("playing", playing);
+    const std::optional<sim::CharacterState> player = playing ? state.play->player() : std::nullopt;
+    if (player) {
+        const double speed = std::hypot(player->velocity.x, player->velocity.z);
+        values.set("player.speed", std::round(speed * 10.0) / 10.0);
+        values.set("player.on_ground", player->on_ground);
+        values.set("player.climbing", player->climbing);
+    } else {
+        values.erase("player.speed");
+        values.erase("player.on_ground");
+        values.erase("player.climbing");
     }
     for (Toast& t : m_toasts) t.left -= seconds;
     std::erase_if(m_toasts, [](const Toast& t) { return t.left <= 0.0; });
@@ -262,6 +296,9 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
         for (const ui::Rect& r : arms) m_canvas.rect(r, light);
     }
 
+    // Markers in the world, under the screens.
+    markers.draw(m_canvas, *m_font, view, {width, height}, s);
+
     // Screens, by layer: laid out for this frame's size and values, then drawn.
     const auto image = [this](std::string_view name) -> rhi::TextureId {
         const auto it = m_images.find(name);
@@ -271,18 +308,8 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
     for (auto& [name, loaded] : m_order) {
         (void)name;
         loaded->screen->lay_out(*m_font, values, {width, height}, s, &text);
-        loaded->screen->draw(m_canvas, *m_font, values, s, image);
-    }
-
-    // A save being written: a mark at the bottom right.
-    const std::string doing = state.saves != nullptr ? state.saves->status().doing : std::string();
-    if (doing == "saving" || doing == "loading" || doing == "applying") {
-        ui::TextStyle style;
-        style.size = 22.0f * s;
-        style.align = ui::Align::right;
-        style.color = ui::rgba(255, 255, 255, 200);
-        style.shadow = std::max(1.0f, 2.0f * s);
-        m_canvas.text({width - 32.0f * s, height - 56.0f * s}, doing == "saving" ? "Saving…" : "Loading…", style);
+        loaded->screen->advance(seconds);
+        loaded->screen->draw(m_canvas, *m_font, values, s, image, markers.compass_marks());
     }
 
     // Toasts: bottom centre, newest lowest, on a dark band (wrapped at 1200 units).
@@ -302,6 +329,20 @@ void GameUi::update(const EditorState& state, double seconds, float width, float
         style.color = ui::rgba(255, 255, 255, alpha(255.0f));
         m_canvas.text({cx - 0.5f * style.wrap, y}, it->text, style); // (centred within the wrap's width)
         bottom = y - 2.0f * pad_y - gap;
+    }
+    // The fade, over everything.
+    if (m_fade_alpha > 0.0f)
+        m_canvas.rect({0.0f, 0.0f, width, height}, m_fade_color | (static_cast<u32>(std::lround(m_fade_alpha * 255.0f)) << 24));
+
+    // A save being written: a mark at the bottom right.
+    const std::string doing = state.saves != nullptr ? state.saves->status().doing : std::string();
+    if (doing == "saving" || doing == "loading" || doing == "applying") {
+        ui::TextStyle mark;
+        mark.size = 22.0f * s;
+        mark.align = ui::Align::right;
+        mark.color = ui::rgba(255, 255, 255, 200);
+        mark.shadow = std::max(1.0f, 2.0f * s);
+        m_canvas.text({width - 32.0f * s, height - 56.0f * s}, doing == "saving" ? "Saving…" : "Loading…", mark);
     }
     m_build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - from).count();
 }

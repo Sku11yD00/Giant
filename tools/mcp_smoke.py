@@ -781,6 +781,12 @@ def player_gate(tool, call, check):
     check(clicked["event"] == {"screen": "hud", "id": "go"}, f"its button clicks, got {clicked}")
     check(tool("get_ui_events")["events"] == [{"screen": "hud", "id": "go"}], "the click is an event")
     tool("ui_remove_screen", {"all": True})
+    tool("ui_set_marker", {"id": "ahead", "position": [0, 1, -50], "label": "Ahead"})
+    call("ping")
+    markers = tool("get_ui_markers")["markers"]
+    check(len(markers) == 1 and markers[0]["shown"], f"a marker is drawn, got {markers}")
+    tool("ui_fade", {"alpha": 0, "seconds": 0})
+    tool("ui_remove_marker", {"all": True})
     tool("set_player_input", {"forward": 1, "yaw": 0})  # down -z, onto the step
     started = time.monotonic()
     player = None
@@ -961,7 +967,7 @@ def main() -> int:
                          "record_audio", "get_audio", "save_game", "load_game", "list_saves", "get_save",
                          "set_autosave", "get_game_ui", "set_game_ui", "show_toast", "ui_load_screen",
                          "ui_remove_screen", "ui_set_values", "ui_click", "ui_key", "get_ui_events",
-                         "get_ui_screen"):
+                         "get_ui_screen", "ui_set_marker", "ui_remove_marker", "get_ui_markers", "ui_fade"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")
