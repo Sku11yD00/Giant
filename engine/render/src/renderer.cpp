@@ -35,7 +35,7 @@ constexpr u32 k_occluded_capacity = 1u << 18; // clusters retested in the second
 // The instances live in the InstanceStore, uploaded in chunks
 // (k_max_instances: renderer.h).
 constexpr u32 k_vertices_per_cluster = geometry::k_cluster_max_triangles * 3;
-constexpr u32 k_max_materials = 1u << 20; // per frame (32 MiB)
+constexpr u32 k_max_materials = 1u << 20; // per frame (48 MiB)
 constexpr u32 k_max_mesh_groups = 65535; // per dimension of a mesh dispatch
 // Mesh groups in one dispatch: whole rows of 65535 under the 2^22 total.
 constexpr u32 k_max_cpu_clusters = 64u * k_max_mesh_groups;
@@ -59,11 +59,26 @@ void set4(float* out, const Vec3& v, float w) {
 
 u32 groups_of(u32 items, u32 per_group) { return (items + per_group - 1) / per_group; }
 
-gpu::Material to_gpu(const Material& m) {
+// `descriptor(id, srgb)`: the read descriptor of a live texture in that
+// colour space, else rhi::k_no_descriptor.
+template <class Descriptor>
+gpu::Material to_gpu(const Material& m, Descriptor&& descriptor) {
     gpu::Material out{};
     set4(out.base_roughness, m.base_color, m.roughness);
     set4(out.emissive_metallic, m.emissive, m.metallic);
+    out.textures[0] = descriptor(m.base_color_texture, true);
+    out.textures[1] = descriptor(m.normal_texture, false);
+    out.textures[2] = descriptor(m.roughness_metal_texture, false);
+    out.textures[3] = descriptor(m.occlusion_texture, false);
     return out;
+}
+
+constexpr u32 k_texture_slot_bits = 20;
+constexpr u32 k_texture_slot_mask = (1u << k_texture_slot_bits) - 1;
+constexpr u32 k_texture_generations = 4095; // generations 1 to 4094: ~0u stays k_no_texture
+
+bool is_srgb(rhi::Format f) {
+    return f == rhi::Format::rgba8_srgb || f == rhi::Format::bc1_srgb || f == rhi::Format::bc7_srgb;
 }
 
 void set_bounds(float* out, const Vec3& center, float radius) { set4(out, center, radius); }
@@ -179,6 +194,9 @@ Renderer::~Renderer() {
     m_device.destroy(m_smaa_search);
     for (Mesh& mesh : m_meshes) {
         destroy(mesh);
+    }
+    for (const TextureSlot& t : m_textures) {
+        m_device.destroy(t.handle);
     }
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
@@ -632,6 +650,68 @@ void Renderer::remove_mesh(MeshId id) {
     m_voxels->forget_mesh(id);
     m_free_meshes.push_back(id);
     ++m_meshes_version;
+}
+
+TextureId Renderer::add_texture(const rhi::TextureDesc& desc, std::span<const u8> contents) {
+    const char* problem = rhi::texture_desc_problem(desc);
+    if (problem == nullptr && (desc.array || desc.layers != 1 || desc.usage != rhi::TextureUsage::sampled)) {
+        problem = "a material texture is one sampled layer, not an array";
+    }
+    if (problem == nullptr) {
+        problem = rhi::texture_contents_problem(desc, contents.size());
+    }
+    if (problem == nullptr && m_free_textures.empty() && m_textures.size() >= k_texture_slot_mask) {
+        problem = "too many textures";
+    }
+    if (problem != nullptr) {
+        log_error("render", std::string("texture refused: ") + problem);
+        return k_no_texture;
+    }
+    rhi::TextureDesc named = desc;
+    named.name = "material texture";
+    const rhi::TextureHandle handle = m_device.create_texture(named, contents);
+    if (!handle.valid()) {
+        return k_no_texture; // the device logged why
+    }
+    u32 slot = 0;
+    if (!m_free_textures.empty()) {
+        slot = m_free_textures.back();
+        m_free_textures.pop_back();
+    } else {
+        slot = static_cast<u32>(m_textures.size());
+        m_textures.emplace_back();
+    }
+    TextureSlot& t = m_textures[slot];
+    t.handle = handle;
+    t.descriptor = m_device.read_descriptor(handle);
+    t.srgb = is_srgb(desc.format);
+    return slot | (t.generation << k_texture_slot_bits);
+}
+
+const Renderer::TextureSlot* Renderer::texture_slot(TextureId id) const {
+    const u32 slot = id & k_texture_slot_mask;
+    if (id == k_no_texture || slot >= m_textures.size()) {
+        return nullptr;
+    }
+    const TextureSlot& t = m_textures[slot];
+    return t.handle.valid() && t.generation == (id >> k_texture_slot_bits) ? &t : nullptr;
+}
+
+void Renderer::remove_texture(TextureId id) {
+    if (texture_slot(id) == nullptr) {
+        return;
+    }
+    TextureSlot& t = m_textures[id & k_texture_slot_mask];
+    m_device.destroy(t.handle); // deferred by the device past frames in flight
+    t.handle = {};
+    t.descriptor = rhi::k_no_descriptor;
+    t.generation = t.generation + 1 >= k_texture_generations ? 1 : t.generation + 1;
+    m_free_textures.push_back(id & k_texture_slot_mask);
+}
+
+const rhi::TextureDesc* Renderer::texture(TextureId id) const {
+    const TextureSlot* t = texture_slot(id);
+    return t != nullptr ? m_device.describe(t->handle) : nullptr;
 }
 
 bool Renderer::mesh_ready(MeshId id) const {
@@ -1864,10 +1944,23 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
                                 " materials in one frame; instances using the rest draw the default");
     }
     m_gpu_materials.clear();
+    const auto texture_descriptor = [this](TextureId id, bool srgb) {
+            const TextureSlot* slot = texture_slot(id);
+            if (slot == nullptr) return rhi::k_no_descriptor;
+            if (slot->srgb != srgb) {
+                if (!m_texture_kind_logged) {
+                    m_texture_kind_logged = true;
+                    log_error("render", srgb ? "a linear texture used as base colour: left out"
+                                             : "an sRGB texture used as a normal, roughness or occlusion map: left out");
+                }
+                return rhi::k_no_descriptor;
+            }
+            return slot->descriptor;
+        };
     for (usize i = 0; i < material_limit; ++i) {
-        m_gpu_materials.push_back(to_gpu(frame.materials[i]));
+        m_gpu_materials.push_back(to_gpu(frame.materials[i], texture_descriptor));
     }
-    m_gpu_materials.push_back(to_gpu(Material{}));
+    m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor));
     data.material_count = static_cast<u32>(material_limit);
     data.materials = cmd.upload(bytes_of(m_gpu_materials));
 

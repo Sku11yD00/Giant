@@ -226,6 +226,28 @@ an offline cooker can use it without a device.
   Smaller mips need not be multiples of 4, so streaming (part 3b) keeps
   the full-size resource and limits the sampled levels rather than making
   a smaller one.
+- **Material textures (photoreal part 3a-3b).** `Renderer::add_texture`
+  takes a cooked texture (any sampled single-layer format, mips and all)
+  and returns a `TextureId`: a slot and its generation, so an id kept after
+  `remove_texture` stops resolving (frames in flight finish with the
+  texture). A `Material` names up to four, combined as glTF combines its
+  maps (in the cooker's channels): base colour (sRGB, multiplies
+  `base_color`; alpha unused yet), normal (x, y in R, G; green up; z
+  rebuilt), roughness and metallic (R, G; multiply theirs) and occlusion
+  (R; dims the ambient light and everything reflected, never the sun). An
+  unknown or removed id counts as none, and so does one in the wrong colour
+  space (base colour sRGB, the rest linear; logged once). gpu::Material is
+  48 bytes: the plain values and four read descriptors. Shading samples them
+  anisotropically (wrapping) with `SampleGrad`, the footprint from ray
+  differentials: the rays of the pixels right of and below this one, met
+  with the triangle's plane, give the uv's change per pixel (at most the
+  whole texture, for grazing views), so mips are right on the visibility
+  buffer, which has no screen derivatives. Pixels of untextured materials
+  skip all of it. The normal map bends the shading normal in the
+  interpolated tangent frame (a mirroring instance flips the bitangent);
+  specular anti-aliasing measures the bent normal, while shadow lookups,
+  bounce light and reflection cones start from the surface's own normal so
+  bumps do not shift them. Far-field voxels keep the plain colours.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool

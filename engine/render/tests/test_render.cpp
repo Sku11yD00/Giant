@@ -2086,3 +2086,271 @@ GIANT_TEST("render: d3d12 bloom spreads a bright light round it; AgX keeps grey 
     GIANT_CHECK(!w.device->device_lost());
     GIANT_CHECK(w.device->validation_errors() == 0);
 }
+
+namespace {
+
+// A 4x4 block of one colour per 4x4 texels, as D3D lays them out.
+std::vector<u8> solid_bc1(u16 rgb565) {
+    return {static_cast<u8>(rgb565 & 0xFF), static_cast<u8>(rgb565 >> 8), static_cast<u8>(rgb565 & 0xFF),
+            static_cast<u8>(rgb565 >> 8), 0, 0, 0, 0};
+}
+std::vector<u8> solid_bc4(u8 value) { return {value, value, 0, 0, 0, 0, 0, 0}; }
+
+rhi::TextureDesc material_desc(u32 width, u32 height, rhi::Format format) {
+    rhi::TextureDesc d;
+    d.width = width;
+    d.height = height;
+    d.format = format;
+    d.usage = rhi::TextureUsage::sampled;
+    return d;
+}
+
+} // namespace
+
+GIANT_TEST("render: textures for materials are added, refused, removed and reused") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+
+    const std::vector<u8> block = solid_bc1(0xF800);
+    const TextureId red = renderer->add_texture(material_desc(4, 4, rhi::Format::bc1_srgb), block);
+    GIANT_CHECK(red != k_no_texture);
+    GIANT_CHECK(renderer->texture(red) != nullptr && renderer->texture(red)->format == rhi::Format::bc1_srgb);
+    // Refused: no contents for a compressed texture, contents that do not
+    // fit, an array, a render target, a size rhi refuses.
+    GIANT_CHECK(renderer->add_texture(material_desc(4, 4, rhi::Format::bc1_srgb), {}) == k_no_texture);
+    GIANT_CHECK(renderer->add_texture(material_desc(8, 4, rhi::Format::bc1_srgb), block) == k_no_texture);
+    rhi::TextureDesc array = material_desc(4, 4, rhi::Format::bc1_srgb);
+    array.array = true;
+    GIANT_CHECK(renderer->add_texture(array, block) == k_no_texture);
+    rhi::TextureDesc target = material_desc(4, 4, rhi::Format::rgba8_srgb);
+    target.usage = rhi::TextureUsage::render_target;
+    GIANT_CHECK(renderer->add_texture(target, {}) == k_no_texture);
+    GIANT_CHECK(renderer->add_texture(material_desc(6, 4, rhi::Format::bc4_unorm), solid_bc4(9)) == k_no_texture);
+    const std::vector<u8> plain(16 * 4, 200);
+    const TextureId rgba = renderer->add_texture(material_desc(4, 4, rhi::Format::rgba8_srgb), plain);
+    GIANT_CHECK(rgba != k_no_texture && rgba != red);
+
+    // Materials using a live, a removed and an unknown texture all draw.
+    rhi::TextureDesc t;
+    t.width = 64;
+    t.height = 64;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle image = device->create_texture(t);
+    std::vector<Material> materials(3);
+    materials[0].base_color_texture = red;
+    materials[0].normal_texture = rgba;
+    materials[1].roughness_metal_texture = rgba;
+    materials[1].occlusion_texture = 12345;
+    std::vector<Instance> instances(3);
+    for (u32 i = 0; i < 3; ++i) {
+        instances[i].mesh = renderer->builtin(BuiltinMesh::cube);
+        instances[i].position = {static_cast<double>(i) * 1.5 - 1.5, 0.0, -4.0};
+        instances[i].material = i;
+    }
+    FrameInput frame;
+    frame.instances = instances;
+    frame.materials = materials;
+    const auto draw = [&] {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd == nullptr) return;
+        renderer->render(*cmd, image, frame);
+        device->end_frame();
+    };
+    draw();
+    renderer->remove_texture(red);
+    GIANT_CHECK(renderer->texture(red) == nullptr);
+    renderer->remove_texture(red); // again: ignored
+    renderer->remove_texture(k_no_texture);
+    draw(); // material 0 now has no base colour texture
+    // The removed slot is handed out again.
+    // The slot is handed out again under a new id: the old one stays dead.
+    const TextureId again = renderer->add_texture(material_desc(4, 4, rhi::Format::bc4_unorm), solid_bc4(64));
+    GIANT_CHECK(again != k_no_texture && again != red);
+    GIANT_CHECK((again & 0xFFFFFu) == (red & 0xFFFFFu));
+    GIANT_CHECK(renderer->texture(red) == nullptr && renderer->texture(again) != nullptr);
+    renderer->remove_texture(red); // the old id does not remove the new texture
+    GIANT_CHECK(renderer->texture(again) != nullptr);
+    // A texture in the wrong colour space is left out (logged once): a
+    // linear one as base colour, an sRGB one as a normal map.
+    materials[2].base_color_texture = again;
+    materials[2].normal_texture = rgba;
+    draw();
+    GIANT_CHECK(renderer->texture(12345) == nullptr && renderer->texture(k_no_texture) == nullptr);
+    device->destroy(image);
+}
+
+#if GIANT_RHI_HAS_D3D12
+GIANT_TEST("render: d3d12 materials sample colour, normal and occlusion textures") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    GIANT_CHECK(device != nullptr);
+    if (device == nullptr) return;
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 96, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+
+    const auto bc1_blocks = [](std::initializer_list<u16> colours) {
+        std::vector<u8> out;
+        for (const u16 c : colours) {
+            const auto b = solid_bc1(c);
+            out.insert(out.end(), b.begin(), b.end());
+        }
+        return out;
+    };
+    // 8x8 BC1: red on the left half (u < 0.5), blue on the right.
+    const TextureId colour = renderer->add_texture(material_desc(8, 8, rhi::Format::bc1_srgb),
+                                                   bc1_blocks({0xF800, 0x001F, 0xF800, 0x001F}));
+    // 16x16 with 3 mips: red, then green, then blue.
+    rhi::TextureDesc mipped_desc = material_desc(16, 16, rhi::Format::bc1_srgb);
+    mipped_desc.mips = 3;
+    std::vector<u8> mipped = bc1_blocks({0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800,
+                                         0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800, // 16x16
+                                         0x07E0, 0x07E0, 0x07E0, 0x07E0,                         // 8x8
+                                         0x001F});                                               // 4x4
+    const TextureId levels = renderer->add_texture(mipped_desc, mipped);
+    // Normal maps: tilted 45 degrees toward +u, -u and +v-up (green).
+    const auto bc5 = [](u8 x, u8 y) {
+        return std::vector<u8>{x, x, 0, 0, 0, 0, 0, 0, y, y, 0, 0, 0, 0, 0, 0};
+    };
+    const TextureId toward = renderer->add_texture(material_desc(4, 4, rhi::Format::bc5_unorm), bc5(217, 128));
+    const TextureId away = renderer->add_texture(material_desc(4, 4, rhi::Format::bc5_unorm), bc5(38, 128));
+    const TextureId up = renderer->add_texture(material_desc(4, 4, rhi::Format::bc5_unorm), bc5(128, 217));
+    const TextureId dim = renderer->add_texture(material_desc(4, 4, rhi::Format::bc4_unorm), solid_bc4(64));
+    GIANT_CHECK(colour != k_no_texture && levels != k_no_texture && toward != k_no_texture &&
+                away != k_no_texture && up != k_no_texture && dim != k_no_texture);
+
+    // A 2 m plane turned to face the camera: +u to the right, the image's
+    // top (+v up the image) up.
+    const DVec3 camera{1000.0, 5.0, -2000.0};
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].rotation = Quat{0.70710678f, 0.0f, 0.0f, 0.70710678f};
+    instances[0].scale = {2.0f, 2.0f, 2.0f};
+    std::vector<Material> materials(1);
+    Material plain;
+    plain.base_color = {1.0f, 1.0f, 1.0f};
+    plain.roughness = 0.9f;
+
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false; // the flat sky and ground light below
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.specular_antialiasing = false;
+    frame.view.position = camera;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    const auto draw = [&](const Material& m, double distance, const Vec3& sun_direction, float sun, float sky) {
+        materials[0] = m;
+        instances[0].position = camera + DVec3{0.0, 0.0, -distance};
+        frame.lighting.sun_direction = sun_direction;
+        frame.lighting.sun_light = {sun, sun, sun};
+        frame.lighting.sky_light = {sky, sky, sky};
+        frame.lighting.ground_light = {sky, sky, sky};
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto pixel = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        return i + 3 < image.size() ? std::array<int, 3>{image[i], image[i + 1], image[i + 2]}
+                                    : std::array<int, 3>{-1, -1, -1};
+    };
+    const auto centre = [&](const Material& m, const Vec3& sun_direction, float sun, float sky) {
+        return pixel(draw(m, 2.0, sun_direction, sun, sky), k_w / 2, k_h / 2)[0];
+    };
+    const Vec3 head_on{0.0f, 0.0f, 1.0f};
+
+    // Colour: red left, blue right, sampled a quarter of the plane's width
+    // (0.5 m) either side of the centre. 2 m off, the view (60 degrees
+    // tall) is 2 tan(30) * 2 m * 96 / 64 = 3.46 m wide.
+    Material coloured = plain;
+    coloured.base_color_texture = colour;
+    const auto halves = draw(coloured, 2.0, head_on, 3.0f, 0.02f);
+    const double pixels_per_metre = k_w / (2.0 * std::tan(30.0 * 3.14159265 / 180.0) * 2.0 * k_w / k_h);
+    const u32 quarter = static_cast<u32>(std::lround(0.5 * pixels_per_metre));
+    const auto left = pixel(halves, k_w / 2 - quarter, k_h / 2);
+    const auto right = pixel(halves, k_w / 2 + quarter, k_h / 2);
+    std::printf("    quarter %u px: left %d %d %d, right %d %d %d\n", quarter, left[0], left[1], left[2], right[0],
+                right[1], right[2]);
+    GIANT_CHECK(left[0] > 120 && left[1] < 40 && left[2] < 40);
+    GIANT_CHECK(right[2] > 120 && right[0] < 40 && right[1] < 40);
+
+    // Mips from the pixel's footprint: near, the 16 texels span about 55
+    // pixels (the full-size red level); 30 m off, about 3.7 (past the
+    // smallest, blue).
+    Material mip_test = plain;
+    mip_test.base_color_texture = levels;
+    const auto near = pixel(draw(mip_test, 2.0, head_on, 3.0f, 0.02f), k_w / 2, k_h / 2);
+    const auto far = pixel(draw(mip_test, 30.0, head_on, 3.0f, 0.02f), k_w / 2, k_h / 2);
+    std::printf("    mips: near %d %d %d, far %d %d %d\n", near[0], near[1], near[2], far[0], far[1], far[2]);
+    GIANT_CHECK(near[0] > 120 && near[1] < 40 && near[2] < 40);
+    GIANT_CHECK(far[2] > 60 && far[2] > far[0] * 2 && far[2] > far[1]);
+
+    // Normal maps: with the sun 45 degrees right, tilted toward it the plane
+    // is brighter than flat, away darker; with it 45 degrees above, a
+    // tilt up the image (green) brightens it.
+    const Vec3 sun_right{0.70710678f, 0.0f, 0.70710678f};
+    const Vec3 sun_above{0.0f, 0.70710678f, 0.70710678f};
+    Material bent = plain;
+    bent.normal_texture = toward;
+    Material turned = plain;
+    turned.normal_texture = away;
+    Material raised = plain;
+    raised.normal_texture = up;
+    const int flat_lum = centre(plain, sun_right, 3.0f, 0.02f);
+    const int toward_lum = centre(bent, sun_right, 3.0f, 0.02f);
+    const int away_lum = centre(turned, sun_right, 3.0f, 0.02f);
+    const int flat_above = centre(plain, sun_above, 3.0f, 0.02f);
+    const int up_lum = centre(raised, sun_above, 3.0f, 0.02f);
+    const int up_right = centre(raised, sun_right, 3.0f, 0.02f);
+    std::printf("    normal maps: flat %d, toward %d, away %d; above: flat %d, up %d; up lit from the right %d\n",
+                flat_lum, toward_lum, away_lum, flat_above, up_lum, up_right);
+    GIANT_CHECK(toward_lum * 100 > flat_lum * 105);
+    GIANT_CHECK(away_lum * 2 < flat_lum);
+    GIANT_CHECK(up_lum * 100 > flat_above * 105);
+    GIANT_CHECK(up_right < flat_lum); // a tilt up is a tilt away from a sun on the right
+
+    // Occlusion dims the ambient light, never the sun's.
+    Material occluded = plain;
+    occluded.occlusion_texture = dim;
+    const int open_lum = centre(plain, sun_right, 0.0f, 0.5f);
+    const int shut_lum = centre(occluded, sun_right, 0.0f, 0.5f);
+    const int sun_open = centre(plain, sun_right, 3.0f, 0.0f);
+    const int sun_shut = centre(occluded, sun_right, 3.0f, 0.0f);
+    std::printf("    occlusion: ambient %d -> %d, sun %d -> %d\n", open_lum, shut_lum, sun_open, sun_shut);
+    GIANT_CHECK(open_lum > 40 && shut_lum * 100 < open_lum * 75);
+    GIANT_CHECK(std::abs(sun_open - sun_shut) <= 3);
+    device->destroy(target);
+}
+#endif
