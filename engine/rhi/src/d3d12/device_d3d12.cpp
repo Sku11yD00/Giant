@@ -410,6 +410,8 @@ public:
     std::unique_ptr<SwapChain> create_swap_chain(const SwapChainDesc& desc) override;
     BufferHandle create_buffer(const BufferDesc& desc, std::span<const u8> initial) override;
     TextureHandle create_texture(const TextureDesc& desc, std::span<const u8> initial) override;
+    bool write_texture(TextureHandle texture, u32 mip, u32 first_row, std::span<const u8> rows) override;
+    bool copy_texture_levels(TextureHandle dst, u32 dst_mip, TextureHandle src, u32 src_mip, u32 count) override;
     PipelineHandle create_pipeline(const GraphicsPipelineDesc& desc) override;
     PipelineHandle create_pipeline(const ComputePipelineDesc& desc) override;
     void destroy(BufferHandle buffer) override;
@@ -1469,6 +1471,98 @@ BufferHandle D3D12Device::create_transient_chunk(u32 size) {
 }
 
 // --- Textures ------------------------------------------------------------------------
+
+bool D3D12Device::write_texture(TextureHandle h, u32 mip, u32 first_row, std::span<const u8> rows) {
+    DxTexture* t = m_textures.get(h);
+    const char* problem = !m_recording ? "write_texture outside a frame"
+                          : t == nullptr ? "write_texture: a dead texture"
+                          : t->state != ResourceState::common ? "write_texture: the texture is not in its common state"
+                                                              : write_texture_problem(t->desc, mip, first_row, rows.size());
+    if (problem != nullptr) {
+        log_error("rhi", problem);
+        return false;
+    }
+    if (m_lost) {
+        return false;
+    }
+    const D3D12_RESOURCE_DESC rd = t->resource->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT level{};
+    m_device->GetCopyableFootprints(&rd, mip, 1, 0, &level, nullptr, nullptr, nullptr);
+    const usize row = static_cast<usize>(level_row_bytes(t->desc.format, std::max(t->desc.width >> mip, 1u)));
+    const u32 count = static_cast<u32>(rows.size() / row);
+    const u32 block = is_block_compressed(t->desc.format) ? 4u : 1u;
+    const u64 pitch = level.Footprint.RowPitch;
+    const Staging staged = stage(pitch * count);
+    ID3D12GraphicsCommandList* list = staged.data != nullptr ? upload_list() : nullptr;
+    if (list == nullptr) {
+        return false;
+    }
+    for (u32 y = 0; y < count; ++y) {
+        std::memcpy(staged.data + static_cast<usize>(y) * pitch, rows.data() + static_cast<usize>(y) * row, row);
+    }
+    m_stats.upload_bytes += rows.size();
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = staged.resource;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint.Offset = staged.offset; // a multiple of 512, as placement needs
+    src.PlacedFootprint.Footprint = level.Footprint;
+    // The rows given (whole blocks; the footprint's height is the level's,
+    // in whole blocks too).
+    src.PlacedFootprint.Footprint.Height = std::min(count * block, level.Footprint.Height - first_row * block);
+    src.PlacedFootprint.Footprint.Depth = 1;
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = t->resource.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = mip;
+    const auto to_copy = transition(t->resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+    list->ResourceBarrier(1, &to_copy);
+    list->CopyTextureRegion(&dst, 0, first_row * block, 0, &src, nullptr);
+    const auto back = transition(t->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    list->ResourceBarrier(1, &back);
+    return true;
+}
+
+bool D3D12Device::copy_texture_levels(TextureHandle dst_handle, u32 dst_mip, TextureHandle src_handle, u32 src_mip,
+                                      u32 count) {
+    DxTexture* d = m_textures.get(dst_handle);
+    DxTexture* s = m_textures.get(src_handle);
+    const char* problem = !m_recording ? "copy_texture_levels outside a frame"
+                          : d == nullptr || s == nullptr || d == s ? "copy_texture_levels: a dead texture, or one into itself"
+                          : d->state != ResourceState::common || s->state != ResourceState::common
+                              ? "copy_texture_levels: a texture is not in its common state"
+                              : copy_levels_problem(d->desc, dst_mip, s->desc, src_mip, count);
+    if (problem != nullptr) {
+        log_error("rhi", problem);
+        return false;
+    }
+    if (m_lost) {
+        return false;
+    }
+    ID3D12GraphicsCommandList* list = upload_list();
+    if (list == nullptr) {
+        return false;
+    }
+    const D3D12_RESOURCE_BARRIER before[] = {
+        transition(d->resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
+        transition(s->resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE)};
+    list->ResourceBarrier(2, before);
+    for (u32 i = 0; i < count; ++i) {
+        D3D12_TEXTURE_COPY_LOCATION to{};
+        to.pResource = d->resource.Get();
+        to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        to.SubresourceIndex = dst_mip + i;
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = s->resource.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        from.SubresourceIndex = src_mip + i;
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    }
+    const D3D12_RESOURCE_BARRIER after[] = {
+        transition(d->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON),
+        transition(s->resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)};
+    list->ResourceBarrier(2, after);
+    return true;
+}
 
 TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<const u8> initial) {
     const char* problem = texture_desc_problem(desc);

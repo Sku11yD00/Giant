@@ -86,6 +86,8 @@ struct Extras {
     uint dust_puffs;  // dust_count puffs of 32 bytes at dust_offset (gpu::GpuDustPuff)
     uint dust_offset;
     uint dust_count;
+    uint texture_feedback;   // write descriptor: u32 per material (feedback_materials 0: off)
+    uint feedback_materials;
 };
 
 Extras load_extras() {
@@ -133,6 +135,8 @@ Extras load_extras() {
     const uint4 m = b.Load4(at + 144);
     o.dust_offset = m.x;
     o.dust_count = m.y;
+    o.texture_feedback = m.z;
+    o.feedback_materials = m.w;
     return o;
 }
 
@@ -366,6 +370,33 @@ void apply_textures(Hit s, inout float3 base, inout float rough, inout float met
     }
     if (s.textures.w != k_no_texture) {
         occlusion = material_sample(s.textures.w, s).r;
+    }
+}
+
+// Texture streaming's feedback (Renderer::texture_residency): for one
+// pixel in 16 a frame (a 4x4 pattern stepping each frame), the texel
+// density its textured material needs here, kept as the largest per
+// material: ceil(-log2(footprint)) + 1, the footprint the uv step over the
+// pixel (anisotropic filtering spreads up to 16 texels along the long
+// axis), so a texture 2^(value - 1) texels wide draws a texel to a pixel.
+static const float k_max_anisotropy = 16.0;
+
+void texture_feedback(Extras e, Frame f, Hit s, uint2 pixel) {
+    if (s.material >= e.feedback_materials || all(s.textures == k_no_texture)) {
+        return;
+    }
+    if (((pixel.x & 3u) | ((pixel.y & 3u) << 2u)) != (f.frame_number & 15u)) {
+        return;
+    }
+    const float dx = length(s.uv_dx);
+    const float dy = length(s.uv_dy);
+    const float footprint = max(min(dx, dy), max(dx, dy) / k_max_anisotropy);
+    const float density = clamp(ceil(-log2(max(footprint, 1.0 / 32768.0))), 0.0, 15.0);
+    const uint value = uint(density) + 1u;
+    RWByteAddressBuffer b = write_buffer(e.texture_feedback);
+    if (b.Load(s.material * 4u) < value) { // (a plain read first spares most atomics)
+        uint ignored;
+        b.InterlockedMax(s.material * 4u, value, ignored);
     }
 }
 
@@ -733,6 +764,7 @@ Output shade_pixel(float4 position) {
     float3 emissive = emissive_metallic.rgb;
     float occlusion = 1.0;
     apply_textures(s, base, rough, metal, occlusion);
+    texture_feedback(extras, f, s, pixel);
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
                  push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);

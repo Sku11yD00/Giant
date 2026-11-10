@@ -198,14 +198,20 @@ u32 full_mip_count(u32 width, u32 height);
 // largest to smallest, each level packed as level_bytes. Meaningful for
 // descriptions texture_desc_problem accepts.
 u64 texture_bytes(const TextureDesc& desc);
+// Where level `mip` of the first layer starts in those contents (mips:
+// the first layer's size).
+u64 level_offset(const TextureDesc& desc, u32 mip);
 // Why the device would refuse the description, or nullptr when it is sound.
 // Covers every shape rule, so bad loaded data is refused, never asserted.
 const char* texture_desc_problem(const TextureDesc& desc);
 // Why `contents_bytes` of initial contents would be refused for a sound
-// description: neither empty nor texture_bytes, or empty for a
-// block-compressed texture (made whole until streaming adds partial
-// uploads). nullptr when they fit.
+// description: neither empty nor texture_bytes. nullptr when they fit.
 const char* texture_contents_problem(const TextureDesc& desc, u64 contents_bytes);
+// Why Device::write_texture or copy_texture_levels would refuse these
+// textures and ranges (the shape rules; the backends check the rest), or
+// nullptr.
+const char* write_texture_problem(const TextureDesc& desc, u32 mip, u32 first_row, u64 bytes);
+const char* copy_levels_problem(const TextureDesc& dst, u32 dst_mip, const TextureDesc& src, u32 src_mip, u32 count);
 
 // What a resource is used for next. barrier() switches between them.
 enum class ResourceState {
@@ -518,11 +524,30 @@ public:
     // `initial` (optional): texture_bytes(desc), layer after layer, each
     // mip after mip from the largest, rows top to bottom (of blocks, for
     // block-compressed formats). Copied like create_buffer's (waited for only
-    // outside a frame), all of it at once. Block-compressed textures need it.
+    // outside a frame), all of it at once. Without it a texture's contents
+    // are undefined until written (write_texture, copy_texture_levels, or
+    // drawn into).
     // A description texture_desc_problem refuses, or contents
     // texture_contents_problem refuses, give an invalid handle (logged).
     virtual TextureHandle create_texture(const TextureDesc& desc,
                                          std::span<const u8> initial = {}) = 0;
+    // Streaming a sampled texture's levels, inside a frame only: recorded
+    // with the frame's uploads, so they land before anything the frame
+    // records (like create_texture's initial data), and nothing waits.
+    // Both take a sampled-only, single-layer, non-array texture that no
+    // command list has moved out of its common state. False (logged) for
+    // anything else, outside a frame, or out of range.
+    //
+    // write_texture: `rows` texel rows (rows of 4x4 blocks when block
+    // compressed) of level `mip`, from row `first_row`, packed as
+    // level_row_bytes each; counted in FrameStats::upload_bytes. A level
+    // can be written in pieces over frames.
+    virtual bool write_texture(TextureHandle texture, u32 mip, u32 first_row, std::span<const u8> rows) = 0;
+    // copy_texture_levels: `count` whole levels of `src` from `src_mip` into
+    // `dst` from `dst_mip`, on the GPU. Each pair must have the same format
+    // and size (a texture's smaller levels into a texture made at one of
+    // them, or back).
+    virtual bool copy_texture_levels(TextureHandle dst, u32 dst_mip, TextureHandle src, u32 src_mip, u32 count) = 0;
     virtual PipelineHandle create_pipeline(const GraphicsPipelineDesc& desc) = 0;
     virtual PipelineHandle create_pipeline(const ComputePipelineDesc& desc) = 0;
     virtual void destroy(BufferHandle buffer) = 0;

@@ -34,7 +34,9 @@
 #include "giant/voxel/clipmap.h"
 
 #include <array>
+#include <deque>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -74,6 +76,27 @@ enum class BuiltinMesh {
 // next.
 using TextureId = u32;
 inline constexpr TextureId k_no_texture = ~0u;
+
+// Streamed textures (Renderer::stream_texture): a texture holds its levels
+// from a first mip down, and finer levels come and go. A texture from one
+// of its levels down is a texture of its own: this is its description.
+rhi::TextureDesc texture_from_mip(const rhi::TextureDesc& desc, u32 first_mip);
+// The coarsest level a texture may start at: its last, or for a
+// block-compressed one the last whose sides are whole blocks (multiples
+// of 4).
+u32 coarsest_first_mip(const rhi::TextureDesc& desc);
+
+// Where a streamed texture stands (Renderer::texture_residency).
+struct TextureResidency {
+    static constexpr u32 k_not_seen = ~0u;
+    u32 first_mip = 0;  // the finest level on the GPU
+    u32 target_mip = 0; // where it is going (first_mip when nothing is under way)
+    // The finest level the drawn pixels needed lately (GPU feedback over
+    // the last 32 to 64 frames, read back two frames late); k_not_seen if
+    // nothing drew it then.
+    u32 wanted_mip = k_not_seen;
+    u64 bytes = 0; // on the GPU
+};
 
 // How a surface looks (metal/roughness PBR). Instances share them by index
 // into FrameInput::materials, so a kit used a thousand times sends its few
@@ -400,6 +423,12 @@ struct RenderStats {
     u32 streamed_in = 0;     // groups loaded this frame
     u32 evicted = 0;         // groups dropped this frame to make room
     u32 waiting = 0;         // groups asked for but not loaded yet
+    // Material textures (this frame, on the CPU).
+    u32 textures = 0;              // live
+    u64 texture_bytes = 0;         // on the GPU, their levels resident
+    u64 texture_stream_bytes = 0;  // finer levels uploaded this frame
+    u32 textures_changing = 0;     // waiting for or in a level change
+    bool texture_feedback = false; // drawn pixels asked what detail they need this frame
     // The voxel world (this frame, on the CPU).
     u32 voxel_bricks = 0;         // in the GPU pool
     u32 voxel_capacity = 0;       // the pool's size, bricks
@@ -463,6 +492,11 @@ struct RendererDesc {
     u64 geometry_pool_bytes = 256ull << 20;
     // At most this much is loaded per frame (the rest waits a frame).
     u64 stream_bytes_per_frame = 32ull << 20;
+    // Finer texture levels uploaded per frame (Renderer::stream_texture;
+    // at least a row of blocks while any wait), and textures made per frame
+    // for level changes (each a new GPU resource).
+    u64 texture_stream_bytes_per_frame = 8ull << 20;
+    u32 texture_changes_per_frame = 8;
     // The voxel world: its levels, and GPU memory for its bricks (2176
     // bytes each; the default is 68 MiB).
     voxel::ClipmapDesc voxel_clipmap{};
@@ -476,7 +510,7 @@ struct RendererDesc {
 // makes a slow frame.
 enum class CpuSection : u8 {
     cells,       // which cells changed
-    streaming,   // geometry streaming
+    streaming,   // geometry and texture streaming
     voxels,      // the voxel world's updates (voxel_ms_per_frame)
     gi_plan,     // which bricks to light
     instances,   // which instances to draw
@@ -540,11 +574,31 @@ public:
     // the thread that calls render(), between frames or inside one (but not
     // while render() runs).
     TextureId add_texture(const rhi::TextureDesc& desc, std::span<const u8> contents);
+    // A streamed texture: `desc` is the whole texture, `contents` its levels
+    // from `first_mip` down (up to coarsest_first_mip), as rhi lays them out
+    // (texture_from_mip's contents).
+    TextureId add_texture(const rhi::TextureDesc& desc, std::span<const u8> contents, u32 first_mip);
+    // Brings a texture's finer levels: `levels` holds those from
+    // `first_mip` to the one above its first resident level, packed as in
+    // the whole texture's contents. render() makes a texture of them that
+    // takes the resident levels over on the GPU and uploads the new ones a
+    // row of blocks at a time under texture_stream_bytes_per_frame, oldest
+    // change first; the texture draws what it had until it is whole, then
+    // the new one. False (logged, nothing changes) for an unknown id, a
+    // level not finer, or the wrong size. A change under way is replaced.
+    bool stream_texture(TextureId texture, u32 first_mip, std::vector<u8> levels);
+    // Drops a texture's levels finer than `first_mip` (no upload: the rest
+    // are copied on the GPU at the next render()); a finer change under way
+    // is given up. False for an unknown id or a level not coarser than the
+    // target, or past coarsest_first_mip.
+    bool trim_texture(TextureId texture, u32 first_mip);
+    std::optional<TextureResidency> texture_residency(TextureId texture) const;
     // Unknown or removed ids are ignored. Frames in flight finish with it;
     // its id then never resolves again (until its slot's generations wrap,
     // after 4094 reuses).
     void remove_texture(TextureId texture);
-    // Null for an unknown or removed id; valid until it is removed.
+    // The whole texture's description (all its levels, resident or not);
+    // null for an unknown or removed id; valid until it is removed.
     const rhi::TextureDesc* texture(TextureId texture) const;
     // Its coarsest level is loaded, so instances of it draw (a mesh added
     // this frame may take a frame or more under a busy streaming budget).
@@ -827,16 +881,59 @@ private:
     std::vector<Mesh> m_meshes;
     std::vector<u32> m_free_meshes; // removed slots, reused by add_mesh
     struct TextureSlot {
-        rhi::TextureHandle handle; // invalid when removed
+        rhi::TextureHandle handle; // its levels from first_mip down; invalid when removed
         u32 descriptor = rhi::k_no_descriptor;
         bool srgb = false;
         u32 generation = 1; // TextureId's high bits; never 0 or 4095
+        rhi::TextureDesc desc; // the whole texture
+        u32 first_mip = 0;
+        u64 bytes = 0; // of handle
+        // A change of levels (render() makes it): `target` the first mip it
+        // goes to (first_mip: none). Finer: `next` takes the levels from
+        // target down, `levels` the new ones (target to first_mip - 1),
+        // `written` bytes of them uploaded so far.
+        u32 target = 0;
+        rhi::TextureHandle next;
+        std::vector<u8> levels;
+        u64 written = 0;
+        // GPU feedback: the finest level wanted in this window of frames
+        // and the last one (k_unseen: none).
+        u8 wanted_now = k_unseen;
+        u8 wanted_before = k_unseen;
+        bool queued = false; // in m_texture_changes
     };
+    static constexpr u8 k_unseen = 0xFF;
     // The live slot an id names, or null.
     const TextureSlot* texture_slot(TextureId id) const;
+    TextureSlot* texture_slot(TextureId id);
+    void release_texture_change(TextureSlot& t);
+    void queue_texture_change(u32 slot);
+    // render(): level changes, under the per-frame budgets.
+    void change_textures();
+    // Feedback: what the GPU asked two frames ago, and this frame's buffer.
+    void read_texture_feedback();
+    void note_wanted(TextureId id, u32 q);
     std::vector<TextureSlot> m_textures; // by TextureId's slot
     std::vector<u32> m_free_textures;    // removed slots, reused by add_texture
+    std::deque<u32> m_texture_changes;   // slots with a change waiting or under way, oldest first
     bool m_texture_kind_logged = false;
+    u64 m_texture_bytes = 0;             // resident, all slots
+    rhi::BufferHandle m_feedback;        // u32 per material: ceil(-log2 footprint) + 1, largest
+    rhi::BufferHandle m_feedback_zero;   // zeros, copied over it each frame
+    rhi::BufferHandle m_feedback_readback[3];
+    u64 m_feedback_frame[3] = {~u64{0}, ~u64{0}, ~u64{0}};
+    u64 m_feedback_taken = ~u64{0};
+    u64 m_feedback_window = 0; // frames_completed() / window length when the window last turned
+    // Per read-back slot: which textures each textured material used.
+    struct FeedbackMaterial {
+        u32 material = 0;
+        std::array<TextureId, 4> textures{};
+    };
+    std::vector<FeedbackMaterial> m_feedback_materials[3];
+    std::vector<FeedbackMaterial> m_feedback_now; // this frame's (moved into its slot)
+    u32 m_feedback_count = 0;                     // this frame's materials asked (0: none)
+    u64 m_texture_streamed = 0;                   // this frame's level uploads, bytes
+    bool m_feedback_on = false;                   // this frame
     std::vector<MeshId> m_builtin; // by BuiltinMesh
     // Per-frame scratch, kept to avoid allocating every frame.
     std::vector<u32> m_valid;    // instances (into frame.instances) with a live mesh, drawn as meshes

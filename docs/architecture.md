@@ -223,9 +223,9 @@ an offline cooker can use it without a device.
   (kind, format, size, mips, layers, contents length, and a hash of header
   and contents) and the contents in rhi's layout, so `read_file` hands `create_texture` the
   bytes as they are and `level_offset` finds any level for streaming.
-  Smaller mips need not be multiples of 4, so streaming (part 3b) keeps
-  the full-size resource and limits the sampled levels rather than making
-  a smaller one.
+  Smaller mips need not be multiples of 4, so a texture streamed from one
+  of its levels (part 3b) starts only at a level whose sides are whole
+  blocks (`render::coarsest_first_mip`).
 - **Material textures (photoreal part 3a-3b).** `Renderer::add_texture`
   takes a cooked texture (any sampled single-layer format, mips and all)
   and returns a `TextureId`: a slot and its generation, so an id kept after
@@ -248,6 +248,34 @@ an offline cooker can use it without a device.
   specular anti-aliasing measures the bent normal, while shadow lookups,
   bounce light and reflection cones start from the surface's own normal so
   bumps do not shift them. Far-field voxels keep the plain colours.
+- **Texture streaming (photoreal part 3b-1).** A renderer texture keeps
+  its whole description and holds its levels from a first mip down, as a
+  texture of its own (`texture_from_mip`), so its descriptor and sampling
+  are unchanged: uvs cover the same image at less detail.
+  `add_texture(desc, contents, first_mip)` makes one from a level;
+  `stream_texture(id, first_mip, levels)` brings finer ones and
+  `trim_texture` drops them. `render()` makes the changes, oldest first,
+  before the material table takes descriptors: a finer change makes a
+  texture from the target level, copies the levels it has into it on the
+  GPU (`rhi::Device::copy_texture_levels`) and uploads the new levels rows
+  of blocks at a time (`write_texture`) under
+  `RendererDesc::texture_stream_bytes_per_frame` (8 MiB, at least a row a
+  frame), swapping it in when whole; a coarser one copies the levels kept
+  into a smaller texture and swaps at once. At most
+  `texture_changes_per_frame` (8) textures are made a frame. Both rhi
+  calls are recorded with the frame's uploads, so nothing waits, and
+  block-compressed textures may now be made empty. Which detail is needed
+  comes from the GPU: shading takes one pixel in 16 a frame (a 4x4
+  pattern stepping each frame) and, for its material, keeps the largest
+  ceil(-log2 footprint) + 1 (the uv step over the pixel, anisotropic
+  filtering allowed 16 texels along the long axis) in a u32 per material
+  (`InterlockedMax` after a plain read), for the first 65536 materials
+  (past them a textured material counts as needing the finest level). It
+  is read back two frames later; each texture keeps the finest level its
+  materials needed in this and the last window of 32 frames
+  (`texture_residency`: `wanted_mip`, or not seen). The streaming policy
+  (what to bring, what to drop, under what memory) is the caller's: the
+  editor's comes in part 3b-2.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

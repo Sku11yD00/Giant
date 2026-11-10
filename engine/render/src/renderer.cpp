@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace giant::render {
 
@@ -76,6 +77,12 @@ gpu::Material to_gpu(const Material& m, Descriptor&& descriptor) {
 constexpr u32 k_texture_slot_bits = 20;
 constexpr u32 k_texture_slot_mask = (1u << k_texture_slot_bits) - 1;
 constexpr u32 k_texture_generations = 4095; // generations 1 to 4094: ~0u stays k_no_texture
+// Texture streaming's feedback: the first materials of a frame asked (the
+// rest count as wanting their finest levels), and frames per window.
+constexpr u32 k_feedback_materials = 1u << 16;
+constexpr u64 k_feedback_window = 32;
+// note_wanted's q for "the finest level" (past any texture's size).
+constexpr u32 k_sharpest = 31;
 
 bool is_srgb(rhi::Format f) {
     return f == rhi::Format::rgba8_srgb || f == rhi::Format::bc1_srgb || f == rhi::Format::bc7_srgb;
@@ -152,6 +159,34 @@ struct Renderer::FrameData {
     rhi::TransientMemory shadow_levels;
 };
 
+rhi::TextureDesc texture_from_mip(const rhi::TextureDesc& desc, u32 first_mip) {
+    rhi::TextureDesc out = desc;
+    const u32 k = desc.mips == 0 ? 0 : std::min(first_mip, desc.mips - 1);
+    out.width = std::max(desc.width >> k, 1u);
+    out.height = std::max(desc.height >> k, 1u);
+    out.mips = desc.mips - k;
+    return out;
+}
+
+u32 coarsest_first_mip(const rhi::TextureDesc& desc) {
+    if (desc.mips == 0) {
+        return 0;
+    }
+    if (!rhi::is_block_compressed(desc.format)) {
+        return desc.mips - 1;
+    }
+    u32 k = 0;
+    while (k + 1 < desc.mips && k + 1 < 32) {
+        const u32 w = desc.width >> (k + 1);
+        const u32 h = desc.height >> (k + 1);
+        if (w < 4 || h < 4 || w % 4 != 0 || h % 4 != 0) {
+            break;
+        }
+        ++k;
+    }
+    return k;
+}
+
 std::unique_ptr<Renderer> Renderer::create(rhi::Device& device, const RendererDesc& desc) {
     auto renderer = std::make_unique<Renderer>(ConstructKey{}, device, desc);
     if (!renderer->init()) {
@@ -197,6 +232,11 @@ Renderer::~Renderer() {
     }
     for (const TextureSlot& t : m_textures) {
         m_device.destroy(t.handle);
+        m_device.destroy(t.next);
+    }
+    for (const rhi::BufferHandle b : {m_feedback, m_feedback_zero, m_feedback_readback[0], m_feedback_readback[1],
+                                      m_feedback_readback[2]}) {
+        m_device.destroy(b);
     }
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
@@ -388,6 +428,29 @@ bool Renderer::init() {
         if (!m_histogram_bins.valid() || !m_histogram_readback[0].valid() || !m_histogram_readback[1].valid() ||
             !m_histogram_readback[2].valid()) {
             log_error("render", "could not create the exposure histogram");
+            return false;
+        }
+    }
+    // Texture streaming's feedback (256 KiB each: made once), and the zeros
+    // that clear it.
+    {
+        rhi::BufferDesc fb;
+        fb.size = u64{k_feedback_materials} * 4;
+        fb.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
+        fb.name = "texture feedback";
+        m_feedback = m_device.create_buffer(fb);
+        fb.usage = rhi::BufferUsage::none;
+        fb.name = "texture feedback (zeros)";
+        const std::vector<u8> zeros(static_cast<usize>(fb.size), 0);
+        m_feedback_zero = m_device.create_buffer(fb, zeros);
+        fb.memory = rhi::Memory::readback;
+        fb.name = "texture feedback (read back)";
+        for (rhi::BufferHandle& b : m_feedback_readback) {
+            b = m_device.create_buffer(fb);
+        }
+        if (!m_feedback.valid() || !m_feedback_zero.valid() || !m_feedback_readback[0].valid() ||
+            !m_feedback_readback[1].valid() || !m_feedback_readback[2].valid()) {
+            log_error("render", "could not create texture streaming's feedback");
             return false;
         }
     }
@@ -653,12 +716,21 @@ void Renderer::remove_mesh(MeshId id) {
 }
 
 TextureId Renderer::add_texture(const rhi::TextureDesc& desc, std::span<const u8> contents) {
+    return add_texture(desc, contents, 0);
+}
+
+TextureId Renderer::add_texture(const rhi::TextureDesc& desc, std::span<const u8> contents, u32 first_mip) {
     const char* problem = rhi::texture_desc_problem(desc);
     if (problem == nullptr && (desc.array || desc.layers != 1 || desc.usage != rhi::TextureUsage::sampled)) {
         problem = "a material texture is one sampled layer, not an array";
     }
+    if (problem == nullptr && first_mip > coarsest_first_mip(desc)) {
+        problem = "a streamed texture starts past its coarsest level";
+    }
+    rhi::TextureDesc part = texture_from_mip(desc, first_mip);
     if (problem == nullptr) {
-        problem = rhi::texture_contents_problem(desc, contents.size());
+        problem = contents.empty() ? "a material texture is made with its contents"
+                                   : rhi::texture_contents_problem(part, contents.size());
     }
     if (problem == nullptr && m_free_textures.empty() && m_textures.size() >= k_texture_slot_mask) {
         problem = "too many textures";
@@ -667,9 +739,8 @@ TextureId Renderer::add_texture(const rhi::TextureDesc& desc, std::span<const u8
         log_error("render", std::string("texture refused: ") + problem);
         return k_no_texture;
     }
-    rhi::TextureDesc named = desc;
-    named.name = "material texture";
-    const rhi::TextureHandle handle = m_device.create_texture(named, contents);
+    part.name = "material texture";
+    const rhi::TextureHandle handle = m_device.create_texture(part, contents);
     if (!handle.valid()) {
         return k_no_texture; // the device logged why
     }
@@ -685,6 +756,14 @@ TextureId Renderer::add_texture(const rhi::TextureDesc& desc, std::span<const u8
     t.handle = handle;
     t.descriptor = m_device.read_descriptor(handle);
     t.srgb = is_srgb(desc.format);
+    t.desc = desc;
+    t.desc.name = "material texture"; // (the caller's name may not outlive the call)
+    t.first_mip = first_mip;
+    t.target = first_mip;
+    t.bytes = rhi::texture_bytes(part);
+    t.wanted_now = k_unseen;
+    t.wanted_before = k_unseen;
+    m_texture_bytes += t.bytes;
     return slot | (t.generation << k_texture_slot_bits);
 }
 
@@ -697,21 +776,252 @@ const Renderer::TextureSlot* Renderer::texture_slot(TextureId id) const {
     return t.handle.valid() && t.generation == (id >> k_texture_slot_bits) ? &t : nullptr;
 }
 
+Renderer::TextureSlot* Renderer::texture_slot(TextureId id) {
+    return const_cast<TextureSlot*>(std::as_const(*this).texture_slot(id));
+}
+
+void Renderer::release_texture_change(TextureSlot& t) {
+    m_device.destroy(t.next); // (deferred past frames in flight, which may have copied into it)
+    t.next = {};
+    std::vector<u8>().swap(t.levels);
+    t.written = 0;
+    t.target = t.first_mip;
+}
+
 void Renderer::remove_texture(TextureId id) {
-    if (texture_slot(id) == nullptr) {
+    TextureSlot* t = texture_slot(id);
+    if (t == nullptr) {
         return;
     }
-    TextureSlot& t = m_textures[id & k_texture_slot_mask];
-    m_device.destroy(t.handle); // deferred by the device past frames in flight
-    t.handle = {};
-    t.descriptor = rhi::k_no_descriptor;
-    t.generation = t.generation + 1 >= k_texture_generations ? 1 : t.generation + 1;
+    release_texture_change(*t);
+    m_device.destroy(t->handle); // deferred by the device past frames in flight
+    m_texture_bytes -= t->bytes;
+    t->handle = {};
+    t->descriptor = rhi::k_no_descriptor;
+    t->bytes = 0;
+    t->generation = t->generation + 1 >= k_texture_generations ? 1 : t->generation + 1;
     m_free_textures.push_back(id & k_texture_slot_mask);
 }
 
 const rhi::TextureDesc* Renderer::texture(TextureId id) const {
     const TextureSlot* t = texture_slot(id);
-    return t != nullptr ? m_device.describe(t->handle) : nullptr;
+    return t != nullptr ? &t->desc : nullptr;
+}
+
+void Renderer::queue_texture_change(u32 slot) {
+    // Once: a slot already waiting (even from a texture since removed, its
+    // slot reused) keeps its place.
+    if (!m_textures[slot].queued) {
+        m_textures[slot].queued = true;
+        m_texture_changes.push_back(slot);
+    }
+}
+
+bool Renderer::stream_texture(TextureId id, u32 first_mip, std::vector<u8> levels) {
+    TextureSlot* t = texture_slot(id);
+    const char* problem = nullptr;
+    if (t == nullptr) {
+        problem = "an unknown texture";
+    } else if (first_mip >= t->first_mip) {
+        problem = "levels no finer than those it has";
+    } else if (levels.size() != rhi::level_offset(t->desc, t->first_mip) - rhi::level_offset(t->desc, first_mip)) {
+        problem = "the levels do not fit the texture";
+    }
+    if (problem != nullptr) {
+        log_error("render", std::string("texture levels refused: ") + problem);
+        return false;
+    }
+    release_texture_change(*t);
+    t->target = first_mip;
+    t->levels = std::move(levels);
+    queue_texture_change(id & k_texture_slot_mask);
+    return true;
+}
+
+bool Renderer::trim_texture(TextureId id, u32 first_mip) {
+    TextureSlot* t = texture_slot(id);
+    if (t == nullptr || first_mip < t->first_mip || first_mip > coarsest_first_mip(t->desc)) {
+        return false;
+    }
+    release_texture_change(*t);
+    if (first_mip != t->first_mip) {
+        t->target = first_mip;
+        queue_texture_change(id & k_texture_slot_mask);
+    }
+    return true;
+}
+
+std::optional<TextureResidency> Renderer::texture_residency(TextureId id) const {
+    const TextureSlot* t = texture_slot(id);
+    if (t == nullptr) {
+        return std::nullopt;
+    }
+    TextureResidency r;
+    r.first_mip = t->first_mip;
+    r.target_mip = t->target;
+    const u8 wanted = std::min(t->wanted_now, t->wanted_before);
+    r.wanted_mip = wanted == k_unseen ? TextureResidency::k_not_seen : wanted;
+    r.bytes = t->bytes;
+    return r;
+}
+
+void Renderer::change_textures() {
+    u64 budget = std::max<u64>(m_desc.texture_stream_bytes_per_frame, 1);
+    u32 creations = std::max(m_desc.texture_changes_per_frame, 1u);
+    bool wrote = false;
+    // A finished (or given up) change leaves its texture as it now is.
+    const auto swap_in = [this](TextureSlot& t, rhi::TextureHandle handle, u32 first_mip) {
+        m_device.destroy(t.handle);
+        m_texture_bytes -= t.bytes;
+        t.handle = handle;
+        t.descriptor = m_device.read_descriptor(handle);
+        t.first_mip = first_mip;
+        t.bytes = rhi::texture_bytes(texture_from_mip(t.desc, first_mip));
+        m_texture_bytes += t.bytes;
+        if (t.next == handle) {
+            t.next = {};
+        }
+        release_texture_change(t);
+    };
+    const auto pop_change = [this] {
+        m_textures[m_texture_changes.front()].queued = false;
+        m_texture_changes.pop_front();
+    };
+    while (!m_texture_changes.empty()) {
+        TextureSlot& t = m_textures[m_texture_changes.front()];
+        if (!t.handle.valid() || t.target == t.first_mip) {
+            pop_change(); // removed or given up
+            continue;
+        }
+        if (t.target > t.first_mip) {
+            // Coarser: the levels it keeps, copied into a smaller texture.
+            if (creations == 0) {
+                break;
+            }
+            --creations;
+            rhi::TextureDesc part = texture_from_mip(t.desc, t.target);
+            part.name = "material texture";
+            const rhi::TextureHandle handle = m_device.create_texture(part);
+            if (handle.valid() && m_device.copy_texture_levels(handle, 0, t.handle, t.target - t.first_mip, part.mips)) {
+                swap_in(t, handle, t.target);
+            } else {
+                m_device.destroy(handle);
+                release_texture_change(t); // (logged by the device)
+            }
+            pop_change();
+            continue;
+        }
+        // Finer: a texture from the target down, the levels it has copied
+        // in at once, the new ones a row of blocks at a time.
+        if (!t.next.valid()) {
+            if (creations == 0) {
+                break;
+            }
+            --creations;
+            rhi::TextureDesc part = texture_from_mip(t.desc, t.target);
+            part.name = "material texture";
+            t.next = m_device.create_texture(part);
+            if (!t.next.valid() || !m_device.copy_texture_levels(t.next, t.first_mip - t.target, t.handle, 0,
+                                                                  t.desc.mips - t.first_mip)) {
+                release_texture_change(t);
+                pop_change();
+                continue;
+            }
+        }
+        bool failed = false;
+        while (t.written < t.levels.size()) {
+            // The level (and row) the next byte is in.
+            u32 level = t.target;
+            u64 start = 0;
+            u64 size = 0;
+            for (; level < t.first_mip; ++level) {
+                size = rhi::level_bytes(t.desc.format, std::max(t.desc.width >> level, 1u),
+                                        std::max(t.desc.height >> level, 1u));
+                if (t.written < start + size) {
+                    break;
+                }
+                start += size;
+            }
+            const u64 row = rhi::level_row_bytes(t.desc.format, std::max(t.desc.width >> level, 1u));
+            const u64 rows_left = (start + size - t.written) / row;
+            u64 rows = std::min(rows_left, budget / row);
+            if (rows == 0 && !wrote) {
+                rows = 1; // a row a frame at least, whatever the budget
+            }
+            if (rows == 0) {
+                break;
+            }
+            const auto first_row = static_cast<u32>((t.written - start) / row);
+            const std::span<const u8> bytes(t.levels.data() + t.written, static_cast<usize>(rows * row));
+            if (!m_device.write_texture(t.next, level - t.target, first_row, bytes)) {
+                failed = true;
+                break;
+            }
+            wrote = true;
+            t.written += rows * row;
+            budget -= std::min(budget, rows * row);
+            m_texture_streamed += rows * row;
+        }
+        if (failed) {
+            release_texture_change(t);
+            pop_change();
+            continue;
+        }
+        if (t.written < t.levels.size()) {
+            break; // the budget is spent: on next frame
+        }
+        swap_in(t, t.next, t.target);
+        pop_change();
+    }
+}
+
+void Renderer::note_wanted(TextureId id, u32 q) {
+    TextureSlot* t = texture_slot(id);
+    if (t == nullptr) {
+        return;
+    }
+    // The level drawn about one texel to a pixel: the side 2^q needed.
+    const u32 top = static_cast<u32>(std::bit_width(std::max(t->desc.width, t->desc.height))) - 1;
+    const u32 level = std::min(q >= top ? 0u : top - q, t->desc.mips - 1);
+    t->wanted_now = std::min(t->wanted_now, static_cast<u8>(std::min(level, 254u)));
+}
+
+void Renderer::read_texture_feedback() {
+    const u64 now = m_device.frames_completed();
+    // A new window: this one's become the last's.
+    if (now / k_feedback_window != m_feedback_window) {
+        m_feedback_window = now / k_feedback_window;
+        for (TextureSlot& t : m_textures) {
+            t.wanted_before = t.wanted_now;
+            t.wanted_now = k_unseen;
+        }
+    }
+    u32 best = 3;
+    for (u32 i = 0; i < 3; ++i) {
+        const u64 tag = m_feedback_frame[i];
+        if (tag != ~u64{0} && tag + rhi::Device::k_frames_in_flight <= now &&
+            (best == 3 || tag > m_feedback_frame[best])) {
+            best = i;
+        }
+    }
+    if (best == 3 || m_feedback_frame[best] == m_feedback_taken) {
+        return;
+    }
+    m_feedback_taken = m_feedback_frame[best];
+    const u8* bytes = m_device.mapped(m_feedback_readback[best]);
+    if (bytes == nullptr) {
+        return;
+    }
+    for (const FeedbackMaterial& m : m_feedback_materials[best]) {
+        u32 value = 0;
+        std::memcpy(&value, bytes + usize{m.material} * 4, 4);
+        if (value == 0) {
+            continue; // not drawn (or not in a sampled pixel this frame)
+        }
+        for (const TextureId id : m.textures) {
+            note_wanted(id, value - 1);
+        }
+    }
 }
 
 bool Renderer::mesh_ready(MeshId id) const {
@@ -1730,6 +2040,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_streamer->update(cmd, frame_number);
     cmd.end_timing();
     pose_skins(cmd);
+    // Textures: what drawn pixels asked for, then level changes (before
+    // the material table takes their descriptors).
+    read_texture_feedback();
+    m_texture_streamed = 0;
+    m_feedback_on = false;
+    change_textures();
     mark(CpuSection::streaming);
     if (settings.voxel_world) {
         cmd.begin_timing("voxels");
@@ -1957,8 +2273,24 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             }
             return slot->descriptor;
         };
+    // Textured materials: the first are asked by the GPU what detail they
+    // need; the rest are taken to need their textures' finest levels.
+    m_feedback_now.clear();
+    m_feedback_count = 0;
     for (usize i = 0; i < material_limit; ++i) {
-        m_gpu_materials.push_back(to_gpu(frame.materials[i], texture_descriptor));
+        const Material& m = frame.materials[i];
+        m_gpu_materials.push_back(to_gpu(m, texture_descriptor));
+        const std::array<TextureId, 4> ids{m.base_color_texture, m.normal_texture, m.roughness_metal_texture,
+                                           m.occlusion_texture};
+        if (std::all_of(ids.begin(), ids.end(), [](TextureId id) { return id == k_no_texture; })) {
+            continue;
+        }
+        if (i < k_feedback_materials) {
+            m_feedback_now.push_back({static_cast<u32>(i), ids});
+            m_feedback_count = static_cast<u32>(i + 1);
+        } else {
+            for (const TextureId id : ids) note_wanted(id, k_sharpest);
+        }
     }
     m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor));
     data.material_count = static_cast<u32>(material_limit);
@@ -2147,6 +2479,15 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         pass.colors[2] = {m_fallback, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
         pass.color_count = 3;
     }
+    // Texture streaming's feedback, cleared for this frame's pixels (lit views).
+    const bool feedback = lit_view && m_feedback_count > 0;
+    m_feedback_on = feedback;
+    if (feedback) {
+        cmd.barrier(m_feedback_zero, rhi::ResourceState::copy_source);
+        cmd.barrier(m_feedback, rhi::ResourceState::copy_dest);
+        cmd.copy_buffer(m_feedback, 0, m_feedback_zero, 0, u64{m_feedback_count} * 4);
+        cmd.barrier(m_feedback, rhi::ResourceState::shader_write);
+    }
     cmd.begin_render_pass(pass);
     cmd.set_pipeline(screen_reflections ? m_resolve : m_resolve_direct);
     gpu::ResolvePush push{};
@@ -2263,6 +2604,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
     }
     m_stats.dust_puffs = extras.dust_count;
+    extras.texture_feedback = feedback ? m_device.write_descriptor(m_feedback) : data.frame.descriptor;
+    extras.feedback_materials = feedback ? m_feedback_count : 0u;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;
@@ -2275,6 +2618,16 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     cmd.draw(3);
     ++m_stats.draws;
     cmd.end_render_pass();
+    if (feedback) {
+        // Read back once the GPU is done (read_texture_feedback), with which
+        // textures each material had.
+        const u64 frame_index = m_device.frames_completed();
+        const u32 slot = static_cast<u32>(frame_index % 3);
+        cmd.barrier(m_feedback, rhi::ResourceState::copy_source);
+        cmd.copy_buffer(m_feedback_readback[slot], 0, m_feedback, 0, u64{m_feedback_count} * 4);
+        m_feedback_frame[slot] = frame_index;
+        std::swap(m_feedback_materials[slot], m_feedback_now);
+    }
     if (screen_reflections) {
         // Screen reflections from this frame's radiance.
         cmd.barrier(m_radiance, rhi::ResourceState::shader_read);
@@ -2551,6 +2904,15 @@ void Renderer::smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3
 }
 
 void Renderer::copy_streaming_stats() {
+    m_stats.textures = static_cast<u32>(m_textures.size() - m_free_textures.size());
+    m_stats.texture_bytes = m_texture_bytes;
+    m_stats.texture_stream_bytes = m_texture_streamed;
+    m_stats.texture_feedback = m_feedback_on;
+    m_stats.textures_changing = 0;
+    for (const u32 slot : m_texture_changes) {
+        const TextureSlot& t = m_textures[slot];
+        m_stats.textures_changing += t.handle.valid() && t.target != t.first_mip ? 1u : 0u;
+    }
     m_stats.skinned_meshes = static_cast<u32>(m_skinned.size());
     m_stats.posed = m_posed;
     const StreamingStats& s = m_streamer->stats();

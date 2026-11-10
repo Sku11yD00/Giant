@@ -739,6 +739,85 @@ GIANT_TEST("rhi: resources made inside a frame hold their data and count as uplo
     device->destroy(texture);
 }
 
+GIANT_TEST("rhi: a texture's levels are written in rows and copied between textures, inside a frame") {
+    auto device = null_device();
+    if (device == nullptr) {
+        GIANT_CHECK(false);
+        return;
+    }
+    // 4x4 rgba8 with mips: 16, 4 and 1 texels.
+    TextureDesc desc;
+    desc.width = 4;
+    desc.height = 4;
+    desc.format = Format::rgba8_unorm;
+    desc.mips = 3;
+    GIANT_CHECK(level_offset(desc, 0) == 0 && level_offset(desc, 1) == 64 && level_offset(desc, 2) == 80 &&
+                level_offset(desc, 3) == 84 && level_offset(desc, 9) == 84);
+    const TextureHandle full = device->create_texture(desc); // empty: written below
+    // The same texture from its level 1 down (2x2, 2 mips).
+    TextureDesc small = desc;
+    small.width = 2;
+    small.height = 2;
+    small.mips = 2;
+    std::vector<u32> tail{11, 12, 13, 14, 15};
+    const TextureHandle part = device->create_texture(
+        small, std::span<const u8>(reinterpret_cast<const u8*>(tail.data()), tail.size() * 4));
+    GIANT_CHECK(full.valid() && part.valid());
+    std::vector<u32> top(16);
+    for (u32 i = 0; i < 16; ++i) top[i] = i + 1;
+    const auto rows = [&](u32 first, u32 count) {
+        return std::span<const u8>(reinterpret_cast<const u8*>(top.data() + first * 4), count * 16);
+    };
+    {
+        // Outside a frame: refused, logged.
+        CountAsserts asserts;
+        GIANT_CHECK(!device->write_texture(full, 0, 0, rows(0, 1)));
+        GIANT_CHECK(!device->copy_texture_levels(full, 1, part, 0, 2));
+        GIANT_CHECK(asserts.count() == 0);
+    }
+    GIANT_CHECK(device->begin_frame(nullptr) != nullptr);
+    // The top level in two pieces (rows 2-3, then 0-1), the rest copied in.
+    GIANT_CHECK(device->write_texture(full, 0, 2, rows(2, 2)));
+    GIANT_CHECK(device->write_texture(full, 0, 0, rows(0, 2)));
+    GIANT_CHECK(device->copy_texture_levels(full, 1, part, 0, 2));
+    {
+        CountAsserts asserts;
+        GIANT_CHECK(!device->write_texture(full, 0, 3, rows(0, 2)));             // past the level's end
+        GIANT_CHECK(!device->write_texture(full, 0, 0, rows(0, 1).first(10)));   // not whole rows
+        GIANT_CHECK(!device->write_texture(full, 3, 0, rows(0, 1)));             // no such level
+        GIANT_CHECK(!device->copy_texture_levels(full, 0, part, 0, 1));          // sizes differ
+        GIANT_CHECK(!device->copy_texture_levels(full, 1, part, 0, 3));          // too many levels
+        GIANT_CHECK(!device->copy_texture_levels(full, 0, full, 0, 1));          // into itself
+        TextureDesc target = desc;
+        target.usage = TextureUsage::sampled | TextureUsage::render_target;
+        target.mips = 1;
+        const TextureHandle drawn = device->create_texture(target);
+        GIANT_CHECK(!device->write_texture(drawn, 0, 0, rows(0, 1)));            // not sampled-only
+        TextureDesc bc = desc;
+        bc.format = Format::bc7_unorm;
+        bc.mips = 1;
+        const TextureHandle blocks = device->create_texture(bc); // compressed may start empty too
+        GIANT_CHECK(blocks.valid());
+        GIANT_CHECK(!device->copy_texture_levels(blocks, 0, full, 0, 1));        // formats differ
+        std::array<u8, 16> block{};
+        GIANT_CHECK(device->write_texture(blocks, 0, 0, block));                 // one row of blocks
+        device->destroy(drawn);
+        device->destroy(blocks);
+        GIANT_CHECK(asserts.count() == 0);
+    }
+    device->end_frame();
+    GIANT_CHECK(device->last_frame_stats().upload_bytes == 64 + 16);
+    const std::vector<u32> back = as_u32(device->read_texture(full));
+    GIANT_CHECK(back == std::vector<u32>(top.begin(), top.end()));
+    // The copied levels are where the next level of the big one starts.
+    device->begin_frame(nullptr);
+    GIANT_CHECK(device->copy_texture_levels(part, 0, full, 1, 2)); // and back
+    device->end_frame();
+    GIANT_CHECK(as_u32(device->read_texture(part)) == (std::vector<u32>{11, 12, 13, 14}));
+    device->destroy(full);
+    device->destroy(part);
+}
+
 GIANT_TEST("rhi: timing scopes are reported in the order begun, nested and capped") {
     auto device = null_device();
     if (device == nullptr) {
@@ -1794,9 +1873,9 @@ GIANT_TEST("rhi: texture sizes count blocks, mips and layers; unsound descriptio
     bad = d;
     bad.usage = TextureUsage::none;
     GIANT_CHECK(texture_desc_problem(bad) != nullptr);
-    // Contents: empty or whole; compressed ones always whole.
+    // Contents: empty (written later) or whole.
     GIANT_CHECK(texture_contents_problem(d, texture_bytes(d)) == nullptr);
-    GIANT_CHECK(texture_contents_problem(d, 0) != nullptr);
+    GIANT_CHECK(texture_contents_problem(d, 0) == nullptr);
     GIANT_CHECK(texture_contents_problem(d, texture_bytes(d) - 8) != nullptr);
     // A 12x12 chain pads its small levels to whole blocks: 9, 4, 1, 1.
     TextureDesc odd;
@@ -1805,7 +1884,7 @@ GIANT_TEST("rhi: texture sizes count blocks, mips and layers; unsound descriptio
     odd.format = Format::bc7_srgb;
     odd.mips = full_mip_count(12, 12);
     GIANT_CHECK(odd.mips == 4 && texture_bytes(odd) == (9 + 4 + 1 + 1) * 16u);
-    // The null device refuses them too, and compressed ones without contents.
+    // The null device refuses them too.
     DeviceDesc desc;
     desc.backend = Backend::null;
     auto device = create_device(desc);
@@ -1816,7 +1895,6 @@ GIANT_TEST("rhi: texture sizes count blocks, mips and layers; unsound descriptio
         // Refused with a log, never an assert: bad loaded data must not abort.
         CountAsserts asserts;
         GIANT_CHECK(!device->create_texture(bad, contents).valid());
-        GIANT_CHECK(!device->create_texture(d).valid());
         GIANT_CHECK(!device->create_texture(d, std::span<const u8>(contents).first(contents.size() - 8)).valid());
         bad = d;
         bad.width = 0;
@@ -1859,6 +1937,114 @@ std::array<u8, 8> bc1_solid(u8 r, u8 g, u8 b) {
 // A 4x4 block of BC4 in one value.
 std::array<u8, 8> bc4_solid(u8 v) { return {v, v, 0, 0, 0, 0, 0, 0}; }
 } // namespace
+
+GIANT_TEST("rhi: d3d12 writes a texture's levels in rows and copies levels between textures") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    // rgba8, read back: the top level written in two pieces, then copied whole.
+    TextureDesc desc;
+    desc.width = 4;
+    desc.height = 4;
+    desc.format = Format::rgba8_unorm;
+    const TextureHandle written = device->create_texture(desc);
+    const TextureHandle copied = device->create_texture(desc);
+    std::vector<u32> texels(16);
+    for (u32 i = 0; i < 16; ++i) texels[i] = 0xFF000000u | (i * 0x0F0F0Fu);
+    const auto rows = [&](u32 first, u32 count) {
+        return std::span<const u8>(reinterpret_cast<const u8*>(texels.data() + first * 4), count * 16);
+    };
+    // BC4, sampled: 8x8 with mips, its top level written in rows of blocks
+    // (0.25) and its three smaller levels copied from a 4x4 texture (0.75).
+    TextureDesc single;
+    single.width = 8;
+    single.height = 8;
+    single.format = Format::bc4_unorm;
+    single.mips = 4;
+    const TextureHandle mask = device->create_texture(single);
+    TextureDesc small = single;
+    small.width = 4;
+    small.height = 4;
+    small.mips = 3;
+    std::vector<u8> small_blocks;
+    for (int i = 0; i < 3; ++i) {
+        const auto b = bc4_solid(191);
+        small_blocks.insert(small_blocks.end(), b.begin(), b.end());
+    }
+    const TextureHandle tail = device->create_texture(small, small_blocks);
+    std::vector<u8> top_row;
+    for (int i = 0; i < 2; ++i) {
+        const auto b = bc4_solid(64);
+        top_row.insert(top_row.end(), b.begin(), b.end());
+    }
+    GIANT_CHECK(written.valid() && copied.valid() && mask.valid() && tail.valid());
+    CommandList* cmd = device->begin_frame(nullptr);
+    GIANT_CHECK(cmd != nullptr);
+    if (cmd != nullptr) {
+        GIANT_CHECK(device->write_texture(written, 0, 1, rows(1, 3)));
+        GIANT_CHECK(device->write_texture(written, 0, 0, rows(0, 1)));
+        GIANT_CHECK(device->write_texture(mask, 0, 1, top_row));
+        GIANT_CHECK(device->write_texture(mask, 0, 0, top_row));
+        GIANT_CHECK(device->copy_texture_levels(mask, 1, tail, 0, 3));
+        device->end_frame();
+    }
+    cmd = device->begin_frame(nullptr); // a frame later, from what the last one wrote
+    if (cmd != nullptr) {
+        GIANT_CHECK(device->copy_texture_levels(copied, 0, written, 0, 1));
+        device->end_frame();
+    }
+    GIANT_CHECK(as_u32(device->read_texture(written)) == texels);
+    GIANT_CHECK(as_u32(device->read_texture(copied)) == texels);
+
+    // Sampled as the block-compressed test samples them (its other slots
+    // filled alike).
+    TextureDesc array;
+    array.width = 8;
+    array.height = 8;
+    array.format = Format::bc1_unorm;
+    array.mips = 2;
+    array.layers = 2;
+    array.array = true;
+    std::vector<u8> colours_blocks;
+    for (int i = 0; i < 10; ++i) {
+        const auto b = bc1_solid(255, 0, 0);
+        colours_blocks.insert(colours_blocks.end(), b.begin(), b.end());
+    }
+    const TextureHandle colours = device->create_texture(array, colours_blocks);
+    ComputePipelineDesc pd;
+    pd.compute = shaders::test_sample_cs();
+    const PipelineHandle sample = device->create_pipeline(pd);
+    BufferDesc out_desc;
+    out_desc.size = 8 * 16;
+    out_desc.usage = BufferUsage::shader_read | BufferUsage::shader_write;
+    const BufferHandle out = device->create_buffer(out_desc);
+    cmd = device->begin_frame(nullptr);
+    if (cmd != nullptr) {
+        cmd->barrier(colours, ResourceState::shader_read);
+        cmd->barrier(out, ResourceState::shader_write);
+        cmd->set_pipeline(sample);
+        // (mask is sampled from its common state, as material textures are)
+        cmd->push(std::array<u32, 4>{device->write_descriptor(out), device->read_descriptor(colours),
+                                     device->read_descriptor(mask), device->read_descriptor(colours)});
+        cmd->dispatch(1);
+        device->end_frame();
+    }
+    const std::vector<u8> bytes = device->read_buffer(out);
+    GIANT_CHECK(bytes.size() == 8 * 16);
+    if (bytes.size() == 8 * 16) {
+        float f[32];
+        std::memcpy(f, bytes.data(), sizeof(f));
+        std::printf("streamed bc4: %.3f / %.3f\n", f[16], f[20]);
+        GIANT_CHECK(std::abs(f[16] - 64.0f / 255.0f) < 0.02f);  // mip 0, written in rows
+        GIANT_CHECK(std::abs(f[20] - 191.0f / 255.0f) < 0.02f); // mip 1, copied
+    }
+    for (const TextureHandle t : {written, copied, mask, tail, colours}) device->destroy(t);
+    device->destroy(sample);
+    device->destroy(out);
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
 
 GIANT_TEST("rhi: d3d12 samples block-compressed texture arrays at each mip and layer") {
     auto device = warp_device();

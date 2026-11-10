@@ -357,7 +357,11 @@ struct ResolveExtras {
     u32 dust_puffs;
     u32 dust_offset;
     u32 dust_count;
-    u32 dust_pad[2];
+    // Texture streaming: a write descriptor of u32 per material (the
+    // largest ceil(-log2 footprint) + 1 a sampled pixel needed), for the
+    // first feedback_materials (0: off).
+    u32 texture_feedback;
+    u32 feedback_materials;
 };
 static_assert(sizeof(ResolveExtras) == 160);
 
