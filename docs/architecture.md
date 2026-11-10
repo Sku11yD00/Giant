@@ -2476,7 +2476,8 @@ reflections are as sharp moving as standing still.
   at the screen's edges, for rays coming back at the camera and from
   roughness 0.25 to 0.4 (mirror sharp: no blur yet). It adds them to the
   light before exposure, into a target of its own (`post_draws` counts
-  it); with screen reflections off, shading writes the light alone
+  it), timed apart from shading as "screen reflections" (photoreal part
+  4d); with screen reflections off, shading writes the light alone
   (`ps_direct`). Either way the post pass then exposes and tone maps.
 - Targets: 24 bytes a pixel (about 88 MB at 1440p). `RenderStats::
   reflections` and `screen_reflections` (`last_frame.reflections.voxel`
@@ -2507,6 +2508,16 @@ over the target frame time). Where it stands:
   everything else (a mesh draws once all of its are in, a few frames after
   many are added at once); the GPU times its passes, so budgets can be
   checked against measurements (`get_engine_info`, the Engine panel).
+- Done in photoreal part 4d: the light's extras are timed pass by pass,
+  "gi", "ambient occlusion", "contact shadows" and "screen reflections";
+  the voxel cones and GI's light looked up in shading stay inside
+  "shading" (a pass of their own would read the G-buffer again), and the
+  N2 gate (`tools/n2_gate.py`) times shading with and without
+  reflections (their share: the cones and writing the screen
+  reflections' inputs), then without any of the light's extras (GI's
+  light, AO and contact shadows looked up there), and holds the sum under
+  4 ms at three stops, printing each part. The N3 gate's weather cost
+  adds the screen reflections wet ground brings.
 - Known gaps: the 32 MiB per frame streaming budget is set by hand, not yet
   tuned from those GPU timings; what callers create in one frame is not
   budgeted by the device, so a big batch of meshes added mid-frame uploads

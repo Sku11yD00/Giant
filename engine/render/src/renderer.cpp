@@ -2752,8 +2752,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_feedback_frame[slot] = frame_index;
         std::swap(m_feedback_materials[slot], m_feedback_now);
     }
+    cmd.end_timing();
     if (screen_reflections) {
-        // Screen reflections from this frame's radiance.
+        // Screen reflections from this frame's radiance (timed apart from
+        // shading, so the light's cost can be read pass by pass).
+        cmd.begin_timing("screen reflections");
         cmd.barrier(m_radiance, rhi::ResourceState::shader_read);
         cmd.barrier(m_gloss, rhi::ResourceState::shader_read);
         cmd.barrier(m_fallback, rhi::ResourceState::shader_read);
@@ -2775,8 +2778,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.draw(3);
         ++m_stats.post_draws;
         cmd.end_render_pass();
+        cmd.end_timing();
     }
-    cmd.end_timing();
     post(cmd, data, frame, screen_reflections ? m_scene : m_radiance, shaded, lit_view);
     m_stats.reflections = voxel_reflections;
     m_stats.screen_reflections = screen_reflections;
