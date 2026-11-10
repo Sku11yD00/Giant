@@ -959,3 +959,26 @@ GIANT_TEST("terrain brush tool: paint mode paints the chosen layer under the poi
     GIANT_CHECK(f.run("undo").ok && t.paint({0, 0}) != nullptr);
     GIANT_CHECK(f.run("undo").ok && t.paints().empty());
 }
+
+GIANT_TEST("terrain brush tool: paint after a strong raise sends strength 1; get_terrain reads paint at tile edges") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {63, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    f.state.camera.position = {32.0, 40.0, 32.0};
+    f.state.camera.pitch_degrees = -89.0f;
+    f.state.brush = {true, "paint", 6.0, 5.0f, 0.0f, 0.0f}; // 5 m from a raise
+    TerrainBrushTool tool;
+    platform::InputEvent press;
+    press.type = platform::InputEvent::Type::mouse_button;
+    press.button = platform::MouseButton::left;
+    press.down = true;
+    press.x = 400.0f;
+    press.y = 300.0f;
+    tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    GIANT_CHECK(tool.stroking() && f.state.scene.terrain.paint({0, 0}) != nullptr);
+    // Past the last sample of a tile with no tile beyond: its own last sample, not null.
+    GIANT_CHECK(f.run("paint_terrain", {{"layer", 1}, {"points", {{63, 63}}}, {"radius", 6}, {"falloff", 0},
+                                        {"strength", 1}}).ok);
+    const ai::CommandResult r = f.run("get_terrain", {{"points", {{63.9, 63.9}, {64.5, 10}}}});
+    GIANT_CHECK(r.ok && r.value["heights"][0].is_number() && r.value["paint"][0][0] == 1.0);
+    GIANT_CHECK(r.value["paint"][1].is_null() && r.value["heights"][1].is_null());
+}

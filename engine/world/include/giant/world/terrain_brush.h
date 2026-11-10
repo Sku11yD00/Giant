@@ -51,6 +51,9 @@ void apply_brush(Terrain& terrain, const Brush& brush, double x, double z, std::
 // a dab; one whose weights all stay is not touched).
 void apply_paint(Terrain& terrain, const Brush& brush, u32 layer, bool erase, double x, double z,
                  std::vector<CellCoord>& changed);
+// Drops the paint of those of `cells` erased to nothing (all 0), so their
+// tiles hold no paint again. Once a stroke, not a dab: it reads whole tiles.
+void drop_empty_paint(Terrain& terrain, std::span<const CellCoord> cells);
 
 // A dent pressed into the ground: a crater's bowl with a rim thrown up
 // round it, or (stretched along `yaw`) a footprint.

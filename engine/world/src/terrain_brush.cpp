@@ -67,12 +67,14 @@ void apply_paint(Terrain& terrain, const Brush& brush, u32 layer, bool erase, do
                     (*paint)[at] = static_cast<u8>(next);
                 }
             }
-            // Erased to nothing: no paint kept.
-            if (paint != nullptr && erase &&
-                std::all_of(paint->begin(), paint->end(), [](u8 v) { return v == 0; })) {
-                terrain.set_paint(cell, {});
-            }
         }
+    }
+}
+
+void drop_empty_paint(Terrain& terrain, std::span<const CellCoord> cells) {
+    for (const CellCoord c : cells) {
+        const Terrain::Paint* p = terrain.paint(c);
+        if (p != nullptr && std::all_of(p->begin(), p->end(), [](u8 v) { return v == 0; })) terrain.set_paint(c, {});
     }
 }
 

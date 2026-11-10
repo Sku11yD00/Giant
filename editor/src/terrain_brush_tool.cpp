@@ -190,6 +190,8 @@ void TerrainBrushTool::update(const std::vector<platform::InputEvent>& events, b
                          {"radius", b.radius},   {"strength", b.strength},
                          {"falloff", b.falloff}, {"continues", continues}};
         const bool paint = b.op == "paint" || b.op == "erase";
+        // Paint takes 0 to 1 (a raise's metres may still be set from before).
+        if (paint) args["strength"] = std::clamp(b.strength, 0.0f, 1.0f);
         if (b.op == "flatten") args["height"] = b.flatten_to_start ? m_start_height : b.height;
         if (paint) args["layer"] = b.layer;
         const char* command = paint ? "paint_terrain" : "sculpt_terrain";

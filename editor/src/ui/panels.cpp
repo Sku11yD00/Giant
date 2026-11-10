@@ -250,6 +250,7 @@ void EditorPanels::draw_terrain_brush() {
         b.radius = std::clamp(static_cast<double>(radius), 0.5, static_cast<double>(most));
     }
     const bool metres = b.op == "raise" || b.op == "lower";
+    if (!metres) b.strength = std::clamp(b.strength, 0.0f, 1.0f); // a raise's metres left from before
     ImGui::SliderFloat(metres ? "Strength (m a dab)" : "Strength", &b.strength, 0.0f, metres ? 10.0f : 1.0f, "%.2f");
     ImGui::SliderFloat("Falloff", &b.falloff, 0.0f, 1.0f, "%.2f");
     if (b.op == "flatten") {

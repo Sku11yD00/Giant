@@ -357,6 +357,8 @@ CommandResult stroke_step(EditorState& state, CommandContext& context, std::shar
         return a.z != b.z ? a.z < b.z : a.x < b.x;
     });
     changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
+    // Paint erased to nothing is no paint (checked once a call: it reads whole tiles).
+    if (!heights) world::drop_empty_paint(t, changed);
     const usize steps_before = stroke->before.size();
     for (TileState& s : before) {
         if (std::binary_search(changed.begin(), changed.end(), s.cell, [](CellCoord a, CellCoord b) {
@@ -979,18 +981,21 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                  Json paint = Json::array();
                  for (const Json& p : args["points"]) {
                      const double x = p[0].get<double>(), z = p[1].get<double>();
-                     const double sx = std::round(x / t.spacing()), sz = std::round(z / t.spacing());
-                     const auto n = static_cast<double>(t.samples());
-                     const CellCoord c{static_cast<i32>(std::clamp(std::floor(sx / n), -2147483648.0, 2147483647.0)),
-                                       static_cast<i32>(std::clamp(std::floor(sz / n), -2147483648.0, 2147483647.0))};
-                     if (t.find(c) == nullptr) {
+                     // The tile the point is in (as its height is), its nearest sample in it.
+                     if (!std::isfinite(x) || !std::isfinite(z) || t.find(world::cell_of({x, 0.0, z})) == nullptr) {
                          paint.push_back(nullptr);
                          continue;
                      }
+                     const CellCoord c = world::cell_of({x, 0.0, z});
+                     const auto n = static_cast<double>(t.samples());
+                     const auto nearest = [&](double v, i32 cell) {
+                         const double k = std::round(v / t.spacing() - static_cast<double>(cell) * n);
+                         return static_cast<usize>(std::clamp(k, 0.0, n - 1.0));
+                     };
                      Json w = Json::array();
                      const Terrain::Paint* tp = t.paint(c);
-                     const auto i = static_cast<usize>(sx - static_cast<double>(c.x) * n);
-                     const auto j = static_cast<usize>(sz - static_cast<double>(c.z) * n);
+                     const usize i = nearest(x, c.x);
+                     const usize j = nearest(z, c.z);
                      for (u32 l = 0; l < world::k_paintable_layers; ++l) {
                          const u8 v = tp != nullptr ? (*tp)[(j * t.samples() + i) * world::k_paint_channels + l] : u8{0};
                          w.push_back(static_cast<double>(v) / 255.0);

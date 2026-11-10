@@ -1468,6 +1468,8 @@ void read_paint(Reader& tr, const char* key, usize n, Terrain::Paint& paint) {
             paint[j * row_bytes + b] = static_cast<u8>(hi * 16 + lo);
         }
     }
+    // All 0 is no paint (as Terrain keeps it).
+    if (std::all_of(paint.begin(), paint.end(), [](u8 v) { return v == 0; })) paint.clear();
 }
 
 // A terrain: its sample spacing, material and tiles (heights as rows of text).

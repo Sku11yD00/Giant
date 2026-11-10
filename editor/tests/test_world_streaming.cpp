@@ -1149,3 +1149,53 @@ GIANT_TEST("world streaming: paint undone to what its file holds is clean again"
     // Undone after the save: the file holds the paint, the scene none.
     GIANT_CHECK(e.commands.undo() && e.w.streaming.unsaved_cells(e.state.scene) == 1);
 }
+
+GIANT_TEST("world streaming: a cell on disk rewritten for an entity keeps its file's paint") {
+    World w;
+    if (w.renderer == nullptr) return;
+    w.scene.terrain.set_samples(8);
+    w.scene.terrain.set({40, 0}, ramp(8, 1.0f));
+    world::Terrain::Paint paint(64 * world::k_paint_channels, 0);
+    paint[9] = 77;
+    GIANT_CHECK(w.scene.terrain.set_paint({40, 0}, paint));
+    GIANT_CHECK(w.streaming.create(w.folder, w.scene, w.generation, {}).error.empty());
+    w.reopen();
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.terrain.empty());
+    w.add(2570.0, 10.0, "moved in"); // into cell (40, 0), still on disk
+    const auto saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.cells_written == 1);
+    w.reopen();
+    w.settle(2570.0, 10.0);
+    GIANT_CHECK(w.named("moved in") == 1 && w.scene.terrain.paint({40, 0}) && *w.scene.terrain.paint({40, 0}) == paint);
+}
+
+GIANT_TEST("world streaming: a tile in the scene before its cell is read is clean only with the file's paint too") {
+    World w;
+    if (w.renderer == nullptr) return;
+    w.scene.terrain.set_samples(8);
+    w.scene.terrain.set({41, 0}, ramp(8, 1.0f));
+    world::Terrain::Paint paint(64 * world::k_paint_channels, 0);
+    paint[4] = 50;
+    GIANT_CHECK(w.scene.terrain.set_paint({41, 0}, paint));
+    GIANT_CHECK(w.streaming.create(w.folder, w.scene, w.generation, {}).error.empty());
+    w.reopen();
+    w.settle(10.0, 10.0);
+    // The same heights and paint put there by hand while on disk: clean once read (so it may go again).
+    w.scene.terrain.set({41, 0}, ramp(8, 1.0f));
+    GIANT_CHECK(w.scene.terrain.set_paint({41, 0}, paint));
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 0 && w.scene.terrain.empty());
+    // Other paint: the scene's is newer and stays, unsaved, and is what a save writes.
+    world::Terrain::Paint other = paint;
+    other[4] = 51;
+    w.scene.terrain.set({41, 0}, ramp(8, 1.0f));
+    GIANT_CHECK(w.scene.terrain.set_paint({41, 0}, other));
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.streaming.stats().loaded == 1 && *w.scene.terrain.paint({41, 0}) == other);
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 1);
+    GIANT_CHECK(w.streaming.save(w.scene, {}).error.empty() && w.streaming.unsaved_cells(w.scene) == 0);
+    w.reopen();
+    w.settle(2620.0, 10.0);
+    GIANT_CHECK(w.scene.terrain.paint({41, 0}) && *w.scene.terrain.paint({41, 0}) == other);
+}

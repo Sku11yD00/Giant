@@ -854,11 +854,20 @@ GIANT_TEST("terrain brush: paint raises one layer's weight towards full, erase t
     // Erasing everything there was leaves no paint at all.
     apply_paint(t, b, 2, true, 64.0, 8.0, changed);
     GIANT_CHECK(weight({1, 0}, 0, 2, 2) == 0 && weight({1, 0}, 0, 2, 7) == 255);
+    changed.clear();
     apply_paint(t, b, 7, true, 64.0, 8.0, changed);
-    GIANT_CHECK(t.paint({0, 0}) == nullptr && t.paint({1, 0}) == nullptr);
+    GIANT_CHECK(changed.size() == 2 && t.paint({1, 0}) != nullptr); // all 0, still kept until dropped
+    drop_empty_paint(t, changed);
+    GIANT_CHECK(t.paint({0, 0}) == nullptr && t.paint({1, 0}) == nullptr && t.paint_version({1, 0}) == 0);
+
     // Erasing unpainted ground, or painting where there is no tile, changes nothing.
     changed.clear();
     apply_paint(t, b, 2, true, 64.0, 8.0, changed);
     apply_paint(t, b, 2, false, 500.0, 500.0, changed);
     GIANT_CHECK(changed.empty() && t.paints().empty());
+    // A stroke over both tiles erasing all of one: only that one's paint goes.
+    apply_paint(t, b, 3, false, 64.0, 8.0, changed);
+    apply_paint(t, b, 3, true, 60.0, 8.0, changed); // (0, 0) erased, (1, 0) keeps x = 72
+    drop_empty_paint(t, std::vector<CellCoord>{{0, 0}, {1, 0}, {9, 9}});
+    GIANT_CHECK(t.paint({0, 0}) == nullptr && t.paint({1, 0}) != nullptr && weight({1, 0}, 2, 2, 3) == 255);
 }
