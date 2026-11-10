@@ -64,13 +64,15 @@ void set_textures(render::Material& r, const std::array<u32, 4>& refs, const Tex
 }
 
 // The material's index in the table, adding it if new, and one more user.
-u32 material_index(const world::Material& m, SceneFrame& out, bool textured = false) {
+// `terrain`: the ground's, shaded from the frame's terrain layers.
+u32 material_index(const world::Material& m, SceneFrame& out, bool textured = false, bool terrain = false) {
     SceneFrame::MaterialKey key{};
     const float values[10] = {m.base_color.x, m.base_color.y, m.base_color.z, m.roughness, m.metallic,
                               m.emissive.x,   m.emissive.y,   m.emissive.z,   m.sway,      m.flutter};
     std::memcpy(key.bits, values, sizeof(values));
     const std::array<u32, 4> refs = texture_refs(m, textured, out);
     std::copy(refs.begin(), refs.end(), key.bits + 10);
+    key.bits[14] = terrain ? 1u : 0u;
     const auto [it, added] = out.lookup.try_emplace(key, static_cast<u32>(out.materials.size()));
     if (added) {
         render::Material r;
@@ -80,6 +82,7 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
         r.emissive = m.emissive;
         r.sway = m.sway;
         r.flutter = m.flutter;
+        r.terrain = terrain;
         if (out.textures != nullptr) set_textures(r, refs, *out.textures);
         out.materials.push_back(r);
         out.material_textures.push_back(refs);
@@ -87,6 +90,42 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
     }
     ++out.users[it->second];
     return it->second;
+}
+
+// The ground's layers for the renderer, their textures requested (and
+// their ids as ready now). Made again each frame: at most a few.
+// Returns whether their textures changed (so the textures in use are told again).
+bool terrain_layers(const world::Scene& scene, SceneFrame& out) {
+    const std::vector<std::array<u32, 4>> before = std::move(out.terrain_layer_textures);
+    out.terrain_layers.clear();
+    out.terrain_layer_textures.clear();
+    const std::vector<world::TerrainLayer>& layers = scene.terrain.material.layers;
+    for (usize i = 0; i < std::min(layers.size(), world::k_max_terrain_layers); ++i) {
+        const world::TerrainLayer& l = layers[i];
+        render::TerrainLayer r;
+        r.base_color = l.base_color;
+        r.roughness = l.roughness;
+        r.tiling = l.tiling;
+        r.min_slope = l.min_slope;
+        r.max_slope = l.max_slope;
+        r.slope_blend = l.slope_blend;
+        r.min_height = l.min_height;
+        r.max_height = l.max_height;
+        r.height_blend = l.height_blend;
+        std::array<u32, 4> refs{TextureLibrary::k_no_ref, TextureLibrary::k_no_ref, TextureLibrary::k_no_ref,
+                                TextureLibrary::k_no_ref};
+        if (out.textures != nullptr && !l.maps.empty()) {
+            world::MaterialMaps maps = l.maps;
+            maps.occlusion.clear(); // (the ground has none)
+            refs = out.textures->request(maps);
+            r.base_color_texture = out.textures->id(refs[0]);
+            r.normal_texture = out.textures->id(refs[1]);
+            r.roughness_metal_texture = out.textures->id(refs[2]);
+        }
+        out.terrain_layers.push_back(r);
+        out.terrain_layer_textures.push_back(refs);
+    }
+    return out.terrain_layer_textures != before;
 }
 
 render::DecalShape decal_shape(world::DecalShape s) {
@@ -266,7 +305,7 @@ void emit_ground(const world::Scene& scene, const TerrainMeshes* terrain, const 
         render::Instance i;
         i.position = {x, 0.0, z};
         i.mesh = mesh;
-        i.material = material_index(m, out);
+        i.material = material_index(m, out, false, !scene.terrain.material.layers.empty());
         i.always_mesh = true;
         cell.instances.push_back(i);
         cell.ground = true;
@@ -806,10 +845,15 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         for (const world::CellCoord c : ground) {
             out.grid[c].ground_dirty = true; // (a new cell is dirty anyway)
         }
-        if (!(scene.terrain.material == out.terrain_material)) {
-            out.terrain_material = scene.terrain.material;
+        // (Only what the ground's instances carry: the layers themselves go
+        // to the renderer each frame, so dragging a layer's slider
+        // rebuilds no cells.)
+        const world::TerrainMaterial& look = scene.terrain.material;
+        if (!(look.base_color == out.terrain_material.base_color) || look.roughness != out.terrain_material.roughness ||
+            look.layers.empty() != out.terrain_material.layers.empty()) {
             for (auto& [coord, cell] : out.grid) cell.ground_dirty = cell.ground_dirty || cell.ground;
         }
+        out.terrain_material = look;
         // Entities added, removed, changed or moved to another cell.
         for (const world::EntityId id : changes.ids) {
             const world::Entity* e = scene.find(id);
@@ -975,14 +1019,20 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.skinned = nullptr;
     out.cloth = nullptr;
     out.fallen = nullptr;
+    const bool layer_textures = terrain_layers(scene, out);
     // The textures drawn materials use, when that may have changed: the
     // rest leave the GPU after a while.
-    if (out.textures != nullptr && (!rebuilt.empty() || compact)) {
+    if (out.textures != nullptr && (!rebuilt.empty() || compact || layer_textures)) {
         std::vector<u32>& used = out.scratch;
         used.clear();
         for (usize i = 0; i < out.materials.size(); ++i) {
             if (out.users[i] == 0) continue;
             for (const u32 ref : out.material_textures[i]) {
+                if (ref != TextureLibrary::k_no_ref) used.push_back(ref);
+            }
+        }
+        for (const std::array<u32, 4>& refs : out.terrain_layer_textures) {
+            for (const u32 ref : refs) {
                 if (ref != TextureLibrary::k_no_ref) used.push_back(ref);
             }
         }

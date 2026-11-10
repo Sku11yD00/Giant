@@ -2,6 +2,7 @@
 // Every change is undoable; the tiles' meshes follow on worker threads
 // (TerrainMeshes), so get_terrain says when they are all drawn.
 #include "editor_commands.h"
+#include "material_maps.h"
 #include "physics_state.h"
 #include "terrain_meshes.h"
 #include "world_streaming.h"
@@ -201,9 +202,64 @@ Json hills_schema() {
                             "anywhere). Left out: flat ground at `height`."}};
 }
 
+Json maps_json(const world::MaterialMaps& maps) {
+    Json out = Json::object();
+    if (!maps.base_color.empty()) out["base_color"] = maps.base_color;
+    if (!maps.normal.empty()) out["normal"] = maps.normal;
+    if (!maps.roughness_metal.empty()) out["roughness_metal"] = maps.roughness_metal;
+    if (maps.normal_green_down) out["normal_green_down"] = true;
+    return out;
+}
+
+Json layer_json(const world::TerrainLayer& l) {
+    return {{"base_color", Json::array({l.base_color.x, l.base_color.y, l.base_color.z})},
+            {"roughness", l.roughness},
+            {"maps", maps_json(l.maps)},
+            {"tiling", l.tiling},
+            {"min_slope", l.min_slope},
+            {"max_slope", l.max_slope},
+            {"slope_blend", l.slope_blend},
+            {"min_height", l.min_height},
+            {"max_height", l.max_height},
+            {"height_blend", l.height_blend}};
+}
+
 Json material_json(const world::TerrainMaterial& m) {
+    Json layers = Json::array();
+    for (const world::TerrainLayer& l : m.layers) layers.push_back(layer_json(l));
     return {{"base_color", Json::array({m.base_color.x, m.base_color.y, m.base_color.z})},
-            {"roughness", m.roughness}};
+            {"roughness", m.roughness},
+            {"layers", std::move(layers)}};
+}
+
+Json layer_schema() {
+    // The maps a layer uses (an occlusion map has no place on the ground).
+    Json maps = maps_schema();
+    maps["properties"].erase("occlusion");
+    maps["description"] = "Image files mapped by world position every `tiling` metres (from above, and "
+                          "from the sides where steep). Paths from the editor's working folder; \"\" "
+                          "removes one. roughness_metal's green (roughness) multiplies roughness; its "
+                          "metal is ignored (the ground is not metal).";
+    const Json colour{{"type", "array"},
+                      {"items", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
+                      {"minItems", 3},
+                      {"maxItems", 3},
+                      {"description", "Linear RGB, multiplying the colour image (set [1, 1, 1] to show it as painted)."}};
+    const double h = world::k_max_terrain_layer_height;
+    return {{"type", "object"},
+            {"additionalProperties", false},
+            {"properties",
+             {{"base_color", colour},
+              {"roughness", number(0, 1, "0 mirror to 1 matte; multiplies the roughness image.")},
+              {"maps", std::move(maps)},
+              {"tiling", number(0.05, 1000, // world::k_min_terrain_tiling, k_max_terrain_tiling (as typed)
+                                "Metres one repeat of the images covers. Default 4.")},
+              {"min_slope", number(0, 90, "Lies where the ground is at least this steep, degrees from level. Default 0.")},
+              {"max_slope", number(0, 90, "And at most this steep. Default 90.")},
+              {"slope_blend", number(0, 90, "Degrees over which it fades in at the slope band's edges. Default 5.")},
+              {"min_height", number(-h, h, "Lies where the ground is at least this high, metres above 0. Default -10000.")},
+              {"max_height", number(-h, h, "And at most this high. Default 10000.")},
+              {"height_blend", number(0, h, "Metres over which it fades in at the height band's edges. Default 10.")}}}};
 }
 
 // Lowest and highest height of the tiles in `cells` that exist.
@@ -688,8 +744,8 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
 
     add(registry, state,
         {"set_terrain_material",
-         "Sets how the ground looks (all of it, until painted layers arrive): base_color "
-         "(linear RGB) and roughness. Undoable.",
+         "Sets how the ground looks without layers (set_terrain_layers), and the far voxel "
+         "world's colour with them: base_color (linear RGB) and roughness. Undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
@@ -707,6 +763,75 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                  m.base_color = {c[0].get<float>(), c[1].get<float>(), c[2].get<float>()};
              }
              m.roughness = args.value("roughness", m.roughness);
+             const world::TerrainMaterial after = m;
+             context.record(scene_change(state, [&state, before] { state.scene.terrain.material = before; },
+                                         [&state, after] { state.scene.terrain.material = after; }));
+             return CommandResult::success(material_json(after));
+         }});
+
+    add(registry, state,
+        {"set_terrain_layers",
+         "Sets the ground's materials as layers stacked like paint: the first covers everywhere, "
+         "each later one lies over those before it where the ground's slope and height are within "
+         "its bands (fading at their edges), e.g. grass, then rock from 35 degrees, then snow above "
+         "1500 m. Each has a colour, roughness and image files mapped by world position. Replaces "
+         "all layers ([] for none: the plain base_color and roughness). The far voxel world, past "
+         "where meshes are drawn, keeps the terrain material's base_color: set it "
+         "(set_terrain_material) near the layers' look from afar. Undoable.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", Json::array({"layers"})},
+              {"properties",
+               {{"layers", {{"type", "array"},
+                            {"items", layer_schema()},
+                            {"maxItems", world::k_max_terrain_layers},
+                            {"description", "Bottom first."}}}}}},
+         false,
+         [&state](const Json& args, CommandContext& context) {
+             std::vector<world::TerrainLayer> layers;
+             for (const Json& j : args["layers"]) {
+                 world::TerrainLayer l;
+                 if (j.contains("base_color")) {
+                     const Json& c = j["base_color"];
+                     l.base_color = {c[0].get<float>(), c[1].get<float>(), c[2].get<float>()};
+                 }
+                 l.roughness = j.value("roughness", l.roughness);
+                 l.tiling = j.value("tiling", l.tiling);
+                 l.min_slope = j.value("min_slope", l.min_slope);
+                 l.max_slope = j.value("max_slope", l.max_slope);
+                 l.slope_blend = j.value("slope_blend", l.slope_blend);
+                 l.min_height = j.value("min_height", l.min_height);
+                 l.max_height = j.value("max_height", l.max_height);
+                 l.height_blend = j.value("height_blend", l.height_blend);
+                 if (j.contains("maps")) {
+                     // Images the layers name already are taken as they are
+                     // (read back and sent again, even if a file has gone
+                     // since); new ones must exist.
+                     Json given = j["maps"];
+                     for (const char* key : {"base_color", "normal", "roughness_metal"}) {
+                         if (!given.contains(key)) continue;
+                         const std::string path = given[key].get<std::string>();
+                         const auto named = [&](const world::TerrainLayer& o) {
+                             return !path.empty() && (o.maps.base_color == path || o.maps.normal == path ||
+                                                      o.maps.roughness_metal == path);
+                         };
+                         const std::vector<world::TerrainLayer>& now = state.scene.terrain.material.layers;
+                         if (std::any_of(now.begin(), now.end(), named)) {
+                             (std::string_view(key) == "base_color" ? l.maps.base_color
+                              : std::string_view(key) == "normal"   ? l.maps.normal
+                                                                    : l.maps.roughness_metal) = path;
+                             given.erase(key);
+                         }
+                     }
+                     if (std::string bad = apply_maps(given, l.maps); !bad.empty()) {
+                         return CommandResult::failure("layers[" + std::to_string(layers.size()) + "]." + bad);
+                     }
+                 }
+                 layers.push_back(std::move(l));
+             }
+             world::TerrainMaterial& m = state.scene.terrain.material;
+             const world::TerrainMaterial before = m;
+             m.layers = std::move(layers);
              const world::TerrainMaterial after = m;
              context.record(scene_change(state, [&state, before] { state.scene.terrain.material = before; },
                                          [&state, after] { state.scene.terrain.material = after; }));

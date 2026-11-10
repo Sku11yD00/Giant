@@ -686,7 +686,20 @@ Json heights_json(const Terrain::Heights& h, usize n) {
 }
 
 Json terrain_material_json(const TerrainMaterial& m) {
-    return {{"base_color", vec3_json(m.base_color)}, {"roughness", m.roughness}};
+    Json out{{"base_color", vec3_json(m.base_color)}, {"roughness", m.roughness}};
+    if (!m.layers.empty()) {
+        Json layers = Json::array();
+        for (const TerrainLayer& l : m.layers) {
+            Json j{{"base_color", vec3_json(l.base_color)}, {"roughness", l.roughness},
+                   {"tiling", l.tiling},
+                   {"min_slope", l.min_slope}, {"max_slope", l.max_slope}, {"slope_blend", l.slope_blend},
+                   {"min_height", l.min_height}, {"max_height", l.max_height}, {"height_blend", l.height_blend}};
+            write_maps(j, l.maps);
+            layers.push_back(std::move(j));
+        }
+        out["layers"] = std::move(layers);
+    }
+    return out;
 }
 
 Json terrain_json(const Terrain& t) {
@@ -1308,6 +1321,22 @@ void read_damage(Reader& r, const std::string& path, CellCoord cell, CellDamage&
     sort_damage(out);
 }
 
+// A terrain layer's values (TerrainLayer; the editor's set_terrain_layers
+// enforces the same limits).
+void read_terrain_layer(Reader& r, const std::string& path, TerrainLayer& l, std::string& error) {
+    r.vec3("base_color", l.base_color, 0, 1);
+    r.number("roughness", l.roughness, 0, 1);
+    r.number("tiling", l.tiling, k_min_terrain_tiling, k_max_terrain_tiling);
+    r.number("min_slope", l.min_slope, 0, 90);
+    r.number("max_slope", l.max_slope, 0, 90);
+    r.number("slope_blend", l.slope_blend, 0, 90);
+    r.number("min_height", l.min_height, -k_max_terrain_layer_height, k_max_terrain_layer_height);
+    r.number("max_height", l.max_height, -k_max_terrain_layer_height, k_max_terrain_layer_height);
+    r.number("height_blend", l.height_blend, 0, k_max_terrain_layer_height);
+    read_maps(r, path, l.maps, error);
+    if (r.ok() && !l.maps.occlusion.empty()) r.fail("maps", "occlusion has no place on the ground's layers");
+}
+
 // "samples" and "material" of a terrain (or a world's terrain settings).
 void read_terrain_settings(Reader& r, const std::string& path, u32& samples, TerrainMaterial& material,
                            std::string& error) {
@@ -1322,6 +1351,21 @@ void read_terrain_settings(Reader& r, const std::string& path, u32& samples, Ter
         Reader mr(*m, path + ".material", error);
         mr.vec3("base_color", material.base_color, 0, 1);
         mr.number("roughness", material.roughness, 0, 1);
+        if (const Json* layers = mr.get("layers", false); layers != nullptr && mr.ok()) {
+            if (!layers->is_array() || layers->size() > k_max_terrain_layers) {
+                mr.fail("layers", "must be an array of at most " + std::to_string(k_max_terrain_layers) + " layers");
+            } else {
+                material.layers.clear();
+                for (usize i = 0; i < layers->size() && error.empty(); ++i) {
+                    TerrainLayer l;
+                    const std::string at = path + ".material.layers[" + std::to_string(i) + "]";
+                    Reader lr((*layers)[i], at, error);
+                    read_terrain_layer(lr, at, l, error);
+                    lr.finish();
+                    material.layers.push_back(std::move(l));
+                }
+            }
+        }
         mr.finish();
     }
 }

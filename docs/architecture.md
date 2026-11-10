@@ -400,6 +400,17 @@ an offline cooker can use it without a device.
   unrolled. Layer textures have no streaming feedback yet: they are
   always wanted at their finest. Shadows, AO and probes keep the surface
   normal. Painted splats and height-blended edges come in 5c.
+- **Terrain layers in worlds (photoreal part 5b).** `world::TerrainMaterial::layers`
+  (`world::TerrainLayer`: colour, roughness, `MaterialMaps` without
+  occlusion, tiling, slope and height bands) save with scenes and in
+  world.json's terrain settings. The editor's `scene_frame` makes the
+  ground's material a terrain one when there are layers (terrain tiles and
+  far ground chunks alike, so the layers reach the horizon) and hands the
+  layers to the renderer each frame, their images cooked and streamed by
+  the TextureLibrary like any material's (kept in use beside the drawn
+  materials'). The far voxel world past the meshes keeps the terrain
+  material's own `base_color`. MCP `set_terrain_layers` (undoable, replaces
+  them all), `get_terrain` lists them; the scene panel edits them.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under
