@@ -252,6 +252,27 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
         return &normals[static_cast<usize>(k)];
     };
 
+    // Colour: the share of a level's texels whose alpha reaches the cutoff
+    // when scaled by `scale`.
+    const float cutoff = options.coverage_cutoff;
+    const auto coverage = [cutoff](const Plane& level, float scale) {
+        usize kept = 0;
+        const usize texels = usize{level.width} * level.height;
+        for (usize i = 0; i < texels; ++i) kept += level.v[i * level.channels + 3] * scale >= cutoff ? 1u : 0u;
+        return static_cast<double>(kept) / static_cast<double>(std::max<usize>(texels, 1));
+    };
+    // The alpha scale that gives `level` the coverage `wanted` (searched
+    // between none and 4x: an alpha needing more is noise).
+    const auto coverage_scale = [&](const Plane& level, double wanted) {
+        float lo = 0.0f, hi = 4.0f;
+        for (int i = 0; i < 16; ++i) {
+            const float mid = 0.5f * (lo + hi);
+            (coverage(level, mid) < wanted ? lo : hi) = mid;
+        }
+        return hi;
+    };
+
+    float alpha_scale = 1.0f;
     const auto to_image = [&](const Plane& level) {
         Image img;
         img.width = level.width;
@@ -271,7 +292,7 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
                         const float lin = a > 1.0f / 512.0f ? p[c] / a : p[4 + c];
                         t[c] = to_u8(linear_to_srgb(lin));
                     }
-                    t[3] = to_u8(a);
+                    t[3] = to_u8(a * alpha_scale);
                     break;
                 }
                 case Kind::normal: {
@@ -311,10 +332,15 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
     std::vector<Image> out;
     Plane level = resample(std::move(source), top_w, top_h);
     out.push_back(to_image(level));
+    // A cut-out (some texels each side of the cutoff) keeps its coverage.
+    const bool cut_out = options.kind == Kind::color && cutoff > 0.0f && cutoff < 1.0f;
+    const double top_coverage = cut_out ? coverage(level, 1.0f) : 0.0;
+    const bool keep_coverage = cut_out && top_coverage > 0.0 && top_coverage < 1.0;
     while (level.width > 1 || level.height > 1) {
         const u32 w = std::max(1u, level.width / 2);
         const u32 h = std::max(1u, level.height / 2);
         level = resample(std::move(level), w, h);
+        alpha_scale = keep_coverage ? coverage_scale(level, top_coverage) : 1.0f;
         out.push_back(to_image(level));
     }
     return out;

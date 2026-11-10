@@ -71,14 +71,23 @@ struct Material {
     // Read descriptors of its textures (rhi::k_no_descriptor: none): base
     // colour, normal, roughness and metallic, occlusion.
     u32 textures[4];
-    u32 flags; // k_material_terrain: shaded from the frame's terrain layers; k_material_two_sided
+    u32 flags; // k_material_terrain: shaded from the frame's terrain layers; k_material_two_sided; k_material_cut_out
     float translucency; // 0 to 1
-    u32 pad[2];
+    float alpha_cutoff; // k_material_cut_out: base colour alpha under it is cut away
+    u32 pad;
 };
 static_assert(sizeof(Material) == 64);
 inline constexpr u32 k_material_bytes = 64; // resolve.slang's k_material_bytes
 inline constexpr u32 k_material_terrain = 1;
 inline constexpr u32 k_material_two_sided = 2;
+inline constexpr u32 k_material_cut_out = 4;
+// A material's kind, as the visibility raster draws it in its own pass
+// (RasterPush::kinds): opaque one-sided 0, opaque two-sided 1, cut-out
+// one-sided 2, cut-out two-sided 3.
+inline constexpr u32 k_material_kinds = 4;
+inline constexpr u32 material_kind(u32 flags) {
+    return ((flags & k_material_two_sided) != 0u ? 1u : 0u) + ((flags & k_material_cut_out) != 0u ? 2u : 0u);
+}
 
 // A terrain layer (terrain.slang's TerrainLayer): FrameInput::terrain_layers.
 struct TerrainLayer {
@@ -298,9 +307,9 @@ struct RasterPush {
     u32 shadow_table_offset;
     i32 shadow_page_x;
     i32 shadow_page_y;
-    // Which clusters draw: 0 all, 1 those of one-sided materials, 2 of
-    // two-sided ones (by the frame's material table, below).
-    u32 sides;
+    // Which clusters draw, by their material's kind (bit k for
+    // material_kind k, by the frame's material table, below); 0: all.
+    u32 kinds;
     u32 materials;
     u32 material_offset;
     u32 material_count;

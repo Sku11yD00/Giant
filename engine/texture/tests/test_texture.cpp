@@ -488,3 +488,41 @@ GIANT_TEST("texture: blocks decode as D3D lays them out") {
     bc7[0] = 0x40;
     GIANT_CHECK(decode_blocks(rhi::Format::bc7_unorm, 4, 4, bc7).size() == 64);
 }
+
+GIANT_TEST("texture: cut-out colour mips keep the top level's alpha coverage") {
+    // Scattered opaque texels, about 30% (leaves on a card): filtered
+    // plainly, smaller levels' alpha sinks under the cutoff and they vanish.
+    u32 seed = 12345;
+    const Image leaves = filled(64, 64, [&seed](u32, u32, u8* t) {
+        seed = seed * 1664525u + 1013904223u;
+        t[0] = 40;
+        t[1] = 160;
+        t[2] = 30;
+        t[3] = (seed >> 24) < 77u ? 255 : 0;
+    });
+    const auto covered = [](const Image& img) {
+        usize kept = 0;
+        for (usize i = 0; i < img.rgba.size(); i += 4) kept += img.rgba[i + 3] >= 128 ? 1u : 0u;
+        return static_cast<double>(kept) / static_cast<double>(img.rgba.size() / 4);
+    };
+    std::string error;
+    const auto kept = make_mips(leaves, {}, error);
+    CookOptions plain_options;
+    plain_options.coverage_cutoff = 0.0f;
+    const auto plain = make_mips(leaves, plain_options, error);
+    const double top = covered(kept[0]);
+    GIANT_CHECK(top > 0.25 && top < 0.35 && covered(plain[0]) == top);
+    for (usize level = 1; level <= 4; ++level) {
+        GIANT_CHECK(std::abs(covered(kept[level]) - top) < 0.08);
+    }
+    GIANT_CHECK(covered(plain[3]) < 0.1); // thinned away
+    // Colour is untouched by the alpha scale.
+    GIANT_CHECK(at(kept[3], 0, 0)[1] == at(plain[3], 0, 0)[1]);
+    // Opaque images are left as they are.
+    const Image solid = filled(8, 8, [](u32, u32, u8* t) {
+        t[0] = t[1] = t[2] = 100;
+        t[3] = 255;
+    });
+    const auto solid_mips = make_mips(solid, {}, error);
+    GIANT_CHECK(at(solid_mips[2], 0, 0)[3] == 255);
+}

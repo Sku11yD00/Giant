@@ -530,6 +530,7 @@ void write_wind(Json& material, const Material& m) {
     if (m.flutter != 0.0f) material["flutter"] = m.flutter;
     if (m.two_sided) material["two_sided"] = true;
     if (m.translucency != 0.0f) material["translucency"] = m.translucency;
+    if (m.alpha_cutoff != 0.0f) material["alpha_cutoff"] = m.alpha_cutoff;
     write_maps(material, m.maps);
 }
 
@@ -1128,6 +1129,7 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
         mr.number("flutter", material.flutter, 0, 4);
         mr.boolean("two_sided", material.two_sided);
         mr.number("translucency", material.translucency, 0, 1);
+        mr.number("alpha_cutoff", material.alpha_cutoff, 0, 1);
         read_maps(mr, path + ".material", material.maps, error);
         mr.finish();
     }
@@ -1633,6 +1635,7 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
                 mr.number("flutter", item.material.flutter, 0, 4);
                 mr.boolean("two_sided", item.material.two_sided);
                 mr.number("translucency", item.material.translucency, 0, 1);
+                mr.number("alpha_cutoff", item.material.alpha_cutoff, 0, 1);
                 read_maps(mr, at + ".material", item.material.maps, error);
                 mr.finish();
             }

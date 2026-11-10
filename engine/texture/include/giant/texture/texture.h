@@ -14,7 +14,10 @@
 //
 // Each kind of texture is filtered the way its data means:
 //   - colour: in linear light, weighted by alpha so cut-out edges do not
-//     darken; BC7 sRGB (or BC1 sRGB, half the size, without alpha).
+//     darken; BC7 sRGB (or BC1 sRGB, half the size, without alpha). Each
+//     smaller level's alpha is scaled so as much of it stays over
+//     coverage_cutoff as of the top level's, so cut-out leaves do not thin
+//     away in the distance.
 //   - normal: the average of the vectors, renormalised; BC5 holds x and y,
 //     shaders rebuild z.
 //   - roughness_metal, from a glTF metallic-roughness image (roughness G,
@@ -63,6 +66,9 @@ struct CookOptions {
     Kind kind = Kind::color;
     // Colour only: BC1 instead of BC7, half the memory; alpha is dropped.
     bool small = false;
+    // Colour only: the alpha cutoff whose coverage smaller levels keep
+    // (materials' alpha_cutoff near it cut out best); 0: alpha filtered plainly.
+    float coverage_cutoff = 0.5f;
     // Normal maps authored for DirectX (green pointing down the image) are
     // flipped to the engine's green-up convention.
     bool flip_green = false;
@@ -117,6 +123,6 @@ std::vector<u8> write_file(const Cooked& texture);
 bool read_file(std::span<const u8> file, Cooked& out, std::string& error);
 
 inline constexpr u32 k_file_header_bytes = 64;
-inline constexpr u32 k_file_version = 1;
+inline constexpr u32 k_file_version = 2; // 2: colour levels keep their alpha coverage
 
 } // namespace giant::texture

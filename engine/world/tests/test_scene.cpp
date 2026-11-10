@@ -975,3 +975,29 @@ GIANT_TEST("world: two-sided and translucent materials save and load, only when 
         R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"translucency": 2}}]})", bad);
     GIANT_CHECK(error.has_value() && contains(error->message, "translucency"));
 }
+
+GIANT_TEST("world: cut-out materials save and load their alpha cutoff, only when set, and it is checked") {
+    Scene scene;
+    Entity card = named("Card");
+    card.material.alpha_cutoff = 0.5f;
+    scene.add(card);
+    scene.add(named("Rock"));
+    ScatterLayer layer;
+    layer.name = "grass";
+    ScatterItem blade;
+    blade.material.alpha_cutoff = 0.3f;
+    layer.items.push_back(blade);
+    scene.scatter.push_back(layer);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(text.find("\"alpha_cutoff\"") != text.rfind("\"alpha_cutoff\"")); // the card's and the grass's
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->material.alpha_cutoff == 0.5f);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->material.alpha_cutoff == 0.0f);
+    GIANT_CHECK(loaded.scatter[0].items[0].material.alpha_cutoff == 0.3f);
+    GIANT_CHECK(save_scene(loaded) == text);
+    Scene bad;
+    const auto error = load_scene(
+        R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"alpha_cutoff": -1}}]})", bad);
+    GIANT_CHECK(error.has_value() && contains(error->message, "alpha_cutoff"));
+}

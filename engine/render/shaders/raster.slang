@@ -9,6 +9,11 @@
 // triangle. Fallback for GPUs without mesh shaders: a draw of 384 vertices
 // per cluster (instance i is cluster base + i); unused triangles collapse
 // to a point, which the rasterizer drops.
+//
+// Cut-out materials (leaves on cards) draw with their own entry points
+// (ms_cut, vs_cut, ps_cut, ps_shadow_cut): the vertices carry uvs, and
+// pixels where the base colour's alpha is under the material's cutoff are
+// dropped. Opaque materials keep pixel shaders without discard (early depth).
 #include "common.slang"
 
 struct RasterPush {
@@ -28,9 +33,10 @@ struct RasterPush {
     uint shadow_table_offset; // its first entry
     int shadow_page_x;        // the level window's minimum page
     int shadow_page_y;
-    // Which clusters draw: 0 all, 1 one-sided materials', 2 two-sided ones'
-    // (gpu::Material flags in the frame's table).
-    uint sides;
+    // Which clusters draw, by their material's kind (bit k for kind k:
+    // 0 opaque one-sided, 1 opaque two-sided, 2 cut-out one-sided, 3 cut-out
+    // two-sided; gpu::Material flags in the frame's table); 0: all.
+    uint kinds;
     uint materials;
     uint material_offset;
     uint material_count;
@@ -38,17 +44,29 @@ struct RasterPush {
 };
 ConstantBuffer<RasterPush> push : register(b0);
 
-static const uint k_material_bytes = 64; // gpu::Material; flags at +48
+static const uint k_material_bytes = 64; // gpu::Material; textures at +32, flags at +48, cutoff at +56
 static const uint k_material_two_sided = 2u;
+static const uint k_material_cut_out = 4u;
 
-// Whether this pass draws an instance's clusters (push.sides).
-bool drawn_side(Instance inst) {
-    if (push.sides == 0u) {
+uint material_at(Instance inst) {
+    return push.material_offset + min(inst.material, push.material_count) * k_material_bytes;
+}
+
+// Whether this pass draws an instance's clusters (push.kinds).
+bool drawn_kind(Instance inst) {
+    if (push.kinds == 0u) {
         return true;
     }
-    const uint at = push.material_offset + min(inst.material, push.material_count) * k_material_bytes + 48;
-    const bool two = (read_buffer(push.materials).Load(at) & k_material_two_sided) != 0u;
-    return (two ? 2u : 1u) == push.sides;
+    const uint flags = read_buffer(push.materials).Load(material_at(inst) + 48);
+    const uint kind = ((flags & k_material_two_sided) != 0u ? 1u : 0u) + ((flags & k_material_cut_out) != 0u ? 2u : 0u);
+    return ((push.kinds >> kind) & 1u) != 0u;
+}
+
+// A cut-out material's base colour (read descriptor) and alpha cutoff.
+uint2 cut_out_of(Instance inst) {
+    const uint at = material_at(inst);
+    ByteAddressBuffer materials = read_buffer(push.materials);
+    return uint2(materials.Load(at + 32), materials.Load(at + 56));
 }
 
 struct Drawn {
@@ -76,7 +94,7 @@ Drawn drawn_cluster_flat(uint id) {
     d.cluster = load_cluster(read_buffer_nonuniform(d.mesh.clusters), e.y);
     d.base = group_offset(d.mesh, d.cluster.group);
     // Never not resident (culling checks it); combined without a branch.
-    d.valid = (uint(d.valid) & uint(d.base != k_not_resident) & uint(drawn_side(d.inst))) != 0;
+    d.valid = (uint(d.valid) & uint(d.base != k_not_resident) & uint(drawn_kind(d.inst))) != 0;
     return d;
 }
 
@@ -94,7 +112,7 @@ Drawn drawn_cluster(uint id) {
     d.mesh = load_mesh(read_buffer(push.meshes), push.mesh_offset + d.inst.mesh * k_mesh_bytes);
     d.cluster = load_cluster(read_buffer_nonuniform(d.mesh.clusters), e.y);
     d.base = group_offset(d.mesh, d.cluster.group);
-    d.valid = d.base != k_not_resident && drawn_side(d.inst); // resident: culling checks it
+    d.valid = d.base != k_not_resident && drawn_kind(d.inst); // resident: culling checks it
     return d;
 }
 
@@ -111,6 +129,14 @@ struct MsVertex {
 };
 struct MsPrimitive {
     uint2 vis : VIS_ID;
+};
+struct MsCutVertex {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+struct MsCutPrimitive {
+    uint2 vis : VIS_ID;
+    uint2 cut : CUT_OUT; // base colour descriptor, asuint(cutoff)
 };
 
 [shader("mesh")]
@@ -137,9 +163,42 @@ void ms_main(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID,
     }
 }
 
+// The mesh shader for cut-out materials: the same, with uvs.
+[shader("mesh")]
+[numthreads(128, 1, 1)]
+[outputtopology("triangle")]
+void ms_cut(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID,
+            OutputVertices<MsCutVertex, 128> verts, OutputIndices<uint3, 128> tris,
+            OutputPrimitives<MsCutPrimitive, 128> prims) {
+    const Drawn d = drawn_cluster_flat(gid.y * 65535 + gid.x);
+    const uint vertex_count = d.cluster.vertex_count * uint(d.valid);
+    const uint triangle_count = d.cluster.triangle_count * uint(d.valid);
+    SetMeshOutputCounts(vertex_count, triangle_count);
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    if (tid < vertex_count) {
+        MsCutVertex v;
+        v.position = clip_position(f, d, swayer_of(f, d.inst, d.mesh), tid);
+        v.uv = cluster_uv(read_buffer(f.pool), d.base, d.cluster, tid);
+        verts[tid] = v;
+    }
+    if (tid < triangle_count) {
+        tris[tid] = cluster_triangle(read_buffer(f.pool), d.base, d.cluster, tid);
+        MsCutPrimitive p;
+        p.vis = uint2(d.entry + 1, tid);
+        p.cut = cut_out_of(d.inst);
+        prims[tid] = p;
+    }
+}
+
 struct VsOut {
     float4 position : SV_Position;
     nointerpolation uint2 vis : VIS_ID;
+};
+struct VsCutOut {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint2 vis : VIS_ID;
+    nointerpolation uint2 cut : CUT_OUT;
 };
 
 [shader("vertex")]
@@ -161,13 +220,61 @@ VsOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
     return o;
 }
 
+// The vertex shader for cut-out materials: the same, with uvs.
+[shader("vertex")]
+VsCutOut vs_cut(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+    VsCutOut o;
+    o.position = float4(0.0, 0.0, 0.0, 1.0);
+    o.uv = float2(0.0, 0.0);
+    o.vis = uint2(0, 0);
+    o.cut = uint2(0xFFFFFFFFu, 0u);
+    const Drawn d = drawn_cluster(instance_id);
+    const uint triangle = vertex_id / 3;
+    if (!d.valid || triangle >= d.cluster.triangle_count) {
+        return o; // all three corners at one point: nothing drawn
+    }
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const uint3 corners = cluster_triangle(read_buffer(f.pool), d.base, d.cluster, triangle);
+    const uint corner = vertex_id % 3;
+    const uint local = corner == 0 ? corners.x : corner == 1 ? corners.y : corners.z;
+    o.position = clip_position(f, d, swayer_of(f, d.inst, d.mesh), local);
+    o.uv = cluster_uv(read_buffer(f.pool), d.base, d.cluster, local);
+    o.vis = uint2(d.entry + 1, triangle);
+    o.cut = cut_out_of(d.inst);
+    return o;
+}
+
 struct PsIn {
     float4 position : SV_Position;
     nointerpolation uint2 vis : VIS_ID;
 };
+struct PsCutIn {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint2 vis : VIS_ID;
+    nointerpolation uint2 cut : CUT_OUT;
+};
 
 [shader("pixel")]
 uint2 ps_main(PsIn i) : SV_Target {
+    return i.vis;
+}
+
+// Whether a cut-out pixel is cut away: its base colour's alpha under the
+// cutoff (no texture: kept).
+bool cut_away(PsCutIn i) {
+    if (i.cut.x == 0xFFFFFFFFu) {
+        return false;
+    }
+    const float alpha = read_texture_nonuniform(i.cut.x).Sample(get_sampler(k_sampler_anisotropic_wrap), i.uv).a;
+    return alpha < asfloat(i.cut.y);
+}
+
+[shader("pixel")]
+uint2 ps_cut(PsCutIn i) : SV_Target {
+    if (cut_away(i)) {
+        discard;
+    }
     return i.vis;
 }
 
@@ -184,12 +291,8 @@ int shadow_wrap(int v) {
     return m < 0 ? m + 16 : m;
 }
 
-[shader("pixel")]
-void ps_shadow(PsIn i) {
-    if (i.vis.x == 0u) {
-        return; // never (drawn triangles carry their entry plus one); keeps the input linked
-    }
-    const uint2 texel = uint2(i.position.xy);
+void shadow_texel(float4 position) {
+    const uint2 texel = uint2(position.xy);
     const int2 page = int2(push.shadow_page_x, push.shadow_page_y) + int2(texel / k_shadow_page_texels);
     const uint slot = uint(shadow_wrap(page.x) + 16 * shadow_wrap(page.y));
     const uint entry = read_buffer(push.shadow_table).Load(push.shadow_table_offset + slot * 4);
@@ -200,5 +303,22 @@ void ps_shadow(PsIn i) {
     const uint index = (entry & 0xFFFFu) * (k_shadow_page_texels * k_shadow_page_texels) +
                        local.y * k_shadow_page_texels + local.x;
     uint ignored;
-    write_buffer(push.shadow_atlas).InterlockedMax(index * 4, asuint(saturate(i.position.z)), ignored);
+    write_buffer(push.shadow_atlas).InterlockedMax(index * 4, asuint(saturate(position.z)), ignored);
+}
+
+[shader("pixel")]
+void ps_shadow(PsIn i) {
+    if (i.vis.x == 0u) {
+        return; // never (drawn triangles carry their entry plus one); keeps the input linked
+    }
+    shadow_texel(i.position);
+}
+
+// Cut-out materials' shadows: only where they are not cut away.
+[shader("pixel")]
+void ps_shadow_cut(PsCutIn i) {
+    if (i.vis.x == 0u || cut_away(i)) {
+        return;
+    }
+    shadow_texel(i.position);
 }
