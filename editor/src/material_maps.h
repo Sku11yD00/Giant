@@ -41,7 +41,8 @@ inline ai::Json maps_schema() {
              "inside a glTF as \"file.glb#image2\"; \"\" "
              "removes one; fields left out are kept). Built-in shapes and meshes whose file has "
              "uvs (list_meshes: uvs) show them; others draw the plain values. Cooked in the "
-             "background the first time they are drawn (at most 4096 texels a side) and kept "
+             "background the first time they are drawn (at most 4096 texels a side; sharp levels "
+             "stream in where drawn up close) and kept "
              "cooked in giant_cache/textures under the working folder; the plain values show "
              "until then (get_textures)."}};
 }
