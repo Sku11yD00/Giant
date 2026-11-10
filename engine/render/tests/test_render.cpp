@@ -3252,6 +3252,9 @@ GIANT_TEST("render: d3d12 leaves: a two-sided sheet is seen from behind, and the
     const auto all_through = draw();
     materials[0].translucency = 7.0f; // kept to 0 to 1
     const auto past_one = draw();
+    materials[0].metallic = 1.0f; // metal lets no light through
+    const auto metal_through = draw();
+    materials[0].metallic = 0.0f;
     // The sun below, on the viewer's side: the underside is lit as the
     // side seen (its normal turned to the viewer), the sun not through it.
     frame.lighting.sun_direction = normalize_or_zero(Vec3{0.2f, -1.0f, 0.1f});
@@ -3264,6 +3267,7 @@ GIANT_TEST("render: d3d12 leaves: a two-sided sheet is seen from behind, and the
     GIANT_CHECK(two_sided[1] > two_sided[2]);       // the sheet's green underside, in shade
     GIANT_CHECK(lit_through[1] > two_sided[1] + 20 && lit_through[1] > lit_through[0]); // brighter, still green
     GIANT_CHECK(all_through[1] > lit_through[1] && past_one == all_through);
+    GIANT_CHECK(metal_through[1] + 40 < lit_through[1]);
     GIANT_CHECK(sunlit_under[1] > two_sided[1] + 40); // the flipped normal faces the sun
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);

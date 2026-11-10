@@ -870,7 +870,8 @@ Output shade_pixel(float4 position) {
     apply_textures(s, base, rough, metal, occlusion);
     const uint material_flags = materials.Load(material_at + 48);
     const float translucency = asfloat(materials.Load(material_at + 52));
-    if ((material_flags & k_material_two_sided) != 0u && dot(s.face_n, world) > 0.0) {
+    const bool from_behind = (material_flags & k_material_two_sided) != 0u && dot(s.face_n, world) > 0.0;
+    if (from_behind) {
         // Two-sided, seen from behind: lit as the side facing the viewer.
         surface_n = -surface_n;
         n = -n;
@@ -881,6 +882,7 @@ Output shade_pixel(float4 position) {
         base = sr.rgb;
         rough = sr.a;
         n = safe_normalize(read_texture(extras.terrain_normal).Load(int3(int2(pixel), 0)).xyz, surface_n);
+        n = from_behind ? -n : n;
         metal = 0.0;
     }
     texture_feedback(extras, f, s, pixel);
@@ -944,7 +946,7 @@ Output shade_pixel(float4 position) {
         const float back = saturate(-dot(n, f.sun_direction.xyz));
         if (back > 0.0) {
             const float shine = sun_visibility(extras.shadows, world, -surface_n, f.sun_direction.xyz, pixel_size) * clouds;
-            color += base * ((1.0 - metal) * translucency * back * shine / k_pi) * f.sun_light.rgb;
+            color += base * ((1.0 - saturate(metal)) * translucency * back * shine / k_pi) * f.sun_light.rgb;
         }
     }
     float through = 1.0; // of the reflection, which reflect.slang adds over the fog and clouds
