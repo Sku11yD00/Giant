@@ -198,6 +198,51 @@ GIANT_TEST("terrain: saved with the scene as rows of text, exactly") {
     GIANT_CHECK(!contains(save_scene(Scene{}), "terrain"));
 }
 
+GIANT_TEST("terrain: layers save and load with their images, bands and tiling; bad ones are refused") {
+    Scene s;
+    TerrainLayer grass;
+    grass.base_color = {1.0f, 1.0f, 1.0f};
+    grass.maps.base_color = "ground/grass.png";
+    grass.maps.normal = "ground/grass_n.png";
+    grass.maps.normal_green_down = true;
+    grass.tiling = 2.5f;
+    TerrainLayer rock;
+    rock.min_slope = 35.0f;
+    rock.slope_blend = 8.0f;
+    rock.maps.roughness_metal = "ground/rock_rm.png";
+    TerrainLayer snow;
+    snow.min_height = 1500.0f;
+    snow.max_height = 20000.0f;
+    snow.height_blend = 60.0f;
+    snow.roughness = 0.4f;
+    s.terrain.material.layers = {grass, rock, snow};
+    const std::string text = save_scene(s);
+    GIANT_CHECK(contains(text, "\"layers\"") && contains(text, "ground/grass.png"));
+    Scene back;
+    GIANT_CHECK(!load_scene(text, back).has_value());
+    GIANT_CHECK(back.terrain.material == s.terrain.material);
+    GIANT_CHECK(save_scene(back) == text);
+    // A world's terrain settings carry them too.
+    WorldIndex world;
+    world.cells = {{0, 0}};
+    world.terrain_material = s.terrain.material;
+    WorldIndex world_back;
+    GIANT_CHECK(!load_world_index(save_world_index(world), world_back).has_value());
+    GIANT_CHECK(world_back.terrain_material == s.terrain.material);
+
+    const auto refused = [](const std::string& layers, const char* why) {
+        return contains(load_error(R"({"format": "giant-scene", "version": 1, "terrain": {"samples": 8,
+            "material": {"base_color": [0.2, 0.2, 0.2], "roughness": 0.9, "layers": )" + layers + "}}}"),
+                        why);
+    };
+    GIANT_CHECK(refused(R"([{"max_slope": 95}])", "max_slope"));
+    GIANT_CHECK(refused(R"([{"tiling": 0}])", "tiling"));
+    GIANT_CHECK(refused(R"([{"colour": [1, 1, 1]}])", "colour"));
+    GIANT_CHECK(refused(R"({"a": 1})", "at most 8"));
+    GIANT_CHECK(refused("[{}, {}, {}, {}, {}, {}, {}, {}, {}]", "at most 8"));
+    GIANT_CHECK(refused(R"([{"maps": {"base_color": 3}}])", "base_color"));
+}
+
 GIANT_TEST("terrain: loading is strict") {
     const std::string good = rows_of("0 1 2 3 4 5 6 7");
     GIANT_CHECK(load_error(with_rows(good)).empty());

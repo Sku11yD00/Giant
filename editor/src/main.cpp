@@ -446,6 +446,7 @@ int run(const Options& options) {
         input.instances = scene_frame.instances;
         input.cells = scene_frame.cells;
         input.materials = scene_frame.materials;
+        input.terrain_layers = scene_frame.terrain_layers;
         input.decals = scene_frame.decals;
         // The dust in the air nearest the camera.
         physics.dust().nearest(state.camera.position, render::k_max_dust_puffs, dust_near);

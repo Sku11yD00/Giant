@@ -350,6 +350,29 @@ GIANT_TEST("terrain: tiles draw in their cells, as meshes at every distance") {
             GIANT_CHECK(a.position == b.position && a.mesh == b.mesh && a.material == b.material);
         }
     }
+    // Layers: the ground's material turns terrain (shaded from the frame's
+    // layers), the layers go to the renderer as given, and the plain
+    // colour stays for the far voxel world.
+    GIANT_CHECK(frame.terrain_layers.empty());
+    world::TerrainLayer grass;
+    grass.base_color = {0.1f, 0.3f, 0.05f};
+    world::TerrainLayer cliff;
+    cliff.min_slope = 35.0f;
+    cliff.tiling = 8.0f;
+    scene.terrain.material.layers = {grass, cliff};
+    build();
+    GIANT_CHECK(frame.cells_rebuilt == 2 && frame.terrain_layers.size() == 2);
+    GIANT_CHECK(frame.terrain_layers[0].base_color == grass.base_color && frame.terrain_layers[1].min_slope == 35.0f &&
+                frame.terrain_layers[1].tiling == 8.0f);
+    GIANT_CHECK(frame.terrain_layers[0].base_color_texture == render::k_no_texture); // no images (and no library)
+    for (const render::Instance& i : live()) {
+        GIANT_CHECK(frame.materials[i.material].terrain == i.always_mesh); // the rock is not ground
+        if (i.always_mesh) GIANT_CHECK(frame.materials[i.material].base_color == scene.terrain.material.base_color);
+    }
+    scene.terrain.material.layers.clear();
+    build();
+    GIANT_CHECK(frame.cells_rebuilt == 2 && frame.terrain_layers.empty());
+    for (const render::Instance& i : live()) GIANT_CHECK(!frame.materials[i.material].terrain);
     // A tile goes: its cell (with no entities) goes once the mesh is dropped.
     scene.terrain.remove({1, 0});
     terrain.finish(scene.terrain);
@@ -427,6 +450,38 @@ GIANT_TEST("terrain commands: create, shape, sample, remove, all undoable") {
     GIANT_CHECK(f.state.scene.terrain.size() == 8);
     GIANT_CHECK(f.commands.redo() && f.commands.redo());
     GIANT_CHECK(f.state.scene.terrain.samples() == 16 && f.state.scene.terrain.size() == 1);
+}
+
+GIANT_TEST("terrain commands: layers set as a whole, read back, undone, and their images checked") {
+    Fixture f;
+    ai::CommandResult r = f.run("set_terrain_layers",
+                                {{"layers", Json::array({Json{{"base_color", {0.1, 0.3, 0.05}}},
+                                                         Json{{"min_slope", 35}, {"tiling", 8}, {"roughness", 0.8}},
+                                                         Json{{"min_height", 1500}, {"height_blend", 50}}})}});
+    GIANT_CHECK(r.ok && r.value["layers"].size() == 3);
+    const std::vector<world::TerrainLayer>& layers = f.state.scene.terrain.material.layers;
+    GIANT_CHECK(layers.size() == 3 && layers[0].base_color == (Vec3{0.1f, 0.3f, 0.05f}) && layers[1].min_slope == 35.0f &&
+                layers[1].tiling == 8.0f && layers[1].roughness == 0.8f && layers[2].min_height == 1500.0f &&
+                layers[2].height_blend == 50.0f && layers[2].max_slope == 90.0f); // left out: the defaults
+    r = f.run("get_terrain");
+    GIANT_CHECK(r.ok && r.value["material"]["layers"].size() == 3 && r.value["material"]["layers"][1]["min_slope"] == 35.0);
+    // The plain look keeps the layers.
+    GIANT_CHECK(f.run("set_terrain_material", {{"roughness", 0.5}}).ok && layers.size() == 3);
+    GIANT_CHECK(f.commands.undo());
+    // Out of range, too many, an image that is not there, occlusion: refused, nothing changed.
+    GIANT_CHECK(!f.run("set_terrain_layers", {{"layers", Json::array({Json{{"max_slope", 95}}})}}).ok);
+    GIANT_CHECK(!f.run("set_terrain_layers", {{"layers", Json::array({Json{{"tiling", 0}}})}}).ok);
+    GIANT_CHECK(!f.run("set_terrain_layers", {{"layers", Json(std::vector<Json>(9, Json::object()))}}).ok);
+    r = f.run("set_terrain_layers",
+              {{"layers", Json::array({Json::object(), Json{{"maps", {{"base_color", "no/such/grass.png"}}}}})}});
+    GIANT_CHECK(!r.ok && r.error.find("layers[1].maps.base_color") != std::string::npos);
+    GIANT_CHECK(!f.run("set_terrain_layers", {{"layers", Json::array({Json{{"maps", {{"occlusion", "x.png"}}}}})}}).ok);
+    GIANT_CHECK(layers.size() == 3);
+    // None again, then undo, then redo.
+    GIANT_CHECK(f.run("set_terrain_layers", {{"layers", Json::array()}}).ok && layers.empty());
+    GIANT_CHECK(f.commands.undo() && layers.size() == 3);
+    GIANT_CHECK(f.commands.undo() && layers.empty());
+    GIANT_CHECK(f.commands.redo() && layers.size() == 3);
 }
 
 GIANT_TEST("terrain commands: work a command and a terrain may hold is capped") {

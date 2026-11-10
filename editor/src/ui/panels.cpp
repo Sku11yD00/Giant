@@ -182,6 +182,7 @@ void EditorPanels::draw_scene_settings() {
         draw_lighting();
         draw_weather();
         draw_terrain_brush();
+        draw_terrain_layers();
         draw_scatter();
     }
     ImGui::End();
@@ -245,6 +246,106 @@ void EditorPanels::draw_terrain_brush() {
         ImGui::Checkbox("To the ground where the stroke starts", &b.flatten_to_start);
         if (!b.flatten_to_start) ImGui::DragFloat("Height (m)", &b.height, 0.1f, -10000.0f, 10000.0f, "%.1f");
     }
+}
+
+void EditorPanels::draw_terrain_layers() {
+    ImGui::SeparatorText("Terrain layers");
+    const std::vector<world::TerrainLayer>& layers = m_state.scene.terrain.material.layers;
+    // All layers as set_terrain_layers takes them (it replaces the lot).
+    const auto all = [&layers] {
+        ai::Json out = ai::Json::array();
+        for (const world::TerrainLayer& l : layers) {
+            ai::Json maps = ai::Json::object();
+            if (!l.maps.base_color.empty()) maps["base_color"] = l.maps.base_color;
+            if (!l.maps.normal.empty()) maps["normal"] = l.maps.normal;
+            if (!l.maps.roughness_metal.empty()) maps["roughness_metal"] = l.maps.roughness_metal;
+            if (l.maps.normal_green_down) maps["normal_green_down"] = true;
+            out.push_back({{"base_color", triple_json(l.base_color)},
+                           {"roughness", l.roughness},
+                           {"maps", std::move(maps)},
+                           {"tiling", l.tiling},
+                           {"min_slope", l.min_slope},
+                           {"max_slope", l.max_slope},
+                           {"slope_blend", l.slope_blend},
+                           {"min_height", l.min_height},
+                           {"max_height", l.max_height},
+                           {"height_blend", l.height_blend}});
+        }
+        return out;
+    };
+    const auto set = [this](ai::Json list) { run("set_terrain_layers", {{"layers", std::move(list)}}, edit_group()); };
+    if (layers.empty()) ImGui::TextDisabled("None: the ground is one material (set_terrain_material).");
+    for (usize i = 0; i < layers.size(); ++i) {
+        const world::TerrainLayer& l = layers[i];
+        ImGui::PushID(static_cast<int>(i));
+        const bool open = ImGui::TreeNode("layer", "Layer %u%s", static_cast<unsigned>(i + 1),
+                                          i == 0 ? " (everywhere)" : "");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) {
+            ai::Json list = all();
+            list.erase(list.begin() + static_cast<std::ptrdiff_t>(i));
+            set(std::move(list));
+        }
+        if (open) {
+            const auto field = [&](const char* key, ai::Json value) {
+                ai::Json list = all();
+                list[i][key] = std::move(value);
+                set(std::move(list));
+            };
+            float color[3] = {l.base_color.x, l.base_color.y, l.base_color.z};
+            if (ImGui::ColorEdit3("Colour", color, ImGuiColorEditFlags_Float)) {
+                field("base_color", triple_json(Vec3{std::clamp(color[0], 0.0f, 1.0f), std::clamp(color[1], 0.0f, 1.0f),
+                                                     std::clamp(color[2], 0.0f, 1.0f)}));
+            }
+            float rough = l.roughness;
+            if (ImGui::SliderFloat("Roughness", &rough, 0.0f, 1.0f)) field("roughness", std::clamp(rough, 0.0f, 1.0f));
+            float tiling = l.tiling;
+            if (ImGui::SliderFloat("Tiling (m)", &tiling, world::k_min_terrain_tiling, 64.0f, "%.2f",
+                                   ImGuiSliderFlags_Logarithmic)) {
+                field("tiling", std::clamp(tiling, world::k_min_terrain_tiling, world::k_max_terrain_tiling));
+            }
+            if (i > 0) {
+                float slope[2] = {l.min_slope, l.max_slope};
+                if (ImGui::SliderFloat2("Slope (deg)", slope, 0.0f, 90.0f, "%.0f")) {
+                    ai::Json list = all();
+                    list[i]["min_slope"] = std::clamp(slope[0], 0.0f, 90.0f);
+                    list[i]["max_slope"] = std::clamp(slope[1], 0.0f, 90.0f);
+                    set(std::move(list));
+                }
+                float slope_blend = l.slope_blend;
+                if (ImGui::SliderFloat("Slope blend", &slope_blend, 0.0f, 45.0f, "%.1f")) {
+                    field("slope_blend", std::clamp(slope_blend, 0.0f, 90.0f));
+                }
+                float height[2] = {l.min_height, l.max_height};
+                const float h = world::k_max_terrain_layer_height;
+                if (ImGui::DragFloat2("Height (m)", height, 1.0f, -h, h, "%.0f")) {
+                    ai::Json list = all();
+                    list[i]["min_height"] = std::clamp(height[0], -h, h);
+                    list[i]["max_height"] = std::clamp(height[1], -h, h);
+                    set(std::move(list));
+                }
+                float height_blend = l.height_blend;
+                if (ImGui::SliderFloat("Height blend", &height_blend, 0.0f, 500.0f, "%.0f", ImGuiSliderFlags_Logarithmic)) {
+                    field("height_blend", std::clamp(height_blend, 0.0f, h));
+                }
+            }
+            if (!l.maps.empty()) {
+                ImGui::TextDisabled("Images: %s%s%s", l.maps.base_color.c_str(), l.maps.normal.empty() ? "" : ", ",
+                                    l.maps.normal.c_str());
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    ImGui::BeginDisabled(layers.size() >= world::k_max_terrain_layers);
+    if (ImGui::SmallButton("+ Layer")) {
+        // A new layer over the rest on steep ground (rock), as a start.
+        ai::Json list = all();
+        list.push_back(layers.empty() ? ai::Json{{"base_color", {0.23, 0.2, 0.15}}}
+                                      : ai::Json{{"base_color", {0.35, 0.34, 0.32}}, {"min_slope", 35.0}});
+        set(std::move(list));
+    }
+    ImGui::EndDisabled();
 }
 
 void EditorPanels::create_ahead(ai::Json args) {

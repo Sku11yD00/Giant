@@ -13,6 +13,7 @@
 #include "giant/core/math.h"
 #include "giant/core/types.h"
 #include "giant/world/cell.h"
+#include "giant/world/material_maps.h"
 
 #include <optional>
 #include <unordered_map>
@@ -29,10 +30,37 @@ bool valid_terrain_samples(u32 samples);
 // Heights stay within this, either side of 0 (metres).
 constexpr float k_max_terrain_height = 10000.0f;
 
-// How the ground looks (one material for all of it until painted layers).
+// One of the ground's materials (render::TerrainLayer): its colour and
+// roughness, image files mapped by world position every `tiling` metres
+// (from above, and from the sides where steep), and where it lies: the
+// first layer everywhere, each later one over those before it where the
+// slope (degrees from level) and height (metres above y = 0) are within
+// its bands, fading over the blends at their edges.
+struct TerrainLayer {
+    Vec3 base_color{0.23f, 0.2f, 0.15f}; // linear; multiplies maps.base_color
+    float roughness = 0.92f;             // multiplies the roughness map (its green, as glTF)
+    MaterialMaps maps;                   // base_color, normal, roughness_metal (occlusion unused)
+    float tiling = 4.0f;                 // metres a repeat of the images covers
+    float min_slope = 0.0f;
+    float max_slope = 90.0f;
+    float slope_blend = 5.0f;
+    float min_height = -10000.0f;
+    float max_height = 10000.0f;
+    float height_blend = 10.0f;
+    bool operator==(const TerrainLayer&) const = default;
+};
+constexpr usize k_max_terrain_layers = 8; // render::k_max_terrain_layers
+constexpr float k_min_terrain_tiling = 0.05f;
+constexpr float k_max_terrain_tiling = 1000.0f;
+constexpr float k_max_terrain_layer_height = 20000.0f; // a band's edges, either side of 0 (metres)
+
+// How the ground looks: one material for all of it, or its layers. The
+// far voxel world (past the meshes) always takes base_color: set it near
+// the layers' look from afar.
 struct TerrainMaterial {
     Vec3 base_color{0.23f, 0.2f, 0.15f}; // linear: dry earth
     float roughness = 0.92f;
+    std::vector<TerrainLayer> layers; // up to k_max_terrain_layers (none: base_color and roughness)
     bool operator==(const TerrainMaterial&) const = default;
 };
 

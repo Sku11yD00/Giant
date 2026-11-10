@@ -98,7 +98,7 @@ struct SceneFrame {
     std::unordered_map<const world::MaterialMaps*, std::array<u32, 4>> maps_seen;
 
     struct MaterialKey {
-        u32 bits[14]; // the values, then the texture refs
+        u32 bits[15]; // the values, the texture refs, then 1 for the ground's terrain material
         bool operator==(const MaterialKey&) const = default;
     };
     struct MaterialHash {
@@ -164,6 +164,11 @@ struct SceneFrame {
     u64 scene_identity = 0;
     u64 meshes_version = ~u64{0};
     world::TerrainMaterial terrain_material; // as last built
+    // The ground's layers (render::FrameInput::terrain_layers), made again
+    // each scene_frame call, with their TextureLibrary refs (base colour,
+    // normal, roughness-metal, none).
+    std::vector<render::TerrainLayer> terrain_layers;
+    std::vector<std::array<u32, 4>> terrain_layer_textures;
 };
 
 // The scene's visible entities, with kits expanded into their pieces, and

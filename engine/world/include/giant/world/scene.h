@@ -11,6 +11,7 @@
 #include "giant/core/types.h"
 #include "giant/world/cell.h"
 #include "giant/world/damage.h"
+#include "giant/world/material_maps.h"
 #include "giant/world/terrain.h"
 
 #include <optional>
@@ -36,8 +37,7 @@ constexpr EntityId k_max_entity_id = (u64{1} << 53) - 1;
 // scatter items.
 enum class Shape { cube, sphere, plane, mesh, kit, decal, cloth };
 
-// Longest Entity::mesh path, in bytes of UTF-8.
-constexpr usize k_max_mesh_path_bytes = 1024;
+// Longest Entity::mesh path: k_max_mesh_path_bytes (material_maps.h).
 // Longest entity, kit or piece name, in bytes of UTF-8.
 constexpr usize k_max_name_bytes = 128;
 constexpr usize k_max_kit_pieces = 4096;
@@ -115,28 +115,6 @@ const char* to_string(Surface surface);
 std::optional<Surface> surface_from_string(std::string_view name);
 
 // A physically based material (metal/roughness, as artists know it).
-// Image files a material draws over its mesh's uvs (paths as Entity::mesh,
-// k_max_mesh_path_bytes each; empty for none), cooked into textures by the
-// editor (giant/texture) and combined as glTF combines its maps:
-// base_color (sRGB) multiplies Material::base_color; normal is a tangent-
-// space normal map, green up unless normal_green_down (DirectX-authored);
-// roughness_metal is a glTF metallic-roughness image (roughness in G,
-// metallic in B) multiplying roughness and metallic, filtered with the
-// normal map's detail; occlusion is a glTF occlusion image (R), dimming
-// ambient and reflected light. Drawn on built-in shapes and on meshes whose
-// file has uvs; others draw the plain values.
-struct MaterialMaps {
-    std::string base_color;
-    std::string normal;
-    std::string roughness_metal;
-    std::string occlusion;
-    bool normal_green_down = false;
-    bool empty() const {
-        return base_color.empty() && normal.empty() && roughness_metal.empty() && occlusion.empty();
-    }
-    bool operator==(const MaterialMaps&) const = default;
-};
-
 struct Material {
     Vec3 base_color{0.8f, 0.8f, 0.8f}; // linear, 0 to 1
     float roughness = 0.5f;             // 0 mirror to 1 matte
