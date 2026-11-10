@@ -6,10 +6,12 @@ not, reviewers enforce them.
 
 ## What this engine is for
 
-One game genre: a huge open world, a giantess who grows to landscape scale and
-destroys cities and forests, photoreal and sharp with no temporal smear.
-Performance is a pillar: every system has a frame budget. When a choice trades
-generality for speed in that genre, take speed.
+A general engine for huge, streamed open worlds: photoreal and sharp with no
+temporal smear, nature at vista scale, weather, destruction, simulated NPCs.
+No game is chosen yet (the giantess game is pinned and may come back), so build
+systems any open-world game can use and skip game-only parts. Performance is a
+pillar: every system has a frame budget. When a choice trades generality for
+speed in open worlds, take speed.
 
 ## Hard rules
 
