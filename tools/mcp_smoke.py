@@ -525,6 +525,19 @@ def terrain_gate(tool, call, check):
           f"the stroke raises the ground, got {sculpted} and {raised}")
     tool("undo")
     check(tool("get_terrain", {"points": [[0, 0]]})["heights"][0] == height[0], "undo puts the ground back")
+    # Photoreal 5c: a second layer painted on (drawn from the tiles' paint); undone, it goes.
+    tool("set_terrain_layers", {"layers": [{"base_color": [0.1, 0.4, 0.1]}, {"base_color": [0.5, 0.1, 0.1],
+                                                                             "min_height": 9000}]})
+    painted = tool("paint_terrain", {"layer": 1, "points": [[-20, 0], [20, 0]], "radius": 10, "strength": 1,
+                                     "falloff": 0})
+    for _ in range(5):
+        call("ping")  # frames draw the paint
+    weights = tool("get_terrain", {"points": [[0, 0]]})
+    check(painted["tiles_changed"] == 4 and weights["paint"][0][0] == 1 and weights["painted_tiles"] == 4,
+          f"the layer is painted on, got {painted} and {weights}")
+    tool("undo")
+    check(tool("get_terrain")["painted_tiles"] == 0, "undo takes the paint off")
+    tool("undo")  # the layers
     # A height map (16-bit RAW, 2 x 2: black then white rows) makes ground; undone too.
     with tempfile.TemporaryDirectory() as folder:
         path = os.path.join(folder, "hills.r16")

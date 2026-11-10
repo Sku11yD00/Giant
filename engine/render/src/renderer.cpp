@@ -8,6 +8,7 @@
 #include "brdf.h"
 #include "exposure.h"
 #include "instance_store.h"
+#include "terrain_paint.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
 #include "shadow_pages.h"
@@ -318,6 +319,7 @@ bool Renderer::init() {
     }
     m_voxels = std::make_unique<VoxelScene>(m_device, m_desc.voxel_clipmap, m_desc.voxel_bricks);
     m_store = std::make_unique<InstanceStore>(m_device);
+    m_paint = std::make_unique<TerrainPaintStore>(m_device);
     if (!m_voxels->init()) {
         return false;
     }
@@ -871,6 +873,24 @@ void Renderer::remove_texture(TextureId id) {
     t->generation = t->generation + 1 >= k_texture_generations ? 1 : t->generation + 1;
     m_free_textures.push_back(id & k_texture_slot_mask);
 }
+
+void Renderer::set_terrain_paint_grid(double tile_size, u32 samples) {
+    if (!(tile_size > 0.0) || !std::isfinite(tile_size) || samples == 0 || samples > 4096) {
+        log_warning("render", "set_terrain_paint_grid: tiles must be over 0 m and 1 to 4096 samples a side");
+        return;
+    }
+    m_paint->set_grid(tile_size, samples);
+}
+
+bool Renderer::set_terrain_paint(i32 tile_x, i32 tile_z, std::vector<u8> weights) {
+    return m_paint->set(tile_x, tile_z, std::move(weights));
+}
+
+void Renderer::clear_terrain_paint() { m_paint->clear(); }
+
+usize Renderer::terrain_paint_tiles() const { return m_paint->tiles(); }
+
+usize Renderer::terrain_paint_waiting() const { return m_paint->waiting(); }
 
 const rhi::TextureDesc* Renderer::texture(TextureId id) const {
     const TextureSlot* t = texture_slot(id);
@@ -2706,6 +2726,26 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         };
         tp.camera_xz[0] = period(frame.view.position.x);
         tp.camera_xz[1] = period(frame.view.position.z);
+        // Painted layers: their tiles uploaded within the budget, and the table.
+        tp.paint_pool = rhi::k_no_descriptor;
+        TerrainPaintStore::Frame paint;
+        if (m_paint->update(cmd, std::max<u64>(m_desc.terrain_paint_bytes_per_frame, 1), paint)) {
+            const double size = m_paint->tile_size();
+            const auto tile = [size](double v) {
+                return std::clamp(std::floor(v / size), -2147483648.0, 2147483647.0);
+            };
+            const double tx = tile(frame.view.position.x), tz = tile(frame.view.position.z);
+            tp.paint_table = paint.table.descriptor;
+            tp.paint_table_offset = paint.table.offset;
+            tp.paint_mask = paint.table_mask;
+            tp.paint_pool = m_device.read_descriptor(paint.pool);
+            tp.paint_samples = m_paint->samples();
+            tp.paint_spacing = static_cast<float>(size / m_paint->samples());
+            tp.paint_tile[0] = static_cast<i32>(tx);
+            tp.paint_tile[1] = static_cast<i32>(tz);
+            tp.paint_origin[0] = static_cast<float>(frame.view.position.x - tx * size);
+            tp.paint_origin[1] = static_cast<float>(frame.view.position.z - tz * size);
+        }
         cmd.set_pipeline(m_terrain_pass);
         cmd.push(tp);
         cmd.dispatch((m_width + 7) / 8, (m_height + 7) / 8);

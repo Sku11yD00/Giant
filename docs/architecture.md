@@ -423,8 +423,19 @@ an offline cooker can use it without a device.
   heights: a cell whose paint version is not its file's is unsaved and
   stays loaded. MCP `paint_terrain` (undoable, drag merging as
   `sculpt_terrain`, sharing its stroke code), `get_terrain` reports
-  weights; the viewport brush has paint and erase ops with a layer. The
-  renderer draws the paint from part 5c-2.
+  weights; the viewport brush has paint and erase ops with a layer.
+- **Painted layers drawn (photoreal part 5c-2).** `Renderer::set_terrain_paint`
+  (grid by `set_terrain_paint_grid`) keeps each tile's weights in one pool
+  buffer, a block a tile (`TerrainPaintStore`: grows by copying on the GPU,
+  uploads whole tiles under `terrain_paint_bytes_per_frame`, at least one a
+  frame; a tile waiting draws its old weights). Each frame a small table
+  (open addressing, at most half full) maps tiles to blocks; terrain.slang
+  reads the four samples around a pixel (across tile edges) and a layer's
+  coverage is the larger of its bands and its paint. A layer with a colour
+  image has its edge sharpened by the image's brightness against its
+  average (its coarsest level) as a height, so stones show through sand
+  before the sand ends. The editor's `TerrainPaintSync` hands over only
+  tiles whose paint changed (all for a new terrain or spacing).
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

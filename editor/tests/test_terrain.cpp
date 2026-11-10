@@ -991,3 +991,41 @@ GIANT_TEST("terrain brush tool: paint after a strong raise sends strength 1; get
     GIANT_CHECK(both.value["paint"][0][1] == 1.0 && both.value["paint"][1][1] == 0.0 &&
                 both.value["paint"][2][1] == 1.0);
 }
+
+GIANT_TEST("terrain paint sync: hands the renderer only the tiles whose paint changed, all for a new terrain") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    if (renderer == nullptr) return;
+    world::Terrain t;
+    t.set_samples(8);
+    for (i32 x = 0; x < 3; ++x) t.set({x, 0}, Terrain::Heights(64, 0.0f));
+    Terrain::Paint p(64 * world::k_paint_channels, 0);
+    p[1] = 200;
+    GIANT_CHECK(t.set_paint({0, 0}, p) && t.set_paint({1, 0}, p));
+    TerrainPaintSync sync;
+    sync.update(t, *renderer);
+    GIANT_CHECK(sync.sent() == 2 && renderer->terrain_paint_tiles() == 2);
+    sync.update(t, *renderer);
+    GIANT_CHECK(sync.sent() == 0); // nothing changed
+    (*t.modify_paint({2, 0}))[0] = 5;
+    sync.update(t, *renderer);
+    GIANT_CHECK(sync.sent() == 1 && renderer->terrain_paint_tiles() == 3);
+    // Erased and removed tiles leave the renderer.
+    GIANT_CHECK(t.set_paint({0, 0}, {}));
+    GIANT_CHECK(t.remove({1, 0}).has_value());
+    sync.update(t, *renderer);
+    GIANT_CHECK(sync.sent() == 2 && renderer->terrain_paint_tiles() == 1);
+    // A new terrain (a copy, as undo puts back): all of it again.
+    world::Terrain other = t;
+    sync.update(other, *renderer);
+    GIANT_CHECK(sync.sent() == 1 && renderer->terrain_paint_tiles() == 1);
+    // Another spacing: the renderer's grid follows, tiles sent at the new size.
+    world::Terrain finer;
+    finer.set_samples(16);
+    finer.set({4, 4}, Terrain::Heights(256, 0.0f));
+    GIANT_CHECK(finer.set_paint({4, 4}, Terrain::Paint(256 * world::k_paint_channels, 7)));
+    sync.update(finer, *renderer);
+    GIANT_CHECK(sync.sent() == 1 && renderer->terrain_paint_tiles() == 1);
+}

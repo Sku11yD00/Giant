@@ -525,6 +525,58 @@ GIANT_TEST("render: terrain layers stack by slope and height") {
     GIANT_CHECK(!s.device->device_lost());
 }
 
+GIANT_TEST("render: painted terrain tiles are kept by tile, checked, and uploaded within a budget") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    RendererDesc desc;
+    desc.terrain_paint_bytes_per_frame = 1; // under a tile: one a frame
+    s.renderer = Renderer::create(*s.device, desc);
+    GIANT_CHECK(s.renderer != nullptr);
+    if (s.renderer == nullptr) return;
+    Renderer& r = *s.renderer;
+    const std::vector<u8> tile(8 * 8 * k_terrain_paint_channels, 9);
+    GIANT_CHECK(!r.set_terrain_paint(0, 0, tile)); // no grid yet
+    r.set_terrain_paint_grid(64.0, 8);
+    GIANT_CHECK(r.set_terrain_paint(0, 0, tile) && r.set_terrain_paint(-3, 7, tile));
+    GIANT_CHECK(!r.set_terrain_paint(1, 0, std::vector<u8>(10, 1))); // the wrong size
+    GIANT_CHECK(r.set_terrain_paint(0, 0, tile)); // again: still one tile
+    GIANT_CHECK(r.terrain_paint_tiles() == 2 && r.terrain_paint_waiting() == 2);
+    std::vector<Instance> instances(1);
+    instances[0].mesh = r.builtin(BuiltinMesh::plane);
+    instances[0].scale = {50.0f, 1.0f, 50.0f};
+    std::vector<Material> materials(1);
+    materials[0].terrain = true;
+    std::vector<TerrainLayer> layers(3);
+    FrameInput frame;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.terrain_layers = layers;
+    frame.view.position = {-2.0e5, 3.0, 9.0e5}; // far from the tiles: their table is still made
+    s.draw(frame);
+    GIANT_CHECK(r.terrain_paint_waiting() == 1);
+    s.draw(frame);
+    GIANT_CHECK(r.terrain_paint_waiting() == 0);
+    for (i32 x = 10; x < 14; ++x) GIANT_CHECK(r.set_terrain_paint(x, 0, tile));
+    GIANT_CHECK(r.terrain_paint_waiting() == 4);
+    GIANT_CHECK(r.set_terrain_paint(11, 0, {}) && r.terrain_paint_waiting() == 3); // removed while waiting
+    GIANT_CHECK(r.set_terrain_paint(99, 99, {}));                                    // never there: nothing
+    GIANT_CHECK(r.terrain_paint_tiles() == 5);
+    // Many tiles: the pool grows (its blocks copied on the GPU).
+    for (i32 x = 0; x < 40; ++x) GIANT_CHECK(r.set_terrain_paint(x, 50, tile));
+    for (int i = 0; i < 43; ++i) s.draw(frame);
+    GIANT_CHECK(r.terrain_paint_tiles() == 45 && r.terrain_paint_waiting() == 0);
+    // Another grid drops it all; so does clear.
+    r.set_terrain_paint_grid(64.0, 16);
+    GIANT_CHECK(r.terrain_paint_tiles() == 0 && !r.set_terrain_paint(0, 0, tile));
+    GIANT_CHECK(r.set_terrain_paint(0, 0, std::vector<u8>(16 * 16 * 8, 1)));
+    r.set_terrain_paint_grid(NAN, 8); // refused: kept
+    GIANT_CHECK(r.terrain_paint_tiles() == 1);
+    r.clear_terrain_paint();
+    GIANT_CHECK(r.terrain_paint_tiles() == 0 && r.terrain_paint_waiting() == 0);
+    s.draw(frame);
+    GIANT_CHECK(!s.device->device_lost());
+}
+
 GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a pass after shading") {
     NullScene s;
     GIANT_CHECK(s.renderer != nullptr);
@@ -2964,3 +3016,101 @@ GIANT_TEST("render: d3d12 terrain layers: grass on the level, rock on the steep,
 }
 
 #endif
+
+GIANT_TEST("render: d3d12 painted terrain: a painted layer covers the ground as far as it is painted") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 128, k_h = 128;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {60.0f, 1.0f, 60.0f};
+    instances[0].position = DVec3{500.0, 0.0, 0.0};
+    std::vector<Material> materials(1);
+    materials[0].terrain = true;
+    std::vector<TerrainLayer> layers(2);
+    layers[0].base_color = {0.08f, 0.4f, 0.08f}; // grass everywhere
+    layers[1].base_color = {0.5f, 0.06f, 0.06f};  // red: only where painted (its bands never hold)
+    layers[1].min_height = 9000.0f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.antialiasing = false;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.terrain_layers = layers;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.3f, 0.8f, 0.5f});
+    frame.lighting.sun_light = {2.0f, 2.0f, 2.0f};
+    frame.lighting.sky_light = {0.3f, 0.3f, 0.3f};
+    frame.lighting.ground_light = {0.3f, 0.3f, 0.3f};
+    frame.view.position = DVec3{500.0, 2.0, 4.0}; // over tile (7, 0), looking along -z into (7, -1)
+    const auto draw = [&] {
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 && renderer->terrain_paint_waiting() == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    struct Rgb {
+        int r, g, b;
+    };
+    const auto at = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        return i + 3 < image.size() ? Rgb{image[i], image[i + 1], image[i + 2]} : Rgb{-1, -1, -1};
+    };
+    constexpr u32 n = 16;
+    renderer->set_terrain_paint_grid(64.0, n);
+    const auto paint_all = [&](u8 weight) {
+        std::vector<u8> tile(n * n * k_terrain_paint_channels, 0);
+        for (usize s = 0; s < n * n; ++s) tile[s * k_terrain_paint_channels] = weight; // layer 1
+        for (i32 z = -1; z <= 0; ++z) {
+            for (i32 x = 7; x <= 8; ++x) GIANT_CHECK(renderer->set_terrain_paint(x, z, tile));
+        }
+    };
+    const std::vector<u8> plain = draw();
+    paint_all(255);
+    const std::vector<u8> full = draw();
+    paint_all(128);
+    const std::vector<u8> half = draw();
+    renderer->clear_terrain_paint();
+    const std::vector<u8> cleared = draw();
+    // Row 100: the ground ahead, in tile (7, -1) (row 115 is about its edge, z 0); row 125 nearer, in (7, 0).
+    const Rgb p = at(plain, 64, 100), f = at(full, 64, 100), f2 = at(full, 64, 125), h = at(half, 64, 100),
+              c = at(cleared, 64, 100);
+    std::printf("    unpainted %d %d %d; painted %d %d %d (nearer %d %d %d); half %d %d %d; cleared %d %d %d\n", p.r, p.g,
+                p.b, f.r, f.g, f.b, f2.r, f2.g, f2.b, h.r, h.g, h.b, c.r, c.g, c.b);
+    GIANT_CHECK(p.g > p.r + 20);                    // grass
+    GIANT_CHECK(f.r > f.g + 20 && f2.r > f2.g + 20); // red, across the tiles' edge
+    GIANT_CHECK(h.r > p.r + 8 && h.g < p.g - 8 && h.r < f.r - 8 && h.g > f.g + 8); // between
+    GIANT_CHECK(std::abs(c.r - p.r) <= 2 && std::abs(c.g - p.g) <= 2);           // back as it was
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}

@@ -550,9 +550,18 @@ struct TerrainPush {
     u32 height;
     float camera_y;
     float camera_xz[2]; // modulo 4096 m (terrain.slang's k_macro_period)
-    u32 pad[2];
+    // Painted layers (TerrainPaintStore): the table (16-byte entries,
+    // paint_mask + 1 of them) and pool; none: paint_pool k_no_descriptor.
+    u32 paint_table;
+    u32 paint_table_offset;
+    u32 paint_mask;
+    u32 paint_pool;
+    u32 paint_samples;
+    float paint_spacing; // metres between samples
+    i32 paint_tile[2];   // the tile the camera is over
+    float paint_origin[2]; // the camera from that tile's corner, metres
 };
-static_assert(sizeof(TerrainPush) == 96);
+static_assert(sizeof(TerrainPush) == 128);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {

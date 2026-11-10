@@ -54,6 +54,7 @@ struct CullPush;
 class GeometryStreamer; // src/streaming.h
 class VoxelScene;       // src/voxel_scene.h
 class InstanceStore;    // src/instance_store.h
+class TerrainPaintStore; // src/terrain_paint.h
 class ShadowPages;      // src/shadow_pages.h
 class VoxelLight;       // src/voxel_light.h
 struct ShadowWindows;
@@ -143,6 +144,9 @@ struct Material {
 // not stretch. A slow variation in brightness over tens of metres hides
 // the textures' repeats.
 inline constexpr u32 k_max_terrain_layers = 8;
+// Painted layers (Renderer::set_terrain_paint): bytes a ground sample, the
+// weights (0 to 255) of layers 1 to 7, the last spare.
+inline constexpr u32 k_terrain_paint_channels = 8;
 struct TerrainLayer {
     Vec3 base_color{0.23f, 0.2f, 0.15f}; // linear
     float roughness = 0.92f;
@@ -548,6 +552,9 @@ struct RendererDesc {
     // keeps are copied on the GPU: copies not counted in the bytes).
     u64 texture_stream_bytes_per_frame = 8ull << 20;
     u32 texture_changes_per_frame = 8;
+    // Painted terrain tiles uploaded per frame (Renderer::set_terrain_paint;
+    // at least one while any wait).
+    u64 terrain_paint_bytes_per_frame = 8ull << 20;
     // The voxel world: its levels, and GPU memory for its bricks (2176
     // bytes each; the default is 68 MiB).
     voxel::ClipmapDesc voxel_clipmap{};
@@ -649,6 +656,23 @@ public:
     // its id then never resolves again (until its slot's generations wrap,
     // after 4094 reuses).
     void remove_texture(TextureId texture);
+
+    // Painted terrain layers: the ground is tiles `tile_size` metres square
+    // from the origin on x and z, `samples` a side (tile_size / samples
+    // apart, sample (0, 0) at the tile's corner; between a tile's last and
+    // the next tile's first, both blend). A change of grid drops all paint.
+    void set_terrain_paint_grid(double tile_size, u32 samples);
+    // A tile's painted weights: samples^2 * k_terrain_paint_channels bytes,
+    // sample (i, j) layer L at (j * samples + i) * 8 + L - 1; empty removes
+    // it. Each painted layer covers the ones before it where its weight is
+    // above its bands' coverage (the larger counts). Uploaded in render()
+    // under terrain_paint_bytes_per_frame (a tile draws its old weights, or
+    // none, until then). False (nothing changes) for the wrong size or
+    // before a grid is set. From the thread that calls render().
+    bool set_terrain_paint(i32 tile_x, i32 tile_z, std::vector<u8> weights);
+    void clear_terrain_paint();
+    usize terrain_paint_tiles() const;   // painted, uploaded or not
+    usize terrain_paint_waiting() const; // not uploaded yet
     // The whole texture's description (all its levels, resident or not);
     // null for an unknown or removed id; valid until it is removed.
     const rhi::TextureDesc* texture(TextureId texture) const;
@@ -780,6 +804,7 @@ private:
     std::unique_ptr<DecalBins> m_decal_bins; // this frame's, reused
     std::unique_ptr<VoxelScene> m_voxels;
     std::unique_ptr<InstanceStore> m_store; // the instances, on the GPU by cell
+    std::unique_ptr<TerrainPaintStore> m_paint; // painted terrain tiles
     u64 m_meshes_version = 0; // changes on every add_mesh and remove_mesh
     std::vector<CellRange> m_seen_cells; // last frame's FrameInput::cells
     std::vector<CellRange> m_changed_cells;

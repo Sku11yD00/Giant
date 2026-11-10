@@ -306,6 +306,7 @@ int run(const Options& options) {
     state.world = &world_streaming;
     editor::TerrainMeshes terrain_meshes(renderer.get()); // after the renderer: released first
     state.terrain_meshes = &terrain_meshes;
+    editor::TerrainPaintSync terrain_paint; // the tiles' paint, handed to the renderer
     terrain_meshes.skirt_depth = 8.0f; // hides the gaps where the far ground's chunks meet the tiles
     editor::FarGround far_ground(renderer.get()); // after the renderer: released first
     state.far_ground = &far_ground;
@@ -405,6 +406,7 @@ int run(const Options& options) {
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         mark(editor::FramePhase::other);
         terrain_meshes.update(state.scene.terrain);
+        terrain_paint.update(state.scene.terrain, *renderer);
         mark(editor::FramePhase::terrain);
         far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes,
                           state.scene.terrain);
