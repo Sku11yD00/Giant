@@ -72,6 +72,8 @@ Json entity_json(const Entity& e) {
             {"surface", world::to_string(e.material.surface)},
             {"sway", e.material.sway},
             {"flutter", e.material.flutter},
+            {"two_sided", e.material.two_sided},
+            {"translucency", e.material.translucency},
             {"visible", e.visible},
             {"body", world::to_string(e.body)}};
     if (e.mass != 0.0f) {
@@ -245,6 +247,11 @@ Json entity_properties() {
                               "only within the render setting wind_distance of the camera.")},
         {"flutter", number(0, 4, "How its tips shake in the wind (leaves, needles: what stands out from its "
                                  "middle). Default 0.")},
+        {"two_sided", {{"type", "boolean"},
+                       {"description", "Drawn from both sides, the back lit as the side facing the viewer (leaves, "
+                                       "grass, cloth, thin sheets). Default false."}}},
+        {"translucency", number(0, 1, "How much sun shines through it to the side away from the sun, tinted by its "
+                                      "colour (leaves 0.3 to 0.6). Default 0.")},
         {"maps", maps_schema()},
         {"visible", {{"type", "boolean"}}},
         {"body",
@@ -322,6 +329,8 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     }
     if (args.contains("sway")) e.material.sway = args["sway"].get<float>();
     if (args.contains("flutter")) e.material.flutter = args["flutter"].get<float>();
+    if (args.contains("two_sided")) e.material.two_sided = args["two_sided"].get<bool>();
+    if (args.contains("translucency")) e.material.translucency = args["translucency"].get<float>();
     if (args.contains("maps")) {
         if (std::string bad = apply_maps(args["maps"], e.material.maps); !bad.empty()) return bad;
     }

@@ -73,6 +73,8 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
     const std::array<u32, 4> refs = texture_refs(m, textured, out);
     std::copy(refs.begin(), refs.end(), key.bits + 10);
     key.bits[14] = terrain ? 1u : 0u;
+    key.bits[15] = m.two_sided ? 1u : 0u;
+    std::memcpy(&key.bits[16], &m.translucency, 4);
     const auto [it, added] = out.lookup.try_emplace(key, static_cast<u32>(out.materials.size()));
     if (added) {
         render::Material r;
@@ -83,6 +85,8 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
         r.sway = m.sway;
         r.flutter = m.flutter;
         r.terrain = terrain;
+        r.two_sided = m.two_sided;
+        r.translucency = m.translucency;
         if (out.textures != nullptr) set_textures(r, refs, *out.textures);
         out.materials.push_back(r);
         out.material_textures.push_back(refs);
@@ -746,6 +750,7 @@ bool same_kit(const world::Kit& a, const world::Kit& b) {
             !same3(p.material.base_color, q.material.base_color) || p.material.roughness != q.material.roughness ||
             p.material.metallic != q.material.metallic || !same3(p.material.emissive, q.material.emissive) ||
             p.material.sway != q.material.sway || p.material.flutter != q.material.flutter ||
+            p.material.two_sided != q.material.two_sided || p.material.translucency != q.material.translucency ||
             !(p.material.maps == q.material.maps) ||
             p.decal.shape != q.decal.shape || p.decal.opacity != q.decal.opacity ||
             p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed) {

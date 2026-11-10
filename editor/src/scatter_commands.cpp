@@ -67,6 +67,8 @@ Json item_schema() {
               {"sway", number(0, 4, "How it bends in the wind (set_entity's sway): 1 a tree, 2 to 3 grass. "
                                     "Default 0.")},
               {"flutter", number(0, 4, "How its tips shake in the wind (set_entity's flutter). Default 0.")},
+              {"two_sided", {{"type", "boolean"}, {"description", "Drawn from both sides (set_entity's two_sided)."}}},
+              {"translucency", number(0, 1, "Sun shining through it (set_entity's translucency). Default 0.")},
               {"maps", maps_schema()},
               {"weight", number(1e-6, 1e6, "How often it is picked, against the layer's other items. Default 1.")},
               {"scale", pair(0.0001, 10000, "[min, max] uniform scale, picked evenly. Default [1, 1].")},
@@ -143,6 +145,8 @@ std::string apply_layer(const Json& args, ScatterLayer& l, EditorState& state) {
             }
             i.material.sway = j.value("sway", i.material.sway);
             i.material.flutter = j.value("flutter", i.material.flutter);
+            i.material.two_sided = j.value("two_sided", i.material.two_sided);
+            i.material.translucency = j.value("translucency", i.material.translucency);
             if (j.contains("maps")) {
                 if (std::string bad = apply_maps(j["maps"], i.material.maps); !bad.empty()) return bad;
             }
@@ -214,6 +218,8 @@ Json layer_json(const ScatterLayer& l) {
         if (i.material.surface != world::Surface::standard) j["surface"] = world::to_string(i.material.surface);
         if (i.material.sway != 0.0f) j["sway"] = i.material.sway;
         if (i.material.flutter != 0.0f) j["flutter"] = i.material.flutter;
+        if (i.material.two_sided) j["two_sided"] = true;
+        if (i.material.translucency != 0.0f) j["translucency"] = i.material.translucency;
         if (!i.material.maps.empty() || i.material.maps.normal_green_down) j["maps"] = maps_json(i.material.maps);
         j["weight"] = i.weight;
         j["scale"] = {i.scale_min, i.scale_max};

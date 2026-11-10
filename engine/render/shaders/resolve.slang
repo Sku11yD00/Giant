@@ -63,6 +63,7 @@ ConstantBuffer<ResolvePush> push : register(b0);
 
 static const uint k_material_bytes = 64; // gpu::Material; its textures at +32, flags at +48
 static const uint k_material_terrain = 1u;
+static const uint k_material_two_sided = 2u;
 static const uint k_no_texture = 0xFFFFFFFFu; // rhi::k_no_descriptor
 
 
@@ -833,7 +834,7 @@ Output shade_pixel(float4 position) {
     // the surface's own places shadow lookups and light probes, so bumps do
     // not move them.
     float3 n = s.shading_n;
-    const float3 surface_n = s.n;
+    float3 surface_n = s.n;
     const float3 world = s.world;
 
     if (!lit_path) {
@@ -857,7 +858,14 @@ Output shade_pixel(float4 position) {
     float3 emissive = emissive_metallic.rgb;
     float occlusion = 1.0;
     apply_textures(s, base, rough, metal, occlusion);
-    if (extras.terrain_on != 0u && (materials.Load(material_at + 48) & k_material_terrain) != 0u) {
+    const uint material_flags = materials.Load(material_at + 48);
+    const float translucency = asfloat(materials.Load(material_at + 52));
+    if ((material_flags & k_material_two_sided) != 0u && dot(surface_n, world) > 0.0) {
+        // Two-sided, seen from behind: lit as the side facing the viewer.
+        surface_n = -surface_n;
+        n = -n;
+    }
+    if (extras.terrain_on != 0u && (material_flags & k_material_terrain) != 0u) {
         // The ground's layers, from terrain.slang's pass.
         const float4 sr = read_texture(extras.terrain_surface).Load(int3(int2(pixel), 0));
         base = sr.rgb;
@@ -882,8 +890,10 @@ Output shade_pixel(float4 position) {
         emissive = float3(0.0, 0.0, 0.0);
     }
     float sun = sun_visibility(extras.shadows, world, surface_n, f.sun_direction.xyz, pixel_size);
+    float clouds = 1.0;
     if (sky_on) {
-        sun *= cloud_shadow(sky, world);
+        clouds = cloud_shadow(sky, world);
+        sun *= clouds;
     }
     if (extras.contact_on != 0u && sun > 0.0 && dot(surface_n, f.sun_direction.xyz) > 0.0) {
         sun *= read_texture_float(extras.contact).Load(int3(int2(pixel), 0));
@@ -917,6 +927,16 @@ Output shade_pixel(float4 position) {
     }
     float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
                          occlusion, bend, spec_weight, spec_light);
+    if (translucency > 0.0) {
+        // Thin surfaces lit from behind: the sun through them, tinted by
+        // their colour, shadowed as the side facing it (the leaf itself
+        // does not shade its own back).
+        const float back = saturate(-dot(n, f.sun_direction.xyz));
+        if (back > 0.0) {
+            const float shine = sun_visibility(extras.shadows, world, -surface_n, f.sun_direction.xyz, pixel_size) * clouds;
+            color += base * (translucency * back * shine / k_pi) * f.sun_light.rgb;
+        }
+    }
     float through = 1.0; // of the reflection, which reflect.slang adds over the fog and clouds
     if (sky_on) {
         color = under_sky(sky, color, view_dir, length(world), pixel, through);

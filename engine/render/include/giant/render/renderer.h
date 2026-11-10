@@ -131,6 +131,13 @@ struct Material {
     // theirs by world position). The voxel world (GI's bounce, the far
     // field) still takes base_color: set it near the layers' average.
     bool terrain = false;
+    // Leaves, grass, cloth: seen from both sides (no back-face culling; the
+    // back's normal is turned to the viewer). A frame with any draws its
+    // visibility in two passes (one-sided, then two-sided).
+    bool two_sided = false;
+    // Thin surfaces (leaves): how much of the sun shines through to the
+    // side away from it (0 to 1), tinted by the base colour.
+    float translucency = 0.0f;
 };
 
 // One of the ground's layers (FrameInput::terrain_layers), for materials
@@ -815,6 +822,8 @@ private:
     // Pipelines.
     rhi::PipelineHandle m_raster_mesh;   // invalid without mesh shaders
     rhi::PipelineHandle m_raster_vertex;
+    rhi::PipelineHandle m_raster_mesh_two;   // two-sided materials: no back-face culling
+    rhi::PipelineHandle m_raster_vertex_two;
     rhi::PipelineHandle m_resolve;
     rhi::PipelineHandle m_skin; // skin.slang
     u32 m_posed = 0;            // skinned meshes posed this frame

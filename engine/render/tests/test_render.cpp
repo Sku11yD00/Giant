@@ -3156,3 +3156,104 @@ GIANT_TEST("render: d3d12 painted terrain: a painted layer covers the ground as 
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }
+
+GIANT_TEST("render: two-sided materials draw visibility in a second pass, only when a frame has them") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = {0.0, 0.0, -5.0};
+    instances[1].mesh = s.renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = {2.0, 0.0, -5.0};
+    instances[1].material = 1;
+    std::vector<Material> materials(2);
+    FrameInput frame;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.view.position = {0.0, 1.0, 0.0};
+    const u32 one = s.settle(frame).draws;
+    materials[1].two_sided = true;
+    materials[1].translucency = 7.0f; // kept to 0 to 1
+    frame.materials = materials;
+    const u32 two = s.settle(frame).draws;
+    GIANT_CHECK(two > one);
+    materials[1].two_sided = false;
+    frame.materials = materials;
+    GIANT_CHECK(s.settle(frame).draws == one);
+    GIANT_CHECK(!s.device->device_lost());
+}
+
+GIANT_TEST("render: d3d12 leaves: a two-sided sheet is seen from behind, and the sun shines through a translucent one") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A sheet facing up (the plane), seen from 2 m under it, looking up; the sun above it.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {20.0f, 1.0f, 20.0f};
+    instances[0].position = DVec3{0.0, 0.0, 0.0};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.2f, 0.6f, 0.1f};
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.antialiasing = false;
+    frame.instances = instances;
+    frame.lighting.background = {0.0f, 0.0f, 1.0f}; // blue where nothing is drawn
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.2f, 1.0f, 0.1f});
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.1f, 0.1f, 0.1f};
+    frame.lighting.ground_light = {0.1f, 0.1f, 0.1f};
+    frame.view.position = DVec3{0.0, -2.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, k_pi * 0.5f); // looking up
+    const auto draw = [&] {
+        frame.materials = materials;
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        const std::vector<u8> image = device->read_texture(target);
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + k_w / 2) * 4;
+        return std::array<int, 3>{image[i], image[i + 1], image[i + 2]};
+    };
+    const auto one_sided = draw();
+    materials[0].two_sided = true;
+    const auto two_sided = draw();
+    materials[0].translucency = 0.6f;
+    const auto lit_through = draw();
+    std::printf("    from behind: one-sided %d %d %d, two-sided %d %d %d, translucent %d %d %d\n", one_sided[0],
+                one_sided[1], one_sided[2], two_sided[0], two_sided[1], two_sided[2], lit_through[0], lit_through[1],
+                lit_through[2]);
+    GIANT_CHECK(one_sided[2] > one_sided[1] + 100); // culled: the blue background
+    GIANT_CHECK(two_sided[1] > two_sided[2]);       // the sheet's green underside, in shade
+    GIANT_CHECK(lit_through[1] > two_sided[1] + 20 && lit_through[1] > lit_through[0]); // brighter, still green
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}

@@ -98,7 +98,9 @@ struct SceneFrame {
     std::unordered_map<const world::MaterialMaps*, std::array<u32, 4>> maps_seen;
 
     struct MaterialKey {
-        u32 bits[15]; // the values, the texture refs, then 1 for the ground's terrain material
+        // The values, the texture refs, 1 for the ground's terrain material,
+        // then two-sided and translucency.
+        u32 bits[17];
         bool operator==(const MaterialKey&) const = default;
     };
     struct MaterialHash {

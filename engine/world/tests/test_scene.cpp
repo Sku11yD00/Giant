@@ -947,3 +947,31 @@ GIANT_TEST("world: a cell's tile paint saves and loads exactly with its heights;
     GIANT_CHECK(refused && contains(refused->message, "this cell has none"));
     GIANT_CHECK(back.size() == 1);
 }
+
+GIANT_TEST("world: two-sided and translucent materials save and load, only when set, and are checked") {
+    Scene scene;
+    Entity leaf = named("Leaf");
+    leaf.material.two_sided = true;
+    leaf.material.translucency = 0.45f;
+    scene.add(leaf);
+    scene.add(named("Rock"));
+    ScatterLayer layer;
+    layer.name = "grass";
+    ScatterItem blade;
+    blade.material.two_sided = true;
+    layer.items.push_back(blade);
+    scene.scatter.push_back(layer);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(text.find("\"two_sided\"") != text.rfind("\"two_sided\""));       // the leaf's and the grass's
+    GIANT_CHECK(text.find("\"translucency\"") == text.rfind("\"translucency\"")); // the leaf's alone
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->material.two_sided && loaded.find(1)->material.translucency == 0.45f);
+    GIANT_CHECK(loaded.find(2) && !loaded.find(2)->material.two_sided && loaded.find(2)->material.translucency == 0.0f);
+    GIANT_CHECK(loaded.scatter[0].items[0].material.two_sided);
+    GIANT_CHECK(save_scene(loaded) == text);
+    Scene bad;
+    const auto error = load_scene(
+        R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"translucency": 2}}]})", bad);
+    GIANT_CHECK(error.has_value() && contains(error->message, "translucency"));
+}

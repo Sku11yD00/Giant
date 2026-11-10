@@ -28,9 +28,28 @@ struct RasterPush {
     uint shadow_table_offset; // its first entry
     int shadow_page_x;        // the level window's minimum page
     int shadow_page_y;
+    // Which clusters draw: 0 all, 1 one-sided materials', 2 two-sided ones'
+    // (gpu::Material flags in the frame's table).
+    uint sides;
+    uint materials;
+    uint material_offset;
+    uint material_count;
     uint pad;
 };
 ConstantBuffer<RasterPush> push : register(b0);
+
+static const uint k_material_bytes = 64; // gpu::Material; flags at +48
+static const uint k_material_two_sided = 2u;
+
+// Whether this pass draws an instance's clusters (push.sides).
+bool drawn_side(Instance inst) {
+    if (push.sides == 0u) {
+        return true;
+    }
+    const uint at = push.material_offset + min(inst.material, push.material_count) * k_material_bytes + 48;
+    const bool two = (read_buffer(push.materials).Load(at) & k_material_two_sided) != 0u;
+    return (two ? 2u : 1u) == push.sides;
+}
 
 struct Drawn {
     Instance inst;
@@ -57,7 +76,7 @@ Drawn drawn_cluster_flat(uint id) {
     d.cluster = load_cluster(read_buffer_nonuniform(d.mesh.clusters), e.y);
     d.base = group_offset(d.mesh, d.cluster.group);
     // Never not resident (culling checks it); combined without a branch.
-    d.valid = (uint(d.valid) & uint(d.base != k_not_resident)) != 0;
+    d.valid = (uint(d.valid) & uint(d.base != k_not_resident) & uint(drawn_side(d.inst))) != 0;
     return d;
 }
 
@@ -75,7 +94,7 @@ Drawn drawn_cluster(uint id) {
     d.mesh = load_mesh(read_buffer(push.meshes), push.mesh_offset + d.inst.mesh * k_mesh_bytes);
     d.cluster = load_cluster(read_buffer_nonuniform(d.mesh.clusters), e.y);
     d.base = group_offset(d.mesh, d.cluster.group);
-    d.valid = d.base != k_not_resident; // never false, as culling checks it
+    d.valid = d.base != k_not_resident && drawn_side(d.inst); // resident: culling checks it
     return d;
 }
 
