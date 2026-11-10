@@ -942,6 +942,7 @@ private:
     rhi::PipelineHandle m_shadow_vertex;
     rhi::PipelineHandle m_shadow_mesh_cut; // cut-out materials' shadows
     rhi::PipelineHandle m_shadow_vertex_cut;
+    u64 m_shadow_cut_outs = 0xcbf29ce484222325ull; // the frame's cut-out materials, hashed (a change redraws all pages)
     rhi::PipelineHandle m_shadow_clear_pages;
     rhi::PipelineHandle m_shadow_clear_words;
     std::vector<u8> m_casts; // per frame instance: drawn as a mesh, so it casts

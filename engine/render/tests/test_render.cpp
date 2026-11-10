@@ -672,24 +672,32 @@ GIANT_TEST("render: shadow pages asked for are drawn, a pass per level, and cach
     instances[1].position.x += 0.5;
     st = s.draw(frame);
     GIANT_CHECK(st.shadow_drawn >= 2 && st.shadow_draws == 2);
-    // A cut-out material in the frame: each level draws twice (solid, then
-    // cut out by alpha).
+    // A cut-out material in the frame: every page is drawn again (they cast
+    // by alpha now), each level twice (solid, then cut out by alpha); the
+    // cube points at the material from before, so only the material changes.
+    instances[1].material = 1;
+    frame.instances = instances;
     std::vector<Material> cut(2);
+    frame.materials = cut;
+    s.draw(frame);
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_draws == 0); // settled
     cut[1].alpha_cutoff = 0.5f;
     cut[1].base_color_texture =
         s.renderer->add_texture(material_desc(4, 4, rhi::Format::rgba8_srgb), std::vector<u8>(64, 255));
-    instances[1].material = 1;
-    frame.instances = instances;
     frame.materials = cut;
-    pages.invalidate_all();
     st = s.draw(frame);
-    GIANT_CHECK(cut[1].base_color_texture != k_no_texture && st.shadow_draws == 4);
-    frame.materials = {};
-    instances[1].material = 0;
-    frame.instances = instances;
-    pages.invalidate_all();
+    GIANT_CHECK(cut[1].base_color_texture != k_no_texture && st.shadow_drawn == 3 && st.shadow_draws == 4);
     st = s.draw(frame);
-    GIANT_CHECK(st.shadow_draws == 2);
+    GIANT_CHECK(st.shadow_draws == 0); // cached again
+    cut[1].alpha_cutoff = 0.3f; // a new cutoff: drawn again
+    frame.materials = cut;
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_drawn == 3 && st.shadow_draws == 4);
+    cut[1].alpha_cutoff = 0.0f; // solid again: drawn again, once a level
+    frame.materials = cut;
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_drawn == 3 && st.shadow_draws == 2);
     // The budget: one page a frame (coarse first), the rest wait.
     frame.settings.shadow_pages_per_frame = 1;
     pages.invalidate_all();

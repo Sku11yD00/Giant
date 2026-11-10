@@ -450,7 +450,8 @@ an offline cooker can use it without a device.
   two-sided, solid or cut out), each a draw of the frame's clusters that
   skips other kinds; only the cut-out ones (ms_cut/vs_cut/ps_cut) carry uvs
   and discard, so solid surfaces keep early depth. Sun shadows draw cut-outs
-  in a second draw with the same alpha test. The texture cooker scales each
+  in a second draw with the same alpha test (a cut-out material coming,
+  going or changing redraws every shadow page). The texture cooker scales each
   smaller colour level's alpha so as much of it stays over 0.5 as of the top
   level's, so leaves do not thin away with distance (.gtex version 2).
   The editor sends a material as two-sided or cut out only while something

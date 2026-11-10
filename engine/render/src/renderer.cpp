@@ -1929,6 +1929,23 @@ void Renderer::plan_shadows(const FrameInput& frame, bool on) {
         m_shadows->invalidate_all();
         m_shadows_were_on = true;
     }
+    // Cut-outs cast by their texture's alpha: a cut-out coming, going or
+    // changing its cutoff or texture redraws every page (rare: an edit).
+    u64 cut_outs = 0xcbf29ce484222325ull;
+    const auto mix = [&cut_outs](u64 v) { cut_outs = (cut_outs ^ v) * 0x100000001b3ull; };
+    for (usize i = 0; i < frame.materials.size(); ++i) {
+        const Material& m = frame.materials[i];
+        if (!(m.alpha_cutoff > 0.0f) || texture_slot(m.base_color_texture) == nullptr) continue;
+        u32 cutoff_bits = 0;
+        std::memcpy(&cutoff_bits, &m.alpha_cutoff, 4);
+        mix(i);
+        mix(m.base_color_texture);
+        mix(cutoff_bits);
+    }
+    if (cut_outs != m_shadow_cut_outs) {
+        m_shadow_cut_outs = cut_outs;
+        m_shadows->invalidate_all();
+    }
     // Only what is drawn as a mesh casts (not the instances left to the
     // voxel world, nor those whose mesh is not ready).
     m_casts.assign(frame.instances.size(), 0);
