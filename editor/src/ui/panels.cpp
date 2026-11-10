@@ -900,6 +900,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::Checkbox("Ambient occlusion", &ao)) {
             run("set_render_settings", {{"ambient_occlusion", ao}});
         }
+        bool contact = r.contact_shadows;
+        if (ImGui::Checkbox("Contact shadows", &contact)) {
+            run("set_render_settings", {{"contact_shadows", contact}});
+        }
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {
             ImGui::TextDisabled(m_state.dotnet_available ? "None loaded (load_scripts command)."

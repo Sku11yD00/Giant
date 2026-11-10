@@ -2543,6 +2543,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.end_timing();
     }
     m_stats.ambient_occlusion = ambient_occlusion;
+    // Contact shadows (lit views): shading marches this frame's depth
+    // towards the sun for the small shadows the shadow maps miss.
+    const bool contact_shadows = settings.contact_shadows && lit_view;
+    m_stats.contact_shadows = contact_shadows;
     cmd.begin_timing("shading");
     // Shading writes the light before exposure into m_radiance (with
     // screen reflections, also what they need, and their pass adds them
@@ -2564,6 +2568,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.barrier(m_feedback, rhi::ResourceState::copy_dest);
         cmd.copy_buffer(m_feedback, 0, m_feedback_zero, 0, u64{m_feedback_count} * 4);
         cmd.barrier(m_feedback, rhi::ResourceState::shader_write);
+    }
+    if (contact_shadows) {
+        cmd.barrier(m_depth, rhi::ResourceState::shader_read);
     }
     cmd.begin_render_pass(pass);
     cmd.set_pipeline(screen_reflections ? m_resolve : m_resolve_direct);
@@ -2687,6 +2694,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.dfg_size = k_dfg_size;
     extras.ao = ambient_occlusion ? m_device.read_descriptor(m_ao) : data.frame.descriptor;
     extras.ao_on = ambient_occlusion ? 1u : 0u;
+    extras.contact_depth = contact_shadows ? m_device.read_descriptor(m_depth) : data.frame.descriptor;
+    extras.contact_on = contact_shadows ? 1u : 0u;
+    const float contact_length = settings.contact_shadow_length;
+    extras.contact_length = std::isfinite(contact_length) ? std::clamp(contact_length, 0.05f, 2.0f) : 0.3f;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;

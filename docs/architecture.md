@@ -354,7 +354,20 @@ an offline cooker can use it without a device.
   is occluded (none on open ground). Timed as
   "ambient occlusion"; `RenderStats::ambient_occlusion`; MCP
   `set_render_settings`. The sun is left alone (its shadows are the
-  shadow pages', contact shadows come next).
+  shadow pages' and the contact shadows').
+- **Contact shadows (photoreal part 4c).** In resolve, lit views
+  (`RenderSettings::contact_shadows`, default on;
+  `contact_shadow_length` metres, default 0.3, 0.05 to 2): where the sun
+  lights a pixel after its shadow pages and cloud shadow, 12 steps march
+  from the point (lifted off the surface by 1.5 pixels' size) towards the
+  sun in view space, never further than 48 pixels on screen or behind
+  the camera's near side, starting at a 4x4 pattern's jitter. A step is
+  in shadow where the depth there is nearer than the ray by more than a
+  bias (growing with distance) and by less than a thickness (0.1 m plus
+  1% of the distance, so things far in front do not shade what is behind
+  them). The shadow fades over the march's last quarter and by the
+  screen's edges, so it never cuts off. Off screen and sky samples do not shade.
+  No history; `RenderStats::contact_shadows`; MCP `set_render_settings`.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

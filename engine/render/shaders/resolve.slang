@@ -94,6 +94,9 @@ struct Extras {
     uint dfg_size;
     uint ao;                 // ambient occlusion (ao.slang), half size (ao_on 0: off)
     uint ao_on;
+    uint contact_depth;      // contact shadows: the scene depth (contact_on 0: off)
+    uint contact_on;
+    float contact_length;    // metres marched towards the sun
 };
 
 Extras load_extras() {
@@ -148,6 +151,10 @@ Extras load_extras() {
     o.dfg_size = q.y;
     o.ao = q.z;
     o.ao_on = q.w;
+    const uint4 c4 = b.Load4(at + 176);
+    o.contact_depth = c4.x;
+    o.contact_on = c4.y;
+    o.contact_length = asfloat(c4.z);
     return o;
 }
 
@@ -599,6 +606,61 @@ void ambient_occlusion(Extras e, Frame f, uint2 pixel, float3 world, float3 surf
     bend = lean * (1.0 - ao);
 }
 
+// Contact shadows: small things the shadow pages are too coarse for
+// (a stone on the ground, a foot, the gap under a crate) seen in this
+// frame's depth. From just off the surface, k_contact_steps steps towards
+// the sun out to contact_length metres (at least a pixel apart, at most
+// k_contact_pixels on screen); a step behind what the depth shows, by no
+// more than an object's assumed thickness, is in shadow. The steps start
+// at a fixed offset per pixel of a 4x4 pattern (no history). Returns how
+// much of the sun gets through (0 to 1), softened over the ray's last
+// quarter and by the screen's edges.
+static const uint k_contact_steps = 12;
+static const float k_contact_pixels = 48.0;
+
+float contact_shadow(Extras e, Frame f, float3 world, float3 surface_n, uint2 pixel, float pixel_size) {
+    Texture2D<float> depth = read_texture_float(e.contact_depth);
+    const float3 l = f.sun_direction.xyz;
+    // In view space (the camera at the origin, looking down -z).
+    const float3 start_world = world + surface_n * (pixel_size * 1.5);
+    const float3 p = float3(dot(f.view_rows[0].xyz, start_world), dot(f.view_rows[1].xyz, start_world),
+                            dot(f.view_rows[2].xyz, start_world));
+    const float3 d = float3(dot(f.view_rows[0].xyz, l), dot(f.view_rows[1].xyz, l), dot(f.view_rows[2].xyz, l));
+    if (-p.z <= f.near_plane * 2.0) return 1.0;
+    float len = max(e.contact_length, 0.0);
+    // Kept in front of the camera, and to k_contact_pixels on screen.
+    if (d.z > 0.0) len = min(len, (-p.z - f.near_plane * 1.5) / d.z);
+    const float max_len = k_contact_pixels * pixel_size;
+    len = min(len, max_len);
+    if (len < pixel_size) return 1.0;
+    const uint cell = (pixel.x & 3u) + 4u * (pixel.y & 3u);
+    const float jitter = (float((cell * 7u + 5u) & 15u) + 0.5) / 16.0;
+    const float thickness = 0.1 + 0.01 * (-p.z);
+    float lit = 1.0;
+    [loop]
+    for (uint i = 0; i < k_contact_steps; ++i) {
+        const float t = len * (float(i) + jitter) / float(k_contact_steps);
+        const float3 q = p + d * t;
+        if (-q.z <= f.near_plane) break;
+        const float2 ndc = float2(f.p00 * q.x, f.p11 * q.y) / -q.z;
+        const float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (any(uv < 0.0) || any(uv >= 1.0)) break; // left the screen: the shadow pages' alone
+        const int2 at = int2(uv * float2(f.width, f.height));
+        const float sd = depth.Load(int3(at, 0));
+        if (sd <= 0.0) continue; // sky
+        const float scene_z = f.near_plane / sd;
+        const float behind = -q.z - scene_z; // how far the step is behind what is drawn there
+        const float bias = 0.02 + 0.002 * scene_z;
+        if (behind > bias && behind < thickness) {
+            // Fainter over the ray's last quarter and by the screen's edges.
+            const float2 edge = min(uv, 1.0 - uv);
+            const float fade = saturate(min(edge.x, edge.y) * 20.0) * saturate(4.0 * (1.0 - t / len));
+            lit = min(lit, 1.0 - fade);
+        }
+    }
+    return lit;
+}
+
 // Voxels have a colour and a normal only; the rest is a rough dielectric.
 static const float k_far_roughness = 0.8;
 // The lighting view's surfaces: plain white-grey, the light alone.
@@ -893,6 +955,9 @@ Output shade_pixel(float4 position) {
     float sun = sun_visibility(extras.shadows, world, surface_n, f.sun_direction.xyz, pixel_size);
     if (sky_on) {
         sun *= cloud_shadow(sky, world);
+    }
+    if (extras.contact_on != 0u && sun > 0.0 && dot(surface_n, f.sun_direction.xyz) > 0.0) {
+        sun *= contact_shadow(extras, f, world, surface_n, pixel, pixel_size);
     }
     float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
     if (extras.gi_on != 0) {
