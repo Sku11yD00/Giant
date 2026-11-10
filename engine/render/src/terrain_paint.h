@@ -34,8 +34,10 @@ public:
     // `budget` bytes), then the table. False: nothing to draw from (no
     // paint, or out of memory).
     struct Frame {
-        rhi::TransientMemory table; // entries of 16 bytes: x, z, block byte offset (~0: empty), 0
-        u32 table_mask = 0;         // entries - 1 (a power of two)
+        // A 16-byte header (the painted tiles' min x, min z, max x, max z),
+        // then entries of 16 bytes: x, z, block byte offset (~0: empty), 0.
+        rhi::TransientMemory table;
+        u32 table_mask = 0; // entries - 1 (a power of two)
         rhi::BufferHandle pool;
     };
     bool update(rhi::CommandList& cmd, u64 budget, Frame& out);

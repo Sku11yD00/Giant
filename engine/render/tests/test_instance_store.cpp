@@ -4,6 +4,7 @@
 #include "giant/rhi/rhi.h"
 #include "giant_test.h"
 #include "gpu_layout.h"
+#include "terrain_paint.h"
 #include "cells.h"
 #include "instance_store.h"
 
@@ -207,4 +208,11 @@ GIANT_TEST("changed cells: lists the cells not exactly as seen") {
     e[2] = {2, 3, 10, 3, 1, 1}; // still "from 3", but 9 was seen
     GIANT_CHECK(changed_cells(e, 7, seen, changed) && changed.size() == 1);
     GIANT_CHECK(changed[0].first == 2 && changed[0].count == 3);
+}
+
+GIANT_TEST("terrain paint: the table's hash is pinned (terrain.slang's paint_hash computes the same)") {
+    GIANT_CHECK(render::terrain_paint_hash(0, 0) == 0u);
+    GIANT_CHECK(render::terrain_paint_hash(1, 0) == 0xc80d83e3u);
+    GIANT_CHECK(render::terrain_paint_hash(-3, 7) == 0xea3eea76u);
+    GIANT_CHECK(render::terrain_paint_hash(2147483647, -2147483647 - 1) == 0x190e577au);
 }

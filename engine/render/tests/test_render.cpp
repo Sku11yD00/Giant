@@ -3024,7 +3024,9 @@ GIANT_TEST("render: d3d12 painted terrain: a painted layer covers the ground as 
     desc.debug_layer = true;
     auto device = rhi::create_device(desc);
     if (device == nullptr) return; // not on Windows
-    auto renderer = Renderer::create(*device);
+    RendererDesc renderer_desc;
+    renderer_desc.terrain_paint_bytes_per_frame = 1; // a tile a frame
+    auto renderer = Renderer::create(*device, renderer_desc);
     GIANT_CHECK(renderer != nullptr);
     if (renderer == nullptr) return;
     constexpr u32 k_w = 128, k_h = 128;
@@ -3095,12 +3097,18 @@ GIANT_TEST("render: d3d12 painted terrain: a painted layer covers the ground as 
             for (i32 x = 7; x <= 8; ++x) GIANT_CHECK(renderer->set_terrain_paint(x, z, tile));
         }
     };
+    // Tiles far off first, more than the pool starts with: it grows (copied on the GPU) as they arrive.
+    for (i32 x = 100; x < 124; ++x) {
+        GIANT_CHECK(renderer->set_terrain_paint(x, 100, std::vector<u8>(n * n * k_terrain_paint_channels, 255)));
+    }
     const std::vector<u8> plain = draw();
     paint_all(255);
     const std::vector<u8> full = draw();
     paint_all(128);
     const std::vector<u8> half = draw();
-    renderer->clear_terrain_paint();
+    for (i32 z = -1; z <= 0; ++z) {
+        for (i32 x = 7; x <= 8; ++x) GIANT_CHECK(renderer->set_terrain_paint(x, z, {}));
+    }
     const std::vector<u8> cleared = draw();
     // Row 100: the ground ahead, in tile (7, -1) (row 115 is about its edge, z 0); row 125 nearer, in (7, 0).
     const Rgb p = at(plain, 64, 100), f = at(full, 64, 100), f2 = at(full, 64, 125), h = at(half, 64, 100),
@@ -3111,6 +3119,40 @@ GIANT_TEST("render: d3d12 painted terrain: a painted layer covers the ground as 
     GIANT_CHECK(f.r > f.g + 20 && f2.r > f2.g + 20); // red, across the tiles' edge
     GIANT_CHECK(h.r > p.r + 8 && h.g < p.g - 8 && h.r < f.r - 8 && h.g > f.g + 8); // between
     GIANT_CHECK(std::abs(c.r - p.r) <= 2 && std::abs(c.g - p.g) <= 2);           // back as it was
+    // A textured layer, half painted: its edge follows its image's brightness (stripes across x, bright
+    // and dark), so where it covers the grass goes in stripes too, not an even half.
+    std::vector<u8> stripes;
+    for (u32 size = 8; size >= 1; size /= 2) {
+        for (u32 y = 0; y < size; ++y) {
+            for (u32 x = 0; x < size; ++x) {
+                const u8 v = size == 1 ? 150 : ((x * 8 / size) / 4 % 2 == 0 ? 255 : 40);
+                stripes.insert(stripes.end(), {v, v, v, 255});
+            }
+        }
+    }
+    rhi::TextureDesc stripe_desc;
+    stripe_desc.width = 8;
+    stripe_desc.height = 8;
+    stripe_desc.mips = 4;
+    stripe_desc.format = rhi::Format::rgba8_srgb;
+    stripe_desc.usage = rhi::TextureUsage::sampled;
+    const TextureId stripe = renderer->add_texture(stripe_desc, stripes);
+    GIANT_CHECK(stripe != k_no_texture);
+    layers[1].base_color_texture = stripe;
+    layers[1].tiling = 1.0f;
+    frame.terrain_layers = layers;
+    paint_all(128);
+    const std::vector<u8> textured = draw();
+    const auto green_spread = [&](const std::vector<u8>& image) {
+        int lo = 255, hi = 0;
+        for (u32 x = 16; x < 112; ++x) {
+            lo = std::min(lo, at(image, x, 100).g);
+            hi = std::max(hi, at(image, x, 100).g);
+        }
+        return hi - lo;
+    };
+    std::printf("    grass across row 100: even half %d, textured half %d\n", green_spread(half), green_spread(textured));
+    GIANT_CHECK(green_spread(textured) > green_spread(half) + 15);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

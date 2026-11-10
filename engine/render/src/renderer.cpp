@@ -2689,6 +2689,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // roughness and shading normal, for resolve to read where a material
     // is terrain (its own pass: in resolve it slowed every pixel).
     const bool terrain = lit_view && data.terrain_count > 0 && m_terrain_ready;
+    // Painted tiles uploaded every frame (within the budget), whatever is drawn.
+    TerrainPaintStore::Frame paint;
+    const bool painted = m_paint->update(cmd, std::max<u64>(m_desc.terrain_paint_bytes_per_frame, 1), paint);
     if (terrain) {
         cmd.begin_timing("terrain");
         cmd.barrier(m_terrain_surface, rhi::ResourceState::shader_write);
@@ -2728,8 +2731,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         tp.camera_xz[1] = period(frame.view.position.z);
         // Painted layers: their tiles uploaded within the budget, and the table.
         tp.paint_pool = rhi::k_no_descriptor;
-        TerrainPaintStore::Frame paint;
-        if (m_paint->update(cmd, std::max<u64>(m_desc.terrain_paint_bytes_per_frame, 1), paint)) {
+        if (painted) {
             const double size = m_paint->tile_size();
             const auto tile = [size](double v) {
                 return std::clamp(std::floor(v / size), -2147483648.0, 2147483647.0);

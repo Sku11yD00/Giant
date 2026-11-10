@@ -119,7 +119,7 @@ uint paint_block(int x, int z) {
     uint at = paint_hash(x, z) & push.paint_mask;
     // At most half full: a probe or two.
     for (uint k = 0; k <= push.paint_mask; ++k) {
-        const uint4 e = table.Load4(push.paint_table_offset + at * 16);
+        const uint4 e = table.Load4(push.paint_table_offset + 16 + at * 16); // after the header
         if (e.z == k_paint_empty) {
             return k_paint_empty;
         }
@@ -164,6 +164,14 @@ void paint_at(float2 xz, out float4 lo, out float4 hi) {
     const float2 base = floor(s);
     const float2 f = s - base;
     const int2 b = int2(base);
+    // Away from every painted tile (the table's header holds their bounds): none.
+    const int n = int(push.paint_samples);
+    const int4 bounds = asint(read_buffer(push.paint_table).Load4(push.paint_table_offset));
+    const int2 first = push.paint_tile + int2(floor_div(b.x, n), floor_div(b.y, n));
+    const int2 last = push.paint_tile + int2(floor_div(b.x + 1, n), floor_div(b.y + 1, n));
+    if (last.x < bounds.x || last.y < bounds.y || first.x > bounds.z || first.y > bounds.w) {
+        return;
+    }
     [unroll]
     for (uint k = 0; k < 4; ++k) {
         const int2 d = int2(int(k & 1u), int(k >> 1));
@@ -272,7 +280,8 @@ void cs_terrain(uint3 id : SV_DispatchThreadID) {
             const TerrainLayer l = load_terrain_layer(i);
             float c = 1.0;
             if (i > 0u) {
-                const float painted = i <= 4u ? paint_lo[i - 1u] : paint_hi[i - 5u];
+                const float4 four = i <= 4u ? paint_lo : paint_hi;
+                const float painted = four[(i - 1u) & 3u];
                 c = max(terrain_band(slope, l.min_slope, l.max_slope, l.slope_blend) *
                             terrain_band(height, l.min_height, l.max_height, l.height_blend),
                         painted);

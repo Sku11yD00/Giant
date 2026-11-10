@@ -7,6 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace giant::render {
 
@@ -60,6 +61,7 @@ void TerrainPaintStore::clear() {
     m_tiles.clear();
     m_waiting.clear();
     m_table_stale = true;
+    m_full_logged = false;
 }
 
 bool TerrainPaintStore::grow(rhi::CommandList& cmd, u32 blocks) {
@@ -90,25 +92,31 @@ bool TerrainPaintStore::update(rhi::CommandList& cmd, u64 budget, Frame& out) {
     const u64 bytes = block_bytes();
     if (!m_waiting.empty() && m_samples != 0) {
         bool barriered = false;
+        bool full = false; // no block to be had: tiles without one wait, the rest still go
         u64 sent = 0;
-        usize done = 0;
-        for (; done < m_waiting.size(); ++done) {
-            if (done > 0 && sent + bytes > budget) break; // at least one a frame
-            Tile& t = m_tiles.at(m_waiting[done]);
+        usize kept = 0; // m_waiting[0, kept): still waiting, in order
+        usize next = 0;
+        for (; next < m_waiting.size(); ++next) {
+            if (sent > 0 && sent + bytes > budget) break; // at least one a frame
+            Tile& t = m_tiles.at(m_waiting[next]);
             if (t.block == ~0u) {
-                if (m_free.empty() && !grow(cmd, m_blocks + 1)) {
+                if (!full && m_free.empty() && !grow(cmd, m_blocks + 1)) {
+                    full = true;
                     if (!m_full_logged) {
                         log_warning("render", "terrain paint: out of room for " + std::to_string(m_tiles.size()) +
                                                   " painted tiles; the rest draw unpainted");
                         m_full_logged = true;
                     }
-                    break;
+                }
+                if (m_free.empty()) {
+                    m_waiting[kept++] = m_waiting[next];
+                    continue;
                 }
                 t.block = m_free.back();
                 m_free.pop_back();
             }
             const rhi::TransientMemory up = cmd.allocate(static_cast<u32>(bytes));
-            if (up.data == nullptr) break;
+            if (up.data == nullptr) break; // out of upload memory: the rest next frame
             std::memcpy(up.data, t.weights.data(), bytes);
             t.weights = {}; // the GPU holds it now
             if (!barriered) {
@@ -121,7 +129,9 @@ bool TerrainPaintStore::update(rhi::CommandList& cmd, u64 budget, Frame& out) {
             t.shown = true;
             t.waiting = false;
         }
-        m_waiting.erase(m_waiting.begin(), m_waiting.begin() + static_cast<std::ptrdiff_t>(done));
+        // Those not reached keep their place after those passed over.
+        for (; next < m_waiting.size(); ++next) m_waiting[kept++] = m_waiting[next];
+        m_waiting.resize(kept);
     }
     if (m_pool.valid()) cmd.barrier(m_pool, rhi::ResourceState::shader_read);
     if (m_table_stale) {
@@ -129,23 +139,35 @@ bool TerrainPaintStore::update(rhi::CommandList& cmd, u64 budget, Frame& out) {
         usize shown = 0;
         for (const auto& [key, tile] : m_tiles) shown += tile.shown ? 1 : 0;
         const usize entries = std::bit_ceil(std::max<usize>(16, shown * 2)); // at most half full: short probes
-        m_table.assign(entries * 4, 0);
-        for (usize e = 0; e < entries; ++e) m_table[e * 4 + 2] = ~0u;
+        // A header first: the painted tiles' bounds (min x, min z, max x, max z),
+        // so pixels away from them skip the lookups.
+        m_table.assign((entries + 1) * 4, 0);
+        i32 lo_x = std::numeric_limits<i32>::max(), lo_z = lo_x;
+        i32 hi_x = std::numeric_limits<i32>::min(), hi_z = hi_x;
+        for (usize e = 1; e <= entries; ++e) m_table[e * 4 + 2] = ~0u;
         const u32 mask = static_cast<u32>(entries - 1);
         for (const auto& [key, tile] : m_tiles) {
             if (!tile.shown) continue;
+            lo_x = std::min(lo_x, key.x);
+            lo_z = std::min(lo_z, key.z);
+            hi_x = std::max(hi_x, key.x);
+            hi_z = std::max(hi_z, key.z);
             u32 at = terrain_paint_hash(key.x, key.z) & mask;
-            while (m_table[at * 4 + 2] != ~0u) at = (at + 1) & mask;
-            m_table[at * 4] = static_cast<u32>(key.x);
-            m_table[at * 4 + 1] = static_cast<u32>(key.z);
-            m_table[at * 4 + 2] = static_cast<u32>(u64{tile.block} * bytes);
+            while (m_table[(at + 1) * 4 + 2] != ~0u) at = (at + 1) & mask;
+            m_table[(at + 1) * 4] = static_cast<u32>(key.x);
+            m_table[(at + 1) * 4 + 1] = static_cast<u32>(key.z);
+            m_table[(at + 1) * 4 + 2] = static_cast<u32>(u64{tile.block} * bytes);
         }
+        m_table[0] = static_cast<u32>(lo_x);
+        m_table[1] = static_cast<u32>(lo_z);
+        m_table[2] = static_cast<u32>(hi_x);
+        m_table[3] = static_cast<u32>(hi_z);
         m_shown = shown;
     }
     if (m_shown == 0 || !m_pool.valid()) return false;
     out.table = cmd.upload({reinterpret_cast<const u8*>(m_table.data()), m_table.size() * 4});
     if (out.table.data == nullptr) return false;
-    out.table_mask = static_cast<u32>(m_table.size() / 4 - 1);
+    out.table_mask = static_cast<u32>(m_table.size() / 4 - 2); // entries - 1 (after the header)
     out.pool = m_pool;
     return true;
 }
