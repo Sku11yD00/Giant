@@ -3,6 +3,8 @@
 // correct barycentrics, interpolates the normal and lights it once.
 //
 // Lighting: one sun (GGX specular, Lambert diffuse) plus sky/ground ambient,
+// the ambient specular from the split-sum table (src/brdf.h) with
+// multi-scatter energy put back and occluded by the material's occlusion,
 // written as the light before exposure (a: 1 to expose and tone map, 0
 // shown as it is). With screen reflections on, also what reflect.slang
 // needs to add them (ps_main); off, the light alone (ps_direct). Either
@@ -88,6 +90,8 @@ struct Extras {
     uint dust_count;
     uint texture_feedback;   // write descriptor: u32 per material (feedback_materials 0: off)
     uint feedback_materials;
+    uint dfg;                // the split-sum BRDF table (src/brdf.h): dfg_size^2 float2
+    uint dfg_size;
 };
 
 Extras load_extras() {
@@ -137,6 +141,9 @@ Extras load_extras() {
     o.dust_count = m.y;
     o.texture_feedback = m.z;
     o.feedback_materials = m.w;
+    const uint4 q = b.Load4(at + 160);
+    o.dfg = q.x;
+    o.dfg_size = q.y;
     return o;
 }
 
@@ -166,6 +173,25 @@ float v_smith(float n_dot_v, float n_dot_l, float alpha) {
 
 float3 f_schlick(float3 f0, float v_dot_h) {
     return f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
+}
+
+// The split-sum table (src/brdf.h), bilinear between its grid points:
+// (a, b) with f0 * a + b the specular light a surface keeps from a white
+// surround in a single bounce.
+float2 dfg_lookup(Extras e, float n_dot_v, float roughness) {
+    if (e.dfg_size < 2u) return float2(1.0, 0.0);
+    ByteAddressBuffer table = read_buffer(e.dfg);
+    const float last = float(e.dfg_size - 1u);
+    const float2 p = float2(saturate(n_dot_v), saturate(roughness)) * last;
+    const uint2 i = min(uint2(p), uint2(e.dfg_size - 2u, e.dfg_size - 2u));
+    const float2 t = saturate(p - float2(i));
+    const uint row = e.dfg_size * 8u;
+    const uint at = (i.y * e.dfg_size + i.x) * 8u;
+    const float2 a = asfloat(table.Load2(at));
+    const float2 b = asfloat(table.Load2(at + 8u));
+    const float2 c = asfloat(table.Load2(at + row));
+    const float2 d = asfloat(table.Load2(at + row + 8u));
+    return lerp(lerp(a, b, t.x), lerp(c, d, t.x), t.y);
 }
 
 struct Surface {
@@ -436,7 +462,7 @@ float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 // against the hemisphere alone. Out: what the ambient
 // reflection is multiplied by (`spec_weight`) and the reflected light it
 // used (`spec_light`), for the screen's reflections to replace.
-float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
+float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
              float sun, float4 bounce, float4 cone, float cone_weight, float occlusion, out float3 spec_weight,
              out float3 spec_light) {
     const float3 v = safe_normalize(-world, n);
@@ -458,8 +484,20 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
     const float n_dot_h = saturate(dot(n, h));
     const float v_dot_h = saturate(dot(v, h));
 
+    // The split sum: what one bounce keeps (fss_ess) and what bounces
+    // between microfacets would add back (fms_ems; Fdez-Aguera 2019), so
+    // rough metals do not darken.
+    const float2 ab = dfg_lookup(e, n_dot_v, sqrt(alpha));
+    const float3 fss_ess = f0 * ab.x + ab.y;
+    const float ess = ab.x + ab.y;
+    const float ems = 1.0 - ess;
+    const float3 f_avg = f0 + (1.0 - f0) / 21.0;
+    const float3 fms_ems = fss_ess * f_avg * ems / (1.0 - ems * f_avg);
+
     const float3 fresnel = f_schlick(f0, v_dot_h);
-    const float3 specular = d_ggx(n_dot_h, alpha) * v_smith(n_dot_v, n_dot_l, alpha) * fresnel;
+    // The sun's highlight, compensated the same way (Filament).
+    const float3 energy = 1.0 + f0 * (1.0 / max(ess, 0.05) - 1.0);
+    const float3 specular = d_ggx(n_dot_h, alpha) * v_smith(n_dot_v, n_dot_l, alpha) * fresnel * energy;
     const float3 diffuse = (1.0 - fresnel) * diffuse_color / k_pi;
     float3 color = (diffuse + specular) * f.sun_light.rgb * (n_dot_l * sun);
 
@@ -479,14 +517,19 @@ float3 shade(Frame f, float3 world, float3 n, float3 base, float rough, float me
         ambient_diffuse = gi;
     }
     // The material's occlusion: small creases the voxels are too coarse to
-    // see dim the ambient light (and below, everything reflected).
+    // see dim the ambient light, and the reflections by how much of the
+    // reflection's cone the occlusion's cone hides (Lagarde 2014).
     ambient_diffuse *= occlusion;
+    const float spec_occlusion =
+        saturate(pow(n_dot_v + occlusion, exp2(-16.0 * sqrt(alpha) - 1.0)) - 1.0 + occlusion);
     // The voxel cone: what it met, and the dimmed hemisphere past it.
     ambient_specular = lerp(ambient_specular, cone.rgb + (1.0 - cone.a) * ambient_specular, cone_weight);
-    const float3 env_fresnel = f0 + (max(1.0 - roughness, f0) - f0) * pow(1.0 - n_dot_v, 5.0);
-    spec_weight = env_fresnel * (1.0 - 0.7 * roughness) * occlusion; // the screen's reflections too
+    spec_weight = fss_ess * spec_occlusion; // the screen's reflections too
     spec_light = ambient_specular;
-    color += diffuse_color * ambient_diffuse + spec_weight * ambient_specular;
+    // Diffuse takes what the specular bounces leave; the light bounced
+    // between microfacets comes from all round, like diffuse light.
+    const float3 diffuse_weight = diffuse_color * saturate(1.0 - fss_ess - fms_ems);
+    color += (diffuse_weight + fms_ems) * ambient_diffuse + spec_weight * ambient_specular;
     return color + emissive;
 }
 
@@ -708,7 +751,7 @@ Output shade_pixel(float4 position) {
                 }
                 float3 spec_weight;
                 float3 spec_light;
-                float3 color = shade(f, world, far_n, albedo, far_rough, far_metal, float3(0.0, 0.0, 0.0), 0.0,
+                float3 color = shade(extras, f, world, far_n, albedo, far_rough, far_metal, float3(0.0, 0.0, 0.0), 0.0,
                                      sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, 1.0, spec_weight, spec_light);
                 float far_through = 1.0;
                 if (sky_on) {
@@ -805,7 +848,7 @@ Output shade_pixel(float4 position) {
     }
     float3 spec_weight;
     float3 spec_light;
-    float3 color = shade(f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
+    float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
                          occlusion, spec_weight, spec_light);
     float through = 1.0; // of the reflection, which reflect.slang adds over the fog and clouds
     if (sky_on) {

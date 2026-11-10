@@ -312,6 +312,20 @@ an offline cooker can use it without a device.
   `tail_mip`, `wanted_mip`, `reading`, `bytes` (on the GPU now) and
   `full_bytes`. Tests set `wanted_override`, as the null device gives no
   feedback.
+- **Split-sum BRDF (photoreal part 4a).** Ambient specular uses the
+  split-sum table (`src/brdf.h`): for n.v and roughness, (a, b) with
+  f0 * a + b the light a GGX surface (resolve's height-correlated Smith
+  and Schlick Fresnel) keeps from a white surround in one bounce, 32x32
+  points made on the CPU at init by sampling GGX's visible normals (Heitz
+  2018; 512 samples a point, within 0.002 of converged) and read bilinear
+  from a buffer (`ResolveExtras::dfg`). The light lost to bounces between
+  microfacets is put back (Fdez-Aguera 2019) as light from all round, and
+  the sun's highlight is scaled by 1 + f0 (1 / Ess - 1) (Filament), so a
+  rough white metal is as bright as a smooth one (a WARP furnace test).
+  Diffuse ambient takes what the specular leaves. Reflections (voxel
+  cones and the screen's) are weighted by the single-bounce part times a
+  specular occlusion from the material's occlusion (Lagarde 2014), in
+  place of the old hand-tuned Fresnel and roughness dimming.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under
