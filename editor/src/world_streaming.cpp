@@ -128,6 +128,10 @@ bool WorldStreaming::same_tile(const world::Terrain& terrain, CellCoord coord, c
     return version != 0 && version == cell.saved_version;
 }
 
+bool WorldStreaming::same_paint(const world::Terrain& terrain, CellCoord coord, const Cell& cell) {
+    return terrain.paint_version(coord) == cell.saved_paint_version;
+}
+
 namespace {
 // What a tile weighs against entities_per_frame: as many entities as its
 // heights over 64 (64 at 64 samples, 256 at 128).
@@ -339,12 +343,14 @@ void WorldStreaming::restore(const Memo& memo, world::Scene& scene) {
             cell.saved = then->second.saved;
             cell.saved_tile = then->second.saved_tile;
             cell.saved_version = then->second.saved_version;
+            cell.saved_paint_version = then->second.saved_paint_version;
             cell.saved_damage = then->second.saved_damage;
         } else {
             cell.state = State::on_disk;
             cell.saved = {};
             cell.saved_tile = false;
             cell.saved_version = 0;
+            cell.saved_paint_version = 0;
             cell.saved_damage = {};
         }
         ++m_count[static_cast<usize>(cell.state)];
@@ -366,7 +372,8 @@ void WorldStreaming::start_read(CellCoord cell) {
         read.cell = cell;
         read.epoch = epoch;
         if (const auto text = read_text(path)) {
-            if (const auto error = world::load_cell(*text, cell, samples, read.entities, read.heights, &read.damage)) {
+            if (const auto error = world::load_cell(*text, cell, samples, read.entities, read.heights, &read.damage,
+                                                &read.paint)) {
                 read.error = path_to_utf8(path) + ": " + error->message;
             } else {
                 for (Entity& e : read.entities) {
@@ -449,6 +456,7 @@ void WorldStreaming::insert(world::Scene& scene) {
         cell.saved = std::move(r.entities);
         cell.saved_tile = r.heights.has_value();
         cell.saved_version = 0;
+        cell.saved_paint_version = 0;
         // Kept damage in the scene already (put back by an undo while the
         // cell was on disk) is newer than the file's.
         cell.saved_damage = std::move(r.damage);
@@ -459,11 +467,18 @@ void WorldStreaming::insert(world::Scene& scene) {
             // it holds the same heights.
             if (const world::Terrain::Heights* there = scene.terrain.find(r.cell); there == nullptr) {
                 scene.terrain.set(r.cell, std::move(*r.heights));
+                if (!r.paint.empty()) scene.terrain.set_paint(r.cell, std::move(r.paint));
                 ++m_totals.tiles_loaded;
                 added += tile_weight(scene.terrain.samples());
                 cell.saved_version = scene.terrain.version(r.cell);
-            } else if (*there == *r.heights) {
-                cell.saved_version = scene.terrain.version(r.cell);
+                cell.saved_paint_version = scene.terrain.paint_version(r.cell);
+            } else {
+                if (*there == *r.heights) cell.saved_version = scene.terrain.version(r.cell);
+                // Its paint likewise: clean only if the same (else the
+                // scene's is newer, and is written over the file's).
+                const world::Terrain::Paint* paint = scene.terrain.paint(r.cell);
+                const bool same = paint == nullptr ? r.paint.empty() : *paint == r.paint;
+                cell.saved_paint_version = same ? scene.terrain.paint_version(r.cell) : ~u64{0};
             }
         }
         for (const Entity& e : cell.saved) {
@@ -532,7 +547,8 @@ bool WorldStreaming::unload(world::Scene& scene, const DVec3& camera, const Scen
         Cell& cell = m_cells[coord];
         if (cell.saved_tile && edited.contains(world::far_chunk_of_cell(coord, 1))) continue;
         std::vector<const Entity*> now = cell_entities(scene, frame, coord);
-        if (!same_tile(scene.terrain, coord, cell) || !same_damage(scene, coord, cell) || !matches(now, cell.saved)) {
+        if (!same_tile(scene.terrain, coord, cell) || !same_paint(scene.terrain, coord, cell) ||
+            !same_damage(scene, coord, cell) || !matches(now, cell.saved)) {
             continue; // unsaved edits: stays
         }
         for (const Entity* e : now) {
@@ -547,6 +563,7 @@ bool WorldStreaming::unload(world::Scene& scene, const DVec3& camera, const Scen
         cell.saved = {};
         cell.saved_tile = false;
         cell.saved_version = 0;
+        cell.saved_paint_version = 0;
         cell.saved_damage = {};
         ++let_go;
     }
@@ -717,6 +734,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     // The tiles in the files of cells on disk that the scene has no tile
     // in, kept when the file is written again.
     std::unordered_map<CellCoord, world::Terrain::Heights, world::CellCoordHash> kept_heights;
+    std::unordered_map<CellCoord, world::Terrain::Paint, world::CellCoordHash> kept_paint; // their paint
     // The same for their kept damage, when the scene has none there.
     std::unordered_map<CellCoord, world::CellDamage, world::CellCoordHash> kept_damage;
     // Cells on disk that an entity of the scene was read from or saved to,
@@ -795,18 +813,20 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         }
         std::vector<Entity> from_file;
         std::optional<world::Terrain::Heights> heights_from_file;
+        world::Terrain::Paint paint_from_file;
         world::CellDamage damage_from_file;
         if (it->second.state == State::ready) {
             for (const Read& r : m_ready) {
                 if (r.cell == coord) {
                     from_file = r.entities;
                     heights_from_file = r.heights;
+                    paint_from_file = r.paint;
                     damage_from_file = r.damage;
                 }
             }
         } else if (const auto text = read_text(cell_path(coord))) {
             if (const auto bad = world::load_cell(*text, coord, m_index.terrain_samples, from_file, heights_from_file,
-                                                  &damage_from_file)) {
+                                                  &damage_from_file, &paint_from_file)) {
                 return {path_to_utf8(cell_path(coord)) + ": " + bad->message};
             }
         } else if (std::error_code error; !std::filesystem::exists(cell_path(coord), error) && !error) {
@@ -825,6 +845,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
                         std::to_string(terrain.samples()) + " samples a side, as the terrain is"};
             }
             kept_heights[coord] = std::move(*heights_from_file);
+            if (!paint_from_file.empty()) kept_paint[coord] = std::move(paint_from_file);
         }
         if (!damage_from_file.empty() && scene.damage_in(coord) == nullptr) {
             kept_damage[coord] = std::move(damage_from_file);
@@ -836,9 +857,12 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     const auto put = [&](CellCoord coord, std::vector<Entity>& list) -> bool {
         const auto it = m_cells.find(coord);
         const world::Terrain::Heights* heights = terrain.find(coord);
+        const world::Terrain::Paint* paint = terrain.paint(coord);
         if (heights == nullptr) {
             const auto kept = kept_heights.find(coord);
             if (kept != kept_heights.end()) heights = &kept->second;
+            const auto kept_p = kept_paint.find(coord);
+            paint = kept_p != kept_paint.end() ? &kept_p->second : nullptr;
         }
         const bool tile_changed = it == m_cells.end()                 ? heights != nullptr
                                   : it->second.state == State::loaded ? !same_tile(terrain, coord, it->second)
@@ -867,10 +891,10 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         }
         std::sort(list.begin(), list.end(), by_id);
         const bool same = it != m_cells.end() && it->second.state == State::loaded &&
-                          same_tile(terrain, coord, it->second) && same_damage(scene, coord, it->second) &&
-                          list == it->second.saved;
+                          same_tile(terrain, coord, it->second) && same_paint(terrain, coord, it->second) &&
+                          same_damage(scene, coord, it->second) && list == it->second.saved;
         if (!same) {
-            if (!write_text(cell_path(coord), world::save_cell(coord, list, heights, damage))) {
+            if (!write_text(cell_path(coord), world::save_cell(coord, list, heights, damage, paint))) {
                 saved.error = "could not write " + path_to_utf8(cell_path(coord));
                 return false;
             }
@@ -886,6 +910,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         const auto keep_tile = [&](Cell& cell) {
             cell.saved_tile = heights != nullptr;
             cell.saved_version = terrain.version(coord);
+            cell.saved_paint_version = terrain.paint_version(coord);
             cell.saved_damage = damage != nullptr ? *damage : world::CellDamage{};
         };
         if (it == m_cells.end()) {
@@ -909,6 +934,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
             cell.saved = {};
             cell.saved_tile = false;
             cell.saved_version = 0;
+            cell.saved_paint_version = 0;
             cell.saved_damage = {};
             std::erase_if(m_ready, [&](const Read& r) { return r.cell == coord; });
         }
@@ -1100,8 +1126,8 @@ u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
         const auto it = m_cells.find(coord);
         if (it == m_cells.end() || it->second.state != State::loaded) {
             ++unsaved; // no file yet, or entities, a tile or damage in a cell still on disk
-        } else if (!same_tile(scene.terrain, coord, it->second) || !same_damage(scene, coord, it->second) ||
-                   !matches(list, it->second.saved)) {
+        } else if (!same_tile(scene.terrain, coord, it->second) || !same_paint(scene.terrain, coord, it->second) ||
+                   !same_damage(scene, coord, it->second) || !matches(list, it->second.saved)) {
             ++unsaved;
         }
     }

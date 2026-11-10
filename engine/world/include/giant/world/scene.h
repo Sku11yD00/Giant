@@ -513,19 +513,22 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
 // One cell's entities, sorted by id, so an unchanged cell saves the same
 // text, and its terrain tile if it has one ("heights", rows of text as in
 // a scene; samples x samples of them).
-// Its kept damage too, if any ("damage": damage.h).
+// Its kept damage too, if any ("damage": damage.h), and its tile's paint
+// if painted ("paint": hex rows, with heights only).
 std::string save_cell(CellCoord cell, std::span<const Entity> entities,
-                      const Terrain::Heights* heights = nullptr, const CellDamage* damage = nullptr);
+                      const Terrain::Heights* heights = nullptr, const CellDamage* damage = nullptr,
+                      const Terrain::Paint* paint = nullptr);
 // Replaces `out` and `heights` only on success (`heights` empty when the
 // file holds no tile). Every entity must be in `cell` (by position) and
 // ids unique in the file; a tile must be `terrain_samples` a side (the
 // world's; 0: none may be there). Kits are not checked (the world's index holds them): an
 // entity naming a missing kit just draws nothing.
 // `damage` (when given) takes the cell's kept damage (empty: none; it is
-// read and checked either way).
+// read and checked either way). `paint` (when given) takes the tile's
+// paint (empty: none).
 std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 terrain_samples,
                                    std::vector<Entity>& out, std::optional<Terrain::Heights>& heights,
-                                   CellDamage* damage = nullptr);
+                                   CellDamage* damage = nullptr, Terrain::Paint* paint = nullptr);
 // The same for a cell that must hold no terrain (terrain_samples 0).
 std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::vector<Entity>& out);
 

@@ -411,6 +411,20 @@ an offline cooker can use it without a device.
   materials'). The far voxel world past the meshes keeps the terrain
   material's own `base_color`. MCP `set_terrain_layers` (undoable, replaces
   them all), `get_terrain` lists them; the scene panel edits them.
+- **Painted terrain layers (photoreal part 5c-1).** `world::Terrain` keeps
+  a tile's paint apart from its heights: `k_paint_channels` (8) bytes a
+  height sample, the weights of layers 1 to 7 (the last byte spare), with
+  its own versions and change list (`take_paint_changes`), so painting
+  rebuilds no meshes, physics or scatter. Saved as hex rows under the
+  tile's `"paint"` in scenes and in cell files beside `"heights"` (paint
+  with no tile is refused); all zero is no paint. `world::apply_paint` is
+  the brush (towards 255 or 0 by strength times the brush falloff, rounded
+  away from where it is so light dabs arrive). Streaming treats paint like
+  heights: a cell whose paint version is not its file's is unsaved and
+  stays loaded. MCP `paint_terrain` (undoable, drag merging as
+  `sculpt_terrain`, sharing its stroke code), `get_terrain` reports
+  weights; the viewport brush has paint and erase ops with a layer. The
+  renderer draws the paint from part 5c-2.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

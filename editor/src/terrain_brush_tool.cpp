@@ -189,10 +189,15 @@ void TerrainBrushTool::update(const std::vector<platform::InputEvent>& events, b
         ai::Json args = {{"op", b.op},           {"points", std::move(points)},
                          {"radius", b.radius},   {"strength", b.strength},
                          {"falloff", b.falloff}, {"continues", continues}};
+        const bool paint = b.op == "paint" || b.op == "erase";
+        // Paint takes 0 to 1 (a raise's metres may still be set from before).
+        if (paint) args["strength"] = std::clamp(b.strength, 0.0f, 1.0f);
         if (b.op == "flatten") args["height"] = b.flatten_to_start ? m_start_height : b.height;
-        const ai::CommandResult result = commands.execute("sculpt_terrain", args, {m_stroke, true});
+        if (paint) args["layer"] = b.layer;
+        const char* command = paint ? "paint_terrain" : "sculpt_terrain";
+        const ai::CommandResult result = commands.execute(command, args, {m_stroke, true});
         if (!result.ok) {
-            log_warning("editor", "sculpt_terrain: " + result.error);
+            log_warning("editor", std::string(command) + ": " + result.error);
             m_down = false;
             return;
         }

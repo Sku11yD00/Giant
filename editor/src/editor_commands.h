@@ -32,7 +32,7 @@ struct EditorCamera {
 // state, set in the Scene panel's Terrain section.
 struct BrushSettings {
     bool enabled = false;
-    std::string op = "raise"; // sculpt_terrain's op
+    std::string op = "raise"; // sculpt_terrain's op, or "paint" / "erase" (paint_terrain)
     double radius = 8.0;
     float strength = 0.5f;
     float falloff = 0.5f;
@@ -41,6 +41,7 @@ struct BrushSettings {
     // 128 samples, so a frame's dab is a small part of it.
     static double max_radius(double spacing) { return 128.0 * spacing; }
     bool flatten_to_start = true; // flatten to the ground where the stroke began, not `height`
+    u32 layer = 1; // paint / erase: paint_terrain's layer (1 to 7: the second layer to the eighth)
 };
 
 class MeshLibrary;

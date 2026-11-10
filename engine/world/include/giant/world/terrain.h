@@ -64,6 +64,15 @@ struct TerrainMaterial {
     bool operator==(const TerrainMaterial&) const = default;
 };
 
+// Painted layers: at every height sample of a tile, a weight (0 to 255)
+// for each of TerrainLayer 1 to 7 (the first lies under all of them), so
+// k_paint_channels bytes a sample: sample (i, j)'s weight for layer L at
+// (j * samples() + i) * k_paint_channels + L - 1 (the last byte spare).
+// A painted weight covers the layers before it as a layer's own bands do
+// (the larger of the two counts).
+constexpr u32 k_paint_channels = 8;
+constexpr u32 k_paintable_layers = 7; // layers 1 to 7
+
 // What changed in a terrain since its last take_changes().
 struct TerrainChanges {
     std::vector<CellCoord> tiles; // added, removed or changed (maybe twice, maybe gone)
@@ -136,6 +145,27 @@ public:
     // sees the same height there.
     std::optional<float> sample(i64 i, i64 j, const CellCoord* home = nullptr) const;
 
+    // Painted layers (k_paint_channels a sample), kept per tile apart from
+    // its heights: painting changes no heights, versions or height changes
+    // (meshes, physics and scatter do not follow it), only its own.
+    using Paint = std::vector<u8>;
+    const Paint* paint(CellCoord cell) const;
+    // The tile's paint to change in place (all 0 if it had none); none
+    // where there is no tile. Marks it changed.
+    Paint* modify_paint(CellCoord cell);
+    // Sets a tile's paint (samples()^2 * k_paint_channels bytes, asserted;
+    // empty or all 0: none). Only where there is a tile (false otherwise).
+    bool set_paint(CellCoord cell, Paint paint);
+    // Puts paint back as it was with the paint version it had (an undo; 0
+    // takes a new one).
+    bool restore_paint(CellCoord cell, Paint paint, u64 version);
+    // New each time a tile's paint changes (0: none), kept by copies.
+    u64 paint_version(CellCoord cell) const;
+    const std::unordered_map<CellCoord, Paint, CellCoordHash>& paints() const { return m_paint; }
+    // Tiles whose paint changed since the last call (a terrain made, copied
+    // or assigned: "all").
+    TerrainChanges take_paint_changes();
+
     // Hands over what changed since the last call. A terrain made, copied
     // or assigned starts as "all changed".
     TerrainChanges take_changes();
@@ -168,8 +198,12 @@ private:
     u32 m_samples = k_default_terrain_samples;
     std::unordered_map<CellCoord, Heights, CellCoordHash> m_tiles;
     std::unordered_map<CellCoord, u64, CellCoordHash> m_versions; // the same cells
+    std::unordered_map<CellCoord, Paint, CellCoordHash> m_paint;         // painted tiles only
+    std::unordered_map<CellCoord, u64, CellCoordHash> m_paint_versions; // the same cells
     TerrainChanges m_changes{{}, true};
     TerrainChanges m_physics_changes{{}, true};
+    TerrainChanges m_paint_changes{{}, true};
+    void paint_changed(CellCoord cell);
     u64 m_edits = 0;
     Identity m_identity;
 };
