@@ -1561,11 +1561,17 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
         {"get_textures",
          "Lists the material textures (image files that drawn materials' maps name), each with "
          "its status: cooking (in the background, two at a time; materials draw their plain "
-         "values meanwhile), ready (with its size, mips, GPU bytes and whether it came from the "
-         "cache in giant_cache/textures), failed (with why) or unloaded (no drawn material used "
-         "it for about 10 s, so it left the GPU; it loads again from the cache when used). "
-         "Cooked at most 4096 texels a side. wait: true asks for every map the scene names and "
-         "blocks until all are cooked and on the GPU (before a screenshot that must show them).",
+         "values meanwhile), ready (with its size, mips, the bytes on the GPU now, full_bytes "
+         "with every level, and whether it came from the cache in giant_cache/textures), failed "
+         "(with why) or unloaded (no drawn material used it for about 10 s, so it left the GPU; "
+         "it loads again from the cache when used). Ready textures stream: first_mip is the "
+         "sharpest level on the GPU (0 = full size), tail_mip the level kept at least (256 "
+         "texels a side, put up first), wanted_mip the sharpest level the screen asked for "
+         "lately (null: not drawn lately) and reading whether finer levels are on their way. "
+         "Sharper levels load where drawn up close and leave again when no longer needed, "
+         "within a GPU memory budget. Cooked at most 4096 texels a side. wait: true asks for "
+         "every map the scene names and blocks until all are cooked and wholly on the GPU "
+         "(before a screenshot that must show them sharp).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"wait", {{"type", "boolean"}}}}}},
@@ -1590,6 +1596,15 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                          j["height"] = e.height;
                          j["mips"] = e.mips;
                          j["bytes"] = e.bytes;
+                         j["full_bytes"] = e.full_bytes;
+                         j["first_mip"] = e.first_mip;
+                         j["tail_mip"] = e.tail_mip;
+                         if (e.wanted_mip == render::TextureResidency::k_not_seen) {
+                             j["wanted_mip"] = nullptr;
+                         } else {
+                             j["wanted_mip"] = e.wanted_mip;
+                         }
+                         j["reading"] = e.reading;
                          j["from_cache"] = e.from_cache;
                          j["seconds"] = e.seconds;
                      }

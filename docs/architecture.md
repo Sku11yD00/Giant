@@ -275,7 +275,27 @@ an offline cooker can use it without a device.
   materials needed in this and the last window of 32 frames
   (`texture_residency`: `wanted_mip`, or not seen). The streaming policy
   (what to bring, what to drop, under what memory) is the caller's: the
-  editor's comes in part 3b-2.
+  editor's is next.
+- **Texture streaming policy (photoreal part 3b-2).** The editor's
+  `TextureLibrary` puts a cooked texture up from its tail, the finest
+  level with sides up to `tail_size` (256), so a scene of new 4096 maps
+  costs a few hundred KiB each at first. Every `update()` it reads each
+  ready texture's residency and keeps it at least at its tail and at most
+  as sharp as its materials wanted lately. Finer levels are read on a
+  worker (at most `max_level_reads`, 4, at once, the furthest behind
+  first) from the texture's `.gtex` at the level's offset, or from the
+  cooked levels kept in memory when there is no cache, and handed to
+  `stream_texture`; a read whose file changed or went makes it cook again
+  (it draws what it has meanwhile). Levels sharper than wanted are trimmed
+  after `trim_after_updates` (120, about 2 s, so a glance away does not
+  reload them), or at once, most bytes first, while all textures hold more
+  than `gpu_budget_bytes` (1 GiB); still over, the biggest lose their
+  finest level even if wanted. A finer read is cut back to what fits in
+  the budget. `finish()` (`get_textures` with `wait`) uploads whole, for a
+  screenshot that must be sharp. `get_textures` reports `first_mip`,
+  `tail_mip`, `wanted_mip`, `reading`, `bytes` (on the GPU now) and
+  `full_bytes`. Tests set `wanted_override`, as the null device gives no
+  feedback.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under
@@ -288,7 +308,8 @@ an offline cooker can use it without a device.
   `giant_cache/textures/<key>-<files>.gtex` under the working folder: the
   first hash names the key, the second the files' sizes and change times,
   so an edited file cooks again and its older file is deleted. Finished
-  textures upload once a frame under a 16 MiB budget (at least one).
+  textures upload once a frame under a 16 MiB budget (at least one; since
+  part 3b-2 only their tails).
   `SceneFrame` dedupes materials on their values and texture refs, asks for
   textures on built-in shapes and on meshes whose file has uvs (once per
   material a call), fills in renderer ids as they become ready without

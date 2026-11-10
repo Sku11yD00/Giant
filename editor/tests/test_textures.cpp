@@ -270,6 +270,122 @@ GIANT_TEST("textures: unused ones leave the GPU after a while and come back when
     GIANT_CHECK(textures.request({spelled, TextureLibrary::Slot::base_color, false, {}}) == a);
 }
 
+GIANT_TEST("textures: the small levels go up first, sharper ones stream in where wanted and leave again") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    rhi::TextureDesc t;
+    t.width = 16;
+    t.height = 16;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle image = device->create_texture(t);
+    const auto draw = [&] { // (queued level changes reach the GPU in a frame)
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd == nullptr) return;
+        render::FrameInput frame;
+        renderer->render(*cmd, image, frame);
+        device->end_frame();
+    };
+    const std::filesystem::path dir = fresh_dir("giant_texture_stream");
+    const std::string path = write_png(dir / "big.png", 512, 512, 90, 120, 30);
+    constexpr u32 not_seen = render::TextureResidency::k_not_seen;
+
+    for (const bool cached : {true, false}) { // levels read from the .gtex, or kept in memory
+        TextureLibrary textures(renderer.get(), cached ? dir / "cache" : std::filesystem::path{});
+        textures.tail_size = 64; // 512 -> 256 -> 128 -> 64: level 3
+        textures.trim_after_updates = 3;
+        u32 wanted = not_seen;
+        textures.wanted_override = [&wanted](TextureLibrary::Ref) { return wanted; };
+        const TextureLibrary::Ref a = textures.request({path, TextureLibrary::Slot::base_color, false, {}});
+        textures.set_used(std::vector<TextureLibrary::Ref>{a});
+        const auto e = [&] { return textures.entry(a); };
+        const auto until = [&](auto done) {
+            for (int i = 0; i < 2000 && !done(); ++i) {
+                textures.update();
+                draw();
+                if (!done()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return done();
+        };
+        const auto at = [&](u32 mip) {
+            const auto r = renderer->texture_residency(textures.id(a));
+            return r && r->first_mip == mip && r->target_mip == mip && e()->first_mip == mip && !e()->reading;
+        };
+        textures.wait_cooked();
+        textures.update();
+        draw();
+        // Only its tail went up.
+        GIANT_CHECK(e()->status == TextureLibrary::Status::ready && e()->tail_mip == 3 && e()->mips == 10);
+        const render::TextureId id = textures.id(a);
+        GIANT_CHECK(id != render::k_no_texture);
+        GIANT_CHECK(until([&] { return at(3); }));
+        const rhi::TextureDesc* whole = renderer->texture(id);
+        GIANT_CHECK(whole != nullptr && whole->width == 512 && whole->mips == 10);
+        if (whole == nullptr) return;
+        const rhi::TextureDesc full = *whole;
+        const auto bytes_from = [&](u32 mip) { return rhi::texture_bytes(render::texture_from_mip(full, mip)); };
+        GIANT_CHECK(e()->full_bytes == rhi::texture_bytes(full));
+        GIANT_CHECK(e()->bytes == bytes_from(3) && e()->bytes < e()->full_bytes);
+        // Not drawn: it stays at its tail.
+        for (int i = 0; i < 5; ++i) {
+            textures.update();
+            draw();
+        }
+        GIANT_CHECK(at(3) && e()->wanted_mip == not_seen);
+        // Drawn close up: finer levels stream in, the same texture id throughout.
+        wanted = 0;
+        GIANT_CHECK(until([&] { return at(0); }));
+        GIANT_CHECK(textures.id(a) == id && e()->bytes == e()->full_bytes && e()->wanted_mip == 0);
+        // Wanted less: kept a while, then trimmed to what is wanted.
+        wanted = 2;
+        textures.update();
+        draw();
+        GIANT_CHECK(at(0)); // not yet
+        GIANT_CHECK(until([&] { return at(2); }));
+        GIANT_CHECK(e()->bytes == bytes_from(2));
+        // Not drawn at all: back to its tail, never coarser.
+        wanted = 9;
+        GIANT_CHECK(until([&] { return at(3); }));
+        // A budget: finer levels only as far as they fit.
+        textures.gpu_budget_bytes = bytes_from(1);
+        wanted = 0;
+        GIANT_CHECK(until([&] { return at(1); }));
+        for (int i = 0; i < 10; ++i) {
+            textures.update();
+            draw();
+        }
+        GIANT_CHECK(at(1) && textures.id(a) == id);
+        // The budget lowered under what it holds: trimmed at once, wanted or not.
+        textures.trim_after_updates = 1000000;
+        textures.gpu_budget_bytes = bytes_from(2);
+        GIANT_CHECK(until([&] { return at(2); }));
+        textures.gpu_budget_bytes = u64{1} << 30;
+        textures.trim_after_updates = 3;
+        // finish() puts it up whole (a screenshot that must be sharp).
+        textures.finish();
+        draw();
+        GIANT_CHECK(until([&] { return at(0); }) && textures.pending() == 0);
+        if (cached) {
+            // Its cooked file gone: the finer read fails, it is cooked again
+            // and draws what it has meanwhile.
+            wanted = 9;
+            GIANT_CHECK(until([&] { return at(3); }));
+            std::error_code ec;
+            std::filesystem::remove_all(dir / "cache", ec);
+            wanted = 0;
+            GIANT_CHECK(until([&] { return textures.id(a) != id; }));
+            GIANT_CHECK(e()->status == TextureLibrary::Status::ready && !e()->from_cache);
+            GIANT_CHECK(renderer->texture(id) == nullptr);
+            GIANT_CHECK(until([&] { return at(0); }));
+        }
+    }
+}
+
 GIANT_TEST("textures: closing with cooks queued returns without cooking them") {
     const std::filesystem::path dir = fresh_dir("giant_texture_close");
     const std::string path = write_png(dir / "big.png", 512, 512, 1, 2, 3);

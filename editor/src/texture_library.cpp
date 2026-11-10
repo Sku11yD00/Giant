@@ -6,6 +6,7 @@
 #include "giant/geometry/gltf.h"
 #include "giant/texture/texture.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <exception>
@@ -126,8 +127,21 @@ struct TextureLibrary::Done {
     std::string error;
     std::string warning;
     texture::Cooked cooked;
+    std::filesystem::path file; // the .gtex it is in (read from, or written to), if any
     bool from_cache = false;
     float seconds = 0.0f;
+};
+
+// Finer levels read on a worker, waiting for update() to stream them.
+struct TextureLibrary::LevelsDone {
+    Ref ref = k_no_ref;
+    u32 generation = 0;
+    render::TextureId id = render::k_no_texture;
+    u32 from_mip = 0; // the first level on the GPU when asked
+    u32 to_mip = 0;   // the finest read
+    std::vector<u8> bytes;
+    bool ok = false;
+    std::string error;
 };
 
 bool TextureLibrary::split_image_ref(std::string_view path, std::string& file, u32& image) {
@@ -250,7 +264,7 @@ const TextureLibrary::Entry* TextureLibrary::entry(Ref ref) const {
 }
 
 usize TextureLibrary::pending() const {
-    return m_waiting_to_cook.size() + m_running + m_to_upload.size();
+    return m_waiting_to_cook.size() + m_running + m_to_upload.size() + m_reading;
 }
 
 void TextureLibrary::set_used(std::span<const Ref> refs) {
@@ -339,6 +353,7 @@ void TextureLibrary::cook_into(const Key& key, u32 max_side, Done& result) {
                 texture::read_file(bytes, done->cooked, ignored) && done->cooked.kind == kind) {
                 done->ok = true;
                 done->from_cache = true;
+                done->file = cached;
             }
         }
         if (!done->ok) {
@@ -388,6 +403,7 @@ void TextureLibrary::cook_into(const Key& key, u32 max_side, Done& result) {
                 if (!written || ec) {
                     std::filesystem::remove(temp, ec);
                 } else {
+                    done->file = cached;
                     // The key's older versions (the file since edited) go.
                     const std::string prefix = cached.filename().string().substr(0, 17); // "<key hash>-"
                     std::filesystem::directory_iterator it(m_cache, ec), end;
@@ -425,13 +441,23 @@ void TextureLibrary::take_done() {
     start_waiting();
 }
 
-void TextureLibrary::upload(Done& done) {
+void TextureLibrary::upload(Done& done, bool whole) {
     Entry& e = m_entries[done.ref];
     if (done.generation != e.generation) return; // asked for again while it waited to upload
     const std::string name = e.key.path + " (" + to_string(e.key.slot) + ")";
+    const rhi::TextureDesc& desc = done.cooked.desc;
+    // Its tail: the finest level whose sides are within tail_size (and
+    // that a texture can start at).
+    u32 tail = 0;
+    const u32 coarsest = render::coarsest_first_mip(desc);
+    while (tail < coarsest && std::max(desc.width, desc.height) >> tail > std::max(tail_size, 1u)) ++tail;
+    const u32 first = whole ? 0 : tail;
     render::TextureId id = render::k_no_texture;
     if (done.ok && m_renderer != nullptr) {
-        id = m_renderer->add_texture(done.cooked.desc, done.cooked.contents);
+        const std::span<const u8> all(done.cooked.contents);
+        const u64 skip = rhi::level_offset(desc, first);
+        id = skip <= all.size() ? m_renderer->add_texture(desc, all.subspan(static_cast<usize>(skip)), first)
+                                : render::k_no_texture;
         if (id == render::k_no_texture) {
             done.ok = false;
             done.error = e.key.path + ": the renderer refused the texture";
@@ -450,10 +476,24 @@ void TextureLibrary::upload(Done& done) {
     e.status = Status::ready;
     e.error.clear();
     e.warning = std::move(done.warning);
-    e.width = done.cooked.desc.width;
-    e.height = done.cooked.desc.height;
-    e.mips = done.cooked.desc.mips;
-    e.bytes = done.cooked.contents.size();
+    e.width = desc.width;
+    e.height = desc.height;
+    e.mips = desc.mips;
+    e.full_bytes = done.cooked.contents.size();
+    e.bytes = m_renderer != nullptr ? done.cooked.contents.size() - rhi::level_offset(desc, first) : e.full_bytes;
+    e.first_mip = m_renderer != nullptr ? first : 0;
+    e.tail_mip = tail;
+    e.wanted_mip = render::TextureResidency::k_not_seen;
+    e.reading = false; // (a read for the texture it replaces is dropped)
+    e.coarser_since = 0;
+    e.desc = desc;
+    e.desc.name = "material texture";
+    e.file = done.file;
+    // Without a file its levels stay in memory (only while they may stream).
+    e.contents.reset();
+    if (e.file.empty() && m_renderer != nullptr && tail > 0) {
+        e.contents = std::make_shared<const std::vector<u8>>(std::move(done.cooked.contents));
+    }
     e.from_cache = done.from_cache;
     e.seconds = done.seconds;
     if (!e.used) e.unused_since = m_updates; // its wait to unload starts now
@@ -464,6 +504,169 @@ void TextureLibrary::upload(Done& done) {
                            std::to_string(e.width) + "x" + std::to_string(e.height) + ", " +
                            std::to_string(e.mips) + " mips (" + seconds + " s)");
     if (!e.warning.empty()) log_warning("editor", "texture " + name + ": " + e.warning);
+}
+
+void TextureLibrary::take_levels() {
+    std::vector<std::unique_ptr<LevelsDone>> done;
+    {
+        const std::lock_guard lock(m_mutex);
+        done.swap(m_levels_done);
+    }
+    for (auto& d : done) {
+        --m_reading;
+        Entry& e = m_entries[d->ref];
+        if (d->generation != e.generation || d->id != e.id || e.id == render::k_no_texture) {
+            continue; // cooked again, replaced or unloaded meanwhile
+        }
+        e.reading = false;
+        if (!d->ok) {
+            // Its .gtex changed or went (another editor, a cleared cache):
+            // cooked again; it draws what it has meanwhile.
+            log_warning("editor", "texture " + e.key.path + " (" + to_string(e.key.slot) +
+                                      "): finer levels could not be read (" + d->error + "); cooking it again");
+            e.file.clear(); // no more reads until cooked again
+            queue(d->ref);
+            continue;
+        }
+        const std::optional<render::TextureResidency> r = m_renderer->texture_residency(e.id);
+        if (!r || r->first_mip != d->from_mip || r->target_mip != r->first_mip) {
+            continue; // its levels changed meanwhile: asked again by stream()
+        }
+        m_renderer->stream_texture(e.id, d->to_mip, std::move(d->bytes));
+    }
+}
+
+void TextureLibrary::stream() {
+    if (m_renderer == nullptr) return;
+    struct Finer {
+        Ref ref;
+        u32 from;
+        u32 to;
+        u32 gap;
+    };
+    struct Coarser {
+        Ref ref;
+        u32 to;
+        u64 freed;
+    };
+    std::vector<Finer> finer;
+    std::vector<Coarser> coarser;
+    std::vector<Coarser> wanted; // finer than their tails and wanted so: trimmed only past the budget
+    u64 resident = 0;
+    for (Ref ref = 0; ref < m_entries.size(); ++ref) {
+        Entry& e = m_entries[ref];
+        if (e.status != Status::ready || e.id == render::k_no_texture) continue;
+        const bool readable = !e.file.empty() || e.contents != nullptr;
+        const std::optional<render::TextureResidency> r = m_renderer->texture_residency(e.id);
+        if (!r) continue;
+        e.first_mip = r->first_mip;
+        if (e.bytes != r->bytes) {
+            e.bytes = r->bytes;
+            ++m_version; // (get_textures shows it; ids are unchanged)
+        }
+        resident += r->bytes;
+        e.wanted_mip = wanted_override ? wanted_override(ref) : r->wanted_mip;
+        // Never coarser than its tail; not drawn lately: its tail.
+        const u32 desired = std::min(e.wanted_mip, e.tail_mip);
+        const bool busy = e.reading || r->target_mip != r->first_mip;
+        if (desired < e.first_mip) {
+            e.coarser_since = 0;
+            if (!busy && readable) finer.push_back({ref, e.first_mip, desired, e.first_mip - desired});
+        } else if (desired > e.first_mip) {
+            if (e.coarser_since == 0) e.coarser_since = m_updates;
+            if (!busy) {
+                const u64 kept = rhi::texture_bytes(render::texture_from_mip(e.desc, desired));
+                coarser.push_back({ref, desired, r->bytes > kept ? r->bytes - kept : 0});
+            }
+        } else {
+            e.coarser_since = 0;
+        }
+        if (!busy && desired <= e.first_mip && e.first_mip < e.tail_mip) {
+            const u64 kept = rhi::texture_bytes(render::texture_from_mip(e.desc, e.first_mip + 1));
+            wanted.push_back({ref, e.first_mip + 1, r->bytes > kept ? r->bytes - kept : 0});
+        }
+    }
+    // Detail no longer wanted goes after a while, or at once (most bytes
+    // first) while over the budget.
+    std::sort(coarser.begin(), coarser.end(), [](const Coarser& a, const Coarser& b) { return a.freed > b.freed; });
+    for (const Coarser& c : coarser) {
+        Entry& e = m_entries[c.ref];
+        if (resident > gpu_budget_bytes || m_updates - e.coarser_since >= trim_after_updates) {
+            if (m_renderer->trim_texture(e.id, c.to)) {
+                resident -= std::min(resident, c.freed);
+                e.coarser_since = 0;
+            }
+        }
+    }
+    // Still over (the budget was lowered): the biggest textures lose their
+    // finest level, wanted or not, until it fits.
+    std::sort(wanted.begin(), wanted.end(), [](const Coarser& a, const Coarser& b) {
+        return a.freed != b.freed ? a.freed > b.freed : a.ref < b.ref;
+    });
+    for (const Coarser& c : wanted) {
+        if (resident <= gpu_budget_bytes) break;
+        if (m_renderer->trim_texture(m_entries[c.ref].id, c.to)) resident -= std::min(resident, c.freed);
+    }
+    // Finer levels where wanted: the furthest from it first, within the
+    // budget (coarser than wanted if that is what fits).
+    std::sort(finer.begin(), finer.end(), [](const Finer& a, const Finer& b) {
+        return a.gap != b.gap ? a.gap > b.gap : a.ref < b.ref;
+    });
+    for (const Finer& f : finer) {
+        if (m_reading >= std::max(max_level_reads, 1u)) break;
+        Entry& e = m_entries[f.ref];
+        u32 to = f.to;
+        const auto bytes = [&](u32 mip) { return rhi::level_offset(e.desc, f.from) - rhi::level_offset(e.desc, mip); };
+        while (to < f.from && resident + bytes(to) > gpu_budget_bytes) ++to;
+        if (to == f.from) continue; // nothing finer fits
+        e.reading = true;
+        ++m_reading;
+        resident += bytes(to);
+        m_jobs->submit(m_group, [this, ref = f.ref, generation = e.generation, id = e.id, from = f.from, to,
+                                 desc = e.desc, file = e.file, contents = e.contents] {
+            if (m_stopping.load(std::memory_order_relaxed)) return; // closing: nobody will take it
+            auto done = std::make_unique<LevelsDone>();
+            done->ref = ref;
+            done->generation = generation;
+            done->id = id;
+            done->from_mip = from;
+            done->to_mip = to;
+            const u64 begin = rhi::level_offset(desc, to);
+            const u64 end = rhi::level_offset(desc, from);
+            try {
+                if (contents != nullptr) {
+                    if (end <= contents->size()) {
+                        done->bytes.assign(contents->begin() + static_cast<std::ptrdiff_t>(begin),
+                                           contents->begin() + static_cast<std::ptrdiff_t>(end));
+                        done->ok = true;
+                    } else {
+                        done->error = "its levels are not all kept";
+                    }
+                } else {
+                    // The .gtex as cooked: its header, then the contents.
+                    std::error_code ec;
+                    const auto size = std::filesystem::file_size(file, ec);
+                    std::ifstream in(file, std::ios::binary);
+                    if (ec || !in || size != texture::k_file_header_bytes + rhi::texture_bytes(desc)) {
+                        done->error = "its cooked file changed or is gone";
+                    } else {
+                        done->bytes.resize(static_cast<usize>(end - begin));
+                        in.seekg(static_cast<std::streamoff>(texture::k_file_header_bytes + begin));
+                        in.read(reinterpret_cast<char*>(done->bytes.data()),
+                                static_cast<std::streamsize>(done->bytes.size()));
+                        done->ok = static_cast<bool>(in);
+                        if (!done->ok) done->error = "its cooked file is cut short";
+                    }
+                }
+            } catch (const std::exception& ex) {
+                done->ok = false;
+                done->error = ex.what();
+            }
+            if (!done->ok) done->bytes.clear();
+            const std::lock_guard lock(m_mutex);
+            m_levels_done.push_back(std::move(done));
+        });
+    }
 }
 
 void TextureLibrary::update() {
@@ -478,9 +681,11 @@ void TextureLibrary::update() {
         if (spent > 0 && spent + bytes > upload_bytes_per_update) break; // next frame
         spent += bytes;
         --m_entries[d.ref].uploading;
-        if (current) upload(d);
+        if (current) upload(d, m_whole);
     }
     m_to_upload.erase(m_to_upload.begin(), m_to_upload.begin() + static_cast<std::ptrdiff_t>(taken));
+    take_levels();
+    stream();
     // Textures no drawn material has used for a while leave the GPU.
     for (Entry& e : m_entries) {
         if (!e.used && e.status == Status::ready && !e.queued && e.cooking == 0 && e.uploading == 0 &&
@@ -489,6 +694,8 @@ void TextureLibrary::update() {
             e.id = render::k_no_texture;
             e.status = Status::unloaded;
             e.bytes = 0;
+            e.contents.reset();
+            e.reading = false; // (a read under way is dropped: the id is gone)
             ++m_version;
         }
     }
@@ -508,9 +715,10 @@ void TextureLibrary::reload() {
 }
 
 void TextureLibrary::wait_cooked() {
-    while (m_running > 0 || !m_waiting_to_cook.empty()) {
-        m_jobs->wait(m_group);
-        take_done(); // starts what waits
+    while (m_running > 0 || !m_waiting_to_cook.empty() || m_reading > 0) {
+        m_jobs->wait(m_group); // cooks and level reads both land meanwhile
+        take_done();           // starts what waits
+        take_levels();         // (a failed read queues a cook again)
     }
 }
 
@@ -518,7 +726,9 @@ void TextureLibrary::finish() {
     wait_cooked();
     const u64 budget = upload_bytes_per_update;
     upload_bytes_per_update = ~u64{0};
+    m_whole = true;
     update();
+    m_whole = false;
     upload_bytes_per_update = budget;
 }
 
