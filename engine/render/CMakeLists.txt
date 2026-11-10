@@ -9,6 +9,7 @@ giant_module(render
     src/shadow_pages.cpp
     src/voxel_light.cpp
     src/exposure.cpp
+    src/brdf.cpp
   DEPENDS core rhi geometry voxel
 )
 giant_shaders(render
@@ -69,6 +70,7 @@ giant_module_tests(render
     tests/test_instance_store.cpp
     tests/test_skin.cpp
     tests/test_exposure.cpp
+    tests/test_brdf.cpp
 )
 if(GIANT_BUILD_TESTS)
   # The streaming tests check the module's own streamer directly.

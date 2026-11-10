@@ -2516,4 +2516,92 @@ GIANT_TEST("render: d3d12 materials sample colour, normal and occlusion textures
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }
+
+GIANT_TEST("render: d3d12 rough metal keeps its light: the split sum with multi-scatter put back") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A plane facing the camera in an even grey surround (sky and ground
+    // alike), no sun: a white furnace for its reflections.
+    const DVec3 camera{0.0, 5.0, 0.0};
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].rotation = Quat{0.70710678f, 0.0f, 0.0f, 0.70710678f};
+    instances[0].scale = {4.0f, 4.0f, 4.0f};
+    instances[0].position = camera + DVec3{0.0, 0.0, -2.0};
+    std::vector<Material> materials(1);
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.specular_antialiasing = false;
+    frame.view.position = camera;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.3f, 0.3f, 0.3f};
+    frame.lighting.ground_light = {0.3f, 0.3f, 0.3f};
+    const auto brightness = [&](float base, float roughness, float metal) {
+        materials[0] = Material{};
+        materials[0].base_color = {base, base, base};
+        materials[0].roughness = roughness;
+        materials[0].metallic = metal;
+        for (int i = 0; i < 6; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        const std::vector<u8> image = device->read_texture(target);
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + k_w / 2) * 4;
+        return i + 3 < image.size() ? static_cast<int>(image[i + 1]) : -1;
+    };
+    const int smooth = brightness(1.0f, 0.1f, 1.0f);
+    const int medium = brightness(1.0f, 0.5f, 1.0f);
+    const int rough = brightness(1.0f, 1.0f, 1.0f);
+    const int white = brightness(1.0f, 1.0f, 0.0f);
+    const int grey_metal = brightness(0.5f, 1.0f, 1.0f);
+    const int grey_smooth = brightness(0.5f, 0.1f, 1.0f);
+    std::printf("    white metal: smooth %d, medium %d, rough %d; rough white dielectric %d; grey metal: rough %d, "
+                "smooth %d\n",
+                smooth, medium, rough, white, grey_metal, grey_smooth);
+    GIANT_CHECK(smooth > 20);
+    // A white metal reflects everything at any roughness (one bounce keeps
+    // only 31% head on at roughness 1; the rest comes back).
+    GIANT_CHECK(std::abs(rough - smooth) * 100 <= smooth * 8 && std::abs(medium - smooth) * 100 <= smooth * 8);
+    // A white dielectric keeps about as much (diffuse takes what the
+    // highlight leaves), never more.
+    GIANT_CHECK(white <= smooth + 3 && white * 100 >= smooth * 85);
+    // A grey metal (f0 0.5) loses light with roughness, as the table says:
+    // head on at roughness 1 one bounce keeps 0.31 of f0, multi-scatter
+    // adds about 0.09 (0.24 of the surround in all, some 51 in sRGB),
+    // where smooth it keeps 0.5 (about 93; without the table both would).
+    GIANT_CHECK(grey_metal < rough - 10);
+    GIANT_CHECK(grey_metal >= 38 && grey_metal <= 66);
+    GIANT_CHECK(grey_smooth - grey_metal > 20);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
 #endif

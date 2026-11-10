@@ -922,6 +922,7 @@ private:
     u64 m_texture_bytes = 0;             // resident, all slots
     rhi::BufferHandle m_feedback;        // u32 per material: ceil(-log2 footprint) + 1, largest
     rhi::BufferHandle m_feedback_zero;   // zeros, copied over it each frame
+    rhi::BufferHandle m_dfg;             // the split-sum BRDF table (src/brdf.h), made at init
     rhi::BufferHandle m_feedback_readback[3];
     u64 m_feedback_frame[3] = {~u64{0}, ~u64{0}, ~u64{0}};
     u64 m_feedback_taken = ~u64{0};

@@ -5,6 +5,7 @@
 #include "giant/geometry/mesh.h"
 #include "cells.h"
 #include "decals.h"
+#include "brdf.h"
 #include "exposure.h"
 #include "instance_store.h"
 #include "gpu_layout.h"
@@ -235,7 +236,7 @@ Renderer::~Renderer() {
         m_device.destroy(t.next);
     }
     for (const rhi::BufferHandle b : {m_feedback, m_feedback_zero, m_feedback_readback[0], m_feedback_readback[1],
-                                      m_feedback_readback[2]}) {
+                                      m_feedback_readback[2], m_dfg}) {
         m_device.destroy(b);
     }
     m_device.destroy(m_depth);
@@ -451,6 +452,20 @@ bool Renderer::init() {
         if (!m_feedback.valid() || !m_feedback_zero.valid() || !m_feedback_readback[0].valid() ||
             !m_feedback_readback[1].valid() || !m_feedback_readback[2].valid()) {
             log_error("render", "could not create texture streaming's feedback");
+            return false;
+        }
+    }
+    // The split-sum BRDF table (8 KiB; some 50 ms of CPU, so made once a
+    // process and shared by every renderer).
+    {
+        static const std::vector<float> dfg = make_dfg_table();
+        rhi::BufferDesc desc;
+        desc.size = dfg.size() * sizeof(float);
+        desc.usage = rhi::BufferUsage::shader_read;
+        desc.name = "BRDF table";
+        m_dfg = m_device.create_buffer(desc, bytes_of(dfg));
+        if (!m_dfg.valid()) {
+            log_error("render", "could not create the BRDF table");
             return false;
         }
     }
@@ -2610,6 +2625,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_stats.dust_puffs = extras.dust_count;
     extras.texture_feedback = feedback ? m_device.write_descriptor(m_feedback) : data.frame.descriptor;
     extras.feedback_materials = feedback ? m_feedback_count : 0u;
+    extras.dfg = m_device.read_descriptor(m_dfg);
+    extras.dfg_size = k_dfg_size;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;

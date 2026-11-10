@@ -362,8 +362,12 @@ struct ResolveExtras {
     // first feedback_materials (0: off).
     u32 texture_feedback;
     u32 feedback_materials;
+    // The split-sum BRDF table (src/brdf.h): dfg_size^2 float2.
+    u32 dfg;
+    u32 dfg_size;
+    u32 pad[2];
 };
-static_assert(sizeof(ResolveExtras) == 160);
+static_assert(sizeof(ResolveExtras) == 176);
 
 // resolve.slang's dust puff: centre camera-relative.
 struct GpuDustPuff {
