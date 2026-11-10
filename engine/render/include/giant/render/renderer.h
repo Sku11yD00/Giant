@@ -126,8 +126,9 @@ struct Material {
     TextureId roughness_metal_texture = k_no_texture;
     TextureId occlusion_texture = k_no_texture;
     // Ground: shaded from FrameInput::terrain_layers instead (its own
-    // values and textures where none are given). Texture-free: the layers
-    // map their textures by world position.
+    // values where none are given; its own textures never: the layers map
+    // theirs by world position). The voxel world (GI's bounce, the far
+    // field) still takes base_color: set it near the layers' average.
     bool terrain = false;
 };
 

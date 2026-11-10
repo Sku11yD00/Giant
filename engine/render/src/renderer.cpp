@@ -96,8 +96,12 @@ gpu::TerrainLayer to_gpu(const TerrainLayer& l, const DVec3& camera, Descriptor&
     out.textures[2] = descriptor(l.roughness_metal_texture, false);
     out.textures[3] = rhi::k_no_descriptor;
     out.tiling = finite_in(l.tiling, 0.05f, 1000.0f, 4.0f);
+    // A band's edge at the end of the range is open (level ground and
+    // sheer faces covered whole, not half by the soft edge's middle).
     out.min_slope = finite_in(l.min_slope, 0.0f, 90.0f, 0.0f);
     out.max_slope = finite_in(l.max_slope, 0.0f, 90.0f, 90.0f);
+    if (out.min_slope <= 0.0f) out.min_slope = -1.0e3f;
+    if (out.max_slope >= 90.0f) out.max_slope = 1.0e3f;
     out.slope_blend = finite_in(l.slope_blend, 0.0f, 90.0f, 5.0f);
     out.min_height = finite_in(l.min_height, -2.0e4f, 2.0e4f, -1.0e4f);
     out.max_height = finite_in(l.max_height, -2.0e4f, 2.0e4f, 1.0e4f);
@@ -2386,8 +2390,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_gpu_materials.push_back(to_gpu(m, texture_descriptor));
         const std::array<TextureId, 4> ids{m.base_color_texture, m.normal_texture, m.roughness_metal_texture,
                                            m.occlusion_texture};
-        if (std::all_of(ids.begin(), ids.end(), [](TextureId id) { return id == k_no_texture; })) {
-            continue;
+        if (m.terrain || std::all_of(ids.begin(), ids.end(), [](TextureId id) { return id == k_no_texture; })) {
+            continue; // (ground: the layers' textures are wanted below)
         }
         if (i < k_feedback_materials) {
             m_feedback_now.push_back({static_cast<u32>(i), ids});
