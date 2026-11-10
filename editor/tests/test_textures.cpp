@@ -281,7 +281,7 @@ GIANT_TEST("textures: closing with cooks queued returns without cooking them") {
     GIANT_CHECK(true);
 }
 
-GIANT_TEST("textures: a mesh's material draws its maps once they are ready; other shapes never do") {
+GIANT_TEST("textures: a mesh's material draws its maps once they are ready; a file without uvs never does") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::null;
     auto device = rhi::create_device(desc);

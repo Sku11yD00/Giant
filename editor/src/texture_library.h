@@ -80,7 +80,8 @@ public:
         float seconds = 0.0f;    // ready or failed: decoding, cooking or reading it
         u32 generation = 0;      // which request a finished job answers (reload asks again)
         bool queued = false;     // waiting to start cooking
-        u32 jobs = 0;            // cooking (results not yet taken)
+        u32 cooking = 0;         // jobs cooking it (results not yet taken; one at a time)
+        u32 uploading = 0;       // finished results waiting to upload
         bool used = true;        // by a drawn material (set_used); newly requested ones count as used
         u64 unused_since = 0;    // the update() count when it stopped being used
     };
@@ -141,6 +142,8 @@ private:
     void queue(Ref ref);
     void start_waiting();
     void cook(Key key, Ref ref, u32 generation, u32 max_side);
+    void cook_into(const Key& key, u32 max_side, Done& done);
+    std::filesystem::path cache_file(const Key& key, u32 max_side) const;
     void upload(Done& done);
     void take_done();
 

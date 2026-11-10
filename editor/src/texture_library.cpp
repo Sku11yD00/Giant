@@ -145,12 +145,17 @@ TextureLibrary::~TextureLibrary() {
 }
 
 std::filesystem::path TextureLibrary::cache_file(const Key& key) const {
+    return cache_file(key, max_size);
+}
+
+std::filesystem::path TextureLibrary::cache_file(const Key& key, u32 max_side) const {
     if (m_cache.empty()) return {};
     bool ok = true;
     // The key (with the cooker's file version) names the texture; the
     // files as they are now, its version.
     const u64 named = hash_u64(static_cast<u64>(KeyHash{}(key)), texture::k_file_version);
-    u64 state = hash_file_state(k_fnv_basis, key.path, ok);
+    u64 state = hash_u64(k_fnv_basis, max_side); // a cook capped smaller is another version
+    state = hash_file_state(state, key.path, ok);
     if (key.slot == Slot::roughness_metal && !key.normal.empty()) {
         bool normal_ok = true;
         state = hash_file_state(state, key.normal, normal_ok);
@@ -238,12 +243,18 @@ void TextureLibrary::queue(Ref ref) {
 void TextureLibrary::start_waiting() {
     // At most one cook a worker at once: each holds its image, mips and
     // blocks only while it runs, and finished ones show while others wait.
-    while (m_running < m_workers && !m_waiting_to_cook.empty()) {
-        const Ref ref = m_waiting_to_cook.front();
-        m_waiting_to_cook.pop_front();
+    // A key already cooking waits for that cook (two would race over its
+    // cache file).
+    for (usize i = 0; i < m_waiting_to_cook.size() && m_running < m_workers;) {
+        const Ref ref = m_waiting_to_cook[i];
         Entry& e = m_entries[ref];
+        if (e.cooking > 0) {
+            ++i;
+            continue;
+        }
+        m_waiting_to_cook.erase(m_waiting_to_cook.begin() + static_cast<std::ptrdiff_t>(i));
         e.queued = false;
-        ++e.jobs;
+        ++e.cooking;
         ++m_running;
         m_jobs->submit(m_group, [this, key = e.key, ref, generation = e.generation, side = max_size] {
             cook(key, ref, generation, side);
@@ -252,23 +263,41 @@ void TextureLibrary::start_waiting() {
 }
 
 // On a worker: the texture from the cache, else decoded and cooked (and
-// cached). Never throws: a failure is a failed Done.
+// cached). Always answers with a Done (unless closing): a failure, or even
+// an exception, is a failed one.
 void TextureLibrary::cook(Key key, Ref ref, u32 generation, u32 max_side) {
     if (m_stopping.load(std::memory_order_relaxed)) return; // closing: nobody will take it
-    const auto begin = std::chrono::steady_clock::now();
-    auto done = std::make_unique<Done>();
+    std::unique_ptr<Done> done;
+    try {
+        done = std::make_unique<Done>();
+        cook_into(key, max_side, *done);
+    } catch (const std::exception& e) {
+        if (done == nullptr) done = std::make_unique<Done>(); // (if this throws too, JobSystem reports it)
+        done->ok = false;
+        done->error = key.path + ": " + e.what();
+    } catch (...) {
+        if (done == nullptr) done = std::make_unique<Done>();
+        done->ok = false;
+        done->error = key.path + ": cooking failed";
+    }
     done->ref = ref;
     done->generation = generation;
-    try {
+    const std::lock_guard lock(m_mutex);
+    m_done.push_back(std::move(done));
+}
+
+void TextureLibrary::cook_into(const Key& key, u32 max_side, Done& result) {
+    const auto begin = std::chrono::steady_clock::now();
+    Done* done = &result;
+    {
         const texture::Kind kind = kind_of(key.slot);
-        const std::filesystem::path cached = cache_file(key);
+        const std::filesystem::path cached = cache_file(key, max_side); // (max_size may change meanwhile)
         if (!cached.empty()) {
             std::vector<u8> bytes;
             std::string ignored;
             std::error_code ec;
             if (std::filesystem::is_regular_file(cached, ec) && read_bytes(cached, bytes, ignored) &&
-                texture::read_file(bytes, done->cooked, ignored) && done->cooked.kind == kind &&
-                std::max(done->cooked.desc.width, done->cooked.desc.height) <= max_side) {
+                texture::read_file(bytes, done->cooked, ignored) && done->cooked.kind == kind) {
                 done->ok = true;
                 done->from_cache = true;
             }
@@ -322,27 +351,20 @@ void TextureLibrary::cook(Key key, Ref ref, u32 generation, u32 max_side) {
                 } else {
                     // The key's older versions (the file since edited) go.
                     const std::string prefix = cached.filename().string().substr(0, 17); // "<key hash>-"
-                    for (const auto& old : std::filesystem::directory_iterator(m_cache, ec)) {
-                        const std::string name = old.path().filename().string();
+                    std::filesystem::directory_iterator it(m_cache, ec), end;
+                    for (; !ec && it != end; it.increment(ec)) {
+                        const std::string name = it->path().filename().string();
                         if (name.size() == cached.filename().string().size() && name.starts_with(prefix) &&
-                            name.ends_with(".gtex") && old.path() != cached) {
+                            name.ends_with(".gtex") && it->path() != cached) {
                             std::error_code ignored_ec;
-                            std::filesystem::remove(old.path(), ignored_ec);
+                            std::filesystem::remove(it->path(), ignored_ec);
                         }
                     }
                 }
             }
         }
-    } catch (const std::exception& e) {
-        done->ok = false;
-        done->error = key.path + ": " + e.what();
-    } catch (...) {
-        done->ok = false;
-        done->error = key.path + ": cooking failed";
     }
     done->seconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - begin).count();
-    const std::lock_guard lock(m_mutex);
-    m_done.push_back(std::move(done));
 }
 
 void TextureLibrary::take_done() {
@@ -354,9 +376,12 @@ void TextureLibrary::take_done() {
     for (auto& d : done) {
         --m_running;
         Entry& e = m_entries[d->ref];
-        --e.jobs;
+        --e.cooking;
         // Asked for again since (reload): the newer answer counts.
-        if (d->generation == e.generation) m_to_upload.push_back(std::move(d));
+        if (d->generation == e.generation) {
+            ++e.uploading;
+            m_to_upload.push_back(std::move(d));
+        }
     }
     start_waiting();
 }
@@ -413,12 +438,13 @@ void TextureLibrary::update() {
         const u64 bytes = current && d.ok ? d.cooked.contents.size() : 0;
         if (spent > 0 && spent + bytes > upload_bytes_per_update) break; // next frame
         spent += bytes;
+        --m_entries[d.ref].uploading;
         if (current) upload(d);
     }
     m_to_upload.erase(m_to_upload.begin(), m_to_upload.begin() + static_cast<std::ptrdiff_t>(taken));
     // Textures no drawn material has used for a while leave the GPU.
     for (Entry& e : m_entries) {
-        if (!e.used && e.status == Status::ready && !e.queued && e.jobs == 0 &&
+        if (!e.used && e.status == Status::ready && !e.queued && e.cooking == 0 && e.uploading == 0 &&
             m_updates - e.unused_since >= unload_after_updates) {
             if (m_renderer != nullptr) m_renderer->remove_texture(e.id);
             e.id = render::k_no_texture;
@@ -432,7 +458,9 @@ void TextureLibrary::update() {
 void TextureLibrary::reload() {
     for (Ref ref = 0; ref < m_entries.size(); ++ref) {
         Entry& e = m_entries[ref];
-        if (e.status == Status::unloaded) continue; // loads from its file when used again
+        if (e.status == Status::unloaded || (e.status == Status::ready && !e.used)) {
+            continue; // loads from its file when used again (an unused one is on its way out)
+        }
         if (e.status == Status::failed) e.status = Status::cooking;
         e.error.clear();
         queue(ref);
