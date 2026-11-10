@@ -455,9 +455,10 @@ bool Renderer::init() {
             return false;
         }
     }
-    // The split-sum BRDF table (8 KiB, a few ms of CPU once).
+    // The split-sum BRDF table (8 KiB; some 50 ms of CPU, so made once a
+    // process and shared by every renderer).
     {
-        const std::vector<float> dfg = make_dfg_table();
+        static const std::vector<float> dfg = make_dfg_table();
         rhi::BufferDesc desc;
         desc.size = dfg.size() * sizeof(float);
         desc.usage = rhi::BufferUsage::shader_read;

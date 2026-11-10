@@ -521,7 +521,7 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
     // reflection's cone the occlusion's cone hides (Lagarde 2014).
     ambient_diffuse *= occlusion;
     const float spec_occlusion =
-        saturate(pow(n_dot_v + occlusion, exp2(-16.0 * sqrt(alpha) - 1.0)) - 1.0 + occlusion);
+        saturate(pow(n_dot_v + occlusion, exp2(-16.0 * alpha - 1.0)) - 1.0 + occlusion); // (alpha: linear roughness)
     // The voxel cone: what it met, and the dimmed hemisphere past it.
     ambient_specular = lerp(ambient_specular, cone.rgb + (1.0 - cone.a) * ambient_specular, cone_weight);
     spec_weight = fss_ess * spec_occlusion; // the screen's reflections too

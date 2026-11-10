@@ -2583,8 +2583,10 @@ GIANT_TEST("render: d3d12 rough metal keeps its light: the split sum with multi-
     const int rough = brightness(1.0f, 1.0f, 1.0f);
     const int white = brightness(1.0f, 1.0f, 0.0f);
     const int grey_metal = brightness(0.5f, 1.0f, 1.0f);
-    std::printf("    white metal: smooth %d, medium %d, rough %d; rough white dielectric %d; rough grey metal %d\n",
-                smooth, medium, rough, white, grey_metal);
+    const int grey_smooth = brightness(0.5f, 0.1f, 1.0f);
+    std::printf("    white metal: smooth %d, medium %d, rough %d; rough white dielectric %d; grey metal: rough %d, "
+                "smooth %d\n",
+                smooth, medium, rough, white, grey_metal, grey_smooth);
     GIANT_CHECK(smooth > 20);
     // A white metal reflects everything at any roughness (one bounce keeps
     // only 31% head on at roughness 1; the rest comes back).
@@ -2592,8 +2594,13 @@ GIANT_TEST("render: d3d12 rough metal keeps its light: the split sum with multi-
     // A white dielectric keeps about as much (diffuse takes what the
     // highlight leaves), never more.
     GIANT_CHECK(white <= smooth + 3 && white * 100 >= smooth * 85);
-    // A grey metal is darker.
+    // A grey metal (f0 0.5) loses light with roughness, as the table says:
+    // head on at roughness 1 one bounce keeps 0.31 of f0, multi-scatter
+    // adds about 0.09 (0.24 of the surround in all, some 51 in sRGB),
+    // where smooth it keeps 0.5 (about 93; without the table both would).
     GIANT_CHECK(grey_metal < rough - 10);
+    GIANT_CHECK(grey_metal >= 38 && grey_metal <= 66);
+    GIANT_CHECK(grey_smooth - grey_metal > 20);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

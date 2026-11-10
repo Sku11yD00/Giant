@@ -51,15 +51,4 @@ GIANT_TEST("brdf: the table holds the points it names and has converged") {
             GIANT_CHECK(std::abs(a1 - a2) < 0.005f && std::abs(b1 - b2) < 0.005f);
         }
     }
-    // Multi-scatter compensation (resolve.slang): with f0 = 1 the surface
-    // keeps everything again, at any roughness.
-    for (const float roughness : {0.1f, 0.5f, 1.0f}) {
-        dfg_point(0.7f, roughness, 512, a, b);
-        const float ess = a + b;
-        const float ems = 1.0f - ess;
-        const float f_avg = 1.0f; // f0 + (1 - f0) / 21 at f0 = 1
-        const float fss_ess = a + b;
-        const float fms = fss_ess * f_avg / (1.0f - ems * f_avg);
-        GIANT_CHECK(std::abs(fss_ess + fms * ems - 1.0f) < 1e-4f);
-    }
 }
