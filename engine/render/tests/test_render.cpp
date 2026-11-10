@@ -103,6 +103,16 @@ GIANT_TEST("render: the scene is one raster draw and one shading pass on the nul
 }
 
 namespace {
+// A material texture's description.
+rhi::TextureDesc material_desc(u32 width, u32 height, rhi::Format format) {
+    rhi::TextureDesc d;
+    d.width = width;
+    d.height = height;
+    d.format = format;
+    d.usage = rhi::TextureUsage::sampled;
+    return d;
+}
+
 struct NullScene {
     std::unique_ptr<rhi::Device> device;
     std::unique_ptr<Renderer> renderer;
@@ -662,6 +672,32 @@ GIANT_TEST("render: shadow pages asked for are drawn, a pass per level, and cach
     instances[1].position.x += 0.5;
     st = s.draw(frame);
     GIANT_CHECK(st.shadow_drawn >= 2 && st.shadow_draws == 2);
+    // A cut-out material in the frame: every page is drawn again (they cast
+    // by alpha now), each level twice (solid, then cut out by alpha); the
+    // cube points at the material from before, so only the material changes.
+    instances[1].material = 1;
+    frame.instances = instances;
+    std::vector<Material> cut(2);
+    frame.materials = cut;
+    s.draw(frame);
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_draws == 0); // settled
+    cut[1].alpha_cutoff = 0.5f;
+    cut[1].base_color_texture =
+        s.renderer->add_texture(material_desc(4, 4, rhi::Format::rgba8_srgb), std::vector<u8>(64, 255));
+    frame.materials = cut;
+    st = s.draw(frame);
+    GIANT_CHECK(cut[1].base_color_texture != k_no_texture && st.shadow_drawn == 3 && st.shadow_draws == 4);
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_draws == 0); // cached again
+    cut[1].alpha_cutoff = 0.3f; // a new cutoff: drawn again
+    frame.materials = cut;
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_drawn == 3 && st.shadow_draws == 4);
+    cut[1].alpha_cutoff = 0.0f; // solid again: drawn again, once a level
+    frame.materials = cut;
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_drawn == 3 && st.shadow_draws == 2);
     // The budget: one page a frame (coarse first), the rest wait.
     frame.settings.shadow_pages_per_frame = 1;
     pages.invalidate_all();
@@ -2233,15 +2269,6 @@ std::vector<u8> solid_bc1(u16 rgb565) {
 }
 std::vector<u8> solid_bc4(u8 value) { return {value, value, 0, 0, 0, 0, 0, 0}; }
 
-rhi::TextureDesc material_desc(u32 width, u32 height, rhi::Format format) {
-    rhi::TextureDesc d;
-    d.width = width;
-    d.height = height;
-    d.format = format;
-    d.usage = rhi::TextureUsage::sampled;
-    return d;
-}
-
 } // namespace
 
 GIANT_TEST("render: textures for materials are added, refused, removed and reused") {
@@ -3269,6 +3296,167 @@ GIANT_TEST("render: d3d12 leaves: a two-sided sheet is seen from behind, and the
     GIANT_CHECK(all_through[1] > lit_through[1] && past_one == all_through);
     GIANT_CHECK(metal_through[1] + 40 < lit_through[1]);
     GIANT_CHECK(sunlit_under[1] > two_sided[1] + 40); // the flipped normal faces the sun
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("render: cut-out materials draw visibility in a pass of their own, only with a texture to cut by") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = {0.0, 0.0, -5.0};
+    instances[1].mesh = s.renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = {2.0, 0.0, -5.0};
+    instances[1].material = 1;
+    std::vector<Material> materials(2);
+    FrameInput frame;
+    frame.instances = instances;
+    frame.view.position = {0.0, 1.0, 0.0};
+    const auto draws = [&] {
+        frame.materials = materials;
+        return s.settle(frame).draws;
+    };
+    materials[1].alpha_cutoff = 0.5f; // no texture: solid, no pass of its own
+    const u32 untextured = draws();
+    materials[1].alpha_cutoff = 0.0f;
+    GIANT_CHECK(draws() == untextured);
+    std::vector<u8> texels(4 * 4 * 4, 255);
+    materials[1].base_color_texture = s.renderer->add_texture(material_desc(4, 4, rhi::Format::rgba8_srgb), texels);
+    GIANT_CHECK(materials[1].base_color_texture != k_no_texture);
+    const u32 one = draws(); // textured, solid
+    materials[1].alpha_cutoff = 0.5f;
+    const u32 per_kind = draws() - one; // its pass's draws (once per raster pass of the frame)
+    GIANT_CHECK(per_kind > 0 && per_kind <= 2);
+    materials[1].two_sided = true; // a two-sided cut-out: still one pass of its own
+    GIANT_CHECK(draws() == one + per_kind);
+    materials[0].two_sided = true; // and the plane two-sided: another
+    GIANT_CHECK(draws() == one + 2 * per_kind);
+    materials[1].alpha_cutoff = 0.0f;
+    materials[0].two_sided = false;
+    GIANT_CHECK(draws() == one + per_kind); // the two-sided cube beside the default
+    GIANT_CHECK(!s.device->device_lost());
+}
+
+GIANT_TEST("render: d3d12 cut-outs: cut-away texels show what is behind, and let the sun through") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // 4x4 white texels: opaque, cut away, and opaque on the left half
+    // (u < 0.5) only.
+    const auto texture = [&](auto&& alpha) {
+        std::vector<u8> texels(4 * 4 * 4, 255);
+        for (u32 i = 0; i < 16; ++i) texels[i * 4 + 3] = alpha(i % 4);
+        return renderer->add_texture(material_desc(4, 4, rhi::Format::rgba8_srgb), texels);
+    };
+    const TextureId solid = texture([](u32) { return u8{255}; });
+    const TextureId clear = texture([](u32) { return u8{0}; });
+    const TextureId half = texture([](u32 x) { return x < 2 ? u8{255} : u8{0}; });
+    GIANT_CHECK(solid != k_no_texture && clear != k_no_texture && half != k_no_texture);
+
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.antialiasing = false;
+    frame.lighting.background = {0.0f, 0.0f, 1.0f}; // blue where nothing is drawn
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.1f, 0.1f, 0.1f};
+    frame.lighting.ground_light = {0.1f, 0.1f, 0.1f};
+    std::vector<Instance> instances;
+    std::vector<Material> materials;
+    const auto draw = [&] {
+        frame.instances = instances;
+        frame.materials = materials;
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 8 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 && st.shadow_waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto pixel = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        return std::array<int, 3>{image[i], image[i + 1], image[i + 2]};
+    };
+
+    // A 2 m card facing the camera, cut out on one half: that half shows
+    // the blue background, the other the white card.
+    instances.assign(1, Instance{});
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].rotation = Quat{0.70710678f, 0.0f, 0.0f, 0.70710678f};
+    instances[0].scale = {2.0f, 2.0f, 2.0f};
+    instances[0].position = DVec3{0.0, 0.0, -2.0};
+    materials.assign(1, Material{});
+    materials[0].base_color = {1.0f, 1.0f, 1.0f};
+    materials[0].base_color_texture = half;
+    materials[0].alpha_cutoff = 0.5f;
+    frame.view.position = DVec3{0.0, 0.0, 0.0};
+    frame.lighting.sun_direction = Vec3{0.0f, 0.0f, 1.0f};
+    const auto card = draw();
+    const auto left = pixel(card, k_w / 2 - 12, k_h / 2);
+    const auto right = pixel(card, k_w / 2 + 12, k_h / 2);
+    const auto is_blue = [](const std::array<int, 3>& p) { return p[2] > p[0] + 100; };
+    const auto is_white = [](const std::array<int, 3>& p) { return p[0] > 100 && std::abs(p[0] - p[2]) < 30; };
+    std::printf("    card: left %d %d %d, right %d %d %d\n", left[0], left[1], left[2], right[0], right[1], right[2]);
+    GIANT_CHECK((is_blue(left) && is_white(right)) || (is_white(left) && is_blue(right)));
+    materials[0].alpha_cutoff = 0.0f; // solid: both halves drawn
+    const auto whole = draw();
+    GIANT_CHECK(is_white(pixel(whole, k_w / 2 - 12, k_h / 2)) && is_white(pixel(whole, k_w / 2 + 12, k_h / 2)));
+
+    // A card 1 m over the ground, the sun at 45 degrees: the ground where
+    // its shadow falls, looked down at, is dark under a solid card and lit
+    // under one cut away.
+    instances.assign(2, Instance{});
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {40.0f, 1.0f, 40.0f};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[1].position = DVec3{0.0, 1.0, 0.0};
+    instances[1].material = 1;
+    materials.assign(2, Material{});
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[1].base_color = {1.0f, 1.0f, 1.0f};
+    materials[1].alpha_cutoff = 0.5f;
+    materials[1].two_sided = true;
+    frame.view.position = DVec3{-1.0, 6.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f); // looking down
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{1.0f, 1.0f, 0.0f});
+    const auto ground_at_shadow = [&](TextureId t) {
+        materials[1].base_color_texture = t;
+        return pixel(draw(), k_w / 2, k_h / 2);
+    };
+    const auto shaded = ground_at_shadow(solid);
+    const auto through = ground_at_shadow(clear);
+    instances.resize(1); // no card
+    const auto open = pixel(draw(), k_w / 2, k_h / 2);
+    std::printf("    ground: under a solid card %d, a cut-away one %d, none %d\n", shaded[0], through[0], open[0]);
+    GIANT_CHECK(through[0] > shaded[0] + 40);
+    GIANT_CHECK(std::abs(through[0] - open[0]) <= 3);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

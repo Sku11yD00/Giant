@@ -362,3 +362,26 @@ GIANT_TEST("scene cells: a material is two-sided for the renderer only while som
     c.build();
     GIANT_CHECK(c.frame.materials.size() == 2 && two_sided() == 1);
 }
+
+GIANT_TEST("scene cells: a material is cut out for the renderer only while something uses it") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    world::Entity card;
+    card.transform.position = {10.0, 0.0, 10.0};
+    card.material.alpha_cutoff = 0.5f;
+    const world::EntityId id = c.scene.add(card);
+    c.add(20.0, 20.0);
+    c.build();
+    const auto cut = [&] {
+        usize n = 0;
+        for (const render::Material& m : c.frame.materials) n += m.alpha_cutoff > 0.0f ? 1 : 0;
+        return n;
+    };
+    GIANT_CHECK(c.frame.materials.size() == 2 && cut() == 1);
+    c.scene.remove(id); // its material lingers, unused
+    c.build();
+    GIANT_CHECK(c.frame.materials.size() == 2 && cut() == 0);
+    c.scene.add(card); // used again: the same entry, cut out again
+    c.build();
+    GIANT_CHECK(c.frame.materials.size() == 2 && cut() == 1);
+}

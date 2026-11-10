@@ -444,6 +444,20 @@ an offline cooker can use it without a device.
   normals towards the eye. `Material::translucency` (0 to 1) lets the sun
   through a thin surface: lit from behind, its base colour shines by the
   sun's light where the back side is unshadowed (clouds included).
+- **Cut-outs (photoreal part 6b).** `Material::alpha_cutoff` (with a base
+  colour texture) cuts a surface away where the texture's alpha is under
+  it. The visibility raster has a pipeline per material kind (one- or
+  two-sided, solid or cut out), each a draw of the frame's clusters that
+  skips other kinds; only the cut-out ones (ms_cut/vs_cut/ps_cut) carry uvs
+  and discard, so solid surfaces keep early depth. Sun shadows draw cut-outs
+  in a second draw with the same alpha test (a cut-out material coming,
+  going or changing redraws every shadow page). The texture cooker scales each
+  smaller colour level's alpha so as much of it stays over 0.5 as of the top
+  level's, so leaves do not thin away with distance (.gtex version 2).
+  The editor sends a material as two-sided or cut out only while something
+  uses it. Known gaps: each kind's draw still walks every visible cluster
+  (culling could split them by kind), and the voxel world (GI, far field)
+  takes cut-outs as solid (part 6c).
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

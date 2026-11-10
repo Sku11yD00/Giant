@@ -61,7 +61,7 @@ struct ResolvePush {
 };
 ConstantBuffer<ResolvePush> push : register(b0);
 
-static const uint k_material_bytes = 64; // gpu::Material; its textures at +32, flags at +48
+static const uint k_material_bytes = 64; // gpu::Material; textures +32, flags +48, translucency +52, alpha cutoff +56
 static const uint k_material_terrain = 1u;
 static const uint k_material_two_sided = 2u;
 static const uint k_no_texture = 0xFFFFFFFFu; // rhi::k_no_descriptor

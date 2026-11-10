@@ -74,6 +74,7 @@ Json entity_json(const Entity& e) {
             {"flutter", e.material.flutter},
             {"two_sided", e.material.two_sided},
             {"translucency", e.material.translucency},
+            {"alpha_cutoff", e.material.alpha_cutoff},
             {"visible", e.visible},
             {"body", world::to_string(e.body)}};
     if (e.mass != 0.0f) {
@@ -252,6 +253,9 @@ Json entity_properties() {
                                        "grass, cloth, thin sheets). Default false."}}},
         {"translucency", number(0, 1, "How much sun shines through it to the side away from the sun, tinted by its "
                                       "colour (leaves 0.3 to 0.6). Default 0.")},
+        {"alpha_cutoff", number(0, 1, "Cut-outs (leaves on cards, grass, fences): where the base colour map's alpha "
+                                      "is under this, nothing is there, in the image and in shadows (0.5 usual). "
+                                      "Needs a base_color map with alpha. Default 0: solid.")},
         {"maps", maps_schema()},
         {"visible", {{"type", "boolean"}}},
         {"body",
@@ -331,6 +335,7 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("flutter")) e.material.flutter = args["flutter"].get<float>();
     if (args.contains("two_sided")) e.material.two_sided = args["two_sided"].get<bool>();
     if (args.contains("translucency")) e.material.translucency = args["translucency"].get<float>();
+    if (args.contains("alpha_cutoff")) e.material.alpha_cutoff = args["alpha_cutoff"].get<float>();
     if (args.contains("maps")) {
         if (std::string bad = apply_maps(args["maps"], e.material.maps); !bad.empty()) return bad;
     }

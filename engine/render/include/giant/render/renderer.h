@@ -132,12 +132,17 @@ struct Material {
     // field) still takes base_color: set it near the layers' average.
     bool terrain = false;
     // Leaves, grass, cloth: seen from both sides (no back-face culling; the
-    // back's normal is turned to the viewer). A frame with any draws its
-    // visibility in two passes (one-sided, then two-sided).
+    // back's normal is turned to the viewer). Each kind of material
+    // in a frame (one- or two-sided, solid or cut out) is a visibility pass.
     bool two_sided = false;
     // Thin surfaces (leaves): how much of the sun shines through to the
     // side away from it (0 to 1), tinted by the base colour.
     float translucency = 0.0f;
+    // Cut-outs (leaves on cards, grass, fences): where the base colour
+    // texture's alpha is under this (0 to 1), nothing is there, in the
+    // image and in shadows. 0, or no base colour texture (yet): solid.
+    // Drawn in a visibility pass of their own.
+    float alpha_cutoff = 0.0f;
 };
 
 // One of the ground's layers (FrameInput::terrain_layers), for materials
@@ -508,7 +513,7 @@ struct RenderStats {
     u32 shadow_swayed = 0;    // of them, drawn again for what sways on them (RenderSettings::wind_shadow_pages_per_frame)
     u32 shadow_waiting = 0;   // pages asked for or changed, not drawn yet
     u32 shadow_missing = 0;   // pages asked for that found no room
-    u32 shadow_draws = 0;     // raster passes for them (one per level with pages to draw)
+    u32 shadow_draws = 0;     // raster passes for them (one per level with pages to draw, two with cut-out materials)
     // Global illumination (this frame, on the CPU).
     bool gi = false;      // on this frame
     u32 gi_lit = 0;       // voxel bricks lit this frame
@@ -820,10 +825,10 @@ private:
     u32 m_request_count = 0; // GPU streaming requests in the slot read last
     u64 m_requests_taken = ~u64{0}; // the frame whose requests were taken last
     // Pipelines.
-    rhi::PipelineHandle m_raster_mesh;   // invalid without mesh shaders
-    rhi::PipelineHandle m_raster_vertex;
-    rhi::PipelineHandle m_raster_mesh_two;   // two-sided materials: no back-face culling
-    rhi::PipelineHandle m_raster_vertex_two;
+    // By material kind (gpu::material_kind): two-sided ones cull no faces,
+    // cut-out ones drop pixels by alpha. Mesh ones invalid without mesh shaders.
+    std::array<rhi::PipelineHandle, 4> m_raster_mesh;
+    std::array<rhi::PipelineHandle, 4> m_raster_vertex;
     rhi::PipelineHandle m_resolve;
     rhi::PipelineHandle m_skin; // skin.slang
     u32 m_posed = 0;            // skinned meshes posed this frame
@@ -935,6 +940,9 @@ private:
     u32 m_shadow_draws = 0; // this frame
     rhi::PipelineHandle m_shadow_mesh; // invalid without mesh shaders
     rhi::PipelineHandle m_shadow_vertex;
+    rhi::PipelineHandle m_shadow_mesh_cut; // cut-out materials' shadows
+    rhi::PipelineHandle m_shadow_vertex_cut;
+    u64 m_shadow_cut_outs = 0xcbf29ce484222325ull; // the frame's cut-out materials, hashed (a change redraws all pages)
     rhi::PipelineHandle m_shadow_clear_pages;
     rhi::PipelineHandle m_shadow_clear_words;
     std::vector<u8> m_casts; // per frame instance: drawn as a mesh, so it casts

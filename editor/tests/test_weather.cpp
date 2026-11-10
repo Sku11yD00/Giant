@@ -241,6 +241,12 @@ GIANT_TEST("weather: the wind near the ground follows it, gusting harder in a st
     GIANT_CHECK(f.run("get_entity", {{"id", id}}).value["two_sided"] == true);
     GIANT_CHECK(!f.run("set_entity", {{"id", id}, {"translucency", 1.5}}).ok);
     GIANT_CHECK(f.run("undo").ok && !f.state.scene.find(id)->material.two_sided);
+    // Cut-outs: an alpha cutoff, by command, undoable.
+    GIANT_CHECK(f.run("set_entity", {{"id", id}, {"alpha_cutoff", 0.5}}).ok);
+    GIANT_CHECK(f.state.scene.find(id)->material.alpha_cutoff == 0.5f);
+    GIANT_CHECK(f.run("get_entity", {{"id", id}}).value["alpha_cutoff"].get<float>() == 0.5f);
+    GIANT_CHECK(!f.run("set_entity", {{"id", id}, {"alpha_cutoff", 1.5}}).ok);
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.find(id)->material.alpha_cutoff == 0.0f);
     // How far out things sway, and the shadow pages kept up for them.
     GIANT_CHECK(f.run("set_render_settings", {{"wind_distance", 80}, {"wind_shadow_pages_per_frame", 0}}).ok);
     GIANT_CHECK(f.state.render_settings.wind_distance == 80.0f && f.state.render_settings.wind_shadow_pages_per_frame == 0);

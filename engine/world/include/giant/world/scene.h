@@ -131,6 +131,9 @@ struct Material {
     // tinted by the base colour) to the side away from it.
     bool two_sided = false;
     float translucency = 0.0f;
+    // Cut-outs (leaves on cards, grass blades, fences): where the base
+    // colour map's alpha is under this (0 to 1), nothing is there. 0: solid.
+    float alpha_cutoff = 0.0f;
     MaterialMaps maps; // entities, kit pieces and scatter items (kept, not drawn, on decals and cloth)
     bool operator==(const Material&) const = default;
 };

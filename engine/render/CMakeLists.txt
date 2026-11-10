@@ -27,6 +27,10 @@ giant_shaders(render
     shaders/raster.slang:vs_main:vertex:raster_vs
     shaders/raster.slang:ps_main:pixel:raster_ps
     shaders/raster.slang:ps_shadow:pixel:raster_shadow_ps
+    shaders/raster.slang:ms_cut:mesh:raster_cut_ms
+    shaders/raster.slang:vs_cut:vertex:raster_cut_vs
+    shaders/raster.slang:ps_cut:pixel:raster_cut_ps
+    shaders/raster.slang:ps_shadow_cut:pixel:raster_shadow_cut_ps
     shaders/shadow_clear.slang:cs_pages:compute:shadow_clear_pages_cs
     shaders/shadow_clear.slang:cs_words:compute:shadow_clear_words_cs
     shaders/resolve.slang:vs_main:vertex:resolve_vs

@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <functional>
 
 namespace giant::texture {
 
@@ -252,6 +254,38 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
         return &normals[static_cast<usize>(k)];
     };
 
+    // Colour: the share of a level's texels whose alpha reaches the cutoff.
+    const float cutoff = options.coverage_cutoff;
+    const auto coverage = [cutoff](const Plane& level) {
+        usize kept = 0;
+        const usize texels = usize{level.width} * level.height;
+        for (usize i = 0; i < texels; ++i) kept += level.v[i * level.channels + 3] >= cutoff ? 1u : 0u;
+        return static_cast<double>(kept) / static_cast<double>(std::max<usize>(texels, 1));
+    };
+    // The alpha scale that gives `level` the coverage `wanted`, in one pass:
+    // the alpha that many texels reach, lifted to the cutoff (at most 4x: an
+    // alpha needing more is noise). Of the two counts of texels around the
+    // wanted share, the nearer.
+    std::vector<float> alphas;
+    const auto coverage_scale = [&](const Plane& level, double wanted) {
+        const usize texels = usize{level.width} * level.height;
+        alphas.resize(texels);
+        for (usize i = 0; i < texels; ++i) alphas[i] = level.v[i * level.channels + 3];
+        const double exact = wanted * static_cast<double>(texels);
+        const auto below = static_cast<usize>(std::floor(exact));
+        const usize kept = std::clamp<usize>(exact - static_cast<double>(below) >= 0.5 ? below + 1 : below, 1, texels);
+        // The kept-th largest alpha.
+        std::nth_element(alphas.begin(), alphas.begin() + static_cast<std::ptrdiff_t>(kept - 1), alphas.end(),
+                         std::greater<float>());
+        const float reached = alphas[kept - 1];
+        // Aimed at the alpha that rounds to the first byte at or over the
+        // cutoff, so the stored level keeps it.
+        const float byte = std::ceil(cutoff * 255.0f - 1e-3f);
+        const float target = (byte - 0.49f) / 255.0f;
+        return reached > target / 4.0f ? target / reached : 4.0f;
+    };
+
+    float alpha_scale = 1.0f;
     const auto to_image = [&](const Plane& level) {
         Image img;
         img.width = level.width;
@@ -271,7 +305,7 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
                         const float lin = a > 1.0f / 512.0f ? p[c] / a : p[4 + c];
                         t[c] = to_u8(linear_to_srgb(lin));
                     }
-                    t[3] = to_u8(a);
+                    t[3] = to_u8(a * alpha_scale);
                     break;
                 }
                 case Kind::normal: {
@@ -311,10 +345,15 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
     std::vector<Image> out;
     Plane level = resample(std::move(source), top_w, top_h);
     out.push_back(to_image(level));
+    // A cut-out (some texels each side of the cutoff) keeps its coverage.
+    const bool cut_out = options.kind == Kind::color && !options.small && cutoff > 0.0f && cutoff < 1.0f;
+    const double top_coverage = cut_out ? coverage(level) : 0.0;
+    const bool keep_coverage = cut_out && top_coverage > 0.0 && top_coverage < 1.0;
     while (level.width > 1 || level.height > 1) {
         const u32 w = std::max(1u, level.width / 2);
         const u32 h = std::max(1u, level.height / 2);
         level = resample(std::move(level), w, h);
+        alpha_scale = keep_coverage ? coverage_scale(level, top_coverage) : 1.0f;
         out.push_back(to_image(level));
     }
     return out;

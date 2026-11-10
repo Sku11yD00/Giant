@@ -75,6 +75,7 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
     key.bits[14] = terrain ? 1u : 0u;
     key.bits[15] = m.two_sided ? 1u : 0u;
     std::memcpy(&key.bits[16], &m.translucency, 4);
+    std::memcpy(&key.bits[17], &m.alpha_cutoff, 4);
     const auto [it, added] = out.lookup.try_emplace(key, static_cast<u32>(out.materials.size()));
     if (added) {
         render::Material r;
@@ -87,10 +88,11 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
         r.terrain = terrain;
         r.two_sided = m.two_sided;
         r.translucency = m.translucency;
+        r.alpha_cutoff = m.alpha_cutoff;
         if (out.textures != nullptr) set_textures(r, refs, *out.textures);
         out.materials.push_back(r);
         out.material_textures.push_back(refs);
-        out.material_two_sided.push_back(m.two_sided ? 1 : 0);
+        out.material_kind.push_back({m.two_sided, m.alpha_cutoff});
         out.users.push_back(0);
     }
     ++out.users[it->second];
@@ -635,7 +637,7 @@ void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const F
     out.lookup.clear();
     out.materials.clear();
     out.material_textures.clear();
-    out.material_two_sided.clear();
+    out.material_kind.clear();
     out.users.clear();
     out.order.clear();
     out.instances.clear(); // laid out afresh
@@ -753,6 +755,7 @@ bool same_kit(const world::Kit& a, const world::Kit& b) {
             p.material.metallic != q.material.metallic || !same3(p.material.emissive, q.material.emissive) ||
             p.material.sway != q.material.sway || p.material.flutter != q.material.flutter ||
             p.material.two_sided != q.material.two_sided || p.material.translucency != q.material.translucency ||
+            p.material.alpha_cutoff != q.material.alpha_cutoff ||
             !(p.material.maps == q.material.maps) ||
             p.decal.shape != q.decal.shape || p.decal.opacity != q.decal.opacity ||
             p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed) {
@@ -1045,10 +1048,13 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         }
         out.textures->set_used(used);
     }
-    // Only materials in use are two-sided for the renderer (one lingering
-    // unused would keep its second raster pass on; a few thousand at most).
+    // Only materials in use are two-sided or cut out for the renderer (one
+    // lingering unused would keep its kind's raster pass on; a few thousand
+    // at most).
     for (usize i = 0; i < out.materials.size(); ++i) {
-        out.materials[i].two_sided = out.users[i] > 0 && out.material_two_sided[i] != 0;
+        const bool used = out.users[i] > 0;
+        out.materials[i].two_sided = used && out.material_kind[i].two_sided;
+        out.materials[i].alpha_cutoff = used ? out.material_kind[i].alpha_cutoff : 0.0f;
     }
     // Textures that came (or changed) since: every material asking for them
     // draws them from now on.
