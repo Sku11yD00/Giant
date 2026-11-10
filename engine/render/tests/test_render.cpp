@@ -2185,6 +2185,137 @@ GIANT_TEST("render: textures for materials are added, refused, removed and reuse
     device->destroy(image);
 }
 
+GIANT_TEST("render: streamed textures change levels under a budget, oldest first, and report where they stand") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    RendererDesc rd;
+    rd.texture_stream_bytes_per_frame = 64; // two rows of the top level a frame
+    rd.texture_changes_per_frame = 1;
+    auto renderer = Renderer::create(*device, rd);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+
+    // Sizes: 8x8 rgba8 with 4 levels (256, 64, 16, 4 bytes).
+    rhi::TextureDesc d = material_desc(8, 8, rhi::Format::rgba8_unorm);
+    d.mips = 4;
+    GIANT_CHECK(texture_from_mip(d, 2).width == 2 && texture_from_mip(d, 2).mips == 2);
+    GIANT_CHECK(texture_from_mip(d, 9).width == 1 && texture_from_mip(d, 9).mips == 1);
+    GIANT_CHECK(coarsest_first_mip(d) == 3);
+    rhi::TextureDesc bc = material_desc(16, 16, rhi::Format::bc7_unorm);
+    bc.mips = 5;
+    GIANT_CHECK(coarsest_first_mip(bc) == 2); // 4x4: whole blocks
+    bc.width = 24;                             // 24, 12, 6: level 2 is not whole blocks
+    bc.mips = 4;
+    GIANT_CHECK(coarsest_first_mip(bc) == 1);
+    std::vector<u8> contents(rhi::texture_bytes(d));
+    for (usize i = 0; i < contents.size(); ++i) contents[i] = static_cast<u8>(i);
+    const std::span<const u8> all(contents);
+    {
+        // Refused: past the coarsest level, contents not of the levels given.
+        GIANT_CHECK(renderer->add_texture(d, all.subspan(320), 4) == k_no_texture);
+        GIANT_CHECK(renderer->add_texture(d, all, 2) == k_no_texture);
+        GIANT_CHECK(renderer->add_texture(d, {}, 2) == k_no_texture);
+    }
+    const TextureId a = renderer->add_texture(d, all.subspan(320), 2); // 2x2 and 1x1
+    const TextureId b = renderer->add_texture(d, all.subspan(256), 1);
+    GIANT_CHECK(a != k_no_texture && b != k_no_texture);
+    GIANT_CHECK(renderer->texture(a) != nullptr && renderer->texture(a)->width == 8 && renderer->texture(a)->mips == 4);
+    std::optional<TextureResidency> r = renderer->texture_residency(a);
+    GIANT_CHECK(r && r->first_mip == 2 && r->target_mip == 2 && r->bytes == 20 &&
+                r->wanted_mip == TextureResidency::k_not_seen);
+
+    // Refused changes: not finer, the wrong size, an unknown id, trims
+    // past the coarsest level.
+    GIANT_CHECK(!renderer->stream_texture(a, 2, {}));
+    GIANT_CHECK(!renderer->stream_texture(a, 0, std::vector<u8>(100)));
+    GIANT_CHECK(!renderer->stream_texture(12345, 0, {}));
+    GIANT_CHECK(!renderer->trim_texture(a, 4) && !renderer->trim_texture(a, 1) && !renderer->trim_texture(777, 3));
+
+    rhi::TextureDesc t;
+    t.width = 32;
+    t.height = 32;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle image = device->create_texture(t);
+    std::vector<Material> materials(2);
+    materials[0].base_color_texture = k_no_texture;
+    materials[0].roughness_metal_texture = a;
+    materials[1].occlusion_texture = b;
+    FrameInput frame;
+    frame.materials = materials;
+    const auto draw = [&] {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd == nullptr) return RenderStats{};
+        renderer->render(*cmd, image, frame);
+        device->end_frame();
+        return renderer->last_stats();
+    };
+    RenderStats st = draw();
+    GIANT_CHECK(st.textures == 2 && st.texture_bytes == 20 + 84 && st.textures_changing == 0);
+
+    // a: levels 0 and 1 (320 bytes) at 64 a frame; b, queued after it,
+    // waits. The top level's rows are 32 bytes, level 1's 16.
+    GIANT_CHECK(renderer->stream_texture(a, 0, std::vector<u8>(contents.begin(), contents.begin() + 320)));
+    GIANT_CHECK(renderer->stream_texture(b, 0, std::vector<u8>(contents.begin(), contents.begin() + 256)));
+    r = renderer->texture_residency(a);
+    GIANT_CHECK(r && r->first_mip == 2 && r->target_mip == 0);
+    u32 frames = 0;
+    u64 most = 0;
+    while (renderer->texture_residency(a)->first_mip != 0 && frames < 20) {
+        st = draw();
+        most = std::max(most, st.texture_stream_bytes);
+        ++frames;
+        GIANT_CHECK(renderer->texture_residency(b)->first_mip == 1 || renderer->texture_residency(a)->first_mip == 0);
+    }
+    GIANT_CHECK(frames == 5 && most == 64); // 320 / 64
+    r = renderer->texture_residency(a);
+    GIANT_CHECK(r && r->first_mip == 0 && r->target_mip == 0 && r->bytes == 340);
+    for (u32 i = 0; i < 10 && renderer->texture_residency(b)->first_mip != 0; ++i) draw();
+    GIANT_CHECK(renderer->texture_residency(b)->first_mip == 0 && renderer->last_stats().texture_bytes == 680);
+
+    // A trim waits for the next render(), then copies (no upload).
+    GIANT_CHECK(renderer->trim_texture(a, 3));
+    GIANT_CHECK(renderer->texture_residency(a)->first_mip == 0 && renderer->texture_residency(a)->target_mip == 3);
+    st = draw();
+    GIANT_CHECK(renderer->texture_residency(a)->first_mip == 3 && renderer->texture_residency(a)->bytes == 4);
+    GIANT_CHECK(st.texture_stream_bytes == 0 && st.texture_bytes == 340 + 4);
+    // A change given up: a stream replaced by a trim to where it is.
+    GIANT_CHECK(renderer->stream_texture(a, 1, std::vector<u8>(contents.begin() + 256, contents.begin() + 336)));
+    draw(); // under way: 64 of 80 bytes
+    GIANT_CHECK(renderer->texture_residency(a)->first_mip == 3 && renderer->texture_residency(a)->target_mip == 1);
+    GIANT_CHECK(renderer->trim_texture(a, 3));
+    GIANT_CHECK(renderer->texture_residency(a)->target_mip == 3);
+    st = draw();
+    GIANT_CHECK(renderer->texture_residency(a)->first_mip == 3 && st.texture_stream_bytes == 0 &&
+                st.textures_changing == 0);
+    // A texture removed mid-change; its slot's next texture starts clean.
+    GIANT_CHECK(renderer->stream_texture(a, 0, std::vector<u8>(contents.begin(), contents.begin() + 336)));
+    draw();
+    renderer->remove_texture(a);
+    GIANT_CHECK(!renderer->texture_residency(a));
+    const TextureId c = renderer->add_texture(d, all.subspan(320), 2);
+    GIANT_CHECK((c & 0xFFFFFu) == (a & 0xFFFFFu));
+    st = draw();
+    GIANT_CHECK(renderer->texture_residency(c)->first_mip == 2 && st.texture_stream_bytes == 0);
+    GIANT_CHECK(st.texture_bytes == 20 + 340);
+
+    // Past the materials the GPU is asked about, a textured material's
+    // textures count as wanting their finest level.
+    std::vector<Material> many(65537);
+    many.back().base_color_texture = c;
+    frame.materials = many;
+    draw();
+    GIANT_CHECK(renderer->texture_residency(c)->wanted_mip == 0);
+    GIANT_CHECK(renderer->texture_residency(b)->wanted_mip == TextureResidency::k_not_seen); // (the null GPU asks nothing)
+    // Unused for two windows (64 frames), it is not wanted.
+    frame.materials = materials;
+    for (int i = 0; i < 70; ++i) draw();
+    GIANT_CHECK(renderer->texture_residency(c)->wanted_mip == TextureResidency::k_not_seen);
+    device->destroy(image);
+}
+
 #if GIANT_RHI_HAS_D3D12
 GIANT_TEST("render: d3d12 materials sample colour, normal and occlusion textures") {
     rhi::DeviceDesc desc;
@@ -2351,6 +2482,38 @@ GIANT_TEST("render: d3d12 materials sample colour, normal and occlusion textures
     std::printf("    occlusion: ambient %d -> %d, sun %d -> %d\n", open_lum, shut_lum, sun_open, sun_shut);
     GIANT_CHECK(open_lum > 40 && shut_lum * 100 < open_lum * 75);
     GIANT_CHECK(std::abs(sun_open - sun_shut) <= 3);
+
+    // Streaming: the same three levels, only the smallest (blue) at first.
+    const std::span<const u8> all_levels(mipped);
+    const TextureId streamed = renderer->add_texture(mipped_desc, all_levels.subspan(20 * 8), 2);
+    GIANT_CHECK(streamed != k_no_texture);
+    Material streaming = plain;
+    streaming.base_color_texture = streamed;
+    // The feedback says which level the pixels need: 30 m off, 16 texels
+    // over about 3.7 pixels want level 2 (4 texels); 2 m off, level 0.
+    const auto far_streamed = pixel(draw(streaming, 30.0, head_on, 3.0f, 0.02f), k_w / 2, k_h / 2);
+    const std::optional<TextureResidency> far_wanted = renderer->texture_residency(streamed);
+    const auto near_blue = pixel(draw(streaming, 2.0, head_on, 3.0f, 0.02f), k_w / 2, k_h / 2);
+    const std::optional<TextureResidency> near_wanted = renderer->texture_residency(streamed);
+    GIANT_CHECK(far_wanted && near_wanted);
+    if (far_wanted && near_wanted) {
+        std::printf("    streaming: wanted far %u, near %u; first mip %u\n", far_wanted->wanted_mip,
+                    near_wanted->wanted_mip, near_wanted->first_mip);
+        GIANT_CHECK(far_wanted->wanted_mip == 2 && near_wanted->wanted_mip == 0 && near_wanted->first_mip == 2);
+    }
+    GIANT_CHECK(far_streamed[2] > 60 && near_blue[2] > 120 && near_blue[0] < 40); // only blue so far
+    // Its finer levels streamed in: red near; trimmed to level 1: green.
+    GIANT_CHECK(renderer->stream_texture(streamed, 0, std::vector<u8>(mipped.begin(), mipped.begin() + 20 * 8)));
+    const auto near_red = pixel(draw(streaming, 2.0, head_on, 3.0f, 0.02f), k_w / 2, k_h / 2);
+    GIANT_CHECK(renderer->texture_residency(streamed)->first_mip == 0);
+    GIANT_CHECK(renderer->trim_texture(streamed, 1));
+    const auto near_green = pixel(draw(streaming, 2.0, head_on, 3.0f, 0.02f), k_w / 2, k_h / 2);
+    GIANT_CHECK(renderer->texture_residency(streamed)->first_mip == 1);
+    std::printf("    streamed: red %d %d %d, trimmed %d %d %d\n", near_red[0], near_red[1], near_red[2],
+                near_green[0], near_green[1], near_green[2]);
+    GIANT_CHECK(near_red[0] > 120 && near_red[1] < 40 && near_red[2] < 40);
+    GIANT_CHECK(near_green[1] > 120 && near_green[0] < 40 && near_green[2] < 40);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }
 #endif

@@ -122,6 +122,14 @@ u64 texture_bytes(const TextureDesc& desc) {
     return layer * desc.layers;
 }
 
+u64 level_offset(const TextureDesc& desc, u32 mip) {
+    u64 at = 0;
+    for (u32 m = 0; m < std::min({mip, desc.mips, 32u}); ++m) {
+        at += level_bytes(desc.format, std::max(desc.width >> m, 1u), std::max(desc.height >> m, 1u));
+    }
+    return at;
+}
+
 const char* texture_desc_problem(const TextureDesc& desc) {
     if (desc.width == 0 || desc.height == 0 || level_row_bytes(desc.format, 1) == 0) {
         return "a texture needs a size and a known format";
@@ -168,9 +176,58 @@ const char* texture_desc_problem(const TextureDesc& desc) {
 
 const char* texture_contents_problem(const TextureDesc& desc, u64 contents_bytes) {
     if (contents_bytes == 0) {
-        return is_block_compressed(desc.format) ? "a block-compressed texture is made with its contents" : nullptr;
+        return nullptr;
     }
     return contents_bytes == texture_bytes(desc) ? nullptr : "a texture's contents do not fit its description";
+}
+
+namespace {
+
+// A texture whose levels may be streamed: one sampled layer, nothing else.
+bool streamable(const TextureDesc& desc) {
+    return desc.usage == TextureUsage::sampled && desc.layers == 1 && !desc.array;
+}
+
+} // namespace
+
+const char* write_texture_problem(const TextureDesc& desc, u32 mip, u32 first_row, u64 bytes) {
+    if (!streamable(desc)) {
+        return "only a sampled, single-layer texture is written by levels";
+    }
+    if (mip >= desc.mips) {
+        return "write_texture: no such level";
+    }
+    const u32 w = std::max(desc.width >> mip, 1u);
+    const u32 h = std::max(desc.height >> mip, 1u);
+    const u64 row = level_row_bytes(desc.format, w);
+    const u32 rows = level_rows(desc.format, h);
+    if (bytes == 0 || row == 0 || bytes % row != 0) {
+        return "write_texture: not whole rows of the level";
+    }
+    if (first_row >= rows || bytes / row > rows - first_row) {
+        return "write_texture: rows past the level's end";
+    }
+    return nullptr;
+}
+
+const char* copy_levels_problem(const TextureDesc& dst, u32 dst_mip, const TextureDesc& src, u32 src_mip, u32 count) {
+    if (!streamable(dst) || !streamable(src)) {
+        return "only sampled, single-layer textures copy levels";
+    }
+    if (dst.format != src.format) {
+        return "copy_texture_levels: the formats differ";
+    }
+    if (count == 0 || dst_mip >= dst.mips || src_mip >= src.mips || count > dst.mips - dst_mip ||
+        count > src.mips - src_mip) {
+        return "copy_texture_levels: no such levels";
+    }
+    for (u32 i = 0; i < count; ++i) {
+        if (std::max(dst.width >> (dst_mip + i), 1u) != std::max(src.width >> (src_mip + i), 1u) ||
+            std::max(dst.height >> (dst_mip + i), 1u) != std::max(src.height >> (src_mip + i), 1u)) {
+            return "copy_texture_levels: the levels' sizes differ";
+        }
+    }
+    return nullptr;
 }
 
 TransientMemory CommandList::upload(std::span<const u8> bytes) {

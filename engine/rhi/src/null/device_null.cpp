@@ -33,6 +33,7 @@ struct NullTexture {
     TextureDesc desc;
     std::vector<u8> pixels;
     ResourceState state = ResourceState::common;
+    u64 barrier_frame = ~u64{0}; // the frame a command list last moved it in (as d3d12 tracks it)
     u32 read = k_no_descriptor;
     u32 write = k_no_descriptor;
 };
@@ -242,6 +243,44 @@ public:
             texture.write = allocate_descriptor();
         }
         return m_textures.add(std::move(texture));
+    }
+
+    bool write_texture(TextureHandle h, u32 mip, u32 first_row, std::span<const u8> rows) override {
+        NullTexture* t = m_textures.get(h);
+        const char* problem = !m_recording ? "write_texture outside a frame"
+                              : t == nullptr ? "write_texture: a dead texture"
+                              : t->state != ResourceState::common || t->barrier_frame == m_frames
+                                  ? "write_texture: the texture is not in its common state (or was moved this frame)"
+                                                                  : write_texture_problem(t->desc, mip, first_row, rows.size());
+        if (problem != nullptr) {
+            log_error("rhi", problem);
+            return false;
+        }
+        const u64 row = level_row_bytes(t->desc.format, std::max(t->desc.width >> mip, 1u));
+        const u64 at = level_offset(t->desc, mip) + u64{first_row} * row;
+        std::copy(rows.begin(), rows.end(), t->pixels.begin() + static_cast<std::ptrdiff_t>(at));
+        m_stats.upload_bytes += rows.size();
+        return true;
+    }
+
+    bool copy_texture_levels(TextureHandle dst, u32 dst_mip, TextureHandle src, u32 src_mip, u32 count) override {
+        NullTexture* d = m_textures.get(dst);
+        const NullTexture* s = m_textures.get(src);
+        const char* problem = !m_recording ? "copy_texture_levels outside a frame"
+                              : d == nullptr || s == nullptr || d == s ? "copy_texture_levels: a dead texture, or one into itself"
+                              : d->state != ResourceState::common || s->state != ResourceState::common ||
+                                        d->barrier_frame == m_frames || s->barrier_frame == m_frames
+                                  ? "copy_texture_levels: a texture is not in its common state (or was moved this frame)"
+                                  : copy_levels_problem(d->desc, dst_mip, s->desc, src_mip, count);
+        if (problem != nullptr) {
+            log_error("rhi", problem);
+            return false;
+        }
+        const u64 from = level_offset(s->desc, src_mip);
+        const u64 bytes = level_offset(s->desc, src_mip + count) - from;
+        std::copy_n(s->pixels.begin() + static_cast<std::ptrdiff_t>(from), static_cast<std::ptrdiff_t>(bytes),
+                    d->pixels.begin() + static_cast<std::ptrdiff_t>(level_offset(d->desc, dst_mip)));
+        return true;
     }
 
     PipelineHandle create_pipeline(const GraphicsPipelineDesc& desc) override {
@@ -520,6 +559,7 @@ void NullCommandList::barrier(TextureHandle handle, ResourceState state) {
     GIANT_ASSERT(state != ResourceState::present, "only end_frame presents");
     if (t->state != state || state == ResourceState::shader_write) {
         ++m_device.stats().barriers;
+        t->barrier_frame = m_device.frames_completed();
     }
     t->state = state;
 }
