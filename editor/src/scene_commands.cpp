@@ -258,17 +258,9 @@ Json entity_properties() {
     };
 }
 
-// Whether the arguments give a look (base colour, roughness, metallic,
-// emissive or maps): if not, a mesh given takes its file's.
-bool look_given(const Json& args) {
-    for (const char* key : {"base_color", "roughness", "metallic", "emissive", "maps"}) {
-        if (args.contains(key)) return true;
-    }
-    return false;
-}
-
 // Returns what is wrong (and may have changed `e` partly), or "".
 std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
+    const std::string mesh_before = e.mesh;
     if (args.contains("name")) e.name = args["name"].get<std::string>();
     if (args.contains("shape")) {
         e.shape = world::shape_from_string(args["shape"].get<std::string>()).value_or(e.shape);
@@ -362,7 +354,12 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         if (loaded.mesh == nullptr) {
             return loaded.error;
         }
-        if (args.contains("mesh") && !look_given(args)) take_file_look(*loaded.mesh, e.material);
+        // A new file brings its look, unless one is given (giving the same
+        // file again keeps the look the entity has).
+        if (e.mesh != mesh_before && !look_given(args)) {
+            take_file_look(*loaded.mesh, e.material);
+            if (args.contains("maps")) apply_maps(args["maps"], e.material.maps); // normal_green_down
+        }
     }
     return {};
 }
@@ -1526,8 +1523,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "entities can draw it (create_entity with mesh). Returns its triangle and cluster "
          "counts. Already-imported files return at once unless reload is true (to pick up "
          "changes). Large files take a few seconds. Returns the file's own look too (material: "
-         "the material with the most triangles, its values and maps; images inside the file are "
-         "written to giant_cache/gltf_images), which entities given this mesh take unless they "
+         "the material with the most triangles: its values, and its maps when it covers at least "
+         "three quarters of the triangles; images inside the file named \"file.glb#image2\"), which entities given this mesh take unless they "
          "give base_color, roughness, metallic, emissive or maps. Not undoable: it loads an asset and changes no entity.",
          Json{{"type", "object"},
               {"additionalProperties", false},

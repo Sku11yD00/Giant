@@ -8,7 +8,6 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 
 namespace giant::editor {
 
@@ -23,55 +22,45 @@ std::string to_utf8(const std::filesystem::path& path) {
     return std::string(s.begin(), s.end());
 }
 
-// An image a material uses, as a path: the file beside the glTF, or the
-// bytes inside it written to `cache` (by a hash of them: the same image is
-// one file, written once). "" (with a warning) if it cannot be had.
-std::string image_path(const geometry::ImportedImage& image, const std::filesystem::path& cache,
+// An image a material uses, as a map names it: "<mesh>#image<N>" for one
+// inside the file (the texture cooker reads it from there), else the file
+// beside it, relative to where the mesh's path is relative to. "" (with a
+// warning) if it is missing or too long a path.
+std::string image_path(const geometry::ImportedImage& image, const std::string& mesh_path,
                        std::vector<std::string>& warnings) {
-    if (!image.path.empty()) return MeshLibrary::normalize(image.path);
-    if (image.bytes.empty()) return {};
-    const bool jpeg = image.mime_type == "image/jpeg" ||
-                      (image.bytes.size() > 2 && image.bytes[0] == 0xFF && image.bytes[1] == 0xD8);
-    u64 h = 1469598103934665603ull;
-    for (const u8 b : image.bytes) h = (h ^ b) * 1099511628211ull;
-    char name[40];
-    std::snprintf(name, sizeof(name), "%016llx.%s", static_cast<unsigned long long>(h), jpeg ? "jpg" : "png");
-    const std::filesystem::path file = cache / name;
-    std::error_code ec;
-    if (std::filesystem::file_size(file, ec) == image.bytes.size() && !ec) return to_utf8(file);
-    std::filesystem::create_directories(cache, ec);
-    std::filesystem::path temp = file;
-    temp += ".tmp";
-    {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        out.write(reinterpret_cast<const char*>(image.bytes.data()), static_cast<std::streamsize>(image.bytes.size()));
-        if (!out) {
-            warnings.push_back("an image inside the file could not be written to " + to_utf8(cache));
+    if (image.empty()) return {};
+    std::string path;
+    if (image.embedded >= 0) {
+        path = mesh_path + "#image" + std::to_string(image.embedded);
+    } else {
+        const std::filesystem::path folder = from_utf8(mesh_path).parent_path();
+        path = MeshLibrary::normalize(to_utf8(folder / from_utf8(image.path)));
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(from_utf8(path), ec)) {
+            warnings.push_back("the image " + path + " it names is missing; that map was left out");
             return {};
         }
     }
-    std::filesystem::rename(temp, file, ec);
-    if (ec) {
-        std::filesystem::remove(temp, ec);
-        warnings.push_back("an image inside the file could not be written to " + to_utf8(cache));
+    if (path.size() > world::k_max_mesh_path_bytes) {
+        warnings.push_back("an image path over " + std::to_string(world::k_max_mesh_path_bytes) +
+                           " bytes was left out");
         return {};
     }
-    return to_utf8(file);
+    return path;
 }
 
-world::Material file_material(const geometry::ImportedMaterial& m, const std::filesystem::path& cache,
+world::Material file_material(const geometry::ImportedMaterial& m, const std::string& mesh_path, bool maps,
                               std::vector<std::string>& warnings) {
     world::Material out;
     out.base_color = m.base_color;
     out.roughness = m.roughness;
     out.metallic = m.metallic;
     out.emissive = m.emissive;
-    out.maps.base_color = image_path(m.base_color_image, cache, warnings);
-    out.maps.normal = image_path(m.normal_image, cache, warnings);
-    out.maps.roughness_metal = image_path(m.roughness_metal_image, cache, warnings);
-    out.maps.occlusion = image_path(m.occlusion_image, cache, warnings);
-    for (std::string* path : {&out.maps.base_color, &out.maps.normal, &out.maps.roughness_metal, &out.maps.occlusion}) {
-        if (path->size() > world::k_max_mesh_path_bytes) path->clear();
+    if (maps) {
+        out.maps.base_color = image_path(m.base_color_image, mesh_path, warnings);
+        out.maps.normal = image_path(m.normal_image, mesh_path, warnings);
+        out.maps.roughness_metal = image_path(m.roughness_metal_image, mesh_path, warnings);
+        out.maps.occlusion = image_path(m.occlusion_image, mesh_path, warnings);
     }
     return out;
 }
@@ -162,14 +151,26 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     }
     mesh->warnings = std::move(imported.warnings);
     mesh->has_uvs = imported.has_uvs;
+    // The file's look: its busiest material, if that covers more than glTF's
+    // default does; its maps only if it covers most of the mesh (else they
+    // would land on the other parts' uvs).
     mesh->file_materials = static_cast<u32>(imported.materials.size());
     if (!imported.materials.empty()) {
-        mesh->material = file_material(imported.materials[0], image_cache, mesh->warnings);
-        if (imported.materials.size() > 1) {
-            mesh->warnings.push_back("the file has " + std::to_string(imported.materials.size()) +
-                                     " materials; entities draw the one with the most triangles (\"" +
-                                     imported.materials[0].name + "\"): split the file into one mesh per material "
-                                     "to keep them all");
+        const geometry::ImportedMaterial& busiest = imported.materials[0];
+        u64 total = imported.default_material_triangles;
+        for (const geometry::ImportedMaterial& m : imported.materials) total += m.triangles;
+        if (busiest.triangles <= imported.default_material_triangles) {
+            mesh->warnings.push_back("most of the file has no material; entities keep their own look");
+        } else {
+            const bool maps = busiest.triangles * 4 >= total * 3;
+            mesh->material = file_material(busiest, path, maps, mesh->warnings);
+            if (imported.materials.size() > 1 || imported.default_material_triangles > 0) {
+                mesh->warnings.push_back(
+                    "the file has " + std::to_string(imported.materials.size() + (imported.default_material_triangles > 0 ? 1 : 0)) +
+                    " materials; entities take the one with the most triangles (\"" + busiest.name + "\")" +
+                    (maps ? "" : " without its maps (it covers under three quarters of the mesh)") +
+                    ": split the file into one mesh per material to keep them all");
+            }
         }
     }
     if (m_renderer != nullptr) {

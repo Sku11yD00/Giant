@@ -3,6 +3,7 @@
 #pragma once
 
 #include "mesh_library.h"
+#include "texture_library.h"
 
 #include "giant/ai/commands.h"
 #include "giant/world/scene.h"
@@ -36,7 +37,8 @@ inline ai::Json maps_schema() {
                                      {"description", "The normal map was made for DirectX (green "
                                                      "pointing down the image). Default false."}}}}},
             {"description",
-             "Image files drawn over the uvs (paths from the editor's working folder; \"\" "
+             "Image files drawn over the uvs (paths from the editor's working folder, or an image "
+             "inside a glTF as \"file.glb#image2\"; \"\" "
              "removes one; fields left out are kept). Built-in shapes and meshes whose file has "
              "uvs (list_meshes: uvs) show them; others draw the plain values. Cooked in the "
              "background the first time they are drawn (at most 4096 texels a side) and kept "
@@ -55,8 +57,11 @@ inline std::string apply_maps(const ai::Json& json, world::MaterialMaps& maps) {
             return {};
         }
         const std::string path = MeshLibrary::normalize(given);
+        std::string file = path; // an image inside a glTF ("x.glb#image2"): the glTF
+        u32 image = 0;
+        TextureLibrary::split_image_ref(path, file, image);
         std::error_code ec;
-        const std::u8string utf8(path.begin(), path.end());
+        const std::u8string utf8(file.begin(), file.end());
         if (!std::filesystem::is_regular_file(std::filesystem::path(utf8), ec)) {
             return std::string("maps.") + key + ": no file " + path;
         }
@@ -73,11 +78,26 @@ inline std::string apply_maps(const ai::Json& json, world::MaterialMaps& maps) {
     return {};
 }
 
+// Whether arguments give a look of their own (base colour, roughness,
+// metallic, emissive, or a map's file): if not, a mesh given takes its
+// file's.
+inline bool look_given(const ai::Json& args) {
+    for (const char* key : {"base_color", "roughness", "metallic", "emissive"}) {
+        if (args.contains(key)) return true;
+    }
+    if (const auto maps = args.find("maps"); maps != args.end()) {
+        for (const char* key : {"base_color", "normal", "roughness_metal", "occlusion"}) {
+            if (maps->contains(key)) return true;
+        }
+    }
+    return false;
+}
+
 // The file's own look (its material's values and maps) onto `material`,
-// keeping what files do not say (surface, wind). Nothing if it has none.
+// keeping what files do not say (surface, wind); the default look if it
+// has none (so a look taken from another file does not stay).
 inline void take_file_look(const MeshLibrary::Mesh& mesh, world::Material& material) {
-    if (!mesh.material) return;
-    const world::Material& file = *mesh.material;
+    const world::Material file = mesh.material.value_or(world::Material{});
     material.base_color = file.base_color;
     material.roughness = file.roughness;
     material.metallic = file.metallic;

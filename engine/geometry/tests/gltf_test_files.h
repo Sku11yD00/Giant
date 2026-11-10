@@ -49,15 +49,14 @@ inline std::vector<u8> make_glb(std::string json, std::vector<u8> bin) {
 // metallic-roughness texture on TEXCOORD_1), two (the whole quad) in
 // "rust": base colour factor (0.5, 0.25, 1), roughness 0.3, metallic 0.7,
 // emissive (1, 0.5, 0) at strength 4, base colour image in the buffer
-// ("PNGDATA1", image/png), normal image `normal_uri` (a file beside), and
+// (`png`, image/png), normal image `normal_uri` (a file beside), and
 // occlusion image as a data URI ("ABC").
-inline std::vector<u8> two_material_quad(const std::string& normal_uri) {
+inline std::vector<u8> two_material_quad(const std::string& normal_uri, const std::string& png = "PNGDATA1") {
     std::vector<u8> bin;
     append(bin, std::vector<float>{0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0});
     append(bin, std::vector<float>{0, 1, 1, 1, 1, 0, 0, 0});
     append(bin, std::vector<u32>{0, 1, 2});
     append(bin, std::vector<u32>{0, 1, 2, 0, 2, 3});
-    const std::string png = "PNGDATA1";
     bin.insert(bin.end(), png.begin(), png.end());
     const std::string json =
         R"({"asset":{"version":"2.0"},"extensionsUsed":["KHR_materials_emissive_strength"],)"
@@ -72,10 +71,10 @@ inline std::vector<u8> two_material_quad(const std::string& normal_uri) {
         R"("textures":[{"source":0},{"source":1},{"source":2}],)"
         R"("images":[{"bufferView":4,"mimeType":"image/png"},{"uri":")" + normal_uri + R"("},)"
         R"({"uri":"data:image/png;base64,QUJD"}],)"
-        R"("buffers":[{"byteLength":124}],)"
+        R"("buffers":[{"byteLength":)" + std::to_string(bin.size()) + R"(}],)"
         R"("bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":32},)"
         R"({"buffer":0,"byteOffset":80,"byteLength":12},{"buffer":0,"byteOffset":92,"byteLength":24},)"
-        R"({"buffer":0,"byteOffset":116,"byteLength":8}],)"
+        R"({"buffer":0,"byteOffset":116,"byteLength":)" + std::to_string(png.size()) + R"(}],)"
         R"("accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},)"
         R"({"bufferView":1,"componentType":5126,"count":4,"type":"VEC2"},)"
         R"({"bufferView":2,"componentType":5125,"count":3,"type":"SCALAR"},)"

@@ -43,13 +43,13 @@ inline constexpr u64 k_max_import_triangles = 16'000'000;
 inline constexpr u64 k_max_import_vertices = 3 * k_max_import_triangles; // read, over all nodes
 inline constexpr u64 k_max_import_file_bytes = u64{2} << 30; // 2 GiB, buffers included
 
-// An image a material uses: a file beside the glTF (`path`, resolved, inside
-// the file's folder) or bytes inside it (`bytes`, with its `mime_type`).
+// An image a material uses: a file beside the glTF (`path`, relative to its
+// folder, forward slashes, never leaving it) or one inside it (`embedded`:
+// its index in the file's images; read_gltf_image gives its bytes).
 struct ImportedImage {
     std::string path; // UTF-8
-    std::vector<u8> bytes;
-    std::string mime_type; // "image/png", "image/jpeg" or as the file says ("" if it does not)
-    bool empty() const { return path.empty() && bytes.empty(); }
+    i32 embedded = -1;
+    bool empty() const { return path.empty() && embedded < 0; }
 };
 
 // A glTF material as the engine draws it: metallic-roughness factors (base
@@ -86,8 +86,10 @@ struct ImportResult {
     std::vector<std::string> warnings; // things that were skipped
     bool has_uvs = false;              // some primitive had texture coordinates (else all are 0)
     // The file's materials that the shown meshes use, most triangles first
-    // (a primitive without one uses glTF's default, which is not listed).
+    // (a primitive without one uses glTF's default, which is not listed:
+    // its triangles are counted apart).
     std::vector<ImportedMaterial> materials;
+    u64 default_material_triangles = 0;
     std::string error;                 // empty on success
     bool ok() const { return error.empty(); }
 };
@@ -98,5 +100,10 @@ ImportResult import_gltf_file(const std::filesystem::path& path);
 
 // Reads a .glb, or a .gltf whose buffers are embedded data URIs.
 ImportResult import_gltf_memory(std::span<const u8> data);
+
+// The bytes of image `index` inside a glTF file (a buffer view or a data
+// URI; ImportedImage::embedded), reading the file again (for a worker that
+// decodes it). False with why if it is not there or cannot be read.
+bool read_gltf_image(const std::filesystem::path& file, u32 index, std::vector<u8>& out, std::string& error);
 
 } // namespace giant::geometry

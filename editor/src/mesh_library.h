@@ -51,10 +51,11 @@ public:
         float import_seconds = 0.0f;
         std::vector<std::string> warnings;
         bool has_uvs = false; // the file has texture coordinates (material maps draw only then)
-        // The file's own look: its material with the most triangles (values
-        // and maps; images inside the file written to image_cache). Entities
-        // given this file without a look of their own take it. None if the
-        // file has no materials.
+        // The file's own look: its material with the most triangles (values,
+        // and maps when it covers three quarters of the mesh: an image inside
+        // the file named "<path>#image<N>", one beside it by its path).
+        // Entities given this file without a look of their own take it.
+        // None if the file has no materials, or glTF's default covers most.
         std::optional<world::Material> material;
         u32 file_materials = 0; // materials the file's shown meshes use
         std::shared_ptr<const Skinned> skinned; // null: not skinned
@@ -66,9 +67,6 @@ public:
 
     // Without a renderer (tests), meshes are imported and measured only.
     explicit MeshLibrary(render::Renderer* renderer) : m_renderer(renderer) {}
-    // Where images inside glTF files are written (named by a hash of their
-    // bytes, so the same image is one file), for materials to name.
-    std::filesystem::path image_cache = "giant_cache/gltf_images";
     ~MeshLibrary();
     MeshLibrary(const MeshLibrary&) = delete;
     MeshLibrary& operator=(const MeshLibrary&) = delete;

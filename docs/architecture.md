@@ -273,14 +273,21 @@ an offline cooker can use it without a device.
   materials the shown meshes use (`ImportResult::materials`, most triangles
   first): metallic-roughness factors (emissive times
   `KHR_materials_emissive_strength`) and the images of the four maps, each
-  a file beside the glTF (URI decoded, never outside its folder) or bytes
-  inside it (a buffer view or a base64 data URI). A mesh is one material
-  in the renderer, so `MeshLibrary` keeps the one with the most triangles
-  as the file's look (warning when there are more), writing images inside
-  the file to `giant_cache/gltf_images/<hash of bytes>.png|jpg` so the maps
-  are paths like any other; an entity or scatter item given the mesh
-  without a look of its own takes it. Not read yet: other uv sets, texture
-  transforms, alpha, emissive maps, specular-glossiness, WebP/KTX2 images.
+  a file beside the glTF (a relative URI, decoded, refused if it could
+  leave the folder: `..`, absolute, backslash, colon, scheme) or bytes
+  inside it (a buffer view or a base64 data URI). Specular-glossiness
+  materials read as non-metals (roughness 1 - glossiness, diffuse image).
+  Triangles drawn with no material count for the default one. A mesh is
+  one material in the renderer, so `MeshLibrary` keeps the one with the
+  most triangles as the file's look (none if the default has more), with
+  its maps only when it covers at least three quarters of the triangles
+  (warning to split the file otherwise). Images inside the file are named
+  `"<mesh path>#image<N>"` and never copied out: texture workers read
+  them through `geometry::read_gltf_image`, and the cache keys them by the
+  glTF file's size and time, so worlds stay portable. An entity or scatter
+  item given the mesh without a look of its own takes it (also when its
+  mesh changes). Not read yet: other uv sets (dropped with a warning),
+  texture transforms, alpha, emissive maps, WebP/KTX2 images.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool
