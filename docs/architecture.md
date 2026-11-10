@@ -354,7 +354,27 @@ an offline cooker can use it without a device.
   is occluded (none on open ground). Timed as
   "ambient occlusion"; `RenderStats::ambient_occlusion`; MCP
   `set_render_settings`. The sun is left alone (its shadows are the
-  shadow pages', contact shadows come next).
+  shadow pages' and the contact shadows').
+- **Contact shadows (photoreal part 4c).** `ao.slang`'s `cs_contact`,
+  a compute pass of its own at full size after ambient occlusion, lit
+  views (`RenderSettings::contact_shadows`, default on;
+  `contact_shadow_length` metres, default 0.3, 0.05 to 2): for each
+  pixel whose surface (its normal from depth) faces the sun, up to 12
+  steps (one each 4 pixels the ray crosses, at least 2) march from the
+  point, lifted off the surface by 1.5 pixels' size, towards the sun in
+  view space, never further than 48 pixels' size or behind the camera's
+  near side, starting at a 4x4 pattern's jitter. A step is in shadow
+  where the depth there is nearer than the ray by more than a bias
+  (growing with distance) and by less than a thickness (0.1 m plus 1% of
+  the distance, so things far in front do not shade what is behind
+  them). The shadow fades over the march's last quarter and by the
+  screen's edges; off screen and sky samples do not shade. The result
+  (r32_float, the sun let through) is read by shading where the sun
+  still lights the pixel after its shadow pages and cloud shadow. Kept
+  out of the shading pass: a march inside that large shader more than
+  doubled the software renderer's frame time (the Windows CI gates). No history; timed as
+  "contact shadows"; `RenderStats::contact_shadows`; MCP
+  `set_render_settings`.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

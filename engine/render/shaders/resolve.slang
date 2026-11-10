@@ -94,6 +94,8 @@ struct Extras {
     uint dfg_size;
     uint ao;                 // ambient occlusion (ao.slang), half size (ao_on 0: off)
     uint ao_on;
+    uint contact;            // contact shadows (ao.slang's cs_contact): the sun let through, full size (contact_on 0: off)
+    uint contact_on;
 };
 
 Extras load_extras() {
@@ -148,6 +150,9 @@ Extras load_extras() {
     o.dfg_size = q.y;
     o.ao = q.z;
     o.ao_on = q.w;
+    const uint2 c2 = b.Load2(at + 176);
+    o.contact = c2.x;
+    o.contact_on = c2.y;
     return o;
 }
 
@@ -893,6 +898,9 @@ Output shade_pixel(float4 position) {
     float sun = sun_visibility(extras.shadows, world, surface_n, f.sun_direction.xyz, pixel_size);
     if (sky_on) {
         sun *= cloud_shadow(sky, world);
+    }
+    if (extras.contact_on != 0u && sun > 0.0 && dot(surface_n, f.sun_direction.xyz) > 0.0) {
+        sun *= read_texture_float(extras.contact).Load(int3(int2(pixel), 0));
     }
     float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
     if (extras.gi_on != 0) {

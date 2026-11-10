@@ -433,21 +433,21 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     };
     frame.settings.gpu_culling = false;
     s.draw(frame);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion", "shading", "post",
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion", "contact shadows", "shading", "post",
                                                      "anti-aliasing"}));
     frame.settings.gpu_culling = true;
     frame.settings.occlusion_culling = true;
     frame.settings.antialiasing = false;
     s.draw(frame);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "ambient occlusion", "shading", "post"}));
+                                                     "raster", "HZB", "shadows", "ambient occlusion", "contact shadows", "shading", "post"}));
     GIANT_CHECK(s.renderer->last_stats().ambient_occlusion);
     // Ambient occlusion off, or a debug view: no pass.
     frame.settings.ambient_occlusion = false;
     s.draw(frame);
     GIANT_CHECK(!s.renderer->last_stats().ambient_occlusion);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "shading", "post"}));
+                                                     "raster", "HZB", "shadows", "contact shadows", "shading", "post"}));
     frame.settings.ambient_occlusion = true;
     frame.settings.ambient_occlusion_radius = NAN; // (kept in range)
     frame.settings.debug_view = DebugView::clusters;
@@ -456,6 +456,20 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     frame.settings.debug_view = DebugView::lit;
     s.draw(frame);
     GIANT_CHECK(s.renderer->last_stats().ambient_occlusion);
+    // Contact shadows: a pass of their own before shading, lit views only.
+    GIANT_CHECK(s.renderer->last_stats().contact_shadows);
+    frame.settings.contact_shadow_length = NAN; // (kept in range)
+    s.draw(frame);
+    GIANT_CHECK(s.renderer->last_stats().contact_shadows);
+    frame.settings.contact_shadows = false;
+    s.draw(frame);
+    GIANT_CHECK(!s.renderer->last_stats().contact_shadows);
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
+                                                     "raster", "HZB", "shadows", "ambient occlusion", "shading", "post"}));
+    frame.settings.contact_shadows = true;
+    frame.settings.debug_view = DebugView::clusters;
+    s.draw(frame);
+    GIANT_CHECK(!s.renderer->last_stats().contact_shadows);
 }
 
 GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a pass after shading") {
@@ -758,14 +772,14 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
         GIANT_CHECK(differing(culled) <= pixels.size() / 200); // nothing visible lost
         // The GPU timed each pass of the newest frame (read after the wait).
         const auto timings = device->gpu_timings();
-        GIANT_CHECK(timings.size() == 12); // streaming, voxels, 2 x (culling, raster, HZB), AO, shading, post, AA
+        GIANT_CHECK(timings.size() == 13); // streaming, voxels, 2 x (culling, raster, HZB), AO, contact shadows, shading, post, AA
         bool timed = true;
         for (const rhi::GpuTiming& t : timings) {
             timed = timed && t.ms >= 0.0f && t.ms <= device->gpu_frame_ms() + 1e-4f;
         }
         GIANT_CHECK(timed && device->gpu_frame_ms() > 0.0f);
-        GIANT_CHECK(timings.size() == 12 && timings[2].name == "culling" && timings[8].name == "ambient occlusion" &&
-                    timings[9].name == "shading" && timings[10].name == "post");
+        GIANT_CHECK(timings.size() == 13 && timings[2].name == "culling" && timings[8].name == "ambient occlusion" &&
+                    timings[9].name == "contact shadows" && timings[10].name == "shading" && timings[11].name == "post");
     }
     // A glowing red decal stamped on the sphere's front, facing the camera
     // (its +Y turned to +Z), on the CPU and GPU paths alike.
@@ -1341,12 +1355,12 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     frame.sky.on = true;
     st = s.draw(frame); // no cover: the air alone
     GIANT_CHECK(st.sky && st.physical_sky && !st.clouds && !st.cloud_shadows);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "shading", "post"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "contact shadows", "shading", "post"}));
     // The physical sky's passes run inside "sky"; off, the single-scattered sky and the flat ambient colours.
     frame.settings.physical_sky = false;
     st = s.draw(frame);
     GIANT_CHECK(st.sky && !st.physical_sky);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "shading", "post"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "contact shadows", "shading", "post"}));
     frame.settings.physical_sky = true;
     frame.settings.aerial_distance = NAN; // (kept in range)
     st = s.draw(frame);
@@ -1356,7 +1370,7 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     st = s.draw(frame);
     GIANT_CHECK(st.sky && st.clouds && st.cloud_shadows);
     GIANT_CHECK(names() ==
-                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "clouds", "ambient occlusion", "shading", "post"}));
+                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "clouds", "ambient occlusion", "contact shadows", "shading", "post"}));
     // Settings turn them off; a sun below the horizon casts no cloud shadows.
     frame.settings.cloud_shadows = false;
     st = s.draw(frame);
@@ -2705,6 +2719,97 @@ GIANT_TEST("render: d3d12 ambient occlusion darkens the crease where a wall meet
     // By the crease they darken (bytes are sRGB: a 5% drop is some 12% of the light).
     GIANT_CHECK(green(on, 90) * 100 < green(off, 90) * 95);
     GIANT_CHECK(green(on, 93) * 100 < green(off, 93) * 95);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+
+GIANT_TEST("render: d3d12 contact shadows darken the floor by a low block towards the camera, not the open floor") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 128, k_h = 128;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // The camera half a metre up, a block 20 cm tall 2 m ahead (its front
+    // face at z -1.9, rows about 82 to 93, columns 36 to 92), a low sun
+    // behind it: its shadow falls towards the camera. The shadow pages are
+    // off, so only contact shadows can find it.
+    const DVec3 camera{500.0, 0.5, 0.0};
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = DVec3{500.0, 0.0, 0.0};
+    instances[0].scale = {20.0f, 1.0f, 20.0f};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = DVec3{500.0, 0.1, -2.1};
+    instances[1].scale = {1.0f, 0.2f, 0.4f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.antialiasing = false;
+    frame.settings.contact_shadow_length = 1.0f; // (48 pixels there, some 70 cm: the bias is passed by mid-ray)
+    frame.view.position = camera;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.0f, 0.3f, -1.0f}); // some 17 degrees up, beyond the block
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.1f, 0.1f, 0.1f};
+    frame.lighting.ground_light = {0.1f, 0.1f, 0.1f};
+    const auto draw = [&](bool contact) {
+        frame.settings.contact_shadows = contact;
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        GIANT_CHECK(renderer->last_stats().contact_shadows == contact);
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto green = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        return i + 3 < image.size() ? static_cast<int>(image[i + 1]) : -1;
+    };
+    const std::vector<u8> off = draw(false);
+    const std::vector<u8> on = draw(true);
+    // Row 98: the floor some 30 cm in front of the block (its shadow
+    // reaches some 65 cm). Column 64 is behind it from the sun, column 10
+    // the open floor to its side.
+    std::printf("    floor by the block %d -> %d; open floor %d -> %d; block's face %d -> %d\n", green(off, 64, 98),
+                green(on, 64, 98), green(off, 10, 98), green(on, 10, 98), green(off, 64, 88), green(on, 64, 88));
+    GIANT_CHECK(green(off, 64, 98) > 60 && green(off, 10, 98) > 60);
+    // The open floor and the block's own face (turned from the sun: unlit
+    // by it either way) stay as they were.
+    GIANT_CHECK(std::abs(green(on, 10, 98) - green(off, 10, 98)) <= 3);
+    GIANT_CHECK(std::abs(green(on, 64, 88) - green(off, 64, 88)) <= 3);
+    // By the block the sun is shut out.
+    GIANT_CHECK(green(on, 64, 98) * 100 < green(off, 64, 98) * 70);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

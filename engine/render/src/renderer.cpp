@@ -208,11 +208,12 @@ Renderer::~Renderer() {
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
           m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
-          m_ao_gtao, m_ao_denoise}) {
+          m_ao_gtao, m_ao_denoise, m_contact_pass}) {
         m_device.destroy(p);
     }
     m_device.destroy(m_ao_raw);
     m_device.destroy(m_ao);
+    m_device.destroy(m_contact);
     for (const rhi::TextureHandle t : m_bloom_downs) {
         m_device.destroy(t);
     }
@@ -308,6 +309,7 @@ bool Renderer::init() {
     m_bloom_down = compute(shaders::bloom_down_cs(), "bloom: down");
     m_ao_gtao = compute(shaders::ao_gtao_cs(), "ambient occlusion");
     m_ao_denoise = compute(shaders::ao_denoise_cs(), "ambient occlusion: denoise");
+    m_contact_pass = compute(shaders::ao_contact_cs(), "contact shadows");
     m_bloom_up = compute(shaders::bloom_up_cs(), "bloom: up");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     ShadowDesc shadow_desc;
@@ -405,7 +407,7 @@ bool Renderer::init() {
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
-          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise}) {
+          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1101,6 +1103,9 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_ao_raw = {};
     m_ao = {};
     m_ao_ready = false;
+    m_device.destroy(m_contact); // the frame's size: made again below
+    m_contact = {};
+    m_contact_ready = false;
     m_bloom_ready = false;
     m_device.destroy(m_clouds_a); // half the frame's size: made again with the sky's
     m_device.destroy(m_clouds_b);
@@ -1216,10 +1221,22 @@ bool Renderer::ensure_post_targets() {
     }
     m_ao_ready = m_ao_raw.valid() && m_ao.valid();
     ok = ok && m_ao_ready;
+    // Contact shadows: the frame's size.
+    if (!m_contact.valid()) {
+        rhi::TextureDesc desc;
+        desc.width = m_width;
+        desc.height = m_height;
+        desc.format = rhi::Format::r32_float;
+        desc.usage = rhi::TextureUsage::sampled | rhi::TextureUsage::shader_write;
+        desc.name = "contact shadows";
+        m_contact = m_device.create_texture(desc);
+    }
+    m_contact_ready = m_contact.valid();
+    ok = ok && m_contact_ready;
     if (!ok && !m_post_logged) {
         // Tried again with the next resize.
         m_post_logged = true;
-        log_error("render", "could not create bloom's or ambient occlusion's textures (out of GPU memory?)");
+        log_error("render", "could not create bloom's, ambient occlusion's or contact shadows' textures (out of GPU memory?)");
     }
     return ok;
 }
@@ -2543,6 +2560,30 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.end_timing();
     }
     m_stats.ambient_occlusion = ambient_occlusion;
+    // Contact shadows (lit views): this frame's depth marched towards the
+    // sun for the small shadows the shadow maps miss, at full size.
+    const bool contact_shadows = settings.contact_shadows && lit_view && m_contact_ready;
+    if (contact_shadows) {
+        cmd.begin_timing("contact shadows");
+        cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+        cmd.barrier(m_contact, rhi::ResourceState::shader_write);
+        gpu::AoPush contact{};
+        contact.frame = data.frame.descriptor;
+        contact.frame_offset = data.frame.offset;
+        contact.depth = m_device.read_descriptor(m_depth);
+        contact.source = contact.depth;
+        contact.target = m_device.write_descriptor(m_contact);
+        contact.width = m_width;
+        contact.height = m_height;
+        const float length = settings.contact_shadow_length;
+        contact.radius = std::isfinite(length) ? std::clamp(length, 0.05f, 2.0f) : 0.3f;
+        cmd.set_pipeline(m_contact_pass);
+        cmd.push(contact);
+        cmd.dispatch((m_width + 7) / 8, (m_height + 7) / 8);
+        cmd.barrier(m_contact, rhi::ResourceState::shader_read);
+        cmd.end_timing();
+    }
+    m_stats.contact_shadows = contact_shadows;
     cmd.begin_timing("shading");
     // Shading writes the light before exposure into m_radiance (with
     // screen reflections, also what they need, and their pass adds them
@@ -2687,6 +2728,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.dfg_size = k_dfg_size;
     extras.ao = ambient_occlusion ? m_device.read_descriptor(m_ao) : data.frame.descriptor;
     extras.ao_on = ambient_occlusion ? 1u : 0u;
+    extras.contact = contact_shadows ? m_device.read_descriptor(m_contact) : data.frame.descriptor;
+    extras.contact_on = contact_shadows ? 1u : 0u;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;

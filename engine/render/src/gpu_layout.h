@@ -368,8 +368,13 @@ struct ResolveExtras {
     // Ambient occlusion (ao.slang): its half-size rgba16_float, or ao_on 0.
     u32 ao;
     u32 ao_on;
+    // Contact shadows (ao.slang's cs_contact): the sun let through, full
+    // size r32_float (contact_on 0: off).
+    u32 contact;
+    u32 contact_on;
+    u32 pad_contact[2];
 };
-static_assert(sizeof(ResolveExtras) == 176);
+static_assert(sizeof(ResolveExtras) == 192);
 
 // resolve.slang's dust puff: centre camera-relative.
 struct GpuDustPuff {
@@ -482,7 +487,7 @@ struct PostPush {
 };
 static_assert(sizeof(PostPush) == 48);
 
-// ao.slang's AoPush (both passes).
+// ao.slang's AoPush (all its passes; cs_contact: radius is the contact length, target full size).
 struct AoPush {
     u32 frame;
     u32 frame_offset;

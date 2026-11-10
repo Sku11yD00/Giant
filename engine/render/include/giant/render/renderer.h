@@ -308,6 +308,13 @@ struct RenderSettings {
     // comes from the open direction there (the bent normal).
     bool ambient_occlusion = true;
     float ambient_occlusion_radius = 1.0f;
+    // Contact shadows (lit views): the small shadows the sun's shadow maps
+    // are too coarse for (a cup on a table, grass blades on the ground,
+    // the crease under a rock), from this frame's depth marched towards
+    // the sun for contact_shadow_length metres (0.05 to 2), never further
+    // than 48 pixels.
+    bool contact_shadows = true;
+    float contact_shadow_length = 0.3f;
     // The physical sky (with FrameInput::sky on): the air's light scattered
     // many times (a brighter, deeper sky, and the glow after sunset), the
     // clear air between the camera and what it sees (far hills fade blue
@@ -466,6 +473,7 @@ struct RenderStats {
     bool reflections = false;        // voxel cones on
     bool screen_reflections = false; // screen-space rays on
     bool ambient_occlusion = false;  // GTAO on
+    bool contact_shadows = false;    // the sun's contact shadows marched
     // The sky (this frame).
     bool sky = false;           // the atmosphere drawn
     bool physical_sky = false;  // with light scattered many times, the air over the view and the sky's ambient light
@@ -782,6 +790,9 @@ private:
     u32 m_ao_width = 0;
     u32 m_ao_height = 0;
     bool m_ao_ready = false;     // its textures made for this size
+    rhi::PipelineHandle m_contact_pass; // contact shadows (ao.slang's cs_contact)
+    rhi::TextureHandle m_contact;       // the sun let through, full size
+    bool m_contact_ready = false;
     rhi::PipelineHandle m_bloom_up;
     rhi::PipelineHandle m_post;
     rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables

@@ -252,3 +252,93 @@ void cs_denoise(uint3 id : SV_DispatchThreadID) {
                          : float4(saturate(here.x), here.yzw);
     write_texture(push.target)[id.xy] = o;
 }
+
+// Contact shadows (photoreal part 4c): the small shadows the sun's shadow
+// pages are too coarse for (a stone on the ground, a foot, the gap under
+// a crate), from this frame's depth, at full size. From each pixel's view
+// point lifted off its surface (the normal from depth) by 1.5 pixels'
+// size, up to k_contact_steps steps (one each k_contact_step_pixels
+// pixels the ray crosses, at least 2) towards the sun, out to
+// push.radius metres and at most k_contact_pixels on screen, starting at
+// a fixed offset of a 4x4 pattern (no history). A step behind the drawn
+// depth by more than a bias (growing with distance) and less than an
+// object's assumed thickness is in shadow. Writes how much of the sun gets
+// through (r32_float, 0 to 1; 1 where nothing is drawn or the surface
+// faces away from the sun, which shading leaves dark anyway), softened
+// over the ray's last quarter and by the screen's edges.
+static const uint k_contact_steps = 12;
+static const float k_contact_step_pixels = 4.0;
+static const float k_contact_pixels = 48.0;
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void cs_contact(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= push.width || id.y >= push.height) {
+        return;
+    }
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    Texture2D<float> depth = read_texture_float(push.depth);
+    RWTexture2D<float> target = write_texture_float(push.target);
+    const int2 px = int2(id.xy);
+    bool drawn;
+    const float3 here = view_point(f, depth, px, drawn);
+    if (!drawn) {
+        target[id.xy] = 1.0;
+        return;
+    }
+    bool l_drawn, r_drawn, u_drawn, d_drawn;
+    const float3 l = view_point(f, depth, px - int2(1, 0), l_drawn);
+    const float3 r = view_point(f, depth, px + int2(1, 0), r_drawn);
+    const float3 u = view_point(f, depth, px - int2(0, 1), u_drawn);
+    const float3 dn = view_point(f, depth, px + int2(0, 1), d_drawn);
+    const float3 v = safe_normalize(-here, float3(0.0, 0.0, 1.0));
+    float3 n = safe_normalize(cross(flatter(here, u, dn, u_drawn, d_drawn), flatter(here, l, r, l_drawn, r_drawn)), v);
+    if (dot(n, v) < 0.0) n = -n;
+    // The sun, in view space.
+    const float3 sun = f.sun_direction.xyz;
+    const float3 d = float3(dot(f.view_rows[0].xyz, sun), dot(f.view_rows[1].xyz, sun), dot(f.view_rows[2].xyz, sun));
+    if (dot(n, d) <= 0.0) {
+        target[id.xy] = 1.0;
+        return;
+    }
+    const float pixel_size = -here.z * 2.0 / max(f.p11 * f.height, 1e-6);
+    const float3 p = here + n * (pixel_size * 1.5);
+    float len = max(push.radius, 0.0);
+    // Kept in front of the camera, and to k_contact_pixels on screen.
+    if (-p.z <= f.near_plane * 2.0) {
+        target[id.xy] = 1.0;
+        return;
+    }
+    if (d.z > 0.0) len = min(len, (-p.z - f.near_plane * 1.5) / d.z);
+    len = min(len, k_contact_pixels * pixel_size);
+    if (len < pixel_size * 2.0) {
+        target[id.xy] = 1.0;
+        return;
+    }
+    const uint steps = clamp(uint(ceil(len / (pixel_size * k_contact_step_pixels))), 2u, k_contact_steps);
+    const uint cell = (id.x & 3u) + 4u * (id.y & 3u);
+    const float jitter = (float((cell * 7u + 5u) & 15u) + 0.5) / 16.0;
+    const float thickness = 0.1 + 0.01 * (-p.z);
+    float lit = 1.0;
+    [loop]
+    for (uint i = 0; i < steps; ++i) {
+        const float t = len * (float(i) + jitter) / float(steps);
+        const float3 q = p + d * t;
+        if (-q.z <= f.near_plane) break;
+        const float2 ndc = float2(f.p00 * q.x, f.p11 * q.y) / -q.z;
+        const float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (any(uv < 0.0) || any(uv >= 1.0)) break; // left the screen: the shadow pages' alone
+        const float sd = depth.Load(int3(int2(uv * float2(f.width, f.height)), 0));
+        if (sd <= 0.0) continue; // sky
+        const float scene_z = f.near_plane / sd;
+        const float behind = -q.z - scene_z; // how far the step is behind what is drawn there
+        const float bias = 0.02 + 0.002 * scene_z;
+        if (behind > bias && behind < thickness) {
+            const float2 edge = min(uv, 1.0 - uv);
+            const float fade = saturate(min(edge.x, edge.y) * 20.0) * saturate(4.0 * (1.0 - t / len));
+            lit = min(lit, 1.0 - fade);
+            if (lit <= 0.0) break; // all shut out
+        }
+    }
+    target[id.xy] = lit;
+}
