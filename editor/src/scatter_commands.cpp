@@ -169,6 +169,9 @@ std::string apply_layer(const Json& args, ScatterLayer& l, EditorState& state) {
                 if (state.meshes == nullptr) return "meshes cannot be imported in this editor";
                 const MeshLibrary::Loaded loaded = state.meshes->load(i.mesh);
                 if (loaded.mesh == nullptr) return loaded.error;
+                bool look = false;
+                for (const char* key : {"base_color", "roughness", "metallic", "emissive", "maps"}) look = look || j.contains(key);
+                if (!look) take_file_look(*loaded.mesh, i.material);
             }
             l.items.push_back(std::move(i));
         }

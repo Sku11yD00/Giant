@@ -280,6 +280,50 @@ GIANT_TEST("geometry: glTF texture coordinates and tangents are read, or tangent
     }
 }
 
+GIANT_TEST("geometry: glTF materials are read with their images, most triangles first") {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "giant_gltf_materials";
+    std::filesystem::create_directories(dir / "maps");
+    const std::vector<u8> glb = two_material_quad("maps/rust%20normal.png");
+    {
+        std::ofstream(dir / "quad.glb", std::ios::binary)
+            .write(reinterpret_cast<const char*>(glb.data()), static_cast<std::streamsize>(glb.size()));
+    }
+    const ImportResult r = import_gltf_file(dir / "quad.glb");
+    GIANT_CHECK(r.ok() && r.materials.size() == 2);
+    if (!r.ok() || r.materials.size() != 2) return;
+    const ImportedMaterial& rust = r.materials[0];
+    GIANT_CHECK(rust.name == "rust" && rust.triangles == 2 && r.materials[1].name == "paint" &&
+                r.materials[1].triangles == 1);
+    GIANT_CHECK(near3(rust.base_color, {0.5f, 0.25f, 1.0f}) && std::fabs(rust.roughness - 0.3f) < 1e-6f &&
+                std::fabs(rust.metallic - 0.7f) < 1e-6f && near3(rust.emissive, {4.0f, 2.0f, 0.0f}));
+    GIANT_CHECK(std::string(rust.base_color_image.bytes.begin(), rust.base_color_image.bytes.end()) == "PNGDATA1" &&
+                rust.base_color_image.mime_type == "image/png" && rust.base_color_image.path.empty());
+    // The URI decoded and resolved beside the file (the image need not exist yet).
+    GIANT_CHECK(rust.normal_image.path.ends_with("maps/rust normal.png") && rust.normal_image.bytes.empty());
+    GIANT_CHECK(std::string(rust.occlusion_image.bytes.begin(), rust.occlusion_image.bytes.end()) == "ABC" &&
+                rust.occlusion_image.mime_type == "image/png");
+    GIANT_CHECK(rust.roughness_metal_image.empty());
+    // The plain one: glTF's defaults; its texture on another set warned once.
+    const ImportedMaterial& paint = r.materials[1];
+    GIANT_CHECK(near3(paint.base_color, {1, 1, 1}) && paint.roughness == 1.0f && paint.metallic == 1.0f);
+    GIANT_CHECK(!paint.roughness_metal_image.empty());
+    usize texcoord_warnings = 0;
+    for (const std::string& w : r.warnings) texcoord_warnings += w.find("TEXCOORD_0") != std::string::npos ? 1u : 0u;
+    GIANT_CHECK(texcoord_warnings == 1);
+    // From memory a file beside cannot be read: left out, with a warning.
+    const ImportResult memory = import_gltf_memory(glb);
+    GIANT_CHECK(memory.ok() && memory.materials.size() == 2 && memory.materials[0].normal_image.empty() &&
+                !memory.materials[0].base_color_image.empty());
+    // One reaching outside the folder is left out.
+    const std::vector<u8> outside = two_material_quad("../secret.png");
+    {
+        std::ofstream(dir / "outside.glb", std::ios::binary)
+            .write(reinterpret_cast<const char*>(outside.data()), static_cast<std::streamsize>(outside.size()));
+    }
+    const ImportResult escaped = import_gltf_file(dir / "outside.glb");
+    GIANT_CHECK(escaped.ok() && escaped.materials.size() == 2 && escaped.materials[0].normal_image.empty());
+}
+
 GIANT_TEST("geometry: vertices pack to 28 bytes and back within a hair") {
     // Directions over the sphere, both hemispheres and the axes.
     std::vector<Vec3> dirs = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};

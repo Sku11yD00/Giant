@@ -11,8 +11,11 @@
 #include "giant/geometry/mesh.h"
 #include "giant/rhi/rhi.h"
 
+#include "gltf_test_files.h"
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -413,4 +416,68 @@ GIANT_TEST("textures: set_entity takes maps, refuses missing files, and get_text
         GIANT_CHECK(t["status"] == "ready" && t["slot"] == "base_color" && t["width"] == 16 && t["mips"] == 5);
     }
     GIANT_CHECK(run("reload_textures", Json::object()).ok);
+}
+
+GIANT_TEST("textures: a glTF's own look comes with it: values, maps, images inside written once") {
+    const std::filesystem::path dir = fresh_dir("giant_gltf_look");
+    std::filesystem::create_directories(dir / "maps");
+    write_png(dir / "maps" / "rust normal.png", 8, 8, 128, 128, 255);
+    const std::vector<u8> glb = geometry::testing::two_material_quad("maps/rust%20normal.png");
+    std::ofstream(dir / "quad.glb", std::ios::binary)
+        .write(reinterpret_cast<const char*>(glb.data()), static_cast<std::streamsize>(glb.size()));
+    const std::string quad = (dir / "quad.glb").generic_string();
+
+    ai::CommandRegistry commands;
+    MeshLibrary meshes{nullptr};
+    meshes.image_cache = dir / "images";
+    EditorState state;
+    state.meshes = &meshes;
+    register_scene_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, {}); };
+
+    const auto imported = run("import_mesh", {{"path", quad}});
+    GIANT_CHECK(imported.ok);
+    if (!imported.ok) {
+        std::fprintf(stderr, "    %s\n", imported.error.c_str());
+        return;
+    }
+    GIANT_CHECK(imported.value["materials"] == 2 && imported.value["uvs"] == true);
+    const Json& look = imported.value["material"];
+    GIANT_CHECK(std::fabs(look["roughness"].get<float>() - 0.3f) < 1e-6f && look["emissive"][0] == 4.0f);
+    const std::string base = look["maps"]["base_color"].get<std::string>();
+    GIANT_CHECK(base.ends_with(".png") && std::filesystem::file_size(std::filesystem::path(base)) == 8); // "PNGDATA1"
+    GIANT_CHECK(look["maps"]["normal"].get<std::string>().ends_with("maps/rust normal.png"));
+    GIANT_CHECK(std::filesystem::file_size(std::filesystem::path(look["maps"]["occlusion"].get<std::string>())) == 3);
+    bool split_warning = false;
+    for (const Json& w : imported.value["warnings"]) split_warning = split_warning || w.get<std::string>().find("2 materials") != std::string::npos;
+    GIANT_CHECK(split_warning);
+    usize images = 0;
+    for (const auto& f : std::filesystem::directory_iterator(dir / "images")) images += f.is_regular_file() ? 1u : 0u;
+    GIANT_CHECK(images == 2); // the buffer's PNG and the data URI's
+    // Imported again: the same files, none added.
+    GIANT_CHECK(run("import_mesh", {{"path", quad}, {"reload", true}}).ok);
+    images = 0;
+    for (const auto& f : std::filesystem::directory_iterator(dir / "images")) images += f.is_regular_file() ? 1u : 0u;
+    GIANT_CHECK(images == 2);
+
+    // An entity given the mesh alone takes the file's look; one given a look keeps its own.
+    const auto made = run("create_entity", {{"mesh", quad}, {"surface", "metal"}, {"sway", 1.0}});
+    GIANT_CHECK(made.ok);
+    {
+        const world::Entity* e = made.ok ? state.scene.find(made.value["id"].get<u64>()) : nullptr;
+        GIANT_CHECK(e != nullptr && e->material.maps.base_color == base && std::fabs(e->material.metallic - 0.7f) < 1e-6f);
+        GIANT_CHECK(e != nullptr && e->material.surface == world::Surface::metal && e->material.sway == 1.0f);
+    }
+    const auto own = run("create_entity", {{"mesh", quad}, {"base_color", {0.1, 0.2, 0.3}}});
+    const world::Entity* o = own.ok ? state.scene.find(own.value["id"].get<u64>()) : nullptr;
+    GIANT_CHECK(o != nullptr && o->material.maps.empty() && o->material.roughness == 0.5f);
+    // Moving it does not reset its look.
+    if (made.ok) {
+        const u64 id = made.value["id"].get<u64>();
+        const auto changed = run("set_entity", {{"id", id}, {"roughness", 0.9}});
+        GIANT_CHECK(changed.ok);
+        if (!changed.ok) std::fprintf(stderr, "    %s\n", changed.error.c_str());
+        GIANT_CHECK(run("set_entity", {{"id", id}, {"position", {1, 2, 3}}}).ok);
+        GIANT_CHECK(std::fabs(state.scene.find(id)->material.roughness - 0.9f) < 1e-6f);
+    }
 }

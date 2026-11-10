@@ -73,6 +73,18 @@ inline std::string apply_maps(const ai::Json& json, world::MaterialMaps& maps) {
     return {};
 }
 
+// The file's own look (its material's values and maps) onto `material`,
+// keeping what files do not say (surface, wind). Nothing if it has none.
+inline void take_file_look(const MeshLibrary::Mesh& mesh, world::Material& material) {
+    if (!mesh.material) return;
+    const world::Material& file = *mesh.material;
+    material.base_color = file.base_color;
+    material.roughness = file.roughness;
+    material.metallic = file.metallic;
+    material.emissive = file.emissive;
+    material.maps = file.maps;
+}
+
 inline ai::Json maps_json(const world::MaterialMaps& maps) {
     ai::Json j = ai::Json::object();
     if (!maps.base_color.empty()) j["base_color"] = maps.base_color;

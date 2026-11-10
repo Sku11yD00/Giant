@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 
 namespace giant::editor {
 
@@ -20,6 +21,59 @@ std::filesystem::path from_utf8(std::string_view path) {
 std::string to_utf8(const std::filesystem::path& path) {
     const std::u8string s = path.generic_u8string();
     return std::string(s.begin(), s.end());
+}
+
+// An image a material uses, as a path: the file beside the glTF, or the
+// bytes inside it written to `cache` (by a hash of them: the same image is
+// one file, written once). "" (with a warning) if it cannot be had.
+std::string image_path(const geometry::ImportedImage& image, const std::filesystem::path& cache,
+                       std::vector<std::string>& warnings) {
+    if (!image.path.empty()) return MeshLibrary::normalize(image.path);
+    if (image.bytes.empty()) return {};
+    const bool jpeg = image.mime_type == "image/jpeg" ||
+                      (image.bytes.size() > 2 && image.bytes[0] == 0xFF && image.bytes[1] == 0xD8);
+    u64 h = 1469598103934665603ull;
+    for (const u8 b : image.bytes) h = (h ^ b) * 1099511628211ull;
+    char name[40];
+    std::snprintf(name, sizeof(name), "%016llx.%s", static_cast<unsigned long long>(h), jpeg ? "jpg" : "png");
+    const std::filesystem::path file = cache / name;
+    std::error_code ec;
+    if (std::filesystem::file_size(file, ec) == image.bytes.size() && !ec) return to_utf8(file);
+    std::filesystem::create_directories(cache, ec);
+    std::filesystem::path temp = file;
+    temp += ".tmp";
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(image.bytes.data()), static_cast<std::streamsize>(image.bytes.size()));
+        if (!out) {
+            warnings.push_back("an image inside the file could not be written to " + to_utf8(cache));
+            return {};
+        }
+    }
+    std::filesystem::rename(temp, file, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        warnings.push_back("an image inside the file could not be written to " + to_utf8(cache));
+        return {};
+    }
+    return to_utf8(file);
+}
+
+world::Material file_material(const geometry::ImportedMaterial& m, const std::filesystem::path& cache,
+                              std::vector<std::string>& warnings) {
+    world::Material out;
+    out.base_color = m.base_color;
+    out.roughness = m.roughness;
+    out.metallic = m.metallic;
+    out.emissive = m.emissive;
+    out.maps.base_color = image_path(m.base_color_image, cache, warnings);
+    out.maps.normal = image_path(m.normal_image, cache, warnings);
+    out.maps.roughness_metal = image_path(m.roughness_metal_image, cache, warnings);
+    out.maps.occlusion = image_path(m.occlusion_image, cache, warnings);
+    for (std::string* path : {&out.maps.base_color, &out.maps.normal, &out.maps.roughness_metal, &out.maps.occlusion}) {
+        if (path->size() > world::k_max_mesh_path_bytes) path->clear();
+    }
+    return out;
 }
 
 } // namespace
@@ -108,6 +162,16 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     }
     mesh->warnings = std::move(imported.warnings);
     mesh->has_uvs = imported.has_uvs;
+    mesh->file_materials = static_cast<u32>(imported.materials.size());
+    if (!imported.materials.empty()) {
+        mesh->material = file_material(imported.materials[0], image_cache, mesh->warnings);
+        if (imported.materials.size() > 1) {
+            mesh->warnings.push_back("the file has " + std::to_string(imported.materials.size()) +
+                                     " materials; entities draw the one with the most triangles (\"" +
+                                     imported.materials[0].name + "\"): split the file into one mesh per material "
+                                     "to keep them all");
+        }
+    }
     if (m_renderer != nullptr) {
         mesh->id = m_renderer->add_mesh(std::move(clusters));
         if (mesh->id == render::k_no_mesh) {

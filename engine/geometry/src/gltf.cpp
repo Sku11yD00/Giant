@@ -201,12 +201,18 @@ public:
         m_unpacked.clear();
         m_unpacked_floats.clear();
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
+            const usize before = target.mesh->indices.size();
             if (!primitive(node->mesh->primitives[i], transform, target)) {
                 return false;
             }
+            const cgltf_material* material = node->mesh->primitives[i].material;
+            if (material != nullptr) m_material_triangles[material] += (target.mesh->indices.size() - before) / 3;
         }
         return true;
     }
+
+    // Triangles drawn with each material (of the meshes read).
+    const std::unordered_map<const cgltf_material*, u64>& material_triangles() const { return m_material_triangles; }
 
     bool fail(std::string text) {
         m_result.error = std::move(text);
@@ -221,6 +227,7 @@ public:
     }
 
 private:
+    std::unordered_map<const cgltf_material*, u64> m_material_triangles;
     // A vertex's joints and weights from up to two sets: the four heaviest,
     // in 255ths summing to 255.
     bool vertex_weights(const std::array<const std::vector<Vec4>*, 2>& joints,
@@ -924,6 +931,98 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
     return true;
 }
 
+// The image a texture view shows: a file in the glTF's folder, or bytes in
+// it (a buffer view or a data URI). Empty (with a warning) if it cannot be
+// had; extensions' images (WebP, KTX2) are not read.
+ImportedImage read_image(const cgltf_texture_view& view, const FileContext& context, const cgltf_options& options,
+                         std::vector<std::string>& warnings) {
+    ImportedImage out;
+    const auto warn = [&warnings](const std::string& text) {
+        if (std::find(warnings.begin(), warnings.end(), text) == warnings.end()) warnings.push_back(text);
+    };
+    if (view.texture == nullptr) return out;
+    if (view.texcoord != 0) warn("textures on texture coordinates other than TEXCOORD_0 are read with TEXCOORD_0");
+    if (view.has_transform) warn("texture transforms (KHR_texture_transform) are ignored");
+    const cgltf_image* image = view.texture->image;
+    if (image == nullptr) {
+        warn("a texture without a PNG or JPEG image (WebP, KTX2) was left out");
+        return out;
+    }
+    out.mime_type = image->mime_type != nullptr ? image->mime_type : "";
+    if (image->buffer_view != nullptr) {
+        const u8* data = cgltf_buffer_view_data(image->buffer_view);
+        if (data != nullptr) out.bytes.assign(data, data + image->buffer_view->size);
+        return out;
+    }
+    if (image->uri == nullptr) return out;
+    const std::string_view uri(image->uri);
+    if (uri.starts_with("data:")) {
+        const usize comma = uri.find(',');
+        const std::string_view head = uri.substr(0, comma == std::string_view::npos ? 0 : comma);
+        if (comma == std::string_view::npos || !head.ends_with(";base64")) {
+            warn("an image data URI that is not base64 was left out");
+            return out;
+        }
+        out.mime_type = std::string(head.substr(5, head.size() - 5 - 7));
+        const std::string_view text = uri.substr(comma + 1);
+        const cgltf_size size = text.size() / 4 * 3 - (text.ends_with("==") ? 2 : text.ends_with("=") ? 1 : 0);
+        void* decoded = nullptr;
+        if (cgltf_load_buffer_base64(&options, size, text.data(), &decoded) == cgltf_result_success) {
+            out.bytes.assign(static_cast<const u8*>(decoded), static_cast<const u8*>(decoded) + size);
+            std::free(decoded);
+        } else {
+            warn("an image data URI could not be decoded");
+        }
+        return out;
+    }
+    if (!context.allow_files) {
+        warn("images in files beside the glTF are left out when it is read from memory");
+        return out;
+    }
+    std::string decoded(uri);
+    decoded.resize(cgltf_decode_uri(decoded.data()));
+    const std::filesystem::path file = (context.folder / std::filesystem::path(std::u8string(decoded.begin(), decoded.end()))).lexically_normal();
+    const std::filesystem::path relative = file.lexically_relative(context.folder);
+    if (relative.empty() || *relative.begin() == "..") {
+        warn("an image outside the file's folder was left out");
+        return out;
+    }
+    const std::u8string u8 = file.generic_u8string();
+    out.path.assign(u8.begin(), u8.end());
+    return out;
+}
+
+ImportedMaterial read_material(const cgltf_material& m, const FileContext& context, const cgltf_options& options,
+                               std::vector<std::string>& warnings) {
+    ImportedMaterial out;
+    out.name = m.name != nullptr ? m.name : "";
+    if (m.has_pbr_metallic_roughness) {
+        const cgltf_pbr_metallic_roughness& pbr = m.pbr_metallic_roughness;
+        const auto unit = [](float v) { return std::isfinite(v) ? std::clamp(v, 0.0f, 1.0f) : 1.0f; };
+        out.base_color = {unit(pbr.base_color_factor[0]), unit(pbr.base_color_factor[1]),
+                          unit(pbr.base_color_factor[2])};
+        out.alpha = unit(pbr.base_color_factor[3]);
+        out.roughness = unit(pbr.roughness_factor);
+        out.metallic = unit(pbr.metallic_factor);
+        out.base_color_image = read_image(pbr.base_color_texture, context, options, warnings);
+        out.roughness_metal_image = read_image(pbr.metallic_roughness_texture, context, options, warnings);
+    } else if (m.has_pbr_specular_glossiness) {
+        warnings.emplace_back("specular-glossiness materials are read as plain grey; re-export as metallic-roughness");
+    }
+    const float strength = m.has_emissive_strength && std::isfinite(m.emissive_strength.emissive_strength)
+                               ? std::clamp(m.emissive_strength.emissive_strength, 0.0f, 1000.0f)
+                               : 1.0f;
+    const auto emit = [strength](float v) { return std::isfinite(v) ? std::clamp(v, 0.0f, 1.0f) * strength : 0.0f; };
+    out.emissive = {emit(m.emissive_factor[0]), emit(m.emissive_factor[1]), emit(m.emissive_factor[2])};
+    out.normal_image = read_image(m.normal_texture, context, options, warnings);
+    out.occlusion_image = read_image(m.occlusion_texture, context, options, warnings);
+    if (m.emissive_texture.texture != nullptr) warnings.emplace_back("emissive textures are not drawn yet");
+    if (m.alpha_mode != cgltf_alpha_mode_opaque) {
+        warnings.emplace_back("alpha (cut-out or blended) materials are drawn opaque for now");
+    }
+    return out;
+}
+
 ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, bool allow_files) {
     ImportResult result;
     FileContext context;
@@ -985,10 +1084,6 @@ ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, boo
             }
         }
     }
-    if (data->materials_count > 0 || data->textures_count > 0) {
-        result.warnings.emplace_back(
-            "materials and textures are not imported yet; set the entity's material instead");
-    }
     // The nodes shown, in order. cgltf_validate rejects cycles; the visit
     // count bounds a bad file anyway.
     std::vector<const cgltf_node*> shown;
@@ -1032,7 +1127,24 @@ ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, boo
     if (result.mesh.indices.empty()) {
         result.error = "the file has no triangles";
         result.skinned.reset();
+        return result;
     }
+    // The materials the shown meshes use, most triangles first.
+    std::vector<std::pair<const cgltf_material*, u64>> used(importer.material_triangles().begin(),
+                                                            importer.material_triangles().end());
+    std::sort(used.begin(), used.end(), [&](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first; // (pointers: file order)
+    });
+    for (const auto& [material, triangles] : used) {
+        result.materials.push_back(read_material(*material, context, options, result.warnings));
+        result.materials.back().triangles = triangles;
+    }
+    // Repeated warnings (one per material) once.
+    std::vector<std::string> unique;
+    for (std::string& w : result.warnings) {
+        if (std::find(unique.begin(), unique.end(), w) == unique.end()) unique.push_back(std::move(w));
+    }
+    result.warnings = std::move(unique);
     return result;
 }
 

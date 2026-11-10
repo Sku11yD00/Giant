@@ -269,6 +269,18 @@ an offline cooker can use it without a device.
   back from the cache when used again. Until ready a material draws its
   plain values. Closing drops cooks not yet begun. MCP: `maps` on entities
   and scatter items, `get_textures`, `reload_textures`.
+- **glTF materials (photoreal part 3a-3c-2).** The importer reads the
+  materials the shown meshes use (`ImportResult::materials`, most triangles
+  first): metallic-roughness factors (emissive times
+  `KHR_materials_emissive_strength`) and the images of the four maps, each
+  a file beside the glTF (URI decoded, never outside its folder) or bytes
+  inside it (a buffer view or a base64 data URI). A mesh is one material
+  in the renderer, so `MeshLibrary` keeps the one with the most triangles
+  as the file's look (warning when there are more), writing images inside
+  the file to `giant_cache/gltf_images/<hash of bytes>.png|jpg` so the maps
+  are paths like any other; an entity or scatter item given the mesh
+  without a look of its own takes it. Not read yet: other uv sets, texture
+  transforms, alpha, emissive maps, specular-glossiness, WebP/KTX2 images.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool
