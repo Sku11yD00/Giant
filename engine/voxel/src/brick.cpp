@@ -271,7 +271,8 @@ u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, cons
     float cover = 0.0f;
     if (coverage < 1.0f) {
         const float edge = s * static_cast<float>(k_brick_edge);
-        const float share = std::min(area_inside(a, b, c, edge) / static_cast<float>(hits), 1.41421356f * s * s);
+        // (The cap first: std::min returns it when the area is NaN, from an infinite corner.)
+        const float share = std::min(1.41421356f * s * s, area_inside(a, b, c, edge) / static_cast<float>(hits));
         cover = coverage * share / (s * s);
     }
     for (u32 k = 0; k < hits; ++k) {
