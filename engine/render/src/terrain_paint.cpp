@@ -11,10 +11,6 @@
 
 namespace giant::render {
 
-namespace {
-constexpr u64 k_max_pool_bytes = u64{1} << 30; // 8192 tiles of 128 samples (32-bit offsets in the shader)
-} // namespace
-
 usize TerrainPaintStore::KeyHash::operator()(const Key& k) const { return terrain_paint_hash(k.x, k.z); }
 
 TerrainPaintStore::~TerrainPaintStore() {
@@ -38,7 +34,10 @@ bool TerrainPaintStore::set(i32 x, i32 z, std::vector<u8> weights) {
     if (weights.empty()) {
         const auto it = m_tiles.find(key);
         if (it == m_tiles.end()) return true;
-        if (it->second.block != ~0u) m_free.push_back(it->second.block);
+        if (it->second.block != ~0u) {
+            m_free.push_back(it->second.block);
+            m_full = false;
+        }
         m_tiles.erase(it);
         std::erase(m_waiting, key);
         m_table_stale = true;
@@ -62,11 +61,12 @@ void TerrainPaintStore::clear() {
     m_waiting.clear();
     m_table_stale = true;
     m_full_logged = false;
+    m_full = false;
 }
 
 bool TerrainPaintStore::grow(rhi::CommandList& cmd, u32 blocks) {
     const u64 bytes = block_bytes();
-    const u32 most = static_cast<u32>(std::max<u64>(1, k_max_pool_bytes / bytes));
+    const u32 most = static_cast<u32>(std::max<u64>(1, m_max_pool_bytes / bytes));
     if (blocks > most) return false;
     const u32 cap = std::min(most, std::max({blocks, m_blocks * 2, 16u}));
     rhi::BufferDesc desc;
@@ -87,12 +87,11 @@ bool TerrainPaintStore::grow(rhi::CommandList& cmd, u32 blocks) {
     return true;
 }
 
-bool TerrainPaintStore::update(rhi::CommandList& cmd, u64 budget, Frame& out) {
+bool TerrainPaintStore::update(rhi::CommandList& cmd, u64 budget, bool table, Frame& out) {
     out = {};
     const u64 bytes = block_bytes();
     if (!m_waiting.empty() && m_samples != 0) {
         bool barriered = false;
-        bool full = false; // no block to be had: tiles without one wait, the rest still go
         u64 sent = 0;
         usize kept = 0; // m_waiting[0, kept): still waiting, in order
         usize next = 0;
@@ -100,8 +99,9 @@ bool TerrainPaintStore::update(rhi::CommandList& cmd, u64 budget, Frame& out) {
             if (sent > 0 && sent + bytes > budget) break; // at least one a frame
             Tile& t = m_tiles.at(m_waiting[next]);
             if (t.block == ~0u) {
-                if (!full && m_free.empty() && !grow(cmd, m_blocks + 1)) {
-                    full = true;
+                // No block to be had: tiles without one wait, the rest still go.
+                if (!m_full && m_free.empty() && !grow(cmd, m_blocks + 1)) {
+                    m_full = true;
                     if (!m_full_logged) {
                         log_warning("render", "terrain paint: out of room for " + std::to_string(m_tiles.size()) +
                                                   " painted tiles; the rest draw unpainted");
@@ -134,6 +134,7 @@ bool TerrainPaintStore::update(rhi::CommandList& cmd, u64 budget, Frame& out) {
         m_waiting.resize(kept);
     }
     if (m_pool.valid()) cmd.barrier(m_pool, rhi::ResourceState::shader_read);
+    if (!table) return false;
     if (m_table_stale) {
         m_table_stale = false;
         usize shown = 0;

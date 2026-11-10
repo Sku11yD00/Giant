@@ -2691,7 +2691,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const bool terrain = lit_view && data.terrain_count > 0 && m_terrain_ready;
     // Painted tiles uploaded every frame (within the budget), whatever is drawn.
     TerrainPaintStore::Frame paint;
-    const bool painted = m_paint->update(cmd, std::max<u64>(m_desc.terrain_paint_bytes_per_frame, 1), paint);
+    const bool painted = m_paint->update(cmd, std::max<u64>(m_desc.terrain_paint_bytes_per_frame, 1), terrain, paint);
     if (terrain) {
         cmd.begin_timing("terrain");
         cmd.barrier(m_terrain_surface, rhi::ResourceState::shader_write);

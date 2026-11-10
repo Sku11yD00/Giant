@@ -41,7 +41,8 @@ struct TerrainPush {
     uint height;
     float camera_y;      // the camera's height (metres above y = 0)
     float2 camera_xz;    // the camera's x and z modulo k_macro_period
-    // Painted layers (TerrainPaintStore): a table of 16-byte entries (tile
+    // Painted layers (TerrainPaintStore): a table, a 16-byte header (the
+    // painted tiles' min x, min z, max x, max z) then 16-byte entries (tile
     // x, z, its block's byte offset in the pool or ~0 empty, 0), paint_mask
     // + 1 of them, open addressing by paint_hash; paint_pool k_no_texture: none.
     uint paint_table;

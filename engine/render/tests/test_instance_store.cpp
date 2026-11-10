@@ -216,3 +216,30 @@ GIANT_TEST("terrain paint: the table's hash is pinned (terrain.slang's paint_has
     GIANT_CHECK(render::terrain_paint_hash(-3, 7) == 0xea3eea76u);
     GIANT_CHECK(render::terrain_paint_hash(2147483647, -2147483647 - 1) == 0x190e577au);
 }
+
+GIANT_TEST("terrain paint: a full pool keeps new tiles waiting, in order, while painted ones still update") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    render::TerrainPaintStore store(*device, 2 * 8 * 8 * render::k_terrain_paint_channels); // two tiles' room
+    store.set_grid(64.0, 8);
+    const std::vector<u8> tile(8 * 8 * render::k_terrain_paint_channels, 3);
+    const auto frame = [&](bool table) {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        render::TerrainPaintStore::Frame out;
+        const bool drawn = store.update(*cmd, 1u << 20, table, out);
+        device->end_frame();
+        return drawn;
+    };
+    GIANT_CHECK(store.set(0, 0, tile) && store.set(1, 0, tile));
+    GIANT_CHECK(!frame(false) && store.waiting() == 0); // uploaded, no table asked for
+    GIANT_CHECK(frame(true));
+    GIANT_CHECK(store.set(5, 5, tile) && store.set(6, 5, tile)); // no room for these
+    GIANT_CHECK(store.set(0, 0, tile));                          // a repaint behind them
+    GIANT_CHECK(frame(true) && store.waiting() == 2);            // it went; they wait
+    GIANT_CHECK(frame(true) && store.waiting() == 2);            // not tried again while full
+    GIANT_CHECK(store.set(1, 0, {}));                            // a block freed: the first in line takes it
+    GIANT_CHECK(frame(true) && store.waiting() == 1 && store.tiles() == 3);
+    store.clear();
+    GIANT_CHECK(!frame(true) && store.tiles() == 0 && store.waiting() == 0);
+}

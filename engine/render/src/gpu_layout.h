@@ -550,8 +550,9 @@ struct TerrainPush {
     u32 height;
     float camera_y;
     float camera_xz[2]; // modulo 4096 m (terrain.slang's k_macro_period)
-    // Painted layers (TerrainPaintStore): the table (16-byte entries,
-    // paint_mask + 1 of them) and pool; none: paint_pool k_no_descriptor.
+    // Painted layers (TerrainPaintStore): the table (a 16-byte header of
+    // the painted tiles' bounds, then 16-byte entries, paint_mask + 1 of
+    // them) and pool; none: paint_pool k_no_descriptor.
     u32 paint_table;
     u32 paint_table_offset;
     u32 paint_mask;

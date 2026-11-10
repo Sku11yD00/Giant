@@ -17,7 +17,9 @@ namespace giant::render {
 
 class TerrainPaintStore {
 public:
-    explicit TerrainPaintStore(rhi::Device& device) : m_device(device) {}
+    // At most `max_pool_bytes` of tiles (32-bit offsets in the shader: under 4 GiB).
+    explicit TerrainPaintStore(rhi::Device& device, u64 max_pool_bytes = u64{1} << 30)
+        : m_device(device), m_max_pool_bytes(max_pool_bytes) {}
     ~TerrainPaintStore();
     TerrainPaintStore(const TerrainPaintStore&) = delete;
     TerrainPaintStore& operator=(const TerrainPaintStore&) = delete;
@@ -31,8 +33,8 @@ public:
     usize waiting() const { return m_waiting.size(); }
 
     // Inside a frame, before the terrain pass: uploads what changed (within
-    // `budget` bytes), then the table. False: nothing to draw from (no
-    // paint, or out of memory).
+    // `budget` bytes), then, with `table`, the table. False: nothing to draw
+    // from (no paint, no table asked for, or out of memory).
     struct Frame {
         // A 16-byte header (the painted tiles' min x, min z, max x, max z),
         // then entries of 16 bytes: x, z, block byte offset (~0: empty), 0.
@@ -40,7 +42,7 @@ public:
         u32 table_mask = 0; // entries - 1 (a power of two)
         rhi::BufferHandle pool;
     };
-    bool update(rhi::CommandList& cmd, u64 budget, Frame& out);
+    bool update(rhi::CommandList& cmd, u64 budget, bool table, Frame& out);
 
 private:
     struct Key {
@@ -61,6 +63,7 @@ private:
     bool grow(rhi::CommandList& cmd, u32 blocks);
 
     rhi::Device& m_device;
+    u64 m_max_pool_bytes;
     double m_tile_size = 0.0;
     u32 m_samples = 0;
     std::unordered_map<Key, Tile, KeyHash> m_tiles;
@@ -72,6 +75,7 @@ private:
     bool m_table_stale = true;
     usize m_shown = 0;         // tiles in the table
     bool m_full_logged = false;
+    bool m_full = false; // the pool could not grow: not tried again until a block is freed
 };
 
 // terrain.slang's paint table hash of a tile.
