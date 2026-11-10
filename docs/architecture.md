@@ -329,6 +329,26 @@ an offline cooker can use it without a device.
   specular occlusion from the material's occlusion (Lagarde 2014, fed
   alpha, roughness squared), in
   place of the old hand-tuned Fresnel and roughness dimming.
+- **Ambient occlusion (photoreal part 4b).** `ao.slang`, between the
+  raster passes and shading in lit views (`RenderSettings::
+  ambient_occlusion`, default on; `ambient_occlusion_radius` metres,
+  default 1): GTAO (Jimenez 2016) at half size from this frame's depth.
+  Each half-size pixel takes the full-size pixel 2i, its view point and a
+  normal from depth (the flatter neighbour on each axis), and integrates
+  the cosine-weighted visibility between the horizons of two slices, six
+  steps a side out to the radius as seen on screen (at most 96 pixels,
+  fading towards it), plus the bent normal. The slices turn by a fixed
+  4x4 pattern; `cs_denoise` averages each 4x4 block round a pixel (all 16
+  angles) weighted by depth, so there is no history and nothing smears.
+  Output rgba16_float: visibility, view depth, bent normal (octahedral,
+  view space). Resolve takes the four half-size texels round each pixel,
+  bilinear and weighted by depth, multiplies the material's occlusion by
+  the visibility (so it dims ambient diffuse, GI's bounce and, through the
+  specular occlusion, reflections) and leans the normal the ambient
+  light is looked up along half way towards the bent normal. Timed as
+  "ambient occlusion"; `RenderStats::ambient_occlusion`; MCP
+  `set_render_settings`. The sun is left alone (its shadows are the
+  shadow pages', contact shadows come next).
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

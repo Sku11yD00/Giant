@@ -365,7 +365,9 @@ struct ResolveExtras {
     // The split-sum BRDF table (src/brdf.h): dfg_size^2 float2.
     u32 dfg;
     u32 dfg_size;
-    u32 pad[2];
+    // Ambient occlusion (ao.slang): its half-size rgba16_float, or ao_on 0.
+    u32 ao;
+    u32 ao_on;
 };
 static_assert(sizeof(ResolveExtras) == 176);
 
@@ -479,6 +481,21 @@ struct PostPush {
     u32 pad[2];
 };
 static_assert(sizeof(PostPush) == 48);
+
+// ao.slang's AoPush (both passes).
+struct AoPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 depth;
+    u32 source;
+    u32 target;
+    u32 width;
+    u32 height;
+    u32 pad0;
+    float radius;
+    float pad1[3];
+};
+static_assert(sizeof(AoPush) == 48);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {

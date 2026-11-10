@@ -896,6 +896,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
             run("set_render_settings", {{"screen_space_reflections", ssr}});
         }
         ImGui::EndDisabled();
+        bool ao = r.ambient_occlusion;
+        if (ImGui::Checkbox("Ambient occlusion", &ao)) {
+            run("set_render_settings", {{"ambient_occlusion", ao}});
+        }
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {
             ImGui::TextDisabled(m_state.dotnet_available ? "None loaded (load_scripts command)."

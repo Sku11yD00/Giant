@@ -92,6 +92,8 @@ struct Extras {
     uint feedback_materials;
     uint dfg;                // the split-sum BRDF table (src/brdf.h): dfg_size^2 float2
     uint dfg_size;
+    uint ao;                 // ambient occlusion (ao.slang), half size (ao_on 0: off)
+    uint ao_on;
 };
 
 Extras load_extras() {
@@ -144,6 +146,8 @@ Extras load_extras() {
     const uint4 q = b.Load4(at + 160);
     o.dfg = q.x;
     o.dfg_size = q.y;
+    o.ao = q.z;
+    o.ao_on = q.w;
     return o;
 }
 
@@ -463,8 +467,8 @@ float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 // reflection is multiplied by (`spec_weight`) and the reflected light it
 // used (`spec_light`), for the screen's reflections to replace.
 float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
-             float sun, float4 bounce, float4 cone, float cone_weight, float occlusion, out float3 spec_weight,
-             out float3 spec_light) {
+             float sun, float4 bounce, float4 cone, float cone_weight, float occlusion, float3 bend,
+             out float3 spec_weight, out float3 spec_light) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
@@ -507,7 +511,9 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
     const float3 r = reflect(-v, n);
     float3 ambient_diffuse;
     float3 ambient_specular;
-    ambient_light2(f, n, r, ambient_diffuse, ambient_specular);
+    // (Diffuse from the open direction: the normal bent as the ambient
+    // occlusion found the surroundings open.)
+    ambient_light2(f, safe_normalize(n + bend, n), r, ambient_diffuse, ambient_specular);
     if (bounce.w > 0.0) {
         // The bounce light takes the flat colours' place; reflections of
         // the sky dim as much as the sky is hidden from here (until they
@@ -531,6 +537,59 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
     const float3 diffuse_weight = diffuse_color * saturate(1.0 - fss_ess - fms_ems);
     color += (diffuse_weight + fms_ems) * ambient_diffuse + spec_weight * ambient_specular;
     return color + emissive;
+}
+
+// Ambient occlusion (ao.slang) at this pixel: its half-size texels round
+// it, bilinear, each weighted by how near its depth is to this pixel's
+// (so occlusion does not bleed over edges). `bend`: the bent normal less
+// the surface's (world space), for shade() to add to the shading normal.
+float3 ao_octahedral(float2 q) {
+    float3 v = float3(q, 1.0 - abs(q.x) - abs(q.y));
+    if (v.z < 0.0) {
+        v.xy = (1.0 - abs(v.yx)) * float2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return safe_normalize(v, float3(0.0, 0.0, 1.0));
+}
+
+void ambient_occlusion(Extras e, Frame f, uint2 pixel, float3 world, float3 surface_n, out float ao,
+                       out float3 bend) {
+    ao = 1.0;
+    bend = float3(0.0, 0.0, 0.0);
+    Texture2D<float4> t = read_texture(e.ao);
+    uint w;
+    uint h;
+    t.GetDimensions(w, h);
+    if (w == 0u || h == 0u) return;
+    const float z = -dot(f.view_rows[2].xyz, world); // this pixel's view depth
+    // Half-size texel i stands for full-size pixel 2i.
+    const float2 at = float2(pixel) * 0.5;
+    const int2 base = int2(floor(at));
+    const float2 frac_at = at - float2(base);
+    const float tolerance = 0.05 * z + 0.05;
+    float total = 0.0;
+    float sum = 0.0;
+    float3 bent = float3(0.0, 0.0, 0.0);
+    [unroll]
+    for (int i = 0; i < 4; ++i) {
+        const int2 o = int2(i & 1, i >> 1);
+        const int2 q = clamp(base + o, int2(0, 0), int2(int(w) - 1, int(h) - 1));
+        const float4 s = t.Load(int3(q, 0));
+        if (s.y <= 0.0) continue;
+        const float bilinear = (o.x == 1 ? frac_at.x : 1.0 - frac_at.x) * (o.y == 1 ? frac_at.y : 1.0 - frac_at.y);
+        const float weight = (bilinear + 1e-3) * saturate(1.0 - abs(s.y - z) / tolerance);
+        total += weight;
+        sum += s.x * weight;
+        bent += ao_octahedral(s.zw) * weight;
+    }
+    if (total <= 1e-4) return; // nothing alike near: left open
+    ao = saturate(sum / total);
+    // The bent normal, view space to world (the rows are orthonormal).
+    const float3 bv = safe_normalize(bent, float3(0.0, 0.0, 1.0));
+    const float3 bw = f.view_rows[0].xyz * bv.x + f.view_rows[1].xyz * bv.y + f.view_rows[2].xyz * bv.z;
+    // How far the open direction leans from the surface, kept to half the
+    // way to a right angle (depth's normals are coarse).
+    const float3 lean = bw - surface_n * dot(bw, surface_n);
+    bend = lean * 0.5;
 }
 
 // Voxels have a colour and a normal only; the rest is a rough dielectric.
@@ -752,7 +811,8 @@ Output shade_pixel(float4 position) {
                 float3 spec_weight;
                 float3 spec_light;
                 float3 color = shade(extras, f, world, far_n, albedo, far_rough, far_metal, float3(0.0, 0.0, 0.0), 0.0,
-                                     sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, 1.0, spec_weight, spec_light);
+                                     sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, 1.0, float3(0.0, 0.0, 0.0),
+                                     spec_weight, spec_light);
                 float far_through = 1.0;
                 if (sky_on) {
                     color = under_sky(sky, color, dir, t, pixel, far_through);
@@ -848,8 +908,14 @@ Output shade_pixel(float4 position) {
     }
     float3 spec_weight;
     float3 spec_light;
+    float3 bend = float3(0.0, 0.0, 0.0);
+    if (extras.ao_on != 0u) {
+        float ao;
+        ambient_occlusion(extras, f, pixel, world, surface_n, ao, bend);
+        occlusion *= ao;
+    }
     float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
-                         occlusion, spec_weight, spec_light);
+                         occlusion, bend, spec_weight, spec_light);
     float through = 1.0; // of the reflection, which reflect.slang adds over the fog and clouds
     if (sky_on) {
         color = under_sky(sky, color, view_dir, length(world), pixel, through);

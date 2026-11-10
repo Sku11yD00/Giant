@@ -49,6 +49,8 @@ giant_shaders(render
     shaders/sky.slang:cs_sky_multi:compute:sky_multi_cs
     shaders/sky.slang:cs_sky_aerial:compute:sky_aerial_cs
     shaders/sky.slang:cs_sky_ambient:compute:sky_ambient_cs
+    shaders/ao.slang:cs_gtao:compute:ao_gtao_cs
+    shaders/ao.slang:cs_denoise:compute:ao_denoise_cs
     shaders/post.slang:cs_histogram_clear:compute:histogram_clear_cs
     shaders/post.slang:cs_histogram:compute:histogram_cs
     shaders/post.slang:cs_bloom_down:compute:bloom_down_cs

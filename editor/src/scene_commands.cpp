@@ -431,6 +431,8 @@ Json render_settings_json(const EditorState& state) {
             {"gi_bricks_per_frame", state.render_settings.gi_bricks_per_frame},
             {"reflections", state.render_settings.reflections},
             {"screen_space_reflections", state.render_settings.screen_space_reflections},
+            {"ambient_occlusion", state.render_settings.ambient_occlusion},
+            {"ambient_occlusion_radius", state.render_settings.ambient_occlusion_radius},
             {"physical_sky", state.render_settings.physical_sky},
             {"aerial_distance", state.render_settings.aerial_distance},
             {"auto_exposure", state.render_settings.auto_exposure},
@@ -477,6 +479,7 @@ Json render_settings_json(const EditorState& state) {
               {"gi",
                {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting}}},
               {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}},
+              {"ambient_occlusion", s.ambient_occlusion},
               {"exposure",
                {{"auto", s.auto_exposure},
                 {"multiplier", s.exposure},
@@ -1671,6 +1674,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "through the lit voxel world as wide as the highlight (needs gi), and with screen_space_reflections "
          "(default on) a sharp reflection from the image itself where what it meets is on screen; "
          "last_frame.reflections says which are on. "
+         "ambient_occlusion: creases, corners and contact darken the ambient light and reflections, found "
+         "in this frame's depth out to ambient_occlusion_radius metres (default 1), and the ambient light "
+         "comes from the open direction there (default on; lit views; last_frame.ambient_occlusion). "
          "physical_sky: with a weather set, the air's light scattered many times (a deeper sky, the glow "
          "after sunset), the clear air between the camera and what it sees (far land fades blue, out to "
          "aerial_distance metres, default 32000) and the ambient light taken from the sky itself all round "
@@ -1715,6 +1721,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                          {"description", "Voxel bricks lit a frame at most. Default 256."}}},
                 {"reflections", {{"type", "boolean"}}},
                 {"screen_space_reflections", {{"type", "boolean"}}},
+                {"ambient_occlusion", {{"type", "boolean"}}},
+                {"ambient_occlusion_radius", number(0.1, 4, "Metres creases and contact are looked for out to. Default 1.")},
                 {"physical_sky", {{"type", "boolean"}}},
                 {"aerial_distance", number(1000, 100000, "Metres the air over the view is worked out to. Default 32000.")},
                 {"auto_exposure", {{"type", "boolean"}}},
@@ -1763,6 +1771,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.gi_bricks_per_frame = args.value("gi_bricks_per_frame", r.gi_bricks_per_frame);
              r.reflections = args.value("reflections", r.reflections);
              r.screen_space_reflections = args.value("screen_space_reflections", r.screen_space_reflections);
+             r.ambient_occlusion = args.value("ambient_occlusion", r.ambient_occlusion);
+             r.ambient_occlusion_radius = args.value("ambient_occlusion_radius", r.ambient_occlusion_radius);
              r.physical_sky = args.value("physical_sky", r.physical_sky);
              r.aerial_distance = args.value("aerial_distance", r.aerial_distance);
              r.auto_exposure = args.value("auto_exposure", r.auto_exposure);

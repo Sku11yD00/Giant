@@ -301,6 +301,13 @@ struct RenderSettings {
     // hidden.
     bool reflections = true;
     bool screen_space_reflections = true;
+    // Ambient occlusion (lit views): creases, corners and contact darken
+    // the ambient light and reflections, from this frame's depth (GTAO at
+    // half resolution, a spatial denoise, no history), out to
+    // ambient_occlusion_radius metres (0.1 to 4); the ambient light also
+    // comes from the open direction there (the bent normal).
+    bool ambient_occlusion = true;
+    float ambient_occlusion_radius = 1.0f;
     // The physical sky (with FrameInput::sky on): the air's light scattered
     // many times (a brighter, deeper sky, and the glow after sunset), the
     // clear air between the camera and what it sees (far hills fade blue
@@ -458,6 +465,7 @@ struct RenderStats {
     // Reflections (this frame).
     bool reflections = false;        // voxel cones on
     bool screen_reflections = false; // screen-space rays on
+    bool ambient_occlusion = false;  // GTAO on
     // The sky (this frame).
     bool sky = false;           // the atmosphere drawn
     bool physical_sky = false;  // with light scattered many times, the air over the view and the sky's ambient light
@@ -767,6 +775,13 @@ private:
     rhi::PipelineHandle m_histogram_clear;
     rhi::PipelineHandle m_histogram;
     rhi::PipelineHandle m_bloom_down;
+    rhi::PipelineHandle m_ao_gtao;
+    rhi::PipelineHandle m_ao_denoise;
+    rhi::TextureHandle m_ao_raw; // half size: cs_gtao's, then cs_denoise's into m_ao
+    rhi::TextureHandle m_ao;
+    u32 m_ao_width = 0;
+    u32 m_ao_height = 0;
+    bool m_ao_ready = false;     // its textures made for this size
     rhi::PipelineHandle m_bloom_up;
     rhi::PipelineHandle m_post;
     rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables
