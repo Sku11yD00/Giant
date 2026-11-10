@@ -125,6 +125,36 @@ struct Material {
     TextureId normal_texture = k_no_texture;
     TextureId roughness_metal_texture = k_no_texture;
     TextureId occlusion_texture = k_no_texture;
+    // Ground: shaded from FrameInput::terrain_layers instead (its own
+    // values and textures where none are given). Texture-free: the layers
+    // map their textures by world position.
+    bool terrain = false;
+};
+
+// One of the ground's layers (FrameInput::terrain_layers), for materials
+// with `terrain`. Layers stack in order like paint: the first covers
+// everywhere, each later one covers where both its slope and its height
+// bands hold (soft over slope_blend degrees and height_blend metres at
+// their edges). Textures as Material's (base colour sRGB, normal map,
+// roughness and metallic: roughness multiplies roughness, metallic is not
+// used), mapped from above by world x and z, every `tiling` metres, and
+// from the sides too where the ground is steep (triplanar), so cliffs do
+// not stretch. A slow variation in brightness over tens of metres hides
+// the textures' repeats.
+inline constexpr u32 k_max_terrain_layers = 8;
+struct TerrainLayer {
+    Vec3 base_color{0.23f, 0.2f, 0.15f}; // linear
+    float roughness = 0.92f;
+    TextureId base_color_texture = k_no_texture;
+    TextureId normal_texture = k_no_texture;
+    TextureId roughness_metal_texture = k_no_texture;
+    float tiling = 4.0f;    // metres (0.05 to 1000)
+    float min_slope = 0.0f; // degrees from level (0 to 90)
+    float max_slope = 90.0f;
+    float slope_blend = 5.0f;   // degrees
+    float min_height = -1.0e4f; // metres above y = 0
+    float max_height = 1.0e4f;
+    float height_blend = 10.0f; // metres
 };
 
 struct Instance {
@@ -402,6 +432,9 @@ struct FrameInput {
     // changed; without, it compares every instance with last frame's.
     std::span<const CellRange> cells;
     std::span<const Material> materials;
+    // The ground's layers, for materials with `terrain` (the first
+    // k_max_terrain_layers).
+    std::span<const TerrainLayer> terrain_layers;
     std::span<const Decal> decals;
     // Dust in the air, nearest first (lit views; past k_max_dust_puffs left out).
     std::span<const DustPuff> dust;

@@ -71,9 +71,28 @@ struct Material {
     // Read descriptors of its textures (rhi::k_no_descriptor: none): base
     // colour, normal, roughness and metallic, occlusion.
     u32 textures[4];
+    u32 flags; // k_material_terrain: shaded from the frame's terrain layers
+    u32 pad[3];
 };
-static_assert(sizeof(Material) == 48);
-inline constexpr u32 k_material_bytes = 48; // resolve.slang's k_material_bytes
+static_assert(sizeof(Material) == 64);
+inline constexpr u32 k_material_bytes = 64; // resolve.slang's k_material_bytes
+inline constexpr u32 k_material_terrain = 1;
+
+// A terrain layer (resolve.slang's TerrainLayer): FrameInput::terrain_layers.
+struct TerrainLayer {
+    float color_rough[4];
+    u32 textures[4]; // read descriptors: base colour, normal, roughness and metallic, (unused)
+    float tiling;    // metres a texture repeat covers
+    float min_slope; // degrees
+    float max_slope;
+    float slope_blend;
+    float min_height; // metres above y = 0
+    float max_height;
+    float height_blend;
+    float pad;
+    float uv_offset[4]; // frac(camera / tiling) on x, y, z: world uvs continue as the camera moves
+};
+static_assert(sizeof(TerrainLayer) == 80);
 
 // A material's wind (FrameConstants::wind_table), one per material.
 struct MaterialWind {
@@ -373,8 +392,17 @@ struct ResolveExtras {
     u32 contact;
     u32 contact_on;
     u32 pad_contact[2];
+    // Terrain layers (TerrainLayer, terrain_count of them; 0: none) and
+    // where the camera is: its height, and x and z modulo 4096 m (macro
+    // variation's period).
+    u32 terrain_layers;
+    u32 terrain_offset;
+    u32 terrain_count;
+    float camera_y;
+    float camera_xz[2];
+    u32 pad_terrain[2];
 };
-static_assert(sizeof(ResolveExtras) == 192);
+static_assert(sizeof(ResolveExtras) == 224);
 
 // resolve.slang's dust puff: centre camera-relative.
 struct GpuDustPuff {
