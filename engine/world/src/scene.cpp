@@ -685,6 +685,23 @@ Json heights_json(const Terrain::Heights& h, usize n) {
     return rows;
 }
 
+// A tile's paint: n rows of n * k_paint_channels bytes as hex (two digits a byte).
+Json paint_json(const Terrain::Paint& p, usize n) {
+    static constexpr char k_hex[] = "0123456789abcdef";
+    Json rows = Json::array();
+    const usize row_bytes = n * k_paint_channels;
+    for (usize j = 0; j < n; ++j) {
+        std::string text(row_bytes * 2, '0');
+        for (usize b = 0; b < row_bytes; ++b) {
+            const u8 v = p[j * row_bytes + b];
+            text[b * 2] = k_hex[v >> 4];
+            text[b * 2 + 1] = k_hex[v & 15];
+        }
+        rows.push_back(std::move(text));
+    }
+    return rows;
+}
+
 Json terrain_material_json(const TerrainMaterial& m) {
     Json out{{"base_color", vec3_json(m.base_color)}, {"roughness", m.roughness}};
     if (!m.layers.empty()) {
@@ -711,7 +728,9 @@ Json terrain_json(const Terrain& t) {
     const usize n = t.samples();
     Json tiles = Json::array();
     for (const CellCoord c : cells) {
-        tiles.push_back({{"cell", Json::array({c.x, c.z})}, {"heights", heights_json(*t.find(c), n)}});
+        Json tile{{"cell", Json::array({c.x, c.z})}, {"heights", heights_json(*t.find(c), n)}};
+        if (const Terrain::Paint* p = t.paint(c)) tile["paint"] = paint_json(*p, n);
+        tiles.push_back(std::move(tile));
     }
     return {{"samples", t.samples()}, {"material", terrain_material_json(t.material)}, {"tiles", std::move(tiles)}};
 }
@@ -1412,6 +1431,45 @@ void read_heights(Reader& tr, const char* key, usize n, Terrain::Heights& height
     }
 }
 
+// A tile's paint under `key`, if there: n rows of n * k_paint_channels bytes in hex.
+void read_paint(Reader& tr, const char* key, usize n, Terrain::Paint& paint) {
+    const Json* rows = tr.get(key, false);
+    if (rows == nullptr || !tr.ok()) {
+        return;
+    }
+    if (!rows->is_array() || rows->size() != n) {
+        tr.fail(key, "must be " + std::to_string(n) + " rows (samples)");
+        return;
+    }
+    const usize row_bytes = n * k_paint_channels;
+    paint.assign(n * row_bytes, 0);
+    const auto digit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (usize j = 0; j < n; ++j) {
+        const Json& row = (*rows)[j];
+        const std::string where = std::string(key) + "[" + std::to_string(j) + "]";
+        if (!row.is_string() || row.get_ref<const std::string&>().size() != row_bytes * 2) {
+            tr.fail(where, "must be " + std::to_string(row_bytes * 2) + " hex digits (" +
+                               std::to_string(k_paint_channels) + " bytes a sample)");
+            return;
+        }
+        const std::string& text = row.get_ref<const std::string&>();
+        for (usize b = 0; b < row_bytes; ++b) {
+            const int hi = digit(text[b * 2]);
+            const int lo = digit(text[b * 2 + 1]);
+            if (hi < 0 || lo < 0) {
+                tr.fail(where, "must be hex digits");
+                return;
+            }
+            paint[j * row_bytes + b] = static_cast<u8>(hi * 16 + lo);
+        }
+    }
+}
+
 // A terrain: its sample spacing, material and tiles (heights as rows of text).
 void read_terrain(const Json& json, Terrain& out, std::string& error) {
     Reader r(json, "terrain", error);
@@ -1438,9 +1496,12 @@ void read_terrain(const Json& json, Terrain& out, std::string& error) {
         }
         Terrain::Heights heights;
         read_heights(tr, "heights", n, heights);
+        Terrain::Paint paint;
+        read_paint(tr, "paint", n, paint);
         tr.finish();
         if (tr.ok() && error.empty()) {
             t.set(*cell, std::move(heights));
+            if (!paint.empty()) t.set_paint(*cell, std::move(paint));
         }
     }
     r.finish();
@@ -1884,7 +1945,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
 }
 
 std::string save_cell(CellCoord cell, std::span<const Entity> entities, const Terrain::Heights* heights,
-                      const CellDamage* damage) {
+                      const CellDamage* damage, const Terrain::Paint* paint) {
     std::vector<const Entity*> sorted;
     sorted.reserve(entities.size());
     for (const Entity& e : entities) {
@@ -1905,6 +1966,10 @@ std::string save_cell(CellCoord cell, std::span<const Entity> entities, const Te
         GIANT_ASSERT(n * n == heights->size() && valid_terrain_samples(static_cast<u32>(n)),
                      "a terrain tile is samples x samples heights");
         out["heights"] = heights_json(*heights, n);
+        if (paint != nullptr && !paint->empty()) {
+            GIANT_ASSERT(paint->size() == n * n * k_paint_channels, "a tile's paint matches its heights");
+            out["paint"] = paint_json(*paint, n);
+        }
     }
     if (damage != nullptr && !damage->empty()) out["damage"] = damage_json(*damage);
     return out.dump(2) + "\n";
@@ -1917,7 +1982,7 @@ std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, std::v
 
 std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 terrain_samples,
                                    std::vector<Entity>& out, std::optional<Terrain::Heights>& heights_out,
-                                   CellDamage* damage_out) {
+                                   CellDamage* damage_out, Terrain::Paint* paint_out) {
     GIANT_ASSERT(terrain_samples == 0 || valid_terrain_samples(terrain_samples), "terrain samples must be valid");
     Json json;
     if (auto bad = parse(text, json)) {
@@ -1956,6 +2021,14 @@ std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 te
             read_heights(root, "heights", terrain_samples, *heights);
         }
     }
+    Terrain::Paint paint;
+    if (root.ok() && error.empty() && root.get("paint", false) != nullptr) {
+        if (!heights) {
+            root.fail("paint", "is a terrain tile's, and this cell has none");
+        } else {
+            read_paint(root, "paint", terrain_samples, paint);
+        }
+    }
     CellDamage damage;
     if (const Json* d = root.get("damage", false); d != nullptr && root.ok() && error.empty()) {
         Reader dr(*d, "damage", error);
@@ -1969,6 +2042,7 @@ std::optional<LoadError> load_cell(std::string_view text, CellCoord cell, u32 te
     out = std::move(entities);
     heights_out = std::move(heights);
     if (damage_out != nullptr) *damage_out = std::move(damage);
+    if (paint_out != nullptr) *paint_out = std::move(paint);
     return std::nullopt;
 }
 

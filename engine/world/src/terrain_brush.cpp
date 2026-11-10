@@ -26,6 +26,56 @@ i64 floor_div(i64 a, i64 b) {
 
 } // namespace
 
+void apply_paint(Terrain& terrain, const Brush& brush, u32 layer, bool erase, double x, double z,
+                 std::vector<CellCoord>& changed) {
+    if (terrain.empty() || layer < 1 || layer > k_paintable_layers || !(brush.radius > 0.0) || !std::isfinite(x) ||
+        !std::isfinite(z)) {
+        return;
+    }
+    const double s = terrain.spacing();
+    const i64 n = terrain.samples();
+    const auto lo = [&](double v) { return static_cast<i64>(std::ceil((v - brush.radius) / s)); };
+    const auto hi = [&](double v) { return static_cast<i64>(std::floor((v + brush.radius) / s)); };
+    const i64 i0 = lo(x), i1 = hi(x), j0 = lo(z), j1 = hi(z);
+    if (i1 < i0 || j1 < j0) return;
+    const float strength = std::clamp(brush.strength, 0.0f, 1.0f);
+    for (i64 cz = floor_div(j0, n); cz <= floor_div(j1, n); ++cz) {
+        for (i64 cx = floor_div(i0, n); cx <= floor_div(i1, n); ++cx) {
+            if (!in_i32(cx) || !in_i32(cz)) continue;
+            const CellCoord cell{static_cast<i32>(cx), static_cast<i32>(cz)};
+            if (terrain.find(cell) == nullptr) continue;
+            const Terrain::Paint* source = terrain.paint(cell);
+            if (erase && source == nullptr) continue; // nothing painted to take off
+            Terrain::Paint* paint = nullptr; // modified only once a weight changes
+            for (i64 j = std::max(j0, cz * n); j <= std::min(j1, cz * n + n - 1); ++j) {
+                for (i64 i = std::max(i0, cx * n); i <= std::min(i1, cx * n + n - 1); ++i) {
+                    const double d = std::hypot(static_cast<double>(i) * s - x, static_cast<double>(j) * s - z);
+                    const float k = brush_weight(brush, d) * strength;
+                    if (k <= 0.0f) continue;
+                    const usize at = static_cast<usize>((j - cz * n) * n + (i - cx * n)) * k_paint_channels + layer - 1;
+                    const u8 w = paint != nullptr ? (*paint)[at] : source != nullptr ? (*source)[at] : u8{0};
+                    // Rounded away from where it is, so a light brush still gets there.
+                    const float to = erase ? 0.0f : 255.0f;
+                    const float moved = (to - static_cast<float>(w)) * std::min(k, 1.0f);
+                    const float next = std::clamp(static_cast<float>(w) + (moved < 0.0f ? std::floor(moved) : std::ceil(moved)),
+                                                  0.0f, 255.0f);
+                    if (static_cast<u8>(next) == w) continue;
+                    if (paint == nullptr) {
+                        paint = terrain.modify_paint(cell);
+                        changed.push_back(cell);
+                    }
+                    (*paint)[at] = static_cast<u8>(next);
+                }
+            }
+            // Erased to nothing: no paint kept.
+            if (paint != nullptr && erase &&
+                std::all_of(paint->begin(), paint->end(), [](u8 v) { return v == 0; })) {
+                terrain.set_paint(cell, {});
+            }
+        }
+    }
+}
+
 void apply_brush(Terrain& terrain, const Brush& brush, double x, double z, std::vector<CellCoord>& changed) {
     if (terrain.empty() || !(brush.radius > 0.0) || !std::isfinite(x) || !std::isfinite(z)) return;
     const double s = terrain.spacing();

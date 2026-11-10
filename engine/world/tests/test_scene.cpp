@@ -915,3 +915,35 @@ GIANT_TEST("world: bad kept damage says what is wrong") {
     const auto bad = load_scene(save_scene(scene), out);
     GIANT_CHECK(bad && contains(bad->message, "damage[0].kits[0].position is not in cell [5, 0]"));
 }
+
+GIANT_TEST("world: a cell's tile paint saves and loads exactly with its heights; paint without a tile is refused") {
+    Terrain::Heights tile(64, 1.5f);
+    Terrain::Paint paint(64 * k_paint_channels, 0);
+    for (usize k = 0; k < paint.size(); k += 5) paint[k] = static_cast<u8>(255 - k % 256);
+    const std::string cell = save_cell({2, -1}, std::vector<Entity>{}, &tile, nullptr, &paint);
+    GIANT_CHECK(contains(cell, "\"paint\""));
+    std::vector<Entity> entities;
+    std::optional<Terrain::Heights> heights;
+    Terrain::Paint back{1, 2, 3};
+    GIANT_CHECK(!load_cell(cell, {2, -1}, 8, entities, heights, nullptr, &back).has_value());
+    GIANT_CHECK(heights && *heights == tile && back == paint);
+    GIANT_CHECK(save_cell({2, -1}, std::vector<Entity>{}, &*heights, nullptr, &back) == cell);
+    // Empty paint is not written, and reads back empty.
+    const Terrain::Paint none;
+    const std::string plain = save_cell({2, -1}, std::vector<Entity>{}, &tile, nullptr, &none);
+    GIANT_CHECK(!contains(plain, "paint"));
+    GIANT_CHECK(!load_cell(plain, {2, -1}, 8, entities, heights, nullptr, &back).has_value() && back.empty());
+    // Paint with no heights: refused, outputs unchanged.
+    std::string orphan = cell;
+    const usize from = orphan.find("\"heights\"");
+    const usize to = orphan.find(']', from);
+    GIANT_CHECK(from != std::string::npos && to != std::string::npos);
+    // The key, its rows and the comma after them ("paint" follows).
+    const usize comma = orphan.find(',', to);
+    GIANT_CHECK(comma != std::string::npos);
+    orphan.erase(from, comma + 1 - from);
+    back = {7};
+    const auto refused = load_cell(orphan, {2, -1}, 8, entities, heights, nullptr, &back);
+    GIANT_CHECK(refused && contains(refused->message, "this cell has none"));
+    GIANT_CHECK(back.size() == 1);
+}

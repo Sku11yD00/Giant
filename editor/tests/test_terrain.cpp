@@ -870,3 +870,92 @@ GIANT_TEST("terrain brush tool: a fast drag over a low crest at a grazing angle 
         GIANT_CHECK(f.run("undo").ok);
     }
 }
+
+GIANT_TEST("terrain commands: paint a layer and erase it, read back, undone in one step a drag; sculpting keeps it") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 2}}).ok);
+    const Terrain& t = f.state.scene.terrain;
+    const auto weight = [&f](double x, double z, int layer) {
+        const ai::CommandResult r = f.run("get_terrain", {{"points", {{x, z}}}});
+        GIANT_CHECK(r.ok);
+        return r.value["paint"][0][static_cast<usize>(layer - 1)].get<double>();
+    };
+    ai::CommandResult r = f.run("paint_terrain", {{"layer", 2}, {"points", {{20, 30}, {100, 30}}}, {"radius", 6},
+                                                  {"strength", 1}, {"falloff", 0}});
+    GIANT_CHECK(r.ok && r.value["tiles_changed"] == 2);
+    GIANT_CHECK(r.value.contains("warning")); // no layers set yet: it says so, and paints all the same
+    GIANT_CHECK(weight(60, 30, 2) == 1.0 && weight(60, 30, 1) == 0.0 && weight(60, 50, 2) == 0.0);
+    GIANT_CHECK(t.height_at(60, 30).value() == 2.0); // heights untouched
+    r = f.run("get_terrain");
+    GIANT_CHECK(r.ok && r.value["painted_tiles"] == 2);
+    GIANT_CHECK(f.run("get_terrain", {{"points", {{5000, 5000}}}}).value["paint"][0].is_null()); // no tile
+    GIANT_CHECK(f.run("undo").ok && weight(60, 30, 2) == 0.0 && t.paints().empty());
+    GIANT_CHECK(f.run("redo").ok && weight(60, 30, 2) == 1.0);
+
+    // A sculpt over painted ground, undone and redone, keeps the paint.
+    GIANT_CHECK(f.run("sculpt_terrain", {{"op", "raise"}, {"points", {{60, 30}}}, {"radius", 6}, {"strength", 1}}).ok);
+    GIANT_CHECK(t.height_at(60, 30).value() > 2.0 && weight(60, 30, 2) == 1.0);
+    GIANT_CHECK(f.run("undo").ok && t.height_at(60, 30).value() == 2.0 && weight(60, 30, 2) == 1.0);
+    GIANT_CHECK(f.run("redo").ok && weight(60, 30, 2) == 1.0);
+    GIANT_CHECK(f.run("undo").ok);
+
+    // Erase, as a drag of two calls: one undo step; erased to nothing, no paint is kept.
+    const usize steps = f.commands.undo_history().size();
+    Json erase = {{"op", "erase"}, {"layer", 2}, {"points", {{20, 30}, {60, 30}}}, {"radius", 6}, {"strength", 1},
+                  {"falloff", 0}};
+    GIANT_CHECK(f.commands.execute("paint_terrain", erase, {88, true}).ok);
+    erase["points"] = {{60, 30}, {100, 30}};
+    erase["continues"] = true;
+    GIANT_CHECK(f.commands.execute("paint_terrain", erase, {88, true}).ok);
+    GIANT_CHECK(f.commands.undo_history().size() == steps + 1 && t.paints().empty());
+    GIANT_CHECK(f.run("undo").ok && weight(20, 30, 2) == 1.0 && weight(100, 30, 2) == 1.0);
+    // Half strength goes half way; layer 7 is the last; bad layers and ops are refused.
+    GIANT_CHECK(f.run("paint_terrain", {{"layer", 7}, {"points", {{60, 10}}}, {"strength", 0.5}, {"falloff", 0}}).ok);
+    GIANT_CHECK(std::fabs(weight(60, 10, 7) - 128.0 / 255.0) < 1e-9);
+    GIANT_CHECK(!f.run("paint_terrain", {{"layer", 0}, {"points", {{60, 10}}}}).ok);
+    GIANT_CHECK(!f.run("paint_terrain", {{"layer", 8}, {"points", {{60, 10}}}}).ok);
+    GIANT_CHECK(!f.run("paint_terrain", {{"layer", 2}, {"op", "raise"}, {"points", {{60, 10}}}}).ok);
+    GIANT_CHECK(!f.run("paint_terrain", {{"layer", 2}, {"points", {{60, 10}}}, {"strength", 2}}).ok);
+    // Nothing there: nothing changes, no undo step.
+    const usize now = f.commands.undo_history().size();
+    r = f.run("paint_terrain", {{"layer", 2}, {"points", {{5000, 5000}}}});
+    GIANT_CHECK(r.ok && r.value["tiles_changed"] == 0 && f.commands.undo_history().size() == now);
+    // With a layer there, no warning.
+    GIANT_CHECK(f.run("set_terrain_layers", {{"layers", {Json::object(), Json::object(), Json::object()}}}).ok);
+    r = f.run("paint_terrain", {{"layer", 2}, {"points", {{60, 50}}}});
+    GIANT_CHECK(r.ok && !r.value.contains("warning"));
+}
+
+GIANT_TEST("terrain brush tool: paint mode paints the chosen layer under the pointer, as one undo step") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {0, 0}}, {"to", {63, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    f.state.camera.position = {32.0, 40.0, 32.0};
+    f.state.camera.pitch_degrees = -89.0f;
+    f.state.brush = {true, "paint", 6.0, 1.0f, 0.0f, 0.0f};
+    f.state.brush.layer = 3;
+    TerrainBrushTool tool;
+    const usize steps = f.commands.undo_history().size();
+    platform::InputEvent press;
+    press.type = platform::InputEvent::Type::mouse_button;
+    press.button = platform::MouseButton::left;
+    press.down = true;
+    press.x = 400.0f;
+    press.y = 300.0f;
+    tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    const Terrain& t = f.state.scene.terrain;
+    const Terrain::Paint* p = t.paint({0, 0});
+    const usize centre = (8 * 16 + 8) * world::k_paint_channels; // the sample at (32, 32)
+    GIANT_CHECK(p != nullptr && (*p)[centre + 2] == 255 && (*p)[centre + 1] == 0);
+    GIANT_CHECK(t.height_at(32.0, 32.0).value() == 0.0);
+    platform::InputEvent release = press;
+    release.down = false;
+    tool.update({release}, false, 800.0f, 600.0f, 0.05f, f.state, f.commands);
+    GIANT_CHECK(f.commands.undo_history().size() == steps + 1);
+    // Erase takes it off.
+    f.state.brush.op = "erase";
+    tool.update({press}, false, 800.0f, 600.0f, 0.016f, f.state, f.commands);
+    tool.update({release}, false, 800.0f, 600.0f, 0.05f, f.state, f.commands);
+    GIANT_CHECK(t.paints().empty() && f.commands.undo_history().size() == steps + 2);
+    GIANT_CHECK(f.run("undo").ok && t.paint({0, 0}) != nullptr);
+    GIANT_CHECK(f.run("undo").ok && t.paints().empty());
+}

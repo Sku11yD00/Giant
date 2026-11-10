@@ -220,15 +220,25 @@ void EditorPanels::draw_scatter() {
 void EditorPanels::draw_terrain_brush() {
     ImGui::SeparatorText("Terrain brush");
     BrushSettings& b = m_state.brush;
-    ImGui::Checkbox("Sculpt (left mouse in the viewport)", &b.enabled);
-    static constexpr const char* k_ops[] = {"raise", "lower", "smooth", "flatten"};
+    ImGui::Checkbox("Sculpt or paint (left mouse in the viewport)", &b.enabled);
+    static constexpr const char* k_ops[] = {"raise", "lower", "smooth", "flatten", "paint", "erase"};
+    constexpr int ops = 6;
     int op = 0;
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < ops; ++k) {
         if (b.op == k_ops[k]) op = k;
     }
-    for (int k = 0; k < 4; ++k) {
-        if (k > 0) ImGui::SameLine();
+    for (int k = 0; k < ops; ++k) {
+        if (k > 0 && k != 4) ImGui::SameLine();
         if (ImGui::RadioButton(k_ops[k], op == k)) b.op = k_ops[k];
+    }
+    if (b.op == "paint" || b.op == "erase") {
+        // Numbered as the layers below (1 lies everywhere under the others,
+        // so 2 and up paint); paint_terrain's layer counts from 0.
+        const auto count = static_cast<int>(m_state.scene.terrain.material.layers.size());
+        if (count < 2) ImGui::TextDisabled("Add a second terrain layer to paint it.");
+        const int last = static_cast<int>(world::k_paintable_layers) + 1;
+        int layer = static_cast<int>(b.layer) + 1;
+        if (ImGui::SliderInt("Layer", &layer, 2, last)) b.layer = static_cast<u32>(std::clamp(layer, 2, last) - 1);
     }
     // Up to 128 samples (a dab stays a small part of a frame); larger
     // shapes come from import_height_map or sculpt_terrain over MCP.

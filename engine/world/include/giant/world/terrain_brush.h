@@ -43,6 +43,15 @@ float brush_weight(const Brush& brush, double distance);
 // with its 8 neighbours (across tiles) as they were before the dab.
 void apply_brush(Terrain& terrain, const Brush& brush, double x, double z, std::vector<CellCoord>& changed);
 
+// One dab of a paint brush at (x, z): raises (or, `erase`, lowers) the
+// painted weight of TerrainLayer `layer` (1 to k_paintable_layers) at the
+// samples within its radius, of the tiles there are, by brush.strength (0
+// to 1: the share of the way to full, or to none, at the centre) times
+// brush_weight. Adds the cells whose paint changed to `changed` (each once
+// a dab; one whose weights all stay is not touched).
+void apply_paint(Terrain& terrain, const Brush& brush, u32 layer, bool erase, double x, double z,
+                 std::vector<CellCoord>& changed);
+
 // A dent pressed into the ground: a crater's bowl with a rim thrown up
 // round it, or (stretched along `yaw`) a footprint.
 struct Dent {

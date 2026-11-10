@@ -1097,3 +1097,55 @@ GIANT_TEST("world streaming: kept damage is saved in its cell's file, streams wi
     GIANT_CHECK(saved.error.empty() && saved.cells_removed == 1);
     GIANT_CHECK(!std::filesystem::exists(w.folder / "cells" / "40_0.cell.json"));
 }
+
+GIANT_TEST("world streaming: tile paint is saved in its cell's file, streams with it, and holds a cell as unsaved") {
+    World w;
+    if (w.renderer == nullptr) return;
+    w.scene.terrain.set_samples(8);
+    w.scene.terrain.set({0, 0}, ramp(8, 1.0f));
+    w.scene.terrain.set({1, 0}, ramp(8, 2.0f));
+    world::Terrain::Paint paint(64 * world::k_paint_channels, 0);
+    paint[3] = 200;
+    paint[100] = 17;
+    GIANT_CHECK(w.scene.terrain.set_paint({0, 0}, paint));
+    GIANT_CHECK(w.streaming.create(w.folder, w.scene, w.generation, {}).error.empty());
+    w.reopen();
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.terrain.paint({0, 0}) && *w.scene.terrain.paint({0, 0}) == paint);
+    GIANT_CHECK(w.scene.terrain.paint({1, 0}) == nullptr && w.streaming.unsaved_cells(w.scene) == 0);
+    // Repainted: unsaved, and it stays loaded however far the camera goes; heights alone are clean.
+    (*w.scene.terrain.modify_paint({1, 0}))[0] = 255;
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 1);
+    w.settle(2570.0, 10.0);
+    GIANT_CHECK(w.scene.terrain.size() == 1 && w.scene.terrain.paint({1, 0}) != nullptr);
+    auto saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.cells_written == 1 && w.streaming.unsaved_cells(w.scene) == 0);
+    w.settle(2570.0, 10.0);
+    GIANT_CHECK(w.scene.terrain.empty()); // saved: it goes
+    // Paint taken off is a change too, and saves as none.
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.terrain.paint({1, 0}) && w.scene.terrain.paint({1, 0})->at(0) == 255);
+    GIANT_CHECK(w.scene.terrain.set_paint({0, 0}, {}));
+    GIANT_CHECK(w.streaming.unsaved_cells(w.scene) == 1);
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.cells_written == 1);
+    w.reopen();
+    w.settle(10.0, 10.0);
+    GIANT_CHECK(w.scene.terrain.size() == 2 && w.scene.terrain.paint({0, 0}) == nullptr);
+    GIANT_CHECK(w.scene.terrain.paint({1, 0}) && w.scene.terrain.paint({1, 0})->at(0) == 255);
+}
+
+GIANT_TEST("world streaming: paint undone to what its file holds is clean again") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("create_terrain", {{"from", {0, 0}}, {"to", {10, 10}}, {"samples", 8}, {"height", 2}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("paint_terrain", {{"layer", 1}, {"points", {{5, 5}}}, {"radius", 12}}));
+    GIANT_CHECK(e.w.streaming.unsaved_cells(e.state.scene) == 1);
+    GIANT_CHECK(e.commands.undo() && e.w.streaming.unsaved_cells(e.state.scene) == 0);
+    GIANT_CHECK(e.commands.redo() && e.w.streaming.unsaved_cells(e.state.scene) == 1);
+    GIANT_CHECK(e.run("save_world"));
+    GIANT_CHECK(e.w.streaming.unsaved_cells(e.state.scene) == 0);
+    // Undone after the save: the file holds the paint, the scene none.
+    GIANT_CHECK(e.commands.undo() && e.w.streaming.unsaved_cells(e.state.scene) == 1);
+}

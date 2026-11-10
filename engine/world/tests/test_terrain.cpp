@@ -3,6 +3,7 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <string>
@@ -722,4 +723,142 @@ GIANT_TEST("ground damage: a pressed tile is kept aside as a dent's; dents over 
     GIANT_CHECK((game.ours_tiles(t) == std::vector<CellCoord>{{0, 0}}));
     GIANT_CHECK(game.restore(t) == 1 && t.version({0, 0}) == v0 && t.height_at(10.0, 10.0).value() == 5.0);
     (void)pressed;
+}
+
+GIANT_TEST("terrain paint: kept per tile apart from heights, with its own versions and changes") {
+    Terrain t;
+    t.set_samples(8);
+    const usize bytes = 64 * k_paint_channels;
+    GIANT_CHECK(t.modify_paint({0, 0}) == nullptr && !t.set_paint({0, 0}, Terrain::Paint(bytes, 1))); // no tile
+    t.set({0, 0}, Terrain::Heights(64, 1.0f));
+    t.set({1, 0}, Terrain::Heights(64, 1.0f));
+    const u64 height_version = t.version({0, 0});
+    (void)t.take_changes();
+    (void)t.take_paint_changes(); // "all" from being made
+    GIANT_CHECK(t.paint({0, 0}) == nullptr && t.paint_version({0, 0}) == 0);
+    Terrain::Paint* p = t.modify_paint({0, 0});
+    GIANT_CHECK(p != nullptr && p->size() == bytes && std::all_of(p->begin(), p->end(), [](u8 w) { return w == 0; }));
+    (*p)[5] = 200;
+    const u64 v1 = t.paint_version({0, 0});
+    GIANT_CHECK(v1 != 0);
+    // Heights, their version and their changes are untouched.
+    GIANT_CHECK(t.version({0, 0}) == height_version);
+    const TerrainChanges heights = t.take_changes();
+    GIANT_CHECK(!heights.all && heights.tiles.empty());
+    TerrainChanges painted = t.take_paint_changes();
+    GIANT_CHECK(!painted.all && painted.tiles.size() == 1 && painted.tiles[0] == (CellCoord{0, 0}));
+    // A copy keeps paint and versions; a restore puts the old version back.
+    Terrain copy = t;
+    GIANT_CHECK(copy.paint({0, 0}) && copy.paint({0, 0})->at(5) == 200 && copy.paint_version({0, 0}) == v1);
+    GIANT_CHECK(copy.take_paint_changes().all);
+    Terrain::Paint other(bytes, 0);
+    other[0] = 9;
+    GIANT_CHECK(t.set_paint({0, 0}, other) && t.paint_version({0, 0}) != v1);
+    GIANT_CHECK(t.restore_paint({0, 0}, *copy.paint({0, 0}), v1) && t.paint_version({0, 0}) == v1);
+    GIANT_CHECK(*t.paint({0, 0}) == *copy.paint({0, 0}));
+    // All zero, or empty, is no paint.
+    GIANT_CHECK(t.set_paint({0, 0}, Terrain::Paint(bytes, 0)) && t.paint({0, 0}) == nullptr &&
+                t.paint_version({0, 0}) == 0);
+    GIANT_CHECK(t.set_paint({1, 0}, other) && t.paint({1, 0}) != nullptr);
+    GIANT_CHECK(t.set_paint({1, 0}, {}) && t.paint({1, 0}) == nullptr);
+    // Removing a tile drops its paint, as a paint change.
+    GIANT_CHECK(t.set_paint({1, 0}, other));
+    (void)t.take_paint_changes();
+    GIANT_CHECK(t.remove({1, 0}) && t.paint({1, 0}) == nullptr && t.paint_version({1, 0}) == 0);
+    painted = t.take_paint_changes();
+    GIANT_CHECK(painted.tiles.size() == 1 && painted.tiles[0] == (CellCoord{1, 0}));
+    t.set({1, 0}, Terrain::Heights(64, 1.0f));
+    GIANT_CHECK(t.paint({1, 0}) == nullptr); // a new tile there starts unpainted
+    t.clear();
+    GIANT_CHECK(t.paints().empty());
+}
+
+GIANT_TEST("terrain paint: saved with the scene's tiles as hex rows, exactly; bad rows are refused") {
+    Scene s;
+    s.terrain.set_samples(8);
+    s.terrain.set({0, 0}, Terrain::Heights(64, 0.0f));
+    s.terrain.set({-1, 3}, Terrain::Heights(64, 2.0f));
+    Terrain::Paint p(64 * k_paint_channels, 0);
+    for (usize k = 0; k < p.size(); k += 3) p[k] = static_cast<u8>(k * 7);
+    p[1] = 255;
+    GIANT_CHECK(s.terrain.set_paint({-1, 3}, p));
+    const std::string text = save_scene(s);
+    GIANT_CHECK(contains(text, "\"paint\""));
+    Scene back;
+    GIANT_CHECK(!load_scene(text, back).has_value());
+    GIANT_CHECK(back.terrain.paint({-1, 3}) && *back.terrain.paint({-1, 3}) == p);
+    GIANT_CHECK(back.terrain.paint({0, 0}) == nullptr);
+    GIANT_CHECK(save_scene(back) == text);
+
+    // 8 samples * 8 bytes * 2 digits = 128 digits a row.
+    const auto with_paint = [](const std::string& rows) {
+        return std::string(R"({"format": "giant-scene", "version": 1, "terrain": {"samples": 8, "tiles": [{"cell": [0, 0], )") +
+               R"("heights": )" + rows_of("0 0 0 0 0 0 0 0") + R"(, "paint": )" + rows + "}]}}";
+    };
+    const std::string row(128, 'a');
+    GIANT_CHECK(load_error(with_paint(rows_of(row.c_str()))).empty());
+    std::string upper = row;
+    upper[0] = 'F';
+    GIANT_CHECK(load_error(with_paint(rows_of(upper.c_str()))).empty()); // either case
+    std::string bad = row;
+    bad[7] = 'g';
+    GIANT_CHECK(contains(load_error(with_paint(rows_of(bad.c_str()))), "hex"));
+    GIANT_CHECK(contains(load_error(with_paint(rows_of(std::string(126, 'a').c_str()))), "must be 128 hex digits"));
+    GIANT_CHECK(contains(load_error(with_paint(rows_of(row.c_str(), 7))), "must be 8 rows"));
+    // All zero reads as no paint.
+    Scene none;
+    GIANT_CHECK(!load_scene(with_paint(rows_of(std::string(128, '0').c_str())), none).has_value());
+    GIANT_CHECK(none.terrain.size() == 1 && none.terrain.paint({0, 0}) == nullptr);
+}
+
+GIANT_TEST("terrain brush: paint raises one layer's weight towards full, erase takes it off, across tiles") {
+    Terrain t;
+    t.set_samples(16); // 4 m apart
+    t.set({0, 0}, Terrain::Heights(256, 1.0f));
+    t.set({1, 0}, Terrain::Heights(256, 1.0f));
+    Brush b;
+    b.radius = 10.0;
+    b.strength = 0.5f;
+    b.falloff = 0.0f;
+    const auto weight = [&t](CellCoord c, usize i, usize j, u32 layer) -> int {
+        const Terrain::Paint* p = t.paint(c);
+        return p == nullptr ? 0 : (*p)[(j * 16 + i) * k_paint_channels + layer - 1];
+    };
+    std::vector<CellCoord> changed;
+    const u64 heights = t.version({0, 0});
+    apply_paint(t, b, 2, false, 64.0, 8.0, changed); // on the border of the two tiles
+    GIANT_CHECK(changed.size() == 2);
+    GIANT_CHECK(weight({1, 0}, 0, 2, 2) == 128 && weight({0, 0}, 14, 2, 2) == 128); // half way, rounded up
+    GIANT_CHECK(weight({1, 0}, 3, 2, 2) == 0);                                     // 12 m away: out of reach
+    GIANT_CHECK(weight({1, 0}, 0, 2, 1) == 0 && weight({1, 0}, 0, 2, 3) == 0);       // other layers untouched
+    GIANT_CHECK(t.version({0, 0}) == heights);                                        // no heights changed
+    apply_paint(t, b, 2, false, 64.0, 8.0, changed);
+    GIANT_CHECK(weight({1, 0}, 0, 2, 2) == 192);
+    // A light brush still gets all the way.
+    b.strength = 0.01f;
+    for (int k = 0; k < 400; ++k) apply_paint(t, b, 2, false, 64.0, 8.0, changed);
+    GIANT_CHECK(weight({1, 0}, 0, 2, 2) == 255);
+    // Full: another dab changes nothing and touches no tile.
+    changed.clear();
+    const u64 painted = t.paint_version({1, 0});
+    apply_paint(t, b, 2, false, 64.0, 8.0, changed);
+    GIANT_CHECK(changed.empty() && t.paint_version({1, 0}) == painted);
+    // Strength past 1 counts as 1; layers outside 1 to 7 do nothing.
+    b.strength = 50.0f;
+    apply_paint(t, b, 7, false, 64.0, 8.0, changed);
+    GIANT_CHECK(weight({1, 0}, 0, 2, 7) == 255);
+    changed.clear();
+    apply_paint(t, b, 0, false, 64.0, 8.0, changed);
+    apply_paint(t, b, 8, false, 64.0, 8.0, changed);
+    GIANT_CHECK(changed.empty());
+    // Erasing everything there was leaves no paint at all.
+    apply_paint(t, b, 2, true, 64.0, 8.0, changed);
+    GIANT_CHECK(weight({1, 0}, 0, 2, 2) == 0 && weight({1, 0}, 0, 2, 7) == 255);
+    apply_paint(t, b, 7, true, 64.0, 8.0, changed);
+    GIANT_CHECK(t.paint({0, 0}) == nullptr && t.paint({1, 0}) == nullptr);
+    // Erasing unpainted ground, or painting where there is no tile, changes nothing.
+    changed.clear();
+    apply_paint(t, b, 2, true, 64.0, 8.0, changed);
+    apply_paint(t, b, 2, false, 500.0, 500.0, changed);
+    GIANT_CHECK(changed.empty() && t.paints().empty());
 }

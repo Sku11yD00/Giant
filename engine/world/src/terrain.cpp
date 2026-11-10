@@ -47,12 +47,14 @@ CellCoord Terrain::tile_of(double x, double z) const {
 
 Terrain::Terrain(const Terrain& other)
     : material(other.material), m_tile_size(other.m_tile_size), m_holes(other.m_holes), m_samples(other.m_samples),
-      m_tiles(other.m_tiles), m_versions(other.m_versions) {}
+      m_tiles(other.m_tiles), m_versions(other.m_versions), m_paint(other.m_paint),
+      m_paint_versions(other.m_paint_versions) {}
 
 Terrain::Terrain(Terrain&& other) noexcept
     : material(other.material), m_tile_size(other.m_tile_size), m_holes(other.m_holes), m_samples(other.m_samples),
       m_tiles(std::move(other.m_tiles)),
-      m_versions(std::move(other.m_versions)) {
+      m_versions(std::move(other.m_versions)), m_paint(std::move(other.m_paint)),
+      m_paint_versions(std::move(other.m_paint_versions)) {
     other.clear();
 }
 
@@ -71,8 +73,11 @@ Terrain& Terrain::operator=(Terrain&& other) noexcept {
         m_samples = other.m_samples;
         m_tiles = std::move(other.m_tiles);
         m_versions = std::move(other.m_versions);
+        m_paint = std::move(other.m_paint);
+        m_paint_versions = std::move(other.m_paint_versions);
         m_changes = {{}, true};
         m_physics_changes = {{}, true};
+        m_paint_changes = {{}, true};
         m_identity = Identity();
         other.clear();
     }
@@ -134,15 +139,79 @@ std::optional<Terrain::Heights> Terrain::remove(CellCoord cell) {
     m_tiles.erase(it);
     m_versions.erase(cell);
     changed(cell);
+    if (m_paint.erase(cell) != 0) {
+        m_paint_versions.erase(cell);
+        paint_changed(cell);
+    }
     return out;
 }
 
 void Terrain::clear() {
     m_tiles.clear();
     m_versions.clear();
+    m_paint.clear();
+    m_paint_versions.clear();
     m_changes = {{}, true};
     m_physics_changes = {{}, true};
+    m_paint_changes = {{}, true};
     ++m_edits;
+}
+
+const Terrain::Paint* Terrain::paint(CellCoord cell) const {
+    const auto it = m_paint.find(cell);
+    return it == m_paint.end() ? nullptr : &it->second;
+}
+
+Terrain::Paint* Terrain::modify_paint(CellCoord cell) {
+    if (!m_tiles.contains(cell)) return nullptr;
+    Paint& p = m_paint[cell];
+    if (p.empty()) p.assign(usize{m_samples} * m_samples * k_paint_channels, 0);
+    m_paint_versions[cell] = next_version();
+    paint_changed(cell);
+    return &p;
+}
+
+bool Terrain::set_paint(CellCoord cell, Paint paint) {
+    if (!m_tiles.contains(cell)) return false;
+    GIANT_ASSERT(paint.empty() || paint.size() == usize{m_samples} * m_samples * k_paint_channels,
+                 "a tile's paint has samples() squared times k_paint_channels weights");
+    if (std::all_of(paint.begin(), paint.end(), [](u8 w) { return w == 0; })) {
+        if (m_paint.erase(cell) == 0) return true; // none before, none now
+        m_paint_versions.erase(cell);
+    } else {
+        m_paint[cell] = std::move(paint);
+        m_paint_versions[cell] = next_version();
+    }
+    paint_changed(cell);
+    return true;
+}
+
+bool Terrain::restore_paint(CellCoord cell, Paint paint, u64 version) {
+    if (!set_paint(cell, std::move(paint))) return false;
+    if (version != 0 && m_paint.contains(cell)) m_paint_versions[cell] = version;
+    return true;
+}
+
+u64 Terrain::paint_version(CellCoord cell) const {
+    const auto it = m_paint_versions.find(cell);
+    return it == m_paint_versions.end() ? 0 : it->second;
+}
+
+void Terrain::paint_changed(CellCoord cell) {
+    if (m_paint_changes.all) return;
+    if (m_paint_changes.tiles.size() >= 4096 + m_paint.size()) {
+        m_paint_changes.tiles.clear();
+        m_paint_changes.tiles.shrink_to_fit();
+        m_paint_changes.all = true;
+        return;
+    }
+    m_paint_changes.tiles.push_back(cell);
+}
+
+TerrainChanges Terrain::take_paint_changes() {
+    TerrainChanges out = std::move(m_paint_changes);
+    m_paint_changes = {};
+    return out;
 }
 
 void Terrain::changed(CellCoord cell) {
