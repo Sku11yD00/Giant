@@ -250,7 +250,8 @@ void EditorPanels::draw_terrain_brush() {
 
 void EditorPanels::draw_terrain_layers() {
     ImGui::SeparatorText("Terrain layers");
-    const std::vector<world::TerrainLayer>& layers = m_state.scene.terrain.material.layers;
+    // A copy: an edit replaces the scene's layers at once, mid-draw.
+    const std::vector<world::TerrainLayer> layers = m_state.scene.terrain.material.layers;
     // All layers as set_terrain_layers takes them (it replaces the lot).
     const auto all = [&layers] {
         ai::Json out = ai::Json::array();

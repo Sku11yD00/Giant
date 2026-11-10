@@ -94,7 +94,9 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
 
 // The ground's layers for the renderer, their textures requested (and
 // their ids as ready now). Made again each frame: at most a few.
-void terrain_layers(const world::Scene& scene, SceneFrame& out) {
+// Returns whether their textures changed (so the textures in use are told again).
+bool terrain_layers(const world::Scene& scene, SceneFrame& out) {
+    const std::vector<std::array<u32, 4>> before = std::move(out.terrain_layer_textures);
     out.terrain_layers.clear();
     out.terrain_layer_textures.clear();
     const std::vector<world::TerrainLayer>& layers = scene.terrain.material.layers;
@@ -123,6 +125,7 @@ void terrain_layers(const world::Scene& scene, SceneFrame& out) {
         out.terrain_layers.push_back(r);
         out.terrain_layer_textures.push_back(refs);
     }
+    return out.terrain_layer_textures != before;
 }
 
 render::DecalShape decal_shape(world::DecalShape s) {
@@ -1011,10 +1014,10 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.skinned = nullptr;
     out.cloth = nullptr;
     out.fallen = nullptr;
-    terrain_layers(scene, out);
+    const bool layer_textures = terrain_layers(scene, out);
     // The textures drawn materials use, when that may have changed: the
     // rest leave the GPU after a while.
-    if (out.textures != nullptr && (!rebuilt.empty() || compact)) {
+    if (out.textures != nullptr && (!rebuilt.empty() || compact || layer_textures)) {
         std::vector<u32>& used = out.scratch;
         used.clear();
         for (usize i = 0; i < out.materials.size(); ++i) {

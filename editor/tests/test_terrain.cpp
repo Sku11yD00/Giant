@@ -477,6 +477,16 @@ GIANT_TEST("terrain commands: layers set as a whole, read back, undone, and thei
     GIANT_CHECK(!r.ok && r.error.find("layers[1].maps.base_color") != std::string::npos);
     GIANT_CHECK(!f.run("set_terrain_layers", {{"layers", Json::array({Json{{"maps", {{"occlusion", "x.png"}}}}})}}).ok);
     GIANT_CHECK(layers.size() == 3);
+    GIANT_CHECK(f.run("set_terrain_layers", {{"layers", Json::array({Json{{"tiling", 0.05}}})}}).ok); // the least
+    GIANT_CHECK(f.commands.undo() && layers.size() == 3);
+    // An image a layer names already goes back as it is, even with its file
+    // gone (read back, one value changed, sent again).
+    f.state.scene.terrain.material.layers[0].maps.base_color = "gone/grass.png";
+    Json back = f.run("get_terrain").value["material"]["layers"];
+    back[1]["roughness"] = 0.3;
+    r = f.run("set_terrain_layers", {{"layers", back}});
+    GIANT_CHECK(r.ok && layers[0].maps.base_color == "gone/grass.png" && layers[1].roughness == 0.3f);
+    GIANT_CHECK(f.commands.undo());
     // None again, then undo, then redo.
     GIANT_CHECK(f.run("set_terrain_layers", {{"layers", Json::array()}}).ok && layers.empty());
     GIANT_CHECK(f.commands.undo() && layers.size() == 3);

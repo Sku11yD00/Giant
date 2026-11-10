@@ -252,7 +252,7 @@ Json layer_schema() {
              {{"base_color", colour},
               {"roughness", number(0, 1, "0 mirror to 1 matte; multiplies the roughness image.")},
               {"maps", std::move(maps)},
-              {"tiling", number(world::k_min_terrain_tiling, world::k_max_terrain_tiling,
+              {"tiling", number(0.05, 1000, // world::k_min_terrain_tiling, k_max_terrain_tiling (as typed)
                                 "Metres one repeat of the images covers. Default 4.")},
               {"min_slope", number(0, 90, "Lies where the ground is at least this steep, degrees from level. Default 0.")},
               {"max_slope", number(0, 90, "And at most this steep. Default 90.")},
@@ -804,7 +804,26 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                  l.max_height = j.value("max_height", l.max_height);
                  l.height_blend = j.value("height_blend", l.height_blend);
                  if (j.contains("maps")) {
-                     if (std::string bad = apply_maps(j["maps"], l.maps); !bad.empty()) {
+                     // Images the layers name already are taken as they are
+                     // (read back and sent again, even if a file has gone
+                     // since); new ones must exist.
+                     Json given = j["maps"];
+                     for (const char* key : {"base_color", "normal", "roughness_metal"}) {
+                         if (!given.contains(key)) continue;
+                         const std::string path = given[key].get<std::string>();
+                         const auto named = [&](const world::TerrainLayer& o) {
+                             return !path.empty() && (o.maps.base_color == path || o.maps.normal == path ||
+                                                      o.maps.roughness_metal == path);
+                         };
+                         const std::vector<world::TerrainLayer>& now = state.scene.terrain.material.layers;
+                         if (std::any_of(now.begin(), now.end(), named)) {
+                             (std::string_view(key) == "base_color" ? l.maps.base_color
+                              : std::string_view(key) == "normal"   ? l.maps.normal
+                                                                    : l.maps.roughness_metal) = path;
+                             given.erase(key);
+                         }
+                     }
+                     if (std::string bad = apply_maps(given, l.maps); !bad.empty()) {
                          return CommandResult::failure("layers[" + std::to_string(layers.size()) + "]." + bad);
                      }
                  }

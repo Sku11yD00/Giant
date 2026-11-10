@@ -1334,6 +1334,7 @@ void read_terrain_layer(Reader& r, const std::string& path, TerrainLayer& l, std
     r.number("max_height", l.max_height, -k_max_terrain_layer_height, k_max_terrain_layer_height);
     r.number("height_blend", l.height_blend, 0, k_max_terrain_layer_height);
     read_maps(r, path, l.maps, error);
+    if (r.ok() && !l.maps.occlusion.empty()) r.fail("maps", "occlusion has no place on the ground's layers");
 }
 
 // "samples" and "material" of a terrain (or a world's terrain settings).

@@ -241,6 +241,7 @@ GIANT_TEST("terrain: layers save and load with their images, bands and tiling; b
     GIANT_CHECK(refused(R"({"a": 1})", "at most 8"));
     GIANT_CHECK(refused("[{}, {}, {}, {}, {}, {}, {}, {}, {}]", "at most 8"));
     GIANT_CHECK(refused(R"([{"maps": {"base_color": 3}}])", "base_color"));
+    GIANT_CHECK(refused(R"([{"maps": {"occlusion": "ao.png"}}])", "occlusion"));
 }
 
 GIANT_TEST("terrain: loading is strict") {
