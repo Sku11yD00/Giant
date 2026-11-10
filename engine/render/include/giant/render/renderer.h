@@ -790,6 +790,9 @@ private:
     u32 m_ao_width = 0;
     u32 m_ao_height = 0;
     bool m_ao_ready = false;     // its textures made for this size
+    rhi::PipelineHandle m_contact_pass; // contact shadows (ao.slang's cs_contact)
+    rhi::TextureHandle m_contact;       // the sun let through, full size
+    bool m_contact_ready = false;
     rhi::PipelineHandle m_bloom_up;
     rhi::PipelineHandle m_post;
     rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables
