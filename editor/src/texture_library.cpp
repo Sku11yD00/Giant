@@ -441,6 +441,17 @@ void TextureLibrary::take_done() {
     start_waiting();
 }
 
+u32 TextureLibrary::upload_first(const Done& done, bool whole) const {
+    u32 first = whole ? 0 : tail_of(done.cooked.desc);
+    const Entry& e = m_entries[done.ref];
+    if (m_renderer != nullptr && e.id != render::k_no_texture) {
+        // A new version of a drawn texture: as sharp as the one it replaces
+        // (a reload does not blur the screen).
+        if (const auto r = m_renderer->texture_residency(e.id)) first = std::min(first, r->first_mip);
+    }
+    return first;
+}
+
 u32 TextureLibrary::tail_of(const rhi::TextureDesc& desc) const {
     u32 tail = 0;
     const u32 coarsest = render::coarsest_first_mip(desc);
@@ -454,12 +465,7 @@ void TextureLibrary::upload(Done& done, bool whole) {
     const std::string name = e.key.path + " (" + to_string(e.key.slot) + ")";
     const rhi::TextureDesc& desc = done.cooked.desc;
     const u32 tail = tail_of(desc);
-    u32 first = whole ? 0 : tail;
-    if (m_renderer != nullptr && e.id != render::k_no_texture) {
-        // A new version of a drawn texture: as sharp as the one it replaces
-        // (a reload does not blur the screen).
-        if (const auto r = m_renderer->texture_residency(e.id)) first = std::min(first, r->first_mip);
-    }
+    const u32 first = upload_first(done, whole);
     render::TextureId id = render::k_no_texture;
     if (done.ok && m_renderer != nullptr) {
         const std::span<const u8> all(done.cooked.contents);
@@ -573,7 +579,9 @@ void TextureLibrary::stream() {
         e.bytes = r->bytes; // (ids are unchanged: no new version)
         // Counted at the most it is heading for: levels on their way
         // (read, or handed to the renderer) count already.
-        u32 heading = std::min(r->first_mip, r->target_mip);
+        // A trim counts at its target: it lands in a few frames (behind
+        // uploads under way), and counting it whole would trim more.
+        u32 heading = r->target_mip;
         if (e.reading) heading = std::min(heading, e.read_to);
         resident += heading == r->first_mip ? r->bytes
                                             : rhi::texture_bytes(render::texture_from_mip(e.desc, heading));
@@ -695,11 +703,11 @@ void TextureLibrary::update() {
     for (; taken < m_to_upload.size(); ++taken) {
         Done& d = *m_to_upload[taken];
         const bool current = d.generation == m_entries[d.ref].generation;
-        // Charged what goes up: its tail (or all of it when whole).
+        // Charged what goes up: its tail, as sharp as a version it
+        // replaces, or all of it when whole.
         const u64 bytes = !current || !d.ok ? 0
-                          : m_whole         ? d.cooked.contents.size()
-                                            : rhi::texture_bytes(render::texture_from_mip(d.cooked.desc,
-                                                                                          tail_of(d.cooked.desc)));
+                                            : rhi::texture_bytes(render::texture_from_mip(
+                                                  d.cooked.desc, upload_first(d, m_whole)));
         if (spent > 0 && spent + bytes > upload_bytes_per_update) break; // next frame
         spent += bytes;
         --m_entries[d.ref].uploading;
@@ -745,20 +753,24 @@ void TextureLibrary::wait_cooked() {
 }
 
 void TextureLibrary::finish() {
-    wait_cooked();
-    const u64 budget = upload_bytes_per_update;
-    upload_bytes_per_update = ~u64{0};
-    m_whole = true;
-    update();
-    m_whole = false;
-    upload_bytes_per_update = budget;
-    // Reads update() started: taken (dropped by make_whole's new ids).
-    while (m_reading > 0) {
-        m_jobs->wait(m_group);
-        take_levels();
+    // (Again while a read found its file gone and cooked it again.)
+    for (int pass = 0; pass < 4; ++pass) {
+        wait_cooked();
+        const u64 budget = upload_bytes_per_update;
+        upload_bytes_per_update = ~u64{0};
+        m_whole = true;
+        update();
+        m_whole = false;
+        upload_bytes_per_update = budget;
+        // Reads update() started: taken (dropped by make_whole's new ids).
+        while (m_reading > 0) {
+            m_jobs->wait(m_group);
+            take_levels();
+        }
+        // Textures already up from their tails: put up whole now.
+        for (Ref ref = 0; ref < m_entries.size(); ++ref) make_whole(ref);
+        if (pending() == 0) break;
     }
-    // Textures already up from their tails: put up whole now.
-    for (Ref ref = 0; ref < m_entries.size(); ++ref) make_whole(ref);
 }
 
 void TextureLibrary::make_whole(Ref ref) {

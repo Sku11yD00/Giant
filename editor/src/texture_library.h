@@ -190,6 +190,9 @@ private:
     // The finest level whose sides are within tail_size (and that a
     // texture can start at).
     u32 tail_of(const rhi::TextureDesc& desc) const;
+    // The level a cooked result goes up from: its tail (0 when whole), as
+    // sharp as a drawn version it replaces.
+    u32 upload_first(const Done& done, bool whole) const;
     // Puts a ready texture up with all its levels at once (finish()).
     void make_whole(Ref ref);
     void take_done();

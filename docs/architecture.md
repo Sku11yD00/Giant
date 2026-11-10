@@ -292,14 +292,16 @@ an offline cooker can use it without a device.
   glance away does not reload them), or at once, most bytes first, while
   all textures hold more than `gpu_budget_bytes` (1 GiB); still over, the
   biggest lose their finest level even if wanted. The budget counts each
-  texture at the sharpest level it is heading for (reads and renderer
-  uploads under way included), and a finer read is cut back to what fits,
-  so levels on their way are not trimmed again. A new version of a drawn
+  texture at the level it is heading for (reads and renderer uploads under
+  way included, trims under way at their target), and a finer read is cut
+  back to what fits, so levels on their way are neither trimmed again nor
+  trimmed twice. A new version of a drawn
   texture (a reload) goes up as sharp as the one it replaces. `finish()`
   (`get_textures` with `wait`) uploads new cooks whole and puts every
   streamed texture up whole at once (read on the main thread; tests and
   screenshots only), kept so at least `trim_after_updates` (unless over
-  the budget). The upload budget charges tails, not whole textures.
+  the budget). The upload budget charges what goes up: tails, or a
+  reload's sharper levels.
   Feedback comes from the `lit` and `lighting` views only, so in other
   debug views textures fall back to their tails after a while, and a
   screenshot straight after a camera move shows what had streamed so far
