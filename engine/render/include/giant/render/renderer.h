@@ -145,12 +145,13 @@ struct Material {
     // Drawn in a visibility pass of their own.
     float alpha_cutoff = 0.0f;
     // For the voxel world, which cannot sample textures: the base colour
-    // texture's average colour (linear, weighted by alpha; texture::
-    // summarize_color), which multiplies base_color there, and, for a cut
-    // out material, the share of its surface alpha_cutoff leaves (0 to 1),
-    // which thins its voxels to match (voxel::BrickBuilder). The caller
-    // keeps them in step with the texture: 1 while it has none (or it is
-    // not ready). A change builds the voxels of its instances again.
+    // texture's average colour (linear; for a cut-out, of what its cutoff
+    // leaves: texture::summarize_color), which multiplies base_color there,
+    // and, for a cut-out, the share of its surface alpha_cutoff leaves (0
+    // to 1), which thins its voxels to match (voxel::BrickBuilder). Both
+    // count only with base_color_texture. The caller keeps them in step
+    // with the texture: 1 while it has none (or it is not ready). A change
+    // builds the voxels of its instances again.
     Vec3 base_color_average{1.0f, 1.0f, 1.0f};
     float coverage = 1.0f;
 };

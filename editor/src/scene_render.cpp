@@ -65,7 +65,7 @@ void set_textures(render::Material& r, const std::array<u32, 4>& refs, const Tex
     r.occlusion_texture = textures.id(refs[3]);
     // The voxel world's view of the base colour texture, while it is drawn.
     const TextureLibrary::Entry* e = r.base_color_texture != render::k_no_texture ? textures.entry(refs[0]) : nullptr;
-    r.base_color_average = e != nullptr ? e->summary.average : Vec3{1.0f, 1.0f, 1.0f};
+    r.base_color_average = e != nullptr ? e->summary.average_at(alpha_cutoff) : Vec3{1.0f, 1.0f, 1.0f};
     r.coverage = e != nullptr ? e->summary.coverage_at(alpha_cutoff) : 1.0f;
 }
 

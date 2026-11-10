@@ -211,6 +211,17 @@ GIANT_TEST("voxel scene: a texture's average colour and a cut-out's coverage rea
     GIANT_CHECK(b.voxels->stats().pending == 0);
     GIANT_CHECK(b.voxels->stats().bricks == 0);
     GIANT_CHECK(!b.voxel_at({1.3, 1.0, 0.0}, packed));
+    // Partly covered: some voxels; barely covered, the dither leaves none,
+    // and a brick thinned to nothing takes no room in the pool.
+    m.coverage = 0.5f;
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0 && b.voxels->stats().bricks > 0);
+    m.coverage = 1.0e-7f;
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->stats().bricks == 0);
     // ...and without the texture (gone, or not there yet) it is solid.
     m.base_color_texture = k_no_texture;
     m.base_color_average = {1.0f, 1.0f, 1.0f};

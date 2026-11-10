@@ -14,6 +14,41 @@ u32 to_bits(float v, float steps) {
 
 float sign_not_zero(float v) { return v < 0.0f ? -1.0f : 1.0f; }
 
+// The area of the triangle's part inside the box [0, edge]^3 (clipped
+// against its six planes, Sutherland-Hodgman).
+float area_inside(const Vec3& a, const Vec3& b, const Vec3& c, float edge) {
+    std::array<Vec3, 9> poly{a, b, c};
+    std::array<Vec3, 9> next{};
+    u32 count = 3;
+    const auto comp = [](const Vec3& v, u32 axis) { return axis == 0 ? v.x : axis == 1 ? v.y : v.z; };
+    for (u32 plane = 0; plane < 6 && count > 0; ++plane) {
+        const u32 axis = plane / 2;
+        const bool upper = plane % 2 == 1;
+        // Signed distance inside the plane: >= 0 keeps.
+        const auto inside = [&](const Vec3& v) { return upper ? edge - comp(v, axis) : comp(v, axis); };
+        u32 kept = 0;
+        for (u32 i = 0; i < count; ++i) {
+            const Vec3& p = poly[i];
+            const Vec3& q = poly[(i + 1) % count];
+            const float dp = inside(p);
+            const float dq = inside(q);
+            if (dp >= 0.0f && kept < next.size()) {
+                next[kept++] = p;
+            }
+            if ((dp >= 0.0f) != (dq >= 0.0f) && kept < next.size()) {
+                next[kept++] = p + (q - p) * (dp / (dp - dq));
+            }
+        }
+        poly = next;
+        count = kept;
+    }
+    Vec3 twice{};
+    for (u32 i = 1; i + 1 < count; ++i) {
+        twice += cross(poly[i] - poly[0], poly[i + 1] - poly[0]);
+    }
+    return 0.5f * length(twice);
+}
+
 } // namespace
 
 u32 pack_voxel(const Vec3& color, const Vec3& normal) {
@@ -231,10 +266,14 @@ u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, cons
     if (hits == 0) {
         return tested;
     }
-    // Its area (the whole triangle's, even where it leaves the brick) over
-    // the voxels of this brick it touches: generous at brick edges, which
-    // only fills a little more there.
-    const float cover = coverage < 1.0f ? coverage * 0.5f * length(face) / (s * s * static_cast<float>(hits)) : 0.0f;
+    // Its area inside the brick, shared among the voxels it touches here,
+    // and never more than a plane can cut through one (sqrt 2 faces).
+    float cover = 0.0f;
+    if (coverage < 1.0f) {
+        const float edge = s * static_cast<float>(k_brick_edge);
+        const float share = std::min(area_inside(a, b, c, edge) / static_cast<float>(hits), 1.41421356f * s * s);
+        cover = coverage * share / (s * s);
+    }
     for (u32 k = 0; k < hits; ++k) {
         add(hit[k], color, normal, coverage, cover, stand_in);
     }

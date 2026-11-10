@@ -1629,7 +1629,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                          j["from_cache"] = e.from_cache;
                          j["seconds"] = e.seconds;
                          if (e.key.slot == TextureLibrary::Slot::base_color) {
-                             const Vec3& a = e.summary.average;
+                             const Vec3 a = e.summary.average_at(0.0f);
                              j["average_color"] = {a.x, a.y, a.z};
                              j["coverage_half"] = e.summary.coverage_at(0.5f);
                          }

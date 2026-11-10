@@ -199,6 +199,36 @@ GIANT_TEST("voxel: cut-out triangles fill voxels as often as they would hide wha
     GIANT_CHECK(in_range);
 }
 
+GIANT_TEST("voxel: a cut-out bigger than the brick, or across its edge, counts only its part inside") {
+    BrickBuilder b;
+    // One huge triangle over the whole layer: each voxel gets a voxel's
+    // face of it, so 30% coverage fills about 30%, not all.
+    u32 filled = 0;
+    const u32 seeds = 64;
+    for (u32 seed = 0; seed < seeds; ++seed) {
+        b.reset(0.5f, seed);
+        b.add_triangle({-50, 1.25f, -50}, {-50, 1.25f, 100}, {100, 1.25f, -50}, {0.2f, 0.6f, 0.1f}, false, 0.3f);
+        filled += b.build().count();
+    }
+    GIANT_CHECK(near(static_cast<float>(filled) / static_cast<float>(seeds * 64), 0.3f, 0.03f));
+    // A card half over the brick's +x edge (the last column): half its
+    // area is inside, in one voxel, so it fills as a half-sized card does.
+    u32 across = 0;
+    u32 half = 0;
+    for (u32 seed = 0; seed < 256; ++seed) {
+        b.reset(0.5f, seed);
+        b.add_triangle({3.75f, 1.25f, 0.0f}, {3.75f, 1.25f, 0.5f}, {4.25f, 1.25f, 0.0f}, {1, 1, 1}, false, 0.8f);
+        b.add_triangle({4.25f, 1.25f, 0.0f}, {3.75f, 1.25f, 0.5f}, {4.25f, 1.25f, 0.5f}, {1, 1, 1}, false, 0.8f);
+        across += b.build().count();
+        b.reset(0.5f, seed);
+        b.add_triangle({3.75f, 1.25f, 0.0f}, {3.75f, 1.25f, 0.5f}, {4.0f, 1.25f, 0.0f}, {1, 1, 1}, false, 0.8f);
+        b.add_triangle({4.0f, 1.25f, 0.0f}, {3.75f, 1.25f, 0.5f}, {4.0f, 1.25f, 0.5f}, {1, 1, 1}, false, 0.8f);
+        half += b.build().count();
+    }
+    GIANT_CHECK(across == half);
+    GIANT_CHECK(near(static_cast<float>(across) / 256.0f, 0.4f, 0.08f));
+}
+
 GIANT_TEST("voxel: a thin cut-out stand-in over solid ground leaves the ground, not a hole") {
     BrickBuilder b;
     b.reset(0.5f, 3);

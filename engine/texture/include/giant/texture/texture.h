@@ -111,26 +111,34 @@ std::vector<u8> decode_blocks(rhi::Format format, u32 width, u32 height, std::sp
 
 // What a colour texture looks like from far away, where the voxel world
 // stands in for its surface: its average colour and how much of it a
-// cutoff leaves.
+// cutoff leaves, at 17 alpha steps (k / 16).
 struct ColorSummary {
     static constexpr u32 k_steps = 16;
-    // Linear RGB, each texel weighted by its alpha (as the colour mips
-    // filter), so cut-away texels do not tint it. 1 (white) when unknown.
-    Vec3 average{1.0f, 1.0f, 1.0f};
+    // average[k]: the mean linear RGB of the texels whose alpha is at or
+    // over k / 16 (average[0]: of every texel, as an opaque material shows
+    // it, whatever its alpha). White when unknown or none are left.
+    std::array<Vec3, k_steps + 1> average{};
     // coverage[k]: the share of texels whose alpha is at or over k / 16
     // (coverage[0] is 1). All 1 without alpha.
     std::array<float, k_steps + 1> coverage{};
-    ColorSummary() { coverage.fill(1.0f); }
-    // The share an alpha cutoff leaves (interpolated between the steps);
-    // 1 at a cutoff of 0 or less.
+    ColorSummary() {
+        average.fill({1.0f, 1.0f, 1.0f});
+        coverage.fill(1.0f);
+    }
+    // At an alpha cutoff, interpolated between the steps: 0 or less (or
+    // NaN) is an opaque material (every texel, coverage 1).
     float coverage_at(float cutoff) const;
+    Vec3 average_at(float cutoff) const;
 };
 
 // Measures a cooked colour texture on its finest level of at most
-// `max_side` texels a side (decoded on the caller: about a millisecond at
-// 128). Other kinds, or contents that do not decode, give the default (white,
-// fully covered).
-ColorSummary summarize_color(const Cooked& texture, u32 max_side = 128);
+// `max_side` texels a side (decoded on the caller: tens of milliseconds at
+// 512). Exact at every cutoff for textures that size or smaller; for
+// bigger ones the level measured is a mip, whose alpha the cooker scaled to
+// keep coverage at CookOptions::coverage_cutoff (0.5): exact there, close
+// near it. Other kinds, or contents that do not decode, give the default
+// (white, fully covered).
+ColorSummary summarize_color(const Cooked& texture, u32 max_side = 512);
 
 // Where a level starts in a texture's contents, and its size.
 u64 level_offset(const rhi::TextureDesc& desc, u32 layer, u32 mip);

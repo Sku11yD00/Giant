@@ -7,14 +7,35 @@
 
 namespace giant::texture {
 
+namespace {
+
+// The step below a cutoff and how far past it (cutoff in (0, 1]).
+void step_of(float cutoff, u32& below, float& t) {
+    const float at = std::min(cutoff, 1.0f) * static_cast<float>(ColorSummary::k_steps);
+    below = std::min(static_cast<u32>(at), ColorSummary::k_steps - 1);
+    t = at - static_cast<float>(below);
+}
+
+} // namespace
+
 float ColorSummary::coverage_at(float cutoff) const {
     if (!(cutoff > 0.0f)) {
         return 1.0f; // also NaN
     }
-    const float at = std::min(cutoff, 1.0f) * static_cast<float>(k_steps);
-    const u32 below = std::min(static_cast<u32>(at), k_steps - 1);
-    const float t = at - static_cast<float>(below);
+    u32 below = 0;
+    float t = 0.0f;
+    step_of(cutoff, below, t);
     return coverage[below] + (coverage[below + 1] - coverage[below]) * t;
+}
+
+Vec3 ColorSummary::average_at(float cutoff) const {
+    if (!(cutoff > 0.0f)) {
+        return average[0];
+    }
+    u32 below = 0;
+    float t = 0.0f;
+    step_of(cutoff, below, t);
+    return average[below] + (average[below + 1] - average[below]) * t;
 }
 
 ColorSummary summarize_color(const Cooked& texture, u32 max_side) {
@@ -44,33 +65,40 @@ ColorSummary summarize_color(const Cooked& texture, u32 max_side) {
         return out;
     }
     const bool srgb = format == rhi::Format::bc7_srgb || format == rhi::Format::bc1_srgb;
-    const auto linear = [srgb](u8 b) {
-        const float c = static_cast<float>(b) / 255.0f;
-        if (!srgb) return c;
-        return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-    };
-    // BC1 as cooked carries no alpha (its 3-colour blocks' black is not a hole).
-    std::array<u64, ColorSummary::k_steps + 1> at_or_over{};
-    double sum[3] = {};
-    double weight = 0.0;
+    std::array<float, 256> linear{};
+    for (u32 i = 0; i < 256; ++i) {
+        const float c = static_cast<float>(i) / 255.0f;
+        linear[i] = !srgb ? c : c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    }
+    // Per alpha byte: how many texels and their colour sums, then summed
+    // from the top down into the steps. (BC1 as cooked carries no alpha:
+    // its 3-colour blocks' black is not a hole.)
+    std::array<u64, 256> count_by_alpha{};
+    std::array<std::array<double, 3>, 256> sum_by_alpha{};
     const usize count = usize{w} * h;
     for (usize i = 0; i < count; ++i) {
         const u8* t = &texels[i * 4];
         const u32 alpha = bc1 ? 255u : t[3];
-        const double a = alpha / 255.0;
-        for (u32 c = 0; c < 3; ++c) sum[c] += a * linear(t[c]);
-        weight += a;
-        // alpha / 255 >= k / 16, in integers.
-        for (u32 k = 0; k <= ColorSummary::k_steps; ++k) {
-            if (alpha * ColorSummary::k_steps >= k * 255u) ++at_or_over[k];
-        }
-    }
-    if (weight > 0.0) {
-        out.average = {static_cast<float>(sum[0] / weight), static_cast<float>(sum[1] / weight),
-                       static_cast<float>(sum[2] / weight)};
+        ++count_by_alpha[alpha];
+        for (u32 c = 0; c < 3; ++c) sum_by_alpha[alpha][c] += linear[t[c]];
     }
     for (u32 k = 0; k <= ColorSummary::k_steps; ++k) {
-        out.coverage[k] = static_cast<float>(static_cast<double>(at_or_over[k]) / static_cast<double>(count));
+        u64 n = 0;
+        double sum[3] = {};
+        for (u32 alpha = 0; alpha < 256; ++alpha) {
+            // alpha / 255 >= k / 16, in integers.
+            if (alpha * ColorSummary::k_steps < k * 255u) continue;
+            n += count_by_alpha[alpha];
+            for (u32 c = 0; c < 3; ++c) sum[c] += sum_by_alpha[alpha][c];
+        }
+        out.coverage[k] = static_cast<float>(static_cast<double>(n) / static_cast<double>(count));
+        if (n > 0) {
+            const double d = static_cast<double>(n);
+            out.average[k] = {static_cast<float>(sum[0] / d), static_cast<float>(sum[1] / d),
+                              static_cast<float>(sum[2] / d)};
+        } else {
+            out.average[k] = k > 0 ? out.average[k - 1] : Vec3{1.0f, 1.0f, 1.0f}; // none left: the step below's
+        }
     }
     return out;
 }
