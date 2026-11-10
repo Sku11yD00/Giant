@@ -305,7 +305,8 @@ GIANT_TEST("textures: the small levels go up first, sharper ones stream in where
         textures.set_used(std::vector<TextureLibrary::Ref>{a});
         const auto e = [&] { return textures.entry(a); };
         const auto until = [&](auto done) {
-            for (int i = 0; i < 2000 && !done(); ++i) {
+            const auto start = std::chrono::steady_clock::now();
+            while (!done() && std::chrono::steady_clock::now() - start < std::chrono::seconds(60)) {
                 textures.update();
                 draw();
                 if (!done()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -366,10 +367,25 @@ GIANT_TEST("textures: the small levels go up first, sharper ones stream in where
         GIANT_CHECK(until([&] { return at(2); }));
         textures.gpu_budget_bytes = u64{1} << 30;
         textures.trim_after_updates = 3;
-        // finish() puts it up whole (a screenshot that must be sharp).
+        // finish() puts it up whole at once, wanted or not (a screenshot
+        // that must be sharp), and it stays so a while.
+        wanted = not_seen;
+        GIANT_CHECK(until([&] { return at(3); }));
         textures.finish();
+        GIANT_CHECK(at(0) && textures.pending() == 0 && e()->bytes == e()->full_bytes);
+        const render::TextureId sharp = textures.id(a);
+        GIANT_CHECK(sharp != id && renderer->texture(id) == nullptr);
+        textures.update();
         draw();
-        GIANT_CHECK(until([&] { return at(0); }) && textures.pending() == 0);
+        GIANT_CHECK(at(0));
+        // A reload's new version is as sharp as the one it replaces.
+        wanted = 0;
+        textures.reload();
+        textures.wait_cooked();
+        textures.update();
+        draw();
+        GIANT_CHECK(textures.id(a) != sharp && at(0));
+        const render::TextureId reloaded = textures.id(a);
         if (cached) {
             // Its cooked file gone: the finer read fails, it is cooked again
             // and draws what it has meanwhile.
@@ -378,9 +394,9 @@ GIANT_TEST("textures: the small levels go up first, sharper ones stream in where
             std::error_code ec;
             std::filesystem::remove_all(dir / "cache", ec);
             wanted = 0;
-            GIANT_CHECK(until([&] { return textures.id(a) != id; }));
+            GIANT_CHECK(until([&] { return textures.id(a) != reloaded; }));
             GIANT_CHECK(e()->status == TextureLibrary::Status::ready && !e()->from_cache);
-            GIANT_CHECK(renderer->texture(id) == nullptr);
+            GIANT_CHECK(renderer->texture(reloaded) == nullptr);
             GIANT_CHECK(until([&] { return at(0); }));
         }
     }

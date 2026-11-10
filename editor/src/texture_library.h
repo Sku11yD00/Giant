@@ -96,6 +96,8 @@ public:
         u32 wanted_mip = render::TextureResidency::k_not_seen; // what drawn pixels wanted lately
         u64 full_bytes = 0;      // all its levels
         bool reading = false;    // finer levels being read (then uploaded by the renderer)
+        u32 read_to = 0;         // the level a read under way brings it to
+        u64 trimmed_at = 0;      // the update() that last trimmed it (no read in the same one)
         u64 coarser_since = 0;   // the update() since which it has had more than wanted (0: not)
         // Where its levels come from: its .gtex (read from the file again),
         // or kept in memory when it has none (no cache, or cooked with a
@@ -157,9 +159,10 @@ public:
     // Waits until nothing is waiting, cooking or being read (starting what
     // waits), without uploading (tests).
     void wait_cooked();
-    // wait_cooked, then uploads everything whole, all levels (tests, and a
+    // wait_cooked, then uploads new cooks whole and puts every streamed
+    // texture up whole at once, read on this thread (tests, and a
     // screenshot that must show textures sharp; levels not wanted go again
-    // after trim_after_updates).
+    // after trim_after_updates, or at once over gpu_budget_bytes).
     void finish();
 
     // The cache file a key's texture is kept in (under `cache`): named by a
@@ -184,6 +187,11 @@ private:
     void cook_into(const Key& key, u32 max_side, Done& done);
     std::filesystem::path cache_file(const Key& key, u32 max_side) const;
     void upload(Done& done, bool whole);
+    // The finest level whose sides are within tail_size (and that a
+    // texture can start at).
+    u32 tail_of(const rhi::TextureDesc& desc) const;
+    // Puts a ready texture up with all its levels at once (finish()).
+    void make_whole(Ref ref);
     void take_done();
 
     render::Renderer* m_renderer;

@@ -441,17 +441,25 @@ void TextureLibrary::take_done() {
     start_waiting();
 }
 
+u32 TextureLibrary::tail_of(const rhi::TextureDesc& desc) const {
+    u32 tail = 0;
+    const u32 coarsest = render::coarsest_first_mip(desc);
+    while (tail < coarsest && std::max(desc.width, desc.height) >> tail > std::max(tail_size, 1u)) ++tail;
+    return tail;
+}
+
 void TextureLibrary::upload(Done& done, bool whole) {
     Entry& e = m_entries[done.ref];
     if (done.generation != e.generation) return; // asked for again while it waited to upload
     const std::string name = e.key.path + " (" + to_string(e.key.slot) + ")";
     const rhi::TextureDesc& desc = done.cooked.desc;
-    // Its tail: the finest level whose sides are within tail_size (and
-    // that a texture can start at).
-    u32 tail = 0;
-    const u32 coarsest = render::coarsest_first_mip(desc);
-    while (tail < coarsest && std::max(desc.width, desc.height) >> tail > std::max(tail_size, 1u)) ++tail;
-    const u32 first = whole ? 0 : tail;
+    const u32 tail = tail_of(desc);
+    u32 first = whole ? 0 : tail;
+    if (m_renderer != nullptr && e.id != render::k_no_texture) {
+        // A new version of a drawn texture: as sharp as the one it replaces
+        // (a reload does not blur the screen).
+        if (const auto r = m_renderer->texture_residency(e.id)) first = std::min(first, r->first_mip);
+    }
     render::TextureId id = render::k_no_texture;
     if (done.ok && m_renderer != nullptr) {
         const std::span<const u8> all(done.cooked.contents);
@@ -515,10 +523,10 @@ void TextureLibrary::take_levels() {
     for (auto& d : done) {
         --m_reading;
         Entry& e = m_entries[d->ref];
+        if (d->id == e.id) e.reading = false; // (also when asked for again: a failed cook keeps this id)
         if (d->generation != e.generation || d->id != e.id || e.id == render::k_no_texture) {
             continue; // cooked again, replaced or unloaded meanwhile
         }
-        e.reading = false;
         if (!d->ok) {
             // Its .gtex changed or went (another editor, a cleared cache):
             // cooked again; it draws what it has meanwhile.
@@ -556,15 +564,19 @@ void TextureLibrary::stream() {
     for (Ref ref = 0; ref < m_entries.size(); ++ref) {
         Entry& e = m_entries[ref];
         if (e.status != Status::ready || e.id == render::k_no_texture) continue;
-        const bool readable = !e.file.empty() || e.contents != nullptr;
+        // (Not while a newer version is on its way: it may replace the file.)
+        const bool readable =
+            (!e.file.empty() || e.contents != nullptr) && !e.queued && e.cooking == 0 && e.uploading == 0;
         const std::optional<render::TextureResidency> r = m_renderer->texture_residency(e.id);
         if (!r) continue;
         e.first_mip = r->first_mip;
-        if (e.bytes != r->bytes) {
-            e.bytes = r->bytes;
-            ++m_version; // (get_textures shows it; ids are unchanged)
-        }
-        resident += r->bytes;
+        e.bytes = r->bytes; // (ids are unchanged: no new version)
+        // Counted at the most it is heading for: levels on their way
+        // (read, or handed to the renderer) count already.
+        u32 heading = std::min(r->first_mip, r->target_mip);
+        if (e.reading) heading = std::min(heading, e.read_to);
+        resident += heading == r->first_mip ? r->bytes
+                                            : rhi::texture_bytes(render::texture_from_mip(e.desc, heading));
         e.wanted_mip = wanted_override ? wanted_override(ref) : r->wanted_mip;
         // Never coarser than its tail; not drawn lately: its tail.
         const u32 desired = std::min(e.wanted_mip, e.tail_mip);
@@ -595,6 +607,7 @@ void TextureLibrary::stream() {
             if (m_renderer->trim_texture(e.id, c.to)) {
                 resident -= std::min(resident, c.freed);
                 e.coarser_since = 0;
+                e.trimmed_at = m_updates;
             }
         }
     }
@@ -605,7 +618,10 @@ void TextureLibrary::stream() {
     });
     for (const Coarser& c : wanted) {
         if (resident <= gpu_budget_bytes) break;
-        if (m_renderer->trim_texture(m_entries[c.ref].id, c.to)) resident -= std::min(resident, c.freed);
+        if (m_renderer->trim_texture(m_entries[c.ref].id, c.to)) {
+            resident -= std::min(resident, c.freed);
+            m_entries[c.ref].trimmed_at = m_updates;
+        }
     }
     // Finer levels where wanted: the furthest from it first, within the
     // budget (coarser than wanted if that is what fits).
@@ -615,11 +631,13 @@ void TextureLibrary::stream() {
     for (const Finer& f : finer) {
         if (m_reading >= std::max(max_level_reads, 1u)) break;
         Entry& e = m_entries[f.ref];
+        if (e.trimmed_at == m_updates) continue; // trimmed for the budget just now
         u32 to = f.to;
         const auto bytes = [&](u32 mip) { return rhi::level_offset(e.desc, f.from) - rhi::level_offset(e.desc, mip); };
         while (to < f.from && resident + bytes(to) > gpu_budget_bytes) ++to;
         if (to == f.from) continue; // nothing finer fits
         e.reading = true;
+        e.read_to = to;
         ++m_reading;
         resident += bytes(to);
         m_jobs->submit(m_group, [this, ref = f.ref, generation = e.generation, id = e.id, from = f.from, to,
@@ -677,7 +695,11 @@ void TextureLibrary::update() {
     for (; taken < m_to_upload.size(); ++taken) {
         Done& d = *m_to_upload[taken];
         const bool current = d.generation == m_entries[d.ref].generation;
-        const u64 bytes = current && d.ok ? d.cooked.contents.size() : 0;
+        // Charged what goes up: its tail (or all of it when whole).
+        const u64 bytes = !current || !d.ok ? 0
+                          : m_whole         ? d.cooked.contents.size()
+                                            : rhi::texture_bytes(render::texture_from_mip(d.cooked.desc,
+                                                                                          tail_of(d.cooked.desc)));
         if (spent > 0 && spent + bytes > upload_bytes_per_update) break; // next frame
         spent += bytes;
         --m_entries[d.ref].uploading;
@@ -730,6 +752,50 @@ void TextureLibrary::finish() {
     update();
     m_whole = false;
     upload_bytes_per_update = budget;
+    // Reads update() started: taken (dropped by make_whole's new ids).
+    while (m_reading > 0) {
+        m_jobs->wait(m_group);
+        take_levels();
+    }
+    // Textures already up from their tails: put up whole now.
+    for (Ref ref = 0; ref < m_entries.size(); ++ref) make_whole(ref);
+}
+
+void TextureLibrary::make_whole(Ref ref) {
+    Entry& e = m_entries[ref];
+    if (m_renderer == nullptr || e.status != Status::ready || e.id == render::k_no_texture) return;
+    const std::optional<render::TextureResidency> r = m_renderer->texture_residency(e.id);
+    if (!r || (r->first_mip == 0 && r->target_mip == 0)) return;
+    const u64 size = rhi::texture_bytes(e.desc);
+    std::vector<u8> read;
+    std::span<const u8> all;
+    if (e.contents != nullptr && e.contents->size() == size) {
+        all = *e.contents;
+    } else if (!e.file.empty()) {
+        std::error_code ec;
+        const auto file_size = std::filesystem::file_size(e.file, ec);
+        std::ifstream in(e.file, std::ios::binary);
+        if (!ec && in && file_size == texture::k_file_header_bytes + size) {
+            read.resize(static_cast<usize>(size));
+            in.seekg(static_cast<std::streamoff>(texture::k_file_header_bytes));
+            in.read(reinterpret_cast<char*>(read.data()), static_cast<std::streamsize>(read.size()));
+            if (in) all = read;
+        }
+    }
+    const render::TextureId id = all.empty() ? render::k_no_texture : m_renderer->add_texture(e.desc, all, 0);
+    if (id == render::k_no_texture) {
+        log_warning("editor", "texture " + e.key.path + " (" + to_string(e.key.slot) +
+                                  "): could not be put up whole (its cooked file changed or is gone)");
+        return;
+    }
+    m_renderer->remove_texture(e.id); // frames in flight finish with it
+    e.id = id;
+    e.first_mip = 0;
+    e.bytes = size;
+    e.reading = false; // (a read for the old id is dropped)
+    e.wanted_mip = render::TextureResidency::k_not_seen;
+    e.coarser_since = m_updates; // kept sharp at least trim_after_updates
+    ++m_version;
 }
 
 } // namespace giant::editor

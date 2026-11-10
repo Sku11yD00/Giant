@@ -1566,12 +1566,13 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "(with why) or unloaded (no drawn material used it for about 10 s, so it left the GPU; "
          "it loads again from the cache when used). Ready textures stream: first_mip is the "
          "sharpest level on the GPU (0 = full size), tail_mip the level kept at least (256 "
-         "texels a side, put up first), wanted_mip the sharpest level the screen asked for "
+         "texels a side for sizes that halve evenly, put up first), wanted_mip the sharpest level the screen asked for "
          "lately (null: not drawn lately) and reading whether finer levels are on their way. "
          "Sharper levels load where drawn up close and leave again when no longer needed, "
          "within a GPU memory budget. Cooked at most 4096 texels a side. wait: true asks for "
          "every map the scene names and blocks until all are cooked and wholly on the GPU "
-         "(before a screenshot that must show them sharp).",
+         "(before a screenshot that must show them sharp, e.g. straight after moving the camera "
+         "close: streaming takes a few frames).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"wait", {{"type", "boolean"}}}}}},

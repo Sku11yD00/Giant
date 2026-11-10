@@ -286,13 +286,27 @@ an offline cooker can use it without a device.
   first) from the texture's `.gtex` at the level's offset, or from the
   cooked levels kept in memory when there is no cache, and handed to
   `stream_texture`; a read whose file changed or went makes it cook again
-  (it draws what it has meanwhile). Levels sharper than wanted are trimmed
-  after `trim_after_updates` (120, about 2 s, so a glance away does not
-  reload them), or at once, most bytes first, while all textures hold more
-  than `gpu_budget_bytes` (1 GiB); still over, the biggest lose their
-  finest level even if wanted. A finer read is cut back to what fits in
-  the budget. `finish()` (`get_textures` with `wait`) uploads whole, for a
-  screenshot that must be sharp. `get_textures` reports `first_mip`,
+  (it draws what it has meanwhile), and no read starts while a newer
+  version is on its way (its cook may replace the file). Levels sharper
+  than wanted are trimmed after `trim_after_updates` (120, about 2 s, so a
+  glance away does not reload them), or at once, most bytes first, while
+  all textures hold more than `gpu_budget_bytes` (1 GiB); still over, the
+  biggest lose their finest level even if wanted. The budget counts each
+  texture at the sharpest level it is heading for (reads and renderer
+  uploads under way included), and a finer read is cut back to what fits,
+  so levels on their way are not trimmed again. A new version of a drawn
+  texture (a reload) goes up as sharp as the one it replaces. `finish()`
+  (`get_textures` with `wait`) uploads new cooks whole and puts every
+  streamed texture up whole at once (read on the main thread; tests and
+  screenshots only), kept so at least `trim_after_updates` (unless over
+  the budget). The upload budget charges tails, not whole textures.
+  Feedback comes from the `lit` and `lighting` views only, so in other
+  debug views textures fall back to their tails after a while, and a
+  screenshot straight after a camera move shows what had streamed so far
+  (`get_textures` `wait` first for full detail). Textures whose sides stop
+  halving into multiples of 4 (e.g. 4092: 2046 is not) cannot start at a
+  finer level, so their tails are larger (up to the whole texture);
+  power-of-two maps stream fully. `get_textures` reports `first_mip`,
   `tail_mip`, `wanted_mip`, `reading`, `bytes` (on the GPU now) and
   `full_bytes`. Tests set `wanted_override`, as the null device gives no
   feedback.
@@ -2440,11 +2454,12 @@ over the target frame time). Where it stands:
   streamed world imports every mesh it lists when it opens, so cells never
   import while streaming; moving imports onto jobs is still to come).
   The editor's material textures (photoreal part 3a-3c) cook on workers
-  under a per-frame upload budget, but each texture is uploaded whole in
-  the frame it is taken, so one larger than the device's per-frame staging
-  (8 MiB; a 4096 BC7 texture with mips is about 22 MiB) is staged through
-  a buffer made that frame; cooks are capped at 4096 a side until mip
-  streaming (photoreal part 3b) uploads a level at a time. Textures are
+  under a per-frame upload budget and go up from their tails (part 3b-2),
+  finer levels streamed rows at a time; a texture whose sides stop
+  halving into multiples of 4 has a larger tail (up to all of it), which
+  goes up in the frame it is taken, staged through a buffer made that
+  frame if larger than the device's 8 MiB per-frame staging. Cooks are
+  capped at 4096 a side for cook memory. Textures are
   asked for when a cell is built, so a cell streamed in draws plain values
   until its textures are ready.
   World streaming (N3 part 3): unloading cells is one `Scene::remove_many`,
