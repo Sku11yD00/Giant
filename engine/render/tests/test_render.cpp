@@ -433,21 +433,21 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     };
     frame.settings.gpu_culling = false;
     s.draw(frame);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion", "contact shadows", "shading", "post",
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post",
                                                      "anti-aliasing"}));
     frame.settings.gpu_culling = true;
     frame.settings.occlusion_culling = true;
     frame.settings.antialiasing = false;
     s.draw(frame);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "ambient occlusion", "contact shadows", "shading", "post"}));
+                                                     "raster", "HZB", "shadows", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
     GIANT_CHECK(s.renderer->last_stats().ambient_occlusion);
     // Ambient occlusion off, or a debug view: no pass.
     frame.settings.ambient_occlusion = false;
     s.draw(frame);
     GIANT_CHECK(!s.renderer->last_stats().ambient_occlusion);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "contact shadows", "shading", "post"}));
+                                                     "raster", "HZB", "shadows", "contact shadows", "shading", "screen reflections", "post"}));
     frame.settings.ambient_occlusion = true;
     frame.settings.ambient_occlusion_radius = NAN; // (kept in range)
     frame.settings.debug_view = DebugView::clusters;
@@ -465,8 +465,15 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     s.draw(frame);
     GIANT_CHECK(!s.renderer->last_stats().contact_shadows);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "ambient occlusion", "shading", "post"}));
+                                                     "raster", "HZB", "shadows", "ambient occlusion", "shading", "screen reflections", "post"}));
     frame.settings.contact_shadows = true;
+    // Screen reflections: timed apart from shading, only when on.
+    frame.settings.screen_space_reflections = false;
+    s.draw(frame);
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
+                                                     "raster", "HZB", "shadows", "ambient occlusion", "contact shadows",
+                                                     "shading", "post"}));
+    frame.settings.screen_space_reflections = true;
     frame.settings.debug_view = DebugView::clusters;
     s.draw(frame);
     GIANT_CHECK(!s.renderer->last_stats().contact_shadows);
@@ -772,14 +779,15 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
         GIANT_CHECK(differing(culled) <= pixels.size() / 200); // nothing visible lost
         // The GPU timed each pass of the newest frame (read after the wait).
         const auto timings = device->gpu_timings();
-        GIANT_CHECK(timings.size() == 13); // streaming, voxels, 2 x (culling, raster, HZB), AO, contact shadows, shading, post, AA
+        GIANT_CHECK(timings.size() == 14); // streaming, voxels, 2 x (culling, raster, HZB), AO, contact shadows, shading, screen reflections, post, AA
         bool timed = true;
         for (const rhi::GpuTiming& t : timings) {
             timed = timed && t.ms >= 0.0f && t.ms <= device->gpu_frame_ms() + 1e-4f;
         }
         GIANT_CHECK(timed && device->gpu_frame_ms() > 0.0f);
-        GIANT_CHECK(timings.size() == 13 && timings[2].name == "culling" && timings[8].name == "ambient occlusion" &&
-                    timings[9].name == "contact shadows" && timings[10].name == "shading" && timings[11].name == "post");
+        GIANT_CHECK(timings.size() == 14 && timings[2].name == "culling" && timings[8].name == "ambient occlusion" &&
+                    timings[9].name == "contact shadows" && timings[10].name == "shading" &&
+                    timings[11].name == "screen reflections" && timings[12].name == "post");
     }
     // A glowing red decal stamped on the sphere's front, facing the camera
     // (its +Y turned to +Z), on the CPU and GPU paths alike.
@@ -1355,12 +1363,12 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     frame.sky.on = true;
     st = s.draw(frame); // no cover: the air alone
     GIANT_CHECK(st.sky && st.physical_sky && !st.clouds && !st.cloud_shadows);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "contact shadows", "shading", "post"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
     // The physical sky's passes run inside "sky"; off, the single-scattered sky and the flat ambient colours.
     frame.settings.physical_sky = false;
     st = s.draw(frame);
     GIANT_CHECK(st.sky && !st.physical_sky);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "contact shadows", "shading", "post"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
     frame.settings.physical_sky = true;
     frame.settings.aerial_distance = NAN; // (kept in range)
     st = s.draw(frame);
@@ -1370,7 +1378,7 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     st = s.draw(frame);
     GIANT_CHECK(st.sky && st.clouds && st.cloud_shadows);
     GIANT_CHECK(names() ==
-                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "clouds", "ambient occlusion", "contact shadows", "shading", "post"}));
+                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "clouds", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
     // Settings turn them off; a sun below the horizon casts no cloud shadows.
     frame.settings.cloud_shadows = false;
     st = s.draw(frame);

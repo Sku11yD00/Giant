@@ -17,9 +17,12 @@ the screen allows. It passes when:
 - the flight holds 60 fps without micro stutter (as the N1 gate: average
   under 16.7 ms, 99th percentile under 20.8 ms, at most one hitch), with
   the voxel world, its light and shadows rebuilt as the camera moves;
-- global illumination and reflections take under 4 ms of GPU time (the
-  "gi" pass plus what shading takes over shading without them, at the
-  wet street, the lake and up high);
+- global illumination, ambient occlusion, contact shadows and
+  reflections take under 4 ms of GPU time together (their own passes,
+  "gi", "ambient occlusion", "contact shadows" and "screen reflections",
+  plus what shading takes over shading without them: the voxel cones and
+  GI's light looked up there, each printed), at the wet street, the lake
+  and up high;
 - the voxel world reaches 20 km (it holds a village 18 km off at its
   coarsest level) and the far field stands in for every far village;
   nothing overflowed, and everything caught up once the camera stopped;
@@ -39,7 +42,7 @@ from gate_common import Editor, describe, frame_stats, slow_frames, speed_failur
 from n1_gate import HOUSES_Z, SPACING, STREET_X, build_gate_scene
 
 VIEW_M = 20_000.0      # the view the gate asks for
-LIGHT_BUDGET_MS = 4.0  # global illumination and reflections, GPU (the N2 gate's figure)
+LIGHT_BUDGET_MS = 4.0  # GI, AO, contact shadows and reflections together, GPU (the N2 gate's figure)
 RESOLUTION = (2560, 1440)  # the frame budget's (docs/architecture.md)
 STOPS = 750
 HILLS = 40
@@ -135,35 +138,53 @@ def flight_path(steps):
 
 
 ALL_ON = {"voxel_world": True, "voxel_far_field": True, "shadows": True, "gi": True,
-          "reflections": True, "screen_space_reflections": True, "gpu_culling": True,
-          "occlusion_culling": True, "antialiasing": True, "specular_antialiasing": True}
-LIGHT_OFF = {"gi": False, "reflections": False, "screen_space_reflections": False}
+          "reflections": True, "screen_space_reflections": True, "ambient_occlusion": True,
+          "contact_shadows": True, "gpu_culling": True, "occlusion_culling": True, "antialiasing": True,
+          "specular_antialiasing": True}
+LIGHT_OFF = {"gi": False, "reflections": False, "screen_space_reflections": False,
+             "ambient_occlusion": False, "contact_shadows": False}
+REFLECTIONS_OFF = {"reflections": False}  # voxel cones and screen reflections
+# Passes timed on their own (the rest of the light's cost is inside "shading").
+LIGHT_PASSES = ("gi", "ambient occlusion", "contact shadows", "screen reflections")
 
 
 def light_cost(editor, at, rounds=3):
-    """GPU ms of global illumination and reflections at a camera stop: the
-    median over `rounds` of the "gi" pass plus what shading takes over
-    shading without them (the screen reflections pass is timed inside
-    "shading"), on and off in turn so drift cancels. None when the GPU did
-    not time those passes. Also returns whether the stop settled."""
+    """GPU ms of global illumination, ambient occlusion, contact shadows and
+    reflections at a camera stop, the median over `rounds`: their own passes
+    ("gi", "ambient occlusion", "contact shadows", "screen reflections")
+    plus what shading takes over shading without them, with the voxel
+    cones (shading with reflections over shading without) told apart from
+    GI's light looked up in shading. All on, reflections off and all off
+    in turn, so drift cancels. Returns (total, parts by name) or (None,
+    None) when the GPU did not time those passes, and whether the stop
+    settled."""
     editor.tool("set_camera", {"position": at[0], "look_at": at[1]})
     editor.tool("set_render_settings", ALL_ON)
     # The voxel world, its light and the shadows there, as the flight had them.
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 8.0})
     settled = settle(editor, 6000)[1]
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 1.0})
-    costs = []
+    totals = []
     for _ in range(rounds):
         editor.hover(10)
         on = editor.gpu_passes(20)
+        editor.tool("set_render_settings", REFLECTIONS_OFF)
+        editor.hover(10)
+        no_reflections = editor.gpu_passes(20)
         editor.tool("set_render_settings", LIGHT_OFF)
         editor.hover(10)
         off = editor.gpu_passes(20)
         editor.tool("set_render_settings", ALL_ON)
-        if "gi" not in on or "shading" not in on or "shading" not in off:
-            return None, settled
-        costs.append(on["gi"] + on["shading"] - off["shading"])
-    return sorted(costs)[len(costs) // 2], settled
+        if any(name not in on for name in LIGHT_PASSES) or any(
+                "shading" not in t for t in (on, no_reflections, off)):
+            return None, None, settled
+        parts = {name: on[name] for name in LIGHT_PASSES}
+        parts["voxel cones"] = on["shading"] - no_reflections["shading"]
+        parts["gi in shading"] = no_reflections["shading"] - off["shading"]
+        totals.append((sum(parts.values()), parts))
+    totals.sort(key=lambda t: t[0])
+    total, parts = totals[len(totals) // 2]
+    return total, parts, settled
 
 
 def settle(editor, frames):
@@ -280,17 +301,19 @@ def main() -> int:
         # Global illumination and reflections: the wet street, the lake, up high.
         for name, at in (("street", path[STOPS // 10]), ("lake", path[int(0.53 * (STOPS - 1))]),
                          ("high", path[-1])):
-            cost, settled = light_cost(editor, at)
+            cost, parts, settled = light_cost(editor, at)
             if not settled:
                 failures.append(f"the voxel world, its light or the shadows did not catch up at the {name}")
             if cost is None:
-                print(f"n2_gate: GI and reflections at the {name}: not timed")
+                print(f"n2_gate: GI, AO and reflections at the {name}: not timed")
                 if real_gpu:
-                    failures.append(f"the GPU did not time the gi and shading passes at the {name}")
+                    failures.append(f"the GPU did not time the light's passes at the {name}")
                 continue
-            print(f"n2_gate: GI and reflections at the {name}: {cost:.2f} ms")
+            detail = ", ".join(f"{part} {ms:.2f}" for part, ms in parts.items())
+            print(f"n2_gate: GI, AO and reflections at the {name}: {cost:.2f} ms ({detail} ms)")
             if real_gpu and cost > LIGHT_BUDGET_MS:
-                failures.append(f"GI and reflections take {cost:.2f} ms at the {name}, over {LIGHT_BUDGET_MS} ms")
+                failures.append(f"GI, AO and reflections take {cost:.2f} ms at the {name}, over {LIGHT_BUDGET_MS} ms "
+                                f"({detail} ms)")
         gpu = tool("get_engine_info").get("gpu", {})
         if gpu.get("passes"):
             passes = ", ".join(f"{p['name']} {p['ms']:.2f}" for p in gpu["passes"])
