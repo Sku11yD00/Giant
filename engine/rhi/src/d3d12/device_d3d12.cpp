@@ -260,6 +260,10 @@ struct DxTexture {
     ComPtr<ID3D12Resource> resource;
     TextureDesc desc;
     ResourceState state = ResourceState::common;
+    // The frame (frames_completed() while recording) a command list last
+    // moved it in: the frame's uploads run before its list, so a texture
+    // moved this frame is not where the tracked state says when they run.
+    u64 barrier_frame = ~u64{0};
     u32 read = k_no_descriptor;
     u32 write = k_no_descriptor;
     u32 rtv = k_no_descriptor;    // in the format's own view (sRGB for rgba8_srgb)
@@ -1476,7 +1480,8 @@ bool D3D12Device::write_texture(TextureHandle h, u32 mip, u32 first_row, std::sp
     DxTexture* t = m_textures.get(h);
     const char* problem = !m_recording ? "write_texture outside a frame"
                           : t == nullptr ? "write_texture: a dead texture"
-                          : t->state != ResourceState::common ? "write_texture: the texture is not in its common state"
+                          : t->state != ResourceState::common || t->barrier_frame == m_frames
+                              ? "write_texture: the texture is not in its common state (or was moved this frame)"
                                                               : write_texture_problem(t->desc, mip, first_row, rows.size());
     if (problem != nullptr) {
         log_error("rhi", problem);
@@ -1528,8 +1533,9 @@ bool D3D12Device::copy_texture_levels(TextureHandle dst_handle, u32 dst_mip, Tex
     DxTexture* s = m_textures.get(src_handle);
     const char* problem = !m_recording ? "copy_texture_levels outside a frame"
                           : d == nullptr || s == nullptr || d == s ? "copy_texture_levels: a dead texture, or one into itself"
-                          : d->state != ResourceState::common || s->state != ResourceState::common
-                              ? "copy_texture_levels: a texture is not in its common state"
+                          : d->state != ResourceState::common || s->state != ResourceState::common ||
+                                    d->barrier_frame == m_frames || s->barrier_frame == m_frames
+                              ? "copy_texture_levels: a texture is not in its common state (or was moved this frame)"
                               : copy_levels_problem(d->desc, dst_mip, s->desc, src_mip, count);
     if (problem != nullptr) {
         log_error("rhi", problem);
@@ -2386,6 +2392,7 @@ void D3D12CommandList::barrier(TextureHandle handle, ResourceState state) {
     const auto b = transition(t->resource.Get(), to_d3d(t->state), to_d3d(state));
     m_list->ResourceBarrier(1, &b);
     t->state = state;
+    t->barrier_frame = m_device.frames_completed();
     ++m_device.stats().barriers;
 }
 

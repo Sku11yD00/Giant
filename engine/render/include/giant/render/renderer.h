@@ -494,7 +494,8 @@ struct RendererDesc {
     u64 stream_bytes_per_frame = 32ull << 20;
     // Finer texture levels uploaded per frame (Renderer::stream_texture;
     // at least a row of blocks while any wait), and textures made per frame
-    // for level changes (each a new GPU resource).
+    // for level changes (each a new GPU resource, into which the levels it
+    // keeps are copied on the GPU: copies not counted in the bytes).
     u64 texture_stream_bytes_per_frame = 8ull << 20;
     u32 texture_changes_per_frame = 8;
     // The voxel world: its levels, and GPU memory for its bricks (2176
@@ -589,8 +590,9 @@ public:
     bool stream_texture(TextureId texture, u32 first_mip, std::vector<u8> levels);
     // Drops a texture's levels finer than `first_mip` (no upload: the rest
     // are copied on the GPU at the next render()); a finer change under way
-    // is given up. False for an unknown id or a level not coarser than the
-    // target, or past coarsest_first_mip.
+    // is given up (the first resident level itself: only that). False for
+    // an unknown id, a level finer than its first resident one, or past
+    // coarsest_first_mip.
     bool trim_texture(TextureId texture, u32 first_mip);
     std::optional<TextureResidency> texture_residency(TextureId texture) const;
     // Unknown or removed ids are ignored. Frames in flight finish with it;

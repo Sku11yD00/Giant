@@ -33,6 +33,7 @@ struct NullTexture {
     TextureDesc desc;
     std::vector<u8> pixels;
     ResourceState state = ResourceState::common;
+    u64 barrier_frame = ~u64{0}; // the frame a command list last moved it in (as d3d12 tracks it)
     u32 read = k_no_descriptor;
     u32 write = k_no_descriptor;
 };
@@ -248,7 +249,8 @@ public:
         NullTexture* t = m_textures.get(h);
         const char* problem = !m_recording ? "write_texture outside a frame"
                               : t == nullptr ? "write_texture: a dead texture"
-                              : t->state != ResourceState::common ? "write_texture: the texture is not in its common state"
+                              : t->state != ResourceState::common || t->barrier_frame == m_frames
+                                  ? "write_texture: the texture is not in its common state (or was moved this frame)"
                                                                   : write_texture_problem(t->desc, mip, first_row, rows.size());
         if (problem != nullptr) {
             log_error("rhi", problem);
@@ -266,8 +268,9 @@ public:
         const NullTexture* s = m_textures.get(src);
         const char* problem = !m_recording ? "copy_texture_levels outside a frame"
                               : d == nullptr || s == nullptr || d == s ? "copy_texture_levels: a dead texture, or one into itself"
-                              : d->state != ResourceState::common || s->state != ResourceState::common
-                                  ? "copy_texture_levels: a texture is not in its common state"
+                              : d->state != ResourceState::common || s->state != ResourceState::common ||
+                                        d->barrier_frame == m_frames || s->barrier_frame == m_frames
+                                  ? "copy_texture_levels: a texture is not in its common state (or was moved this frame)"
                                   : copy_levels_problem(d->desc, dst_mip, s->desc, src_mip, count);
         if (problem != nullptr) {
             log_error("rhi", problem);
@@ -556,6 +559,7 @@ void NullCommandList::barrier(TextureHandle handle, ResourceState state) {
     GIANT_ASSERT(state != ResourceState::present, "only end_frame presents");
     if (t->state != state || state == ResourceState::shader_write) {
         ++m_device.stats().barriers;
+        t->barrier_frame = m_device.frames_completed();
     }
     t->state = state;
 }

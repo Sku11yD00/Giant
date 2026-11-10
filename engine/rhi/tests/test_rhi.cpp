@@ -775,7 +775,8 @@ GIANT_TEST("rhi: a texture's levels are written in rows and copied between textu
         GIANT_CHECK(!device->copy_texture_levels(full, 1, part, 0, 2));
         GIANT_CHECK(asserts.count() == 0);
     }
-    GIANT_CHECK(device->begin_frame(nullptr) != nullptr);
+    CommandList* cmd = device->begin_frame(nullptr);
+    GIANT_CHECK(cmd != nullptr);
     // The top level in two pieces (rows 2-3, then 0-1), the rest copied in.
     GIANT_CHECK(device->write_texture(full, 0, 2, rows(2, 2)));
     GIANT_CHECK(device->write_texture(full, 0, 0, rows(0, 2)));
@@ -801,6 +802,11 @@ GIANT_TEST("rhi: a texture's levels are written in rows and copied between textu
         GIANT_CHECK(!device->copy_texture_levels(blocks, 0, full, 0, 1));        // formats differ
         std::array<u8, 16> block{};
         GIANT_CHECK(device->write_texture(blocks, 0, 0, block));                 // one row of blocks
+        // Moved by the frame's list (even back to common): its uploads run
+        // before that list, where the texture is not yet back.
+        cmd->barrier(blocks, ResourceState::shader_read);
+        cmd->barrier(blocks, ResourceState::common);
+        GIANT_CHECK(!device->write_texture(blocks, 0, 0, block));
         device->destroy(drawn);
         device->destroy(blocks);
         GIANT_CHECK(asserts.count() == 0);

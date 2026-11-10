@@ -989,10 +989,12 @@ void Renderer::note_wanted(TextureId id, u32 q) {
 void Renderer::read_texture_feedback() {
     const u64 now = m_device.frames_completed();
     // A new window: this one's become the last's.
+    // (Two or more windows on, with no render() between: neither holds.)
     if (now / k_feedback_window != m_feedback_window) {
+        const bool skipped = now / k_feedback_window > m_feedback_window + 1;
         m_feedback_window = now / k_feedback_window;
         for (TextureSlot& t : m_textures) {
-            t.wanted_before = t.wanted_now;
+            t.wanted_before = skipped ? k_unseen : t.wanted_now;
             t.wanted_now = k_unseen;
         }
     }

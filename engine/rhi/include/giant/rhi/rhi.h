@@ -534,9 +534,10 @@ public:
     // Streaming a sampled texture's levels, inside a frame only: recorded
     // with the frame's uploads, so they land before anything the frame
     // records (like create_texture's initial data), and nothing waits.
-    // Both take a sampled-only, single-layer, non-array texture that no
-    // command list has moved out of its common state. False (logged) for
-    // anything else, outside a frame, or out of range.
+    // Both take a sampled-only, single-layer, non-array texture in its
+    // common state that no command list has moved this frame (the uploads
+    // run before the frame's list). False (logged) for anything else,
+    // outside a frame, or out of range.
     //
     // write_texture: `rows` texel rows (rows of 4x4 blocks when block
     // compressed) of level `mip`, from row `first_row`, packed as
