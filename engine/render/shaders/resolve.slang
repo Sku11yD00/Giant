@@ -561,11 +561,17 @@ void ambient_occlusion(Extras e, Frame f, uint2 pixel, float3 world, float3 surf
     t.GetDimensions(w, h);
     if (w == 0u || h == 0u) return;
     const float z = -dot(f.view_rows[2].xyz, world); // this pixel's view depth
+    // How much depth changes over a full-size pixel on this surface (its
+    // slope as seen), so grazing ground still matches its texels.
+    const float3 v = safe_normalize(-world, surface_n);
+    const float n_dot_v = max(abs(dot(surface_n, v)), 0.05);
+    const float pixel_size = z * 2.0 / max(f.p11 * f.height, 1e-6);
+    const float step_depth = pixel_size * sqrt(max(1.0 - n_dot_v * n_dot_v, 0.0)) / n_dot_v;
     // Half-size texel i stands for full-size pixel 2i.
     const float2 at = float2(pixel) * 0.5;
     const int2 base = int2(floor(at));
     const float2 frac_at = at - float2(base);
-    const float tolerance = 0.05 * z + 0.05;
+    const float tolerance = 0.02 * z + 0.05 + 3.0 * step_depth; // texels up to 1.5 half-size texels off
     float total = 0.0;
     float sum = 0.0;
     float3 bent = float3(0.0, 0.0, 0.0);
@@ -586,10 +592,11 @@ void ambient_occlusion(Extras e, Frame f, uint2 pixel, float3 world, float3 surf
     // The bent normal, view space to world (the rows are orthonormal).
     const float3 bv = safe_normalize(bent, float3(0.0, 0.0, 1.0));
     const float3 bw = f.view_rows[0].xyz * bv.x + f.view_rows[1].xyz * bv.y + f.view_rows[2].xyz * bv.z;
-    // How far the open direction leans from the surface, kept to half the
-    // way to a right angle (depth's normals are coarse).
+    // How far the open direction leans from the surface, as much as the
+    // place is occluded (open ground: none; the bent normal of a two-slice
+    // estimate leans towards the view even there).
     const float3 lean = bw - surface_n * dot(bw, surface_n);
-    bend = lean * 0.5;
+    bend = lean * (1.0 - ao);
 }
 
 // Voxels have a colour and a normal only; the rest is a rough dielectric.

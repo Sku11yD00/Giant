@@ -42,14 +42,49 @@ static const float k_ao_max_pixels = 96.0; // full-size pixels: the march's long
 
 // The view-space point of a full-size pixel (z negative ahead), and
 // whether anything is drawn there.
-float3 view_point(Frame f, Texture2D<float> depth, int2 px, out bool drawn) {
-    px = clamp(px, int2(0, 0), int2(int(f.width) - 1, int(f.height) - 1));
-    const float d = depth.Load(int3(px, 0));
-    drawn = d > 0.0;
-    const float z = drawn ? f.near_plane / d : 1.0e6;
-    const float2 uv = (float2(px) + 0.5) / float2(f.width, f.height);
+// Off the screen counts as nothing drawn.
+float3 point_at(Frame f, float d, float2 pos) {
+    const float z = f.near_plane / d;
+    const float2 uv = (pos + 0.5) / float2(f.width, f.height);
     const float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     return float3(ndc.x * z / f.p00, ndc.y * z / f.p11, -z);
+}
+
+float3 view_point(Frame f, Texture2D<float> depth, int2 px, out bool drawn) {
+    drawn = false;
+    if (any(px < int2(0, 0)) || px.x >= int(f.width) || px.y >= int(f.height)) {
+        return float3(0.0, 0.0, -1.0e6);
+    }
+    const float d = depth.Load(int3(px, 0));
+    drawn = d > 0.0;
+    return drawn ? point_at(f, d, float2(px)) : float3(0.0, 0.0, -1.0e6);
+}
+
+// The view-space point at a fractional pixel position: reverse-Z depth is
+// linear across the screen on a plane, so it is interpolated between the
+// four pixels round it (where all four are drawn; else the nearest), and
+// samples lie on the slice exactly (rounding them would lift the horizon
+// of open ground half the time).
+float3 view_point_between(Frame f, Texture2D<float> depth, float2 pos, out bool drawn) {
+    drawn = false;
+    if (any(pos < float2(0.0, 0.0)) || pos.x > f.width - 1.0 || pos.y > f.height - 1.0) {
+        return float3(0.0, 0.0, -1.0e6);
+    }
+    const int2 base = min(int2(floor(pos)), int2(int(f.width) - 2, int(f.height) - 2));
+    const float2 t = saturate(pos - float2(base));
+    const float d00 = depth.Load(int3(base, 0));
+    const float d10 = depth.Load(int3(base + int2(1, 0), 0));
+    const float d01 = depth.Load(int3(base + int2(0, 1), 0));
+    const float d11 = depth.Load(int3(base + int2(1, 1), 0));
+    float d;
+    if (d00 > 0.0 && d10 > 0.0 && d01 > 0.0 && d11 > 0.0) {
+        d = lerp(lerp(d00, d10, t.x), lerp(d01, d11, t.x), t.y);
+    } else {
+        const int2 nearest = base + int2(round(t));
+        d = depth.Load(int3(nearest, 0));
+    }
+    drawn = d > 0.0;
+    return drawn ? point_at(f, d, pos) : float3(0.0, 0.0, -1.0e6);
 }
 
 float2 encode_octahedral(float3 n) {
@@ -72,6 +107,7 @@ float3 decode_octahedral(float2 q) {
 float3 flatter(float3 here, float3 a, float3 b, bool a_drawn, bool b_drawn) {
     const float3 da = here - a;
     const float3 db = b - here;
+    if (!a_drawn && !b_drawn) return float3(0.0, 0.0, 0.0); // (the normal falls back to the view)
     if (!a_drawn) return db;
     if (!b_drawn) return da;
     return abs(da.z) < abs(db.z) ? da : db;
@@ -140,8 +176,8 @@ void cs_gtao(uint3 id : SV_DispatchThreadID) {
                 const float t = (float(step) + jitter) / float(k_ao_steps);
                 const float2 offset = s * screen_dir * max(t * t * pixels, 1.0);
                 bool q_drawn;
-                const float3 q = view_point(f, depth, px + int2(round(offset)), q_drawn);
-                if (!q_drawn) continue;
+                const float3 q = view_point_between(f, depth, float2(px) + offset, q_drawn);
+                if (!q_drawn) continue; // off the screen or the sky
                 const float3 to = q - p;
                 const float len2 = dot(to, to);
                 if (len2 < 1e-8) continue;
@@ -161,7 +197,9 @@ void cs_gtao(uint3 id : SV_DispatchThreadID) {
         const float middle = 0.5 * (h0 + h1);
         bent += (v * cos(middle) + ortho * sin(middle)) * projected_len;
     }
-    visibility = saturate(visibility / float(k_ao_slices));
+    // Kept unclamped (two slices' estimate scatters either side of the
+    // truth): the denoise averages first, then clamps.
+    visibility = clamp(visibility / float(k_ao_slices), 0.0, 2.0);
     const float3 bent_n = safe_normalize(bent, n);
     target[id.xy] = float4(visibility, -p.z, encode_octahedral(bent_n));
 }
@@ -178,7 +216,19 @@ void cs_denoise(uint3 id : SV_DispatchThreadID) {
         write_texture(push.target)[id.xy] = here;
         return;
     }
-    const float tolerance = 0.05 * here.y + 0.05;
+    // How far depth may differ and still be the same surface: a little,
+    // plus the slope seen at this texel (grazing ground changes a lot
+    // from one texel to the next), per texel of distance.
+    const int2 last = int2(int(push.width) - 1, int(push.height) - 1);
+    const float zl = source.Load(int3(clamp(int2(id.xy) - int2(1, 0), int2(0, 0), last), 0)).y;
+    const float zr = source.Load(int3(clamp(int2(id.xy) + int2(1, 0), int2(0, 0), last), 0)).y;
+    const float zu = source.Load(int3(clamp(int2(id.xy) - int2(0, 1), int2(0, 0), last), 0)).y;
+    const float zd = source.Load(int3(clamp(int2(id.xy) + int2(0, 1), int2(0, 0), last), 0)).y;
+    const float gx = min(zl > 0.0 ? abs(zl - here.y) : 1e9, zr > 0.0 ? abs(zr - here.y) : 1e9);
+    const float gy = min(zu > 0.0 ? abs(zu - here.y) : 1e9, zd > 0.0 ? abs(zd - here.y) : 1e9);
+    const float slope_x = gx < 1e8 ? gx : 0.0;
+    const float slope_y = gy < 1e8 ? gy : 0.0;
+    const float base_tolerance = 0.02 * here.y + 0.05;
     float total = 0.0;
     float ao = 0.0;
     float3 bent = float3(0.0, 0.0, 0.0);
@@ -189,6 +239,7 @@ void cs_denoise(uint3 id : SV_DispatchThreadID) {
             const int2 at = clamp(int2(id.xy) + int2(x, y), int2(0, 0), int2(int(push.width) - 1, int(push.height) - 1));
             const float4 s = source.Load(int3(at, 0));
             if (s.y <= 0.0) continue;
+            const float tolerance = base_tolerance + 1.5 * (abs(float(x)) * slope_x + abs(float(y)) * slope_y);
             const float w = saturate(1.0 - abs(s.y - here.y) / tolerance);
             total += w;
             ao += s.x * w;
@@ -196,7 +247,8 @@ void cs_denoise(uint3 id : SV_DispatchThreadID) {
         }
     }
     const float4 o = total > 0.0
-                         ? float4(ao / total, here.y, encode_octahedral(safe_normalize(bent, decode_octahedral(here.zw))))
-                         : here;
+                         ? float4(saturate(ao / total), here.y,
+                                  encode_octahedral(safe_normalize(bent, decode_octahedral(here.zw))))
+                         : float4(saturate(here.x), here.yzw);
     write_texture(push.target)[id.xy] = o;
 }

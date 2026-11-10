@@ -337,15 +337,21 @@ an offline cooker can use it without a device.
   normal from depth (the flatter neighbour on each axis), and integrates
   the cosine-weighted visibility between the horizons of two slices, six
   steps a side out to the radius as seen on screen (at most 96 pixels,
-  fading towards it), plus the bent normal. The slices turn by a fixed
+  fading towards it; samples between pixels take depth interpolated, as
+  it is linear across a plane, so open ground does not occlude itself),
+  plus the bent normal. The slices turn by a fixed
   4x4 pattern; `cs_denoise` averages each 4x4 block round a pixel (all 16
-  angles) weighted by depth, so there is no history and nothing smears.
+  angles) weighted by depth (allowing for the slope seen there, so
+  grazing ground still averages), then clamps, so there is no history and
+  nothing smears.
   Output rgba16_float: visibility, view depth, bent normal (octahedral,
   view space). Resolve takes the four half-size texels round each pixel,
-  bilinear and weighted by depth, multiplies the material's occlusion by
+  bilinear and weighted by depth (again allowing for the surface's slope),
+  multiplies the material's occlusion by
   the visibility (so it dims ambient diffuse, GI's bounce and, through the
   specular occlusion, reflections) and leans the normal the ambient
-  light is looked up along half way towards the bent normal. Timed as
+  light is looked up along towards the bent normal as much as the place
+  is occluded (none on open ground). Timed as
   "ambient occlusion"; `RenderStats::ambient_occlusion`; MCP
   `set_render_settings`. The sun is left alone (its shadows are the
   shadow pages', contact shadows come next).

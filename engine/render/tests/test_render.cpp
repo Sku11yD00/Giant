@@ -2621,6 +2621,7 @@ GIANT_TEST("render: d3d12 rough metal keeps its light: the split sum with multi-
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }
+
 GIANT_TEST("render: d3d12 ambient occlusion darkens the crease where a wall meets the floor, not the open wall") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::d3d12;
@@ -2691,14 +2692,19 @@ GIANT_TEST("render: d3d12 ambient occlusion darkens the crease where a wall meet
     };
     const std::vector<u8> off = draw(false);
     const std::vector<u8> on = draw(true);
-    // Rows: 40 the open wall (some 2.8 m above the floor), 88 the wall and
-    // 94 the floor each a hand's width from the crease.
-    std::printf("    open wall %d -> %d; wall by the crease %d -> %d; floor by it %d -> %d\n", green(off, 40),
-                green(on, 40), green(off, 88), green(on, 88), green(off, 94), green(on, 94));
-    GIANT_CHECK(green(off, 40) > 60 && green(off, 88) > 60 && green(off, 94) > 60);
+    // Rows: 40 the open wall (some 2.8 m above the floor), 90 the wall
+    // some 7 cm above the crease (about row 91.7), 93 the floor some 30 cm
+    // out from it, 115 the open floor (about 2.6 m out).
+    std::printf("    open wall %d -> %d; wall by the crease %d -> %d; floor by it %d -> %d; open floor %d -> %d\n",
+                green(off, 40), green(on, 40), green(off, 90), green(on, 90), green(off, 93), green(on, 93),
+                green(off, 115), green(on, 115));
+    GIANT_CHECK(green(off, 40) > 60 && green(off, 90) > 60 && green(off, 93) > 60 && green(off, 115) > 60);
+    // Open surfaces stay as they were (no self-occlusion of a plane).
     GIANT_CHECK(std::abs(green(on, 40) - green(off, 40)) <= 4);
-    GIANT_CHECK(green(on, 88) * 100 < green(off, 88) * 92);
-    GIANT_CHECK(green(on, 94) * 100 < green(off, 94) * 92);
+    GIANT_CHECK(std::abs(green(on, 115) - green(off, 115)) <= 4);
+    // By the crease they darken (bytes are sRGB: a 5% drop is some 12% of the light).
+    GIANT_CHECK(green(on, 90) * 100 < green(off, 90) * 95);
+    GIANT_CHECK(green(on, 93) * 100 < green(off, 93) * 95);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

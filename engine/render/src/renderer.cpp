@@ -1100,6 +1100,8 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_device.destroy(m_ao);
     m_ao_raw = {};
     m_ao = {};
+    m_ao_ready = false;
+    m_bloom_ready = false;
     m_device.destroy(m_clouds_a); // half the frame's size: made again with the sky's
     m_device.destroy(m_clouds_b);
     m_clouds_a = {};
