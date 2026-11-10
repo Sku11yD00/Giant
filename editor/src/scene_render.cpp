@@ -845,10 +845,15 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         for (const world::CellCoord c : ground) {
             out.grid[c].ground_dirty = true; // (a new cell is dirty anyway)
         }
-        if (!(scene.terrain.material == out.terrain_material)) {
-            out.terrain_material = scene.terrain.material;
+        // (Only what the ground's instances carry: the layers themselves go
+        // to the renderer each frame, so dragging a layer's slider
+        // rebuilds no cells.)
+        const world::TerrainMaterial& look = scene.terrain.material;
+        if (!(look.base_color == out.terrain_material.base_color) || look.roughness != out.terrain_material.roughness ||
+            look.layers.empty() != out.terrain_material.layers.empty()) {
             for (auto& [coord, cell] : out.grid) cell.ground_dirty = cell.ground_dirty || cell.ground;
         }
+        out.terrain_material = look;
         // Entities added, removed, changed or moved to another cell.
         for (const world::EntityId id : changes.ids) {
             const world::Entity* e = scene.find(id);

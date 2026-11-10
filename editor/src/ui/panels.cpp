@@ -331,8 +331,11 @@ void EditorPanels::draw_terrain_layers() {
                 }
             }
             if (!l.maps.empty()) {
-                ImGui::TextDisabled("Images: %s%s%s", l.maps.base_color.c_str(), l.maps.normal.empty() ? "" : ", ",
-                                    l.maps.normal.c_str());
+                std::string images;
+                for (const std::string* path : {&l.maps.base_color, &l.maps.normal, &l.maps.roughness_metal}) {
+                    if (!path->empty()) images += (images.empty() ? "" : ", ") + *path;
+                }
+                ImGui::TextWrapped("Images: %s", images.c_str());
             }
             ImGui::TreePop();
         }

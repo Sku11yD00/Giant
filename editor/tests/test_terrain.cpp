@@ -369,6 +369,10 @@ GIANT_TEST("terrain: tiles draw in their cells, as meshes at every distance") {
         GIANT_CHECK(frame.materials[i.material].terrain == i.always_mesh); // the rock is not ground
         if (i.always_mesh) GIANT_CHECK(frame.materials[i.material].base_color == scene.terrain.material.base_color);
     }
+    // A layer's values change: the renderer gets them, no cell is rebuilt.
+    scene.terrain.material.layers[1].min_slope = 40.0f;
+    build();
+    GIANT_CHECK(frame.cells_rebuilt == 0 && frame.terrain_layers[1].min_slope == 40.0f);
     scene.terrain.material.layers.clear();
     build();
     GIANT_CHECK(frame.cells_rebuilt == 2 && frame.terrain_layers.empty());
