@@ -479,6 +479,52 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     GIANT_CHECK(!s.renderer->last_stats().contact_shadows);
 }
 
+GIANT_TEST("render: terrain layers stack by slope and height") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {50.0f, 1.0f, 50.0f};
+    std::vector<Material> materials(1);
+    materials[0].terrain = true;
+    materials[0].base_color_texture = 12345; // ignored: the layers map their own
+    std::vector<TerrainLayer> layers(k_max_terrain_layers + 3); // the rest left out
+    layers[1].tiling = NAN;
+    layers[1].min_slope = -INFINITY;
+    layers[2].height_blend = NAN;
+    FrameInput frame;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.terrain_layers = layers;
+    frame.view.position = {1.0e6, 2.0, -3.0e5}; // far out: uvs and variation continue from the camera
+    const auto timed = [&s](const char* name) {
+        for (const rhi::GpuTiming& t : s.device->gpu_timings()) {
+            if (t.name == name) return true;
+        }
+        return false;
+    };
+    const auto before = [&s](const char* a, const char* b) {
+        int at_a = -1, at_b = -1, i = 0;
+        for (const rhi::GpuTiming& t : s.device->gpu_timings()) {
+            if (t.name == a) at_a = i;
+            if (t.name == b) at_b = i;
+            ++i;
+        }
+        return at_a >= 0 && at_b >= 0 && at_a < at_b;
+    };
+    s.draw(frame);
+    // Their own pass, just before shading.
+    GIANT_CHECK(timed("terrain") && before("contact shadows", "terrain") && before("terrain", "shading"));
+    frame.settings.debug_view = DebugView::clusters;
+    s.draw(frame);
+    GIANT_CHECK(!timed("terrain")); // lit views only
+    frame.settings.debug_view = DebugView::lit;
+    frame.terrain_layers = {};
+    s.draw(frame); // none: the material's own values, and no pass
+    GIANT_CHECK(!timed("terrain"));
+    GIANT_CHECK(!s.device->device_lost());
+}
+
 GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a pass after shading") {
     NullScene s;
     GIANT_CHECK(s.renderer != nullptr);
@@ -2818,6 +2864,101 @@ GIANT_TEST("render: d3d12 contact shadows darken the floor by a low block toward
     GIANT_CHECK(std::abs(green(on, 64, 88) - green(off, 64, 88)) <= 3);
     // By the block the sun is shut out.
     GIANT_CHECK(green(on, 64, 98) * 100 < green(off, 64, 98) * 70);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+
+GIANT_TEST("render: d3d12 terrain layers: grass on the level, rock on the steep, snow up high") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 128, k_h = 128;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // Level ground and a 2 m block 9 m ahead of the camera (its front face
+    // about rows 64 to 89), all ground; drawn again 60 m higher.
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {60.0f, 1.0f, 60.0f};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[1].scale = {2.0f, 2.0f, 2.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {1.0f, 0.0f, 1.0f}; // not shown: the layers are
+    materials[0].terrain = true;
+    std::vector<TerrainLayer> layers(3);
+    layers[0].base_color = {0.08f, 0.4f, 0.08f}; // grass everywhere
+    layers[1].base_color = {0.35f, 0.35f, 0.35f}; // rock where steep
+    layers[1].min_slope = 40.0f;
+    layers[2].base_color = {0.9f, 0.9f, 0.9f}; // snow up high
+    layers[2].min_height = 50.0f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.antialiasing = false;
+    frame.materials = materials;
+    frame.terrain_layers = layers;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.3f, 0.8f, 0.5f}); // lights the block's front
+    frame.lighting.sun_light = {2.0f, 2.0f, 2.0f};
+    frame.lighting.sky_light = {0.3f, 0.3f, 0.3f};
+    frame.lighting.ground_light = {0.3f, 0.3f, 0.3f};
+    const auto draw = [&](double up) {
+        instances[0].position = DVec3{500.0, up, 0.0};
+        instances[1].position = DVec3{500.0, up + 1.0, -6.0}; // its front face at z -5
+        frame.instances = instances;
+        frame.view.position = DVec3{500.0, up + 2.0, 4.0};
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    struct Rgb {
+        int r, g, b;
+    };
+    const auto at = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        return i + 3 < image.size() ? Rgb{image[i], image[i + 1], image[i + 2]} : Rgb{-1, -1, -1};
+    };
+    const std::vector<u8> low = draw(0.0);
+    const std::vector<u8> high = draw(60.0);
+    // Row 115: the ground some 4 m ahead; (64, 80): the block's face, 0.7 m up.
+    const Rgb ground = at(low, 64, 115), face = at(low, 64, 80), snow = at(high, 64, 115), snow_face = at(high, 64, 80);
+    std::printf("    ground %d %d %d; block's face %d %d %d; 60 m up: ground %d %d %d, face %d %d %d\n", ground.r, ground.g,
+                ground.b, face.r, face.g, face.b, snow.r, snow.g, snow.b, snow_face.r, snow_face.g, snow_face.b);
+    // Level ground: the first layer (green), never the material's magenta.
+    GIANT_CHECK(ground.g > ground.r + 20 && ground.g > ground.b + 20);
+    // The block's steep face: rock (grey).
+    GIANT_CHECK(face.r > 20 && std::abs(face.r - face.g) <= 12 && std::abs(face.b - face.g) <= 12);
+    // Up high, snow covers both (white, brighter than the rock).
+    GIANT_CHECK(snow.r > 150 && std::abs(snow.r - snow.g) <= 12 && std::abs(snow.b - snow.g) <= 12);
+    GIANT_CHECK(snow_face.r > face.r + 30 && std::abs(snow_face.r - snow_face.g) <= 12);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

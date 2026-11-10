@@ -669,3 +669,33 @@ float3 level_color(uint level) {
     };
     return k_levels[min(level, 7u)];
 }
+
+// --- A view ray met with a triangle (resolve.slang, terrain.slang) --------
+
+// Unclamped: where the ray meets the triangle's plane, even outside it
+// (for the uv differentials of neighbouring pixels' rays). w: 1 if it meets
+// the plane in front of the camera, 0 if the ray runs along it or meets it
+// behind.
+float4 plane_barycentrics(float3 dir, float3 a, float3 b, float3 c) {
+    const float3 e1 = b - a;
+    const float3 e2 = c - a;
+    const float3 p = cross(dir, e2);
+    const float det = dot(e1, p);
+    if (abs(det) < 1e-20) {
+        return float4(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0); // seen edge-on
+    }
+    const float inv = 1.0 / det;
+    const float3 s = -a; // the ray starts at the camera, the origin
+    const float u = dot(s, p) * inv;
+    const float3 q = cross(s, e1);
+    const float v = dot(dir, q) * inv;
+    const float t = dot(e2, q) * inv;
+    return float4(1.0 - u - v, u, v, t > 0.0 ? 1.0 : 0.0);
+}
+
+// Clamped onto the triangle: pixels whose centre misses it slightly
+// (edges: the rasterizer covers by area) stay on it.
+float3 on_triangle(float3 plane) {
+    const float3 w = max(plane, float3(0.0, 0.0, 0.0));
+    return w / max(w.x + w.y + w.z, 1e-12);
+}

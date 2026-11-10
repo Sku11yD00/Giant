@@ -61,7 +61,8 @@ struct ResolvePush {
 };
 ConstantBuffer<ResolvePush> push : register(b0);
 
-static const uint k_material_bytes = 48; // gpu::Material; its textures at +32
+static const uint k_material_bytes = 64; // gpu::Material; its textures at +32, flags at +48
+static const uint k_material_terrain = 1u;
 static const uint k_no_texture = 0xFFFFFFFFu; // rhi::k_no_descriptor
 
 
@@ -96,6 +97,9 @@ struct Extras {
     uint ao_on;
     uint contact;            // contact shadows (ao.slang's cs_contact): the sun let through, full size (contact_on 0: off)
     uint contact_on;
+    uint terrain_surface;    // terrain.slang's colour and roughness, full size (terrain_on 0: off)
+    uint terrain_normal;     // and its shading normal
+    uint terrain_on;
 };
 
 Extras load_extras() {
@@ -153,6 +157,10 @@ Extras load_extras() {
     const uint2 c2 = b.Load2(at + 176);
     o.contact = c2.x;
     o.contact_on = c2.y;
+    const uint3 t3 = b.Load3(at + 192);
+    o.terrain_surface = t3.x;
+    o.terrain_normal = t3.y;
+    o.terrain_on = t3.z;
     return o;
 }
 
@@ -210,36 +218,6 @@ struct Surface {
 
 // The ray through pixel `pixel` (camera-relative, from the camera) against
 // the triangle's corners: Moller-Trumbore, without back-face rejection.
-// Barycentrics are clamped, so pixels whose centre misses the triangle
-// slightly (edges: the rasterizer covers by area) stay on it.
-// Unclamped: where the ray meets the triangle's plane, even outside it
-// (for the uv differentials of neighbouring pixels' rays). w: 1 if it meets
-// the plane in front of the camera, 0 if the ray runs along it or meets it
-// behind.
-float4 plane_barycentrics(float3 dir, float3 a, float3 b, float3 c) {
-    const float3 e1 = b - a;
-    const float3 e2 = c - a;
-    const float3 p = cross(dir, e2);
-    const float det = dot(e1, p);
-    if (abs(det) < 1e-20) {
-        return float4(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0); // seen edge-on
-    }
-    const float inv = 1.0 / det;
-    const float3 s = -a; // the ray starts at the camera, the origin
-    const float u = dot(s, p) * inv;
-    const float3 q = cross(s, e1);
-    const float v = dot(dir, q) * inv;
-    const float t = dot(e2, q) * inv;
-    return float4(1.0 - u - v, u, v, t > 0.0 ? 1.0 : 0.0);
-}
-
-// Clamped onto the triangle: pixels whose centre misses it slightly
-// (edges: the rasterizer covers by area) stay on it.
-float3 on_triangle(float3 plane) {
-    const float3 w = max(plane, float3(0.0, 0.0, 0.0));
-    return w / max(w.x + w.y + w.z, 1e-12);
-}
-
 // The uv's change to a neighbouring pixel, from where its ray meets the
 // plane: at most the whole texture (grazing views), `fallback` (also the
 // whole texture) when it misses the plane.
@@ -879,6 +857,14 @@ Output shade_pixel(float4 position) {
     float3 emissive = emissive_metallic.rgb;
     float occlusion = 1.0;
     apply_textures(s, base, rough, metal, occlusion);
+    if (extras.terrain_on != 0u && (materials.Load(material_at + 48) & k_material_terrain) != 0u) {
+        // The ground's layers, from terrain.slang's pass.
+        const float4 sr = read_texture(extras.terrain_surface).Load(int3(int2(pixel), 0));
+        base = sr.rgb;
+        rough = sr.a;
+        n = safe_normalize(read_texture(extras.terrain_normal).Load(int3(int2(pixel), 0)).xyz, s.n);
+        metal = 0.0;
+    }
     texture_feedback(extras, f, s, pixel);
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,

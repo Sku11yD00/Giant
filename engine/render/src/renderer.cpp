@@ -72,6 +72,48 @@ gpu::Material to_gpu(const Material& m, Descriptor&& descriptor) {
     out.textures[1] = descriptor(m.normal_texture, false);
     out.textures[2] = descriptor(m.roughness_metal_texture, false);
     out.textures[3] = descriptor(m.occlusion_texture, false);
+    out.flags = m.terrain ? gpu::k_material_terrain : 0u;
+    if (m.terrain) {
+        // The layers map their own textures by world position.
+        for (u32& t : out.textures) t = rhi::k_no_descriptor;
+    }
+    return out;
+}
+
+float finite_in(float v, float lo, float hi, float fallback) {
+    return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
+}
+
+// A layer for the GPU, its uvs continued from where the camera is.
+template <class Descriptor>
+gpu::TerrainLayer to_gpu(const TerrainLayer& l, const DVec3& camera, Descriptor&& descriptor) {
+    gpu::TerrainLayer out{};
+    const Vec3 c{finite_in(l.base_color.x, 0.0f, 1.0f, 0.5f), finite_in(l.base_color.y, 0.0f, 1.0f, 0.5f),
+                 finite_in(l.base_color.z, 0.0f, 1.0f, 0.5f)};
+    set4(out.color_rough, c, finite_in(l.roughness, 0.0f, 1.0f, 0.9f));
+    out.textures[0] = descriptor(l.base_color_texture, true);
+    out.textures[1] = descriptor(l.normal_texture, false);
+    out.textures[2] = descriptor(l.roughness_metal_texture, false);
+    out.textures[3] = rhi::k_no_descriptor;
+    out.tiling = finite_in(l.tiling, 0.05f, 1000.0f, 4.0f);
+    // A band's edge at the end of the range is open (level ground and
+    // sheer faces covered whole, not half by the soft edge's middle).
+    out.min_slope = finite_in(l.min_slope, 0.0f, 90.0f, 0.0f);
+    out.max_slope = finite_in(l.max_slope, 0.0f, 90.0f, 90.0f);
+    if (out.min_slope <= 0.0f) out.min_slope = -1.0e3f;
+    if (out.max_slope >= 90.0f) out.max_slope = 1.0e3f;
+    out.slope_blend = finite_in(l.slope_blend, 0.0f, 90.0f, 5.0f);
+    out.min_height = finite_in(l.min_height, -2.0e4f, 2.0e4f, -1.0e4f);
+    out.max_height = finite_in(l.max_height, -2.0e4f, 2.0e4f, 1.0e4f);
+    out.height_blend = finite_in(l.height_blend, 0.0f, 1.0e4f, 10.0f);
+    const double tiling = out.tiling;
+    const auto frac = [tiling](double v) {
+        const double t = v / tiling;
+        return static_cast<float>(t - std::floor(t));
+    };
+    out.uv_offset[0] = frac(camera.x);
+    out.uv_offset[1] = frac(camera.y);
+    out.uv_offset[2] = frac(camera.z);
     return out;
 }
 
@@ -136,6 +178,8 @@ struct Renderer::FrameData {
     rhi::TransientMemory frame;
     rhi::TransientMemory materials; // the frame's, then the default
     u32 material_count = 0;         // the frame's
+    rhi::TransientMemory terrain_layers; // gpu::TerrainLayer each (terrain_count of them)
+    u32 terrain_count = 0;
     rhi::TransientMemory decals;    // decals, tiles, entries (DecalBins)
     u32 decal_offset = 0;
     u32 tile_offset = 0;
@@ -208,12 +252,14 @@ Renderer::~Renderer() {
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
           m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
-          m_ao_gtao, m_ao_denoise, m_contact_pass}) {
+          m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass}) {
         m_device.destroy(p);
     }
     m_device.destroy(m_ao_raw);
     m_device.destroy(m_ao);
     m_device.destroy(m_contact);
+    m_device.destroy(m_terrain_surface);
+    m_device.destroy(m_terrain_normal);
     for (const rhi::TextureHandle t : m_bloom_downs) {
         m_device.destroy(t);
     }
@@ -310,6 +356,7 @@ bool Renderer::init() {
     m_ao_gtao = compute(shaders::ao_gtao_cs(), "ambient occlusion");
     m_ao_denoise = compute(shaders::ao_denoise_cs(), "ambient occlusion: denoise");
     m_contact_pass = compute(shaders::ao_contact_cs(), "contact shadows");
+    m_terrain_pass = compute(shaders::terrain_cs(), "terrain layers");
     m_bloom_up = compute(shaders::bloom_up_cs(), "bloom: up");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     ShadowDesc shadow_desc;
@@ -407,7 +454,7 @@ bool Renderer::init() {
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
-          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass}) {
+          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1106,6 +1153,11 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_device.destroy(m_contact); // the frame's size: made again below
     m_contact = {};
     m_contact_ready = false;
+    m_device.destroy(m_terrain_surface); // the frame's size: made again below
+    m_device.destroy(m_terrain_normal);
+    m_terrain_surface = {};
+    m_terrain_normal = {};
+    m_terrain_ready = false;
     m_bloom_ready = false;
     m_device.destroy(m_clouds_a); // half the frame's size: made again with the sky's
     m_device.destroy(m_clouds_b);
@@ -1233,10 +1285,24 @@ bool Renderer::ensure_post_targets() {
     }
     m_contact_ready = m_contact.valid();
     ok = ok && m_contact_ready;
+    // Terrain layers' colour and roughness, and shading normal: the frame's size.
+    for (rhi::TextureHandle* t : {&m_terrain_surface, &m_terrain_normal}) {
+        if (!t->valid()) {
+            rhi::TextureDesc desc;
+            desc.width = m_width;
+            desc.height = m_height;
+            desc.format = rhi::Format::rgba16_float;
+            desc.usage = rhi::TextureUsage::sampled | rhi::TextureUsage::shader_write;
+            desc.name = t == &m_terrain_surface ? "terrain layers: colour" : "terrain layers: normal";
+            *t = m_device.create_texture(desc);
+        }
+    }
+    m_terrain_ready = m_terrain_surface.valid() && m_terrain_normal.valid();
+    ok = ok && m_terrain_ready;
     if (!ok && !m_post_logged) {
         // Tried again with the next resize.
         m_post_logged = true;
-        log_error("render", "could not create bloom's, ambient occlusion's or contact shadows' textures (out of GPU memory?)");
+        log_error("render", "could not create bloom's, ambient occlusion's, contact shadows' or terrain layers' textures (out of GPU memory?)");
     }
     return ok;
 }
@@ -2346,8 +2412,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_gpu_materials.push_back(to_gpu(m, texture_descriptor));
         const std::array<TextureId, 4> ids{m.base_color_texture, m.normal_texture, m.roughness_metal_texture,
                                            m.occlusion_texture};
-        if (std::all_of(ids.begin(), ids.end(), [](TextureId id) { return id == k_no_texture; })) {
-            continue;
+        if (m.terrain || std::all_of(ids.begin(), ids.end(), [](TextureId id) { return id == k_no_texture; })) {
+            continue; // (ground: the layers' textures are wanted below)
         }
         if (i < k_feedback_materials) {
             m_feedback_now.push_back({static_cast<u32>(i), ids});
@@ -2359,6 +2425,21 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor));
     data.material_count = static_cast<u32>(material_limit);
     data.materials = cmd.upload(bytes_of(m_gpu_materials));
+    // The ground's layers (their textures always wanted at their finest:
+    // they have no feedback of their own yet).
+    if (!frame.terrain_layers.empty()) {
+        std::array<gpu::TerrainLayer, k_max_terrain_layers> layers{};
+        const usize count = std::min<usize>(frame.terrain_layers.size(), k_max_terrain_layers);
+        for (usize i = 0; i < count; ++i) {
+            const TerrainLayer& l = frame.terrain_layers[i];
+            layers[i] = to_gpu(l, frame.view.position, texture_descriptor);
+            for (const TextureId id : {l.base_color_texture, l.normal_texture, l.roughness_metal_texture}) {
+                if (id != k_no_texture) note_wanted(id, k_sharpest);
+            }
+        }
+        data.terrain_layers = cmd.upload({reinterpret_cast<const u8*>(layers.data()), count * sizeof(gpu::TerrainLayer)});
+        data.terrain_count = data.terrain_layers.data != nullptr ? static_cast<u32>(count) : 0u;
+    }
 
     // Decals in view, binned into screen tiles (lit view only).
     if (!frame.decals.empty() && settings.debug_view == DebugView::lit) {
@@ -2584,6 +2665,54 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.end_timing();
     }
     m_stats.contact_shadows = contact_shadows;
+    // Terrain layers (lit views, with layers given): the ground's colour,
+    // roughness and shading normal, for resolve to read where a material
+    // is terrain (its own pass: in resolve it slowed every pixel).
+    const bool terrain = lit_view && data.terrain_count > 0 && m_terrain_ready;
+    if (terrain) {
+        cmd.begin_timing("terrain");
+        cmd.barrier(m_terrain_surface, rhi::ResourceState::shader_write);
+        cmd.barrier(m_terrain_normal, rhi::ResourceState::shader_write);
+        gpu::TerrainPush tp{};
+        tp.frame = data.frame.descriptor;
+        tp.frame_offset = data.frame.offset;
+        tp.vis = m_device.read_descriptor(m_vis);
+        if (gpu && m_cull.visible.valid()) {
+            tp.visible = m_device.read_descriptor(m_cull.visible);
+            tp.visible_offset = 0;
+        } else {
+            tp.visible = data.entries.data != nullptr ? data.entries.descriptor : data.frame.descriptor;
+            tp.visible_offset = data.entries.offset;
+        }
+        tp.instances = data.instances.descriptor != rhi::k_no_descriptor ? data.instances.descriptor
+                                                                         : data.frame.descriptor;
+        tp.instance_offset = data.instances.offset;
+        tp.meshes = data.meshes.descriptor;
+        tp.mesh_offset = data.meshes.offset;
+        tp.materials = data.materials.descriptor;
+        tp.material_offset = data.materials.offset;
+        tp.material_count = data.material_count;
+        tp.layers = data.terrain_layers.descriptor;
+        tp.layers_offset = data.terrain_layers.offset;
+        tp.layer_count = data.terrain_count;
+        tp.surface = m_device.write_descriptor(m_terrain_surface);
+        tp.normal = m_device.write_descriptor(m_terrain_normal);
+        tp.width = m_width;
+        tp.height = m_height;
+        tp.camera_y = static_cast<float>(frame.view.position.y);
+        const auto period = [](double v) {
+            constexpr double k_period = 4096.0; // terrain.slang's k_macro_period
+            return static_cast<float>(v - std::floor(v / k_period) * k_period);
+        };
+        tp.camera_xz[0] = period(frame.view.position.x);
+        tp.camera_xz[1] = period(frame.view.position.z);
+        cmd.set_pipeline(m_terrain_pass);
+        cmd.push(tp);
+        cmd.dispatch((m_width + 7) / 8, (m_height + 7) / 8);
+        cmd.barrier(m_terrain_surface, rhi::ResourceState::shader_read);
+        cmd.barrier(m_terrain_normal, rhi::ResourceState::shader_read);
+        cmd.end_timing();
+    }
     cmd.begin_timing("shading");
     // Shading writes the light before exposure into m_radiance (with
     // screen reflections, also what they need, and their pass adds them
@@ -2730,6 +2859,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.ao_on = ambient_occlusion ? 1u : 0u;
     extras.contact = contact_shadows ? m_device.read_descriptor(m_contact) : data.frame.descriptor;
     extras.contact_on = contact_shadows ? 1u : 0u;
+    extras.terrain_surface = terrain ? m_device.read_descriptor(m_terrain_surface) : data.frame.descriptor;
+    extras.terrain_normal = terrain ? m_device.read_descriptor(m_terrain_normal) : data.frame.descriptor;
+    extras.terrain_on = terrain ? 1u : 0u;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;

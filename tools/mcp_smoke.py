@@ -828,7 +828,8 @@ def gi_gate(tool, call, check):
                            "base_color": [0.9, 0.05, 0.05], "roughness": 0.9})
     tool("set_lighting", {"sun_elevation_degrees": 37, "sun_azimuth_degrees": 270})
     tool("set_camera", {"position": [-2, 8, 6], "look_at": [1, 0, 0]})
-    tool("set_render_settings", {"gi": True, "gi_bricks_per_frame": 64, "screen_space_reflections": True})
+    tool("set_render_settings", {"gi": True, "gi_bricks_per_frame": 64, "screen_space_reflections": True,
+                                 "ambient_occlusion": True, "contact_shadows": True})
 
     def settle():
         last = None
@@ -862,7 +863,7 @@ def gi_gate(tool, call, check):
     tool("set_render_settings", {"debug_view": "clusters"})
     last = settle()
     check(not last["gi"]["on"] and last["gi"]["lit"] == 0, f"debug views of the geometry have none, got {last['gi']}")
-    tool("set_render_settings", {"debug_view": "lit", "gi": False})
+    tool("set_render_settings", {"debug_view": "lit", "gi": False, "ambient_occlusion": False, "contact_shadows": False})
     last = settle()
     check(not last["gi"]["on"], f"global illumination turns off, got {last['gi']}")
     tool("new_scene")
@@ -1031,10 +1032,12 @@ def main() -> int:
         check(settings["gi"] is True and settings["gi_bricks_per_frame"] == 256, "global illumination is on by default")
         check(settings["reflections"] is True and settings["screen_space_reflections"] is True,
               "reflections are on by default")
-        # Lighting the voxel world and the screen reflections pass are heavy
-        # on the software GPU CI runs on: off for the other gates (the
-        # renderer's own d3d12 tests check them), on in gi_gate.
-        tool("set_render_settings", {"gi": False, "screen_space_reflections": False})
+        # Lighting the voxel world, the screen reflections pass, ambient
+        # occlusion and contact shadows are heavy on the software GPU CI runs
+        # on (full-size passes, with GPU validation): off for the other gates
+        # (the renderer's own d3d12 tests check them), on in gi_gate.
+        tool("set_render_settings", {"gi": False, "screen_space_reflections": False,
+                                     "ambient_occlusion": False, "contact_shadows": False})
         for gate in (build_scene, world_gate, lod_gate, kit_gate, voxel_gate, far_field_gate,
                      terrain_gate, shadow_gate, weather_gate, physics_gate, player_gate, gi_gate, n1_gate):
             # Each gate's time, so a run near the timeout shows which one grew.

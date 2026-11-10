@@ -375,6 +375,31 @@ an offline cooker can use it without a device.
   doubled the software renderer's frame time (the Windows CI gates). No history; timed as
   "contact shadows"; `RenderStats::contact_shadows`; MCP
   `set_render_settings`.
+- **Terrain layers (photoreal part 5a).** A material with
+  `Material::terrain` is shaded from `FrameInput::terrain_layers` (up to
+  8; `gpu::Material` grew to 64 bytes for its flags). A full-size compute
+  pass (`terrain.slang`, timed as "terrain", only in lit views with layers
+  given) rebuilds the triangle from the visibility buffer where a material
+  is terrain and writes the colour, roughness and shading normal to two
+  rgba16_float targets; resolve only loads them (the same code inside
+  resolve's pixel shader doubled WARP frame time for every pixel, terrain
+  or not). The pass stacks the layers like paint: the first covers everywhere, each later one where its slope
+  band (degrees from level, of the surface normal) and height band
+  (metres above y = 0) hold, soft over `slope_blend` and `height_blend`
+  at their edges. Each layer's colour, roughness and textures (base
+  colour, normal map, roughness) are mapped by world position every
+  `tiling` metres: from above, and from the sides where the ground is
+  steep (triplanar, weights |n|^4 with small ones dropped, so level
+  ground takes one sample a texture). The CPU passes each layer's
+  frac(camera / tiling) so the uvs stay exact far from the origin, and the
+  footprint for filtering comes from the neighbouring pixels' rays met
+  with the surface's plane. Normal maps bend the normal along each
+  plane's axes (summed, as UDN). A value noise over 32 m and 128 m cells
+  (period 4096 m, from the camera's x and z modulo it) varies the
+  brightness by about 18% against the textures' repeats. Fixed loops,
+  unrolled. Layer textures have no streaming feedback yet: they are
+  always wanted at their finest. Shadows, AO and probes keep the surface
+  normal. Painted splats and height-blended edges come in 5c.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under
