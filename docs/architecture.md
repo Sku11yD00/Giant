@@ -371,8 +371,8 @@ an offline cooker can use it without a device.
   screen's edges; off screen and sky samples do not shade. The result
   (r32_float, the sun let through) is read by shading where the sun
   still lights the pixel after its shadow pages and cloud shadow. Kept
-  out of the shading pass: a march inside that large shader slowed the
-  software renderer by half again for every pixel. No history; timed as
+  out of the shading pass: a march inside that large shader more than
+  doubled the software renderer's frame time (the Windows CI gates). No history; timed as
   "contact shadows"; `RenderStats::contact_shadows`; MCP
   `set_render_settings`.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`

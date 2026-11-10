@@ -1236,7 +1236,7 @@ bool Renderer::ensure_post_targets() {
     if (!ok && !m_post_logged) {
         // Tried again with the next resize.
         m_post_logged = true;
-        log_error("render", "could not create bloom's or ambient occlusion's textures (out of GPU memory?)");
+        log_error("render", "could not create bloom's, ambient occlusion's or contact shadows' textures (out of GPU memory?)");
     }
     return ok;
 }
