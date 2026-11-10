@@ -320,14 +320,14 @@ an offline cooker can use it without a device.
   512 samples a point, within 0.002 of converged; some 50 ms, once a
   process) and read bilinear from a buffer (`ResolveExtras::dfg`; columns
   linear in n.v, so at silhouettes below n.v 0.03 it is off by up to
-  0.04). The light lost to bounces between
+  0.07). The light lost to bounces between
   microfacets is put back (Fdez-Aguera 2019) as light from all round, and
   the sun's highlight is scaled by 1 + f0 (1 / Ess - 1) (Filament), so a
   rough white metal is as bright as a smooth one (a WARP furnace test).
   Diffuse ambient takes what the specular leaves. Reflections (voxel
   cones and the screen's) are weighted by the single-bounce part times a
-  specular occlusion from the material's occlusion (Lagarde 2014, with
-  linear roughness), in
+  specular occlusion from the material's occlusion (Lagarde 2014, fed
+  alpha, roughness squared), in
   place of the old hand-tuned Fresnel and roughness dimming.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
