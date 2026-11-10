@@ -3173,7 +3173,7 @@ GIANT_TEST("render: two-sided materials draw visibility in a second pass, only w
     frame.view.position = {0.0, 1.0, 0.0};
     const u32 one = s.settle(frame).draws;
     materials[1].two_sided = true;
-    materials[1].translucency = 7.0f; // kept to 0 to 1
+    materials[1].translucency = 0.5f;
     frame.materials = materials;
     const u32 two = s.settle(frame).draws;
     GIANT_CHECK(two > one);
@@ -3248,12 +3248,23 @@ GIANT_TEST("render: d3d12 leaves: a two-sided sheet is seen from behind, and the
     const auto two_sided = draw();
     materials[0].translucency = 0.6f;
     const auto lit_through = draw();
-    std::printf("    from behind: one-sided %d %d %d, two-sided %d %d %d, translucent %d %d %d\n", one_sided[0],
-                one_sided[1], one_sided[2], two_sided[0], two_sided[1], two_sided[2], lit_through[0], lit_through[1],
-                lit_through[2]);
+    materials[0].translucency = 1.0f;
+    const auto all_through = draw();
+    materials[0].translucency = 7.0f; // kept to 0 to 1
+    const auto past_one = draw();
+    // The sun below, on the viewer's side: the underside is lit as the
+    // side seen (its normal turned to the viewer), the sun not through it.
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.2f, -1.0f, 0.1f});
+    materials[0].translucency = 0.0f;
+    const auto sunlit_under = draw();
+    std::printf("    from behind: one-sided %d %d %d, two-sided %d %d %d, translucent %d %d %d, sun below %d %d %d\n",
+                one_sided[0], one_sided[1], one_sided[2], two_sided[0], two_sided[1], two_sided[2], lit_through[0],
+                lit_through[1], lit_through[2], sunlit_under[0], sunlit_under[1], sunlit_under[2]);
     GIANT_CHECK(one_sided[2] > one_sided[1] + 100); // culled: the blue background
     GIANT_CHECK(two_sided[1] > two_sided[2]);       // the sheet's green underside, in shade
     GIANT_CHECK(lit_through[1] > two_sided[1] + 20 && lit_through[1] > lit_through[0]); // brighter, still green
+    GIANT_CHECK(all_through[1] > lit_through[1] && past_one == all_through);
+    GIANT_CHECK(sunlit_under[1] > two_sided[1] + 40); // the flipped normal faces the sun
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

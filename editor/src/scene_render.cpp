@@ -90,6 +90,7 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
         if (out.textures != nullptr) set_textures(r, refs, *out.textures);
         out.materials.push_back(r);
         out.material_textures.push_back(refs);
+        out.material_two_sided.push_back(m.two_sided ? 1 : 0);
         out.users.push_back(0);
     }
     ++out.users[it->second];
@@ -634,6 +635,7 @@ void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const F
     out.lookup.clear();
     out.materials.clear();
     out.material_textures.clear();
+    out.material_two_sided.clear();
     out.users.clear();
     out.order.clear();
     out.instances.clear(); // laid out afresh
@@ -1042,6 +1044,11 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             }
         }
         out.textures->set_used(used);
+    }
+    // Only materials in use are two-sided for the renderer (one lingering
+    // unused would keep its second raster pass on; a few thousand at most).
+    for (usize i = 0; i < out.materials.size(); ++i) {
+        out.materials[i].two_sided = out.users[i] > 0 && out.material_two_sided[i] != 0;
     }
     // Textures that came (or changed) since: every material asking for them
     // draws them from now on.
