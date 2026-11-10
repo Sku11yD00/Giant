@@ -56,11 +56,17 @@ bool has_uvs(world::Shape shape, const MeshLibrary::Mesh* mesh) {
     }
 }
 
-void set_textures(render::Material& r, const std::array<u32, 4>& refs, const TextureLibrary& textures) {
+// `alpha_cutoff`: the material's own (the row's may be 0 while unused).
+void set_textures(render::Material& r, const std::array<u32, 4>& refs, const TextureLibrary& textures,
+                  float alpha_cutoff) {
     r.base_color_texture = textures.id(refs[0]);
     r.normal_texture = textures.id(refs[1]);
     r.roughness_metal_texture = textures.id(refs[2]);
     r.occlusion_texture = textures.id(refs[3]);
+    // The voxel world's view of the base colour texture, while it is drawn.
+    const TextureLibrary::Entry* e = r.base_color_texture != render::k_no_texture ? textures.entry(refs[0]) : nullptr;
+    r.base_color_average = e != nullptr ? e->summary.average : Vec3{1.0f, 1.0f, 1.0f};
+    r.coverage = e != nullptr ? e->summary.coverage_at(alpha_cutoff) : 1.0f;
 }
 
 // The material's index in the table, adding it if new, and one more user.
@@ -89,7 +95,7 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
         r.two_sided = m.two_sided;
         r.translucency = m.translucency;
         r.alpha_cutoff = m.alpha_cutoff;
-        if (out.textures != nullptr) set_textures(r, refs, *out.textures);
+        if (out.textures != nullptr) set_textures(r, refs, *out.textures, m.alpha_cutoff);
         out.materials.push_back(r);
         out.material_textures.push_back(refs);
         out.material_kind.push_back({m.two_sided, m.alpha_cutoff});
@@ -1061,7 +1067,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     if (out.textures != nullptr && out.textures->version() != out.textures_version) {
         out.textures_version = out.textures->version();
         for (usize i = 0; i < out.materials.size(); ++i) {
-            set_textures(out.materials[i], out.material_textures[i], *out.textures);
+            set_textures(out.materials[i], out.material_textures[i], *out.textures, out.material_kind[i].alpha_cutoff);
         }
     }
     if (!layout && out.cells_rebuilt == 0) {

@@ -455,9 +455,26 @@ an offline cooker can use it without a device.
   smaller colour level's alpha so as much of it stays over 0.5 as of the top
   level's, so leaves do not thin away with distance (.gtex version 2).
   The editor sends a material as two-sided or cut out only while something
-  uses it. Known gaps: each kind's draw still walks every visible cluster
-  (culling could split them by kind), and the voxel world (GI, far field)
-  takes cut-outs as solid (part 6c).
+  uses it. Known gap: each kind's draw still walks every visible cluster
+  (culling could split them by kind).
+- **Far vegetation matching near (photoreal part 6c-1).** The voxel world
+  cannot sample textures, so a material carries what it needs from its
+  base colour texture: `Material::base_color_average` (the texture's
+  alpha-weighted average in linear light, times base_color) and
+  `Material::coverage` (the share of the texture its alpha_cutoff leaves).
+  The editor measures both on a worker when a texture cooks or loads
+  (`texture::summarize_color`, on the finest level within 128 texels:
+  average plus coverage at 17 alpha steps) and fills them in once the
+  texture is drawn (until then: white, solid). `voxel::BrickBuilder`
+  thins cut-outs: each cut-out triangle adds its coverage times its area
+  (shared among the voxels it touches) over the voxel's face, and a voxel
+  only cut-outs touch fills when that reaches a threshold dithered per
+  voxel and seeded by the brick's key (a rebuild comes out the same).
+  A sparse card leaves a sparse field, a dense clump a solid one; a thin
+  stand-in over solid ground falls back to the ground's own voxel. Colour
+  and facing count by coverage. The voxel world compares material rows
+  itself each update (a row's values change under unchanged cells as
+  textures arrive) and rebuilds what uses a changed one.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

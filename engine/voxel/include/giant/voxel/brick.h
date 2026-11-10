@@ -69,28 +69,51 @@ bool triangle_overlaps_box(const Vec3& box_center, const Vec3& half_size, const 
 // triangle touches gets the triangle's colour and facing (the average of
 // every triangle touching it; where stand-in triangles touch it, theirs
 // only, so a far tree keeps its colour over the ground it stands on).
+//
+// Cut-out triangles (coverage under 1: leaves and grass whose texture cuts
+// most of them away) fill a voxel only as often as they would hide what is
+// behind it: each adds its coverage times its area in the voxel (its area
+// shared evenly among the voxels it touches) over the voxel's face, and a
+// voxel only they touch is filled when that sum reaches a threshold
+// dithered per voxel (stable across rebuilds by `seed`). A thin grass card
+// leaves a sparse voxel field; a dense clump, a solid one. Their colour and
+// facing count by coverage.
 class BrickBuilder {
 public:
-    // Empties it (cheap: clears only the voxels touched since the last reset).
-    void reset(float voxel_size);
+    // Empties it (cheap: clears only the voxels touched since the last
+    // reset). `seed`: picks the dither (the brick's place, so a brick built
+    // again comes out the same).
+    void reset(float voxel_size, u32 seed = 0);
     // Returns how many voxels it tested (the work done, for budgets).
     // `stand_in`: from a small object the far field stands in for.
-    u32 add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color, bool stand_in = false);
+    // `coverage`: the share of the surface its texture leaves (1: solid);
+    // 0 or less (or NaN) adds nothing.
+    u32 add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color, bool stand_in = false,
+                     float coverage = 1.0f);
     bool empty() const { return m_touched == 0; }
     Brick build() const;
+    // The dither threshold of voxel `index` under the current seed, in (0, 1].
+    float threshold(u32 index) const;
 
 private:
-    struct Sum {
+    struct Part {
         Vec3 color{};
         Vec3 normal{};
         float weight = 0.0f;
-        Vec3 stand_color{}; // the stand-in triangles' alone
-        Vec3 stand_normal{};
-        float stand_weight = 0.0f;
+        float cover = 0.0f; // cut-out triangles' coverage times area, over the voxel's face
+        bool solid = false; // a triangle with full coverage touches it
     };
+    struct Sum {
+        Part own;   // triangles of objects that stay meshes
+        Part stand; // the stand-in triangles'
+        bool touched = false;
+    };
+    void add(u32 index, const Vec3& color, const Vec3& normal, float coverage, float cover, bool stand_in);
+    bool fills(const Part& part, u32 index) const;
     std::array<Sum, k_brick_voxels> m_sums{};
     std::array<u16, k_brick_voxels> m_list{}; // the touched voxels, so reset clears only them
     float m_voxel_size = 1.0f;
+    u32 m_seed = 0;
     u32 m_touched = 0;
 };
 

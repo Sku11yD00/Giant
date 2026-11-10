@@ -2,6 +2,7 @@ giant_module(texture
   SOURCES
     src/cook.cpp
     src/mips.cpp
+    src/summary.cpp
   DEPENDS core rhi
 )
 # The decoder and encoders stay private: the API is rhi descriptions and bytes.

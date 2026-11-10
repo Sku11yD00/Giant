@@ -127,6 +127,7 @@ struct TextureLibrary::Done {
     std::string error;
     std::string warning;
     texture::Cooked cooked;
+    texture::ColorSummary summary; // base colour: measured on the worker
     std::filesystem::path file; // the .gtex it is in (read from, or written to), if any
     bool from_cache = false;
     float seconds = 0.0f;
@@ -419,6 +420,7 @@ void TextureLibrary::cook_into(const Key& key, u32 max_side, Done& result) {
             }
         }
     }
+    if (done->ok && key.slot == Slot::base_color) done->summary = texture::summarize_color(done->cooked);
     done->seconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - begin).count();
 }
 
@@ -509,6 +511,7 @@ void TextureLibrary::upload(Done& done, bool whole) {
         e.contents = std::make_shared<const std::vector<u8>>(std::move(done.cooked.contents));
     }
     e.from_cache = done.from_cache;
+    e.summary = done.summary;
     e.seconds = done.seconds;
     if (!e.used) e.unused_since = m_updates; // its wait to unload starts now
     ++m_version;

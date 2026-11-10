@@ -30,9 +30,11 @@
 //     occlusion (R of the same image); BC4.
 #pragma once
 
+#include "giant/core/math.h"
 #include "giant/core/types.h"
 #include "giant/rhi/rhi.h"
 
+#include <array>
 #include <span>
 #include <string>
 #include <vector>
@@ -106,6 +108,29 @@ bool cook(const Image& image, const CookOptions& options, Cooked& out, std::stri
 // rhi lays them out) back to RGBA8, for checks and tools. BC4 fills R, G and
 // B; BC5 fills R and G (B 0). Empty for other formats or a size mismatch.
 std::vector<u8> decode_blocks(rhi::Format format, u32 width, u32 height, std::span<const u8> blocks);
+
+// What a colour texture looks like from far away, where the voxel world
+// stands in for its surface: its average colour and how much of it a
+// cutoff leaves.
+struct ColorSummary {
+    static constexpr u32 k_steps = 16;
+    // Linear RGB, each texel weighted by its alpha (as the colour mips
+    // filter), so cut-away texels do not tint it. 1 (white) when unknown.
+    Vec3 average{1.0f, 1.0f, 1.0f};
+    // coverage[k]: the share of texels whose alpha is at or over k / 16
+    // (coverage[0] is 1). All 1 without alpha.
+    std::array<float, k_steps + 1> coverage{};
+    ColorSummary() { coverage.fill(1.0f); }
+    // The share an alpha cutoff leaves (interpolated between the steps);
+    // 1 at a cutoff of 0 or less.
+    float coverage_at(float cutoff) const;
+};
+
+// Measures a cooked colour texture on its finest level of at most
+// `max_side` texels a side (decoded on the caller: about a millisecond at
+// 128). Other kinds, or contents that do not decode, give the default (white,
+// fully covered).
+ColorSummary summarize_color(const Cooked& texture, u32 max_side = 128);
 
 // Where a level starts in a texture's contents, and its size.
 u64 level_offset(const rhi::TextureDesc& desc, u32 layer, u32 mip);

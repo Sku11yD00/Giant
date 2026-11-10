@@ -1628,6 +1628,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                          j["reading"] = e.reading;
                          j["from_cache"] = e.from_cache;
                          j["seconds"] = e.seconds;
+                         if (e.key.slot == TextureLibrary::Slot::base_color) {
+                             const Vec3& a = e.summary.average;
+                             j["average_color"] = {a.x, a.y, a.z};
+                             j["coverage_half"] = e.summary.coverage_at(0.5f);
+                         }
                      }
                      if (!e.error.empty()) j["error"] = e.error;
                      if (!e.warning.empty()) j["warning"] = e.warning;

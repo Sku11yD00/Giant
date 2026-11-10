@@ -56,9 +56,10 @@ struct Bench {
         clip.bricks_per_axis = 8;
         voxels = std::make_unique<VoxelScene>(*device, clip, capacity);
     }
+    std::vector<CellRange> cells; // empty: none handed over
     void step(float budget_ms = 1000.0f) {
         rhi::CommandList* cmd = device->begin_frame(nullptr);
-        voxels->update(*cmd, camera, instances, {}, materials, version,
+        voxels->update(*cmd, camera, instances, cells, materials, version,
                        [this](MeshId id) { return id == 0 ? &cube : nullptr; }, budget_ms);
         device->end_frame();
     }
@@ -170,6 +171,67 @@ GIANT_TEST("voxel scene: moving, recolouring and removing rebuild what they touc
     b.step();
     GIANT_CHECK(b.voxels->stats().bricks == 0);
     GIANT_CHECK(!b.voxel_at({3.8, 1.0, 0.2}, packed));
+}
+
+GIANT_TEST("voxel scene: a texture's average colour and a cut-out's coverage reach the voxels") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    Instance cube;
+    cube.mesh = 0;
+    cube.position = {0.3, 1.1, 0.2};
+    cube.scale = {2.0f, 2.0f, 2.0f};
+    b.instances = {cube};
+    // In a cell that never changes: the material rows are compared anyway.
+    b.cells = {CellRange{.first = 0, .count = 1, .version = 7}};
+    Material m{{1.0f, 1.0f, 1.0f}};
+    b.materials = {m};
+    b.step();
+    u32 packed = 0;
+    GIANT_CHECK(b.voxel_at({1.3, 1.0, 0.0}, packed));
+    GIANT_CHECK(voxel::unpack_color(packed).z > 0.8f); // white
+    // Its texture arrives: the voxels take its average (green here).
+    m.base_color_texture = 3;
+    m.base_color_average = {0.1f, 0.7f, 0.1f};
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxels->stats().built > 0);
+    GIANT_CHECK(b.voxel_at({1.3, 1.0, 0.0}, packed));
+    Vec3 c = voxel::unpack_color(packed);
+    GIANT_CHECK(c.y > 0.5f && c.x < 0.2f && c.z < 0.2f);
+    // Coverage alone does nothing without a cutoff...
+    m.coverage = 0.0f;
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxels->stats().built == 0);
+    GIANT_CHECK(b.voxel_at({1.3, 1.0, 0.0}, packed));
+    // ...with one, a surface its texture cuts wholly away leaves no voxels,
+    m.alpha_cutoff = 0.5f;
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->stats().bricks == 0);
+    GIANT_CHECK(!b.voxel_at({1.3, 1.0, 0.0}, packed));
+    // ...and without the texture (gone, or not there yet) it is solid.
+    m.base_color_texture = k_no_texture;
+    m.base_color_average = {1.0f, 1.0f, 1.0f};
+    m.coverage = 1.0f;
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxel_at({1.3, 1.0, 0.0}, packed));
+    // A NaN coverage counts as solid too.
+    m.base_color_texture = 3;
+    m.coverage = std::nanf("");
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxel_at({1.3, 1.0, 0.0}, packed));
+    // Nothing changes: nothing is built again (NaN is no change).
+    b.step();
+    GIANT_CHECK(b.voxels->stats().built == 0);
+    m.base_color_average = {std::nanf(""), 0.5f, 0.5f};
+    b.materials = {m};
+    b.step();
+    b.step();
+    GIANT_CHECK(b.voxels->stats().built == 0);
 }
 
 GIANT_TEST("voxel scene: building keeps to its budget and coarse levels go first") {

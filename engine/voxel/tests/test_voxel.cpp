@@ -134,6 +134,96 @@ GIANT_TEST("voxel: stand-in triangles mark their voxels and keep their own colou
     GIANT_CHECK(!b.build().stands_in(corner));
 }
 
+namespace {
+// A layer of voxel-sized cut-out cards at y = 1.25 (voxels 0.5 m: layer 2),
+// each inset so it touches its own voxel only; `layers` copies stacked.
+u32 card_layer(BrickBuilder& b, float coverage, u32 layers, bool stand_in = false) {
+    const Vec3 color{0.2f, 0.6f, 0.1f};
+    for (u32 l = 0; l < layers; ++l) {
+        for (u32 z = 0; z < k_brick_edge; ++z) {
+            for (u32 x = 0; x < k_brick_edge; ++x) {
+                const float x0 = static_cast<float>(x) * 0.5f + 0.01f;
+                const float z0 = static_cast<float>(z) * 0.5f + 0.01f;
+                const float x1 = x0 + 0.48f;
+                const float z1 = z0 + 0.48f;
+                b.add_triangle({x0, 1.25f, z0}, {x0, 1.25f, z1}, {x1, 1.25f, z0}, color, stand_in, coverage);
+                b.add_triangle({x1, 1.25f, z0}, {x0, 1.25f, z1}, {x1, 1.25f, z1}, color, stand_in, coverage);
+            }
+        }
+    }
+    return b.build().count();
+}
+} // namespace
+
+GIANT_TEST("voxel: cut-out triangles fill voxels as often as they would hide what is behind") {
+    BrickBuilder b;
+    // One card of coverage c in a voxel hides about c * 0.92 (its inset
+    // area) of it: over many seeds that share of the layer fills.
+    for (const float coverage : {0.2f, 0.5f, 0.8f}) {
+        u32 filled = 0;
+        const u32 seeds = 64;
+        for (u32 seed = 0; seed < seeds; ++seed) {
+            b.reset(0.5f, seed);
+            filled += card_layer(b, coverage, 1);
+        }
+        const float share = static_cast<float>(filled) / static_cast<float>(seeds * 64);
+        const float expected = coverage * 0.48f * 0.48f / 0.25f;
+        GIANT_CHECK(near(share, expected, 0.03f));
+    }
+    // Full coverage is solid: every voxel, whatever the seed.
+    b.reset(0.5f, 9);
+    GIANT_CHECK(card_layer(b, 1.0f, 1) == 64);
+    // Denser (cards stacked) fills more; enough fills every voxel.
+    b.reset(0.5f, 5);
+    const u32 one = card_layer(b, 0.3f, 1);
+    b.reset(0.5f, 5);
+    const u32 three = card_layer(b, 0.3f, 3);
+    b.reset(0.5f, 5);
+    const u32 four = card_layer(b, 0.3f, 4);
+    GIANT_CHECK(one < three && three <= four && four == 64);
+    // The same seed builds the same brick (a rebuild does not flicker).
+    b.reset(0.5f, 11);
+    card_layer(b, 0.4f, 1);
+    const Brick first = b.build();
+    b.reset(0.5f, 11);
+    card_layer(b, 0.4f, 1);
+    GIANT_CHECK(b.build().occupancy == first.occupancy);
+    // Nothing (or NaN) covered adds nothing.
+    b.reset(0.5f, 1);
+    GIANT_CHECK(b.add_triangle({0, 1.25f, 0}, {0, 1.25f, 4}, {4, 1.25f, 0}, {1, 1, 1}, false, 0.0f) == 0);
+    GIANT_CHECK(b.add_triangle({0, 1.25f, 0}, {0, 1.25f, 4}, {4, 1.25f, 0}, {1, 1, 1}, false, k_nan) == 0);
+    GIANT_CHECK(b.empty());
+    // Thresholds stay in (0, 1].
+    bool in_range = true;
+    for (u32 i = 0; i < k_brick_voxels; ++i) in_range = in_range && b.threshold(i) > 0.0f && b.threshold(i) <= 1.0f;
+    GIANT_CHECK(in_range);
+}
+
+GIANT_TEST("voxel: a thin cut-out stand-in over solid ground leaves the ground, not a hole") {
+    BrickBuilder b;
+    b.reset(0.5f, 3);
+    // Grey ground (solid, stays a mesh) and a barely-there green stand-in
+    // in every voxel of the layer.
+    b.add_triangle({-1, 1.25f, -1}, {-1, 1.25f, 9}, {9, 1.25f, -1}, {0.5f, 0.5f, 0.5f});
+    const u32 count = card_layer(b, 0.05f, 1, true);
+    GIANT_CHECK(count == 64);
+    const Brick brick = b.build();
+    u32 stand = 0;
+    u32 green = 0;
+    for (u32 z = 0; z < k_brick_edge; ++z) {
+        for (u32 x = 0; x < k_brick_edge; ++x) {
+            const u32 i = voxel_index(x, 2, z);
+            if (brick.stands_in(i)) {
+                ++stand;
+                green += near(unpack_color(brick.voxels[i]), {0.2f, 0.6f, 0.1f}, 0.05f) ? 1u : 0u;
+            } else {
+                GIANT_CHECK(near(unpack_color(brick.voxels[i]), {0.5f, 0.5f, 0.5f}, 0.05f)); // the ground's own
+            }
+        }
+    }
+    GIANT_CHECK(stand < 16 && green == stand); // few, and those keep the grass's colour
+}
+
 GIANT_TEST("voxel: a triangle outside the brick, or with no area, adds nothing") {
     BrickBuilder b;
     b.reset(1.0f);

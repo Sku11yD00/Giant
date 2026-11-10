@@ -545,3 +545,44 @@ GIANT_TEST("texture: cut-out colour mips keep the top level's alpha coverage") {
     const auto solid_mips = make_mips(solid, {}, error);
     GIANT_CHECK(at(solid_mips[2], 0, 0)[3] == 255);
 }
+
+GIANT_TEST("texture: colour summaries give the average colour and what cutoffs leave") {
+    // 30% opaque green leaf texels over transparent red (which must not tint it).
+    u32 seed = 777;
+    const Image leaves = filled(256, 256, [&seed](u32, u32, u8* t) {
+        seed = seed * 1664525u + 1013904223u;
+        const bool leaf = (seed >> 24) < 77u;
+        t[0] = leaf ? 40 : 255;
+        t[1] = leaf ? 160 : 0;
+        t[2] = leaf ? 30 : 0;
+        t[3] = leaf ? 255 : 0;
+    });
+    std::string error;
+    Cooked cooked;
+    GIANT_CHECK(cook(leaves, {}, cooked, error));
+    const ColorSummary s = summarize_color(cooked);
+    const auto linear = [](float c) { return std::pow((c / 255.0f + 0.055f) / 1.055f, 2.4f); };
+    GIANT_CHECK(std::abs(s.average.y - linear(160)) < 0.04f);
+    GIANT_CHECK(s.average.x < 0.06f); // red cut away
+    GIANT_CHECK(std::abs(s.coverage_at(0.5f) - 0.3f) < 0.04f);
+    GIANT_CHECK(s.coverage_at(0.0f) == 1.0f && s.coverage[0] == 1.0f);
+    GIANT_CHECK(s.coverage_at(std::nanf("")) == 1.0f);
+    GIANT_CHECK(s.coverage_at(1.0f) <= s.coverage_at(0.5f) && s.coverage_at(2.0f) == s.coverage_at(1.0f));
+    // Measured on a level within max_side: still close at 16.
+    GIANT_CHECK(std::abs(summarize_color(cooked, 16).coverage_at(0.5f) - 0.3f) < 0.08f);
+    // BC1 has no alpha: fully covered.
+    CookOptions small;
+    small.small = true;
+    Cooked bc1;
+    GIANT_CHECK(cook(leaves, small, bc1, error));
+    const ColorSummary sb = summarize_color(bc1);
+    GIANT_CHECK(sb.coverage_at(0.5f) == 1.0f && sb.coverage_at(1.0f) == 1.0f);
+    // Other kinds, or contents cut short: the default.
+    CookOptions normal;
+    normal.kind = Kind::normal;
+    Cooked n;
+    GIANT_CHECK(cook(bumpy_normals(64, 64), normal, n, error));
+    GIANT_CHECK(summarize_color(n).average.x == 1.0f && summarize_color(n).coverage_at(0.5f) == 1.0f);
+    cooked.contents.resize(16);
+    GIANT_CHECK(summarize_color(cooked).coverage_at(0.5f) == 1.0f);
+}

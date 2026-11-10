@@ -213,7 +213,48 @@ VoxelScene::Box VoxelScene::bounds_of(const Instance& in, const MeshLookup& mesh
 }
 
 Vec3 VoxelScene::color_of(const Instance& in, std::span<const Material> materials) const {
-    return in.material < materials.size() ? materials[in.material].base_color : Material{}.base_color;
+    const Material& m = in.material < materials.size() ? materials[in.material] : Material{};
+    const Vec3& a = m.base_color_average;
+    // NaN as 0, so it compares equal to itself (else it would build again every frame).
+    const auto clean = [](float v) { return v == v ? v : 0.0f; };
+    return {clean(m.base_color.x * a.x), clean(m.base_color.y * a.y), clean(m.base_color.z * a.z)};
+}
+
+float VoxelScene::coverage_of(const Instance& in, std::span<const Material> materials) const {
+    if (in.material >= materials.size()) {
+        return 1.0f;
+    }
+    const Material& m = materials[in.material];
+    // Cut out only as the renderer draws it (a cutoff and a texture);
+    // NaN counts as solid.
+    if (!(m.alpha_cutoff > 0.0f) || m.base_color_texture == k_no_texture || !(m.coverage >= 0.0f)) {
+        return 1.0f;
+    }
+    return std::min(m.coverage, 1.0f);
+}
+
+void VoxelScene::material_changes(std::span<const Material> materials, std::vector<u32>& forced) {
+    std::vector<u8> changed(materials.size(), 0);
+    bool any = false;
+    m_material_looks.resize(materials.size());
+    for (u32 i = 0; i < materials.size(); ++i) {
+        const Instance probe{.material = i};
+        const MaterialLook look{color_of(probe, materials), coverage_of(probe, materials)};
+        if (!(look == m_material_looks[i])) {
+            m_material_looks[i] = look;
+            changed[i] = 1;
+            any = true;
+        }
+    }
+    if (!any) {
+        return;
+    }
+    for (u32 i = 0; i < m_copies.size(); ++i) {
+        const u32 material = m_copies[i].instance.material;
+        if (material < changed.size() && changed[material] != 0) {
+            forced.push_back(i);
+        }
+    }
 }
 
 bool VoxelScene::differs(const Instance& in, std::span<const Material> materials, const Copy& copy) const {
@@ -221,10 +262,12 @@ bool VoxelScene::differs(const Instance& in, std::span<const Material> materials
     if (in.moves && c.moves) {
         // Not held either way: where it is does not matter.
         return !(in.scale == c.scale && in.mesh == c.mesh && in.material == c.material &&
-                 in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color);
+                 in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color &&
+                 coverage_of(in, materials) == copy.coverage);
     }
     return in.moves != c.moves || !(in.position == c.position && in.rotation == c.rotation && in.scale == c.scale && in.mesh == c.mesh &&
-             in.material == c.material && in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color);
+             in.material == c.material && in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color &&
+                 coverage_of(in, materials) == copy.coverage);
 }
 
 void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Material> materials,
@@ -233,6 +276,7 @@ void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Materia
     c.instance = in;
     m_copy_mesh[index] = in.mesh;
     c.color = color_of(in, materials);
+    c.coverage = coverage_of(in, materials);
     c.box = bounds_of(in, meshes);
     c.large = false;
     const MeshCache* m = c.box.empty() ? nullptr : mesh_cache(in.mesh, meshes);
@@ -598,6 +642,7 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
     // Meshes added or removed: the cached ones that are gone (or came back)
     // and the instances using them.
     std::vector<u32> forced;
+    material_changes(materials, forced);
     if (meshes_version != m_meshes_version) {
         m_meshes_version = meshes_version;
         std::unordered_set<MeshId> stale(m_forgotten.begin(), m_forgotten.end());
@@ -1044,7 +1089,7 @@ bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_ti
                     if (mirrored) {
                         std::swap(b, d); // keep the facing outward
                     }
-                    m_builder.add_triangle(a, b, d, copy.color, copy.stand_in);
+                    m_builder.add_triangle(a, b, d, copy.color, copy.stand_in, copy.coverage);
                 }
             }
         }
@@ -1314,7 +1359,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
                     m_building.found = m_found;
                     m_building.next = 0;
                     m_building.again = false;
-                    m_builder.reset(static_cast<float>(m_clipmap.voxel_size(key.level)));
+                    m_builder.reset(static_cast<float>(m_clipmap.voxel_size(key.level)), static_cast<u32>(KeyHash{}(key)));
                     started = true;
                     break;
                 }

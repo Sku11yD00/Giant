@@ -182,7 +182,8 @@ private:
     // An instance as the bricks were (or are being) built from it.
     struct Copy {
         Instance instance;
-        Vec3 color{}; // its material's, resolved
+        Vec3 color{}; // its material's, resolved (with its texture's average)
+        float coverage = 1.0f; // its material's (cut-outs: under 1)
         Box box;      // world bounds (empty: no mesh)
         bool large = false; // in m_large, not the grid
         bool stand_in = false; // small enough for the far field to stand in for
@@ -224,6 +225,11 @@ private:
     MeshCache* mesh_cache(MeshId id, const MeshLookup& meshes);
     Box bounds_of(const Instance& in, const MeshLookup& meshes);
     Vec3 color_of(const Instance& in, std::span<const Material> materials) const;
+    float coverage_of(const Instance& in, std::span<const Material> materials) const;
+    // Instances whose material's voxel look (colour, coverage) changed
+    // since the last update, into `forced` (a scan of the copies, only when
+    // one did).
+    void material_changes(std::span<const Material> materials, std::vector<u32>& forced);
     bool differs(const Instance& in, std::span<const Material> materials, const Copy& copy) const;
 
     // The grid of instance copies.
@@ -303,6 +309,12 @@ private:
     std::vector<voxel::BrickBox> m_job_bounds; // per level: around its queued jobs (count 0: none), for holds()
     std::vector<std::vector<voxel::BrickBox>> m_job_boxes; // per level: the queued jobs' boxes
     float m_stand_in_radius = 0.0f;
+    struct MaterialLook {
+        Vec3 color{};
+        float coverage = 1.0f;
+        bool operator==(const MaterialLook&) const = default;
+    };
+    std::vector<MaterialLook> m_material_looks; // per material row, as last seen
     // The regions waiting (m_changed: how many hold each changed instance).
     void queue_old(const Box& box);
     void queue_changed(u32 index);
