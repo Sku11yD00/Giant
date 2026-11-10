@@ -248,6 +248,27 @@ an offline cooker can use it without a device.
   specular anti-aliasing measures the bent normal, while shadow lookups,
   bounce light and reflection cones start from the surface's own normal so
   bumps do not shift them. Far-field voxels keep the plain colours.
+- **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
+  names image files (base colour, normal, glTF metallic-roughness, glTF
+  occlusion; `normal_green_down` for DirectX normal maps), saved under
+  `"material": {"maps": ...}` on entities, kit pieces and scatter items,
+  only when set. The editor's `TextureLibrary` cooks each (file, slot) the
+  first time a drawn material asks for it, at most two at once (one a
+  worker, each encoded on its own worker, so no cook starts inside another
+  and only two hold their images), at most 4096 texels a side; roughness is
+  cooked with the material's normal map (Toksvig). Results are kept in
+  `giant_cache/textures/<key>-<files>.gtex` under the working folder: the
+  first hash names the key, the second the files' sizes and change times,
+  so an edited file cooks again and its older file is deleted. Finished
+  textures upload once a frame under a 16 MiB budget (at least one).
+  `SceneFrame` dedupes materials on their values and texture refs, asks for
+  textures on built-in shapes and on meshes whose file has uvs (once per
+  material a call), fills in renderer ids as they become ready without
+  rebuilding cells, and tells the library which textures drawn materials
+  use; one unused for 600 updates (about 10 s) leaves the GPU and comes
+  back from the cache when used again. Until ready a material draws its
+  plain values. Closing drops cooks not yet begun. MCP: `maps` on entities
+  and scatter items, `get_textures`, `reload_textures`.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool
@@ -2348,6 +2369,14 @@ over the target frame time). Where it stands:
   it reads and clusters files on the main thread (editor only today; a
   streamed world imports every mesh it lists when it opens, so cells never
   import while streaming; moving imports onto jobs is still to come).
+  The editor's material textures (photoreal part 3a-3c) cook on workers
+  under a per-frame upload budget, but each texture is uploaded whole in
+  the frame it is taken, so one larger than the device's per-frame staging
+  (8 MiB; a 4096 BC7 texture with mips is about 22 MiB) is staged through
+  a buffer made that frame; cooks are capped at 4096 a side until mip
+  streaming (photoreal part 3b) uploads a level at a time. Textures are
+  asked for when a cell is built, so a cell streamed in draws plain values
+  until its textures are ready.
   World streaming (N3 part 3): unloading cells is one `Scene::remove_many`,
   a pass over the scene's entities (a few milliseconds at tens of
   thousands of entities, once every `unload_every` frames that unloads

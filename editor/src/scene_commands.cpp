@@ -2,7 +2,9 @@
 // the AI (over MCP) build and light a scene. Every scene change is undoable;
 // the camera is view state and is not.
 #include "editor_commands.h"
+#include "material_maps.h"
 #include "mesh_library.h"
+#include "texture_library.h"
 #include "physics_state.h"
 #include "play_state.h"
 #include "far_ground.h"
@@ -78,6 +80,9 @@ Json entity_json(const Entity& e) {
     if (!e.mesh.empty()) {
         j["mesh"] = e.mesh;
     }
+    if (!e.material.maps.empty() || e.material.maps.normal_green_down) {
+        j["maps"] = maps_json(e.material.maps);
+    }
     if (!e.kit.empty()) {
         j["kit"] = e.kit;
     }
@@ -109,6 +114,7 @@ Json mesh_json(const MeshLibrary::Mesh& m) {
             {"levels", m.levels},
             {"coarsest_triangles", m.coarsest_triangles},
             {"import_seconds", m.import_seconds},
+            {"uvs", m.has_uvs},
             {"warnings", m.warnings}};
 }
 
@@ -228,6 +234,7 @@ Json entity_properties() {
                               "only within the render setting wind_distance of the camera.")},
         {"flutter", number(0, 4, "How its tips shake in the wind (leaves, needles: what stands out from its "
                                  "middle). Default 0.")},
+        {"maps", maps_schema()},
         {"visible", {{"type", "boolean"}}},
         {"body",
          {{"enum", {"fixed", "dynamic", "none"}},
@@ -303,6 +310,9 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     }
     if (args.contains("sway")) e.material.sway = args["sway"].get<float>();
     if (args.contains("flutter")) e.material.flutter = args["flutter"].get<float>();
+    if (args.contains("maps")) {
+        if (std::string bad = apply_maps(args["maps"], e.material.maps); !bad.empty()) return bad;
+    }
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
     if (args.contains("body")) {
         e.body = world::body_from_string(args["body"].get<std::string>()).value_or(e.body);
@@ -627,6 +637,30 @@ world::KitPiece piece_from(const Entity& e) {
     p.material = e.material;
     p.decal = e.decal;
     return p;
+}
+
+// Asks the texture library for every map the scene's drawn things name, as
+// drawing them would (built-in shapes, and meshes whose file has uvs).
+void request_scene_textures(EditorState& state) {
+    if (state.textures == nullptr) return;
+    const auto ask = [&](world::Shape shape, const std::string& mesh, const world::Material& m) {
+        if (m.maps.empty()) return;
+        bool uvs = shape == world::Shape::cube || shape == world::Shape::sphere || shape == world::Shape::plane;
+        if (shape == world::Shape::mesh && state.meshes != nullptr) {
+            const MeshLibrary::Mesh* found = state.meshes->find_normalized(mesh);
+            uvs = found != nullptr && found->has_uvs;
+        }
+        if (uvs) state.textures->request(m.maps);
+    };
+    for (const Entity& e : state.scene.entities()) {
+        if (e.visible) ask(e.shape, e.mesh, e.material);
+    }
+    for (const world::Kit& k : state.scene.kits) {
+        for (const world::KitPiece& p : k.pieces) ask(p.shape, p.mesh, p.material);
+    }
+    for (const world::ScatterLayer& l : state.scene.scatter) {
+        for (const world::ScatterItem& i : l.items) ask(i.shape, i.mesh, i.material);
+    }
 }
 
 Json piece_json(const world::KitPiece& p) {
@@ -1470,8 +1504,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "Imports a glTF (.gltf with its buffers) or .glb file and builds its cluster LOD, so "
          "entities can draw it (create_entity with mesh). Returns its triangle and cluster "
          "counts. Already-imported files return at once unless reload is true (to pick up "
-         "changes). Large files take a few seconds. Materials and textures are not imported "
-         "yet. Not undoable: it loads an asset and changes no entity.",
+         "changes). Large files take a few seconds. The file's own materials and textures are "
+         "not imported yet (give entities maps instead). Not undoable: it loads an asset and changes no entity.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"path"}},
@@ -1501,6 +1535,62 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  for (const auto& m : state.meshes->meshes()) list.push_back(mesh_json(*m));
              }
              return CommandResult::success({{"meshes", std::move(list)}});
+         }});
+
+    add(registry,
+        {"get_textures",
+         "Lists the material textures (image files that drawn materials' maps name), each with "
+         "its status: cooking (in the background, two at a time; materials draw their plain "
+         "values meanwhile), ready (with its size, mips, GPU bytes and whether it came from the "
+         "cache in giant_cache/textures), failed (with why) or unloaded (no drawn material used "
+         "it for about 10 s, so it left the GPU; it loads again from the cache when used). "
+         "Cooked at most 4096 texels a side. wait: true asks for every map the scene names and "
+         "blocks until all are cooked and on the GPU (before a screenshot that must show them).",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"properties", {{"wait", {{"type", "boolean"}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             Json list = Json::array();
+             usize pending = 0;
+             if (state.textures != nullptr) {
+                 if (args.value("wait", false)) {
+                     request_scene_textures(state); // what was given since the last frame drew
+                     state.textures->finish();
+                 }
+                 pending = state.textures->pending();
+                 for (const TextureLibrary::Entry& e : state.textures->entries()) {
+                     Json j = {{"path", e.key.path},
+                               {"slot", TextureLibrary::to_string(e.key.slot)},
+                               {"status", TextureLibrary::to_string(e.status)}};
+                     if (e.key.green_down) j["normal_green_down"] = true;
+                     if (!e.key.normal.empty()) j["normal"] = e.key.normal;
+                     if (e.status == TextureLibrary::Status::ready) {
+                         j["width"] = e.width;
+                         j["height"] = e.height;
+                         j["mips"] = e.mips;
+                         j["bytes"] = e.bytes;
+                         j["from_cache"] = e.from_cache;
+                         j["seconds"] = e.seconds;
+                     }
+                     if (!e.error.empty()) j["error"] = e.error;
+                     if (!e.warning.empty()) j["warning"] = e.warning;
+                     list.push_back(std::move(j));
+                 }
+             }
+             return CommandResult::success({{"textures", std::move(list)}, {"pending", pending}});
+         }});
+
+    add(registry,
+        {"reload_textures",
+         "Cooks every material texture again from its file (after editing the images; "
+         "unchanged ones come back from the cache at once). Each keeps drawing its old version "
+         "until the new one is ready. Not undoable: it reloads assets and changes no entity.",
+         Json{{"type", "object"}, {"additionalProperties", false}}, false,
+         [&state](const Json&, CommandContext&) {
+             if (state.textures == nullptr) return CommandResult::failure("textures are not available in this editor");
+             state.textures->reload();
+             return CommandResult::success({{"pending", state.textures->pending()}});
          }});
 
     add(registry,

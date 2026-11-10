@@ -433,6 +433,7 @@ private:
         if ((uvs != nullptr && uv == nullptr) || (tangents != nullptr && tan == nullptr)) {
             return false;
         }
+        if (uv != nullptr) m_result.has_uvs = true;
         const auto uv_of = [uv](u32 i) {
             if (uv == nullptr) return TexCoord{};
             const float u = (*uv)[usize{i} * 2], v = (*uv)[usize{i} * 2 + 1];

@@ -253,6 +253,7 @@ GIANT_TEST("geometry: glTF texture coordinates and tangents are read, or tangent
     const ImportResult made = import_uv_triangle({});
     GIANT_CHECK(made.ok() && made.mesh.vertices.size() == 3);
     if (!made.ok()) return;
+    GIANT_CHECK(made.has_uvs);
     GIANT_CHECK(made.mesh.vertices[0].uv == (TexCoord{0, 1}) && made.mesh.vertices[2].uv == (TexCoord{0, 0}));
     for (const Vertex& v : made.mesh.vertices) {
         GIANT_CHECK(near3(v.tangent, {1, 0, 0}) && near3(bitangent(v), {0, 1, 0})); // +u, up the image

@@ -333,6 +333,59 @@ GIANT_TEST("world: a material's wind saves and loads, and only when set") {
     GIANT_CHECK(error.has_value() && contains(error->message, "sway must be from 0 to 4"));
 }
 
+GIANT_TEST("world: a material's image files save and load, and only when set") {
+    Scene scene;
+    Entity crate = named("Crate");
+    crate.shape = Shape::mesh;
+    crate.mesh = "assets/crate.glb";
+    crate.material.maps.base_color = "assets/crate_albedo.png";
+    crate.material.maps.normal = "assets/crate_normal.png";
+    crate.material.maps.roughness_metal = "assets/crate_orm.png";
+    crate.material.maps.occlusion = "assets/crate_orm.png";
+    crate.material.maps.normal_green_down = true;
+    scene.add(crate);
+    scene.add(named("Rock"));
+    Kit kit;
+    kit.name = "shed";
+    KitPiece wall;
+    wall.shape = Shape::mesh;
+    wall.mesh = "assets/wall.glb";
+    wall.material.maps.base_color = "assets/planks.png";
+    kit.pieces.push_back(wall);
+    scene.kits.push_back(kit);
+    ScatterLayer layer;
+    layer.name = "ferns";
+    ScatterItem fern;
+    fern.shape = Shape::mesh;
+    fern.mesh = "assets/fern.glb";
+    fern.material.maps.normal = "assets/fern_n.png";
+    layer.items.push_back(fern);
+    scene.scatter.push_back(layer);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(text.find("\"maps\"") != std::string::npos);
+    GIANT_CHECK(text.find("crate_albedo") != std::string::npos);
+    Scene loaded;
+    const auto loaded_error = load_scene(text, loaded);
+    GIANT_CHECK(!loaded_error.has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->material.maps == crate.material.maps);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->material.maps == MaterialMaps{});
+    GIANT_CHECK(loaded.find_kit("shed") && loaded.find_kit("shed")->pieces[0].material.maps == wall.material.maps);
+    GIANT_CHECK(loaded.scatter.size() == 1 && loaded.scatter[0].items[0].material.maps == fern.material.maps);
+    GIANT_CHECK(save_scene(loaded) == text);
+    // The rock has none: no "maps" written for it (three: crate, wall, fern).
+    usize count = 0;
+    for (usize at = text.find("\"maps\""); at != std::string::npos; at = text.find("\"maps\"", at + 1)) ++count;
+    GIANT_CHECK(count == 3);
+    for (const char* bad_scene :
+         {R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"maps": {"albedo": "a.png"}}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"maps": {"normal": 3}}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"maps": "a.png"}}]})"}) {
+        Scene bad;
+        const auto error = load_scene(bad_scene, bad);
+        GIANT_CHECK(error.has_value() && contains(error->message, "maps"));
+    }
+}
+
 GIANT_TEST("world: cloth saves and loads, only when set, and hangs from entities alone") {
     Scene scene;
     Entity flag = named("Flag");

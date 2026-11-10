@@ -11,3 +11,4 @@ obj/
 /screenshots/
 giant_editor_layout.ini
 /.downloads/
+giant_cache/

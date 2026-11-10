@@ -512,10 +512,23 @@ namespace {
 Json vec3_json(const Vec3& v) { return Json::array({v.x, v.y, v.z}); }
 Json dvec3_json(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
 
-// A material's wind (written only when it moves).
+// A material's image files (written only when it has some).
+void write_maps(Json& material, const MaterialMaps& maps) {
+    if (maps.empty() && !maps.normal_green_down) return;
+    Json out = Json::object();
+    if (!maps.base_color.empty()) out["base_color"] = maps.base_color;
+    if (!maps.normal.empty()) out["normal"] = maps.normal;
+    if (!maps.roughness_metal.empty()) out["roughness_metal"] = maps.roughness_metal;
+    if (!maps.occlusion.empty()) out["occlusion"] = maps.occlusion;
+    if (maps.normal_green_down) out["normal_green_down"] = true;
+    material["maps"] = std::move(out);
+}
+
+// A material's wind (written only when it moves) and image files.
 void write_wind(Json& material, const Material& m) {
     if (m.sway != 0.0f) material["sway"] = m.sway;
     if (m.flutter != 0.0f) material["flutter"] = m.flutter;
+    write_maps(material, m.maps);
 }
 
 } // namespace
@@ -1025,6 +1038,19 @@ void read_surface(Reader& r, Surface& out) {
     }
 }
 
+// A material's "maps" (its image files), if given.
+void read_maps(Reader& r, const std::string& path, MaterialMaps& out, std::string& error) {
+    if (const Json* m = r.get("maps", false); m != nullptr && r.ok()) {
+        Reader mr(*m, path + ".maps", error);
+        mr.string("base_color", out.base_color, false, k_max_mesh_path_bytes);
+        mr.string("normal", out.normal, false, k_max_mesh_path_bytes);
+        mr.string("roughness_metal", out.roughness_metal, false, k_max_mesh_path_bytes);
+        mr.string("occlusion", out.occlusion, false, k_max_mesh_path_bytes);
+        mr.boolean("normal_green_down", out.normal_green_down);
+        mr.finish();
+    }
+}
+
 // Shape, files, transform, material and decal of an entity or kit piece.
 void read_look(Reader& r, const std::string& path, Shape& shape, std::string& mesh, std::string* kit,
                Transform& t, Material& material, DecalSettings& decal, std::string& error) {
@@ -1066,6 +1092,7 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
         read_surface(mr, material.surface);
         mr.number("sway", material.sway, 0, 4);
         mr.number("flutter", material.flutter, 0, 4);
+        read_maps(mr, path + ".material", material.maps, error);
         mr.finish();
     }
     if (const Json* d = r.get("decal", false); d != nullptr && r.ok()) {
@@ -1493,6 +1520,7 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
                 read_surface(mr, item.material.surface);
                 mr.number("sway", item.material.sway, 0, 4);
                 mr.number("flutter", item.material.flutter, 0, 4);
+                read_maps(mr, at + ".material", item.material.maps, error);
                 mr.finish();
             }
             ir.number("weight", item.weight, 1e-6, 1e6);

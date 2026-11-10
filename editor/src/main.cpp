@@ -12,6 +12,7 @@
 // when the client disconnects. --scripts loads C# scripts at start-up.
 #include "editor_commands.h"
 #include "mesh_library.h"
+#include "texture_library.h"
 #include "scene_render.h"
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
@@ -297,6 +298,10 @@ int run(const Options& options) {
     editor::MeshLibrary meshes(renderer.get()); // after the renderer: released first
     editor::EditorState state;
     state.meshes = &meshes;
+    // Cooked material textures are kept beside the working folder's assets
+    // between sessions (cooking a 4K map takes seconds; reading it back, not).
+    editor::TextureLibrary textures(renderer.get(), "giant_cache/textures"); // after the renderer: released first
+    state.textures = &textures;
     editor::WorldStreaming world_streaming;
     state.world = &world_streaming;
     editor::TerrainMeshes terrain_meshes(renderer.get()); // after the renderer: released first
@@ -370,6 +375,7 @@ int run(const Options& options) {
     std::vector<rhi::UiDrawList> ui_lists; // the game's UI, then the panels
     // Before the scripts: their OnStop may run commands (a raycast reads it).
     editor::SceneFrame scene_frame; // reused every frame
+    scene_frame.textures = &textures;
     physics.take_frame_changes = [&scene_frame] { return scene_frame.take_for_followers(); };
     editor::EditorPanels panels(commands, state, log_history);
     // After the registry, so scripts' OnStop can still run commands.
@@ -426,6 +432,7 @@ int run(const Options& options) {
         const std::vector<world::EntityId> walked_ids = walkers.take_moved();
         moved.insert(moved.end(), walked_ids.begin(), walked_ids.end());
         const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();
+        textures.update(); // cooked since last frame: uploaded, a budget's worth
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
                             &animation.copies(), &cloth.meshes(), moved, &swing.poses(), &walkers.poses());

@@ -55,6 +55,7 @@ struct ImportResult {
     TriangleMesh mesh;
     std::optional<SkinnedImport> skinned; // the file had a skin
     std::vector<std::string> warnings; // things that were skipped
+    bool has_uvs = false;              // some primitive had texture coordinates (else all are 0)
     std::string error;                 // empty on success
     bool ok() const { return error.empty(); }
 };

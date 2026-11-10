@@ -2,10 +2,12 @@
 
 #include "far_ground.h"
 #include "scatter_placer.h"
+#include "texture_library.h"
 
 #include "giant/sim/swing.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 
@@ -29,12 +31,46 @@ render::BuiltinMesh builtin(world::Shape shape) {
     return render::BuiltinMesh::cube;
 }
 
+// The textures a material's maps ask for (requested from the library),
+// k_no_ref each for none. `textured`: drawn on something with uvs (built-in
+// shapes, meshes whose file has them); else it draws the plain values.
+// Looked up once a scene_frame call for each material's maps (a kit piece
+// placed ten thousand times asks once).
+std::array<u32, 4> texture_refs(const world::Material& m, bool textured, SceneFrame& out) {
+    std::array<u32, 4> refs{TextureLibrary::k_no_ref, TextureLibrary::k_no_ref, TextureLibrary::k_no_ref,
+                            TextureLibrary::k_no_ref};
+    if (out.textures == nullptr || !textured || m.maps.empty()) return refs;
+    const auto [it, added] = out.maps_seen.try_emplace(&m.maps);
+    if (added) it->second = out.textures->request(m.maps);
+    return it->second;
+}
+
+// Whether a shape (and its file, for a mesh) has uvs to draw maps with.
+bool has_uvs(world::Shape shape, const MeshLibrary::Mesh* mesh) {
+    switch (shape) {
+    case world::Shape::cube:
+    case world::Shape::sphere:
+    case world::Shape::plane: return true;
+    case world::Shape::mesh: return mesh != nullptr && mesh->has_uvs;
+    default: return false;
+    }
+}
+
+void set_textures(render::Material& r, const std::array<u32, 4>& refs, const TextureLibrary& textures) {
+    r.base_color_texture = textures.id(refs[0]);
+    r.normal_texture = textures.id(refs[1]);
+    r.roughness_metal_texture = textures.id(refs[2]);
+    r.occlusion_texture = textures.id(refs[3]);
+}
+
 // The material's index in the table, adding it if new, and one more user.
-u32 material_index(const world::Material& m, SceneFrame& out) {
+u32 material_index(const world::Material& m, SceneFrame& out, bool textured = false) {
     SceneFrame::MaterialKey key{};
     const float values[10] = {m.base_color.x, m.base_color.y, m.base_color.z, m.roughness, m.metallic,
                               m.emissive.x,   m.emissive.y,   m.emissive.z,   m.sway,      m.flutter};
     std::memcpy(key.bits, values, sizeof(values));
+    const std::array<u32, 4> refs = texture_refs(m, textured, out);
+    std::copy(refs.begin(), refs.end(), key.bits + 10);
     const auto [it, added] = out.lookup.try_emplace(key, static_cast<u32>(out.materials.size()));
     if (added) {
         render::Material r;
@@ -44,7 +80,9 @@ u32 material_index(const world::Material& m, SceneFrame& out) {
         r.emissive = m.emissive;
         r.sway = m.sway;
         r.flutter = m.flutter;
+        if (out.textures != nullptr) set_textures(r, refs, *out.textures);
         out.materials.push_back(r);
+        out.material_textures.push_back(refs);
         out.users.push_back(0);
     }
     ++out.users[it->second];
@@ -84,6 +122,7 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     }
     render::MeshId mesh = render::k_no_mesh;
     render::Instance i;
+    const MeshLibrary::Mesh* file = shape == world::Shape::mesh ? meshes.find_normalized(mesh_path) : nullptr;
     if (shape == world::Shape::cloth) {
         if (own == render::k_no_mesh) {
             return; // its sheet's mesh not made or loaded yet
@@ -92,11 +131,10 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     } else if (shape == world::Shape::mesh && own != render::k_no_mesh) {
         mesh = own; // an animated copy
     } else if (shape == world::Shape::mesh) {
-        const MeshLibrary::Mesh* found = meshes.find_normalized(mesh_path);
-        if (found == nullptr || found->id == render::k_no_mesh) {
+        if (file == nullptr || file->id == render::k_no_mesh) {
             return;
         }
-        mesh = found->id;
+        mesh = file->id;
     } else if (shape == world::Shape::kit) {
         return; // kits do not nest
     } else {
@@ -106,7 +144,7 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     i.position = t.position;
     i.rotation = t.rotation;
     i.mesh = mesh;
-    i.material = material_index(m, out);
+    i.material = material_index(m, out, has_uvs(shape, file));
     i.moves = moves;
     cell.instances.push_back(i);
 }
@@ -160,26 +198,28 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
                     for (const world::KitPiece& piece : look.kit->pieces) {
                         Piece& lp = look.pieces.emplace_back();
                         lp.piece = &piece;
+                        const MeshLibrary::Mesh* found = nullptr;
                         if (piece.shape == world::Shape::mesh) {
-                            const MeshLibrary::Mesh* found = meshes.find_normalized(piece.mesh);
+                            found = meshes.find_normalized(piece.mesh);
                             if (found != nullptr) lp.mesh = found->id;
                         } else if (piece.shape != world::Shape::decal) {
                             lp.mesh = renderer.builtin(builtin(piece.shape));
                         }
                         if (lp.mesh != render::k_no_mesh) {
-                            lp.material = material_index(piece.material, out);
+                            lp.material = material_index(piece.material, out, has_uvs(piece.shape, found));
                             --out.users[lp.material]; // counted per instance below
                         }
                     }
                 }
-            } else if (item.shape == world::Shape::mesh) {
-                const MeshLibrary::Mesh* found = meshes.find_normalized(item.mesh);
+            }
+            const MeshLibrary::Mesh* found = item.shape == world::Shape::mesh ? meshes.find_normalized(item.mesh) : nullptr;
+            if (item.shape == world::Shape::mesh) {
                 if (found != nullptr) look.mesh = found->id;
-            } else if (item.shape != world::Shape::decal) {
+            } else if (item.shape != world::Shape::decal && item.shape != world::Shape::kit) {
                 look.mesh = renderer.builtin(builtin(item.shape));
             }
             if (look.mesh != render::k_no_mesh) {
-                look.material = material_index(item.material, out);
+                look.material = material_index(item.material, out, has_uvs(item.shape, found));
                 --out.users[look.material]; // counted per instance below
             }
         }
@@ -550,6 +590,7 @@ void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const F
     out.where.clear();
     out.lookup.clear();
     out.materials.clear();
+    out.material_textures.clear();
     out.users.clear();
     out.order.clear();
     out.instances.clear(); // laid out afresh
@@ -666,6 +707,7 @@ bool same_kit(const world::Kit& a, const world::Kit& b) {
             !same3(p.material.base_color, q.material.base_color) || p.material.roughness != q.material.roughness ||
             p.material.metallic != q.material.metallic || !same3(p.material.emissive, q.material.emissive) ||
             p.material.sway != q.material.sway || p.material.flutter != q.material.flutter ||
+            !(p.material.maps == q.material.maps) ||
             p.decal.shape != q.decal.shape || p.decal.opacity != q.decal.opacity ||
             p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed) {
             return false;
@@ -731,6 +773,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, world::Transform>* swings,
                  const std::unordered_map<world::EntityId, world::Transform>* walkers) {
     out.cells_rebuilt = 0;
+    out.maps_seen.clear(); // the scene may have changed since: its materials' addresses with it
     out.poses = poses;
     out.swings = swings;
     out.walkers = walkers;
@@ -932,6 +975,27 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.skinned = nullptr;
     out.cloth = nullptr;
     out.fallen = nullptr;
+    // The textures drawn materials use, when that may have changed: the
+    // rest leave the GPU after a while.
+    if (out.textures != nullptr && (!rebuilt.empty() || compact)) {
+        std::vector<u32>& used = out.scratch;
+        used.clear();
+        for (usize i = 0; i < out.materials.size(); ++i) {
+            if (out.users[i] == 0) continue;
+            for (const u32 ref : out.material_textures[i]) {
+                if (ref != TextureLibrary::k_no_ref) used.push_back(ref);
+            }
+        }
+        out.textures->set_used(used);
+    }
+    // Textures that came (or changed) since: every material asking for them
+    // draws them from now on.
+    if (out.textures != nullptr && out.textures->version() != out.textures_version) {
+        out.textures_version = out.textures->version();
+        for (usize i = 0; i < out.materials.size(); ++i) {
+            set_textures(out.materials[i], out.material_textures[i], *out.textures);
+        }
+    }
     if (!layout && out.cells_rebuilt == 0) {
         return; // as last frame
     }
