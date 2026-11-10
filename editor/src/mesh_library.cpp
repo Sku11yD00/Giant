@@ -62,6 +62,12 @@ world::Material file_material(const geometry::ImportedMaterial& m, const std::st
         out.maps.roughness_metal = image_path(m.roughness_metal_image, mesh_path, warnings);
         out.maps.occlusion = image_path(m.occlusion_image, mesh_path, warnings);
     }
+    // glTF's metallic factor defaults to 1 and exporters leave it so when
+    // the map says where the metal is: without the map, all of it would be.
+    if (m.names_roughness_metal && out.maps.roughness_metal.empty() && out.metallic > 0.0f) {
+        out.metallic = 0.0f;
+        warnings.push_back("\"" + m.name + "\"'s metallic-roughness map was left out, so it is drawn as a non-metal");
+    }
     return out;
 }
 
@@ -160,7 +166,7 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
         u64 total = imported.default_material_triangles;
         for (const geometry::ImportedMaterial& m : imported.materials) total += m.triangles;
         if (busiest.triangles <= imported.default_material_triangles) {
-            mesh->warnings.push_back("most of the file has no material; entities keep their own look");
+            mesh->warnings.push_back("most of the file has no material; entities given it take the default look unless they give one");
         } else {
             const bool maps = busiest.triangles * 4 >= total * 3;
             mesh->material = file_material(busiest, path, maps, mesh->warnings);

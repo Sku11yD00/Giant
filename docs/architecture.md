@@ -284,8 +284,10 @@ an offline cooker can use it without a device.
   (warning to split the file otherwise). Images inside the file are named
   `"<mesh path>#image<N>"` and never copied out: texture workers read
   them through `geometry::read_gltf_image`, and the cache keys them by the
-  glTF file's size and time, so worlds stay portable. An entity or scatter
-  item given the mesh without a look of its own takes it (also when its
+  glTF file's size and time (and a .gltf's buffer files'), so worlds stay
+  portable. A metallic-roughness map that is left out makes the material
+  a non-metal (glTF's metallic factor defaults to 1). An entity or scatter
+  item given the mesh takes it under the look fields given (also when its
   mesh changes). Not read yet: other uv sets (dropped with a warning),
   texture transforms, alpha, emissive maps, WebP/KTX2 images.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,

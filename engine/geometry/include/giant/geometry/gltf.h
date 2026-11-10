@@ -65,6 +65,7 @@ struct ImportedMaterial {
     ImportedImage base_color_image;
     ImportedImage normal_image;
     ImportedImage roughness_metal_image; // glTF metallicRoughnessTexture: roughness G, metallic B
+    bool names_roughness_metal = false;  // the file gives one (even if not read): its factors scale it
     ImportedImage occlusion_image;       // R
     u64 triangles = 0;                   // of the mesh drawn with it
 };
@@ -105,5 +106,9 @@ ImportResult import_gltf_memory(std::span<const u8> data);
 // URI; ImportedImage::embedded), reading the file again (for a worker that
 // decodes it). False with why if it is not there or cannot be read.
 bool read_gltf_image(const std::filesystem::path& file, u32 index, std::vector<u8>& out, std::string& error);
+// The buffer files a glTF names (beside it, URIs decoded; data URIs left
+// out), to tell when images inside them change. Empty if it names none or
+// cannot be read.
+std::vector<std::filesystem::path> gltf_buffer_files(const std::filesystem::path& file);
 
 } // namespace giant::geometry

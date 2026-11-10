@@ -78,31 +78,22 @@ inline std::string apply_maps(const ai::Json& json, world::MaterialMaps& maps) {
     return {};
 }
 
-// Whether arguments give a look of their own (base colour, roughness,
-// metallic, emissive, or a map's file): if not, a mesh given takes its
-// file's.
-inline bool look_given(const ai::Json& args) {
-    for (const char* key : {"base_color", "roughness", "metallic", "emissive"}) {
-        if (args.contains(key)) return true;
-    }
-    if (const auto maps = args.find("maps"); maps != args.end()) {
-        for (const char* key : {"base_color", "normal", "roughness_metal", "occlusion"}) {
-            if (maps->contains(key)) return true;
-        }
-    }
-    return false;
-}
-
-// The file's own look (its material's values and maps) onto `material`,
-// keeping what files do not say (surface, wind); the default look if it
-// has none (so a look taken from another file does not stay).
-inline void take_file_look(const MeshLibrary::Mesh& mesh, world::Material& material) {
+// A mesh's file's own look (its material's values and maps) onto
+// `material`, keeping what files do not say (surface, wind), then what
+// `args` give over it (base colour, roughness, metallic, emissive, maps:
+// already applied to `material`, kept). The default look if the file has
+// none (so a look taken from another file does not stay).
+inline void take_file_look(const MeshLibrary::Mesh& mesh, world::Material& material, const ai::Json& args) {
+    const world::Material given = material;
     const world::Material file = mesh.material.value_or(world::Material{});
-    material.base_color = file.base_color;
-    material.roughness = file.roughness;
-    material.metallic = file.metallic;
-    material.emissive = file.emissive;
+    material.base_color = args.contains("base_color") ? given.base_color : file.base_color;
+    material.roughness = args.contains("roughness") ? given.roughness : file.roughness;
+    material.metallic = args.contains("metallic") ? given.metallic : file.metallic;
+    material.emissive = args.contains("emissive") ? given.emissive : file.emissive;
     material.maps = file.maps;
+    if (const auto maps = args.find("maps"); maps != args.end()) {
+        apply_maps(*maps, material.maps); // (checked when first applied)
+    }
 }
 
 inline ai::Json maps_json(const world::MaterialMaps& maps) {

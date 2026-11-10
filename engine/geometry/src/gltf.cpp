@@ -996,6 +996,7 @@ ImportedMaterial read_material(const cgltf_data& data, const cgltf_material& m, 
         out.metallic = unit(pbr.metallic_factor, 1);
         out.base_color_image = read_image(data, pbr.base_color_texture, warnings);
         out.roughness_metal_image = read_image(data, pbr.metallic_roughness_texture, warnings);
+        out.names_roughness_metal = pbr.metallic_roughness_texture.texture != nullptr;
     } else if (m.has_pbr_specular_glossiness) {
         // As a non-metal: its diffuse colour and map, roughness from glossiness.
         const cgltf_pbr_specular_glossiness& sg = m.pbr_specular_glossiness;
@@ -1259,5 +1260,29 @@ bool read_gltf_image(const std::filesystem::path& path, u32 index, std::vector<u
 }
 
 ImportResult import_gltf_memory(std::span<const u8> data) { return import(data, std::string(), false); }
+
+std::vector<std::filesystem::path> gltf_buffer_files(const std::filesystem::path& path) {
+    std::vector<std::filesystem::path> files;
+    std::vector<u8> bytes;
+    std::string full;
+    std::string error;
+    if (!read_gltf_bytes(path, bytes, full, error)) return files;
+    cgltf_options options{};
+    cgltf_data* raw = nullptr;
+    const cgltf_result r = cgltf_parse(&options, bytes.data(), bytes.size(), &raw);
+    std::unique_ptr<cgltf_data, DataDeleter> data(raw);
+    if (r != cgltf_result_success) return files;
+    const std::u8string full_u8(full.begin(), full.end());
+    const std::filesystem::path folder = std::filesystem::path(full_u8).parent_path();
+    for (cgltf_size i = 0; i < data->buffers_count; ++i) {
+        const char* uri = data->buffers[i].uri;
+        if (uri == nullptr || std::string_view(uri).starts_with("data:")) continue;
+        std::string decoded(uri);
+        cgltf_decode_uri(decoded.data());
+        decoded.resize(std::strlen(decoded.c_str()));
+        files.push_back(folder / std::filesystem::path(std::u8string(decoded.begin(), decoded.end())));
+    }
+    return files;
+}
 
 } // namespace giant::geometry

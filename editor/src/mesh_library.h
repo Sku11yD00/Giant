@@ -54,7 +54,7 @@ public:
         // The file's own look: its material with the most triangles (values,
         // and maps when it covers three quarters of the mesh: an image inside
         // the file named "<path>#image<N>", one beside it by its path).
-        // Entities given this file without a look of their own take it.
+        // Entities given this file take it, under the look fields given.
         // None if the file has no materials, or glTF's default covers most.
         std::optional<world::Material> material;
         u32 file_materials = 0; // materials the file's shown meshes use

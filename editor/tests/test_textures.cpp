@@ -476,7 +476,7 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     GIANT_CHECK(maps["normal"].get<std::string>().ends_with("giant_gltf_look/maps/rust normal.png"));
     GIANT_CHECK(!std::filesystem::exists("giant_cache/gltf_images")); // nothing copied out
 
-    // An entity given the mesh alone takes the file's look; one given a look keeps its own.
+    // An entity given the mesh alone takes the file's look; look fields given lie over it.
     const auto made = run("create_entity", {{"mesh", only}, {"surface", "metal"}, {"sway", 1.0}});
     GIANT_CHECK(made.ok);
     if (!made.ok) return;
@@ -489,7 +489,8 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     }
     const auto own = run("create_entity", {{"mesh", only}, {"base_color", {0.1, 0.2, 0.3}}});
     const world::Entity* o = own.ok ? state.scene.find(own.value["id"].get<u64>()) : nullptr;
-    GIANT_CHECK(o != nullptr && o->material.maps.empty() && o->material.roughness == 0.5f);
+    GIANT_CHECK(o != nullptr && o->material.base_color.x == 0.1f && o->material.maps.base_color == only + "#image0" &&
+                std::fabs(o->material.roughness - 0.3f) < 1e-6f);
     // A flag alone is not a look: the file's maps come, the flag kept.
     const auto flagged = run("create_entity", {{"mesh", only}, {"maps", {{"normal_green_down", true}}}});
     const world::Entity* f = flagged.ok ? state.scene.find(flagged.value["id"].get<u64>()) : nullptr;
@@ -498,7 +499,11 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     GIANT_CHECK(run("set_entity", {{"id", id}, {"roughness", 0.9}}).ok);
     GIANT_CHECK(run("set_entity", {{"id", id}, {"position", {1, 2, 3}}, {"mesh", only}}).ok);
     GIANT_CHECK(std::fabs(state.scene.find(id)->material.roughness - 0.9f) < 1e-6f);
-    // Another file without materials: the old file's maps go, the default look comes.
+    // Another file given with a colour: its look under the colour, the old file's maps gone.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", quad}, {"base_color", {1, 0, 0}}}).ok);
+    GIANT_CHECK(state.scene.find(id)->material.maps.empty() && state.scene.find(id)->material.base_color.x == 1.0f &&
+                std::fabs(state.scene.find(id)->material.roughness - 0.3f) < 1e-6f);
+    // Another file without materials: the default look comes.
     GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", bare}}).ok);
     GIANT_CHECK(state.scene.find(id)->material.maps.empty() && state.scene.find(id)->material.roughness == 0.5f &&
                 state.scene.find(id)->material.surface == world::Surface::metal);
@@ -517,4 +522,13 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     GIANT_CHECK(textures.entry(base)->status == TextureLibrary::Status::ready && textures.entry(base)->width == 16);
     GIANT_CHECK(textures.entry(missing)->status == TextureLibrary::Status::failed); // image 1 is beside, not inside
     GIANT_CHECK(std::filesystem::exists(textures.cache_file(textures.entry(base)->key)));
+    // A GLB by another name (a .vrm avatar): its images are named and cook the same way.
+    std::filesystem::copy_file(dir / "only.glb", dir / "avatar.vrm");
+    const std::string avatar = (dir / "avatar.vrm").generic_string();
+    const auto vrm = run("import_mesh", {{"path", avatar}});
+    GIANT_CHECK(vrm.ok && vrm.value["material"]["maps"]["base_color"] == avatar + "#image0");
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"maps", {{"base_color", avatar + "#image0"}}}}).ok);
+    const TextureLibrary::Ref vrm_base = textures.request({avatar + "#image0", TextureLibrary::Slot::base_color, false, {}});
+    textures.finish();
+    GIANT_CHECK(textures.entry(vrm_base)->status == TextureLibrary::Status::ready);
 }

@@ -139,7 +139,8 @@ public:
     std::filesystem::path cache_file(const Key& key) const;
 
     // An image inside a glTF, as a map names it: "path/to/file.glb#image2"
-    // (the file's image 2; .glb or .gltf). False for a plain path.
+    // (the file's image 2; any name, as glTFs can be .vrm and the like).
+    // False for a plain path.
     static bool split_image_ref(std::string_view path, std::string& file, u32& image);
 
 private:

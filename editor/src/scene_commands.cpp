@@ -354,12 +354,9 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         if (loaded.mesh == nullptr) {
             return loaded.error;
         }
-        // A new file brings its look, unless one is given (giving the same
-        // file again keeps the look the entity has).
-        if (e.mesh != mesh_before && !look_given(args)) {
-            take_file_look(*loaded.mesh, e.material);
-            if (args.contains("maps")) apply_maps(args["maps"], e.material.maps); // normal_green_down
-        }
+        // A new file brings its look, under what the arguments give (giving
+        // the same file again keeps the look the entity has).
+        if (e.mesh != mesh_before) take_file_look(*loaded.mesh, e.material, args);
     }
     return {};
 }
@@ -1524,8 +1521,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "counts. Already-imported files return at once unless reload is true (to pick up "
          "changes). Large files take a few seconds. Returns the file's own look too (material: "
          "the material with the most triangles: its values, and its maps when it covers at least "
-         "three quarters of the triangles; images inside the file named \"file.glb#image2\"), which entities given this mesh take unless they "
-         "give base_color, roughness, metallic, emissive or maps. Not undoable: it loads an asset and changes no entity.",
+         "three quarters of the triangles; images inside the file named \"file.glb#image2\"), which entities given this mesh take, under "
+         "any base_color, roughness, metallic, emissive or maps given with it. Not undoable: it loads an asset and changes no entity.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"path"}},

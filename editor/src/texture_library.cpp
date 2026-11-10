@@ -75,12 +75,10 @@ u64 hash_text(u64 h, std::string_view text) {
 }
 
 // The file's size and change time, hashed in (so an edited file cooks
-// again); for an image inside a glTF, the glTF's.
-u64 hash_file_state(u64 h, const std::string& path, bool& ok) {
+// again); for an image inside a glTF, the glTF's and its buffer files'
+// (a .gltf's images can live in its .bin).
+u64 hash_one_file(u64 h, const std::filesystem::path& p, bool& ok) {
     std::error_code ec;
-    std::string file;
-    u32 index = 0;
-    const std::filesystem::path p = from_utf8(TextureLibrary::split_image_ref(path, file, index) ? file : path);
     const auto size = std::filesystem::file_size(p, ec);
     if (ec) {
         ok = false;
@@ -93,6 +91,23 @@ u64 hash_file_state(u64 h, const std::string& path, bool& ok) {
     }
     h = hash_u64(h, static_cast<u64>(size));
     return hash_u64(h, static_cast<u64>(time.time_since_epoch().count()));
+}
+
+u64 hash_file_state(u64 h, const std::string& path, bool& ok) {
+    std::string file;
+    u32 index = 0;
+    if (!TextureLibrary::split_image_ref(path, file, index)) return hash_one_file(h, from_utf8(path), ok);
+    h = hash_one_file(h, from_utf8(file), ok);
+    if (!ok) return h;
+    std::string lower = file;
+    for (char& c : lower) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
+    if (lower.ends_with(".glb")) return h; // (its images are in its own chunk; reading it all would cost)
+    for (const std::filesystem::path& buffer : geometry::gltf_buffer_files(from_utf8(file))) {
+        bool buffer_ok = true;
+        h = hash_one_file(h, buffer, buffer_ok);
+        if (!buffer_ok) h = hash_u64(h, 0); // missing: the cook fails, and says why
+    }
+    return h;
 }
 
 std::string hex(u64 v) {
@@ -122,9 +137,6 @@ bool TextureLibrary::split_image_ref(std::string_view path, std::string& file, u
     if (digits.empty() || digits.size() > 9 || digits.find_first_not_of("0123456789") != std::string_view::npos) {
         return false;
     }
-    std::string lower(path.substr(0, hash));
-    for (char& c : lower) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
-    if (!lower.ends_with(".glb") && !lower.ends_with(".gltf")) return false;
     file.assign(path.substr(0, hash));
     image = 0;
     for (const char c : digits) image = image * 10 + static_cast<u32>(c - '0');

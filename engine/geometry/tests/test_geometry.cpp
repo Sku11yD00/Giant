@@ -604,6 +604,11 @@ GIANT_TEST("geometry: a .gltf file reads its buffer from next to it") {
     if (!r.ok()) std::fprintf(stderr, "    %s\n", r.error.c_str());
     GIANT_CHECK(r.mesh.indices.size() == 3);
     GIANT_CHECK(!import_gltf_file(dir / "missing.gltf").ok());
+    // Its buffer files, decoded (to tell when images inside them change).
+    const std::vector<std::filesystem::path> buffers = gltf_buffer_files(dir / "tri.gltf");
+    GIANT_CHECK(buffers.size() == 1 && buffers[0].filename() == "tri data.bin" &&
+                std::filesystem::exists(buffers[0]));
+    GIANT_CHECK(gltf_buffer_files(dir / "missing.gltf").empty());
 
     // A buffer file shorter than its byteLength must not be read past.
     {
