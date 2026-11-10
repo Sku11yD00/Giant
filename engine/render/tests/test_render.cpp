@@ -103,6 +103,16 @@ GIANT_TEST("render: the scene is one raster draw and one shading pass on the nul
 }
 
 namespace {
+// A material texture's description.
+rhi::TextureDesc material_desc(u32 width, u32 height, rhi::Format format) {
+    rhi::TextureDesc d;
+    d.width = width;
+    d.height = height;
+    d.format = format;
+    d.usage = rhi::TextureUsage::sampled;
+    return d;
+}
+
 struct NullScene {
     std::unique_ptr<rhi::Device> device;
     std::unique_ptr<Renderer> renderer;
@@ -662,6 +672,24 @@ GIANT_TEST("render: shadow pages asked for are drawn, a pass per level, and cach
     instances[1].position.x += 0.5;
     st = s.draw(frame);
     GIANT_CHECK(st.shadow_drawn >= 2 && st.shadow_draws == 2);
+    // A cut-out material in the frame: each level draws twice (solid, then
+    // cut out by alpha).
+    std::vector<Material> cut(2);
+    cut[1].alpha_cutoff = 0.5f;
+    cut[1].base_color_texture =
+        s.renderer->add_texture(material_desc(4, 4, rhi::Format::rgba8_srgb), std::vector<u8>(64, 255));
+    instances[1].material = 1;
+    frame.instances = instances;
+    frame.materials = cut;
+    pages.invalidate_all();
+    st = s.draw(frame);
+    GIANT_CHECK(cut[1].base_color_texture != k_no_texture && st.shadow_draws == 4);
+    frame.materials = {};
+    instances[1].material = 0;
+    frame.instances = instances;
+    pages.invalidate_all();
+    st = s.draw(frame);
+    GIANT_CHECK(st.shadow_draws == 2);
     // The budget: one page a frame (coarse first), the rest wait.
     frame.settings.shadow_pages_per_frame = 1;
     pages.invalidate_all();
@@ -2232,15 +2260,6 @@ std::vector<u8> solid_bc1(u16 rgb565) {
             static_cast<u8>(rgb565 >> 8), 0, 0, 0, 0};
 }
 std::vector<u8> solid_bc4(u8 value) { return {value, value, 0, 0, 0, 0, 0, 0}; }
-
-rhi::TextureDesc material_desc(u32 width, u32 height, rhi::Format format) {
-    rhi::TextureDesc d;
-    d.width = width;
-    d.height = height;
-    d.format = format;
-    d.usage = rhi::TextureUsage::sampled;
-    return d;
-}
 
 } // namespace
 

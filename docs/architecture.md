@@ -453,6 +453,10 @@ an offline cooker can use it without a device.
   in a second draw with the same alpha test. The texture cooker scales each
   smaller colour level's alpha so as much of it stays over 0.5 as of the top
   level's, so leaves do not thin away with distance (.gtex version 2).
+  The editor sends a material as two-sided or cut out only while something
+  uses it. Known gaps: each kind's draw still walks every visible cluster
+  (culling could split them by kind), and the voxel world (GI, far field)
+  takes cut-outs as solid (part 6c).
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

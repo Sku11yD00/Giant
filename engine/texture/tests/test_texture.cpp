@@ -518,6 +518,13 @@ GIANT_TEST("texture: cut-out colour mips keep the top level's alpha coverage") {
     GIANT_CHECK(covered(plain[3]) < 0.1); // thinned away
     // Colour is untouched by the alpha scale.
     GIANT_CHECK(at(kept[3], 0, 0)[1] == at(plain[3], 0, 0)[1]);
+    // BC1 drops alpha: nothing to keep.
+    CookOptions small_options;
+    small_options.small = true;
+    const auto small = make_mips(leaves, small_options, error);
+    GIANT_CHECK(at(small[3], 0, 0)[3] == at(plain[3], 0, 0)[3]);
+    // The smallest levels are not pushed past the top's coverage.
+    GIANT_CHECK(covered(kept[4]) < top + 0.08);
     // Opaque images are left as they are.
     const Image solid = filled(8, 8, [](u32, u32, u8* t) {
         t[0] = t[1] = t[2] = 100;

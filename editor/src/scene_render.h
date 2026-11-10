@@ -93,9 +93,13 @@ struct SceneFrame {
     // occlusion) and their renderer ids filled in as they become ready.
     TextureLibrary* textures = nullptr;
     std::vector<std::array<u32, 4>> material_textures; // per material
-    // Each material's own two_sided (materials[i].two_sided is it only
-    // while the material is used).
-    std::vector<u8> material_two_sided;
+    // Each material's own two_sided and alpha_cutoff (materials[i] has them
+    // only while the material is used: each kind is a raster pass).
+    struct MaterialKind {
+        bool two_sided = false;
+        float alpha_cutoff = 0.0f;
+    };
+    std::vector<MaterialKind> material_kind;
     u64 textures_version = ~u64{0};
     // Each material's maps' refs, by address, within one scene_frame call.
     std::unordered_map<const world::MaterialMaps*, std::array<u32, 4>> maps_seen;
