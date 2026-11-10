@@ -608,14 +608,16 @@ void ambient_occlusion(Extras e, Frame f, uint2 pixel, float3 world, float3 surf
 
 // Contact shadows: small things the shadow pages are too coarse for
 // (a stone on the ground, a foot, the gap under a crate) seen in this
-// frame's depth. From just off the surface, k_contact_steps steps towards
-// the sun out to contact_length metres (at least a pixel apart, at most
+// frame's depth. From just off the surface, up to k_contact_steps steps
+// (one each 4 pixels the ray crosses, at least 2) towards
+// the sun out to contact_length metres (at least 2 pixels long, at most
 // k_contact_pixels on screen); a step behind what the depth shows, by no
 // more than an object's assumed thickness, is in shadow. The steps start
 // at a fixed offset per pixel of a 4x4 pattern (no history). Returns how
 // much of the sun gets through (0 to 1), softened over the ray's last
 // quarter and by the screen's edges.
 static const uint k_contact_steps = 12;
+static const float k_contact_step_pixels = 4.0;
 static const float k_contact_pixels = 48.0;
 
 float contact_shadow(Extras e, Frame f, float3 world, float3 surface_n, uint2 pixel, float pixel_size) {
@@ -632,14 +634,17 @@ float contact_shadow(Extras e, Frame f, float3 world, float3 surface_n, uint2 pi
     if (d.z > 0.0) len = min(len, (-p.z - f.near_plane * 1.5) / d.z);
     const float max_len = k_contact_pixels * pixel_size;
     len = min(len, max_len);
-    if (len < pixel_size) return 1.0;
+    if (len < pixel_size * 2.0) return 1.0;
+    // Steps no finer than the screen needs: short rays (far away, or a
+    // short contact_length) take fewer.
+    const uint steps = clamp(uint(ceil(len / (pixel_size * k_contact_step_pixels))), 2u, k_contact_steps);
     const uint cell = (pixel.x & 3u) + 4u * (pixel.y & 3u);
     const float jitter = (float((cell * 7u + 5u) & 15u) + 0.5) / 16.0;
     const float thickness = 0.1 + 0.01 * (-p.z);
     float lit = 1.0;
     [loop]
-    for (uint i = 0; i < k_contact_steps; ++i) {
-        const float t = len * (float(i) + jitter) / float(k_contact_steps);
+    for (uint i = 0; i < steps; ++i) {
+        const float t = len * (float(i) + jitter) / float(steps);
         const float3 q = p + d * t;
         if (-q.z <= f.near_plane) break;
         const float2 ndc = float2(f.p00 * q.x, f.p11 * q.y) / -q.z;
@@ -656,6 +661,7 @@ float contact_shadow(Extras e, Frame f, float3 world, float3 surface_n, uint2 pi
             const float2 edge = min(uv, 1.0 - uv);
             const float fade = saturate(min(edge.x, edge.y) * 20.0) * saturate(4.0 * (1.0 - t / len));
             lit = min(lit, 1.0 - fade);
+            if (lit <= 0.0) break; // all shut out
         }
     }
     return lit;
