@@ -1006,7 +1006,9 @@ void Renderer::read_texture_feedback() {
             best = i;
         }
     }
-    if (best == 3 || m_feedback_frame[best] == m_feedback_taken) {
+    // (Nor one from before the last window: older than the windows hold.)
+    if (best == 3 || m_feedback_frame[best] == m_feedback_taken ||
+        m_feedback_frame[best] / k_feedback_window + 1 < m_feedback_window) {
         return;
     }
     m_feedback_taken = m_feedback_frame[best];
