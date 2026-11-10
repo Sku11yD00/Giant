@@ -377,8 +377,13 @@ an offline cooker can use it without a device.
   `set_render_settings`.
 - **Terrain layers (photoreal part 5a).** A material with
   `Material::terrain` is shaded from `FrameInput::terrain_layers` (up to
-  8; `gpu::Material` grew to 64 bytes for its flags). Resolve stacks them
-  like paint: the first covers everywhere, each later one where its slope
+  8; `gpu::Material` grew to 64 bytes for its flags). A full-size compute
+  pass (`terrain.slang`, timed as "terrain", only in lit views with layers
+  given) rebuilds the triangle from the visibility buffer where a material
+  is terrain and writes the colour, roughness and shading normal to two
+  rgba16_float targets; resolve only loads them (the same code inside
+  resolve's pixel shader doubled WARP frame time for every pixel, terrain
+  or not). The pass stacks the layers like paint: the first covers everywhere, each later one where its slope
   band (degrees from level, of the surface normal) and height band
   (metres above y = 0) hold, soft over `slope_blend` and `height_blend`
   at their edges. Each layer's colour, roughness and textures (base

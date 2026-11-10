@@ -78,7 +78,7 @@ static_assert(sizeof(Material) == 64);
 inline constexpr u32 k_material_bytes = 64; // resolve.slang's k_material_bytes
 inline constexpr u32 k_material_terrain = 1;
 
-// A terrain layer (resolve.slang's TerrainLayer): FrameInput::terrain_layers.
+// A terrain layer (terrain.slang's TerrainLayer): FrameInput::terrain_layers.
 struct TerrainLayer {
     float color_rough[4];
     u32 textures[4]; // read descriptors: base colour, normal, roughness and metallic, (unused)
@@ -392,17 +392,14 @@ struct ResolveExtras {
     u32 contact;
     u32 contact_on;
     u32 pad_contact[2];
-    // Terrain layers (TerrainLayer, terrain_count of them; 0: none) and
-    // where the camera is: its height, and x and z modulo 4096 m (macro
-    // variation's period).
-    u32 terrain_layers;
-    u32 terrain_offset;
-    u32 terrain_count;
-    float camera_y;
-    float camera_xz[2];
-    u32 pad_terrain[2];
+    // Terrain layers (terrain.slang): the ground's colour and roughness
+    // and its shading normal, full size rgba16_float (terrain_on 0: off).
+    u32 terrain_surface;
+    u32 terrain_normal;
+    u32 terrain_on;
+    u32 pad_terrain;
 };
-static_assert(sizeof(ResolveExtras) == 224);
+static_assert(sizeof(ResolveExtras) == 208);
 
 // resolve.slang's dust puff: centre camera-relative.
 struct GpuDustPuff {
@@ -529,6 +526,33 @@ struct AoPush {
     float pad1[3];
 };
 static_assert(sizeof(AoPush) == 48);
+
+// terrain.slang's TerrainPush.
+struct TerrainPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 vis;
+    u32 visible;
+    u32 visible_offset;
+    u32 instances;
+    u32 instance_offset;
+    u32 meshes;
+    u32 mesh_offset;
+    u32 materials;
+    u32 material_offset;
+    u32 material_count;
+    u32 layers; // TerrainLayer each
+    u32 layers_offset;
+    u32 layer_count;
+    u32 surface; // write descriptors
+    u32 normal;
+    u32 width;
+    u32 height;
+    float camera_y;
+    float camera_xz[2]; // modulo 4096 m (terrain.slang's k_macro_period)
+    u32 pad[2];
+};
+static_assert(sizeof(TerrainPush) == 96);
 
 // smaa.slang's SmaaPush (all three passes).
 struct SmaaPush {

@@ -497,9 +497,31 @@ GIANT_TEST("render: terrain layers stack by slope and height") {
     frame.materials = materials;
     frame.terrain_layers = layers;
     frame.view.position = {1.0e6, 2.0, -3.0e5}; // far out: uvs and variation continue from the camera
+    const auto timed = [&s](const char* name) {
+        for (const rhi::GpuTiming& t : s.device->gpu_timings()) {
+            if (t.name == name) return true;
+        }
+        return false;
+    };
+    const auto before = [&s](const char* a, const char* b) {
+        int at_a = -1, at_b = -1, i = 0;
+        for (const rhi::GpuTiming& t : s.device->gpu_timings()) {
+            if (t.name == a) at_a = i;
+            if (t.name == b) at_b = i;
+            ++i;
+        }
+        return at_a >= 0 && at_b >= 0 && at_a < at_b;
+    };
     s.draw(frame);
+    // Their own pass, just before shading.
+    GIANT_CHECK(timed("terrain") && before("contact shadows", "terrain") && before("terrain", "shading"));
+    frame.settings.debug_view = DebugView::clusters;
+    s.draw(frame);
+    GIANT_CHECK(!timed("terrain")); // lit views only
+    frame.settings.debug_view = DebugView::lit;
     frame.terrain_layers = {};
-    s.draw(frame); // none: the material's own values
+    s.draw(frame); // none: the material's own values, and no pass
+    GIANT_CHECK(!timed("terrain"));
     GIANT_CHECK(!s.device->device_lost());
 }
 

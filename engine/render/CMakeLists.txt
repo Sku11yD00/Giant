@@ -52,6 +52,7 @@ giant_shaders(render
     shaders/ao.slang:cs_gtao:compute:ao_gtao_cs
     shaders/ao.slang:cs_denoise:compute:ao_denoise_cs
     shaders/ao.slang:cs_contact:compute:ao_contact_cs
+    shaders/terrain.slang:cs_terrain:compute:terrain_cs
     shaders/post.slang:cs_histogram_clear:compute:histogram_clear_cs
     shaders/post.slang:cs_histogram:compute:histogram_cs
     shaders/post.slang:cs_bloom_down:compute:bloom_down_cs

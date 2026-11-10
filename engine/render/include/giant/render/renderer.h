@@ -827,6 +827,10 @@ private:
     rhi::PipelineHandle m_contact_pass; // contact shadows (ao.slang's cs_contact)
     rhi::TextureHandle m_contact;       // the sun let through, full size
     bool m_contact_ready = false;
+    rhi::PipelineHandle m_terrain_pass;   // terrain layers (terrain.slang's cs_terrain)
+    rhi::TextureHandle m_terrain_surface; // their colour and roughness, full size
+    rhi::TextureHandle m_terrain_normal;  // and shading normal
+    bool m_terrain_ready = false;
     rhi::PipelineHandle m_bloom_up;
     rhi::PipelineHandle m_post;
     rhi::TextureHandle m_smaa_area;   // SMAA's precomputed tables

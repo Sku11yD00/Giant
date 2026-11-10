@@ -97,11 +97,9 @@ struct Extras {
     uint ao_on;
     uint contact;            // contact shadows (ao.slang's cs_contact): the sun let through, full size (contact_on 0: off)
     uint contact_on;
-    uint terrain_layers;     // TerrainLayer each, terrain_count of them (0: none)
-    uint terrain_offset;
-    uint terrain_count;
-    float camera_y;          // the camera's height (metres above y = 0)
-    float2 camera_xz;        // the camera's x and z modulo k_macro_period
+    uint terrain_surface;    // terrain.slang's colour and roughness, full size (terrain_on 0: off)
+    uint terrain_normal;     // and its shading normal
+    uint terrain_on;
 };
 
 Extras load_extras() {
@@ -159,12 +157,10 @@ Extras load_extras() {
     const uint2 c2 = b.Load2(at + 176);
     o.contact = c2.x;
     o.contact_on = c2.y;
-    const uint4 t4 = b.Load4(at + 192);
-    o.terrain_layers = t4.x;
-    o.terrain_offset = t4.y;
-    o.terrain_count = t4.z;
-    o.camera_y = asfloat(t4.w);
-    o.camera_xz = asfloat(b.Load2(at + 208));
+    const uint3 t3 = b.Load3(at + 192);
+    o.terrain_surface = t3.x;
+    o.terrain_normal = t3.y;
+    o.terrain_on = t3.z;
     return o;
 }
 
@@ -222,36 +218,6 @@ struct Surface {
 
 // The ray through pixel `pixel` (camera-relative, from the camera) against
 // the triangle's corners: Moller-Trumbore, without back-face rejection.
-// Barycentrics are clamped, so pixels whose centre misses the triangle
-// slightly (edges: the rasterizer covers by area) stay on it.
-// Unclamped: where the ray meets the triangle's plane, even outside it
-// (for the uv differentials of neighbouring pixels' rays). w: 1 if it meets
-// the plane in front of the camera, 0 if the ray runs along it or meets it
-// behind.
-float4 plane_barycentrics(float3 dir, float3 a, float3 b, float3 c) {
-    const float3 e1 = b - a;
-    const float3 e2 = c - a;
-    const float3 p = cross(dir, e2);
-    const float det = dot(e1, p);
-    if (abs(det) < 1e-20) {
-        return float4(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0); // seen edge-on
-    }
-    const float inv = 1.0 / det;
-    const float3 s = -a; // the ray starts at the camera, the origin
-    const float u = dot(s, p) * inv;
-    const float3 q = cross(s, e1);
-    const float v = dot(dir, q) * inv;
-    const float t = dot(e2, q) * inv;
-    return float4(1.0 - u - v, u, v, t > 0.0 ? 1.0 : 0.0);
-}
-
-// Clamped onto the triangle: pixels whose centre misses it slightly
-// (edges: the rasterizer covers by area) stay on it.
-float3 on_triangle(float3 plane) {
-    const float3 w = max(plane, float3(0.0, 0.0, 0.0));
-    return w / max(w.x + w.y + w.z, 1e-12);
-}
-
 // The uv's change to a neighbouring pixel, from where its ray meets the
 // plane: at most the whole texture (grazing views), `fallback` (also the
 // whole texture) when it misses the plane.
@@ -418,168 +384,6 @@ void apply_textures(Hit s, inout float3 base, inout float rough, inout float met
     if (s.textures.w != k_no_texture) {
         occlusion = material_sample(s.textures.w, s).r;
     }
-}
-
-// --- Terrain layers (photoreal part 5a) ------------------------------------
-// The ground's materials (renderer.h's TerrainLayer), stacked like paint by
-// slope and height, mapped by world position: from above, and from the
-// sides too where it is steep (triplanar, weights |n|^4, so flat ground
-// takes one sample a texture), with a slow variation in brightness against
-// the textures' repeats. Fixed loops, unrolled (WARP).
-
-static const uint k_max_terrain_layers = 8;
-static const uint k_terrain_layer_bytes = 80; // gpu::TerrainLayer
-static const float k_macro_period = 4096.0;   // metres: camera_xz's (renderer.cpp)
-static const float k_terrain_min_weight = 0.004;
-
-struct TerrainLayer {
-    float3 color;
-    float rough;
-    uint4 textures; // base colour, normal, roughness and metallic
-    float tiling;
-    float min_slope;
-    float max_slope;
-    float slope_blend;
-    float min_height;
-    float max_height;
-    float height_blend;
-    float3 uv_offset;
-};
-
-TerrainLayer load_terrain_layer(Extras e, uint i) {
-    ByteAddressBuffer b = read_buffer(e.terrain_layers);
-    const uint at = e.terrain_offset + i * k_terrain_layer_bytes;
-    TerrainLayer l;
-    const float4 cr = asfloat(b.Load4(at));
-    l.color = cr.rgb;
-    l.rough = cr.a;
-    l.textures = b.Load4(at + 16);
-    const float4 a = asfloat(b.Load4(at + 32));
-    l.tiling = max(a.x, 0.05);
-    l.min_slope = a.y;
-    l.max_slope = a.z;
-    l.slope_blend = a.w;
-    const float4 h = asfloat(b.Load4(at + 48));
-    l.min_height = h.x;
-    l.max_height = h.y;
-    l.height_blend = h.z;
-    l.uv_offset = asfloat(b.Load3(at + 64));
-    return l;
-}
-
-// 1 inside [lo, hi], fading to 0 over `soft` centred on each edge.
-float terrain_band(float x, float lo, float hi, float soft) {
-    const float s = max(soft, 1e-3);
-    return saturate((x - lo) / s + 0.5) * saturate((hi - x) / s + 0.5);
-}
-
-// Value noise (0 to 1) over x and z, `cells` cells a period (it wraps
-// with k_macro_period, as camera_xz does).
-float terrain_noise(float2 p, float cells) {
-    const float2 q = p * (cells / k_macro_period);
-    const float2 i = floor(q);
-    const float2 t = q - i;
-    const float2 u = t * t * (3.0 - 2.0 * t);
-    const uint n = uint(cells);
-    const uint2 c0 = uint2(fmod(i + cells * 64.0, cells));
-    const uint2 c1 = (c0 + 1u) % n;
-    const float a = float(hash(c0.x + c0.y * 7919u) & 0xFFFFu) / 65535.0;
-    const float b = float(hash(c1.x + c0.y * 7919u) & 0xFFFFu) / 65535.0;
-    const float c = float(hash(c0.x + c1.y * 7919u) & 0xFFFFu) / 65535.0;
-    const float d = float(hash(c1.x + c1.y * 7919u) & 0xFFFFu) / 65535.0;
-    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
-}
-
-float4 terrain_sample(uint descriptor, float2 uv, float2 gx, float2 gy) {
-    return read_texture_nonuniform(descriptor).SampleGrad(get_sampler(k_sampler_anisotropic_wrap), uv, gx, gy);
-}
-
-// The ground's colour, roughness and shading normal at `world`
-// (camera-relative), its surface normal s.n; `dir`, `dir_dx` and `dir_dy`
-// the rays through this pixel and its neighbours (for the footprint).
-void terrain_surface(Extras e, Hit s, float3 dir, float3 dir_dx, float3 dir_dy, float pixel_size,
-                     inout float3 base, inout float rough, inout float3 n) {
-    const uint count = min(e.terrain_count, k_max_terrain_layers);
-    const float3 geo = s.n;
-    const float slope = degrees(acos(saturate(abs(geo.y))));
-    const float height = s.world.y + e.camera_y;
-    // The stack: each layer covers what is under it where its bands hold.
-    float w[k_max_terrain_layers];
-    [unroll]
-    for (uint i = 0; i < k_max_terrain_layers; ++i) {
-        w[i] = 0.0;
-        if (i < count) {
-            const TerrainLayer l = load_terrain_layer(e, i);
-            const float c = i == 0u ? 1.0
-                                    : terrain_band(slope, l.min_slope, l.max_slope, l.slope_blend) *
-                                          terrain_band(height, l.min_height, l.max_height, l.height_blend);
-            [unroll]
-            for (uint j = 0; j < i; ++j) w[j] *= 1.0 - c;
-            w[i] = c;
-        }
-    }
-    // The footprint: the neighbours' rays met with the surface's plane.
-    const float plane = dot(s.world, geo);
-    const float ddx_n = dot(dir_dx, geo);
-    const float ddy_n = dot(dir_dy, geo);
-    float3 dpdx = abs(ddx_n) > 1e-6 ? dir_dx * (plane / ddx_n) - s.world : float3(pixel_size, 0.0, 0.0);
-    float3 dpdy = abs(ddy_n) > 1e-6 ? dir_dy * (plane / ddy_n) - s.world : float3(0.0, 0.0, pixel_size);
-    // (Grazing: no longer than a few hundred pixels' worth.)
-    const float longest = pixel_size * 256.0;
-    if (dot(dpdx, dpdx) > longest * longest) dpdx = normalize(dpdx) * longest;
-    if (dot(dpdy, dpdy) > longest * longest) dpdy = normalize(dpdy) * longest;
-    // Triplanar weights: |n|^4, small ones dropped (flat ground: one plane).
-    float3 b = geo * geo;
-    b *= b;
-    b /= max(b.x + b.y + b.z, 1e-6);
-    b *= step(0.02, b);
-    b /= max(b.x + b.y + b.z, 1e-6);
-    float3 color = float3(0.0, 0.0, 0.0);
-    float roughness = 0.0;
-    float3 bump = float3(0.0, 0.0, 0.0);
-    [unroll]
-    for (uint i = 0; i < k_max_terrain_layers; ++i) {
-        if (w[i] > k_terrain_min_weight) {
-            const TerrainLayer l = load_terrain_layer(e, i);
-            const float inv = 1.0 / l.tiling;
-            const float3 p = s.world * inv + l.uv_offset;
-            const float3 gx = dpdx * inv;
-            const float3 gy = dpdy * inv;
-            float3 c = float3(0.0, 0.0, 0.0);
-            float r = 0.0;
-            float3 nb = float3(0.0, 0.0, 0.0);
-            [unroll]
-            for (uint k = 0; k < 3; ++k) {
-                const float bw = k == 0u ? b.y : (k == 1u ? b.x : b.z);
-                if (bw > 0.0) {
-                    // Above: u along +x, v along +z. The sides: v down the slope.
-                    const float2 uv = k == 0u ? p.xz : (k == 1u ? float2(p.z, -p.y) : float2(p.x, -p.y));
-                    const float2 ux = k == 0u ? gx.xz : (k == 1u ? float2(gx.z, -gx.y) : float2(gx.x, -gx.y));
-                    const float2 uy = k == 0u ? gy.xz : (k == 1u ? float2(gy.z, -gy.y) : float2(gy.x, -gy.y));
-                    float3 ck = l.color;
-                    if (l.textures.x != k_no_texture) ck *= terrain_sample(l.textures.x, uv, ux, uy).rgb;
-                    float rk = l.rough;
-                    if (l.textures.z != k_no_texture) rk *= terrain_sample(l.textures.z, uv, ux, uy).r;
-                    if (l.textures.y != k_no_texture) {
-                        // Green up: +y is up the texture (-v). Turned into the world along the plane's axes.
-                        const float2 t = terrain_sample(l.textures.y, uv, ux, uy).rg * 2.0 - 1.0;
-                        nb += bw * (k == 0u ? float3(t.x, 0.0, -t.y) : (k == 1u ? float3(0.0, t.y, t.x) : float3(t.x, t.y, 0.0)));
-                    }
-                    c += bw * ck;
-                    r += bw * rk;
-                }
-            }
-            color += w[i] * c;
-            roughness += w[i] * r;
-            bump += w[i] * nb;
-        }
-    }
-    // Brightness drifting slowly over tens and hundreds of metres.
-    const float2 xz = s.world.xz + e.camera_xz;
-    const float macro = terrain_noise(xz, 128.0) * 0.6 + terrain_noise(xz, 32.0) * 0.4; // 32 m and 128 m cells
-    base = color * lerp(0.82, 1.18, macro);
-    rough = saturate(roughness);
-    n = safe_normalize(geo + bump, geo);
 }
 
 // Texture streaming's feedback (Renderer::texture_residency): for one
@@ -1053,12 +857,12 @@ Output shade_pixel(float4 position) {
     float3 emissive = emissive_metallic.rgb;
     float occlusion = 1.0;
     apply_textures(s, base, rough, metal, occlusion);
-    if ((materials.Load(material_at + 48) & k_material_terrain) != 0u && extras.terrain_count != 0u) {
-        const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
-        const float3 dir = f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz;
-        const float pixel_here = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
-        terrain_surface(extras, s, dir, dir + f.ray_x.xyz * (2.0 / f.width), dir - f.ray_y.xyz * (2.0 / f.height),
-                        pixel_here, base, rough, n);
+    if (extras.terrain_on != 0u && (materials.Load(material_at + 48) & k_material_terrain) != 0u) {
+        // The ground's layers, from terrain.slang's pass.
+        const float4 sr = read_texture(extras.terrain_surface).Load(int3(int2(pixel), 0));
+        base = sr.rgb;
+        rough = sr.a;
+        n = safe_normalize(read_texture(extras.terrain_normal).Load(int3(int2(pixel), 0)).xyz, s.n);
         metal = 0.0;
     }
     texture_feedback(extras, f, s, pixel);
