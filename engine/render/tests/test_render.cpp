@@ -2766,7 +2766,7 @@ GIANT_TEST("render: d3d12 contact shadows darken the floor by a low block toward
     frame.settings.screen_space_reflections = false;
     frame.settings.ambient_occlusion = false;
     frame.settings.antialiasing = false;
-    frame.settings.contact_shadow_length = 0.5f;
+    frame.settings.contact_shadow_length = 1.0f; // (48 pixels there, some 70 cm: the bias is passed by mid-ray)
     frame.view.position = camera;
     frame.instances = instances;
     frame.materials = materials;
@@ -2798,18 +2798,18 @@ GIANT_TEST("render: d3d12 contact shadows darken the floor by a low block toward
     };
     const std::vector<u8> off = draw(false);
     const std::vector<u8> on = draw(true);
-    // Row 100: the floor some 35 cm in front of the block (its shadow
+    // Row 98: the floor some 30 cm in front of the block (its shadow
     // reaches some 65 cm). Column 64 is behind it from the sun, column 10
     // the open floor to its side.
-    std::printf("    floor by the block %d -> %d; open floor %d -> %d; block's face %d -> %d\n", green(off, 64, 100),
-                green(on, 64, 100), green(off, 10, 100), green(on, 10, 100), green(off, 64, 88), green(on, 64, 88));
-    GIANT_CHECK(green(off, 64, 100) > 60 && green(off, 10, 100) > 60);
+    std::printf("    floor by the block %d -> %d; open floor %d -> %d; block's face %d -> %d\n", green(off, 64, 98),
+                green(on, 64, 98), green(off, 10, 98), green(on, 10, 98), green(off, 64, 88), green(on, 64, 88));
+    GIANT_CHECK(green(off, 64, 98) > 60 && green(off, 10, 98) > 60);
     // The open floor and the block's own face (turned from the sun: unlit
     // by it either way) stay as they were.
-    GIANT_CHECK(std::abs(green(on, 10, 100) - green(off, 10, 100)) <= 3);
+    GIANT_CHECK(std::abs(green(on, 10, 98) - green(off, 10, 98)) <= 3);
     GIANT_CHECK(std::abs(green(on, 64, 88) - green(off, 64, 88)) <= 3);
     // By the block the sun is shut out.
-    GIANT_CHECK(green(on, 64, 100) * 100 < green(off, 64, 100) * 70);
+    GIANT_CHECK(green(on, 64, 98) * 100 < green(off, 64, 98) * 70);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }
