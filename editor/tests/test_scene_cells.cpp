@@ -335,3 +335,30 @@ GIANT_TEST("scene cells: entities drawn at their poses, the posed one's cell reb
     GIANT_CHECK(c.frame.cells_rebuilt == 1 && c.live()[0].position.y == 0.0);
     GIANT_CHECK(c.frame.poses == nullptr);
 }
+
+GIANT_TEST("scene cells: a material is two-sided for the renderer only while something uses it") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    world::Entity leaf;
+    leaf.transform.position = {10.0, 0.0, 10.0};
+    leaf.material.two_sided = true;
+    leaf.material.translucency = 0.4f;
+    const world::EntityId id = c.scene.add(leaf);
+    c.add(20.0, 20.0);
+    c.build();
+    const auto two_sided = [&] {
+        usize n = 0;
+        for (const render::Material& m : c.frame.materials) n += m.two_sided ? 1 : 0;
+        return n;
+    };
+    GIANT_CHECK(c.frame.materials.size() == 2 && two_sided() == 1);
+    for (const render::Material& m : c.frame.materials) {
+        GIANT_CHECK(m.two_sided == (m.translucency == 0.4f));
+    }
+    c.scene.remove(id); // its material lingers, unused
+    c.build();
+    GIANT_CHECK(c.frame.materials.size() == 2 && two_sided() == 0);
+    c.scene.add(leaf); // used again: the same entry, two-sided again
+    c.build();
+    GIANT_CHECK(c.frame.materials.size() == 2 && two_sided() == 1);
+}

@@ -63,6 +63,7 @@ ConstantBuffer<ResolvePush> push : register(b0);
 
 static const uint k_material_bytes = 64; // gpu::Material; its textures at +32, flags at +48
 static const uint k_material_terrain = 1u;
+static const uint k_material_two_sided = 2u;
 static const uint k_no_texture = 0xFFFFFFFFu; // rhi::k_no_descriptor
 
 
@@ -243,6 +244,7 @@ struct Hit {
     float4 tangent; // world tangent (along +u) and bitangent sign
     uint4 textures; // the material's (gpu::Material::textures)
     float3 shading_n; // n bent by the material's normal map (shade_pixel sets it)
+    float3 face_n; // the triangle's own normal, on the side its corners' normals lean to
     uint instance; // into the frame's instances
     uint material;
     uint cluster;  // the visible list's cluster index
@@ -262,6 +264,7 @@ Hit no_hit() {
     h.tangent = float4(1.0, 0.0, 0.0, 1.0);
     h.textures = uint4(k_no_texture, k_no_texture, k_no_texture, k_no_texture);
     h.shading_n = h.n;
+    h.face_n = h.n;
     h.instance = 0xFFFFFFFFu;
     h.material = 0;
     h.cluster = 0;
@@ -298,12 +301,20 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     const float3 dir = f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz;
     const float4 here = plane_barycentrics(dir, a, b, c);
     const float3 w = on_triangle(here.xyz);
-    const float3 object_normal = cluster_normal(pool, geometry, cluster, corners.x) * w.x +
-                                 cluster_normal(pool, geometry, cluster, corners.y) * w.y +
-                                 cluster_normal(pool, geometry, cluster, corners.z) * w.z;
+    const float3 n0 = cluster_normal(pool, geometry, cluster, corners.x);
+    const float3 n1 = cluster_normal(pool, geometry, cluster, corners.y);
+    const float3 n2 = cluster_normal(pool, geometry, cluster, corners.z);
+    const float3 object_normal = n0 * w.x + n1 * w.y + n2 * w.z;
     Hit h = no_hit();
     h.n = safe_normalize(to_world_normal(inst, object_normal), float3(0.0, 1.0, 0.0));
     h.shading_n = h.n;
+    // Which side of the triangle is seen, for two-sided materials: its
+    // plane's normal turned to its corners' (the same over the whole
+    // triangle, so smoothed normals leaning away near a silhouette do not
+    // flip it).
+    const float3 face = cross(b - a, c - a);
+    const float3 corner_sum = to_world_normal(inst, n0 + n1 + n2);
+    h.face_n = safe_normalize(dot(face, corner_sum) < 0.0 ? -face : face, h.n);
     h.world = a * w.x + b * w.y + c * w.z;
     // The material's textures (the CPU keeps the index in range): the
     // texture coordinates and their footprint only for a material with
@@ -833,7 +844,7 @@ Output shade_pixel(float4 position) {
     // the surface's own places shadow lookups and light probes, so bumps do
     // not move them.
     float3 n = s.shading_n;
-    const float3 surface_n = s.n;
+    float3 surface_n = s.n;
     const float3 world = s.world;
 
     if (!lit_path) {
@@ -857,12 +868,21 @@ Output shade_pixel(float4 position) {
     float3 emissive = emissive_metallic.rgb;
     float occlusion = 1.0;
     apply_textures(s, base, rough, metal, occlusion);
-    if (extras.terrain_on != 0u && (materials.Load(material_at + 48) & k_material_terrain) != 0u) {
+    const uint material_flags = materials.Load(material_at + 48);
+    const float translucency = asfloat(materials.Load(material_at + 52));
+    const bool from_behind = (material_flags & k_material_two_sided) != 0u && dot(s.face_n, world) > 0.0;
+    if (from_behind) {
+        // Two-sided, seen from behind: lit as the side facing the viewer.
+        surface_n = -surface_n;
+        n = -n;
+    }
+    if (extras.terrain_on != 0u && (material_flags & k_material_terrain) != 0u) {
         // The ground's layers, from terrain.slang's pass.
         const float4 sr = read_texture(extras.terrain_surface).Load(int3(int2(pixel), 0));
         base = sr.rgb;
         rough = sr.a;
-        n = safe_normalize(read_texture(extras.terrain_normal).Load(int3(int2(pixel), 0)).xyz, s.n);
+        n = safe_normalize(read_texture(extras.terrain_normal).Load(int3(int2(pixel), 0)).xyz, surface_n);
+        n = from_behind ? -n : n;
         metal = 0.0;
     }
     texture_feedback(extras, f, s, pixel);
@@ -882,8 +902,10 @@ Output shade_pixel(float4 position) {
         emissive = float3(0.0, 0.0, 0.0);
     }
     float sun = sun_visibility(extras.shadows, world, surface_n, f.sun_direction.xyz, pixel_size);
+    float clouds = 1.0;
     if (sky_on) {
-        sun *= cloud_shadow(sky, world);
+        clouds = cloud_shadow(sky, world);
+        sun *= clouds;
     }
     if (extras.contact_on != 0u && sun > 0.0 && dot(surface_n, f.sun_direction.xyz) > 0.0) {
         sun *= read_texture_float(extras.contact).Load(int3(int2(pixel), 0));
@@ -917,6 +939,16 @@ Output shade_pixel(float4 position) {
     }
     float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
                          occlusion, bend, spec_weight, spec_light);
+    if (translucency > 0.0) {
+        // Thin surfaces lit from behind: the sun through them, tinted by
+        // their colour, shadowed as the side facing it (the leaf itself
+        // does not shade its own back).
+        const float back = saturate(-dot(n, f.sun_direction.xyz));
+        if (back > 0.0) {
+            const float shine = sun_visibility(extras.shadows, world, -surface_n, f.sun_direction.xyz, pixel_size) * clouds;
+            color += base * ((1.0 - saturate(metal)) * translucency * back * shine / k_pi) * f.sun_light.rgb;
+        }
+    }
     float through = 1.0; // of the reflection, which reflect.slang adds over the fog and clouds
     if (sky_on) {
         color = under_sky(sky, color, view_dir, length(world), pixel, through);

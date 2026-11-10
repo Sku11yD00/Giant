@@ -71,12 +71,14 @@ struct Material {
     // Read descriptors of its textures (rhi::k_no_descriptor: none): base
     // colour, normal, roughness and metallic, occlusion.
     u32 textures[4];
-    u32 flags; // k_material_terrain: shaded from the frame's terrain layers
-    u32 pad[3];
+    u32 flags; // k_material_terrain: shaded from the frame's terrain layers; k_material_two_sided
+    float translucency; // 0 to 1
+    u32 pad[2];
 };
 static_assert(sizeof(Material) == 64);
 inline constexpr u32 k_material_bytes = 64; // resolve.slang's k_material_bytes
 inline constexpr u32 k_material_terrain = 1;
+inline constexpr u32 k_material_two_sided = 2;
 
 // A terrain layer (terrain.slang's TerrainLayer): FrameInput::terrain_layers.
 struct TerrainLayer {
@@ -296,9 +298,15 @@ struct RasterPush {
     u32 shadow_table_offset;
     i32 shadow_page_x;
     i32 shadow_page_y;
+    // Which clusters draw: 0 all, 1 those of one-sided materials, 2 of
+    // two-sided ones (by the frame's material table, below).
+    u32 sides;
+    u32 materials;
+    u32 material_offset;
+    u32 material_count;
     u32 pad;
 };
-static_assert(sizeof(RasterPush) == 64);
+static_assert(sizeof(RasterPush) == 80);
 
 // shadow_clear.slang's ClearPush: zeroes shadow pages (a list of physical
 // pages) or a run of words.

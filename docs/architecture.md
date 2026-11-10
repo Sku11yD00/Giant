@@ -436,6 +436,14 @@ an offline cooker can use it without a device.
   average (its coarsest level) as a height, so stones show through sand
   before the sand ends. The editor's `TerrainPaintSync` hands over only
   tiles whose paint changed (all for a new terrain or spacing).
+- **Two-sided leaves (photoreal part 6a).** `Material::two_sided` draws a
+  surface from both sides: when a frame has any, the visibility raster runs
+  twice, the second time with a pipeline that culls nothing, and each pass
+  keeps only the clusters whose material matches it (read from the frame's
+  material table; shadows draw everything). Resolve turns a back face's
+  normals towards the eye. `Material::translucency` (0 to 1) lets the sun
+  through a thin surface: lit from behind, its base colour shines by the
+  sun's light where the back side is unshadowed (clouds included).
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

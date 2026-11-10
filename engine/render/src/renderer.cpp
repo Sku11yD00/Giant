@@ -73,7 +73,8 @@ gpu::Material to_gpu(const Material& m, Descriptor&& descriptor) {
     out.textures[1] = descriptor(m.normal_texture, false);
     out.textures[2] = descriptor(m.roughness_metal_texture, false);
     out.textures[3] = descriptor(m.occlusion_texture, false);
-    out.flags = m.terrain ? gpu::k_material_terrain : 0u;
+    out.flags = (m.terrain ? gpu::k_material_terrain : 0u) | (m.two_sided ? gpu::k_material_two_sided : 0u);
+    out.translucency = std::isfinite(m.translucency) ? std::clamp(m.translucency, 0.0f, 1.0f) : 0.0f;
     if (m.terrain) {
         // The layers map their own textures by world position.
         for (u32& t : out.textures) t = rhi::k_no_descriptor;
@@ -179,6 +180,7 @@ struct Renderer::FrameData {
     rhi::TransientMemory frame;
     rhi::TransientMemory materials; // the frame's, then the default
     u32 material_count = 0;         // the frame's
+    bool two_sided = false;         // any material two-sided: visibility drawn in two passes
     rhi::TransientMemory terrain_layers; // gpu::TerrainLayer each (terrain_count of them)
     u32 terrain_count = 0;
     rhi::TransientMemory decals;    // decals, tiles, entries (DecalBins)
@@ -247,7 +249,7 @@ Renderer::Renderer(ConstructKey, rhi::Device& device, const RendererDesc& desc)
 Renderer::~Renderer() {
     // Deferred by the device until the GPU is done with them.
     for (const rhi::PipelineHandle p :
-         {m_raster_mesh, m_raster_vertex, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
+         {m_raster_mesh, m_raster_vertex, m_raster_mesh_two, m_raster_vertex_two, m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
           m_smaa_blend, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
@@ -375,13 +377,26 @@ bool Renderer::init() {
     raster.cull = rhi::CullMode::back;
     raster.name = "clusters to visibility (vertex)";
     m_raster_vertex = m_device.create_pipeline(raster);
+    // Two-sided materials (leaves): the same, both faces drawn.
+    rhi::GraphicsPipelineDesc raster_two = raster;
+    raster_two.cull = rhi::CullMode::none;
+    raster_two.name = "two-sided clusters to visibility (vertex)";
+    m_raster_vertex_two = m_device.create_pipeline(raster_two);
     if (m_device.adapter().mesh_shaders) {
         raster.geometry = rhi::GeometryStage::mesh;
         raster.mesh = shaders::raster_ms();
         raster.name = "clusters to visibility (mesh)";
         m_raster_mesh = m_device.create_pipeline(raster);
-        if (!m_raster_mesh.valid()) {
+        raster_two.geometry = rhi::GeometryStage::mesh;
+        raster_two.mesh = shaders::raster_ms();
+        raster_two.name = "two-sided clusters to visibility (mesh)";
+        m_raster_mesh_two = m_device.create_pipeline(raster_two);
+        if (!m_raster_mesh.valid() || !m_raster_mesh_two.valid()) {
             log_warning("render", "mesh shader pipeline failed; drawing with vertex shaders");
+            if (m_raster_mesh.valid()) m_device.destroy(m_raster_mesh);
+            if (m_raster_mesh_two.valid()) m_device.destroy(m_raster_mesh_two);
+            m_raster_mesh = {};
+            m_raster_mesh_two = {};
         }
     }
     // Shadow pages: the same geometry stages, no targets (the pixel shader
@@ -452,7 +467,7 @@ bool Renderer::init() {
     m_voxel_view = m_device.create_pipeline(voxels);
     for (const rhi::PipelineHandle p :
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
-          m_hzb_down, m_raster_vertex, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
+          m_hzb_down, m_raster_vertex, m_raster_vertex_two, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
@@ -1613,9 +1628,19 @@ void Renderer::raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bo
     desc.depth = {m_depth, load, 0.0f};
     cmd.begin_render_pass(desc);
     const bool drawing = gpu || data.entry_count > 0;
-    if (drawing) {
-        cmd.set_pipeline(data.use_mesh_shaders ? m_raster_mesh : m_raster_vertex);
+    // With two-sided materials in the frame: the one-sided clusters, then
+    // the two-sided ones with no back-face culling (each draw skips the
+    // other kind's clusters).
+    const u32 draws = drawing ? (data.two_sided ? 2u : 1u) : 0u;
+    for (u32 side = 0; side < draws; ++side) {
+        const bool two = side == 1;
+        cmd.set_pipeline(data.use_mesh_shaders ? (two ? m_raster_mesh_two : m_raster_mesh)
+                                               : (two ? m_raster_vertex_two : m_raster_vertex));
         gpu::RasterPush push{};
+        push.sides = data.two_sided ? side + 1 : 0u;
+        push.materials = data.materials.descriptor;
+        push.material_offset = data.materials.offset;
+        push.material_count = data.material_count;
         push.frame = data.frame.descriptor;
         push.frame_offset = data.frame.offset;
         push.instances = data.instances.descriptor;
@@ -2443,6 +2468,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
     }
     m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor));
+    data.two_sided = std::any_of(m_gpu_materials.begin(), m_gpu_materials.end(),
+                                 [](const gpu::Material& m) { return (m.flags & gpu::k_material_two_sided) != 0u; });
     data.material_count = static_cast<u32>(material_limit);
     data.materials = cmd.upload(bytes_of(m_gpu_materials));
     // The ground's layers (their textures always wanted at their finest:

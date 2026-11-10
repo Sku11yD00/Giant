@@ -235,6 +235,12 @@ GIANT_TEST("weather: the wind near the ground follows it, gusting harder in a st
     GIANT_CHECK(f.run("set_entity", {{"id", id}, {"sway", 3}}).ok && f.state.scene.find(id)->material.sway == 3.0f);
     GIANT_CHECK(f.run("get_entity", {{"id", id}}).value["sway"].get<float>() == 3.0f);
     GIANT_CHECK(f.run("undo").ok && f.state.scene.find(id)->material.sway == 1.0f);
+    // Leaves: two-sided and translucent, by command, undoable.
+    GIANT_CHECK(f.run("set_entity", {{"id", id}, {"two_sided", true}, {"translucency", 0.5}}).ok);
+    GIANT_CHECK(f.state.scene.find(id)->material.two_sided && f.state.scene.find(id)->material.translucency == 0.5f);
+    GIANT_CHECK(f.run("get_entity", {{"id", id}}).value["two_sided"] == true);
+    GIANT_CHECK(!f.run("set_entity", {{"id", id}, {"translucency", 1.5}}).ok);
+    GIANT_CHECK(f.run("undo").ok && !f.state.scene.find(id)->material.two_sided);
     // How far out things sway, and the shadow pages kept up for them.
     GIANT_CHECK(f.run("set_render_settings", {{"wind_distance", 80}, {"wind_shadow_pages_per_frame", 0}}).ok);
     GIANT_CHECK(f.state.render_settings.wind_distance == 80.0f && f.state.render_settings.wind_shadow_pages_per_frame == 0);
