@@ -6,6 +6,7 @@ giant_module(render
     src/smaa.cpp
     src/voxel_scene.cpp
     src/instance_store.cpp
+    src/terrain_paint.cpp
     src/shadow_pages.cpp
     src/voxel_light.cpp
     src/exposure.cpp

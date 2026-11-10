@@ -3,6 +3,9 @@
 // position: from above, and from the sides too where it is steep
 // (triplanar, weights |n|^4, so flat ground takes one sample a texture),
 // with a slow variation in brightness against the textures' repeats.
+// Painted weights (part 5c-2, TerrainPaintStore) cover as bands do, the
+// larger counting; a textured layer's edge is sharpened by its texture's
+// brightness as a height (stones show through sand before the sand ends).
 //
 // Its own full-size compute pass (not in resolve's pixel shader: code
 // there slows every pixel of the frame on WARP, terrain or not). Per pixel
@@ -12,7 +15,8 @@
 // into `normal` (rgba16_float: xyz, w 1). Other pixels are left as they
 // are: resolve reads these only where the material is terrain.
 //
-// Layout: TerrainPush in src/gpu_layout.h. Fixed loops, unrolled (WARP).
+// Layout: TerrainPush in src/gpu_layout.h. Fixed loops, unrolled (WARP),
+// but the paint table's probe (short: the table is at most half full).
 #include "common.slang"
 
 struct TerrainPush {
@@ -37,8 +41,18 @@ struct TerrainPush {
     uint height;
     float camera_y;      // the camera's height (metres above y = 0)
     float2 camera_xz;    // the camera's x and z modulo k_macro_period
-    uint pad0;
-    uint pad1;
+    // Painted layers (TerrainPaintStore): a table, a 16-byte header (the
+    // painted tiles' min x, min z, max x, max z) then 16-byte entries (tile
+    // x, z, its block's byte offset in the pool or ~0 empty, 0), paint_mask
+    // + 1 of them, open addressing by paint_hash; paint_pool k_no_texture: none.
+    uint paint_table;
+    uint paint_table_offset;
+    uint paint_mask;
+    uint paint_pool;
+    uint paint_samples;
+    float paint_spacing; // metres between samples
+    int2 paint_tile;     // the tile the camera is over
+    float2 paint_origin; // the camera from that tile's corner, metres
 };
 ConstantBuffer<TerrainPush> push : register(b0);
 
@@ -83,6 +97,94 @@ TerrainLayer load_terrain_layer(uint i) {
     l.height_blend = h.z;
     l.uv_offset = asfloat(b.Load3(at + 64));
     return l;
+}
+
+static const uint k_paint_empty = 0xFFFFFFFFu;
+static const uint k_paint_bytes = 8; // a sample: layers 1 to 7, a spare
+// How sharp a textured layer's edge is (a part of its coverage's ramp):
+// its texture's bright parts (high, as stones over sand) cover first.
+static const float k_height_blend = 0.3;
+
+// TerrainPaintStore's terrain_paint_hash.
+uint paint_hash(int x, int z) {
+    uint h = (uint(x) * 0x9E3779B1u) ^ (uint(z) * 0x85EBCA77u);
+    h ^= h >> 15;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12;
+    return h;
+}
+
+// The byte offset of tile (x, z)'s block in the pool, or k_paint_empty.
+uint paint_block(int x, int z) {
+    ByteAddressBuffer table = read_buffer(push.paint_table);
+    uint at = paint_hash(x, z) & push.paint_mask;
+    // At most half full: a probe or two.
+    for (uint k = 0; k <= push.paint_mask; ++k) {
+        const uint4 e = table.Load4(push.paint_table_offset + 16 + at * 16); // after the header
+        if (e.z == k_paint_empty) {
+            return k_paint_empty;
+        }
+        if (int(e.x) == x && int(e.y) == z) {
+            return e.z;
+        }
+        at = (at + 1) & push.paint_mask;
+    }
+    return k_paint_empty;
+}
+
+int floor_div(int v, int n) {
+    return v >= 0 ? v / n : -((-v + n - 1) / n);
+}
+
+// The painted weights at sample `l` (counted from the camera's tile's
+// corner): layers 1 to 4 in `lo`, 5 to 7 in `hi` (w spare).
+void paint_sample(int2 l, out float4 lo, out float4 hi) {
+    const int n = int(push.paint_samples);
+    const int2 t = int2(floor_div(l.x, n), floor_div(l.y, n));
+    const uint block = paint_block(push.paint_tile.x + t.x, push.paint_tile.y + t.y);
+    if (block == k_paint_empty) {
+        lo = float4(0.0, 0.0, 0.0, 0.0);
+        hi = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    const int2 i = l - t * n;
+    const uint2 v = read_buffer(push.paint_pool).Load2(block + uint(i.y * n + i.x) * k_paint_bytes);
+    lo = float4(float(v.x & 255u), float((v.x >> 8) & 255u), float((v.x >> 16) & 255u), float(v.x >> 24)) / 255.0;
+    hi = float4(float(v.y & 255u), float((v.y >> 8) & 255u), float((v.y >> 16) & 255u), float(v.y >> 24)) / 255.0;
+}
+
+// The painted weights at a point (camera-relative x and z), bilinear
+// between samples (and across tiles: a tile's last and the next's first).
+void paint_at(float2 xz, out float4 lo, out float4 hi) {
+    lo = float4(0.0, 0.0, 0.0, 0.0);
+    hi = float4(0.0, 0.0, 0.0, 0.0);
+    if (push.paint_pool == k_no_texture) {
+        return;
+    }
+    const float2 s = (push.paint_origin + xz) / push.paint_spacing;
+    const float2 base = floor(s);
+    const float2 f = s - base;
+    const int2 b = int2(base);
+    // Away from every painted tile (the table's header holds their bounds): none.
+    const int n = int(push.paint_samples);
+    const int4 bounds = asint(read_buffer(push.paint_table).Load4(push.paint_table_offset));
+    const int2 first = push.paint_tile + int2(floor_div(b.x, n), floor_div(b.y, n));
+    const int2 last = push.paint_tile + int2(floor_div(b.x + 1, n), floor_div(b.y + 1, n));
+    if (last.x < bounds.x || last.y < bounds.y || first.x > bounds.z || first.y > bounds.w) {
+        return;
+    }
+    [unroll]
+    for (uint k = 0; k < 4; ++k) {
+        const int2 d = int2(int(k & 1u), int(k >> 1));
+        const float w = (d.x == 1 ? f.x : 1.0 - f.x) * (d.y == 1 ? f.y : 1.0 - f.y);
+        if (w > 0.0) {
+            float4 a;
+            float4 c;
+            paint_sample(b + d, a, c);
+            lo += w * a;
+            hi += w * c;
+        }
+    }
 }
 
 // 1 inside [lo, hi], fading to 0 over `soft` centred on each edge.
@@ -154,21 +256,6 @@ void cs_terrain(uint3 id : SV_DispatchThreadID) {
     const uint count = clamp(push.layer_count, 1u, k_max_terrain_layers);
     const float slope = degrees(acos(saturate(abs(geo.y))));
     const float height = world.y + push.camera_y;
-    // The stack: each layer covers what is under it where its bands hold.
-    float w[k_max_terrain_layers];
-    [unroll]
-    for (uint i = 0; i < k_max_terrain_layers; ++i) {
-        w[i] = 0.0;
-        if (i < count) {
-            const TerrainLayer l = load_terrain_layer(i);
-            const float c = i == 0u ? 1.0
-                                    : terrain_band(slope, l.min_slope, l.max_slope, l.slope_blend) *
-                                          terrain_band(height, l.min_height, l.max_height, l.height_blend);
-            [unroll]
-            for (uint j = 0; j < i; ++j) w[j] *= 1.0 - c;
-            w[i] = c;
-        }
-    }
     // The footprint: the neighbours' rays met with the surface's plane.
     const float plane = dot(world, geo);
     const float ddx_n = dot(dir_dx, geo);
@@ -179,6 +266,47 @@ void cs_terrain(uint3 id : SV_DispatchThreadID) {
     const float longest = pixel_size * 256.0;
     if (dot(dpdx, dpdx) > longest * longest) dpdx = normalize(dpdx) * longest;
     if (dot(dpdy, dpdy) > longest * longest) dpdy = normalize(dpdy) * longest;
+    // Painted weights here (layers 1 to 7).
+    float4 paint_lo;
+    float4 paint_hi;
+    paint_at(world.xz, paint_lo, paint_hi);
+    // The stack: each layer covers what is under it where its bands hold,
+    // or as far as it is painted (the larger), its edge sharpened by its
+    // texture's height.
+    float w[k_max_terrain_layers];
+    [unroll]
+    for (uint i = 0; i < k_max_terrain_layers; ++i) {
+        w[i] = 0.0;
+        if (i < count) {
+            const TerrainLayer l = load_terrain_layer(i);
+            float c = 1.0;
+            if (i > 0u) {
+                const float4 four = i <= 4u ? paint_lo : paint_hi;
+                const float painted = four[(i - 1u) & 3u];
+                c = max(terrain_band(slope, l.min_slope, l.max_slope, l.slope_blend) *
+                            terrain_band(height, l.min_height, l.max_height, l.height_blend),
+                        painted);
+                if (c > 0.0 && c < 1.0 && l.textures.x != k_no_texture) {
+                    // Height: the texture's brightness against its average
+                    // (its coarsest level), from above.
+                    const float inv = 1.0 / l.tiling;
+                    const float2 uv = world.xz * inv + l.uv_offset.xz;
+                    const float3 luma = float3(0.2126, 0.7152, 0.0722);
+                    const float here = dot(terrain_sample(l.textures.x, uv, dpdx.xz * inv, dpdy.xz * inv).rgb, luma);
+                    const float mean = dot(read_texture_nonuniform(l.textures.x)
+                                               .SampleLevel(get_sampler(k_sampler_anisotropic_wrap), uv, 16.0)
+                                               .rgb,
+                                           luma);
+                    const float h = saturate(0.5 + 0.5 * (here / max(mean, 1e-3) - 1.0));
+                    const float threshold = k_height_blend * 0.5 + (1.0 - k_height_blend) * (1.0 - h);
+                    c = saturate((c - threshold) / k_height_blend + 0.5);
+                }
+            }
+            [unroll]
+            for (uint j = 0; j < i; ++j) w[j] *= 1.0 - c;
+            w[i] = c;
+        }
+    }
     // Triplanar weights: |n|^4, small ones dropped (flat ground: one plane).
     float3 b = geo * geo;
     b *= b;

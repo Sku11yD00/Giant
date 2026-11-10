@@ -220,4 +220,19 @@ world::Transform place(const world::Transform& parent, const world::Transform& c
 
 render::Lighting scene_lighting(const world::Lighting& lighting);
 
+// Keeps the renderer's painted terrain tiles (Renderer::set_terrain_paint)
+// the terrain's: once a frame, only the tiles whose paint changed (all of
+// them for a new terrain or another spacing).
+class TerrainPaintSync {
+public:
+    void update(world::Terrain& terrain, render::Renderer& renderer);
+    usize sent() const { return m_sent; } // tiles handed over by the last update
+
+private:
+    u64 m_identity = 0;
+    double m_tile_size = 0.0;
+    u32 m_samples = 0;
+    usize m_sent = 0;
+};
+
 } // namespace giant::editor

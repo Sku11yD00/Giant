@@ -1117,4 +1117,31 @@ render::Lighting scene_lighting(const world::Lighting& l) {
     return out;
 }
 
+static_assert(world::k_paint_channels == render::k_terrain_paint_channels);
+
+void TerrainPaintSync::update(world::Terrain& terrain, render::Renderer& renderer) {
+    m_sent = 0;
+    world::TerrainChanges changes = terrain.take_paint_changes();
+    if (terrain.identity() != m_identity || terrain.tile_size() != m_tile_size || terrain.samples() != m_samples) {
+        m_identity = terrain.identity();
+        changes.all = true;
+    }
+    if (terrain.tile_size() != m_tile_size || terrain.samples() != m_samples) {
+        m_tile_size = terrain.tile_size();
+        m_samples = terrain.samples();
+        renderer.set_terrain_paint_grid(m_tile_size, m_samples); // drops what it had
+    }
+    const auto send = [&](world::CellCoord c) {
+        const world::Terrain::Paint* p = terrain.paint(c);
+        renderer.set_terrain_paint(c.x, c.z, p != nullptr ? *p : world::Terrain::Paint{});
+        ++m_sent;
+    };
+    if (changes.all) {
+        renderer.clear_terrain_paint();
+        for (const auto& [cell, paint] : terrain.paints()) send(cell);
+    } else {
+        for (const world::CellCoord c : changes.tiles) send(c);
+    }
+}
+
 } // namespace giant::editor
