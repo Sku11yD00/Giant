@@ -207,9 +207,12 @@ Renderer::~Renderer() {
           m_smaa_blend, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
-          m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post}) {
+          m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
+          m_ao_gtao, m_ao_denoise}) {
         m_device.destroy(p);
     }
+    m_device.destroy(m_ao_raw);
+    m_device.destroy(m_ao);
     for (const rhi::TextureHandle t : m_bloom_downs) {
         m_device.destroy(t);
     }
@@ -303,6 +306,8 @@ bool Renderer::init() {
     m_histogram_clear = compute(shaders::histogram_clear_cs(), "exposure: clear the histogram");
     m_histogram = compute(shaders::histogram_cs(), "exposure: histogram");
     m_bloom_down = compute(shaders::bloom_down_cs(), "bloom: down");
+    m_ao_gtao = compute(shaders::ao_gtao_cs(), "ambient occlusion");
+    m_ao_denoise = compute(shaders::ao_denoise_cs(), "ambient occlusion: denoise");
     m_bloom_up = compute(shaders::bloom_up_cs(), "bloom: up");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     ShadowDesc shadow_desc;
@@ -400,7 +405,7 @@ bool Renderer::init() {
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
-          m_bloom_down, m_bloom_up, m_post}) {
+          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1091,6 +1096,12 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
         m_device.destroy(t);
         t = {};
     }
+    m_device.destroy(m_ao_raw); // half the frame's size: made again below
+    m_device.destroy(m_ao);
+    m_ao_raw = {};
+    m_ao = {};
+    m_ao_ready = false;
+    m_bloom_ready = false;
     m_device.destroy(m_clouds_a); // half the frame's size: made again with the sky's
     m_device.destroy(m_clouds_b);
     m_clouds_a = {};
@@ -1154,7 +1165,8 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     // first frame with weather); a failure is tried again on the next resize.
     m_sky_failed = false;
     ensure_sky_targets();
-    // Bloom's levels likewise (without them, no bloom: the frame still draws).
+    // Bloom's levels and ambient occlusion's likewise (without them, none:
+    // the frame still draws).
     m_post_logged = false;
     ensure_post_targets();
     return true;
@@ -1188,10 +1200,26 @@ bool Renderer::ensure_post_targets() {
         }
     }
     m_bloom_ready = ok;
+    // Ambient occlusion: half the frame's size.
+    m_ao_width = std::max((m_width + 1) / 2, 1u);
+    m_ao_height = std::max((m_height + 1) / 2, 1u);
+    for (rhi::TextureHandle* t : {&m_ao_raw, &m_ao}) {
+        if (!t->valid()) {
+            rhi::TextureDesc desc;
+            desc.width = m_ao_width;
+            desc.height = m_ao_height;
+            desc.format = rhi::Format::rgba16_float;
+            desc.usage = rhi::TextureUsage::sampled | rhi::TextureUsage::shader_write;
+            desc.name = t == &m_ao ? "ambient occlusion" : "ambient occlusion (noisy)";
+            *t = m_device.create_texture(desc);
+        }
+    }
+    m_ao_ready = m_ao_raw.valid() && m_ao.valid();
+    ok = ok && m_ao_ready;
     if (!ok && !m_post_logged) {
         // Tried again with the next resize.
         m_post_logged = true;
-        log_error("render", "could not create bloom's textures (out of GPU memory?)");
+        log_error("render", "could not create bloom's or ambient occlusion's textures (out of GPU memory?)");
     }
     return ok;
 }
@@ -2485,6 +2513,36 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_sky_ambient_made = false; // (not kept up: the flat colours until it is filled again)
     }
     mark(CpuSection::sky);
+    // Ambient occlusion (lit views) from this frame's depth, at half size.
+    const bool ambient_occlusion = settings.ambient_occlusion && lit_view && m_ao_ready;
+    if (ambient_occlusion) {
+        cmd.begin_timing("ambient occlusion");
+        cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+        cmd.barrier(m_ao_raw, rhi::ResourceState::shader_write);
+        gpu::AoPush ao{};
+        ao.frame = data.frame.descriptor;
+        ao.frame_offset = data.frame.offset;
+        ao.depth = m_device.read_descriptor(m_depth);
+        ao.source = ao.depth;
+        ao.target = m_device.write_descriptor(m_ao_raw);
+        ao.width = m_ao_width;
+        ao.height = m_ao_height;
+        const float radius = settings.ambient_occlusion_radius;
+        ao.radius = std::isfinite(radius) ? std::clamp(radius, 0.1f, 4.0f) : 1.0f;
+        cmd.set_pipeline(m_ao_gtao);
+        cmd.push(ao);
+        cmd.dispatch((m_ao_width + 7) / 8, (m_ao_height + 7) / 8);
+        cmd.barrier(m_ao_raw, rhi::ResourceState::shader_read);
+        cmd.barrier(m_ao, rhi::ResourceState::shader_write);
+        ao.source = m_device.read_descriptor(m_ao_raw);
+        ao.target = m_device.write_descriptor(m_ao);
+        cmd.set_pipeline(m_ao_denoise);
+        cmd.push(ao);
+        cmd.dispatch((m_ao_width + 7) / 8, (m_ao_height + 7) / 8);
+        cmd.barrier(m_ao, rhi::ResourceState::shader_read);
+        cmd.end_timing();
+    }
+    m_stats.ambient_occlusion = ambient_occlusion;
     cmd.begin_timing("shading");
     // Shading writes the light before exposure into m_radiance (with
     // screen reflections, also what they need, and their pass adds them
@@ -2627,6 +2685,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.feedback_materials = feedback ? m_feedback_count : 0u;
     extras.dfg = m_device.read_descriptor(m_dfg);
     extras.dfg_size = k_dfg_size;
+    extras.ao = ambient_occlusion ? m_device.read_descriptor(m_ao) : data.frame.descriptor;
+    extras.ao_on = ambient_occlusion ? 1u : 0u;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;
