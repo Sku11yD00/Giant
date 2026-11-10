@@ -27,7 +27,8 @@ falls, the ground wets. It passes when:
   up with every cell loaded some time in the street, and no cell was cut
   short;
 - the weather (the sky passes: atmosphere, clouds, their shadows, the
-  cover map; and what rain, wet ground and cover add to shading) takes
+  cover map; and what rain, wet ground and cover add to shading and to
+  the screen reflections) takes
   under 1.5 ms of GPU time (its share of the frame budget) in the full
   storm, by the river, in the street and up in the clouds, each caught up
   first;
@@ -218,7 +219,7 @@ def weather_cost(editor, at, rounds=3):
     atmosphere, clouds, their shadows, the cover map) plus what shading
     takes over shading with the weather's parts off (rain falling, wet
     ground, the cover; fog stays on, so its few instructions are not
-    counted), the median over `rounds`, on and off in turn. The stop is
+    counted) and the screen reflections wet ground adds, the median over `rounds`, on and off in turn. The stop is
     caught up first (streaming, scatter, the voxel world, as the flight had
     them). Returns (ms or None when the GPU did not time those passes,
     whether it caught up, whether the parts went on and off as asked)."""
@@ -240,7 +241,9 @@ def weather_cost(editor, at, rounds=3):
         editor.tool("set_render_settings", WEATHER_ON)
         if "sky" not in on or "shading" not in on or "shading" not in off:
             return None, caught_up, toggled
-        costs.append(on["sky"] + on.get("clouds", 0.0) + on["shading"] - off["shading"])
+        # Wet ground's extra screen reflections are timed apart from shading.
+        extra_reflections = on.get("screen reflections", 0.0) - off.get("screen reflections", 0.0)
+        costs.append(on["sky"] + on.get("clouds", 0.0) + on["shading"] - off["shading"] + extra_reflections)
     return sorted(costs)[len(costs) // 2], caught_up, toggled
 
 

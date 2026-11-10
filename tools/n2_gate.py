@@ -20,8 +20,9 @@ the screen allows. It passes when:
 - global illumination, ambient occlusion, contact shadows and
   reflections take under 4 ms of GPU time together (their own passes,
   "gi", "ambient occlusion", "contact shadows" and "screen reflections",
-  plus what shading takes over shading without them: the voxel cones and
-  GI's light looked up there, each printed), at the wet street, the lake
+  plus what shading takes over shading without them: reflections' share
+  (the voxel cones) and the rest (GI's light, AO and contact shadows
+  looked up there), each printed), at the wet street, the lake
   and up high;
 - the voxel world reaches 20 km (it holds a village 18 km off at its
   coarsest level) and the far field stands in for every far village;
@@ -152,9 +153,10 @@ def light_cost(editor, at, rounds=3):
     """GPU ms of global illumination, ambient occlusion, contact shadows and
     reflections at a camera stop, the median over `rounds`: their own passes
     ("gi", "ambient occlusion", "contact shadows", "screen reflections")
-    plus what shading takes over shading without them, with the voxel
-    cones (shading with reflections over shading without) told apart from
-    GI's light looked up in shading. All on, reflections off and all off
+    plus what shading takes over shading without them, with reflections'
+    share of it (the voxel cones and writing the screen reflections'
+    inputs: shading with reflections over shading without) told apart from
+    the rest (GI's light, AO and contact shadows looked up there). All on, reflections off and all off
     in turn, so drift cancels. Returns (total, parts by name) or (None,
     None) when the GPU did not time those passes, and whether the stop
     settled."""
@@ -179,8 +181,8 @@ def light_cost(editor, at, rounds=3):
                 "shading" not in t for t in (on, no_reflections, off)):
             return None, None, settled
         parts = {name: on[name] for name in LIGHT_PASSES}
-        parts["voxel cones"] = on["shading"] - no_reflections["shading"]
-        parts["gi in shading"] = no_reflections["shading"] - off["shading"]
+        parts["reflections in shading"] = on["shading"] - no_reflections["shading"]
+        parts["gi, AO and contact in shading"] = no_reflections["shading"] - off["shading"]
         totals.append((sum(parts.values()), parts))
     totals.sort(key=lambda t: t[0])
     total, parts = totals[len(totals) // 2]

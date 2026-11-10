@@ -2512,9 +2512,12 @@ over the target frame time). Where it stands:
   "gi", "ambient occlusion", "contact shadows" and "screen reflections";
   the voxel cones and GI's light looked up in shading stay inside
   "shading" (a pass of their own would read the G-buffer again), and the
-  N2 gate (`tools/n2_gate.py`) tells them apart by shading with and
-  without reflections, then without any of the light's extras, and holds
-  the sum under 4 ms at three stops, printing each part.
+  N2 gate (`tools/n2_gate.py`) times shading with and without
+  reflections (their share: the cones and writing the screen
+  reflections' inputs), then without any of the light's extras (GI's
+  light, AO and contact shadows looked up there), and holds the sum under
+  4 ms at three stops, printing each part. The N3 gate's weather cost
+  adds the screen reflections wet ground brings.
 - Known gaps: the 32 MiB per frame streaming budget is set by hand, not yet
   tuned from those GPU timings; what callers create in one frame is not
   budgeted by the device, so a big batch of meshes added mid-frame uploads
