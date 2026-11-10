@@ -278,7 +278,11 @@ std::vector<Image> make_mips(const Image& image, const CookOptions& options, std
         std::nth_element(alphas.begin(), alphas.begin() + static_cast<std::ptrdiff_t>(kept - 1), alphas.end(),
                          std::greater<float>());
         const float reached = alphas[kept - 1];
-        return reached > cutoff / 4.0f ? cutoff / reached * 1.0001f : 4.0f; // (just over: rounding)
+        // Aimed at the alpha that rounds to the first byte at or over the
+        // cutoff, so the stored level keeps it.
+        const float byte = std::ceil(cutoff * 255.0f - 1e-3f);
+        const float target = (byte - 0.49f) / 255.0f;
+        return reached > target / 4.0f ? target / reached : 4.0f;
     };
 
     float alpha_scale = 1.0f;

@@ -523,8 +523,20 @@ GIANT_TEST("texture: cut-out colour mips keep the top level's alpha coverage") {
     small_options.small = true;
     const auto small = make_mips(leaves, small_options, error);
     GIANT_CHECK(at(small[3], 0, 0)[3] == at(plain[3], 0, 0)[3]);
-    // The smallest levels are not pushed past the top's coverage.
-    GIANT_CHECK(covered(kept[4]) < top + 0.08);
+    // A 2x2 level takes the nearest count of texels (1 of 4), not more.
+    GIANT_CHECK(covered(kept[5]) <= top);
+    // Any cutoff keeps its coverage once stored in bytes.
+    CookOptions third_options;
+    third_options.coverage_cutoff = 0.33f;
+    const auto third = make_mips(leaves, third_options, error);
+    const auto covered_at = [](const Image& img, float cutoff) {
+        usize kept_texels = 0;
+        for (usize i = 0; i < img.rgba.size(); i += 4) kept_texels += img.rgba[i + 3] / 255.0f >= cutoff ? 1u : 0u;
+        return static_cast<double>(kept_texels) / static_cast<double>(img.rgba.size() / 4);
+    };
+    for (usize level = 1; level <= 4; ++level) {
+        GIANT_CHECK(std::abs(covered_at(third[level], 0.33f) - top) < 0.08);
+    }
     // Opaque images are left as they are.
     const Image solid = filled(8, 8, [](u32, u32, u8* t) {
         t[0] = t[1] = t[2] = 100;
