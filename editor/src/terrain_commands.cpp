@@ -313,7 +313,7 @@ struct SculptStroke {
 CommandResult stroke_step(EditorState& state, CommandContext& context, std::shared_ptr<SculptStroke>& stroke,
                           const world::Brush& brush, const std::vector<world::GroundPoint>& dabs,
                           const std::function<void(const world::GroundPoint&, std::vector<CellCoord>&)>& dab,
-                          bool heights) {
+                          bool heights, bool erase = false) {
     Terrain& t = state.scene.terrain;
     // The cells the stroke reaches.
     std::unordered_set<CellCoord, world::CellCoordHash> reach;
@@ -358,7 +358,7 @@ CommandResult stroke_step(EditorState& state, CommandContext& context, std::shar
     });
     changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
     // Paint erased to nothing is no paint (checked once a call: it reads whole tiles).
-    if (!heights) world::drop_empty_paint(t, changed);
+    if (erase) world::drop_empty_paint(t, changed);
     const usize steps_before = stroke->before.size();
     for (TileState& s : before) {
         if (std::binary_search(changed.begin(), changed.end(), s.cell, [](CellCoord a, CellCoord b) {
@@ -728,7 +728,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                  [&t, &brush, layer, erase](const world::GroundPoint& d, std::vector<CellCoord>& changed) {
                      world::apply_paint(t, brush, layer, erase, d.x, d.z, changed);
                  },
-                 false);
+                 false, erase);
              if (result.ok && layer >= t.material.layers.size()) {
                  result.value["warning"] = "there is no layer " + std::to_string(layer) +
                                            " yet (set_terrain_layers): its paint shows once there is";
@@ -981,21 +981,43 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
                  Json paint = Json::array();
                  for (const Json& p : args["points"]) {
                      const double x = p[0].get<double>(), z = p[1].get<double>();
-                     // The tile the point is in (as its height is), its nearest sample in it.
-                     if (!std::isfinite(x) || !std::isfinite(z) || t.find(world::cell_of({x, 0.0, z})) == nullptr) {
+                     // The tile holding the nearest sample (as the brush puts it); off
+                     // the ground's samples (a tile with none past it), the tile the
+                     // height comes from, its nearest sample in it.
+                     if (!std::isfinite(x) || !std::isfinite(z) || !t.height_at(x, z)) {
                          paint.push_back(nullptr);
                          continue;
                      }
-                     const CellCoord c = world::cell_of({x, 0.0, z});
-                     const auto n = static_cast<double>(t.samples());
-                     const auto nearest = [&](double v, i32 cell) {
-                         const double k = std::round(v / t.spacing() - static_cast<double>(cell) * n);
-                         return static_cast<usize>(std::clamp(k, 0.0, n - 1.0));
+                     const auto n = static_cast<i64>(t.samples());
+                     const auto global = [&](double v) {
+                         return static_cast<i64>(std::clamp(std::round(v / t.spacing()), -9.0e15, 9.0e15));
+                     };
+                     const i64 gi = global(x), gj = global(z);
+                     const auto cell_index = [n](i64 g) {
+                         return static_cast<i32>(std::clamp<i64>(g >= 0 ? g / n : -((-g + n - 1) / n),
+                                                                 std::numeric_limits<i32>::min(),
+                                                                 std::numeric_limits<i32>::max()));
+                     };
+                     CellCoord c{cell_index(gi), cell_index(gj)};
+                     if (t.find(c) == nullptr) {
+                         const CellCoord in = world::cell_of({x, 0.0, z});
+                         const i32 low = std::numeric_limits<i32>::min();
+                         const i32 bx = in.x > low ? in.x - 1 : in.x, bz = in.z > low ? in.z - 1 : in.z;
+                         const CellCoord candidates[4] = {in, {bx, in.z}, {in.x, bz}, {bx, bz}};
+                         for (const CellCoord k : candidates) {
+                             if (t.find(k) != nullptr) {
+                                 c = k;
+                                 break;
+                             }
+                         }
+                     }
+                     const auto local = [n](i64 g, i32 cell) {
+                         return static_cast<usize>(std::clamp<i64>(g - i64{cell} * n, 0, n - 1));
                      };
                      Json w = Json::array();
                      const Terrain::Paint* tp = t.paint(c);
-                     const usize i = nearest(x, c.x);
-                     const usize j = nearest(z, c.z);
+                     const usize i = local(gi, c.x);
+                     const usize j = local(gj, c.z);
                      for (u32 l = 0; l < world::k_paintable_layers; ++l) {
                          const u8 v = tp != nullptr ? (*tp)[(j * t.samples() + i) * world::k_paint_channels + l] : u8{0};
                          w.push_back(static_cast<double>(v) / 255.0);

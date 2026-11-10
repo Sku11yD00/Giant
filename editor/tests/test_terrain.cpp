@@ -981,4 +981,13 @@ GIANT_TEST("terrain brush tool: paint after a strong raise sends strength 1; get
     const ai::CommandResult r = f.run("get_terrain", {{"points", {{63.9, 63.9}, {64.5, 10}}}});
     GIANT_CHECK(r.ok && r.value["heights"][0].is_number() && r.value["paint"][0][0] == 1.0);
     GIANT_CHECK(r.value["paint"][1].is_null() && r.value["heights"][1].is_null());
+    // On a tile's far edge, with only it there: its last sample.
+    GIANT_CHECK(f.run("get_terrain", {{"points", {{64, 63}}}}).value["paint"][0][0] == 1.0);
+    // With a tile past it, the nearest sample is that tile's first, as the brush paints it.
+    GIANT_CHECK(f.run("create_terrain", {{"from", {64, 0}}, {"to", {127, 63}}, {"samples", 16}, {"height", 0}}).ok);
+    GIANT_CHECK(f.run("paint_terrain", {{"layer", 2}, {"points", {{64, 8}}}, {"radius", 1}, {"falloff", 0},
+                                        {"strength", 1}}).ok);
+    const ai::CommandResult both = f.run("get_terrain", {{"points", {{63.9, 8}, {61.9, 8}, {64.1, 8}}}});
+    GIANT_CHECK(both.value["paint"][0][1] == 1.0 && both.value["paint"][1][1] == 0.0 &&
+                both.value["paint"][2][1] == 1.0);
 }
