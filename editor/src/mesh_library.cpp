@@ -22,6 +22,55 @@ std::string to_utf8(const std::filesystem::path& path) {
     return std::string(s.begin(), s.end());
 }
 
+// An image a material uses, as a map names it: "<mesh>#image<N>" for one
+// inside the file (the texture cooker reads it from there), else the file
+// beside it, relative to where the mesh's path is relative to. "" (with a
+// warning) if it is missing or too long a path.
+std::string image_path(const geometry::ImportedImage& image, const std::string& mesh_path,
+                       std::vector<std::string>& warnings) {
+    if (image.empty()) return {};
+    std::string path;
+    if (image.embedded >= 0) {
+        path = mesh_path + "#image" + std::to_string(image.embedded);
+    } else {
+        const std::filesystem::path folder = from_utf8(mesh_path).parent_path();
+        path = MeshLibrary::normalize(to_utf8(folder / from_utf8(image.path)));
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(from_utf8(path), ec)) {
+            warnings.push_back("the image " + path + " it names is missing; that map was left out");
+            return {};
+        }
+    }
+    if (path.size() > world::k_max_mesh_path_bytes) {
+        warnings.push_back("an image path over " + std::to_string(world::k_max_mesh_path_bytes) +
+                           " bytes was left out");
+        return {};
+    }
+    return path;
+}
+
+world::Material file_material(const geometry::ImportedMaterial& m, const std::string& mesh_path, bool maps,
+                              std::vector<std::string>& warnings) {
+    world::Material out;
+    out.base_color = m.base_color;
+    out.roughness = m.roughness;
+    out.metallic = m.metallic;
+    out.emissive = m.emissive;
+    if (maps) {
+        out.maps.base_color = image_path(m.base_color_image, mesh_path, warnings);
+        out.maps.normal = image_path(m.normal_image, mesh_path, warnings);
+        out.maps.roughness_metal = image_path(m.roughness_metal_image, mesh_path, warnings);
+        out.maps.occlusion = image_path(m.occlusion_image, mesh_path, warnings);
+    }
+    // glTF's metallic factor defaults to 1 and exporters leave it so when
+    // the map says where the metal is: without the map, all of it would be.
+    if (m.names_roughness_metal && out.maps.roughness_metal.empty() && out.metallic > 0.0f) {
+        out.metallic = 0.0f;
+        warnings.push_back("\"" + m.name + "\"'s metallic-roughness map was left out, so it is drawn as a non-metal");
+    }
+    return out;
+}
+
 } // namespace
 
 u32 MeshLibrary::Skinned::find_clip(std::string_view name) const {
@@ -108,6 +157,28 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     }
     mesh->warnings = std::move(imported.warnings);
     mesh->has_uvs = imported.has_uvs;
+    // The file's look: its busiest material, if that covers more than glTF's
+    // default does; its maps only if it covers most of the mesh (else they
+    // would land on the other parts' uvs).
+    mesh->file_materials = static_cast<u32>(imported.materials.size());
+    if (!imported.materials.empty()) {
+        const geometry::ImportedMaterial& busiest = imported.materials[0];
+        u64 total = imported.default_material_triangles;
+        for (const geometry::ImportedMaterial& m : imported.materials) total += m.triangles;
+        if (busiest.triangles <= imported.default_material_triangles) {
+            mesh->warnings.push_back("most of the file has no material; entities given it take the default look unless they give one");
+        } else {
+            const bool maps = busiest.triangles * 4 >= total * 3;
+            mesh->material = file_material(busiest, path, maps, mesh->warnings);
+            if (imported.materials.size() > 1 || imported.default_material_triangles > 0) {
+                mesh->warnings.push_back(
+                    "the file has " + std::to_string(imported.materials.size() + (imported.default_material_triangles > 0 ? 1 : 0)) +
+                    " materials; entities take the one with the most triangles (\"" + busiest.name + "\")" +
+                    (maps ? "" : " without its maps (it covers under three quarters of the mesh)") +
+                    ": split the file into one mesh per material to keep them all");
+            }
+        }
+    }
     if (m_renderer != nullptr) {
         mesh->id = m_renderer->add_mesh(std::move(clusters));
         if (mesh->id == render::k_no_mesh) {

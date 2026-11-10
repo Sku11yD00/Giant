@@ -52,7 +52,7 @@ Json item_schema() {
               {"mesh", {{"type", "string"},
                         {"minLength", 1},
                         {"maxLength", world::k_max_mesh_path_bytes},
-                        {"description", "A glTF or GLB file (imported on first use)."}}},
+                        {"description", "A glTF or GLB file (imported on first use). The item takes the file's look (import_mesh: material) under the look fields given."}}},
               {"kit", {{"type", "string"},
                        {"minLength", 1},
                        {"maxLength", world::k_max_name_bytes},
@@ -169,6 +169,7 @@ std::string apply_layer(const Json& args, ScatterLayer& l, EditorState& state) {
                 if (state.meshes == nullptr) return "meshes cannot be imported in this editor";
                 const MeshLibrary::Loaded loaded = state.meshes->load(i.mesh);
                 if (loaded.mesh == nullptr) return loaded.error;
+                take_file_look(*loaded.mesh, i.material, j);
             }
             l.items.push_back(std::move(i));
         }

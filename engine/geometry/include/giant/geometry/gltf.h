@@ -9,8 +9,10 @@
 // tangents and indices of triangle, strip and fan primitives, and one skin
 // with its skeleton and animation clips. Tangents the file lacks are made
 // from the uvs (generate_tangents, mesh.h).
-// Materials, textures and morph targets are skipped with a warning;
-// compressed files (Draco, meshopt) are refused.
+// Materials are read as their metallic-roughness values and images
+// (ImportedMaterial; the mesh itself is one, so a drawer picks one of
+// them); morph targets are skipped with a warning; compressed files (Draco,
+// meshopt) are refused.
 //
 // Skinned files. When a mesh the scene shows is skinned, the file is read
 // as one character: `mesh` is it in its rest pose (as if no clip played),
@@ -24,6 +26,7 @@
 #pragma once
 
 #include "giant/anim/skeleton.h"
+#include "giant/core/math.h"
 #include "giant/core/types.h"
 #include "giant/geometry/mesh.h"
 
@@ -39,6 +42,33 @@ namespace giant::geometry {
 inline constexpr u64 k_max_import_triangles = 16'000'000;
 inline constexpr u64 k_max_import_vertices = 3 * k_max_import_triangles; // read, over all nodes
 inline constexpr u64 k_max_import_file_bytes = u64{2} << 30; // 2 GiB, buffers included
+
+// An image a material uses: a file beside the glTF (`path`, relative to its
+// folder, forward slashes, never leaving it) or one inside it (`embedded`:
+// its index in the file's images; read_gltf_image gives its bytes).
+struct ImportedImage {
+    std::string path; // UTF-8
+    i32 embedded = -1;
+    bool empty() const { return path.empty() && embedded < 0; }
+};
+
+// A glTF material as the engine draws it: metallic-roughness factors (base
+// colour linear, emissive times KHR_materials_emissive_strength) and the
+// images of its four maps, each read with TEXCOORD_0.
+struct ImportedMaterial {
+    std::string name;
+    Vec3 base_color{1.0f, 1.0f, 1.0f};
+    float alpha = 1.0f; // not drawn yet
+    float roughness = 1.0f;
+    float metallic = 1.0f;
+    Vec3 emissive{};
+    ImportedImage base_color_image;
+    ImportedImage normal_image;
+    ImportedImage roughness_metal_image; // glTF metallicRoughnessTexture: roughness G, metallic B
+    bool names_roughness_metal = false;  // the file gives one (even if not read): its factors scale it
+    ImportedImage occlusion_image;       // R
+    u64 triangles = 0;                   // of the mesh drawn with it
+};
 
 struct SkinnedImport {
     SkinnedTriangleMesh mesh;
@@ -56,6 +86,11 @@ struct ImportResult {
     std::optional<SkinnedImport> skinned; // the file had a skin
     std::vector<std::string> warnings; // things that were skipped
     bool has_uvs = false;              // some primitive had texture coordinates (else all are 0)
+    // The file's materials that the shown meshes use, most triangles first
+    // (a primitive without one uses glTF's default, which is not listed:
+    // its triangles are counted apart).
+    std::vector<ImportedMaterial> materials;
+    u64 default_material_triangles = 0;
     std::string error;                 // empty on success
     bool ok() const { return error.empty(); }
 };
@@ -66,5 +101,14 @@ ImportResult import_gltf_file(const std::filesystem::path& path);
 
 // Reads a .glb, or a .gltf whose buffers are embedded data URIs.
 ImportResult import_gltf_memory(std::span<const u8> data);
+
+// The bytes of image `index` inside a glTF file (a buffer view or a data
+// URI; ImportedImage::embedded), reading the file again (for a worker that
+// decodes it). False with why if it is not there or cannot be read.
+bool read_gltf_image(const std::filesystem::path& file, u32 index, std::vector<u8>& out, std::string& error);
+// The buffer files a glTF names (beside it, URIs decoded; data URIs left
+// out), to tell when images inside them change. Empty if it names none or
+// cannot be read.
+std::vector<std::filesystem::path> gltf_buffer_files(const std::filesystem::path& file);
 
 } // namespace giant::geometry

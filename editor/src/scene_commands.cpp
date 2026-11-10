@@ -108,14 +108,24 @@ Json entity_json(const Entity& e) {
 }
 
 Json mesh_json(const MeshLibrary::Mesh& m) {
-    return {{"path", m.path},
-            {"triangles", m.triangles},
-            {"clusters", m.clusters},
-            {"levels", m.levels},
-            {"coarsest_triangles", m.coarsest_triangles},
-            {"import_seconds", m.import_seconds},
-            {"uvs", m.has_uvs},
-            {"warnings", m.warnings}};
+    Json j = {{"path", m.path},
+              {"triangles", m.triangles},
+              {"clusters", m.clusters},
+              {"levels", m.levels},
+              {"coarsest_triangles", m.coarsest_triangles},
+              {"import_seconds", m.import_seconds},
+              {"uvs", m.has_uvs},
+              {"materials", m.file_materials},
+              {"warnings", m.warnings}};
+    if (m.material) {
+        const world::Material& f = *m.material;
+        j["material"] = {{"base_color", vec3_json(f.base_color)},
+                         {"roughness", f.roughness},
+                         {"metallic", f.metallic},
+                         {"emissive", vec3_json(f.emissive)},
+                         {"maps", maps_json(f.maps)}};
+    }
+    return j;
 }
 
 // JSON Schema helpers.
@@ -209,7 +219,8 @@ Json entity_properties() {
           {"maxLength", world::k_max_mesh_path_bytes},
           {"description", "A glTF or GLB file to draw (path from the editor's working folder); "
                           "imported on first use. Giving it sets shape to mesh unless shape is "
-                          "given too."}}},
+                          "given too, and the file's own look (import_mesh: material) unless "
+                          "base_color, roughness, metallic, emissive or maps are given."}}},
         {"position", triple(-1e8, 1e8, "Centre in metres [x, y, z]; +Y up. Default origin.")},
         {"rotation",
          {{"type", "object"},
@@ -249,6 +260,7 @@ Json entity_properties() {
 
 // Returns what is wrong (and may have changed `e` partly), or "".
 std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
+    const std::string mesh_before = e.mesh;
     if (args.contains("name")) e.name = args["name"].get<std::string>();
     if (args.contains("shape")) {
         e.shape = world::shape_from_string(args["shape"].get<std::string>()).value_or(e.shape);
@@ -342,6 +354,9 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         if (loaded.mesh == nullptr) {
             return loaded.error;
         }
+        // A new file brings its look, under what the arguments give (giving
+        // the same file again keeps the look the entity has).
+        if (e.mesh != mesh_before) take_file_look(*loaded.mesh, e.material, args);
     }
     return {};
 }
@@ -1504,8 +1519,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "Imports a glTF (.gltf with its buffers) or .glb file and builds its cluster LOD, so "
          "entities can draw it (create_entity with mesh). Returns its triangle and cluster "
          "counts. Already-imported files return at once unless reload is true (to pick up "
-         "changes). Large files take a few seconds. The file's own materials and textures are "
-         "not imported yet (give entities maps instead). Not undoable: it loads an asset and changes no entity.",
+         "changes). Large files take a few seconds. Returns the file's own look too (material: "
+         "the material with the most triangles: its values, and its maps when it covers at least "
+         "three quarters of the triangles; images inside the file named \"file.glb#image2\"), which entities given this mesh take, under "
+         "any base_color, roughness, metallic, emissive or maps given with it. Not undoable: it loads an asset and changes no entity.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"path"}},

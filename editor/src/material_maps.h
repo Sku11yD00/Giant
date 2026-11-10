@@ -3,6 +3,7 @@
 #pragma once
 
 #include "mesh_library.h"
+#include "texture_library.h"
 
 #include "giant/ai/commands.h"
 #include "giant/world/scene.h"
@@ -36,7 +37,8 @@ inline ai::Json maps_schema() {
                                      {"description", "The normal map was made for DirectX (green "
                                                      "pointing down the image). Default false."}}}}},
             {"description",
-             "Image files drawn over the uvs (paths from the editor's working folder; \"\" "
+             "Image files drawn over the uvs (paths from the editor's working folder, or an image "
+             "inside a glTF as \"file.glb#image2\"; \"\" "
              "removes one; fields left out are kept). Built-in shapes and meshes whose file has "
              "uvs (list_meshes: uvs) show them; others draw the plain values. Cooked in the "
              "background the first time they are drawn (at most 4096 texels a side) and kept "
@@ -55,8 +57,11 @@ inline std::string apply_maps(const ai::Json& json, world::MaterialMaps& maps) {
             return {};
         }
         const std::string path = MeshLibrary::normalize(given);
+        std::string file = path; // an image inside a glTF ("x.glb#image2"): the glTF
+        u32 image = 0;
+        TextureLibrary::split_image_ref(path, file, image);
         std::error_code ec;
-        const std::u8string utf8(path.begin(), path.end());
+        const std::u8string utf8(file.begin(), file.end());
         if (!std::filesystem::is_regular_file(std::filesystem::path(utf8), ec)) {
             return std::string("maps.") + key + ": no file " + path;
         }
@@ -71,6 +76,24 @@ inline std::string apply_maps(const ai::Json& json, world::MaterialMaps& maps) {
     }
     maps.normal_green_down = json.value("normal_green_down", maps.normal_green_down);
     return {};
+}
+
+// A mesh's file's own look (its material's values and maps) onto
+// `material`, keeping what files do not say (surface, wind), then what
+// `args` give over it (base colour, roughness, metallic, emissive, maps:
+// already applied to `material`, kept). The default look if the file has
+// none (so a look taken from another file does not stay).
+inline void take_file_look(const MeshLibrary::Mesh& mesh, world::Material& material, const ai::Json& args) {
+    const world::Material given = material;
+    const world::Material file = mesh.material.value_or(world::Material{});
+    material.base_color = args.contains("base_color") ? given.base_color : file.base_color;
+    material.roughness = args.contains("roughness") ? given.roughness : file.roughness;
+    material.metallic = args.contains("metallic") ? given.metallic : file.metallic;
+    material.emissive = args.contains("emissive") ? given.emissive : file.emissive;
+    material.maps = file.maps;
+    if (const auto maps = args.find("maps"); maps != args.end()) {
+        apply_maps(*maps, material.maps); // (checked when first applied)
+    }
 }
 
 inline ai::Json maps_json(const world::MaterialMaps& maps) {

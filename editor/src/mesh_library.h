@@ -15,8 +15,11 @@
 #include "giant/core/types.h"
 #include "giant/geometry/clusters.h"
 #include "giant/render/renderer.h"
+#include "giant/world/scene.h"
 
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <string>
 #include <string_view>
@@ -48,6 +51,13 @@ public:
         float import_seconds = 0.0f;
         std::vector<std::string> warnings;
         bool has_uvs = false; // the file has texture coordinates (material maps draw only then)
+        // The file's own look: its material with the most triangles (values,
+        // and maps when it covers three quarters of the mesh: an image inside
+        // the file named "<path>#image<N>", one beside it by its path).
+        // Entities given this file take it, under the look fields given.
+        // None if the file has no materials, or glTF's default covers most.
+        std::optional<world::Material> material;
+        u32 file_materials = 0; // materials the file's shown meshes use
         std::shared_ptr<const Skinned> skinned; // null: not skinned
     };
     struct Loaded {

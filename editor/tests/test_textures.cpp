@@ -11,8 +11,11 @@
 #include "giant/geometry/mesh.h"
 #include "giant/rhi/rhi.h"
 
+#include "gltf_test_files.h"
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -413,4 +416,119 @@ GIANT_TEST("textures: set_entity takes maps, refuses missing files, and get_text
         GIANT_CHECK(t["status"] == "ready" && t["slot"] == "base_color" && t["width"] == 16 && t["mips"] == 5);
     }
     GIANT_CHECK(run("reload_textures", Json::object()).ok);
+}
+
+GIANT_TEST("textures: a glTF's own look comes with it, its images named inside it and cooked from there") {
+    const std::filesystem::path dir = fresh_dir("giant_gltf_look");
+    std::filesystem::create_directories(dir / "maps");
+    write_png(dir / "maps" / "rust normal.png", 8, 8, 128, 128, 255);
+    // A real PNG inside the file.
+    std::vector<u8> rgba(16 * 16 * 4, 200);
+    const std::string png = encode_png_rgba(16, 16, rgba);
+    const std::vector<u8> glb = geometry::testing::two_material_quad("maps/rust%20normal.png", png);
+    std::ofstream(dir / "quad.glb", std::ios::binary)
+        .write(reinterpret_cast<const char*>(glb.data()), static_cast<std::streamsize>(glb.size()));
+    const std::string quad = (dir / "quad.glb").generic_string();
+    // A file with no materials (the bare sphere).
+    const std::string bare = (dir / "bare.glb").generic_string();
+    write_glb(bare, geometry::make_sphere(16, 8), true);
+
+    ai::CommandRegistry commands;
+    MeshLibrary meshes{nullptr};
+    TextureLibrary textures(nullptr, dir / "cache");
+    EditorState state;
+    state.meshes = &meshes;
+    state.textures = &textures;
+    register_scene_commands(commands, state);
+    register_scatter_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, {}); };
+
+    const auto imported = run("import_mesh", {{"path", quad}});
+    GIANT_CHECK(imported.ok);
+    if (!imported.ok) {
+        std::fprintf(stderr, "    %s\n", imported.error.c_str());
+        return;
+    }
+    GIANT_CHECK(imported.value["materials"] == 2 && imported.value["uvs"] == true);
+    const Json& look = imported.value["material"];
+    GIANT_CHECK(std::fabs(look["roughness"].get<float>() - 0.3f) < 1e-6f && look["emissive"][0] == 4.0f);
+    // Rust covers two of three triangles: under three quarters, so no maps.
+    GIANT_CHECK(look["maps"].empty());
+    bool split_warning = false;
+    for (const Json& w : imported.value["warnings"]) {
+        split_warning = split_warning || w.get<std::string>().find("without its maps") != std::string::npos;
+    }
+    GIANT_CHECK(split_warning);
+    // The quad without "paint": rust alone, with its maps.
+    const std::string only = (dir / "only.glb").generic_string();
+    {
+        const std::string json_from = R"("indices":2,"material":0})";
+        std::string text(glb.begin(), glb.end());
+        const usize at = text.find(json_from);
+        text.replace(at, json_from.size(), R"("indices":3,"material":1})"); // the same length
+        std::ofstream(dir / "only.glb", std::ios::binary).write(text.data(), static_cast<std::streamsize>(text.size()));
+    }
+    const auto rust = run("import_mesh", {{"path", only}});
+    GIANT_CHECK(rust.ok && rust.value["materials"] == 1);
+    if (!rust.ok) return;
+    const Json& maps = rust.value["material"]["maps"];
+    GIANT_CHECK(maps["base_color"] == only + "#image0" && maps["occlusion"] == only + "#image2");
+    GIANT_CHECK(maps["normal"].get<std::string>().ends_with("giant_gltf_look/maps/rust normal.png"));
+    GIANT_CHECK(!std::filesystem::exists("giant_cache/gltf_images")); // nothing copied out
+
+    // An entity given the mesh alone takes the file's look; look fields given lie over it.
+    const auto made = run("create_entity", {{"mesh", only}, {"surface", "metal"}, {"sway", 1.0}});
+    GIANT_CHECK(made.ok);
+    if (!made.ok) return;
+    const u64 id = made.value["id"].get<u64>();
+    {
+        const world::Entity* e = state.scene.find(id);
+        GIANT_CHECK(e != nullptr && e->material.maps.base_color == only + "#image0" &&
+                    std::fabs(e->material.metallic - 0.7f) < 1e-6f);
+        GIANT_CHECK(e != nullptr && e->material.surface == world::Surface::metal && e->material.sway == 1.0f);
+    }
+    const auto own = run("create_entity", {{"mesh", only}, {"base_color", {0.1, 0.2, 0.3}}});
+    const world::Entity* o = own.ok ? state.scene.find(own.value["id"].get<u64>()) : nullptr;
+    GIANT_CHECK(o != nullptr && o->material.base_color.x == 0.1f && o->material.maps.base_color == only + "#image0" &&
+                std::fabs(o->material.roughness - 0.3f) < 1e-6f);
+    // A flag alone is not a look: the file's maps come, the flag kept.
+    const auto flagged = run("create_entity", {{"mesh", only}, {"maps", {{"normal_green_down", true}}}});
+    const world::Entity* f = flagged.ok ? state.scene.find(flagged.value["id"].get<u64>()) : nullptr;
+    GIANT_CHECK(f != nullptr && !f->material.maps.base_color.empty() && f->material.maps.normal_green_down);
+    // Edits and moves keep the look; the same file again keeps it too.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"roughness", 0.9}}).ok);
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"position", {1, 2, 3}}, {"mesh", only}}).ok);
+    GIANT_CHECK(std::fabs(state.scene.find(id)->material.roughness - 0.9f) < 1e-6f);
+    // Another file given with a colour: its look under the colour, the old file's maps gone.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", quad}, {"base_color", {1, 0, 0}}}).ok);
+    GIANT_CHECK(state.scene.find(id)->material.maps.empty() && state.scene.find(id)->material.base_color.x == 1.0f &&
+                std::fabs(state.scene.find(id)->material.roughness - 0.3f) < 1e-6f);
+    // Another file without materials: the default look comes.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", bare}}).ok);
+    GIANT_CHECK(state.scene.find(id)->material.maps.empty() && state.scene.find(id)->material.roughness == 0.5f &&
+                state.scene.find(id)->material.surface == world::Surface::metal);
+    // A scatter item given the mesh takes the look too.
+    const auto layer = run("add_scatter_layer", {{"name", "crates"}, {"items", {{{"mesh", only}}}}});
+    GIANT_CHECK(layer.ok && state.scene.scatter.size() == 1 &&
+                state.scene.scatter[0].items[0].material.maps.occlusion == only + "#image2");
+    // Maps may name an image inside a glTF directly.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"maps", {{"base_color", only + "#image0"}}}}).ok);
+    GIANT_CHECK(!run("set_entity", {{"id", id}, {"maps", {{"base_color", (dir / "none.glb#image0").generic_string()}}}}).ok);
+
+    // The textures cook from inside the file (and come back from the cache).
+    const TextureLibrary::Ref base = textures.request({only + "#image0", TextureLibrary::Slot::base_color, false, {}});
+    const TextureLibrary::Ref missing = textures.request({only + "#image1", TextureLibrary::Slot::occlusion, false, {}});
+    textures.finish();
+    GIANT_CHECK(textures.entry(base)->status == TextureLibrary::Status::ready && textures.entry(base)->width == 16);
+    GIANT_CHECK(textures.entry(missing)->status == TextureLibrary::Status::failed); // image 1 is beside, not inside
+    GIANT_CHECK(std::filesystem::exists(textures.cache_file(textures.entry(base)->key)));
+    // A GLB by another name (a .vrm avatar): its images are named and cook the same way.
+    std::filesystem::copy_file(dir / "only.glb", dir / "avatar.vrm");
+    const std::string avatar = (dir / "avatar.vrm").generic_string();
+    const auto vrm = run("import_mesh", {{"path", avatar}});
+    GIANT_CHECK(vrm.ok && vrm.value["material"]["maps"]["base_color"] == avatar + "#image0");
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"maps", {{"base_color", avatar + "#image0"}}}}).ok);
+    const TextureLibrary::Ref vrm_base = textures.request({avatar + "#image0", TextureLibrary::Slot::base_color, false, {}});
+    textures.finish();
+    GIANT_CHECK(textures.entry(vrm_base)->status == TextureLibrary::Status::ready);
 }

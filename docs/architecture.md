@@ -269,6 +269,27 @@ an offline cooker can use it without a device.
   back from the cache when used again. Until ready a material draws its
   plain values. Closing drops cooks not yet begun. MCP: `maps` on entities
   and scatter items, `get_textures`, `reload_textures`.
+- **glTF materials (photoreal part 3a-3c-2).** The importer reads the
+  materials the shown meshes use (`ImportResult::materials`, most triangles
+  first): metallic-roughness factors (emissive times
+  `KHR_materials_emissive_strength`) and the images of the four maps, each
+  a file beside the glTF (a relative URI, decoded, refused if it could
+  leave the folder: `..`, absolute, backslash, colon, scheme) or bytes
+  inside it (a buffer view or a base64 data URI). Specular-glossiness
+  materials read as non-metals (roughness 1 - glossiness, diffuse image).
+  Triangles drawn with no material count for the default one. A mesh is
+  one material in the renderer, so `MeshLibrary` keeps the one with the
+  most triangles as the file's look (none if the default has more), with
+  its maps only when it covers at least three quarters of the triangles
+  (warning to split the file otherwise). Images inside the file are named
+  `"<mesh path>#image<N>"` and never copied out: texture workers read
+  them through `geometry::read_gltf_image`, and the cache keys them by the
+  glTF file's size and time (and a .gltf's buffer files'), so worlds stay
+  portable. A metallic-roughness map that is left out makes the material
+  a non-metal (glTF's metallic factor defaults to 1). An entity or scatter
+  item given the mesh takes it under the look fields given (also when its
+  mesh changes). Not read yet: other uv sets (dropped with a warning),
+  texture transforms, alpha, emissive maps, WebP/KTX2 images.
 - **Streaming (N1 part 4, `src/streaming.h`).** Cluster metadata (clusters,
   groups, LOD tree) stays on the GPU for every mesh, but the geometry
   (vertices, triangles) lives group by group in one fixed GPU pool

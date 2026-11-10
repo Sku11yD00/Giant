@@ -201,12 +201,18 @@ public:
         m_unpacked.clear();
         m_unpacked_floats.clear();
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
+            const usize before = target.mesh->indices.size();
             if (!primitive(node->mesh->primitives[i], transform, target)) {
                 return false;
             }
+            const u64 added = (target.mesh->indices.size() - before) / 3;
+            if (added > 0) m_material_triangles[node->mesh->primitives[i].material] += added; // null: glTF's default
         }
         return true;
     }
+
+    // Triangles drawn with each material (of the meshes read; null: none given).
+    const std::unordered_map<const cgltf_material*, u64>& material_triangles() const { return m_material_triangles; }
 
     bool fail(std::string text) {
         m_result.error = std::move(text);
@@ -221,6 +227,7 @@ public:
     }
 
 private:
+    std::unordered_map<const cgltf_material*, u64> m_material_triangles;
     // A vertex's joints and weights from up to two sets: the four heaviest,
     // in 255ths summing to 255.
     bool vertex_weights(const std::array<const std::vector<Vec4>*, 2>& joints,
@@ -924,6 +931,97 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
     return true;
 }
 
+// The exact byte count of base64 text (with or without padding); false if
+// it cannot be whole base64.
+bool base64_size(std::string_view text, cgltf_size& size) {
+    while (text.ends_with('=')) text.remove_suffix(1);
+    if (text.size() % 4 == 1) return false;
+    size = text.size() / 4 * 3 + (text.size() % 4 == 0 ? 0 : text.size() % 4 - 1);
+    return true;
+}
+
+// The image a texture view shows: inside the file (a buffer view or a data
+// URI: its index) or a file beside it (its URI, decoded, relative to the
+// glTF's folder; never outside it, never a scheme or a backslash). Empty
+// (with a warning) if it cannot be had. Maps on another uv set are left out
+// (only TEXCOORD_0 is read); extensions' images (WebP, KTX2) are not read.
+ImportedImage read_image(const cgltf_data& data, const cgltf_texture_view& view, std::vector<std::string>& warnings) {
+    ImportedImage out;
+    const auto warn = [&warnings](const std::string& text) {
+        if (std::find(warnings.begin(), warnings.end(), text) == warnings.end()) warnings.push_back(text);
+    };
+    if (view.texture == nullptr) return out;
+    if (view.texcoord != 0) {
+        warn("maps on texture coordinates other than TEXCOORD_0 were left out");
+        return out;
+    }
+    if (view.has_transform) warn("texture transforms (KHR_texture_transform) are ignored");
+    const cgltf_image* image = view.texture->image;
+    if (image == nullptr) {
+        warn("a texture without a PNG or JPEG image (WebP, KTX2) was left out");
+        return out;
+    }
+    const std::string_view uri = image->uri != nullptr ? image->uri : "";
+    if (image->buffer_view != nullptr || uri.starts_with("data:")) {
+        out.embedded = static_cast<i32>(image - data.images);
+        return out;
+    }
+    std::string decoded(uri);
+    decoded.resize(cgltf_decode_uri(decoded.data()));
+    // A relative path inside the folder, spelled with forward slashes.
+    const bool bad_text = decoded.empty() || decoded.find_first_of(std::string_view("\\:\0", 3)) != std::string::npos ||
+                          decoded.front() == '/';
+    const std::filesystem::path relative =
+        std::filesystem::path(std::u8string(decoded.begin(), decoded.end())).lexically_normal();
+    if (bad_text || relative.empty() || relative == "." || *relative.begin() == ".." || relative.is_absolute() ||
+        relative.has_root_name() || std::string_view(decoded).ends_with("/")) {
+        warn("an image outside the file's folder, or not a file path, was left out");
+        return out;
+    }
+    const std::u8string u8 = relative.generic_u8string();
+    out.path.assign(u8.begin(), u8.end());
+    return out;
+}
+
+ImportedMaterial read_material(const cgltf_data& data, const cgltf_material& m, std::vector<std::string>& warnings) {
+    ImportedMaterial out;
+    out.name = m.name != nullptr ? m.name : "";
+    const auto unit = [](float v, float otherwise) { return std::isfinite(v) ? std::clamp(v, 0.0f, 1.0f) : otherwise; };
+    if (m.has_pbr_metallic_roughness) {
+        const cgltf_pbr_metallic_roughness& pbr = m.pbr_metallic_roughness;
+        out.base_color = {unit(pbr.base_color_factor[0], 1), unit(pbr.base_color_factor[1], 1),
+                          unit(pbr.base_color_factor[2], 1)};
+        out.alpha = unit(pbr.base_color_factor[3], 1);
+        out.roughness = unit(pbr.roughness_factor, 1);
+        out.metallic = unit(pbr.metallic_factor, 1);
+        out.base_color_image = read_image(data, pbr.base_color_texture, warnings);
+        out.roughness_metal_image = read_image(data, pbr.metallic_roughness_texture, warnings);
+        out.names_roughness_metal = pbr.metallic_roughness_texture.texture != nullptr;
+    } else if (m.has_pbr_specular_glossiness) {
+        // As a non-metal: its diffuse colour and map, roughness from glossiness.
+        const cgltf_pbr_specular_glossiness& sg = m.pbr_specular_glossiness;
+        out.base_color = {unit(sg.diffuse_factor[0], 1), unit(sg.diffuse_factor[1], 1), unit(sg.diffuse_factor[2], 1)};
+        out.alpha = unit(sg.diffuse_factor[3], 1);
+        out.metallic = 0.0f;
+        out.roughness = 1.0f - unit(sg.glossiness_factor, 0);
+        out.base_color_image = read_image(data, sg.diffuse_texture, warnings);
+        warnings.emplace_back("specular-glossiness materials are read as non-metals (diffuse colour and map, "
+                              "roughness from glossiness); re-export as metallic-roughness for metals");
+    }
+    const float strength = m.has_emissive_strength && std::isfinite(m.emissive_strength.emissive_strength)
+                               ? std::clamp(m.emissive_strength.emissive_strength, 0.0f, 1000.0f)
+                               : 1.0f;
+    out.emissive = {unit(m.emissive_factor[0], 0) * strength, unit(m.emissive_factor[1], 0) * strength,
+                    unit(m.emissive_factor[2], 0) * strength};
+    out.normal_image = read_image(data, m.normal_texture, warnings);
+    out.occlusion_image = read_image(data, m.occlusion_texture, warnings);
+    if (m.emissive_texture.texture != nullptr) warnings.emplace_back("emissive textures are not drawn yet");
+    if (m.alpha_mode != cgltf_alpha_mode_opaque) {
+        warnings.emplace_back("alpha (cut-out or blended) materials are drawn opaque for now");
+    }
+    return out;
+}
+
 ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, bool allow_files) {
     ImportResult result;
     FileContext context;
@@ -985,10 +1083,6 @@ ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, boo
             }
         }
     }
-    if (data->materials_count > 0 || data->textures_count > 0) {
-        result.warnings.emplace_back(
-            "materials and textures are not imported yet; set the entity's material instead");
-    }
     // The nodes shown, in order. cgltf_validate rejects cycles; the visit
     // count bounds a bad file anyway.
     std::vector<const cgltf_node*> shown;
@@ -1032,42 +1126,163 @@ ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, boo
     if (result.mesh.indices.empty()) {
         result.error = "the file has no triangles";
         result.skinned.reset();
+        return result;
     }
+    // The materials the shown meshes use, most triangles first.
+    std::vector<std::pair<const cgltf_material*, u64>> used(importer.material_triangles().begin(),
+                                                            importer.material_triangles().end());
+    std::sort(used.begin(), used.end(), [&](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first; // (pointers: file order)
+    });
+    for (const auto& [material, triangles] : used) {
+        if (material == nullptr) {
+            result.default_material_triangles = triangles;
+            continue;
+        }
+        result.materials.push_back(read_material(*data, *material, result.warnings));
+        result.materials.back().triangles = triangles;
+    }
+    // Repeated warnings (one per material) once.
+    std::vector<std::string> unique;
+    for (std::string& w : result.warnings) {
+        if (std::find(unique.begin(), unique.end(), w) == unique.end()) unique.push_back(std::move(w));
+    }
+    result.warnings = std::move(unique);
     return result;
 }
 
 } // namespace
 
-ImportResult import_gltf_file(const std::filesystem::path& path) {
+namespace {
+
+// The whole file, and its path made absolute (so buffer URIs can be checked
+// against its folder); false with why.
+bool read_gltf_bytes(const std::filesystem::path& path, std::vector<u8>& bytes, std::string& full_utf8,
+                     std::string& error) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
-        ImportResult result;
-        result.error = "could not open the file";
-        return result;
+        error = "could not open the file";
+        return false;
     }
     const std::streamoff length = file.tellg();
     if (length < 0 || static_cast<u64>(length) > k_max_import_file_bytes) {
-        ImportResult result;
-        result.error = describe(cgltf_result_io_error);
-        return result;
+        error = describe(cgltf_result_io_error);
+        return false;
     }
-    std::vector<u8> bytes(static_cast<usize>(length));
+    bytes.resize(static_cast<usize>(length));
     file.seekg(0);
     if (length > 0 && !file.read(reinterpret_cast<char*>(bytes.data()), length)) {
-        ImportResult result;
-        result.error = describe(cgltf_result_io_error);
-        return result;
+        error = describe(cgltf_result_io_error);
+        return false;
     }
-    // Absolute, so buffer URIs can be checked against the file's folder.
     std::error_code ec;
     std::filesystem::path full = std::filesystem::absolute(path, ec);
     if (ec) {
         full = path;
     }
     const std::u8string utf8 = full.u8string();
-    return import(bytes, std::string(utf8.begin(), utf8.end()), true);
+    full_utf8.assign(utf8.begin(), utf8.end());
+    return true;
+}
+
+} // namespace
+
+ImportResult import_gltf_file(const std::filesystem::path& path) {
+    std::vector<u8> bytes;
+    std::string full;
+    ImportResult result;
+    if (!read_gltf_bytes(path, bytes, full, result.error)) return result;
+    return import(bytes, full, true);
+}
+
+bool read_gltf_image(const std::filesystem::path& path, u32 index, std::vector<u8>& out, std::string& error) {
+    out.clear();
+    std::vector<u8> bytes;
+    std::string full;
+    if (!read_gltf_bytes(path, bytes, full, error)) return false;
+    FileContext context;
+    context.allow_files = true;
+    const std::u8string full_u8(full.begin(), full.end());
+    context.folder = std::filesystem::path(full_u8).parent_path().lexically_normal();
+    cgltf_options options{};
+    options.file.read = &read_file;
+    options.file.release = &release_file;
+    options.file.user_data = &context;
+    cgltf_data* raw = nullptr;
+    cgltf_result r = cgltf_parse(&options, bytes.data(), bytes.size(), &raw);
+    std::unique_ptr<cgltf_data, DataDeleter> data(raw);
+    if (r != cgltf_result_success) {
+        error = describe(r);
+        return false;
+    }
+    if (index >= data->images_count) {
+        error = "the file has no image " + std::to_string(index);
+        return false;
+    }
+    const cgltf_image& image = data->images[index];
+    const std::string_view uri = image.uri != nullptr ? image.uri : "";
+    if (image.buffer_view != nullptr) {
+        r = cgltf_load_buffers(&options, data.get(), full.c_str());
+        if (r != cgltf_result_success || cgltf_validate(data.get()) != cgltf_result_success) {
+            error = context.refusal != nullptr ? context.refusal : describe(r == cgltf_result_success ? cgltf_result_invalid_gltf : r);
+            return false;
+        }
+        const u8* view = cgltf_buffer_view_data(image.buffer_view);
+        if (view == nullptr) {
+            error = "image " + std::to_string(index) + "'s buffer has no data";
+            return false;
+        }
+        out.assign(view, view + image.buffer_view->size);
+        return true;
+    }
+    if (uri.starts_with("data:")) {
+        const usize comma = uri.find(',');
+        if (comma == std::string_view::npos || !uri.substr(0, comma).ends_with(";base64")) {
+            error = "image " + std::to_string(index) + " is a data URI that is not base64";
+            return false;
+        }
+        const std::string_view text = uri.substr(comma + 1);
+        cgltf_size size = 0;
+        void* decoded = nullptr;
+        if (!base64_size(text, size) ||
+            (size > 0 && cgltf_load_buffer_base64(&options, size, text.data(), &decoded) != cgltf_result_success)) {
+            error = "image " + std::to_string(index) + "'s data URI is not valid base64";
+            return false;
+        }
+        if (decoded != nullptr) {
+            out.assign(static_cast<const u8*>(decoded), static_cast<const u8*>(decoded) + size);
+            std::free(decoded);
+        }
+        return true;
+    }
+    error = "image " + std::to_string(index) + " is a file beside the glTF, not inside it";
+    return false;
 }
 
 ImportResult import_gltf_memory(std::span<const u8> data) { return import(data, std::string(), false); }
+
+std::vector<std::filesystem::path> gltf_buffer_files(const std::filesystem::path& path) {
+    std::vector<std::filesystem::path> files;
+    std::vector<u8> bytes;
+    std::string full;
+    std::string error;
+    if (!read_gltf_bytes(path, bytes, full, error)) return files;
+    cgltf_options options{};
+    cgltf_data* raw = nullptr;
+    const cgltf_result r = cgltf_parse(&options, bytes.data(), bytes.size(), &raw);
+    std::unique_ptr<cgltf_data, DataDeleter> data(raw);
+    if (r != cgltf_result_success) return files;
+    const std::u8string full_u8(full.begin(), full.end());
+    const std::filesystem::path folder = std::filesystem::path(full_u8).parent_path();
+    for (cgltf_size i = 0; i < data->buffers_count; ++i) {
+        const char* uri = data->buffers[i].uri;
+        if (uri == nullptr || std::string_view(uri).starts_with("data:")) continue;
+        std::string decoded(uri);
+        cgltf_decode_uri(decoded.data());
+        decoded.resize(std::strlen(decoded.c_str()));
+        files.push_back(folder / std::filesystem::path(std::u8string(decoded.begin(), decoded.end())));
+    }
+    return files;
+}
 
 } // namespace giant::geometry

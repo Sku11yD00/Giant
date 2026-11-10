@@ -280,6 +280,114 @@ GIANT_TEST("geometry: glTF texture coordinates and tangents are read, or tangent
     }
 }
 
+GIANT_TEST("geometry: glTF materials are read with their images, most triangles first") {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "giant_gltf_materials";
+    std::filesystem::create_directories(dir / "maps");
+    const std::vector<u8> glb = two_material_quad("maps/rust%20normal.png");
+    {
+        std::ofstream(dir / "quad.glb", std::ios::binary)
+            .write(reinterpret_cast<const char*>(glb.data()), static_cast<std::streamsize>(glb.size()));
+    }
+    const ImportResult r = import_gltf_file(dir / "quad.glb");
+    GIANT_CHECK(r.ok() && r.materials.size() == 2);
+    if (!r.ok() || r.materials.size() != 2) return;
+    const ImportedMaterial& rust = r.materials[0];
+    GIANT_CHECK(rust.name == "rust" && rust.triangles == 2 && r.materials[1].name == "paint" &&
+                r.materials[1].triangles == 1);
+    GIANT_CHECK(near3(rust.base_color, {0.5f, 0.25f, 1.0f}) && std::fabs(rust.roughness - 0.3f) < 1e-6f &&
+                std::fabs(rust.metallic - 0.7f) < 1e-6f && near3(rust.emissive, {4.0f, 2.0f, 0.0f}));
+    GIANT_CHECK(rust.base_color_image.embedded == 0 && rust.base_color_image.path.empty());
+    // The URI decoded, relative to the file's folder (the image need not exist yet).
+    GIANT_CHECK(rust.normal_image.path == "maps/rust normal.png" && rust.normal_image.embedded < 0);
+    GIANT_CHECK(rust.occlusion_image.embedded == 2);
+    GIANT_CHECK(rust.roughness_metal_image.empty());
+    // Their bytes, read from the file again (as a worker cooking them does).
+    std::vector<u8> bytes;
+    std::string error;
+    GIANT_CHECK(read_gltf_image(dir / "quad.glb", 0, bytes, error) && std::string(bytes.begin(), bytes.end()) == "PNGDATA1");
+    GIANT_CHECK(read_gltf_image(dir / "quad.glb", 2, bytes, error) && std::string(bytes.begin(), bytes.end()) == "ABC");
+    GIANT_CHECK(!read_gltf_image(dir / "quad.glb", 1, bytes, error) && error.find("beside") != std::string::npos);
+    GIANT_CHECK(!read_gltf_image(dir / "quad.glb", 3, bytes, error));
+    // The plain one: glTF's defaults; its map on another uv set left out, with a warning.
+    const ImportedMaterial& paint = r.materials[1];
+    GIANT_CHECK(near3(paint.base_color, {1, 1, 1}) && paint.roughness == 1.0f && paint.metallic == 1.0f);
+    GIANT_CHECK(paint.roughness_metal_image.empty());
+    usize texcoord_warnings = 0;
+    for (const std::string& w : r.warnings) texcoord_warnings += w.find("TEXCOORD_0") != std::string::npos ? 1u : 0u;
+    GIANT_CHECK(texcoord_warnings == 1);
+    GIANT_CHECK(r.default_material_triangles == 0);
+    // From memory the beside-file reference is kept (resolving it is the caller's).
+    const ImportResult memory = import_gltf_memory(glb);
+    GIANT_CHECK(memory.ok() && memory.materials.size() == 2 && memory.materials[0].base_color_image.embedded == 0);
+    // URIs that leave the folder, name a scheme or a drive, or hide a
+    // separator in a backslash are left out.
+    for (const char* bad : {"../secret.png", "..%2Fsecret.png", "..%5C..%5Cetc%5Cpasswd", "/etc/passwd",
+                            "file:///etc/passwd", "C:/x.png", "", "maps/..", "maps/"}) {
+        const std::vector<u8> outside = two_material_quad(bad);
+        const ImportResult escaped = import_gltf_memory(outside);
+        GIANT_CHECK(escaped.ok() && escaped.materials.size() == 2 && escaped.materials[0].normal_image.empty());
+        if (!escaped.materials.empty() && !escaped.materials[0].normal_image.empty()) {
+            std::fprintf(stderr, "    accepted %s as %s\n", bad, escaped.materials[0].normal_image.path.c_str());
+        }
+    }
+}
+
+namespace {
+// The GLB with `from` in its JSON replaced by `to` (chunks rebuilt).
+std::vector<u8> replace_json(const std::vector<u8>& glb, const std::string& from, const std::string& to) {
+    const u32 json_length = static_cast<u32>(glb[12] | (glb[13] << 8) | (glb[14] << 16) | (glb[15] << 24));
+    std::string json(glb.begin() + 20, glb.begin() + 20 + json_length);
+    const usize at = json.find(from);
+    if (at != std::string::npos) json.replace(at, from.size(), to);
+    const std::vector<u8> bin(glb.begin() + 20 + json_length + 8, glb.end());
+    return make_glb(json, bin);
+}
+} // namespace
+
+GIANT_TEST("geometry: glTF data URIs decode exactly, padded or not; bad ones are refused") {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "giant_gltf_base64";
+    std::filesystem::create_directories(dir);
+    const auto with_occlusion = [&](const std::string& uri) {
+        const std::vector<u8> out = replace_json(two_material_quad("n.png"), "data:image/png;base64,QUJD", uri);
+        std::ofstream(dir / "q.glb", std::ios::binary)
+            .write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    };
+    std::vector<u8> bytes;
+    std::string error;
+    with_occlusion("data:image/png;base64,QUJDRA"); // "ABCD", unpadded
+    GIANT_CHECK(read_gltf_image(dir / "q.glb", 2, bytes, error) && std::string(bytes.begin(), bytes.end()) == "ABCD");
+    with_occlusion("data:image/png;base64,QUJDRA=="); // padded
+    GIANT_CHECK(read_gltf_image(dir / "q.glb", 2, bytes, error) && std::string(bytes.begin(), bytes.end()) == "ABCD");
+    with_occlusion("data:image/png;base64,="); // nothing
+    GIANT_CHECK(read_gltf_image(dir / "q.glb", 2, bytes, error) && bytes.empty());
+    with_occlusion("data:image/png;base64,QUJDR"); // one char over a group: not base64
+    GIANT_CHECK(!read_gltf_image(dir / "q.glb", 2, bytes, error));
+    with_occlusion("data:image/png,ABC"); // not base64
+    GIANT_CHECK(!read_gltf_image(dir / "q.glb", 2, bytes, error));
+}
+
+GIANT_TEST("geometry: glTF's default material is counted; lines do not count; spec-gloss is a non-metal") {
+    const std::vector<u8> glb = two_material_quad("n.png");
+    // The "paint" triangle without its material: default 1, rust 2.
+    const ImportResult r = import_gltf_memory(replace_json(glb, R"("indices":2,"material":0})", R"("indices":2})"));
+    GIANT_CHECK(r.ok() && r.materials.size() == 1 && r.materials[0].name == "rust" && r.default_material_triangles == 1);
+    // Rust drawn as lines instead: no triangles, so not listed.
+    const ImportResult l =
+        import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":1})"));
+    GIANT_CHECK(l.ok() && l.materials.size() == 1 && l.materials[0].name == "paint");
+    // Paint as specular-glossiness: its diffuse colour, no metal, roughness from glossiness.
+    const ImportResult sg = import_gltf_memory(replace_json(
+        glb, R"({"name":"paint","pbrMetallicRoughness":{"metallicRoughnessTexture":{"index":0,"texCoord":1}}})",
+        R"({"name":"paint","extensions":{"KHR_materials_pbrSpecularGlossiness":{"diffuseFactor":[0.2,0.4,0.6,1],)"
+        R"("glossinessFactor":0.75,"diffuseTexture":{"index":0}}}})"));
+    GIANT_CHECK(sg.ok() && sg.materials.size() == 2);
+    if (sg.ok() && sg.materials.size() == 2) {
+        const ImportedMaterial& p = sg.materials[1];
+        GIANT_CHECK(near3(p.base_color, {0.2f, 0.4f, 0.6f}) && p.metallic == 0.0f && std::fabs(p.roughness - 0.25f) < 1e-6f &&
+                    p.base_color_image.embedded == 0);
+    }
+}
+
 GIANT_TEST("geometry: vertices pack to 28 bytes and back within a hair") {
     // Directions over the sphere, both hemispheres and the axes.
     std::vector<Vec3> dirs = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
@@ -496,6 +604,11 @@ GIANT_TEST("geometry: a .gltf file reads its buffer from next to it") {
     if (!r.ok()) std::fprintf(stderr, "    %s\n", r.error.c_str());
     GIANT_CHECK(r.mesh.indices.size() == 3);
     GIANT_CHECK(!import_gltf_file(dir / "missing.gltf").ok());
+    // Its buffer files, decoded (to tell when images inside them change).
+    const std::vector<std::filesystem::path> buffers = gltf_buffer_files(dir / "tri.gltf");
+    GIANT_CHECK(buffers.size() == 1 && buffers[0].filename() == "tri data.bin" &&
+                std::filesystem::exists(buffers[0]));
+    GIANT_CHECK(gltf_buffer_files(dir / "missing.gltf").empty());
 
     // A buffer file shorter than its byteLength must not be read past.
     {
