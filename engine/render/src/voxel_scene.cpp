@@ -1112,10 +1112,9 @@ bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_ti
                         if (dot(own, out) < 0.0f) {
                             own = own * -1.0f;
                         }
-                        facing = normalize_or_zero(own + (out - own) * copy.canopy);
-                        if (facing == Vec3{}) {
-                            facing = out;
-                        }
+                        // (Never cancels once own is on out's side; out
+                        // zero, at the middle: add_triangle keeps own.)
+                        facing = own + (out - own) * copy.canopy;
                     }
                     m_builder.add_triangle(a, b, d, copy.color, copy.stand_in, copy.coverage, facing);
                 }

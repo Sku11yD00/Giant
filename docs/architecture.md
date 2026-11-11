@@ -493,11 +493,12 @@ an offline cooker can use it without a device.
   pulled back where it would face away from the viewer (no grazing
   sparkle on a crown's edge). Shadows, GI lookups and contact shadows keep
   the surface's own normal; the middle is the crown's at rest (a swaying
-  crown's light shifts a little). The voxel world bends
-  each triangle's facing the same way (its side facing out, bent towards
-  the direction through its centroid: `BrickBuilder`'s `facing`; exact for
-  leaf-sized triangles, coarse for big ones), so far crowns and the bounce light off them match; this also
-  stops a two-sided card's opposite faces cancelling to +Y. It works per
+  crown's light shifts a little). The voxel world bends each triangle's
+  facing the same way (its side facing out, bent towards the direction
+  through its centroid: `BrickBuilder`'s `facing`; exact for leaf-sized
+  triangles, coarse for big ones), so far crowns and the bounce light off
+  them match; this also stops a two-sided card's opposite faces
+  cancelling to +Y. It works per
   instance, so a tree's leaves want their own mesh (entity, kit piece or
   scatter item) apart from the trunk.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
