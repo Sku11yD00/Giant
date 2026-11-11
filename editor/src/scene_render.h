@@ -106,7 +106,7 @@ struct SceneFrame {
 
     struct MaterialKey {
         // The values, the texture refs, 1 for the ground's terrain material,
-        // then two-sided, translucency and alpha cutoff.
+        // then two-sided, translucency, alpha cutoff and canopy.
         u32 bits[19];
         bool operator==(const MaterialKey&) const = default;
     };

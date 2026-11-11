@@ -1105,9 +1105,17 @@ bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_ti
                     }
                     Vec3 facing{};
                     if (copy.canopy > 0.0f) {
-                        const Vec3 own = normalize_or_zero(cross(b - a, d - a));
+                        // As resolve.slang: the side seen from outside
+                        // (a leaf card's either way), bent out.
+                        Vec3 own = normalize_or_zero(cross(b - a, d - a));
                         const Vec3 out = normalize_or_zero((a + b + d) * (1.0f / 3.0f) - middle);
-                        facing = own + (out - own) * copy.canopy;
+                        if (dot(own, out) < 0.0f) {
+                            own = own * -1.0f;
+                        }
+                        facing = normalize_or_zero(own + (out - own) * copy.canopy);
+                        if (facing == Vec3{}) {
+                            facing = out;
+                        }
                     }
                     m_builder.add_triangle(a, b, d, copy.color, copy.stand_in, copy.coverage, facing);
                 }

@@ -489,10 +489,14 @@ an offline cooker can use it without a device.
   the instance's bounding sphere's centre (resolve.slang, after the
   two-sided flip and the normal map), so a crown of leaf cards lights as
   one rounded mass: bright towards the sun, falling off around it, and
-  glowing through (translucency) on the far side. Shadows, GI lookups and
-  contact shadows keep the surface's own normal. The voxel world bends
-  each triangle's facing the same way (from its centroid, `BrickBuilder`'s
-  `facing`), so far crowns and the bounce light off them match; this also
+  glowing through (translucency) on the far side; the bent normal is
+  pulled back where it would face away from the viewer (no grazing
+  sparkle on a crown's edge). Shadows, GI lookups and contact shadows keep
+  the surface's own normal; the middle is the crown's at rest (a swaying
+  crown's light shifts a little). The voxel world bends
+  each triangle's facing the same way (its side facing out, bent towards
+  the direction through its centroid: `BrickBuilder`'s `facing`; exact for
+  leaf-sized triangles, coarse for big ones), so far crowns and the bounce light off them match; this also
   stops a two-sided card's opposite faces cancelling to +Y. It works per
   instance, so a tree's leaves want their own mesh (entity, kit piece or
   scatter item) apart from the trunk.

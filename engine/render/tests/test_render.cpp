@@ -3325,6 +3325,7 @@ GIANT_TEST("render: d3d12 canopy: a crown's normals bend out from its middle, li
     instances[0].scale = {20.0f, 1.0f, 20.0f};
     std::vector<Material> materials(1);
     materials[0].base_color = {0.2f, 0.6f, 0.1f};
+    materials[0].roughness = 1.0f; // diffuse-like: highlights would blur the comparison
     FrameInput frame;
     frame.settings.auto_exposure = false;
     frame.settings.bloom = false;
@@ -3371,12 +3372,12 @@ GIANT_TEST("render: d3d12 canopy: a crown's normals bend out from its middle, li
     const auto half = draw();
     std::printf("    left/right: flat %d %d, crown %d %d, half %d %d\n", flat[0], flat[1], crown[0], crown[1], half[0],
                 half[1]);
+    // Image right is +x, towards the sun.
     GIANT_CHECK(std::abs(flat[0] - flat[1]) <= 2);
-    GIANT_CHECK(std::abs(crown[0] - crown[1]) > 60); // one side to the sun, the other away
+    GIANT_CHECK(crown[1] > crown[0] + 60); // one side to the sun, the other away
+    GIANT_CHECK(crown[0] <= flat[0]);      // the far side turned from the sun
     GIANT_CHECK(past_one == crown);
-    const int crown_gap = std::abs(crown[0] - crown[1]);
-    const int half_gap = std::abs(half[0] - half[1]);
-    GIANT_CHECK(half_gap > 10 && half_gap < crown_gap);
+    GIANT_CHECK(half[1] > flat[1] + 10 && half[1] < crown[1]); // half bent: between
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

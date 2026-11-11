@@ -880,8 +880,13 @@ Output shade_pixel(float4 position) {
     if (canopy > 0.0) {
         // A leafy crown, lit as one rounded mass: the normal bent out from
         // the middle of the instance (its bounding sphere).
+        // (The middle at rest: a swaying crown's light shifts a little.)
         const float3 out_n = safe_normalize(world - s.center, n);
         n = safe_normalize(lerp(n, out_n, canopy), out_n);
+        // Never turned away from the viewer (the side of a crown seen
+        // edge-on): a normal facing away lights as grazing and sparkles.
+        const float3 to_eye = safe_normalize(-world, n);
+        n = safe_normalize(n + to_eye * max(0.0, 0.05 - dot(n, to_eye)), n);
     }
     if (extras.terrain_on != 0u && (material_flags & k_material_terrain) != 0u) {
         // The ground's layers, from terrain.slang's pass.

@@ -268,8 +268,27 @@ GIANT_TEST("voxel scene: a canopy material's voxels face out from the instance's
     b.step(); // a changed row, in an unchanged cell
     GIANT_CHECK(b.voxels->stats().built > 0);
     GIANT_CHECK(b.voxel_at(high, packed));
-    const Vec3 n = voxel::unpack_normal(packed);
-    GIANT_CHECK(n.x > 0.3f && n.y > 0.3f);
+    // Out from the cube's middle through each triangle's centroid (a leaf
+    // card's is its place; the cube's two big triangles per face lean the
+    // voxel towards their own): turned up, off the face's own +x.
+    const Vec3 full = voxel::unpack_normal(packed);
+    GIANT_CHECK(full.x > 0.7f && full.y > 0.2f);
+    // Half bent: between its own facing (+x) and the full bend.
+    m.canopy = 0.5f;
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxel_at(high, packed));
+    const Vec3 half = voxel::unpack_normal(packed);
+    GIANT_CHECK(half.x > full.x && half.y > 0.05f && half.y < full.y);
+    // Mirrored (its triangles wound the other way, its middle placed by
+    // the negative scale too): the same.
+    b.instances[0].scale = {-2.0f, 2.0f, 2.0f};
+    b.step();
+    GIANT_CHECK(b.voxel_at(high, packed));
+    GIANT_CHECK(dot(voxel::unpack_normal(packed), half) > 0.97f);
+    m.canopy = 1.0f;
+    b.materials = {m};
+    b.step();
     // Out of range is kept to 0 to 1 (as the renderer reads it): no rebuild.
     m.canopy = 4.0f;
     b.materials = {m};

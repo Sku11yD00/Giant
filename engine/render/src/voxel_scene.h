@@ -228,7 +228,7 @@ private:
     Vec3 color_of(const Instance& in, std::span<const Material> materials) const;
     float coverage_of(const Instance& in, std::span<const Material> materials) const;
     float canopy_of(const Instance& in, std::span<const Material> materials) const;
-    // Marks the material rows whose voxel look (colour, coverage) changed
+    // Marks the material rows whose voxel look (colour, coverage, canopy) changed
     // since the last update in m_material_changed; true if any did.
     bool material_changes(std::span<const Material> materials);
     bool differs(const Instance& in, std::span<const Material> materials, const Copy& copy) const;

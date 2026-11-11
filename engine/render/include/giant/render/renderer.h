@@ -146,8 +146,11 @@ struct Material {
     float alpha_cutoff = 0.0f;
     // Leafy crowns (0 to 1): the shading normal bends this far towards the
     // direction out from the instance's bounding sphere's centre, so a
-    // crown of cards is lit as one rounded mass; the voxel world's facing
-    // bends the same way. Shadows keep the surface's own normal.
+    // crown of cards is lit as one rounded mass (kept from facing away from
+    // the viewer); the voxel world's facing bends the same way. Shadows
+    // keep the surface's own normal. At 1 the normal map's detail is gone
+    // (0.5 to 0.8 keeps some); the middle is the crown's at rest, so a
+    // swaying crown's light shifts a little.
     float canopy = 0.0f;
     // For the voxel world, which cannot sample textures: the base colour
     // texture's average colour (linear; for a cut-out, of what its cutoff
