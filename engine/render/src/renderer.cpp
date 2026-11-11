@@ -5,6 +5,7 @@
 #include "giant/geometry/mesh.h"
 #include "cells.h"
 #include "decals.h"
+#include "lights.h"
 #include "brdf.h"
 #include "exposure.h"
 #include "instance_store.h"
@@ -197,6 +198,11 @@ struct Renderer::FrameData {
     u32 entry_offset = 0;
     u32 tile_columns = 0; // 0: no decals this frame
     u32 tile_rows = 0;
+    rhi::TransientMemory lights;    // lights, clusters, entries (LightBins)
+    u32 light_offset = 0;
+    u32 light_cluster_offset = 0;
+    u32 light_entry_offset = 0;
+    u32 light_count = 0; // 0: no local lights this frame
     rhi::TransientMemory instances;
     rhi::TransientMemory meshes;
     u32 instance_count = 0;
@@ -252,7 +258,8 @@ std::unique_ptr<Renderer> Renderer::create(rhi::Device& device, const RendererDe
 }
 
 Renderer::Renderer(ConstructKey, rhi::Device& device, const RendererDesc& desc)
-    : m_device(device), m_desc(desc), m_decal_bins(std::make_unique<DecalBins>()) {}
+    : m_device(device), m_desc(desc), m_decal_bins(std::make_unique<DecalBins>()),
+      m_light_bins(std::make_unique<LightBins>()) {}
 
 Renderer::~Renderer() {
     // Deferred by the device until the GPU is done with them.
@@ -1483,6 +1490,8 @@ void Renderer::read_gpu_stats() {
         m_stats.materials = cpu.materials;
         m_stats.decals = cpu.decals;
         m_stats.decal_overflow = cpu.decal_overflow;
+        m_stats.lights = cpu.lights;
+        m_stats.light_overflow = cpu.light_overflow;
         copy_streaming_stats();
     }
 }
@@ -2583,6 +2592,34 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         log_warning("render", "too many decals on screen; some are not drawn");
     }
 
+    // Local lights near enough, binned into the view's clusters (lit views).
+    if (!frame.lights.empty() && settings.local_lights && lit_view) {
+        bin_lights(frame.lights, frame.view, aspect, frustum, *m_light_bins);
+    } else {
+        m_light_bins->lights.clear();
+        m_light_bins->overflow = false;
+    }
+    if (!m_light_bins->lights.empty()) {
+        const LightBins& bins = *m_light_bins;
+        const usize light_bytes = bins.lights.size() * sizeof(gpu::Light);
+        const usize cluster_bytes = bins.clusters.size() * 4;
+        const usize total = light_bytes + cluster_bytes + std::max<usize>(bins.entries.size(), 1) * 4;
+        data.lights = cmd.allocate(static_cast<u32>(total));
+        if (data.lights.data != nullptr) {
+            std::memcpy(data.lights.data, bins.lights.data(), light_bytes);
+            std::memcpy(data.lights.data + light_bytes, bins.clusters.data(), cluster_bytes);
+            std::memcpy(data.lights.data + light_bytes + cluster_bytes, bins.entries.data(), bins.entries.size() * 4);
+            data.light_offset = data.lights.offset;
+            data.light_cluster_offset = data.lights.offset + static_cast<u32>(light_bytes);
+            data.light_entry_offset = data.light_cluster_offset + static_cast<u32>(cluster_bytes);
+            data.light_count = static_cast<u32>(bins.lights.size());
+        }
+    }
+    if (m_light_bins->overflow && !m_lights_logged) {
+        m_lights_logged = true;
+        log_warning("render", "too many local lights in view; the furthest are not shaded");
+    }
+
     // Instances and the mesh table.
     std::vector<gpu::MeshEntry>& table = m_table;
     std::vector<bool>& used = m_used;
@@ -3003,6 +3040,13 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.terrain_surface = terrain ? m_device.read_descriptor(m_terrain_surface) : data.frame.descriptor;
     extras.terrain_normal = terrain ? m_device.read_descriptor(m_terrain_normal) : data.frame.descriptor;
     extras.terrain_on = terrain ? 1u : 0u;
+    extras.lights = data.light_count != 0 ? data.lights.descriptor : data.frame.descriptor;
+    extras.light_count = data.light_count;
+    extras.light_offset = data.light_offset;
+    extras.light_cluster_offset = data.light_cluster_offset;
+    extras.light_entry_offset = data.light_entry_offset;
+    extras.light_near = k_light_near;
+    extras.light_scale = light_slice_scale();
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;
@@ -3231,6 +3275,8 @@ void Renderer::finish_stats(const FrameData& data) {
     m_stats.cells_changed = m_cells_changed;
     m_stats.decals = data.tile_columns != 0 ? static_cast<u32>(m_decal_bins->decals.size()) : 0;
     m_stats.decal_overflow = m_decal_bins->overflow;
+    m_stats.lights = data.light_count;
+    m_stats.light_overflow = m_light_bins->overflow;
 }
 
 void Renderer::draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,

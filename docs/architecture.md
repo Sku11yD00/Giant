@@ -612,6 +612,24 @@ an offline cooker can use it without a device.
   ring, seeded splat and cracks), anti-aliased to the pixel's footprint;
   image stamps arrive with textures. Surfaces facing away from the stamp
   take none of it, and the box's top and bottom fade out.
+- **Local lights (lights part L2a, `src/lights.h`, `shaders/lights.slang`).**
+  `FrameInput::lights` takes lamps: points, and spots shining down a cone
+  (inner and outer half angles, a smooth edge between). Light at distance
+  d is colour x intensity / d^2 in the sun's relative units, eased to
+  nothing at `range` by a windowed falloff (`(1 - (d/range)^4)^2`), with
+  the source's radius added to d^2 so close surfaces never flare, and its
+  highlights widened by that radius (Karis 2013). Like
+  decals, they are binned on the CPU each frame (never late): the view is
+  cut into 16 x 9 screen tiles by 24 depth slices spaced evenly in log
+  depth from 0.5 m to 4096 m, each light's bounding sphere (a spot's is
+  the sphere round its cone) lists it in the clusters it may touch,
+  nearest lights first, at most 4096 lights a frame and 256 a cluster
+  (`RenderStats::light_overflow`: the furthest were left out). Shading
+  finds its pixel's cluster and lights the surface with each light listed
+  there, GGX and Lambert as for the sun. Lit views only, not the far
+  field; `RenderSettings::local_lights` turns them off. No shadows yet
+  (they light through walls until L3), and the voxel world's bounce light
+  does not see them yet (L4).
 - **Anti-aliasing (N1 part 6, `src/smaa.h`, `shaders/smaa.slang`).** No
   temporal anti-aliasing: nothing uses earlier frames, so the image is as
   sharp moving as standing still. Edges: SMAA 1x (High preset, no diagonal

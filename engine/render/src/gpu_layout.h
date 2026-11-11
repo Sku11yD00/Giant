@@ -125,6 +125,21 @@ struct Decal {
 };
 static_assert(sizeof(Decal) == 96);
 
+// A local light (src/lights.h), camera-relative. Spot: the cone's light is
+// saturate(dot(-l, direction) * spot_scale + spot_offset)^2 (a point
+// light: scale 0, offset 1).
+struct Light {
+    float position[3];
+    float range;
+    float color[3]; // colour x intensity
+    float source_radius;
+    float direction[3];
+    float spot_scale;
+    float spot_offset;
+    u32 pad[3];
+};
+static_assert(sizeof(Light) == 64);
+
 struct MeshEntry {
     u32 residency;  // u32 per group: its geometry's byte offset in the pool, or k_not_resident
     u32 group_base; // first of its groups in the global numbering (usage)
@@ -408,7 +423,10 @@ struct ResolveExtras {
     // size r32_float (contact_on 0: off).
     u32 contact;
     u32 contact_on;
-    u32 pad_contact[2];
+    // Local lights (src/lights.h): light_count gpu::Light, their clusters
+    // and entries share one upload (light_count 0: none).
+    u32 lights;
+    u32 light_count;
     // Terrain layers (terrain.slang): the ground's colour and roughness
     // and its shading normal, full size rgba16_float (terrain_on 0: off).
     u32 terrain_surface;
@@ -423,8 +441,16 @@ struct ResolveExtras {
     float shadow_prev_x[4];
     float shadow_prev_y[4];
     float shadow_prev_z[4];
+    // Local lights, continued: where in the upload, and the depth slices
+    // (slice = floor(log2(depth / light_near) * light_scale), 0 nearer).
+    u32 light_offset;
+    u32 light_cluster_offset; // u32 first entry, u32 count per cluster
+    u32 light_entry_offset;   // u32 light index each
+    float light_near;
+    float light_scale;
+    u32 pad_lights[3];
 };
-static_assert(sizeof(ResolveExtras) == 256);
+static_assert(sizeof(ResolveExtras) == 288);
 
 // resolve.slang's dust puff: centre camera-relative.
 struct GpuDustPuff {
