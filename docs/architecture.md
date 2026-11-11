@@ -2502,10 +2502,14 @@ the view, so every mesh casts at the detail its shadow texels need.
   the previous view's page on that level before a coarser one, so a
   running clock's shadows hand over page by page with no gap or blur.
   The pages used lately are asked for again in the new view at once
-  (about the camera's page as before), drawn coarse levels first; the
-  previous view's pages go back to the pool once none of the new view's
-  waits to be drawn for the first time, one at a time (finest first)
-  when the pool runs dry, all at the next step, or after 600 frames.
+  (about the camera's page as before; into free room only), drawn coarse
+  levels first; the previous view's pages go back to the pool once none
+  of the new view's waits to be drawn for the first time and shading's
+  requests in it have come back (3 frames), up to 64 a frame (coarse
+  levels first, as the new view draws them) when shading asks for pages
+  and the pool is dry, or after 600 frames. A new view that drew less
+  than the previous one holds (two steps close together, a fast clock)
+  leaves that one in place.
   Shadows follow the
   stepped sun, so they may lag the lighting's sun by up to a quarter of a
   degree (a 100 m tower's shadow by about 0.4 m).

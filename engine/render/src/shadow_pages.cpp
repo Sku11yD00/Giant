@@ -97,6 +97,7 @@ void ShadowPages::free_page(Page& p) {
 void ShadowPages::begin_frame(const DVec3& camera, const Vec3& sun_direction) {
     ++m_frame;
     m_stats.drawn = 0;
+    m_prev_given = 0;
     for (Page& p : m_pages) {
         p.draw = false;
     }
@@ -177,7 +178,10 @@ void ShadowPages::begin_frame(const DVec3& camera, const Vec3& sun_direction) {
                 m_reask_indices.push_back(q.level * k_slots + slot_of(x, y));
             }
         }
-        allocate(m_reask_indices);
+        // Only into free room: none of the previous view's pages goes
+        // before anything has been drawn (those that find none are asked
+        // for again by shading).
+        allocate(m_reask_indices, false);
         m_reask.clear();
     }
     m_stats.resident = m_desc.pool_pages - u32(m_free.size());
@@ -185,7 +189,31 @@ void ShadowPages::begin_frame(const DVec3& camera, const Vec3& sun_direction) {
 
 void ShadowPages::retire_view(const DVec3& camera) {
     const DVec3 light = to_light(camera);
-    release_previous();
+    m_reask.clear();
+    // A view that drew less than the previous one holds (two steps close
+    // together, a fast clock): the previous stays, this one's pages go.
+    u32 drawn = 0;
+    for (const Page& p : m_pages) {
+        drawn += p.physical != k_no_page && p.drawn ? 1u : 0u;
+    }
+    const bool keep = m_prev.on && drawn < m_prev.held;
+    if (!keep) {
+        release_previous();
+    }
+    for (u32 i = 0; i < m_pages.size(); ++i) {
+        Page& p = m_pages[i];
+        if (p.physical != k_no_page && p.used + k_recent_frames >= m_frame) {
+            const u32 level = i / k_slots;
+            const double size = page_size(level);
+            m_reask.push_back({level, p.x - page_floor(light.x / size), p.y - page_floor(light.y / size)});
+        }
+    }
+    if (keep) {
+        for (Page& p : m_pages) {
+            free_page(p);
+        }
+        return;
+    }
     m_prev.on = true;
     m_prev.basis = m_basis;
     m_prev.anchor = m_anchor;
@@ -193,17 +221,11 @@ void ShadowPages::retire_view(const DVec3& camera) {
     m_prev.table.assign(m_pages.size(), k_no_page);
     m_prev.since = m_frame;
     m_prev.held = 0;
-    m_prev.cursor = 0;
-    m_reask.clear();
+    m_prev.cursor = u32(m_pages.size());
     for (u32 i = 0; i < m_pages.size(); ++i) {
         Page& p = m_pages[i];
         if (p.physical == k_no_page) {
             continue;
-        }
-        if (p.used + k_recent_frames >= m_frame) {
-            const u32 level = i / k_slots;
-            const double size = page_size(level);
-            m_reask.push_back({level, p.x - page_floor(light.x / size), p.y - page_floor(light.y / size)});
         }
         if (p.drawn) {
             m_prev.table[i] = (p.physical & k_page_mask) | k_drawn_bit;
@@ -235,8 +257,10 @@ bool ShadowPages::release_previous_page() {
     if (!m_prev.on) {
         return false;
     }
-    for (; m_prev.cursor < m_prev.table.size(); ++m_prev.cursor) {
-        u32& e = m_prev.table[m_prev.cursor];
+    // Coarse levels first: the new view draws those first, so they are the
+    // first the previous view's are no longer needed for.
+    for (; m_prev.cursor > 0; --m_prev.cursor) {
+        u32& e = m_prev.table[m_prev.cursor - 1];
         if (e != k_no_page) {
             m_free.push_back(e & k_page_mask);
             e = k_no_page;
@@ -318,11 +342,11 @@ void ShadowPages::request(std::span<const u32> bits, const Windows* asked_in) {
             m_pages[i].used = m_frame;
         }
     }
-    allocate(m_asked);
+    allocate(m_asked, true);
     m_stats.resident = m_desc.pool_pages - u32(m_free.size());
 }
 
-void ShadowPages::allocate(std::span<const u32> indices) {
+void ShadowPages::allocate(std::span<const u32> indices, bool asked) {
     const auto page_in = [](i32 window, u32 slot_axis) {
         return window + wrap(i32(slot_axis) - window, i32(k_pages_per_axis));
     };
@@ -336,10 +360,13 @@ void ShadowPages::allocate(std::span<const u32> indices) {
         if (p.physical != k_no_page) {
             continue;
         }
-        if (m_free.empty()) {
-            release_previous_page();
+        if (m_free.empty() && asked && m_prev_given < k_previous_given_per_frame) {
+            m_prev_given += release_previous_page() ? 1u : 0u;
         }
         if (m_free.empty()) {
+            if (!asked) {
+                continue; // (re-asked: only where there is room)
+            }
             if (!listed) {
                 listed = true;
                 for (u32 j = 0; j < m_pages.size(); ++j) {
@@ -495,14 +522,17 @@ std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget, u32 sway_budget) {
     m_stats.drawn = u32(count);
     m_stats.waiting = u32(m_waiting.size() - count);
     // The previous view is needed while any page of this one is still to
-    // be drawn for the first time (drawn this frame: not read until next).
-    if (m_prev.on) {
+    // be drawn for the first time (those drawn this frame are read this
+    // frame), and until shading's requests in the new view have come back
+    // (they find pages the ones asked again missed).
+    if (m_prev.on && m_frame > m_prev.since + k_previous_min_frames) {
         bool first_waiting = false;
         for (size_t k = count; k < m_waiting.size() && !first_waiting; ++k) {
             first_waiting = !m_pages[m_waiting[k]].drawn;
         }
-        if (!first_waiting && m_prev.since < m_frame) {
+        if (!first_waiting) {
             release_previous();
+            m_stats.resident = m_desc.pool_pages - u32(m_free.size());
         }
     }
     // Then pages under swaying things, drawn longest ago first (those
