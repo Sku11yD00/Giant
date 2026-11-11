@@ -684,6 +684,7 @@ void GameSaves::take(EditorState& state) {
     state.scene.clear_game_damage();
     clear_ground(state);
     drop_weather();
+    if (state.clock != nullptr) state.clock->show(state.scene.clock); // (a save without a time shows the scene's)
     m_poses_waiting.clear();
     m_poses_from.reset();
     m_carried_feet.reset();

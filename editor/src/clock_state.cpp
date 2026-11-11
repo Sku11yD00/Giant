@@ -42,10 +42,7 @@ ClockLight clock_light(const world::Lighting& lighting, const world::Clock& cloc
 void clock_sky(render::Sky& sky, const world::Clock& clock) {
     if (!clock.on) return;
     const world::SkyBodies b = world::sky_bodies(clock);
-    // Under a moon up, brighter (the sky it lights would hide them: the
-    // moon's light is far brighter against the stars' than the real one's).
-    const float moon_up = std::clamp((b.moon_elevation_degrees + 6.0f) / 16.0f, 0.0f, 1.0f);
-    sky.stars = world::star_brightness(b) * (1.0f + 4.0f * b.moon_lit * moon_up);
+    sky.stars = world::star_brightness(b);
     sky.celestial = b.to_celestial;
     sky.moon = world::moon_leads(b);
     sky.moon_lit = b.moon_lit;

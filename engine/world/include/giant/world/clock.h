@@ -72,8 +72,9 @@ bool moon_leads(const SkyBodies& bodies);
 // degrees under), in the moon's colour. Clock off: unchanged.
 Lighting clock_lighting(const Lighting& lighting, const Clock& clock);
 
-// How bright the stars are drawn (0 by day, 1 at night): coming out from
-// the sun 4 degrees under the horizon to 12 under.
+// How bright the stars are drawn (0 by day, 1 on a moonless night): coming
+// out from the sun 4 degrees under the horizon to 12 under, up to 5 times
+// brighter under a full moon up (its sky would hide them).
 float star_brightness(const SkyBodies& bodies);
 
 // The sky's ambient light at this time, against the day's (0 to 1): the

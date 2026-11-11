@@ -156,7 +156,11 @@ Lighting clock_lighting(const Lighting& lighting, const Clock& clock) {
 
 bool moon_leads(const SkyBodies& b) { return !(b.sun_elevation_degrees > k_moon_leads_below); }
 
-float star_brightness(const SkyBodies& b) { return smooth(-4.0f, -12.0f, b.sun_elevation_degrees); }
+float star_brightness(const SkyBodies& b) {
+    // Under a moon up, brighter: the sky it lights would hide them (the
+    // moon's light is far brighter against the stars' than the real one's).
+    return smooth(-4.0f, -12.0f, b.sun_elevation_degrees) * (1.0f + 4.0f * b.moon_lit * daylight(b.moon_elevation_degrees));
+}
 
 float ambient_scale(const SkyBodies& b) {
     const float sun = daylight(b.sun_elevation_degrees);

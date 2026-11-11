@@ -373,7 +373,8 @@ float3 star_light(Sky s, float3 dir) {
     const float3 p = e * cells;
     // A star's radius in cells: at most a quarter, so all it lights is
     // within half a cell of it and the 8 cells round p - 0.5 hold every
-    // star that can reach p.
+    // star that can reach p (in views under about 330 pixels tall at 60
+    // degrees the cap makes them narrower than a pixel).
     const float spread = clamp(s.pixel_angle * cells * 0.75, 0.02, 0.25);
     const int3 base = int3(floor(p - 0.5));
     float3 light = float3(0.0, 0.0, 0.0);
@@ -411,16 +412,18 @@ float3 sky_background(Sky s, float3 dir) {
     const float mu = dot(dir, s.sun_direction);
     float disc = smoothstep(0.99996, 0.99999, mu); // about half a degree across
     if (s.moon > 0.5) {
-        // The moon's face: its true size (0.26 degrees in radius, a
-        // tight edge), lit from the sun with its terminator the phase and
+        // The moon's face: its true size (0.26 degrees in radius), lit from the sun with its terminator the phase and
         // no darkening towards the limb (Lommel-Seeliger: the full moon a
         // flat disc), the dark side faintly by the earth. Its light
         // (sun_light) is already scaled by the share lit: the face's own
         // brightness is not.
-        disc = smoothstep(0.99998988, 0.9999912, mu);
+        // Its edge half a pixel soft either side (no crawl as it moves).
+        const float radius = 0.0045;
+        const float off = length(dir - s.sun_direction * mu); // the sine of the angle from its middle
+        const float soft = max(0.5 * s.pixel_angle, 0.0001);
+        disc = mu > 0.0 ? 1.0 - smoothstep(radius - soft, radius + soft, off) : 0.0;
         float shade = 0.0;
         if (disc > 0.0) {
-            const float radius = 0.0045;
             float3 across = (dir - s.sun_direction * mu) / radius;
             const float r2 = dot(across, across);
             if (r2 > 1.0) across *= rsqrt(r2); // (the soft edge: shaded as the limb)

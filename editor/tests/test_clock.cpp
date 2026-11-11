@@ -69,7 +69,7 @@ GIANT_TEST("clock commands: set, get, refused out of range, undoable, saved with
     GIANT_CHECK(f.run("set_time", {{"hours", 0}}).ok);
     f.clock.update(f.state.scene.clock, 0.0, false);
     r = f.run("get_time");
-    GIANT_CHECK(r.ok && r.value["light"] == "moon" && r.value["stars"].get<float>() == 1.0f);
+    GIANT_CHECK(r.ok && r.value["light"] == "moon" && r.value["stars"].get<float>() >= 1.0f);
     GIANT_CHECK(r.value["daylight"].get<float>() < 0.03f && r.value["daylight"].get<float>() > 0.0f);
     // Saved and loaded whole (hours not through float).
     GIANT_CHECK(f.run("set_time", {{"hours", 6.3}}).ok);
@@ -155,7 +155,7 @@ GIANT_TEST("clock: the light it places and the night sky it gives the renderer")
     // Dusk: the sun's light fades out by 2 degrees under, and the moon's
     // starts from nothing at 6 under: no jump in the light either side.
     c.day = 80;
-    float last = -1.0f;
+    float last = -1.0f, last_flat = -1.0f;
     for (double h = 17.5; h < 20.5; h += 1.0 / 240.0) {
         c.hours = h;
         const world::SkyBodies b = world::sky_bodies(c);
@@ -164,5 +164,9 @@ GIANT_TEST("clock: the light it places and the night sky it gives the renderer")
         if (b.sun_elevation_degrees <= -2.0f && b.sun_elevation_degrees > -6.0f) GIANT_CHECK(r.sun_light.y == 0.0f);
         if (last >= 0.0f) GIANT_CHECK(std::fabs(r.sun_light.y - last) < 0.01f);
         last = r.sun_light.y;
+        // Without weather (the sun's full colour) likewise.
+        const render::Lighting flat = weather_lighting(l.lighting, std::nullopt, l.daylight);
+        if (last_flat >= 0.0f) GIANT_CHECK(std::fabs(flat.sun_light.y - last_flat) < 0.1f); // (a 15 s step of the ramp)
+        last_flat = flat.sun_light.y;
     }
 }

@@ -155,7 +155,8 @@ GIANT_TEST("clock: the light by day is the sun, by night the moon by its phase; 
     GIANT_CHECK(clock_lighting(l, at(0.0, 1, 45.0f)).sun_intensity < 0.001f);
     GIANT_CHECK(ambient_scale(full) > ambient_scale(dark) && ambient_scale(dark) >= k_star_light);
     GIANT_CHECK(ambient_scale(full) < 0.05f);
-    GIANT_CHECK(star_brightness(full) == 1.0f);
+    GIANT_CHECK(star_brightness(full) > 4.0f && star_brightness(full) <= 5.0f); // (brighter under a full moon)
+    GIANT_CHECK(near(star_brightness(dark), 1.0f, 0.05f));
     // The handover: the moon's light starts at nothing (the sun gave none from 2 degrees under).
     for (double h = 17.0; h < 21.0; h += 1.0 / 120.0) {
         const Clock c = at(h, 16, 45.0f);
