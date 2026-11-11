@@ -8,7 +8,10 @@
 // themselves).
 //
 // A brick takes the lamps whose bounding sphere (a spot's round its cone)
-// touches it, at most k_max_voxel_lamps, the brightest there first. Lamps
+// touches it, at most k_max_voxel_lamps, the brightest there first; a
+// coarse brick (voxels k_voxel_lamp_merge or more across) with more takes
+// those in each eighth of it merged into one (summed, at their centre,
+// reaching as far as they all do), so a town far off lights it whole. Lamps
 // are found through a grid of k_voxel_lamp_cell cells (a lamp too big for
 // it, or a brick too big for it, looks at all).
 #pragma once
@@ -19,6 +22,7 @@
 #include "giant/voxel/clipmap.h"
 #include "gpu_layout.h"
 
+#include <array>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -27,6 +31,7 @@ namespace giant::render {
 
 inline constexpr u32 k_max_voxel_lamps = 8;        // per brick
 inline constexpr double k_voxel_lamp_cell = 32.0;  // metres
+inline constexpr double k_voxel_lamp_merge = 2.0;  // metres: voxels this big merge lamps
 
 class VoxelLamps {
 public:
@@ -41,7 +46,8 @@ public:
     std::vector<gpu::LightJob>& jobs() { return m_jobs; }
     const std::vector<gpu::Light>& lights() const { return m_lights; }
     const std::vector<u32>& entries() const { return m_entries; }
-    u32 lit() const { return static_cast<u32>(m_lights.size()); } // lamps reaching some brick this frame
+    u32 lit() const { return m_listed; }     // lamps listed for some brick this frame
+    u32 merged() const { return m_merged; }  // merged lamps made this frame
 
 private:
     struct Lamp {
@@ -52,7 +58,16 @@ private:
         u32 gpu = ~0u; // index in m_lights this frame
         u64 stamp = 0;
     };
+    struct Pick {
+        u32 lamp;
+        double score;
+    };
+    u32 record(u32 lamp, std::span<const LocalLight> lights, const DVec3& camera); // its index in m_lights
     std::vector<Lamp> m_lamps;
+    std::vector<Pick> m_picks;
+    std::array<std::vector<u32>, 8> m_parts; // a coarse brick's lamps by eighth
+    u32 m_listed = 0;
+    u32 m_merged = 0;
     std::vector<u32> m_big; // lamps too big for the grid
     std::unordered_map<u64, std::vector<u32>> m_grid;
     std::vector<gpu::LightJob> m_jobs;

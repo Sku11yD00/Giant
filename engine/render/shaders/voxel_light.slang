@@ -54,24 +54,30 @@ void cs_clear(uint3 id : SV_DispatchThreadID) {
 // world stands between them. Coarse voxels are much bigger than a lamp's
 // reach: the light is taken over the voxel (from its nearest point for the
 // reach, at least half a voxel away, the normal wrapped as the lamp gets
-// inside it) so a distant town's lamps still light the coarse ground.
+// inside it, a voxel only grazed by its reach taking as much less) so a
+// distant town's lamps still light the coarse ground, and about as much.
 float3 lamp_on_voxel(VoxelWorld w, LocalLight lamp, float3 centre, float3 n, float size, float3 origin, uint level) {
     const float3 to_light = lamp.position - centre;
     const float len = length(to_light);
     const float reach = max(len - 0.87 * size, 0.0);
-    if (!(reach < lamp.range) || len <= 0.0) {
+    if (!(reach < lamp.range)) {
         return float3(0.0, 0.0, 0.0);
     }
-    const float3 l = to_light / len;
+    const float3 l = len > 1e-6 ? to_light / len : n; // (at its centre: straight on)
     const float q = reach * reach / (lamp.range * lamp.range);
     const float window = saturate(1.0 - q * q);
     const float d2 = max(len * len, 0.25 * size * size) + lamp.source_radius * lamp.source_radius;
-    const float inside = saturate(size / len - 0.5);
+    const float inside = saturate(size / max(len, 1e-6) - 0.5);
     const float n_dot_l = lerp(saturate(dot(n, l)), saturate(dot(n, l) * 0.5 + 0.5), inside);
     const float cone = saturate(dot(-l, lamp.direction) * lamp.spot_scale + lamp.spot_offset);
-    const float3 light = lamp.color * (window * window / d2 * cone * cone * n_dot_l / k_gi_pi);
-    if (max(light.x, max(light.y, light.z)) < 1e-5 || inside > 0.0) {
-        return inside > 0.0 ? light : float3(0.0, 0.0, 0.0); // (in the lamp's own voxel: no march)
+    // How much of the voxel its reach covers, roughly (1 for small voxels).
+    const float covered = saturate((lamp.range - reach) / min(lamp.range, size));
+    const float3 light = lamp.color * (window * window / d2 * cone * cone * n_dot_l * covered / k_gi_pi);
+    if (max(light.x, max(light.y, light.z)) < 1e-5) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    if (len < 0.87 * size) {
+        return light; // the lamp in the voxel itself: nothing between
     }
     // Its shadow: the voxel world between (the lamp's own fitting, within a
     // couple of voxels of it, left out; the voxel's own surface too).

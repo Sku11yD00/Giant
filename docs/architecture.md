@@ -670,15 +670,19 @@ an offline cooker can use it without a device.
   pose into them.
   In the voxel world (lights part L4, `src/voxel_lamps.h`): each voxel
   has a lamp word beside its light word (a second buffer the size of the
-  light pool, made with the first lamp under global illumination). When a
+  light pool, 64 MiB by default, made with it). When a
   brick is lit (`voxel_light.slang`), the CPU lists the lamps whose sphere
-  touches it (a 32 m grid; at most 8, the brightest there first) and each
+  touches it (a 32 m grid; at most 8, the brightest there first; a brick
+  of 2 m voxels or more with more lamps takes those in each eighth of it
+  merged into one, summed at their centre, so a far town lights it
+  whole) and each
   filled voxel adds each one's light, over pi as light words hold it,
   with a march through the voxel world towards it for its shadow (the
   lamp's own fitting, within a couple of voxels of it, left out). Coarse
   voxels, far bigger than a lamp's reach, take its light over the voxel
   (the reach from its nearest point, at least half a voxel away, the
-  normal wrapped as the lamp gets inside it), so a town's lamps light the
+  normal wrapped as the lamp gets inside it, a voxel its reach only
+  grazes taking as much less), so a town's lamps light the
   coarse ground kilometres off. The lamp word is what a voxel sends on:
   bounce (cones), voxel reflections, the voxel view and the far field
   (distant towns glow at night), never what pixels beside it take as

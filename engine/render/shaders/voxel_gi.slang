@@ -60,7 +60,10 @@ static const float k_gi_pi = 3.14159265;
 // word holds it. Kept apart from the light word: what the voxel sends on,
 // not what pixels near it take again (the lamps light those themselves).
 float3 voxel_lamp(VoxelWorld w, uint at) {
-    return w.lamps_on != 0u ? unpack_light(write_buffer(w.lamps).Load(at * 4)) : float3(0.0, 0.0, 0.0);
+    if (w.lamps_on == 0u) {
+        return float3(0.0, 0.0, 0.0); // (the descriptor is no lamp words then: never loaded)
+    }
+    return unpack_light(write_buffer(w.lamps).Load(at * 4));
 }
 
 // What a filled voxel sends back (diffuse, the same every way), as shading

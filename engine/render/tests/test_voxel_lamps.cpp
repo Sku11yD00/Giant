@@ -107,9 +107,19 @@ GIANT_TEST("voxel lamps: coarse bricks and lamps bigger than the grid still find
     const std::vector<gpu::LightJob> jobs{job_at(clip, 9, {2100.0, 0.0, 50.0}), job_at(clip, 0, {-100.0, 0.5, 0.0})};
     VoxelLamps v;
     v.list(lights, jobs, clip, {});
-    GIANT_CHECK(v.jobs()[0].lamp_count == k_max_voxel_lamps); // the coarse brick holds the town
-    for (const u32 s : sources(v, v.jobs()[0], lights, {})) GIANT_CHECK(s < 50u);
+    // The coarse brick holds 44 of the town's lamps (those from x = 2042 m
+    // on): merged by eighths of it, all their light is there.
+    const gpu::LightJob& coarse = v.jobs()[0];
+    GIANT_CHECK(coarse.lamp_count >= 1 && coarse.lamp_count <= k_max_voxel_lamps && v.merged() >= 1);
+    float total = 0.0f;
+    for (u32 k = 0; k < coarse.lamp_count; ++k) {
+        const gpu::Light& g = v.lights()[v.entries()[coarse.lamp_first + k]];
+        total += std::max({g.color[0], g.color[1], g.color[2]});
+        GIANT_CHECK(g.position[0] > 2040.0f && g.position[0] < 2350.0f && g.range >= 8.0f);
+    }
+    GIANT_CHECK(std::fabs(total - 44.0f * 3.0f) < 1e-2f);
     GIANT_CHECK((sources(v, v.jobs()[1], lights, {}) == std::vector<u32>{50}));
+    GIANT_CHECK(v.lit() == 1); // the floodlight's own record (the town's merged)
     // The same again (grid cells kept from before): the same lists.
     const std::vector<u32> first = v.entries();
     v.list(lights, jobs, clip, {});
