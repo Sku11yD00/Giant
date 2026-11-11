@@ -411,7 +411,17 @@ void EditorPanels::draw_outliner() {
                       {"metallic", 1.0},
                       {"roughness", 0.5},
                       {"emissive", {2.0, 1.4, 0.6}},
-                      {"swing", {{"on", true}, {"length", 0.5}, {"weight", 1.5}}}});
+                      {"swing", {{"on", true}, {"length", 0.5}, {"weight", 1.5}}},
+                      {"lamp", {{"on", true}, {"intensity", 2.0}, {"range", 8.0}, {"source_radius", 0.08}}}});
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("+ Lamp")) {
+        // A glowing bulb giving warm light all round.
+        create_ahead({{"shape", "sphere"},
+                      {"scale", {0.15, 0.15, 0.15}},
+                      {"emissive", {4.0, 3.2, 2.2}},
+                      {"body", "none"},
+                      {"lamp", {{"on", true}}}});
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(m_state.scene.find(m_state.selected) == nullptr);
@@ -601,6 +611,51 @@ void EditorPanels::draw_properties() {
             float limit = e->swing.limit;
             if (ImGui::SliderFloat("Swing limit", &limit, 5.0f, 175.0f, "%.0f deg")) {
                 set("swing", {{"limit", std::clamp(limit, 5.0f, 175.0f)}});
+            }
+        }
+    }
+    {
+        bool lit = e->lamp.on;
+        if (ImGui::Checkbox("Gives light", &lit)) {
+            set("lamp", {{"on", lit}});
+        }
+        if (e->lamp.on) {
+            int kind = static_cast<int>(e->lamp.kind);
+            const char* const kinds[] = {"point", "spot"};
+            if (ImGui::Combo("Light", &kind, kinds, IM_ARRAYSIZE(kinds))) {
+                set("lamp", {{"kind", kinds[kind]}});
+            }
+            float color[3] = {e->lamp.color.x, e->lamp.color.y, e->lamp.color.z};
+            if (ImGui::ColorEdit3("Light colour", color)) {
+                set("lamp", {{"color", {std::clamp(color[0], 0.0f, 1.0f), std::clamp(color[1], 0.0f, 1.0f),
+                                        std::clamp(color[2], 0.0f, 1.0f)}}});
+            }
+            float intensity = e->lamp.intensity;
+            if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
+                set("lamp", {{"intensity", std::clamp(intensity, 0.0f, world::k_max_lamp_intensity)}});
+            }
+            float range = e->lamp.range;
+            if (ImGui::SliderFloat("Range", &range, 0.1f, 1000.0f, "%.1f m", ImGuiSliderFlags_Logarithmic)) {
+                set("lamp", {{"range", std::clamp(range, 0.1f, 1000.0f)}});
+            }
+            float offset[3] = {e->lamp.offset.x, e->lamp.offset.y, e->lamp.offset.z};
+            if (ImGui::DragFloat3("Light offset", offset, 0.01f, -100.0f, 100.0f, "%.2f")) {
+                set("lamp", {{"offset", {std::clamp(offset[0], -100.0f, 100.0f), std::clamp(offset[1], -100.0f, 100.0f),
+                                         std::clamp(offset[2], -100.0f, 100.0f)}}});
+            }
+            if (e->lamp.kind == world::LampKind::spot) {
+                float inner = e->lamp.inner_degrees;
+                if (ImGui::SliderFloat("Inner cone", &inner, 0.0f, 89.0f, "%.0f deg")) {
+                    set("lamp", {{"inner_degrees", std::clamp(inner, 0.0f, 89.0f)}});
+                }
+                float outer = e->lamp.outer_degrees;
+                if (ImGui::SliderFloat("Outer cone", &outer, 0.1f, 89.0f, "%.0f deg")) {
+                    set("lamp", {{"outer_degrees", std::clamp(outer, 0.1f, 89.0f)}});
+                }
+            }
+            float radius = e->lamp.source_radius;
+            if (ImGui::SliderFloat("Bulb size", &radius, 0.0f, 10.0f, "%.2f m", ImGuiSliderFlags_Logarithmic)) {
+                set("lamp", {{"source_radius", std::clamp(radius, 0.0f, 10.0f)}});
             }
         }
     }
@@ -964,6 +1019,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         ImGui::Text("Materials: %u shared, decals: %u in view", stats.materials, stats.decals);
         if (stats.decal_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many decals on screen: some not drawn");
+        }
+        ImGui::Text("Lights: %u in view", stats.lights);
+        if (stats.light_overflow) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many lights in view: the furthest left out");
         }
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),

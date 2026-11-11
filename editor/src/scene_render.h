@@ -40,6 +40,7 @@ struct SceneFrame {
     std::vector<render::CellRange> cells;
     std::vector<render::Material> materials;
     std::vector<render::Decal> decals;
+    std::vector<render::LocalLight> lights; // the lamps entities and kit pieces carry (world::Lamp)
     u32 cells_rebuilt = 0; // by the last scene_frame
     // What scene_frame took from the scene (it takes them all), kept for the
     // other followers of its changes (the physics), who take it in turn
@@ -86,6 +87,8 @@ struct SceneFrame {
         u32 count = 0;
         u32 decal_first = 0;
         u32 decals = 0;
+        u32 light_first = 0; // its lamps (the entity's, or its kit pieces' in order)
+        u32 lights = 0;
     };
 
     // Material image files are cooked by `textures` (set by the owner; null:
@@ -125,6 +128,7 @@ struct SceneFrame {
         std::vector<world::EntityId> ids; // the entities in it
         std::vector<render::Instance> instances;
         std::vector<render::Decal> decals;
+        std::vector<render::LocalLight> lights;
         u64 version = 0; // new each rebuild, unique in the process (0: never built)
         bool dirty = true;
         // Only its ground changed (a terrain tile's or far ground's mesh, the

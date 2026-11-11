@@ -451,6 +451,58 @@ GIANT_TEST("world: swing settings save and load, only when set, within their ran
     }
 }
 
+GIANT_TEST("world: lamps on entities and kit pieces save and load, only when set, within their ranges") {
+    Scene scene;
+    Entity lamp = named("Street lamp");
+    lamp.lamp.on = true;
+    lamp.lamp.kind = LampKind::spot;
+    lamp.lamp.color = {0.9f, 0.7f, 0.4f};
+    lamp.lamp.intensity = 40.0f;
+    lamp.lamp.range = 18.0f;
+    lamp.lamp.offset = {0.0f, 4.5f, 0.6f};
+    lamp.lamp.inner_degrees = 20.0f;
+    lamp.lamp.outer_degrees = 50.0f;
+    lamp.lamp.source_radius = 0.1f;
+    scene.add(lamp);
+    Entity off = named("Off");
+    off.lamp.range = 3.0f; // kept while off
+    scene.add(off);
+    scene.add(named("Rock"));
+    Kit kit;
+    kit.name = "Lamp post";
+    KitPiece post;
+    post.name = "post";
+    KitPiece bulb;
+    bulb.name = "bulb";
+    bulb.shape = Shape::sphere;
+    bulb.lamp.on = true;
+    kit.pieces = {post, bulb};
+    scene.kits.push_back(kit);
+    const std::string text = save_scene(scene);
+    usize lamps = 0;
+    for (usize at = text.find("\"lamp\": {"); at != std::string::npos; at = text.find("\"lamp\": {", at + 1)) ++lamps;
+    GIANT_CHECK(lamps == 3); // the lamp's, the off one's and the bulb's; not the rock's or the post's
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->lamp == lamp.lamp);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->lamp == off.lamp && !loaded.find(2)->lamp.on);
+    GIANT_CHECK(loaded.find(3) && loaded.find(3)->lamp == Lamp{});
+    GIANT_CHECK(loaded.kits.size() == 1 && loaded.kits[0] == kit);
+    GIANT_CHECK(save_scene(loaded) == text);
+    GIANT_CHECK(lamp_kind_from_string("spot") == LampKind::spot && !lamp_kind_from_string("area"));
+    for (const char* bad_scene :
+         {R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"kind": "area"}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"range": 0}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"color": [2, 1, 1]}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"outer_degrees": 90}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"intensity": -1}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"glow": true}}]})",
+          R"({"format": "giant-scene", "version": 1, "kits": [{"name": "k", "pieces": [{"lamp": {"on": 1}}]}]})"}) {
+        Scene bad;
+        GIANT_CHECK(load_scene(bad_scene, bad).has_value());
+    }
+}
+
 GIANT_TEST("world: a mesh entity's animation saves and loads, and only when set") {
     Scene scene;
     Entity walker = named("Walker");
@@ -576,7 +628,7 @@ GIANT_TEST("world: a world's index and cells save and load as text") {
     WorldIndex world;
     world.next_id = 42;
     world.lighting.exposure = 2.0f;
-    world.kits.push_back({"house", {KitPiece{"wall", Shape::cube, {}, {}, {}, {}}}});
+    world.kits.push_back({"house", {KitPiece{"wall", Shape::cube, {}, {}, {}, {}, {}}}});
     world.meshes = {"b.glb", "a.glb", "b.glb"};
     world.cells = {{3, 1}, {-2, 0}, {0, 1}};
     WorldIndex back;

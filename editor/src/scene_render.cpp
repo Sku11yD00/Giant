@@ -156,6 +156,31 @@ render::DecalShape decal_shape(world::DecalShape s) {
     return render::DecalShape::disc;
 }
 
+// A lamp an entity or kit piece carries, where it is drawn (`t`).
+// (Cloth's scale is unused: `scaled` false keeps the offset in metres.)
+void put_lamp(render::LocalLight& out, const world::Lamp& lamp, const world::Transform& t, bool scaled = true) {
+    constexpr float k_radians = 3.14159265358979f / 180.0f;
+    const Vec3 s = scaled ? t.scale : Vec3{1.0f, 1.0f, 1.0f};
+    const Vec3 offset = {lamp.offset.x * s.x, lamp.offset.y * s.y, lamp.offset.z * s.z};
+    const Vec3 turned = rotate(t.rotation, offset);
+    out.position = t.position + DVec3{turned.x, turned.y, turned.z};
+    out.color = lamp.color;
+    out.intensity = lamp.intensity;
+    out.range = lamp.range;
+    out.kind = lamp.kind == world::LampKind::spot ? render::LightKind::spot : render::LightKind::point;
+    out.direction = rotate(t.rotation, {0.0f, -1.0f, 0.0f});
+    out.inner_angle = lamp.inner_degrees * k_radians;
+    out.outer_angle = lamp.outer_degrees * k_radians;
+    out.source_radius = lamp.source_radius;
+}
+
+void emit_lamp(const world::Lamp& lamp, const world::Transform& t, SceneFrame::Cell& cell, bool scaled = true) {
+    if (!lamp.on) return;
+    render::LocalLight l;
+    put_lamp(l, lamp, t, scaled);
+    cell.lights.push_back(l);
+}
+
 // One drawable thing (an entity, or a piece of a placed kit).
 void emit(world::Shape shape, const std::string& mesh_path, const world::Transform& t, const world::Material& m,
           const world::DecalSettings& d, const render::Renderer& renderer, const MeshLibrary& meshes,
@@ -375,6 +400,7 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
     }
     cell.instances.clear();
     cell.decals.clear();
+    cell.lights.clear();
     emit_ground(scene, terrain, far, coord, out, cell);
     cell.ground_count = static_cast<u32>(cell.instances.size());
     cell.ground_dirty = false;
@@ -393,9 +419,11 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
         // What it draws, for moving it in place later (rebuild_moved).
         const u32 first = static_cast<u32>(cell.instances.size());
         const usize decals = cell.decals.size();
+        const usize lights = cell.lights.size();
         const auto slot = [&] {
             cell.slots.push_back({id, first, static_cast<u32>(cell.instances.size()) - first, static_cast<u32>(decals),
-                                  static_cast<u32>(cell.decals.size() - decals)});
+                                  static_cast<u32>(cell.decals.size() - decals), static_cast<u32>(lights),
+                                  static_cast<u32>(cell.lights.size() - lights)});
         };
         if (e->shape != world::Shape::kit) {
             render::MeshId own = render::k_no_mesh;
@@ -408,9 +436,11 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
                 if (c != out.cloth->end()) own = c->second;
             }
             emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own, moves);
+            emit_lamp(e->lamp, at, cell, e->shape != world::Shape::cloth);
             slot();
             continue;
         }
+        emit_lamp(e->lamp, at, cell); // the placement's own, then its pieces'
         const world::Kit* kit = scene.find_kit(e->kit);
         if (kit == nullptr) {
             slot();
@@ -427,8 +457,9 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             const world::KitPiece& p = kit->pieces[i];
             while (loose != nullptr && next < loose->size() && (*loose)[next].piece < i) ++next;
             const bool fell = loose != nullptr && next < loose->size() && (*loose)[next].piece == i;
-            emit(p.shape, p.mesh, fell ? (*loose)[next].at : place(at, p.transform), p.material, p.decal, renderer,
-                 meshes, out, cell, render::k_no_mesh, moves);
+            const world::Transform t = fell ? (*loose)[next].at : place(at, p.transform);
+            emit(p.shape, p.mesh, t, p.material, p.decal, renderer, meshes, out, cell, render::k_no_mesh, moves);
+            emit_lamp(p.lamp, t, cell);
         }
         slot();
     }
@@ -549,6 +580,7 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
     u32 lo = ~u32{0};
     u32 hi = 0;
     bool decals_moved = false;
+    bool lights_moved = false;
     const auto put = [](render::Instance& i, const world::Transform& t, bool scaled) {
         i.position = t.position;
         i.rotation = t.rotation;
@@ -568,14 +600,22 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
             return false;
         }
         if (e == nullptr || !e->visible || slot->first + slot->count > cell.instances.size() ||
-            slot->decal_first + slot->decals > cell.decals.size()) {
+            slot->decal_first + slot->decals > cell.decals.size() ||
+            slot->light_first + slot->lights > cell.lights.size()) {
             return false;
         }
         const world::Transform& at = drawn_at(out, *e);
         if (e->shape == world::Shape::kit) {
             const world::Kit* kit = scene.find_kit(e->kit);
+            const u32 own_lamp = e->lamp.on ? 1u : 0u;
             if (kit == nullptr) {
-                if (slot->count == 0 && slot->decals == 0) continue;
+                if (slot->count == 0 && slot->decals == 0 && slot->lights == own_lamp) {
+                    if (own_lamp == 1) {
+                        put_lamp(cell.lights[slot->light_first], e->lamp, at);
+                        lights_moved = true;
+                    }
+                    continue;
+                }
                 return false;
             }
             // Each piece drew one instance or one decal, in order (else some
@@ -583,6 +623,9 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
             u32 decal_pieces = 0;
             for (const world::KitPiece& p : kit->pieces) decal_pieces += p.shape == world::Shape::decal ? 1u : 0u;
             if (slot->decals != decal_pieces || slot->count + slot->decals != kit->pieces.size()) return false;
+            u32 lamp_pieces = 0;
+            for (const world::KitPiece& p : kit->pieces) lamp_pieces += p.lamp.on ? 1u : 0u;
+            if (slot->lights != lamp_pieces + own_lamp) return false;
             const std::vector<sim::PiecePose>* loose = nullptr;
             if (out.piece_poses != nullptr) {
                 const auto l = out.piece_poses->find(id);
@@ -591,6 +634,8 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
             usize next = 0;
             u32 instance = slot->first;
             u32 decal = slot->decal_first;
+            u32 light = slot->light_first;
+            if (own_lamp == 1) put_lamp(cell.lights[light++], e->lamp, at);
             for (u32 k = 0; k < kit->pieces.size(); ++k) {
                 const world::KitPiece& p = kit->pieces[k];
                 while (loose != nullptr && next < loose->size() && (*loose)[next].piece < k) ++next;
@@ -601,8 +646,14 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
                 } else {
                     put(cell.instances[instance++], t, true);
                 }
+                if (p.lamp.on) put_lamp(cell.lights[light++], p.lamp, t);
             }
         } else {
+            if (slot->lights != (e->lamp.on ? 1u : 0u)) return false;
+            if (slot->lights == 1) {
+                put_lamp(cell.lights[slot->light_first], e->lamp, at, e->shape != world::Shape::cloth);
+                lights_moved = true;
+            }
             if (slot->count + slot->decals == 0) continue; // draws nothing (a mesh not loaded, a cloth with no mesh yet)
             if (slot->count + slot->decals != 1) return false;
             if (slot->decals == 1) {
@@ -612,13 +663,14 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
             }
         }
         decals_moved = decals_moved || slot->decals > 0;
+        lights_moved = lights_moved || slot->lights > 0;
         if (slot->count > 0) {
             lo = std::min(lo, slot->first);
             hi = std::max(hi, slot->first + slot->count);
         }
     }
     cell.moved.clear();
-    if (decals_moved) ++out.cells_rebuilt; // the frame's decals gathered again
+    if (decals_moved || lights_moved) ++out.cells_rebuilt; // the frame's decals and lamps gathered again
     if (lo >= hi) {
         return true; // no instance moved
     }
@@ -768,7 +820,7 @@ bool same_kit(const world::Kit& a, const world::Kit& b) {
             p.material.alpha_cutoff != q.material.alpha_cutoff || p.material.canopy != q.material.canopy ||
             !(p.material.maps == q.material.maps) ||
             p.decal.shape != q.decal.shape || p.decal.opacity != q.decal.opacity ||
-            p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed) {
+            p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed || !(p.lamp == q.lamp)) {
             return false;
         }
     }
@@ -1126,9 +1178,11 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                   return a.first != b.first ? a.first < b.first : a.count < b.count;
               });
     out.decals.clear();
+    out.lights.clear();
     for (const world::CellCoord coord : out.order) {
         const SceneFrame::Cell& cell = out.grid.at(coord);
         out.decals.insert(out.decals.end(), cell.decals.begin(), cell.decals.end());
+        out.lights.insert(out.lights.end(), cell.lights.begin(), cell.lights.end());
     }
 }
 

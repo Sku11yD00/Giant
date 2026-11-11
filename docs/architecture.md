@@ -630,6 +630,15 @@ an offline cooker can use it without a device.
   field; `RenderSettings::local_lights` turns them off. No shadows yet
   (they light through walls until L3), and the voxel world's bounce light
   does not see them yet (L4).
+  In the world (lights part L2b), any entity can carry a `world::Lamp`
+  (saved with it, only when set; kept while off) and so can a kit piece,
+  lighting every placement. The editor's scene frame turns each into a
+  render light where its entity or piece is drawn (the offset scaled and
+  turned with it, a spot down its -Y), kept per cell beside its decals and
+  moved in place with swinging lanterns, walkers and physics poses; hidden
+  entities give none, a kit placement may carry its own beside its
+  pieces', and a breakable kit's loose piece keeps its lamp lit where it
+  lies. Scatter items carry none.
 - **Anti-aliasing (N1 part 6, `src/smaa.h`, `shaders/smaa.slang`).** No
   temporal anti-aliasing: nothing uses earlier frames, so the image is as
   sharp moving as standing still. Edges: SMAA 1x (High preset, no diagonal

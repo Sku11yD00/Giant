@@ -99,6 +99,29 @@ struct SwingSettings {
     bool operator==(const SwingSettings&) const = default;
 };
 
+// A light an entity or kit piece carries (a lamp, a lantern, a street
+// light): a point light at its origin plus `offset` (in its own space,
+// scaled and turned with it; for cloth, whose scale is unused, in metres), or a spot shining down its own -Y. Its light
+// at 1 m is colour x intensity, in the sun's units (the default sun is 3),
+// fading to nothing at `range`. No shadows yet: it lights through walls.
+enum class LampKind : u8 { point, spot };
+const char* to_string(LampKind kind);
+std::optional<LampKind> lamp_kind_from_string(std::string_view name);
+constexpr float k_max_lamp_intensity = 1e6f;
+
+struct Lamp {
+    bool on = false;
+    LampKind kind = LampKind::point;
+    Vec3 color{1.0f, 0.8f, 0.55f}; // linear, 0 to 1 (a warm lamp)
+    float intensity = 3.0f;       // 0 to k_max_lamp_intensity
+    float range = 10.0f;          // metres, 0.1 to 1000
+    Vec3 offset{};                // metres, -100 to 100 each
+    float inner_degrees = 30.0f;  // spot: full light inside this, 0 to 89
+    float outer_degrees = 45.0f;  // spot: none outside this, 0.1 to 89
+    float source_radius = 0.05f;  // metres, 0 to 10: the bulb's size
+    bool operator==(const Lamp&) const = default;
+};
+
 struct Transform {
     DVec3 position{};  // metres; doubles so a 20 km world keeps millimetres
     Quat rotation{};   // unit quaternion
@@ -180,6 +203,7 @@ struct Entity {
     DecalSettings decal; // used when shape is `decal`
     ClothSettings cloth; // used when shape is `cloth` (kept when the shape changes)
     SwingSettings swing; // when on: cube, sphere, plane, mesh and kit entities swing (kept otherwise)
+    Lamp lamp;           // when on: it gives light, any shape (hidden entities give none)
     bool visible = true;
     BodyKind body = BodyKind::fixed;
     float mass = 0.0f; // kilograms, when dynamic; 0: from its size (as water)
@@ -195,6 +219,7 @@ struct KitPiece {
     Transform transform;
     Material material;
     DecalSettings decal;
+    Lamp lamp; // when on: each placement gives its light
     bool operator==(const KitPiece&) const = default;
 };
 

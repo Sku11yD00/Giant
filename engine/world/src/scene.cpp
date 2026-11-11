@@ -85,6 +85,23 @@ std::optional<SwingHinge> swing_hinge_from_string(std::string_view name) {
     return std::nullopt;
 }
 
+const char* to_string(LampKind kind) {
+    switch (kind) {
+    case LampKind::point: return "point";
+    case LampKind::spot: return "spot";
+    }
+    return "point";
+}
+
+std::optional<LampKind> lamp_kind_from_string(std::string_view name) {
+    for (const LampKind k : {LampKind::point, LampKind::spot}) {
+        if (name == to_string(k)) {
+            return k;
+        }
+    }
+    return std::nullopt;
+}
+
 const char* to_string(BodyKind body) {
     switch (body) {
     case BodyKind::fixed: return "fixed";
@@ -573,6 +590,18 @@ void write_look(Json& out, Shape shape, const std::string& mesh, const std::stri
     }
 }
 
+Json lamp_json(const Lamp& l) {
+    return {{"on", l.on},
+            {"kind", to_string(l.kind)},
+            {"color", vec3_json(l.color)},
+            {"intensity", l.intensity},
+            {"range", l.range},
+            {"offset", vec3_json(l.offset)},
+            {"inner_degrees", l.inner_degrees},
+            {"outer_degrees", l.outer_degrees},
+            {"source_radius", l.source_radius}};
+}
+
 Json weather_json(const Weather& w) {
     return {
         {"cloud_cover", w.cloud_cover},
@@ -623,6 +652,7 @@ Json kits_json(std::span<const Kit> kits) {
         for (const KitPiece& p : k.pieces) {
             Json piece = {{"name", p.name}};
             write_look(piece, p.shape, p.mesh, {}, p.transform, p.material, p.decal);
+            if (!(p.lamp == Lamp{})) piece["lamp"] = lamp_json(p.lamp);
             pieces.push_back(std::move(piece));
         }
         Json kit = {{"name", k.name}, {"pieces", std::move(pieces)}};
@@ -767,6 +797,7 @@ Json entity_json(const Entity& e) {
         entity["swing"] = {{"on", w.on},         {"length", w.length}, {"hinge", to_string(w.hinge)},
                            {"weight", w.weight}, {"limit", w.limit}};
     }
+    if (!(e.lamp == Lamp{})) entity["lamp"] = lamp_json(e.lamp);
     // Only when not the default, so older scenes read and write the same.
     if (e.body != BodyKind::fixed) entity["body"] = to_string(e.body);
     if (e.mass != 0.0f) entity["mass"] = e.mass;
@@ -1211,6 +1242,30 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
     }
 }
 
+void read_lamp(Reader& r, const std::string& path, Lamp& l, std::string& error) {
+    if (const Json* j = r.get("lamp", false); j != nullptr && r.ok()) {
+        Reader lr(*j, path + ".lamp", error);
+        lr.boolean("on", l.on);
+        std::string kind = to_string(l.kind);
+        lr.string("kind", kind);
+        if (lr.ok()) {
+            if (const auto parsed = lamp_kind_from_string(kind)) {
+                l.kind = *parsed;
+            } else {
+                lr.fail("kind", "must be point or spot");
+            }
+        }
+        lr.vec3("color", l.color, 0, 1);
+        lr.number("intensity", l.intensity, 0, k_max_lamp_intensity);
+        lr.number("range", l.range, 0.1, 1000);
+        lr.vec3("offset", l.offset, -100, 100);
+        lr.number("inner_degrees", l.inner_degrees, 0, 89);
+        lr.number("outer_degrees", l.outer_degrees, 0.1, 89);
+        lr.number("source_radius", l.source_radius, 0, 10);
+        lr.finish();
+    }
+}
+
 void read_entity(const Json& json, const std::string& path, Entity& e, std::string& error) {
     Reader r(json, path, error);
     r.id("id", e.id, true);
@@ -1267,6 +1322,7 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         ar.boolean("loop", e.animation.loop);
         ar.finish();
     }
+    read_lamp(r, path, e.lamp, error);
     r.finish();
 }
 
@@ -1286,6 +1342,7 @@ void read_kit(const Json& json, const std::string& path, Kit& k, std::string& er
                 Reader pr((*pieces)[i], piece_path, error);
                 pr.string("name", p.name, false, k_max_name_bytes);
                 read_look(pr, piece_path, p.shape, p.mesh, nullptr, p.transform, p.material, p.decal, error);
+                read_lamp(pr, piece_path, p.lamp, error);
                 pr.finish();
                 k.pieces.push_back(std::move(p));
             }
