@@ -192,6 +192,7 @@ GIANT_TEST("lamps: a kit placement's own lamp and its pieces' swing with it, mov
     for (int i = 0; i < 120; ++i) f.frame_step(20.0f);
     const SceneFrame::Cell& cell = f.frame.grid.at(f.frame.where.at(cage));
     GIANT_CHECK(cell.prev_version != 0 && cell.lights.size() == 2 && f.frame.lights.size() == 2);
+    GIANT_CHECK(cell.instances.size() == 2);
     if (cell.instances.size() == 2 && cell.lights.size() == 2) {
         // The placement's own first, then the piece's, each where it hangs now.
         const render::Instance& box = cell.instances[0];
@@ -199,7 +200,7 @@ GIANT_TEST("lamps: a kit placement's own lamp and its pieces' swing with it, mov
         GIANT_CHECK(cell.lights[0].intensity == 5.0f && cell.lights[1].intensity == 1.0f);
         const Vec3 own = rotate(box.rotation, Vec3{0.0f, 0.1f, 0.0f});
         GIANT_CHECK(near(cell.lights[1].position, cell.instances[1].position));
-        GIANT_CHECK(length(cell.lights[0].position - (box.position + DVec3{own.x, own.y, own.z})) < 0.05);
+        GIANT_CHECK(near(cell.lights[0].position, box.position + DVec3{own.x, own.y, own.z}));
     }
 }
 

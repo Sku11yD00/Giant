@@ -101,7 +101,7 @@ struct SwingSettings {
 
 // A light an entity or kit piece carries (a lamp, a lantern, a street
 // light): a point light at its origin plus `offset` (in its own space,
-// scaled and turned with it), or a spot shining down its own -Y. Its light
+// scaled and turned with it; for cloth, whose scale is unused, in metres), or a spot shining down its own -Y. Its light
 // at 1 m is colour x intensity, in the sun's units (the default sun is 3),
 // fading to nothing at `range`. No shadows yet: it lights through walls.
 enum class LampKind : u8 { point, spot };
