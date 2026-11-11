@@ -97,6 +97,7 @@ void light_bounds(const LocalLight& light, const DVec3& camera, Vec3& center, fl
 void bin_lights(std::span<const LocalLight> lights, const View& view, float aspect,
                 const geometry::Frustum& frustum, LightBins& out) {
     out.lights.clear();
+    out.sources.clear();
     out.entries.clear();
     out.overflow = false;
     out.clusters.assign(usize{k_light_clusters} * 2, 0);
@@ -180,6 +181,7 @@ void bin_lights(std::span<const LocalLight> lights, const View& view, float aspe
         b.z1 = std::min(light_slice(d1), k_light_slices - 1);
         boxes.push_back(b);
         out.lights.push_back(to_gpu(lights[c.index], view.position));
+        out.sources.push_back(c.index);
     }
 
     // Count per cluster (the first k_max_lights_per_cluster in order),

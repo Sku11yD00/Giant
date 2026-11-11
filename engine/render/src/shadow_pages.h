@@ -189,6 +189,11 @@ public:
     // the last call are compared.
     void track(std::span<const Instance> instances, std::span<const CellRange> cells, std::span<const u8> casts,
                u64 meshes_version, const MeshLookup& meshes);
+    // What the last track() found changed, for other shadows to follow
+    // (local lights' shadows): boxes round casters that came, went or
+    // moved (world space), or everything (too many to list).
+    const std::unordered_map<u64, std::pair<DVec3, DVec3>>& changed_boxes() const { return m_boxes; }
+    bool changed_all() const { return m_track_all; }
 
 private:
     struct Page {
@@ -300,6 +305,7 @@ private:
     // Boxes to dirty this frame, gathered by 32 m square (thousands of
     // scatter placements arriving are a few invalidations, not thousands).
     std::unordered_map<u64, std::pair<DVec3, DVec3>> m_boxes;
+    bool m_track_all = false; // the last track() changed everything
 };
 
 } // namespace giant::render

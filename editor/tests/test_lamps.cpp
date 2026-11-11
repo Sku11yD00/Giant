@@ -12,7 +12,9 @@
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 using namespace giant;
 using namespace giant::editor;
@@ -225,4 +227,54 @@ GIANT_TEST("lamps: a swinging lantern's light swings with it, moved in place") {
         const Vec3 off = rotate(i.rotation, Vec3{0.0f, -0.2f * 0.35f, 0.0f});
         GIANT_CHECK(near(f.frame.lights[0].position, i.position + DVec3{off.x, off.y, off.z}));
     }
+}
+
+GIANT_TEST("lamps: shadows on give each lamp its own id, the same frame to frame; the renderer casts them") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_kit", {{"name", "pair"},
+                                     {"pieces",
+                                      {{{"shape", "sphere"},
+                                        {"scale", {0.1, 0.1, 0.1}},
+                                        {"position", {-0.5, 0.0, 0.0}},
+                                        {"lamp", {{"on", true}, {"shadows", true}}}},
+                                       {{"shape", "sphere"},
+                                        {"scale", {0.1, 0.1, 0.1}},
+                                        {"position", {0.5, 0.0, 0.0}},
+                                        {"lamp", {{"on", true}, {"shadows", true}}}}}}})
+                    .ok);
+    const world::EntityId floor = f.create({{"shape", "plane"}, {"scale", {20.0, 1.0, 20.0}}});
+    const world::EntityId a = f.create({{"kit", "pair"}, {"position", {-2.0, 2.0, 0.0}},
+                                        {"lamp", {{"on", true}, {"shadows", true}, {"shadow_near", 0.4}}}});
+    const world::EntityId b = f.create({{"shape", "cube"},
+                                        {"position", {2.0, 2.0, 0.0}},
+                                        {"scale", {0.2, 0.2, 0.2}},
+                                        {"lamp", {{"on", true}}}}); // no shadows
+    GIANT_CHECK(floor != 0 && a != 0 && b != 0);
+    const auto got = f.run("get_entity", {{"id", a}});
+    GIANT_CHECK(got.ok && got.value["lamp"]["shadows"] == true && got.value["lamp"]["shadow_near"] == 0.4f);
+    const render::RenderStats& st = f.frame_step();
+    GIANT_CHECK(st.lights == 4 && st.local_shadows == 3 && st.local_shadow_drawn == 18);
+    GIANT_CHECK(f.frame.lights.size() == 4);
+    std::vector<u32> ids;
+    for (const render::LocalLight& l : f.frame.lights) {
+        if (l.shadow_id != 0) ids.push_back(l.shadow_id);
+        if (l.shadow_id != 0 && near(l.position, {-2.0, 2.0, 0.0})) GIANT_CHECK(std::fabs(l.shadow_near - 0.4f) < 1e-6f);
+    }
+    GIANT_CHECK(ids.size() == 3);
+    std::sort(ids.begin(), ids.end());
+    GIANT_CHECK(std::unique(ids.begin(), ids.end()) == ids.end());
+    // Moved: the same ids, drawn again; a frame later nothing to draw.
+    GIANT_CHECK(f.run("set_entity", {{"id", a}, {"position", {-2.0, 2.5, 0.0}}}).ok);
+    GIANT_CHECK(f.frame_step().local_shadow_drawn == 18);
+    std::vector<u32> again;
+    for (const render::LocalLight& l : f.frame.lights)
+        if (l.shadow_id != 0) again.push_back(l.shadow_id);
+    std::sort(again.begin(), again.end());
+    GIANT_CHECK(again == ids);
+    GIANT_CHECK(f.frame_step().local_shadow_drawn == 0);
+    // Turned off: no shadows from it, the light stays.
+    GIANT_CHECK(f.run("set_entity", {{"id", a}, {"lamp", {{"shadows", false}}}}).ok);
+    const render::RenderStats& off = f.frame_step();
+    GIANT_CHECK(off.lights == 4 && off.local_shadows == 2);
+    GIANT_CHECK(!f.run("set_entity", {{"id", a}, {"lamp", {{"shadow_near", 0.0}}}}).ok);
 }

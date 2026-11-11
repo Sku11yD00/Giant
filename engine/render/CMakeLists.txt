@@ -3,6 +3,7 @@ giant_module(render
     src/renderer.cpp
     src/decals.cpp
     src/lights.cpp
+    src/local_shadows.cpp
     src/streaming.cpp
     src/smaa.cpp
     src/voxel_scene.cpp
@@ -74,6 +75,7 @@ giant_module_tests(render
     tests/test_render.cpp
     tests/test_decals.cpp
     tests/test_lights.cpp
+    tests/test_local_shadows.cpp
     tests/test_streaming.cpp
     tests/test_voxel_scene.cpp
     tests/test_shadow_pages.cpp

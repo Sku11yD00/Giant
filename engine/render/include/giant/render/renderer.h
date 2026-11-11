@@ -60,6 +60,7 @@ class VoxelLight;       // src/voxel_light.h
 struct ShadowWindows;
 struct DecalBins;       // src/decals.h
 struct LightBins;       // src/lights.h
+class LocalShadows;     // src/local_shadows.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
@@ -306,7 +307,10 @@ inline constexpr u32 k_max_dust_puffs = 32;
 // (the same relative units as Lighting::sun_light, so intensity 3 at 1 m
 // lights like the default sun), easing smoothly to nothing at `range`.
 // A source the size of `source_radius` keeps close surfaces from flaring
-// and widens its highlights. No shadows yet (L3): it lights through walls.
+// and widens its highlights. With a shadow_id it casts shadows (the
+// nearest few in view; the id must stay the same from frame to frame, as
+// the shadows are kept by it and drawn again only when the light or what
+// is near it changes); without, it lights through walls.
 enum class LightKind : u8 { point, spot };
 struct LocalLight {
     DVec3 position{};
@@ -318,6 +322,8 @@ struct LocalLight {
     float inner_angle = 0.4f;   // spot: full light inside this half angle, radians
     float outer_angle = 0.6f;   // spot: none outside this (at most 89 degrees)
     float source_radius = 0.05f; // metres
+    u32 shadow_id = 0;          // nonzero: casts shadows (unique among the frame's lights)
+    float shadow_near = 0.1f;   // metres: nothing nearer the light than this casts (its own lamp's shade)
 };
 // Lights one frame shades at most (the nearest of FrameInput::lights in
 // view), and at most per cluster of the screen (the nearest again).
@@ -420,6 +426,11 @@ struct RenderSettings {
     float contact_shadow_length = 0.3f;
     // Local lights (FrameInput::lights; lit views).
     bool local_lights = true;
+    // Their shadows (lights with a shadow_id; needs `shadows` and GPU
+    // culling): faces of shadow tiles drawn a frame at most (nearest first;
+    // a face not drawn yet lets its light through).
+    bool local_shadows = true;
+    u32 local_shadow_faces_per_frame = 24;
     // The physical sky (with FrameInput::sky on): the air's light scattered
     // many times (a brighter, deeper sky, and the glow after sunset), the
     // clear air between the camera and what it sees (far hills fade blue
@@ -603,6 +614,10 @@ struct RenderStats {
     u32 dust_puffs = 0;         // dust puffs drawn
     u32 lights = 0;             // local lights shaded this frame (in view, near enough)
     bool light_overflow = false; // too many: the furthest were left out of some clusters or of the frame
+    u32 local_shadows = 0;        // lights shaded with shadows this frame
+    u32 local_shadow_drawn = 0;   // shadow tile faces drawn this frame
+    u32 local_shadow_waiting = 0; // faces of shadowed lights not drawn yet, or to draw again
+    u32 local_shadow_tiles = 0;   // tiles in use (of RendererDesc::local_shadow_tiles)
     u32 skinned_meshes = 0;     // skinned meshes added (live)
     u32 posed = 0;              // of them, posed on the GPU this frame (a new pose, or just loaded)
 };
@@ -638,6 +653,10 @@ struct RendererDesc {
     // Sun shadow pages of 128 x 128 depths (64 KiB each; the default is
     // 64 MiB), made on the first frame with shadows.
     u32 shadow_pages = 1024;
+    // Local lights' shadow tiles of 256 x 256 depths (256 KiB each; the
+    // default is 48 MiB): a spot light takes one, a point light six. Made
+    // on the first frame with a shadowed light.
+    u32 local_shadow_tiles = 192;
 };
 
 // Where render()'s CPU time goes (Renderer::last_cpu_ms), for finding what
@@ -844,6 +863,9 @@ private:
     void cull_walk(rhi::CommandList& cmd, const CullBuffers& c, const gpu::CullPush& base, const FrameData& data,
                    u32 pass);
     bool ensure_shadow_buffers(u32 instance_count);
+    bool ensure_local_atlas();
+    void draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame,
+                            const gpu::FrameConstants& base);
     // Sun shadows: which pages this frame, then drawing them.
     void plan_shadows(const FrameInput& frame, bool on);
     void sway_shadows(const FrameInput& frame);
@@ -879,6 +901,11 @@ private:
     std::unique_ptr<GeometryStreamer> m_streamer;
     std::unique_ptr<DecalBins> m_decal_bins; // this frame's, reused
     std::unique_ptr<LightBins> m_light_bins; // this frame's, reused
+    std::unique_ptr<LocalShadows> m_local_shadows;
+    rhi::BufferHandle m_local_atlas; // u32 depths, tile after tile of 256 x 256 (made when first wanted)
+    bool m_local_atlas_failed = false;
+    bool m_local_planned = false; // this frame
+    bool m_local_were_on = false;
     std::unique_ptr<VoxelScene> m_voxels;
     std::unique_ptr<InstanceStore> m_store; // the instances, on the GPU by cell
     std::unique_ptr<TerrainPaintStore> m_paint; // painted terrain tiles
@@ -1051,6 +1078,7 @@ private:
     bool m_materials_logged = false;
     bool m_decals_logged = false;
     bool m_lights_logged = false;
+    u32 m_local_drawn = 0; // shadow tile faces drawn this frame
 
     std::vector<Mesh> m_meshes;
     std::vector<u32> m_free_meshes; // removed slots, reused by add_mesh

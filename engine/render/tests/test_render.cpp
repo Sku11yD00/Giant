@@ -2133,6 +2133,163 @@ GIANT_TEST("render: d3d12 a lamp lights the floor round it, fading to nothing at
     device->destroy(target);
 }
 
+GIANT_TEST("render: lamp shadows are drawn once, again when a caster near moves, a few faces a frame (null device)") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {40.0f, 1.0f, 40.0f};
+    instances[1].mesh = s.renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = {0.0, 1.0, -4.0};
+    std::vector<LocalLight> lights(2);
+    lights[0].position = {0.0, 2.5, -4.0};
+    lights[0].shadow_id = 1;
+    lights[1].position = {3.0, 2.5, -6.0};
+    lights[1].kind = LightKind::spot;
+    lights[1].shadow_id = 2;
+    FrameInput frame;
+    frame.instances = instances;
+    frame.lights = lights;
+    frame.view.position = {0.0, 2.0, 0.0};
+    frame.settings.antialiasing = false;
+    RenderStats st = s.draw(frame);
+    GIANT_CHECK(st.lights == 2 && st.local_shadows == 2);
+    GIANT_CHECK(st.local_shadow_drawn == 7 && st.local_shadow_waiting == 0 && st.local_shadow_tiles == 7);
+    GIANT_CHECK(st.shadow_draws == 7); // a pass a face (the sun's pages asked for nothing)
+    st = s.draw(frame);
+    GIANT_CHECK(st.local_shadows == 2 && st.local_shadow_drawn == 0 && st.shadow_draws == 0); // kept
+    // The cube moves: both lights reach it, both drawn again; the budget
+    // leaves some for later, the old depths shading meanwhile.
+    frame.settings.local_shadow_faces_per_frame = 4;
+    instances[1].position.x += 0.5;
+    st = s.draw(frame);
+    GIANT_CHECK(st.local_shadows == 2 && st.local_shadow_drawn == 4 && st.local_shadow_waiting == 3);
+    st = s.draw(frame);
+    GIANT_CHECK(st.local_shadow_drawn == 3 && st.local_shadow_waiting == 0);
+    // Without an id a light casts nothing; turned off, none do (tiles kept).
+    lights[1].shadow_id = 0;
+    st = s.draw(frame);
+    GIANT_CHECK(st.lights == 2 && st.local_shadows == 1 && st.local_shadow_drawn == 0);
+    frame.settings.local_shadows = false;
+    st = s.draw(frame);
+    GIANT_CHECK(st.lights == 2 && st.local_shadows == 0 && st.shadow_draws == 0 && st.local_shadow_tiles == 7);
+    // Back on: drawn again (casters may have changed unseen).
+    frame.settings.local_shadows = true;
+    frame.settings.local_shadow_faces_per_frame = 24;
+    st = s.draw(frame);
+    GIANT_CHECK(st.local_shadows == 1 && st.local_shadow_drawn == 6);
+    // They go with the sun's shadows.
+    frame.settings.shadows = false;
+    st = s.draw(frame);
+    GIANT_CHECK(st.lights == 2 && st.local_shadows == 0 && st.local_shadow_drawn == 0);
+}
+
+GIANT_TEST("render: d3d12 a lamp's shadow falls behind a block; a spot's too; without an id light goes through") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 128, k_h = 128;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // The camera 10 m above the floor looking straight down (some 9 cm a
+    // pixel, +x to the right); a lamp 1.5 m up and a block 1.2 m tall
+    // standing 0.85-1.15 m to its right (+x): the floor past the block is
+    // in its shadow out to some 5.7 m.
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = DVec3{300.0, 0.0, 0.0};
+    instances[0].scale = {40.0f, 1.0f, 40.0f};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = DVec3{301.0, 0.6, 0.0};
+    instances[1].scale = {0.3f, 1.2f, 2.0f}; // (the cube is 1 m, centred)
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[0].roughness = 0.9f;
+    std::vector<LocalLight> lights(1);
+    lights[0].position = {300.0, 1.5, 0.0};
+    lights[0].range = 6.0f;
+    lights[0].intensity = 12.0f;
+    lights[0].shadow_id = 1;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.view.position = {300.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lights = lights;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    const auto draw = [&] {
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 && st.local_shadow_waiting == 0 ? quiet + 1 : 0;
+        }
+        GIANT_CHECK(renderer->last_stats().lights == 1);
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto green = [](const std::vector<u8>& image, u32 x) {
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + x) * 4;
+        return i + 3 < image.size() ? static_cast<int>(image[i + 1]) : -1;
+    };
+    // Columns (some 9 cm each, 64 under the lamp): 41 is 2 m to the left
+    // (open floor), 86 is 2 m to the right (behind the block).
+    const std::vector<u8> point = draw();
+    const u32 point_shadows = renderer->last_stats().local_shadows;
+    lights[0].shadow_id = 0;
+    const std::vector<u8> through = draw();
+    // A spot 2 m up, 1 m to the left, looking down and to the right (its
+    // block's shadow reaches out to some 3.6 m).
+    lights[0].kind = LightKind::spot;
+    lights[0].shadow_id = 5;
+    lights[0].position = {299.0, 2.0, 0.0};
+    lights[0].direction = {0.6f, -0.8f, 0.0f};
+    lights[0].inner_angle = 0.6f;
+    lights[0].outer_angle = 0.9f;
+    const std::vector<u8> spot = draw();
+    const u32 spot_shadows = renderer->last_stats().local_shadows;
+    std::printf("    point: open %d, behind %d; no id: open %d, behind %d; spot: before %d, behind %d\n",
+                green(point, 41), green(point, 86), green(through, 41), green(through, 86), green(spot, 64),
+                green(spot, 86));
+    GIANT_CHECK(point_shadows == 1 && spot_shadows == 1);
+    GIANT_CHECK(green(point, 41) > 40);
+    GIANT_CHECK(green(point, 86) >= 0 && green(point, 86) * 4 < green(point, 41));
+    GIANT_CHECK(green(through, 86) > 40); // without shadows the light reaches behind
+    GIANT_CHECK(std::abs(green(through, 41) - green(point, 41)) <= 2);
+    GIANT_CHECK(green(spot, 64) > 40);
+    GIANT_CHECK(green(spot, 86) >= 0 && green(spot, 86) * 4 < green(spot, 64));
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: d3d12 a dust puff hides what is behind it, lit; one behind the ground shows nothing") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::d3d12;

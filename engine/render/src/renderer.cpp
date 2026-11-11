@@ -6,6 +6,7 @@
 #include "cells.h"
 #include "decals.h"
 #include "lights.h"
+#include "local_shadows.h"
 #include "brdf.h"
 #include "exposure.h"
 #include "instance_store.h"
@@ -203,6 +204,8 @@ struct Renderer::FrameData {
     u32 light_cluster_offset = 0;
     u32 light_entry_offset = 0;
     u32 light_count = 0; // 0: no local lights this frame
+    u32 light_shadow_offset = 0;
+    u32 local_shadows = 0; // LightShadow records there
     rhi::TransientMemory instances;
     rhi::TransientMemory meshes;
     u32 instance_count = 0;
@@ -326,7 +329,7 @@ Renderer::~Renderer() {
         }
     }
     for (const rhi::BufferHandle b : {m_shadow_atlas, m_shadow_requests, m_shadow_readback[0], m_shadow_readback[1],
-                                      m_shadow_readback[2]}) {
+                                      m_shadow_readback[2], m_local_atlas}) {
         m_device.destroy(b);
     }
 }
@@ -383,6 +386,7 @@ bool Renderer::init() {
     ShadowDesc shadow_desc;
     shadow_desc.pool_pages = m_desc.shadow_pages;
     m_shadows = std::make_unique<ShadowPages>(shadow_desc);
+    m_local_shadows = std::make_unique<LocalShadows>(std::min<u32>(m_desc.local_shadow_tiles, 4096u));
     m_shadow_readback_windows = std::make_unique<ShadowWindows[]>(3);
 
     rhi::GraphicsPipelineDesc raster;
@@ -1492,6 +1496,10 @@ void Renderer::read_gpu_stats() {
         m_stats.decal_overflow = cpu.decal_overflow;
         m_stats.lights = cpu.lights;
         m_stats.light_overflow = cpu.light_overflow;
+        m_stats.local_shadows = cpu.local_shadows;
+        m_stats.local_shadow_drawn = cpu.local_shadow_drawn;
+        m_stats.local_shadow_waiting = cpu.local_shadow_waiting;
+        m_stats.local_shadow_tiles = cpu.local_shadow_tiles;
         copy_streaming_stats();
     }
 }
@@ -1923,6 +1931,121 @@ bool Renderer::ensure_shadow_buffers(u32 instance_count) {
     return ok;
 }
 
+bool Renderer::ensure_local_atlas() {
+    if (m_local_atlas.valid()) return true;
+    if (m_local_atlas_failed || m_local_shadows->tiles() == 0) return false;
+    rhi::BufferDesc desc;
+    desc.size = u64{m_local_shadows->tiles()} * k_local_shadow_size * k_local_shadow_size * 4;
+    desc.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
+    desc.memory = rhi::Memory::gpu;
+    desc.name = "local light shadow tiles";
+    m_local_atlas = m_device.create_buffer(desc); // zeroed: lit until drawn
+    if (!m_local_atlas.valid()) {
+        m_local_atlas_failed = true;
+        log_error("render", "could not create the local light shadow tiles (out of GPU memory?); no lamp shadows");
+        return false;
+    }
+    return true;
+}
+
+void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame,
+                                  const gpu::FrameConstants& base) {
+    const std::vector<LocalShadows::Face>& faces = m_local_shadows->draws();
+    if (faces.empty() || data.instance_count == 0) return;
+    cmd.begin_timing("lamp shadows");
+    // The tiles drawn again start empty (as pages of the sun's clear: four
+    // 128 x 128 pages a tile).
+    constexpr u32 page_words = ShadowPages::k_page_texels * ShadowPages::k_page_texels;
+    constexpr u32 pages_per_tile = k_local_shadow_size * k_local_shadow_size / page_words;
+    std::vector<u32> pages;
+    pages.reserve(faces.size() * pages_per_tile);
+    for (const LocalShadows::Face& f : faces) {
+        for (u32 k = 0; k < pages_per_tile; ++k) pages.push_back(f.tile * pages_per_tile + k);
+    }
+    const rhi::TransientMemory list = cmd.upload(bytes_of(pages));
+    if (list.data == nullptr) {
+        cmd.end_timing();
+        return;
+    }
+    cmd.barrier(m_local_atlas, rhi::ResourceState::shader_write);
+    {
+        gpu::ShadowClearPush push{};
+        push.target = m_device.write_descriptor(m_local_atlas);
+        push.list = list.descriptor;
+        push.list_offset = list.offset;
+        push.count = static_cast<u32>(pages.size());
+        cmd.set_pipeline(m_shadow_clear_pages);
+        cmd.push(push);
+        cmd.dispatch(page_words / 4 / 64, push.count);
+    }
+    cmd.barrier(m_local_atlas, rhi::ResourceState::shader_write); // cleared before drawn
+    for (const LocalShadows::Face& f : faces) {
+        gpu::FrameConstants k = base;
+        const Mat4 m = LocalShadows::face_matrix(f, frame.view.position);
+        std::memcpy(k.view_proj, m.m, sizeof(k.view_proj));
+        LocalShadows::face_planes(f, frame.view.position, k.planes);
+        // Detail by the texel half way out (the error over a distance that never wins).
+        const double texel = 2.0 * f.tan_half * 0.5 * f.range / k_local_shadow_size;
+        constexpr float k_far = 1.0e7f;
+        k.near_plane = k_far;
+        k.pixels_per_unit = float(double(k_far) / std::max(texel, 1e-4));
+        k.occlusion = 0;
+        k.camera_delta[3] = 0.0f;
+        const rhi::TransientMemory frame_k = cmd.upload(bytes_of_one(k));
+        if (frame_k.data == nullptr) break;
+        CullBuffers& c = m_shadow_cull;
+        const gpu::CullPush push = cull_push(c, data, frame_k, false);
+        cull_first_pass(cmd, c, data, push);
+        cmd.barrier(c.args, rhi::ResourceState::indirect_argument);
+        cmd.barrier(c.counters, rhi::ResourceState::shader_read);
+        cmd.barrier(c.visible, rhi::ResourceState::shader_read);
+        cmd.barrier(m_local_atlas, rhi::ResourceState::shader_write);
+        rhi::RenderPassDesc pass;
+        pass.color_count = 0;
+        pass.width = k_local_shadow_size;
+        pass.height = k_local_shadow_size;
+        cmd.begin_render_pass(pass);
+        const bool mesh = data.use_mesh_shaders && m_shadow_mesh.valid();
+        gpu::RasterPush r{};
+        r.frame = frame_k.descriptor;
+        r.frame_offset = frame_k.offset;
+        r.instances = data.instances.descriptor;
+        r.instance_offset = data.instances.offset;
+        r.meshes = data.meshes.descriptor;
+        r.mesh_offset = data.meshes.offset;
+        r.visible = m_device.read_descriptor(c.visible);
+        r.visible_offset = 0;
+        r.range = m_device.read_descriptor(c.counters);
+        r.range_offset = gpu::k_slot_range * 4;
+        r.shadow_atlas = m_device.write_descriptor(m_local_atlas);
+        r.shadow_table = data.frame.descriptor; // (unused for tiles)
+        r.shadow_table_offset = f.tile * k_local_shadow_size * k_local_shadow_size;
+        r.local_size = k_local_shadow_size;
+        r.materials = data.materials.descriptor;
+        r.material_offset = data.materials.offset;
+        r.material_count = data.material_count;
+        constexpr u32 k_cut_kinds = 0b1100u;
+        const bool cuts = (data.kinds & k_cut_kinds) != 0u;
+        for (u32 draw = 0; draw < (cuts ? 2u : 1u); ++draw) {
+            const bool cut = draw == 1;
+            cmd.set_pipeline(mesh ? (cut ? m_shadow_mesh_cut : m_shadow_mesh)
+                                  : (cut ? m_shadow_vertex_cut : m_shadow_vertex));
+            r.kinds = !cuts ? 0u : cut ? k_cut_kinds : ~k_cut_kinds & 0b1111u;
+            cmd.push(r);
+            if (mesh) {
+                cmd.dispatch_mesh_indirect(c.args, gpu::k_args_raster);
+            } else {
+                cmd.draw_indirect(c.args, gpu::k_args_raster + 16);
+            }
+            ++m_shadow_draws;
+        }
+        cmd.end_render_pass();
+        ++m_local_drawn;
+    }
+    cmd.barrier(m_local_atlas, rhi::ResourceState::shader_read);
+    cmd.end_timing();
+}
+
 void Renderer::plan_shadows(const FrameInput& frame, bool on) {
     m_shadows_on = on;
     if (!on) {
@@ -1955,6 +2078,7 @@ void Renderer::plan_shadows(const FrameInput& frame, bool on) {
     if (cut_outs != m_shadow_cut_outs) {
         m_shadow_cut_outs = cut_outs;
         m_shadows->invalidate_all();
+        m_local_shadows->invalidate_all();
     }
     // Only what is drawn as a mesh casts (not the instances left to the
     // voxel world, nor those whose mesh is not ready).
@@ -2599,11 +2723,42 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_light_bins->lights.clear();
         m_light_bins->overflow = false;
     }
+    // Their shadows (with the sun's: GPU culling, a lit view): the nearest
+    // shadowed lights keep or get tiles, a few faces drawn a frame.
+    m_local_planned = false;
+    m_local_drawn = 0;
+    if (!m_light_bins->lights.empty() && m_shadows_on && settings.local_shadows) {
+        bool any = false;
+        for (const u32 s : m_light_bins->sources) any = any || frame.lights[s].shadow_id != 0;
+        if (any && ensure_local_atlas()) {
+            if (!m_local_were_on) {
+                m_local_shadows->invalidate_all(); // casters may have changed meanwhile
+                m_local_were_on = true;
+            }
+            std::vector<ShadowCandidate> candidates;
+            for (u32 i = 0; i < m_light_bins->sources.size(); ++i) {
+                const LocalLight& l = frame.lights[m_light_bins->sources[i]];
+                if (l.shadow_id != 0) candidates.push_back({i, &l});
+            }
+            m_local_shadows->plan(candidates, frame.view.position, m_shadows->changed_boxes(),
+                                  m_shadows->changed_all(),
+                                  std::clamp<u32>(settings.local_shadow_faces_per_frame, 1u, 384u));
+            m_local_planned = true;
+            const std::vector<LocalShadows::Shadowed>& shadowed = m_local_shadows->shadowed();
+            for (u32 i = 0; i < shadowed.size(); ++i) m_light_bins->lights[shadowed[i].light].shadow = i + 1;
+        }
+    }
+    if (!m_local_planned) {
+        m_local_were_on = false; // casters' changes go unseen meanwhile: all drawn again when back
+    }
     if (!m_light_bins->lights.empty()) {
         const LightBins& bins = *m_light_bins;
         const usize light_bytes = bins.lights.size() * sizeof(gpu::Light);
         const usize cluster_bytes = bins.clusters.size() * 4;
-        const usize total = light_bytes + cluster_bytes + std::max<usize>(bins.entries.size(), 1) * 4;
+        const usize entry_bytes = std::max<usize>(bins.entries.size(), 1) * 4;
+        const std::vector<LocalShadows::Shadowed>* shadowed = m_local_planned ? &m_local_shadows->shadowed() : nullptr;
+        const usize shadow_bytes = shadowed != nullptr ? shadowed->size() * sizeof(gpu::LightShadow) : 0;
+        const usize total = light_bytes + cluster_bytes + entry_bytes + shadow_bytes;
         data.lights = cmd.allocate(static_cast<u32>(total));
         if (data.lights.data != nullptr) {
             std::memcpy(data.lights.data, bins.lights.data(), light_bytes);
@@ -2613,6 +2768,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             data.light_cluster_offset = data.lights.offset + static_cast<u32>(light_bytes);
             data.light_entry_offset = data.light_cluster_offset + static_cast<u32>(cluster_bytes);
             data.light_count = static_cast<u32>(bins.lights.size());
+            data.light_shadow_offset = data.light_entry_offset + static_cast<u32>(entry_bytes);
+            u8* records = data.lights.data + light_bytes + cluster_bytes + entry_bytes;
+            for (usize i = 0; shadowed != nullptr && i < shadowed->size(); ++i) {
+                std::memcpy(records + i * sizeof(gpu::LightShadow), &(*shadowed)[i].record, sizeof(gpu::LightShadow));
+            }
+            data.local_shadows = shadowed != nullptr ? static_cast<u32>(shadowed->size()) : 0u;
         }
     }
     if (m_light_bins->overflow && !m_lights_logged) {
@@ -2715,6 +2876,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (m_shadows_on) {
         draw_shadows(cmd, data, frame, k); // after the view's culling: its streaming requests go first
     }
+    if (m_local_planned) {
+        draw_local_shadows(cmd, data, frame, k);
+    }
     mark(CpuSection::shadows);
     if (data.occlusion && !m_valid.empty()) {
         m_hzb_valid = true;
@@ -2745,6 +2909,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (m_shadows_on) {
         cmd.barrier(m_shadow_atlas, rhi::ResourceState::shader_read);
         cmd.barrier(m_shadow_requests, rhi::ResourceState::shader_write);
+    }
+    if (m_local_planned && m_local_atlas.valid()) {
+        cmd.barrier(m_local_atlas, rhi::ResourceState::shader_read);
     }
     const bool gi = m_gi_on && data.voxel_levels.data != nullptr;
     if (gi) {
@@ -3047,6 +3214,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.light_entry_offset = data.light_entry_offset;
     extras.light_near = k_light_near;
     extras.light_scale = light_slice_scale();
+    extras.light_shadow_offset = data.light_shadow_offset;
+    const bool local_atlas = data.local_shadows != 0 && m_local_atlas.valid();
+    extras.local_atlas = local_atlas ? m_device.read_descriptor(m_local_atlas) : data.frame.descriptor;
+    extras.local_atlas_on = local_atlas ? 1u : 0u;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;
@@ -3277,6 +3448,10 @@ void Renderer::finish_stats(const FrameData& data) {
     m_stats.decal_overflow = m_decal_bins->overflow;
     m_stats.lights = data.light_count;
     m_stats.light_overflow = m_light_bins->overflow;
+    m_stats.local_shadows = data.local_shadows;
+    m_stats.local_shadow_drawn = m_local_drawn;
+    m_stats.local_shadow_waiting = m_local_planned ? m_local_shadows->waiting() : 0u;
+    m_stats.local_shadow_tiles = m_local_shadows->tiles_used();
 }
 
 void Renderer::draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,

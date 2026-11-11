@@ -136,9 +136,24 @@ struct Light {
     float direction[3];
     float spot_scale;
     float spot_offset;
-    u32 pad[3];
+    u32 shadow; // 0: none; else 1 + its LightShadow's index
+    u32 pad[2];
 };
 static_assert(sizeof(Light) == 64);
+
+// A local light's shadow tiles (src/local_shadows.h): the first tile (a
+// spot has one, a point light six: +x, -x, +y, -y, +z, -z), which are
+// drawn (bit per face), the depth's near distance, the face's half width
+// (tan) and a spot's right axis.
+struct LightShadow {
+    float near;
+    u32 tile;
+    u32 drawn;
+    float tan_half;
+    float right[3];
+    u32 pad;
+};
+static_assert(sizeof(LightShadow) == 32);
 
 struct MeshEntry {
     u32 residency;  // u32 per group: its geometry's byte offset in the pool, or k_not_resident
@@ -328,7 +343,9 @@ struct RasterPush {
     u32 materials;
     u32 material_offset;
     u32 material_count;
-    u32 pad;
+    // Local light shadow tiles (ps_shadow): their side in texels (0: sun
+    // pages); the tile's first word is shadow_table_offset.
+    u32 local_size;
 };
 static_assert(sizeof(RasterPush) == 80);
 
@@ -448,7 +465,12 @@ struct ResolveExtras {
     u32 light_entry_offset;   // u32 light index each
     float light_near;
     float light_scale;
-    u32 pad_lights[3];
+    // Their shadows (src/local_shadows.h): LightShadow records at
+    // light_shadow_offset in the lights' upload, and the tiles' depths
+    // (read descriptor; local_atlas_on 0: none this frame).
+    u32 light_shadow_offset;
+    u32 local_atlas;
+    u32 local_atlas_on;
 };
 static_assert(sizeof(ResolveExtras) == 288);
 

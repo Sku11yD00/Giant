@@ -118,7 +118,9 @@ Json entity_json(const Entity& e) {
                      {"offset", vec3_json(l.offset)},
                      {"inner_degrees", l.inner_degrees},
                      {"outer_degrees", l.outer_degrees},
-                     {"source_radius", l.source_radius}};
+                     {"source_radius", l.source_radius},
+                     {"shadows", l.shadows},
+                     {"shadow_near", l.shadow_near}};
     }
     return j;
 }
@@ -248,10 +250,15 @@ Json entity_properties() {
             {"inner_degrees", number(0, 89, "Spot: full light within this angle of its axis. Default 30.")},
             {"outer_degrees", number(0.1, 89, "Spot: no light past this angle (a soft edge between). Default 45.")},
             {"source_radius", number(0, 10, "Metres: the bulb's size (bigger is softer close by, with broader "
-                                            "highlights). Default 0.05.")}}},
+                                            "highlights). Default 0.05.")},
+            {"shadows", {{"type", "boolean"},
+                         {"description", "It casts shadows (the nearest 64 lamps in view that cast do; a "
+                                         "point lamp costs six times a spot). Default off."}}},
+            {"shadow_near", number(0.01, 10, "Metres from the light within which nothing casts (so its own "
+                                             "lantern glass or shade does not darken everything). Default 0.1.")}}},
           {"description", "A light it carries (a lamp, a lantern, a street light, a window's glow), drawn in the "
                           "lit view out to 4 km, following it as it moves or swings. Any shape; a hidden entity "
-                          "gives none. Pair it with emissive for the bulb itself to glow. No shadows yet: it "
+                          "gives none. Pair it with emissive for the bulb itself to glow. Without shadows it "
                           "lights through walls. Kept while off. A kit piece's lamp lights every placement (not scatter's); for cloth the offset is in metres (its scale is unused)."}}},
         {"mesh",
          {{"type", "string"},
@@ -367,6 +374,8 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         e.lamp.inner_degrees = l.value("inner_degrees", e.lamp.inner_degrees);
         e.lamp.outer_degrees = l.value("outer_degrees", e.lamp.outer_degrees);
         e.lamp.source_radius = l.value("source_radius", e.lamp.source_radius);
+        e.lamp.shadows = l.value("shadows", e.lamp.shadows);
+        e.lamp.shadow_near = l.value("shadow_near", e.lamp.shadow_near);
     }
     if (args.contains("position")) e.transform.position = dvec3_from(args["position"]);
     if (args.contains("rotation")) {
@@ -506,6 +515,8 @@ Json render_settings_json(const EditorState& state) {
             {"contact_shadows", state.render_settings.contact_shadows},
             {"contact_shadow_length", state.render_settings.contact_shadow_length},
             {"local_lights", state.render_settings.local_lights},
+            {"local_shadows", state.render_settings.local_shadows},
+            {"local_shadow_faces_per_frame", state.render_settings.local_shadow_faces_per_frame},
             {"physical_sky", state.render_settings.physical_sky},
             {"aerial_distance", state.render_settings.aerial_distance},
             {"auto_exposure", state.render_settings.auto_exposure},
@@ -533,6 +544,9 @@ Json render_settings_json(const EditorState& state) {
               {"occluded_clusters", s.occluded_clusters}, {"overflow", s.overflow},
               {"materials", s.materials}, {"decals", s.decals}, {"decal_overflow", s.decal_overflow},
               {"lights", s.lights}, {"light_overflow", s.light_overflow},
+              {"lamp_shadows",
+               {{"lights", s.local_shadows}, {"drawn", s.local_shadow_drawn}, {"waiting", s.local_shadow_waiting},
+                {"tiles", s.local_shadow_tiles}}},
               {"cells", {{"count", s.cells}, {"changed", s.cells_changed}}},
               {"streaming",
                {{"pool_bytes", s.pool_bytes}, {"pool_used_bytes", s.pool_used_bytes},
@@ -1766,6 +1780,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "local_lights: the lamps entities and kit pieces carry (their lamp settings) light the scene "
          "(default on; lit views; last_frame.lights says how many were in view, light_overflow when the "
          "furthest were left out). "
+         "local_shadows: lamps with shadows on cast them (the nearest 64 in view; needs shadows; default on); "
+         "their shadow tiles are kept and drawn again only when the lamp or something near it changes, at "
+         "most local_shadow_faces_per_frame faces a frame (a spot is one, a point lamp six; default 24); "
+         "last_frame.lamp_shadows has the lamps shaded with shadows, faces drawn and waiting, and tiles in use. "
          "physical_sky: with a weather set, the air's light scattered many times (a deeper sky, the glow "
          "after sunset), the clear air between the camera and what it sees (far land fades blue, out to "
          "aerial_distance metres, default 32000) and the ambient light taken from the sky itself all round "
@@ -1815,6 +1833,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"contact_shadows", {{"type", "boolean"}}},
                 {"contact_shadow_length", number(0.05, 2, "Metres contact shadows are looked for towards the sun. Default 0.3.")},
                 {"local_lights", {{"type", "boolean"}}},
+                {"local_shadows", {{"type", "boolean"}}},
+                {"local_shadow_faces_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 384},
+                                                  {"description", "Lamp shadow faces drawn a frame at most. Default 24."}}},
                 {"physical_sky", {{"type", "boolean"}}},
                 {"aerial_distance", number(1000, 100000, "Metres the air over the view is worked out to. Default 32000.")},
                 {"auto_exposure", {{"type", "boolean"}}},
@@ -1868,6 +1889,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.contact_shadows = args.value("contact_shadows", r.contact_shadows);
              r.contact_shadow_length = args.value("contact_shadow_length", r.contact_shadow_length);
              r.local_lights = args.value("local_lights", r.local_lights);
+             r.local_shadows = args.value("local_shadows", r.local_shadows);
+             r.local_shadow_faces_per_frame = args.value("local_shadow_faces_per_frame", r.local_shadow_faces_per_frame);
              r.physical_sky = args.value("physical_sky", r.physical_sky);
              r.aerial_distance = args.value("aerial_distance", r.aerial_distance);
              r.auto_exposure = args.value("auto_exposure", r.auto_exposure);
