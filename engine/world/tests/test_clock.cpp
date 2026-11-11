@@ -64,6 +64,9 @@ GIANT_TEST("clock: the moon's phase over the month, and where it stands") {
     // Full about 14.8 days on: opposite the sun, all lit, high at midnight.
     const SkyBodies full = sky_bodies(at(0.0, 16, 45.0f));
     GIANT_CHECK(full.moon_lit > 0.99f && near(full.moon_age, 0.5f, 0.02f));
+    // Twelve months a year: the phase carries on over the year's end.
+    GIANT_CHECK(std::fabs(sky_bodies(at(23.99, 365, 45.0f)).moon_age - 1.0f) < 0.01f ||
+                sky_bodies(at(23.99, 365, 45.0f)).moon_age < 0.01f);
     GIANT_CHECK(dot(full.moon, full.sun) < -0.95f && full.moon_elevation_degrees > 40.0f);
     // A first quarter: half lit, 90 degrees from the sun.
     const SkyBodies quarter = sky_bodies(at(18.0, 8, 45.0f));
@@ -108,6 +111,21 @@ GIANT_TEST("clock: time moves on through midnight and the year's end; check_cloc
     c = advance(c, 86400.0 * 400.0);
     GIANT_CHECK(c.day == 36 && near(static_cast<float>(c.hours), 1.0f, 1e-6f));
     GIANT_CHECK(advance(c, -5.0) == c);
+    // Saved and loaded whole; a part day refused.
+    Scene scene;
+    scene.clock = at(6.3, 200, 12.5f);
+    Scene loaded;
+    GIANT_CHECK(!load_scene(save_scene(scene), loaded).has_value() && loaded.clock == scene.clock);
+    std::string text = save_scene(scene);
+    const usize d = text.find("\"day\": 200");
+    GIANT_CHECK(d != std::string::npos);
+    if (d != std::string::npos) {
+        text.replace(d, 11, "\"day\": 200.5");
+        GIANT_CHECK(load_scene(text, loaded).has_value());
+    }
+    Clock late = at(24.0, 365, 45.0f);
+    late = midnight_wrapped(late);
+    GIANT_CHECK(late.hours == 0.0 && late.day == 1);
     GIANT_CHECK(advance(c, std::nan("")) == c);
     GIANT_CHECK(!check_clock(Clock{}).has_value());
     Clock bad;

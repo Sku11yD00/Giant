@@ -51,8 +51,9 @@ GIANT_TEST("clock commands: set, get, refused out of range, undoable, saved with
     GIANT_CHECK(!f.run("set_time", {{"latitude", -91}}).ok);
     GIANT_CHECK(!f.run("set_time", {{"time", 3}}).ok);
     GIANT_CHECK(f.state.scene.clock.hours == 6.5);
-    // 24 is midnight: the start of the day.
-    GIANT_CHECK(f.run("set_time", {{"hours", 24}}).ok && f.state.scene.clock.hours == 0.0);
+    // 24 is midnight: the start of the next day.
+    GIANT_CHECK(f.run("set_time", {{"hours", 24}}).ok && f.state.scene.clock.hours == 0.0 &&
+                f.state.scene.clock.day == 81);
     GIANT_CHECK(f.run("undo").ok && f.state.scene.clock.hours == 6.5);
     GIANT_CHECK(f.run("undo").ok && !f.state.scene.clock.on);
     GIANT_CHECK(f.run("redo").ok && f.state.scene.clock.on && f.state.scene.clock.hours == 6.5);
@@ -70,9 +71,19 @@ GIANT_TEST("clock commands: set, get, refused out of range, undoable, saved with
     r = f.run("get_time");
     GIANT_CHECK(r.ok && r.value["light"] == "moon" && r.value["stars"].get<float>() == 1.0f);
     GIANT_CHECK(r.value["daylight"].get<float>() < 0.03f && r.value["daylight"].get<float>() > 0.0f);
+    // Saved and loaded whole (hours not through float).
+    GIANT_CHECK(f.run("set_time", {{"hours", 6.3}}).ok);
     world::Scene loaded;
     GIANT_CHECK(!world::load_scene(world::save_scene(f.state.scene), loaded).has_value());
     GIANT_CHECK(loaded.clock == f.state.scene.clock);
+    // Play moved the time on: set_time to the scene's own time shows it again.
+    f.clock.update(f.state.scene.clock, 0.0, true);
+    f.clock.update(f.state.scene.clock, 60.0, true); // an hour at speed 60
+    GIANT_CHECK(f.clock.shown().hours > 7.0);
+    GIANT_CHECK(f.run("set_time", {{"hours", 6.3}}).ok);
+    GIANT_CHECK(f.clock.shown().hours == 6.3 && f.run("get_time").value["shown"]["hours"] == 6.3);
+    f.clock.update(f.state.scene.clock, 0.0, false);
+    GIANT_CHECK(f.clock.shown().hours == 6.3);
 }
 
 GIANT_TEST("clock state: play moves the time on by its speed, the scene's clock shows again when it changes") {
@@ -129,7 +140,8 @@ GIANT_TEST("clock: the light it places and the night sky it gives the renderer")
     GIANT_CHECK(night.lighting.sun_intensity < lighting.sun_intensity * world::k_moon_light * 1.01f &&
                 night.lighting.sun_intensity > lighting.sun_intensity * world::k_moon_light * 0.9f);
     clock_sky(sky, c);
-    GIANT_CHECK(sky.stars == 1.0f && sky.moon);
+    GIANT_CHECK(sky.moon && sky.moon_lit > 0.95f);
+    GIANT_CHECK(sky.stars > 4.0f && sky.stars <= 5.0f); // (brighter under a full moon up)
     // The sky's light falls at night, but not to black (no weather: the flat colours).
     const render::Lighting day_light = weather_lighting(lighting, std::nullopt);
     const render::Lighting night_light = weather_lighting(night.lighting, std::nullopt, night.daylight);
@@ -140,4 +152,17 @@ GIANT_TEST("clock: the light it places and the night sky it gives the renderer")
     const render::Lighting night_weather = weather_lighting(night.lighting, w, night.daylight);
     const render::Lighting day_weather = weather_lighting(lighting, w);
     GIANT_CHECK(night_weather.sky_light.y < day_weather.sky_light.y * 0.05f && night_weather.sky_light.y > 0.0f);
+    // Dusk: the sun's light fades out by 2 degrees under, and the moon's
+    // starts from nothing at 6 under: no jump in the light either side.
+    c.day = 80;
+    float last = -1.0f;
+    for (double h = 17.5; h < 20.5; h += 1.0 / 240.0) {
+        c.hours = h;
+        const world::SkyBodies b = world::sky_bodies(c);
+        const ClockLight l = clock_light(lighting, c);
+        const render::Lighting r = weather_lighting(l.lighting, w, l.daylight);
+        if (b.sun_elevation_degrees <= -2.0f && b.sun_elevation_degrees > -6.0f) GIANT_CHECK(r.sun_light.y == 0.0f);
+        if (last >= 0.0f) GIANT_CHECK(std::fabs(r.sun_light.y - last) < 0.01f);
+        last = r.sun_light.y;
+    }
 }

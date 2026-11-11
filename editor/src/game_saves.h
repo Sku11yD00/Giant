@@ -6,7 +6,8 @@
 // ground a game dented (craters, footprints: each such tile whole), and
 // sections for the camera (where the player's eyes were), whether play was
 // on, the weather it was going to with its ground, the time of day (the
-// clock shown: put back until the scene's clock changes), and the bodies
+// clock shown: put back until set_time, close_game or
+// a change to the scene's clock), and the bodies
 // (whether simulating, and where the moved dynamic entities are), and the
 // walkers (where each stood, faced and moved, where it was going and how
 // far it had got). Loading stops play

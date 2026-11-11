@@ -312,14 +312,19 @@ GIANT_TEST("game saves: a cell's kept trees stay with a new break there; set_wea
         const world::CellDamage* shown = scene.shown_damage_in({0, 0});
         GIANT_CHECK(shown != nullptr && scene.game_damage_in({0, 0}) == shown);
         GIANT_CHECK(shown->kits.size() == 1 && shown->kits[0].pieces.size() == 2 && shown->trees.size() == 1);
-        // The time of day the save had.
+        // The time of day the save had, and play goes on from it.
         GIANT_CHECK(std::fabs(clock.shown().hours - saved_time.hours) < 1e-9 && clock.shown().day == saved_time.day);
+        frame();
+        GIANT_CHECK(std::fabs(clock.shown().hours - (saved_time.hours + 1.0 / 60.0)) < 1e-6);
         // The save's weather shows; set_weather (to the scene's own, even) ends it.
         frame();
         GIANT_CHECK(saves.weather() != nullptr && *saves.weather() == *world::weather_preset("clear"));
         GIANT_CHECK(run("set_weather", {{"preset", "storm"}}).ok && saves.weather() == nullptr);
         frame();
         GIANT_CHECK(weather.shown() && *weather.shown() == *world::weather_preset("storm"));
+        // Closing the game: the scene's own time again.
+        GIANT_CHECK(clock.shown().hours > 9.0 && !(clock.shown() == scene.clock));
+        GIANT_CHECK(run("close_game").ok && clock.shown() == scene.clock);
     }
     std::error_code error;
     std::filesystem::remove_all(folder, error);

@@ -5,6 +5,7 @@
 #include "texture_library.h"
 
 #include "giant/sim/swing.h"
+#include "giant/world/weather.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1136,7 +1137,7 @@ render::Lighting scene_lighting(const world::Lighting& l, std::optional<float> d
     out.sun_direction = world::sun_direction(l);
     // Below the horizon the sun stops lighting (night); ambient remains
     // (with a clock's daylight, as much as the moon and stars give).
-    const float sun = l.sun_elevation_degrees > -2.0f ? l.sun_intensity : 0.0f;
+    const float sun = l.sun_intensity * world::sun_share(l.sun_elevation_degrees);
     const float day = daylight && std::isfinite(*daylight) ? std::clamp(*daylight, 0.0f, 1.0f) : 1.0f;
     out.sun_light = l.sun_color * sun;
     out.sky_light = l.sky_color * (l.ambient_intensity * day);

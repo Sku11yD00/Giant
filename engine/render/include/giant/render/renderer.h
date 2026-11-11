@@ -278,10 +278,13 @@ struct Sky {
     // as the hours pass; `stars` their brightness (0: none; seen where the
     // sky is darker than they are, and through no cloud). `moon`: the disc
     // drawn at sun_direction is the moon, lit from `moon_sun` (towards the
-    // sun) by its phase, with a faint earthshine on its dark side.
+    // sun) by its phase, with a faint earthshine on its dark side;
+    // `moon_lit` the share of it lit, which Lighting's light (the moon's)
+    // already carries, so its lit face is as bright at any phase.
     float stars = 0.0f;
     std::array<Vec3, 3> celestial{Vec3{1.0f, 0.0f, 0.0f}, Vec3{0.0f, 1.0f, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}};
     bool moon = false;
+    float moon_lit = 1.0f;
     Vec3 moon_sun{0.0f, -1.0f, 0.0f};
 };
 

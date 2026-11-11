@@ -470,7 +470,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                 if (!only_keys(j, {"hours", "day"}) || !j.contains("hours") || !finite_in(j["hours"], 0.0, 24.0, hours) ||
                     !j.contains("day") || !j["day"].is_number_integer() || !finite_in(j["day"], 1.0, 365.0, day))
                     return fail(file + ": a bad clock");
-                p->sections.time = std::pair<double, i32>{hours, static_cast<i32>(day)};
+                p->sections.time = std::pair<double, i32>{hours, static_cast<i32>(day)}; // (24: set_time wraps it)
             } else if (name == "player") {
                 PlayerStart s;
                 const Json none(nullptr);
@@ -589,6 +589,7 @@ void GameSaves::close(EditorState& state) {
     m_carried_feet.reset();
     forget_walkers();
     drop_weather();
+    if (state.clock != nullptr) state.clock->show(state.scene.clock); // the scene's time again
     m_applying.clear();
     m_sections.reset();
     m_generation = 0;

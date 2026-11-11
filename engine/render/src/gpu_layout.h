@@ -491,7 +491,7 @@ struct SkyParams {
     float celestial_y[3];
     float moon;
     float celestial_z[3];
-    float pad0;
+    float moon_lit;
     float moon_sun[3];
     float pad1;
 };

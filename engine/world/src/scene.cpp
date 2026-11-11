@@ -1,4 +1,5 @@
 #include "giant/world/scene.h"
+#include "giant/world/clock.h"
 #include "giant/world/far_ground.h"
 #include "giant/world/scatter.h"
 
@@ -923,6 +924,27 @@ public:
         }
     }
 
+    // A double kept whole (not through float).
+    void number(const char* key, double& out, double minimum, double maximum) {
+        float probe = 0.0f;
+        number(key, probe, minimum, maximum);
+        if (const Json* v = get(key, false); v != nullptr && v->is_number() && std::isfinite(v->get<double>())) {
+            const double d = v->get<double>();
+            if (within(d, minimum, maximum)) out = d;
+        }
+    }
+
+    // A whole number.
+    void integer(const char* key, i32& out, i32 minimum, i32 maximum) {
+        if (const Json* v = get(key, false)) {
+            if (!v->is_number_integer() || v->get<i64>() < minimum || v->get<i64>() > maximum) {
+                fail(key, "must be a whole number from " + std::to_string(minimum) + " to " + std::to_string(maximum));
+                return;
+            }
+            out = static_cast<i32>(v->get<i64>());
+        }
+    }
+
     template <typename V>
     void vec3(const char* key, V& out, double minimum, double maximum) {
         if (const Json* v = get(key, false)) {
@@ -1060,16 +1082,13 @@ void read_lighting(const Json& json, Lighting& l, std::string& error) {
 void read_clock(const Json& json, Clock& c, std::string& error) {
     Reader r(json, "clock", error);
     r.boolean("on", c.on);
-    float hours = static_cast<float>(c.hours);
-    r.number("hours", hours, 0, 24);
-    float day = static_cast<float>(c.day);
-    r.number("day", day, 1, 365);
+    r.number("hours", c.hours, 0, 24);
+    r.integer("day", c.day, 1, 365);
     r.number("latitude", c.latitude, -90, 90);
     r.number("north_degrees", c.north_degrees, 0, 360);
     r.number("speed", c.speed, 0, 86400);
     r.finish();
-    c.hours = hours >= 24.0f ? 0.0 : static_cast<double>(hours);
-    c.day = static_cast<i32>(std::lround(day));
+    c = midnight_wrapped(c);
 }
 
 void read_weather(const Json& json, std::optional<Weather>& out, std::string& error) {

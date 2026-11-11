@@ -116,6 +116,15 @@ Clock advance(const Clock& clock, double game_seconds) {
     return c;
 }
 
+Clock midnight_wrapped(const Clock& clock) {
+    Clock c = clock;
+    if (std::isfinite(c.hours) && c.hours >= 24.0) {
+        c.hours = 0.0;
+        c.day = std::clamp(c.day, 1, 365) % 365 + 1;
+    }
+    return c;
+}
+
 std::optional<std::string> check_clock(const Clock& c) {
     if (!in(c.hours, 0.0, 24.0)) return "hours must be 0 to 24";
     if (c.day < 1 || c.day > 365) return "day must be 1 to 365";

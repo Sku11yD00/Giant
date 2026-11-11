@@ -118,7 +118,7 @@ render::Sky weather_sky(const world::Lighting& lighting, const std::optional<wor
     }
     const world::Weather& w = *weather;
     sky.on = true;
-    const float sun = lighting.sun_elevation_degrees > -2.0f ? lighting.sun_intensity : 0.0f;
+    const float sun = lighting.sun_intensity * world::sun_share(lighting.sun_elevation_degrees);
     sky.sun_top = lighting.sun_color * sun;
     sky.haze = w.haze;
     sky.cloud_cover = w.cloud_cover;

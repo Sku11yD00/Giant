@@ -1772,6 +1772,7 @@ GIANT_TEST("render: d3d12 night sky: stars that turn with the sky, a moon lit by
     frame.lighting.exposure = 0.01f; // (the disc is drawn 2000 times its light: the moon's face just white)
     frame.sky.moon = true;
     frame.sky.moon_sun = {1.0f, 0.0f, 0.0f};
+    frame.sky.moon_lit = 0.5f;
     const auto moon = draw();
     GIANT_CHECK(moon.size() == size);
     if (moon.size() == size) {
@@ -1785,6 +1786,19 @@ GIANT_TEST("render: d3d12 night sky: stars that turn with the sky, a moon lit by
         std::printf("moon: left %d centre %d right %d outside %d\n", left, centre, right, outside);
         GIANT_CHECK(right > 150 && right > left + 100);
         GIANT_CHECK(outside < 30);
+        GIANT_CHECK(px(c + 14, c) < 30); // its true size: 0.26 degrees in radius
+    }
+    // A thin crescent: less light, but its lit face as bright (the phase counted once).
+    frame.sky.moon_lit = 0.1f;
+    frame.lighting.sun_light = {0.016f, 0.016f, 0.016f};
+    frame.sky.moon_sun = normalize_or_zero(Vec3{1.0f, 0.0f, 0.0f} + ahead); // (the sun beyond it, to the right)
+    const auto crescent = draw();
+    GIANT_CHECK(crescent.size() == size);
+    if (crescent.size() == size) {
+        // The lit edge on the right.
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + k_w / 2 + 10) * 4;
+        std::printf("crescent: edge %d %d %d\n", crescent[i], crescent[i + 1], crescent[i + 2]);
+        GIANT_CHECK(crescent[i] + crescent[i + 1] + crescent[i + 2] > 150);
     }
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);

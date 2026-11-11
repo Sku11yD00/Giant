@@ -3563,6 +3563,7 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
         row(sky.celestial[2], p.celestial_z);
         p.stars = std::clamp(finite(sky.stars, 0.0f), 0.0f, 100.0f);
         p.moon = sky.moon ? 1.0f : 0.0f;
+        p.moon_lit = std::clamp(finite(sky.moon_lit, 1.0f), 0.0f, 1.0f);
         const Vec3 ms = normalize_or_zero(sky.moon_sun);
         row(std::isfinite(ms.x) && std::isfinite(ms.y) && std::isfinite(ms.z) ? ms : Vec3{0.0f, -1.0f, 0.0f}, p.moon_sun);
     }

@@ -23,9 +23,12 @@ public:
     // Whether it shows `clock` (the scene's as last followed); else the
     // next update shows that clock again.
     bool follows(const world::Clock& clock) const { return m_seen && clock == m_scene; }
-    // Puts the time there (a loaded game), until the scene's clock changes.
+    // Puts the time there (a loaded game), until the scene's clock
+    // changes or show() is called (set_time, close_game).
     // Out of range: unchanged.
     void set_time(double hours, i32 day);
+    // Shows `clock` (the scene's, just set or put back) from now.
+    void show(const world::Clock& clock);
 
 private:
     world::Clock m_scene; // the scene's, as last seen

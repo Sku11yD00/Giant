@@ -45,7 +45,7 @@ void register_clock_commands(ai::CommandRegistry& registry, EditorState& state) 
         {"set_time",
          "Sets the scene's clock: the time of day and the date place the sun (by latitude: a simple model "
          "good to about a degree, local solar time), and at night the moon (lit by its phase, new on day 1 "
-         "and every 29.5 days) is the light that casts shadows, the sky's light falling to what the moon "
+         "and twelve times a year, every 30.4 days) is the light that casts shadows, the sky's light falling to what the moon "
          "and stars give, and the stars turn overhead (drawn with the weather's sky; clouds hide them). "
          "While on, the clock places the light instead of set_lighting's sun angles (its colour and "
          "intensity stay). Play moves the time on, `speed` game seconds a second. Starts from the time "
@@ -69,11 +69,16 @@ void register_clock_commands(ai::CommandRegistry& registry, EditorState& state) 
              c.north_degrees = args.value("north_degrees", c.north_degrees);
              c.speed = args.value("speed", c.speed);
              if (const auto bad = world::check_clock(c)) return CommandResult::failure(*bad);
-             if (c.hours >= 24.0) c.hours = 0.0; // midnight: the next day's start
+             c = world::midnight_wrapped(c); // 24: the next day's start
              const Clock before = state.scene.clock;
-             state.scene.clock = c;
-             context.record(scene_change(
-                 state, [&state, before] { state.scene.clock = before; }, [&state, c] { state.scene.clock = c; }));
+             // The view shows it at once, even where the scene's clock is
+             // unchanged (play or a loaded game had moved the time on).
+             const auto put = [&state](const Clock& to) {
+                 state.scene.clock = to;
+                 if (state.clock != nullptr) state.clock->show(to);
+             };
+             put(c);
+             context.record(scene_change(state, [put, before] { put(before); }, [put, c] { put(c); }));
              return CommandResult::success({{"clock", clock_json(c)}});
          }});
     add(registry,

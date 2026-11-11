@@ -231,10 +231,14 @@ Vec3 air_transmittance(float sun_elevation_degrees, float haze) {
             std::exp(-mass * (rayleigh.z + mie))};
 }
 
+float sun_share(float elevation_degrees) {
+    return std::isfinite(elevation_degrees) ? std::clamp((elevation_degrees + 2.0f) * 0.5f, 0.0f, 1.0f) : 0.0f;
+}
+
 WeatherLight weather_light(const Lighting& l, const Weather& w, std::optional<float> daylight) {
     WeatherLight out;
     // Below the horizon the sun stops lighting (night); the sky dims with it.
-    const float sun = l.sun_elevation_degrees > -2.0f ? l.sun_intensity : 0.0f;
+    const float sun = l.sun_intensity * sun_share(l.sun_elevation_degrees);
     const Vec3 through = air_transmittance(std::max(l.sun_elevation_degrees, 0.0f), w.haze);
     out.sun_light = Vec3{l.sun_color.x * through.x, l.sun_color.y * through.y, l.sun_color.z * through.z} * sun;
     // Day: the sky's light follows the sun up from dusk.

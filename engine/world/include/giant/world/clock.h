@@ -6,8 +6,8 @@
 //
 // The sky is worked out from a simple model, good to about a degree: the
 // sun on a circular orbit (the equinox on day 80), the moon on the
-// ecliptic at its phase's angle from the sun (new on day 1, every 29.53
-// days), local solar time (no time zones or equation of time).
+// ecliptic at its phase's angle from the sun (new on day 1, twelve times
+// a year: every 30.4 days), local solar time (no time zones or equation of time).
 //
 // Directions are the world's: +X east, -Z north, +Y up, then turned by the
 // clock's north_degrees (the compass heading the world's -Z points to).
@@ -29,7 +29,9 @@ namespace giant::world {
 // day sky's light.
 inline constexpr float k_moon_light = 0.025f;
 inline constexpr float k_star_light = 0.004f;
-inline constexpr float k_lunar_month_days = 29.530588f;
+// The moon's month in this model: twelve to the 365-day year (the real
+// 29.53 days would make its phase jump where the year wraps).
+inline constexpr float k_lunar_month_days = 365.0f / 12.0f;
 // The sun's elevation (degrees) under which the moon is the light.
 inline constexpr float k_moon_leads_below = -6.0f;
 
@@ -54,6 +56,9 @@ SkyBodies sky_bodies(const Clock& clock);
 // The clock `game_seconds` later (hours wrap into days, day 365 into 1).
 // Not finite or negative: unchanged.
 Clock advance(const Clock& clock, double game_seconds);
+
+// Hours 24 as 0 of the next day (the rest unchanged).
+Clock midnight_wrapped(const Clock& clock);
 
 // Why it cannot be used (a value out of range), or none.
 std::optional<std::string> check_clock(const Clock& clock);
