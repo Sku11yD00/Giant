@@ -657,6 +657,8 @@ constexpr double k_dirty_square = 32.0;
 void ShadowPages::track(std::span<const Instance> instances, std::span<const CellRange> cells,
                         std::span<const u8> casts, u64 meshes_version, const MeshLookup& meshes) {
     const auto casting = [&](size_t i) { return casts.empty() || (i < casts.size() && casts[i] != 0); };
+    m_boxes.clear();
+    m_track_all = false;
     // Meshes came or went: those whose bounds differ from what the casters
     // used (terrain tiles stream in all the time; most meshes stay put).
     bool stale_any = false;
@@ -801,6 +803,7 @@ void ShadowPages::track(std::span<const Instance> instances, std::span<const Cel
         dirty(m_casters[i]);
     }
     if (all) {
+        m_track_all = true;
         invalidate_all();
         return;
     }

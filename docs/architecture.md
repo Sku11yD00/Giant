@@ -627,9 +627,9 @@ an offline cooker can use it without a device.
   (`RenderStats::light_overflow`: the furthest were left out). Shading
   finds its pixel's cluster and lights the surface with each light listed
   there, GGX and Lambert as for the sun. Lit views only, not the far
-  field; `RenderSettings::local_lights` turns them off. No shadows yet
-  (they light through walls until L3), and the voxel world's bounce light
-  does not see them yet (L4).
+  field; `RenderSettings::local_lights` turns them off. Lights without a
+  shadow id light through walls, and the voxel world's bounce light does
+  not see them yet (L4).
   In the world (lights part L2b), any entity can carry a `world::Lamp`
   (saved with it, only when set; kept while off) and so can a kit piece,
   lighting every placement. The editor's scene frame turns each into a
@@ -639,6 +639,35 @@ an offline cooker can use it without a device.
   entities give none, a kit placement may carry its own beside its
   pieces', and a breakable kit's loose piece keeps its lamp lit where it
   lies. Scatter items carry none.
+  Shadows (lights part L3, `src/local_shadows.h`): a light with a
+  `shadow_id` (a lamp with `shadows` on; the editor hashes its entity and
+  which of its lamps, so the id stays the same frame to frame) casts them
+  from depth tiles of 256 x 256 in one atlas buffer
+  (`RendererDesc::local_shadow_tiles`, 192 by default: 48 MiB), a spot one
+  tile, a point light six (a cube round it, each face a little over 90
+  degrees so filtering at its edge stays inside it). Depth is near /
+  distance along the face's axis, larger nearer, written by the sun's
+  shadow raster pipelines (`RasterPush::local_size` switches them to a
+  tile, `InterlockedMax`), culled on the GPU per face like a sun level.
+  Tiles are kept by id frame to frame: a face is drawn again only when its
+  light changes (range, cone, near: unshadowed until drawn), moves (the
+  faces drawn from within 1% of its range, or 1 cm, keep shading
+  meanwhile, so a swinging lantern over the budget keeps a shadow), or a
+  caster near it comes, goes or moves (the sun pages' changed boxes and
+  posed skinned meshes', tested against every kept light, in view or not;
+  the old depths stand in). At most
+  `RenderSettings::local_shadow_faces_per_frame` faces (24) are drawn a
+  frame, for at most 64 lights: faces with nothing to shade with first,
+  then those whose old depths stand in, each drawn longest ago first, so
+  lights changing every frame share the budget and all their faces come
+  round; lights not wanted
+  for 600 frames give their tiles back, and when tiles run out the oldest
+  not wanted this frame give theirs. Shading picks the face (a point
+  light's by its major axis), moves the point off the surface by a texel
+  and a half along the surface normal and filters four taps bilinearly.
+  They go with sun shadows (lit views, GPU culling). No contact shadows
+  for local lights yet, and foliage swaying in the wind casts its rest
+  pose into them.
 - **Anti-aliasing (N1 part 6, `src/smaa.h`, `shaders/smaa.slang`).** No
   temporal anti-aliasing: nothing uses earlier frames, so the image is as
   sharp moving as standing still. Edges: SMAA 1x (High preset, no diagonal

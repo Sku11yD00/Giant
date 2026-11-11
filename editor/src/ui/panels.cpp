@@ -412,7 +412,13 @@ void EditorPanels::draw_outliner() {
                       {"roughness", 0.5},
                       {"emissive", {2.0, 1.4, 0.6}},
                       {"swing", {{"on", true}, {"length", 0.5}, {"weight", 1.5}}},
-                      {"lamp", {{"on", true}, {"intensity", 2.0}, {"range", 8.0}, {"source_radius", 0.08}}}});
+                      {"lamp",
+                       {{"on", true},
+                        {"intensity", 2.0},
+                        {"range", 8.0},
+                        {"source_radius", 0.08},
+                        {"shadows", true},
+                        {"shadow_near", 0.25}}}}); // (past its own box)
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("+ Lamp")) {
@@ -656,6 +662,16 @@ void EditorPanels::draw_properties() {
             float radius = e->lamp.source_radius;
             if (ImGui::SliderFloat("Bulb size", &radius, 0.0f, 10.0f, "%.2f m", ImGuiSliderFlags_Logarithmic)) {
                 set("lamp", {{"source_radius", std::clamp(radius, 0.0f, 10.0f)}});
+            }
+            bool shadows = e->lamp.shadows;
+            if (ImGui::Checkbox("Casts shadows", &shadows)) {
+                set("lamp", {{"shadows", shadows}});
+            }
+            if (e->lamp.shadows) {
+                float near = e->lamp.shadow_near;
+                if (ImGui::SliderFloat("Shadow start", &near, 0.01f, 10.0f, "%.2f m", ImGuiSliderFlags_Logarithmic)) {
+                    set("lamp", {{"shadow_near", std::clamp(near, 0.01f, 10.0f)}});
+                }
             }
         }
     }
@@ -1024,6 +1040,8 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (stats.light_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many lights in view: the furthest left out");
         }
+        ImGui::Text("Lamp shadows: %u lamps, %u faces drawn, %u waiting, %u tiles", stats.local_shadows,
+                    stats.local_shadow_drawn, stats.local_shadow_waiting, stats.local_shadow_tiles);
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),
                     m_state.window->pixel_height());

@@ -40,7 +40,7 @@ struct RasterPush {
     uint materials;
     uint material_offset;
     uint material_count;
-    uint pad;
+    uint local_size; // local light shadow tiles: their side (0: sun pages); the tile's first word is shadow_table_offset
 };
 ConstantBuffer<RasterPush> push : register(b0);
 
@@ -293,6 +293,17 @@ int shadow_wrap(int v) {
 
 void shadow_texel(float4 position) {
     const uint2 texel = uint2(position.xy);
+    if (push.local_size != 0u) {
+        // A local light's tile: the pass covers it alone.
+        if (texel.x >= push.local_size || texel.y >= push.local_size) {
+            return;
+        }
+        uint kept;
+        write_buffer(push.shadow_atlas)
+            .InterlockedMax((push.shadow_table_offset + texel.y * push.local_size + texel.x) * 4,
+                            asuint(saturate(position.z)), kept);
+        return;
+    }
     const int2 page = int2(push.shadow_page_x, push.shadow_page_y) + int2(texel / k_shadow_page_texels);
     const uint slot = uint(shadow_wrap(page.x) + 16 * shadow_wrap(page.y));
     const uint entry = read_buffer(push.shadow_table).Load(push.shadow_table_offset + slot * 4);

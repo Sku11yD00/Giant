@@ -103,7 +103,8 @@ struct SwingSettings {
 // light): a point light at its origin plus `offset` (in its own space,
 // scaled and turned with it; for cloth, whose scale is unused, in metres), or a spot shining down its own -Y. Its light
 // at 1 m is colour x intensity, in the sun's units (the default sun is 3),
-// fading to nothing at `range`. No shadows yet: it lights through walls.
+// fading to nothing at `range`. With `shadows` it casts them (the nearest few
+// lamps in view); without, it lights through walls.
 enum class LampKind : u8 { point, spot };
 const char* to_string(LampKind kind);
 std::optional<LampKind> lamp_kind_from_string(std::string_view name);
@@ -119,6 +120,8 @@ struct Lamp {
     float inner_degrees = 30.0f;  // spot: full light inside this, 0 to 89
     float outer_degrees = 45.0f;  // spot: none outside this, 0.1 to 89
     float source_radius = 0.05f;  // metres, 0 to 10: the bulb's size
+    bool shadows = false;         // casts shadows (the nearest few in view)
+    float shadow_near = 0.1f;     // metres, 0.01 to 10: nothing nearer the light casts (its own shade)
     bool operator==(const Lamp&) const = default;
 };
 

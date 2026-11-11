@@ -179,7 +179,11 @@ Extras load_extras() {
     o.local.clusters = lo.y;
     o.local.entries = lo.z;
     o.local.near_depth = asfloat(lo.w);
-    o.local.scale = asfloat(b.Load(at + 272));
+    const uint4 ls = b.Load4(at + 272);
+    o.local.scale = asfloat(ls.x);
+    o.local.shadows = ls.y;
+    o.local.atlas = ls.z;
+    o.local.atlas_on = ls.w;
     return o;
 }
 
@@ -555,8 +559,8 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
 // pixel's cluster, each lit like the sun (GGX specular, Lambert diffuse,
 // the same energy compensation), with highlights widened by the source's
 // size (Karis 2013; the widened lobe keeps its energy). No shadows yet.
-float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n, float3 base, float rough,
-                      float metal, float variance) {
+float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n, float3 surface_n, float3 base,
+                      float rough, float metal, float variance) {
     float3 sum = float3(0.0, 0.0, 0.0);
     if (e.local.count == 0u) {
         return sum;
@@ -594,9 +598,15 @@ float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n
         if (n_dot_l <= 0.0) {
             continue;
         }
-        const float falloff = light_falloff(light, to_light, l);
+        float falloff = light_falloff(light, to_light, l);
         if (falloff <= 0.0) {
             continue;
+        }
+        if (light.shadow != 0u && e.local.atlas_on != 0u) {
+            falloff *= light_shadow(e.local, b, light, world, surface_n);
+            if (falloff <= 0.0) {
+                continue;
+            }
         }
         const float3 h = safe_normalize(v + l, n);
         const float n_dot_h = saturate(dot(n, h));
@@ -1028,7 +1038,7 @@ Output shade_pixel(float4 position) {
     }
     float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
                          occlusion, bend, spec_weight, spec_light);
-    color += local_lighting(extras, f, position.xy, world, n, base, rough, metal, variance);
+    color += local_lighting(extras, f, position.xy, world, n, surface_n, base, rough, metal, variance);
     if (translucency > 0.0) {
         // Thin surfaces lit from behind: the sun through them, tinted by
         // their colour, shadowed as the side facing it (the leaf itself

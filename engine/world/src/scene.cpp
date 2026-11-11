@@ -599,7 +599,9 @@ Json lamp_json(const Lamp& l) {
             {"offset", vec3_json(l.offset)},
             {"inner_degrees", l.inner_degrees},
             {"outer_degrees", l.outer_degrees},
-            {"source_radius", l.source_radius}};
+            {"source_radius", l.source_radius},
+            {"shadows", l.shadows},
+            {"shadow_near", l.shadow_near}};
 }
 
 Json weather_json(const Weather& w) {
@@ -1262,6 +1264,8 @@ void read_lamp(Reader& r, const std::string& path, Lamp& l, std::string& error) 
         lr.number("inner_degrees", l.inner_degrees, 0, 89);
         lr.number("outer_degrees", l.outer_degrees, 0.1, 89);
         lr.number("source_radius", l.source_radius, 0, 10);
+        lr.boolean("shadows", l.shadows);
+        lr.number("shadow_near", l.shadow_near, 0.01, 10);
         lr.finish();
     }
 }

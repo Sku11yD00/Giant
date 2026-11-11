@@ -367,3 +367,31 @@ GIANT_TEST("skin: poses set before loading are put on once; slots go between ski
     }
     GIANT_CHECK(posed == 1 && s.renderer->last_stats().skinned_meshes == 1);
 }
+
+GIANT_TEST("skin: a pose changing under a lamp draws the lamp's shadow again") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    Renderer& r = *s.renderer;
+    const MeshId id = r.add_skinned_mesh(two_balls(), 2);
+    std::vector<Instance> instances(1);
+    instances[0].mesh = id;
+    instances[0].position = {0.0, 0.0, -4.0};
+    std::vector<LocalLight> lights(1);
+    lights[0].position = {0.0, 2.0, -4.0};
+    lights[0].range = 8.0f;
+    lights[0].shadow_id = 3;
+    FrameInput frame;
+    frame.instances = instances;
+    frame.lights = lights;
+    RenderStats st = s.draw(frame);
+    for (int i = 0; i < 8 && !r.mesh_ready(id); ++i) st = s.draw(frame);
+    s.draw(frame);
+    st = s.draw(frame);
+    GIANT_CHECK(st.local_shadows == 1 && st.local_shadow_drawn == 0); // settled
+    // Posed in place (its instance unmoved): drawn again.
+    GIANT_CHECK(r.set_pose(id, bent(), k_bent_bounds));
+    st = s.draw(frame);
+    GIANT_CHECK(st.local_shadow_drawn == 6);
+    st = s.draw(frame);
+    GIANT_CHECK(st.local_shadow_drawn == 0);
+}

@@ -158,7 +158,23 @@ render::DecalShape decal_shape(world::DecalShape s) {
 
 // A lamp an entity or kit piece carries, where it is drawn (`t`).
 // (Cloth's scale is unused: `scaled` false keeps the offset in metres.)
-void put_lamp(render::LocalLight& out, const world::Lamp& lamp, const world::Transform& t, bool scaled = true) {
+// The id a lamp's shadows are kept by in the renderer, the same frame to
+// frame: its entity and which of its lamps (0 the entity's own, 1 + i kit
+// piece i's); 0 (no shadows) unless it casts them.
+u32 lamp_shadow_id(const world::Lamp& lamp, world::EntityId entity, u32 which) {
+    if (!lamp.shadows) return 0;
+    u64 h = entity * 0x9e3779b97f4a7c15ull + which;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdull;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53ull;
+    h ^= h >> 33;
+    const u32 id = static_cast<u32>(h);
+    return id != 0 ? id : 1u;
+}
+
+void put_lamp(render::LocalLight& out, const world::Lamp& lamp, const world::Transform& t, u32 shadow_id,
+              bool scaled = true) {
     constexpr float k_radians = 3.14159265358979f / 180.0f;
     const Vec3 s = scaled ? t.scale : Vec3{1.0f, 1.0f, 1.0f};
     const Vec3 offset = {lamp.offset.x * s.x, lamp.offset.y * s.y, lamp.offset.z * s.z};
@@ -172,12 +188,15 @@ void put_lamp(render::LocalLight& out, const world::Lamp& lamp, const world::Tra
     out.inner_angle = lamp.inner_degrees * k_radians;
     out.outer_angle = lamp.outer_degrees * k_radians;
     out.source_radius = lamp.source_radius;
+    out.shadow_id = shadow_id;
+    out.shadow_near = lamp.shadow_near;
 }
 
-void emit_lamp(const world::Lamp& lamp, const world::Transform& t, SceneFrame::Cell& cell, bool scaled = true) {
+void emit_lamp(const world::Lamp& lamp, const world::Transform& t, SceneFrame::Cell& cell, u32 shadow_id,
+               bool scaled = true) {
     if (!lamp.on) return;
     render::LocalLight l;
-    put_lamp(l, lamp, t, scaled);
+    put_lamp(l, lamp, t, shadow_id, scaled);
     cell.lights.push_back(l);
 }
 
@@ -436,11 +455,11 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
                 if (c != out.cloth->end()) own = c->second;
             }
             emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own, moves);
-            emit_lamp(e->lamp, at, cell, e->shape != world::Shape::cloth);
+            emit_lamp(e->lamp, at, cell, lamp_shadow_id(e->lamp, id, 0), e->shape != world::Shape::cloth);
             slot();
             continue;
         }
-        emit_lamp(e->lamp, at, cell); // the placement's own, then its pieces'
+        emit_lamp(e->lamp, at, cell, lamp_shadow_id(e->lamp, id, 0)); // the placement's own, then its pieces'
         const world::Kit* kit = scene.find_kit(e->kit);
         if (kit == nullptr) {
             slot();
@@ -459,7 +478,7 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             const bool fell = loose != nullptr && next < loose->size() && (*loose)[next].piece == i;
             const world::Transform t = fell ? (*loose)[next].at : place(at, p.transform);
             emit(p.shape, p.mesh, t, p.material, p.decal, renderer, meshes, out, cell, render::k_no_mesh, moves);
-            emit_lamp(p.lamp, t, cell);
+            emit_lamp(p.lamp, t, cell, lamp_shadow_id(p.lamp, id, i + 1));
         }
         slot();
     }
@@ -611,7 +630,7 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
             if (kit == nullptr) {
                 if (slot->count == 0 && slot->decals == 0 && slot->lights == own_lamp) {
                     if (own_lamp == 1) {
-                        put_lamp(cell.lights[slot->light_first], e->lamp, at);
+                        put_lamp(cell.lights[slot->light_first], e->lamp, at, lamp_shadow_id(e->lamp, id, 0));
                         lights_moved = true;
                     }
                     continue;
@@ -635,7 +654,7 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
             u32 instance = slot->first;
             u32 decal = slot->decal_first;
             u32 light = slot->light_first;
-            if (own_lamp == 1) put_lamp(cell.lights[light++], e->lamp, at);
+            if (own_lamp == 1) put_lamp(cell.lights[light++], e->lamp, at, lamp_shadow_id(e->lamp, id, 0));
             for (u32 k = 0; k < kit->pieces.size(); ++k) {
                 const world::KitPiece& p = kit->pieces[k];
                 while (loose != nullptr && next < loose->size() && (*loose)[next].piece < k) ++next;
@@ -646,12 +665,13 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
                 } else {
                     put(cell.instances[instance++], t, true);
                 }
-                if (p.lamp.on) put_lamp(cell.lights[light++], p.lamp, t);
+                if (p.lamp.on) put_lamp(cell.lights[light++], p.lamp, t, lamp_shadow_id(p.lamp, id, k + 1));
             }
         } else {
             if (slot->lights != (e->lamp.on ? 1u : 0u)) return false;
             if (slot->lights == 1) {
-                put_lamp(cell.lights[slot->light_first], e->lamp, at, e->shape != world::Shape::cloth);
+                put_lamp(cell.lights[slot->light_first], e->lamp, at, lamp_shadow_id(e->lamp, id, 0),
+                         e->shape != world::Shape::cloth);
                 lights_moved = true;
             }
             if (slot->count + slot->decals == 0) continue; // draws nothing (a mesh not loaded, a cloth with no mesh yet)

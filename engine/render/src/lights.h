@@ -28,6 +28,7 @@ inline constexpr float k_light_far = 4096.0f; // metres: lights wholly further a
 
 struct LightBins {
     std::vector<gpu::Light> lights; // those shaded, nearest first
+    std::vector<u32> sources;       // each one's index in the frame's lights
     std::vector<u32> clusters;      // per cluster: first entry, count
     std::vector<u32> entries;       // light indices, cluster by cluster
     bool overflow = false;          // a limit was reached: some lights were left out somewhere

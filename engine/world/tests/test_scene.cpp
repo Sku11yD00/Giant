@@ -463,6 +463,8 @@ GIANT_TEST("world: lamps on entities and kit pieces save and load, only when set
     lamp.lamp.inner_degrees = 20.0f;
     lamp.lamp.outer_degrees = 50.0f;
     lamp.lamp.source_radius = 0.1f;
+    lamp.lamp.shadows = true;
+    lamp.lamp.shadow_near = 0.35f;
     scene.add(lamp);
     Entity off = named("Off");
     off.lamp.range = 3.0f; // kept while off
@@ -497,6 +499,8 @@ GIANT_TEST("world: lamps on entities and kit pieces save and load, only when set
           R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"outer_degrees": 90}}]})",
           R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"intensity": -1}}]})",
           R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"glow": true}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"shadow_near": 0}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "lamp": {"shadows": 1}}]})",
           R"({"format": "giant-scene", "version": 1, "kits": [{"name": "k", "pieces": [{"lamp": {"on": 1}}]}]})"}) {
         Scene bad;
         GIANT_CHECK(load_scene(bad_scene, bad).has_value());
