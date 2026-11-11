@@ -108,6 +108,18 @@ Json entity_json(const Entity& e) {
         j["swing"] = {{"on", w.on},         {"length", w.length}, {"hinge", world::to_string(w.hinge)},
                       {"weight", w.weight}, {"limit", w.limit}};
     }
+    if (!(e.lamp == world::Lamp{})) {
+        const world::Lamp& l = e.lamp; // kept while off
+        j["lamp"] = {{"on", l.on},
+                     {"kind", world::to_string(l.kind)},
+                     {"color", vec3_json(l.color)},
+                     {"intensity", l.intensity},
+                     {"range", l.range},
+                     {"offset", vec3_json(l.offset)},
+                     {"inner_degrees", l.inner_degrees},
+                     {"outer_degrees", l.outer_degrees},
+                     {"source_radius", l.source_radius}};
+    }
     return j;
 }
 
@@ -217,6 +229,30 @@ Json entity_properties() {
                           "off it holds still. Put its origin at its middle. View state: the scene keeps "
                           "where it hangs at rest, and so does its body (shots and collisions meet it "
                           "there). Kept when the shape changes."}}},
+        {"lamp",
+         {{"type", "object"},
+          {"additionalProperties", false},
+          {"properties",
+           {{"on", {{"type", "boolean"}, {"description", "It gives light. Default off."}}},
+            {"kind",
+             {{"enum", {"point", "spot"}},
+              {"description", "point shines all round (a bulb, a lantern; the default); spot shines down the "
+                              "entity's own -y in a cone (a street light, a torch: rotate the entity to aim it)."}}},
+            {"color", triple(0, 1, "Linear RGB. Default a warm lamp [1, 0.8, 0.55].")},
+            {"intensity", number(0, world::k_max_lamp_intensity,
+                                 "Its light 1 m away, in the sun's units (the default sun is 3): 1 to 5 a lamp or "
+                                 "lantern, 20 to 100 a street light seen from below, more for floodlights. Default 3.")},
+            {"range", number(0.1, 1000, "Metres; it fades smoothly to nothing there. Default 10.")},
+            {"offset", triple(-100, 100, "Where the light is from the entity's origin, in its own space (scaled and "
+                                         "turned with it), metres. Default [0, 0, 0].")},
+            {"inner_degrees", number(0, 89, "Spot: full light within this angle of its axis. Default 30.")},
+            {"outer_degrees", number(0.1, 89, "Spot: no light past this angle (a soft edge between). Default 45.")},
+            {"source_radius", number(0, 10, "Metres: the bulb's size (bigger is softer close by, with broader "
+                                            "highlights). Default 0.05.")}}},
+          {"description", "A light it carries (a lamp, a lantern, a street light, a window's glow), drawn in the "
+                          "lit view out to 4 km, following it as it moves or swings. Any shape; a hidden entity "
+                          "gives none. Pair it with emissive for the bulb itself to glow. No shadows yet: it "
+                          "lights through walls. Kept while off. A kit piece's lamp lights every placement (not scatter's); for cloth the offset is in metres (its scale is unused)."}}},
         {"mesh",
          {{"type", "string"},
           {"minLength", 1},
@@ -317,6 +353,20 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         }
         e.swing.weight = w.value("weight", e.swing.weight);
         e.swing.limit = w.value("limit", e.swing.limit);
+    }
+    if (args.contains("lamp")) {
+        const Json& l = args["lamp"];
+        e.lamp.on = l.value("on", e.lamp.on);
+        if (l.contains("kind")) {
+            e.lamp.kind = world::lamp_kind_from_string(l["kind"].get<std::string>()).value_or(e.lamp.kind);
+        }
+        if (l.contains("color")) e.lamp.color = vec3_from(l["color"]);
+        e.lamp.intensity = l.value("intensity", e.lamp.intensity);
+        e.lamp.range = l.value("range", e.lamp.range);
+        if (l.contains("offset")) e.lamp.offset = vec3_from(l["offset"]);
+        e.lamp.inner_degrees = l.value("inner_degrees", e.lamp.inner_degrees);
+        e.lamp.outer_degrees = l.value("outer_degrees", e.lamp.outer_degrees);
+        e.lamp.source_radius = l.value("source_radius", e.lamp.source_radius);
     }
     if (args.contains("position")) e.transform.position = dvec3_from(args["position"]);
     if (args.contains("rotation")) {
@@ -455,6 +505,7 @@ Json render_settings_json(const EditorState& state) {
             {"ambient_occlusion_radius", state.render_settings.ambient_occlusion_radius},
             {"contact_shadows", state.render_settings.contact_shadows},
             {"contact_shadow_length", state.render_settings.contact_shadow_length},
+            {"local_lights", state.render_settings.local_lights},
             {"physical_sky", state.render_settings.physical_sky},
             {"aerial_distance", state.render_settings.aerial_distance},
             {"auto_exposure", state.render_settings.auto_exposure},
@@ -481,6 +532,7 @@ Json render_settings_json(const EditorState& state) {
               {"occluded_instances", s.occluded_instances},
               {"occluded_clusters", s.occluded_clusters}, {"overflow", s.overflow},
               {"materials", s.materials}, {"decals", s.decals}, {"decal_overflow", s.decal_overflow},
+              {"lights", s.lights}, {"light_overflow", s.light_overflow},
               {"cells", {{"count", s.cells}, {"changed", s.cells_changed}}},
               {"streaming",
                {{"pool_bytes", s.pool_bytes}, {"pool_used_bytes", s.pool_used_bytes},
@@ -680,6 +732,7 @@ world::KitPiece piece_from(const Entity& e) {
     p.transform = e.transform;
     p.material = e.material;
     p.decal = e.decal;
+    p.lamp = e.lamp;
     return p;
 }
 
@@ -715,6 +768,7 @@ Json piece_json(const world::KitPiece& p) {
     e.transform = p.transform;
     e.material = p.material;
     e.decal = p.decal;
+    e.lamp = p.lamp;
     Json j = entity_json(e);
     j.erase("id");
     j.erase("visible");
@@ -1709,6 +1763,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "the crease under a rock), from this frame's depth marched towards the sun for "
          "contact_shadow_length metres (default 0.3, never past 48 pixels; default on; lit views; "
          "last_frame.contact_shadows). "
+         "local_lights: the lamps entities and kit pieces carry (their lamp settings) light the scene "
+         "(default on; lit views; last_frame.lights says how many were in view, light_overflow when the "
+         "furthest were left out). "
          "physical_sky: with a weather set, the air's light scattered many times (a deeper sky, the glow "
          "after sunset), the clear air between the camera and what it sees (far land fades blue, out to "
          "aerial_distance metres, default 32000) and the ambient light taken from the sky itself all round "
@@ -1757,6 +1814,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"ambient_occlusion_radius", number(0.1, 4, "Metres creases and contact are looked for out to. Default 1.")},
                 {"contact_shadows", {{"type", "boolean"}}},
                 {"contact_shadow_length", number(0.05, 2, "Metres contact shadows are looked for towards the sun. Default 0.3.")},
+                {"local_lights", {{"type", "boolean"}}},
                 {"physical_sky", {{"type", "boolean"}}},
                 {"aerial_distance", number(1000, 100000, "Metres the air over the view is worked out to. Default 32000.")},
                 {"auto_exposure", {{"type", "boolean"}}},
@@ -1809,6 +1867,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.ambient_occlusion_radius = args.value("ambient_occlusion_radius", r.ambient_occlusion_radius);
              r.contact_shadows = args.value("contact_shadows", r.contact_shadows);
              r.contact_shadow_length = args.value("contact_shadow_length", r.contact_shadow_length);
+             r.local_lights = args.value("local_lights", r.local_lights);
              r.physical_sky = args.value("physical_sky", r.physical_sky);
              r.aerial_distance = args.value("aerial_distance", r.aerial_distance);
              r.auto_exposure = args.value("auto_exposure", r.auto_exposure);
