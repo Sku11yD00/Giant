@@ -35,6 +35,7 @@ private:
     void draw_properties();
     void draw_lighting();
     void draw_weather();
+    void draw_clock();
     void draw_terrain_brush(); // the viewport brush's settings (EditorState::brush)
     void draw_terrain_layers(); // the ground's layers (set_terrain_layers)
     void draw_scatter();       // the scatter layers' main settings

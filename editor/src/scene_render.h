@@ -12,6 +12,7 @@
 
 #include <array>
 #include <map>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -227,7 +228,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
 // rotated pieces along the piece's own axes).
 world::Transform place(const world::Transform& parent, const world::Transform& child);
 
-render::Lighting scene_lighting(const world::Lighting& lighting);
+render::Lighting scene_lighting(const world::Lighting& lighting, std::optional<float> daylight = std::nullopt);
 
 // Keeps the renderer's painted terrain tiles (Renderer::set_terrain_paint)
 // the terrain's: once a frame, only the tiles whose paint changed (all of

@@ -2,6 +2,7 @@
 // (never in its files), shown again on loading over a whole world, with
 // the camera and the weather; only changes written again; another world's
 // save refused unless forced; slots listed and deleted; the game closed.
+#include "../src/clock_state.h"
 #include "../src/editor_commands.h"
 #include "../src/game_saves.h"
 #include "../src/nav_state.h"
@@ -19,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -230,16 +232,18 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
     std::filesystem::remove_all(folder, error);
 }
 
-GIANT_TEST("game saves: a cell's kept trees stay with a new break there; set_weather ends a game's weather") {
+GIANT_TEST("game saves: a cell's kept trees stay with a new break there; set_weather ends a game's weather; the time comes back") {
     const std::filesystem::path folder = fresh_folder();
     {
         PhysicsState physics;
         WeatherState weather;
+        ClockState clock;
         WorldStreaming streaming;
         GameSaves saves;
         EditorState state;
         state.physics = &physics;
         state.weather = &weather;
+        state.clock = &clock;
         state.world = &streaming;
         state.saves = &saves;
         ai::CommandRegistry commands;
@@ -276,6 +280,9 @@ GIANT_TEST("game saves: a cell's kept trees stay with a new break there; set_wea
         kept.trees.push_back(t);
         scene.set_damage({0, 0}, kept);
         scene.weather = world::weather_preset("clear");
+        scene.clock.on = true;
+        scene.clock.hours = 9.0;
+        scene.clock.speed = 3600.0f; // an hour a second
         GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
         ScatterPlacer placer;
         placer.finish(scene, scene.terrain.take_changes());
@@ -286,12 +293,17 @@ GIANT_TEST("game saves: a cell's kept trees stay with a new break there; set_wea
             saves.update(state, 1.0 / 60.0);
             weather.update(saves.weather() != nullptr ? *saves.weather() : scene.weather, 1.0 / 60.0, far,
                            state.scene_generation);
+            clock.update(scene.clock, 1.0 / 60.0, true, state.scene_generation); // (as if playing)
         };
         frame();
         GIANT_CHECK(run("simulate", {{"on", true}}).ok);
         GIANT_CHECK(run("impact", {{"point", {32.6, 1.5, 32.0}}, {"radius", 0.3}, {"impulse", 6000.0}}).value["loosened"] == 2);
         frame();
         GIANT_CHECK(run("save_game", {{"slot", "mixed"}, {"wait", true}}).ok);
+        const world::Clock saved_time = clock.shown();
+        GIANT_CHECK(saved_time.hours > 9.0);
+        for (int i = 0; i < 30; ++i) frame(); // half an hour on
+        GIANT_CHECK(clock.shown().hours > saved_time.hours + 0.4);
         GIANT_CHECK(run("simulate", {{"on", false}}).ok);
         scene.weather = world::weather_preset("storm"); // (a value the save's is not)
         frame();
@@ -300,12 +312,19 @@ GIANT_TEST("game saves: a cell's kept trees stay with a new break there; set_wea
         const world::CellDamage* shown = scene.shown_damage_in({0, 0});
         GIANT_CHECK(shown != nullptr && scene.game_damage_in({0, 0}) == shown);
         GIANT_CHECK(shown->kits.size() == 1 && shown->kits[0].pieces.size() == 2 && shown->trees.size() == 1);
+        // The time of day the save had, and play goes on from it.
+        GIANT_CHECK(std::fabs(clock.shown().hours - saved_time.hours) < 1e-9 && clock.shown().day == saved_time.day);
+        frame();
+        GIANT_CHECK(std::fabs(clock.shown().hours - (saved_time.hours + 1.0 / 60.0)) < 1e-6);
         // The save's weather shows; set_weather (to the scene's own, even) ends it.
         frame();
         GIANT_CHECK(saves.weather() != nullptr && *saves.weather() == *world::weather_preset("clear"));
         GIANT_CHECK(run("set_weather", {{"preset", "storm"}}).ok && saves.weather() == nullptr);
         frame();
         GIANT_CHECK(weather.shown() && *weather.shown() == *world::weather_preset("storm"));
+        // Closing the game: the scene's own time again.
+        GIANT_CHECK(clock.shown().hours > 9.0 && !(clock.shown() == scene.clock));
+        GIANT_CHECK(run("close_game").ok && clock.shown() == scene.clock);
     }
     std::error_code error;
     std::filesystem::remove_all(folder, error);

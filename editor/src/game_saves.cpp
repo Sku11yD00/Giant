@@ -5,6 +5,7 @@
 #include "physics_state.h"
 #include "play_state.h"
 #include "walker_state.h"
+#include "clock_state.h"
 #include "weather_state.h"
 #include "world_streaming.h"
 
@@ -134,6 +135,7 @@ struct GameSaves::Sections {
     std::optional<world::Weather> weather;
     world::Ground ground;
     std::optional<PlayerStart> player;
+    std::optional<std::pair<double, i32>> time; // the clock's hours and day
     bool has_bodies = false;
     bool simulating = false;
     std::vector<SavedPose> poses;
@@ -211,6 +213,11 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
     // The weather it is going to (a blend under way saved as where it ends), and the ground now.
     const std::optional<world::Weather>& target = weather() != nullptr ? *weather() : state.scene.weather;
     sections["weather"] = weather_text(target, state.weather != nullptr ? state.weather->ground() : world::Ground{});
+    // The time of day play reached.
+    if (state.clock != nullptr) {
+        const world::Clock& c = state.clock->shown();
+        sections["clock"] = Json{{"hours", c.hours}, {"day", c.day}}.dump(1) + "\n";
+    }
     // The player as it is (put down: else a load puts it under the camera again, as play starting does).
     if (playing && state.play->placing() && state.play->pending_start()) {
         // Still being put down where a load had it: kept as that load had it.
@@ -458,6 +465,12 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     if (const auto e = world::load_weather(j["weather"].dump(), w)) return fail(file + ": " + e->message);
                     p->sections.weather = w;
                 }
+            } else if (name == "clock") {
+                double hours = 0.0, day = 0.0;
+                if (!only_keys(j, {"hours", "day"}) || !j.contains("hours") || !finite_in(j["hours"], 0.0, 24.0, hours) ||
+                    !j.contains("day") || !j["day"].is_number_integer() || !finite_in(j["day"], 1.0, 365.0, day))
+                    return fail(file + ": a bad clock");
+                p->sections.time = std::pair<double, i32>{hours, static_cast<i32>(day)}; // (24: set_time wraps it)
             } else if (name == "player") {
                 PlayerStart s;
                 const Json none(nullptr);
@@ -576,6 +589,7 @@ void GameSaves::close(EditorState& state) {
     m_carried_feet.reset();
     forget_walkers();
     drop_weather();
+    if (state.clock != nullptr) state.clock->show(state.scene.clock); // the scene's time again
     m_applying.clear();
     m_sections.reset();
     m_generation = 0;
@@ -670,6 +684,7 @@ void GameSaves::take(EditorState& state) {
     state.scene.clear_game_damage();
     clear_ground(state);
     drop_weather();
+    if (state.clock != nullptr) state.clock->show(state.scene.clock); // (a save without a time shows the scene's)
     m_poses_waiting.clear();
     m_poses_from.reset();
     m_carried_feet.reset();
@@ -724,6 +739,7 @@ void GameSaves::finish_load(EditorState& state) {
             state.weather->set_ground(s.ground);
         }
     }
+    if (s.time && state.clock != nullptr) state.clock->set_time(s.time->first, s.time->second); // until the scene's clock changes
     if (s.playing && state.play != nullptr && state.physics != nullptr) {
         if (!state.play->start(state.scene, state.camera, state.scene_generation,
                                s.player ? &*s.player : nullptr)) {

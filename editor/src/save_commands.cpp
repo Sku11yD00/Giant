@@ -234,8 +234,8 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
 
     add(registry,
         {"close_game",
-         "Closes the game shown: its damage and dented ground go (the world shows as it is kept), the weather shown is the "
-         "scene's again, and the next save is whole. Saves on the disk are kept. Returns get_save.",
+         "Closes the game shown: its damage and dented ground go (the world shows as it is kept), the weather shown and the "
+         "time of day are the scene's again, and the next save is whole. Saves on the disk are kept. Returns get_save.",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          false,
          [&state](const Json&, CommandContext&) {

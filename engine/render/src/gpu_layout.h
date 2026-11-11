@@ -483,8 +483,19 @@ struct SkyParams {
     u32 voxel_bricks_per_axis;
     u32 aerial_through; // read descriptor: what comes through the air over the view, by colour
     u32 sky_ambient;    // read descriptor: the sky's light from all round (atmosphere bit 2)
+    // The night sky: rows taking a world direction into the stars' frame,
+    // their brightness, whether the disc is the moon (1) and from where
+    // the sun lights it.
+    float celestial_x[3];
+    float stars;
+    float celestial_y[3];
+    float moon;
+    float celestial_z[3];
+    float moon_lit;
+    float moon_sun[3];
+    float pad1;
 };
-static_assert(sizeof(SkyParams) == 272);
+static_assert(sizeof(SkyParams) == 336);
 
 // sky.slang's SkyPush (all its passes).
 struct SkyPush {

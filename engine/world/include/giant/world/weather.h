@@ -36,7 +36,15 @@ struct WeatherLight {
     Vec3 sky_light;    // ambient from above
     Vec3 ground_light; // ambient from below
 };
-WeatherLight weather_light(const Lighting& lighting, const Weather& weather);
+// `daylight`: the sky's light against the day's (clock.h's ambient_scale,
+// with a clock); none: from the sun's elevation (dusk down to a night floor).
+// How much of the sun's light reaches the ground by its elevation: all of
+// it from the horizon up, fading to none 2 degrees under (no jump as it
+// sets).
+float sun_share(float elevation_degrees);
+
+WeatherLight weather_light(const Lighting& lighting, const Weather& weather,
+                           std::optional<float> daylight = std::nullopt);
 
 // What falls: rain and snow, each 0 to 1 (together the precipitation),
 // split by temperature (all snow at -1 degrees and below, all rain at 2

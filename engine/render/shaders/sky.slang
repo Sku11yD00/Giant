@@ -154,7 +154,8 @@ void cs_sky_aerial(uint3 id : SV_DispatchThreadID) {
 // deck (grey, even: the clear sky's light and half the sunlight the clouds
 // take out); below, the ground lit by the sun and that sky. In the dusk
 // (the sun 3 to 6 degrees under the horizon) it goes over to the flat
-// sky_light and ground_light (the night's: no moon or stars yet). Projected onto 9
+// sky_light and ground_light (the night's, from the moon and stars: with
+// the moon as the light, s.moon, they are all of it). Projected onto 9
 // spherical harmonics, convolved with the cosine and over pi (so a
 // surface's diffuse light is its albedo times the sum). One group: 1024
 // directions even over the sphere, 16 a thread.
@@ -168,7 +169,7 @@ void cs_sky_ambient(uint tid : SV_GroupIndex) {
     const float clouded = (s.flags & 1u) != 0u ? saturate(s.cloud_cover) : 0.0;
     // Night: from 3 degrees under the horizon to 6 (sin -0.0523 to -0.1045,
     // where the flat colours are down to their night floor).
-    const float day = saturate((s.sun_direction.y + 0.1045) / 0.0522);
+    const float day = s.moon > 0.5 ? 0.0 : saturate((s.sun_direction.y + 0.1045) / 0.0522);
     const uint rings = 32;
     const uint around = 32;
     const float solid = 4.0 * k_pi_sky / float(rings * around);

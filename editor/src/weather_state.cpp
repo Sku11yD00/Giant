@@ -98,10 +98,11 @@ void WeatherState::set_ground(const world::Ground& ground) {
     m_ground_on = true;
 }
 
-render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather) {
-    render::Lighting out = scene_lighting(lighting);
+render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather,
+                                  std::optional<float> daylight) {
+    render::Lighting out = scene_lighting(lighting, daylight);
     if (weather) {
-        const world::WeatherLight w = world::weather_light(lighting, *weather);
+        const world::WeatherLight w = world::weather_light(lighting, *weather, daylight);
         out.sun_light = w.sun_light;
         out.sky_light = w.sky_light;
         out.ground_light = w.ground_light;
@@ -117,7 +118,7 @@ render::Sky weather_sky(const world::Lighting& lighting, const std::optional<wor
     }
     const world::Weather& w = *weather;
     sky.on = true;
-    const float sun = lighting.sun_elevation_degrees > -2.0f ? lighting.sun_intensity : 0.0f;
+    const float sun = lighting.sun_intensity * world::sun_share(lighting.sun_elevation_degrees);
     sky.sun_top = lighting.sun_color * sun;
     sky.haze = w.haze;
     sky.cloud_cover = w.cloud_cover;

@@ -231,14 +231,19 @@ Vec3 air_transmittance(float sun_elevation_degrees, float haze) {
             std::exp(-mass * (rayleigh.z + mie))};
 }
 
-WeatherLight weather_light(const Lighting& l, const Weather& w) {
+float sun_share(float elevation_degrees) {
+    return std::isfinite(elevation_degrees) ? std::clamp((elevation_degrees + 2.0f) * 0.5f, 0.0f, 1.0f) : 0.0f;
+}
+
+WeatherLight weather_light(const Lighting& l, const Weather& w, std::optional<float> daylight) {
     WeatherLight out;
     // Below the horizon the sun stops lighting (night); the sky dims with it.
-    const float sun = l.sun_elevation_degrees > -2.0f ? l.sun_intensity : 0.0f;
+    const float sun = l.sun_intensity * sun_share(l.sun_elevation_degrees);
     const Vec3 through = air_transmittance(std::max(l.sun_elevation_degrees, 0.0f), w.haze);
     out.sun_light = Vec3{l.sun_color.x * through.x, l.sun_color.y * through.y, l.sun_color.z * through.z} * sun;
     // Day: the sky's light follows the sun up from dusk.
-    const float day = std::clamp((l.sun_elevation_degrees + 6.0f) / 16.0f, 0.05f, 1.0f);
+    const float day = daylight && std::isfinite(*daylight) ? std::clamp(*daylight, 0.0f, 1.0f)
+                                                           : std::clamp((l.sun_elevation_degrees + 6.0f) / 16.0f, 0.05f, 1.0f);
     const Vec3 clear_sky = l.sky_color * (l.ambient_intensity * day);
     // Clouds take the blue out and pass the sun's light on, scattered.
     const float covered = std::clamp(w.cloud_cover, 0.0f, 1.0f) * (0.4f + 0.6f * std::clamp(w.cloud_density, 0.0f, 1.0f));
