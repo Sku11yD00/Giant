@@ -533,9 +533,9 @@ an offline cooker can use it without a device.
   scene's own values) and close_game show the scene's clock at once, game
   saves keep the time reached. Stars only draw
   with a weather's sky (the flat sky stays flat, only darker). Not yet:
-  the twilight glow once the moon leads, the sun's shadow pages moving
-  smoothly (each 0.25 degree step redraws them: part L1b), the moon's
-  own orbit tilt, the planets.
+  the twilight glow once the moon leads, the moon's own orbit tilt, the
+  planets. (Each 0.25 degree step of the sun redraws its shadow pages,
+  the old ones standing in meanwhile: "Sun shadows", part L1b.)
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under
@@ -2493,11 +2493,24 @@ the view, so every mesh casts at the detail its shadow texels need.
   of the instances)) dirty everything. The copy is kept by index, so removing an instance
   early in the list reads as all the rest moving (everything is redrawn).
 - A new sun direction (taken up in steps of a quarter of a degree, so
-  time of day redraws now and then, not every frame) makes every page
-  read as missing until drawn again: light space turns about the world's
-  origin, so old pages are of no use. Coarse levels are drawn first (and
-  pages not drawn are drawn whether or not they were asked for lately),
-  so for a few frames the shadows are coarser, not gone. Shadows follow the
+  time of day redraws now and then, not every frame) or depth anchor
+  starts a new view (lights part L1b): light space turns about the
+  world's origin, so the old pages do not fit the new grid, but they are
+  kept as the previous view (its axes, windows, depths and table, after
+  the current's in the same buffers: `ResolveExtras::shadow_prev_*`).
+  Shading that finds a level's page of the new view not drawn yet uses
+  the previous view's page on that level before a coarser one, so a
+  running clock's shadows hand over page by page with no gap or blur.
+  The pages used lately are asked for again in the new view at once
+  (about the camera's page as before; into free room only), drawn coarse
+  levels first; the previous view's pages go back to the pool once none
+  of the new view's waits to be drawn for the first time and shading's
+  requests in it have come back (3 frames), up to the page budget a frame (coarse
+  levels first, as the new view draws them) when shading asks for pages
+  and the pool is dry, or after 600 frames. A new view that drew less
+  than the previous one holds (two steps close together, a fast clock)
+  leaves that one in place.
+  Shadows follow the
   stepped sun, so they may lag the lighting's sun by up to a quarter of a
   degree (a 100 m tower's shadow by about 0.4 m).
 - Drawing is budgeted: at most `shadow_pages_per_frame` pages a frame (64

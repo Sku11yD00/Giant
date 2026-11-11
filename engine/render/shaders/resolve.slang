@@ -162,6 +162,14 @@ Extras load_extras() {
     o.terrain_surface = t3.x;
     o.terrain_normal = t3.y;
     o.terrain_on = t3.z;
+    const float4 px = asfloat(b.Load4(at + 208));
+    const float4 py = asfloat(b.Load4(at + 224));
+    const float4 pz = asfloat(b.Load4(at + 240));
+    o.shadows.prev_on = px.w > 0.5 ? 1u : 0u;
+    o.shadows.prev_x = px.xyz;
+    o.shadows.prev_y = py.xyz;
+    o.shadows.prev_z = pz.xyz;
+    o.shadows.prev_depth_offset = pz.w;
     return o;
 }
 
