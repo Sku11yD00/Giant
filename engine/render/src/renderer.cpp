@@ -2043,10 +2043,11 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
     const std::vector<ShadowPages::Draw> draws = m_shadows->plan(budget, sway_budget);
     // The table and levels as they are now, drawn pages marked: shading and
     // the page raster read them.
-    m_shadow_table.resize(size_t{m_shadows->levels()} * ShadowPages::k_slots);
+    // (The previous view's after the current's: shading falls back on it.)
+    m_shadow_table.resize(2 * size_t{m_shadows->levels()} * ShadowPages::k_slots);
     m_shadows->write_table(m_shadow_table);
-    m_shadow_levels.resize(m_shadows->levels());
-    m_shadows->write_levels(m_shadow_levels.data(), frame.view.position);
+    m_shadow_levels.resize(2 * size_t{m_shadows->levels()});
+    m_shadows->write_levels(m_shadow_levels, frame.view.position);
     data.shadow_table = cmd.upload(bytes_of(m_shadow_table));
     data.shadow_levels = cmd.upload(bytes_of(m_shadow_levels));
     if (data.shadow_table.data == nullptr || data.shadow_levels.data == nullptr) {
@@ -2951,6 +2952,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         axis(extras.shadow_x, b.x, 1.0 / m_shadows->desc().depth_range);
         axis(extras.shadow_y, b.y, 0.0);
         axis(extras.shadow_z, b.z, m_shadows->depth_offset(frame.view.position));
+        if (m_shadows->has_previous()) {
+            const ShadowPages::Basis& p = m_shadows->previous_basis();
+            axis(extras.shadow_prev_x, p.x, 1.0);
+            axis(extras.shadow_prev_y, p.y, 0.0);
+            axis(extras.shadow_prev_z, p.z, m_shadows->previous_depth_offset(frame.view.position));
+        }
     }
     // Dust in the air (lit views): the first puffs given, camera-relative.
     extras.dust_puffs = data.frame.descriptor;

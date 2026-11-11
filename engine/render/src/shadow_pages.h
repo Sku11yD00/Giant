@@ -13,9 +13,16 @@
 // read back a couple of frames later, and the pages they name are given
 // room in the pool and drawn. A drawn page stays as it is (cached) until
 // what casts onto it changes: a caster added, moved, changed or removed
-// dirties the pages under where it was and where it is; a new sun
-// direction (in steps of a quarter of a degree) dirties all of them and
-// they read as missing until drawn again. Drawing is budgeted: at most
+// dirties the pages under where it was and where it is. A new sun
+// direction (in steps of a quarter of a degree, as a clock moves it) or
+// depth anchor starts a new view: the pages drawn so far are kept as the
+// previous view (read-only, sampled with its own axes, windows and
+// depths) where the new view's pages are not drawn yet, so the shadows
+// hand over page by page with no gap; the same pages are asked for again
+// at once in the new view, and the previous view's pages are given back
+// once none of the new view's is waiting to be drawn for the first time
+// (or to make room, finest first, when the pool runs dry; or after
+// k_previous_frames). Drawing is budgeted: at most
 // `pages_per_frame` pages a frame, pages never drawn first (coarse levels
 // first), then those dirty longest; only pages asked for lately. A page not drawn yet reads as missing (the shader falls
 // back to a coarser level); a dirty one keeps its old content until it is
@@ -101,7 +108,8 @@ public:
     static constexpr double k_sun_step = 0.25 * 3.14159265358979323846 / 180.0;
 
     // Starts a frame: moves the windows with the camera (pages that leave
-    // are freed) and, if the sun moved, dirties every page.
+    // are freed) and, if the sun moved (or the depth anchor), starts a new
+    // view, the old one kept as the previous.
     void begin_frame(const DVec3& camera, const Vec3& sun_direction);
     // The windows as they are now, to go with requests asked against them.
     using Windows = ShadowWindows;
@@ -136,9 +144,21 @@ public:
     std::vector<Draw> plan(u32 budget, u32 sway_budget = 0);
 
     // For the GPU: levels() * k_slots table entries (k_no_page, or the
-    // physical page with flags), and per level its window.
+    // physical page with flags), and per level its window; then, where
+    // `out` has room for twice that, the previous view's (all k_no_page
+    // without one).
     void write_table(std::span<u32> out) const;
-    void write_levels(gpu::ShadowLevel* out, const DVec3& camera) const;
+    void write_levels(std::span<gpu::ShadowLevel> out, const DVec3& camera) const;
+    // The previous view, while one is kept (its pages stand in for the
+    // new view's not drawn yet).
+    bool has_previous() const { return m_prev.on; }
+    const Basis& previous_basis() const { return m_prev.basis; }
+    double previous_depth_offset(const DVec3& camera) const;
+    // A previous view is given back after this many frames at most.
+    static constexpr u64 k_previous_frames = 600;
+    // The previous view's entry for the page holding a world position on a
+    // level (tests): k_no_page, or its table entry.
+    u32 previous_entry_at(u32 level, const DVec3& world) const;
     // A level's window: its minimum page.
     i32 window_x(u32 level) const { return m_window[level].x; }
     i32 window_y(u32 level) const { return m_window[level].y; }
@@ -185,7 +205,30 @@ private:
         bool casts = false; // drawn this frame (with live: dirties pages)
     };
 
+    struct Previous {
+        bool on = false;
+        Basis basis{};
+        double anchor = 0.0;
+        std::vector<Window> window;
+        std::vector<u32> table; // per level and slot: k_no_page or the physical page with k_drawn_bit
+        u64 since = 0;          // the frame it was kept
+        u32 held = 0;           // pages it still holds
+        u32 cursor = 0;         // where giving pages back to make room goes on from
+    };
+
     Page& page(u32 level, u32 slot) { return m_pages[level * k_slots + slot]; }
+    // Keeps the view so far as the previous (the one before is given
+    // back) and empties the current one; the pages used lately are asked
+    // for again once the windows are placed.
+    void retire_view(const DVec3& camera);
+    void release_previous();
+    // Gives one of the previous view's pages back to the pool (finest
+    // levels first); false when it holds none.
+    bool release_previous_page();
+    // Room in the pool for the pages of these indices (levels * slots)
+    // that have none, the previous view's pages and then those used longest
+    // ago given up for it.
+    void allocate(std::span<const u32> indices);
     const Page& page(u32 level, u32 slot) const { return m_pages[level * k_slots + slot]; }
     void free_page(Page& p);
     void mark_dirty(Page& p);
@@ -232,6 +275,14 @@ private:
     std::vector<u32> m_victims;
     std::vector<u32> m_waiting;
     std::vector<u32> m_swaying;
+    Previous m_prev;
+    struct Reask {
+        u32 level;
+        i32 dx; // pages from the camera's
+        i32 dy;
+    };
+    std::vector<Reask> m_reask; // pages to ask for again in a new view
+    std::vector<u32> m_reask_indices; // scratch
     // Boxes to dirty this frame, gathered by 32 m square (thousands of
     // scatter placements arriving are a few invalidations, not thousands).
     std::unordered_map<u64, std::pair<DVec3, DVec3>> m_boxes;

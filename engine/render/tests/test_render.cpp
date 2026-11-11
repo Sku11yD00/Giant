@@ -1117,6 +1117,39 @@ GIANT_TEST("render: d3d12 casts sun shadows from shadow pages") {
         const u32 shade_x = k_w / 2 - 13;
         GIANT_CHECK(std::abs(at(moved, shade_x, k_h / 2) - at(plain, shade_x, k_h / 2)) <= 3); // sunlit again
     }
+    // The sun turned a degree (a clock running): the next frame, with one
+    // page drawn a frame, still shows the shadow (the previous view stands
+    // in while the new view's pages are drawn), and it settles in the new.
+    instances[1].position.z -= 3.0;
+    const auto settled = draw(true);
+    frame.settings.shadow_pages_per_frame = 1;
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.6f, 0.8f, 0.014f});
+    {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd != nullptr) {
+            renderer->render(*cmd, target, frame);
+            device->end_frame();
+        }
+        device->wait_idle();
+    }
+    const auto stepped = device->read_texture(target);
+    GIANT_CHECK(renderer->last_stats().shadow_waiting > 0); // (the new view not drawn yet)
+    if (stepped.size() == k_w * k_h * 4 && settled.size() == stepped.size() && plain.size() == stepped.size()) {
+        const auto at = [](const std::vector<u8>& p, u32 x, u32 y) { return int{p[(static_cast<usize>(y) * k_w + x) * 4]}; };
+        const u32 shade_x = k_w / 2 - 13;
+        std::printf("sun step: shadow %d, just after the step %d, lit %d\n", at(settled, shade_x, k_h / 2),
+                    at(stepped, shade_x, k_h / 2), at(plain, shade_x, k_h / 2));
+        GIANT_CHECK(at(settled, shade_x, k_h / 2) < at(plain, shade_x, k_h / 2) / 2);
+        GIANT_CHECK(std::abs(at(stepped, shade_x, k_h / 2) - at(settled, shade_x, k_h / 2)) <= 6);
+    }
+    frame.settings.shadow_pages_per_frame = RenderSettings{}.shadow_pages_per_frame;
+    const auto after = draw(true);
+    GIANT_CHECK(renderer->last_stats().shadow_waiting == 0);
+    if (after.size() == k_w * k_h * 4 && plain.size() == after.size()) {
+        const auto at = [](const std::vector<u8>& p, u32 x, u32 y) { return int{p[(static_cast<usize>(y) * k_w + x) * 4]}; };
+        GIANT_CHECK(at(after, k_w / 2 - 13, k_h / 2) < at(plain, k_w / 2 - 13, k_h / 2) / 2);
+    }
     GIANT_CHECK(!device->device_lost());
     GIANT_CHECK(device->validation_errors() == 0);
     device->destroy(target);

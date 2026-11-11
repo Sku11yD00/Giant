@@ -415,8 +415,16 @@ struct ResolveExtras {
     u32 terrain_normal;
     u32 terrain_on;
     u32 pad_terrain;
+    // The sun shadows' previous view (ShadowPages::has_previous), standing
+    // in where the new one's pages are not drawn yet: its axes, prev_x.w 1
+    // while there is one (0: none), prev_z.w its depth offset. Its table
+    // and levels follow the current view's (level_count * 256 entries and
+    // level_count levels on).
+    float shadow_prev_x[4];
+    float shadow_prev_y[4];
+    float shadow_prev_z[4];
 };
-static_assert(sizeof(ResolveExtras) == 208);
+static_assert(sizeof(ResolveExtras) == 256);
 
 // resolve.slang's dust puff: centre camera-relative.
 struct GpuDustPuff {

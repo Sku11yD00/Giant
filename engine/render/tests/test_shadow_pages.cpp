@@ -145,7 +145,7 @@ GIANT_TEST("shadow pages: windows follow the camera and pages that leave are fre
     camera = {30000.0, 0.0, -25000.0};
     s.begin_frame(camera, k_up_sun);
     std::vector<gpu::ShadowLevel> levels(s.levels());
-    s.write_levels(levels.data(), camera);
+    s.write_levels(levels, camera);
     for (u32 level = 0; level < s.levels(); ++level) {
         const double size = s.page_size(level);
         GIANT_CHECK(levels[level].origin[0] <= -7.5 * size + 1e-3 && levels[level].origin[0] > -8.5 * size);
@@ -265,6 +265,90 @@ GIANT_TEST("shadow pages: a new sun direction dirties everything") {
     GIANT_CHECK(s.plan(64).size() == 4);
     s.begin_frame(camera, Vec3{0.3f, 0.9f, 0.1f});
     GIANT_CHECK(s.plan(64).empty());
+}
+
+GIANT_TEST("shadow pages: a sun step keeps the old view standing in until the new one is drawn") {
+    ShadowPages s;
+    const DVec3 camera{100.0, 0.0, 200.0};
+    const Vec3 sun = normalize_or_zero(Vec3{0.2f, 0.9f, 0.1f});
+    s.begin_frame(camera, sun);
+    Requests r(s);
+    for (u32 level = 0; level < 6; ++level) r.ask(s, level, camera);
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(64).size() == 6);
+    GIANT_CHECK(!s.has_previous() && s.stats().resident == 6);
+    std::vector<u32> table(2 * size_t{s.levels()} * ShadowPages::k_slots);
+    s.write_table(table);
+    GIANT_CHECK(table[size_t{s.levels()} * ShadowPages::k_slots] == ShadowPages::k_no_page);
+    // A step of the sun: the drawn pages are the previous view's now, the
+    // same pages asked for again at once in the new one, not drawn yet.
+    const Vec3 moved = normalize_or_zero(Vec3{0.21f, 0.9f, 0.1f});
+    s.begin_frame(camera, moved);
+    GIANT_CHECK(s.has_previous());
+    for (u32 level = 0; level < 6; ++level) {
+        GIANT_CHECK(has(s.previous_entry_at(level, camera), ShadowPages::k_drawn_bit));
+        GIANT_CHECK(s.entry_at(level, camera) != ShadowPages::k_no_page);
+        GIANT_CHECK(!has(s.entry_at(level, camera), ShadowPages::k_drawn_bit));
+    }
+    GIANT_CHECK(s.stats().resident == 12);
+    // Its table and levels go after the current view's.
+    s.write_table(table);
+    usize held = 0;
+    for (usize i = size_t{s.levels()} * ShadowPages::k_slots; i < table.size(); ++i) {
+        held += has(table[i], ShadowPages::k_drawn_bit) ? 1u : 0u;
+    }
+    GIANT_CHECK(held == 6);
+    std::vector<gpu::ShadowLevel> levels(2 * size_t{s.levels()});
+    s.write_levels(levels, camera);
+    const ShadowPages::Basis& before = s.previous_basis();
+    const double size = s.page_size(0);
+    GIANT_CHECK(levels[s.levels()].page_size == static_cast<float>(size));
+    const float corner = static_cast<float>(double(levels[s.levels()].page[0]) * size - dot(camera, before.x));
+    GIANT_CHECK(std::fabs(levels[s.levels()].origin[0] - corner) < 1e-3f);
+    // Drawn a few at a time: the previous view stays while any is still to come...
+    GIANT_CHECK(s.plan(4).size() == 4);
+    GIANT_CHECK(s.has_previous());
+    s.begin_frame(camera, moved);
+    // ...and is given back once the rest are drawn.
+    GIANT_CHECK(s.plan(4).size() == 2);
+    GIANT_CHECK(!s.has_previous());
+    s.begin_frame(camera, moved);
+    GIANT_CHECK(s.stats().resident == 6);
+    for (u32 level = 0; level < 6; ++level) GIANT_CHECK(has(s.entry_at(level, camera), ShadowPages::k_drawn_bit));
+}
+
+GIANT_TEST("shadow pages: the previous view gives its pages up first, and goes at the next step or in time") {
+    ShadowDesc desc;
+    desc.pool_pages = 4;
+    ShadowPages s(desc);
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const Vec3 a = normalize_or_zero(Vec3{0.0f, 1.0f, 0.1f});
+    const Vec3 b = normalize_or_zero(Vec3{0.0f, 1.0f, 0.12f});
+    const Vec3 c = normalize_or_zero(Vec3{0.0f, 1.0f, 0.14f});
+    s.begin_frame(camera, a);
+    Requests r(s);
+    for (u32 level = 0; level < 3; ++level) r.ask(s, level, camera);
+    s.request(r.bits);
+    s.plan(16);
+    // A step: 3 held by the previous view, the pool's last one for the new
+    // view, and the others taken from the previous view (finest first).
+    s.begin_frame(camera, b);
+    GIANT_CHECK(s.has_previous() && s.stats().resident == 4 && s.stats().missing == 0);
+    for (u32 level = 0; level < 3; ++level) GIANT_CHECK(s.entry_at(level, camera) != ShadowPages::k_no_page);
+    GIANT_CHECK(s.previous_entry_at(0, camera) == ShadowPages::k_no_page);
+    GIANT_CHECK(s.previous_entry_at(1, camera) == ShadowPages::k_no_page);
+    GIANT_CHECK(has(s.previous_entry_at(2, camera), ShadowPages::k_drawn_bit));
+    // Another step before the new view was drawn: the oldest goes, nothing leaks.
+    s.begin_frame(camera, c);
+    GIANT_CHECK(!s.has_previous()); // (the view just left had nothing drawn)
+    GIANT_CHECK(s.stats().resident == 3);
+    s.plan(16);
+    s.begin_frame(camera, b);
+    GIANT_CHECK(s.has_previous());
+    // Not drawn for long (no budget asks it away): given back in time.
+    for (u64 f = 0; f <= ShadowPages::k_previous_frames + 1; ++f) s.begin_frame(camera, b);
+    GIANT_CHECK(!s.has_previous());
+    GIANT_CHECK(s.stats().resident <= 4);
 }
 
 GIANT_TEST("shadow pages: a full pool gives the page used longest ago") {
