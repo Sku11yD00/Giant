@@ -217,15 +217,19 @@ void BrickBuilder::add(u32 index, const Vec3& color, const Vec3& normal, float c
 }
 
 u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color, bool stand_in,
-                               float coverage) {
+                               float coverage, const Vec3& facing) {
     if (!(coverage > 0.0f)) {
         return 0; // also NaN: cut away entirely
     }
     coverage = std::min(coverage, 1.0f);
     const Vec3 face = cross(b - a, c - a);
-    const Vec3 normal = normalize_or_zero(face);
+    Vec3 normal = normalize_or_zero(face);
     if (normal == Vec3{}) {
         return 0; // degenerate: no area, no facing
+    }
+    if (const Vec3 bent = normalize_or_zero(facing);
+        bent != Vec3{} && std::isfinite(bent.x) && std::isfinite(bent.y) && std::isfinite(bent.z)) {
+        normal = bent;
     }
     const float s = m_voxel_size;
     const auto range = [s](float lo, float hi, u32& first, u32& last) {

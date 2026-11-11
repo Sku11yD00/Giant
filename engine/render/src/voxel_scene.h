@@ -184,6 +184,7 @@ private:
         Instance instance;
         Vec3 color{}; // its material's, resolved (with its texture's average)
         float coverage = 1.0f; // its material's (cut-outs: under 1)
+        float canopy = 0.0f;   // its material's: facing bent out from its middle
         Box box;      // world bounds (empty: no mesh)
         bool large = false; // in m_large, not the grid
         bool stand_in = false; // small enough for the far field to stand in for
@@ -226,7 +227,8 @@ private:
     Box bounds_of(const Instance& in, const MeshLookup& meshes);
     Vec3 color_of(const Instance& in, std::span<const Material> materials) const;
     float coverage_of(const Instance& in, std::span<const Material> materials) const;
-    // Marks the material rows whose voxel look (colour, coverage) changed
+    float canopy_of(const Instance& in, std::span<const Material> materials) const;
+    // Marks the material rows whose voxel look (colour, coverage, canopy) changed
     // since the last update in m_material_changed; true if any did.
     bool material_changes(std::span<const Material> materials);
     bool differs(const Instance& in, std::span<const Material> materials, const Copy& copy) const;
@@ -311,6 +313,7 @@ private:
     struct MaterialLook {
         Vec3 color{};
         float coverage = 1.0f;
+        float canopy = 0.0f;
         bool operator==(const MaterialLook&) const = default;
     };
     std::vector<MaterialLook> m_material_looks; // per material row, as last seen

@@ -234,13 +234,21 @@ float VoxelScene::coverage_of(const Instance& in, std::span<const Material> mate
     return std::min(m.coverage, 1.0f);
 }
 
+float VoxelScene::canopy_of(const Instance& in, std::span<const Material> materials) const {
+    if (in.material >= materials.size()) {
+        return 0.0f;
+    }
+    const float c = materials[in.material].canopy;
+    return std::isfinite(c) ? std::clamp(c, 0.0f, 1.0f) : 0.0f; // as the renderer reads it
+}
+
 bool VoxelScene::material_changes(std::span<const Material> materials) {
     m_material_changed.assign(materials.size(), 0);
     bool any = false;
     m_material_looks.resize(materials.size());
     for (u32 i = 0; i < materials.size(); ++i) {
         const Instance probe{.material = i};
-        const MaterialLook look{color_of(probe, materials), coverage_of(probe, materials)};
+        const MaterialLook look{color_of(probe, materials), coverage_of(probe, materials), canopy_of(probe, materials)};
         if (!(look == m_material_looks[i])) {
             m_material_looks[i] = look;
             m_material_changed[i] = 1;
@@ -256,11 +264,11 @@ bool VoxelScene::differs(const Instance& in, std::span<const Material> materials
         // Not held either way: where it is does not matter.
         return !(in.scale == c.scale && in.mesh == c.mesh && in.material == c.material &&
                  in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color &&
-                 coverage_of(in, materials) == copy.coverage);
+                 coverage_of(in, materials) == copy.coverage && canopy_of(in, materials) == copy.canopy);
     }
     return in.moves != c.moves || !(in.position == c.position && in.rotation == c.rotation && in.scale == c.scale && in.mesh == c.mesh &&
              in.material == c.material && in.always_mesh == c.always_mesh && color_of(in, materials) == copy.color &&
-                 coverage_of(in, materials) == copy.coverage);
+                 coverage_of(in, materials) == copy.coverage && canopy_of(in, materials) == copy.canopy);
 }
 
 void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Material> materials,
@@ -270,6 +278,7 @@ void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Materia
     m_copy_mesh[index] = in.mesh;
     c.color = color_of(in, materials);
     c.coverage = coverage_of(in, materials);
+    c.canopy = canopy_of(in, materials);
     c.box = bounds_of(in, meshes);
     c.large = false;
     const MeshCache* m = c.box.empty() ? nullptr : mesh_cache(in.mesh, meshes);
@@ -1073,6 +1082,8 @@ bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_ti
                 return rel + rotate(in.rotation, Vec3{p.x * in.scale.x, p.y * in.scale.y, p.z * in.scale.z});
             };
             const geometry::ClusterMesh& mesh = *m->mesh;
+            // Leafy crowns face out from the middle, as resolve.slang bends them.
+            const Vec3 middle = place(mesh.bounds.center);
             for (const u32 ci : cut_it->second) {
                 const geometry::Cluster& c = mesh.clusters[ci];
                 const Vec3 center = place(c.bounds.center);
@@ -1092,7 +1103,20 @@ bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_ti
                     if (mirrored) {
                         std::swap(b, d); // keep the facing outward
                     }
-                    m_builder.add_triangle(a, b, d, copy.color, copy.stand_in, copy.coverage);
+                    Vec3 facing{};
+                    if (copy.canopy > 0.0f) {
+                        // As resolve.slang: the side seen from outside
+                        // (a leaf card's either way), bent out.
+                        Vec3 own = normalize_or_zero(cross(b - a, d - a));
+                        const Vec3 out = normalize_or_zero((a + b + d) * (1.0f / 3.0f) - middle);
+                        if (dot(own, out) < 0.0f) {
+                            own = own * -1.0f;
+                        }
+                        // (Never cancels once own is on out's side; out
+                        // zero, at the middle: add_triangle keeps own.)
+                        facing = own + (out - own) * copy.canopy;
+                    }
+                    m_builder.add_triangle(a, b, d, copy.color, copy.stand_in, copy.coverage, facing);
                 }
             }
         }

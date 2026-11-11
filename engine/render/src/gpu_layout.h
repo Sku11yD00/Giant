@@ -74,7 +74,7 @@ struct Material {
     u32 flags; // k_material_terrain: shaded from the frame's terrain layers; k_material_two_sided; k_material_cut_out
     float translucency; // 0 to 1
     float alpha_cutoff; // k_material_cut_out: base colour alpha under it is cut away
-    u32 pad;
+    float canopy;       // 0 to 1: shading normal bent out from the instance's bounding sphere
 };
 static_assert(sizeof(Material) == 64);
 inline constexpr u32 k_material_bytes = 64; // resolve.slang's k_material_bytes

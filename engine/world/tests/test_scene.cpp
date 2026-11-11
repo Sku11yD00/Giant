@@ -1001,3 +1001,29 @@ GIANT_TEST("world: cut-out materials save and load their alpha cutoff, only when
         R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"alpha_cutoff": -1}}]})", bad);
     GIANT_CHECK(error.has_value() && contains(error->message, "alpha_cutoff"));
 }
+
+GIANT_TEST("world: canopy normals save and load, only when set, and are checked") {
+    Scene scene;
+    Entity crown = named("Crown");
+    crown.material.canopy = 0.7f;
+    scene.add(crown);
+    scene.add(named("Rock"));
+    ScatterLayer layer;
+    layer.name = "bushes";
+    ScatterItem bush;
+    bush.material.canopy = 0.4f;
+    layer.items.push_back(bush);
+    scene.scatter.push_back(layer);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(text.find("\"canopy\"") != text.rfind("\"canopy\"")); // the crown's and the bush's, not the rock's
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->material.canopy == 0.7f);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->material.canopy == 0.0f);
+    GIANT_CHECK(loaded.scatter[0].items[0].material.canopy == 0.4f);
+    GIANT_CHECK(save_scene(loaded) == text);
+    Scene bad;
+    const auto error = load_scene(
+        R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"canopy": 2}}]})", bad);
+    GIANT_CHECK(error.has_value() && contains(error->message, "canopy"));
+}

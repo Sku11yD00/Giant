@@ -3300,6 +3300,88 @@ GIANT_TEST("render: d3d12 leaves: a two-sided sheet is seen from behind, and the
     device->destroy(target);
 }
 
+GIANT_TEST("render: d3d12 canopy: a crown's normals bend out from its middle, lit as one rounded mass") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A flat sheet facing up, seen from above; the sun low from +x. Flat,
+    // both sides of the image are lit alike; as a crown, the side towards
+    // the sun is bright and the far side dark.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {20.0f, 1.0f, 20.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.2f, 0.6f, 0.1f};
+    materials[0].roughness = 1.0f; // diffuse-like: highlights would blur the comparison
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.shadows = false;
+    frame.settings.antialiasing = false;
+    frame.instances = instances;
+    frame.lighting.background = {0.0f, 0.0f, 1.0f};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{1.0f, 0.2f, 0.0f});
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.05f, 0.05f, 0.05f};
+    frame.lighting.ground_light = {0.05f, 0.05f, 0.05f};
+    frame.view.position = DVec3{0.0, 6.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f); // looking down
+    const auto draw = [&] {
+        frame.materials = materials;
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        const std::vector<u8> image = device->read_texture(target);
+        const auto green = [&](u32 x) { return static_cast<int>(image[(static_cast<usize>(k_h / 2) * k_w + x) * 4 + 1]); };
+        return std::array<int, 2>{green(k_w / 5), green(k_w - 1 - k_w / 5)};
+    };
+    const auto flat = draw();
+    materials[0].canopy = 1.0f;
+    const auto crown = draw();
+    materials[0].canopy = 5.0f; // kept to 0 to 1
+    const auto past_one = draw();
+    materials[0].canopy = 0.5f;
+    const auto half = draw();
+    std::printf("    left/right: flat %d %d, crown %d %d, half %d %d\n", flat[0], flat[1], crown[0], crown[1], half[0],
+                half[1]);
+    // Image right is +x, towards the sun.
+    GIANT_CHECK(std::abs(flat[0] - flat[1]) <= 2);
+    GIANT_CHECK(crown[1] > crown[0] + 60); // one side to the sun, the other away
+    GIANT_CHECK(crown[0] <= flat[0]);      // the far side turned from the sun
+    GIANT_CHECK(past_one == crown);
+    GIANT_CHECK(half[1] > flat[1] + 10 && half[1] < crown[1]); // half bent: between
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: cut-out materials draw visibility in a pass of their own, only with a texture to cut by") {
     NullScene s;
     if (s.renderer == nullptr) return;
