@@ -1661,6 +1661,136 @@ GIANT_TEST("render: d3d12 draws a blue sky, grey under overcast clouds that shad
     device->destroy(target);
 }
 
+GIANT_TEST("render: d3d12 night sky: stars that turn with the sky, a moon lit by its phase") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) {
+        return; // not on Windows
+    }
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    constexpr u32 k_w = 96, k_h = 96;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // Nothing but sky: the camera looks up, 30 degrees across.
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.physical_sky = false; // (a black sky with the sun down: only what the night adds)
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.shadows = false;
+    frame.settings.antialiasing = false;
+    frame.view.position = {0.0, 2.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(80.0f));
+    frame.view.vertical_fov_degrees = 30.0f;
+    frame.lighting.sun_direction = {0.0f, -1.0f, 0.0f};
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.exposure = 40.0f;
+    frame.sky.on = true;
+    // The sky's frame turned so overhead is the galactic pole (no Milky Way there: stars alone).
+    const Vec3 pole{-0.8676f, -0.1981f, 0.4560f};
+    const Vec3 across = normalize_or_zero(cross(pole, Vec3{0.0f, 0.0f, 1.0f}));
+    const Vec3 third = cross(across, pole);
+    // Columns: where the world's x, y (up) and z go; the rows are what the sky takes.
+    const auto rows = [](const Vec3& c0, const Vec3& c1, const Vec3& c2) {
+        return std::array<Vec3, 3>{Vec3{c0.x, c1.x, c2.x}, Vec3{c0.y, c1.y, c2.y}, Vec3{c0.z, c1.z, c2.z}};
+    };
+    frame.sky.celestial = rows(across, pole, third);
+    const auto draw = [&] {
+        for (int i = 0; i < 3; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const usize size = usize{k_w} * k_h * 4;
+    const auto lit = [&](const std::vector<u8>& p) {
+        // Pixels clearly lit, and the sum of their light.
+        int count = 0;
+        long sum = 0;
+        for (usize i = 0; i + 3 < p.size(); i += 4) {
+            const int v = p[i] + p[i + 1] + p[i + 2];
+            count += v > 60 ? 1 : 0;
+            sum += v;
+        }
+        return std::pair<int, long>{count, sum};
+    };
+    const auto none = draw();
+    frame.sky.stars = 100.0f; // (a day's exposure here: the night's brightness times a hundred)
+    const auto stars = draw();
+    // The sky turned a little about the world's up: the stars move.
+    const float turn = degrees_to_radians(15.0f);
+    frame.sky.celestial = rows(across * std::cos(turn) + third * std::sin(turn), pole,
+                               third * std::cos(turn) - across * std::sin(turn));
+    const auto turned = draw();
+    GIANT_CHECK(none.size() == size && stars.size() == size && turned.size() == size);
+    if (none.size() == size && stars.size() == size && turned.size() == size) {
+        const auto [none_count, none_sum] = lit(none);
+        const auto [star_count, star_sum] = lit(stars);
+        const auto [turned_count, turned_sum] = lit(turned);
+        std::printf("night sky: lit pixels none %d, stars %d (sum %ld), turned %d (sum %ld)\n", none_count, star_count,
+                    star_sum, turned_count, turned_sum);
+        GIANT_CHECK(none_count == 0);
+        // Points of light: some, on a dark sky.
+        GIANT_CHECK(star_count >= 3 && star_count < static_cast<int>(k_w * k_h / 4));
+        GIANT_CHECK(turned_count >= 3);
+        // Somewhere they moved.
+        int moved = 0;
+        for (usize i = 0; i + 3 < size; i += 4) {
+            const int a = stars[i] + stars[i + 1] + stars[i + 2];
+            const int b = turned[i] + turned[i + 1] + turned[i + 2];
+            moved += (a > 60) != (b > 60) ? 1 : 0;
+        }
+        GIANT_CHECK(moved > 0);
+    }
+    // The moon ahead, half lit from the right (+X): its right side bright, its left faint.
+    frame.sky.stars = 0.0f;
+    frame.sky.celestial = {Vec3{1.0f, 0.0f, 0.0f}, Vec3{0.0f, 1.0f, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees_to_radians(30.0f));
+    frame.view.vertical_fov_degrees = 2.0f;
+    const Vec3 ahead = rotate(frame.view.orientation, Vec3{0.0f, 0.0f, -1.0f});
+    frame.lighting.sun_direction = ahead;
+    frame.lighting.sun_light = {0.08f, 0.08f, 0.08f};
+    frame.lighting.exposure = 0.01f; // (the disc is drawn 2000 times its light: the moon's face just white)
+    frame.sky.moon = true;
+    frame.sky.moon_sun = {1.0f, 0.0f, 0.0f};
+    const auto moon = draw();
+    GIANT_CHECK(moon.size() == size);
+    if (moon.size() == size) {
+        const auto px = [&](u32 x, u32 y) {
+            const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+            return moon[i] + moon[i + 1] + moon[i + 2];
+        };
+        const u32 c = k_w / 2;
+        // The disc is about 0.52 degrees across: some 25 pixels at 2 degrees over 96.
+        const int right = px(c + 6, c), left = px(c - 6, c), centre = px(c, c), outside = px(c + 30, c);
+        std::printf("moon: left %d centre %d right %d outside %d\n", left, centre, right, outside);
+        GIANT_CHECK(right > 150 && right > left + 100);
+        GIANT_CHECK(outside < 30);
+    }
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: d3d12 physical sky: a brighter sky, far ground fading blue through the air, ambient from the sky") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::d3d12;

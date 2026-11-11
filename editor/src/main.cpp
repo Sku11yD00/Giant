@@ -27,6 +27,7 @@
 #include "hit_targets.h"
 #include "physics_state.h"
 #include "play_state.h"
+#include "clock_state.h"
 #include "weather_state.h"
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
@@ -314,6 +315,8 @@ int run(const Options& options) {
     state.scatter = &scatter;
     editor::WeatherState weather;
     state.weather = &weather;
+    editor::ClockState time_of_day; // the time of day shown (play moves it on)
+    state.clock = &time_of_day;
     editor::HitTargets hit_targets; // before the physics, which reads its shapes
     state.hits = &hit_targets;
     editor::PhysicsState physics;
@@ -441,9 +444,12 @@ int run(const Options& options) {
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
-        input.lighting = editor::weather_lighting(state.scene.lighting, weather.shown());
-        input.sky = editor::weather_sky(state.scene.lighting, weather.shown(), weather.cloud_offset(), weather.ground(),
+        // The sun (or at night the moon) where the clock puts it.
+        const editor::ClockLight lit = editor::clock_light(state.scene.lighting, time_of_day.shown());
+        input.lighting = editor::weather_lighting(lit.lighting, weather.shown(), lit.daylight);
+        input.sky = editor::weather_sky(lit.lighting, weather.shown(), weather.cloud_offset(), weather.ground(),
                                         weather.time());
+        editor::clock_sky(input.sky, time_of_day.shown());
         input.settings = state.render_settings;
         input.instances = scene_frame.instances;
         input.cells = scene_frame.cells;
@@ -606,6 +612,7 @@ int run(const Options& options) {
         window->set_relative_mouse(playing && !menus.paused()); // mouse look (a menu: the pointer is free)
         weather.update(saves.weather() != nullptr ? *saves.weather() : state.scene.weather, game_delta, state.camera.position,
                        state.scene_generation); // after the panels' changes (a loaded game's shown over the scene's)
+        time_of_day.update(state.scene.clock, game_delta, playing, state.scene_generation); // play moves the time on
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
         mark(editor::FramePhase::weather);

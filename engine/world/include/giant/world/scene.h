@@ -306,6 +306,19 @@ struct Lighting {
 // A unit vector pointing towards the sun.
 Vec3 sun_direction(const Lighting& lighting);
 
+// The time of day (clock.h works out the sky from it). On, it places the
+// sun (and at night the moon) instead of Lighting's angles; the editor
+// runs it while playing, `speed` game seconds to each real one.
+struct Clock {
+    bool on = false;
+    double hours = 12.0;        // local solar time, 0 to 24
+    i32 day = 172;              // of the year, 1 to 365 (172: midsummer in the north)
+    float latitude = 45.0f;     // degrees, -90 (south pole) to 90
+    float north_degrees = 0.0f; // the compass heading the world's -Z points to, 0 to 360
+    float speed = 60.0f;        // game seconds a real second while playing (0 to 86400; 60: an hour a minute)
+    bool operator==(const Clock&) const = default;
+};
+
 // The weather (weather.h for presets, blending and the light it gives):
 // clouds, wind, fog and haze. A scene with none keeps the flat sky colours
 // of its Lighting; with one, the sky is an atmosphere the sun shines
@@ -400,6 +413,8 @@ public:
     std::vector<ScatterLayer> scatter;
     // None: the flat sky of `lighting` (not tracked: compare).
     std::optional<Weather> weather;
+    // The time of day the scene starts at (not tracked: compare).
+    Clock clock;
 
     // Damage kept (damage.h), by cell: copied, saved and loaded with the
     // scene, not undone by itself (commands record it). Setting a cell's
@@ -500,6 +515,7 @@ struct WorldIndex {
     std::vector<Kit> kits;
     std::vector<ScatterLayer> scatter;
     std::optional<Weather> weather;
+    Clock clock;
     std::vector<std::string> meshes; // imported when the world opens
     std::vector<CellCoord> cells;    // cells that have a file
     // The ground: one sample spacing and material for every tile, and the

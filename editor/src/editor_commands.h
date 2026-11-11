@@ -50,6 +50,7 @@ class TerrainMeshes;
 class FarGround;
 class ScatterPlacer;
 class WeatherState;
+class ClockState;
 class PhysicsState;
 class PlayState;
 class AnimationState;
@@ -220,6 +221,9 @@ struct EditorState {
     ScatterPlacer* scatter = nullptr;
     // The weather the view shows (blends, wind-carried clouds); set by main.
     WeatherState* weather = nullptr;
+    // The time of day the view shows (play moves it on); set by main (and
+    // tests). Null: get_time reports the scene's clock as it is.
+    ClockState* clock = nullptr;
     // The scene's bodies and simulating them (a play button); set by main
     // (and tests). Null: physics is not available.
     PhysicsState* physics = nullptr;
@@ -289,6 +293,7 @@ void register_terrain_commands(ai::CommandRegistry& registry, EditorState& state
 void register_scatter_commands(ai::CommandRegistry& registry, EditorState& state);
 // The weather commands (weather_commands.cpp).
 void register_weather_commands(ai::CommandRegistry& registry, EditorState& state);
+void register_clock_commands(ai::CommandRegistry& registry, EditorState& state);
 // The physics commands (physics_commands.cpp).
 void register_physics_commands(ai::CommandRegistry& registry, EditorState& state);
 // The animation commands (animation_commands.cpp).

@@ -71,8 +71,10 @@ private:
 double cloud_tile_metres(const world::Weather& weather);
 
 // The renderer's lighting for a scene: its own, or under its weather (the
-// sun through the air, the sky's light greyed by clouds).
-render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather);
+// sun through the air, the sky's light greyed by clouds). `daylight`: the
+// sky's light against the day's (a clock's, ClockLight); none: by the sun.
+render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather,
+                                  std::optional<float> daylight = std::nullopt);
 // The renderer's sky for a weather (off without one), with what falls
 // and the ground (`ground`, `time`: WeatherState's).
 render::Sky weather_sky(const world::Lighting& lighting, const std::optional<world::Weather>& weather,

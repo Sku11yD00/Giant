@@ -98,10 +98,11 @@ void WeatherState::set_ground(const world::Ground& ground) {
     m_ground_on = true;
 }
 
-render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather) {
-    render::Lighting out = scene_lighting(lighting);
+render::Lighting weather_lighting(const world::Lighting& lighting, const std::optional<world::Weather>& weather,
+                                  std::optional<float> daylight) {
+    render::Lighting out = scene_lighting(lighting, daylight);
     if (weather) {
-        const world::WeatherLight w = world::weather_light(lighting, *weather);
+        const world::WeatherLight w = world::weather_light(lighting, *weather, daylight);
         out.sun_light = w.sun_light;
         out.sky_light = w.sky_light;
         out.ground_light = w.ground_light;

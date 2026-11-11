@@ -1,6 +1,7 @@
 giant_module(world
   SOURCES
     src/scene.cpp
+    src/clock.cpp
     src/terrain.cpp
     src/far_ground.cpp
   src/ground_damage.cpp
@@ -20,4 +21,5 @@ giant_module_tests(world
     tests/test_terrain.cpp
     tests/test_scatter.cpp
     tests/test_weather.cpp
+    tests/test_clock.cpp
 )

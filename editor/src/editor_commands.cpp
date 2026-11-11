@@ -73,6 +73,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     register_terrain_commands(registry, state);
     register_scatter_commands(registry, state);
     register_weather_commands(registry, state);
+    register_clock_commands(registry, state);
     register_physics_commands(registry, state);
     register_animation_commands(registry, state);
     register_cloth_commands(registry, state);

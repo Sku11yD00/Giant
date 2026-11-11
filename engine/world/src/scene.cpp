@@ -198,13 +198,14 @@ Scene::Identity& Scene::Identity::operator=(const Identity&) {
 
 Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
-      weather(other.weather), m_entities(other.m_entities), m_index(other.m_index),
+      weather(other.weather), clock(other.clock), m_entities(other.m_entities), m_index(other.m_index),
       m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
       m_game(other.m_game), m_game_kits(other.m_game_kits), m_damage_edits(other.m_damage_edits) {}
 
 Scene::Scene(Scene&& other) noexcept
     : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
-      scatter(std::move(other.scatter)), weather(other.weather), m_entities(std::move(other.m_entities)),
+      scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock),
+      m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
       m_kept_kits(std::move(other.m_kept_kits)), m_game(std::move(other.m_game)),
       m_game_kits(std::move(other.m_game_kits)), m_damage_edits(other.m_damage_edits) {
@@ -229,6 +230,7 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         terrain = std::move(other.terrain);
         scatter = std::move(other.scatter);
         weather = other.weather;
+        clock = other.clock;
         m_entities = std::move(other.m_entities);
         m_index = std::move(other.m_index);
         m_next_id = other.m_next_id;
@@ -589,6 +591,17 @@ Json weather_json(const Weather& w) {
     };
 }
 
+Json clock_json(const Clock& c) {
+    return {
+        {"on", c.on},
+        {"hours", c.hours},
+        {"day", c.day},
+        {"latitude", c.latitude},
+        {"north_degrees", c.north_degrees},
+        {"speed", c.speed},
+    };
+}
+
 Json lighting_json(const Lighting& l) {
     return {
         {"sun_elevation_degrees", l.sun_elevation_degrees},
@@ -817,6 +830,9 @@ std::string save_scene(const Scene& scene) {
     if (scene.weather) {
         out["weather"] = weather_json(*scene.weather);
     }
+    if (!(scene.clock == Clock{})) {
+        out["clock"] = clock_json(scene.clock);
+    }
     if (const Terrain& t = scene.terrain;
         !t.empty() || t.samples() != k_default_terrain_samples || !(t.material == TerrainMaterial{})) {
         out["terrain"] = terrain_json(t);
@@ -1039,6 +1055,21 @@ void read_lighting(const Json& json, Lighting& l, std::string& error) {
     r.number("ambient_intensity", l.ambient_intensity, 0, 100);
     r.number("exposure", l.exposure, 0.01, 100);
     r.finish();
+}
+
+void read_clock(const Json& json, Clock& c, std::string& error) {
+    Reader r(json, "clock", error);
+    r.boolean("on", c.on);
+    float hours = static_cast<float>(c.hours);
+    r.number("hours", hours, 0, 24);
+    float day = static_cast<float>(c.day);
+    r.number("day", day, 1, 365);
+    r.number("latitude", c.latitude, -90, 90);
+    r.number("north_degrees", c.north_degrees, 0, 360);
+    r.number("speed", c.speed, 0, 86400);
+    r.finish();
+    c.hours = hours >= 24.0f ? 0.0 : static_cast<double>(hours);
+    c.day = static_cast<i32>(std::lround(day));
 }
 
 void read_weather(const Json& json, std::optional<Weather>& out, std::string& error) {
@@ -1742,6 +1773,9 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     if (const Json* weather = root.get("weather", false); weather != nullptr && root.ok()) {
         read_weather(*weather, scene.weather, error);
     }
+    if (const Json* clock = root.get("clock", false); clock != nullptr && root.ok()) {
+        read_clock(*clock, scene.clock, error);
+    }
     read_kits(root, scene.kits, error);
     read_scatter(root, scene.kits, scene.scatter, error);
     if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
@@ -1819,6 +1853,9 @@ std::string save_world_index(const WorldIndex& world) {
     if (world.weather) {
         out["weather"] = weather_json(*world.weather);
     }
+    if (!(world.clock == Clock{})) {
+        out["clock"] = clock_json(world.clock);
+    }
     std::vector<std::string> meshes = world.meshes;
     std::sort(meshes.begin(), meshes.end());
     meshes.erase(std::unique(meshes.begin(), meshes.end()), meshes.end());
@@ -1872,6 +1909,9 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     }
     if (const Json* weather = root.get("weather", false); weather != nullptr && root.ok()) {
         read_weather(*weather, world.weather, error);
+    }
+    if (const Json* clock = root.get("clock", false); clock != nullptr && root.ok()) {
+        read_clock(*clock, world.clock, error);
     }
     read_kits(root, world.kits, error);
     read_scatter(root, world.kits, world.scatter, error);

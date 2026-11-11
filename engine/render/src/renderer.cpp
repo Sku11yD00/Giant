@@ -3551,6 +3551,21 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     p.sky_ambient = m_device.read_descriptor(m_sky_ambient);
     p.aerial_far = std::clamp(finite(settings.aerial_distance, 32000.0f), 1000.0f, 100000.0f);
     p.atmosphere = physical ? 7u : 0u; // (the ambient table is filled before the clouds and shading read it)
+    // The night sky.
+    {
+        const auto row = [&finite](const Vec3& v, float* out) {
+            out[0] = finite(v.x, 0.0f);
+            out[1] = finite(v.y, 0.0f);
+            out[2] = finite(v.z, 0.0f);
+        };
+        row(sky.celestial[0], p.celestial_x);
+        row(sky.celestial[1], p.celestial_y);
+        row(sky.celestial[2], p.celestial_z);
+        p.stars = std::clamp(finite(sky.stars, 0.0f), 0.0f, 100.0f);
+        p.moon = sky.moon ? 1.0f : 0.0f;
+        const Vec3 ms = normalize_or_zero(sky.moon_sun);
+        row(std::isfinite(ms.x) && std::isfinite(ms.y) && std::isfinite(ms.z) ? ms : Vec3{0.0f, -1.0f, 0.0f}, p.moon_sun);
+    }
     // Rain and snow, and the ground under them.
     const auto unit = [&finite](float v) { return std::clamp(finite(v, 0.0f), 0.0f, 1.0f); };
     p.rain = unit(sky.rain);

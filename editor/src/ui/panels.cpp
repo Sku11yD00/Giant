@@ -3,6 +3,7 @@
 #include "../mesh_library.h"
 #include "../physics_state.h"
 #include "../play_state.h"
+#include "../clock_state.h"
 #include "../weather_state.h"
 
 #include "giant/core/log.h"
@@ -181,6 +182,7 @@ void EditorPanels::draw_scene_settings() {
         draw_properties();
         draw_lighting();
         draw_weather();
+        draw_clock();
         draw_terrain_brush();
         draw_terrain_layers();
         draw_scatter();
@@ -764,6 +766,38 @@ void EditorPanels::draw_weather() {
     if (ImGui::Button("Clear weather")) {
         run("clear_weather");
     }
+}
+
+void EditorPanels::draw_clock() {
+    ImGui::SeparatorText("Time of day");
+    const world::Clock& c = m_state.scene.clock;
+    bool on = c.on;
+    if (ImGui::Checkbox("Clock places the sun and moon", &on)) run("set_time", {{"on", on}});
+    if (!c.on) return;
+    // What play reached shows (a slider moves the scene's clock there).
+    const world::Clock& shown =
+        m_state.clock != nullptr && m_state.clock->follows(c) ? m_state.clock->shown() : c;
+    float hours = static_cast<float>(shown.hours);
+    if (ImGui::SliderFloat("Hour", &hours, 0.0f, 24.0f, "%.2f h")) {
+        run("set_time", {{"hours", std::clamp(hours, 0.0f, 24.0f)}}, edit_group());
+    }
+    int day = shown.day;
+    if (ImGui::SliderInt("Day of year", &day, 1, 365)) run("set_time", {{"day", std::clamp(day, 1, 365)}}, edit_group());
+    float latitude = c.latitude;
+    if (ImGui::SliderFloat("Latitude", &latitude, -90.0f, 90.0f, "%.1f deg")) {
+        run("set_time", {{"latitude", std::clamp(latitude, -90.0f, 90.0f)}}, edit_group());
+    }
+    float north = c.north_degrees;
+    if (ImGui::SliderFloat("North", &north, 0.0f, 360.0f, "%.0f deg")) {
+        run("set_time", {{"north_degrees", std::clamp(north, 0.0f, 360.0f)}}, edit_group());
+    }
+    float speed = c.speed;
+    if (ImGui::SliderFloat("Speed in play", &speed, 0.0f, 86400.0f, "%.0f x", ImGuiSliderFlags_Logarithmic)) {
+        run("set_time", {{"speed", std::clamp(speed, 0.0f, 86400.0f)}}, edit_group());
+    }
+    const world::SkyBodies b = world::sky_bodies(shown);
+    ImGui::TextDisabled("Sun %.1f deg up; moon %.1f deg up, %.0f%% lit; light: %s", b.sun_elevation_degrees,
+                        b.moon_elevation_degrees, b.moon_lit * 100.0f, world::moon_leads(b) ? "moon" : "sun");
 }
 
 void EditorPanels::draw_log() {

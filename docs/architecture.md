@@ -501,6 +501,34 @@ an offline cooker can use it without a device.
   cancelling to +Y. It works per
   instance, so a tree's leaves want their own mesh (entity, kit piece or
   scatter item) apart from the trunk.
+- **Day and night (lights part L1).** `world::Clock` (`clock.h`; saved in
+  scenes and world.json only when set) holds the time of day, the day of
+  the year, latitude, a north offset and a speed. When on, `sky_bodies`
+  places the sun (a circular orbit, equinox on day 80, local solar time:
+  good to about a degree), the moon (on the ecliptic at its phase's angle
+  from the sun, new on day 1, every 29.53 days) and the sky's own
+  (equatorial) frame; `clock_lighting` puts Lighting's light where the
+  sun is, or, once the sun is 6 degrees under the horizon, where the moon
+  is (k_moon_light of the sun's intensity, by the share of its disc lit,
+  fading in to 12 degrees under so the handover shows no jump: the sun
+  gave no light from 2 under), so shadows follow whichever leads.
+  `ambient_scale` (the day sky's light from the sun's and moon's heights
+  plus k_star_light) scales the sky and ground light (`weather_light`'s
+  and `scene_lighting`'s `daylight`), and the sky ambient pass takes the
+  flat night colours while the moon leads. The renderer's `Sky` gets
+  `stars` (their brightness, out from 4 to 12 degrees under), `celestial`
+  (world to the sky's frame) and `moon` / `moon_sun`: `sky_background`
+  draws a fixed hashed star field in the sky's frame (about 7000 above the
+  horizon, each a pixel or so wide by `pixel_angle`, no twinkle), a faint
+  Milky Way band and the moon's disc shaded by its phase with a faint
+  earthshine; clouds draw over them. The editor's `ClockState`
+  (`clock_state.h`) is view state: it shows the scene's clock and play
+  moves the time on (game seconds times speed); a change to the scene's
+  clock shows at once, game saves keep the time reached. Stars only draw
+  with a weather's sky (the flat sky stays flat, only darker). Not yet:
+  the twilight glow once the moon leads, the sun's shadow pages moving
+  smoothly (each 0.25 degree step redraws them: part L1b), the moon's
+  own orbit tilt, the planets.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

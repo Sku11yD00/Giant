@@ -94,8 +94,14 @@ struct Sky {
     uint voxel_bricks_per_axis;
     uint aerial_through;  // and what comes through it, by colour
     uint sky_ambient;     // the sky's light from all round (atmosphere bit 2: filled this frame)
+    float3 celestial_x;   // the night sky: rows taking a world direction into the stars' frame
+    float stars;          // their brightness (0: none)
+    float3 celestial_y;
+    float moon;           // 1: the disc is the moon
+    float3 celestial_z;
+    float3 moon_sun;      // towards the sun, lighting the moon's disc
 };
-static const uint k_sky_params_bytes = 272;
+static const uint k_sky_params_bytes = 336;
 static const uint k_cover_size = 256;       // texels a side (gpu: renderer.cpp k_cover_size)
 static const float k_weather_wrap = 4096.0; // metres: ground patterns repeat this far
 
@@ -170,6 +176,16 @@ Sky load_sky(uint descriptor, uint offset) {
     s.voxel_bricks_per_axis = r16.y;
     s.aerial_through = r16.z;
     s.sky_ambient = r16.w;
+    const float4 r17 = load4(b, offset + 272);
+    const float4 r18 = load4(b, offset + 288);
+    const float4 r19 = load4(b, offset + 304);
+    const float4 r20 = load4(b, offset + 320);
+    s.celestial_x = r17.xyz;
+    s.stars = r17.w;
+    s.celestial_y = r18.xyz;
+    s.moon = r18.w;
+    s.celestial_z = r19.xyz;
+    s.moon_sun = r20.xyz;
     return s;
 }
 
@@ -327,12 +343,83 @@ float3 sample_sky(Sky s, float3 dir) {
     return read_texture(s.sky_view).SampleLevel(get_sampler(k_sampler_linear_clamp), uv, 0.0).rgb;
 }
 
-// What the sky shows along `dir`: the air, and the sun's disc.
+// A hash of a cell to three values in [0, 1).
+float3 star_hash(int3 cell) {
+    uint3 v = uint3(cell) * uint3(1664525u, 1013904223u, 2654435761u);
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return float3(v & 0xFFFFu) / 65536.0;
+}
+
+// The stars along a world direction: a fixed field in the sky's own frame
+// (one star at most per cell of a 3D grid over the unit sphere, about
+// 7000 above the horizon, their brightness falling off as a power, most
+// faint), each drawn a pixel or so wide (s.pixel_angle) so it neither
+// flickers nor vanishes as the view turns, and the Milky Way's faint
+// band. Dimmed towards the horizon by the thicker air. No twinkling: no
+// noise from frame to frame. At s.stars 1 they are set for a night's
+// exposure (a moonless night's ground is lit about 1/2000 of the day's:
+// the faint ones just show, the brightest burn white).
+float3 star_light(Sky s, float3 dir) {
+    const float3 e = float3(dot(s.celestial_x, dir), dot(s.celestial_y, dir), dot(s.celestial_z, dir));
+    const float cells = 96.0;
+    const float3 p = e * cells;
+    const int3 base = int3(floor(p));
+    const float spread = max(s.pixel_angle * cells * 0.75, 0.02); // a star's radius, in cells
+    float3 light = float3(0.0, 0.0, 0.0);
+    for (int i = 0; i < 8; ++i) {
+        const int3 cell = base + int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        const float3 h = star_hash(cell);
+        if (h.x > 0.12) continue; // about one cell in eight holds one
+        // Where it is: jittered in its cell, on the sphere.
+        const float3 at = normalize(float3(cell) + 0.5 + (star_hash(cell + int3(17, 31, 47)) - 0.5) * 0.8) * cells;
+        const float3 d = p - at;
+        const float r2 = dot(d, d) / (spread * spread);
+        if (r2 > 4.0) continue;
+        // Most faint, a few bright; warmer and cooler around white.
+        const float bright = pow(h.y, 6.0) * 40.0 + 0.3;
+        const float3 tint = lerp(float3(1.0, 0.82, 0.62), float3(0.72, 0.82, 1.0), h.z);
+        // The same light however wide it is drawn (a smaller spot is brighter).
+        light += tint * (bright * exp(-r2 * 2.0) / (spread * spread * 1.6e6));
+    }
+    // The Milky Way: a soft band round the galactic plane (its north pole
+    // at right ascension 192.9 degrees, declination 27.1).
+    const float3 pole = float3(-0.8676, -0.1981, 0.4560);
+    const float band = exp(-pow(dot(e, pole) / 0.16, 2.0));
+    const float clumps = 0.6 + 0.4 * sin(e.x * 23.0 + sin(e.y * 17.0) * 2.0) * sin(e.z * 19.0 + e.y * 7.0);
+    light += float3(0.85, 0.88, 1.0) * (band * clumps * 0.0003);
+    const float air = saturate(dir.y * 6.0 + 0.1); // the thick air near the horizon
+    return light * (s.stars * air);
+}
+
+// What the sky shows along `dir`: the air, the sun's disc (or the moon's,
+// lit by its phase), and at night the stars behind them.
 float3 sky_background(Sky s, float3 dir) {
     float3 c = sample_sky(s, dir);
     const float mu = dot(dir, s.sun_direction);
     const float disc = smoothstep(0.99996, 0.99999, mu); // about half a degree across
-    c += s.sun_light * (disc * 2000.0);
+    if (s.moon > 0.5) {
+        // The moon's face: a sphere lit from the sun (its terminator the
+        // phase), the dark side faintly by the earth.
+        float shade = 0.0;
+        if (disc > 0.0) {
+            const float radius = 0.0045; // its angular radius in radians (a little over a quarter degree)
+            const float3 across = (dir - s.sun_direction * mu) / radius;
+            const float3 normal = across - s.sun_direction * sqrt(saturate(1.0 - dot(across, across)));
+            shade = saturate(dot(normal, s.moon_sun)) + 0.015;
+        }
+        c += s.sun_light * (disc * shade * 2000.0);
+    } else {
+        c += s.sun_light * (disc * 2000.0);
+    }
+    if (s.stars > 0.0 && dir.y > -0.05) {
+        c += star_light(s, dir) * (1.0 - disc);
+    }
     return c;
 }
 
