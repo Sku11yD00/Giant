@@ -1026,7 +1026,7 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
             }
         }
         if (stats.gi) {
-            ImGui::Text("GI: %u bricks lit, %u waiting", stats.gi_lit, stats.gi_waiting);
+            ImGui::Text("GI: %u bricks lit, %u waiting, %u lamps", stats.gi_lit, stats.gi_waiting, stats.gi_lamps);
         }
         if (stats.reflections || stats.screen_reflections) {
             ImGui::Text("Reflections: %s%s", stats.reflections ? "voxel cones" : "",

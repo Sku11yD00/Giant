@@ -471,8 +471,13 @@ struct ResolveExtras {
     u32 light_shadow_offset;
     u32 local_atlas;
     u32 local_atlas_on;
+    // Lamps in the voxel world (src/voxel_lamps.h): the lamp word per voxel
+    // beside the light pool, for the far field (gi_lamps_on 0: none).
+    u32 gi_lamps;
+    u32 gi_lamps_on;
+    u32 pad_lamps[2];
 };
-static_assert(sizeof(ResolveExtras) == 288);
+static_assert(sizeof(ResolveExtras) == 304);
 
 // resolve.slang's dust puff: centre camera-relative.
 struct GpuDustPuff {
@@ -695,7 +700,8 @@ struct VoxelPush {
     float background[4];
     u32 light;    // write descriptor of the voxel light pool
     u32 light_on; // 1: show the voxels with their light (bounce and the sun bit)
-    u32 pad[2];
+    u32 lamps;    // write descriptor of the lamp words (lamps_on 0: none)
+    u32 lamps_on;
 };
 static_assert(sizeof(VoxelPush) == 64);
 
@@ -703,7 +709,8 @@ static_assert(sizeof(VoxelPush) == 64);
 struct LightJob {
     u32 index;    // the brick's pool index
     u32 level;
-    u32 pad[2];
+    u32 lamp_first; // its lamps (src/voxel_lamps.h): u32 entries in LightPush's list
+    u32 lamp_count;
     i32 brick[4]; // xyz: its brick coordinate on the level
 };
 static_assert(sizeof(LightJob) == 32);
@@ -721,8 +728,17 @@ struct LightPush {
     u32 level_count;
     u32 bricks_per_axis;
     u32 light;    // write descriptor of the light pool
+    // Lamps (src/voxel_lamps.h): the lamp word per voxel beside the light
+    // pool (write descriptor; lamps_on 0: none), and this frame's lamps
+    // (gpu::Light each) and the jobs' entries (u32 light index each).
+    u32 lamps;
+    u32 lamps_on;
+    u32 lamp_lights;
+    u32 lamp_lights_offset;
+    u32 lamp_entries_offset;
+    u32 pad[3];
 };
-static_assert(sizeof(LightPush) == 48);
+static_assert(sizeof(LightPush) == 80);
 inline constexpr u32 k_no_brick = ~0u;  // a slot with nothing in it
 inline constexpr u32 k_unbuilt = ~1u;   // a slot not built yet: use the next coarser level
 

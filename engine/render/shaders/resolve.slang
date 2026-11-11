@@ -103,6 +103,8 @@ struct Extras {
     uint terrain_normal;     // and its shading normal
     uint terrain_on;
     LocalLights local;       // lamps (lights.slang; count 0: none)
+    uint gi_lamps;           // the lamp words beside the voxel light pool (gi_lamps_on 0: none)
+    uint gi_lamps_on;
 };
 
 Extras load_extras() {
@@ -184,6 +186,9 @@ Extras load_extras() {
     o.local.shadows = ls.y;
     o.local.atlas = ls.z;
     o.local.atlas_on = ls.w;
+    const uint2 gl = b.Load2(at + 288);
+    o.gi_lamps = gl.x;
+    o.gi_lamps_on = gl.y;
     return o;
 }
 
@@ -861,6 +866,8 @@ Output shade_pixel(float4 position) {
     w.level_count = extras.voxel_level_count;
     w.bricks_per_axis = extras.voxel_bricks_per_axis;
     w.stand_ins = 1u; // the far field: only what the CPU left out (meshes drawn keep their own look)
+    w.lamps = extras.gi_lamps;
+    w.lamps_on = extras.gi_on != 0u ? extras.gi_lamps_on : 0u;
     if (lit_path && extras.far_on != 0) {
         const float mesh_t = hit ? length(s.world) : 3.0e38;
         // A stand-in drawn as a mesh (straddling the distance, moving, or
@@ -887,7 +894,8 @@ Output shade_pixel(float4 position) {
                 float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
                 if (extras.gi_on != 0) {
                     const uint lw = write_buffer(extras.gi_light).Load(hit_at * 4);
-                    bounce = light_lit(lw) ? float4(unpack_light(lw), 1.0) : bounce;
+                    // (With the lamps' light on it: no lamp lights the far field itself.)
+                    bounce = light_lit(lw) ? float4(unpack_light(lw) + voxel_lamp(w, hit_at), 1.0) : bounce;
                 }
                 float3 albedo = lighting_view ? k_lighting_albedo : unpack_color(packed);
                 float far_rough = k_far_roughness;

@@ -627,9 +627,9 @@ an offline cooker can use it without a device.
   (`RenderStats::light_overflow`: the furthest were left out). Shading
   finds its pixel's cluster and lights the surface with each light listed
   there, GGX and Lambert as for the sun. Lit views only, not the far
-  field; `RenderSettings::local_lights` turns them off. Lights without a
-  shadow id light through walls, and the voxel world's bounce light does
-  not see them yet (L4).
+  field (which takes them from the voxel world instead, below);
+  `RenderSettings::local_lights` turns them off. Lights without a shadow
+  id light through walls.
   In the world (lights part L2b), any entity can carry a `world::Lamp`
   (saved with it, only when set; kept while off) and so can a kit piece,
   lighting every placement. The editor's scene frame turns each into a
@@ -668,6 +668,22 @@ an offline cooker can use it without a device.
   They go with sun shadows (lit views, GPU culling). No contact shadows
   for local lights yet, and foliage swaying in the wind casts its rest
   pose into them.
+  In the voxel world (lights part L4, `src/voxel_lamps.h`): each voxel
+  has a lamp word beside its light word (a second buffer the size of the
+  light pool, made with the first lamp under global illumination). When a
+  brick is lit (`voxel_light.slang`), the CPU lists the lamps whose sphere
+  touches it (a 32 m grid; at most 8, the brightest there first) and each
+  filled voxel adds each one's light, over pi as light words hold it,
+  with a march through the voxel world towards it for its shadow (the
+  lamp's own fitting, within a couple of voxels of it, left out). Coarse
+  voxels, far bigger than a lamp's reach, take its light over the voxel
+  (the reach from its nearest point, at least half a voxel away, the
+  normal wrapped as the lamp gets inside it), so a town's lamps light the
+  coarse ground kilometres off. The lamp word is what a voxel sends on:
+  bounce (cones), voxel reflections, the voxel view and the far field
+  (distant towns glow at night), never what pixels beside it take as
+  indirect light (the lamps light those themselves). Lamp light changes
+  reach the voxels as bricks are lit again in turn.
 - **Anti-aliasing (N1 part 6, `src/smaa.h`, `shaders/smaa.slang`).** No
   temporal anti-aliasing: nothing uses earlier frames, so the image is as
   sharp moving as standing still. Edges: SMAA 1x (High preset, no diagonal
