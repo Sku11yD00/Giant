@@ -28,6 +28,8 @@ struct VoxelWorld {
     uint level_count;
     uint bricks_per_axis;
     uint stand_ins;       // 1: only voxels with the stand-in bit (the far field), 0: every voxel
+    uint lamps;           // write descriptor of the lamp words beside the light pool (voxel_gi.slang)
+    uint lamps_on;        // 0: no lamp light in the voxel world
 };
 
 struct Level {

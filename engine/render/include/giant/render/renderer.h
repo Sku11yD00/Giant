@@ -62,6 +62,7 @@ struct ShadowWindows;
 struct DecalBins;       // src/decals.h
 struct LightBins;       // src/lights.h
 class LocalShadows;     // src/local_shadows.h
+class VoxelLamps;       // src/voxel_lamps.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
@@ -619,6 +620,7 @@ struct RenderStats {
     u32 local_shadow_drawn = 0;   // shadow tile faces drawn this frame
     u32 local_shadow_waiting = 0; // faces of shadowed lights not drawn yet, or to draw again
     u32 local_shadow_tiles = 0;   // tiles in use (of RendererDesc::local_shadow_tiles)
+    u32 gi_lamps = 0;             // lamps lighting the voxel bricks lit this frame (global illumination)
     u32 skinned_meshes = 0;     // skinned meshes added (live)
     u32 posed = 0;              // of them, posed on the GPU this frame (a new pose, or just loaded)
 };
@@ -882,7 +884,10 @@ private:
     bool ensure_voxel_light();
     // Global illumination's voxel lighting. False: the light pool may hold
     // stale words this frame (out of memory), so nothing may read it.
-    bool light_voxels(rhi::CommandList& cmd, const FrameData& data);
+    bool light_voxels(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame);
+    // (Until a frame first has lamps the words are all zero, as made: not
+    // written or read.)
+    bool lamps_in_voxels() const { return m_gi_on && m_voxel_lamps.valid() && m_voxel_lamps_seen; }
     // The sky's passes before shading (sky view, cloud shadows, clouds):
     // fills `params` (the SkyParams shading reads). False: no sky this frame.
     bool draw_sky(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
@@ -1047,6 +1052,13 @@ private:
     std::unique_ptr<VoxelLight> m_light_plan;
     rhi::BufferHandle m_voxel_light; // u32 per voxel, beside the brick pool (made on first use)
     bool m_voxel_light_failed = false; // could not be made: not tried again until gi is turned off and on
+    // Lamps in it (src/voxel_lamps.h): a lamp word per voxel (made with the
+    // first lamp under global illumination), each frame's lists.
+    rhi::BufferHandle m_voxel_lamps;
+    bool m_voxel_lamps_failed = false;
+    bool m_voxel_lamps_seen = false; // some frame has had lamps under global illumination
+    std::unique_ptr<VoxelLamps> m_voxel_lamp_lists;
+    u32 m_gi_lamps = 0; // lamps listed this frame
     bool m_gi_on = false; // this frame
     rhi::PipelineHandle m_light_clear;
     rhi::PipelineHandle m_light_voxels;

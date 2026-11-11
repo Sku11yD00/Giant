@@ -5,8 +5,13 @@
 // are first cleared to "not lit" (cs_clear), so nothing reads what the pool
 // index held before.
 //
+// Lamps (src/voxel_lamps.h): each brick lists the lamps reaching it; a
+// voxel adds each one's light (with a march towards it for its shadow)
+// into its lamp word.
+//
 // Layouts: LightPush and LightJob in src/gpu_layout.h.
 #include "voxel_gi.slang"
+#include "lights.slang"
 
 struct LightPush {
     uint frame;
@@ -21,6 +26,12 @@ struct LightPush {
     uint level_count;
     uint bricks_per_axis;
     uint light;    // write descriptor of the light pool
+    uint lamps;    // write descriptor of the lamp words (lamps_on 0: none)
+    uint lamps_on;
+    uint lamp_lights; // gpu::Light each, then the jobs' entries
+    uint lamp_lights_offset;
+    uint lamp_entries_offset;
+    uint3 pad;
 };
 ConstantBuffer<LightPush> push : register(b0);
 
@@ -33,6 +44,55 @@ void cs_clear(uint3 id : SV_DispatchThreadID) {
     }
     const uint index = read_buffer(push.jobs).Load(push.jobs_offset + id.y * 4);
     write_buffer(push.light).Store4((index * k_brick_voxels + id.x * 4) * 4, uint4(0, 0, 0, 0));
+    if (push.lamps_on != 0u) {
+        write_buffer(push.lamps).Store4((index * k_brick_voxels + id.x * 4) * 4, uint4(0, 0, 0, 0));
+    }
+}
+
+// The light a lamp gives a voxel (centre, normal, size; `origin` a voxel out
+// along the normal), over pi as light words hold it; 0 where the voxel
+// world stands between them. Coarse voxels are much bigger than a lamp's
+// reach: the light is taken over the voxel (from its nearest point for the
+// reach, at least half a voxel away, the normal wrapped as the lamp gets
+// inside it, a voxel only grazed by its reach taking as much less) so a
+// distant town's lamps still light the coarse ground, and about as much.
+float3 lamp_on_voxel(VoxelWorld w, LocalLight lamp, float3 centre, float3 n, float size, float3 origin, uint level) {
+    const float3 to_light = lamp.position - centre;
+    const float len = length(to_light);
+    const float reach = max(len - 0.87 * size, 0.0);
+    if (!(reach < lamp.range)) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    const float3 l = len > 1e-6 ? to_light / len : n; // (at its centre: straight on)
+    const float q = reach * reach / (lamp.range * lamp.range);
+    const float window = saturate(1.0 - q * q);
+    const float d2 = max(len * len, 0.25 * size * size) + lamp.source_radius * lamp.source_radius;
+    const float inside = saturate(size / max(len, 1e-6) - 0.5);
+    const float n_dot_l = lerp(saturate(dot(n, l)), saturate(dot(n, l) * 0.5 + 0.5), inside);
+    const float cone = saturate(dot(-l, lamp.direction) * lamp.spot_scale + lamp.spot_offset);
+    // How much of the voxel its reach covers, roughly (1 for small voxels).
+    const float covered = saturate((lamp.range - max(len - 0.5 * size, 0.0)) / min(lamp.range, size));
+    const float3 light = lamp.color * (window * window / d2 * cone * cone * n_dot_l * covered / k_gi_pi);
+    if (max(light.x, max(light.y, light.z)) < 1e-5) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    if (len < 0.87 * size) {
+        return light; // the lamp in the voxel itself: nothing between
+    }
+    // Its shadow: the voxel world between (the lamp's own fitting, within a
+    // couple of voxels of it, left out; the voxel's own surface too).
+    const float3 from = origin;
+    const float3 to = lamp.position - from;
+    const float dist = length(to);
+    if (dist <= size) {
+        return light;
+    }
+    float hit_t;
+    uint hit;
+    uint hit_at;
+    const bool blocked = march_voxels_from(w, from, to / dist, level, size * 0.5, dist, float4(lamp.position, 0.1),
+                                           float4(n, dot(n, centre) + size), hit_t, hit, hit_at);
+    return blocked ? float3(0.0, 0.0, 0.0) : light;
 }
 
 groupshared uint g_filled[k_brick_voxels];
@@ -82,6 +142,8 @@ void cs_light(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     w.level_count = push.level_count;
     w.bricks_per_axis = push.bricks_per_axis;
     w.stand_ins = 0u; // everything casts and bounces
+    w.lamps = push.lamps;
+    w.lamps_on = push.lamps_on;
     const Level l = load_level(read_buffer(push.levels), push.levels_offset, level);
     const float3 brick_min = l.origin + float3(brick - l.brick) * l.brick_size;
     const float size = l.brick_size / 8.0;
@@ -107,5 +169,15 @@ void cs_light(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
         }
         const float3 bounce = gather_cones(w, light, f, origin, n, centre + n * size, level, size);
         light.Store((index * k_brick_voxels + i) * 4, pack_light(bounce, sun));
+        if (push.lamps_on != 0u) {
+            float3 lamp = float3(0.0, 0.0, 0.0);
+            ByteAddressBuffer lamps = read_buffer(push.lamp_lights);
+            for (uint k = 0; k < head.w; ++k) {
+                const uint li = lamps.Load(push.lamp_entries_offset + (head.z + k) * 4);
+                lamp += lamp_on_voxel(w, load_light(lamps, push.lamp_lights_offset + li * k_light_bytes), centre, n,
+                                      size, origin, level);
+            }
+            write_buffer(push.lamps).Store((index * k_brick_voxels + i) * 4, pack_light(lamp, false));
+        }
     }
 }

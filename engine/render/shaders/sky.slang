@@ -483,6 +483,8 @@ void cs_weather_cover(uint3 id : SV_DispatchThreadID) {
     w.level_count = min(s.voxel_level_count, k_max_levels);
     w.bricks_per_axis = s.voxel_bricks_per_axis;
     w.stand_ins = 0u; // everything shelters
+    w.lamps = 0u;
+    w.lamps_on = 0u;
     float height = -1.0e9;
     if (w.level_count > 0u) {
         const float texel = s.cover_size / float(k_cover_size);

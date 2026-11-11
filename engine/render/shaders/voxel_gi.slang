@@ -55,18 +55,29 @@ float3 sky_radiance(Frame f, float3 dir) {
 
 static const float k_gi_pi = 3.14159265;
 
+// The light lamps give a voxel (src/voxel_lamps.h; its lamp word, beside
+// its light word: `at` is pool index * 512 + voxel), over pi as the light
+// word holds it. Kept apart from the light word: what the voxel sends on,
+// not what pixels near it take again (the lamps light those themselves).
+float3 voxel_lamp(VoxelWorld w, uint at) {
+    if (w.lamps_on == 0u) {
+        return float3(0.0, 0.0, 0.0); // (the descriptor is no lamp words then: never loaded)
+    }
+    return unpack_light(write_buffer(w.lamps).Load(at * 4));
+}
+
 // What a filled voxel sends back (diffuse, the same every way), as shading
 // lights a Lambert surface: its colour times the sun over pi (if it
 // reaches it) plus the light reaching it (ambient-like, as the flat sky
-// colours are). Not lit yet: the sky colours stand in.
-float3 voxel_radiance(Frame f, uint packed, uint light) {
+// colours are) and the lamps'. Not lit yet: the sky colours stand in.
+float3 voxel_radiance(Frame f, uint packed, uint light, float3 lamp) {
     const float3 albedo = unpack_color(packed);
     const float3 n = unpack_normal(packed);
     if (!light_lit(light)) {
         return albedo * sky_radiance(f, n);
     }
     const float sun = light_sun(light) ? saturate(dot(n, f.sun_direction.xyz)) : 0.0;
-    return albedo * (f.sun_light.rgb * (sun / k_gi_pi) + unpack_light(light));
+    return albedo * (f.sun_light.rgb * (sun / k_gi_pi) + unpack_light(light) + lamp);
 }
 
 // The voxel at a camera-relative point on the finest level from `min_level`
@@ -154,7 +165,8 @@ float3 trace_cone(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origi
         if (filled) {
             const uint packed = pool.Load(index * k_brick_bytes + 64 + voxel * 4);
             const uint lw = light.Load((index * k_brick_voxels + voxel) * 4);
-            color += (1.0 - a) * k_cone_alpha * voxel_radiance(f, packed, lw);
+            const float3 lamp = voxel_lamp(w, index * k_brick_voxels + voxel);
+            color += (1.0 - a) * k_cone_alpha * voxel_radiance(f, packed, lw, lamp);
             a += (1.0 - a) * k_cone_alpha;
         }
         t += max(width * 0.5, size * 0.5);
@@ -347,7 +359,8 @@ float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3
         if (filled) {
             const uint packed = pool.Load(index * k_brick_bytes + 64 + voxel * 4);
             const uint lw = light.Load((index * k_brick_voxels + voxel) * 4);
-            color += (1.0 - a) * k_cone_alpha * voxel_radiance(f, packed, lw);
+            const float3 lamp = voxel_lamp(w, index * k_brick_voxels + voxel);
+            color += (1.0 - a) * k_cone_alpha * voxel_radiance(f, packed, lw, lamp);
             a += (1.0 - a) * k_cone_alpha;
         }
         t += max(t * cone_tan, size * 0.75);

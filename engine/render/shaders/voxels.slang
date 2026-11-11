@@ -18,7 +18,8 @@ struct VoxelPush {
     float4 background;  // linear
     uint light;         // write descriptor of the voxel light pool
     uint light_on;      // 1: lit by global illumination
-    uint2 pad;
+    uint lamps;         // write descriptor of the lamp words (lamps_on 0: none)
+    uint lamps_on;
 };
 ConstantBuffer<VoxelPush> push : register(b0);
 
@@ -42,6 +43,8 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     w.level_count = push.level_count;
     w.bricks_per_axis = push.bricks_per_axis;
     w.stand_ins = 0u; // every voxel
+    w.lamps = push.lamps;
+    w.lamps_on = push.lamps_on;
     float t;
     uint packed;
     uint hit_at;
@@ -50,7 +53,8 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
         const float3 albedo = unpack_color(packed);
         float3 lit;
         if (push.light_on != 0u) {
-            lit = voxel_radiance(f, packed, write_buffer(push.light).Load(hit_at * 4)) * f.exposure;
+            lit = voxel_radiance(f, packed, write_buffer(push.light).Load(hit_at * 4), voxel_lamp(w, hit_at)) *
+                  f.exposure;
         } else {
             const float3 sun = f.sun_light.xyz * max(dot(normal, f.sun_direction.xyz), 0.0);
             const float3 ambient = ambient_light(f, normal);

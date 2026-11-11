@@ -11,6 +11,7 @@ giant_module(render
     src/terrain_paint.cpp
     src/shadow_pages.cpp
     src/voxel_light.cpp
+    src/voxel_lamps.cpp
     src/exposure.cpp
     src/brdf.cpp
   DEPENDS core rhi geometry voxel
@@ -80,6 +81,7 @@ giant_module_tests(render
     tests/test_voxel_scene.cpp
     tests/test_shadow_pages.cpp
     tests/test_voxel_light.cpp
+    tests/test_voxel_lamps.cpp
     tests/test_instance_store.cpp
     tests/test_skin.cpp
     tests/test_exposure.cpp

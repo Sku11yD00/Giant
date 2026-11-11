@@ -2296,6 +2296,135 @@ GIANT_TEST("render: d3d12 a lamp's shadow falls behind a block; a spot's too; wi
     device->destroy(target);
 }
 
+GIANT_TEST("render: lamps light the voxel world's bricks under global illumination (null device)") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {20.0f, 1.0f, 20.0f};
+    std::vector<LocalLight> lights(2);
+    lights[0].position = {0.0, 1.0, -3.0};
+    lights[0].range = 4.0f;
+    lights[1].position = {0.0, 1.0, 9000.0}; // reaches no brick
+    FrameInput frame;
+    frame.instances = instances;
+    frame.lights = lights;
+    frame.view.position = {0.0, 3.0, 0.0};
+    frame.settings.antialiasing = false;
+    frame.settings.voxel_ms_per_frame = 1000.0f;
+    RenderStats st = s.draw(frame);
+    for (int i = 0; i < 64 && (st.voxel_pending > 0 || st.gi_waiting > 0 || st.gi_lamps == 0); ++i) st = s.draw(frame);
+    GIANT_CHECK(st.gi && st.gi_lamps == 1);
+    frame.settings.local_lights = false; // lamps off: their words lit to nothing
+    st = s.draw(frame);
+    GIANT_CHECK(st.gi && st.gi_lamps == 0);
+    frame.settings.local_lights = true;
+    frame.settings.gi = false;
+    st = s.draw(frame);
+    GIANT_CHECK(!st.gi && st.gi_lamps == 0);
+}
+
+GIANT_TEST("render: d3d12 a lamp lights the voxel world, shadowed by it, and bounces its light") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    RendererDesc rd;
+    rd.voxel_clipmap.levels = 6;
+    rd.voxel_clipmap.bricks_per_axis = 16;
+    rd.voxel_bricks = 4096;
+    auto renderer = Renderer::create(*device, rd);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 96, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // Night: white ground and a red wall (x from 1.8 to 2.2 m, 2 m tall);
+    // a lamp 1 m up at x = 1.2 before it. The camera 6 m up looking down
+    // (screen right is +X, some 0.108 m a pixel).
+    const DVec3 origin{-40'000.0, 120.0, 70'000.0};
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = origin;
+    instances[0].scale = {12.0f, 1.0f, 12.0f};
+    instances[0].material = 0;
+    instances[1].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[1].position = origin + DVec3{2.0, 1.0, 0.0};
+    instances[1].scale = {0.4f, 2.0f, 8.0f};
+    instances[1].material = 1;
+    std::vector<Material> materials(2);
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[0].roughness = 0.9f;
+    materials[1].base_color = {0.9f, 0.05f, 0.05f};
+    materials[1].roughness = 0.9f;
+    std::vector<LocalLight> lights(1);
+    lights[0].position = origin + DVec3{1.2, 1.0, 0.0};
+    lights[0].range = 3.0f;
+    lights[0].intensity = 4.0f;
+    lights[0].color = {1.0f, 1.0f, 1.0f};
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.antialiasing = false;
+    frame.settings.physical_sky = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.voxel_ms_per_frame = 1000.0f;
+    frame.settings.gi_bricks_per_frame = 4096;
+    frame.view.position = origin + DVec3{0.0, 6.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -k_pi * 0.5f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lights = lights;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    const auto draw = [&](bool gi, DebugView view) {
+        frame.settings.gi = gi;
+        frame.settings.debug_view = view;
+        for (int i = 0; i < 16; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto at = [](const std::vector<u8>& p, double x, u32 c) {
+        const u32 col = static_cast<u32>(static_cast<int>(k_w / 2) + static_cast<int>(x / 0.108));
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + col) * 4 + c;
+        return i < p.size() ? int{p[i]} : -1;
+    };
+    // The voxel world as it is lit: the ground under the lamp bright, the
+    // ground behind the wall in its shadow, past its reach dark.
+    const std::vector<u8> voxels = draw(true, DebugView::voxels);
+    GIANT_CHECK(renderer->last_stats().gi && renderer->last_stats().gi_lamps == 1);
+    // The lit view: the lamp's light bounced off the red wall reddens the
+    // ground before it (with global illumination, not without).
+    const std::vector<u8> lit = draw(true, DebugView::lit);
+    const std::vector<u8> flat = draw(false, DebugView::lit);
+    std::printf("    voxels: under %d, behind the wall %d, far %d; red-green at x = 1.5: gi %d, none %d\n",
+                at(voxels, 1.2, 1), at(voxels, 3.5, 1), at(voxels, -4.0, 1), at(lit, 1.5, 0) - at(lit, 1.5, 1),
+                at(flat, 1.5, 0) - at(flat, 1.5, 1));
+    GIANT_CHECK(at(voxels, 1.2, 1) > 40);
+    GIANT_CHECK(at(voxels, 3.5, 1) >= 0 && at(voxels, 3.5, 1) * 4 < at(voxels, 1.2, 1));
+    GIANT_CHECK(at(voxels, -4.0, 1) >= 0 && at(voxels, -4.0, 1) <= 6);
+    GIANT_CHECK(at(lit, 1.5, 0) - at(lit, 1.5, 1) > at(flat, 1.5, 0) - at(flat, 1.5, 1) + 2);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: d3d12 a dust puff hides what is behind it, lit; one behind the ground shows nothing") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::d3d12;

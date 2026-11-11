@@ -7,6 +7,7 @@
 #include "decals.h"
 #include "lights.h"
 #include "local_shadows.h"
+#include "voxel_lamps.h"
 #include "brdf.h"
 #include "exposure.h"
 #include "instance_store.h"
@@ -299,6 +300,7 @@ Renderer::~Renderer() {
         m_device.destroy(t);
     }
     m_device.destroy(m_voxel_light);
+    m_device.destroy(m_voxel_lamps);
     m_device.destroy(m_smaa_area);
     m_device.destroy(m_smaa_search);
     for (Mesh& mesh : m_meshes) {
@@ -383,6 +385,7 @@ bool Renderer::init() {
     m_terrain_pass = compute(shaders::terrain_cs(), "terrain layers");
     m_bloom_up = compute(shaders::bloom_up_cs(), "bloom: up");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
+    m_voxel_lamp_lists = std::make_unique<VoxelLamps>();
     ShadowDesc shadow_desc;
     shadow_desc.pool_pages = m_desc.shadow_pages;
     m_shadows = std::make_unique<ShadowPages>(shadow_desc);
@@ -2449,9 +2452,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // voxel view), a budgeted number of bricks a frame.
     if (!settings.gi) {
         m_voxel_light_failed = false; // try again when turned back on
+        m_voxel_lamps_failed = false;
     }
     m_gi_on = settings.gi && settings.voxel_world && (lit_view || settings.debug_view == DebugView::voxels) &&
               ensure_voxel_light();
+
     if (m_gi_on) {
         m_light_plan->plan(*m_voxels, std::clamp<u32>(settings.gi_bricks_per_frame, 1u, 4096u));
     } else {
@@ -2841,7 +2846,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         return; // out of memory: the device is lost
     }
-    if (!light_voxels(cmd, data)) {
+    if (!light_voxels(cmd, data, frame)) {
         m_gi_on = false; // this frame shades without it
     }
     mark(CpuSection::light);
@@ -2929,6 +2934,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const bool gi = m_gi_on && data.voxel_levels.data != nullptr;
     if (gi) {
         cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // after lighting's writes
+        if (lamps_in_voxels()) cmd.barrier(m_voxel_lamps, rhi::ResourceState::shader_write);
     }
     // Reflections (lit views): voxel cones need the lit voxel world.
     const bool reflections = settings.reflections && lit_view;
@@ -3141,9 +3147,14 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         extras.far_radius = static_cast<float>(far_radius);
         extras.far_on = far_march ? 1u : 0u;
     }
+    extras.gi_lamps = data.frame.descriptor;
     if (gi) {
         extras.gi_on = 1;
         extras.gi_light = m_device.write_descriptor(m_voxel_light);
+        if (lamps_in_voxels()) {
+            extras.gi_lamps = m_device.write_descriptor(m_voxel_lamps);
+            extras.gi_lamps_on = 1;
+        }
     }
     extras.reflect_on = (voxel_reflections ? 1u : 0u) | (screen_reflections ? 2u : 0u);
     extras.sky_params = sky ? sky_params.descriptor : data.frame.descriptor;
@@ -3472,6 +3483,7 @@ void Renderer::draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, con
     cmd.begin_timing("voxel view");
     if (m_gi_on && data.voxel_levels.data != nullptr) {
         cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // after lighting's writes
+        if (lamps_in_voxels()) cmd.barrier(m_voxel_lamps, rhi::ResourceState::shader_write);
     }
     rhi::RenderPassDesc pass;
     pass.colors[0] = {target, rhi::LoadOp::clear, {background.x, background.y, background.z, 1.0f}};
@@ -3489,9 +3501,14 @@ void Renderer::draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, con
         push.bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
         set4(push.background, background, 1.0f);
         push.light = push.pool;
+        push.lamps = push.pool;
         if (m_gi_on) {
             push.light = m_device.write_descriptor(m_voxel_light);
             push.light_on = 1;
+            if (lamps_in_voxels()) {
+                push.lamps = m_device.write_descriptor(m_voxel_lamps);
+                push.lamps_on = 1;
+            }
         }
         cmd.push(push);
         cmd.draw(3);
@@ -3582,6 +3599,7 @@ void Renderer::copy_streaming_stats() {
     m_stats.gi_lit = gi.lit;
     m_stats.gi_cleared = gi.cleared;
     m_stats.gi_waiting = gi.waiting;
+    m_stats.gi_lamps = m_gi_on ? m_gi_lamps : 0u;
 }
 
 bool Renderer::ensure_voxel_light() {
@@ -3599,16 +3617,40 @@ bool Renderer::ensure_voxel_light() {
             return false;
         }
     }
+    // The lamps' words beside it, made with it (never mid-play: a buffer
+    // made then would hitch).
+    if (m_voxel_light.valid() && !m_voxel_lamps.valid() && !m_voxel_lamps_failed) {
+        rhi::BufferDesc desc;
+        desc.size = u64{m_voxels->capacity()} * voxel::k_brick_voxels * 4;
+        desc.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
+        desc.name = "voxel lamps";
+        m_voxel_lamps = m_device.create_buffer(desc);
+        if (!m_voxel_lamps.valid()) {
+            m_voxel_lamps_failed = true;
+            log_error("render", "could not create the voxel lamp words (out of GPU memory?); lamps not in global illumination");
+        }
+    }
     return m_voxel_light.valid();
 }
 
-bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
+bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame) {
+    m_gi_lamps = 0;
     if (!m_gi_on) {
         return true;
     }
     cmd.begin_timing("gi");
     const std::span<const u32> clears = m_light_plan->clears();
-    const std::span<const gpu::LightJob> jobs = m_light_plan->jobs();
+    // The jobs with the lamps reaching each brick (lamps off: none, their
+    // words lit to nothing).
+    if (frame.settings.local_lights && !frame.lights.empty()) m_voxel_lamps_seen = true;
+    const bool lamps = lamps_in_voxels();
+    std::span<const gpu::LightJob> jobs = m_light_plan->jobs();
+    if (lamps) {
+        const std::span<const LocalLight> lit =
+            frame.settings.local_lights ? frame.lights : std::span<const LocalLight>{};
+        m_voxel_lamp_lists->list(lit, jobs, m_voxels->clipmap(), frame.view.position);
+        jobs = m_voxel_lamp_lists->jobs();
+    }
     if (data.voxel_levels.data == nullptr) {
         m_light_plan->lost(); // out of memory: nothing lit, the clears again next time
     } else if (!clears.empty() || !jobs.empty()) {
@@ -3622,7 +3664,29 @@ bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
         push.level_count = m_voxels->levels();
         push.bricks_per_axis = static_cast<u32>(m_voxels->clipmap().desc().bricks_per_axis);
         push.light = m_device.write_descriptor(m_voxel_light);
+        push.lamps = push.light;
+        push.lamp_lights = data.frame.descriptor;
         cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // after last frame's reads
+        if (lamps) {
+            push.lamps = m_device.write_descriptor(m_voxel_lamps);
+            push.lamps_on = 1;
+            cmd.barrier(m_voxel_lamps, rhi::ResourceState::shader_write);
+            // This frame's lamps, then the jobs' entries.
+            const std::vector<gpu::Light>& ls = m_voxel_lamp_lists->lights();
+            const std::vector<u32>& es = m_voxel_lamp_lists->entries();
+            const usize light_bytes = ls.size() * sizeof(gpu::Light);
+            const usize total = light_bytes + std::max<usize>(es.size(), 1) * 4;
+            const rhi::TransientMemory up = cmd.allocate(static_cast<u32>(total));
+            if (up.data == nullptr) {
+                m_voxel_lamp_lists->drop(); // lit without lamps this time
+            } else {
+                if (light_bytes > 0) std::memcpy(up.data, ls.data(), light_bytes);
+                if (!es.empty()) std::memcpy(up.data + light_bytes, es.data(), es.size() * 4);
+                push.lamp_lights = up.descriptor;
+                push.lamp_lights_offset = up.offset;
+                push.lamp_entries_offset = up.offset + static_cast<u32>(light_bytes);
+            }
+        }
         if (!clears.empty()) {
             const rhi::TransientMemory list = cmd.upload_array(clears);
             if (list.data == nullptr) {
@@ -3640,6 +3704,7 @@ bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
                     cmd.dispatch(voxel::k_brick_voxels / 4 / 64, push.count);
                 }
                 cmd.barrier(m_voxel_light, rhi::ResourceState::shader_write); // cleared before lit
+                if (lamps) cmd.barrier(m_voxel_lamps, rhi::ResourceState::shader_write);
             }
         }
         if (!jobs.empty()) {
@@ -3651,6 +3716,7 @@ bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data) {
                 cmd.set_pipeline(m_light_voxels);
                 cmd.push(push);
                 cmd.dispatch(push.count);
+                m_gi_lamps = lamps ? m_voxel_lamp_lists->lit() : 0u;
             } else {
                 m_light_plan->lost(); // lit next frame instead (they read as not lit meanwhile)
             }
