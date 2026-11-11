@@ -1991,6 +1991,148 @@ GIANT_TEST("render: dust puffs given are counted, bad ones and those past the ca
     device->destroy(target);
 }
 
+GIANT_TEST("render: local lights in view are counted, lit views only, and can be turned off (null device)") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) {
+        return;
+    }
+    rhi::TextureDesc target_desc;
+    target_desc.width = 32;
+    target_desc.height = 16;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[0].position = {0.0, 0.0, -6.0};
+    std::vector<LocalLight> lights(3);
+    lights[0].position = {0.0, 1.0, -5.0};
+    lights[1].position = {0.0, 1.0, 50.0}; // behind the camera
+    lights[2].position = {2.0, 0.0, -8.0};
+    lights[2].kind = LightKind::spot;
+    FrameInput frame;
+    frame.instances = instances;
+    frame.lights = lights;
+    const auto draw = [&] {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd != nullptr) {
+            renderer->render(*cmd, target, frame);
+            device->end_frame();
+        }
+    };
+    draw();
+    GIANT_CHECK(renderer->last_stats().lights == 2 && !renderer->last_stats().light_overflow);
+    frame.settings.debug_view = DebugView::lighting; // the light alone: lamps too
+    draw();
+    GIANT_CHECK(renderer->last_stats().lights == 2);
+    frame.settings.debug_view = DebugView::clusters; // not lit: none
+    draw();
+    GIANT_CHECK(renderer->last_stats().lights == 0);
+    frame.settings.debug_view = DebugView::lit;
+    frame.settings.local_lights = false;
+    draw();
+    GIANT_CHECK(renderer->last_stats().lights == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("render: d3d12 a lamp lights the floor round it, fading to nothing at its range; a spot only its cone") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 128, k_h = 128;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // The camera 10 m above a dark floor looking straight down (60 degree
+    // view: some 9 cm a pixel, +x to the right of the image).
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = DVec3{300.0, 0.0, 0.0};
+    instances[0].scale = {40.0f, 1.0f, 40.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[0].roughness = 0.9f;
+    std::vector<LocalLight> lights(1);
+    lights[0].position = {300.0, 1.0, 0.0};
+    lights[0].range = 4.0f;
+    lights[0].intensity = 3.0f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.view.position = {300.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lights = lights;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    const auto draw = [&] {
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        GIANT_CHECK(renderer->last_stats().lights == 1);
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto green = [](const std::vector<u8>& image, u32 x) {
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + x) * 4;
+        return i + 3 < image.size() ? static_cast<int>(image[i + 1]) : -1;
+    };
+    // Columns: 64 under the lamp, 86 some 2 m out, 114 some 4.5 m out
+    // (past its range).
+    const std::vector<u8> point = draw();
+    lights[0].kind = LightKind::spot; // 3 m up, a narrow cone straight down: some 0.9 m in radius on the floor
+    lights[0].position = {300.0, 3.0, 0.0};
+    lights[0].range = 6.0f;
+    lights[0].intensity = 9.0f;
+    lights[0].direction = {0.0f, -1.0f, 0.0f};
+    lights[0].inner_angle = 0.2f;
+    lights[0].outer_angle = 0.3f;
+    const std::vector<u8> spot = draw();
+    std::printf("    point: under %d, 2 m out %d, past range %d; spot: under %d, 2 m out %d\n", green(point, 64),
+                green(point, 86), green(point, 114), green(spot, 64), green(spot, 86));
+    GIANT_CHECK(green(point, 64) > 90);
+    GIANT_CHECK(green(point, 86) > 10 && green(point, 86) * 2 < green(point, 64));
+    GIANT_CHECK(green(point, 114) >= 0 && green(point, 114) <= 2);
+    GIANT_CHECK(green(spot, 64) > 90);
+    GIANT_CHECK(green(spot, 86) >= 0 && green(spot, 86) <= 2);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: d3d12 a dust puff hides what is behind it, lit; one behind the ground shows nothing") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::d3d12;

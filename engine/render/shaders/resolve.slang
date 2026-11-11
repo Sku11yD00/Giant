@@ -32,6 +32,7 @@
 #include "voxel_march.slang"
 #include "voxel_gi.slang"
 #include "shadow_pages.slang"
+#include "lights.slang"
 #include "tone_map.slang"
 #include "sky_common.slang"
 
@@ -101,6 +102,7 @@ struct Extras {
     uint terrain_surface;    // terrain.slang's colour and roughness, full size (terrain_on 0: off)
     uint terrain_normal;     // and its shading normal
     uint terrain_on;
+    LocalLights local;       // lamps (lights.slang; count 0: none)
 };
 
 Extras load_extras() {
@@ -155,9 +157,11 @@ Extras load_extras() {
     o.dfg_size = q.y;
     o.ao = q.z;
     o.ao_on = q.w;
-    const uint2 c2 = b.Load2(at + 176);
+    const uint4 c2 = b.Load4(at + 176);
     o.contact = c2.x;
     o.contact_on = c2.y;
+    o.local.buffer = c2.z;
+    o.local.count = c2.w;
     const uint3 t3 = b.Load3(at + 192);
     o.terrain_surface = t3.x;
     o.terrain_normal = t3.y;
@@ -170,6 +174,12 @@ Extras load_extras() {
     o.shadows.prev_y = py.xyz;
     o.shadows.prev_z = pz.xyz;
     o.shadows.prev_depth_offset = pz.w;
+    const uint4 lo = b.Load4(at + 256);
+    o.local.lights = lo.x;
+    o.local.clusters = lo.y;
+    o.local.entries = lo.z;
+    o.local.near_depth = asfloat(lo.w);
+    o.local.scale = asfloat(b.Load(at + 272));
     return o;
 }
 
@@ -539,6 +549,65 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
     const float3 diffuse_weight = diffuse_color * saturate(1.0 - fss_ess - fms_ems);
     color += (diffuse_weight + fms_ems) * ambient_diffuse + spec_weight * ambient_specular;
     return color + emissive;
+}
+
+// The lamps' light on a surface (lights.slang): the lights listed in the
+// pixel's cluster, each lit like the sun (GGX specular, Lambert diffuse,
+// the same energy compensation), with highlights widened by the source's
+// size (Karis 2013; the widened lobe keeps its energy). No shadows yet.
+float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n, float3 base, float rough,
+                      float metal, float variance) {
+    float3 sum = float3(0.0, 0.0, 0.0);
+    if (e.local.count == 0u) {
+        return sum;
+    }
+    ByteAddressBuffer b = read_buffer(e.local.buffer);
+    const float depth = -dot(f.view_rows[2].xyz, world);
+    const uint2 listed = light_cluster(e.local, b, position, f.width, f.height, depth);
+    if (listed.y == 0u) {
+        return sum;
+    }
+    const float3 v = safe_normalize(-world, n);
+    const float roughness = clamp(rough, 0.045, 1.0);
+    float alpha = roughness * roughness;
+    if (push.specular_aa != 0) {
+        const float kernel = min(2.0 * k_specular_aa_variance * variance, k_specular_aa_limit);
+        alpha = sqrt(saturate(alpha * alpha + kernel));
+    }
+    const float metallic = saturate(metal);
+    const float3 f0 = lerp(float3(0.04, 0.04, 0.04), base, metallic);
+    const float3 diffuse_color = base * (1.0 - metallic);
+    const float n_dot_v = max(dot(n, v), 1e-4);
+    const float2 ab = dfg_lookup(e, n_dot_v, sqrt(alpha));
+    const float3 energy = 1.0 + f0 * (1.0 / max(ab.x + ab.y, 0.05) - 1.0);
+    [loop] for (uint i = 0; i < listed.y; ++i) {
+        const uint index = b.Load(e.local.entries + (listed.x + i) * 4u);
+        const LocalLight light = load_light(b, e.local.lights + index * k_light_bytes);
+        const float3 to_light = light.position - world;
+        const float d2 = dot(to_light, to_light);
+        if (d2 >= light.range * light.range || d2 < 1e-8) {
+            continue;
+        }
+        const float inv_d = rsqrt(d2);
+        const float3 l = to_light * inv_d;
+        const float n_dot_l = saturate(dot(n, l));
+        if (n_dot_l <= 0.0) {
+            continue;
+        }
+        const float falloff = light_falloff(light, to_light, l);
+        if (falloff <= 0.0) {
+            continue;
+        }
+        const float3 h = safe_normalize(v + l, n);
+        const float n_dot_h = saturate(dot(n, h));
+        const float v_dot_h = saturate(dot(v, h));
+        const float wide = saturate(alpha + light.source_radius * inv_d * 0.5);
+        const float3 fresnel = f_schlick(f0, v_dot_h);
+        const float3 specular = d_ggx(n_dot_h, wide) * v_smith(n_dot_v, n_dot_l, wide) * fresnel * energy;
+        const float3 diffuse = (1.0 - fresnel) * diffuse_color / k_pi;
+        sum += (diffuse + specular) * light.color * (falloff * n_dot_l);
+    }
+    return sum;
 }
 
 // Ambient occlusion (ao.slang) at this pixel: its half-size texels round
@@ -959,6 +1028,7 @@ Output shade_pixel(float4 position) {
     }
     float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
                          occlusion, bend, spec_weight, spec_light);
+    color += local_lighting(extras, f, position.xy, world, n, base, rough, metal, variance);
     if (translucency > 0.0) {
         // Thin surfaces lit from behind: the sun through them, tinted by
         // their colour, shadowed as the side facing it (the leaf itself

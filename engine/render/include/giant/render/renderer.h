@@ -59,6 +59,7 @@ class ShadowPages;      // src/shadow_pages.h
 class VoxelLight;       // src/voxel_light.h
 struct ShadowWindows;
 struct DecalBins;       // src/decals.h
+struct LightBins;       // src/lights.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
@@ -300,6 +301,29 @@ struct DustPuff {
 // Puffs one frame draws at most (the first of FrameInput::dust).
 inline constexpr u32 k_max_dust_puffs = 32;
 
+// A lamp: a point light, or a spot light shining down a cone (lit views,
+// not the far field). Its light at distance d is colour x intensity / d^2
+// (the same relative units as Lighting::sun_light, so intensity 3 at 1 m
+// lights like the default sun), easing smoothly to nothing at `range`.
+// A source the size of `source_radius` keeps close surfaces from flaring
+// and widens its highlights. No shadows yet (L3): it lights through walls.
+enum class LightKind : u8 { point, spot };
+struct LocalLight {
+    DVec3 position{};
+    Vec3 color{1.0f, 1.0f, 1.0f}; // linear
+    float intensity = 1.0f;
+    float range = 10.0f;          // metres (0.01 to 1000)
+    LightKind kind = LightKind::point;
+    Vec3 direction{0.0f, -1.0f, 0.0f}; // spot: where it points (normalized here)
+    float inner_angle = 0.4f;   // spot: full light inside this half angle, radians
+    float outer_angle = 0.6f;   // spot: none outside this (at most 89 degrees)
+    float source_radius = 0.05f; // metres
+};
+// Lights one frame shades at most (the nearest of FrameInput::lights in
+// view), and at most per cluster of the screen (the nearest again).
+inline constexpr u32 k_max_lights = 4096;
+inline constexpr u32 k_max_lights_per_cluster = 256;
+
 struct View {
     DVec3 position{};
     Quat orientation{}; // looks down -Z, +Y up, before rotation
@@ -394,6 +418,8 @@ struct RenderSettings {
     // than 48 pixels.
     bool contact_shadows = true;
     float contact_shadow_length = 0.3f;
+    // Local lights (FrameInput::lights; lit views).
+    bool local_lights = true;
     // The physical sky (with FrameInput::sky on): the air's light scattered
     // many times (a brighter, deeper sky, and the glow after sunset), the
     // clear air between the camera and what it sees (far hills fade blue
@@ -489,6 +515,8 @@ struct FrameInput {
     std::span<const Decal> decals;
     // Dust in the air, nearest first (lit views; past k_max_dust_puffs left out).
     std::span<const DustPuff> dust;
+    // Lamps (lit views; see LocalLight).
+    std::span<const LocalLight> lights;
     // What swaying materials move in (WindClock::state).
     WindState wind;
     // Seconds since the last frame, for auto exposure's easing (0: held;
@@ -573,6 +601,8 @@ struct RenderStats {
     bool wet_surfaces = false;  // wet or snowy surfaces
     bool weather_cover = false; // the cover map made (sheltered places stay dry)
     u32 dust_puffs = 0;         // dust puffs drawn
+    u32 lights = 0;             // local lights shaded this frame (in view, near enough)
+    bool light_overflow = false; // too many: the furthest were left out of some clusters or of the frame
     u32 skinned_meshes = 0;     // skinned meshes added (live)
     u32 posed = 0;              // of them, posed on the GPU this frame (a new pose, or just loaded)
 };
@@ -848,6 +878,7 @@ private:
     RendererDesc m_desc;
     std::unique_ptr<GeometryStreamer> m_streamer;
     std::unique_ptr<DecalBins> m_decal_bins; // this frame's, reused
+    std::unique_ptr<LightBins> m_light_bins; // this frame's, reused
     std::unique_ptr<VoxelScene> m_voxels;
     std::unique_ptr<InstanceStore> m_store; // the instances, on the GPU by cell
     std::unique_ptr<TerrainPaintStore> m_paint; // painted terrain tiles
@@ -1019,6 +1050,7 @@ private:
     bool m_cpu_clusters_logged = false;
     bool m_materials_logged = false;
     bool m_decals_logged = false;
+    bool m_lights_logged = false;
 
     std::vector<Mesh> m_meshes;
     std::vector<u32> m_free_meshes; // removed slots, reused by add_mesh
