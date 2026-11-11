@@ -61,7 +61,7 @@ struct ResolvePush {
 };
 ConstantBuffer<ResolvePush> push : register(b0);
 
-static const uint k_material_bytes = 64; // gpu::Material; textures +32, flags +48, translucency +52, alpha cutoff +56
+static const uint k_material_bytes = 64; // gpu::Material; textures +32, flags +48, translucency +52, alpha cutoff +56, canopy +60
 static const uint k_material_terrain = 1u;
 static const uint k_material_two_sided = 2u;
 static const uint k_no_texture = 0xFFFFFFFFu; // rhi::k_no_descriptor
@@ -875,6 +875,13 @@ Output shade_pixel(float4 position) {
         // Two-sided, seen from behind: lit as the side facing the viewer.
         surface_n = -surface_n;
         n = -n;
+    }
+    const float canopy = asfloat(materials.Load(material_at + 60));
+    if (canopy > 0.0) {
+        // A leafy crown, lit as one rounded mass: the normal bent out from
+        // the middle of the instance (its bounding sphere).
+        const float3 out_n = safe_normalize(world - s.center, n);
+        n = safe_normalize(lerp(n, out_n, canopy), out_n);
     }
     if (extras.terrain_on != 0u && (material_flags & k_material_terrain) != 0u) {
         // The ground's layers, from terrain.slang's pass.

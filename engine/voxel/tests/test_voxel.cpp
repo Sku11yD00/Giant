@@ -254,6 +254,23 @@ GIANT_TEST("voxel: a thin cut-out stand-in over solid ground leaves the ground, 
     GIANT_CHECK(stand < 16 && green == stand); // few, and those keep the grass's colour
 }
 
+GIANT_TEST("voxel: a triangle can face another way for lighting (leafy crowns)") {
+    BrickBuilder b;
+    b.reset(0.5f);
+    // A floor triangle (facing up) told to face +x.
+    b.add_triangle({0.1f, 1.25f, 0.1f}, {0.1f, 1.25f, 0.4f}, {0.4f, 1.25f, 0.1f}, {1, 1, 1}, false, 1.0f, {3, 0, 0});
+    Brick brick = b.build();
+    const u32 i = voxel_index(0, 2, 0);
+    GIANT_CHECK(brick.occupied(i) && dot(unpack_normal(brick.voxels[i]), {1, 0, 0}) > 0.95f);
+    // Zero or not finite: its own facing.
+    for (const Vec3& facing : {Vec3{}, Vec3{k_nan, 0, 0}, Vec3{std::numeric_limits<float>::infinity(), 0, 0}}) {
+        b.reset(0.5f);
+        b.add_triangle({0.1f, 1.25f, 0.1f}, {0.1f, 1.25f, 0.4f}, {0.4f, 1.25f, 0.1f}, {1, 1, 1}, false, 1.0f, facing);
+        brick = b.build();
+        GIANT_CHECK(brick.occupied(i) && dot(unpack_normal(brick.voxels[i]), {0, 1, 0}) > 0.95f);
+    }
+}
+
 GIANT_TEST("voxel: a triangle outside the brick, or with no area, adds nothing") {
     BrickBuilder b;
     b.reset(1.0f);

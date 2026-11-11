@@ -75,6 +75,7 @@ Json entity_json(const Entity& e) {
             {"two_sided", e.material.two_sided},
             {"translucency", e.material.translucency},
             {"alpha_cutoff", e.material.alpha_cutoff},
+            {"canopy", e.material.canopy},
             {"visible", e.visible},
             {"body", world::to_string(e.body)}};
     if (e.mass != 0.0f) {
@@ -256,6 +257,10 @@ Json entity_properties() {
         {"alpha_cutoff", number(0, 1, "Cut-outs (leaves on cards, grass, fences): where the base colour map's alpha "
                                       "is under this, nothing is there, in the image and in shadows (0.5 usual). "
                                       "Needs a base_color map with alpha. Default 0: solid.")},
+        {"canopy", number(0, 1, "Leafy crowns: how far the shading normal bends outward from the middle of the "
+                                "thing (its bounding sphere), so a crown of leaf cards is lit as one soft rounded "
+                                "mass, near and far (0.5 to 0.8 for leaves on a tree split from its trunk). "
+                                "Default 0: as modelled.")},
         {"maps", maps_schema()},
         {"visible", {{"type", "boolean"}}},
         {"body",
@@ -336,6 +341,7 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("two_sided")) e.material.two_sided = args["two_sided"].get<bool>();
     if (args.contains("translucency")) e.material.translucency = args["translucency"].get<float>();
     if (args.contains("alpha_cutoff")) e.material.alpha_cutoff = args["alpha_cutoff"].get<float>();
+    if (args.contains("canopy")) e.material.canopy = args["canopy"].get<float>();
     if (args.contains("maps")) {
         if (std::string bad = apply_maps(args["maps"], e.material.maps); !bad.empty()) return bad;
     }

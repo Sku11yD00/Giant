@@ -245,6 +245,38 @@ GIANT_TEST("voxel scene: a texture's average colour and a cut-out's coverage rea
     GIANT_CHECK(b.voxels->stats().built == 0);
 }
 
+GIANT_TEST("voxel scene: a canopy material's voxels face out from the instance's middle") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    Instance cube;
+    cube.mesh = 0;
+    cube.position = {0.3, 1.1, 0.2};
+    cube.scale = {2.0f, 2.0f, 2.0f};
+    b.instances = {cube};
+    b.cells = {CellRange{.first = 0, .count = 1, .version = 3}};
+    Material m{{0.3f, 0.6f, 0.2f}};
+    b.materials = {m};
+    b.step();
+    // Near the top of the +X face: as modelled it faces +X; as a crown,
+    // out from the middle, so up as well.
+    const DVec3 high{1.3, 1.95, 0.2};
+    u32 packed = 0;
+    GIANT_CHECK(b.voxel_at(high, packed));
+    GIANT_CHECK(voxel::unpack_normal(packed).y < 0.1f);
+    m.canopy = 1.0f;
+    b.materials = {m};
+    b.step(); // a changed row, in an unchanged cell
+    GIANT_CHECK(b.voxels->stats().built > 0);
+    GIANT_CHECK(b.voxel_at(high, packed));
+    const Vec3 n = voxel::unpack_normal(packed);
+    GIANT_CHECK(n.x > 0.3f && n.y > 0.3f);
+    // Out of range is kept to 0 to 1 (as the renderer reads it): no rebuild.
+    m.canopy = 4.0f;
+    b.materials = {m};
+    b.step();
+    GIANT_CHECK(b.voxels->stats().built == 0);
+}
+
 GIANT_TEST("voxel scene: building keeps to its budget and coarse levels go first") {
     Bench b;
     GIANT_CHECK(b.voxels->init());

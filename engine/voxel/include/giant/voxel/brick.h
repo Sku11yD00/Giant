@@ -87,9 +87,11 @@ public:
     // Returns how many voxels it tested (the work done, for budgets).
     // `stand_in`: from a small object the far field stands in for.
     // `coverage`: the share of the surface its texture leaves (1: solid);
-    // 0 or less (or NaN) adds nothing.
+    // 0 or less (or NaN) adds nothing. `facing`: the way it faces for
+    // lighting, if not its own (leafy crowns bend theirs outward); zero or
+    // not finite: its own.
     u32 add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color, bool stand_in = false,
-                     float coverage = 1.0f);
+                     float coverage = 1.0f, const Vec3& facing = {});
     bool empty() const { return m_touched == 0; }
     Brick build() const;
     // The dither threshold of voxel `index` under the current seed, in (0, 1].

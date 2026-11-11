@@ -134,6 +134,10 @@ struct Material {
     // Cut-outs (leaves on cards, grass blades, fences): where the base
     // colour map's alpha is under this (0 to 1), nothing is there. 0: solid.
     float alpha_cutoff = 0.0f;
+    // Leafy crowns: how far (0 to 1) the shading normal bends outward from
+    // the middle of the thing, so a crown of leaves is lit as one soft,
+    // rounded mass instead of a scatter of flat cards. 0: as modelled.
+    float canopy = 0.0f;
     MaterialMaps maps; // entities, kit pieces and scatter items (kept, not drawn, on decals and cloth)
     bool operator==(const Material&) const = default;
 };

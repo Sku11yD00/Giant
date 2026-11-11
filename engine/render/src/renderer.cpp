@@ -86,6 +86,7 @@ gpu::Material to_gpu(const Material& m, Descriptor&& descriptor) {
         out.flags |= gpu::k_material_cut_out;
         out.alpha_cutoff = cutoff;
     }
+    out.canopy = std::isfinite(m.canopy) ? std::clamp(m.canopy, 0.0f, 1.0f) : 0.0f;
     return out;
 }
 

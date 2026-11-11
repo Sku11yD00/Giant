@@ -71,6 +71,7 @@ Json item_schema() {
               {"translucency", number(0, 1, "Sun shining through it (set_entity's translucency). Default 0.")},
               {"alpha_cutoff", number(0, 1, "Cut away where the base colour map's alpha is under it "
                                             "(set_entity's alpha_cutoff). Default 0.")},
+              {"canopy", number(0, 1, "Crown light bent outward (set_entity's canopy). Default 0.")},
               {"maps", maps_schema()},
               {"weight", number(1e-6, 1e6, "How often it is picked, against the layer's other items. Default 1.")},
               {"scale", pair(0.0001, 10000, "[min, max] uniform scale, picked evenly. Default [1, 1].")},
@@ -150,6 +151,7 @@ std::string apply_layer(const Json& args, ScatterLayer& l, EditorState& state) {
             i.material.two_sided = j.value("two_sided", i.material.two_sided);
             i.material.translucency = j.value("translucency", i.material.translucency);
             i.material.alpha_cutoff = j.value("alpha_cutoff", i.material.alpha_cutoff);
+            i.material.canopy = j.value("canopy", i.material.canopy);
             if (j.contains("maps")) {
                 if (std::string bad = apply_maps(j["maps"], i.material.maps); !bad.empty()) return bad;
             }
@@ -224,6 +226,7 @@ Json layer_json(const ScatterLayer& l) {
         if (i.material.two_sided) j["two_sided"] = true;
         if (i.material.translucency != 0.0f) j["translucency"] = i.material.translucency;
         if (i.material.alpha_cutoff != 0.0f) j["alpha_cutoff"] = i.material.alpha_cutoff;
+        if (i.material.canopy != 0.0f) j["canopy"] = i.material.canopy;
         if (!i.material.maps.empty() || i.material.maps.normal_green_down) j["maps"] = maps_json(i.material.maps);
         j["weight"] = i.weight;
         j["scale"] = {i.scale_min, i.scale_max};

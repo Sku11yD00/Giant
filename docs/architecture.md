@@ -483,6 +483,19 @@ an offline cooker can use it without a device.
   unchanged cells as textures arrive) and rebuilds what uses a changed one;
   one used by more than an eighth of the instances rebuilds everything,
   as any bulk change does.
+- **Canopy normals (photoreal part 6c-2).** `Material::canopy` (0 to 1,
+  saved with world materials, MCP `canopy` on entities, kit pieces and
+  scatter items) bends the shading normal towards the direction out from
+  the instance's bounding sphere's centre (resolve.slang, after the
+  two-sided flip and the normal map), so a crown of leaf cards lights as
+  one rounded mass: bright towards the sun, falling off around it, and
+  glowing through (translucency) on the far side. Shadows, GI lookups and
+  contact shadows keep the surface's own normal. The voxel world bends
+  each triangle's facing the same way (from its centroid, `BrickBuilder`'s
+  `facing`), so far crowns and the bounce light off them match; this also
+  stops a two-sided card's opposite faces cancelling to +Y. It works per
+  instance, so a tree's leaves want their own mesh (entity, kit piece or
+  scatter item) apart from the trunk.
 - **Textures from files (photoreal part 3a-3c).** `world::Material::maps`
   names image files (base colour, normal, glTF metallic-roughness, glTF
   occlusion; `normal_green_down` for DirectX normal maps), saved under

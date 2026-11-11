@@ -144,6 +144,11 @@ struct Material {
     // image and in shadows. 0, or no base colour texture (yet): solid.
     // Drawn in a visibility pass of their own.
     float alpha_cutoff = 0.0f;
+    // Leafy crowns (0 to 1): the shading normal bends this far towards the
+    // direction out from the instance's bounding sphere's centre, so a
+    // crown of cards is lit as one rounded mass; the voxel world's facing
+    // bends the same way. Shadows keep the surface's own normal.
+    float canopy = 0.0f;
     // For the voxel world, which cannot sample textures: the base colour
     // texture's average colour (linear; for a cut-out, of what its cutoff
     // leaves: texture::summarize_color), which multiplies base_color there,
