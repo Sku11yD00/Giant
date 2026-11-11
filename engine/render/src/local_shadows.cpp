@@ -125,8 +125,9 @@ void LocalShadows::release(u32 id) {
     m_entries.erase(it);
 }
 
-void LocalShadows::undo_draws() {
-    for (const Face& f : m_draws) {
+void LocalShadows::undo_draws(usize from) {
+    for (usize i = from; i < m_draws.size(); ++i) {
+        const Face& f = m_draws[i];
         const u32 id = f.tile < m_owner.size() ? m_owner[f.tile] : k_free;
         const auto it = m_entries.find(id);
         if (it == m_entries.end()) continue;
@@ -134,7 +135,7 @@ void LocalShadows::undo_draws() {
         it->second.dirty |= 1u << face;
         it->second.drawn &= ~(1u << face); // what the tile holds is unknown
     }
-    m_draws.clear();
+    m_draws.resize(std::min(from, m_draws.size()));
 }
 
 void LocalShadows::invalidate_all() {
@@ -250,9 +251,11 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
         }
         taken.push_back({c.light, id, l});
     }
-    // Faces to draw: those with nothing drawn first (nearest lights first),
-    // then those drawn longest ago, so lights changing every frame share
-    // the budget and every face of theirs comes round.
+    // Faces to draw: those with nothing to shade with first, then those
+    // whose old depths stand in, each drawn longest ago first (never drawn
+    // before all, nearest lights first), so lights changing every frame
+    // share the budget and every face of theirs comes round. (While faces
+    // with nothing drawn fill the budget, stale ones wait.)
     struct Want {
         u32 order; // in `taken`
         u32 face;
@@ -269,7 +272,7 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
     }
     std::stable_sort(wants.begin(), wants.end(), [](const Want& a, const Want& b) {
         if (a.stale != b.stale) return a.stale < b.stale;
-        if (a.stale == 1u && a.frame != b.frame) return a.frame < b.frame;
+        if (a.frame != b.frame) return a.frame < b.frame; // (0: never drawn, first)
         return a.order < b.order;
     });
     if (wants.size() > budget) wants.resize(budget);

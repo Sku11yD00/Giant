@@ -296,6 +296,24 @@ GIANT_TEST("local shadows: lights changing every frame share the budget, every f
         GIANT_CHECK(shadowed(s, 0)->record.drawn == 0x3fu);
     }
     GIANT_CHECK(seen == 0x3fu);
+    // Lights moving fast (past where old faces are kept, every frame):
+    // their faces still all come round, both lights'.
+    LocalShadows fast(32);
+    std::vector<LocalLight> runners{lamp(1, {0.0, 0.0, 0.0}), lamp(2, {20.0, 0.0, 0.0})};
+    u32 got[2] = {0, 0};
+    for (int frame = 0; frame < 12; ++frame) {
+        runners[0].position.x += 0.1;
+        runners[1].position.x += 0.1;
+        plan(fast, runners, 4);
+        for (const LocalShadows::Face& f : fast.draws()) {
+            for (u32 l = 0; l < 2; ++l) {
+                const LocalShadows::Shadowed* sh = shadowed(fast, l);
+                if (sh != nullptr && f.tile >= sh->record.tile && f.tile < sh->record.tile + 6)
+                    got[l] |= 1u << (f.tile - sh->record.tile);
+            }
+        }
+    }
+    GIANT_CHECK(got[0] == 0x3fu && got[1] == 0x3fu);
 }
 
 GIANT_TEST("local shadows: casters changing near a light out of view draw it again when back") {
@@ -314,6 +332,12 @@ GIANT_TEST("local shadows: casters changing near a light out of view draw it aga
 GIANT_TEST("local shadows: faces that could not be drawn are drawn again, unshadowed meanwhile") {
     LocalShadows s(16);
     std::vector<LocalLight> lights{lamp(1, {0.0, 0.0, 0.0})};
+    plan(s, lights, 4);
+    s.undo_draws(2); // the first two drawn, the rest not
+    GIANT_CHECK(s.draws().size() == 2);
+    plan(s, lights, 24);
+    GIANT_CHECK(s.draws().size() == 4 && shadowed(s, 0)->record.drawn == 0x3fu);
+    s.invalidate_all();
     plan(s, lights, 4);
     s.undo_draws();
     GIANT_CHECK(s.draws().empty());

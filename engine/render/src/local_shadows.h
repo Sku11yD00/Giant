@@ -65,9 +65,9 @@ public:
     void plan(std::span<const ShadowCandidate> candidates, const DVec3& camera,
               std::span<const std::pair<DVec3, DVec3>> changed, bool all, u32 budget);
     void invalidate_all();
-    // This frame's faces could not be drawn: drawn again later, their
-    // lights unshadowed there until then.
-    void undo_draws();
+    // This frame's faces from `from` on could not be drawn: drawn again
+    // later, their lights unshadowed there until then.
+    void undo_draws(usize from = 0);
 
     const std::vector<Face>& draws() const { return m_draws; }
     const std::vector<Shadowed>& shadowed() const { return m_shadowed; }

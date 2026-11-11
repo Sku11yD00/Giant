@@ -657,9 +657,10 @@ an offline cooker can use it without a device.
   posed skinned meshes', tested against every kept light, in view or not;
   the old depths stand in). At most
   `RenderSettings::local_shadow_faces_per_frame` faces (24) are drawn a
-  frame, for at most 64 lights: faces with nothing drawn first (nearest
-  lights first), then those drawn longest ago, so lights changing every
-  frame share the budget and all their faces come round; lights not wanted
+  frame, for at most 64 lights: faces with nothing to shade with first,
+  then those whose old depths stand in, each drawn longest ago first, so
+  lights changing every frame share the budget and all their faces come
+  round; lights not wanted
   for 600 frames give their tiles back, and when tiles run out the oldest
   not wanted this frame give theirs. Shading picks the face (a point
   light's by its major axis), moves the point off the surface by a texel

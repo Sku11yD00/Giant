@@ -2178,6 +2178,12 @@ GIANT_TEST("render: lamp shadows are drawn once, again when a caster near moves,
     frame.settings.local_shadow_faces_per_frame = 24;
     st = s.draw(frame);
     GIANT_CHECK(st.local_shadows == 1 && st.local_shadow_drawn == 6);
+    // The last casters gone: drawn again (empty), not left holding them.
+    frame.instances = {};
+    st = s.draw(frame);
+    GIANT_CHECK(st.local_shadows == 1 && st.local_shadow_drawn == 6 && st.shadow_draws == 0);
+    frame.instances = instances;
+    s.draw(frame);
     // They go with the sun's shadows.
     frame.settings.shadows = false;
     st = s.draw(frame);

@@ -1983,6 +1983,7 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
         cmd.dispatch(page_words / 4 / 64, push.count);
     }
     cmd.barrier(m_local_atlas, rhi::ResourceState::shader_write); // cleared before drawn
+    if (data.instance_count == 0) m_local_drawn = static_cast<u32>(faces.size()); // drawn empty
     for (u32 fi = 0; fi < faces.size() && data.instance_count > 0; ++fi) { // (no casters: left clear)
         const LocalShadows::Face& f = faces[fi];
         gpu::FrameConstants k = base;
@@ -1997,7 +1998,10 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
         k.occlusion = 0;
         k.camera_delta[3] = 0.0f;
         const rhi::TransientMemory frame_k = cmd.upload(bytes_of_one(k));
-        if (frame_k.data == nullptr) break;
+        if (frame_k.data == nullptr) {
+            m_local_shadows->undo_draws(fi); // cleared, not drawn: drawn again later
+            break;
+        }
         CullBuffers& c = m_shadow_cull;
         const gpu::CullPush push = cull_push(c, data, frame_k, false);
         cull_first_pass(cmd, c, data, push);
@@ -2831,6 +2835,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (data.frame.data == nullptr || data.meshes.data == nullptr || data.materials.data == nullptr) {
         if (m_gi_on) {
             m_light_plan->lost(); // this frame's clears never ran
+        }
+        if (m_local_planned) {
+            m_local_shadows->undo_draws(); // never drawn
         }
         return; // out of memory: the device is lost
     }
