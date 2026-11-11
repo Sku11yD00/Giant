@@ -2505,7 +2505,7 @@ the view, so every mesh casts at the detail its shadow texels need.
   (about the camera's page as before; into free room only), drawn coarse
   levels first; the previous view's pages go back to the pool once none
   of the new view's waits to be drawn for the first time and shading's
-  requests in it have come back (3 frames), up to 64 a frame (coarse
+  requests in it have come back (3 frames), up to the page budget a frame (coarse
   levels first, as the new view draws them) when shading asks for pages
   and the pool is dry, or after 600 frames. A new view that drew less
   than the previous one holds (two steps close together, a fast clock)

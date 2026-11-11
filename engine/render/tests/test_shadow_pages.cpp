@@ -397,6 +397,42 @@ GIANT_TEST("shadow pages: a sun step with the pool over half full keeps the fine
     GIANT_CHECK(has(s.previous_entry_at(0, camera), ShadowPages::k_drawn_bit));
 }
 
+GIANT_TEST("shadow pages: a previous view kept over a thinner one still waits for the newest view's requests") {
+    ShadowPages s;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const Vec3 suns[] = {normalize_or_zero(Vec3{0.0f, 1.0f, 0.1f}), normalize_or_zero(Vec3{0.0f, 1.0f, 0.12f}),
+                         normalize_or_zero(Vec3{0.0f, 1.0f, 0.14f})};
+    s.begin_frame(camera, suns[0]);
+    Requests all(s);
+    for (u32 word = 0; word < 16; ++word) all.bits[word] = ~0u; // levels 0 and 1 whole
+    s.request(all.bits);
+    for (int f = 0; f < 10; ++f) s.plan(64);
+    // A while asking for one page only, then a step (the full view kept), the
+    // new view's one page drawn, and a second step: the full view stays...
+    Requests one(s);
+    one.ask(s, 0, camera);
+    for (int f = 0; f < 40; ++f) {
+        s.begin_frame(camera, suns[0]);
+        s.request(one.bits);
+        s.plan(64);
+    }
+    s.begin_frame(camera, suns[1]);
+    s.plan(64);
+    s.begin_frame(camera, suns[2]);
+    GIANT_CHECK(s.has_previous());
+    // ...for the newest view's first frames, though its pages are drawn.
+    for (u64 f = 0; f < ShadowPages::k_previous_min_frames; ++f) {
+        s.plan(64);
+        GIANT_CHECK(s.has_previous());
+        s.begin_frame(camera, suns[2]);
+    }
+    s.plan(64);
+    GIANT_CHECK(s.has_previous()); // (frame since + 3: its requests just back)
+    s.begin_frame(camera, suns[2]);
+    s.plan(64);
+    GIANT_CHECK(!s.has_previous());
+}
+
 GIANT_TEST("shadow pages: a full pool gives the page used longest ago") {
     ShadowDesc desc;
     desc.pool_pages = 3;

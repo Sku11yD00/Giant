@@ -130,7 +130,7 @@ void ShadowPages::begin_frame(const DVec3& camera, const Vec3& sun_direction) {
         m_anchor = light.z;
         m_anchor_placed = true;
     }
-    if (m_prev.on && m_frame > m_prev.since + k_previous_frames) {
+    if (m_prev.on && m_frame > m_prev.since + k_previous_frames && m_frame > m_view_since + k_previous_min_frames) {
         release_previous();
     }
     if (retired) {
@@ -189,6 +189,7 @@ void ShadowPages::begin_frame(const DVec3& camera, const Vec3& sun_direction) {
 
 void ShadowPages::retire_view(const DVec3& camera) {
     const DVec3 light = to_light(camera);
+    m_view_since = m_frame;
     m_reask.clear();
     // A view that drew less than the previous one holds (two steps close
     // together, a fast clock): the previous stays, this one's pages go.
@@ -360,7 +361,7 @@ void ShadowPages::allocate(std::span<const u32> indices, bool asked) {
         if (p.physical != k_no_page) {
             continue;
         }
-        if (m_free.empty() && asked && m_prev_given < k_previous_given_per_frame) {
+        if (m_free.empty() && asked && m_prev_given < m_budget) {
             m_prev_given += release_previous_page() ? 1u : 0u;
         }
         if (m_free.empty()) {
@@ -525,7 +526,8 @@ std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget, u32 sway_budget) {
     // be drawn for the first time (those drawn this frame are read this
     // frame), and until shading's requests in the new view have come back
     // (they find pages the ones asked again missed).
-    if (m_prev.on && m_frame > m_prev.since + k_previous_min_frames) {
+    m_budget = std::max<u32>(budget, 1u);
+    if (m_prev.on && m_frame > m_view_since + k_previous_min_frames && m_stats.missing == 0) {
         bool first_waiting = false;
         for (size_t k = count; k < m_waiting.size() && !first_waiting; ++k) {
             first_waiting = !m_pages[m_waiting[k]].drawn;

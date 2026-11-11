@@ -21,9 +21,11 @@
 // hand over page by page with no gap; the same pages are asked for again
 // at once in the new view (in free room only), and the previous view's
 // pages are given back once none of the new view's is waiting to be drawn
-// for the first time and shading's requests in it have come back (or, to
-// make room when the pool runs dry, a budget a frame, coarse levels first
-// as the new view draws them; or after k_previous_frames). A view that
+// for the first time, shading's requests in it have come back and found
+// room (or, to make room when the pool runs dry, plan's budget a frame,
+// coarse levels first as the new view draws them; or after
+// k_previous_frames). Caster changes do not touch it (a stand-in may show
+// a moved caster's old shadow for the few frames it stands in). A view that
 // drew less than the previous one holds leaves that one in place. Drawing is budgeted: at most
 // `pages_per_frame` pages a frame, pages never drawn first (coarse levels
 // first), then those dirty longest; only pages asked for lately. A page not drawn yet reads as missing (the shader falls
@@ -161,9 +163,9 @@ public:
     // ...and kept at least this many (shading's requests in the new view
     // come back a few frames later).
     static constexpr u64 k_previous_min_frames = 3;
-    // At most this many of its pages are given up a frame to make room
-    // (the new view draws about that many: what stands in goes as it does).
-    static constexpr u32 k_previous_given_per_frame = 64;
+    // (At most plan's budget of its pages are given up a frame to make
+    // room: the new view draws about that many, so what stands in goes as
+    // it does.)
     // The previous view's entry for the page holding a world position on a
     // level (tests): k_no_page, or its table entry.
     u32 previous_entry_at(u32 level, const DVec3& world) const;
@@ -286,6 +288,8 @@ private:
     std::vector<u32> m_swaying;
     Previous m_prev;
     u32 m_prev_given = 0; // its pages given up this frame
+    u64 m_view_since = 0; // the frame the current view started
+    u32 m_budget = 64;    // plan's budget, as last given
     struct Reask {
         u32 level;
         i32 dx; // pages from the camera's
