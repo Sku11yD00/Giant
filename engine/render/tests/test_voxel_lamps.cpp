@@ -119,9 +119,56 @@ GIANT_TEST("voxel lamps: coarse bricks and lamps bigger than the grid still find
     }
     GIANT_CHECK(std::fabs(total - 44.0f * 3.0f) < 1e-2f);
     GIANT_CHECK((sources(v, v.jobs()[1], lights, {}) == std::vector<u32>{50}));
-    GIANT_CHECK(v.lit() == 1); // the floodlight's own record (the town's merged)
+    GIANT_CHECK(v.lit() == 45); // the 44 merged and the floodlight
     // The same again (grid cells kept from before): the same lists.
     const std::vector<u32> first = v.entries();
     v.list(lights, jobs, clip, {});
     GIANT_CHECK(v.entries().size() == first.size());
+}
+
+GIANT_TEST("voxel lamps: a coarse brick merges its small lamps by eighth; big or outside lamps keep their own") {
+    const voxel::Clipmap clip; // level 3: 2 m voxels, 16 m bricks; level 2: 1 m, 8 m
+    std::vector<LocalLight> lights;
+    for (int i = 0; i < 6; ++i) { // red, in the eighth nearest the origin
+        LocalLight l = lamp({1.0 + i, 1.0, 2.0}, 3.0f);
+        l.color = {1.0f, 0.0f, 0.0f};
+        lights.push_back(l);
+    }
+    for (int i = 0; i < 6; ++i) { // blue spots shining down, in the +x eighth
+        LocalLight l = lamp({9.0 + i, 1.0, 2.0}, 3.0f);
+        l.color = {0.0f, 0.0f, 1.0f};
+        l.kind = LightKind::spot;
+        l.direction = {0.0f, -1.0f, 0.0f};
+        l.outer_angle = 1.0471976f; // 60 degrees: half the light of a point
+        lights.push_back(l);
+    }
+    LocalLight odd = lamp({3.0, 1.0, 3.0}, 3.0f);
+    odd.range = std::numeric_limits<float>::infinity(); // (clamped: must not darken the rest)
+    odd.color = {1.0f, 0.0f, 0.0f};
+    lights.push_back(odd);
+    lights.push_back(lamp({-700.0, 20.0, 0.0}, 900.0f, 50.0f)); // a floodlight from outside
+    const std::vector<gpu::LightJob> jobs{job_at(clip, 3, {4.0, 1.0, 2.0})};
+    VoxelLamps v;
+    v.list(lights, jobs, clip, {});
+    const gpu::LightJob& j = v.jobs()[0];
+    GIANT_CHECK(j.lamp_count == 3 && v.merged() == 2 && v.lit() == 14);
+    bool red = false, blue = false, flood = false;
+    for (u32 k = 0; k < j.lamp_count; ++k) {
+        const gpu::Light& g = v.lights()[v.entries()[j.lamp_first + k]];
+        if (std::fabs(g.position[0] + 700.0f) < 1e-3f) {
+            flood = g.range == 900.0f && std::fabs(g.color[0] - 50.0f) < 1e-3f; // its own, as it is
+        } else if (g.color[0] > 0.0f) {
+            // 7 red lamps of 3: 21; reaching each lamp's own reach from the centre.
+            red = std::fabs(g.color[0] - 21.0f) < 1e-3f && g.color[2] == 0.0f && g.range >= 3.0f + 2.5f &&
+                  g.position[0] > 1.0f && g.position[0] < 6.0f && g.spot_scale == 0.0f;
+        } else {
+            // 6 blue spots of 3, each as a point light of half: 9.
+            blue = std::fabs(g.color[2] - 9.0f) < 1e-2f && g.position[0] > 9.0f && g.position[0] < 14.0f;
+        }
+    }
+    GIANT_CHECK(red && blue && flood);
+    // Finer bricks (1 m voxels) never merge: the brightest eight.
+    const std::vector<gpu::LightJob> fine{job_at(clip, 2, {4.0, 1.0, 2.0})};
+    v.list(lights, fine, clip, {});
+    GIANT_CHECK(v.merged() == 0 && v.jobs()[0].lamp_count <= k_max_voxel_lamps);
 }

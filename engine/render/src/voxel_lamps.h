@@ -10,8 +10,9 @@
 // A brick takes the lamps whose bounding sphere (a spot's round its cone)
 // touches it, at most k_max_voxel_lamps, the brightest there first; a
 // coarse brick (voxels k_voxel_lamp_merge or more across) with more takes
-// those in each eighth of it merged into one (summed, at their centre,
-// reaching as far as they all do), so a town far off lights it whole. Lamps
+// the small lamps inside each eighth of it merged into one (summed, at
+// their centre, reaching as far as they all do; a spot as the point light
+// sending as much light), so a town far off lights it whole. Lamps
 // are found through a grid of k_voxel_lamp_cell cells (a lamp too big for
 // it, or a brick too big for it, looks at all).
 #pragma once
@@ -46,7 +47,7 @@ public:
     std::vector<gpu::LightJob>& jobs() { return m_jobs; }
     const std::vector<gpu::Light>& lights() const { return m_lights; }
     const std::vector<u32>& entries() const { return m_entries; }
-    u32 lit() const { return m_listed; }     // lamps listed for some brick this frame
+    u32 lit() const { return m_listed; }     // lamps lighting some brick this frame (listed or merged)
     u32 merged() const { return m_merged; }  // merged lamps made this frame
 
 private:
@@ -57,12 +58,22 @@ private:
         float power;  // brightest channel x intensity
         u32 gpu = ~0u; // index in m_lights this frame
         u64 stamp = 0;
+        bool counted = false; // in lit() this frame (listed or merged)
     };
     struct Pick {
         u32 lamp;
         double score;
     };
+    struct Item {
+        u32 at;     // a lamp, or an eighth of the brick (part)
+        double score;
+        bool part;
+    };
     u32 record(u32 lamp, std::span<const LocalLight> lights, const DVec3& camera); // its index in m_lights
+    void count(Lamp& lamp);
+    void merge(gpu::LightJob& j, std::span<const Pick> picks, std::span<const LocalLight> lights, const DVec3& lo,
+               double size, const DVec3& camera);
+    std::vector<Item> m_items;
     std::vector<Lamp> m_lamps;
     std::vector<Pick> m_picks;
     std::array<std::vector<u32>, 8> m_parts; // a coarse brick's lamps by eighth

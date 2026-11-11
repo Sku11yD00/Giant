@@ -3642,6 +3642,7 @@ bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data, const 
     const std::span<const u32> clears = m_light_plan->clears();
     // The jobs with the lamps reaching each brick (lamps off: none, their
     // words lit to nothing).
+    if (frame.settings.local_lights && !frame.lights.empty()) m_voxel_lamps_seen = true;
     const bool lamps = lamps_in_voxels();
     std::span<const gpu::LightJob> jobs = m_light_plan->jobs();
     if (lamps) {

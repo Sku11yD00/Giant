@@ -885,7 +885,9 @@ private:
     // Global illumination's voxel lighting. False: the light pool may hold
     // stale words this frame (out of memory), so nothing may read it.
     bool light_voxels(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame);
-    bool lamps_in_voxels() const { return m_gi_on && m_voxel_lamps.valid(); }
+    // (Until a frame first has lamps the words are all zero, as made: not
+    // written or read.)
+    bool lamps_in_voxels() const { return m_gi_on && m_voxel_lamps.valid() && m_voxel_lamps_seen; }
     // The sky's passes before shading (sky view, cloud shadows, clouds):
     // fills `params` (the SkyParams shading reads). False: no sky this frame.
     bool draw_sky(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
@@ -1054,6 +1056,7 @@ private:
     // first lamp under global illumination), each frame's lists.
     rhi::BufferHandle m_voxel_lamps;
     bool m_voxel_lamps_failed = false;
+    bool m_voxel_lamps_seen = false; // some frame has had lamps under global illumination
     std::unique_ptr<VoxelLamps> m_voxel_lamp_lists;
     u32 m_gi_lamps = 0; // lamps listed this frame
     bool m_gi_on = false; // this frame

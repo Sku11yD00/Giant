@@ -18,6 +18,8 @@ bool usable(const LocalLight& l) {
            std::max({l.color.x, l.color.y, l.color.z}) > 0.0f;
 }
 
+float clamped_lamp_range(float range) { return std::isfinite(range) ? std::clamp(range, 0.01f, 1000.0f) : 0.01f; }
+
 i64 cell_of(double v) { return static_cast<i64>(std::floor(v / k_voxel_lamp_cell)); }
 
 u64 key(i64 x, i64 y, i64 z) {
@@ -128,54 +130,7 @@ void VoxelLamps::list(std::span<const LocalLight> lights, std::span<const gpu::L
         if (picks.empty()) continue;
         j.lamp_first = static_cast<u32>(m_entries.size());
         if (picks.size() > k_max_voxel_lamps && size / 8.0 >= k_voxel_lamp_merge) {
-            // A coarse brick with more lamps than it takes (a town far
-            // off): those in each eighth of it merged into one, so all of
-            // them light it.
-            std::array<std::vector<u32>, 8>& parts = m_parts;
-            for (std::vector<u32>& part : parts) part.clear();
-            for (const Pick& p : picks) {
-                const DVec3 at = lights[m_lamps[p.lamp].source].position;
-                const u32 o = (at.x >= lo.x + size * 0.5 ? 1u : 0u) | (at.y >= lo.y + size * 0.5 ? 2u : 0u) |
-                              (at.z >= lo.z + size * 0.5 ? 4u : 0u);
-                parts[o].push_back(p.lamp);
-            }
-            for (const std::vector<u32>& part : parts) {
-                if (part.empty()) continue;
-                if (part.size() == 1) {
-                    m_entries.push_back(record(part[0], lights, camera));
-                    continue;
-                }
-                Vec3 total{};
-                DVec3 centre{};
-                double weight = 0.0;
-                for (const u32 at : part) {
-                    const LocalLight& l = lights[m_lamps[at].source];
-                    const Vec3 c{std::max(l.color.x, 0.0f) * l.intensity, std::max(l.color.y, 0.0f) * l.intensity,
-                                 std::max(l.color.z, 0.0f) * l.intensity};
-                    total = total + c;
-                    const double w = std::max({c.x, c.y, c.z});
-                    centre = centre + l.position * w;
-                    weight += w;
-                }
-                centre = centre * (1.0 / std::max(weight, 1e-30));
-                double reach = 0.0;
-                for (const u32 at : part) {
-                    const LocalLight& l = lights[m_lamps[at].source];
-                    reach = std::max(reach, length(l.position - centre) + double(l.range));
-                }
-                const float peak = std::max({total.x, total.y, total.z});
-                LocalLight merged;
-                merged.position = centre;
-                merged.kind = LightKind::point;
-                merged.range = static_cast<float>(reach);
-                merged.intensity = peak;
-                merged.color = total * (1.0f / std::max(peak, 1e-30f));
-                merged.source_radius = 0.0f;
-                m_entries.push_back(static_cast<u32>(m_lights.size()));
-                m_lights.push_back(to_gpu(merged, camera));
-                ++m_merged;
-            }
-            j.lamp_count = static_cast<u32>(m_entries.size()) - j.lamp_first;
+            merge(j, picks, lights, lo, size, camera);
             continue;
         }
         const usize keep = std::min<usize>(picks.size(), k_max_voxel_lamps);
@@ -193,9 +148,103 @@ u32 VoxelLamps::record(u32 at, std::span<const LocalLight> lights, const DVec3& 
     if (lamp.gpu == ~0u) {
         lamp.gpu = static_cast<u32>(m_lights.size());
         m_lights.push_back(to_gpu(lights[lamp.source], camera));
+    }
+    count(lamp);
+    return lamp.gpu;
+}
+
+void VoxelLamps::count(Lamp& lamp) {
+    if (!lamp.counted) {
+        lamp.counted = true;
         ++m_listed;
     }
-    return lamp.gpu;
+}
+
+void VoxelLamps::merge(gpu::LightJob& j, std::span<const Pick> picks, std::span<const LocalLight> lights,
+                       const DVec3& lo, double size, const DVec3& camera) {
+    // Lamps inside the brick reaching no further than an eighth of it are
+    // merged by eighth; the rest (bigger, or from outside) keep their own,
+    // as do merged eighths, the brightest at the brick first.
+    std::array<std::vector<u32>, 8>& parts = m_parts;
+    for (std::vector<u32>& part : parts) part.clear();
+    std::array<double, 8> part_score{};
+    m_items.clear();
+    for (const Pick& p : picks) {
+        const LocalLight& l = lights[m_lamps[p.lamp].source];
+        const DVec3 at = l.position;
+        const bool inside = at.x >= lo.x && at.y >= lo.y && at.z >= lo.z && at.x < lo.x + size &&
+                            at.y < lo.y + size && at.z < lo.z + size;
+        if (inside && double(clamped_lamp_range(l.range)) <= size * 0.5) {
+            const u32 o = (at.x >= lo.x + size * 0.5 ? 1u : 0u) | (at.y >= lo.y + size * 0.5 ? 2u : 0u) |
+                          (at.z >= lo.z + size * 0.5 ? 4u : 0u);
+            parts[o].push_back(p.lamp);
+            part_score[o] += p.score;
+        } else {
+            m_items.push_back({p.lamp, p.score, false});
+        }
+    }
+    for (u32 o = 0; o < 8; ++o) {
+        if (!parts[o].empty()) m_items.push_back({o, part_score[o], true});
+    }
+    const usize keep = std::min<usize>(m_items.size(), k_max_voxel_lamps);
+    std::partial_sort(m_items.begin(), m_items.begin() + static_cast<std::ptrdiff_t>(keep), m_items.end(),
+                      [](const Item& x, const Item& y) {
+                          if (x.score != y.score) return x.score > y.score;
+                          return x.part != y.part ? x.part : x.at < y.at;
+                      });
+    for (usize k = 0; k < keep; ++k) {
+        const Item& item = m_items[k];
+        if (!item.part) {
+            m_entries.push_back(record(item.at, lights, camera));
+            continue;
+        }
+        const std::vector<u32>& part = parts[item.at];
+        if (part.size() == 1) {
+            m_entries.push_back(record(part[0], lights, camera));
+            continue;
+        }
+        // Summed at their centre (weighted by power), reaching as far as
+        // they all do; a spot counts as the point light sending as much
+        // light down its cone (all of it lands on the coarse ground).
+        Vec3 total{};
+        DVec3 centre{};
+        double weight = 0.0;
+        for (const u32 at : part) {
+            const LocalLight& l = lights[m_lamps[at].source];
+            float share = 1.0f;
+            if (l.kind == LightKind::spot) {
+                const float outer = std::isfinite(l.outer_angle) ? std::clamp(l.outer_angle, 0.001f, 1.5533f) : 1.5533f;
+                share = 1.0f - std::cos(outer);
+            }
+            const float power = l.intensity * share;
+            const Vec3 c{std::min(std::max(l.color.x, 0.0f) * power, 1e9f), std::min(std::max(l.color.y, 0.0f) * power, 1e9f),
+                         std::min(std::max(l.color.z, 0.0f) * power, 1e9f)};
+            total = total + c;
+            const double w = std::max({c.x, c.y, c.z});
+            centre = centre + l.position * w;
+            weight += w;
+            count(m_lamps[at]);
+        }
+        centre = weight > 0.0 ? centre * (1.0 / weight) : lights[m_lamps[part[0]].source].position;
+        double reach = 0.0;
+        for (const u32 at : part) {
+            const LocalLight& l = lights[m_lamps[at].source];
+            reach = std::max(reach, length(l.position - centre) + double(clamped_lamp_range(l.range)));
+        }
+        const float peak = std::max({total.x, total.y, total.z});
+        if (!(peak > 0.0f) || !std::isfinite(peak)) continue;
+        LocalLight merged;
+        merged.position = centre;
+        merged.kind = LightKind::point;
+        merged.range = static_cast<float>(reach);
+        merged.intensity = peak;
+        merged.color = total * (1.0f / peak);
+        merged.source_radius = 0.0f;
+        m_entries.push_back(static_cast<u32>(m_lights.size()));
+        m_lights.push_back(to_gpu(merged, camera));
+        ++m_merged;
+    }
+    j.lamp_count = static_cast<u32>(m_entries.size()) - j.lamp_first;
 }
 
 } // namespace giant::render

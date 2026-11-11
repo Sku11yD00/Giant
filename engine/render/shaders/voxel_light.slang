@@ -71,7 +71,7 @@ float3 lamp_on_voxel(VoxelWorld w, LocalLight lamp, float3 centre, float3 n, flo
     const float n_dot_l = lerp(saturate(dot(n, l)), saturate(dot(n, l) * 0.5 + 0.5), inside);
     const float cone = saturate(dot(-l, lamp.direction) * lamp.spot_scale + lamp.spot_offset);
     // How much of the voxel its reach covers, roughly (1 for small voxels).
-    const float covered = saturate((lamp.range - reach) / min(lamp.range, size));
+    const float covered = saturate((lamp.range - max(len - 0.5 * size, 0.0)) / min(lamp.range, size));
     const float3 light = lamp.color * (window * window / d2 * cone * cone * n_dot_l * covered / k_gi_pi);
     if (max(light.x, max(light.y, light.z)) < 1e-5) {
         return float3(0.0, 0.0, 0.0);
