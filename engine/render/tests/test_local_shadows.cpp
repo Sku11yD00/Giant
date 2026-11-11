@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
-#include <unordered_map>
 #include <vector>
 
 using namespace giant;
@@ -16,7 +15,7 @@ using namespace giant::render;
 
 namespace {
 
-using Boxes = std::unordered_map<u64, std::pair<DVec3, DVec3>>;
+using Boxes = std::vector<std::pair<DVec3, DVec3>>;
 
 LocalLight lamp(u32 id, const DVec3& p, LightKind kind = LightKind::point) {
     LocalLight l;
@@ -43,6 +42,11 @@ const LocalShadows::Shadowed* shadowed(const LocalShadows& s, u32 light) {
         if (x.light == light) return &x;
     return nullptr;
 }
+
+struct LightShadowRight {
+    Vec3 v;
+    explicit LightShadowRight(const float (&r)[3]) : v{r[0], r[1], r[2]} {}
+};
 
 } // namespace
 
@@ -111,7 +115,8 @@ GIANT_TEST("local shadows: a moved or changed light is unshadowed until drawn ag
     GIANT_CHECK(shadowed(s, 0) != nullptr && shadowed(s, 0)->record.drawn == 0x3fu);
     lights[0].position.x += 0.03; // 6 cm from where four faces were drawn, 3 cm from the two just drawn
     plan(s, lights, 1);
-    GIANT_CHECK(s.draws().size() == 1 && shadowed(s, 0)->record.drawn == 0x3u);
+    // (Faces with nothing to shade with go first: face 2.)
+    GIANT_CHECK(s.draws().size() == 1 && shadowed(s, 0)->record.drawn == 0x7u);
     plan(s, lights, 24);
     GIANT_CHECK(s.draws().size() == 5 && shadowed(s, 0)->record.drawn == 0x3fu);
     // A spot turned: dropped at once.
@@ -132,11 +137,11 @@ GIANT_TEST("local shadows: casters changing near a light draw it again, the old 
     std::vector<LocalLight> lights{lamp(1, {0.0, 0.0, 0.0}), lamp(2, {100.0, 0.0, 0.0})};
     plan(s, lights);
     Boxes far;
-    far[1] = {DVec3{50.0, -1.0, -1.0}, DVec3{52.0, 1.0, 1.0}};
+    far.push_back({DVec3{50.0, -1.0, -1.0}, DVec3{52.0, 1.0, 1.0}});
     plan(s, lights, 24, far);
     GIANT_CHECK(s.draws().empty());
     Boxes near;
-    near[1] = {DVec3{4.0, -1.0, -1.0}, DVec3{6.0, 1.0, 1.0}}; // 4 m from the first: inside its 5 m
+    near.push_back({DVec3{4.0, -1.0, -1.0}, DVec3{6.0, 1.0, 1.0}}); // 4 m from the first: inside its 5 m
     plan(s, lights, 2, near);
     GIANT_CHECK(s.draws().size() == 2);
     GIANT_CHECK(s.draws()[0].tile == shadowed(s, 0)->record.tile);
@@ -260,4 +265,79 @@ GIANT_TEST("local shadows: a point light's faces cover every direction, each the
         GIANT_CHECK(along > 0.0f);
         GIANT_CHECK(std::fabs(dot(d, right)) <= along * t && std::fabs(dot(d, up)) <= along * t);
     }
+}
+
+GIANT_TEST("local shadows: lights changing every frame share the budget, every face coming round") {
+    LocalShadows s(32);
+    std::vector<LocalLight> lights{lamp(1, {0.0, 0.0, 0.0}), lamp(2, {20.0, 0.0, 0.0})};
+    plan(s, lights, 24);
+    const Boxes both{{DVec3{-1.0, -1.0, -1.0}, DVec3{21.0, 1.0, 1.0}}}; // something moving by both, every frame
+    std::vector<u32> times(12, 0);
+    for (int frame = 0; frame < 12; ++frame) {
+        plan(s, lights, 4, both);
+        GIANT_CHECK(s.draws().size() == 4);
+        for (const LocalShadows::Face& f : s.draws()) {
+            const u32 base0 = shadowed(s, 0)->record.tile;
+            const u32 base1 = shadowed(s, 1)->record.tile;
+            const u32 k = f.tile >= base0 && f.tile < base0 + 6 ? f.tile - base0 : 6 + (f.tile - base1);
+            if (k < 12) ++times[k];
+        }
+        GIANT_CHECK(shadowed(s, 0)->record.drawn == 0x3fu && shadowed(s, 1)->record.drawn == 0x3fu);
+    }
+    // 48 faces drawn over 12 frames: each of the 12 four times.
+    for (const u32 t : times) GIANT_CHECK(t == 4);
+    // A swinging light (always moving a little): all six of its faces come round.
+    std::vector<LocalLight> swing{lamp(3, {0.0, 5.0, 0.0})};
+    u32 seen = 0;
+    for (int frame = 0; frame < 4; ++frame) {
+        swing[0].position.x = 0.01 * (frame % 2);
+        plan(s, swing, frame == 0 ? 24 : 2);
+        for (const LocalShadows::Face& f : s.draws()) seen |= 1u << (f.tile - shadowed(s, 0)->record.tile);
+        GIANT_CHECK(shadowed(s, 0)->record.drawn == 0x3fu);
+    }
+    GIANT_CHECK(seen == 0x3fu);
+}
+
+GIANT_TEST("local shadows: casters changing near a light out of view draw it again when back") {
+    LocalShadows s(16);
+    std::vector<LocalLight> lights{lamp(1, {0.0, 0.0, 0.0})};
+    plan(s, lights);
+    const std::vector<LocalLight> none;
+    const Boxes at{{DVec3{1.0, -1.0, -1.0}, DVec3{2.0, 1.0, 1.0}}};
+    plan(s, none, 24, at);
+    GIANT_CHECK(s.draws().empty());
+    plan(s, none);
+    plan(s, lights);
+    GIANT_CHECK(s.draws().size() == 6);
+}
+
+GIANT_TEST("local shadows: faces that could not be drawn are drawn again, unshadowed meanwhile") {
+    LocalShadows s(16);
+    std::vector<LocalLight> lights{lamp(1, {0.0, 0.0, 0.0})};
+    plan(s, lights, 4);
+    s.undo_draws();
+    GIANT_CHECK(s.draws().empty());
+    plan(s, lights, 24);
+    GIANT_CHECK(s.draws().size() == 6 && shadowed(s, 0)->record.drawn == 0x3fu);
+}
+
+GIANT_TEST("local shadows: a spot keeps the right axis it was drawn with, dropped when the axis jumps") {
+    LocalShadows s(16);
+    std::vector<LocalLight> spot{lamp(1, {0.0, 3.0, 0.0}, LightKind::spot)};
+    // Its axis just under 0.9 along x: the right axis is made from x.
+    spot[0].direction = normalize_or_zero(Vec3{0.8999f, -std::sqrt(1.0f - 0.8999f * 0.8999f), 0.0f});
+    plan(s, spot);
+    const Vec3 drawn{shadowed(s, 0)->record.right[0], shadowed(s, 0)->record.right[1], shadowed(s, 0)->record.right[2]};
+    // Turned a hair: kept (and its record's right axis is still the drawn one) while drawn again.
+    spot[0].direction = normalize_or_zero(Vec3{0.89995f, -std::sqrt(1.0f - 0.89995f * 0.89995f), 0.00001f});
+    plan(s, spot, 0);
+    GIANT_CHECK(shadowed(s, 0) != nullptr);
+    if (shadowed(s, 0) != nullptr) {
+        const LightShadowRight r{shadowed(s, 0)->record.right};
+        GIANT_CHECK(r.v.x == drawn.x && r.v.y == drawn.y && r.v.z == drawn.z);
+    }
+    // Over 0.9: made from z now, a quarter turn from before: dropped at once.
+    spot[0].direction = normalize_or_zero(Vec3{0.9001f, -std::sqrt(1.0f - 0.9001f * 0.9001f), 0.0f});
+    plan(s, spot, 0);
+    GIANT_CHECK(shadowed(s, 0) == nullptr);
 }

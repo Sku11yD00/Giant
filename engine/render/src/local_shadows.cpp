@@ -125,12 +125,24 @@ void LocalShadows::release(u32 id) {
     m_entries.erase(it);
 }
 
+void LocalShadows::undo_draws() {
+    for (const Face& f : m_draws) {
+        const u32 id = f.tile < m_owner.size() ? m_owner[f.tile] : k_free;
+        const auto it = m_entries.find(id);
+        if (it == m_entries.end()) continue;
+        const u32 face = f.tile - it->second.first;
+        it->second.dirty |= 1u << face;
+        it->second.drawn &= ~(1u << face); // what the tile holds is unknown
+    }
+    m_draws.clear();
+}
+
 void LocalShadows::invalidate_all() {
     for (auto& [id, e] : m_entries) e.dirty = (1u << e.count) - 1u;
 }
 
 void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3& camera,
-                        const std::unordered_map<u64, std::pair<DVec3, DVec3>>& changed, bool all, u32 budget) {
+                        std::span<const std::pair<DVec3, DVec3>> changed, bool all, u32 budget) {
     (void)camera;
     ++m_frame;
     m_draws.clear();
@@ -143,6 +155,18 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
             it = m_entries.erase(it);
         } else {
             ++it;
+        }
+    }
+    // Casters near a light came, went or moved: drawn again (the old depths
+    // stand in meanwhile), whether it is wanted this frame or not.
+    for (auto& [id, e] : m_entries) {
+        const u32 every = (1u << e.count) - 1u;
+        if (all) {
+            e.dirty = every;
+            continue;
+        }
+        for (u32 i = 0; i < changed.size() && e.dirty != every; ++i) {
+            if (sphere_touches_box(e.position, e.range, changed[i].first, changed[i].second)) e.dirty = every;
         }
     }
     struct Taken {
@@ -211,46 +235,63 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
             e.direction = direction;
             e.dirty = (1u << count) - 1u;
             const double tolerance = std::max(0.01, 0.01 * double(range));
+            Vec3 forward;
+            Vec3 right;
+            face_axes(e.kind, direction, 0, forward, right);
             for (u32 f = 0; f < count; ++f) {
                 const DVec3 d = e.face_position[f] - l.position;
+                // (A spot's right axis too: it can jump as the axis turns.)
                 if (d.x * d.x + d.y * d.y + d.z * d.z > tolerance * tolerance ||
-                    (l.kind == LightKind::spot && dot(e.face_direction[f], direction) < 0.9999f)) {
+                    (l.kind == LightKind::spot &&
+                     (dot(e.face_direction[f], direction) < 0.9999f || dot(e.face_right, right) < 0.9999f))) {
                     e.drawn &= ~(1u << f);
-                }
-            }
-        }
-        // Casters near it came, went or moved: drawn again (the old depths
-        // stand in meanwhile).
-        if (all) {
-            e.dirty = (1u << count) - 1u;
-        } else if (e.dirty != (1u << count) - 1u) {
-            for (const auto& [key, box] : changed) {
-                if (sphere_touches_box(e.position, range, box.first, box.second)) {
-                    e.dirty = (1u << count) - 1u;
-                    break;
                 }
             }
         }
         taken.push_back({c.light, id, l});
     }
-    // Faces to draw, nearest lights first.
+    // Faces to draw: those with nothing drawn first (nearest lights first),
+    // then those drawn longest ago, so lights changing every frame share
+    // the budget and every face of theirs comes round.
+    struct Want {
+        u32 order; // in `taken`
+        u32 face;
+        u32 stale;  // 0: nothing drawn there, 1: old depths stand in
+        u64 frame;  // when last drawn
+    };
+    std::vector<Want> wants;
+    for (u32 i = 0; i < taken.size(); ++i) {
+        const Entry& e = m_entries.at(taken[i].id);
+        for (u32 face = 0; face < e.count; ++face) {
+            if ((e.dirty & (1u << face)) == 0u) continue;
+            wants.push_back({i, face, (e.drawn >> face) & 1u, e.face_frame[face]});
+        }
+    }
+    std::stable_sort(wants.begin(), wants.end(), [](const Want& a, const Want& b) {
+        if (a.stale != b.stale) return a.stale < b.stale;
+        if (a.stale == 1u && a.frame != b.frame) return a.frame < b.frame;
+        return a.order < b.order;
+    });
+    if (wants.size() > budget) wants.resize(budget);
+    for (const Want& w : wants) {
+        Entry& e = m_entries.at(taken[w.order].id);
+        Face f;
+        f.tile = e.first + w.face;
+        f.position = e.position;
+        face_axes(e.kind, e.direction, w.face, f.forward, f.right);
+        f.tan_half = tan_half(e.kind, e.outer);
+        f.near = e.near;
+        f.range = e.range;
+        m_draws.push_back(f);
+        e.face_position[w.face] = e.position;
+        e.face_direction[w.face] = e.direction;
+        if (w.face == 0) e.face_right = f.right;
+        e.face_frame[w.face] = m_frame;
+        e.dirty &= ~(1u << w.face);
+        e.drawn |= 1u << w.face;
+    }
     for (const Taken& t : taken) {
         Entry& e = m_entries.at(t.id);
-        for (u32 face = 0; face < e.count && m_draws.size() < budget; ++face) {
-            if ((e.dirty & (1u << face)) == 0u) continue;
-            Face f;
-            f.tile = e.first + face;
-            f.position = e.position;
-            face_axes(e.kind, e.direction, face, f.forward, f.right);
-            f.tan_half = tan_half(e.kind, e.outer);
-            f.near = e.near;
-            f.range = e.range;
-            m_draws.push_back(f);
-            e.face_position[face] = e.position;
-            e.face_direction[face] = e.direction;
-            e.dirty &= ~(1u << face);
-            e.drawn |= 1u << face;
-        }
         m_waiting += static_cast<u32>(std::popcount(e.dirty));
         if (e.drawn == 0) continue; // nothing to shade with yet
         Shadowed s;
@@ -259,12 +300,10 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
         s.record.tile = e.first;
         s.record.drawn = e.drawn;
         s.record.tan_half = tan_half(e.kind, e.outer);
-        Vec3 forward;
-        Vec3 right;
-        face_axes(e.kind, e.direction, 0, forward, right);
-        s.record.right[0] = right.x;
-        s.record.right[1] = right.y;
-        s.record.right[2] = right.z;
+        // (The right axis its face was drawn with.)
+        s.record.right[0] = e.face_right.x;
+        s.record.right[1] = e.face_right.y;
+        s.record.right[2] = e.face_right.z;
         m_shadowed.push_back(s);
     }
 }

@@ -1552,6 +1552,7 @@ void Renderer::pose_skins(rhi::CommandList& cmd) {
 }
 
 void Renderer::track_skin_shadows(const FrameInput& frame) {
+    m_local_changed.clear(); // (filled here, then with the sun pages' boxes)
     if (!m_shadows_on || m_skinned.empty()) {
         for (const MeshId id : m_skinned) {
             m_meshes[id].skin->shadow_known = false; // casters may change meanwhile (invalidate_all on return)
@@ -1591,9 +1592,11 @@ void Renderer::track_skin_shadows(const FrameInput& frame) {
         }
         if (skin.shadow_known) {
             m_shadows->invalidate(skin.shadow_min, skin.shadow_max);
+            m_local_changed.emplace_back(skin.shadow_min, skin.shadow_max);
         }
         if (box.any) {
             m_shadows->invalidate(box.min, box.max);
+            m_local_changed.emplace_back(box.min, box.max);
         }
         skin.shadow_known = box.any;
         skin.shadow_min = box.min;
@@ -1951,7 +1954,7 @@ bool Renderer::ensure_local_atlas() {
 void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame,
                                   const gpu::FrameConstants& base) {
     const std::vector<LocalShadows::Face>& faces = m_local_shadows->draws();
-    if (faces.empty() || data.instance_count == 0) return;
+    if (faces.empty()) return;
     cmd.begin_timing("lamp shadows");
     // The tiles drawn again start empty (as pages of the sun's clear: four
     // 128 x 128 pages a tile).
@@ -1964,6 +1967,7 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
     }
     const rhi::TransientMemory list = cmd.upload(bytes_of(pages));
     if (list.data == nullptr) {
+        m_local_shadows->undo_draws(); // not even cleared: drawn again later
         cmd.end_timing();
         return;
     }
@@ -1979,7 +1983,8 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
         cmd.dispatch(page_words / 4 / 64, push.count);
     }
     cmd.barrier(m_local_atlas, rhi::ResourceState::shader_write); // cleared before drawn
-    for (const LocalShadows::Face& f : faces) {
+    for (u32 fi = 0; fi < faces.size() && data.instance_count > 0; ++fi) { // (no casters: left clear)
+        const LocalShadows::Face& f = faces[fi];
         gpu::FrameConstants k = base;
         const Mat4 m = LocalShadows::face_matrix(f, frame.view.position);
         std::memcpy(k.view_proj, m.m, sizeof(k.view_proj));
@@ -2740,8 +2745,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
                 const LocalLight& l = frame.lights[m_light_bins->sources[i]];
                 if (l.shadow_id != 0) candidates.push_back({i, &l});
             }
-            m_local_shadows->plan(candidates, frame.view.position, m_shadows->changed_boxes(),
-                                  m_shadows->changed_all(),
+            // Casters changed: the sun pages' boxes and posed skinned meshes'.
+            for (const auto& [key, box] : m_shadows->changed_boxes()) m_local_changed.push_back(box);
+            m_local_shadows->plan(candidates, frame.view.position, m_local_changed, m_shadows->changed_all(),
                                   std::clamp<u32>(settings.local_shadow_faces_per_frame, 1u, 384u));
             m_local_planned = true;
             const std::vector<LocalShadows::Shadowed>& shadowed = m_local_shadows->shadowed();

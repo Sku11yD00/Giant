@@ -3,7 +3,9 @@
 // nearest lights in view that cast shadows (LocalLight::shadow_id). Tiles
 // are kept from frame to frame by the light's id and drawn again only when
 // the light changes or a caster near it comes, goes or moves (the sun
-// shadow pages' changed boxes), a few faces a frame (nearest first);
+// shadow pages' changed boxes and posed skinned meshes), a few faces a
+// frame (faces with nothing drawn first, nearest lights first, then those
+// drawn longest ago);
 // until a face is drawn the light shines unshadowed there. A light moved
 // only a little (a lantern swinging) keeps shading with its old faces while
 // they are drawn again.
@@ -61,8 +63,11 @@ public:
     // (at most `budget`). `changed`: the casters' changed boxes; `all`: all
     // casters changed.
     void plan(std::span<const ShadowCandidate> candidates, const DVec3& camera,
-              const std::unordered_map<u64, std::pair<DVec3, DVec3>>& changed, bool all, u32 budget);
+              std::span<const std::pair<DVec3, DVec3>> changed, bool all, u32 budget);
     void invalidate_all();
+    // This frame's faces could not be drawn: drawn again later, their
+    // lights unshadowed there until then.
+    void undo_draws();
 
     const std::vector<Face>& draws() const { return m_draws; }
     const std::vector<Shadowed>& shadowed() const { return m_shadowed; }
@@ -97,6 +102,8 @@ private:
         // faces until drawn again; moved further, they are dropped).
         DVec3 face_position[6]{};
         Vec3 face_direction[6]{};
+        Vec3 face_right{};     // face 0's right axis as drawn (a spot's)
+        u64 face_frame[6]{};   // when each was last drawn
     };
     bool allocate(u32 count, u32& first);
     void release(u32 id);

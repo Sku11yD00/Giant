@@ -38,6 +38,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace giant::render {
@@ -906,6 +907,7 @@ private:
     bool m_local_atlas_failed = false;
     bool m_local_planned = false; // this frame
     bool m_local_were_on = false;
+    std::vector<std::pair<DVec3, DVec3>> m_local_changed; // this frame's changed caster boxes
     std::unique_ptr<VoxelScene> m_voxels;
     std::unique_ptr<InstanceStore> m_store; // the instances, on the GPU by cell
     std::unique_ptr<TerrainPaintStore> m_paint; // painted terrain tiles

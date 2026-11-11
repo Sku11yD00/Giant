@@ -653,16 +653,20 @@ an offline cooker can use it without a device.
   light changes (range, cone, near: unshadowed until drawn), moves (the
   faces drawn from within 1% of its range, or 1 cm, keep shading
   meanwhile, so a swinging lantern over the budget keeps a shadow), or a
-  caster near it comes, goes or moves (the sun pages' changed boxes; the
-  old depths stand in). At most
+  caster near it comes, goes or moves (the sun pages' changed boxes and
+  posed skinned meshes', tested against every kept light, in view or not;
+  the old depths stand in). At most
   `RenderSettings::local_shadow_faces_per_frame` faces (24) are drawn a
-  frame, nearest lights first, for at most 64 lights; lights not wanted
+  frame, for at most 64 lights: faces with nothing drawn first (nearest
+  lights first), then those drawn longest ago, so lights changing every
+  frame share the budget and all their faces come round; lights not wanted
   for 600 frames give their tiles back, and when tiles run out the oldest
   not wanted this frame give theirs. Shading picks the face (a point
   light's by its major axis), moves the point off the surface by a texel
   and a half along the surface normal and filters four taps bilinearly.
   They go with sun shadows (lit views, GPU culling). No contact shadows
-  for local lights yet.
+  for local lights yet, and foliage swaying in the wind casts its rest
+  pose into them.
 - **Anti-aliasing (N1 part 6, `src/smaa.h`, `shaders/smaa.slang`).** No
   temporal anti-aliasing: nothing uses earlier frames, so the image is as
   sharp moving as standing still. Edges: SMAA 1x (High preset, no diagonal
