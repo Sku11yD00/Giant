@@ -23,6 +23,7 @@
 #include "giant/core/jobs.h"
 #include "giant/core/types.h"
 #include "giant/render/renderer.h"
+#include "giant/texture/texture.h"
 #include "giant/world/scene.h"
 
 #include <array>
@@ -82,6 +83,9 @@ public:
         u32 mips = 0;
         u64 bytes = 0;           // ready: on the GPU
         bool from_cache = false; // ready: read from the disk cache, not cooked
+        // Ready base colour textures: their average colours and alpha
+        // coverage by cutoff, for the voxel world (default: white, solid).
+        texture::ColorSummary summary;
         float seconds = 0.0f;    // ready or failed: decoding, cooking or reading it
         u32 generation = 0;      // which request a finished job answers (reload asks again)
         bool queued = false;     // waiting to start cooking

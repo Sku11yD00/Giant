@@ -545,3 +545,82 @@ GIANT_TEST("texture: cut-out colour mips keep the top level's alpha coverage") {
     const auto solid_mips = make_mips(solid, {}, error);
     GIANT_CHECK(at(solid_mips[2], 0, 0)[3] == 255);
 }
+
+GIANT_TEST("texture: colour summaries give the average colour and what cutoffs leave") {
+    // 30% opaque green leaf texels over transparent red (which must not tint it).
+    u32 seed = 777;
+    const Image leaves = filled(256, 256, [&seed](u32, u32, u8* t) {
+        seed = seed * 1664525u + 1013904223u;
+        const bool leaf = (seed >> 24) < 77u;
+        t[0] = leaf ? 40 : 255;
+        t[1] = leaf ? 160 : 0;
+        t[2] = leaf ? 30 : 0;
+        t[3] = leaf ? 255 : 0;
+    });
+    std::string error;
+    Cooked cooked;
+    GIANT_CHECK(cook(leaves, {}, cooked, error));
+    const ColorSummary s = summarize_color(cooked);
+    const auto linear = [](float c) { return std::pow((c / 255.0f + 0.055f) / 1.055f, 2.4f); };
+    GIANT_CHECK(std::abs(s.average_at(0.5f).y - linear(160)) < 0.04f);
+    GIANT_CHECK(s.average_at(0.5f).x < 0.06f); // red cut away
+    // An opaque material shows every texel, whatever its alpha.
+    GIANT_CHECK(s.average_at(0.0f).x > 0.5f && s.average_at(0.0f).x == s.average[0].x);
+    GIANT_CHECK(std::abs(s.coverage_at(0.5f) - 0.3f) < 0.04f);
+    GIANT_CHECK(s.coverage_at(0.0f) == 1.0f && s.coverage[0] == 1.0f);
+    GIANT_CHECK(s.coverage_at(std::nanf("")) == 1.0f);
+    GIANT_CHECK(s.coverage_at(1.0f) <= s.coverage_at(0.5f) && s.coverage_at(2.0f) == s.coverage_at(1.0f));
+    // Measured on a level within max_side: still close at 16.
+    GIANT_CHECK(std::abs(summarize_color(cooked, 16).coverage_at(0.5f) - 0.3f) < 0.08f);
+    // BC1 has no alpha: fully covered.
+    CookOptions small;
+    small.small = true;
+    Cooked bc1;
+    GIANT_CHECK(cook(leaves, small, bc1, error));
+    const ColorSummary sb = summarize_color(bc1);
+    GIANT_CHECK(sb.coverage_at(0.5f) == 1.0f && sb.coverage_at(1.0f) == 1.0f);
+    // Other kinds, or contents cut short: the default.
+    CookOptions normal;
+    normal.kind = Kind::normal;
+    Cooked n;
+    GIANT_CHECK(cook(bumpy_normals(64, 64), normal, n, error));
+    GIANT_CHECK(summarize_color(n).average_at(0.5f).x == 1.0f && summarize_color(n).coverage_at(0.5f) == 1.0f);
+    cooked.contents.resize(16);
+    GIANT_CHECK(summarize_color(cooked).coverage_at(0.5f) == 1.0f);
+}
+
+GIANT_TEST("texture: colour summaries are exact at any cutoff up to 512 texels, and at 0.5 above") {
+    // Alphas of 32, 96, 160 and 255 in equal shares (well between the
+    // steps, so block compression does not move them across one).
+    const auto image = [](u32 side) {
+        u32 seed = 99;
+        return filled(side, side, [&seed](u32, u32, u8* t) {
+            seed = seed * 1664525u + 1013904223u;
+            const u32 pick = seed >> 30;
+            t[0] = t[1] = t[2] = static_cast<u8>(40 + pick * 60);
+            t[3] = pick == 0 ? 32 : pick == 1 ? 96 : pick == 2 ? 160 : 255;
+        });
+    };
+    std::string error;
+    Cooked cooked;
+    GIANT_CHECK(cook(image(512), {}, cooked, error));
+    const ColorSummary s = summarize_color(cooked);
+    GIANT_CHECK(std::abs(s.coverage_at(0.25f) - 0.75f) < 0.02f); // 96 and over
+    GIANT_CHECK(std::abs(s.coverage_at(0.5f) - 0.5f) < 0.02f);
+    GIANT_CHECK(std::abs(s.coverage_at(0.75f) - 0.25f) < 0.02f);
+    // The texels a cutoff leaves are the brighter ones.
+    GIANT_CHECK(s.average_at(0.75f).x > s.average_at(0.25f).x && s.average_at(0.25f).x > s.average_at(0.0f).x);
+    // Bigger: measured on a mip whose alpha keeps 0.5's coverage (alphas
+    // spread evenly, as photographed ones are; the cooker keeps a share by
+    // the alpha a count of texels reaches, so many texels on one value
+    // move together).
+    u32 seed = 5;
+    const Image spread = filled(1024, 1024, [&seed](u32, u32, u8* t) {
+        seed = seed * 1664525u + 1013904223u;
+        t[0] = t[1] = t[2] = 120;
+        t[3] = static_cast<u8>(seed >> 24);
+    });
+    Cooked big;
+    GIANT_CHECK(cook(spread, {}, big, error));
+    GIANT_CHECK(std::abs(summarize_color(big).coverage_at(0.5f) - summarize_color(big, 1024).coverage_at(0.5f)) < 0.03f);
+}

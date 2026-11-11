@@ -116,12 +116,13 @@ struct Material {
     // does a texture of the wrong colour space (logged once): base colour
     // must be sRGB, the others linear. Combined as glTF combines its maps,
     // in the cooker's channels: base colour multiplies base_color (its
-    // alpha is not used yet: no cut-outs or blending); the normal map (x in
+    // alpha cuts out, with alpha_cutoff); the normal map (x in
     // R, y in G, green up, z rebuilt) bends the shading normal in the mesh's
     // tangent frame; roughness (R) and metallic (G) multiply theirs;
     // occlusion (R) dims the ambient, bounce and reflected light, not the
     // sun's. Sampled with wrapping. Only meshes drawn as meshes show them:
-    // the far field's voxels keep the plain colours.
+    // the voxel world (the far field, GI's bounce) takes base_color times
+    // base_color_average below.
     TextureId base_color_texture = k_no_texture;
     TextureId normal_texture = k_no_texture;
     TextureId roughness_metal_texture = k_no_texture;
@@ -143,6 +144,16 @@ struct Material {
     // image and in shadows. 0, or no base colour texture (yet): solid.
     // Drawn in a visibility pass of their own.
     float alpha_cutoff = 0.0f;
+    // For the voxel world, which cannot sample textures: the base colour
+    // texture's average colour (linear; for a cut-out, of what its cutoff
+    // leaves: texture::summarize_color), which multiplies base_color there,
+    // and, for a cut-out, the share of its surface alpha_cutoff leaves (0
+    // to 1), which thins its voxels to match (voxel::BrickBuilder). Both
+    // count only with base_color_texture. The caller keeps them in step
+    // with the texture: 1 while it has none (or it is not ready). A change
+    // builds the voxels of its instances again.
+    Vec3 base_color_average{1.0f, 1.0f, 1.0f};
+    float coverage = 1.0f;
 };
 
 // One of the ground's layers (FrameInput::terrain_layers), for materials
@@ -427,7 +438,9 @@ struct CellRange {
     u32 first = 0;
     u32 count = 0;
     // A cell whose version and place are as last frame's holds the same
-    // instances as then, by value (their materials' values included).
+    // instances as then, by value (their material indices: a material
+    // row's values may change under an unchanged cell, as its textures
+    // arrive; the voxel world compares the rows itself).
     u64 version = 0;
     // A cell changed from version prev_version (same place and count) only
     // in instances [first + changed_first, + changed_count): the rest are

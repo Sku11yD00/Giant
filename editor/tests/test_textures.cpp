@@ -494,6 +494,18 @@ GIANT_TEST("textures: a mesh's material draws its maps once they are ready; a fi
         }
     }
     GIANT_CHECK(textured == 2); // the ball's material and the crate's
+    // The voxel world's colour: the texture's average (sRGB 200, 100, 50
+    // in linear light), solid; untextured ones white.
+    for (const render::Material& m : frame.materials) {
+        GIANT_CHECK(m.coverage == 1.0f);
+        if (m.base_color_texture == render::k_no_texture) {
+            GIANT_CHECK(m.base_color_average.x == 1.0f && m.base_color_average.y == 1.0f);
+        } else {
+            GIANT_CHECK(std::abs(m.base_color_average.x - 0.578f) < 0.03f);
+            GIANT_CHECK(std::abs(m.base_color_average.y - 0.127f) < 0.02f);
+            GIANT_CHECK(std::abs(m.base_color_average.z - 0.032f) < 0.02f);
+        }
+    }
     usize crate = 0;
     for (const render::Material& m : frame.materials) {
         crate += m.base_color_texture != render::k_no_texture && m.normal_texture == render::k_no_texture ? 1u : 0u;
@@ -663,4 +675,57 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     const TextureLibrary::Ref vrm_base = textures.request({avatar + "#image0", TextureLibrary::Slot::base_color, false, {}});
     textures.finish();
     GIANT_CHECK(textures.entry(vrm_base)->status == TextureLibrary::Status::ready);
+}
+
+GIANT_TEST("textures: a cut-out material tells the voxel world how much of it its cutoff leaves") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    const std::filesystem::path dir = fresh_dir("giant_texture_coverage");
+    // Left quarter opaque green, the rest see-through at alpha 64 (a
+    // quarter): a cutoff of 0.5 leaves 25%, of 0.2 all of it.
+    std::vector<u8> rgba(usize{32} * 32 * 4);
+    for (u32 y = 0; y < 32; ++y) {
+        for (u32 x = 0; x < 32; ++x) {
+            u8* t = &rgba[(usize{y} * 32 + x) * 4];
+            t[0] = 20;
+            t[1] = 180;
+            t[2] = 20;
+            t[3] = x < 8 ? 255 : 64;
+        }
+    }
+    const std::string png = encode_png_rgba(32, 32, rgba);
+    const std::filesystem::path leaf = dir / "leaf.png";
+    std::ofstream(leaf, std::ios::binary).write(png.data(), static_cast<std::streamsize>(png.size()));
+    MeshLibrary meshes(renderer.get());
+    TextureLibrary textures(renderer.get(), {});
+    SceneFrame frame;
+    frame.textures = &textures;
+    world::Scene scene;
+    world::Entity card;
+    card.shape = world::Shape::plane;
+    card.material.maps.base_color = leaf.generic_string();
+    card.material.alpha_cutoff = 0.5f;
+    const world::EntityId id = scene.add(card);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials.size() == 1 && frame.materials[0].coverage == 1.0f); // cooking: solid
+    textures.finish();
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials[0].base_color_texture != render::k_no_texture);
+    GIANT_CHECK(std::abs(frame.materials[0].coverage - 0.25f) < 0.03f);
+    GIANT_CHECK(frame.materials[0].base_color_average.y > 0.3f);
+    // A lower cutoff leaves more (a new material row, its texture ready).
+    scene.modify(id)->material.alpha_cutoff = 0.2f;
+    scene_frame(scene, *renderer, meshes, frame);
+    bool found = false;
+    for (usize i = 0; i < frame.materials.size(); ++i) {
+        if (frame.users[i] > 0) {
+            found = true;
+            GIANT_CHECK(frame.materials[i].coverage > 0.97f);
+        }
+    }
+    GIANT_CHECK(found);
 }

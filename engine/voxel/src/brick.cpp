@@ -14,6 +14,41 @@ u32 to_bits(float v, float steps) {
 
 float sign_not_zero(float v) { return v < 0.0f ? -1.0f : 1.0f; }
 
+// The area of the triangle's part inside the box [0, edge]^3 (clipped
+// against its six planes, Sutherland-Hodgman).
+float area_inside(const Vec3& a, const Vec3& b, const Vec3& c, float edge) {
+    std::array<Vec3, 9> poly{a, b, c};
+    std::array<Vec3, 9> next{};
+    u32 count = 3;
+    const auto comp = [](const Vec3& v, u32 axis) { return axis == 0 ? v.x : axis == 1 ? v.y : v.z; };
+    for (u32 plane = 0; plane < 6 && count > 0; ++plane) {
+        const u32 axis = plane / 2;
+        const bool upper = plane % 2 == 1;
+        // Signed distance inside the plane: >= 0 keeps.
+        const auto inside = [&](const Vec3& v) { return upper ? edge - comp(v, axis) : comp(v, axis); };
+        u32 kept = 0;
+        for (u32 i = 0; i < count; ++i) {
+            const Vec3& p = poly[i];
+            const Vec3& q = poly[(i + 1) % count];
+            const float dp = inside(p);
+            const float dq = inside(q);
+            if (dp >= 0.0f && kept < next.size()) {
+                next[kept++] = p;
+            }
+            if ((dp >= 0.0f) != (dq >= 0.0f) && kept < next.size()) {
+                next[kept++] = p + (q - p) * (dp / (dp - dq));
+            }
+        }
+        poly = next;
+        count = kept;
+    }
+    Vec3 twice{};
+    for (u32 i = 1; i + 1 < count; ++i) {
+        twice += cross(poly[i] - poly[0], poly[i + 1] - poly[0]);
+    }
+    return 0.5f * length(twice);
+}
+
 } // namespace
 
 u32 pack_voxel(const Vec3& color, const Vec3& normal) {
@@ -143,15 +178,50 @@ bool triangle_overlaps_box(const Vec3& box_center, const Vec3& half_size, const 
     return true;
 }
 
-void BrickBuilder::reset(float voxel_size) {
+void BrickBuilder::reset(float voxel_size, u32 seed) {
     for (u32 i = 0; i < m_touched; ++i) {
         m_sums[m_list[i]] = {};
     }
     m_voxel_size = voxel_size > 0.0f ? voxel_size : 1.0f;
+    m_seed = seed;
     m_touched = 0;
 }
 
-u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color, bool stand_in) {
+float BrickBuilder::threshold(u32 index) const {
+    // A hash of the seed and the voxel (lowbias32), to (0, 1].
+    u32 h = m_seed * 0x9E3779B9u ^ index;
+    h ^= h >> 16;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15;
+    h *= 0x846CA68Bu;
+    h ^= h >> 16;
+    return static_cast<float>((h >> 8) + 1u) / 16777216.0f;
+}
+
+void BrickBuilder::add(u32 index, const Vec3& color, const Vec3& normal, float coverage, float cover,
+                       bool stand_in) {
+    Sum& sum = m_sums[index];
+    if (!sum.touched) {
+        sum.touched = true;
+        m_list[m_touched++] = static_cast<u16>(index);
+    }
+    Part& part = stand_in ? sum.stand : sum.own;
+    part.color += color * coverage;
+    part.normal += normal * coverage;
+    part.weight += coverage;
+    if (coverage >= 1.0f) {
+        part.solid = true;
+    } else {
+        part.cover += cover;
+    }
+}
+
+u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color, bool stand_in,
+                               float coverage) {
+    if (!(coverage > 0.0f)) {
+        return 0; // also NaN: cut away entirely
+    }
+    coverage = std::min(coverage, 1.0f);
     const Vec3 face = cross(b - a, c - a);
     const Vec3 normal = normalize_or_zero(face);
     if (normal == Vec3{}) {
@@ -176,6 +246,10 @@ u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, cons
         return 0;
     }
     const Vec3 half{s * 0.5f, s * 0.5f, s * 0.5f};
+    // Cut-outs share their area among the voxels they touch, so they are
+    // gathered first (a solid triangle fills each at once).
+    std::array<u16, k_brick_voxels> hit;
+    u32 hits = 0;
     u32 tested = 0;
     for (u32 z = z0; z <= z1; ++z) {
         for (u32 y = y0; y <= y1; ++y) {
@@ -183,25 +257,32 @@ u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, cons
                 ++tested;
                 const Vec3 center{(static_cast<float>(x) + 0.5f) * s, (static_cast<float>(y) + 0.5f) * s,
                                   (static_cast<float>(z) + 0.5f) * s};
-                if (!triangle_overlaps_box(center, half, a, b, c)) {
-                    continue;
-                }
-                Sum& sum = m_sums[voxel_index(x, y, z)];
-                if (sum.weight == 0.0f) {
-                    m_list[m_touched++] = static_cast<u16>(voxel_index(x, y, z));
-                }
-                sum.color += color;
-                sum.normal += normal;
-                sum.weight += 1.0f;
-                if (stand_in) {
-                    sum.stand_color += color;
-                    sum.stand_normal += normal;
-                    sum.stand_weight += 1.0f;
+                if (triangle_overlaps_box(center, half, a, b, c)) {
+                    hit[hits++] = static_cast<u16>(voxel_index(x, y, z));
                 }
             }
         }
     }
+    if (hits == 0) {
+        return tested;
+    }
+    // Its area inside the brick, shared among the voxels it touches here,
+    // and never more than a plane can cut through one (sqrt 2 faces).
+    float cover = 0.0f;
+    if (coverage < 1.0f) {
+        const float edge = s * static_cast<float>(k_brick_edge);
+        // (The cap first: std::min returns it when the area is NaN, from an infinite corner.)
+        const float share = std::min(1.41421356f * s * s, area_inside(a, b, c, edge) / static_cast<float>(hits));
+        cover = coverage * share / (s * s);
+    }
+    for (u32 k = 0; k < hits; ++k) {
+        add(hit[k], color, normal, coverage, cover, stand_in);
+    }
     return tested;
+}
+
+bool BrickBuilder::fills(const Part& part, u32 index) const {
+    return part.weight > 0.0f && (part.solid || part.cover >= threshold(index));
 }
 
 Brick BrickBuilder::build() const {
@@ -211,10 +292,10 @@ Brick BrickBuilder::build() const {
         const Sum& sum = m_sums[i];
         // Opposite faces in one voxel (a thin wall) cancel: pack_voxel
         // then falls back to +Y.
-        if (sum.stand_weight > 0.0f) {
-            brick.set(i, pack_voxel(sum.stand_color / sum.stand_weight, sum.stand_normal), true);
-        } else {
-            brick.set(i, pack_voxel(sum.color / sum.weight, sum.normal));
+        if (fills(sum.stand, i)) {
+            brick.set(i, pack_voxel(sum.stand.color / sum.stand.weight, sum.stand.normal), true);
+        } else if (fills(sum.own, i)) {
+            brick.set(i, pack_voxel(sum.own.color / sum.own.weight, sum.own.normal));
         }
     }
     return brick;
