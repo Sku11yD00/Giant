@@ -456,6 +456,11 @@ GIANT_TEST("water render: rapids packed in range; running water's clock cycles")
     GIANT_CHECK(std::fabs(water_flow_clock(1.0e9 + 0.25) - 0.25f) < 1e-4f);
     GIANT_CHECK(water_flow_clock(std::numeric_limits<double>::infinity()) == 0.0f);
     GIANT_CHECK(water_flow_clock(-0.5) >= 0.0f && water_flow_clock(-0.5) < k_water_flow_period);
+    GIANT_CHECK(std::fabs(water_clock(13.0, k_water_surf_period) - 1.0f) < 1e-6f && water_clock(1.0, 0.0f) == 0.0f);
+    GIANT_CHECK(water_clock(-1e-12, 6.0f) < 6.0f);
+    // The surf: a calm laps, a strong wind breaks; bad numbers are calm.
+    GIANT_CHECK(water_surf({}) == 0.15f && water_surf({8.0f, 0.0f, 6.0f}) == 1.0f);
+    GIANT_CHECK(std::fabs(water_surf({4.0f, 9.0f, 0.0f}) - 0.5f) < 1e-6f && water_surf({std::nanf(""), 0.0f, 0.0f}) == 0.15f);
 }
 
 GIANT_TEST("water render: under water where the near plane dips under the camera's water; looks packed in range") {
@@ -784,6 +789,107 @@ GIANT_TEST("water render: d3d12 running water carries its waves; rapids foam; a 
     std::printf("    in a tenth of a second still water differs at %zu pixels, running at %zu; rapids foam at %zu, "
                 "leaning differs at %zu\n", still_moved, moved, bright, leaned);
     GIANT_CHECK(moved > still_moved + 100 && bright > 64 && leaned > 256);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("water render: d3d12 surf runs in and breaks where the bed shelves, not over a level one") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A dark bed shelving 5 cm a metre, a metre under the water below the camera.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = {0.0, -1.0, 0.0};
+    instances[0].rotation = quat_from_axis_angle({0.0f, 0.0f, 1.0f}, 0.05f);
+    instances[0].scale = {500.0f, 1.0f, 500.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.03f, 0.03f, 0.03f};
+    materials[0].roughness = 0.9f;
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    square(v, idx, {0.0, 0.0, 0.0}, 200.0);
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.water_vertices = v;
+    frame.water_indices = idx;
+    frame.lighting.background = {0.5f, 0.5f, 0.5f};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.95f, 0.31f, 0.0f}); // low: its glint off the screen
+    frame.lighting.sun_light = {2.0f, 2.0f, 2.0f};
+    frame.lighting.sky_light = {0.5f, 0.5f, 0.5f};
+    frame.lighting.ground_light = {0.02f, 0.02f, 0.02f};
+    frame.wind.velocity = {10.0f, 0.0f, 0.0f};
+    frame.view.position = {0.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    const auto draw = [&] {
+        for (int i = 0; i < 6; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto green = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4 + 1;
+        return i < image.size() ? static_cast<int>(image[i]) : -1000;
+    };
+    const auto brighter = [&](const std::vector<u8>& a, const std::vector<u8>& b) {
+        usize n = 0;
+        for (u32 y = 0; y < k_h; ++y) {
+            for (u32 x = 0; x < k_w; ++x) n += green(a, x, y) > green(b, x, y) + 30 ? usize{1} : usize{0};
+        }
+        return n;
+    };
+    // The band of surf at a metre deep breaking at the start of a wave's
+    // run, half a run on between two there (the shallower and deeper
+    // water then in theirs).
+    frame.water_seconds = 12.0;
+    const auto breaking = draw();
+    frame.water_seconds = 15.0;
+    const auto between = draw();
+    // A calm: it only laps.
+    frame.water_seconds = 12.0;
+    frame.wind.velocity = {0.5f, 0.0f, 0.0f};
+    const auto lapping = draw();
+    // Over a level bed a metre down: no surf (a pool's water does not run in).
+    frame.wind.velocity = {10.0f, 0.0f, 0.0f};
+    instances[0].rotation = Quat{};
+    const auto level = draw();
+    const usize surf = brighter(breaking, between);
+    const usize calm = brighter(breaking, lapping);
+    const usize pool = brighter(level, between);
+    std::printf("    surf: breaking brighter than between waves at %zu pixels, than a calm's at %zu; over a level bed %zu\n",
+                surf, calm, pool);
+    GIANT_CHECK(surf > 400 && calm > 400 && pool < 16);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

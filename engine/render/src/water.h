@@ -21,6 +21,8 @@ inline constexpr u32 k_water_waves = 8;
 inline constexpr float k_water_flow_period = 2.0f;
 // A surface's slope is kept within this (WaterVertex::slope_*), packed to 16 bits each.
 inline constexpr float k_water_slope_most = 10.0f;
+// The surf: a wave runs in to the shore every this many seconds.
+inline constexpr float k_water_surf_period = 6.0f;
 
 struct WaterBatch {
     std::vector<gpu::WaterVertex> vertices;
@@ -41,6 +43,11 @@ WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32
 // Running water's clock at `seconds`: seconds into its cycle (0 to
 // k_water_flow_period; worked out in double, so it keeps its precision late on).
 float water_flow_clock(double seconds);
+// A clock folded at `period` (> 0) the same way: seconds into its cycle.
+float water_clock(double seconds, float period);
+// How high the surf runs under wind `velocity` (m/s): a calm's ripples
+// lap (0.15) to a strong wind's breakers (1, from 8 m/s over the water).
+float water_surf(const Vec3& velocity);
 
 // A look as the GPU holds it, its numbers kept in range (a bad one: the default's).
 gpu::WaterLook pack_water_look(const WaterLook& look);

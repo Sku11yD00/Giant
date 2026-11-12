@@ -35,6 +35,9 @@
 // the crests); a sloping surface (a river falling) lit as it leans, the
 // vertices' slope added to the waves'.
 //
+// The sea (W4b): surf where it shoals over a shelving bed, bands running
+// in along the depth's contours and breaking into foam.
+//
 // Caustics: where the sun's ray to a point on the bed came through the
 // still surface, the waves' curvature there focuses (or spreads) the light
 // as the bent rays' spread on the bed has it (one over the determinant of
@@ -70,8 +73,8 @@ struct WaterPush {
     uint under_look;
     float under_level;
     float flow_clock;
-    uint pad0;
-    uint pad1;
+    float surf_clock;
+    float surf;
 };
 ConstantBuffer<WaterPush> push : register(b0);
 
@@ -86,6 +89,12 @@ static const float k_water_cone = 0.05;      // the voxel cone's width (tangent)
 static const float k_flow_period = 2.0;      // seconds running water carries its waves before they start again (water.h's k_water_flow_period)
 static const float k_run_rough = 4.0;        // m/s at which running water is as rough as it gets of itself (rapids roughen it more)
 static const float k_slope_most = 10.0;      // a vertex's slope: snorm16 of this (water.h's k_water_slope_most)
+static const float k_surf_period = 6.0;      // seconds between waves running in (water.h's k_water_surf_period)
+static const float k_surf_depth = 1.8;       // metres of water over the bed from which the surf breaks (1.2 times k_break_depth)
+static const float k_surf_spacing = 0.8;     // metres of depth between one wave's crest and the next as they run in
+static const float k_break_depth = 1.5;      // breaking: from 1.8 m of depth (a fifth at 1.5 m), all of it from 0.3 m
+static const float k_surf_shelving = 0.01;   // metres the bed falls a metre at which the surf is whole (a level bed: none)
+static const float k_surf_edge = 0.5;        // a bed falling more than this a metre (twice it: none) is an edge, not a shore
 
 [shader("vertex")]
 float4 vs_copy(uint vertex_id : SV_VertexID) : SV_Position {
@@ -445,8 +454,18 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const int2 pixel = int2(i.position.xy);
     Texture2D<float> depth = read_texture_float(push.depth);
     Texture2D<float4> light = read_texture(push.light);
-    // Behind what shading drew here: not seen.
     const float scene_d = depth.Load(int3(pixel, 0));
+    // How the bed's depth (straight down) changes from pixel to pixel, for
+    // the surf (worked out before any pixel leaves: neighbours' differences).
+    float bed_change;
+    {
+        const float here = length(i.world);
+        const float view_z = max(-dot(f.view_rows[2].xyz, i.world), 1e-6);
+        const float scene_z = scene_d > 0.0 ? min(f.near_plane / scene_d, 1.0e6) : 1.0e6;
+        const float bed_here = min(max(scene_z - view_z, 0.0) * (here / view_z) * max(-i.world.y / max(here, 1e-6), 0.0), 1.0e4);
+        bed_change = length(float2(ddx(bed_here), ddy(bed_here)));
+    }
+    // Behind what shading drew here: not seen.
     if (scene_d > i.position.z) {
         discard;
     }
@@ -546,7 +565,21 @@ float4 ps_main(WaterVaryings i) : SV_Target {
                             ? saturate(rapids * 1.7 + saturate((speed - 2.0) / 6.0) * 0.6 - 0.7 + (crest - 0.5) * 1.5) *
                                   saturate(rapids * 20.0 + (speed - 2.0))
                             : 0.0;
-    const float foam = max(shore_foam, white);
+    // Surf: where it shoals, waves run in to the shore in bands (their
+    // crests along the depth's contours, coming in as the depth they are
+    // at falls), breaking into foam as it gets shallow, broken up by the crests.
+    float surf_foam = 0.0;
+    // (Where the bed shelves: over a level one, a pool's, nothing runs in.)
+    // (Far steeper is an edge: a body's side, a rock's, not a beach.)
+    const float bed_slope = bed_change / max(footprint, 1e-6);
+    const float shelving = saturate(bed_slope / k_surf_shelving) * saturate(2.0 - bed_slope / k_surf_edge);
+    if (look.waves > 0.0 && bed_depth < k_surf_depth && shelving > 0.0) {
+        const float theta = 6.2831853 * (bed_depth / k_surf_spacing + push.surf_clock / k_surf_period);
+        const float band = pow(saturate(0.5 + 0.5 * sin(theta)), 6.0);
+        const float breaking = saturate(1.2 - bed_depth / k_break_depth);
+        surf_foam = saturate(band * breaking * push.surf * saturate(look.waves) * (0.6 + crest)) * shelving;
+    }
+    const float foam = max(max(shore_foam, white), surf_foam);
     // The screen's ray and the voxel cone, unless foam hides the mirror
     // (water reflects at least a fiftieth even seen straight down: no cut-off by angle).
     const bool mirror_shows = foam < 0.95;

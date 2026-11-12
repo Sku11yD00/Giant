@@ -2100,8 +2100,28 @@ as it leans (its slope added to the waves'; the bed seen through it
 bent only by the waves, not by its lean), and the caustics under it
 take its roughness (not its flow). Still level water draws as before.
 
-The rest comes in the following parts (the water plan: W4b the sea, W5
-the voxel world, weather and sound, W6 the water gate).
+The sea (W4b): surf. Where water shoals over a shelving bed (any water
+with waves), waves run in to the shore in bands: their crests along the
+depth's contours, one every 0.8 m of depth, each coming in as the depth
+it is at falls, one every `k_water_surf_period` (6 s, its clock folded on
+the CPU in double), drawn as they break into foam from 1.8 m of depth (a
+fifth at 1.5 m, all of it from 0.3 m, broken up by the crests), as high as
+the wind makes them (`water_surf`: a calm's 0.15 laps, 1 from 8 m/s). How
+much the bed shelves comes from the depth's change between neighbouring
+pixels over the pixel's width on the surface (whole from 1 cm a metre,
+none over a level bed: a pool, a flat-bottomed pond; fading out from 50
+cm a metre, none past a metre a metre: an edge, a body's or a rock's
+side, not a beach). The depth is the screen's: a floating body's or a
+sunken rock's gently sloping top within 1.8 m of the surface gets surf
+of its own. The sea's surface itself stays flat: heaving its geometry
+with the long waves waits for the physics to float things on the same
+waves and the underwater line to follow them (W5), as otherwise the
+camera and what floats would go under and out of the drawn water by
+metres in a storm.
+
+The rest comes in the following parts (the water plan: W5 the sea's
+swell with the physics' waves, the voxel world, weather and sound, W6 the
+water gate).
 
 ## Navigation
 
