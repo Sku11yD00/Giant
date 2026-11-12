@@ -1022,6 +1022,25 @@ GIANT_TEST("world streaming: the weather is saved in world.json and comes back o
     GIANT_CHECK(!e.state.scene.weather.has_value());
 }
 
+GIANT_TEST("world streaming: water is saved in world.json, comes back on open, and holds the settings unsaved") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    world::Water sea;
+    sea.name = "sea";
+    sea.kind = world::WaterKind::sea;
+    sea.level = -2.0f;
+    e.state.scene.water = {sea};
+    GIANT_CHECK(e.run("create_entities", {{"entities", {{{"position", {5, 0, 5}}}}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(!e.commands.execute("get_world").value["unsaved_settings"].get<bool>());
+    e.state.scene.water[0].level = -1.0f;
+    GIANT_CHECK(e.commands.execute("get_world").value["unsaved_settings"].get<bool>());
+    GIANT_CHECK(!e.run("open_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("close_world") && e.run("new_scene") && e.state.scene.water.empty());
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.state.scene.water.size() == 1 && e.state.scene.water[0] == sea);
+}
+
 GIANT_TEST("world streaming: unsaved weather, lighting, kits or scatter keep open_world from discarding them") {
     Editor e;
     if (e.w.renderer == nullptr) return;

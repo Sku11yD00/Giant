@@ -10,6 +10,7 @@ giant_module(world
   src/scatter.cpp
   src/weather.cpp
   src/wind.cpp
+  src/water.cpp
   DEPENDS core
 )
 # JSON stays private: the scene API is plain C++ types.
@@ -22,4 +23,5 @@ giant_module_tests(world
     tests/test_scatter.cpp
     tests/test_weather.cpp
     tests/test_clock.cpp
+    tests/test_water.cpp
 )

@@ -1910,6 +1910,26 @@ first. Known limits: a swing does not collide with what it hangs by (the
 wall behind a lantern), it does not spin about its rod, its physics body
 (if any) stays where it hangs at rest, and chains are one rigid rod.
 
+## Water (water plan part W1a)
+
+Lakes, rivers and the sea are scene data (`world::Water` in scene.h, the
+queries in `world/water.h`), saved with the scene and in a world's
+world.json, made and changed by `create_water` / `set_water` /
+`remove_water` (undoable) and listed and asked by `get_water`. A lake is a
+level inside its shore (an outline, even-odd inside), a river a strip down
+its path (each point's width and level, taken along it, flowing from its
+first point), the sea a level everywhere: what is under the water is the
+ground's (water is there only where the ground lies under the level, so a
+sea's shore is where the ground rises over it). Water never moves the
+ground: the bed is carved with the terrain brushes. Where bodies overlap,
+the highest surface counts; a hidden body is not there at all.
+`water_at(x, z)` answers what is at a point (level, a river's flow and
+width), bounding-box first. Drawing it (the surface, refraction,
+reflections), floating and swimming come in the following parts
+(the water plan: W1b floating and swimming, W2 the surface pass after
+shading, W3 under the surface, W4 rivers and the sea, W5 the voxel world,
+weather and sound, W6 the water gate).
+
 ## Navigation
 
 `giant/nav/nav.h` says where people can walk and finds the way. The

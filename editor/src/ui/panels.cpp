@@ -8,6 +8,7 @@
 
 #include "giant/core/log.h"
 #include "giant/sim/swing.h"
+#include "giant/world/water.h"
 #include "giant/world/weather.h"
 
 #include <imgui.h>
@@ -186,6 +187,7 @@ void EditorPanels::draw_scene_settings() {
         draw_terrain_brush();
         draw_terrain_layers();
         draw_scatter();
+        draw_water();
     }
     ImGui::End();
 }
@@ -214,6 +216,43 @@ void EditorPanels::draw_scatter() {
         float slope = l.slope_max;
         if (ImGui::SliderFloat("Steepest (deg)", &slope, l.slope_min, 90.0f, "%.0f")) {
             set("slope_max", std::clamp(slope, l.slope_min, 90.0f));
+        }
+        ImGui::PopID();
+    }
+}
+
+void EditorPanels::draw_water() {
+    ImGui::SeparatorText("Water");
+    if (m_state.scene.water.empty()) {
+        ImGui::TextDisabled("No water (create_water adds a lake, a river or the sea).");
+        return;
+    }
+    for (const world::Water& w : m_state.scene.water) {
+        ImGui::PushID(w.name.c_str());
+        const std::string name = w.name; // set_water replaces the body (the list keeps its size)
+        const auto set = [&](const char* field, ai::Json value) {
+            run("set_water", {{"name", name}, {field, std::move(value)}}, edit_group());
+        };
+        bool visible = w.visible;
+        if (ImGui::Checkbox(name.c_str(), &visible)) set("visible", visible);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", std::string(world::water_kind_name(w.kind)).c_str());
+        if (w.kind != world::WaterKind::river) {
+            float level = w.level;
+            if (ImGui::DragFloat("Level (m)", &level, 0.05f, -world::k_max_terrain_height, world::k_max_terrain_height)) {
+                set("level", std::clamp(level, -world::k_max_terrain_height, world::k_max_terrain_height));
+            }
+        } else {
+            float flow = w.flow;
+            if (ImGui::SliderFloat("Flow (m/s)", &flow, 0.0f, 20.0f, "%.1f")) set("flow", std::clamp(flow, 0.0f, 20.0f));
+        }
+        float waves = w.waves;
+        if (ImGui::SliderFloat("Waves", &waves, 0.0f, 4.0f, "%.2f")) set("waves", std::clamp(waves, 0.0f, 4.0f));
+        float turbidity = w.turbidity;
+        if (ImGui::SliderFloat("Murk", &turbidity, 0.0f, 1.0f, "%.2f")) set("turbidity", std::clamp(turbidity, 0.0f, 1.0f));
+        float color[3] = {w.color.x, w.color.y, w.color.z};
+        if (ImGui::ColorEdit3("Colour", color)) {
+            set("color", {std::clamp(color[0], 0.0f, 1.0f), std::clamp(color[1], 0.0f, 1.0f), std::clamp(color[2], 0.0f, 1.0f)});
         }
         ImGui::PopID();
     }

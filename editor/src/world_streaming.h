@@ -131,7 +131,7 @@ public:
     // yet. Walks the whole scene.
     u32 unsaved_cells(const world::Scene& scene) const;
     // Whether the scene's world-wide settings (lighting, kits, scatter
-    // layers, weather, clock) differ from what world.json holds.
+    // layers, weather, clock, water) differ from what world.json holds.
     bool unsaved_settings(const world::Scene& scene) const;
 
     // What streaming knows of the scene now, to keep with a copy of it that
