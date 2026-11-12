@@ -780,8 +780,11 @@ struct WaterPush {
     u32 light;          // the light before exposure to draw over (read)
     u32 depth;          // the scene depth (reverse-Z)
     u32 wave_count;
-    u32 pad;
+    u32 extras;         // shading's ResolveExtras (shadows, voxel light, sky, dust, lamps)
+    u32 extras_offset;
+    u32 extras_on;      // 0: shading had none (lit by the flat sky, unfogged)
+    u32 pad[2];
 };
-static_assert(sizeof(WaterPush) == 48);
+static_assert(sizeof(WaterPush) == 64);
 
 } // namespace giant::render::gpu

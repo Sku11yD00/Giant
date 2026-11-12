@@ -2397,6 +2397,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     };
     m_stats = {};
     m_shadow_draws = 0;
+    m_shading_extras = {}; // until shading uploads this frame's
     const rhi::TextureDesc* target_desc = m_device.describe(target);
     GIANT_ASSERT(target_desc != nullptr && target_desc->format == rhi::Format::rgba8_srgb,
                  "the renderer draws into a live rgba8_srgb render target");
@@ -3265,6 +3266,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.local_atlas = local_atlas ? m_device.read_descriptor(m_local_atlas) : data.frame.descriptor;
     extras.local_atlas_on = local_atlas ? 1u : 0u;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
+    m_shading_extras = extras_memory; // the water's lighting too (this frame's)
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
     push.extras_offset = extras_memory.data != nullptr ? extras_memory.offset : 0u;
     if (extras_memory.data == nullptr) {
@@ -3392,6 +3394,10 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     push.light = m_device.read_descriptor(light);
     push.depth = m_device.read_descriptor(m_depth);
     push.wave_count = k_water_waves;
+    const bool extras_on = m_shading_extras.data != nullptr;
+    push.extras = extras_on ? m_shading_extras.descriptor : data.frame.descriptor;
+    push.extras_offset = extras_on ? m_shading_extras.offset : 0u;
+    push.extras_on = extras_on ? 1u : 0u;
     // The light as it is, then the water over it.
     cmd.set_pipeline(m_water_copy);
     cmd.push(push);

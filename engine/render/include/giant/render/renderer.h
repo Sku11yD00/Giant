@@ -1036,6 +1036,7 @@ private:
     rhi::TextureHandle m_fallback; // rgba16_float
     rhi::TextureHandle m_scene;    // rgba16_float: the light with screen reflections, before exposure
     rhi::TextureHandle m_water_light; // rgba16_float: and with water (made when first drawn)
+    rhi::TransientMemory m_shading_extras; // this frame's gpu::ResolveExtras (data null: none yet), which the water reads too
     // Bloom: the light halved k_bloom_levels times (down), and back up
     // (up[i]: down[i] plus up[i + 1] spread; the last level is down's own).
     static constexpr u32 k_bloom_levels = 6;
