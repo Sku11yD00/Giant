@@ -35,6 +35,7 @@
 
 namespace giant::world {
 struct Water;
+struct Swell;
 }
 
 namespace giant::sim {
@@ -349,10 +350,23 @@ public:
     // a body all under it and the surface with something fixed under it
     // within 6 m, not the terrain's heightfield (a tunnel under a lake;
     // under a pier over the bed is open water). The
-    // bodies where it was and where it is are woken. The surface is flat
-    // (waves come later).
+    // bodies where it was and where it is are woken. Lakes and rivers are
+    // flat; the sea rises and falls with the swell (set_swell).
     void set_water(std::span<const world::Water> water);
     std::span<const world::Water> water() const;
+    // The sea's swell (world::sea_swell, SwellTrack) at `seconds` on its
+    // clock (the clock drawing it keeps: what floats rides what is seen),
+    // given before step() with the time it is to step to still to come:
+    // the swell's clock is set to `seconds` less the time not yet stepped
+    // (step_fraction's), and each fixed step moves it on by itself. Seas
+    // rise and fall under it by their `waves`; floating bodies bob and tilt
+    // with the surface (kept awake while they float; a body sunk to the
+    // bed sleeps) and swimmers ride it. A bad clock: 0. Sleeping bodies in
+    // the water are woken when the swell first comes, and again each time
+    // it has risen another quarter metre.
+    void set_swell(const world::Swell& swell, double seconds);
+    const world::Swell& swell() const;
+    double swell_seconds() const;
     // Whether water whose surface is at `level` reaches `point` under it:
     // not in a room under something fixed (a tunnel under a lake), as
     // set_water keeps it out for bodies. (The camera under water.)

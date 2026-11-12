@@ -29,6 +29,7 @@
 #include "play_state.h"
 #include "clock_state.h"
 #include "water_meshes.h"
+#include "giant/world/water.h"
 #include "weather_state.h"
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
@@ -408,7 +409,9 @@ int run(const Options& options) {
     std::vector<render::DustPuff> dust_frame;
     float render_seconds = 1.0f / 60.0f; // since the last frame (auto exposure eases over it)
     editor::WaterMeshes water_meshes;    // the scene's lakes, rivers and sea, drawn
-    double water_seconds = 0.0;          // the waves' clock
+    double water_seconds = 0.0;          // the waves' clock (the game's time)
+    world::SwellTrack swell_track;       // the sea's swell following the wind
+    static_assert(render::k_swell_waves == world::k_swell_waves);
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         mark(editor::FramePhase::other);
         terrain_meshes.update(state.scene.terrain);
@@ -460,19 +463,30 @@ int run(const Options& options) {
         input.terrain_layers = scene_frame.terrain_layers;
         input.decals = scene_frame.decals;
         input.lights = scene_frame.lights;
+        // The sea's swell (floated on by physics at this same clock).
+        const world::Swell& swell = swell_track.swell();
+        for (u32 i = 0; i < world::k_swell_waves; ++i) {
+            const world::SwellWave& w = swell.waves[i];
+            input.swell[i] = {w.dir_x, w.dir_z, w.k, w.amplitude, w.phase};
+        }
+        state.water_swell = world::swell_most(swell);
         if (input.settings.water && input.settings.debug_view == render::DebugView::lit) {
-            water_meshes.update(state.scene.water, state.camera.position);
+            water_meshes.update(state.scene.water);
             input.water_vertices = water_meshes.vertices();
             input.water_indices = water_meshes.indices();
             input.water_looks = water_meshes.looks();
+            input.seas = water_meshes.seas();
+            input.water_indices_under_seas = water_meshes.indices_under_seas();
             // The water the camera is in (not in a room under it).
-            input.underwater = editor::camera_water(state.scene.water, state.camera.position);
-            if (input.underwater.on && !physics.world().water_reaches(state.camera.position, input.underwater.level)) {
+            const float crest = world::swell_most(swell);
+            input.underwater = editor::camera_water(state.scene.water, state.camera.position, crest);
+            const double top = input.underwater.level +
+                               (input.underwater.swell ? crest * static_cast<double>(input.underwater.look.waves) : 0.0);
+            if (input.underwater.on && !physics.world().water_reaches(state.camera.position, top)) {
                 input.underwater.on = false;
             }
         }
         state.water_broken_lakes = water_meshes.broken_lakes();
-        if (!in_screenshot) water_seconds += render_seconds;
         input.water_seconds = water_seconds;
         // The dust in the air nearest the camera.
         physics.dust().nearest(state.camera.position, render::k_max_dust_puffs, dust_near);
@@ -643,6 +657,14 @@ int run(const Options& options) {
             }
         }
         walkers.before_step(state.scene, game_delta); // steered towards their paths' corners
+        // The sea's swell from the wind, at the water's clock, then the clock
+        // moved on with the game (paused: the sea stands still with what floats).
+        // (Physics stepped on by a command, step_physics or step_play: the clock with it.)
+        water_seconds = std::max(water_seconds, physics.world().swell_seconds() +
+                                                    physics.world().step_fraction() * sim::PhysicsWorld::k_step_seconds);
+        swell_track.update(weather.wind().velocity, water_seconds);
+        physics.world().set_swell(swell_track.swell(), water_seconds);
+        water_seconds += game_delta;
         physics.update(state.scene, scene_frame.take_for_followers(), game_delta);
         walkers.after_step(); // drawn where they walked
         if (playing) play.after_step(state.camera, game_delta); // the camera at its eyes

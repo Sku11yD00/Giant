@@ -291,3 +291,70 @@ GIANT_TEST("water: a character wades slower, swims at the surface, dives, floats
     bad.swim_speed = std::nanf("");
     GIANT_CHECK(physics.add_character(bad) == k_no_character);
 }
+
+GIANT_TEST("water: a body on the sea rides the swell, up and down with the surface, and does not fall asleep") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(box({0.0, -20.5, 0.0}, {200.0f, 0.5f, 200.0f})); // the bed, deep
+    world::Water sea;
+    sea.name = "sea";
+    sea.kind = world::WaterKind::sea;
+    sea.level = 0.0f;
+    sea.waves = 1.0f;
+    physics.set_water(std::vector<world::Water>{sea});
+    // One wave 40 m long, 0.5 m up and down, running along x.
+    world::Swell swell;
+    swell.waves[0] = {1.0f, 0.0f, static_cast<float>(6.283185307179586 / 40.0), 0.5f, 0.0f};
+    physics.set_swell(swell, 100.0);
+    GIANT_CHECK(physics.swell() == swell && physics.swell_seconds() == 100.0);
+    // A light raft (200 kg a cubic metre: floats 0.08 m under, its centre 0.12 m over the surface).
+    const BodyId raft = physics.add(box({7.0, 0.5, 3.0}, {1.0f, 0.2f, 1.0f}, Motion::dynamic, 320.0f));
+    run(physics, 5.0);
+    double low = 1e9, high = -1e9, off = 0.0;
+    int n = 0;
+    for (int i = 0; i < 12 * 60; ++i) {
+        physics.step(1.0 / 60.0);
+        const BodyState s = *physics.state(raft);
+        const double surface = world::swell_height(swell, s.position.x, s.position.z, physics.swell_seconds());
+        low = std::min(low, s.position.y);
+        high = std::max(high, s.position.y);
+        off += std::fabs(s.position.y - 0.12 - surface);
+        ++n;
+    }
+    // Up and down nearly as much as the surface (1 m), never far from it.
+    GIANT_CHECK(high - low > 0.7 && high - low < 1.3);
+    GIANT_CHECK(off / n < 0.15);
+    GIANT_CHECK(physics.state(raft)->active);
+    // The clock moved on with the steps (5 s + 12 s).
+    GIANT_CHECK(std::fabs(physics.swell_seconds() - 117.0) < 0.05);
+    // A still sea (its waves 0): flat, the raft settles on the level.
+    sea.waves = 0.0f;
+    physics.set_water(std::vector<world::Water>{sea});
+    run(physics, 6.0);
+    // (However it came to lie: on the level, still.)
+    GIANT_CHECK(std::fabs(physics.state(raft)->position.y) < 0.25 && std::fabs(physics.state(raft)->linear_velocity.y) < 0.02f);
+    // A calm swell (none) then one again: its sleeper is woken and bobs.
+    sea.waves = 1.0f;
+    physics.set_swell(world::Swell{}, 0.0);
+    physics.set_water(std::vector<world::Water>{sea});
+    run(physics, 6.0);
+    const double rest = physics.state(raft)->position.y;
+    physics.set_swell(swell, 10.0);
+    low = 1e9;
+    high = -1e9;
+    for (int i = 0; i < 8 * 60; ++i) {
+        physics.step(1.0 / 60.0);
+        low = std::min(low, physics.state(raft)->position.y);
+        high = std::max(high, physics.state(raft)->position.y);
+    }
+    GIANT_CHECK(std::fabs(rest) < 0.25 && high - low > 0.7);
+    // A rock sunk to the bed under the swell falls asleep (only what floats is kept awake).
+    const BodyId rock = physics.add(box({30.0, -15.0, 0.0}, {0.5f, 0.5f, 0.5f}, Motion::dynamic, 3000.0f));
+    run(physics, 8.0);
+    GIANT_CHECK(std::fabs(physics.state(rock)->position.y - -19.5) < 0.05 && !physics.state(rock)->active);
+    GIANT_CHECK(physics.state(raft)->active);
+    // The clock set with time still to step: that much behind.
+    physics.step(0.5 / 60.0);
+    physics.set_swell(swell, 500.0);
+    GIANT_CHECK(std::fabs(physics.swell_seconds() - (500.0 - physics.step_fraction() / 60.0)) < 1e-9);
+}

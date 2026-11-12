@@ -3346,16 +3346,41 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     // The water the camera is in: on where some of the near plane is under it.
     const Underwater& under = frame.underwater;
     const double under_level = under.level - frame.view.position.y;
+    // The sea's swell, as the GPU takes it.
+    u32 swell_count = 0;
+    const std::array<gpu::SwellWave, k_swell_waves> swell = water_swell(frame.swell, frame.water_seconds,
+                                                                        frame.view.position, swell_count);
+    // Riding the swell, the camera's water may be as high as its highest crest.
+    const bool under_swell = under.swell && swell_count > 0;
+    double under_reach = 0.0;
+    if (under_swell) {
+        const gpu::WaterLook packed = pack_water_look(under.look);
+        for (u32 i = 0; i < swell_count; ++i) under_reach += static_cast<double>(swell[i].amplitude) * packed.waves;
+    }
     const float aspect = static_cast<float>(m_width) / static_cast<float>(std::max(m_height, 1u));
     const float tan_y = std::tan(degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f)) * 0.5f);
     const bool under_on = under.on && std::isfinite(under.level) &&
                           near_plane_under(frame.view.orientation, tan_y, aspect,
-                                           std::max(frame.view.near_plane, 1e-4f), under_level);
-    if (!under_on && (frame.water_vertices.empty() || frame.water_indices.size() < 3)) return light;
-    WaterBatch batch = pack_water(frame.water_vertices, frame.water_indices, frame.water_looks, frame.view.position);
+                                           std::max(frame.view.near_plane, 1e-4f), under_level + under_reach);
+    // The seas (a bad level: left out).
+    std::array<SeaSurface, k_max_seas> seas{};
+    u32 sea_count = 0;
+    bool seas_left_out = false;
+    for (const SeaSurface& sea : frame.seas) {
+        if (!std::isfinite(sea.level) || !(std::fabs(sea.level - frame.view.position.y) < 1.0e6)) continue;
+        if (sea_count == k_max_seas) {
+            seas_left_out = true;
+            break;
+        }
+        seas[sea_count++] = sea;
+    }
+    if (!under_on && sea_count == 0 && (frame.water_vertices.empty() || frame.water_indices.size() < 3)) return light;
+    WaterBatch batch = pack_water(frame.water_vertices, frame.water_indices, frame.water_looks, frame.view.position,
+                                  frame.water_indices_under_seas);
     m_stats.water_dropped = batch.dropped;
-    m_stats.water_overflow = batch.overflow;
-    if (!under_on && batch.indices.empty()) return light;
+    m_stats.water_overflow = batch.overflow || seas_left_out;
+    if (!under_on && sea_count == 0 && batch.indices.empty()) return light;
+    const u32 fallback_look = static_cast<u32>(batch.looks.size() - 1); // (the default, last)
     // The camera's water's look last (after the default).
     const u32 under_look = static_cast<u32>(batch.looks.size());
     if (under_on) batch.looks.push_back(pack_water_look(under.look));
@@ -3369,7 +3394,7 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
         m_water_light = m_device.create_texture(desc);
         if (!m_water_light.valid()) return light; // out of memory: no water this frame
     }
-    // One upload: vertices, indices, looks, waves (each 16-byte aligned).
+    // One upload: vertices, indices, looks, waves, the swell (each 16-byte aligned).
     const std::array<gpu::WaterWave, k_water_waves> waves = water_waves(frame.wind.velocity, frame.water_seconds,
                                                                         frame.view.position);
     const auto aligned = [](usize n) { return (n + 15) & ~usize{15}; };
@@ -3377,7 +3402,10 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     const usize indices_at = aligned(vertices_at + batch.vertices.size() * sizeof(gpu::WaterVertex));
     const usize looks_at = aligned(indices_at + batch.indices.size() * sizeof(u32));
     const usize waves_at = aligned(looks_at + batch.looks.size() * sizeof(gpu::WaterLook));
-    const usize total = waves_at + waves.size() * sizeof(gpu::WaterWave);
+    const usize swell_at = aligned(waves_at + waves.size() * sizeof(gpu::WaterWave));
+    const std::vector<float>& radii = sea_radii();
+    const usize radii_at = aligned(swell_at + swell.size() * sizeof(gpu::SwellWave));
+    const usize total = radii_at + radii.size() * sizeof(float);
     // Written straight into this frame's transient memory.
     const rhi::TransientMemory memory = cmd.allocate(static_cast<u32>(total));
     if (memory.data == nullptr) return light; // out of memory: the device is lost
@@ -3390,6 +3418,8 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     if (!batch.indices.empty()) std::memcpy(bytes + indices_at, batch.indices.data(), batch.indices.size() * sizeof(u32));
     std::memcpy(bytes + looks_at, batch.looks.data(), batch.looks.size() * sizeof(gpu::WaterLook));
     std::memcpy(bytes + waves_at, waves.data(), waves.size() * sizeof(gpu::WaterWave));
+    std::memcpy(bytes + swell_at, swell.data(), swell.size() * sizeof(gpu::SwellWave));
+    std::memcpy(bytes + radii_at, radii.data(), radii.size() * sizeof(float));
     cmd.begin_timing("water");
     cmd.barrier(light, rhi::ResourceState::shader_read);
     cmd.barrier(m_depth, rhi::ResourceState::shader_read);
@@ -3418,19 +3448,42 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     push.flow_clock = water_flow_clock(frame.water_seconds);
     push.surf_clock = water_clock(frame.water_seconds, k_water_surf_period);
     push.surf = water_surf(frame.wind.velocity);
+    push.swell_offset = memory.offset + static_cast<u32>(swell_at);
+    push.swell_count = swell_count;
+    push.under_swell = under_on && under_swell ? 1u : 0u;
+    push.sea_radii_offset = memory.offset + static_cast<u32>(radii_at);
+    push.sea_rings = static_cast<u32>(radii.size());
     // The light as it is (dimmed where the view is under water), then the water over it.
     cmd.set_pipeline(m_water_copy);
     cmd.push(push);
     cmd.draw(3);
     m_stats.post_draws += 1;
-    if (!batch.indices.empty()) {
-        cmd.set_pipeline(m_water);
+    // The water lower than the seas, the seas, then the rest over them.
+    u32 triangles = 0;
+    if (sea_count > 0 || !batch.indices.empty()) cmd.set_pipeline(m_water);
+    const u32 under_seas = sea_count > 0 ? static_cast<u32>(batch.under_seas) : 0u;
+    const auto draw_indices = [&](u32 first, u32 count) {
+        if (count == 0) return;
+        push.sea_on = 0u;
+        push.indices_offset = memory.offset + static_cast<u32>(indices_at) + first * 4u;
         cmd.push(push);
-        cmd.draw(static_cast<u32>(batch.indices.size()));
+        cmd.draw(count);
+        triangles += count / 3;
+        m_stats.post_draws += 1;
+    };
+    draw_indices(0, under_seas);
+    for (u32 i = 0; i < sea_count; ++i) {
+        push.sea_on = 1u;
+        push.sea_level = static_cast<float>(seas[i].level - frame.view.position.y);
+        push.sea_look = seas[i].look < fallback_look ? seas[i].look : fallback_look;
+        cmd.push(push);
+        cmd.draw(3 * sea_triangles());
+        triangles += sea_triangles();
         m_stats.post_draws += 1;
     }
+    draw_indices(under_seas, static_cast<u32>(batch.indices.size()) - under_seas);
     m_stats.underwater = under_on;
-    m_stats.water_triangles = static_cast<u32>(batch.indices.size() / 3);
+    m_stats.water_triangles = triangles;
     cmd.end_render_pass();
     cmd.end_timing();
     return m_water_light;
