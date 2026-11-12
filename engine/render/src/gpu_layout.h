@@ -742,4 +742,46 @@ static_assert(sizeof(LightPush) == 80);
 inline constexpr u32 k_no_brick = ~0u;  // a slot with nothing in it
 inline constexpr u32 k_unbuilt = ~1u;   // a slot not built yet: use the next coarser level
 
+// Water (shaders/water.slang; src/water.h packs them).
+struct WaterVertex {
+    float position[3]; // camera-relative
+    u32 look;
+    float flow[2];
+    float pad[2];
+};
+static_assert(sizeof(WaterVertex) == 32);
+struct WaterLook {
+    float color[3];
+    float turbidity;
+    float absorption[3];
+    float waves;
+};
+static_assert(sizeof(WaterLook) == 32);
+// One travelling wave: height steepness / k * sin(k * dot(dir, xz) + phase),
+// xz camera-relative (the camera's own place folded into phase).
+struct WaterWave {
+    float dir_x;
+    float dir_z;
+    float k;         // radians a metre (2 pi / wavelength)
+    float steepness; // amplitude times k at waves 1
+    float phase;     // radians, 0 to 2 pi
+    float pad[3];
+};
+static_assert(sizeof(WaterWave) == 32);
+struct WaterPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 data;           // the frame's water: vertices, indices, looks, waves (one upload)
+    u32 vertices_offset; // bytes into `data`
+    u32 indices_offset;
+    u32 looks_offset;
+    u32 waves_offset;
+    u32 look_count;
+    u32 light;          // the light before exposure to draw over (read)
+    u32 depth;          // the scene depth (reverse-Z)
+    u32 wave_count;
+    u32 pad;
+};
+static_assert(sizeof(WaterPush) == 48);
+
 } // namespace giant::render::gpu

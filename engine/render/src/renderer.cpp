@@ -8,6 +8,7 @@
 #include "lights.h"
 #include "local_shadows.h"
 #include "voxel_lamps.h"
+#include "water.h"
 #include "brdf.h"
 #include "exposure.h"
 #include "instance_store.h"
@@ -276,9 +277,10 @@ Renderer::~Renderer() {
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
           m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
-          m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass}) {
+          m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass, m_water_copy, m_water}) {
         m_device.destroy(p);
     }
+    m_device.destroy(m_water_light);
     m_device.destroy(m_ao_raw);
     m_device.destroy(m_ao);
     m_device.destroy(m_contact);
@@ -486,6 +488,17 @@ bool Renderer::init() {
     reflect.cull = rhi::CullMode::none;
     reflect.name = "screen reflections";
     m_reflect = m_device.create_pipeline(reflect);
+    rhi::GraphicsPipelineDesc water;
+    water.vertex = shaders::water_copy_vs();
+    water.pixel = shaders::water_copy_ps();
+    water.color_formats[0] = rhi::Format::rgba16_float;
+    water.cull = rhi::CullMode::none;
+    water.name = "water: the light under it";
+    m_water_copy = m_device.create_pipeline(water);
+    water.vertex = shaders::water_vs();
+    water.pixel = shaders::water_ps();
+    water.name = "water";
+    m_water = m_device.create_pipeline(water);
     rhi::GraphicsPipelineDesc post;
     post.vertex = shaders::post_vs();
     post.pixel = shaders::post_ps();
@@ -521,7 +534,8 @@ bool Renderer::init() {
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
-          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass}) {
+          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass, m_water_copy,
+          m_water}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1242,6 +1256,8 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_device.destroy(m_terrain_normal);
     m_terrain_surface = {};
     m_terrain_normal = {};
+    m_device.destroy(m_water_light); // the frame's size: made again when water is drawn
+    m_water_light = {};
     m_terrain_ready = false;
     m_bloom_ready = false;
     m_device.destroy(m_clouds_a); // half the frame's size: made again with the sky's
@@ -3298,7 +3314,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.end_render_pass();
         cmd.end_timing();
     }
-    post(cmd, data, frame, screen_reflections ? m_scene : m_radiance, shaded, lit_view);
+    rhi::TextureHandle exposed = screen_reflections ? m_scene : m_radiance;
+    // Water in the lit view only (the light alone shows the scene's light, not the water's own colour).
+    if (frame.settings.debug_view == DebugView::lit && frame.settings.water) exposed = draw_water(cmd, data, frame, exposed);
+    post(cmd, data, frame, exposed, shaded, lit_view);
     m_stats.reflections = voxel_reflections;
     m_stats.screen_reflections = screen_reflections;
     if (shadows) {
@@ -3318,6 +3337,73 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     }
     finish_stats(data);
     mark(CpuSection::shading);
+}
+
+rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
+                                        rhi::TextureHandle light) {
+    if (frame.water_vertices.empty() || frame.water_indices.size() < 3) return light;
+    const WaterBatch batch = pack_water(frame.water_vertices, frame.water_indices, frame.water_looks, frame.view.position);
+    m_stats.water_dropped = batch.dropped;
+    m_stats.water_overflow = batch.overflow;
+    if (batch.indices.empty()) return light;
+    if (!m_water_light.valid()) {
+        rhi::TextureDesc desc;
+        desc.width = m_width;
+        desc.height = m_height;
+        desc.format = rhi::Format::rgba16_float;
+        desc.usage = rhi::TextureUsage::render_target | rhi::TextureUsage::sampled;
+        desc.name = "light with water";
+        m_water_light = m_device.create_texture(desc);
+        if (!m_water_light.valid()) return light; // out of memory: no water this frame
+    }
+    // One upload: vertices, indices, looks, waves (each 16-byte aligned).
+    const std::array<gpu::WaterWave, k_water_waves> waves = water_waves(frame.wind.velocity, frame.water_seconds,
+                                                                        frame.view.position);
+    const auto aligned = [](usize n) { return (n + 15) & ~usize{15}; };
+    const usize vertices_at = 0;
+    const usize indices_at = aligned(vertices_at + batch.vertices.size() * sizeof(gpu::WaterVertex));
+    const usize looks_at = aligned(indices_at + batch.indices.size() * sizeof(u32));
+    const usize waves_at = aligned(looks_at + batch.looks.size() * sizeof(gpu::WaterLook));
+    const usize total = waves_at + waves.size() * sizeof(gpu::WaterWave);
+    // Written straight into this frame's transient memory.
+    const rhi::TransientMemory memory = cmd.allocate(static_cast<u32>(total));
+    if (memory.data == nullptr) return light; // out of memory: the device is lost
+    u8* const bytes = memory.data;
+    std::memset(bytes, 0, total);
+    std::memcpy(bytes + vertices_at, batch.vertices.data(), batch.vertices.size() * sizeof(gpu::WaterVertex));
+    std::memcpy(bytes + indices_at, batch.indices.data(), batch.indices.size() * sizeof(u32));
+    std::memcpy(bytes + looks_at, batch.looks.data(), batch.looks.size() * sizeof(gpu::WaterLook));
+    std::memcpy(bytes + waves_at, waves.data(), waves.size() * sizeof(gpu::WaterWave));
+    cmd.begin_timing("water");
+    cmd.barrier(light, rhi::ResourceState::shader_read);
+    cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+    rhi::RenderPassDesc pass;
+    pass.colors[0] = {m_water_light, rhi::LoadOp::discard, {0.0f, 0.0f, 0.0f, 0.0f}}; // the copy covers it all
+    cmd.begin_render_pass(pass);
+    gpu::WaterPush push{};
+    push.frame = data.frame.descriptor;
+    push.frame_offset = data.frame.offset;
+    push.data = memory.descriptor;
+    push.vertices_offset = memory.offset + static_cast<u32>(vertices_at);
+    push.indices_offset = memory.offset + static_cast<u32>(indices_at);
+    push.looks_offset = memory.offset + static_cast<u32>(looks_at);
+    push.waves_offset = memory.offset + static_cast<u32>(waves_at);
+    push.look_count = static_cast<u32>(batch.looks.size());
+    push.light = m_device.read_descriptor(light);
+    push.depth = m_device.read_descriptor(m_depth);
+    push.wave_count = k_water_waves;
+    // The light as it is, then the water over it.
+    cmd.set_pipeline(m_water_copy);
+    cmd.push(push);
+    cmd.draw(3);
+    cmd.set_pipeline(m_water);
+    cmd.push(push);
+    cmd.draw(static_cast<u32>(batch.indices.size()));
+    m_stats.post_draws += 2;
+    m_stats.water_triangles = static_cast<u32>(batch.indices.size() / 3);
+    cmd.end_render_pass();
+    cmd.end_timing();
+    return m_water_light;
 }
 
 float Renderer::update_exposure(const FrameInput& frame, bool lit_view) {

@@ -14,6 +14,7 @@ giant_module(render
     src/voxel_lamps.cpp
     src/exposure.cpp
     src/brdf.cpp
+    src/water.cpp
   DEPENDS core rhi geometry voxel
 )
 giant_shaders(render
@@ -41,6 +42,10 @@ giant_shaders(render
     shaders/resolve.slang:ps_direct:pixel:resolve_direct_ps
     shaders/reflect.slang:vs_main:vertex:reflect_vs
     shaders/reflect.slang:ps_main:pixel:reflect_ps
+    shaders/water.slang:vs_copy:vertex:water_copy_vs
+    shaders/water.slang:ps_copy:pixel:water_copy_ps
+    shaders/water.slang:vs_main:vertex:water_vs
+    shaders/water.slang:ps_main:pixel:water_ps
     shaders/smaa.slang:vs_main:vertex:smaa_vs
     shaders/smaa.slang:ps_edges:pixel:smaa_edges_ps
     shaders/smaa.slang:ps_weights:pixel:smaa_weights_ps
@@ -74,6 +79,7 @@ target_link_libraries(giant_render PRIVATE third_party::smaa)
 giant_module_tests(render
   SOURCES
     tests/test_render.cpp
+    tests/test_water_render.cpp
     tests/test_decals.cpp
     tests/test_lights.cpp
     tests/test_local_shadows.cpp
