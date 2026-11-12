@@ -1082,6 +1082,15 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         }
         ImGui::Text("Lamp shadows: %u lamps, %u faces drawn, %u waiting, %u tiles", stats.local_shadows,
                     stats.local_shadow_drawn, stats.local_shadow_waiting, stats.local_shadow_tiles);
+        ImGui::Text("Water: %u triangles", stats.water_triangles);
+        if (m_state.water_broken_lakes > 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Water: %u lakes not drawn (their shore crosses itself)",
+                               m_state.water_broken_lakes);
+        }
+        if (stats.water_overflow || stats.water_dropped > 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Water: %u bad triangles dropped%s", stats.water_dropped,
+                               stats.water_overflow ? ", too many: some left out" : "");
+        }
         ImGui::Text("UI draw calls: %u", frame.ui_draw_calls);
         ImGui::Text("Window: %u x %u pixels", m_state.window->pixel_width(),
                     m_state.window->pixel_height());
@@ -1170,6 +1179,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         bool contact = r.contact_shadows;
         if (ImGui::Checkbox("Contact shadows", &contact)) {
             run("set_render_settings", {{"contact_shadows", contact}});
+        }
+        bool water = r.water;
+        if (ImGui::Checkbox("Water", &water)) {
+            run("set_render_settings", {{"water", water}});
         }
         ImGui::SeparatorText("C# scripts");
         if (m_state.scripts_loaded.empty()) {

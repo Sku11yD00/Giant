@@ -2009,10 +2009,33 @@ the very edge), lit by sun, sky and lamps (unshadowed). Then the air,
 as shading puts it over the scene (aerial perspective, fog, clouds, what
 falls, dust), over the water's own light; what is seen through it already
 holds its own air, which is taken off before the water dims it, and the
-screen's reflection is added over it as reflect.slang's is. Not yet: the
-editor drawing its water (W2c).
+screen's reflection is added over it as reflect.slang's is.
 
-The rest comes in the following parts (the water plan: W2c, W3 under
+The editor draws its water (W2c, editor/src/water_meshes.h): each visible
+body gets its own look (colour, absorption, turbidity, waves); a lake's
+shore is cut into triangles at its level by ear clipping (a shore that
+crosses itself is not drawn, counted in the stats panel and
+`last_frame.water.broken_lakes`), a river is a strip down its path (each
+point's width and level, widened at bends so each stretch keeps its
+width, at most doubled; square ends, where the physics' stretches are
+rounded), the sea rings round the camera (64 around, growing by half
+again from 4 m out to 40 km, then one ring 2,000 km out so its edge never
+shows). The pass draws over itself in order, so bodies go lowest first (a
+river by its highest point, so at a river's mouth the river shows over
+the lake): where surfaces overlap the highest shows, as the physics has
+it. Each body's triangles are kept and cut again only when its shape
+changes (the scene's water compared each frame, as the physics' copy is;
+a new colour, waves or lake level only puts the triangles together
+again). Cutting a 4096-point shore takes a few to a few tens of
+milliseconds (its corners that turn back filed in a grid, its edges
+checked for crossing by a sweep along x, worst for a star whose every edge
+spans its middle): a hitch while such a shore is reshaped, none in play.
+The sea's rings follow the camera every frame. Nothing is made while the
+water is off or the view is not lit. The waves' clock runs with the
+frames (not in a screenshot's). `set_render_settings` `water` turns it
+off; `last_frame.water` counts triangles drawn, dropped and overflow.
+
+The rest comes in the following parts (the water plan: W3 under
 the surface, W4 rivers and the sea, W5 the voxel world, weather and sound,
 W6 the water gate).
 
