@@ -87,10 +87,19 @@ WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32
 
 gpu::WaterLook pack_water_look(const WaterLook& look) { return look_for_gpu(look); }
 
-float water_flow_clock(double seconds) {
-    if (!std::isfinite(seconds)) return 0.0f;
-    const double t = std::fmod(seconds, static_cast<double>(k_water_flow_period));
-    return static_cast<float>(t < 0.0 ? t + k_water_flow_period : t);
+float water_clock(double seconds, float period) {
+    if (!std::isfinite(seconds) || !(period > 0.0f)) return 0.0f;
+    const double t = std::fmod(seconds, static_cast<double>(period));
+    const float folded = static_cast<float>(t < 0.0 ? t + period : t);
+    return folded < period ? folded : 0.0f; // (a hair under the period rounds to it: the start)
+}
+
+float water_flow_clock(double seconds) { return water_clock(seconds, k_water_flow_period); }
+
+float water_surf(const Vec3& velocity) {
+    const float x = std::isfinite(velocity.x) ? velocity.x : 0.0f;
+    const float z = std::isfinite(velocity.z) ? velocity.z : 0.0f;
+    return std::clamp(std::sqrt(x * x + z * z) / 8.0f, 0.15f, 1.0f);
 }
 
 bool near_plane_under(const Quat& orientation, float tan_y, float aspect, float near_plane, double level_relative) {

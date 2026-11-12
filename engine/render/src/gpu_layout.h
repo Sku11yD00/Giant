@@ -788,7 +788,8 @@ struct WaterPush {
     u32 under_look;     // that water's look (an index into the looks)
     float under_level;  // its surface, camera-relative (metres)
     float flow_clock;   // running water's clock: seconds into its cycle (0 to k_water_flow_period)
-    u32 pad[2];
+    float surf_clock;   // the surf's clock: seconds into a wave's run in (0 to k_water_surf_period)
+    float surf;         // how high the surf runs (0 to 1, from the wind)
 };
 static_assert(sizeof(WaterPush) == 80);
 

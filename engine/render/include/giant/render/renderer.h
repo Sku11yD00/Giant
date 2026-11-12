@@ -502,7 +502,9 @@ struct RenderSettings {
 // FrameInput::water_seconds; the surface itself stays flat (its normals
 // wave). Running water (WaterVertex::flow) carries its waves downstream,
 // rougher and foaming the faster it runs and in rapids, and a surface that
-// slopes (WaterVertex::slope_*) is lit as it leans. The sun's light through
+// slopes (WaterVertex::slope_*) is lit as it leans. Where it shoals over a
+// sloping bed, the waves run in to the shore in bands and break into foam
+// (higher in a stronger wind). The sun's light through
 // the waves gathers into moving caustics on
 // what lies under them. Seen from below (FrameInput::underwater) the
 // surface lets the world above through a window (Snell's) and mirrors the
