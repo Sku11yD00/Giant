@@ -470,13 +470,16 @@ int run(const Options& options) {
             input.swell[i] = {w.dir_x, w.dir_z, w.k, w.amplitude, w.phase};
         }
         state.water_swell = world::swell_most(swell);
+        // The water's surfaces: drawn in the lit view with the water on,
+        // in the voxel world (lakes and rivers) whatever is drawn.
+        water_meshes.update(state.scene.water);
+        input.water_vertices = water_meshes.vertices();
+        input.water_indices = water_meshes.indices();
+        input.water_looks = water_meshes.looks();
+        input.seas = water_meshes.seas();
+        input.water_indices_under_seas = water_meshes.indices_under_seas();
+        input.water_version = water_meshes.version();
         if (input.settings.water && input.settings.debug_view == render::DebugView::lit) {
-            water_meshes.update(state.scene.water);
-            input.water_vertices = water_meshes.vertices();
-            input.water_indices = water_meshes.indices();
-            input.water_looks = water_meshes.looks();
-            input.seas = water_meshes.seas();
-            input.water_indices_under_seas = water_meshes.indices_under_seas();
             // The water the camera is in (not in a room under it).
             const float crest = world::swell_most(swell);
             input.underwater = editor::camera_water(state.scene.water, state.camera.position, crest);

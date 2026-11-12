@@ -746,3 +746,195 @@ GIANT_TEST("voxel scene: levels say whether the far field need look at them") {
     settle();
     GIANT_CHECK(stands() == 0);
 }
+
+GIANT_TEST("voxel scene: lakes and rivers become water voxels, rebuilt when they change, gone when they go") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    // A pond 6 m square at 0.6 m, its own colour; the sea's vertices are left out.
+    std::vector<WaterVertex> v(4);
+    v[0].position = {-3.0, 0.6, -3.0};
+    v[1].position = {3.0, 0.6, -3.0};
+    v[2].position = {3.0, 0.6, 3.0};
+    v[3].position = {-3.0, 0.6, 3.0};
+    std::vector<u32> idx{0, 2, 1, 0, 3, 2};
+    std::vector<WaterLook> looks(1);
+    looks[0].color = {0.1f, 0.3f, 0.2f};
+    b.voxels->set_water(v, idx, looks);
+    b.step();
+    GIANT_CHECK(b.voxels->water_bodies() == 1 && b.voxels->stats().pending == 0);
+    u32 packed = 0;
+    GIANT_CHECK(b.voxel_at({0.1, 0.6, 0.1}, packed) && voxel::water_voxel(packed));
+    GIANT_CHECK(std::fabs(voxel::unpack_color(packed).y - 0.3f) < 0.03f);
+    GIANT_CHECK(b.voxel_at({-2.9, 0.6, 2.9}, packed) && voxel::water_voxel(packed));
+    // Raised: the old level empties, the new one fills.
+    for (WaterVertex& w : v) w.position.y = 1.4;
+    b.voxels->set_water(v, idx, looks);
+    b.step();
+    GIANT_CHECK(!b.voxel_at({0.1, 0.6, 0.1}, packed));
+    GIANT_CHECK(b.voxel_at({0.1, 1.4, 0.1}, packed) && voxel::water_voxel(packed));
+    // The same again: nothing to do.
+    b.voxels->set_water(v, idx, looks);
+    b.step();
+    GIANT_CHECK(b.voxels->stats().built == 0);
+    // Over a cube's top: water there, the cube's sides below as they were.
+    Instance cube;
+    cube.mesh = 0;
+    cube.position = {0.0, 1.0, 0.0}; // (a unit cube: its top at 1.5)
+    b.instances = {cube};
+    b.step();
+    GIANT_CHECK(b.voxel_at({0.1, 1.4, 0.1}, packed) && voxel::water_voxel(packed));
+    GIANT_CHECK(b.voxel_at({0.5, 0.8, 0.0}, packed) && !voxel::water_voxel(packed));
+    // Riding the swell (a sea's), or gone: no water voxels.
+    for (WaterVertex& w : v) w.swell = true;
+    b.voxels->set_water(v, idx, looks);
+    b.step();
+    GIANT_CHECK(b.voxels->water_bodies() == 0);
+    GIANT_CHECK(!b.voxel_at({-2.9, 1.4, 2.9}, packed));
+    b.instances.clear();
+    b.voxels->set_water({}, {}, {});
+    b.step();
+    GIANT_CHECK(b.voxels->stats().bricks == 0);
+}
+
+namespace {
+// A square pond `half` metres from its middle each way, at `level`, of look `look`.
+void add_pond(std::vector<WaterVertex>& v, std::vector<u32>& idx, double x, double z, double half, double level,
+              u32 look) {
+    const u32 first = static_cast<u32>(v.size());
+    const double corners[4][2] = {{-half, -half}, {half, -half}, {half, half}, {-half, half}};
+    for (const auto& c : corners) {
+        WaterVertex w;
+        w.position = {x + c[0], level, z + c[1]};
+        w.look = look;
+        v.push_back(w);
+    }
+    for (const u32 k : {0u, 2u, 1u, 0u, 3u, 2u}) {
+        idx.push_back(first + k);
+    }
+}
+} // namespace
+
+GIANT_TEST("voxel scene: only the water body that changed is built again") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    add_pond(v, idx, -5.0, 0.0, 1.5, 0.6, 0);
+    add_pond(v, idx, 5.0, 0.0, 1.5, 0.6, 1);
+    std::vector<WaterLook> looks(2);
+    b.voxels->set_water(v, idx, looks);
+    b.step();
+    const u32 both = b.voxels->stats().built;
+    GIANT_CHECK(b.voxels->water_bodies() == 2 && both > 0);
+    // The second raised: only the bricks under it (both levels) again.
+    for (usize i = 4; i < 8; ++i) v[i].position.y = 0.9;
+    b.voxels->set_water(v, idx, looks);
+    b.step();
+    const u32 one = b.voxels->stats().built;
+    GIANT_CHECK(one > 0 && one < both);
+    u32 packed = 0;
+    GIANT_CHECK(b.voxel_at({-5.0, 0.6, 0.0}, packed) && voxel::water_voxel(packed));
+    GIANT_CHECK(b.voxel_at({5.0, 0.9, 0.0}, packed) && voxel::water_voxel(packed));
+    // Water off (none passed): every water brick goes.
+    b.voxels->set_water({}, {}, {});
+    b.step();
+    GIANT_CHECK(b.voxels->water_bodies() == 0 && b.voxels->stats().bricks == 0);
+}
+
+GIANT_TEST("voxel scene: water bricks that waited for room in the pool come back") {
+    Bench b(3); // the cube's four bricks fill it
+    GIANT_CHECK(b.voxels->init());
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    add_pond(v, idx, 1.0, 1.0, 0.9, 0.6, 0); // (in one brick a level)
+    std::vector<WaterLook> looks(1);
+    Instance cube;
+    cube.mesh = 0;
+    cube.position = {5.0, 4.0, 5.0};
+    b.instances = {cube};
+    b.step();
+    b.voxels->set_water(v, idx, looks);
+    for (int i = 0; i < 5; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().missing > 0);
+    b.instances.clear(); // room again
+    for (int i = 0; i < 10; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().missing == 0);
+    int holes = 0;
+    for (double x = 0.2; x < 2.0; x += 0.5) {
+        for (double z = 0.2; z < 2.0; z += 0.5) {
+            u32 p = 0;
+            holes += b.voxel_at({x, 0.6, z}, p) && voxel::water_voxel(p) ? 0 : 1;
+        }
+    }
+    GIANT_CHECK(holes == 0);
+}
+
+GIANT_TEST("voxel scene: water comes into view with the window, and goes if removed while away") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    add_pond(v, idx, 0.0, 0.0, 3.0, 0.6, 0);
+    std::vector<WaterLook> looks(1);
+    b.camera = {500.0, 1.0, 0.0};
+    b.voxels->set_water(v, idx, looks);
+    for (int i = 0; i < 3; ++i) b.step();
+    b.camera = {0.0, 1.0, 0.0};
+    for (int i = 0; i < 3; ++i) b.step();
+    int holes = 0;
+    for (double x = -2.9; x < 3.0; x += 1.0) {
+        for (double z = -2.9; z < 3.0; z += 1.0) {
+            u32 p = 0;
+            holes += b.voxel_at({x, 0.6, z}, p) && voxel::water_voxel(p) ? 0 : 1;
+        }
+    }
+    GIANT_CHECK(holes == 0);
+    b.camera = {500.0, 1.0, 0.0};
+    b.voxels->set_water({}, {}, {});
+    for (int i = 0; i < 3; ++i) b.step();
+    b.camera = {0.0, 1.0, 0.0};
+    for (int i = 0; i < 3; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().bricks == 0);
+}
+
+GIANT_TEST("voxel scene: a lake of thousands of slivers is built a few at a time, whole in the end") {
+    // A fan of 2000 slivers round a point: a round lake 12 m across at 0.6 m.
+    std::vector<WaterVertex> v(1);
+    v[0].position = {0.0, 0.6, 0.0};
+    constexpr u32 k_slivers = 2000;
+    for (u32 i = 0; i < k_slivers; ++i) {
+        const double a = 6.283185307179586 * static_cast<double>(i) / k_slivers;
+        WaterVertex w;
+        w.position = {6.0 * std::cos(a), 0.6, 6.0 * std::sin(a)};
+        v.push_back(w);
+    }
+    std::vector<u32> idx;
+    for (u32 i = 0; i < k_slivers; ++i) {
+        idx.insert(idx.end(), {0u, 1u + i, 1u + (i + 1) % k_slivers});
+    }
+    // Twice: still, and with a pond far away (out of view) raised every frame meanwhile.
+    for (const bool busy : {false, true}) {
+        Bench b;
+        GIANT_CHECK(b.voxels->init());
+        std::vector<WaterLook> looks(2);
+        int frames = 0;
+        bool spread = false; // a frame that built nothing while bricks waited: a brick over frames
+        for (; frames < 20000; ++frames) {
+            std::vector<WaterVertex> all = v;
+            std::vector<u32> all_idx = idx;
+            if (busy) {
+                add_pond(all, all_idx, 1000.0, 0.0, 2.0, 0.01 * frames, 1);
+            }
+            b.voxels->set_water(all, all_idx, looks);
+            b.step(0.05f); // a sliver of a millisecond: a few looks at the clock each frame
+            spread = spread || (frames > 2 && b.voxels->stats().built == 0 && b.voxels->stats().pending > 0);
+            if (b.voxels->stats().pending == 0 && frames > 0) {
+                break;
+            }
+        }
+        GIANT_CHECK(spread && frames < 20000);
+        u32 packed = 0;
+        GIANT_CHECK(b.voxel_at({0.1, 0.6, 0.1}, packed) && voxel::water_voxel(packed));
+        GIANT_CHECK(b.voxel_at({-4.0, 0.6, 3.0}, packed) && voxel::water_voxel(packed));
+    }
+}

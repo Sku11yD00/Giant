@@ -47,9 +47,12 @@ struct FrameConstants {
     u32 wind_table;       // read descriptor of per-material (sway, flutter), the default last
     u32 wind_table_offset;
     u32 wind_table_count; // materials before the default
-    u32 wind_pad;
+    // The highest sea's level, camera-relative (k_no_sea: none): voxel
+    // cones meet it where they cross it going down (voxel_gi.slang).
+    float sea_level;
 };
 static_assert(sizeof(FrameConstants) == 512);
+inline constexpr float k_no_sea = -1.0e30f;
 
 // 64 bytes, kept on the GPU from frame to frame (InstanceStore). The
 // normal matrix is worked out in the shader (the cofactors of the model's

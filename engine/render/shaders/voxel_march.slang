@@ -20,6 +20,8 @@ static const uint k_max_steps = 1024;
 static const uint k_max_levels = 16;
 
 // Where the voxel world is, for one shader.
+static const uint k_no_water = 2u; // VoxelWorld::stand_ins: water voxels let through
+
 struct VoxelWorld {
     uint pool;            // read descriptor of the bricks
     uint table;           // u32 per slot, level after level: brick index, k_no_brick or k_unbuilt
@@ -27,7 +29,8 @@ struct VoxelWorld {
     uint levels_offset;
     uint level_count;
     uint bricks_per_axis;
-    uint stand_ins;       // 1: only voxels with the stand-in bit (the far field), 0: every voxel
+    uint stand_ins;       // bit 0: only voxels with the stand-in bit (the far field), else every voxel;
+                          // bit 1 (k_no_water): reflections skip water voxels (the water's own)
     uint lamps;           // write descriptor of the lamp words beside the light pool (voxel_gi.slang)
     uint lamps_on;        // 0: no lamp light in the voxel world
 };
@@ -86,7 +89,13 @@ float3 unpack_color(uint v) {
 
 float sign_not_zero(float v) { return v < 0.0 ? -1.0 : 1.0; }
 
+// Water's surface (voxel::pack_water_voxel): both normal bytes 0, facing up.
+bool water_voxel(uint v) { return (v >> 16) == 0u; }
+
 float3 unpack_normal(uint v) {
+    if (water_voxel(v)) {
+        return float3(0.0, 1.0, 0.0);
+    }
     const float u = float((v >> 16) & 255u) / 255.0 * 2.0 - 1.0;
     const float w = float((v >> 24) & 255u) / 255.0 * 2.0 - 1.0;
     float3 n = float3(u, w, 1.0 - abs(u) - abs(w));
@@ -142,7 +151,7 @@ bool march_voxels_sized(VoxelWorld w, float3 origin, float3 dir, uint first_leve
     if (level_count == 0u || n <= 0) {
         return false;
     }
-    const bool stand_ins = w.stand_ins != 0u;
+    const bool stand_ins = (w.stand_ins & 1u) != 0u;
 
     float t = t_start;
     // A ray leaves each window (a box) once for good, so once past a

@@ -72,8 +72,11 @@ u32 pack_voxel(const Vec3& color, const Vec3& normal) {
     }
     const u32 nu = to_bits(u * 0.5f + 0.5f, 255.0f);
     const u32 nv = to_bits(v * 0.5f + 0.5f, 255.0f);
-    return rgb | nu << 16 | nv << 24;
+    // (0, 0) is water's: the same -Z every way round, as 255, 255.
+    return nu == 0 && nv == 0 ? rgb | 255u << 16 | 255u << 24 : rgb | nu << 16 | nv << 24;
 }
+
+u32 pack_water_voxel(const Vec3& color) { return pack_voxel(color, {0.0f, 1.0f, 0.0f}) & 0xFFFFu; }
 
 Vec3 unpack_color(u32 voxel) {
     const float r = static_cast<float>(voxel >> 11 & 31u) / 31.0f;
@@ -113,6 +116,9 @@ Vec3 unpack_light(u32 light) {
 }
 
 Vec3 unpack_normal(u32 voxel) {
+    if (water_voxel(voxel)) {
+        return {0.0f, 1.0f, 0.0f};
+    }
     const float u = static_cast<float>(voxel >> 16 & 255u) / 255.0f * 2.0f - 1.0f;
     const float v = static_cast<float>(voxel >> 24 & 255u) / 255.0f * 2.0f - 1.0f;
     Vec3 n{u, v, 1.0f - std::fabs(u) - std::fabs(v)};
@@ -205,11 +211,13 @@ void BrickBuilder::add(u32 index, const Vec3& color, const Vec3& normal, float c
         sum.touched = true;
         m_list[m_touched++] = static_cast<u16>(index);
     }
-    Part& part = stand_in ? sum.stand : sum.own;
+    Part& part = m_water ? sum.water : stand_in ? sum.stand : sum.own;
     part.color += color * coverage;
     part.normal += normal * coverage;
     part.weight += coverage;
-    if (coverage >= 1.0f) {
+    if (m_water) {
+        part.cover += cover; // its share of the voxel's plan, whole triangles too
+    } else if (coverage >= 1.0f) {
         part.solid = true;
     } else {
         part.cover += cover;
@@ -280,8 +288,24 @@ u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, cons
         cover = coverage * share / (s * s);
     }
     for (u32 k = 0; k < hits; ++k) {
+        if (m_water) {
+            // Water: how much of this voxel it covers (its area in it over a face).
+            const u32 i = hit[k];
+            const Vec3 corner{static_cast<float>(i % k_brick_edge) * s,
+                              static_cast<float>((i / k_brick_edge) % k_brick_edge) * s,
+                              static_cast<float>(i / (k_brick_edge * k_brick_edge)) * s};
+            const float area = area_inside(a - corner, b - corner, c - corner, s);
+            cover = std::isfinite(area) ? std::min(area / (s * s), 1.41421356f) : 1.0f;
+        }
         add(hit[k], color, normal, coverage, cover, stand_in);
     }
+    return tested;
+}
+
+u32 BrickBuilder::add_water_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color) {
+    m_water = true;
+    const u32 tested = add_triangle(a, b, c, color);
+    m_water = false;
     return tested;
 }
 
@@ -298,6 +322,8 @@ Brick BrickBuilder::build() const {
         // then falls back to +Y.
         if (fills(sum.stand, i)) {
             brick.set(i, pack_voxel(sum.stand.color / sum.stand.weight, sum.stand.normal), true);
+        } else if (sum.water.weight > 0.0f && (sum.water.cover >= k_water_share || (sum.water.cover > 1e-3f && !fills(sum.own, i)))) {
+            brick.set(i, pack_water_voxel(sum.water.color / sum.water.weight));
         } else if (fills(sum.own, i)) {
             brick.set(i, pack_voxel(sum.own.color / sum.own.weight, sum.own.normal));
         }

@@ -398,3 +398,62 @@ GIANT_TEST("voxel: far and NaN positions do not overflow brick coordinates") {
     GIANT_CHECK(clip.contains(0, clip.brick_at(0, {1e300, 0, 0})));
     GIANT_CHECK(clip.slot(0, clip.brick_at(0, {1e300, 0, 0})) < clip.slots_per_level());
 }
+
+GIANT_TEST("voxel: water voxels have their own normal code, facing up; no other normal makes it") {
+    const u32 w = pack_water_voxel({0.02f, 0.05f, 0.06f});
+    GIANT_CHECK(water_voxel(w) && unpack_normal(w) == (Vec3{0.0f, 1.0f, 0.0f}));
+    GIANT_CHECK(std::fabs(unpack_color(w).z - 0.06f) < 0.01f);
+    // Every direction, near -Z most of all (where the code lies), packs as something else.
+    for (int i = 0; i < 2000; ++i) {
+        const float a = static_cast<float>(i) * 0.731f;
+        const float b = static_cast<float>(i) * 0.377f;
+        const Vec3 n{std::cos(a) * std::sin(b) * 1e-3f, std::sin(a) * std::sin(b) * 1e-3f, i % 2 == 0 ? -1.0f : std::cos(b)};
+        GIANT_CHECK(!water_voxel(pack_voxel({0.5f, 0.5f, 0.5f}, n)));
+    }
+    GIANT_CHECK(!water_voxel(pack_voxel({1.0f, 0.0f, 0.0f}, {-1e-9f, -1e-9f, -1.0f})));
+    GIANT_CHECK(unpack_normal(pack_voxel({1.0f, 0.0f, 0.0f}, {-1e-9f, -1e-9f, -1.0f})).z < -0.99f);
+}
+
+GIANT_TEST("voxel: water's surface wins over the bed at the shore, a stand-in over the water") {
+    BrickBuilder builder;
+    builder.reset(1.0f);
+    // A sloping bed through the brick, water level at 4 m, a stand-in at one corner.
+    builder.add_triangle({0.0f, 2.0f, 0.0f}, {0.0f, 6.0f, 8.0f}, {8.0f, 2.0f, 0.0f}, {0.6f, 0.5f, 0.4f});
+    builder.add_triangle({8.0f, 2.0f, 0.0f}, {0.0f, 6.0f, 8.0f}, {8.0f, 6.0f, 8.0f}, {0.6f, 0.5f, 0.4f});
+    builder.add_water_triangle({0.0f, 4.2f, 0.0f}, {8.0f, 4.2f, 0.0f}, {0.0f, 4.2f, 8.0f}, {0.02f, 0.05f, 0.06f});
+    builder.add_water_triangle({8.0f, 4.2f, 0.0f}, {8.0f, 4.2f, 8.0f}, {0.0f, 4.2f, 8.0f}, {0.02f, 0.05f, 0.06f});
+    builder.add_triangle({7.1f, 4.1f, 7.1f}, {7.9f, 4.1f, 7.1f}, {7.1f, 4.9f, 7.9f}, {0.1f, 0.5f, 0.1f}, true);
+    const Brick brick = builder.build();
+    u32 water = 0;
+    for (u32 x = 0; x < 8; ++x) {
+        for (u32 z = 0; z < 8; ++z) {
+            const u32 i = voxel_index(x, 4, z);
+            GIANT_CHECK(brick.occupied(i));
+            water += water_voxel(brick.voxels[i]) ? 1u : 0u;
+        }
+    }
+    // Every voxel of the level layer water but the stand-in's.
+    GIANT_CHECK(water == 63 && brick.stands_in(voxel_index(7, 4, 7)) && !water_voxel(brick.voxels[voxel_index(7, 4, 7)]));
+    // The bed elsewhere stays the bed.
+    GIANT_CHECK(brick.occupied(voxel_index(3, 2, 0)) && !water_voxel(brick.voxels[voxel_index(3, 2, 0)]));
+}
+
+GIANT_TEST("voxel: a narrow river in a coarse voxel gives way to the valley, water alone stays") {
+    BrickBuilder builder;
+    builder.reset(16.0f);
+    // A valley floor at 8 m across the brick, a river 4 m wide along z at
+    // 8.5 m in the first column of voxels, and a pond alone higher up.
+    builder.add_triangle({0.0f, 8.0f, 0.0f}, {0.0f, 8.0f, 128.0f}, {128.0f, 8.0f, 0.0f}, {0.4f, 0.4f, 0.3f});
+    builder.add_triangle({128.0f, 8.0f, 0.0f}, {0.0f, 8.0f, 128.0f}, {128.0f, 8.0f, 128.0f}, {0.4f, 0.4f, 0.3f});
+    builder.add_water_triangle({6.0f, 8.5f, 0.0f}, {10.0f, 8.5f, 0.0f}, {6.0f, 8.5f, 128.0f}, {0.0f, 0.1f, 0.1f});
+    builder.add_water_triangle({10.0f, 8.5f, 0.0f}, {10.0f, 8.5f, 128.0f}, {6.0f, 8.5f, 128.0f}, {0.0f, 0.1f, 0.1f});
+    // Wide water over the valley's other side (it covers the voxel): water.
+    builder.add_water_triangle({64.0f, 9.0f, 0.0f}, {128.0f, 9.0f, 0.0f}, {64.0f, 9.0f, 128.0f}, {0.0f, 0.1f, 0.1f});
+    builder.add_water_triangle({128.0f, 9.0f, 0.0f}, {128.0f, 9.0f, 128.0f}, {64.0f, 9.0f, 128.0f}, {0.0f, 0.1f, 0.1f});
+    // A sliver of water with nothing else in its voxels, up high: water.
+    builder.add_water_triangle({0.0f, 100.0f, 0.0f}, {2.0f, 100.0f, 0.0f}, {0.0f, 100.0f, 2.0f}, {0.0f, 0.1f, 0.1f});
+    const Brick brick = builder.build();
+    GIANT_CHECK(brick.occupied(voxel_index(0, 0, 3)) && !water_voxel(brick.voxels[voxel_index(0, 0, 3)]));
+    GIANT_CHECK(brick.occupied(voxel_index(6, 0, 3)) && water_voxel(brick.voxels[voxel_index(6, 0, 3)]));
+    GIANT_CHECK(brick.occupied(voxel_index(0, 6, 0)) && water_voxel(brick.voxels[voxel_index(0, 6, 0)]));
+}

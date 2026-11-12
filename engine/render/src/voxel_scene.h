@@ -45,6 +45,7 @@
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace giant::render {
@@ -109,6 +110,20 @@ public:
     // A mesh was removed (its id may come back as another mesh): its cached
     // cuts go, and instances that used it are looked at again.
     void forget_mesh(MeshId mesh);
+    // Water's surfaces (water plan W5b): lakes' and rivers' triangles as
+    // FrameInput gives them (a triangle riding the swell, or naming a vertex
+    // not there, left out), a body to each look, voxelized as water
+    // (voxel::pack_water_voxel, the look's colour) over the bed. Compared
+    // each call (by `version` when not 0, else a hash of the whole; then a
+    // hash of each body): only the bodies
+    // that changed are built again, the bricks under their old pieces and
+    // their new ones (pieces: the triangles in each k_water_piece square,
+    // so a brick is marked only where water is). Nothing passed: no water.
+    // The seas are not voxels (the shaders meet their level where a ray
+    // crosses it).
+    void set_water(std::span<const WaterVertex> vertices, std::span<const u32> indices,
+                   std::span<const WaterLook> looks, u64 version = 0);
+    u32 water_bodies() const { return static_cast<u32>(m_water.size()); }
     // A frame without update() (the voxel world switched off): this
     // frame's stats are zero, the bricks stay.
     void idle();
@@ -211,6 +226,7 @@ private:
     struct Region {
         std::vector<Box> old;
         std::vector<u32> changed;
+        std::vector<Box> fresh; // every brick under them (water come or changed)
     };
     struct Job {
         voxel::BrickBox box;
@@ -320,6 +336,26 @@ private:
     std::vector<u8> m_material_changed;         // per material row: changed this update (scratch)
     // The regions waiting (m_changed: how many hold each changed instance).
     void queue_old(const Box& box);
+    void queue_fresh(const Box& box);
+    struct WaterPiece {
+        Box box;                  // where its triangles are within its square
+        std::vector<u32> triangles; // into the body's (a triangle in each square it crosses)
+    };
+    struct WaterBody {
+        Box box;
+        Vec3 color{};
+        std::vector<DVec3> corners; // three a triangle, world
+        std::vector<WaterPiece> pieces;
+        u64 hash = 0; // its corners and colour
+        // Per triangle: the gather that last took it (each once a brick).
+        mutable std::vector<u32> stamps;
+    };
+    // Shared with a build in flight (it keeps the bodies it gathered from).
+    std::vector<std::shared_ptr<const WaterBody>> m_water;
+    u64 m_water_hash = 0;
+    u64 m_water_version = 0;
+    u32 m_water_stamp = 0;
+    bool water_over(const Box& box) const; // any water piece over it
     void queue_changed(u32 index);
     Region& region_for(const Box& box);
     std::unordered_map<u64, Region> m_regions;
@@ -363,6 +399,13 @@ private:
         std::vector<u32> found; // instances over it when started
         u32 next = 0;
         bool again = false;     // something over it changed meanwhile
+        // Water over it, gathered once the instances are done: the bodies
+        // as they were then (a change meanwhile sets `again`), (body,
+        // triangle) pairs, and the next to add.
+        bool water_gathered = false;
+        std::vector<std::shared_ptr<const WaterBody>> water_bodies;
+        std::vector<std::pair<u32, u32>> water;
+        usize water_next = 0;
     };
     Building m_building;
     voxel::BrickBuilder m_builder;

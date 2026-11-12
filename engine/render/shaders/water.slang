@@ -714,7 +714,7 @@ float4 ps_main(WaterVaryings i) : SV_Target {
         w.levels_offset = e.voxel_levels_offset;
         w.level_count = e.voxel_level_count;
         w.bricks_per_axis = e.voxel_bricks_per_axis;
-        w.stand_ins = 0u; // everything reflects
+        w.stand_ins = k_no_water; // everything reflects but the water's own voxels (a river's upstream)
         w.lamps = e.gi_lamps;
         w.lamps_on = e.gi_lamps_on;
         const float4 cone = trace_reflection(w, write_buffer(e.gi_light), f, p, float3(0.0, 1.0, 0.0), r_up, k_water_cone);
