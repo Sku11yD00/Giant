@@ -488,6 +488,7 @@ void PhysicsState::update(world::Scene& scene, const world::SceneChanges& change
     m_bodies.sync(scene, changed.ids, changed.all);
     m_forest.sync(m_camera);
     if (!m_on) return;
+    sync_water(scene);
     m_physics.step(seconds);
     m_bodies.update_poses();
     m_forest.after_step();
@@ -545,6 +546,7 @@ void PhysicsState::flush(world::Scene& scene) {
     const world::SceneChanges& untaken = scene.untaken_changes();
     m_bodies.flush(scene, untaken.ids, untaken.all);
     m_forest.flush(m_camera);
+    sync_water(scene);
 }
 
 void PhysicsState::catch_up(world::Scene& scene) {
@@ -556,6 +558,22 @@ void PhysicsState::catch_up(world::Scene& scene) {
     }
     const world::SceneChanges& untaken = scene.untaken_changes();
     m_bodies.sync(scene, untaken.ids, untaken.all);
+    sync_water(scene);
+}
+
+void PhysicsState::sync_water(const world::Scene& scene) {
+    // The lakes, rivers and sea, while simulating (the physics keeps a
+    // copy): compared rather than tracked, as their edits come from many
+    // places (commands, undo, the panel, a world opened). A few bodies of
+    // ordinary size compare in microseconds; at the limits (256 bodies of
+    // 4096 points) it would be about a millisecond a call.
+    // Only what the physics uses: a new colour wakes nothing.
+    if (!m_on) return;
+    const auto same = [](const world::Water& a, const world::Water& b) {
+        return a.kind == b.kind && a.visible == b.visible && a.level == b.level && a.flow == b.flow &&
+               a.outline == b.outline && a.path == b.path;
+    };
+    if (!std::ranges::equal(scene.water, m_physics.water(), same)) m_physics.set_water(scene.water);
 }
 
 u32 PhysicsState::run_steps(u32 steps) {

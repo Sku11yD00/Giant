@@ -33,6 +33,10 @@
 #include <variant>
 #include <vector>
 
+namespace giant::world {
+struct Water;
+}
+
 namespace giant::sim {
 
 // Fixed: never moves (the ground, buildings standing). Kinematic: moved by
@@ -164,6 +168,11 @@ struct CharacterDesc {
     float mass = 80.0f;              // kilograms: how hard what it stands on is pressed
     float strength = 500.0f;         // newtons it pushes dynamic bodies with
     float climb_speed = 2.0f;        // metres a second up, down or across a wall
+    // In water (set_water) this deep over its feet (at most three quarters
+    // of its height) it swims, head and shoulders out at rest, until 0.3 m
+    // shallower; shallower it wades, slowed the deeper it is.
+    float swim_depth = 1.3f;
+    float swim_speed = 1.6f; // metres a second, any way, through the water
     DVec3 position{};
     u64 user = 0; // handed back by queries that hit it
 };
@@ -174,9 +183,12 @@ constexpr CharacterId k_no_character = 0;
 
 // What the character is told to do, held until told otherwise.
 struct CharacterInput {
-    // Metres a second over the ground (y left out; at most 100): reached at
+    // Metres a second over the ground (y left out; each at most 100): reached at
     // once on the ground (within `acceleration`), slowly in the air (there
-    // over the world, not over what it jumped off).
+    // over the world, not over what it jumped off). Swimming, through the
+    // water (carried by a river's flow) at most swim_speed, and y is up
+    // (to the surface, no higher) or down (diving); with none it floats
+    // up to the surface.
     Vec3 velocity{};
     float acceleration = 60.0f;     // metres a second squared, on the ground
     float air_acceleration = 6.0f;  // and in the air
@@ -204,6 +216,8 @@ struct CharacterState {
     BodyId wall = k_no_body;
     Vec3 wall_normal{};
     BodyId carrier = k_no_body; // carried by this body (carry_character)
+    bool swimming = false;
+    float water_depth = 0.0f; // of the water over its feet (0: none)
 };
 
 struct PreparedShapeData;
@@ -325,6 +339,18 @@ public:
     usize characters() const;
     // Whether the body stands for a character (character_body of one).
     bool is_character_body(BodyId id) const;
+
+    // The lakes, rivers and sea (world/water.h), copied. In each fixed
+    // step a dynamic body in water is buoyed up by the water it displaces
+    // (at 1000 kg per cubic metre: lighter than that it floats, heavier it
+    // sinks; a body of the default mass hangs where it is), slowed by it,
+    // and carried along by a river's flow; characters wade and swim
+    // (CharacterDesc). Water does not reach under something fixed between
+    // a body all under it and the surface (a tunnel under a lake). The
+    // bodies where it was and where it is are woken. The surface is flat
+    // (waves come later).
+    void set_water(std::span<const world::Water> water);
+    std::span<const world::Water> water() const;
 
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance) const;
     // Only bodies `accept` takes (called with each candidate's id and user

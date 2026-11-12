@@ -216,8 +216,11 @@ Json player_json(const EditorState& state) {
     out["input"] = {{"forward", play.input().forward},
                     {"right", play.input().right},
                     {"sprint", play.input().sprint},
-                    {"climb", play.input().climb}};
+                    {"climb", play.input().climb},
+                    {"up", play.input().up}};
     out["waiting_for_ground"] = play.waiting_for_ground();
+    out["swimming"] = s->swimming;
+    out["water_depth"] = s->water_depth; // over its feet
     return out;
 }
 
@@ -761,7 +764,9 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "`sprint` (Shift: 8 m/s, else 4), `climb` (default true: walked into a wall too steep to walk it "
          "climbs, forward up, back down, right/left along it, at 2 m/s, and pulls itself up onto the top; "
          "false lets go), `jump` true jumps once (as soon as it is on the ground; on a wall it pushes off), "
-         "`yaw` and "
+         "`up` from -1 to 1 swimming (Space up to the surface, C down: in water swim_depth 1.3 m deep over its "
+         "feet it swims at 1.6 m/s, carried by a river; shallower it wades, slower the deeper; let be it floats "
+         "up), `yaw` and "
          "`pitch` where it looks (degrees, as the camera's: yaw 0 looks down -z, 90 down -x). Leave out what "
          "stays. Time moves with the frames, or with step_player. Returns get_player's report.",
          Json{{"type", "object"},
@@ -771,6 +776,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
                 {"right", {{"type", "number"}, {"minimum", -1}, {"maximum", 1}}},
                 {"sprint", {{"type", "boolean"}}},
                 {"climb", {{"type", "boolean"}}},
+                {"up", {{"type", "number"}, {"minimum", -1}, {"maximum", 1}}},
                 {"jump", {{"type", "boolean"}}},
                 {"yaw", {{"type", "number"}, {"minimum", -720}, {"maximum", 720}}},
                 {"pitch", {{"type", "number"}, {"minimum", -89}, {"maximum", 89}}}}}},
@@ -783,6 +789,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              in.right = args.value("right", in.right);
              in.sprint = args.value("sprint", in.sprint);
              in.climb = args.value("climb", in.climb);
+             in.up = args.value("up", in.up);
              state.play->set_input(in);
              state.play->look(args.value("yaw", state.play->yaw()), args.value("pitch", state.play->pitch()));
              if (args.value("jump", false)) state.play->jump();
@@ -863,8 +870,8 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "0 the ground, null nothing), `climbing` (on a wall: `wall` its entity, 0 something else), "
          "`mantling` (pulling itself up onto a ledge), `carried_by` (carry_player: the entity, 0 a body that "
          "is no entity's (or one just removed), null none), "
-         "`yaw`, `pitch`, its `input`, and `waiting_for_ground` (held still while the ground under it is "
-         "still being made).",
+         "`yaw`, `pitch`, its `input`, `waiting_for_ground` (held still while the ground under it is "
+         "still being made), `swimming` and `water_depth` (of the water over its feet, 0 none).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
          [&state](const Json&, CommandContext&) {

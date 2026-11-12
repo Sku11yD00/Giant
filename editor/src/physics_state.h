@@ -207,6 +207,7 @@ public:
 private:
     // A new scene: the forest's trunks go before the scene's bodies clear the world.
     void notice_scene(const world::Scene& scene);
+    void sync_water(const world::Scene& scene);
     // The trees of a cell's placement, in point order.
     sim::Ballistics::Target target_of(const sim::RayHit& hit) const;
     // Hits described (what they met), and taken when `apply` (pushes, wear).

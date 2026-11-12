@@ -116,49 +116,65 @@ bool water_bounds(const Water& w, double& min_x, double& min_z, double& max_x, d
     return min_x <= max_x;
 }
 
+std::optional<WaterHere> water_part_at(const Water& w, usize segment, double x, double z, double& nearness) {
+    nearness = 0.0;
+    if (!w.visible) return std::nullopt;
+    if (w.kind == WaterKind::sea) return WaterHere{&w, w.level};
+    if (w.kind == WaterKind::lake) {
+        if (w.outline.size() >= 3 && inside(w.outline, x, z)) return WaterHere{&w, w.level};
+        return std::nullopt;
+    }
+    // A river's stretch: measured against its half width there (so a wide
+    // stretch beside a narrow one is found where it reaches).
+    if (segment + 1 >= w.path.size()) return std::nullopt;
+    const RiverPoint& a = w.path[segment];
+    const RiverPoint& b = w.path[segment + 1];
+    const double dx = b.x - a.x, dz = b.z - a.z;
+    const double len2 = dx * dx + dz * dz;
+    if (!(len2 > 0.0)) return std::nullopt;
+    const double t = std::clamp(((x - a.x) * dx + (z - a.z) * dz) / len2, 0.0, 1.0);
+    const double px = a.x + dx * t - x, pz = a.z + dz * t - z;
+    const double half = 0.5 * (a.width + (b.width - a.width) * t);
+    if (!(half > 0.0)) return std::nullopt; // (unchecked data: no width, no water)
+    const double d = std::sqrt(px * px + pz * pz) / half;
+    if (!(d <= 1.0)) return std::nullopt;
+    nearness = d;
+    const double len = std::sqrt(len2);
+    WaterHere here;
+    here.water = &w;
+    here.level = static_cast<float>(a.level + (b.level - a.level) * t);
+    here.flow_x = static_cast<float>(dx / len * w.flow);
+    here.flow_z = static_cast<float>(dz / len * w.flow);
+    here.width = static_cast<float>(2.0 * half);
+    return here;
+}
+
 std::optional<WaterHere> water_at(std::span<const Water> waters, double x, double z) {
     std::optional<WaterHere> best;
-    const auto offer = [&](const WaterHere& h) {
-        if (!best || h.level > best->level) best = h;
-    };
     for (const Water& w : waters) {
         if (!w.visible) continue;
+        double nearness = 0.0;
+        std::optional<WaterHere> here;
         if (w.kind == WaterKind::sea) {
-            offer({&w, w.level});
-            continue;
+            here = water_part_at(w, 0, x, z, nearness);
+        } else {
+            double x0, z0, x1, z1;
+            if (!water_bounds(w, x0, z0, x1, z1) || x < x0 || x > x1 || z < z0 || z > z1) continue;
+            if (w.kind == WaterKind::lake) {
+                here = water_part_at(w, 0, x, z, nearness);
+            } else {
+                // The nearest stretch whose half width reaches the point.
+                double nearest = std::numeric_limits<double>::infinity();
+                for (usize i = 0; i + 1 < w.path.size(); ++i) {
+                    const std::optional<WaterHere> h = water_part_at(w, i, x, z, nearness);
+                    if (h && nearness < nearest) {
+                        nearest = nearness;
+                        here = h;
+                    }
+                }
+            }
         }
-        double x0, z0, x1, z1;
-        if (!water_bounds(w, x0, z0, x1, z1) || x < x0 || x > x1 || z < z0 || z > z1) continue;
-        if (w.kind == WaterKind::lake) {
-            if (w.outline.size() >= 3 && inside(w.outline, x, z)) offer({&w, w.level});
-            continue;
-        }
-        // A river: the nearest stretch whose half width reaches the point
-        // (measured against that half width, so a wide stretch beside a
-        // narrow one is found where it reaches).
-        double nearest = std::numeric_limits<double>::infinity();
-        WaterHere here;
-        for (usize i = 1; i < w.path.size(); ++i) {
-            const RiverPoint& a = w.path[i - 1];
-            const RiverPoint& b = w.path[i];
-            const double dx = b.x - a.x, dz = b.z - a.z;
-            const double len2 = dx * dx + dz * dz;
-            if (!(len2 > 0.0)) continue;
-            const double t = std::clamp(((x - a.x) * dx + (z - a.z) * dz) / len2, 0.0, 1.0);
-            const double px = a.x + dx * t - x, pz = a.z + dz * t - z;
-            const double half = 0.5 * (a.width + (b.width - a.width) * t);
-            if (!(half > 0.0)) continue; // (unchecked data: no width, no water)
-            const double d = std::sqrt(px * px + pz * pz) / half;
-            if (!(d <= 1.0) || d >= nearest) continue;
-            nearest = d;
-            const double len = std::sqrt(len2);
-            here.water = &w;
-            here.level = static_cast<float>(a.level + (b.level - a.level) * t);
-            here.flow_x = static_cast<float>(dx / len * w.flow);
-            here.flow_z = static_cast<float>(dz / len * w.flow);
-            here.width = static_cast<float>(2.0 * half);
-        }
-        if (here.water != nullptr) offer(here);
+        if (here && (!best || here->level > best->level)) best = here;
     }
     return best;
 }

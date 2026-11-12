@@ -153,8 +153,10 @@ void register_water_commands(ai::CommandRegistry& registry, EditorState& state) 
          "Adds a body of water: a lake (`level` inside its `outline`), a river (a strip down its `path`, "
          "its width and level given at each point, flowing `flow` m/s from the first point on) or the sea "
          "(`level` everywhere; the shore is where the ground rises over it). Water never moves the ground: "
-         "carve its bed with sculpt_terrain. `color`, `absorption`, `turbidity` and `waves` set how it "
-         "looks. Saved with the scene or the world. Undoable.",
+         "carve its bed with sculpt_terrain. Simulating, dynamic entities lighter than the water they "
+         "displace (1000 kg a cubic metre) float, heavier ones sink, one of the default mass (made at "
+         "water's density) hangs, and a river carries them; the player wades, then swims. `color`, "
+         "`absorption`, `turbidity` and `waves` set how it looks. Saved with the scene or the world. Undoable.",
          Json{{"type", "object"}, {"additionalProperties", false}, {"required", {"name", "kind"}},
               {"properties", properties()}},
          false,

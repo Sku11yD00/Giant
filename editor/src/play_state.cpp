@@ -48,7 +48,7 @@ bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_gener
     m_physics.set_simulating(true);
     m_input = {};
     m_keys = {};
-    m_shift = m_space = m_stop = m_escape = m_from_keys = false;
+    m_shift = m_space = m_stop = m_escape = m_from_keys = m_up_from_keys = false;
     m_waiting = false;
     m_placing = placing_waits(scene, m_place_eye);
     m_placing_for = 0.0;
@@ -120,6 +120,13 @@ void PlayState::handle_input(const std::vector<InputEvent>& events, bool ui_has_
             case Key::space:
                 if (e.down && !e.repeat && !m_space) jump(); // a press, not the key repeating
                 m_space = e.down;
+                // Held: up, swimming (the rest of the input left as it was told).
+                m_keys[4] = e.down;
+                m_up_from_keys = true;
+                break;
+            case Key::c: // held: down, swimming
+                m_keys[5] = e.down;
+                m_up_from_keys = true;
                 break;
             case Key::escape:
                 if (e.down && escape_stops) m_stop = true; // even with a text field focused
@@ -144,14 +151,17 @@ void PlayState::handle_input(const std::vector<InputEvent>& events, bool ui_has_
         m_input.right = (m_keys[3] ? 1.0f : 0.0f) - (m_keys[2] ? 1.0f : 0.0f);
         m_input.sprint = m_shift;
     }
+    if (m_from_keys || m_up_from_keys) m_input.up = (m_keys[4] ? 1.0f : 0.0f) - (m_keys[5] ? 1.0f : 0.0f);
 }
 
 void PlayState::set_input(const PlayerInput& input) {
     m_input.forward = std::isfinite(input.forward) ? std::clamp(input.forward, -1.0f, 1.0f) : 0.0f;
     m_input.right = std::isfinite(input.right) ? std::clamp(input.right, -1.0f, 1.0f) : 0.0f;
     m_input.sprint = input.sprint;
+    m_input.up = std::isfinite(input.up) ? std::clamp(input.up, -1.0f, 1.0f) : 0.0f;
     m_input.climb = input.climb;
     m_from_keys = false; // until a key is pressed
+    m_up_from_keys = false;
 }
 
 void PlayState::jump() {
@@ -168,6 +178,7 @@ void PlayState::release_keys() {
     m_keys = {};
     m_shift = m_space = false;
     if (m_from_keys) m_input = {};
+    if (m_up_from_keys) m_input.up = 0.0f;
 }
 
 void PlayState::look(float yaw_degrees, float pitch_degrees) {
@@ -185,6 +196,7 @@ void PlayState::apply_input() {
     if (length > 1.0f) move = move * (1.0f / length); // diagonals no faster
     sim::CharacterInput in;
     in.velocity = move * (m_input.sprint ? m_settings.sprint_speed : m_settings.walk_speed);
+    in.velocity.y = m_input.up * m_settings.body.swim_speed; // (swimming: up or down)
     in.climb = m_input.climb;
     m_physics.world().set_character_input(m_player, in);
 }

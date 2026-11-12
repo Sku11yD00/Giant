@@ -1924,11 +1924,55 @@ sea's shore is where the ground rises over it). Water never moves the
 ground: the bed is carved with the terrain brushes. Where bodies overlap,
 the highest surface counts; a hidden body is not there at all.
 `water_at(x, z)` answers what is at a point (level, a river's flow and
-width), bounding-box first. Drawing it (the surface, refraction,
-reflections), floating and swimming come in the following parts
-(the water plan: W1b floating and swimming, W2 the surface pass after
-shading, W3 under the surface, W4 rivers and the sea, W5 the voxel world,
-weather and sound, W6 the water gate).
+width), bounding-box first.
+
+Floating and swimming (W1b): the editor's PhysicsState hands the scene's
+water to `PhysicsWorld::set_water` while simulating, whenever what the
+physics uses differs (kind, shown, level, flow, shore, path: compared, as
+its edits come from many places, microseconds for ordinary water; a new
+colour wakes nothing). The physics keeps a copy cut into parts (a lake's shore, the sea,
+each river stretch), each with the ground it covers and its highest
+surface, filed in a grid of 128 m squares (the sea and huge parts looked at
+everywhere): a body finds the few parts under it (each river's nearest
+stretch, then the highest surface, as `water_at`: past a waterfall the
+upper level is not there), and one over all water costs a compare. Before each fixed step every awake dynamic body whose
+bounds dip under the surface at its centre gets Jolt's buoyancy impulse:
+the water it displaces under a flat surface at 1000 kg a cubic metre (so a
+body lighter than that floats with that share under, a heavier one sinks,
+and one of the default mass, made at water's density, hangs where it is),
+quadratic drag, and a river's flow as the water's speed (logs drift down
+it). Bobbing settles: a share (3 a second when half under, less for a body
+heavier than water) of its speed against the water is taken off before
+the buoyancy; only what floats (or nearly) is drawn towards a river's
+flow, a sunk body being left to the drag (a block stays on the bed, a
+round boulder rolls a little in a fast river). Water does not reach a
+room: a body all under it with something fixed over it before the
+surface and something fixed under it, at most 6 m apart (a tunnel or a
+basement under a lake is dry; open water under a pontoon or an overhang
+is not). Setting water wakes the sleeping bodies where it was
+and where it is (lowered or removed, what floated falls).
+
+A character with `swim_depth` (1.3 m, at most three quarters of its
+height) of water over its feet swims, until 0.3 m shallower: no gravity,
+through the water at its input up to `swim_speed` (1.6 m/s) relative to a
+river's flow, `velocity.y` up (to where it rests, feet `swim_depth` under
+the surface, no higher) or down; with none it floats up at 0.6 m/s. Up and
+down change at 15 m/s^2 plus water's drag (0.5 v^2), so a fall into deep
+water stops within a few metres. At the surface (not diving), swimming
+into an edge out of reach of walking up (over its step height above its
+feet), up to 0.4 m over the surface and shallow enough there to stand, it
+pulls itself out, as onto a ledge climbed; a higher bank is climbed
+(climb input, the default) or not left by, and climbing down into water
+deep enough lets go. Shallower than swimming it wades, slowed from 0.3 m
+deep to half speed at `swim_depth`. The same room rule keeps a character
+in a tunnel under a lake dry. In play Space (held) is up and C down, given
+without taking over the rest of an input set by command. The surface is
+flat until waves (W2/W4) move it.
+
+Drawing it (the surface, refraction, reflections) comes in the
+following parts (the water plan: W2 the surface pass after shading, W3
+under the surface, W4 rivers and the sea, W5 the voxel world, weather and
+sound, W6 the water gate).
 
 ## Navigation
 
