@@ -2,7 +2,9 @@
 // triangles dropped, looks kept in range, the caps), the waves (the same
 // at a place whatever the camera, moving with time), the pass on the null
 // device, and on the software adapter: shallow water shows its bed, deep
-// water its own colour, and seen flat it mirrors the sky.
+// water its own colour, and seen flat it mirrors the sky. Under water (W3):
+// the camera's water dims the view where the near plane is under it,
+// the surface from below shows Snell's window, waves gather caustics.
 #include "giant/render/renderer.h"
 
 #include "giant_test.h"
@@ -429,6 +431,223 @@ GIANT_TEST("water render: d3d12 far water fades into the fog as the ground does"
     std::printf("    far water: unlike the clear ground by %d, fog changed it by %d, from the fogged ground by %d\n",
                 water_shows, fog_change, versus_ground);
     GIANT_CHECK(water_shows > 12 && fog_change > 12 && versus_ground <= 8);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("water render: under water where the near plane dips under the camera's water; looks packed in range") {
+    // Level: the lower half of the near plane is under a surface at the camera.
+    const Quat level{};
+    GIANT_CHECK(near_plane_under(level, 0.577f, 1.0f, 0.1f, 0.0));
+    GIANT_CHECK(!near_plane_under(level, 0.577f, 1.0f, 0.1f, -0.06)); // its lowest corner is 0.0577 m down
+    GIANT_CHECK(near_plane_under(level, 0.577f, 1.0f, 0.1f, -0.05));
+    // Looking straight down: all of it 0.1 m down; straight up: 0.1 m up.
+    const Quat down = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    const Quat up = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, 1.5707963f);
+    GIANT_CHECK(near_plane_under(down, 0.577f, 1.0f, 0.1f, -0.09) && !near_plane_under(down, 0.577f, 1.0f, 0.1f, -0.11));
+    GIANT_CHECK(near_plane_under(up, 0.577f, 1.0f, 0.1f, 0.11) && !near_plane_under(up, 0.577f, 1.0f, 0.1f, 0.09));
+    GIANT_CHECK(!near_plane_under(level, 0.577f, 1.0f, 0.1f, std::numeric_limits<double>::quiet_NaN()));
+    WaterLook l;
+    l.absorption = {-1.0f, 50.0f, std::nanf("")};
+    const gpu::WaterLook g = pack_water_look(l);
+    GIANT_CHECK(g.absorption[0] == 0.0f && g.absorption[1] == 10.0f && g.absorption[2] == WaterLook{}.absorption.z);
+}
+
+GIANT_TEST("water render: the camera's water dims the view with no surfaces drawn, only where the near plane is under (null device)") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    rhi::TextureDesc target_desc;
+    target_desc.width = 32;
+    target_desc.height = 16;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    FrameInput frame;
+    frame.view.position = {0.0, 5.0, 0.0};
+    const auto draw = [&] {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd != nullptr) {
+            renderer->render(*cmd, target, frame);
+            device->end_frame();
+        }
+        return renderer->last_stats();
+    };
+    const u32 without = draw().post_draws;
+    frame.underwater.on = true;
+    frame.underwater.level = 10.0;
+    RenderStats s = draw();
+    GIANT_CHECK(s.underwater && s.post_draws == without + 1 && s.water_triangles == 0);
+    // The surface well under the near plane: nothing.
+    frame.underwater.level = 4.0;
+    s = draw();
+    GIANT_CHECK(!s.underwater && s.post_draws == without);
+    // Off, a bad level, water off, a view not lit: nothing.
+    frame.underwater.level = std::numeric_limits<double>::infinity();
+    GIANT_CHECK(!draw().underwater);
+    frame.underwater.level = 10.0;
+    frame.underwater.on = false;
+    GIANT_CHECK(!draw().underwater);
+    frame.underwater.on = true;
+    frame.settings.water = false;
+    GIANT_CHECK(!draw().underwater && draw().post_draws == without);
+    frame.settings.water = true;
+    frame.settings.debug_view = DebugView::clusters;
+    GIANT_CHECK(!draw().underwater);
+    frame.settings.debug_view = DebugView::lit;
+    // With surfaces too: both passes.
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    square(v, idx, {0.0, 10.0, 0.0}, 50.0);
+    frame.water_vertices = v;
+    frame.water_indices = idx;
+    s = draw();
+    GIANT_CHECK(s.underwater && s.post_draws == without + 2 && s.water_triangles == 2);
+    GIANT_CHECK(!device->device_lost());
+    device->destroy(target);
+}
+
+GIANT_TEST("water render: d3d12 under water: far things hidden, near seen, split at the near plane, Snell's window, caustics") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A white floor at 0.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {2000.0f, 1.0f, 2000.0f};
+    instances[0].always_mesh = true;
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.background = {0.5f, 0.5f, 0.5f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {2.0f, 2.0f, 2.0f};
+    frame.lighting.sky_light = {0.4f, 0.4f, 0.4f};
+    frame.lighting.ground_light = {0.02f, 0.02f, 0.02f};
+    frame.wind.velocity = {6.0f, 0.0f, 2.0f};
+    frame.water_seconds = 7.0;
+    frame.underwater.level = 10.0;
+    frame.underwater.look.waves = 0.0f;
+    const auto draw = [&] {
+        for (int i = 0; i < 6; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto pixel = [](const std::vector<u8>& image, u32 x, u32 y, u32 c) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4 + c;
+        return i < image.size() ? static_cast<int>(image[i]) : -1000;
+    };
+    // Level, 5 m under: row 44 sees the floor about 22 m out, row 63 about 8 m.
+    frame.view.position = {0.0, 5.0, 0.0};
+    frame.view.orientation = Quat{};
+    const auto dry = draw();
+    frame.underwater.on = true;
+    const auto wet = draw();
+    GIANT_CHECK(renderer->last_stats().underwater);
+    // Straight down from a metre over the floor: seen through a metre of water.
+    frame.view.position = {0.0, 1.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    const auto near_wet = draw();
+    frame.underwater.on = false;
+    const auto near_dry = draw();
+    std::printf("    far floor red %d -> %d, green %d -> %d; near floor green %d -> %d\n", pixel(dry, 32, 44, 0),
+                pixel(wet, 32, 44, 0), pixel(dry, 32, 44, 1), pixel(wet, 32, 44, 1), pixel(near_dry, 32, 32, 1),
+                pixel(near_wet, 32, 32, 1));
+    // Far: red (absorbed first) all but gone, and dimmer than near.
+    GIANT_CHECK(pixel(wet, 32, 44, 0) < pixel(dry, 32, 44, 0) / 3);
+    GIANT_CHECK(pixel(wet, 32, 63, 1) > pixel(wet, 32, 44, 1));
+    // Near: still seen.
+    GIANT_CHECK(pixel(near_wet, 32, 32, 1) > pixel(near_dry, 32, 32, 1) / 2 && pixel(near_wet, 32, 32, 1) > 40);
+    // The camera at the surface, level: the sky above as it is, the floor under dimmed.
+    frame.underwater.on = true;
+    frame.view.position = {0.0, 10.0, 0.0};
+    frame.view.orientation = Quat{};
+    const auto split = draw();
+    frame.underwater.on = false;
+    const auto split_dry = draw();
+    int top_change = 0;
+    for (u32 c = 0; c < 3; ++c) top_change = std::max(top_change, std::abs(pixel(split, 32, 8, c) - pixel(split_dry, 32, 8, c)));
+    std::printf("    at the surface: top changed by %d, bottom red %d -> %d\n", top_change, pixel(split_dry, 32, 60, 0),
+                pixel(split, 32, 60, 0));
+    GIANT_CHECK(top_change <= 2 && pixel(split, 32, 60, 0) < pixel(split_dry, 32, 60, 0) / 2);
+    // Looking up at the surface from 5 m under, a wide view: the sky through
+    // the window overhead, the water mirrored past it (outside 48.75 degrees).
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    square(v, idx, {0.0, 10.0, 0.0}, 400.0);
+    std::vector<WaterLook> looks(1);
+    looks[0].waves = 0.0f;
+    frame.water_vertices = v;
+    frame.water_indices = idx;
+    frame.water_looks = looks;
+    frame.underwater.on = true;
+    frame.view.position = {0.0, 5.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, 1.5707963f);
+    frame.view.vertical_fov_degrees = 120.0f;
+    const auto up = draw();
+    GIANT_CHECK(renderer->last_stats().water_triangles == 2);
+    std::printf("    from below: overhead %d, past the window %d\n", pixel(up, 32, 32, 1), pixel(up, 32, 1, 1));
+    GIANT_CHECK(pixel(up, 32, 32, 1) > pixel(up, 32, 1, 1) + 40);
+    // Straight down at the floor 3 m under, 6 m of water over it: still
+    // water lights it evenly, waves gather the sun into caustics.
+    frame.water_vertices = {};
+    frame.water_indices = {};
+    frame.view.vertical_fov_degrees = 60.0f;
+    frame.view.position = {0.0, 3.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.underwater.level = 6.0;
+    const auto even = draw();
+    frame.underwater.look.waves = 2.0f;
+    const auto gathered = draw();
+    int even_low = 255, even_high = 0, low = 255, high = 0;
+    for (u32 y = 8; y < k_h - 8; ++y) {
+        for (u32 x = 8; x < k_w - 8; ++x) {
+            even_low = std::min(even_low, pixel(even, x, y, 1));
+            even_high = std::max(even_high, pixel(even, x, y, 1));
+            low = std::min(low, pixel(gathered, x, y, 1));
+            high = std::max(high, pixel(gathered, x, y, 1));
+        }
+    }
+    std::printf("    caustics: still %d to %d, waves %d to %d\n", even_low, even_high, low, high);
+    GIANT_CHECK(high - low > even_high - even_low + 30);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

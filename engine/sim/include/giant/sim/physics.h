@@ -346,11 +346,17 @@ public:
     // sinks; a body of the default mass hangs where it is), slowed by it,
     // and carried along by a river's flow; characters wade and swim
     // (CharacterDesc). Water does not reach under something fixed between
-    // a body all under it and the surface (a tunnel under a lake). The
+    // a body all under it and the surface with something fixed under it
+    // within 6 m, not the terrain's heightfield (a tunnel under a lake;
+    // under a pier over the bed is open water). The
     // bodies where it was and where it is are woken. The surface is flat
     // (waves come later).
     void set_water(std::span<const world::Water> water);
     std::span<const world::Water> water() const;
+    // Whether water whose surface is at `level` reaches `point` under it:
+    // not in a room under something fixed (a tunnel under a lake), as
+    // set_water keeps it out for bodies. (The camera under water.)
+    bool water_reaches(const DVec3& point, double level) const;
 
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance) const;
     // Only bodies `accept` takes (called with each candidate's id and user

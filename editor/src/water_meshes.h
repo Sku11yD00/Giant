@@ -27,6 +27,17 @@ namespace giant::editor {
 // top of the one before are dropped.
 std::vector<u32> clip_ears(std::span<const world::WaterPoint> points, bool& whole);
 
+// A body's look as the renderer takes it.
+render::WaterLook water_look(const world::Water& water);
+
+// The water the camera is in (render::FrameInput::underwater, water plan
+// W3): the body over the camera's place (x, z) where its surface wins
+// (world::water_at), whether the camera is under it or not (the renderer
+// splits the view where the near plane meets it); off where there is none,
+// or the camera is more than k_camera_water_margin over every surface.
+inline constexpr double k_camera_water_margin = 2.0;
+render::Underwater camera_water(std::span<const world::Water> water, const DVec3& camera);
+
 class WaterMeshes {
 public:
     // The sea's rings: from the camera out to this far (metres), then one

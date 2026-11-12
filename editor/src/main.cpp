@@ -465,6 +465,11 @@ int run(const Options& options) {
             input.water_vertices = water_meshes.vertices();
             input.water_indices = water_meshes.indices();
             input.water_looks = water_meshes.looks();
+            // The water the camera is in (not in a room under it).
+            input.underwater = editor::camera_water(state.scene.water, state.camera.position);
+            if (input.underwater.on && !physics.world().water_reaches(state.camera.position, input.underwater.level)) {
+                input.underwater.on = false;
+            }
         }
         state.water_broken_lakes = water_meshes.broken_lakes();
         if (!in_screenshot) water_seconds += render_seconds;

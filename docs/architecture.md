@@ -1948,8 +1948,9 @@ flow, a sunk body being left to the drag (a block stays on the bed, a
 round boulder rolls a little in a fast river). Water does not reach a
 room: a body all under it with something fixed over it before the
 surface and something fixed under it, at most 6 m apart (a tunnel or a
-basement under a lake is dry; open water under a pontoon or an overhang
-is not). Setting water wakes the sleeping bodies where it was
+basement under a lake is dry; open water under a pontoon, a pier or an
+overhang is not: the terrain's bed is no floor, though a fixed rock or
+wreck on the bed under a deck still reads as one). Setting water wakes the sleeping bodies where it was
 and where it is (lowered or removed, what floated falls).
 
 A character with `swim_depth` (1.3 m, at most three quarters of its
@@ -1979,7 +1980,8 @@ triangles, 256 looks): a triangle with a bad index or a vertex that is not
 a number is dropped (`RenderStats::water_dropped`), one past the caps left
 out (`water_overflow`), a look out of range takes the default. In the lit view
 only (not the light alone), after shading (and screen reflections) and before post, the pass
-(water.slang, timed "water", two post draws) copies the light into a
+(water.slang, timed "water", two post draws; one when only the camera's
+water is drawn, W3) copies the light into a
 texture of its own and draws the water's triangles over it, each pixel
 tested against the scene's depth (no depth target): the normal is a sum
 of 8 travelling waves made from the wind (`water_waves`: the longest
@@ -1991,8 +1993,7 @@ where the bent pixel shows something above the water), dimmed by
 Beer-Lambert over the distance the view travels in the water and
 replaced, as that grows, by the look's colour lit by the sky and the sun;
 the sky (its ambient light round the mirror direction) and the sun's
-glint (GGX) are mirrored by Fresnel's law (n 1.33). Seen from below it is
-left out (W3).
+glint (GGX) are mirrored by Fresnel's law (n 1.33). Seen from below: W3.
 
 Lit as the scene is (W2b): the pass reads shading's own extras (the same
 `gpu::ResolveExtras` upload, shading_extras.slang shared with
@@ -2035,9 +2036,47 @@ water is off or the view is not lit. The waves' clock runs with the
 frames (not in a screenshot's). `set_render_settings` `water` turns it
 off; `last_frame.water` counts triangles drawn, dropped and overflow.
 
-The rest comes in the following parts (the water plan: W3 under
-the surface, W4 rivers and the sea, W5 the voxel world, weather and sound,
-W6 the water gate).
+Under the surface (W3): FrameInput::underwater names the water the
+camera is over (the editor's camera_water: world::water_at at the camera,
+off in a room under it, PhysicsWorld::water_reaches as the physics keeps
+bodies dry there: something fixed overhead and a floor of its own within
+6 m, the terrain's bed no floor, so under a pier is open water; skipped
+while the camera is more than 2 m over every body's surface). Pixel by pixel, where the near plane is under its
+level, the copy pass (ps_copy) dims what is seen by the water between
+(Beer-Lambert, from the near plane to what is there, or to where the view
+comes up through the surface) and adds the water's own light: single
+scattering of its colour lit by the sun and the sky, the light dimmed by
+the water above each point, so the view darkens with depth and is
+lighter looking up; from above the deep water's own light is the same
+model along the view bent into it, so in the sun it does not jump at the
+surface (from above the sun on it is shadowed, from below not). So the screen splits where the near plane meets the
+surface when the camera bobs at it, and nothing extra is drawn when no
+part of the near plane is under (found on the CPU from its lowest corner:
+then the copy is a plain copy, as before). The surface seen from below
+lets the world above through Snell's window (the sky along the bent ray,
+or what the screen shows that way if it lies above the water), and past
+48.75 degrees mirrors the water under it (total internal reflection: its
+own light, or what the screen shows along the mirror, a pool's floor,
+through the water back), then the water between it and the camera. Caustics: the sun's ray to a
+point on the bed came through the still surface at a point found by
+refraction; the waves' curvature there spreads or focuses the light
+(one over the determinant of how the bed point moves with the surface
+point, the curvature taken three times for the finer ripples the eight
+waves stand for, at most five times as bright; a crest gathers like a lens), the pattern
+fading over 10 m of depth and with the waves too short for the pixel,
+laid over the sun's share of the light from above (none under lamps with
+the sun and the moon down) where the sun reaches (its shadows and the clouds'): from above on the bed seen through the surface, from below in
+the copy pass. Approximations: the light already in the image keeps the
+air shading put over it (a few metres of fog under water); the
+in-scattered light is unshadowed; caustics also brighten what faces
+away from the sun under water when shadows are off; no sun disc through
+the window, nor its radiance gain; the sky seen dimmed under water
+is exposed as drawn things are, a background's alpha set; what
+lies above the window is looked up on screen as if far. `last_frame.water.underwater`
+says when some of the view was under.
+
+The rest comes in the following parts (the water plan: W4 rivers and
+the sea, W5 the voxel world, weather and sound, W6 the water gate).
 
 ## Navigation
 

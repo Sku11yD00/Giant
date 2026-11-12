@@ -1082,7 +1082,7 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         }
         ImGui::Text("Lamp shadows: %u lamps, %u faces drawn, %u waiting, %u tiles", stats.local_shadows,
                     stats.local_shadow_drawn, stats.local_shadow_waiting, stats.local_shadow_tiles);
-        ImGui::Text("Water: %u triangles", stats.water_triangles);
+        ImGui::Text("Water: %u triangles%s", stats.water_triangles, stats.underwater ? " (camera under water)" : "");
         if (m_state.water_broken_lakes > 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Water: %u lakes not drawn (their shore crosses itself)",
                                m_state.water_broken_lakes);

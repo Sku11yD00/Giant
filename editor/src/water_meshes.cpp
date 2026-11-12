@@ -1,7 +1,10 @@
 #include "water_meshes.h"
 
+#include "giant/world/water.h"
+
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 namespace giant::editor {
@@ -59,15 +62,6 @@ bool crosses_itself(std::span<const world::WaterPoint> p, const world::WaterPoin
     return false;
 }
 
-render::WaterLook look_of(const world::Water& w) {
-    render::WaterLook l;
-    l.color = w.color;
-    l.absorption = w.absorption;
-    l.turbidity = w.turbidity;
-    l.waves = w.waves;
-    return l;
-}
-
 render::WaterVertex vertex(double x, double y, double z, float flow_x, float flow_z) {
     render::WaterVertex v;
     v.position = DVec3{x, y, z};
@@ -85,6 +79,36 @@ double order_level(const world::Water& w) {
 }
 
 } // namespace
+
+render::WaterLook water_look(const world::Water& w) {
+    render::WaterLook l;
+    l.color = w.color;
+    l.absorption = w.absorption;
+    l.turbidity = w.turbidity;
+    l.waves = w.waves;
+    return l;
+}
+
+render::Underwater camera_water(std::span<const world::Water> water, const DVec3& camera) {
+    render::Underwater u;
+    // Over every surface (with room for the near plane): none, and no search.
+    double highest = -std::numeric_limits<double>::infinity();
+    for (const world::Water& w : water) {
+        if (!w.visible) continue;
+        if (w.kind == world::WaterKind::river) {
+            for (const world::RiverPoint& p : w.path) highest = std::max(highest, static_cast<double>(p.level));
+        } else {
+            highest = std::max(highest, static_cast<double>(w.level));
+        }
+    }
+    if (!(camera.y < highest + k_camera_water_margin)) return u;
+    const std::optional<world::WaterHere> here = world::water_at(water, camera.x, camera.z);
+    if (!here || here->water == nullptr) return u;
+    u.on = true;
+    u.level = here->level;
+    u.look = water_look(*here->water);
+    return u;
+}
 
 std::vector<u32> clip_ears(std::span<const world::WaterPoint> given, bool& whole) {
     whole = false;
@@ -343,7 +367,7 @@ void WaterMeshes::assemble() {
         if (!w.visible || m_looks.size() >= render::k_max_water_looks) continue;
         if (m_bodies[i].broken) ++m_broken;
         look[i] = static_cast<u32>(m_looks.size());
-        m_looks.push_back(look_of(w));
+        m_looks.push_back(water_look(w));
         order.push_back(i);
     }
     std::stable_sort(order.begin(), order.end(),
