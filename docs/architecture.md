@@ -1992,10 +1992,27 @@ Beer-Lambert over the distance the view travels in the water and
 replaced, as that grows, by the look's colour lit by the sky and the sun;
 the sky (its ambient light round the mirror direction) and the sun's
 glint (GGX) are mirrored by Fresnel's law (n 1.33). Seen from below it is
-left out (W3). Not yet: sharp reflections, the moon and lamps on it, foam,
-fog over it (W2b), and the editor drawing its water (W2c).
+left out (W3).
 
-The rest comes in the following parts (the water plan: W2b/W2c, W3 under
+Lit as the scene is (W2b): the pass reads shading's own extras (the same
+`gpu::ResolveExtras` upload, shading_extras.slang shared with
+resolve.slang). The mirror is what the screen shows along it (screen
+reflections on: the ray screen_trace.slang shares with reflect.slang), else
+a cone through the lit voxel world (voxel reflections and GI on; skipped
+where the screen's is sure; both skipped under thick foam), else the sky's air along it (the flat
+hemisphere without the sky). The sun's glint, the moon's at night (it is
+the light then), is shadowed by the sun's pages and the clouds; the lamps
+in the pixel's cluster add highlights widened by their size, shadowed as
+shading's are. On wavy water foam shows where the bed comes near (from
+about 0.5 m straight down on the highest crests, nearly everywhere at
+the very edge), lit by sun, sky and lamps (unshadowed). Then the air,
+as shading puts it over the scene (aerial perspective, fog, clouds, what
+falls, dust), over the water's own light; what is seen through it already
+holds its own air, which is taken off before the water dims it, and the
+screen's reflection is added over it as reflect.slang's is. Not yet: the
+editor drawing its water (W2c).
+
+The rest comes in the following parts (the water plan: W2c, W3 under
 the surface, W4 rivers and the sea, W5 the voxel world, weather and sound,
 W6 the water gate).
 

@@ -96,6 +96,9 @@ giant_module_tests(render
 if(GIANT_BUILD_TESTS)
   # The streaming tests check the module's own streamer directly.
   target_include_directories(giant_render_tests PRIVATE src)
+  # The software adapter's pixel tests take ~80 s on a CI Windows runner
+  # and half again on a slow one, past the default 120 s.
+  set_tests_properties(render PROPERTIES TIMEOUT 300)
 endif()
 if(GIANT_BUILD_TESTS AND GIANT_REQUIRE_VALIDATION)
   target_compile_definitions(giant_render_tests PRIVATE GIANT_REQUIRE_VALIDATION=1)

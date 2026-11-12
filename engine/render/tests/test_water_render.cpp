@@ -199,16 +199,30 @@ GIANT_TEST("water render: d3d12 shallow water shows its bed, deep water its own 
     target_desc.usage = rhi::TextureUsage::render_target;
     const rhi::TextureHandle target = device->create_texture(target_desc);
     // A white floor; the water over it 0.3 m deep (x < 500) or 30 m deep (x >= 500, the floor lower).
-    std::vector<Instance> instances(2);
+    std::vector<Instance> instances(4);
     instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
     instances[0].position = DVec3{400.0, 0.0, 0.0};
     instances[0].scale = {100.0f, 1.0f, 100.0f};
     instances[1].mesh = renderer->builtin(BuiltinMesh::plane);
     instances[1].position = DVec3{600.0, -29.7, 0.0};
     instances[1].scale = {100.0f, 1.0f, 100.0f};
-    std::vector<Material> materials(1);
+    // A glowing post standing in the deep water ahead and to the left of the
+    // flat view (reflected), and a dark bed 0.15 m under the surface (foam).
+    instances[2].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[2].position = DVec3{588.0, 3.0, -40.0};
+    instances[2].scale = {4.0f, 6.0f, 1.0f};
+    instances[2].material = 1;
+    instances[3].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[3].position = DVec3{200.0, 0.15, 0.0};
+    instances[3].scale = {100.0f, 1.0f, 100.0f};
+    instances[3].material = 2;
+    std::vector<Material> materials(3);
     materials[0].base_color = {0.8f, 0.8f, 0.8f};
     materials[0].roughness = 0.9f;
+    materials[1].base_color = {0.0f, 0.0f, 0.0f};
+    materials[1].emissive = {4.0f, 4.0f, 4.0f};
+    materials[2].base_color = {0.03f, 0.03f, 0.03f};
+    materials[2].roughness = 0.9f;
     std::vector<WaterVertex> v;
     std::vector<u32> idx;
     square(v, idx, {500.0, 0.3, 0.0}, 400.0);
@@ -265,6 +279,12 @@ GIANT_TEST("water render: d3d12 shallow water shows its bed, deep water its own 
     frame.view.position = {600.0, 2.0, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -0.12f);
     const std::vector<u8> flat = draw();
+    // The same with screen reflections: the post shows in the water under it.
+    frame.settings.reflections = true; // (screen reflections need both; GI off: no voxel cones)
+    frame.settings.screen_space_reflections = true;
+    const std::vector<u8> mirrored = draw();
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
     // A low sun ahead, still water then waves: the waves move the view,
     // which stays lit, and catch the sun.
     frame.wind.velocity = {6.0f, 0.0f, 2.0f};
@@ -290,6 +310,125 @@ GIANT_TEST("water render: d3d12 shallow water shows its bed, deep water its own 
     // Near the horizon Fresnel mirrors much of the sky.
     GIANT_CHECK(green(flat, 32, 34) > 2 * green(deep, 32, 32));
     GIANT_CHECK(differing > 64 && dark == 0 && brightest > 200);
+    // The post's reflection (rows 28 to 35 under it, column 16): only with
+    // screen reflections, and not on the other side.
+    int post_with = 0, post_without = 0, other_side = 0;
+    for (u32 y = 29; y <= 34; ++y) {
+        post_with = std::max(post_with, green(mirrored, 16, y));
+        post_without = std::max(post_without, green(flat, 16, y));
+        other_side = std::max(other_side, green(mirrored, 48, y));
+    }
+    std::printf("    post reflected %d, without screen reflections %d, other side %d\n", post_with, post_without,
+                other_side);
+    GIANT_CHECK(post_with > post_without + 40 && post_with > other_side + 40);
+    // Straight down over the dark bed 0.15 m under: still water shows it
+    // dark; with waves, foam (bright patches) breaks out.
+    looks[0].waves = 0.0f;
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.view.position = {200.0, 10.0, 0.0};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.6f, 0.8f, 0.0f}); // its glint off the screen
+    const std::vector<u8> bare = draw();
+    looks[0].waves = 1.0f;
+    const std::vector<u8> foamy = draw();
+    usize bright = 0;
+    for (u32 y = 0; y < k_h; ++y) {
+        for (u32 x = 0; x < k_w; ++x) {
+            bright += green(foamy, x, y) > 2 * green(bare, x, y) + 20 ? usize{1} : usize{0};
+        }
+    }
+    std::printf("    bed %d, foam pixels %zu\n", green(bare, 32, 32), bright);
+    GIANT_CHECK(bright > 64);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("water render: d3d12 far water fades into the fog as the ground does") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 48;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A grey ground; the water (when given) 10 km across, 0.5 m over it.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {40000.0f, 1.0f, 40000.0f};
+    instances[0].always_mesh = true;
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[0].roughness = 0.9f;
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    square(v, idx, {0.0, 0.5, 0.0}, 5000.0);
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.physical_sky = false;
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.shadows = false;
+    frame.settings.antialiasing = false;
+    frame.view.position = {0.0, 2.0, 0.0};
+    frame.view.orientation = Quat{}; // level: the horizon on row 24
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.2f, 0.7f, -0.6f});
+    frame.lighting.sun_light = {2.6f, 2.5f, 2.3f};
+    frame.lighting.sky_light = {0.15f, 0.25f, 0.45f};
+    frame.lighting.ground_light = {0.08f, 0.07f, 0.06f};
+    frame.sky.on = true;
+    frame.sky.sun_top = {3.0f, 3.0f, 3.0f};
+    const auto draw = [&] {
+        for (int i = 0; i < 6; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto pixel = [](const std::vector<u8>& image, u32 x, u32 y, u32 c) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4 + c;
+        return i < image.size() ? static_cast<int>(image[i]) : -1000;
+    };
+    // Row 40 looks steeply down (the water mirrors little), 4 to 6 m out,
+    // in a fog of 1 a metre all but hidden.
+    constexpr u32 k_row = 40;
+    const auto clear_ground = draw();
+    const auto clear_water = [&] {
+        frame.water_vertices = v;
+        frame.water_indices = idx;
+        return draw();
+    }();
+    GIANT_CHECK(renderer->last_stats().water_triangles == 2);
+    frame.sky.fog_density = 1.0f;
+    frame.sky.fog_falloff = 1.0f / 100.0f;
+    const auto fogged_water = draw();
+    frame.water_vertices = {};
+    frame.water_indices = {};
+    const auto fogged_ground = draw();
+    int fog_change = 0, versus_ground = 0, water_shows = 0;
+    for (u32 c = 0; c < 3; ++c) {
+        water_shows = std::max(water_shows, std::abs(pixel(clear_water, 32, k_row, c) - pixel(clear_ground, 32, k_row, c)));
+        fog_change = std::max(fog_change, std::abs(pixel(fogged_water, 32, k_row, c) - pixel(clear_water, 32, k_row, c)));
+        versus_ground = std::max(versus_ground, std::abs(pixel(fogged_water, 32, k_row, c) - pixel(fogged_ground, 32, k_row, c)));
+    }
+    std::printf("    far water: unlike the clear ground by %d, fog changed it by %d, from the fogged ground by %d\n",
+                water_shows, fog_change, versus_ground);
+    GIANT_CHECK(water_shows > 12 && fog_change > 12 && versus_ground <= 8);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }
