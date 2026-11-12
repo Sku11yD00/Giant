@@ -35,6 +35,13 @@ struct WaterHere {
 };
 std::optional<WaterHere> water_at(std::span<const Water> waters, double x, double z);
 
+// One part of a body, for a caller keeping its own index of where the parts
+// are (physics): a lake's shore or the sea (`segment` not looked at), or a
+// river's stretch from path point `segment` to the next. `nearness` is a
+// river's distance from its middle over its half width there (0 to 1):
+// water_at takes the nearest stretch. Hidden: none.
+std::optional<WaterHere> water_part_at(const Water& water, usize segment, double x, double z, double& nearness);
+
 // The ground a body covers, x and z (a sea: everywhere, false).
 bool water_bounds(const Water& water, double& min_x, double& min_z, double& max_x, double& max_z);
 

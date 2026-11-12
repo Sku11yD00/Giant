@@ -32,6 +32,7 @@ struct PlayerInput {
     float right = 0.0f;   // -1 (left) to 1
     bool sprint = false;
     bool climb = true; // climbs walls walked into
+    float up = 0.0f;   // swimming: -1 (dive, C) to 1 (up to the surface, Space)
 };
 
 struct PlayerSettings {
@@ -140,12 +141,13 @@ private:
     PlayerInput m_input;
     float m_yaw = 0.0f;
     float m_pitch = 0.0f;
-    std::array<bool, 4> m_keys{}; // W S A D
+    std::array<bool, 6> m_keys{}; // W S A D, Space C
     bool m_shift = false;
     bool m_space = false;
     bool m_escape = false; // Esc pressed, for the menus
     bool m_stop = false; // Esc pressed
     bool m_from_keys = false; // the keys, not set_input, give the input
+    bool m_up_from_keys = false; // Space and C give `up` (pressed since set_input)
     double m_eye = 0.0; // the camera's height shown (eased up steps)
     bool m_waiting = false;
     bool m_placing = false;   // started, waiting for the bodies before standing

@@ -3,6 +3,7 @@
 
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
+#include "giant/world/water.h"
 
 #include <Jolt/Jolt.h>
 
@@ -37,9 +38,11 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <tuple>
 #include <mutex>
@@ -380,7 +383,9 @@ bool valid_character(const CharacterDesc& d) {
            std::isfinite(d.max_slope_degrees) && std::isfinite(d.step_height) && std::isfinite(d.mass) &&
            std::isfinite(d.strength) && d.radius >= 0.05f && d.height >= 2.0f * d.radius + 0.01f &&
            d.height <= 100.0f && d.max_slope_degrees >= 0.0f && d.max_slope_degrees <= 89.0f &&
-           d.step_height >= 0.0f && d.step_height <= 0.5f * d.height && d.mass > 0.0f && d.strength >= 0.0f;
+           d.step_height >= 0.0f && d.step_height <= 0.5f * d.height && d.mass > 0.0f && d.strength >= 0.0f &&
+           std::isfinite(d.swim_depth) && d.swim_depth > 0.0f &&
+           std::isfinite(d.swim_speed) && d.swim_speed >= 0.0f && d.swim_speed <= 100.0f;
 }
 
 // Fastest a character is told to go, jump or fall (metres a second): far
@@ -389,7 +394,8 @@ constexpr float k_max_character_speed = 100.0f;
 
 bool valid_input(const CharacterInput& in) {
     return finite(in.velocity) && std::fabs(in.velocity.x) <= k_max_character_speed &&
-           std::fabs(in.velocity.z) <= k_max_character_speed && std::isfinite(in.acceleration) && in.acceleration >= 0.0f &&
+           std::fabs(in.velocity.y) <= k_max_character_speed && std::fabs(in.velocity.z) <= k_max_character_speed &&
+           std::isfinite(in.acceleration) && in.acceleration >= 0.0f &&
            std::isfinite(in.air_acceleration) && in.air_acceleration >= 0.0f;
 }
 
@@ -413,6 +419,44 @@ JPH::Vec3 approach(JPH::Vec3Arg from, JPH::Vec3Arg to, float step) {
 
 // How long a jump asked for in the air waits for the ground (seconds).
 constexpr float k_jump_wait = 0.2f;
+
+// Water (set_water): its density (kg per cubic metre), how it drags a
+// body (Jolt's factors: through it, and turning in it, then a share of its
+// speed against the water lost each second, by how much of it is under), and a swimmer's
+// way through it: speeding up or slowing (m/s^2, across; up and down, and
+// more the faster, so a fall into deep water stops within metres), floating up with no
+// input (m/s), how hard it is held at the surface (per second), and how
+// much shallower than swim_depth it stops swimming (no flicker at a shelf).
+constexpr float k_water_density = 1000.0f;
+constexpr float k_water_drag = 0.5f;
+constexpr float k_water_turn_drag = 0.05f;
+constexpr float k_water_damping = 3.0f; // per second, half or more under
+// A space under something fixed with a floor this near (m) is a room the
+// water does not reach (Impl::roofed).
+constexpr float k_water_room_height = 6.0f;
+constexpr float k_swim_acceleration = 4.0f;
+constexpr float k_swim_vertical_acceleration = 15.0f;
+constexpr float k_swim_drag = 0.5f; // per metre: a person's drag over their weight
+constexpr float k_swim_float_up = 0.6f;
+constexpr float k_swim_hold = 3.0f;
+constexpr float k_swim_leave = 0.3f;
+// Swimming out onto an edge (swim_out): one this much over its feet (m, or
+// its step height if more) and up to this much over the surface
+// (and shallow enough there to stand: under the surface by less than where
+// it stops swimming).
+constexpr float k_swim_out_least = 0.25f;
+constexpr float k_swim_out_over = 0.4f;
+// Wading: slowed from this depth (m) on, to k_wade_slowest of its speed at swim_depth.
+constexpr float k_wade_from = 0.3f;
+constexpr float k_wade_slowest = 0.5f;
+
+float approach(float from, float to, float step) {
+    return from < to ? std::min(from + step, to) : std::max(from - step, to);
+}
+
+// How deep a character swims: its swim_depth, at most three quarters of
+// its height (a small one swims in shallower water).
+float swim_depth(const CharacterDesc& d) { return std::min(d.swim_depth, 0.75f * d.height); }
 
 } // namespace
 
@@ -492,6 +536,9 @@ struct PhysicsWorld::Impl {
         // Carried (carry_character): by this body, held at `carry_at` in its frame.
         JPH::BodyID carrier;
         DVec3 carry_at{};
+        // In water (as of its last step).
+        bool swimming = false;
+        float water_depth = 0.0f;
     };
     std::map<CharacterId, Character> characters; // in id order: the same steps every run
 
@@ -501,6 +548,216 @@ struct PhysicsWorld::Impl {
     bool is_character_body(JPH::BodyID b) const { return character_bodies.contains(b.GetIndexAndSequenceNumber()); }
     void index_character(const Character& c) { character_bodies.insert(c.body->GetInnerBodyID().GetIndexAndSequenceNumber()); }
     CharacterId next_character = 1;
+
+    // The water (set_water), cut into parts (a lake's shore, the sea, a
+    // river's stretch), each with the ground it covers and its highest
+    // surface, filed in a grid of k_water_cell squares (the sea, and a part
+    // over k_water_cells_most squares, everywhere): a point finds the few
+    // parts there, and a body over all of them none.
+    struct WaterPart {
+        u32 water = 0;
+        u32 segment = 0;
+        double x0 = 0.0, z0 = 0.0, x1 = 0.0, z1 = 0.0;
+        bool everywhere = false;
+        float top = 0.0f;
+    };
+    static constexpr double k_water_cell = 128.0;
+    static constexpr double k_water_cells_most = 65536.0;
+    std::vector<world::Water> water;
+    std::vector<WaterPart> water_parts;
+    std::vector<u32> water_everywhere;                      // parts looked at anywhere
+    std::unordered_map<u64, std::vector<u32>> water_grid;   // the rest, by square
+    float water_top = -std::numeric_limits<float>::infinity(); // the highest surface of all
+
+    static i64 water_square(double v) { return static_cast<i64>(std::floor(v / k_water_cell)); }
+    static u64 water_key(i64 x, i64 z) {
+        return (static_cast<u64>(static_cast<u32>(x)) << 32) | static_cast<u64>(static_cast<u32>(z));
+    }
+
+    void set_water(std::span<const world::Water> w) {
+        std::vector<world::Water> copy(w.begin(), w.end()); // (w may be this world's own)
+        water = std::move(copy);
+        water_parts.clear();
+        water_everywhere.clear();
+        water_grid.clear();
+        water_top = -std::numeric_limits<float>::infinity();
+        for (u32 i = 0; i < water.size(); ++i) {
+            const world::Water& b = water[i];
+            if (!b.visible) continue; // (not there)
+            if (b.kind == world::WaterKind::river) {
+                for (u32 k = 0; k + 1 < b.path.size(); ++k) {
+                    const world::RiverPoint& p = b.path[k];
+                    const world::RiverPoint& q = b.path[k + 1];
+                    const double half = 0.5 * std::max(p.width, q.width);
+                    WaterPart part{i, k, std::min(p.x, q.x) - half, std::min(p.z, q.z) - half,
+                                   std::max(p.x, q.x) + half, std::max(p.z, q.z) + half, false,
+                                   std::max(p.level, q.level)};
+                    water_parts.push_back(part);
+                }
+            } else {
+                WaterPart part{i, 0, 0.0, 0.0, 0.0, 0.0, false, b.level};
+                part.everywhere = !world::water_bounds(b, part.x0, part.z0, part.x1, part.z1);
+                water_parts.push_back(part);
+            }
+        }
+        for (u32 n = 0; n < water_parts.size(); ++n) {
+            WaterPart& part = water_parts[n];
+            if (!std::isfinite(part.top)) continue; // (unchecked data)
+            // (Unchecked data: a part out past any world, or not a number, looked at everywhere.)
+            constexpr double k_far = 1.0e12;
+            if (!(std::fabs(part.x0) < k_far && std::fabs(part.x1) < k_far && std::fabs(part.z0) < k_far &&
+                  std::fabs(part.z1) < k_far)) {
+                part.everywhere = true;
+            }
+            water_top = std::max(water_top, part.top);
+            if (!part.everywhere) {
+                const double across = std::floor(part.x1 / k_water_cell) - std::floor(part.x0 / k_water_cell) + 1.0;
+                const double down = std::floor(part.z1 / k_water_cell) - std::floor(part.z0 / k_water_cell) + 1.0;
+                if (!(across * down <= k_water_cells_most)) part.everywhere = true;
+            }
+            if (part.everywhere) {
+                water_everywhere.push_back(n);
+                continue;
+            }
+            for (i64 z = water_square(part.z0); z <= water_square(part.z1); ++z) {
+                for (i64 x = water_square(part.x0); x <= water_square(part.x1); ++x) water_grid[water_key(x, z)].push_back(n);
+            }
+        }
+    }
+
+    // The water at (x, z) as world::water_at has it (each body's nearest
+    // stretch, then the highest surface), if its surface is over `bottom`.
+    struct WaterFound {
+        u32 water = 0;
+        double nearness = 0.0;
+        world::WaterHere here;
+    };
+    mutable std::vector<WaterFound> water_found; // (water_over's scratch: the stepping thread's)
+    std::optional<world::WaterHere> water_over(double x, double z, double bottom) const {
+        if (!(static_cast<double>(water_top) > bottom) || !std::isfinite(x) || !std::isfinite(z)) return std::nullopt;
+        water_found.clear();
+        const auto offer = [&](u32 n) {
+            const WaterPart& part = water_parts[n];
+            if (!part.everywhere && (x < part.x0 || x > part.x1 || z < part.z0 || z > part.z1)) return;
+            double nearness = 0.0;
+            const std::optional<world::WaterHere> h = world::water_part_at(water[part.water], part.segment, x, z, nearness);
+            if (!h) return;
+            for (WaterFound& f : water_found) {
+                if (f.water != part.water) continue;
+                if (nearness < f.nearness) f = {part.water, nearness, *h}; // (a nearer stretch of the same river)
+                return;
+            }
+            water_found.push_back({part.water, nearness, *h});
+        };
+        for (const u32 n : water_everywhere) offer(n);
+        const auto found = water_grid.find(water_key(water_square(x), water_square(z)));
+        if (found != water_grid.end()) {
+            for (const u32 n : found->second) offer(n);
+        }
+        std::optional<world::WaterHere> best;
+        for (const WaterFound& f : water_found) {
+            if (!best || f.here.level > best->level) best = f.here;
+        }
+        if (!best || !(static_cast<double>(best->level) > bottom)) return std::nullopt;
+        return best;
+    }
+
+    // Whether `from` (top of a body or a head, under the surface) is in a
+    // room the water does not reach: something fixed over it before the
+    // surface (a ceiling) and something fixed under it (a floor) at most
+    // k_water_room_height apart, `low` metres under `from` being its own
+    // bottom. A tunnel or a basement under a lake is dry; the open water
+    // under a pontoon, an overhang or a hull's bottom (no floor near) is not.
+    bool roofed(const JPH::RVec3& from, double level, float low) const {
+        const double up = level - static_cast<double>(from.GetY());
+        if (!(up > 0.0)) return false;
+        const JPH::SpecifiedBroadPhaseLayerFilter broad{JPH::BroadPhaseLayer(layers::fixed)};
+        const JPH::SpecifiedObjectLayerFilter object{layers::fixed};
+        JPH::RayCastResult ceiling;
+        const float reach = std::min(static_cast<float>(up), k_water_room_height);
+        if (!system.GetNarrowPhaseQuery().CastRay(JPH::RRayCast(from, JPH::Vec3(0.0f, reach, 0.0f)), ceiling, broad, object)) {
+            return false;
+        }
+        const float over = ceiling.mFraction * reach;
+        const float under = k_water_room_height - over;
+        if (!(under > low)) return false;
+        JPH::RayCastResult floor;
+        return system.GetNarrowPhaseQuery().CastRay(JPH::RRayCast(from, JPH::Vec3(0.0f, -under, 0.0f)), floor, broad, object);
+    }
+
+    // Before a step: each dynamic body awake in water buoyed up, slowed
+    // and carried along (Jolt's buoyancy: the water it displaces under a
+    // flat surface at the level over its centre).
+    void float_bodies(float dt) {
+        if (water_parts.empty()) return;
+        JPH::BodyIDVector active;
+        system.GetActiveBodies(JPH::EBodyType::RigidBody, active);
+        const JPH::Vec3 gravity = system.GetGravity();
+        for (const JPH::BodyID id : active) {
+            // A first look without the lock (only this thread moves bodies
+            // between steps): most bodies are in no water.
+            std::optional<world::WaterHere> here;
+            {
+                const JPH::BodyLockRead look(system.GetBodyLockInterfaceNoLock(), id);
+                if (!look.Succeeded() || !look.GetBody().IsDynamic()) continue;
+                const JPH::Body& b = look.GetBody();
+                const JPH::RVec3 centre = b.GetCenterOfMassPosition();
+                const JPH::AABox& box = b.GetWorldSpaceBounds();
+                here = water_over(static_cast<double>(centre.GetX()), static_cast<double>(centre.GetZ()),
+                                  static_cast<double>(box.mMin.GetY()));
+                // All under: a roof between it and the surface keeps the water out.
+                if (here && static_cast<double>(box.mMax.GetY()) < static_cast<double>(here->level) &&
+                    roofed(JPH::RVec3(centre.GetX(), static_cast<JPH::Real>(box.mMax.GetY()) + 0.01f, centre.GetZ()),
+                           static_cast<double>(here->level), box.mMax.GetY() - box.mMin.GetY() + 0.02f)) {
+                    here.reset();
+                }
+            }
+            if (!here) continue;
+            const JPH::BodyLockWrite lock(system.GetBodyLockInterface(), id);
+            if (!lock.Succeeded()) continue;
+            JPH::Body& b = lock.GetBody();
+            const JPH::RVec3 centre = b.GetCenterOfMassPosition();
+            const JPH::RVec3 surface(centre.GetX(), static_cast<JPH::Real>(here->level), centre.GetZ());
+            float volume = 0.0f, submerged = 0.0f;
+            JPH::Vec3 buoyed_at;
+            b.GetSubmergedVolume(surface, JPH::Vec3::sAxisY(), volume, submerged, buoyed_at);
+            const float inverse_mass = b.GetMotionProperties()->GetInverseMass();
+            if (!(volume > 0.0f) || !(submerged > 0.0f) || !(inverse_mass > 0.0f)) continue;
+            // Jolt's factor: 1 is a body as dense as the water.
+            const float buoyancy = k_water_density * volume * inverse_mass;
+            const JPH::Vec3 flow(here->flow_x, 0.0f, here->flow_z);
+            // Bobbing settles (the waves a moving body makes carry its
+            // motion off, which quadratic drag alone leaves for a long
+            // time): its speed against the water lost by a share, by how
+            // much is under and how light it is for its size (a sunk rock
+            // is not swept along a river bed). Before the buoyancy, so what
+            // holds it up against gravity is not taken off with it.
+            const float under = std::min(2.0f * submerged / volume, 1.0f);
+            const float keep = std::max(0.0f, 1.0f - k_water_damping * under * std::min(buoyancy, 1.0f) * dt);
+            // Towards the flow only what floats (or nearly): a sunk body is
+            // left to the drag (a rock rolls only in a fast river).
+            const JPH::Vec3 along = flow * std::clamp((buoyancy - 0.9f) / 0.1f, 0.0f, 1.0f);
+            b.SetLinearVelocityClamped(along + (b.GetLinearVelocity() - along) * keep);
+            b.SetAngularVelocityClamped(b.GetAngularVelocity() * keep);
+            b.ApplyBuoyancyImpulse(volume, submerged, buoyed_at, buoyancy, k_water_drag, k_water_turn_drag, flow,
+                                   gravity, dt);
+        }
+    }
+
+    // Wakes the sleeping moving bodies the water reaches (each part's
+    // ground, from the deep up to its top: the sea's everywhere under it),
+    // so they float, or fall where it went.
+    void wake_in_water() {
+        for (const WaterPart& part : water_parts) {
+            constexpr float far = 1.0e7f;
+            const float top = std::isfinite(part.top) ? part.top : far;
+            const JPH::AABox box = part.everywhere
+                                       ? JPH::AABox(JPH::Vec3(-far, -far, -far), JPH::Vec3(far, top, far))
+                                       : JPH::AABox(JPH::Vec3(static_cast<float>(part.x0), -far, static_cast<float>(part.z0)),
+                                                    JPH::Vec3(static_cast<float>(part.x1), top, static_cast<float>(part.z1)));
+            wake_in(box);
+        }
+    }
 
     JPH::BodyInterface& bodies_interface() { return system.GetBodyInterface(); }
     const JPH::BodyInterface& bodies_interface() const { return system.GetBodyInterface(); }
@@ -642,6 +899,59 @@ struct PhysicsWorld::Impl {
         return !hit.HadHit();
     }
 
+    // Pulling itself up from `feet` onto `ledge` (not a dynamic body) at `to`.
+    void start_mantle(Character& c, const JPH::RVec3& feet, const JPH::RVec3& to, const Hit& ledge) {
+        c.mantling = true;
+        c.mantle_t = 0.0f;
+        c.mantle_from = from_jolt_r(feet);
+        c.mantle_to = from_jolt_r(to);
+        c.mantle_on = JPH::BodyID();
+        const JPH::BodyLockRead lock(system.GetBodyLockInterface(), ledge.body);
+        if (lock.Succeeded() && !lock.GetBody().IsStatic()) { // a moving ledge: in its frame
+            const JPH::RMat44 into = lock.GetBody().GetWorldTransform().Inversed();
+            c.mantle_on = ledge.body;
+            c.mantle_from = from_jolt_r(into * feet);
+            c.mantle_to = from_jolt_r(into * to);
+        }
+    }
+
+    // Swimming into a bank or an edge whose top is out of reach of
+    // walking up (over k_swim_out_least above its feet, up to
+    // k_swim_out_over over the surface: a jetty, a shelf): pulls itself up
+    // onto it, as onto a ledge climbed. Higher banks are climbed (climb
+    // input) or not left by.
+    bool swim_out(Character& c, const world::WaterHere& wet, JPH::Vec3Arg want) {
+        if (want.LengthSq() < 0.25f) return false;
+        const JPH::CharacterVirtual& cv = *c.body;
+        const JPH::Vec3 up = JPH::Vec3::sAxisY();
+        const JPH::Vec3 dir = want.Normalized();
+        const JPH::RVec3 feet = cv.GetPosition();
+        // Only at the surface (not diving under a jetty), onto an edge
+        // shallow enough to stand on (not more of the bed), out of reach of
+        // walking up.
+        const double surface = static_cast<double>(wet.level);
+        if (static_cast<double>(feet.GetY()) < surface - static_cast<double>(swim_depth(c.desc)) - 0.2) return false;
+        const double highest = surface + k_swim_out_over;
+        const double lowest = std::max({static_cast<double>(feet.GetY()) + std::max(k_swim_out_least, c.desc.step_height),
+                                        surface - static_cast<double>(swim_depth(c.desc) - k_swim_leave)});
+        if (!(highest > lowest)) return false;
+        const JPH::RVec3 above(feet.GetX(), static_cast<JPH::Real>(highest + 0.05), feet.GetZ());
+        // Room over the ledge's edge first (no reaching through a wall).
+        const float ahead = c.desc.radius + 0.3f;
+        if (look(above, dir, ahead)) return false;
+        const std::optional<Hit> ledge = look(above + dir * ahead, -up, static_cast<float>(highest + 0.05 - lowest));
+        const float steep = std::cos(JPH::DegreesToRadians(c.desc.max_slope_degrees));
+        if (!ledge || ledge->dynamic || ledge->normal.y < steep) return false;
+        const JPH::RVec3 to = to_jolt(ledge->point) + up * 0.02f;
+        const JPH::RVec3 risen(feet.GetX(), to.GetY(), feet.GetZ());
+        if (!clear_at(c, (feet + risen) * 0.5) || !clear_at(c, risen) || !clear_at(c, (risen + to) * 0.5) ||
+            !clear_at(c, to)) {
+            return false;
+        }
+        start_mantle(c, feet, to, *ledge);
+        return true;
+    }
+
     // One fixed step on a wall, or onto its ledge. False: not climbing (any
     // more): the step goes on as walking or falling.
     bool climb_step(Character& c, float dt) {
@@ -741,20 +1051,7 @@ struct PhysicsWorld::Impl {
                 // Room on the way: risen beside the wall, halfway over, and there.
                 const JPH::RVec3 risen(feet.GetX(), to.GetY(), feet.GetZ());
                 if (clear_at(c, risen) && clear_at(c, (risen + to) * 0.5) && clear_at(c, to)) {
-                    c.mantling = true;
-                    c.mantle_t = 0.0f;
-                    c.mantle_from = from_jolt_r(feet);
-                    c.mantle_to = from_jolt_r(to);
-                    c.mantle_on = JPH::BodyID();
-                    if (!ledge->dynamic) {
-                        const JPH::BodyLockRead lock(system.GetBodyLockInterface(), ledge->body);
-                        if (lock.Succeeded() && !lock.GetBody().IsStatic()) { // a moving ledge: in its frame
-                            const JPH::RMat44 into = lock.GetBody().GetWorldTransform().Inversed();
-                            c.mantle_on = ledge->body;
-                            c.mantle_from = from_jolt_r(into * feet);
-                            c.mantle_to = from_jolt_r(into * to);
-                        }
-                    }
+                    start_mantle(c, feet, to, *ledge);
                     return climb_step(c, dt);
                 }
             }
@@ -821,7 +1118,41 @@ struct PhysicsWorld::Impl {
     // One fixed step of a character: its velocity from its input, then
     // moved (sliding along what it meets, up steps, down onto the floor).
     void step_character(Character& c, float dt) {
-        if (climb_step(c, dt)) return;
+        // The water over its feet: deep enough, it swims (until a little
+        // shallower: no flicker at the edge of a shelf).
+        const JPH::RVec3 feet = c.body->GetPosition();
+        std::optional<world::WaterHere> wet =
+            water_parts.empty() ? std::nullopt
+                                : water_over(static_cast<double>(feet.GetX()), static_cast<double>(feet.GetZ()),
+                                             static_cast<double>(feet.GetY()));
+        // Under a roof (a tunnel under the lake): dry. (From the head up: all under.)
+        const JPH::RVec3 head = feet + JPH::Vec3(0.0f, c.desc.height + 0.01f, 0.0f);
+        if (wet && static_cast<double>(head.GetY()) < static_cast<double>(wet->level) &&
+            roofed(head, static_cast<double>(wet->level), c.desc.height + 0.02f)) {
+            wet.reset();
+        }
+        const float deep = swim_depth(c.desc);
+        c.water_depth = wet ? static_cast<float>(static_cast<double>(wet->level) - static_cast<double>(feet.GetY())) : 0.0f;
+        c.swimming = wet && c.water_depth > (c.swimming ? deep - k_swim_leave : deep);
+        // Climbing down into water deep enough to swim: lets go of the wall.
+        if (c.climbing && !c.mantling && c.water_depth > deep &&
+            to_jolt(c.input.velocity).Dot(to_jolt(c.wall_normal)) > 0.1f) {
+            c.climbing = false;
+        }
+        if (climb_step(c, dt)) {
+            c.swimming = false; // (holding on, out of it)
+            return;
+        }
+        if (c.swimming && wet) {
+            // (A plain copy: GCC's optimizer cannot tell the optional is set.)
+            const world::WaterHere water_here = wet.value_or(world::WaterHere{});
+            if (swim_out(c, water_here, to_jolt(c.input.velocity) * JPH::Vec3(1.0f, 0.0f, 1.0f)) && climb_step(c, dt)) {
+                c.swimming = false;
+                return;
+            }
+            swim_step(c, water_here, dt);
+            return;
+        }
         JPH::CharacterVirtual& cv = *c.body;
         const JPH::Vec3 up = JPH::Vec3::sAxisY();
         const JPH::Vec3 gravity = system.GetGravity();
@@ -829,7 +1160,11 @@ struct PhysicsWorld::Impl {
         // How it really moved: a wall, a ceiling or a slope stopped what it asked for.
         const JPH::Vec3 v = to_jolt(c.velocity);
         const JPH::Vec3 ground = cv.GetGroundVelocity();
-        const JPH::Vec3 want(c.input.velocity.x, 0.0f, c.input.velocity.z);
+        JPH::Vec3 want(c.input.velocity.x, 0.0f, c.input.velocity.z);
+        if (c.water_depth > k_wade_from) { // wading: the deeper, the slower
+            const float wading = std::min((c.water_depth - k_wade_from) / std::max(deep - k_wade_from, 0.01f), 1.0f);
+            want *= 1.0f - (1.0f - k_wade_slowest) * wading;
+        }
         // Not on its way up off the ground (a jump), by the speed it was
         // given: walking up a slope rises without leaving it.
         const bool towards_ground = c.vertical - ground.GetY() < 0.1f;
@@ -864,6 +1199,38 @@ struct PhysicsWorld::Impl {
         update.mWalkStairsStepUp = JPH::Vec3(0.0f, c.desc.step_height, 0.0f);
         const JPH::RVec3 from = cv.GetPosition();
         cv.ExtendedUpdate(dt, gravity, update, system.GetDefaultBroadPhaseLayerFilter(layers::moving),
+                          system.GetDefaultLayerFilter(layers::moving), {}, {}, temp);
+        c.velocity = from_jolt(JPH::Vec3(cv.GetPosition() - from) / dt);
+    }
+
+    // A fixed step swimming: through the water at its input (carried by the
+    // flow), up to the surface and no higher, down diving; with no input up
+    // or down it floats up to where it rests (feet swim_depth under the surface).
+    void swim_step(Character& c, const world::WaterHere& wet, float dt) {
+        JPH::CharacterVirtual& cv = *c.body;
+        const JPH::Vec3 v = to_jolt(c.velocity);
+        const JPH::Vec3 flow(wet.flow_x, 0.0f, wet.flow_z);
+        JPH::Vec3 want(c.input.velocity.x, 0.0f, c.input.velocity.z);
+        const float across = want.Length();
+        if (across > c.desc.swim_speed) want *= c.desc.swim_speed / across;
+        const JPH::Vec3 flat(v.GetX(), 0.0f, v.GetZ());
+        JPH::Vec3 out = flow + approach(flat - flow, want, k_swim_acceleration * dt);
+        // How far under where it rests its feet are (less than 0: above, as a fall in).
+        const float under = (wet.level - swim_depth(c.desc)) - static_cast<float>(cv.GetPosition().GetY());
+        const float asked = std::clamp(c.input.velocity.y, -c.desc.swim_speed, c.desc.swim_speed);
+        const float to_rest = k_swim_hold * under; // up to where it rests, never past it
+        const float wanted = asked < 0.0f ? asked : std::min(std::max(asked, k_swim_float_up), to_rest);
+        // (Water's drag growing with the speed squared: a fall in slows within metres.)
+        const float brake = k_swim_vertical_acceleration + k_swim_drag * v.GetY() * v.GetY();
+        out.SetY(approach(v.GetY(), std::max(wanted, -k_max_character_speed), brake * dt));
+        c.jump_wait = 0.0f; // (no jumping out of the water)
+        c.vertical = out.GetY();
+        cv.SetLinearVelocity(out);
+        JPH::CharacterVirtual::ExtendedUpdateSettings update;
+        update.mStickToFloorStepDown = JPH::Vec3::sZero(); // afloat: not pulled down onto the bed
+        update.mWalkStairsStepUp = JPH::Vec3(0.0f, c.desc.step_height, 0.0f);
+        const JPH::RVec3 from = cv.GetPosition();
+        cv.ExtendedUpdate(dt, system.GetGravity(), update, system.GetDefaultBroadPhaseLayerFilter(layers::moving),
                           system.GetDefaultLayerFilter(layers::moving), {}, {}, temp);
         c.velocity = from_jolt(JPH::Vec3(cv.GetPosition() - from) / dt);
     }
@@ -910,6 +1277,7 @@ void PhysicsWorld::clear() {
     fresh->dropped = m_impl->dropped;
     fresh->next_character = m_impl->next_character;
     fresh->carried = m_impl->carried;
+    fresh->set_water(m_impl->water);
     // Characters carry on in the fresh world where they were.
     for (auto& [id, c] : m_impl->characters) {
         Impl::Character moved = c;
@@ -1071,8 +1439,13 @@ u32 PhysicsWorld::step(double seconds) {
             break;
         }
         m_impl->carried -= k_step_seconds;
+        m_impl->float_bodies(static_cast<float>(k_step_seconds));
         for (auto& [id, c] : m_impl->characters) {
             c.previous = from_jolt_r(c.body->GetPosition());
+            if (!c.carrier.IsInvalid() || c.held) { // (not stepped: out of the water as far as it knows)
+                c.swimming = false;
+                c.water_depth = 0.0f;
+            }
             if (!c.carrier.IsInvalid()) {
                 c.jump_wait = 0.0f; // (carried after the step, below)
             } else if (!c.held) {
@@ -1253,6 +1626,8 @@ std::optional<CharacterState> PhysicsWorld::character_state(CharacterId id) cons
         s.wall_normal = ch.wall_normal;
     }
     if (!ch.carrier.IsInvalid()) s.carrier = to_id(ch.carrier);
+    s.swimming = ch.swimming;
+    s.water_depth = ch.water_depth;
     return s;
 }
 
@@ -1262,6 +1637,14 @@ BodyId PhysicsWorld::character_body(CharacterId id) const {
 }
 
 usize PhysicsWorld::characters() const { return m_impl->characters.size(); }
+
+void PhysicsWorld::set_water(std::span<const world::Water> water) {
+    m_impl->wake_in_water(); // where it was (gone or lowered: what floated falls)
+    m_impl->set_water(water);
+    m_impl->wake_in_water(); // and where it is
+}
+
+std::span<const world::Water> PhysicsWorld::water() const { return m_impl->water; }
 
 bool PhysicsWorld::is_character_body(BodyId id) const {
     return id != k_no_body && m_impl->is_character_body(from_id(id));

@@ -27,6 +27,7 @@ struct Fixture {
         state.play = &play;
         register_scene_commands(commands, state);
         register_physics_commands(commands, state);
+        register_water_commands(commands, state);
     }
     ai::CommandResult run(const char* name, const Json& args = Json::object()) {
         return commands.execute(name, args, {});
@@ -430,4 +431,47 @@ GIANT_TEST("ballistics commands: shots go through wood, stop in concrete, push c
     GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
     r = f.run("get_ballistics");
     GIANT_CHECK(r.value["flying"] == 0 && f.run("get_physics").value["loose_pieces"] == 0);
+}
+
+GIANT_TEST("play commands: in the scene's water the player swims, dives and floats up; a light crate floats") {
+    Fixture f;
+    f.create({{"shape", "plane"}, {"scale", {200, 1, 200}}});
+    const world::EntityId crate =
+        f.create({{"shape", "cube"}, {"position", {6, 0.5, 0}}, {"body", "dynamic"}, {"mass", 300}});
+    // The sea 3 m over the plane.
+    GIANT_CHECK(f.run("create_water", {{"name", "sea"}, {"kind", "sea"}, {"level", 3.0}}).ok);
+    f.state.camera.position = {0.0, 10.0, 0.0};
+    ai::CommandResult r = f.run("play", {{"on", true}});
+    GIANT_CHECK(r.ok);
+    r = f.run("step_player", {{"seconds", 4}});
+    // Floating, its feet swim_depth (1.3 m) under the surface.
+    GIANT_CHECK(r.value["swimming"] == true && std::fabs(triple(r.value["position"]).y - 1.7) < 0.05);
+    GIANT_CHECK(std::fabs(r.value["water_depth"].get<double>() - 1.3) < 0.05);
+    // The crate (300 kg a cubic metre): afloat, 0.3 m of it under.
+    GIANT_CHECK(std::fabs(f.y(crate) - 3.2) < 0.05);
+    // Down (C): diving to the bottom; let be: back up.
+    GIANT_CHECK(f.run("set_player_input", {{"up", -1}}).ok);
+    r = f.run("step_player", {{"seconds", 2}});
+    GIANT_CHECK(r.value["input"]["up"] == -1.0 && triple(r.value["position"]).y < 0.1);
+    GIANT_CHECK(f.run("set_player_input", {{"up", 0}}).ok);
+    r = f.run("step_player", {{"seconds", 5}});
+    GIANT_CHECK(r.value["swimming"] == true && std::fabs(triple(r.value["position"]).y - 1.7) < 0.05);
+    // The water lowered to 0.5 m (undoable edits followed): wading on the plane.
+    GIANT_CHECK(f.run("set_water", {{"name", "sea"}, {"level", 0.5}}).ok);
+    r = f.run("step_player", {{"seconds", 2}});
+    GIANT_CHECK(r.value["swimming"] == false && r.value["on_ground"] == true);
+    GIANT_CHECK(std::fabs(r.value["water_depth"].get<double>() - 0.5) < 0.05);
+    // The crate (woken where the water was): floating lower, 0.3 m of it still under.
+    GIANT_CHECK(std::fabs(f.y(crate) - 0.7) < 0.05);
+    // Space and C held give up and down without taking over the rest of what it was told.
+    GIANT_CHECK(f.run("set_player_input", {{"forward", 0.5}, {"climb", false}}).ok);
+    platform::InputEvent space;
+    space.type = platform::InputEvent::Type::key;
+    space.key = platform::Key::space;
+    space.down = true;
+    f.play.handle_input({space}, false);
+    GIANT_CHECK(f.play.input().up == 1.0f && f.play.input().forward == 0.5f && !f.play.input().climb);
+    space.down = false;
+    f.play.handle_input({space}, false);
+    GIANT_CHECK(f.play.input().up == 0.0f && f.play.input().forward == 0.5f);
 }

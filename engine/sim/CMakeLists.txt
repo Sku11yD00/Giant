@@ -25,6 +25,7 @@ giant_module_tests(sim
     tests/test_physics.cpp
     tests/test_scene_physics.cpp
     tests/test_swing.cpp
+    tests/test_water_physics.cpp
 )
 if(GIANT_BUILD_TESTS)
   # Jolt in an unoptimized MSVC build is slow: the character tests alone take
