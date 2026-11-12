@@ -1143,12 +1143,14 @@ struct PhysicsWorld::Impl {
             c.swimming = false; // (holding on, out of it)
             return;
         }
-        if (c.swimming) {
-            if (swim_out(c, *wet, to_jolt(c.input.velocity) * JPH::Vec3(1.0f, 0.0f, 1.0f)) && climb_step(c, dt)) {
+        if (c.swimming && wet) {
+            // (A plain copy: GCC's optimizer cannot tell the optional is set.)
+            const world::WaterHere water_here = wet.value_or(world::WaterHere{});
+            if (swim_out(c, water_here, to_jolt(c.input.velocity) * JPH::Vec3(1.0f, 0.0f, 1.0f)) && climb_step(c, dt)) {
                 c.swimming = false;
                 return;
             }
-            swim_step(c, *wet, dt);
+            swim_step(c, water_here, dt);
             return;
         }
         JPH::CharacterVirtual& cv = *c.body;
