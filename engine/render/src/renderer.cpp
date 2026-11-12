@@ -3343,11 +3343,22 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
 
 rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
                                         rhi::TextureHandle light) {
-    if (frame.water_vertices.empty() || frame.water_indices.size() < 3) return light;
-    const WaterBatch batch = pack_water(frame.water_vertices, frame.water_indices, frame.water_looks, frame.view.position);
+    // The water the camera is in: on where some of the near plane is under it.
+    const Underwater& under = frame.underwater;
+    const double under_level = under.level - frame.view.position.y;
+    const float aspect = static_cast<float>(m_width) / static_cast<float>(std::max(m_height, 1u));
+    const float tan_y = std::tan(degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f)) * 0.5f);
+    const bool under_on = under.on && std::isfinite(under.level) &&
+                          near_plane_under(frame.view.orientation, tan_y, aspect,
+                                           std::max(frame.view.near_plane, 1e-4f), under_level);
+    if (!under_on && (frame.water_vertices.empty() || frame.water_indices.size() < 3)) return light;
+    WaterBatch batch = pack_water(frame.water_vertices, frame.water_indices, frame.water_looks, frame.view.position);
     m_stats.water_dropped = batch.dropped;
     m_stats.water_overflow = batch.overflow;
-    if (batch.indices.empty()) return light;
+    if (!under_on && batch.indices.empty()) return light;
+    // The camera's water's look last (after the default).
+    const u32 under_look = static_cast<u32>(batch.looks.size());
+    if (under_on) batch.looks.push_back(pack_water_look(under.look));
     if (!m_water_light.valid()) {
         rhi::TextureDesc desc;
         desc.width = m_width;
@@ -3372,8 +3383,11 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     if (memory.data == nullptr) return light; // out of memory: the device is lost
     u8* const bytes = memory.data;
     std::memset(bytes, 0, total);
-    std::memcpy(bytes + vertices_at, batch.vertices.data(), batch.vertices.size() * sizeof(gpu::WaterVertex));
-    std::memcpy(bytes + indices_at, batch.indices.data(), batch.indices.size() * sizeof(u32));
+    // (Under water with no surfaces: none to copy.)
+    if (!batch.vertices.empty()) {
+        std::memcpy(bytes + vertices_at, batch.vertices.data(), batch.vertices.size() * sizeof(gpu::WaterVertex));
+    }
+    if (!batch.indices.empty()) std::memcpy(bytes + indices_at, batch.indices.data(), batch.indices.size() * sizeof(u32));
     std::memcpy(bytes + looks_at, batch.looks.data(), batch.looks.size() * sizeof(gpu::WaterLook));
     std::memcpy(bytes + waves_at, waves.data(), waves.size() * sizeof(gpu::WaterWave));
     cmd.begin_timing("water");
@@ -3398,14 +3412,21 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     push.extras = extras_on ? m_shading_extras.descriptor : data.frame.descriptor;
     push.extras_offset = extras_on ? m_shading_extras.offset : 0u;
     push.extras_on = extras_on ? 1u : 0u;
-    // The light as it is, then the water over it.
+    push.under_on = under_on ? 1u : 0u;
+    push.under_look = under_look;
+    push.under_level = under_on ? static_cast<float>(under_level) : 0.0f;
+    // The light as it is (dimmed where the view is under water), then the water over it.
     cmd.set_pipeline(m_water_copy);
     cmd.push(push);
     cmd.draw(3);
-    cmd.set_pipeline(m_water);
-    cmd.push(push);
-    cmd.draw(static_cast<u32>(batch.indices.size()));
-    m_stats.post_draws += 2;
+    m_stats.post_draws += 1;
+    if (!batch.indices.empty()) {
+        cmd.set_pipeline(m_water);
+        cmd.push(push);
+        cmd.draw(static_cast<u32>(batch.indices.size()));
+        m_stats.post_draws += 1;
+    }
+    m_stats.underwater = under_on;
     m_stats.water_triangles = static_cast<u32>(batch.indices.size() / 3);
     cmd.end_render_pass();
     cmd.end_timing();

@@ -1,7 +1,14 @@
-// Water's surfaces (water plan W2a, W2b), drawn after shading over a copy
-// of the light (rgba16_float, before exposure) that post.slang then exposes:
+// Water's surfaces (water plan W2a, W2b, W3), drawn after shading over a
+// copy of the light (rgba16_float, before exposure) that post.slang then
+// exposes:
 //
-// - vs_copy / ps_copy: the light as it is, under everything.
+// - vs_copy / ps_copy: the light as it is, under everything; where the
+//   camera's near plane is under the water it is in (FrameInput::underwater),
+//   dimmed by the water between (Beer-Lambert) and hidden by the water's own
+//   light (its colour lit by the sun and the sky, dimmer the deeper the
+//   light has gone: single scattering), with caustics on what lies under
+//   the surface. Pixel by pixel, so the line where the near plane meets the
+//   surface splits the screen.
 // - vs_main / ps_main: the water's triangles (src/water.h packs them,
 //   camera-relative, from FrameInput::water_*), each pixel in front of
 //   what shading drew there (the scene depth, reverse-Z, tested here: no
@@ -16,8 +23,21 @@
 //   world, else the sky; the sun's (or the moon's) glint, shadowed, and the
 //   lamps' highlights; foam where it is shallow; the air over it all (the
 //   clear air, fog, clouds, what falls, dust) as shading puts over the
-//   scene, the light from under it keeping the air it already had.
-//   Seen from below (the camera under the surface) it is left out (W3).
+//   scene, the light from under it keeping the air it already had; the
+//   sun's light gathered by the waves into caustics on the bed. Seen from
+//   below: the world above through Snell's window (the sky along the bent
+//   ray, or what the screen shows that way where that lies above the
+//   water), beyond it the water mirrored (total internal reflection), then
+//   the water between it and the camera as ps_copy's.
+//
+// Caustics: where the sun's ray to a point on the bed came through the
+// still surface, the waves' curvature there focuses (or spreads) the light
+// as the bent rays' spread on the bed has it (one over the determinant of
+// how the bed point moves with the surface point), the pattern fading as
+// the bed deepens; laid over all of what is seen there (the sun's share of
+// it is not known: the sun's share of the light from above, as a surface
+// facing up would take it), where the sun reaches. (Averaged over the
+// bed the pattern lightens it a little, a few hundredths at a few metres.)
 //
 // Layout: WaterPush, WaterVertex, WaterLook, WaterWave in src/gpu_layout.h;
 // shading's extras as resolve.slang's (shading_extras.slang).
@@ -41,8 +61,12 @@ struct WaterPush {
     uint extras;
     uint extras_offset;
     uint extras_on;
+    uint under_on;
+    uint under_look;
+    float under_level;
     uint pad0;
     uint pad1;
+    uint pad2;
 };
 ConstantBuffer<WaterPush> push : register(b0);
 
@@ -51,17 +75,14 @@ static const float k_scatter_per_turbidity = 1.5; // metres^-1 of scattering at 
 static const float k_refraction_reach = 4.0; // metres through the water the bend is worked out over, at most
 static const float k_foam_depth = 0.6;       // metres of water at which shore foam fades out entirely (it shows from about 0.5 m, on the highest crests)
 static const float k_foam_albedo = 0.8;
+static const float k_caustic_fade = 10.0;    // metres of depth over which caustics blur away (e-folding)
+static const float k_caustic_ripples = 3.0;  // the waves' curvature taken this many times: they stand for many finer ripples, which focus more
 static const float k_water_cone = 0.05;      // the voxel cone's width (tangent) for the mirror (trace_reflection widens it to a sixth of its distance)
 
 [shader("vertex")]
 float4 vs_copy(uint vertex_id : SV_VertexID) : SV_Position {
     const float2 p = float2(vertex_id == 1 ? 3.0 : -1.0, vertex_id == 2 ? 3.0 : -1.0);
     return float4(p, 0.0, 1.0);
-}
-
-[shader("pixel")]
-float4 ps_copy(float4 position : SV_Position) : SV_Target {
-    return read_texture(push.light).Load(int3(int2(position.xy), 0));
 }
 
 // Camera-relative world to clip (Frame::view_proj: columns).
@@ -134,6 +155,74 @@ float3 wave_normal(float2 xz, float footprint, float scale, out float crest) {
     }
     crest = saturate(0.5 + 0.5 * height / max(total * 0.5, 1.0));
     return normalize(float3(-slope.x, 1.0, -slope.y));
+}
+
+// The camera-relative ray through a pixel's centre, a metre deep along the view.
+float3 pixel_ray(Frame f, float2 position) {
+    const float2 ndc = position / float2(f.width, f.height) * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    return f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz;
+}
+
+float3 water_extinction(Look look) {
+    return max(look.absorption + look.turbidity * k_scatter_per_turbidity, float3(1e-3, 1e-3, 1e-3));
+}
+
+// What the water scatters at its surface: its colour lit by the sky and
+// the sun (`sun`: how much of the sun reaches).
+float3 water_source(Frame f, Look look, float sun) {
+    const float3 sky_up = ambient_light(f, float3(0.0, 1.0, 0.0));
+    return look.color * (sky_up + f.sun_light.rgb * (saturate(f.sun_direction.y) * sun * 0.31830989));
+}
+
+// The water's own light along a view `length` metres through it, from
+// `start_depth` metres under the surface heading `vy` up (the view's
+// direction's y): single scattering of `source`, the light dimmed by the
+// water above each point (extinction `sigma`) and by the water back to
+// the start. (The view stays under the surface: start_depth - vy * length >= 0.)
+float3 water_glow(float3 source, float3 sigma, float start_depth, float length, float vy) {
+    const float a = max(1.0 - vy, 1e-3);
+    return source * exp(-sigma * max(start_depth, 0.0)) * (1.0 - exp(-sigma * (max(length, 0.0) * a))) / a;
+}
+
+// How much the waves gather the sun's light (1: as still water lets it
+// through, up to 5) on a bed `depth` metres under the surface at
+// camera-relative `xz`, a pixel there `footprint` metres wide; `l`: toward
+// the sun. (See the top.)
+float caustic(float2 xz, float depth, float footprint, float scale, float3 l) {
+    if (depth <= 0.0 || scale <= 0.0 || l.y <= 0.0) {
+        return 1.0;
+    }
+    // The sun's ray, bent by the still surface, came through it here.
+    const float3 t = refract(-l, float3(0.0, 1.0, 0.0), 1.0 / 1.33);
+    const float2 at = xz + t.xz * (depth / min(t.y, -1e-3));
+    ByteAddressBuffer b = read_buffer(push.data);
+    // The waves' curvature there (each wave's slope changing across it).
+    float3 m = float3(0.0, 0.0, 0.0); // xx, xz, zz
+    [loop]
+    for (uint i = 0; i < push.wave_count; ++i) {
+        const uint w_at = push.waves_offset + i * 32u;
+        const float4 w = asfloat(b.Load4(w_at));
+        const float phase = asfloat(b.Load(w_at + 16u));
+        const float wavelength = 6.2831853 / w.z;
+        const float seen = saturate(wavelength / max(footprint * 4.0, 1e-6) - 1.0);
+        const float bend = w.w * scale * seen * w.z * sin(w.z * dot(w.xy, at) + phase);
+        m += float3(w.x * w.x, w.x * w.y, w.y * w.y) * bend;
+    }
+    // A ray through a surface leaning by slope s turns about (1 - 1 / 1.33) s.
+    const float c = depth * (1.0 - 1.0 / 1.33) * k_caustic_ripples;
+    // (m is minus the height's curvature: a crest, a lens, gathers.)
+    const float det = (1.0 - c * m.x) * (1.0 - c * m.z) - c * c * m.y * m.y;
+    const float gathered = min(1.0 / max(abs(det), 0.2), 5.0);
+    return lerp(1.0, gathered, exp(-depth / k_caustic_fade));
+}
+
+// How much of what a lit bed shows the caustics gather: the sun's share of
+// the light from above (`sun`: how much of it reaches), the sky's the rest.
+float caustic_weight(Frame f, float sun) {
+    const float3 luma = float3(0.2126, 0.7152, 0.0722);
+    const float from_sun = dot(f.sun_light.rgb, luma) * saturate(f.sun_direction.y) * sun * 0.31830989;
+    const float from_sky = dot(ambient_light(f, float3(0.0, 1.0, 0.0)), luma);
+    return from_sun / max(from_sun + from_sky, 1e-6);
 }
 
 // How far (along the view, scaled as the ray's: the depth's near / d) the
@@ -216,6 +305,77 @@ float3 lamp_diffuse(Extras e, Frame f, float2 position, float3 p, float view_z, 
     return sum;
 }
 
+// The water between the camera and a point `distance` metres out along
+// `v` (from the camera), over `color` there: where this pixel's near plane
+// is under the camera's water (FrameInput::underwater), from the near
+// plane on (the view stays under the surface that far: the caller's).
+float3 under_camera_water(Frame f, float3 color, float3 v, float distance, float3 ray) {
+    if (push.under_on == 0u || ray.y * f.near_plane >= push.under_level) {
+        return color;
+    }
+    const Look look = load_look(push.under_look);
+    const float3 sigma = water_extinction(look);
+    const float start = f.near_plane * length(ray);
+    const float length_through = max(distance - start, 0.0);
+    return color * exp(-sigma * length_through) +
+           water_glow(water_source(f, look, 1.0), sigma, push.under_level - v.y * start, length_through, v.y);
+}
+
+// The surface seen from below (`v` heading up, `n` the waves' normal, up).
+float3 shade_below(Frame f, bool screen_on, bool sky_on, Sky sky, Look look, float3 n, float3 p, float distance, float3 v,
+                   float footprint, Texture2D<float> depth, Texture2D<float4> light) {
+    const float3 down = -n;
+    // Out into the air (Snell, 1.33 to 1), unless it is all reflected.
+    const float3 t = refract(v, down, 1.33);
+    float fresnel = 1.0;
+    float3 above = float3(0.0, 0.0, 0.0);
+    if (dot(t, t) > 1e-8) {
+        const float cos_t = saturate(dot(t, n));
+        fresnel = k_water_f0 + (1.0 - k_water_f0) * pow(1.0 - cos_t, 5.0);
+        const float3 t_up = normalize(float3(t.x, max(t.y, 0.01), t.z));
+        above = sky_on ? sample_sky(sky, t_up) : ambient_light(f, t_up);
+        // What the screen shows that way (as if far), where that lies above the water.
+        const float4 far_clip = to_clip(f, p + t_up * 1.0e4);
+        if (far_clip.w > 1e-4) {
+            const float2 uv = far_clip.xy / far_clip.w * float2(0.5, -0.5) + 0.5;
+            if (all(uv >= 0.0) && all(uv < 1.0)) {
+                const int2 px = int2(uv * float2(f.width, f.height));
+                const float d = depth.Load(int3(px, 0));
+                const float3 q = pixel_ray(f, float2(px) + 0.5) * (d > 0.0 ? f.near_plane / d : 1.0e6);
+                if (q.y > p.y) {
+                    above = light.Load(int3(px, 0)).rgb;
+                }
+            }
+        }
+    }
+    // Beyond the window the water under it mirrored: its own light, seen
+    // down from the surface into water as deep as it goes.
+    const float3 r = reflect(v, down);
+    const float3 source = water_source(f, look, 1.0);
+    const float3 sigma = water_extinction(look);
+    float3 mirrored = water_glow(source, sigma, 0.0, 1.0e4, min(r.y, 0.0));
+    // What the screen shows along the mirror (a pool's floor), through the
+    // water back to the surface.
+    int2 hit_px = int2(0, 0);
+    float trust = 0.0;
+    if (screen_on && fresnel > 0.0 &&
+        screen_ray(f, depth, p - float3(0.0, 2.0 * footprint * max(v.y, 0.05), 0.0), r, hit_px, trust) && trust > 0.0) {
+        const float d = depth.Load(int3(hit_px, 0));
+        if (d > 0.0) {
+            const float3 q = pixel_ray(f, float2(hit_px) + 0.5) * (f.near_plane / d);
+            const float along = length(q - p);
+            const float3 seen = light.Load(int3(hit_px, 0)).rgb * exp(-sigma * along) +
+                                water_glow(source, sigma, 0.0, along, min(r.y, 0.0));
+            mirrored = lerp(mirrored, seen, trust);
+        }
+    }
+    const float3 color = above * (1.0 - fresnel) + mirrored * fresnel;
+    // (`p` is on the view: its ray is p over its view-space depth.)
+    const float own_view_z = -dot(f.view_rows[2].xyz, p);
+    const float3 shown = under_camera_water(f, color, v, distance, p / max(own_view_z, 1e-6));
+    return min(max(shown, float3(0.0, 0.0, 0.0)), float3(60000.0, 60000.0, 60000.0));
+}
+
 [shader("pixel")]
 float4 ps_main(WaterVaryings i) : SV_Target {
     const Frame f = load_frame(push.frame, push.frame_offset);
@@ -230,9 +390,6 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const float3 p = i.world;
     const float distance = length(p);
     const float3 v = p / max(distance, 1e-6); // from the camera
-    if (v.y > 0.0) {
-        discard; // seen from below: W3
-    }
     const Look look = load_look(i.look);
     // Shading's extras: shadows, the voxel light, the sky, the lamps.
     const bool have = push.extras_on != 0u;
@@ -241,9 +398,13 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const bool sky_on = have && e.sky_on != 0u;
     const Sky sky = load_sky(have ? e.sky_params : push.frame, have ? e.sky_params_offset : 0u);
     // A pixel's width on the surface there (metres).
-    const float footprint = distance * 2.0 / max(f.p11 * f.height, 1e-6) / max(-v.y, 0.05);
+    const float footprint = distance * 2.0 / max(f.p11 * f.height, 1e-6) / max(abs(v.y), 0.05);
     float crest;
     const float3 n = wave_normal(p.xz, footprint, look.waves, crest);
+    if (v.y > 0.0) {
+        const bool screen_on = have && (e.reflect_on & 2u) != 0u;
+        return float4(shade_below(f, screen_on, sky_on, sky, look, n, p, distance, v, footprint, depth, light), 1.0);
+    }
     const float n_dot_v = saturate(dot(n, -v));
     // Fresnel (Schlick), n 1.33.
     const float fresnel = k_water_f0 + (1.0 - k_water_f0) * pow(1.0 - n_dot_v, 5.0);
@@ -285,11 +446,22 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     if (sky_on) {
         sun *= cloud_shadow(sky, p);
     }
+    // The sun's light gathered by the waves on the bed seen (as lit as the surface over it).
+    float gather = 1.0;
+    if (under_z < 1.0e37 && look.waves > 0.0 && sun > 0.0) {
+        const float3 bed_point = pixel_ray(f, float2(bent_px) + 0.5) * under_z;
+        const float bed_under = p.y - bed_point.y;
+        const float bed_distance = length(bed_point);
+        // (A pixel's width on a level bed there.)
+        const float bed_footprint = bed_distance * 2.0 / max(f.p11 * f.height, 1e-6) /
+                                    max(abs(bed_point.y) / max(bed_distance, 1e-6), 0.05);
+        gather = lerp(1.0, caustic(bed_point.xz, bed_under, bed_footprint, look.waves, l), caustic_weight(f, sun));
+    }
     // The water's own colour, lit by the sun and the sky (as a rough
     // surface would be lit under the surface), where its depth hides what is under it.
     const float3 sky_up = ambient_light(f, float3(0.0, 1.0, 0.0));
-    const float sun_up = saturate(l.y);
-    const float3 deep = look.color * (sky_up + f.sun_light.rgb * (sun_up * sun * 0.31830989));
+    // (The same light as from below: the water_glow along the view bent into it.)
+    const float3 deep = water_glow(water_source(f, look, sun), extinction, 0.0, through_water, t_still.y);
     // Foam where the bed comes near (how deep straight down), broken up by
     // the waves' crests.
     const float bed_depth = straight_full * max(-v.y, 0.0);
@@ -337,7 +509,7 @@ float4 ps_main(WaterVaryings i) : SV_Target {
         }
     }
     // The water's own light (all but what comes from under it).
-    const float3 own = lerp((deep * (1.0 - transmitted)) * (1.0 - fresnel) + mirrored * fresnel + glint + lamps, foam_light, foam);
+    const float3 own = lerp(deep * (1.0 - fresnel) + mirrored * fresnel + glint + lamps, foam_light, foam);
     // The air in front of it, as shading puts it over the scene; `through`:
     // how much of the water's own light comes through it.
     // `air`: the air's own light, the same over nothing (it is linear in
@@ -358,11 +530,58 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     // What lies under it already holds the air in front of it (and the
     // little more to the bed): that air's light taken off, the rest dimmed
     // by the water.
-    color += max(seen - air, float3(0.0, 0.0, 0.0)) * transmitted * ((1.0 - fresnel) * (1.0 - foam));
+    color += max(seen - air, float3(0.0, 0.0, 0.0)) * transmitted * ((1.0 - fresnel) * (1.0 - foam) * gather);
     // The screen's reflection over the mirror's (it holds its own air, as reflect.slang's).
     if (trust > 0.0) {
         color += (light.Load(int3(hit_px, 0)).rgb - mirrored) * (fresnel * (1.0 - foam) * through * trust);
     }
     color = min(max(color, float3(0.0, 0.0, 0.0)), float3(60000.0, 60000.0, 60000.0));
     return float4(color, 1.0);
+}
+
+[shader("pixel")]
+float4 ps_copy(float4 position : SV_Position) : SV_Target {
+    const int2 pixel = int2(position.xy);
+    float4 c = read_texture(push.light).Load(int3(pixel, 0));
+    if (push.under_on == 0u) {
+        return c;
+    }
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const float3 ray = pixel_ray(f, position.xy);
+    if (ray.y * f.near_plane >= push.under_level) {
+        return c; // this pixel's near plane is above the surface
+    }
+    const float ray_length = length(ray);
+    const float3 v = ray / ray_length;
+    const float d = read_texture_float(push.depth).Load(int3(pixel, 0));
+    float distance = d > 0.0 ? f.near_plane / d * ray_length : 1.0e6;
+    // Not past where the view comes up through the surface (that the
+    // surface's own pass draws over).
+    if (v.y > 1e-5 && push.under_level > 0.0) {
+        distance = min(distance, push.under_level / v.y);
+    }
+    const Look look = load_look(push.under_look);
+    // Caustics on what is seen, where it is under the surface and the sun reaches it.
+    const float3 l = f.sun_direction.xyz;
+    if (d > 0.0 && look.waves > 0.0 && l.y > 0.0) {
+        const float3 p = ray * (f.near_plane / d);
+        const float bed_under = push.under_level - p.y;
+        if (bed_under > 0.0) {
+            const float footprint = length(p) * 2.0 / max(f.p11 * f.height, 1e-6) / max(abs(v.y), 0.05);
+            float sun = 1.0;
+            if (push.extras_on != 0u) {
+                const Extras e = load_extras(push.extras, push.extras_offset);
+                sun = sun_visibility(e.shadows, p, float3(0.0, 1.0, 0.0), l, footprint);
+                if (e.sky_on != 0u) {
+                    sun *= cloud_shadow(load_sky(e.sky_params, e.sky_params_offset), p);
+                }
+            }
+            if (sun > 0.0) {
+                c.rgb *= lerp(1.0, caustic(p.xz, bed_under, footprint, look.waves, l), caustic_weight(f, sun));
+            }
+        }
+    }
+    c.rgb = min(under_camera_water(f, c.rgb, v, distance, ray), float3(60000.0, 60000.0, 60000.0));
+    c.a = 1.0; // (the sky behind is water now: exposed as everything drawn is)
+    return c;
 }

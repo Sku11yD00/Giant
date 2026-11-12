@@ -783,8 +783,11 @@ struct WaterPush {
     u32 extras;         // shading's ResolveExtras (shadows, voxel light, sky, dust, lamps)
     u32 extras_offset;
     u32 extras_on;      // 0: shading had none (lit by the flat sky, unfogged)
-    u32 pad[2];
+    u32 under_on;       // 1: the near plane dips under the water the camera is in (FrameInput::underwater)
+    u32 under_look;     // that water's look (an index into the looks)
+    float under_level;  // its surface, camera-relative (metres)
+    u32 pad[3];
 };
-static_assert(sizeof(WaterPush) == 64);
+static_assert(sizeof(WaterPush) == 80);
 
 } // namespace giant::render::gpu

@@ -33,6 +33,16 @@ struct WaterBatch {
 WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32> indices,
                       std::span<const WaterLook> looks, const DVec3& camera);
 
+// A look as the GPU holds it, its numbers kept in range (a bad one: the default's).
+gpu::WaterLook pack_water_look(const WaterLook& look);
+
+// Whether any of the near plane lies under the surface `level_relative`
+// metres above (or, negative, below) the camera: the view looking along
+// `orientation` (-Z, +Y up), `tan_y` the tangent of half its vertical field
+// of view, `aspect` its width over its height, `near_plane` metres out.
+// (Its lowest corner: the plane is flat.)
+bool near_plane_under(const Quat& orientation, float tan_y, float aspect, float near_plane, double level_relative);
+
 // The waves at `seconds` under wind `velocity` (m/s; the sea's waves grow
 // with it, longest about where a sea under that wind peaks, with a little
 // ripple when calm), camera-relative to `camera`: each wave's phase holds

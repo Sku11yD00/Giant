@@ -8,6 +8,7 @@
 #include "giant_test.h"
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 using namespace giant;
@@ -128,11 +129,38 @@ GIANT_TEST("water: past a waterfall the upper level is not there; rivers listed 
         physics.remove_character(at_bend);
         physics.remove_character(in_tunnel);
     }
+    // The water reaches a point in the open water, over the tunnel's roof,
+    // and over the surface; not in the tunnel (the camera under water).
+    GIANT_CHECK(physics.water_reaches({-3.0, 1.0, -97.0}, 5.0));
+    GIANT_CHECK(physics.water_reaches({-100.0, 4.5, 0.0}, 5.0));
+    GIANT_CHECK(physics.water_reaches({-100.0, 6.0, 0.0}, 5.0));
+    GIANT_CHECK(!physics.water_reaches({-100.0, 1.6, 0.0}, 5.0));
+    GIANT_CHECK(!physics.water_reaches({-100.0, std::numeric_limits<double>::quiet_NaN(), 0.0}, 5.0));
     // A crate on the shelf past the drop stays dry; one in the lower river floats there.
     physics.add(box({53.0, 0.25, 0.0}, {1.0f, 0.25f, 1.0f}));
     const BodyId dry = physics.add(box({53.0, 0.75, 0.0}, {0.25f, 0.25f, 0.25f}, Motion::dynamic, 20.0f));
     run(physics, 3.0);
     GIANT_CHECK(std::fabs(physics.state(dry)->position.y - 0.75) < 0.02);
+}
+
+GIANT_TEST("water: under a pier over the bed is open water; a room with its own floor is dry") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    // The terrain's bed at y 0 (a heightfield), a lake 5 m deep over it.
+    BodyDesc bed;
+    HeightShape h;
+    h.samples = 9;
+    h.spacing = 10.0f;
+    h.heights.assign(81, 0.0f);
+    bed.parts.push_back({h});
+    bed.position = {-40.0, 0.0, -40.0};
+    physics.add(bed);
+    physics.add(box({0.0, 3.0, 0.0}, {4.0f, 0.25f, 4.0f}));   // a pier's deck over the bed
+    physics.add(box({20.0, 3.0, 0.0}, {4.0f, 0.25f, 4.0f}));  // a room's roof...
+    physics.add(box({20.0, 0.5, 0.0}, {4.0f, 0.25f, 4.0f}));  // ...and its floor
+    run(physics, 1.0 / 60.0);
+    GIANT_CHECK(physics.water_reaches({0.0, 1.5, 0.0}, 5.0));
+    GIANT_CHECK(!physics.water_reaches({20.0, 1.5, 0.0}, 5.0));
 }
 
 GIANT_TEST("water: a river carries a floating body down its stretches; a sunk rock stays; out of it, nothing") {

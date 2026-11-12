@@ -573,7 +573,7 @@ Json render_settings_json(const EditorState& state) {
               {"ambient_occlusion", s.ambient_occlusion},
               {"contact_shadows", s.contact_shadows},
               {"water", {{"triangles", s.water_triangles}, {"dropped", s.water_dropped}, {"overflow", s.water_overflow},
-                         {"broken_lakes", state.water_broken_lakes}}},
+                         {"broken_lakes", state.water_broken_lakes}, {"underwater", s.underwater}}},
               {"exposure",
                {{"auto", s.auto_exposure},
                 {"multiplier", s.exposure},
@@ -1784,7 +1784,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "last_frame.contact_shadows). "
          "water: the scene's lakes, rivers and sea drawn (waves from the wind, the bed seen through shallow "
          "water, reflections, foam at the shore; default on; the lit view; last_frame.water: triangles drawn, "
-         "dropped bad ones, overflow past the caps, broken_lakes: lakes not drawn as their shore crosses itself). "
+         "dropped bad ones, overflow past the caps, broken_lakes: lakes not drawn as their shore crosses itself, "
+         "underwater: some of the view under the water the camera is in, seen dimmed by it, the surface from "
+         "below and caustics on the bed; caustics show from above too). "
          "local_lights: the lamps entities and kit pieces carry (their lamp settings) light the scene "
          "(default on; lit views; last_frame.lights says how many were in view, light_overflow when the "
          "furthest were left out). "

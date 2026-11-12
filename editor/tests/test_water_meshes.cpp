@@ -211,3 +211,27 @@ GIANT_TEST("water meshes: the sea is rings round the camera out to the horizon, 
     m.update(water, {std::nan(""), 0.0, 0.0});
     GIANT_CHECK(std::fabs(m.vertices()[0].position.x + 3000.0) < 1e-9);
 }
+
+GIANT_TEST("water meshes: the camera's water is the highest over its place, with its look; none outside") {
+    world::Water pond = lake({{0.0, 0.0}, {10.0, 0.0}, {10.0, 10.0}, {0.0, 10.0}}, 4.0f);
+    pond.color = {0.1f, 0.2f, 0.3f};
+    pond.waves = 2.5f;
+    world::Water sea;
+    sea.name = "sea";
+    sea.kind = world::WaterKind::sea;
+    sea.level = 0.0f;
+    const std::vector<world::Water> water{sea, pond};
+    // In the pond (under or over it): the pond.
+    for (const double y : {1.0, 5.9}) {
+        const render::Underwater u = camera_water(water, {5.0, y, 5.0});
+        GIANT_CHECK(u.on && u.level == 4.0 && u.look.color.y == 0.2f && u.look.waves == 2.5f);
+    }
+    // High over every surface: none (not looked for).
+    GIANT_CHECK(!camera_water(water, {5.0, 6.5, 5.0}).on && camera_water(water, {5.0, 5.5, 5.0}).on);
+    // Past it: the sea; with no sea, nothing; hidden, nothing.
+    const render::Underwater out = camera_water(water, {50.0, -2.0, 5.0});
+    GIANT_CHECK(out.on && out.level == 0.0);
+    GIANT_CHECK(!camera_water(std::vector<world::Water>{pond}, {50.0, 1.0, 5.0}).on);
+    pond.visible = false;
+    GIANT_CHECK(!camera_water(std::vector<world::Water>{pond}, {5.0, 1.0, 5.0}).on);
+}

@@ -13,7 +13,7 @@ float clamp_or(float v, float lo, float hi, float fallback) {
     return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
 }
 
-gpu::WaterLook gpu_look(const WaterLook& l) {
+gpu::WaterLook look_for_gpu(const WaterLook& l) {
     const WaterLook d;
     gpu::WaterLook g{};
     g.color[0] = clamp_or(l.color.x, 0.0f, 1.0f, d.color.x);
@@ -37,9 +37,9 @@ WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32
     WaterBatch out;
     const usize look_count = std::min<usize>(looks.size(), k_max_water_looks);
     out.looks.reserve(look_count + 1);
-    for (usize i = 0; i < look_count; ++i) out.looks.push_back(gpu_look(looks[i]));
+    for (usize i = 0; i < look_count; ++i) out.looks.push_back(look_for_gpu(looks[i]));
     const u32 fallback_look = static_cast<u32>(out.looks.size());
-    out.looks.push_back(gpu_look(WaterLook{})); // the default, last
+    out.looks.push_back(look_for_gpu(WaterLook{})); // the default, last
     if (vertices.size() > k_max_water_vertices) out.overflow = true;
     const usize vertex_count = std::min<usize>(vertices.size(), k_max_water_vertices);
     // Each vertex once, camera-relative; a bad one marked so its triangles go.
@@ -75,6 +75,18 @@ WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32
         out.indices.insert(out.indices.end(), {a, b, c});
     }
     return out;
+}
+
+gpu::WaterLook pack_water_look(const WaterLook& look) { return look_for_gpu(look); }
+
+bool near_plane_under(const Quat& orientation, float tan_y, float aspect, float near_plane, double level_relative) {
+    if (!std::isfinite(level_relative)) return false;
+    const Vec3 right = rotate(orientation, {1.0f, 0.0f, 0.0f}) * (tan_y * aspect);
+    const Vec3 up = rotate(orientation, {0.0f, 1.0f, 0.0f}) * tan_y;
+    const Vec3 ahead = rotate(orientation, {0.0f, 0.0f, -1.0f});
+    // The lowest corner: each axis's part taken downwards.
+    const double lowest = (ahead.y - std::fabs(right.y) - std::fabs(up.y)) * static_cast<double>(near_plane);
+    return lowest < level_relative;
 }
 
 std::array<gpu::WaterWave, k_water_waves> water_waves(const Vec3& velocity, double seconds, const DVec3& camera) {

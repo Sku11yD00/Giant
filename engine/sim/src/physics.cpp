@@ -667,7 +667,8 @@ struct PhysicsWorld::Impl {
     // surface (a ceiling) and something fixed under it (a floor) at most
     // k_water_room_height apart, `low` metres under `from` being its own
     // bottom. A tunnel or a basement under a lake is dry; the open water
-    // under a pontoon, an overhang or a hull's bottom (no floor near) is not.
+    // under a pontoon, an overhang, a pier or a hull's bottom (no floor
+    // near, the bed itself no floor: the terrain's heightfield) is not.
     bool roofed(const JPH::RVec3& from, double level, float low) const {
         const double up = level - static_cast<double>(from.GetY());
         if (!(up > 0.0)) return false;
@@ -682,7 +683,12 @@ struct PhysicsWorld::Impl {
         const float under = k_water_room_height - over;
         if (!(under > low)) return false;
         JPH::RayCastResult floor;
-        return system.GetNarrowPhaseQuery().CastRay(JPH::RRayCast(from, JPH::Vec3(0.0f, -under, 0.0f)), floor, broad, object);
+        if (!system.GetNarrowPhaseQuery().CastRay(JPH::RRayCast(from, JPH::Vec3(0.0f, -under, 0.0f)), floor, broad, object)) {
+            return false;
+        }
+        // (Between steps, nothing moving bodies: no lock needed to look.)
+        const JPH::RefConst<JPH::Shape> shape = system.GetBodyInterfaceNoLock().GetShape(floor.mBodyID);
+        return shape == nullptr || shape->GetSubType() != JPH::EShapeSubType::HeightField;
     }
 
     // Before a step: each dynamic body awake in water buoyed up, slowed
@@ -1645,6 +1651,14 @@ void PhysicsWorld::set_water(std::span<const world::Water> water) {
 }
 
 std::span<const world::Water> PhysicsWorld::water() const { return m_impl->water; }
+
+bool PhysicsWorld::water_reaches(const DVec3& point, double level) const {
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z) || !std::isfinite(level)) {
+        return false;
+    }
+    if (!(point.y < level)) return true; // over it: nothing between
+    return !m_impl->roofed(to_jolt(point), level, 0.0f);
+}
 
 bool PhysicsWorld::is_character_body(BodyId id) const {
     return id != k_no_body && m_impl->is_character_body(from_id(id));

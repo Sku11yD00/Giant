@@ -500,8 +500,10 @@ struct RenderSettings {
 // seen). The waves are a sum of travelling waves blown by
 // FrameInput::wind, `waves` high (0 still to 4), their pattern moving with
 // FrameInput::water_seconds; the surface itself stays flat (its normals
-// wave). Seen from below (the camera under the surface) it is not drawn
-// yet.
+// wave). The sun's light through the waves gathers into moving caustics on
+// what lies under them. Seen from below (FrameInput::underwater) the
+// surface lets the world above through a window (Snell's) and mirrors the
+// water beyond it.
 struct WaterLook {
     Vec3 color{0.02f, 0.05f, 0.06f};       // seen deep (linear RGB, what it scatters back)
     Vec3 absorption{0.45f, 0.09f, 0.065f}; // light lost a metre, per channel (0 to 10)
@@ -513,6 +515,17 @@ struct WaterVertex {
     float flow_x = 0.0f; // the water's speed (m/s; rivers)
     float flow_z = 0.0f;
     u32 look = 0;     // index into FrameInput::water_looks (past it: the default look)
+};
+// The water the camera is in (water plan W3), as the caller finds it at the
+// camera (x, z): wherever the camera's near plane dips under `level`, the
+// view there is under water: what is seen dimmed and hidden by the water's
+// own colour (its look's absorption and turbidity, lit by the sun and the
+// sky, dimmer the deeper), the surface seen from below, caustics on the
+// bed. The line where the near plane meets the surface splits the screen.
+struct Underwater {
+    bool on = false;    // the camera is over (or in) a body of water
+    double level = 0.0; // its surface there (world y)
+    WaterLook look;
 };
 // What one frame draws at most (the rest are left out: RenderStats::water_overflow).
 inline constexpr u32 k_max_water_vertices = 1u << 18;
@@ -572,6 +585,8 @@ struct FrameInput {
     std::span<const u32> water_indices;
     std::span<const WaterLook> water_looks;
     double water_seconds = 0.0;
+    // The water the camera is in (lit views, with RenderSettings::water).
+    Underwater underwater;
 };
 
 struct RenderStats {
@@ -663,6 +678,7 @@ struct RenderStats {
     u32 water_triangles = 0;      // water triangles drawn (in view or not: the GPU clips them)
     bool water_overflow = false;  // past k_max_water_vertices or _triangles: some left out
     u32 water_dropped = 0;        // triangles left out for bad indices or numbers
+    bool underwater = false;      // some of the view was under water (FrameInput::underwater)
     u32 skinned_meshes = 0;     // skinned meshes added (live)
     u32 posed = 0;              // of them, posed on the GPU this frame (a new pose, or just loaded)
 };
