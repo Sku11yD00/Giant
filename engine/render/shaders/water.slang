@@ -83,6 +83,10 @@ struct WaterPush {
     uint sea_rings;
     float sea_level;
     uint sea_look;
+    float whitecaps;
+    float whitecap_z;
+    float rain;
+    float rain_clock;
 };
 ConstantBuffer<WaterPush> push : register(b0);
 
@@ -348,6 +352,134 @@ float caustic_weight(Frame f, float sun) {
     return from_sun / max(from_sun + from_sky, 1e-6);
 }
 
+// Rain on the water (W5c): rings spreading from where drops land. Three
+// layers of cells (k_rain_cells metres, a ground place `at`, wrapped as the
+// weather's are); in each cell, each second of a layer's own cycle (its
+// second counted within the k_rain_cycle clock, so the clock's wrap is one
+// more second), a drop lands with chance `rain` at a place and moment from
+// a hash, its ring spreading to 0.3 of the cell in k_rain_life seconds as
+// it fades, its middle kept 0.3 of a cell in and the whole faded out
+// before the cell's edge. Nothing is kept from frame to frame. Returns the
+// rings' slope (x, z); `fine` is how much of them a pixel `footprint`
+// metres wide resolves (four pixels a ring's wavelength, as the waves;
+// where it does not, the rain roughens the glint instead).
+static const float k_rain_cycle = 64.0;      // seconds (water.h's k_water_rain_period)
+static const float k_rain_life = 0.6;        // seconds a ring lasts
+static const float k_rain_wavelength = 0.03; // metres between a ring's crests
+static const float k_rain_height = 0.0012;   // metres: a fresh ring's height
+float rain_cell(uint layer) { return layer == 0u ? 0.5 : (layer == 1u ? 0.4 : 0.32); } // metres (each divides k_weather_wrap)
+float2 rain_rings(float2 at, float rain, float clock, float footprint, out float fine) {
+    fine = saturate(k_rain_wavelength / max(footprint * 4.0, 1e-6) - 1.0);
+    float2 slope = float2(0.0, 0.0);
+    if (fine <= 0.0 || rain <= 0.0) {
+        return slope;
+    }
+    const float w = k_rain_wavelength;
+    const float a = 6.2831853 / w;
+    [unroll]
+    for (uint layer = 0; layer < 3; ++layer) {
+        const float cell = rain_cell(layer);
+        const float2 v = at / cell;
+        const float2 c = floor(v);
+        const int period = int(k_weather_wrap / cell + 0.5);
+        const int2 ci = ((int2(c) % period) + period) % period;
+        // The layer's cycle (1 s, its start shifted by the layer) and which second.
+        const float t = clock + float(layer) * 0.37;
+        const float turn = floor(t);
+        const uint second = uint(turn) % uint(k_rain_cycle);
+        const uint3 key = uint3(uint(ci.x), uint(ci.y), second * 3u + layer + 101u);
+        if (weather_unit(key) >= rain * 0.85) {
+            continue; // no drop here this time
+        }
+        const float age = (t - turn) - weather_unit(key + uint3(0u, 0u, 7919u)) * (1.0 - k_rain_life);
+        if (age <= 0.0 || age >= k_rain_life) {
+            continue;
+        }
+        const float2 middle = float2(0.3, 0.3) + 0.4 * float2(weather_unit(key + uint3(0u, 0u, 15013u)),
+                                                              weather_unit(key + uint3(0u, 0u, 22111u)));
+        const float2 in_cell = v - c;
+        const float2 off = (in_cell - middle) * cell; // metres from where it landed
+        const float r = length(off);
+        const float life = age / k_rain_life;
+        const float d = r - life * 0.3 * cell;    // from the ring's crest
+        const float envelope = exp(-(d * d) / (w * w));
+        // Fading as it spreads (in over its first 30 ms), and out before
+        // the cell's edge; none at its very middle (no point there).
+        const float edge = min(min(in_cell.x, 1.0 - in_cell.x), min(in_cell.y, 1.0 - in_cell.y)) * cell;
+        const float fade = (1.0 - life) * (1.0 - life) * saturate(age / 0.03) * smoothstep(0.0, 2.0 * w, edge) *
+                           saturate(r / w);
+        // The height h = A sin(a d) e^-(d/w)^2, sloped along the radius.
+        const float dh = k_rain_height * fade * envelope * (a * cos(a * d) - 2.0 * d / (w * w) * sin(a * d));
+        slope += r > 1e-5 ? off / r * dh : float2(0.0, 0.0);
+    }
+    return slope * fine;
+}
+
+// How far the waves' crests spread round 0.5 (crest is 0.5 plus the mean
+// of the sines drawn, each faded as the pixel `footprint` outgrows it): the
+// standard deviation, a quarter with every wave drawn, 0 with none.
+float crest_spread(float footprint) {
+    ByteAddressBuffer b = read_buffer(push.data);
+    float sum = 0.0;
+    [loop]
+    for (uint i = 0; i < push.wave_count; ++i) {
+        const float k = asfloat(b.Load(push.waves_offset + i * 32u + 8u));
+        const float seen = saturate((6.2831853 / k) / max(footprint * 4.0, 1e-6) - 1.0);
+        sum += seen * seen;
+    }
+    return sqrt(sum * 0.5) / max(float(push.wave_count), 1.0);
+}
+
+// The upper tail of the standard normal past x (Abramowitz and Stegun 7.1.26's erfc).
+float normal_tail(float x) {
+    const float z = abs(x) * 0.70710678;
+    const float t = 1.0 / (1.0 + 0.3275911 * z);
+    const float erfc = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) *
+                       exp(-z * z);
+    return x >= 0.0 ? 0.5 * erfc : 1.0 - 0.5 * erfc;
+}
+
+// Whitecaps (W5c): open water foams on its highest crests in a strong
+// wind, `share` of it (push.whitecaps): the crests above 0.5 plus the
+// spread times `z` (push.whitecap_z: the top `share` of a normal spread).
+// Crests are clamped at 1, so past 0.97 the line stays there and the foam
+// thins to match (a light wind's few caps). Where the waves are too fine
+// to draw, the foam is the share itself, spread evenly (far water lighter
+// in a gale). Broken up (its mean kept but where it is solid) by a noise drifting with the
+// wind over the ground place `at` (with the sky's: `placed`), cross-faded
+// over the weather's clock, each octave smoothed to its mean as the pixel
+// outgrows it.
+float whitecap_foam(float share, float z, float crest, float waves, float footprint, float2 at, bool placed,
+                    float2 wind, float clock) {
+    if (share <= 0.0 || waves <= 0.0) {
+        return 0.0;
+    }
+    const float spread = crest_spread(footprint);
+    float line = 0.5 + spread * z;
+    float strength = 1.0;
+    if (line > 0.97) {
+        line = 0.97;
+        strength = saturate(share / max(normal_tail(0.47 / max(spread, 1e-4)), 1e-6));
+    }
+    // (The crests' line only once nearly every wave is drawn: with a few,
+    // no crest reaches it, and the share is the better guess.)
+    const float resolved = smoothstep(0.2, 0.25, spread);
+    const float on_crest = saturate((crest - line) / 0.02) * strength;
+    float foam = lerp(share, on_crest, resolved);
+    if (placed) {
+        const float f = clock / k_rain_cycle;
+        const float2 drift = wind * 0.6; // metres a second the breakup drifts
+        const float2 at0 = at - drift * clock;
+        const float2 at1 = at - drift * (clock - k_rain_cycle);
+        const float coarse_seen = saturate(2.0 - footprint / 1.6);
+        const float fine_seen = saturate(2.0 - footprint / 0.4);
+        const float n0 = lerp(0.5, weather_noise(at0, 3.2, 41u), coarse_seen) * 0.6 + lerp(0.5, weather_noise(at0, 0.8, 43u), fine_seen) * 0.4;
+        const float n1 = lerp(0.5, weather_noise(at1, 3.2, 41u), coarse_seen) * 0.6 + lerp(0.5, weather_noise(at1, 0.8, 43u), fine_seen) * 0.4;
+        foam *= 0.2 + 1.6 * lerp(n0, n1, f); // (mean 1: thin foam keeps its share, solid foam loses about a tenth)
+    }
+    return saturate(foam) * saturate(waves);
+}
+
 // The waves' normal on running water: carried `flow` (m/s) downstream
 // from two starts half a period apart, each faded out as it starts again
 // (a flow map's two phases; the second shifted so the two differ), the
@@ -596,6 +728,20 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const float scale = look.waves * (1.0 + 1.5 * rough) + rough;
     float crest;
     float3 n = flowing_normal(p.xz, i.flow, footprint, scale, crest);
+    // Rain's rings where the sky is open over the water (the cover map's
+    // shelter, where it is made; push.rain is 0 with the sky's weather off
+    // or rain not drawn falling).
+    const bool weather = sky_on;
+    const float2 at = sky.place + p.xz; // the ground place (with the sky's parameters)
+    float rain_fine = 0.0;
+    float rain_here = 0.0;
+    if (weather && push.rain > 0.0) {
+        rain_here = push.rain * open_sky(sky, p, float3(0.0, 1.0, 0.0));
+        // (On running water they would ride its flow: faster than half a
+        // metre a second, the rain only roughens it.)
+        const float2 rings = rain_rings(at, rain_here, push.rain_clock, footprint, rain_fine) * saturate(1.0 - speed / 0.5);
+        n = normalize(n / max(n.y, 1e-3) - float3(rings.x, 0.0, rings.y));
+    }
     // Leaning as the surface does (its slope and the waves', added).
     if (any(lean != float2(0.0, 0.0))) {
         n = normalize(n / max(n.y, 1e-3) - float3(lean.x, 0.0, lean.y));
@@ -689,7 +835,9 @@ float4 ps_main(WaterVaryings i) : SV_Target {
         const float breaking = saturate(1.2 - bed_depth / k_break_depth);
         surf_foam = saturate(band * breaking * push.surf * saturate(look.waves) * (0.6 + crest)) * shelving;
     }
-    const float foam = max(max(shore_foam, white), surf_foam);
+    const float caps = whitecap_foam(push.whitecaps, push.whitecap_z, crest, look.waves, footprint, at, sky_on, sky.wind,
+                                     push.rain_clock);
+    const float foam = max(max(max(shore_foam, white), surf_foam), caps);
     // The screen's ray and the voxel cone, unless foam hides the mirror
     // (water reflects at least a fiftieth even seen straight down: no cut-off by angle).
     const bool mirror_shows = foam < 0.95;
@@ -721,7 +869,8 @@ float4 ps_main(WaterVaryings i) : SV_Target {
         mirrored = cone.rgb + (1.0 - cone.a) * mirrored;
     }
     // The sun's glint off the waves (GGX), and the lamps'.
-    const float alpha = 0.02 + 0.03 * saturate(look.waves) + 0.08 * rough; // the glint's spread
+    // (Rain too far to make out roughens it.)
+    const float alpha = 0.02 + 0.03 * saturate(look.waves) + 0.08 * rough + 0.06 * rain_here * (1.0 - rain_fine * saturate(1.0 - speed / 0.5)); // the glint's spread
     const float3 glint = f.sun_light.rgb * (water_highlight(n, -v, l, n_dot_v, alpha) * fresnel * sun);
     const float3 lamps = have ? lamp_highlights(e, f, i.position.xy, p, own_view_z, n, -v, n_dot_v, alpha) : float3(0.0, 0.0, 0.0);
     float3 foam_light = float3(0.0, 0.0, 0.0);
