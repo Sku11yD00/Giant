@@ -28,6 +28,7 @@
 #include "physics_state.h"
 #include "play_state.h"
 #include "clock_state.h"
+#include "water_meshes.h"
 #include "weather_state.h"
 #include "terrain_brush_tool.h"
 #include "terrain_meshes.h"
@@ -406,6 +407,8 @@ int run(const Options& options) {
     std::vector<sim::DustPuff> dust_near;
     std::vector<render::DustPuff> dust_frame;
     float render_seconds = 1.0f / 60.0f; // since the last frame (auto exposure eases over it)
+    editor::WaterMeshes water_meshes;    // the scene's lakes, rivers and sea, drawn
+    double water_seconds = 0.0;          // the waves' clock
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         mark(editor::FramePhase::other);
         terrain_meshes.update(state.scene.terrain);
@@ -457,6 +460,15 @@ int run(const Options& options) {
         input.terrain_layers = scene_frame.terrain_layers;
         input.decals = scene_frame.decals;
         input.lights = scene_frame.lights;
+        if (input.settings.water && input.settings.debug_view == render::DebugView::lit) {
+            water_meshes.update(state.scene.water, state.camera.position);
+            input.water_vertices = water_meshes.vertices();
+            input.water_indices = water_meshes.indices();
+            input.water_looks = water_meshes.looks();
+        }
+        state.water_broken_lakes = water_meshes.broken_lakes();
+        if (!in_screenshot) water_seconds += render_seconds;
+        input.water_seconds = water_seconds;
         // The dust in the air nearest the camera.
         physics.dust().nearest(state.camera.position, render::k_max_dust_puffs, dust_near);
         dust_frame.clear();

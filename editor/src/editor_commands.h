@@ -261,6 +261,7 @@ struct EditorState {
     render::RenderSettings render_settings;
     // Last frame's renderer counts, updated by the main loop.
     render::RenderStats scene_stats;
+    u32 water_broken_lakes = 0; // lakes not drawn: their shore crosses itself (WaterMeshes)
     FrameTimes frame_times; // updated by the main loop
     bool quit_requested = false;
     // Renders the editor as it looks now (viewport and panels) and returns

@@ -517,6 +517,7 @@ Json render_settings_json(const EditorState& state) {
             {"local_lights", state.render_settings.local_lights},
             {"local_shadows", state.render_settings.local_shadows},
             {"local_shadow_faces_per_frame", state.render_settings.local_shadow_faces_per_frame},
+            {"water", state.render_settings.water},
             {"physical_sky", state.render_settings.physical_sky},
             {"aerial_distance", state.render_settings.aerial_distance},
             {"auto_exposure", state.render_settings.auto_exposure},
@@ -571,6 +572,8 @@ Json render_settings_json(const EditorState& state) {
               {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}},
               {"ambient_occlusion", s.ambient_occlusion},
               {"contact_shadows", s.contact_shadows},
+              {"water", {{"triangles", s.water_triangles}, {"dropped", s.water_dropped}, {"overflow", s.water_overflow},
+                         {"broken_lakes", state.water_broken_lakes}}},
               {"exposure",
                {{"auto", s.auto_exposure},
                 {"multiplier", s.exposure},
@@ -1779,6 +1782,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "the crease under a rock), from this frame's depth marched towards the sun for "
          "contact_shadow_length metres (default 0.3, never past 48 pixels; default on; lit views; "
          "last_frame.contact_shadows). "
+         "water: the scene's lakes, rivers and sea drawn (waves from the wind, the bed seen through shallow "
+         "water, reflections, foam at the shore; default on; the lit view; last_frame.water: triangles drawn, "
+         "dropped bad ones, overflow past the caps, broken_lakes: lakes not drawn as their shore crosses itself). "
          "local_lights: the lamps entities and kit pieces carry (their lamp settings) light the scene "
          "(default on; lit views; last_frame.lights says how many were in view, light_overflow when the "
          "furthest were left out). "
@@ -1838,6 +1844,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"local_shadows", {{"type", "boolean"}}},
                 {"local_shadow_faces_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 384},
                                                   {"description", "Lamp shadow faces drawn a frame at most. Default 24."}}},
+                {"water", {{"type", "boolean"}}},
                 {"physical_sky", {{"type", "boolean"}}},
                 {"aerial_distance", number(1000, 100000, "Metres the air over the view is worked out to. Default 32000.")},
                 {"auto_exposure", {{"type", "boolean"}}},
@@ -1893,6 +1900,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.local_lights = args.value("local_lights", r.local_lights);
              r.local_shadows = args.value("local_shadows", r.local_shadows);
              r.local_shadow_faces_per_frame = args.value("local_shadow_faces_per_frame", r.local_shadow_faces_per_frame);
+             r.water = args.value("water", r.water);
              r.physical_sky = args.value("physical_sky", r.physical_sky);
              r.aerial_distance = args.value("aerial_distance", r.aerial_distance);
              r.auto_exposure = args.value("auto_exposure", r.auto_exposure);
