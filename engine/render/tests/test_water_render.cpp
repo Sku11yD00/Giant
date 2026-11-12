@@ -326,7 +326,7 @@ GIANT_TEST("water render: d3d12 shallow water shows its bed, deep water its own 
     looks[0].waves = 0.0f;
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
     frame.view.position = {200.0, 10.0, 0.0};
-    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.6f, 0.8f, 0.0f}); // its glint off the screen
     const std::vector<u8> bare = draw();
     looks[0].waves = 1.0f;
     const std::vector<u8> foamy = draw();
@@ -404,8 +404,9 @@ GIANT_TEST("water render: d3d12 far water fades into the fog as the ground does"
         const usize i = (static_cast<usize>(y) * k_w + x) * 4 + c;
         return i < image.size() ? static_cast<int>(image[i]) : -1000;
     };
-    // Row 26 looks about 25 to 33 m out, in a fog of 0.3 a metre all but hidden.
-    constexpr u32 k_row = 26;
+    // Row 40 looks steeply down (the water mirrors little), 4 to 6 m out,
+    // in a fog of 1 a metre all but hidden.
+    constexpr u32 k_row = 40;
     const auto clear_ground = draw();
     const auto clear_water = [&] {
         frame.water_vertices = v;
@@ -413,7 +414,7 @@ GIANT_TEST("water render: d3d12 far water fades into the fog as the ground does"
         return draw();
     }();
     GIANT_CHECK(renderer->last_stats().water_triangles == 2);
-    frame.sky.fog_density = 0.3f;
+    frame.sky.fog_density = 1.0f;
     frame.sky.fog_falloff = 1.0f / 100.0f;
     const auto fogged_water = draw();
     frame.water_vertices = {};
