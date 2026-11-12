@@ -27,6 +27,12 @@ gpu::WaterLook look_for_gpu(const WaterLook& l) {
     return g;
 }
 
+// A slope as a snorm16 of k_water_slope_most (a bad one: level).
+u32 pack_slope(float slope) {
+    const float s = std::isfinite(slope) ? std::clamp(slope / k_water_slope_most, -1.0f, 1.0f) : 0.0f;
+    return static_cast<u32>(static_cast<u16>(static_cast<i16>(std::lround(s * 32767.0f))));
+}
+
 constexpr double k_two_pi = 6.283185307179586;
 constexpr double k_gravity = 9.81;
 
@@ -58,6 +64,8 @@ WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32
         g.position[2] = static_cast<float>(p.z);
         g.flow[0] = std::clamp(v.flow_x, -100.0f, 100.0f);
         g.flow[1] = std::clamp(v.flow_z, -100.0f, 100.0f);
+        g.rapids = std::isfinite(v.rapids) ? std::clamp(v.rapids, 0.0f, 1.0f) : 0.0f;
+        g.slope = pack_slope(v.slope_x) | (pack_slope(v.slope_z) << 16);
         g.look = v.look < fallback_look ? v.look : fallback_look;
     }
     const usize triangles = indices.size() / 3;
@@ -78,6 +86,12 @@ WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32
 }
 
 gpu::WaterLook pack_water_look(const WaterLook& look) { return look_for_gpu(look); }
+
+float water_flow_clock(double seconds) {
+    if (!std::isfinite(seconds)) return 0.0f;
+    const double t = std::fmod(seconds, static_cast<double>(k_water_flow_period));
+    return static_cast<float>(t < 0.0 ? t + k_water_flow_period : t);
+}
 
 bool near_plane_under(const Quat& orientation, float tan_y, float aspect, float near_plane, double level_relative) {
     if (!std::isfinite(level_relative)) return false;

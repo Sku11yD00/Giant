@@ -435,6 +435,29 @@ GIANT_TEST("water render: d3d12 far water fades into the fog as the ground does"
     device->destroy(target);
 }
 
+GIANT_TEST("water render: rapids packed in range; running water's clock cycles") {
+    std::vector<WaterVertex> v(3);
+    v[0].rapids = 2.0f;
+    v[1].rapids = -1.0f;
+    v[2].rapids = std::nanf("");
+    std::vector<u32> idx{0, 1, 2};
+    const WaterBatch b = pack_water(v, idx, {}, {});
+    GIANT_CHECK(b.vertices[0].rapids == 1.0f && b.vertices[1].rapids == 0.0f && b.vertices[2].rapids == 0.0f);
+    // Slopes: snorm16 of 10 each, x low; past it kept to it; a bad one level.
+    v[0].slope_x = 0.5f;
+    v[0].slope_z = -20.0f;
+    v[1].slope_x = std::nanf("");
+    const WaterBatch s = pack_water(v, idx, {}, {});
+    const auto unpack = [](u32 bits) { return static_cast<float>(static_cast<i16>(static_cast<u16>(bits))) * (10.0f / 32767.0f); };
+    GIANT_CHECK(std::fabs(unpack(s.vertices[0].slope) - 0.5f) < 1e-3f && unpack(s.vertices[0].slope >> 16) == -10.0f);
+    GIANT_CHECK(s.vertices[1].slope == 0u && s.vertices[2].slope == 0u);
+    GIANT_CHECK(b.indices.size() == 3);
+    GIANT_CHECK(std::fabs(water_flow_clock(5.5) - 1.5f) < 1e-6f);
+    GIANT_CHECK(std::fabs(water_flow_clock(1.0e9 + 0.25) - 0.25f) < 1e-4f);
+    GIANT_CHECK(water_flow_clock(std::numeric_limits<double>::infinity()) == 0.0f);
+    GIANT_CHECK(water_flow_clock(-0.5) >= 0.0f && water_flow_clock(-0.5) < k_water_flow_period);
+}
+
 GIANT_TEST("water render: under water where the near plane dips under the camera's water; looks packed in range") {
     // Level: the lower half of the near plane is under a surface at the camera.
     const Quat level{};
@@ -648,6 +671,119 @@ GIANT_TEST("water render: d3d12 under water: far things hidden, near seen, split
     }
     std::printf("    caustics: still %d to %d, waves %d to %d\n", even_low, even_high, low, high);
     GIANT_CHECK(high - low > even_high - even_low + 30);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("water render: d3d12 running water carries its waves; rapids foam; a falling surface leans") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A dark floor 30 m down; the water over it at 0.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = {0.0, -30.0, 0.0};
+    instances[0].scale = {500.0f, 1.0f, 500.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.05f, 0.05f, 0.05f};
+    materials[0].roughness = 0.9f;
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    square(v, idx, {0.0, 0.0, 0.0}, 200.0);
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.water_vertices = v;
+    frame.water_indices = idx;
+    frame.lighting.background = {0.5f, 0.5f, 0.5f};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.6f, 0.8f, 0.0f}); // its glint on the right
+    frame.lighting.sun_light = {2.0f, 2.0f, 2.0f};
+    frame.lighting.sky_light = {0.5f, 0.5f, 0.5f};
+    frame.lighting.ground_light = {0.02f, 0.02f, 0.02f};
+    frame.wind.velocity = {3.0f, 0.0f, 1.0f};
+    frame.water_seconds = 10.3;
+    // Looking down from 15 m, a little forward.
+    frame.view.position = {0.0, 15.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.3f);
+    const auto draw = [&] {
+        for (int i = 0; i < 6; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto green = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4 + 1;
+        return i < image.size() ? static_cast<int>(image[i]) : -1000;
+    };
+    const auto differing = [&](const std::vector<u8>& a, const std::vector<u8>& b) {
+        usize n = 0;
+        for (u32 y = 0; y < k_h; ++y) {
+            for (u32 x = 0; x < k_w; ++x) n += std::abs(green(a, x, y) - green(b, x, y)) > 2 ? usize{1} : usize{0};
+        }
+        return n;
+    };
+    const auto still = draw();
+    frame.water_seconds = 10.4;
+    const auto still_later = draw();
+    // Running at 3 m/s: a tenth of a second on, its waves have moved further
+    // (carried 0.3 m) than still water's.
+    for (WaterVertex& w : v) {
+        w.flow_x = 0.0f;
+        w.flow_z = 3.0f;
+    }
+    const auto running_later = draw();
+    frame.water_seconds = 10.3;
+    const auto running = draw();
+    // In rapids: foam breaks out.
+    for (WaterVertex& w : v) w.rapids = 1.0f;
+    const auto white = draw();
+    usize bright = 0;
+    for (u32 y = 0; y < k_h; ++y) {
+        for (u32 x = 0; x < k_w; ++x) bright += green(white, x, y) > green(running, x, y) + 40 ? usize{1} : usize{0};
+    }
+    // Calm again, its slope falling 1 m in 10 towards +x: lit as it leans.
+    for (WaterVertex& w : v) {
+        w.flow_z = 0.0f;
+        w.rapids = 0.0f;
+        w.slope_x = -0.1f;
+    }
+    const auto leaning = draw();
+    const usize still_moved = differing(still, still_later);
+    const usize moved = differing(running, running_later);
+    const usize leaned = differing(still, leaning);
+    std::printf("    in a tenth of a second still water differs at %zu pixels, running at %zu; rapids foam at %zu, "
+                "leaning differs at %zu\n", still_moved, moved, bright, leaned);
+    GIANT_CHECK(moved > still_moved + 100 && bright > 64 && leaned > 256);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

@@ -747,7 +747,8 @@ struct WaterVertex {
     float position[3]; // camera-relative
     u32 look;
     float flow[2];
-    float pad[2];
+    float rapids; // 0 to 1
+    u32 slope;    // the surface's slope x, z: snorm16 each (low, high) of k_water_slope_most
 };
 static_assert(sizeof(WaterVertex) == 32);
 struct WaterLook {
@@ -786,7 +787,8 @@ struct WaterPush {
     u32 under_on;       // 1: the near plane dips under the water the camera is in (FrameInput::underwater)
     u32 under_look;     // that water's look (an index into the looks)
     float under_level;  // its surface, camera-relative (metres)
-    u32 pad[3];
+    float flow_clock;   // running water's clock: seconds into its cycle (0 to k_water_flow_period)
+    u32 pad[2];
 };
 static_assert(sizeof(WaterPush) == 80);
 

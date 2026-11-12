@@ -3415,6 +3415,7 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     push.under_on = under_on ? 1u : 0u;
     push.under_look = under_look;
     push.under_level = under_on ? static_cast<float>(under_level) : 0.0f;
+    push.flow_clock = water_flow_clock(frame.water_seconds);
     // The light as it is (dimmed where the view is under water), then the water over it.
     cmd.set_pipeline(m_water_copy);
     cmd.push(push);

@@ -500,7 +500,10 @@ struct RenderSettings {
 // seen). The waves are a sum of travelling waves blown by
 // FrameInput::wind, `waves` high (0 still to 4), their pattern moving with
 // FrameInput::water_seconds; the surface itself stays flat (its normals
-// wave). The sun's light through the waves gathers into moving caustics on
+// wave). Running water (WaterVertex::flow) carries its waves downstream,
+// rougher and foaming the faster it runs and in rapids, and a surface that
+// slopes (WaterVertex::slope_*) is lit as it leans. The sun's light through
+// the waves gathers into moving caustics on
 // what lies under them. Seen from below (FrameInput::underwater) the
 // surface lets the world above through a window (Snell's) and mirrors the
 // water beyond it.
@@ -515,6 +518,14 @@ struct WaterVertex {
     float flow_x = 0.0f; // the water's speed (m/s; rivers)
     float flow_z = 0.0f;
     u32 look = 0;     // index into FrameInput::water_looks (past it: the default look)
+    // White water (rivers: rapids where the bed is steep): 0 calm to 1,
+    // foaming and rough. (Running water roughens and foams with its speed too.)
+    float rapids = 0.0f;
+    // How the surface slopes here (its height's rise a metre along x and
+    // z; -10 to 10): lit as it leans (a river falling), smoothly across
+    // its triangles. 0 for level water.
+    float slope_x = 0.0f;
+    float slope_z = 0.0f;
 };
 // The water the camera is in (water plan W3), as the caller finds it at the
 // camera (x, z): wherever the camera's near plane dips under `level`, the

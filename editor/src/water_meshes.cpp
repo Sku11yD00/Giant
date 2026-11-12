@@ -307,10 +307,28 @@ void WaterMeshes::update(std::span<const world::Water> water, const DVec3& camer
                         dz = 0.0;
                     }
                 };
+                // Each point's two banks (across, square to its two stretches'
+                // directions halved, widened at a bend so each stretch keeps its
+                // width, at most doubled at the sharpest), its flow, and how
+                // its surface slopes (downstream, over both its stretches).
+                struct Bank {
+                    double lx, lz, rx, rz;
+                    double tx, tz; // downstream
+                    float fx, fz, slope_x, slope_z;
+                };
+                // A stretch's own slope (rise a metre downstream; a waterfall's the steepest).
+                const auto stretch_slope = [&](usize a, double& slope) {
+                    const double run = std::hypot(w.path[a + 1].x - w.path[a].x, w.path[a + 1].z - w.path[a].z);
+                    const double rise = static_cast<double>(w.path[a + 1].level) - w.path[a].level;
+                    if (run > 1e-6) {
+                        slope = std::clamp(rise / run, -k_slope_most, k_slope_most);
+                        return true;
+                    }
+                    slope = rise > 0.0 ? k_slope_most : (rise < 0.0 ? -k_slope_most : 0.0);
+                    return false; // (no run: no way along it)
+                };
+                std::vector<Bank> banks(n);
                 for (usize p = 0; p < n; ++p) {
-                    // Along: the two stretches' directions halved; across, square to
-                    // that, widened at a bend so each stretch keeps its width (at
-                    // most doubled at the sharpest).
                     double ix = 0.0, iz = 0.0, ox = 0.0, oz = 0.0;
                     if (p > 0) dir(p - 1, p, ix, iz);
                     if (p + 1 < n) dir(p, p + 1, ox, oz);
@@ -329,14 +347,47 @@ void WaterMeshes::update(std::span<const world::Water> water, const DVec3& camer
                     const double widen = 1.0 / std::max(along, 0.5);
                     const world::RiverPoint& rp = w.path[p];
                     const double half = 0.5 * std::max(rp.width, 0.0f) * widen;
-                    const float fx = static_cast<float>(tx) * w.flow;
-                    const float fz = static_cast<float>(tz) * w.flow;
-                    b.vertices.push_back(vertex(rp.x - tz * half, rp.level, rp.z + tx * half, fx, fz));
-                    b.vertices.push_back(vertex(rp.x + tz * half, rp.level, rp.z - tx * half, fx, fz));
+                    // The point's slope: its stretches' own, averaged (a waterfall
+                    // beside it, of no run, set on that stretch's corners below).
+                    double sum = 0.0;
+                    int stretches = 0;
+                    for (const usize a : {p > 0 ? p - 1 : n, p + 1 < n ? p : n}) {
+                        double s = 0.0;
+                        if (a < n && stretch_slope(a, s)) {
+                            sum += s;
+                            ++stretches;
+                        }
+                    }
+                    const double slope = stretches > 0 ? sum / stretches : 0.0;
+                    banks[p] = {rp.x - tz * half, rp.z + tx * half, rp.x + tz * half, rp.z - tx * half, tx, tz,
+                                static_cast<float>(tx) * w.flow, static_cast<float>(tz) * w.flow,
+                                static_cast<float>(tx * slope), static_cast<float>(tz * slope)};
                 }
+                // Each stretch its own four corners, so its rapids stay on it
+                // (where its surface falls steeply; a waterfall all white).
                 for (usize p = 0; p + 1 < n; ++p) {
-                    const u32 a = static_cast<u32>(p * 2);
-                    b.indices.insert(b.indices.end(), {a, a + 2, a + 1, a + 1, a + 2, a + 3});
+                    const world::RiverPoint& a = w.path[p];
+                    const world::RiverPoint& c = w.path[p + 1];
+                    const double run = std::hypot(c.x - a.x, c.z - a.z);
+                    const double drop = std::fabs(static_cast<double>(c.level) - a.level);
+                    const double fall = drop > 0.0 ? (run > 1e-6 ? drop / run : k_slope_most) : 0.0;
+                    const float rapids =
+                        static_cast<float>(std::clamp((fall - k_rapids_from) / (k_rapids_full - k_rapids_from), 0.0, 1.0));
+                    double own = 0.0;
+                    const bool sheer = !stretch_slope(p, own) && own != 0.0; // a waterfall: its own, the steepest
+                    const u32 first = static_cast<u32>(b.vertices.size());
+                    for (const usize q : {p, p + 1}) {
+                        const Bank& k = banks[q];
+                        const float level = w.path[q].level;
+                        for (const bool left : {true, false}) {
+                            render::WaterVertex v = vertex(left ? k.lx : k.rx, level, left ? k.lz : k.rz, k.fx, k.fz);
+                            v.rapids = rapids;
+                            v.slope_x = sheer ? static_cast<float>(k.tx * own) : k.slope_x;
+                            v.slope_z = sheer ? static_cast<float>(k.tz * own) : k.slope_z;
+                            b.vertices.push_back(v);
+                        }
+                    }
+                    b.indices.insert(b.indices.end(), {first, first + 2, first + 1, first + 1, first + 2, first + 3});
                 }
             }
             bodies.push_back(std::move(b));

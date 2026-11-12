@@ -30,6 +30,11 @@
 //   water), beyond it the water mirrored (total internal reflection), then
 //   the water between it and the camera as ps_copy's.
 //
+// Running water (W4a): its waves carried along its flow (flowing_normal),
+// rougher and foaming the faster it runs and in rapids (white water on
+// the crests); a sloping surface (a river falling) lit as it leans, the
+// vertices' slope added to the waves'.
+//
 // Caustics: where the sun's ray to a point on the bed came through the
 // still surface, the waves' curvature there focuses (or spreads) the light
 // as the bent rays' spread on the bed has it (one over the determinant of
@@ -64,9 +69,9 @@ struct WaterPush {
     uint under_on;
     uint under_look;
     float under_level;
+    float flow_clock;
     uint pad0;
     uint pad1;
-    uint pad2;
 };
 ConstantBuffer<WaterPush> push : register(b0);
 
@@ -78,6 +83,9 @@ static const float k_foam_albedo = 0.8;
 static const float k_caustic_fade = 10.0;    // metres of depth over which caustics blur away (e-folding)
 static const float k_caustic_ripples = 3.0;  // the waves' curvature taken this many times: they stand for many finer ripples, which focus more
 static const float k_water_cone = 0.05;      // the voxel cone's width (tangent) for the mirror (trace_reflection widens it to a sixth of its distance)
+static const float k_flow_period = 2.0;      // seconds running water carries its waves before they start again (water.h's k_water_flow_period)
+static const float k_run_rough = 4.0;        // m/s at which running water is as rough as it gets of itself (rapids roughen it more)
+static const float k_slope_most = 10.0;      // a vertex's slope: snorm16 of this (water.h's k_water_slope_most)
 
 [shader("vertex")]
 float4 vs_copy(uint vertex_id : SV_VertexID) : SV_Position {
@@ -93,6 +101,9 @@ float4 to_clip(Frame f, float3 p) {
 struct WaterVaryings {
     float4 position : SV_Position;
     float3 world : WORLD;   // camera-relative
+    float2 flow : FLOW;     // m/s
+    float rapids : RAPIDS;  // 0 to 1
+    float2 slope : SLOPE;   // the surface's rise a metre along x, z
     nointerpolation uint look : LOOK;
 };
 
@@ -107,6 +118,10 @@ WaterVaryings vs_main(uint vertex_id : SV_VertexID) {
     WaterVaryings o;
     o.position = to_clip(f, p);
     o.world = p;
+    o.flow = asfloat(b.Load2(at + 16u));
+    o.rapids = asfloat(b.Load(at + 24u));
+    const uint slope = b.Load(at + 28u);
+    o.slope = float2(float(int(slope << 16) >> 16), float(int(slope) >> 16)) * (k_slope_most / 32767.0);
     o.look = look;
     return o;
 }
@@ -223,6 +238,54 @@ float caustic_weight(Frame f, float sun) {
     const float from_sun = dot(f.sun_light.rgb, luma) * saturate(f.sun_direction.y) * sun * 0.31830989;
     const float from_sky = dot(ambient_light(f, float3(0.0, 1.0, 0.0)), luma);
     return from_sun / max(from_sun + from_sky, 1e-6);
+}
+
+// The waves' normal on running water: carried `flow` (m/s) downstream
+// from two starts half a period apart, each faded out as it starts again
+// (a flow map's two phases; the second shifted so the two differ), the
+// blend's slopes and crests scaled back to one sum's spread (two unlike
+// patterns halfway averaged would be calmer); the blend comes in as the
+// water starts to run. Still water's as it is.
+float3 flowing_normal(float2 xz, float2 flow, float footprint, float scale, out float crest) {
+    const float speed = length(flow);
+    if (speed < 1e-3) {
+        return wave_normal(xz, footprint, scale, crest);
+    }
+    const float t0 = saturate(push.flow_clock / k_flow_period);
+    const float t1 = frac(t0 + 0.5);
+    const float w = abs(2.0 * t0 - 1.0); // the second's share: all of it as the first starts again
+    // (Slower than 0.1 m/s the two phases come together into still water's
+    // waves, never seen as either starts again.)
+    const float running = saturate(speed / 0.1);
+    const float2 xz0 = xz - flow * ((t0 - 0.5) * k_flow_period);
+    const float2 xz1 = xz - flow * ((t1 - 0.5) * k_flow_period) + float2(3.7, -2.3) * running;
+    ByteAddressBuffer b = read_buffer(push.data);
+    float2 slope0 = float2(0.0, 0.0);
+    float2 slope1 = float2(0.0, 0.0);
+    float height0 = 0.0;
+    float height1 = 0.0;
+    float total = 0.0;
+    [loop]
+    for (uint i = 0; i < push.wave_count; ++i) {
+        const uint at = push.waves_offset + i * 32u;
+        const float4 wave = asfloat(b.Load4(at));
+        const float phase = asfloat(b.Load(at + 16u));
+        const float wavelength = 6.2831853 / wave.z;
+        const float seen = saturate(wavelength / max(footprint * 4.0, 1e-6) - 1.0);
+        const float theta0 = wave.z * dot(wave.xy, xz0) + phase;
+        const float theta1 = wave.z * dot(wave.xy, xz1) + phase;
+        const float a = wave.w * scale * seen;
+        slope0 += wave.xy * (a * cos(theta0));
+        slope1 += wave.xy * (a * cos(theta1));
+        height0 += seen * sin(theta0);
+        height1 += seen * sin(theta1);
+        total += 1.0;
+    }
+    const float spread = lerp(1.0, rsqrt(max((1.0 - w) * (1.0 - w) + w * w, 0.5)), running);
+    const float2 slope = (slope0 * (1.0 - w) + slope1 * w) * spread;
+    const float height = (height0 * (1.0 - w) + height1 * w) * spread;
+    crest = saturate(0.5 + 0.5 * height / max(total * 0.5, 1.0));
+    return normalize(float3(-slope.x, 1.0, -slope.y));
 }
 
 // How far (along the view, scaled as the ray's: the depth's near / d) the
@@ -399,8 +462,17 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const Sky sky = load_sky(have ? e.sky_params : push.frame, have ? e.sky_params_offset : 0u);
     // A pixel's width on the surface there (metres).
     const float footprint = distance * 2.0 / max(f.p11 * f.height, 1e-6) / max(abs(v.y), 0.05);
+    // Running water: rougher the faster it runs, and in rapids.
+    const float speed = length(i.flow);
+    const float rapids = saturate(i.rapids);
+    const float rough = saturate(0.5 * saturate(speed / k_run_rough) + rapids);
+    const float scale = look.waves * (1.0 + 1.5 * rough) + rough;
     float crest;
-    const float3 n = wave_normal(p.xz, footprint, look.waves, crest);
+    float3 n = flowing_normal(p.xz, i.flow, footprint, scale, crest);
+    // Leaning as the surface does (its slope and the waves', added).
+    if (any(i.slope != float2(0.0, 0.0))) {
+        n = normalize(n / max(n.y, 1e-3) - float3(i.slope.x, 0.0, i.slope.y));
+    }
     if (v.y > 0.0) {
         const bool screen_on = have && (e.reflect_on & 2u) != 0u;
         return float4(shade_below(f, screen_on, sky_on, sky, look, n, p, distance, v, footprint, depth, light), 1.0);
@@ -418,7 +490,8 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const float straight_full = straight_z >= 1.0e37 ? 1.0e6 : max(straight_z - own_view_z, 0.0) * (distance / max(own_view_z, 1e-6));
     const float straight_through = min(straight_full, k_refraction_reach);
     const float3 t_wavy = refract(v, n, 1.0 / 1.33);
-    const float3 t_still = refract(v, float3(0.0, 1.0, 0.0), 1.0 / 1.33);
+    // (Against the surface as it lies: a sloping river's own lean is no wave.)
+    const float3 t_still = refract(v, normalize(float3(-i.slope.x, 1.0, -i.slope.y)), 1.0 / 1.33);
     const float3 bed = p + v * straight_through + (t_wavy - t_still) * straight_through;
     const float4 bed_clip = to_clip(f, bed);
     int2 bent_px = pixel;
@@ -448,14 +521,14 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     }
     // The sun's light gathered by the waves on the bed seen (as lit as the surface over it).
     float gather = 1.0;
-    if (under_z < 1.0e37 && look.waves > 0.0 && sun > 0.0) {
+    if (under_z < 1.0e37 && scale > 0.0 && sun > 0.0) {
         const float3 bed_point = pixel_ray(f, float2(bent_px) + 0.5) * under_z;
         const float bed_under = p.y - bed_point.y;
         const float bed_distance = length(bed_point);
         // (A pixel's width on a level bed there.)
         const float bed_footprint = bed_distance * 2.0 / max(f.p11 * f.height, 1e-6) /
                                     max(abs(bed_point.y) / max(bed_distance, 1e-6), 0.05);
-        gather = lerp(1.0, caustic(bed_point.xz, bed_under, bed_footprint, look.waves, l), caustic_weight(f, sun));
+        gather = lerp(1.0, caustic(bed_point.xz, bed_under, bed_footprint, scale, l), caustic_weight(f, sun));
     }
     // The water's own colour, lit by the sun and the sky (as a rough
     // surface would be lit under the surface), where its depth hides what is under it.
@@ -466,7 +539,14 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     // the waves' crests.
     const float bed_depth = straight_full * max(-v.y, 0.0);
     const float shore = saturate(1.0 - bed_depth / k_foam_depth);
-    const float foam = look.waves > 0.0 ? saturate(shore * 1.6 - 1.0 + (crest - 0.5) * 1.5) * saturate(look.waves) : 0.0;
+    const float shore_foam = look.waves > 0.0 ? saturate(shore * 1.6 - 1.0 + (crest - 0.5) * 1.5) * saturate(look.waves) : 0.0;
+    // White water: in rapids, and where it runs fast, on the crests carried down.
+    // (None on still or slow water: its crests stay clear.)
+    const float white = rapids > 0.0 || speed > 2.0
+                            ? saturate(rapids * 1.7 + saturate((speed - 2.0) / 6.0) * 0.6 - 0.7 + (crest - 0.5) * 1.5) *
+                                  saturate(rapids * 20.0 + (speed - 2.0))
+                            : 0.0;
+    const float foam = max(shore_foam, white);
     // The screen's ray and the voxel cone, unless foam hides the mirror
     // (water reflects at least a fiftieth even seen straight down: no cut-off by angle).
     const bool mirror_shows = foam < 0.95;
@@ -498,7 +578,7 @@ float4 ps_main(WaterVaryings i) : SV_Target {
         mirrored = cone.rgb + (1.0 - cone.a) * mirrored;
     }
     // The sun's glint off the waves (GGX), and the lamps'.
-    const float alpha = 0.02 + 0.03 * saturate(look.waves); // the glint's spread
+    const float alpha = 0.02 + 0.03 * saturate(look.waves) + 0.08 * rough; // the glint's spread
     const float3 glint = f.sun_light.rgb * (water_highlight(n, -v, l, n_dot_v, alpha) * fresnel * sun);
     const float3 lamps = have ? lamp_highlights(e, f, i.position.xy, p, own_view_z, n, -v, n_dot_v, alpha) : float3(0.0, 0.0, 0.0);
     float3 foam_light = float3(0.0, 0.0, 0.0);
