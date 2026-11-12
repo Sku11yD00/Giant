@@ -428,6 +428,8 @@ struct RenderSettings {
     float contact_shadow_length = 0.3f;
     // Local lights (FrameInput::lights; lit views).
     bool local_lights = true;
+    // Water (FrameInput::water_vertices; lit views).
+    bool water = true;
     // Their shadows (lights with a shadow_id; needs `shadows` and GPU
     // culling): faces of shadow tiles drawn a frame at most (nearest first;
     // a face not drawn yet lets its light through).
@@ -488,6 +490,35 @@ struct RenderSettings {
     u32 wind_shadow_pages_per_frame = 32;
 };
 
+// Water (lit views; water plan W2): the surfaces of lakes, rivers and the
+// sea as triangles the caller makes (FrameInput::water_vertices, three
+// indices a triangle in water_indices), drawn after shading over what lies
+// under them: seen through (bent by the waves, the light lost a metre per
+// channel by `absorption`, fading into the water's own `color` lit by the
+// sun and the sky as it deepens, `turbidity` thickening it), and mirroring
+// the sky and the sun as Fresnel's law has it (more the flatter it is
+// seen). The waves are a sum of travelling waves blown by
+// FrameInput::wind, `waves` high (0 still to 4), their pattern moving with
+// FrameInput::water_seconds; the surface itself stays flat (its normals
+// wave). Seen from below (the camera under the surface) it is not drawn
+// yet.
+struct WaterLook {
+    Vec3 color{0.02f, 0.05f, 0.06f};       // seen deep (linear RGB, what it scatters back)
+    Vec3 absorption{0.45f, 0.09f, 0.065f}; // light lost a metre, per channel (0 to 10)
+    float turbidity = 0.1f;                // 0 clear to 1 muddy
+    float waves = 1.0f;                    // 0 still to 4
+};
+struct WaterVertex {
+    DVec3 position{}; // world, on the surface
+    float flow_x = 0.0f; // the water's speed (m/s; rivers)
+    float flow_z = 0.0f;
+    u32 look = 0;     // index into FrameInput::water_looks (past it: the default look)
+};
+// What one frame draws at most (the rest are left out: RenderStats::water_overflow).
+inline constexpr u32 k_max_water_vertices = 1u << 18;
+inline constexpr u32 k_max_water_triangles = 1u << 18;
+inline constexpr u32 k_max_water_looks = 256;
+
 // A run of FrameInput::instances that changes together (a world cell).
 // Instances one frame draws at most (instance culling is one dispatch of
 // 65535 groups of 64); the ones past it are not drawn.
@@ -535,6 +566,12 @@ struct FrameInput {
     // Seconds since the last frame, for auto exposure's easing (0: held;
     // at most 1 counts).
     float delta_seconds = 1.0f / 60.0f;
+    // Water's surfaces (see WaterLook), and the clock its waves move by
+    // (seconds; the same seconds draw the same waves).
+    std::span<const WaterVertex> water_vertices;
+    std::span<const u32> water_indices;
+    std::span<const WaterLook> water_looks;
+    double water_seconds = 0.0;
 };
 
 struct RenderStats {
@@ -623,6 +660,9 @@ struct RenderStats {
     u32 local_shadow_waiting = 0; // faces of shadowed lights not drawn yet, or to draw again
     u32 local_shadow_tiles = 0;   // tiles in use (of RendererDesc::local_shadow_tiles)
     u32 gi_lamps = 0;             // lamps lighting the voxel bricks lit this frame (global illumination)
+    u32 water_triangles = 0;      // water triangles drawn (in view or not: the GPU clips them)
+    bool water_overflow = false;  // past k_max_water_vertices or _triangles: some left out
+    u32 water_dropped = 0;        // triangles left out for bad indices or numbers
     u32 skinned_meshes = 0;     // skinned meshes added (live)
     u32 posed = 0;              // of them, posed on the GPU this frame (a new pose, or just loaded)
 };
@@ -896,6 +936,9 @@ private:
                   rhi::TransientMemory& params);
     bool ensure_sky_targets();
     bool ensure_post_targets(); // bloom's levels, sized to the frame
+    // Water over `light` (water.h, shaders/water.slang): the light to expose next.
+    rhi::TextureHandle draw_water(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
+                                  rhi::TextureHandle light);
     // Auto exposure from the newest histogram the GPU is done with, eased;
     // the multiplier this frame's light gets before tone mapping.
     float update_exposure(const FrameInput& frame, bool lit_view);
@@ -952,6 +995,8 @@ private:
     rhi::PipelineHandle m_smaa_blend;
     rhi::PipelineHandle m_voxel_view;
     rhi::PipelineHandle m_reflect; // screen reflections, into m_scene
+    rhi::PipelineHandle m_water_copy; // water (shaders/water.slang): the light under it, then
+    rhi::PipelineHandle m_water;      // the surfaces, into m_water_light
     rhi::PipelineHandle m_resolve_direct; // shading without screen reflections: m_radiance alone
     // After shading (post.slang): auto exposure's histogram, bloom, exposure and tone mapping.
     rhi::PipelineHandle m_histogram_clear;
@@ -990,6 +1035,7 @@ private:
     rhi::TextureHandle m_gloss;    // rg32_uint
     rhi::TextureHandle m_fallback; // rgba16_float
     rhi::TextureHandle m_scene;    // rgba16_float: the light with screen reflections, before exposure
+    rhi::TextureHandle m_water_light; // rgba16_float: and with water (made when first drawn)
     // Bloom: the light halved k_bloom_levels times (down), and back up
     // (up[i]: down[i] plus up[i + 1] spread; the last level is down's own).
     static constexpr u32 k_bloom_levels = 6;

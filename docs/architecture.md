@@ -1969,10 +1969,35 @@ in a tunnel under a lake dry. In play Space (held) is up and C down, given
 without taking over the rest of an input set by command. The surface is
 flat until waves (W2/W4) move it.
 
-Drawing it (the surface, refraction, reflections) comes in the
-following parts (the water plan: W2 the surface pass after shading, W3
-under the surface, W4 rivers and the sea, W5 the voxel world, weather and
-sound, W6 the water gate).
+Drawing the surface (W2a): the caller hands `FrameInput::water_vertices`
+(world positions, a flow, a look index), `water_indices` (triangles) and
+`water_looks` (`WaterLook`: the colour deep water shows, absorption a
+metre per channel, turbidity, how wavy), with `water_seconds` for the
+waves' clock; `RenderSettings::water` turns it off. `pack_water`
+(src/water.h) makes them camera-relative (at most 2^18 vertices and
+triangles, 256 looks): a triangle with a bad index or a vertex that is not
+a number is dropped (`RenderStats::water_dropped`), one past the caps left
+out (`water_overflow`), a look out of range takes the default. In the lit view
+only (not the light alone), after shading (and screen reflections) and before post, the pass
+(water.slang, timed "water", two post draws) copies the light into a
+texture of its own and draws the water's triangles over it, each pixel
+tested against the scene's depth (no depth target): the normal is a sum
+of 8 travelling waves made from the wind (`water_waves`: the longest
+where a sea under that wind peaks, 2 to 200 m, steeper in a storm; each
+phase folded at the camera in doubles, so the waves are the same at a
+place wherever the camera is, and a wave shorter than a few pixels fades
+out); what lies under it is seen through, bent by the waves (straight
+where the bent pixel shows something above the water), dimmed by
+Beer-Lambert over the distance the view travels in the water and
+replaced, as that grows, by the look's colour lit by the sky and the sun;
+the sky (its ambient light round the mirror direction) and the sun's
+glint (GGX) are mirrored by Fresnel's law (n 1.33). Seen from below it is
+left out (W3). Not yet: sharp reflections, the moon and lamps on it, foam,
+fog over it (W2b), and the editor drawing its water (W2c).
+
+The rest comes in the following parts (the water plan: W2b/W2c, W3 under
+the surface, W4 rivers and the sea, W5 the voxel world, weather and sound,
+W6 the water gate).
 
 ## Navigation
 
