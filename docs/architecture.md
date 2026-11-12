@@ -2031,7 +2031,9 @@ again). Cutting a 4096-point shore takes a few to a few tens of
 milliseconds (its corners that turn back filed in a grid, its edges
 checked for crossing by a sweep along x, worst for a star whose every edge
 spans its middle): a hitch while such a shore is reshaped, none in play.
-Nothing is made while the water is off or the view is not lit. The
+The editor feeds the water in every view (the voxel world keeps it in
+the debug views too, below); the water setting off skips the water pass
+and takes the water out of the voxel world. The
 waves' clock is the game's time (not a screenshot's; paused, it stands
 still; it keeps up with physics stepped by a command). `set_render_settings` `water` turns it
 off; `last_frame.water` counts triangles drawn, dropped and overflow.
@@ -2160,8 +2162,57 @@ still with what floats on it; a sea's `waves` reaches physics as soon as
 it is edited. Wakes and rings round floating bodies wait
 for the effects part.
 
-The rest comes in the following parts (the water plan: W5 the voxel
-world, weather and sound, W6 the water gate).
+Water in the voxel world (W5b). Lakes and rivers become voxels: the
+renderer hands the frame's water triangles to the voxel scene
+(`VoxelScene::set_water`; with the water setting off it hands none, so the
+setting compares the whole picture with and without water). The scene
+groups them by look into bodies (a colour and its triangles, the seas'
+own vertices left out), each filed in 64 m squares (pieces: the triangles
+whose ground plan meets the square, and their box within it). Whether
+anything changed is `FrameInput::water_version` (the editor's WaterMeshes
+counts its changes; 0: a hash of the whole, every frame, about 20 ns a
+vertex); then each body's own hash says which did, and only those are
+filed again (row by row, the squares under each triangle's span: a few
+milliseconds on the main thread for a 4096-point lake a kilometre or two
+across, while it is edited) and built again: the bricks under their old
+pieces cleared, those under their new pieces built, so a brick is marked
+only where water is. Building a brick adds the water's triangles over it
+after its instances, gathered once from the pieces over it (the bodies as
+they were then are kept by the build, so an edit elsewhere never restarts
+it), a few dozen between looks at the clock (a lake of thousands of
+slivers is built over frames, never in one). A brick waiting for room in the pool
+comes back when there is room if water is over it, as if an instance were.
+
+A water voxel is marked by its normal bytes both zero (`pack_water_voxel`,
+`water_voxel`; an ordinary normal that would pack so is written as 255,
+255, the same straight down) and reads as facing up. In a brick, water
+gives way to a stand-in; it shows over the ground or anything else in the
+same voxel where it covers at least half of the voxel's plan
+(`voxel::k_water_share`, its clipped area), so a shore shows water and a
+5 m river in a 16 m voxel of its valley shows the valley; where nothing
+else is, any water covering part of it shows. Light cones and reflections that meet water from
+above see it as a mirror: its diffuse light times (1 - Fresnel) plus the
+sky mirrored at that angle times Fresnel (n 1.33); from below, its diffuse
+light only. Water voxels block the sun and sky like anything else, so beds
+and what is under water are darker in the bounce light (the water takes
+the light, roughly). The water pass's own reflections pass through water
+voxels (`k_no_water`: a sloping river's upstream would mirror itself). The
+far field does not draw water voxels (they are not stand-ins): the water
+pass draws every body at every distance.
+
+The seas are not voxels (they reach the horizon): `Frame::sea_level` is
+the highest sea's level (none, or the water setting off: -1e30). A cone or
+reflection ray that crosses down through it before hitting anything stops
+there and sees the same mirror over deep water's colour (WaterLook's
+default: the seas' own looks are not in the frame); one from under it that
+crosses up sees the water's glow, dimmed (the seabed's bounce light is not
+the open sky's). The water pass's reflections ignore the sea plane (they
+start on a surface riding the swell about it). Waves and the swell are not
+in the voxels (they are flat at the body's level), and dry ground below
+the sea's level is under the sea plane, as the sea is drawn there too.
+
+The rest comes in the following parts (the water plan: W5 weather and
+sound, W6 the water gate).
 
 ## Navigation
 

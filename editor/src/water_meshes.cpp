@@ -401,6 +401,7 @@ void WaterMeshes::update(std::span<const world::Water> water) {
 }
 
 void WaterMeshes::assemble() {
+    ++m_version;
     m_vertices.clear();
     m_indices.clear();
     m_looks.clear();

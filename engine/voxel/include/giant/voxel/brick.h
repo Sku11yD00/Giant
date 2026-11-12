@@ -21,13 +21,21 @@ inline constexpr u32 k_brick_edge = 8;
 inline constexpr u32 k_brick_voxels = k_brick_edge * k_brick_edge * k_brick_edge;
 
 constexpr u32 voxel_index(u32 x, u32 y, u32 z) { return x + k_brick_edge * (y + k_brick_edge * z); }
+// The share of a voxel water must cover to show over the ground there (BrickBuilder).
+inline constexpr float k_water_share = 0.5f;
 
 // A voxel's colour (linear RGB in [0, 1], stored as RGB565 of its square
 // root, so darks keep their steps) and unit normal (octahedral, 8 bits per
 // axis), in one u32: colour in the low 16 bits.
 u32 pack_voxel(const Vec3& color, const Vec3& normal);
 Vec3 unpack_color(u32 voxel);
-Vec3 unpack_normal(u32 voxel); // unit (a zero normal packs as +Y)
+Vec3 unpack_normal(u32 voxel); // unit (a zero normal packs as +Y; water's is +Y)
+// Water's surface (lakes and rivers: a mirror the shaders treat as one,
+// water plan W5b): its colour (what it scatters back) and a normal code
+// pack_voxel never makes (both octahedral bytes 0, a -Z pack_voxel writes
+// as 255, 255), facing up.
+u32 pack_water_voxel(const Vec3& color);
+constexpr bool water_voxel(u32 voxel) { return (voxel >> 16) == 0u; }
 
 // A voxel's light (the GPU's light pool, render/shaders/voxel_gi.slang):
 // the bounce and sky light reaching it (linear RGB, 9-bit mantissas over a
@@ -92,6 +100,14 @@ public:
     // not finite: its own.
     u32 add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color, bool stand_in = false,
                      float coverage = 1.0f, const Vec3& facing = {});
+    // Water's surface (either winding): a voxel it covers at least
+    // k_water_share of (its area in the voxel over a face) is water
+    // (pack_water_voxel, its colour) over what else is there (the bed at
+    // the shore), unless a stand-in's (a far tree over the water); less,
+    // and what else is there shows (a narrow river in a coarse voxel of
+    // its valley), water only where nothing else is (a voxel it only
+    // touches, at its edge, is not water).
+    u32 add_water_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color);
     bool empty() const { return m_touched == 0; }
     Brick build() const;
     // The dither threshold of voxel `index` under the current seed, in (0, 1].
@@ -108,6 +124,7 @@ private:
     struct Sum {
         Part own;   // triangles of objects that stay meshes
         Part stand; // the stand-in triangles'
+        Part water; // water's surface
         bool touched = false;
     };
     void add(u32 index, const Vec3& color, const Vec3& normal, float coverage, float cover, bool stand_in);
@@ -115,6 +132,7 @@ private:
     std::array<Sum, k_brick_voxels> m_sums{};
     std::array<u16, k_brick_voxels> m_list{}; // the touched voxels, so reset clears only them
     float m_voxel_size = 1.0f;
+    bool m_water = false; // add_triangle adds water (add_water_triangle)
     u32 m_seed = 0;
     u32 m_touched = 0;
 };

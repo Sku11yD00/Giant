@@ -2455,6 +2455,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (settings.voxel_world) {
         cmd.begin_timing("voxels");
         m_voxels->set_stand_in_radius(settings.far_field_max_radius);
+        // (Water off: none in the voxel world either, so the setting compares with and without.)
+        if (settings.water) {
+            m_voxels->set_water(frame.water_vertices, frame.water_indices, frame.water_looks, frame.water_version);
+        } else {
+            m_voxels->set_water({}, {}, {}, ~u64{0});
+        }
         // Skinned meshes are not held: their pose is not the bind the
         // voxels would be made from (they bounce no light; known gap).
         m_voxels->update(cmd, frame.view.position, frame.instances, frame.cells, frame.materials, m_meshes_version,
@@ -2648,6 +2654,13 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     k.wind_table = wind_table.descriptor;
     k.wind_table_offset = wind_table.offset;
     k.wind_table_count = static_cast<u32>(material_limit);
+    k.sea_level = gpu::k_no_sea;
+    for (const SeaSurface& sea : settings.water ? frame.seas : std::span<const SeaSurface>{}) {
+        const double level = sea.level - frame.view.position.y;
+        if (std::isfinite(level) && std::fabs(level) < 1.0e6) {
+            k.sea_level = std::max(k.sea_level, static_cast<float>(level));
+        }
+    }
 
     FrameData data;
     data.frame = cmd.upload(bytes_of_one(k));

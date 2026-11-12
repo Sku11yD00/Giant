@@ -48,7 +48,9 @@ struct Frame {
     uint wind_table;      // read descriptor of per-material (sway, flutter), the default last
     uint wind_table_offset;
     uint wind_table_count;
+    float sea_level;      // the highest sea's level, camera-relative (k_no_sea: none)
 };
+static const float k_no_sea = -1.0e30;
 static const uint k_frame_bytes = 512;
 
 float4 load4(ByteAddressBuffer b, uint at) { return asfloat(b.Load4(at)); }
@@ -123,6 +125,7 @@ Frame load_frame(uint descriptor, uint offset) {
     f.wind_table = w.x;
     f.wind_table_offset = w.y;
     f.wind_table_count = w.z;
+    f.sea_level = asfloat(w.w);
     return f;
 }
 

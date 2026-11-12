@@ -519,6 +519,244 @@ void VoxelScene::queue_old(const Box& box) {
     }
 }
 
+void VoxelScene::queue_fresh(const Box& box) {
+    if (box.empty()) {
+        return;
+    }
+    region_for(box).fresh.push_back(box);
+}
+
+namespace {
+
+// Water's pieces: the squares (metres, as the regions) a body's triangles are filed in.
+constexpr double k_water_piece = 64.0;
+
+// A 64-bit mix of words (splitmix's finaliser per word, chained).
+struct WordHash {
+    u64 h = 0x9E3779B97F4A7C15ull;
+    void add(u64 w) {
+        u64 x = h ^ w;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+        h = x ^ (x >> 31);
+    }
+    void add(double d) {
+        u64 w = 0;
+        std::memcpy(&w, &d, sizeof(w));
+        add(w);
+    }
+    void add(float f) {
+        u32 w = 0;
+        std::memcpy(&w, &f, sizeof(w));
+        add(u64{w});
+    }
+};
+
+// The x the triangle's ground plan (x, z) spans within the row z0 <= z <= z1
+// (false: it does not reach the row). The plan clipped to the row is
+// convex, so it meets every square of the row whose x overlaps the span.
+bool plan_span_in_row(const DVec3& a, const DVec3& b, const DVec3& c, double z0, double z1, double& x0,
+                      double& x1) {
+    x0 = std::numeric_limits<double>::infinity();
+    x1 = -std::numeric_limits<double>::infinity();
+    const DVec3* p[3] = {&a, &b, &c};
+    for (int e = 0; e < 3; ++e) {
+        const DVec3& s = *p[e];
+        const DVec3& t = *p[(e + 1) % 3];
+        if (s.z >= z0 && s.z <= z1) {
+            x0 = std::min(x0, s.x);
+            x1 = std::max(x1, s.x);
+        }
+        for (const double z : {z0, z1}) {
+            if ((s.z < z && t.z > z) || (s.z > z && t.z < z)) {
+                const double x = s.x + (t.x - s.x) * ((z - s.z) / (t.z - s.z));
+                x0 = std::min(x0, x);
+                x1 = std::max(x1, x);
+            }
+        }
+    }
+    return x0 <= x1;
+}
+
+} // namespace
+
+bool VoxelScene::water_over(const Box& box) const {
+    for (const auto& body : m_water) {
+        if (!overlaps(body->box.min, body->box.max, box.min, box.max)) {
+            continue;
+        }
+        for (const WaterPiece& piece : body->pieces) {
+            if (overlaps(piece.box.min, piece.box.max, box.min, box.max)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void VoxelScene::set_water(std::span<const WaterVertex> vertices, std::span<const u32> indices,
+                           std::span<const WaterLook> looks, u64 version) {
+    // First whether anything changed: by the caller's version, else a hash
+    // of the whole (what makes the voxels: positions, the triangles, the
+    // looks' colours), as it is the same nearly every frame.
+    if (version != 0 && version == m_water_version) {
+        return;
+    }
+    m_water_version = version;
+    WordHash whole;
+    for (const WaterVertex& v : vertices) {
+        whole.add(v.position.x);
+        whole.add(v.position.y);
+        whole.add(v.position.z);
+        whole.add(u64{v.look} | (u64{v.swell ? 1u : 0u} << 32));
+    }
+    for (usize i = 0; i + 1 < indices.size(); i += 2) {
+        whole.add(u64{indices[i]} | (u64{indices[i + 1]} << 32));
+    }
+    if ((indices.size() & 1u) != 0) {
+        whole.add(u64{indices.back()});
+    }
+    for (const WaterLook& l : looks) {
+        whole.add(l.color.x);
+        whole.add(l.color.y);
+        whole.add(l.color.z);
+    }
+    whole.add(u64{vertices.size()});
+    whole.add(u64{indices.size()} | (u64{looks.size()} << 32));
+    if (whole.h == m_water_hash) {
+        return;
+    }
+    m_water_hash = whole.h;
+    // The bodies as they are now.
+    std::vector<WaterBody> bodies;
+    std::unordered_map<u32, usize> by_look;
+    for (usize t = 0; t + 2 < indices.size(); t += 3) {
+        const u32 a = indices[t], b = indices[t + 1], c = indices[t + 2];
+        if (a >= vertices.size() || b >= vertices.size() || c >= vertices.size()) {
+            continue;
+        }
+        const WaterVertex* v[3] = {&vertices[a], &vertices[b], &vertices[c]};
+        bool ok = true;
+        for (const WaterVertex* p : v) {
+            ok = ok && !p->swell && std::isfinite(p->position.x) && std::isfinite(p->position.y) &&
+                 std::isfinite(p->position.z) && std::fabs(p->position.x) < 1e7 &&
+                 std::fabs(p->position.y) < 1e7 && std::fabs(p->position.z) < 1e7;
+        }
+        if (!ok) {
+            continue;
+        }
+        const u32 look = v[0]->look;
+        auto [it, added] = by_look.try_emplace(look, bodies.size());
+        if (added) {
+            WaterBody body;
+            Vec3 color = WaterLook{}.color;
+            if (look < looks.size()) {
+                const Vec3& tint = looks[look].color;
+                if (std::isfinite(tint.x) && std::isfinite(tint.y) && std::isfinite(tint.z)) {
+                    color = {std::clamp(tint.x, 0.0f, 1.0f), std::clamp(tint.y, 0.0f, 1.0f),
+                             std::clamp(tint.z, 0.0f, 1.0f)};
+                }
+            }
+            body.color = color;
+            bodies.push_back(std::move(body));
+        }
+        WaterBody& body = bodies[it->second];
+        for (const WaterVertex* p : v) {
+            body.corners.push_back(p->position);
+            body.box.min = lower(body.box.min, p->position);
+            body.box.max = upper(body.box.max, p->position);
+        }
+    }
+    for (WaterBody& body : bodies) {
+        WordHash h;
+        for (const DVec3& p : body.corners) {
+            h.add(p.x);
+            h.add(p.y);
+            h.add(p.z);
+        }
+        h.add(body.color.x);
+        h.add(body.color.y);
+        h.add(body.color.z);
+        body.hash = h.h;
+    }
+    // Bodies the same as before are kept (pieces and all); the others go
+    // and come, their bricks built again.
+    std::unordered_map<u64, usize> before;
+    for (usize i = 0; i < m_water.size(); ++i) {
+        before.emplace(m_water[i]->hash, i);
+    }
+    std::vector<u8> kept(m_water.size(), 0);
+    std::vector<std::shared_ptr<const WaterBody>> now(bodies.size());
+    for (usize i = 0; i < bodies.size(); ++i) {
+        const auto it = before.find(bodies[i].hash);
+        if (it != before.end() && kept[it->second] == 0 && m_water[it->second]->corners == bodies[i].corners) {
+            kept[it->second] = 1;
+            now[i] = m_water[it->second];
+        }
+    }
+    for (usize i = 0; i < m_water.size(); ++i) {
+        if (kept[i] == 0) {
+            for (const WaterPiece& piece : m_water[i]->pieces) {
+                queue_old(piece.box);
+                touch_building(piece.box);
+            }
+        }
+    }
+    for (usize i = 0; i < bodies.size(); ++i) {
+        if (now[i] != nullptr) {
+            continue;
+        }
+        WaterBody& body = bodies[i];
+        // File each triangle in every square its plan meets (row by row:
+        // the squares under its span in each).
+        std::unordered_map<u64, usize> square;
+        const usize triangles = body.corners.size() / 3;
+        body.stamps.assign(triangles, 0);
+        for (usize t = 0; t < triangles; ++t) {
+            const DVec3& a = body.corners[t * 3];
+            const DVec3& b = body.corners[t * 3 + 1];
+            const DVec3& c = body.corners[t * 3 + 2];
+            const DVec3 lo = lower(lower(a, b), c);
+            const DVec3 hi = upper(upper(a, b), c);
+            const i64 z0 = static_cast<i64>(std::floor(lo.z / k_water_piece));
+            const i64 z1 = static_cast<i64>(std::floor(hi.z / k_water_piece));
+            for (i64 z = z0; z <= z1; ++z) {
+                const double sz = static_cast<double>(z) * k_water_piece;
+                double span0 = 0.0, span1 = 0.0;
+                if (!plan_span_in_row(a, b, c, sz, sz + k_water_piece, span0, span1)) {
+                    continue;
+                }
+                const i64 x0 = static_cast<i64>(std::floor(span0 / k_water_piece));
+                const i64 x1 = static_cast<i64>(std::floor(span1 / k_water_piece));
+                for (i64 x = x0; x <= x1; ++x) {
+                    const double sx = static_cast<double>(x) * k_water_piece;
+                    const u64 key = (static_cast<u64>(static_cast<u32>(x)) << 32) | static_cast<u32>(z);
+                    auto [it, added] = square.try_emplace(key, body.pieces.size());
+                    if (added) {
+                        body.pieces.emplace_back();
+                    }
+                    WaterPiece& piece = body.pieces[it->second];
+                    piece.triangles.push_back(static_cast<u32>(t));
+                    // Its box within the square (as much of it as is there).
+                    const DVec3 in_lo{std::max(lo.x, sx), lo.y, std::max(lo.z, sz)};
+                    const DVec3 in_hi{std::min(hi.x, sx + k_water_piece), hi.y, std::min(hi.z, sz + k_water_piece)};
+                    piece.box.min = lower(piece.box.min, in_lo);
+                    piece.box.max = upper(piece.box.max, in_hi);
+                }
+            }
+        }
+        for (const WaterPiece& piece : body.pieces) {
+            queue_fresh(piece.box);
+            touch_building(piece.box);
+        }
+        now[i] = std::make_shared<const WaterBody>(std::move(body));
+    }
+    m_water = std::move(now);
+    if (m_regions.size() > k_max_backlog) {
+        request_rebuild(); // changing faster than they are worked through
+    }
+}
+
 void VoxelScene::queue_changed(u32 index) {
     const Box& box = m_copies[index].box;
     // An empty box (nothing to voxelize) still waits, for holds().
@@ -621,7 +859,7 @@ void VoxelScene::remove_range(u32 first, u32 count) {
         } else if (job.kind == JobKind::region) {
             // Its changed instances too (each job its own copy now).
             Region r = *job.region;
-            const u32 olds = static_cast<u32>(r.old.size());
+            const u32 olds = static_cast<u32>(r.fresh.size() + r.old.size()); // (fresh first, then old)
             if (job.next < olds) {
                 u32 none = 0;
                 remap(r.changed, none, nullptr);
@@ -900,15 +1138,19 @@ bool VoxelScene::run_job(Job& job, const OutOfTime& out_of_time) {
     if (job.kind == JobKind::region) {
         // Each old box's bricks in the pool, then every brick under each
         // changed instance where it is now (within the job's box).
+        // (Fresh boxes first: every brick under them, as under a changed instance.)
         const Region& r = *job.region;
-        const usize total = r.old.size() + r.changed.size();
+        const usize fresh = r.fresh.size();
+        const usize total = fresh + r.old.size() + r.changed.size();
         while (job.next < total) {
-            const bool old = job.next < r.old.size();
+            const bool old = job.next >= fresh && job.next < fresh + r.old.size();
             Box b;
-            if (old) {
-                b = r.old[job.next];
+            if (job.next < fresh) {
+                b = r.fresh[job.next];
+            } else if (old) {
+                b = r.old[job.next - fresh];
             } else {
-                const u32 i = r.changed[job.next - r.old.size()];
+                const u32 i = r.changed[job.next - fresh - r.old.size()];
                 b = i < m_copies.size() ? m_copies[i].box : Box{};
             }
             const voxel::BrickBox under =
@@ -949,6 +1191,23 @@ bool VoxelScene::run_job(Job& job, const OutOfTime& out_of_time) {
             ++job.next;
             if (job.next % 64 == 0 && out_of_time()) {
                 return false;
+            }
+        }
+        // Water over the box (bricks under its bodies; once, as the sweep starts).
+        if (job.next == job.found.size() && job.cursor == 0) {
+            const Box around{m_clipmap.brick_min(level, box.min),
+                             m_clipmap.brick_min(level, box.max)}; // (max: one past)
+            for (const auto& body : m_water) {
+                if (!overlaps(body->box.min, body->box.max, around.min, around.max)) {
+                    continue;
+                }
+                for (const WaterPiece& piece : body->pieces) {
+                    const voxel::BrickBox under =
+                        voxel::intersect(m_clipmap.bricks_touching(level, piece.box.min, piece.box.max), box);
+                    for (u64 k = 0; k < under.count(); ++k) {
+                        mark(level, brick_of(under, k));
+                    }
+                }
             }
         }
         // Unbuilt slots nothing is over: empty.
@@ -1124,6 +1383,56 @@ bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_ti
             return false;
         }
     }
+    // Water's surfaces over the brick, after everything else: gathered
+    // once from the pieces over it (each triangle once; the bodies as they
+    // are then, kept while it builds), added a few dozen between looks at
+    // the clock.
+    const DVec3 far_corner = origin + DVec3{edge, edge, edge};
+    if (!job.water_gathered) {
+        job.water_gathered = true;
+        job.water_bodies.clear();
+        job.water.clear();
+        job.water_next = 0;
+        const u32 stamp = ++m_water_stamp;
+        for (const auto& body : m_water) {
+            if (!overlaps(body->box.min, body->box.max, origin, far_corner)) {
+                continue;
+            }
+            const u32 bi = static_cast<u32>(job.water_bodies.size());
+            bool any = false;
+            for (const WaterPiece& piece : body->pieces) {
+                if (!overlaps(piece.box.min, piece.box.max, origin, far_corner)) {
+                    continue;
+                }
+                for (const u32 t : piece.triangles) {
+                    if (body->stamps[t] != stamp) {
+                        body->stamps[t] = stamp;
+                        job.water.emplace_back(bi, t);
+                        any = true;
+                    }
+                }
+            }
+            if (any) {
+                job.water_bodies.push_back(body);
+            }
+        }
+    }
+    while (job.water_next < job.water.size()) {
+        const auto [bi, t] = job.water[job.water_next++];
+        const WaterBody& body = *job.water_bodies[bi];
+        const DVec3& a = body.corners[usize{t} * 3];
+        const DVec3& b = body.corners[usize{t} * 3 + 1];
+        const DVec3& c = body.corners[usize{t} * 3 + 2];
+        const DVec3 lo = lower(lower(a, b), c);
+        const DVec3 hi = upper(upper(a, b), c);
+        if (overlaps(lo, hi, origin, far_corner)) {
+            m_builder.add_water_triangle(to_camera_relative(a, origin), to_camera_relative(b, origin),
+                                         to_camera_relative(c, origin), body.color);
+        }
+        if (job.water_next % 64 == 0 && job.water_next < job.water.size() && out_of_time()) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -1289,7 +1598,11 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         }
         auto region = std::make_shared<Region>(std::move(it->second));
         m_regions.erase(it);
-        Box around; // the old boxes and where the changed instances are now
+        Box around; // the old and fresh boxes and where the changed instances are now
+        for (const Box& b : region->fresh) {
+            around.min = lower(around.min, b.min);
+            around.max = upper(around.max, b.max);
+        }
         for (const Box& b : region->old) {
             around.min = lower(around.min, b.min);
             around.max = upper(around.max, b.max);
@@ -1330,9 +1643,10 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
                 it = m_retry.erase(it); // left the view
                 continue;
             }
-            find({m_clipmap.brick_min(key.level, key.brick),
-                  m_clipmap.brick_min(key.level, {key.brick.x + 1, key.brick.y + 1, key.brick.z + 1})});
-            if (m_found.empty()) {
+            const Box around{m_clipmap.brick_min(key.level, key.brick),
+                             m_clipmap.brick_min(key.level, {key.brick.x + 1, key.brick.y + 1, key.brick.z + 1})};
+            find(around);
+            if (m_found.empty() && !water_over(around)) {
                 const u32 slot = m_clipmap.slot(key.level, key.brick);
                 const u32 s = key.level * m_clipmap.slots_per_level() + slot;
                 if (m_slots[s] == gpu::k_unbuilt && m_slot_bricks[s] == key.brick && !pending(key.level, key.brick)) {
@@ -1387,6 +1701,10 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
                     m_building.found = m_found;
                     m_building.next = 0;
                     m_building.again = false;
+                    m_building.water_gathered = false;
+                    m_building.water_bodies.clear();
+                    m_building.water.clear();
+                    m_building.water_next = 0;
                     m_builder.reset(static_cast<float>(m_clipmap.voxel_size(key.level)), static_cast<u32>(KeyHash{}(key)));
                     started = true;
                     break;

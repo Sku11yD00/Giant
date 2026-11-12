@@ -80,6 +80,49 @@ float3 voxel_radiance(Frame f, uint packed, uint light, float3 lamp) {
     return albedo * (f.sun_light.rgb * (sun / k_gi_pi) + unpack_light(light) + lamp);
 }
 
+// Water's Fresnel (n 1.33) for an eye looking along `dir` down at it, and
+// the sky it mirrors there.
+float water_fresnel(float3 dir) {
+    const float c = saturate(-dir.y);
+    return 0.02 + 0.98 * pow(1.0 - c, 5.0);
+}
+float3 water_sky(Frame f, float3 dir) { return sky_radiance(f, float3(dir.x, abs(dir.y), dir.z)); }
+
+// What a filled voxel sends back towards a cone looking along `dir`: its
+// diffuse light; water seen from above mirrors the sky as well (what it
+// mirrors taken from what comes up through it).
+float3 voxel_seen(Frame f, uint packed, uint light, float3 lamp, float3 dir) {
+    float3 c = voxel_radiance(f, packed, light, lamp);
+    if (water_voxel(packed) && dir.y < 0.0) {
+        const float fresnel = water_fresnel(dir);
+        c = c * (1.0 - fresnel) + fresnel * water_sky(f, dir);
+    }
+    return c;
+}
+
+// The sea (Frame::sea_level). Met by a cone going down across it from
+// above: deep water's colour lit by the sun and the sky overhead, and its
+// mirror of the sky; nothing under it is seen. Met going up across it
+// from under it: the water's glow, dimmer (the light that gets down).
+static const float3 k_sea_color = float3(0.02, 0.05, 0.06); // (WaterLook's default; the seas' own looks are not in the frame)
+bool sea_crossed(Frame f, float3 origin, float3 dir, float t) {
+    if (f.sea_level <= k_no_sea) {
+        return false;
+    }
+    const float y = origin.y + dir.y * t;
+    return (dir.y < 0.0 && origin.y > f.sea_level && y <= f.sea_level) ||
+           (dir.y > 0.0 && origin.y < f.sea_level && y >= f.sea_level);
+}
+float3 sea_seen(Frame f, float3 dir) {
+    const float sun = saturate(f.sun_direction.y);
+    const float3 glow = k_sea_color * (f.sun_light.rgb * (sun / k_gi_pi) + sky_radiance(f, float3(0.0, 1.0, 0.0)));
+    if (dir.y > 0.0) {
+        return glow * 0.5; // from under the sea: what reaches back down through it
+    }
+    const float fresnel = water_fresnel(dir);
+    return glow * (1.0 - fresnel) + fresnel * water_sky(f, dir);
+}
+
 // The voxel at a camera-relative point on the finest level from `min_level`
 // up whose window holds it (a slot not built yet: the next coarser level).
 // False past the coarsest window. `level` is the level looked at; `index`
@@ -155,6 +198,9 @@ float3 trace_cone(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origi
         uint index;
         uint voxel;
         float3 centre;
+        if (sea_crossed(f, origin, dir, t)) {
+            return color + (1.0 - a) * sea_seen(f, dir); // (the sea: all the rest)
+        }
         if (!voxel_at(w, levels, pool, table, origin + dir * t, level, used, filled, index, voxel, centre)) {
             break; // past the coarsest window
         }
@@ -166,7 +212,7 @@ float3 trace_cone(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3 origi
             const uint packed = pool.Load(index * k_brick_bytes + 64 + voxel * 4);
             const uint lw = light.Load((index * k_brick_voxels + voxel) * 4);
             const float3 lamp = voxel_lamp(w, index * k_brick_voxels + voxel);
-            color += (1.0 - a) * k_cone_alpha * voxel_radiance(f, packed, lw, lamp);
+            color += (1.0 - a) * k_cone_alpha * voxel_seen(f, packed, lw, lamp, dir);
             a += (1.0 - a) * k_cone_alpha;
         }
         t += max(width * 0.5, size * 0.5);
@@ -349,6 +395,12 @@ float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3
         uint index;
         uint voxel;
         float3 centre;
+        // (Not from the water pass: its rays leave the surface, a sea's riding the swell about its level.)
+        if ((w.stand_ins & k_no_water) == 0u && sea_crossed(f, p, dir, t)) {
+            color += (1.0 - a) * sea_seen(f, dir); // (the sea: all the rest)
+            a = 1.0;
+            break;
+        }
         if (!voxel_at(w, levels, pool, table, p + dir * t, level, used, filled, index, voxel, centre)) {
             break; // past the coarsest window
         }
@@ -358,10 +410,12 @@ float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3
         }
         if (filled) {
             const uint packed = pool.Load(index * k_brick_bytes + 64 + voxel * 4);
-            const uint lw = light.Load((index * k_brick_voxels + voxel) * 4);
-            const float3 lamp = voxel_lamp(w, index * k_brick_voxels + voxel);
-            color += (1.0 - a) * k_cone_alpha * voxel_radiance(f, packed, lw, lamp);
-            a += (1.0 - a) * k_cone_alpha;
+            if ((w.stand_ins & k_no_water) == 0u || !water_voxel(packed)) {
+                const uint lw = light.Load((index * k_brick_voxels + voxel) * 4);
+                const float3 lamp = voxel_lamp(w, index * k_brick_voxels + voxel);
+                color += (1.0 - a) * k_cone_alpha * voxel_seen(f, packed, lw, lamp, dir);
+                a += (1.0 - a) * k_cone_alpha;
+            }
         }
         t += max(t * cone_tan, size * 0.75);
     }

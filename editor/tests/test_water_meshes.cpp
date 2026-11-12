@@ -137,13 +137,15 @@ GIANT_TEST("water meshes: lakes at their level, rivers as strips with their flow
     GIANT_CHECK(std::fabs(l.slope_x - -0.02f) < 1e-6f && std::fabs(l.slope_z) < 1e-6f && l2.slope_x == l.slope_x);
     for (const u32 i : m.indices()) GIANT_CHECK(i < m.vertices().size());
     // The same water again: not made again; a colour changed: made again.
+    const u64 version = m.version();
     m.update(water);
-    GIANT_CHECK(m.rebuilds() == 2);
+    GIANT_CHECK(m.rebuilds() == 2 && m.version() == version && version != 0); // (the voxel world's cue)
     // The lake's colour and level changed: put together again, not cut again.
     water[0].color.x = 0.5f;
     water[0].level = 3.5f;
     m.update(water);
     GIANT_CHECK(m.rebuilds() == 2 && m.looks()[0].color.x == 0.5f && m.vertices()[0].position.y == 3.5);
+    GIANT_CHECK(m.version() != version);
     // Its shore moved: only the lake cut again.
     water[0].outline[2].x = 12.0;
     m.update(water);

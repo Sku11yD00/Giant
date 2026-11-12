@@ -62,6 +62,8 @@ public:
     // Of indices(), how many come before the seas (bodies lower than the
     // lowest sea: drawn under it, render::FrameInput::water_indices_under_seas).
     u32 indices_under_seas() const { return m_under_seas; }
+    // Changes whenever vertices(), indices() or looks() do (render::FrameInput::water_version).
+    u64 version() const { return m_version; }
     u32 rebuilds() const { return m_rebuilds; } // bodies cut again (lakes and rivers), so far
     u32 broken_lakes() const { return m_broken; } // lakes not drawn: their shore crosses itself (or has no area)
 
@@ -77,6 +79,7 @@ private:
     std::vector<Body> m_bodies; // as the scene has them
     std::vector<world::Water> m_seen;
     bool m_built = false;
+    u64 m_version = 0;
     std::vector<render::WaterVertex> m_vertices;
     std::vector<u32> m_indices;
     std::vector<render::WaterLook> m_looks;

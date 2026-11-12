@@ -633,6 +633,10 @@ struct FrameInput {
     // How many of water_indices (from the first; whole triangles) are
     // drawn before the seas: the water lower than them (the rest after).
     u32 water_indices_under_seas = 0;
+    // Changes whenever water_vertices, water_indices or water_looks do
+    // (the voxel world then looks at them again); 0: unknown, they are
+    // compared every frame (a hash of them all).
+    u64 water_version = 0;
     // The sea's swell (WaterVertex::swell): none when every amplitude is 0.
     std::array<SwellWave, k_swell_waves> swell{};
     // The water the camera is in (lit views, with RenderSettings::water).
