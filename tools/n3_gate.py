@@ -75,9 +75,10 @@ WEATHER_OFF = {"clouds": False, "cloud_shadows": False, "precipitation": False, 
 WEATHER_ON = {k: True for k in WEATHER_OFF}
 
 
-def build_valley(tool):
+def build_valley(tool, lantern_lamp=None):
     """The edited valley: terrain, brush strokes, the town and the scatter
-    layers. Returns the town's ground height."""
+    layers. `lantern_lamp(i)`: the lamp the street's i-th lantern carries
+    (None: unlit). Returns the town's ground height."""
     tool("new_scene")
     made = tool("create_terrain", {"from": [-HALF, -HALF], "to": [HALF - 1, HALF - 1], "samples": SAMPLES,
                                    "hills": {"base": 20, "amplitude": 25, "size": 500, "octaves": 4, "seed": 3}})
@@ -140,7 +141,8 @@ def build_valley(tool):
                "position": [TOWN[0] + (3.2 if i % 2 else -3.2), town_h + 3.2,
                             round(TOWN[1] + (i // 2 - 15.5) * (HOUSES_Z * SPACING / 32), 2)],
                "scale": [0.25, 0.35, 0.25], "base_color": [0.2, 0.15, 0.08], "metallic": 1.0, "roughness": 0.5,
-               "emissive": [2.0, 1.4, 0.6], "swing": {"on": True, "length": 0.5, "weight": 1.5}}
+               "emissive": [2.0, 1.4, 0.6], "swing": {"on": True, "length": 0.5, "weight": 1.5},
+               **({"lamp": lantern_lamp(i)} if lantern_lamp and lantern_lamp(i) else {})}
               for i in range(64)]
     swings += [{"name": f"Sign {i}", "shape": "cube",
                 "position": [TOWN[0] + (1.4 if i % 2 else -1.4), town_h + 3.6,
