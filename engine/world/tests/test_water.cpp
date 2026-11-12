@@ -126,7 +126,7 @@ GIANT_TEST("water: saved and loaded with the scene and the world, refused when b
     WorldIndex back;
     GIANT_CHECK(!load_world_index(save_world_index(index), back).has_value());
     GIANT_CHECK(back.water == scene.water);
-    // Bad: two of a name, a river without a path, an unknown key.
+    // Bad: two of a name.
     scene.water.push_back(lake("pond", 1.0f));
     GIANT_CHECK(load_scene(save_scene(scene), loaded).has_value());
     // Text with one sea named "w", changed: an unknown kind, a river
@@ -147,4 +147,12 @@ GIANT_TEST("water: saved and loaded with the scene and the world, refused when b
     GIANT_CHECK(load_scene(changed("\"sea\"", "\"pool\""), loaded).has_value());
     GIANT_CHECK(load_scene(changed("\"sea\"", "\"river\""), loaded).has_value());
     GIANT_CHECK(load_scene(changed("\"level\"", "\"levle\""), loaded).has_value());
+    // A river point missing a key is refused, not read as 0.
+    Scene flowing;
+    flowing.water = {river()};
+    std::string t = save_scene(flowing);
+    const usize width = t.find("\"width\"");
+    GIANT_CHECK(width != std::string::npos && !load_scene(t, loaded).has_value());
+    if (width != std::string::npos) t.replace(width, 7, "\"wodth\"");
+    GIANT_CHECK(load_scene(t, loaded).has_value());
 }

@@ -1207,6 +1207,7 @@ void read_water(Reader& root, std::vector<Water>& out, std::string& error) {
             for (usize k = 0; r.ok() && k < points->size(); ++k) {
                 Reader pr((*points)[k], path + ".path[" + std::to_string(k) + "]", error);
                 RiverPoint p;
+                for (const char* key : {"x", "z", "width", "level"}) pr.get(key, true); // (all four, as the commands ask)
                 pr.number("x", p.x, -1e7, 1e7);
                 pr.number("z", p.z, -1e7, 1e7);
                 pr.number("width", p.width, 0.5, 2000);
