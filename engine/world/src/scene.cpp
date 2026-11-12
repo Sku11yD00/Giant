@@ -2,6 +2,7 @@
 #include "giant/world/clock.h"
 #include "giant/world/far_ground.h"
 #include "giant/world/scatter.h"
+#include "giant/world/water.h"
 
 #include "giant/core/assert.h"
 
@@ -216,14 +217,15 @@ Scene::Identity& Scene::Identity::operator=(const Identity&) {
 
 Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
-      weather(other.weather), clock(other.clock), m_entities(other.m_entities), m_index(other.m_index),
+      weather(other.weather), clock(other.clock), water(other.water), m_entities(other.m_entities),
+      m_index(other.m_index),
       m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
       m_game(other.m_game), m_game_kits(other.m_game_kits), m_damage_edits(other.m_damage_edits) {}
 
 Scene::Scene(Scene&& other) noexcept
     : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
       scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock),
-      m_entities(std::move(other.m_entities)),
+      water(std::move(other.water)), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
       m_kept_kits(std::move(other.m_kept_kits)), m_game(std::move(other.m_game)),
       m_game_kits(std::move(other.m_game_kits)), m_damage_edits(other.m_damage_edits) {
@@ -249,6 +251,7 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         scatter = std::move(other.scatter);
         weather = other.weather;
         clock = other.clock;
+        water = std::move(other.water);
         m_entities = std::move(other.m_entities);
         m_index = std::move(other.m_index);
         m_next_id = other.m_next_id;
@@ -623,6 +626,35 @@ Json weather_json(const Weather& w) {
     };
 }
 
+Json water_json(std::span<const Water> waters) {
+    Json list = Json::array();
+    for (const Water& w : waters) {
+        Json o = {{"name", w.name},
+                  {"kind", std::string(water_kind_name(w.kind))},
+                  {"color", Json::array({w.color.x, w.color.y, w.color.z})},
+                  {"absorption", Json::array({w.absorption.x, w.absorption.y, w.absorption.z})},
+                  {"turbidity", w.turbidity},
+                  {"waves", w.waves}};
+        o["level"] = w.level; // (both always: what a body of another kind kept comes back too)
+        o["flow"] = w.flow;
+        if (!w.outline.empty()) {
+            Json points = Json::array();
+            for (const WaterPoint& p : w.outline) points.push_back(Json::array({p.x, p.z}));
+            o["outline"] = std::move(points);
+        }
+        if (!w.path.empty()) {
+            Json points = Json::array();
+            for (const RiverPoint& p : w.path) {
+                points.push_back({{"x", p.x}, {"z", p.z}, {"width", p.width}, {"level", p.level}});
+            }
+            o["path"] = std::move(points);
+        }
+        if (!w.visible) o["visible"] = false;
+        list.push_back(std::move(o));
+    }
+    return list;
+}
+
 Json clock_json(const Clock& c) {
     return {
         {"on", c.on},
@@ -866,6 +898,9 @@ std::string save_scene(const Scene& scene) {
     }
     if (!(scene.clock == Clock{})) {
         out["clock"] = clock_json(scene.clock);
+    }
+    if (!scene.water.empty()) {
+        out["water"] = water_json(scene.water);
     }
     if (const Terrain& t = scene.terrain;
         !t.empty() || t.samples() != k_default_terrain_samples || !(t.material == TerrainMaterial{})) {
@@ -1122,6 +1157,75 @@ void read_clock(const Json& json, Clock& c, std::string& error) {
     r.number("speed", c.speed, 0, 86400);
     r.finish();
     c = midnight_wrapped(c);
+}
+
+void read_water(Reader& root, std::vector<Water>& out, std::string& error) {
+    const Json* list = root.get("water", false);
+    if (list == nullptr || !root.ok()) return;
+    if (!list->is_array() || list->size() > k_max_waters) {
+        root.fail("water", "must be an array of at most " + std::to_string(k_max_waters) + " bodies");
+        return;
+    }
+    for (usize i = 0; i < list->size() && error.empty(); ++i) {
+        const std::string path = "water[" + std::to_string(i) + "]";
+        Reader r((*list)[i], path, error);
+        Water w;
+        r.string("name", w.name, true, 256);
+        std::string kind = "lake";
+        r.string("kind", kind, true, 16);
+        if (r.ok()) {
+            if (const auto k = water_kind_from_name(kind)) {
+                w.kind = *k;
+            } else {
+                r.fail("kind", "must be lake, river or sea");
+            }
+        }
+        r.number("level", w.level, -k_max_terrain_height, k_max_terrain_height);
+        r.number("flow", w.flow, 0, 20);
+        r.vec3("color", w.color, 0, 1);
+        r.vec3("absorption", w.absorption, 0, 10);
+        r.number("turbidity", w.turbidity, 0, 1);
+        r.number("waves", w.waves, 0, 4);
+        r.boolean("visible", w.visible);
+        if (const Json* outline = r.get("outline", false); outline != nullptr && r.ok()) {
+            if (!outline->is_array() || outline->size() > k_max_water_points) {
+                r.fail("outline", "must be an array of at most " + std::to_string(k_max_water_points) + " [x, z] points");
+            }
+            for (usize k = 0; r.ok() && k < outline->size(); ++k) {
+                const Json& p = (*outline)[k];
+                if (!p.is_array() || p.size() != 2 || !p[0].is_number() || !p[1].is_number()) {
+                    r.fail("outline[" + std::to_string(k) + "]", "must be [x, z]");
+                } else {
+                    w.outline.push_back({p[0].get<double>(), p[1].get<double>()});
+                }
+            }
+        }
+        if (const Json* points = r.get("path", false); points != nullptr && r.ok()) {
+            if (!points->is_array() || points->size() > k_max_water_points) {
+                r.fail("path", "must be an array of at most " + std::to_string(k_max_water_points) + " points");
+            }
+            for (usize k = 0; r.ok() && k < points->size(); ++k) {
+                Reader pr((*points)[k], path + ".path[" + std::to_string(k) + "]", error);
+                RiverPoint p;
+                for (const char* key : {"x", "z", "width", "level"}) pr.get(key, true); // (all four, as the commands ask)
+                pr.number("x", p.x, -1e7, 1e7);
+                pr.number("z", p.z, -1e7, 1e7);
+                pr.number("width", p.width, 0.5, 2000);
+                pr.number("level", p.level, -k_max_terrain_height, k_max_terrain_height);
+                pr.finish();
+                if (pr.ok()) w.path.push_back(p);
+            }
+        }
+        r.finish();
+        if (!error.empty()) return;
+        if (const auto bad = check_water(w)) {
+            error = path + ": " + *bad;
+        } else if (std::any_of(out.begin(), out.end(), [&](const Water& o) { return o.name == w.name; })) {
+            error = path + ".name \"" + w.name + "\" is used twice";
+        } else {
+            out.push_back(std::move(w));
+        }
+    }
 }
 
 void read_weather(const Json& json, std::optional<Weather>& out, std::string& error) {
@@ -1858,6 +1962,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     }
     read_kits(root, scene.kits, error);
     read_scatter(root, scene.kits, scene.scatter, error);
+    read_water(root, scene.water, error);
     if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
         read_terrain(*terrain, scene.terrain, error);
     }
@@ -1936,6 +2041,9 @@ std::string save_world_index(const WorldIndex& world) {
     if (!(world.clock == Clock{})) {
         out["clock"] = clock_json(world.clock);
     }
+    if (!world.water.empty()) {
+        out["water"] = water_json(world.water);
+    }
     std::vector<std::string> meshes = world.meshes;
     std::sort(meshes.begin(), meshes.end());
     meshes.erase(std::unique(meshes.begin(), meshes.end()), meshes.end());
@@ -1995,6 +2103,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     }
     read_kits(root, world.kits, error);
     read_scatter(root, world.kits, world.scatter, error);
+    read_water(root, world.water, error);
     if (const Json* meshes = root.get("meshes", false); meshes != nullptr && root.ok()) {
         if (!meshes->is_array()) {
             root.fail("meshes", "must be an array of paths");

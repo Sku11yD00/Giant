@@ -371,6 +371,45 @@ struct Weather {
     bool operator==(const Weather&) const = default;
 };
 
+// A body of water (water.h for the queries): a lake (a level inside its
+// shore), a river (a strip down its path, its level and width per point)
+// or the sea (a level everywhere: the shore is where the ground rises over
+// it). Bodies never move the ground: carve their beds with the terrain
+// brushes.
+enum class WaterKind : u8 { lake, river, sea };
+
+struct RiverPoint {
+    double x = 0.0; // metres
+    double z = 0.0;
+    float width = 10.0f; // metres across
+    float level = 0.0f;  // the surface's height here (metres)
+    bool operator==(const RiverPoint&) const = default;
+};
+
+struct WaterPoint {
+    double x = 0.0;
+    double z = 0.0;
+    bool operator==(const WaterPoint&) const = default;
+};
+
+constexpr usize k_max_waters = 256;
+constexpr usize k_max_water_points = 4096;
+
+struct Water {
+    std::string name; // unique in the scene
+    WaterKind kind = WaterKind::lake;
+    float level = 0.0f;               // lake and sea: the surface's height (metres)
+    std::vector<WaterPoint> outline;  // lake: its shore in order (3 or more points; the water is inside)
+    std::vector<RiverPoint> path;     // river: down its middle, upstream first (2 or more points)
+    float flow = 1.0f;                // river: metres a second downstream (0 to 20)
+    Vec3 color{0.02f, 0.06f, 0.07f};  // what it scatters back (its colour seen deep), 0 to 1
+    Vec3 absorption{0.45f, 0.09f, 0.065f}; // light lost a metre through it, per channel (clear water: red first)
+    float turbidity = 0.1f;           // 0 clear to 1 muddy: how much light it scatters back
+    float waves = 1.0f;               // 0 still to 4: how high the wind raises its waves
+    bool visible = true;              // hidden: not there (not drawn, nothing floats)
+    bool operator==(const Water&) const = default;
+};
+
 // What changed in a scene since its last take_changes().
 struct SceneChanges {
     // Entities added, removed or handed out by Scene::modify, oldest first
@@ -443,6 +482,8 @@ public:
     std::optional<Weather> weather;
     // The time of day the scene starts at (not tracked: compare).
     Clock clock;
+    // Lakes, rivers and the sea (water.h), by name, in order (not tracked: compare).
+    std::vector<Water> water;
 
     // Damage kept (damage.h), by cell: copied, saved and loaded with the
     // scene, not undone by itself (commands record it). Setting a cell's
@@ -544,6 +585,7 @@ struct WorldIndex {
     std::vector<ScatterLayer> scatter;
     std::optional<Weather> weather;
     Clock clock;
+    std::vector<Water> water;
     std::vector<std::string> meshes; // imported when the world opens
     std::vector<CellCoord> cells;    // cells that have a file
     // The ground: one sample spacing and material for every tile, and the
