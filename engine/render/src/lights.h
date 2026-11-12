@@ -6,6 +6,19 @@
 // bounding sphere (a spot's is around its cone) gives the tiles and slices
 // it may touch; lights are listed nearest first, so when a cluster or the
 // frame is full the furthest are the ones left out.
+//
+// Far lamps are merged (a lamp LOD): a lamp whose sphere is at least
+// k_light_merge_distance away and whose radius is at most half a grid cell
+// k_light_merge_angle of its distance across (rounded down to a power of two
+// metres) is summed with the others in its cell into one point light at
+// their power-weighted centre, reaching as far as they all do, its source
+// as wide as they are spread, as bright as to light the ground under them
+// as much as they all did (a spot as the point light sending as much
+// light down its cone). Lamps are grouped by distance alone, in view or not, so turning
+// the view never changes a group. A far town's thousand lamps so take a
+// few dozen lights, not hundreds in each of its clusters; merged lamps
+// cast no shadows (a casting lamp that far sharing its cell loses its
+// shadow; one alone in its cell keeps it).
 #pragma once
 
 #include "giant/core/math.h"
@@ -25,13 +38,18 @@ inline constexpr u32 k_light_slices = 24;
 inline constexpr u32 k_light_clusters = k_light_columns * k_light_rows * k_light_slices;
 inline constexpr float k_light_near = 0.5f;  // metres: slice 0 reaches from the camera past this
 inline constexpr float k_light_far = 4096.0f; // metres: lights wholly further are left out
+inline constexpr float k_light_merge_distance = 256.0f; // metres: lamps further may merge
+inline constexpr float k_light_merge_angle = 1.0f / 32.0f; // a merge cell across, per metre away
+inline constexpr u32 k_merged_light = ~0u; // LightBins::sources of a merged light
 
 struct LightBins {
     std::vector<gpu::Light> lights; // those shaded, nearest first
-    std::vector<u32> sources;       // each one's index in the frame's lights
+    std::vector<u32> sources;       // each one's index in the frame's lights (k_merged_light: merged)
     std::vector<u32> clusters;      // per cluster: first entry, count
     std::vector<u32> entries;       // light indices, cluster by cluster
     bool overflow = false;          // a limit was reached: some lights were left out somewhere
+    u32 lamps = 0;                  // lamps the lights shaded stand for (each merged one counted)
+    u32 merged = 0;                 // of the lights, far lamps merged into one
 };
 
 // The depth slices: slice = floor(log2(depth / k_light_near) * light_slice_scale()).

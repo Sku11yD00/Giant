@@ -211,16 +211,17 @@ GIANT_TEST("lights: the nearest are kept when a cluster or the frame is full") {
     // The list is nearest first: bins.lights[0] is the last one added.
     GIANT_CHECK(bins.lights[0].position[2] > -20.02f);
     for (const u32 i : l) GIANT_CHECK(i < k_max_lights_per_cluster);
-    // More than the frame holds: the nearest k_max_lights stay.
+    // More than the frame holds (all nearer than lamps merge): the nearest k_max_lights stay (and are counted).
     lights.clear();
     for (u32 i = 0; i < k_max_lights + 10; ++i) {
-        lights.push_back(point_at({0.0, 0.0, -10.0 - 0.5 * i}, 0.1f));
+        lights.push_back(point_at({0.0, 0.0, -10.0 - 0.05 * i}, 0.1f));
     }
     cam.bin(lights, bins);
-    GIANT_CHECK(bins.overflow && bins.lights.size() == k_max_lights);
+    GIANT_CHECK(bins.overflow && bins.lights.size() == k_max_lights && bins.merged == 0);
+    GIANT_CHECK(bins.lamps == k_max_lights);
     float furthest = 0.0f;
     for (const gpu::Light& g : bins.lights) furthest = std::min(furthest, g.position[2]);
-    GIANT_CHECK(furthest > -10.0f - 0.5f * k_max_lights);
+    GIANT_CHECK(furthest > -10.0f - 0.05f * k_max_lights);
 }
 
 GIANT_TEST("lights: GPU records clamp and shape the cone") {
@@ -278,4 +279,137 @@ GIANT_TEST("lights: a spot's bounding sphere holds its cone") {
             GIANT_CHECK(length(p - c) <= r * 1.0001f + 1e-4f);
         }
     }
+}
+
+GIANT_TEST("lights: far lamps merge by cell, keeping their light; near, big or lone ones stay themselves") {
+    const Camera cam;
+    std::vector<LocalLight> lights;
+    // A far town: 30 x 30 lamps 10 m apart, 1.5 km off, more than its few clusters hold.
+    for (int x = 0; x < 30; ++x) {
+        for (int z = 0; z < 30; ++z) {
+            LocalLight l = point_at({-150.0 + 10.0 * x, -5.0, -1500.0 - 10.0 * z}, 6.0f);
+            l.intensity = 3.0f;
+            l.shadow_id = 1 + u32(x * 30 + z); // (merged: no shadows)
+            lights.push_back(l);
+        }
+    }
+    const u32 town = static_cast<u32>(lights.size());
+    // A point and a spot sharing a cell 1 km off (16 m cells there): one light of 1.5 points.
+    LocalLight a = point_at({1.0, 0.0, -1001.0}, 4.0f);
+    a.intensity = 3.0f;
+    a.color = {1.0f, 0.5f, 0.0f};
+    LocalLight b = a;
+    b.position = {2.0, 0.0, -1002.0};
+    b.kind = LightKind::spot;
+    b.direction = {0.0f, -1.0f, 0.0f};
+    b.outer_angle = 1.0471976f; // 60 degrees: half a point light's light
+    lights.push_back(a);
+    lights.push_back(b);
+    // Two street lights sharing a cell 1.1 km off (32 m cells there).
+    const u32 spots = static_cast<u32>(lights.size());
+    for (const double x : {100.0, 105.0}) {
+        LocalLight l = point_at({x, 0.0, -1000.0 - x}, 16.0f);
+        l.kind = LightKind::spot;
+        l.direction = {0.0f, -1.0f, 0.0f};
+        l.intensity = 12.0f;
+        l.inner_angle = 0.6108652f; // 35 degrees
+        l.outer_angle = 1.0471976f; // 60
+        lights.push_back(l);
+    }
+    const u32 lone = static_cast<u32>(lights.size());
+    lights.push_back(point_at({-40.0, 0.0, -700.0}, 4.0f)); // alone in its cell: itself
+    const u32 big = static_cast<u32>(lights.size());
+    lights.push_back(point_at({60.0, 0.0, -1200.0}, 200.0f)); // too big to merge
+    const u32 near = static_cast<u32>(lights.size());
+    lights.push_back(point_at({0.0, 0.0, -200.0}, 2.0f)); // too near
+    lights.push_back(point_at({0.5, 0.0, -200.5}, 2.0f));
+    LightBins bins;
+    cam.bin(lights, bins);
+    GIANT_CHECK(!bins.overflow);
+    GIANT_CHECK(bins.lamps == lights.size());
+    GIANT_CHECK(bins.merged >= 50 && bins.merged <= 160 && bins.lights.size() < 200);
+    bool pair = false;
+    for (u32 i = 0; i < bins.lights.size(); ++i) {
+        const gpu::Light& g = bins.lights[i];
+        if (bins.sources[i] != k_merged_light) continue;
+        GIANT_CHECK(g.spot_scale == 0.0f && g.range >= 4.0f && g.shadow == 0);
+        if (g.position[2] < -1400.0f) {
+            GIANT_CHECK(g.range < 6.0f + 32.0f * 1.8f && g.source_radius > 0.0f);
+        } else if (g.position[2] > -1050.0f) {
+            // The pair: orange as both are, nearer the brighter point, reaching both lamps' reach.
+            pair = std::fabs(g.color[0] - 2.0f * g.color[1]) < 1e-3f * g.color[0] && g.color[2] == 0.0f &&
+                   g.position[0] > 1.0f && g.position[0] < 1.5f && g.range >= 4.0f;
+        }
+    }
+    // The town lights its ground (1.5 m under the lamps) as much merged as
+    // lamp by lamp: summed over the ground round it, as shading lights it.
+    const auto ground = [](const std::vector<gpu::Light>& from) {
+        double sum = 0.0;
+        for (double x = -200.0; x <= 190.0; x += 2.0) {
+            for (double z = -1460.0; z >= -1830.0; z -= 2.0) {
+                for (const gpu::Light& g : from) {
+                    if (g.position[2] > -1400.0f) continue;
+                    const double dx = g.position[0] - x, dy = g.position[1] + 6.5, dz = g.position[2] - z;
+                    const double d2 = dx * dx + dy * dy + dz * dz;
+                    const double q = d2 / (double(g.range) * g.range);
+                    const double w = std::clamp(1.0 - q * q, 0.0, 1.0);
+                    sum += double(g.color[0]) * w * w / (d2 + double(g.source_radius) * g.source_radius) *
+                           std::max(dy, 0.0) / std::sqrt(d2);
+                }
+            }
+        }
+        return sum;
+    };
+    std::vector<gpu::Light> each;
+    for (u32 i = 0; i < town; ++i) each.push_back(to_gpu(lights[i], {}));
+    const double ratio = ground(bins.lights) / ground(each);
+    GIANT_CHECK(ratio > 0.85 && ratio < 1.15);
+    // So do the street lights, their cones' soft edges counted as shading counts them.
+    const auto lit = [](const gpu::Light& g) {
+        double sum = 0.0;
+        for (double x = 60.0; x <= 150.0; x += 0.5) {
+            for (double z = -1060.0; z >= -1150.0; z -= 0.5) {
+                const double dx = g.position[0] - x, dy = g.position[1] + 1.5, dz = g.position[2] - z;
+                const double d2 = dx * dx + dy * dy + dz * dz;
+                const double d = std::sqrt(d2);
+                const double q = d2 / (double(g.range) * g.range);
+                const double w = std::clamp(1.0 - q * q, 0.0, 1.0);
+                // -l (light to surface) against the spot's direction.
+                const double along = -(dx * g.direction[0] + dy * g.direction[1] + dz * g.direction[2]) / d;
+                const double cone = std::clamp(along * g.spot_scale + g.spot_offset, 0.0, 1.0);
+                sum += double(g.color[0]) * w * w / (d2 + double(g.source_radius) * g.source_radius) * cone * cone *
+                       std::max(dy, 0.0) / d;
+            }
+        }
+        return sum;
+    };
+    const double street = lit(to_gpu(lights[spots], {})) + lit(to_gpu(lights[spots + 1], {}));
+    double street_merged = -1.0;
+    for (u32 i = 0; i < bins.lights.size(); ++i) {
+        const gpu::Light& g = bins.lights[i];
+        if (bins.sources[i] == k_merged_light && g.position[2] < -1090.0f && g.position[2] > -1110.0f) {
+            street_merged = lit(g);
+        }
+    }
+    GIANT_CHECK(street_merged > 0.85 * street && street_merged < 1.15 * street);
+    GIANT_CHECK(pair);
+    for (const u32 kept : {lone, big, near, near + 1}) {
+        GIANT_CHECK(std::find(bins.sources.begin(), bins.sources.end(), kept) != bins.sources.end());
+    }
+    for (u32 i = 0; i < town; ++i) {
+        GIANT_CHECK(std::find(bins.sources.begin(), bins.sources.end(), i) == bins.sources.end());
+    }
+    // Every cluster the town shows in lists few lights.
+    u32 most = 0;
+    for (usize c = 0; c < k_light_clusters; ++c) most = std::max(most, bins.clusters[c * 2 + 1]);
+    GIANT_CHECK(most < 100);
+    // Seen from 100 m off, the town's nearest lamps are themselves again.
+    const Camera close(View{DVec3{0.0, 0.0, -1400.0}});
+    close.bin(lights, bins);
+    GIANT_CHECK(std::find(bins.sources.begin(), bins.sources.end(), 15u * 30u) != bins.sources.end());
+    GIANT_CHECK(!bins.overflow);
+    GIANT_CHECK(bins.lamps > town / 2);
+    // No lights: nothing, counts cleared.
+    cam.bin({}, bins);
+    GIANT_CHECK(bins.lights.empty() && bins.lamps == 0 && bins.merged == 0);
 }

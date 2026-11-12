@@ -624,7 +624,26 @@ an offline cooker can use it without a device.
   depth from 0.5 m to 4096 m, each light's bounding sphere (a spot's is
   the sphere round its cone) lists it in the clusters it may touch,
   nearest lights first, at most 4096 lights a frame and 256 a cluster
-  (`RenderStats::light_overflow`: the furthest were left out). Shading
+  (`RenderStats::light_overflow`: the furthest were left out). Far
+  lamps are merged first (lights part L5, a lamp LOD found by the night
+  gate: a far town's thousand lamps fell in a few clusters, over their 256,
+  and each pixel there would walk 256 lights): a lamp past 256 m whose
+  sphere's radius is at most half a cell about a 32nd of its distance across
+  (a power of two metres: 8 m at 256 m, 32 m at 1 to 2 km) is summed with
+  the others in its cell into one point light at their power-weighted
+  centre, reaching as far as they all do, its source as wide as they are
+  spread, as bright as to light the ground 1.5 m under them as much as
+  they all did (a spot as the point light sending as much light down its
+  cone, its soft edge counted as shading counts it); a cell
+  of one lamp keeps it as it is. Far lamps are grouped by distance alone,
+  in view or not, and the group then tested for view, so turning the view
+  never changes a group (only crossing a cell size's distance does).
+  Merged lamps cast no shadows: a casting lamp sharing its cell with
+  another (past 1 km for the gate's lanterns and street lights, 512 m for
+  its 6 m window lamps) loses its shadow even when fewer than 64 nearer
+  ones cast; one alone in its cell keeps it. The voxel world's lamps (below) are never merged here.
+  `RenderStats::light_lamps` counts the lamps the shaded lights stand
+  for, `lights_merged` the merged ones. Shading
   finds its pixel's cluster and lights the surface with each light listed
   there, GGX and Lambert as for the sun. Lit views only, not the far
   field (which takes them from the voxel world instead, below);

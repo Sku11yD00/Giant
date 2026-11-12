@@ -616,6 +616,8 @@ struct RenderStats {
     u32 dust_puffs = 0;         // dust puffs drawn
     u32 lights = 0;             // local lights shaded this frame (in view, near enough)
     bool light_overflow = false; // too many: the furthest were left out of some clusters or of the frame
+    u32 light_lamps = 0;         // lamps the lights stand for (far lamps merged: each counted)
+    u32 lights_merged = 0;       // of the lights, far lamps merged into one (src/lights.h)
     u32 local_shadows = 0;        // lights shaded with shadows this frame
     u32 local_shadow_drawn = 0;   // shadow tile faces drawn this frame
     u32 local_shadow_waiting = 0; // faces of shadowed lights not drawn yet, or to draw again

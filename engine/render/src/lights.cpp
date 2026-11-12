@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 namespace giant::render {
 
@@ -23,6 +24,37 @@ Vec3 spot_direction(const LocalLight& light) {
 
 float outer_angle(const LocalLight& light) {
     return std::isfinite(light.outer_angle) ? std::clamp(light.outer_angle, 0.001f, k_max_outer) : k_max_outer;
+}
+
+// The light a lamp of unit power (range, source radius) sheds on the
+// ground k_ground_drop below it, summed over the ground (the shading's
+// falloff, lights.slang: window^2 / (d^2 + source^2), times the cosine).
+// Merged lamps are made as bright as to light the ground as much.
+constexpr float k_ground_drop = 1.5f; // metres: a lamp's height over what it lights
+float ground_light(float range, float source) {
+    const float h = std::min(k_ground_drop, range * 0.5f);
+    const float out = std::sqrt(std::max(range * range - h * h, 0.0f));
+    constexpr int k_steps = 48;
+    const float step = out / static_cast<float>(k_steps);
+    float sum = 0.0f;
+    for (int k = 0; k < k_steps; ++k) {
+        const float rho = (static_cast<float>(k) + 0.5f) * step;
+        const float d2 = rho * rho + h * h;
+        const float q = d2 / (range * range);
+        const float window = std::clamp(1.0f - q * q, 0.0f, 1.0f);
+        sum += 2.0f * k_pi * rho * step * window * window / (d2 + source * source) * (h / std::sqrt(d2));
+    }
+    return sum;
+}
+
+// The share of a point light's light on the ground a spot sends: its cone
+// (cone^2 in the shading, ramping in cos from outer to inner) over the
+// sphere, all of it landing near, seen from far.
+float spot_share(const LocalLight& l) {
+    if (l.kind != LightKind::spot) return 1.0f;
+    const float outer = outer_angle(l);
+    const float inner = std::isfinite(l.inner_angle) ? std::clamp(l.inner_angle, 0.0f, outer) : 0.0f;
+    return 1.0f - (2.0f * std::cos(inner) + std::cos(outer)) / 3.0f;
 }
 
 } // namespace
@@ -100,6 +132,8 @@ void bin_lights(std::span<const LocalLight> lights, const View& view, float aspe
     out.sources.clear();
     out.entries.clear();
     out.overflow = false;
+    out.lamps = 0;
+    out.merged = 0;
     out.clusters.assign(usize{k_light_clusters} * 2, 0);
     if (lights.empty() || !(aspect > 0.0f)) {
         return;
@@ -114,12 +148,24 @@ void bin_lights(std::span<const LocalLight> lights, const View& view, float aspe
     const float near_plane = std::max(view.near_plane, 1e-4f);
 
     struct Candidate {
-        u32 index;
+        u32 index; // in the frame's lights, or (merged) in `merged`
         float key; // distance to the light's sphere (0 inside)
         Vec3 center;
         float radius;
+        bool merged = false;
+        u32 lamps = 1; // the lamps it stands for
     };
     std::vector<Candidate> candidates;
+    // Far lamps by merge cell: (level, cell) -> their group.
+    struct Group {
+        std::vector<u32> lamps; // indices in the frame's lights
+    };
+    std::vector<Group> groups;
+    std::unordered_map<u64, u32> group_of;
+    // In the frustum and not wholly past the far distance.
+    const auto seen = [&](const Vec3& c, float r) {
+        return geometry::sphere_in_frustum(frustum, c, r) && dot(c, forward) - r <= k_light_far;
+    };
     for (u32 i = 0; i < lights.size(); ++i) {
         const LocalLight& l = lights[i];
         if (!std::isfinite(l.position.x + l.position.y + l.position.z) || !(l.intensity > 0.0f) || !std::isfinite(l.intensity) ||
@@ -130,14 +176,95 @@ void bin_lights(std::span<const LocalLight> lights, const View& view, float aspe
         float r;
         light_bounds(l, view.position, c, r);
         r += r * 1e-3f + 1e-3f; // (the light itself can sit on the sphere: GPU rounding must not lose it)
-        if (!finite(c) || !geometry::sphere_in_frustum(frustum, c, r)) {
+        if (!finite(c)) {
             continue;
         }
-        const float depth = dot(c, forward);
-        if (depth - r > k_light_far) {
+        const float key = std::max(length(c) - r, 0.0f);
+        if (key >= k_light_merge_distance) {
+            // A far lamp small against its merge cell joins the cell's
+            // group, in view or not (by distance alone: turning the view
+            // must not change a group; the group is tested for view after).
+            const float cell = std::exp2(std::floor(std::log2(length(c) * k_light_merge_angle)));
+            if (r <= cell * 0.5f) {
+                const auto at = [&](double v) {
+                    return static_cast<u64>(static_cast<i64>(std::floor(v / double(cell)))) & 0x7ffffull;
+                };
+                const u64 level = static_cast<u64>(std::log2(cell)) & 0x3full;
+                const u64 k = level | (at(l.position.x) << 6) | (at(l.position.y) << 25) | (at(l.position.z) << 44);
+                const auto [it, added] = group_of.try_emplace(k, static_cast<u32>(groups.size()));
+                if (added) groups.emplace_back();
+                groups[it->second].lamps.push_back(i);
+                continue;
+            }
+        }
+        if (seen(c, r)) {
+            candidates.push_back({i, key, c, r});
+        }
+    }
+    // Each group: one lamp alone stays itself; more are summed into one.
+    std::vector<LocalLight> merged;
+    std::vector<double> weights; // a group's lamps' powers (brightest channel)
+    for (const Group& g : groups) {
+        if (g.lamps.size() == 1) {
+            const LocalLight& l = lights[g.lamps[0]];
+            Vec3 c;
+            float r;
+            light_bounds(l, view.position, c, r);
+            r += r * 1e-3f + 1e-3f;
+            if (seen(c, r)) candidates.push_back({g.lamps[0], std::max(length(c) - r, 0.0f), c, r});
             continue;
         }
-        candidates.push_back({i, std::max(length(c) - r, 0.0f), c, r});
+        Vec3 total{};
+        DVec3 centre{};
+        double weight = 0.0;
+        double ground = 0.0; // what they all light of the ground (power x ground_light)
+        weights.clear();
+        for (const u32 i : g.lamps) {
+            const LocalLight& l = lights[i];
+            const float power = std::max(l.intensity, 0.0f) * spot_share(l);
+            const Vec3 c{std::min(std::max(l.color.x, 0.0f) * power, k_max_light),
+                         std::min(std::max(l.color.y, 0.0f) * power, k_max_light),
+                         std::min(std::max(l.color.z, 0.0f) * power, k_max_light)};
+            total = total + c;
+            const double w = std::max({c.x, c.y, c.z});
+            weights.push_back(w);
+            centre = centre + l.position * w;
+            weight += w;
+            const float range = clamped_range(l.range);
+            const float source = std::isfinite(l.source_radius) ? std::clamp(l.source_radius, 0.0f, range * 0.5f) : 0.0f;
+            ground += w * double(ground_light(range, source));
+        }
+        const float peak = std::max({total.x, total.y, total.z});
+        if (!(weight > 0.0) || !(peak > 0.0f) || !std::isfinite(peak)) continue;
+        centre = centre * (1.0 / weight);
+        double reach = 0.0;
+        double spread = 0.0; // power-weighted mean squared distance from the centre
+        for (usize k = 0; k < g.lamps.size(); ++k) {
+            const LocalLight& l = lights[g.lamps[k]];
+            const double d = length(l.position - centre);
+            reach = std::max(reach, d + double(clamped_range(l.range)));
+            spread += d * d * weights[k];
+        }
+        LocalLight m;
+        m.position = centre;
+        m.kind = LightKind::point;
+        m.range = clamped_range(static_cast<float>(reach));
+        m.source_radius = std::min(static_cast<float>(std::sqrt(std::max(spread / weight, 0.0))), m.range * 0.5f);
+        // As bright as lights the ground as much as they all did: spread
+        // wider and softer, the same light in all.
+        const double own = double(ground_light(m.range, m.source_radius));
+        const double scale = own > 0.0 ? ground / (weight * own) : 0.0;
+        m.intensity = static_cast<float>(std::min(double(peak) * scale, double(k_max_light)));
+        m.color = total * (1.0f / peak);
+        if (!(m.intensity > 0.0f) || !std::isfinite(m.intensity)) continue;
+        Vec3 c;
+        float r;
+        light_bounds(m, view.position, c, r);
+        r += r * 1e-3f + 1e-3f;
+        if (!finite(c) || !seen(c, r)) continue;
+        candidates.push_back({static_cast<u32>(merged.size()), std::max(length(c) - r, 0.0f), c, r, true,
+                              static_cast<u32>(g.lamps.size())});
+        merged.push_back(m);
     }
     std::stable_sort(candidates.begin(), candidates.end(),
                      [](const Candidate& a, const Candidate& b) { return a.key < b.key; });
@@ -180,8 +307,10 @@ void bin_lights(std::span<const LocalLight> lights, const View& view, float aspe
         b.z0 = std::min(light_slice(d0), k_light_slices - 1);
         b.z1 = std::min(light_slice(d1), k_light_slices - 1);
         boxes.push_back(b);
-        out.lights.push_back(to_gpu(lights[c.index], view.position));
-        out.sources.push_back(c.index);
+        out.lights.push_back(to_gpu(c.merged ? merged[c.index] : lights[c.index], view.position));
+        out.sources.push_back(c.merged ? k_merged_light : c.index);
+        out.merged += c.merged ? 1u : 0u;
+        out.lamps += c.lamps;
     }
 
     // Count per cluster (the first k_max_lights_per_cluster in order),

@@ -1036,7 +1036,8 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (stats.decal_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many decals on screen: some not drawn");
         }
-        ImGui::Text("Lights: %u in view", stats.lights);
+        ImGui::Text("Lights: %u in view (%u lamps; %u of the lights far lamps merged)", stats.lights,
+                    stats.light_lamps, stats.lights_merged);
         if (stats.light_overflow) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Too many lights in view: the furthest left out");
         }

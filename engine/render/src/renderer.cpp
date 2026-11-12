@@ -1499,6 +1499,8 @@ void Renderer::read_gpu_stats() {
         m_stats.decal_overflow = cpu.decal_overflow;
         m_stats.lights = cpu.lights;
         m_stats.light_overflow = cpu.light_overflow;
+        m_stats.light_lamps = cpu.light_lamps;
+        m_stats.lights_merged = cpu.lights_merged;
         m_stats.local_shadows = cpu.local_shadows;
         m_stats.local_shadow_drawn = cpu.local_shadow_drawn;
         m_stats.local_shadow_waiting = cpu.local_shadow_waiting;
@@ -2735,7 +2737,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         bin_lights(frame.lights, frame.view, aspect, frustum, *m_light_bins);
     } else {
         m_light_bins->lights.clear();
+        m_light_bins->sources.clear();
         m_light_bins->overflow = false;
+        m_light_bins->lamps = 0;
+        m_light_bins->merged = 0;
     }
     // Their shadows (with the sun's: GPU culling, a lit view): the nearest
     // shadowed lights keep or get tiles, a few faces drawn a frame.
@@ -2743,7 +2748,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_local_drawn = 0;
     if (!m_light_bins->lights.empty() && m_shadows_on && settings.local_shadows) {
         bool any = false;
-        for (const u32 s : m_light_bins->sources) any = any || frame.lights[s].shadow_id != 0;
+        for (const u32 s : m_light_bins->sources) any = any || (s != k_merged_light && frame.lights[s].shadow_id != 0);
         if (any && ensure_local_atlas()) {
             if (!m_local_were_on) {
                 m_local_shadows->invalidate_all(); // casters may have changed meanwhile
@@ -2751,6 +2756,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             }
             std::vector<ShadowCandidate> candidates;
             for (u32 i = 0; i < m_light_bins->sources.size(); ++i) {
+                if (m_light_bins->sources[i] == k_merged_light) continue; // (merged far lamps cast none)
                 const LocalLight& l = frame.lights[m_light_bins->sources[i]];
                 if (l.shadow_id != 0) candidates.push_back({i, &l});
             }
@@ -3472,6 +3478,8 @@ void Renderer::finish_stats(const FrameData& data) {
     m_stats.decal_overflow = m_decal_bins->overflow;
     m_stats.lights = data.light_count;
     m_stats.light_overflow = m_light_bins->overflow;
+    m_stats.light_lamps = data.light_count != 0 ? m_light_bins->lamps : 0u;
+    m_stats.lights_merged = data.light_count != 0 ? m_light_bins->merged : 0u;
     m_stats.local_shadows = data.local_shadows;
     m_stats.local_shadow_drawn = m_local_drawn;
     m_stats.local_shadow_waiting = m_local_planned ? m_local_shadows->waiting() : 0u;

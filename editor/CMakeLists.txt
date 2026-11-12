@@ -109,6 +109,11 @@ if(GIANT_BUILD_TESTS)
         COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/n3_gate.py
                 $<TARGET_FILE:giant_editor> --hidden --backend null)
       set_tests_properties(editor_n3_gate PROPERTIES TIMEOUT 1500 ENVIRONMENT "${gate_env}")
+      # The night gate (lights part L5): the valley at night, lit by over a thousand lamps.
+      add_test(NAME editor_night_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/night_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set_tests_properties(editor_night_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${gate_env}")
     endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")
