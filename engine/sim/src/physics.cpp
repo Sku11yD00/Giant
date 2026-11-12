@@ -567,7 +567,15 @@ struct PhysicsWorld::Impl {
     std::vector<WaterPart> water_parts;
     std::vector<u32> water_everywhere;                      // parts looked at anywhere
     std::unordered_map<u64, std::vector<u32>> water_grid;   // the rest, by square
-    float water_top = -std::numeric_limits<float>::infinity(); // the highest surface of all
+    float water_top = -std::numeric_limits<float>::infinity(); // the highest surface of all (still)
+    // The sea's swell (set_swell), its clock (moved on by each step), and
+    // how high it lifts the seas at most (sea_lift: the highest sea's waves).
+    world::Swell swell;
+    double swell_seconds = 0.0;
+    float sea_lift = 0.0f;
+    double woken_reach = 0.0; // the swell's reach when sleepers in the seas were last woken
+    // How far over its still level any sea may rise now.
+    double swell_reach() const { return static_cast<double>(sea_lift) * static_cast<double>(world::swell_most(swell)); }
 
     static i64 water_square(double v) { return static_cast<i64>(std::floor(v / k_water_cell)); }
     static u64 water_key(i64 x, i64 z) {
@@ -581,9 +589,11 @@ struct PhysicsWorld::Impl {
         water_everywhere.clear();
         water_grid.clear();
         water_top = -std::numeric_limits<float>::infinity();
+        sea_lift = 0.0f;
         for (u32 i = 0; i < water.size(); ++i) {
             const world::Water& b = water[i];
             if (!b.visible) continue; // (not there)
+            if (b.kind == world::WaterKind::sea) sea_lift = std::max(sea_lift, world::swell_scale(b));
             if (b.kind == world::WaterKind::river) {
                 for (u32 k = 0; k + 1 < b.path.size(); ++k) {
                     const world::RiverPoint& p = b.path[k];
@@ -634,14 +644,26 @@ struct PhysicsWorld::Impl {
     };
     mutable std::vector<WaterFound> water_found; // (water_over's scratch: the stepping thread's)
     std::optional<world::WaterHere> water_over(double x, double z, double bottom) const {
-        if (!(static_cast<double>(water_top) > bottom) || !std::isfinite(x) || !std::isfinite(z)) return std::nullopt;
+        if (!(static_cast<double>(water_top) + swell_reach() > bottom) || !std::isfinite(x) || !std::isfinite(z)) {
+            return std::nullopt;
+        }
         water_found.clear();
         const auto offer = [&](u32 n) {
             const WaterPart& part = water_parts[n];
             if (!part.everywhere && (x < part.x0 || x > part.x1 || z < part.z0 || z > part.z1)) return;
             double nearness = 0.0;
-            const std::optional<world::WaterHere> h = world::water_part_at(water[part.water], part.segment, x, z, nearness);
+            std::optional<world::WaterHere> h = world::water_part_at(water[part.water], part.segment, x, z, nearness);
             if (!h) return;
+            if (water[part.water].kind == world::WaterKind::sea) {
+                // Risen or fallen with the swell, leaning with it.
+                const double scale = world::swell_scale(water[part.water]);
+                if (scale > 0.0) {
+                    const world::SwellHere sw = world::swell_at(swell, x, z, swell_seconds);
+                    h->level = static_cast<float>(static_cast<double>(h->level) + scale * sw.height);
+                    h->slope_x = static_cast<float>(scale * sw.slope_x);
+                    h->slope_z = static_cast<float>(scale * sw.slope_z);
+                }
+            }
             for (WaterFound& f : water_found) {
                 if (f.water != part.water) continue;
                 if (nearness < f.nearness) f = {part.water, nearness, *h}; // (a nearer stretch of the same river)
@@ -724,13 +746,21 @@ struct PhysicsWorld::Impl {
             JPH::Body& b = lock.GetBody();
             const JPH::RVec3 centre = b.GetCenterOfMassPosition();
             const JPH::RVec3 surface(centre.GetX(), static_cast<JPH::Real>(here->level), centre.GetZ());
+            // (Leaning with the swell: a body on it tilts with it.)
+            const JPH::Vec3 up = JPH::Vec3(-here->slope_x, 1.0f, -here->slope_z).Normalized();
             float volume = 0.0f, submerged = 0.0f;
             JPH::Vec3 buoyed_at;
-            b.GetSubmergedVolume(surface, JPH::Vec3::sAxisY(), volume, submerged, buoyed_at);
+            b.GetSubmergedVolume(surface, up, volume, submerged, buoyed_at);
             const float inverse_mass = b.GetMotionProperties()->GetInverseMass();
             if (!(volume > 0.0f) || !(submerged > 0.0f) || !(inverse_mass > 0.0f)) continue;
             // Jolt's factor: 1 is a body as dense as the water.
             const float buoyancy = k_water_density * volume * inverse_mass;
+            // Riding the swell: kept awake (its turns, where it stops a
+            // moment at the top and the bottom, would otherwise let it sleep).
+            // (Only what floats: a body sunk to the bed sleeps.)
+            if ((here->slope_x != 0.0f || here->slope_z != 0.0f) && (submerged < volume * 0.999f || buoyancy > 1.0f)) {
+                b.ResetSleepTimer();
+            }
             const JPH::Vec3 flow(here->flow_x, 0.0f, here->flow_z);
             // Bobbing settles (the waves a moving body makes carry its
             // motion off, which quadratic drag alone leaves for a long
@@ -756,7 +786,8 @@ struct PhysicsWorld::Impl {
     void wake_in_water() {
         for (const WaterPart& part : water_parts) {
             constexpr float far = 1.0e7f;
-            const float top = std::isfinite(part.top) ? part.top : far;
+            const bool sea = water[part.water].kind == world::WaterKind::sea;
+            const float top = std::isfinite(part.top) ? part.top + (sea ? static_cast<float>(swell_reach()) : 0.0f) : far;
             const JPH::AABox box = part.everywhere
                                        ? JPH::AABox(JPH::Vec3(-far, -far, -far), JPH::Vec3(far, top, far))
                                        : JPH::AABox(JPH::Vec3(static_cast<float>(part.x0), -far, static_cast<float>(part.z0)),
@@ -1284,6 +1315,8 @@ void PhysicsWorld::clear() {
     fresh->next_character = m_impl->next_character;
     fresh->carried = m_impl->carried;
     fresh->set_water(m_impl->water);
+    fresh->swell = m_impl->swell;
+    fresh->swell_seconds = m_impl->swell_seconds;
     // Characters carry on in the fresh world where they were.
     for (auto& [id, c] : m_impl->characters) {
         Impl::Character moved = c;
@@ -1446,6 +1479,7 @@ u32 PhysicsWorld::step(double seconds) {
         }
         m_impl->carried -= k_step_seconds;
         m_impl->float_bodies(static_cast<float>(k_step_seconds));
+        m_impl->swell_seconds += k_step_seconds;
         for (auto& [id, c] : m_impl->characters) {
             c.previous = from_jolt_r(c.body->GetPosition());
             if (!c.carrier.IsInvalid() || c.held) { // (not stepped: out of the water as far as it knows)
@@ -1651,6 +1685,25 @@ void PhysicsWorld::set_water(std::span<const world::Water> water) {
 }
 
 std::span<const world::Water> PhysicsWorld::water() const { return m_impl->water; }
+
+void PhysicsWorld::set_swell(const world::Swell& swell, double seconds) {
+    m_impl->swell = swell;
+    // Its clock where the steps are: the time not yet stepped is still to come.
+    m_impl->swell_seconds = (std::isfinite(seconds) ? seconds : 0.0) - m_impl->carried;
+    // Risen by a quarter metre since the sleepers were last woken (from
+    // none: at once): woken where it now reaches, so they float or bob.
+    const double reach = m_impl->swell_reach();
+    if (reach > m_impl->woken_reach + (m_impl->woken_reach > 0.0 ? 0.25 : 0.0)) {
+        m_impl->wake_in_water();
+        m_impl->woken_reach = reach;
+    } else if (reach < m_impl->woken_reach) {
+        m_impl->woken_reach = reach; // (fallen: what it left falls, awake as it rides)
+    }
+}
+
+const world::Swell& PhysicsWorld::swell() const { return m_impl->swell; }
+
+double PhysicsWorld::swell_seconds() const { return m_impl->swell_seconds; }
 
 bool PhysicsWorld::water_reaches(const DVec3& point, double level) const {
     if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z) || !std::isfinite(level)) {

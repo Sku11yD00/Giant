@@ -5,6 +5,7 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <cmath>
 
 using namespace giant;
@@ -118,7 +119,7 @@ GIANT_TEST("water meshes: lakes at their level, rivers as strips with their flow
     hidden.name = "hidden";
     hidden.visible = false;
     water.push_back(hidden);
-    m.update(water, {0.0, 10.0, 0.0});
+    m.update(water);
     GIANT_CHECK(m.rebuilds() == 2 && m.broken_lakes() == 0); // the lake and the river (the hidden one is not cut)
     GIANT_CHECK(m.looks().size() == 2 && m.looks()[0].color.y == 0.2f && m.looks()[0].waves == 2.0f);
     // Lowest first: the lake (3 m) then the river (to 5 m). The lake: 4
@@ -136,23 +137,23 @@ GIANT_TEST("water meshes: lakes at their level, rivers as strips with their flow
     GIANT_CHECK(std::fabs(l.slope_x - -0.02f) < 1e-6f && std::fabs(l.slope_z) < 1e-6f && l2.slope_x == l.slope_x);
     for (const u32 i : m.indices()) GIANT_CHECK(i < m.vertices().size());
     // The same water again: not made again; a colour changed: made again.
-    m.update(water, {5.0, 10.0, 5.0});
+    m.update(water);
     GIANT_CHECK(m.rebuilds() == 2);
     // The lake's colour and level changed: put together again, not cut again.
     water[0].color.x = 0.5f;
     water[0].level = 3.5f;
-    m.update(water, {5.0, 10.0, 5.0});
+    m.update(water);
     GIANT_CHECK(m.rebuilds() == 2 && m.looks()[0].color.x == 0.5f && m.vertices()[0].position.y == 3.5);
     // Its shore moved: only the lake cut again.
     water[0].outline[2].x = 12.0;
-    m.update(water, {5.0, 10.0, 5.0});
+    m.update(water);
     GIANT_CHECK(m.rebuilds() == 3);
     // A crossed shore: counted, not drawn.
     water[0].outline = {{0, 0}, {10, 10}, {10, 0}, {0, 12}};
-    m.update(water, {});
+    m.update(water);
     GIANT_CHECK(m.broken_lakes() == 1 && m.vertices().size() == 8 && m.indices().size() == 12);
     // No water: nothing.
-    m.update({}, {});
+    m.update({});
     GIANT_CHECK(m.vertices().empty() && m.indices().empty() && m.looks().empty());
 }
 
@@ -162,7 +163,7 @@ GIANT_TEST("water meshes: a river keeps its width round a bend") {
     river.name = "river";
     river.kind = world::WaterKind::river;
     river.path = {{0.0, 0.0, 10.0f, 1.0f}, {100.0, 0.0, 10.0f, 1.0f}, {100.0, 100.0, 10.0f, 1.0f}};
-    m.update(std::vector<world::Water>{river}, {});
+    m.update(std::vector<world::Water>{river});
     // At the right-angle bend the two edges are the stretches' own edges' corners.
     const render::WaterVertex& a = m.vertices()[2];
     const render::WaterVertex& b = m.vertices()[3];
@@ -170,50 +171,38 @@ GIANT_TEST("water meshes: a river keeps its width round a bend") {
     GIANT_CHECK(std::fabs(std::fabs(a.position.x - 100.0) - 5.0) < 1e-6 && std::fabs(std::fabs(a.position.z) - 5.0) < 1e-6);
 }
 
-GIANT_TEST("water meshes: the sea is drawn under higher water, whatever the scene's order") {
+GIANT_TEST("water meshes: seas handed to the renderer to draw, lowest first, with their looks; none cut") {
     WaterMeshes m;
     world::Water sea;
     sea.name = "sea";
     sea.kind = world::WaterKind::sea;
     sea.level = 0.0f;
-    std::vector<world::Water> water{lake({{0, 0}, {10, 0}, {10, 10}, {0, 10}}, -2.0f),
-                                    lake({{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3.0f), sea};
-    water[1].name = "high";
-    m.update(water, {});
-    // Indices in order: the low lake's, the sea's, the high lake's last.
-    const auto idx = m.indices();
-    const auto v = m.vertices();
-    GIANT_CHECK(v[idx[0]].position.y == -2.0 && v[idx[6]].position.y == 0.0 && v[idx.back()].position.y == 3.0);
-    // Looks stay in the scene's order.
-    GIANT_CHECK(v[idx[0]].look == 0 && v[idx[6]].look == 2 && v[idx.back()].look == 1);
-}
-
-GIANT_TEST("water meshes: the sea is rings round the camera out to the horizon, following it") {
-    WaterMeshes m;
-    world::Water sea;
-    sea.name = "sea";
-    sea.kind = world::WaterKind::sea;
-    sea.level = -1.0f;
-    std::vector<world::Water> water{sea};
-    m.update(water, {1000.0, 20.0, -500.0});
-    const auto vertices = m.vertices();
-    GIANT_CHECK(!vertices.empty() && m.indices().size() % 3 == 0);
-    double farthest = 0.0;
-    for (const render::WaterVertex& v : vertices) {
-        GIANT_CHECK(v.position.y == -1.0 && v.look == 0);
-        farthest = std::max(farthest, std::hypot(v.position.x - 1000.0, v.position.z + 500.0));
+    world::Water deep = sea;
+    deep.name = "deep";
+    deep.level = -5.0f;
+    std::vector<world::Water> water{lake({{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3.0f), sea, deep};
+    m.update(water);
+    // The seas are no triangles of the editor's: only the lake's, over them.
+    GIANT_CHECK(m.vertices().size() == 4 && m.indices().size() == 6 && m.indices_under_seas() == 0);
+    const auto seas = m.seas();
+    GIANT_CHECK(seas.size() == 2);
+    if (seas.size() == 2) {
+        GIANT_CHECK(seas[0].level == -5.0 && seas[0].look == 2 && seas[1].level == 0.0 && seas[1].look == 1);
     }
-    GIANT_CHECK(std::fabs(farthest - WaterMeshes::k_sea_edge) < 1.0);
-    GIANT_CHECK(std::fabs(vertices[0].position.x - 1000.0) < 1e-9 && std::fabs(vertices[0].position.z + 500.0) < 1e-9);
-    for (const u32 i : m.indices()) GIANT_CHECK(i < vertices.size());
-    // Moved: the rings with it, nothing made again.
-    m.update(water, {-3000.0, 20.0, 7000.0});
-    GIANT_CHECK(m.rebuilds() == 0 && std::fabs(m.vertices()[0].position.x + 3000.0) < 1e-9); // (the sea is never cut)
-    // Within the renderer's caps.
-    GIANT_CHECK(m.vertices().size() < render::k_max_water_vertices && m.indices().size() / 3 < render::k_max_water_triangles);
-    // A camera that is not a number: the rings where they were.
-    m.update(water, {std::nan(""), 0.0, 0.0});
-    GIANT_CHECK(std::fabs(m.vertices()[0].position.x + 3000.0) < 1e-9);
+    GIANT_CHECK(m.looks().size() == 3 && m.rebuilds() == 1); // (the lake; the seas are never cut)
+    // A lake lower than the seas: drawn before them.
+    water[0].level = -9.0f;
+    m.update(water);
+    GIANT_CHECK(m.indices_under_seas() == 6);
+    water[0].level = 3.0f;
+    // Hidden: not handed over.
+    water[2].visible = false;
+    m.update(water);
+    GIANT_CHECK(m.seas().size() == 1 && m.seas()[0].level == 0.0);
+    // A bad waves number: drawn still, as physics floats it.
+    water[1].waves = std::nanf("");
+    m.update(water);
+    GIANT_CHECK(m.looks()[m.seas()[0].look].waves == 0.0f);
 }
 
 GIANT_TEST("water meshes: the camera's water is the highest over its place, with its look; none outside") {
@@ -234,7 +223,14 @@ GIANT_TEST("water meshes: the camera's water is the highest over its place, with
     GIANT_CHECK(!camera_water(water, {5.0, 6.5, 5.0}).on && camera_water(water, {5.0, 5.5, 5.0}).on);
     // Past it: the sea; with no sea, nothing; hidden, nothing.
     const render::Underwater out = camera_water(water, {50.0, -2.0, 5.0});
-    GIANT_CHECK(out.on && out.level == 0.0);
+    GIANT_CHECK(out.on && out.level == 0.0 && out.swell);
+    GIANT_CHECK(!camera_water(water, {5.0, 1.0, 5.0}).swell); // (a lake is flat)
+    // Over the sea by more than the margin: looked for only within its
+    // highest crest (the swell's most times its waves) and the margin.
+    const std::vector<world::Water> open{sea};
+    GIANT_CHECK(!camera_water(open, {50.0, 2.5, 5.0}).on);
+    GIANT_CHECK(camera_water(open, {50.0, 2.5, 5.0}, 1.0f).on);
+    GIANT_CHECK(!camera_water(open, {50.0, 3.5, 5.0}, 1.0f).on);
     GIANT_CHECK(!camera_water(std::vector<world::Water>{pond}, {50.0, 1.0, 5.0}).on);
     pond.visible = false;
     GIANT_CHECK(!camera_water(std::vector<world::Water>{pond}, {5.0, 1.0, 5.0}).on);
@@ -248,7 +244,7 @@ GIANT_TEST("water meshes: a river foams in rapids where it falls steeply, calm w
     r.path = {{0.0, 0.0, 8.0f, 10.0f}, {100.0, 0.0, 8.0f, 10.0f}, {120.0, 0.0, 8.0f, 7.0f}, {220.0, 0.0, 8.0f, 7.0f}};
     WaterMeshes m;
     const std::vector<world::Water> water{r};
-    m.update(water, {0.0, 50.0, 0.0});
+    m.update(water);
     const auto v = m.vertices();
     GIANT_CHECK(v.size() == 12);
     if (v.size() != 12) return;
@@ -259,7 +255,7 @@ GIANT_TEST("water meshes: a river foams in rapids where it falls steeply, calm w
     // A waterfall (two points at one place, 3 m apart in level): all white, its slope the most.
     r.path = {{0.0, 0.0, 8.0f, 10.0f}, {100.0, 0.0, 8.0f, 10.0f}, {100.0, 0.0, 8.0f, 7.0f}, {200.0, 0.0, 8.0f, 7.0f}};
     const std::vector<world::Water> fall{r};
-    m.update(fall, {0.0, 50.0, 0.0});
+    m.update(fall);
     GIANT_CHECK(m.vertices()[4].rapids == 1.0f && m.vertices()[0].rapids == 0.0f && m.vertices()[8].rapids == 0.0f);
     // The fall lit as the steepest (falling along +x); beside it, the level stretches' own (level).
     GIANT_CHECK(m.vertices()[4].slope_x == -10.0f && m.vertices()[7].slope_x == -10.0f && m.vertices()[1].slope_x == 0.0f);
@@ -268,6 +264,6 @@ GIANT_TEST("water meshes: a river foams in rapids where it falls steeply, calm w
     r.path[2].level = 8.8f;
     r.path[3].level = 8.8f;
     const std::vector<world::Water> gentle{r};
-    m.update(gentle, {0.0, 50.0, 0.0});
+    m.update(gentle);
     GIANT_CHECK(std::fabs(m.vertices()[4].rapids - 0.5f) < 0.01f);
 }

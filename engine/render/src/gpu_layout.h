@@ -745,7 +745,7 @@ inline constexpr u32 k_unbuilt = ~1u;   // a slot not built yet: use the next co
 // Water (shaders/water.slang; src/water.h packs them).
 struct WaterVertex {
     float position[3]; // camera-relative
-    u32 look;
+    u32 look;          // its look; the top bit: rides the swell (k_water_swell_bit)
     float flow[2];
     float rapids; // 0 to 1
     u32 slope;    // the surface's slope x, z: snorm16 each (low, high) of k_water_slope_most
@@ -769,6 +769,16 @@ struct WaterWave {
     float pad[3];
 };
 static_assert(sizeof(WaterWave) == 32);
+// The sea's swell's waves (camera-relative phase): height a sin(k dir.p + phase).
+struct SwellWave {
+    float dir_x;
+    float dir_z;
+    float k;         // radians a metre
+    float amplitude; // metres
+    float phase;     // radians at the camera, 0 to 2 pi
+    float pad[3];
+};
+static_assert(sizeof(SwellWave) == 32);
 struct WaterPush {
     u32 frame;
     u32 frame_offset;
@@ -790,7 +800,15 @@ struct WaterPush {
     float flow_clock;   // running water's clock: seconds into its cycle (0 to k_water_flow_period)
     float surf_clock;   // the surf's clock: seconds into a wave's run in (0 to k_water_surf_period)
     float surf;         // how high the surf runs (0 to 1, from the wind)
+    u32 swell_offset;   // bytes into `data`: the swell's waves
+    u32 swell_count;    // 0: none
+    u32 under_swell;    // 1: the camera's water rides the swell
+    u32 sea_on;         // 1: this draw is a sea's rings (made from the vertex id), not the vertices
+    u32 sea_radii_offset; // bytes into `data`: the rings' radii (floats, the first 0)
+    u32 sea_rings;      // how many radii
+    float sea_level;    // camera-relative
+    u32 sea_look;       // its look (an index into the looks)
 };
-static_assert(sizeof(WaterPush) == 80);
+static_assert(sizeof(WaterPush) == 112);
 
 } // namespace giant::render::gpu

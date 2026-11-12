@@ -1,6 +1,7 @@
 #include "physics_state.h"
 
 #include "giant/core/assert.h"
+#include "giant/world/water.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -567,11 +568,12 @@ void PhysicsState::sync_water(const world::Scene& scene) {
     // places (commands, undo, the panel, a world opened). A few bodies of
     // ordinary size compare in microseconds; at the limits (256 bodies of
     // 4096 points) it would be about a millisecond a call.
-    // Only what the physics uses: a new colour wakes nothing.
+    // Only what the physics uses (a sea's waves: how high its swell rises):
+    // a new colour wakes nothing.
     if (!m_on) return;
     const auto same = [](const world::Water& a, const world::Water& b) {
         return a.kind == b.kind && a.visible == b.visible && a.level == b.level && a.flow == b.flow &&
-               a.outline == b.outline && a.path == b.path;
+               a.outline == b.outline && a.path == b.path && world::swell_scale(a) == world::swell_scale(b);
     };
     if (!std::ranges::equal(scene.water, m_physics.water(), same)) m_physics.set_water(scene.water);
 }

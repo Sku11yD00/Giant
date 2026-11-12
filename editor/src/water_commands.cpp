@@ -57,7 +57,7 @@ Json properties() {
         {"color", triple(0, 1, "What it scatters back: its colour seen deep, linear RGB.")},
         {"absorption", triple(0, 10, "Light lost a metre through it, per channel (default clear water 0.45, 0.09, 0.065).")},
         {"turbidity", number(0, 1, "0 clear to 1 muddy (default 0.1).")},
-        {"waves", number(0, 4, "0 still to 4: how high the wind raises its waves (default 1).")},
+        {"waves", number(0, 4, "0 still to 4: how high the wind raises its waves, and the sea's swell (default 1).")},
         {"visible", {{"type", "boolean"}, {"description", "Hidden: not there (not drawn, nothing floats)."}}},
     };
 }

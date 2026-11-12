@@ -262,6 +262,7 @@ struct EditorState {
     // Last frame's renderer counts, updated by the main loop.
     render::RenderStats scene_stats;
     u32 water_broken_lakes = 0; // lakes not drawn: their shore crosses itself (WaterMeshes)
+    float water_swell = 0.0f;   // the most the sea's swell rises now (world::swell_most, before a sea's waves)
     FrameTimes frame_times; // updated by the main loop
     bool quit_requested = false;
     // Renders the editor as it looks now (viewport and panels) and returns

@@ -39,7 +39,7 @@ constexpr double k_gravity = 9.81;
 } // namespace
 
 WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32> indices,
-                      std::span<const WaterLook> looks, const DVec3& camera) {
+                      std::span<const WaterLook> looks, const DVec3& camera, usize under_seas) {
     WaterBatch out;
     const usize look_count = std::min<usize>(looks.size(), k_max_water_looks);
     out.looks.reserve(look_count + 1);
@@ -66,13 +66,14 @@ WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32
         g.flow[1] = std::clamp(v.flow_z, -100.0f, 100.0f);
         g.rapids = std::isfinite(v.rapids) ? std::clamp(v.rapids, 0.0f, 1.0f) : 0.0f;
         g.slope = pack_slope(v.slope_x) | (pack_slope(v.slope_z) << 16);
-        g.look = v.look < fallback_look ? v.look : fallback_look;
+        g.look = (v.look < fallback_look ? v.look : fallback_look) | (v.swell ? k_water_swell_bit : 0u);
     }
     const usize triangles = indices.size() / 3;
     if (triangles > k_max_water_triangles) out.overflow = true;
     const usize kept = std::min<usize>(triangles, k_max_water_triangles);
     out.indices.reserve(kept * 3);
     for (usize t = 0; t < kept; ++t) {
+        if (t * 3 <= under_seas) out.under_seas = out.indices.size(); // (kept before this one)
         const u32 a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
         const u32 most = std::max({a, b, c});
         if (most >= vertex_count && most < vertices.size()) continue; // its vertex left out: overflow's
@@ -82,10 +83,59 @@ WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32
         }
         out.indices.insert(out.indices.end(), {a, b, c});
     }
+    if (kept * 3 <= under_seas) out.under_seas = out.indices.size();
     return out;
 }
 
 gpu::WaterLook pack_water_look(const WaterLook& look) { return look_for_gpu(look); }
+
+const std::vector<float>& sea_radii() {
+    static const std::vector<float> radii = [] {
+        std::vector<float> r{0.0f};
+        double at = k_sea_first;
+        for (; at < k_sea_fine; at *= k_sea_fine_step) r.push_back(static_cast<float>(at));
+        for (at = k_sea_fine; static_cast<double>(r.back()) < k_sea_radius; at *= 1.5) {
+            r.push_back(static_cast<float>(std::min(at, k_sea_radius)));
+        }
+        r.push_back(static_cast<float>(k_sea_edge));
+        return r;
+    }();
+    return radii;
+}
+
+u32 sea_triangles() {
+    const u32 rings = static_cast<u32>(sea_radii().size());
+    return (rings - 2) * 2 * k_sea_segments + k_sea_segments;
+}
+
+std::array<gpu::SwellWave, k_swell_waves> water_swell(std::span<const SwellWave, k_swell_waves> swell, double seconds,
+                                                     const DVec3& camera, u32& count) {
+    const double t = std::isfinite(seconds) ? seconds : 0.0;
+    const double cx = std::isfinite(camera.x) ? camera.x : 0.0;
+    const double cz = std::isfinite(camera.z) ? camera.z : 0.0;
+    std::array<gpu::SwellWave, k_swell_waves> out{};
+    count = 0;
+    for (const SwellWave& w : swell) {
+        const bool ok = std::isfinite(w.dir_x) && std::isfinite(w.dir_z) && std::isfinite(w.k) &&
+                        std::isfinite(w.amplitude) && std::isfinite(w.phase) && w.k > 0.0f && w.amplitude > 0.0f;
+        if (!ok) continue;
+        const double k = w.k;
+        const double length = std::sqrt(static_cast<double>(w.dir_x) * w.dir_x + static_cast<double>(w.dir_z) * w.dir_z);
+        if (!(length > 1e-6)) continue;
+        // As the caller gives them (world::swell_at's sum), the phase at
+        // the camera folded into a turn (doubles: exact far out and late on).
+        const double phase = std::fmod(k * (static_cast<double>(w.dir_x) * cx + static_cast<double>(w.dir_z) * cz) -
+                                           std::sqrt(k_gravity * k) * t + static_cast<double>(w.phase),
+                                       k_two_pi);
+        gpu::SwellWave& g = out[count++];
+        g.dir_x = w.dir_x;
+        g.dir_z = w.dir_z;
+        g.k = static_cast<float>(k);
+        g.amplitude = w.amplitude;
+        g.phase = static_cast<float>(phase < 0.0 ? phase + k_two_pi : phase);
+    }
+    return out;
+}
 
 float water_clock(double seconds, float period) {
     if (!std::isfinite(seconds) || !(period > 0.0f)) return 0.0f;

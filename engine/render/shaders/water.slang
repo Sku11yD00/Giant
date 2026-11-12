@@ -75,6 +75,14 @@ struct WaterPush {
     float flow_clock;
     float surf_clock;
     float surf;
+    uint swell_offset;
+    uint swell_count;
+    uint under_swell;
+    uint sea_on;
+    uint sea_radii_offset;
+    uint sea_rings;
+    float sea_level;
+    uint sea_look;
 };
 ConstantBuffer<WaterPush> push : register(b0);
 
@@ -95,6 +103,58 @@ static const float k_surf_spacing = 0.8;     // metres of depth between one wave
 static const float k_break_depth = 1.5;      // breaking: from 1.8 m of depth (a fifth at 1.5 m), all of it from 0.3 m
 static const float k_surf_shelving = 0.01;   // metres the bed falls a metre at which the surf is whole (a level bed: none)
 static const float k_surf_edge = 0.5;        // a bed falling more than this a metre (twice it: none) is an edge, not a shore
+static const uint k_swell_bit = 0x80000000u; // a vertex's look's top bit: it rides the swell (water.h's k_water_swell_bit)
+static const float k_swell_mesh = 0.03;      // the sea's mesh: its triangles about this share of their distance across (water.h's k_sea_*)
+static const uint k_sea_segments = 256;      // round each of the sea's rings (water.h's k_sea_segments)
+static const float k_swell_reach = 2000.0;   // metres out the sea's mesh is fine; the swell fades out over the last quarter
+
+// The sea's swell at camera-relative `xz` (its height over the still
+// level, and its slope), times `scale` (the sea's waves). Each wave fades
+// out where it is too short for the mesh there to follow (under 6 of its
+// triangles a wave: none under 3), and all of it by k_swell_reach (past
+// it the mesh is coarse); physics floats bodies on the whole of it.
+struct SwellHere {
+    float height;
+    float2 slope;
+};
+SwellHere swell_at(float2 xz, float scale) {
+    SwellHere h;
+    h.height = 0.0;
+    h.slope = float2(0.0, 0.0);
+    if (push.swell_count == 0u || !(scale > 0.0)) {
+        return h;
+    }
+    ByteAddressBuffer b = read_buffer(push.data);
+    const float r = length(xz);
+    const float spacing = max(k_swell_mesh * r, 0.1);
+    const float far = saturate((k_swell_reach - r) / (0.25 * k_swell_reach));
+    [loop]
+    for (uint i = 0; i < push.swell_count; ++i) {
+        const uint at = push.swell_offset + i * 32u;
+        const float4 w = asfloat(b.Load4(at));
+        const float phase = asfloat(b.Load(at + 16u));
+        const float2 dir = w.xy;
+        const float k = w.z;
+        const float seen = saturate(6.2831853 / max(k, 1e-6) / (3.0 * spacing) - 1.0) * far;
+        const float a = w.w * seen * scale;
+        const float theta = k * dot(dir, xz) + phase;
+        h.height += a * sin(theta);
+        h.slope += dir * (a * k * cos(theta));
+    }
+    return h;
+}
+
+// The camera's water's surface over camera-relative `xz` (camera-relative
+// height): its level, risen or fallen with the swell where it rides it.
+float under_level_at(float2 xz) {
+    float level = push.under_level;
+    if (push.under_swell != 0u) {
+        ByteAddressBuffer b = read_buffer(push.data);
+        const uint at = push.looks_offset + min(push.under_look, push.look_count - 1u) * 32u;
+        level += swell_at(xz, asfloat(b.Load(at + 28u))).height;
+    }
+    return level;
+}
 
 [shader("vertex")]
 float4 vs_copy(uint vertex_id : SV_VertexID) : SV_Position {
@@ -119,17 +179,56 @@ struct WaterVaryings {
 [shader("vertex")]
 WaterVaryings vs_main(uint vertex_id : SV_VertexID) {
     ByteAddressBuffer b = read_buffer(push.data);
-    const uint index = b.Load(push.indices_offset + vertex_id * 4u);
-    const uint at = push.vertices_offset + index * 32u;
-    const float3 p = asfloat(b.Load3(at));
-    const uint look = b.Load(at + 12u);
+    float3 p;
+    uint look;
+    float2 flow = float2(0.0, 0.0);
+    float rapids = 0.0;
+    uint slope = 0u;
+    if (push.sea_on != 0u) {
+        // A sea's rings round the camera, far to near: each band from the
+        // outside in (two triangles a segment), then the fan at the camera.
+        const uint t = vertex_id / 3u;
+        const uint corner = vertex_id % 3u;
+        const uint band_triangles = (push.sea_rings - 2u) * 2u * k_sea_segments;
+        uint ring;
+        uint segment;
+        if (t < band_triangles) {
+            const uint band = push.sea_rings - 2u - t / (2u * k_sea_segments);
+            const uint local = t % (2u * k_sea_segments);
+            const uint s = local / 2u;
+            // (band, s), (band + 1, s), (band + 1, s + 1); (band, s), (band + 1, s + 1), (band, s + 1)
+            const bool second = (local & 1u) != 0u;
+            ring = corner == 0u ? band : (second && corner == 2u ? band : band + 1u);
+            segment = corner == 0u ? s : (second ? s + 1u : s + (corner == 2u ? 1u : 0u));
+        } else {
+            const uint s = t - band_triangles;
+            ring = corner == 0u ? 0u : 1u;
+            segment = corner == 0u ? 0u : s + (corner == 2u ? 1u : 0u);
+        }
+        const float r = asfloat(b.Load(push.sea_radii_offset + ring * 4u));
+        const float angle = 6.2831853 * float(segment % k_sea_segments) / float(k_sea_segments);
+        p = float3(r * cos(angle), push.sea_level, r * sin(angle));
+        look = push.sea_look | k_swell_bit;
+    } else {
+        const uint index = b.Load(push.indices_offset + vertex_id * 4u);
+        const uint at = push.vertices_offset + index * 32u;
+        p = asfloat(b.Load3(at));
+        look = b.Load(at + 12u);
+        flow = asfloat(b.Load2(at + 16u));
+        rapids = asfloat(b.Load(at + 24u));
+        slope = b.Load(at + 28u);
+    }
+    if ((look & k_swell_bit) != 0u) {
+        // Risen or fallen with the swell, by its look's waves.
+        const uint look_at = push.looks_offset + min(look & ~k_swell_bit, push.look_count - 1u) * 32u;
+        p.y += swell_at(p.xz, asfloat(b.Load(look_at + 28u))).height;
+    }
     const Frame f = load_frame(push.frame, push.frame_offset);
     WaterVaryings o;
     o.position = to_clip(f, p);
     o.world = p;
-    o.flow = asfloat(b.Load2(at + 16u));
-    o.rapids = asfloat(b.Load(at + 24u));
-    const uint slope = b.Load(at + 28u);
+    o.flow = flow;
+    o.rapids = rapids;
     o.slope = float2(float(int(slope << 16) >> 16), float(int(slope) >> 16)) * (k_slope_most / 32767.0);
     o.look = look;
     return o;
@@ -382,7 +481,11 @@ float3 lamp_diffuse(Extras e, Frame f, float2 position, float3 p, float view_z, 
 // is under the camera's water (FrameInput::underwater), from the near
 // plane on (the view stays under the surface that far: the caller's).
 float3 under_camera_water(Frame f, float3 color, float3 v, float distance, float3 ray) {
-    if (push.under_on == 0u || ray.y * f.near_plane >= push.under_level) {
+    if (push.under_on == 0u) {
+        return color;
+    }
+    const float level = under_level_at(ray.xz * f.near_plane);
+    if (ray.y * f.near_plane >= level) {
         return color;
     }
     const Look look = load_look(push.under_look);
@@ -390,7 +493,7 @@ float3 under_camera_water(Frame f, float3 color, float3 v, float distance, float
     const float start = f.near_plane * length(ray);
     const float length_through = max(distance - start, 0.0);
     return color * exp(-sigma * length_through) +
-           water_glow(water_source(f, look, 1.0), sigma, push.under_level - v.y * start, length_through, v.y);
+           water_glow(water_source(f, look, 1.0), sigma, level - v.y * start, length_through, v.y);
 }
 
 // The surface seen from below (`v` heading up, `n` the waves' normal, up).
@@ -472,7 +575,12 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const float3 p = i.world;
     const float distance = length(p);
     const float3 v = p / max(distance, 1e-6); // from the camera
-    const Look look = load_look(i.look);
+    const Look look = load_look(i.look & ~k_swell_bit);
+    // How the surface lies: a river's slope, the swell's.
+    float2 lean = i.slope;
+    if ((i.look & k_swell_bit) != 0u) {
+        lean += swell_at(i.world.xz, look.waves).slope;
+    }
     // Shading's extras: shadows, the voxel light, the sky, the lamps.
     const bool have = push.extras_on != 0u;
     // (Without, the frame's descriptor: read, never used.)
@@ -489,10 +597,12 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     float crest;
     float3 n = flowing_normal(p.xz, i.flow, footprint, scale, crest);
     // Leaning as the surface does (its slope and the waves', added).
-    if (any(i.slope != float2(0.0, 0.0))) {
-        n = normalize(n / max(n.y, 1e-3) - float3(i.slope.x, 0.0, i.slope.y));
+    if (any(lean != float2(0.0, 0.0))) {
+        n = normalize(n / max(n.y, 1e-3) - float3(lean.x, 0.0, lean.y));
     }
-    if (v.y > 0.0) {
+    // Seen from below: the eye under the surface as it lies here (a crest
+    // seen from a trough is seen from above).
+    if (dot(v, float3(-lean.x, 1.0, -lean.y)) > 0.0) {
         const bool screen_on = have && (e.reflect_on & 2u) != 0u;
         return float4(shade_below(f, screen_on, sky_on, sky, look, n, p, distance, v, footprint, depth, light), 1.0);
     }
@@ -510,7 +620,7 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const float straight_through = min(straight_full, k_refraction_reach);
     const float3 t_wavy = refract(v, n, 1.0 / 1.33);
     // (Against the surface as it lies: a sloping river's own lean is no wave.)
-    const float3 t_still = refract(v, normalize(float3(-i.slope.x, 1.0, -i.slope.y)), 1.0 / 1.33);
+    const float3 t_still = refract(v, normalize(float3(-lean.x, 1.0, -lean.y)), 1.0 / 1.33);
     const float3 bed = p + v * straight_through + (t_wavy - t_still) * straight_through;
     const float4 bed_clip = to_clip(f, bed);
     int2 bent_px = pixel;
@@ -661,7 +771,9 @@ float4 ps_copy(float4 position : SV_Position) : SV_Target {
     }
     const Frame f = load_frame(push.frame, push.frame_offset);
     const float3 ray = pixel_ray(f, position.xy);
-    if (ray.y * f.near_plane >= push.under_level) {
+    // (The surface over this pixel's near point: the swell's there.)
+    const float level = under_level_at(ray.xz * f.near_plane);
+    if (ray.y * f.near_plane >= level) {
         return c; // this pixel's near plane is above the surface
     }
     const float ray_length = length(ray);
@@ -670,15 +782,15 @@ float4 ps_copy(float4 position : SV_Position) : SV_Target {
     float distance = d > 0.0 ? f.near_plane / d * ray_length : 1.0e6;
     // Not past where the view comes up through the surface (that the
     // surface's own pass draws over).
-    if (v.y > 1e-5 && push.under_level > 0.0) {
-        distance = min(distance, push.under_level / v.y);
+    if (v.y > 1e-5 && level > 0.0) {
+        distance = min(distance, level / v.y);
     }
     const Look look = load_look(push.under_look);
     // Caustics on what is seen, where it is under the surface and the sun reaches it.
     const float3 l = f.sun_direction.xyz;
     if (d > 0.0 && look.waves > 0.0 && l.y > 0.0) {
         const float3 p = ray * (f.near_plane / d);
-        const float bed_under = push.under_level - p.y;
+        const float bed_under = under_level_at(p.xz) - p.y;
         if (bed_under > 0.0) {
             const float footprint = length(p) * 2.0 / max(f.p11 * f.height, 1e-6) / max(abs(v.y), 0.05);
             float sun = 1.0;

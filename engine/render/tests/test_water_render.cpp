@@ -11,10 +11,12 @@
 #include "water.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <limits>
+#include <utility>
 #include <vector>
 
 using namespace giant;
@@ -891,5 +893,231 @@ GIANT_TEST("water render: d3d12 surf runs in and breaks where the bed shelves, n
                 surf, calm, pool);
     GIANT_CHECK(surf > 400 && calm > 400 && pool < 16);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("water render: the swell is the caller's at a place whatever the camera; sea vertices marked; bad waves left out") {
+    std::array<SwellWave, k_swell_waves> swell{};
+    swell[0] = {0.6f, 0.8f, 0.1f, 1.5f, 0.4f};
+    swell[1] = {std::nanf(""), 0.0f, 0.2f, 1.0f, 0.0f}; // bad: left out
+    swell[2] = {-1.0f, 0.0f, 0.05f, 0.7f, 2.0f};
+    swell[3] = {0.0f, 0.0f, 0.3f, 0.5f, 0.0f}; // no direction: left out
+    // The caller's sum (world::swell_at's), in world coordinates.
+    const auto caller = [&](double x, double z, double t) {
+        double h = 0.0;
+        for (const SwellWave& w : {swell[0], swell[2]}) {
+            const double k = w.k;
+            h += w.amplitude * std::sin(k * (w.dir_x * x + w.dir_z * z) - std::sqrt(9.81 * k) * t + w.phase);
+        }
+        return h;
+    };
+    for (const DVec3 camera : {DVec3{0.0, 0.0, 0.0}, DVec3{4.0e6, 10.0, -2.5e6}}) {
+        const double t = 3.0e5;
+        u32 count = 0;
+        const auto g = water_swell(swell, t, camera, count);
+        GIANT_CHECK(count == 2);
+        for (const auto& [dx, dz] : {std::pair{0.0, 0.0}, std::pair{37.0, -12.0}, std::pair{-150.0, 400.0}}) {
+            double h = 0.0;
+            for (u32 i = 0; i < count; ++i) {
+                // As the GPU works it out (floats, camera-relative).
+                h += g[i].amplitude * std::sin(static_cast<float>(g[i].k * (g[i].dir_x * static_cast<float>(dx) +
+                                                                           g[i].dir_z * static_cast<float>(dz)) +
+                                                                  g[i].phase));
+                GIANT_CHECK(g[i].phase >= 0.0f && g[i].phase < 6.2832f);
+            }
+            GIANT_CHECK(std::fabs(h - caller(camera.x + dx, camera.z + dz, t)) < 2e-3);
+        }
+    }
+    u32 none = 7;
+    water_swell(std::array<SwellWave, k_swell_waves>{}, 1.0, {}, none);
+    GIANT_CHECK(none == 0);
+    // A sea's vertex carries the swell bit over its look.
+    std::vector<WaterVertex> v(3);
+    v[1].swell = true;
+    v[1].look = 1;
+    const std::vector<WaterLook> looks(2);
+    const std::vector<u32> idx{0, 1, 2};
+    const WaterBatch b = pack_water(v, idx, looks, {});
+    GIANT_CHECK(b.vertices[0].look == 0 && b.vertices[1].look == (1u | k_water_swell_bit));
+    v[1].look = 99; // (past the looks: the default's, still marked)
+    GIANT_CHECK(pack_water(v, idx, looks, {}).vertices[1].look == (2u | k_water_swell_bit));
+}
+
+GIANT_TEST("water render: d3d12 the sea rises with the swell over the horizon; the camera in a trough's crest is under it") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A white floor 8 m under the still sea.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = {0.0, -8.0, 0.0};
+    instances[0].scale = {2000.0f, 1.0f, 2000.0f};
+    instances[0].always_mesh = true;
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.background = {0.9f, 0.9f, 0.9f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {2.0f, 2.0f, 2.0f};
+    frame.lighting.sky_light = {0.4f, 0.4f, 0.4f};
+    frame.lighting.ground_light = {0.02f, 0.02f, 0.02f};
+    frame.water_seconds = 0.0;
+    const auto draw = [&] {
+        for (int i = 0; i < 6; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto pixel = [](const std::vector<u8>& image, u32 x, u32 y, u32 c) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4 + c;
+        return i < image.size() ? static_cast<int>(image[i]) : -1000;
+    };
+    // The sea, the renderer's own rings round the camera.
+    std::vector<WaterLook> looks(1);
+    looks[0].waves = 1.0f;
+    const std::vector<SeaSurface> seas{{0.0, 0}};
+    frame.seas = seas;
+    frame.water_looks = looks;
+    // One wave 60 m long, 2.5 m up and down, its crest 15 m ahead (-z).
+    const float k = 6.2831853f / 60.0f;
+    SwellWave wave{0.0f, 1.0f, k, 2.5f, 1.5707963f + 15.0f * k};
+    // Level, half a metre over the still sea, looking along -z.
+    frame.view.position = {0.0, 0.5, 0.0};
+    frame.view.orientation = Quat{};
+    const auto flat = draw();
+    frame.swell[0] = wave;
+    const auto swollen = draw();
+    GIANT_CHECK(renderer->last_stats().water_triangles == sea_triangles());
+    // The crest rises over the horizon (its near face about 10 degrees up
+    // from the eye, about 10 rows over the middle), seen from above (a face
+    // towards the eye, though looked up at); the sky high up is as it was.
+    int crest_change = 0, sky_change = 0;
+    for (u32 y = 26; y < 31; ++y) {
+        for (u32 c = 0; c < 3; ++c) crest_change = std::max(crest_change, std::abs(pixel(swollen, 32, y, c) - pixel(flat, 32, y, c)));
+    }
+    for (u32 c = 0; c < 3; ++c) sky_change = std::max(sky_change, std::abs(pixel(swollen, 32, 4, c) - pixel(flat, 32, 4, c)));
+    std::printf("    swell: rows over the horizon changed by %d, the sky by %d\n", crest_change, sky_change);
+    GIANT_CHECK(crest_change > 10 && sky_change <= 2);
+    // The camera half a metre over the still level, but under a crest
+    // there (2.5 m): under water, though the still sea is under it.
+    frame.seas = {};
+    frame.swell[0] = {0.0f, 1.0f, k, 2.5f, 1.5707963f};
+    frame.underwater.on = true;
+    frame.underwater.level = 0.0;
+    frame.underwater.look = looks[0];
+    frame.underwater.swell = false;
+    const auto still = draw();
+    GIANT_CHECK(!renderer->last_stats().underwater);
+    frame.underwater.swell = true;
+    const auto risen = draw();
+    GIANT_CHECK(renderer->last_stats().underwater);
+    std::printf("    under a crest: floor red %d -> %d\n", pixel(still, 32, 60, 0), pixel(risen, 32, 60, 0));
+    GIANT_CHECK(pixel(risen, 32, 60, 0) < pixel(still, 32, 60, 0) / 2);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("water render: the sea's rings are fine out to 2 km and reach past the horizon; seas drawn first (null device)") {
+    const std::vector<float>& radii = sea_radii();
+    GIANT_CHECK(radii.size() > 200 && radii[0] == 0.0f && radii.back() == static_cast<float>(k_sea_edge));
+    for (usize i = 2; i < radii.size(); ++i) {
+        GIANT_CHECK(radii[i] > radii[i - 1]);
+        // Within 2 km: each about 3 % past the last, 256 round (water.slang's k_swell_mesh).
+        if (radii[i] <= k_sea_fine) GIANT_CHECK(radii[i] / radii[i - 1] <= 1.0301f);
+    }
+    GIANT_CHECK(6.2831853 / k_sea_segments < 0.03 && sea_triangles() == (radii.size() - 2) * 512 + 256);
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    GIANT_CHECK(device != nullptr);
+    if (device == nullptr) return;
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    rhi::TextureDesc target_desc;
+    target_desc.width = 32;
+    target_desc.height = 32;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.antialiasing = false;
+    const auto draw = [&] {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd == nullptr) return;
+        renderer->render(*cmd, target, frame);
+        device->end_frame();
+    };
+    draw();
+    const u32 bare = renderer->last_stats().post_draws;
+    // Two seas (one with a bad level, left out) and a lake's square: the copy, the sea, the square.
+    std::vector<SeaSurface> seas{{0.0, 0}, {std::nan(""), 0}};
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    square(v, idx, {0.0, 1.0, 0.0}, 5.0);
+    frame.seas = seas;
+    frame.water_vertices = v;
+    frame.water_indices = idx;
+    draw();
+    GIANT_CHECK(renderer->last_stats().post_draws == bare + 3);
+    GIANT_CHECK(renderer->last_stats().water_triangles == sea_triangles() + 2 && !renderer->last_stats().water_overflow);
+    // Water lower than the sea (its first triangle): drawn before it, the rest after.
+    frame.water_indices_under_seas = 3;
+    draw();
+    GIANT_CHECK(renderer->last_stats().post_draws == bare + 4);
+    GIANT_CHECK(renderer->last_stats().water_triangles == sea_triangles() + 2);
+    frame.water_indices_under_seas = 0;
+    // Packed: the split counts only what was kept before it.
+    {
+        std::vector<WaterVertex> three(3);
+        const std::vector<u32> tris{0, 1, 2, 0, 1, 9, 0, 2, 1, 1, 2, 0};
+        GIANT_CHECK(pack_water(three, tris, {}, {}, 9).under_seas == 6);  // (the second dropped)
+        GIANT_CHECK(pack_water(three, tris, {}, {}, 0).under_seas == 0);
+        GIANT_CHECK(pack_water(three, tris, {}, {}, 99).under_seas == 9); // (all of them)
+    }
+    // A sea alone draws; past k_max_seas the rest are left out.
+    frame.water_vertices = {};
+    frame.water_indices = {};
+    seas.assign(k_max_seas + 2, SeaSurface{});
+    frame.seas = seas;
+    draw();
+    GIANT_CHECK(renderer->last_stats().water_triangles == k_max_seas * sea_triangles());
+    GIANT_CHECK(renderer->last_stats().water_overflow);
     device->destroy(target);
 }

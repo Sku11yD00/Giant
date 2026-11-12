@@ -2019,9 +2019,9 @@ crosses itself is not drawn, counted in the stats panel and
 `last_frame.water.broken_lakes`), a river is a strip down its path (each
 point's width and level, widened at bends so each stretch keeps its
 width, at most doubled; square ends, where the physics' stretches are
-rounded), the sea rings round the camera (64 around, growing by half
-again from 4 m out to 40 km, then one ring 2,000 km out so its edge never
-shows). The pass draws over itself in order, so bodies go lowest first (a
+rounded), a sea is handed over as its level and look (the renderer
+draws its rings, W5a). The pass draws over itself in order, so bodies go
+lowest first (a
 river by its highest point, so at a river's mouth the river shows over
 the lake): where surfaces overlap the highest shows, as the physics has
 it. Each body's triangles are kept and cut again only when its shape
@@ -2031,9 +2031,9 @@ again). Cutting a 4096-point shore takes a few to a few tens of
 milliseconds (its corners that turn back filed in a grid, its edges
 checked for crossing by a sweep along x, worst for a star whose every edge
 spans its middle): a hitch while such a shore is reshaped, none in play.
-The sea's rings follow the camera every frame. Nothing is made while the
-water is off or the view is not lit. The waves' clock runs with the
-frames (not in a screenshot's). `set_render_settings` `water` turns it
+Nothing is made while the water is off or the view is not lit. The
+waves' clock is the game's time (not a screenshot's; paused, it stands
+still; it keeps up with physics stepped by a command). `set_render_settings` `water` turns it
 off; `last_frame.water` counts triangles drawn, dropped and overflow.
 
 Under the surface (W3): FrameInput::underwater names the water the
@@ -2113,15 +2113,55 @@ none over a level bed: a pool, a flat-bottomed pond; fading out from 50
 cm a metre, none past a metre a metre: an edge, a body's or a rock's
 side, not a beach). The depth is the screen's: a floating body's or a
 sunken rock's gently sloping top within 1.8 m of the surface gets surf
-of its own. The sea's surface itself stays flat: heaving its geometry
-with the long waves waits for the physics to float things on the same
-waves and the underwater line to follow them (W5), as otherwise the
-camera and what floats would go under and out of the drawn water by
-metres in a storm.
+of its own.
 
-The rest comes in the following parts (the water plan: W5 the sea's
-swell with the physics' waves, the voxel world, weather and sound, W6 the
-water gate).
+The sea's swell (W5a). `world::sea_swell(wind)` gives four long sines:
+three running with the wind, the longest about as long as the sea that
+wind grows peaks (Pierson-Moskowitz, 40 to 250 m), one from far off
+across them 1.4 times that, scaled so their significant height is the
+grown sea's (0.3 m in a calm to 4 m in a gale), none steeper than k a
+0.12. `world::SwellTrack` follows a changing wind without the waves
+jumping (a sine's phase k x - w t moves far out and late on by metres of
+wave with the smallest change of k): a set's lengths and directions are
+held while the wind's stay within a tenth and 15 degrees, only their
+heights following (easing, 10 s to come most of the way, so a sudden
+wind steps nothing); past that a new set fades in over 20 s as the old one
+fades out (eight waves while it does). A sea's height at a place is its
+level plus the sum (`world::swell_at`, in double, with its slope) times
+its `waves`; lakes and rivers stay flat. One set, two users. Physics
+(`PhysicsWorld::set_swell(swell, seconds)` before each step, its clock
+the given time less what is still to step, moved on by its own steps)
+floats bodies on the risen surface and tilts the plane Jolt's buoyancy
+takes by its slope, keeps floating bodies awake while they ride it (a
+body sunk to the bed sleeps), wakes the water's sleepers each time the
+swell has risen another quarter metre, and swimmers bob with it. The
+renderer (`FrameInput::swell`) folds each wave's phase at the camera in
+double (`water_swell`) and raises the vertices that ride it
+(`WaterVertex::swell`, the seas' own) in the vertex shader, its slope
+worked out again per pixel for the lighting. The renderer draws the seas
+itself (`FrameInput::seas`: a level and a look each, at most 4): rings
+round the camera made from the vertex id (no upload but the radii), fine
+out to 2 km (each 1.03 times the last, 256 round: triangles about 3 % of
+their distance across), then coarse to the horizon, about 113 thousand
+triangles a sea; each wave fades out where the mesh cannot follow it
+(under 6 triangles a wave, none under 3, and all of it from 1.5 to 2 km).
+Physics keeps the whole swell everywhere, so a body far out bobs a little
+against a sea drawn calmer there. The water pass has no depth, so the
+rings are drawn far to near (a nearer crest hides the sea behind it),
+after the water lower than the seas and before the rest
+(`FrameInput::water_indices_under_seas`). A surface is shaded as seen from
+below only when the eye is under it as it lies there (a crest seen from a
+trough is seen from above). Under water, the line where the near plane
+meets the surface follows the swell per pixel (the camera's water rides
+it, `Underwater::swell`; the near plane's test takes the highest crest),
+and the depth the water's glow and the caustics take is the risen
+surface's. The editor's water clock is the game's: paused, the sea stands
+still with what floats on it; a sea's `waves` reaches physics as soon as
+it is edited. Wakes and rings round floating bodies wait
+for the effects part.
+
+The rest comes in the following parts (the water plan: W5 the voxel
+world, weather and sound, W6 the water gate).
 
 ## Navigation
 

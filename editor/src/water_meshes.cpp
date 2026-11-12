@@ -85,20 +85,22 @@ render::WaterLook water_look(const world::Water& w) {
     l.color = w.color;
     l.absorption = w.absorption;
     l.turbidity = w.turbidity;
-    l.waves = w.waves;
+    l.waves = world::swell_scale(w); // (0 to 4; a bad number: still, as physics has it)
     return l;
 }
 
-render::Underwater camera_water(std::span<const world::Water> water, const DVec3& camera) {
+render::Underwater camera_water(std::span<const world::Water> water, const DVec3& camera, float swell_most) {
     render::Underwater u;
     // Over every surface (with room for the near plane): none, and no search.
+    const double crest = std::isfinite(swell_most) ? std::max(static_cast<double>(swell_most), 0.0) : 0.0;
     double highest = -std::numeric_limits<double>::infinity();
     for (const world::Water& w : water) {
         if (!w.visible) continue;
         if (w.kind == world::WaterKind::river) {
             for (const world::RiverPoint& p : w.path) highest = std::max(highest, static_cast<double>(p.level));
         } else {
-            highest = std::max(highest, static_cast<double>(w.level));
+            const double lift = w.kind == world::WaterKind::sea ? crest * world::swell_scale(w) : 0.0;
+            highest = std::max(highest, static_cast<double>(w.level) + lift);
         }
     }
     if (!(camera.y < highest + k_camera_water_margin)) return u;
@@ -107,6 +109,7 @@ render::Underwater camera_water(std::span<const world::Water> water, const DVec3
     u.on = true;
     u.level = here->level;
     u.look = water_look(*here->water);
+    u.swell = here->water->kind == world::WaterKind::sea;
     return u;
 }
 
@@ -253,7 +256,7 @@ std::vector<u32> clip_ears(std::span<const world::WaterPoint> given, bool& whole
     return out;
 }
 
-void WaterMeshes::update(std::span<const world::Water> water, const DVec3& camera) {
+void WaterMeshes::update(std::span<const world::Water> water) {
     if (!m_built || !std::ranges::equal(water, m_seen)) {
         m_seen.assign(water.begin(), water.end());
         m_built = true;
@@ -395,7 +398,6 @@ void WaterMeshes::update(std::span<const world::Water> water, const DVec3& camer
         m_bodies = std::move(bodies);
         assemble();
     }
-    place_seas(camera);
 }
 
 void WaterMeshes::assemble() {
@@ -403,13 +405,8 @@ void WaterMeshes::assemble() {
     m_indices.clear();
     m_looks.clear();
     m_seas.clear();
+    m_under_seas = 0;
     m_broken = 0;
-    if (m_radii.empty()) {
-        // Rings growing by half again each, from 4 m out to k_sea_radius, then the edge.
-        m_radii.push_back(0.0);
-        for (double r = 4.0; m_radii.back() < k_sea_radius; r *= 1.5) m_radii.push_back(std::min(r, k_sea_radius));
-        m_radii.push_back(k_sea_edge);
-    }
     // Looks in the scene's order; bodies lowest first.
     std::vector<u32> look(m_bodies.size(), 0);
     std::vector<usize> order;
@@ -427,19 +424,8 @@ void WaterMeshes::assemble() {
         const Body& b = m_bodies[i];
         const u32 base = static_cast<u32>(m_vertices.size());
         if (b.water.kind == world::WaterKind::sea) {
-            m_seas.push_back({b.water.level, look[i], m_vertices.size()});
-            const usize rings = m_radii.size() - 1;
-            m_vertices.resize(m_vertices.size() + 1 + rings * k_sea_segments); // placed by place_seas
-            const auto at = [&](usize ring, u32 s) {
-                return ring == 0 ? base : base + 1 + static_cast<u32>(ring - 1) * k_sea_segments + (s % k_sea_segments);
-            };
-            for (u32 s = 0; s < k_sea_segments; ++s) m_indices.insert(m_indices.end(), {at(0, 0), at(1, s), at(1, s + 1)});
-            for (usize ring = 1; ring < rings; ++ring) {
-                for (u32 s = 0; s < k_sea_segments; ++s) {
-                    m_indices.insert(m_indices.end(), {at(ring, s), at(ring + 1, s), at(ring + 1, s + 1)});
-                    m_indices.insert(m_indices.end(), {at(ring, s), at(ring + 1, s + 1), at(ring, s + 1)});
-                }
-            }
+            if (m_seas.empty()) m_under_seas = static_cast<u32>(m_indices.size());
+            m_seas.push_back({static_cast<double>(b.water.level), look[i]}); // (the renderer draws its rings)
             continue;
         }
         const bool lake = b.water.kind == world::WaterKind::lake;
@@ -449,28 +435,6 @@ void WaterMeshes::assemble() {
             m_vertices.push_back(v);
         }
         for (const u32 t : b.indices) m_indices.push_back(base + t);
-    }
-}
-
-void WaterMeshes::place_seas(const DVec3& camera) {
-    // (A camera that is not a number: the rings where they were.)
-    if (!std::isfinite(camera.x) || !std::isfinite(camera.z)) return;
-    for (const Sea& sea : m_seas) {
-        render::WaterVertex* v = m_vertices.data() + sea.first_vertex;
-        *v++ = [&] {
-            render::WaterVertex c = vertex(camera.x, sea.level, camera.z, 0.0f, 0.0f);
-            c.look = sea.look;
-            return c;
-        }();
-        for (usize ring = 1; ring < m_radii.size(); ++ring) {
-            for (u32 s = 0; s < k_sea_segments; ++s) {
-                const double angle = 6.283185307179586 * s / k_sea_segments;
-                *v = vertex(camera.x + m_radii[ring] * std::cos(angle), sea.level,
-                            camera.z + m_radii[ring] * std::sin(angle), 0.0f, 0.0f);
-                v->look = sea.look;
-                ++v;
-            }
-        }
     }
 }
 

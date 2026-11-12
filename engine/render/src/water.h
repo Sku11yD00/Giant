@@ -23,6 +23,24 @@ inline constexpr float k_water_flow_period = 2.0f;
 inline constexpr float k_water_slope_most = 10.0f;
 // The surf: a wave runs in to the shore every this many seconds.
 inline constexpr float k_water_surf_period = 6.0f;
+// gpu::WaterVertex::look's top bit: the vertex rides the swell.
+inline constexpr u32 k_water_swell_bit = 0x80000000u;
+// The sea's rings (SeaSurface): from k_sea_first out to k_sea_fine each
+// k_sea_fine_step times the last (water.slang's k_swell_mesh and
+// k_swell_reach fade the swell by them), then half again each to
+// k_sea_radius, then one more at k_sea_edge (past where a flat sea's edge
+// shows from any height); k_sea_segments round.
+inline constexpr double k_sea_first = 4.0;
+inline constexpr double k_sea_fine = 2000.0;
+inline constexpr double k_sea_fine_step = 1.03;
+inline constexpr double k_sea_radius = 40000.0;
+inline constexpr double k_sea_edge = 2.0e6;
+inline constexpr u32 k_sea_segments = 256;
+// The rings' radii, the first 0 (the camera).
+const std::vector<float>& sea_radii();
+// A sea's triangles (far to near: each band of rings from the outside in,
+// then the fan round the camera).
+u32 sea_triangles();
 
 struct WaterBatch {
     std::vector<gpu::WaterVertex> vertices;
@@ -30,6 +48,7 @@ struct WaterBatch {
     std::vector<gpu::WaterLook> looks; // at least one (the default)
     u32 dropped = 0;       // triangles left out: an index past the vertices, a bad number
     bool overflow = false; // past k_max_water_vertices or k_max_water_triangles
+    usize under_seas = 0;  // of `indices`, those from the caller's first `under_seas` (drawn before the seas)
 };
 
 // The frame's water, camera-relative to `camera`. Vertices past
@@ -37,8 +56,10 @@ struct WaterBatch {
 // out (overflow); a triangle naming a vertex not there, or a vertex with a
 // bad number, is dropped; a look's numbers are kept in range (a bad one:
 // the default's); a vertex's look past the looks given takes the default.
+// `under_seas`: how many of the caller's indices come before the seas
+// (WaterBatch::under_seas: how many of the kept ones those are).
 WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32> indices,
-                      std::span<const WaterLook> looks, const DVec3& camera);
+                      std::span<const WaterLook> looks, const DVec3& camera, usize under_seas = 0);
 
 // Running water's clock at `seconds`: seconds into its cycle (0 to
 // k_water_flow_period; worked out in double, so it keeps its precision late on).
@@ -66,5 +87,14 @@ bool near_plane_under(const Quat& orientation, float tan_y, float aspect, float 
 // pattern keeps its millimetres and does not jump as the camera moves.
 // Deep water's waves: a wave k radians a metre long moves at sqrt(g k) / k.
 std::array<gpu::WaterWave, k_water_waves> water_waves(const Vec3& velocity, double seconds, const DVec3& camera);
+
+// The sea's swell (FrameInput::swell) at `seconds` as the GPU takes it,
+// camera-relative to `camera`: each wave's phase there worked out in double,
+// so the GPU's height at a camera-relative point is the caller's
+// (world::swell_at) at the world point. Waves with a bad number, no
+// amplitude or no direction are left out; `count` is how many are kept
+// (first in the array).
+std::array<gpu::SwellWave, k_swell_waves> water_swell(std::span<const SwellWave, k_swell_waves> swell, double seconds,
+                                                     const DVec3& camera, u32& count);
 
 } // namespace giant::render

@@ -500,7 +500,8 @@ struct RenderSettings {
 // seen). The waves are a sum of travelling waves blown by
 // FrameInput::wind, `waves` high (0 still to 4), their pattern moving with
 // FrameInput::water_seconds; the surface itself stays flat (its normals
-// wave). Running water (WaterVertex::flow) carries its waves downstream,
+// wave), but for the sea's swell (FrameInput::swell, WaterVertex::swell),
+// which raises and lowers it. Running water (WaterVertex::flow) carries its waves downstream,
 // rougher and foaming the faster it runs and in rapids, and a surface that
 // slopes (WaterVertex::slope_*) is lit as it leans. Where it shoals over a
 // sloping bed, the waves run in to the shore in bands and break into foam
@@ -528,7 +529,35 @@ struct WaterVertex {
     // its triangles. 0 for level water.
     float slope_x = 0.0f;
     float slope_z = 0.0f;
+    // Rides the swell: raised and lowered by FrameInput::swell, times its
+    // look's `waves`, as it lies here, lit as it leans. Waves too short for
+    // the triangles to follow fade out with the distance from the camera
+    // (made for FrameInput::seas' mesh: about 3 % of the distance across).
+    bool swell = false;
 };
+// A sea (FrameInput::seas): the renderer draws it everywhere, as rings
+// round the camera out past the horizon (fine out to 2 km, each 1.03 times
+// the last, 256 round, for the swell to ride; then coarse), far to near so
+// a nearer crest hides what is behind it (the water pass has no depth),
+// riding the swell. Seas are drawn after the water lower than them
+// (FrameInput::water_indices_under_seas) and before the rest, which shows
+// over them.
+struct SeaSurface {
+    double level = 0.0; // the still surface (world y)
+    u32 look = 0;       // index into FrameInput::water_looks (past it: the default look)
+};
+inline constexpr u32 k_max_seas = 4;
+// One of the sea's swell's waves (world::SwellWave, which physics floats
+// bodies on): its height at (x, z) at FrameInput::water_seconds `t` is
+//   amplitude * sin(k (dir_x x + dir_z z) - sqrt(9.81 k) t + phase).
+struct SwellWave {
+    float dir_x = 1.0f; // unit, level
+    float dir_z = 0.0f;
+    float k = 0.0f;         // radians a metre
+    float amplitude = 0.0f; // metres (0: none)
+    float phase = 0.0f;     // radians
+};
+inline constexpr u32 k_swell_waves = 8; // (world::k_swell_waves: a set and the one fading out)
 // The water the camera is in (water plan W3), as the caller finds it at the
 // camera (x, z): wherever the camera's near plane dips under `level`, the
 // view there is under water: what is seen dimmed and hidden by the water's
@@ -537,8 +566,9 @@ struct WaterVertex {
 // bed. The line where the near plane meets the surface splits the screen.
 struct Underwater {
     bool on = false;    // the camera is over (or in) a body of water
-    double level = 0.0; // its surface there (world y)
+    double level = 0.0; // its surface there (world y; the sea's still level)
     WaterLook look;
+    bool swell = false; // the sea: its surface rises and falls with the swell (as WaterVertex::swell)
 };
 // What one frame draws at most (the rest are left out: RenderStats::water_overflow).
 inline constexpr u32 k_max_water_vertices = 1u << 18;
@@ -598,6 +628,13 @@ struct FrameInput {
     std::span<const u32> water_indices;
     std::span<const WaterLook> water_looks;
     double water_seconds = 0.0;
+    // The seas (past k_max_seas: left out, RenderStats::water_overflow).
+    std::span<const SeaSurface> seas;
+    // How many of water_indices (from the first; whole triangles) are
+    // drawn before the seas: the water lower than them (the rest after).
+    u32 water_indices_under_seas = 0;
+    // The sea's swell (WaterVertex::swell): none when every amplitude is 0.
+    std::array<SwellWave, k_swell_waves> swell{};
     // The water the camera is in (lit views, with RenderSettings::water).
     Underwater underwater;
 };
