@@ -1,8 +1,8 @@
 // The scene's lakes, rivers and sea as the renderer's water triangles
 // (render::FrameInput::water_*, water plan W2c): a lake's shore cut into
 // triangles at its level (ear clipping), a river as a strip down its path
-// (each point's width, level and flow), the sea as rings round the camera
-// out past the horizon. Each body's triangles are kept and made again only
+// (each point's width, level and flow; rapids where it falls steeply), the
+// sea as rings round the camera out past the horizon. Each body's triangles are kept and made again only
 // when that body's shape changes (its look and a lake's level are put on
 // as they are) (the scene's water is compared: its edits come
 // from many places); the sea's rings follow the camera every update. The
@@ -46,6 +46,14 @@ public:
     static constexpr double k_sea_radius = 40000.0;
     static constexpr double k_sea_edge = 2.0e6;
     static constexpr u32 k_sea_segments = 64;
+    // A river's rapids (render::WaterVertex::rapids), each stretch's own
+    // (its corners its own): none where its surface falls less than this a
+    // metre, the most from k_rapids_full (a waterfall too).
+    static constexpr double k_rapids_from = 0.02;
+    static constexpr double k_rapids_full = 0.1;
+    // A river's surface slope given to the renderer (render::WaterVertex::slope_*,
+    // a waterfall's too) is at most this (metres a metre).
+    static constexpr double k_slope_most = 10.0;
 
     // Follows the scene's water (bodies that changed made again) and the camera.
     void update(std::span<const world::Water> water, const DVec3& camera);

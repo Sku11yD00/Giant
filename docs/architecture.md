@@ -2075,8 +2075,33 @@ is exposed as drawn things are, a background's alpha set; what
 lies above the window is looked up on screen as if far. `last_frame.water.underwater`
 says when some of the view was under.
 
-The rest comes in the following parts (the water plan: W4 rivers and
-the sea, W5 the voxel world, weather and sound, W6 the water gate).
+Running water (W4a): each vertex carries its flow (m/s), its rapids
+(`WaterVertex::rapids`, 0 to 1) and its surface's slope (`slope_x`,
+`slope_z`, rise a metre, at most 10, snorm16 on the GPU). The editor
+gives each river stretch its own four corners and its own rapids, from
+how steeply its surface falls (none under 2 cm a metre, the most from
+10 cm, a waterfall's two points at one place too), and each point its
+stretches' own slopes averaged, so the lighting leans smoothly where the
+geometry folds (a waterfall's corners its own, the steepest: 10). Four
+corners a stretch: the vertex cap (2^18) holds 65,536 stretches. The waves on running water are carried downstream as a
+flow map's two phases would carry a texture: the wave sum taken where
+the water was up to a second ago and a second ahead, from two starts
+half of `k_water_flow_period` (2 s) apart, each faded out as it starts
+again (the second shifted by a few metres so the two differ, both in one
+loop over the waves), the blend's slopes and crests scaled back to one
+sum's spread so it does not calm and pulse halfway, and coming in over
+the first 0.1 m/s (slower, the two phases come together into still
+water's waves, never seen starting again); the clock is folded on the CPU in double. Faster
+water is rougher (taller, broader-glinting waves, up to 4 m/s, and
+rapids more: running water ripples even with `waves` 0) and foams on its
+crests from 2 m/s; rapids foam on most of their crests (white water).
+Still, slow water never foams but at the shore. A sloping surface is lit
+as it leans (its slope added to the waves'; the bed seen through it
+bent only by the waves, not by its lean), and the caustics under it
+take its roughness (not its flow). Still level water draws as before.
+
+The rest comes in the following parts (the water plan: W4b the sea, W5
+the voxel world, weather and sound, W6 the water gate).
 
 ## Navigation
 

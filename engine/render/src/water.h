@@ -16,6 +16,11 @@
 namespace giant::render {
 
 inline constexpr u32 k_water_waves = 8;
+// Running water carries its waves along for this long, from two starts half
+// of it apart, each faded in and out (water.slang: a flow map's two phases).
+inline constexpr float k_water_flow_period = 2.0f;
+// A surface's slope is kept within this (WaterVertex::slope_*), packed to 16 bits each.
+inline constexpr float k_water_slope_most = 10.0f;
 
 struct WaterBatch {
     std::vector<gpu::WaterVertex> vertices;
@@ -32,6 +37,10 @@ struct WaterBatch {
 // the default's); a vertex's look past the looks given takes the default.
 WaterBatch pack_water(std::span<const WaterVertex> vertices, std::span<const u32> indices,
                       std::span<const WaterLook> looks, const DVec3& camera);
+
+// Running water's clock at `seconds`: seconds into its cycle (0 to
+// k_water_flow_period; worked out in double, so it keeps its precision late on).
+float water_flow_clock(double seconds);
 
 // A look as the GPU holds it, its numbers kept in range (a bad one: the default's).
 gpu::WaterLook pack_water_look(const WaterLook& look);

@@ -122,14 +122,18 @@ GIANT_TEST("water meshes: lakes at their level, rivers as strips with their flow
     GIANT_CHECK(m.rebuilds() == 2 && m.broken_lakes() == 0); // the lake and the river (the hidden one is not cut)
     GIANT_CHECK(m.looks().size() == 2 && m.looks()[0].color.y == 0.2f && m.looks()[0].waves == 2.0f);
     // Lowest first: the lake (3 m) then the river (to 5 m). The lake: 4
-    // vertices, 2 triangles; the river: 2 a point, 2 triangles a stretch.
-    GIANT_CHECK(m.vertices().size() == 4 + 6 && m.indices().size() == 6 + 12);
+    // vertices, 2 triangles; the river: 4 corners and 2 triangles a stretch.
+    GIANT_CHECK(m.vertices().size() == 4 + 8 && m.indices().size() == 6 + 12);
     for (usize i = 0; i < 4; ++i) GIANT_CHECK(m.vertices()[i].position.y == 3.0 && m.vertices()[i].look == 0);
     // Across the river at its middle point: 12 m wide, at its level, flowing +x at 2 m/s.
     const render::WaterVertex& l = m.vertices()[4 + 2];
     const render::WaterVertex& r = m.vertices()[4 + 3];
     GIANT_CHECK(std::fabs(l.position.x - 50.0) < 1e-9 && std::fabs(std::fabs(l.position.z - r.position.z) - 12.0) < 1e-6);
     GIANT_CHECK(l.position.y == 4.0 && l.look == 1 && std::fabs(l.flow_x - 2.0f) < 1e-6f && l.flow_z == 0.0f);
+    // The next stretch starts there too; the slope there over both stretches (2 m down in 100 m, along +x).
+    const render::WaterVertex& l2 = m.vertices()[4 + 4];
+    GIANT_CHECK(l2.position.x == l.position.x && l2.position.z == l.position.z && l2.position.y == 4.0);
+    GIANT_CHECK(std::fabs(l.slope_x - -0.02f) < 1e-6f && std::fabs(l.slope_z) < 1e-6f && l2.slope_x == l.slope_x);
     for (const u32 i : m.indices()) GIANT_CHECK(i < m.vertices().size());
     // The same water again: not made again; a colour changed: made again.
     m.update(water, {5.0, 10.0, 5.0});
@@ -146,7 +150,7 @@ GIANT_TEST("water meshes: lakes at their level, rivers as strips with their flow
     // A crossed shore: counted, not drawn.
     water[0].outline = {{0, 0}, {10, 10}, {10, 0}, {0, 12}};
     m.update(water, {});
-    GIANT_CHECK(m.broken_lakes() == 1 && m.vertices().size() == 6 && m.indices().size() == 12);
+    GIANT_CHECK(m.broken_lakes() == 1 && m.vertices().size() == 8 && m.indices().size() == 12);
     // No water: nothing.
     m.update({}, {});
     GIANT_CHECK(m.vertices().empty() && m.indices().empty() && m.looks().empty());
@@ -234,4 +238,36 @@ GIANT_TEST("water meshes: the camera's water is the highest over its place, with
     GIANT_CHECK(!camera_water(std::vector<world::Water>{pond}, {50.0, 1.0, 5.0}).on);
     pond.visible = false;
     GIANT_CHECK(!camera_water(std::vector<world::Water>{pond}, {5.0, 1.0, 5.0}).on);
+}
+
+GIANT_TEST("water meshes: a river foams in rapids where it falls steeply, calm where level") {
+    world::Water r;
+    r.name = "river";
+    r.kind = world::WaterKind::river;
+    // Level for 100 m, then 3 m down in 20 m (0.15 a metre), then level again.
+    r.path = {{0.0, 0.0, 8.0f, 10.0f}, {100.0, 0.0, 8.0f, 10.0f}, {120.0, 0.0, 8.0f, 7.0f}, {220.0, 0.0, 8.0f, 7.0f}};
+    WaterMeshes m;
+    const std::vector<world::Water> water{r};
+    m.update(water, {0.0, 50.0, 0.0});
+    const auto v = m.vertices();
+    GIANT_CHECK(v.size() == 12);
+    if (v.size() != 12) return;
+    // Its stretches in order, four corners each: only the steep one's in rapids.
+    for (usize i = 0; i < 12; ++i) GIANT_CHECK(v[i].rapids == (i >= 4 && i < 8 ? 1.0f : 0.0f));
+    // Each point's slope its stretches' averaged: the chute's ends half of its 0.15.
+    GIANT_CHECK(std::fabs(v[4].slope_x - -0.075f) < 1e-6f && std::fabs(v[7].slope_x - -0.075f) < 1e-6f && v[0].slope_x == 0.0f);
+    // A waterfall (two points at one place, 3 m apart in level): all white, its slope the most.
+    r.path = {{0.0, 0.0, 8.0f, 10.0f}, {100.0, 0.0, 8.0f, 10.0f}, {100.0, 0.0, 8.0f, 7.0f}, {200.0, 0.0, 8.0f, 7.0f}};
+    const std::vector<world::Water> fall{r};
+    m.update(fall, {0.0, 50.0, 0.0});
+    GIANT_CHECK(m.vertices()[4].rapids == 1.0f && m.vertices()[0].rapids == 0.0f && m.vertices()[8].rapids == 0.0f);
+    // The fall lit as the steepest (falling along +x); beside it, the level stretches' own (level).
+    GIANT_CHECK(m.vertices()[4].slope_x == -10.0f && m.vertices()[7].slope_x == -10.0f && m.vertices()[1].slope_x == 0.0f);
+    r.path = {{0.0, 0.0, 8.0f, 10.0f}, {100.0, 0.0, 8.0f, 10.0f}, {120.0, 0.0, 8.0f, 7.0f}, {220.0, 0.0, 8.0f, 7.0f}};
+    // A gentler fall (0.06 a metre): half.
+    r.path[2].level = 8.8f;
+    r.path[3].level = 8.8f;
+    const std::vector<world::Water> gentle{r};
+    m.update(gentle, {0.0, 50.0, 0.0});
+    GIANT_CHECK(std::fabs(m.vertices()[4].rapids - 0.5f) < 0.01f);
 }
