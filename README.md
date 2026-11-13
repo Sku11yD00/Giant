@@ -376,8 +376,9 @@ It is a console app for now so its log is visible; run `giant_editor.exe` and
 close the window to exit. Keep the `D3D12` folder next to the exe. The
 performance gates come with it: in that folder, run
 `python n1_gate.py giant_editor.exe`, `python n2_gate.py giant_editor.exe`,
-`python n3_gate.py giant_editor.exe` and `python night_gate.py giant_editor.exe`
-(the valley at night, lit by over a thousand lamps) (Python 3; keep `gate_common.py` beside them). A gate with hitches prints which part of the frame each one spent its time on; set `GIANT_GATE_FRAMES` to a file name to keep the details. C# scripts need the .NET 10 runtime
+`python n3_gate.py giant_editor.exe`, `python night_gate.py giant_editor.exe`
+(the valley at night, lit by over a thousand lamps) and `python water_gate.py giant_editor.exe`
+(the valley with a lake, a river past the town and a coast, flown over and under the water) (Python 3; keep `gate_common.py` beside them). A gate with hitches prints which part of the frame each one spent its time on; set `GIANT_GATE_FRAMES` to a file name to keep the details. C# scripts need the .NET 10 runtime
 (https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
 The earlier Godot-based work is archived on the branches
