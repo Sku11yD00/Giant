@@ -835,3 +835,75 @@ GIANT_TEST("shadow pages: a mesh arriving for a caster that had none casts; bogu
     GIANT_CHECK(!settle().empty());
     GIANT_CHECK(settle().empty());
 }
+
+GIANT_TEST("shadow pages: pages dirtied every frame and drawn in turn wait but are not behind; a backlog is") {
+    ShadowPages s;
+    const DVec3 camera{0.0, 2.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    Requests r(s);
+    for (int i = 0; i < 3; ++i) r.ask(s, 0, DVec3{-6.5 + 4.0 * i, 0.0, 0.5});
+    s.request(r.bits);
+    (void)s.plan(16);
+    GIANT_CHECK(s.stats().behind == 0);
+    // Moving things over all three each frame, one drawn a frame: each in turn, every third frame.
+    for (int f = 0; f < 100; ++f) {
+        s.begin_frame(camera, k_up_sun);
+        s.invalidate(DVec3{-8.0, -50.0, 0.0}, DVec3{4.0, 50.0, 1.0});
+        s.request(r.bits);
+        GIANT_CHECK(s.plan(1).size() == 1);
+        GIANT_CHECK(s.stats().waiting == 2 && s.stats().behind == 0);
+    }
+    // Never drawn: behind at once.
+    Requests more(s);
+    for (int i = 0; i < 3; ++i) more.ask(s, 0, DVec3{-6.5 + 4.0 * i, 0.0, 0.5});
+    more.ask(s, 2, camera);
+    more.ask(s, 3, camera);
+    s.begin_frame(camera, k_up_sun);
+    s.request(more.bits);
+    (void)s.plan(1);
+    GIANT_CHECK(s.stats().behind == 1);
+    s.begin_frame(camera, k_up_sun);
+    s.request(more.bits);
+    (void)s.plan(16);
+    GIANT_CHECK(s.stats().waiting == 0 && s.stats().behind == 0);
+    // Dirty and not drawn for longer than k_behind_frames: behind.
+    s.begin_frame(camera, k_up_sun);
+    s.invalidate_all();
+    for (u64 f = 0; f < ShadowPages::k_behind_frames + 2; ++f) {
+        s.begin_frame(camera, k_up_sun);
+        s.request(more.bits);
+    }
+    GIANT_CHECK(s.plan(1).size() == 1);
+    GIANT_CHECK(s.stats().waiting == 4 && s.stats().behind == 4);
+}
+
+GIANT_TEST("shadow pages: dirty 30 frames is not behind, 31 is; pages the sway pass draws are neither") {
+    ShadowPages s;
+    const DVec3 camera{0.0, 2.0, 0.0};
+    s.begin_frame(camera, k_up_sun);
+    Requests r(s);
+    for (int i = 0; i < 4; ++i) r.ask(s, 0, DVec3{-6.5 + 4.0 * i, 0.0, 0.5});
+    s.request(r.bits);
+    (void)s.plan(16);
+    const DVec3 lo{-8.0, -50.0, 0.0};
+    const DVec3 hi{8.0, 50.0, 1.0};
+    s.begin_frame(camera, k_up_sun); // frame F: all four dirty
+    s.invalidate(lo, hi);
+    s.request(r.bits);
+    for (u64 f = 0; f < ShadowPages::k_behind_frames; ++f) { // to F + 30, not drawn
+        s.begin_frame(camera, k_up_sun);
+        s.request(r.bits);
+    }
+    GIANT_CHECK(s.plan(1).size() == 1);
+    GIANT_CHECK(s.stats().waiting == 3 && s.stats().behind == 0);
+    s.begin_frame(camera, k_up_sun); // F + 31
+    s.request(r.bits);
+    GIANT_CHECK(s.plan(1).size() == 1);
+    GIANT_CHECK(s.stats().waiting == 2 && s.stats().behind == 2);
+    // Swaying over the two left: the sway pass draws them, so neither waits.
+    s.begin_frame(camera, k_up_sun);
+    s.sway(lo, hi, 0.1f);
+    s.request(r.bits);
+    (void)s.plan(1, 8);
+    GIANT_CHECK(s.stats().waiting == 0 && s.stats().behind == 0);
+}

@@ -49,7 +49,7 @@ import sys
 import tempfile
 
 from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures
-from n2_gate import ALL_ON, set_resolution, settle
+from n2_gate import ALL_ON, behind_text, set_resolution, settle
 
 RESOLUTION = (2560, 1440)
 STOPS = 750
@@ -227,8 +227,14 @@ def weather_cost(editor, at, rounds=3):
     whether it caught up, whether the parts went on and off as asked)."""
     editor.tool("set_camera", {"position": at[0], "look_at": at[1]})
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 8.0})
-    streamed = wait_streaming(editor, 6000)[2]
-    caught_up = settle(editor, 6000)[1] and streamed
+    world, scatter, streamed = wait_streaming(editor, 6000)
+    last, settled = settle(editor, 6000)
+    caught_up = settled and streamed
+    if not caught_up:  # what was behind, for the report
+        far = world["far_ground"]
+        print(f"n3_gate: behind: cells reading {world['reading']}, waiting {world['waiting']}, "
+              f"far ground reading {far['reading']}, building {[l['building'] for l in far['levels']]}, "
+              f"scatter building {scatter['building']}, {behind_text(last)}")
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 1.0})
     costs = []
     toggled = True
@@ -430,7 +436,8 @@ def main() -> int:
                          ("clouds", path[-1])):
             cost, caught_up, toggled = weather_cost(editor, at)
             if not caught_up:
-                failures.append(f"streaming, the scatter or the voxel world did not catch up by the {name}")
+                failures.append(f"streaming, the scatter, the voxel world, its light or the shadows "
+                                f"did not catch up by the {name} (printed above)")
             if not toggled:
                 failures.append(f"the weather's parts did not go on and off as asked by the {name}")
             if cost is None:

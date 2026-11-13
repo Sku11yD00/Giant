@@ -43,7 +43,7 @@ import sys
 import tempfile
 
 from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures
-from n2_gate import ALL_ON, set_resolution, settle
+from n2_gate import ALL_ON, behind_text, set_resolution, settle
 from n3_gate import (HOUSES_X, HOUSES_Z, SPACING, STOPS, TOWN, build_valley, flight_path, leg_ends, leg_of,
                      wait_streaming)
 
@@ -123,7 +123,10 @@ def lamp_cost(editor, at, rounds=3):
     editor.tool("set_camera", {"position": at[0], "look_at": at[1]})
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 8.0})
     streamed = wait_streaming(editor, 6000)[2]
-    caught_up = settle(editor, 6000)[1] and streamed
+    last, settled = settle(editor, 6000)
+    caught_up = settled and streamed
+    if not caught_up:  # what was behind, for the report
+        print(f"night_gate: behind: streaming {'caught up' if streamed else 'not caught up'}, {behind_text(last)}")
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 1.0})
     costs = []
     toggled = True

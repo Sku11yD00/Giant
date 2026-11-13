@@ -191,14 +191,31 @@ def light_cost(editor, at, rounds=3):
 
 def settle(editor, frames):
     """Up to `frames` frames, until the voxel world, its light and the
-    shadows have caught up. Returns (last frame, whether they caught up)."""
+    shadows have caught up (shadow pages under things moving all the time,
+    as cloth in a storm, are dirty again every frame: those drawn in turn
+    are not behind). Quiet four samples in a row, 10 frames apart (over
+    the 30 frames a page dirty that long is behind; shading's page requests
+    take a few frames to come back after a camera move). Returns (last
+    frame, whether they caught up)."""
     last = editor.last_frame()
+    quiet = 0
     for _ in range(frames // 10):
-        if last["voxels"]["pending"] == 0 and last["gi"]["waiting"] == 0 and last["shadows"]["waiting"] == 0:
-            return last, True
+        if last["voxels"]["pending"] == 0 and last["gi"]["waiting"] == 0 and last["shadows"]["behind"] == 0:
+            quiet += 1
+            if quiet >= 4:
+                return last, True
+        else:
+            quiet = 0
         editor.hover(10)
         last = editor.last_frame()
     return last, False
+
+
+def behind_text(last):
+    """What a frame says is still to do: the voxel world, its light, the shadows."""
+    s = last["shadows"]
+    return (f"voxels {last['voxels']['pending']} pending, gi {last['gi']['waiting']} bricks waiting, "
+            f"shadows {s['waiting']} pages waiting ({s['behind']} behind, {s['drawn']} drawn, {s['missing']} missing)")
 
 
 def set_resolution(editor, width, height):
