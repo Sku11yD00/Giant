@@ -2451,8 +2451,9 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
 }
 
 void Renderer::update_particles(rhi::CommandList& cmd, const FrameInput& frame) {
-    const ParticleRing::Frame& f = m_particles->update(frame.particle_bursts, frame.particle_styles,
-                                                       frame.delta_seconds, frame.view.position, frame.wind);
+    const double seconds = frame.particle_seconds >= 0.0f ? frame.particle_seconds : frame.delta_seconds;
+    const ParticleRing::Frame& f = m_particles->update(frame.particle_bursts, frame.particle_styles, seconds,
+                                                       frame.view.position, frame.wind);
     const std::span<const gpu::Particle> born = m_particles->born_records();
     if (born.empty()) {
         return;

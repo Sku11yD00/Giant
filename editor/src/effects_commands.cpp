@@ -1,6 +1,7 @@
 // Effects commands: particle looks and effects (world/effects.h). Scene data
 // (saved with the scene and the world's world.json, undoable).
 #include "editor_commands.h"
+#include "effects_state.h"
 #include "world_streaming.h"
 
 #include "giant/core/assert.h"
@@ -497,10 +498,57 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
          }});
 
     add(registry,
+        {"spawn_effect",
+         "Plays an effect once (the scene's, else built-in) at `position` [x, y, z] metres, turned by `rotation` "
+         "(pitch, yaw, roll degrees; its emitters' directions and shapes turn with it), its rates times `rate`: "
+         "its bursts at once, then its rates for its duration (sparks off a hit, a puff of dust, a splash). View "
+         "state: not saved, not undoable; at most 256 running at once. Drawn in the lit view (render setting "
+         "particles); births while the game's clock runs (not while paused).",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"name", "position"}},
+              {"properties",
+               {{"name", name_schema()},
+                {"position", triple(-1e8, 1e8, "Where, metres.")},
+                {"rotation", {{"type", "object"},
+                              {"additionalProperties", false},
+                              {"properties", {{"pitch", number(-360, 360, "Degrees.")},
+                                              {"yaw", number(-360, 360, "Degrees.")},
+                                              {"roll", number(-360, 360, "Degrees.")}}}}},
+                {"rate", number(0, world::k_max_effect_rate_scale, "Times its emitters' rates (default 1).")}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.effects == nullptr) return CommandResult::failure("effects are not available");
+             const std::string name = args["name"].get<std::string>();
+             if (world::find_effect(state.scene.effects, name) == nullptr) {
+                 return CommandResult::failure("no effect named \"" + name + "\" (get_effects lists them)");
+             }
+             const Json& p = args["position"];
+             const DVec3 position{p[0].get<double>(), p[1].get<double>(), p[2].get<double>()};
+             EulerDegrees r;
+             if (args.contains("rotation")) {
+                 const Json& rot = args["rotation"];
+                 r.pitch = rot.value("pitch", 0.0f);
+                 r.yaw = rot.value("yaw", 0.0f);
+                 r.roll = rot.value("roll", 0.0f);
+             }
+             const auto id = state.effects->spawn(state.scene, name, position, normalize(quat_from_euler(r)),
+                                                  args.value("rate", 1.0f));
+             if (!id) {
+                 return CommandResult::failure("at most " + std::to_string(EffectsState::k_max_spawned) +
+                                               " spawned effects run at once: wait for some to end");
+             }
+             return CommandResult::success({{"spawned", *id}, {"name", name}});
+         }});
+
+    add(registry,
         {"get_effects",
          std::string("Lists the scene's particle looks and effects (every field; an effect naming a look found "
                      "nowhere lists it in missing_looks), the built-in ones' names (") + k_built_ins +
-             "; with built_in true, every field of them too), and the entities naming each effect (on or off).",
+             "; with built_in true, every field of them too), the entities naming each effect (on or off), and "
+             "`emitting`: last update's effects that gave birth (`running`), entities' farther than `reach` m "
+             "(`far`), spawned ones still running, bursts, particles asked for (`born`) and left out past the "
+             "budgets (`cut`), and emitters naming a look (or entities an effect) found nowhere (`missing`).",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"built_in", {{"type", "boolean"}, {"description", "Every field of the built-in "
@@ -535,7 +583,15 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
                  }
                  built_effects.push_back(std::move(j));
              }
-             return CommandResult::success({{"particle_looks", std::move(look_list)},
+             Json emitting = nullptr;
+             if (state.effects != nullptr) {
+                 const EffectsState::Stats& st = state.effects->stats();
+                 emitting = {{"running", st.running}, {"far", st.far},       {"spawned", st.spawned},
+                             {"bursts", st.bursts},   {"born", st.born},     {"cut", st.cut},
+                             {"missing", st.missing}, {"reach", state.effects->reach}};
+             }
+             return CommandResult::success({{"emitting", std::move(emitting)},
+                                            {"particle_looks", std::move(look_list)},
                                             {"effects", std::move(effect_list)},
                                             {"built_in", {{"particle_looks", std::move(built_looks)},
                                                           {"effects", std::move(built_effects)}}}});

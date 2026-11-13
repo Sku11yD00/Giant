@@ -373,6 +373,12 @@ GIANT_TEST("particles: born and alive reach the frame's stats on the null device
     RenderStats s = draw(frame);
     GIANT_CHECK(s.particles == 300 && s.particles_born == 300 && s.particles_dropped == 5 && s.particles_cut == 0);
     frame.particle_bursts = {};
+    // Their own clock (the game's): stood still however long the frame.
+    frame.delta_seconds = 1.0f;
+    frame.particle_seconds = 0.0f;
+    for (int i = 0; i < 8; ++i) s = draw(frame);
+    GIANT_CHECK(s.particles == 300);
+    frame.particle_seconds = -1.0f; // (negative: delta_seconds)
     frame.delta_seconds = 0.5f;
     s = draw(frame);
     GIANT_CHECK(s.particles == 300 && s.particles_born == 0);
