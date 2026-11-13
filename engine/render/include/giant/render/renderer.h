@@ -691,8 +691,8 @@ struct FrameInput {
     std::span<const LocalLight> lights;
     // Particles born this frame (ParticleBurst), and the styles they and
     // those alive draw with (the same index the same style from frame to
-    // frame; past k_max_particle_styles: left out). Their clock is the
-    // frames' delta_seconds (held: still).
+    // frame; past k_max_particle_styles: left out). Their clock is
+    // particle_seconds (or delta_seconds when that is negative; 0: still).
     std::span<const ParticleBurst> particle_bursts;
     std::span<const ParticleStyle> particle_styles;
     // What swaying materials move in (WindClock::state).
@@ -700,6 +700,9 @@ struct FrameInput {
     // Seconds since the last frame, for auto exposure's easing (0: held;
     // at most 1 counts).
     float delta_seconds = 1.0f / 60.0f;
+    // The particles' clock: seconds since the last frame (the game's, so a
+    // paused game's stand still; negative: delta_seconds).
+    float particle_seconds = -1.0f;
     // Water's surfaces (see WaterLook), and the clock its waves move by
     // (seconds; the same seconds draw the same waves).
     std::span<const WaterVertex> water_vertices;

@@ -14,6 +14,7 @@
 #include "mesh_library.h"
 #include "texture_library.h"
 #include "scene_render.h"
+#include "effects_state.h"
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
 #include "far_ground.h"
@@ -332,6 +333,8 @@ int run(const Options& options) {
     state.cloth = &cloth;
     editor::SwingState swing(renderer.get(), &meshes);
     state.swing = &swing;
+    editor::EffectsState effects; // entities' effects and spawned ones, born as particles
+    state.effects = &effects;
     editor::NavState nav(renderer.get(), &meshes, &scatter); // after what it reads
     state.nav = &nav;
     editor::WalkerState walkers(physics, nav); // after both: its characters and searches go first
@@ -411,6 +414,7 @@ int run(const Options& options) {
     std::vector<render::Decal> wet_decals;   // what went in the water, wet a while
     std::vector<render::Decal> frame_decals; // the scene's and those
     float render_seconds = 1.0f / 60.0f; // since the last frame (auto exposure eases over it)
+    float particle_seconds = 0.0f;       // the game's since the last frame (particles move by it)
     editor::WaterMeshes water_meshes;    // the scene's lakes, rivers and sea, drawn
     double water_seconds = 0.0;          // the waves' clock (the game's time)
     world::SwellTrack swell_track;       // the sea's swell following the wind
@@ -432,6 +436,7 @@ int run(const Options& options) {
         animation.follow_now(state.scene, meshes, state.scene.untaken_changes());
         cloth.follow(state.scene, state.scene.untaken_changes());
         swing.follow(state.scene, state.scene.untaken_changes());
+        effects.follow(state.scene, state.scene.untaken_changes());
         nav.follow(state.scene, state.scene.untaken_changes());
         // Drawn with other meshes now: their cells rebuilt.
         std::vector<world::EntityId> redraw = animation.take_redraw();
@@ -507,6 +512,14 @@ int run(const Options& options) {
         for (const sim::DustPuff& d : dust_near) dust_frame.push_back({d.position, d.radius, d.density, d.color});
         input.dust = dust_frame;
         input.wind = weather.wind();
+        input.particle_styles = effects.styles();
+        if (!in_screenshot) { // (a screenshot's frame gives no births again, and stands still)
+            input.particle_bursts = effects.take();
+            input.particle_seconds = particle_seconds; // the game's clock: paused, they stand still
+            particle_seconds = 0.0f;
+        } else {
+            input.particle_seconds = 0.0f;
+        }
         input.delta_seconds = in_screenshot ? 0.0f : render_seconds; // (a screenshot's frame does not ease it again)
         renderer->render(cmd, target, input);
         mark(editor::FramePhase::render);
@@ -686,6 +699,10 @@ int run(const Options& options) {
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
         cloth.update(weather.wind(), state.camera.position, game_delta); // drawn as it moved next frame
         swing.update(weather.wind(), state.camera.position, game_delta);
+        effects.follow(state.scene, state.scene.untaken_changes());
+        particle_seconds += game_delta; // (a frame not drawn: carried to the next)
+        effects.update(state.scene, state.camera.position, game_delta,
+                       [&state](double x, double z) { return state.scene.terrain.height_at(x, z); });
         nav.update(state.scene); // tiles taken and started, searches moved on (bounded)
         audio.set_weather(weather.shown() ? &*weather.shown() : nullptr, weather.ground());
         {

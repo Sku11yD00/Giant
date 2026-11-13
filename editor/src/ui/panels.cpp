@@ -9,6 +9,8 @@
 #include "giant/core/log.h"
 #include "giant/sim/swing.h"
 #include "giant/world/water.h"
+#include "giant/world/effects.h"
+#include "../effects_state.h"
 #include "giant/world/weather.h"
 
 #include <imgui.h>
@@ -188,6 +190,7 @@ void EditorPanels::draw_scene_settings() {
         draw_terrain_layers();
         draw_scatter();
         draw_water();
+        draw_effects();
     }
     ImGui::End();
 }
@@ -256,6 +259,39 @@ void EditorPanels::draw_water() {
         }
         ImGui::PopID();
     }
+}
+
+void EditorPanels::draw_effects() {
+    ImGui::SeparatorText("Effects");
+    if (m_state.effects != nullptr) {
+        const EffectsState::Stats& st = m_state.effects->stats();
+        ImGui::TextDisabled("%u running, %u particles born, %u cut, %u far", st.running, st.born, st.cut, st.far);
+        if (st.missing > 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%u emitters or entities name nothing (get_effects)",
+                               st.missing);
+        }
+    }
+    // Played once, 10 m in front of the camera (spawn_effect).
+    if (!ImGui::TreeNode("Play one 10 m ahead")) return;
+    usize shown = 0;
+    const auto offer = [&](const std::string& name) {
+        if (shown++ % 4 != 0) ImGui::SameLine();
+        if (ImGui::SmallButton(name.c_str())) {
+            const EditorCamera& c = m_state.camera;
+            const double yaw = static_cast<double>(c.yaw_degrees) * 0.017453292519943295;
+            const double pitch = static_cast<double>(c.pitch_degrees) * 0.017453292519943295;
+            const double ahead = 10.0;
+            const double x = c.position.x - std::sin(yaw) * std::cos(pitch) * ahead;
+            const double y = c.position.y + std::sin(pitch) * ahead;
+            const double z = c.position.z - std::cos(yaw) * std::cos(pitch) * ahead;
+            run("spawn_effect", {{"name", name}, {"position", {x, y, z}}}, 0);
+        }
+    };
+    for (const world::Effect& f : m_state.scene.effects) offer(f.name);
+    for (const world::Effect& f : world::built_in_effects()) {
+        if (world::find_effect(m_state.scene.effects, f.name) == &f) offer(f.name);
+    }
+    ImGui::TreePop();
 }
 
 void EditorPanels::draw_terrain_brush() {
@@ -576,6 +612,23 @@ void EditorPanels::draw_properties() {
         int body = static_cast<int>(e->body);
         if (ImGui::Combo("Body", &body, bodies, IM_ARRAYSIZE(bodies))) {
             set("body", std::string(bodies[body]));
+        }
+    }
+    {
+        // An effect it runs where it stands (chimney smoke, a torch's fire).
+        bool on = e->effect.on;
+        const std::string current_effect = e->effect.effect.empty() ? std::string("smoke") : e->effect.effect;
+        if (ImGui::Checkbox("Effect", &on)) set("effect", {{"on", on}, {"effect", current_effect}});
+        ImGui::SameLine();
+        if (ImGui::BeginCombo("##effect", current_effect.c_str())) {
+            const auto offer = [&](const std::string& n) {
+                if (ImGui::Selectable(n.c_str(), n == e->effect.effect)) set("effect", {{"effect", n}});
+            };
+            for (const world::Effect& f : m_state.scene.effects) offer(f.name);
+            for (const world::Effect& f : world::built_in_effects()) {
+                if (world::find_effect(m_state.scene.effects, f.name) == &f) offer(f.name); // (not stood in for)
+            }
+            ImGui::EndCombo();
         }
     }
     if (e->shape == world::Shape::kit) {

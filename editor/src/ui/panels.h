@@ -40,6 +40,7 @@ private:
     void draw_terrain_layers(); // the ground's layers (set_terrain_layers)
     void draw_scatter();       // the scatter layers' main settings
     void draw_water();         // the lakes, rivers and sea: level, waves, shown
+    void draw_effects();       // effects running, and buttons playing each once
     void draw_log();
     void draw_commands();
     void draw_engine(const FrameInfo& frame);

@@ -2,11 +2,15 @@
 // and removed by command (undoable, saved with the scene), and entities
 // given an effect to run.
 #include "../src/editor_commands.h"
+#include "../src/effects_state.h"
 #include "../src/mesh_library.h"
 
 #include "giant_test.h"
 
+#include "giant/rhi/rhi.h"
 #include "giant/world/effects.h"
+
+#include <cmath>
 
 using namespace giant;
 using namespace giant::editor;
@@ -146,4 +150,348 @@ GIANT_TEST("effects commands: effects made, changed, renamed with their entities
     GIANT_CHECK(f.state.scene.find(id)->effect.effect == "chimney_smoke");
     GIANT_CHECK(!f.run("remove_effect", {{"name", "chimney_smoke"}}).ok);
     GIANT_CHECK(f.run("undo").ok && f.state.scene.effects.size() == 2);
+}
+
+// --- Emitting (effects plan FX2b) ---------------------------------------------
+
+namespace {
+
+const EffectsState::Ground k_flat = [](double, double) { return std::optional<double>(0.0); };
+
+world::EntityId add_runner(world::Scene& scene, const DVec3& at, const char* effect, float rate = 1.0f) {
+    world::Entity e;
+    e.transform.position = at;
+    e.effect = {true, effect, rate};
+    return scene.add(e);
+}
+
+// An update whose bursts are drawn (taken).
+void tick(EffectsState& fx, const world::Scene& scene, const DVec3& camera, double seconds,
+          const EffectsState::Ground& ground) {
+    fx.update(scene, camera, seconds, ground);
+    (void)fx.take();
+}
+
+u32 born(const EffectsState& fx) {
+    u32 n = 0;
+    for (const render::ParticleBurst& b : fx.bursts()) n += b.count;
+    return n;
+}
+
+} // namespace
+
+GIANT_TEST("effects emitting: an entity's effect runs its rates where it stands, fractions carried, paused gives none") {
+    world::Scene scene;
+    const world::EntityId id = add_runner(scene, {10.0, 2.0, -5.0}, "smoke"); // 6 a second off a 0.3 m disc
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    u32 total = 0;
+    for (int i = 0; i < 8; ++i) { // 2 s at 0.25 s: 12
+        tick(fx, scene, {}, 0.25, k_flat);
+        total += born(fx);
+        for (const render::ParticleBurst& b : fx.bursts()) {
+            GIANT_CHECK(b.count == 1 && b.spread == 0.0f && b.ground < -1e29); // smoke does not stop on the ground
+            GIANT_CHECK(std::abs(b.position.y - 2.0) < 1e-6);
+            const double dx = b.position.x - 10.0, dz = b.position.z + 5.0;
+            GIANT_CHECK(dx * dx + dz * dz <= 0.3 * 0.3 + 1e-6);
+            GIANT_CHECK(b.style < fx.styles().size());
+        }
+    }
+    GIANT_CHECK(total == 12 && fx.stats().running == 1);
+    // Paused: nothing.
+    tick(fx, scene, {}, 0.0, k_flat);
+    GIANT_CHECK(fx.bursts().empty());
+    // A rate scale; off; hidden; far.
+    scene.modify(id)->effect.rate = 2.0f;
+    fx.follow(scene, scene.take_changes());
+    total = 0;
+    for (int i = 0; i < 4; ++i) {
+        tick(fx, scene, {}, 0.25, k_flat);
+        total += born(fx);
+    }
+    GIANT_CHECK(total == 12);
+    scene.modify(id)->effect.on = false;
+    fx.follow(scene, scene.take_changes());
+    tick(fx, scene, {}, 0.25, k_flat);
+    GIANT_CHECK(fx.bursts().empty() && fx.stats().running == 0);
+    scene.modify(id)->effect.on = true;
+    scene.modify(id)->visible = false;
+    fx.follow(scene, scene.take_changes());
+    tick(fx, scene, {}, 0.25, k_flat);
+    GIANT_CHECK(fx.bursts().empty());
+    scene.modify(id)->visible = true;
+    fx.follow(scene, scene.take_changes());
+    fx.reach = 5.0;
+    tick(fx, scene, {}, 1.0, k_flat);
+    GIANT_CHECK(fx.bursts().empty() && fx.stats().far == 1);
+    // Naming nothing: counted.
+    fx.reach = EffectsState::k_default_reach;
+    scene.modify(id)->effect.effect = "nothing";
+    fx.follow(scene, scene.take_changes());
+    tick(fx, scene, {}, 0.25, k_flat);
+    GIANT_CHECK(fx.bursts().empty() && fx.stats().missing == 1);
+}
+
+GIANT_TEST("effects emitting: spawned effects burst once, turned, landing on the ground, then end") {
+    world::Scene scene;
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    GIANT_CHECK(!fx.spawn(scene, "nothing", {}).has_value());
+    const Quat turn = normalize(quat_from_euler({0.0f, 0.0f, 90.0f})); // rolled: up becomes sideways
+    GIANT_CHECK(fx.spawn(scene, "sparks", {1.0, 6.0, 2.0}, turn).has_value());
+    const EffectsState::Ground five = [](double, double) { return std::optional<double>(5.0); };
+    tick(fx, scene, {}, 1.0 / 60.0, five);
+    GIANT_CHECK(fx.bursts().size() == 1 && born(fx) == 40);
+    const render::ParticleBurst& b = fx.bursts()[0];
+    GIANT_CHECK(std::abs(b.ground - 4.99) < 1e-9 && b.position == (DVec3{1.0, 6.0, 2.0}));
+    GIANT_CHECK(std::abs(b.direction.y) < 1e-5f && std::abs(std::abs(b.direction.x) - 1.0f) < 1e-5f);
+    GIANT_CHECK(fx.stats().spawned == 0); // sparks: bursts only, done
+    tick(fx, scene, {}, 1.0 / 60.0, five);
+    GIANT_CHECK(fx.bursts().empty());
+    // Born below the ground's height: they land where they were born.
+    GIANT_CHECK(fx.spawn(scene, "sparks", {0.0, 3.0, 0.0}).has_value());
+    tick(fx, scene, {}, 1.0 / 60.0, five);
+    GIANT_CHECK(fx.bursts().size() == 1 && std::abs(fx.bursts()[0].ground - 2.99) < 1e-9);
+    // One with a duration runs its rates that long (mist: 8 a second for 10 s), a spawn standing in included.
+    GIANT_CHECK(fx.spawn(scene, "mist", {}).has_value());
+    u32 total = 0;
+    for (int i = 0; i < 60; ++i) {
+        tick(fx, scene, {}, 0.25, k_flat);
+        total += born(fx);
+    }
+    GIANT_CHECK(total == 80 && fx.stats().spawned == 0);
+    // The cap.
+    for (u32 i = 0; i < EffectsState::k_max_spawned; ++i) GIANT_CHECK(fx.spawn(scene, "mist", {}).has_value());
+    GIANT_CHECK(!fx.spawn(scene, "mist", {}).has_value());
+    fx.clear();
+    GIANT_CHECK(fx.spawn(scene, "mist", {}).has_value());
+    // Another scene (one loaded): what was spawned is forgotten.
+    const world::Scene other;
+    tick(fx, other, {}, 0.25, k_flat);
+    GIANT_CHECK(fx.stats().spawned == 0 && fx.bursts().empty());
+}
+
+GIANT_TEST("effects emitting: budgets go to the nearest, the rest counted; the same steps give the same bursts") {
+    world::Scene scene;
+    EffectsState fx;
+    fx.births_per_frame = 50;
+    fx.follow(scene, scene.untaken_changes());
+    GIANT_CHECK(fx.spawn(scene, "sparks", {100.0, 0.0, 0.0}).has_value()); // 40 each, the far one first
+    GIANT_CHECK(fx.spawn(scene, "sparks", {10.0, 0.0, 0.0}).has_value());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(born(fx) == 50 && fx.stats().cut == 30 && fx.stats().born == 50);
+    GIANT_CHECK(fx.bursts()[0].position.x == 10.0 && fx.bursts()[0].count == 40 && fx.bursts()[1].count == 10);
+    // Grounded ones have their own budget.
+    fx.births_per_frame = 1000;
+    fx.grounded_per_frame = 5;
+    GIANT_CHECK(fx.spawn(scene, "sparks", {}).has_value());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(born(fx) == 5 && fx.stats().cut == 35);
+
+    // Deterministic.
+    const auto run = [] {
+        world::Scene s;
+        add_runner(s, {0.0, 0.0, 0.0}, "fire");
+        add_runner(s, {3.0, 0.0, 0.0}, "mist");
+        EffectsState f;
+        f.follow(s, s.untaken_changes());
+        std::vector<render::ParticleBurst> all;
+        for (int i = 0; i < 10; ++i) {
+            tick(f, s, {}, 0.1, k_flat);
+            all.insert(all.end(), f.bursts().begin(), f.bursts().end());
+        }
+        return all;
+    };
+    const auto a = run(), b = run();
+    GIANT_CHECK(a.size() == b.size() && !a.empty());
+    for (usize i = 0; i < a.size() && i < b.size(); ++i) {
+        GIANT_CHECK(a[i].seed == b[i].seed && a[i].count == b[i].count && a[i].position == b[i].position);
+    }
+}
+
+GIANT_TEST("effects emitting: every built-in and stood-in look and effect is drawable: the renderer drops nothing") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    rhi::TextureDesc t;
+    t.width = 64;
+    t.height = 64;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(t);
+    world::Scene scene;
+    // A look at the bounds stands in for smoke; an effect at the bounds.
+    world::ParticleLook edge = *world::find_particle_look({}, "smoke");
+    edge.buoyancy = world::k_max_look_buoyancy;
+    edge.gravity = -world::k_max_look_pull;
+    edge.wind = world::k_max_look_pull;
+    edge.drag = world::k_max_look_drag;
+    edge.emissive = {world::k_max_look_light, world::k_max_look_light, world::k_max_look_light};
+    edge.size_start = edge.size_end = edge.wobble = edge.soft = world::k_max_look_size;
+    edge.life_min = edge.life_max = world::k_max_look_life;
+    scene.particle_looks = {edge};
+    world::Emitter far_box;
+    far_box.look = "smoke";
+    far_box.burst = 64;
+    far_box.shape = world::EmitterShape::box;
+    far_box.size = {world::k_max_emitter_reach, world::k_max_emitter_reach, world::k_max_emitter_reach};
+    far_box.offset = {world::k_max_emitter_reach, -world::k_max_emitter_reach, 0.0f};
+    far_box.speed_min = far_box.speed_max = world::k_max_emitter_speed;
+    far_box.cone_degrees = 180.0f;
+    far_box.size_scale = 1000.0f;
+    world::Emitter ball = far_box;
+    ball.shape = world::EmitterShape::sphere;
+    scene.effects = {{"edge", {far_box, ball}, 0.0f}};
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    for (const world::Effect& f : world::built_in_effects()) GIANT_CHECK(fx.spawn(scene, f.name, {}).has_value());
+    GIANT_CHECK(fx.spawn(scene, "edge", {}).has_value());
+    tick(fx, scene, {}, 0.25, k_flat);
+    GIANT_CHECK(fx.stats().missing == 0 && fx.stats().cut == 0 && born(fx) > 0);
+    render::FrameInput frame;
+    frame.settings.gpu_culling = false;
+    frame.particle_styles = fx.styles();
+    frame.particle_bursts = fx.bursts();
+    rhi::CommandList* cmd = device->begin_frame(nullptr);
+    renderer->render(*cmd, target, frame);
+    device->end_frame();
+    const render::RenderStats s = renderer->last_stats();
+    GIANT_CHECK(s.particles_dropped == 0 && s.particles_born == born(fx));
+}
+
+GIANT_TEST("effects emitting: spawn_effect plays one and get_effects reports the emitting") {
+    Fixture f;
+    EffectsState fx;
+    f.state.effects = &fx;
+    ai::CommandResult r = f.run("spawn_effect", {{"name", "dust_kick"}, {"position", {1, 2, 3}}, {"rotation", {{"yaw", 45}}}});
+    GIANT_CHECK(r.ok && r.value["spawned"].get<u32>() >= 1);
+    GIANT_CHECK(!f.run("spawn_effect", {{"name", "nothing"}, {"position", {0, 0, 0}}}).ok);
+    fx.follow(f.state.scene, f.state.scene.untaken_changes());
+    tick(fx, f.state.scene, {}, 0.1, k_flat);
+    r = f.run("get_effects");
+    GIANT_CHECK(r.ok && r.value["emitting"]["born"] == 12 && r.value["emitting"]["running"] == 1);
+    f.state.effects = nullptr;
+    GIANT_CHECK(!f.run("spawn_effect", {{"name", "dust_kick"}, {"position", {0, 0, 0}}}).ok);
+    GIANT_CHECK(f.run("get_effects").value["emitting"].is_null());
+}
+
+GIANT_TEST("effects emitting: births of a frame not drawn are given with the next; styles keep their slots") {
+    world::Scene scene;
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    GIANT_CHECK(fx.spawn(scene, "sparks", {}).has_value());
+    fx.update(scene, {}, 0.1, k_flat); // not taken: the frame failed to draw
+    GIANT_CHECK(fx.spawn(scene, "dust_kick", {}).has_value());
+    fx.update(scene, {}, 0.1, k_flat);
+    GIANT_CHECK(born(fx) == 40 + 12);
+    (void)fx.take();
+    fx.update(scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.bursts().empty());
+
+    // Slots: a new look, a stand-in, a removal leave the others' indices as they were.
+    const u32 smoke = fx.style_index("smoke").value(), fire = fx.style_index("fire").value();
+    world::ParticleLook ash = *world::find_particle_look({}, "smoke");
+    ash.name = "ash";
+    scene.particle_looks = {ash};
+    fx.update(scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.style_index("smoke") == smoke && fx.style_index("fire") == fire && fx.style_index("ash").has_value());
+    const u32 ash_slot = *fx.style_index("ash");
+    world::ParticleLook red = *world::find_particle_look({}, "smoke");
+    red.color_start = {1.0f, 0.0f, 0.0f};
+    scene.particle_looks.push_back(red); // stands in for smoke: in smoke's slot
+    fx.update(scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.style_index("smoke") == smoke && fx.styles()[smoke].color_start.x == 1.0f);
+    scene.particle_looks.erase(scene.particle_looks.begin()); // ash gone: its slot kept, not offered
+    fx.update(scene, {}, 0.1, k_flat);
+    GIANT_CHECK(!fx.style_index("ash").has_value() && fx.style_index("smoke") == smoke && fx.styles().size() > ash_slot);
+    // Many looks come and go: never past the renderer's table, the live ones kept.
+    for (int round = 0; round < 3; ++round) {
+        scene.particle_looks.clear();
+        for (u32 k = 0; k < world::k_max_particle_looks; ++k) {
+            world::ParticleLook l = ash;
+            l.name = "look" + std::to_string(round) + "_" + std::to_string(k);
+            scene.particle_looks.push_back(l);
+        }
+        fx.update(scene, {}, 0.1, k_flat);
+        GIANT_CHECK(fx.styles().size() <= render::k_max_particle_styles);
+        GIANT_CHECK(fx.style_index("look" + std::to_string(round) + "_0").has_value() && fx.style_index("fire") == fire);
+    }
+}
+
+GIANT_TEST("effects emitting: ground under each point of a box, none without terrain, a spawn's rates its duration") {
+    world::Scene scene;
+    world::Emitter e;
+    e.look = "sparks";
+    e.rate = 0.0f;
+    e.burst = 64;
+    e.shape = world::EmitterShape::box;
+    e.size = {50.0f, 0.0f, 0.0f};
+    world::Emitter drip;
+    drip.look = "spray";
+    drip.rate = 100.0f;
+    scene.effects = {{"slope", {e}, 0.0f}, {"drip", {drip}, 0.05f}};
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    const EffectsState::Ground slope = [](double x, double) { return std::optional<double>(x * 0.1); };
+    GIANT_CHECK(fx.spawn(scene, "slope", {0.0, 2.0, 0.0}).has_value());
+    tick(fx, scene, {}, 0.1, slope);
+    GIANT_CHECK(fx.bursts().size() == 64);
+    for (const render::ParticleBurst& b : fx.bursts()) {
+        GIANT_CHECK(std::abs(b.ground - (std::min(b.position.x * 0.1, 2.0) - 0.01)) < 1e-9);
+    }
+    // No terrain: they fall on, and the grounded budget is not spent.
+    fx.grounded_per_frame = 1;
+    GIANT_CHECK(fx.spawn(scene, "sparks", {}).has_value());
+    tick(fx, scene, {}, 0.1, [](double, double) { return std::optional<double>(); });
+    GIANT_CHECK(born(fx) == 40 && fx.stats().cut == 0 && fx.bursts()[0].ground < -1e29);
+    // A spawn's rates run only its duration, however long the frame: 100 a second for 0.05 s.
+    fx.grounded_per_frame = 1000;
+    GIANT_CHECK(fx.spawn(scene, "drip", {}).has_value());
+    tick(fx, scene, {}, 0.25, k_flat);
+    GIANT_CHECK(born(fx) == 5);
+    tick(fx, scene, {}, 0.25, k_flat);
+    GIANT_CHECK(fx.bursts().empty() && fx.stats().spawned == 0);
+}
+
+GIANT_TEST("effects emitting: a sphere lands under its middle less its radius; headings turn; edits and clear followed") {
+    world::Scene scene;
+    world::Emitter ball;
+    ball.look = "sparks";
+    ball.rate = 0.0f;
+    ball.burst = 10;
+    ball.shape = world::EmitterShape::sphere;
+    ball.size = {2.0f, 0.0f, 0.0f};
+    ball.direction = {0.0f, 1e-3f, 0.0f}; // short, but a heading
+    scene.effects = {{"ball", {ball}, 0.0f}};
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    const Quat turn = normalize(quat_from_euler({0.0f, 0.0f, 90.0f}));
+    GIANT_CHECK(fx.spawn(scene, "ball", {0.0, 10.0, 0.0}, turn).has_value());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.bursts().size() == 1 && fx.bursts()[0].spread == 2.0f);
+    GIANT_CHECK(std::abs(fx.bursts()[0].ground - (0.0 - 0.01)) < 1e-9);       // ground under it
+    GIANT_CHECK(std::abs(length(fx.bursts()[0].direction) - 1.0f) < 1e-5f && std::abs(fx.bursts()[0].direction.y) < 1e-5f);
+    GIANT_CHECK(fx.spawn(scene, "ball", {0.0, 1.0, 0.0}).has_value());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(std::abs(fx.bursts()[0].ground - (1.0 - 2.0 - 0.01)) < 1e-9); // its middle less its radius
+
+    // An entity's effect edited (set_effect): the new one runs.
+    const world::EntityId id = add_runner(scene, {}, "ball");
+    fx.follow(scene, scene.take_changes());
+    scene.effects[0].emitters[0].rate = 40.0f;
+    scene.effects[0].emitters[0].burst = 0;
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(born(fx) == 4);
+    scene.effects.insert(scene.effects.begin(), world::Effect{"other", {ball}, 0.0f}); // indices move
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(born(fx) == 4);
+    // Cleared: entities' effects still run (looked over again).
+    fx.clear();
+    fx.follow(scene, scene.take_changes());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(born(fx) == 4 && fx.stats().running == 1);
+    (void)id;
 }

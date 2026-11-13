@@ -2284,8 +2284,10 @@ them all and moves it. Each frame's births are one span of the ring that
 ends when its longest-lived particle dies (lives are at most 60 s); spans
 end from the oldest, so the alive range is known without reading anything
 back (some in it may have died: the shader skips those by age), and a full
-ring cuts the oldest (`particles_cut`). The clock is the frames'
-`delta_seconds` (at most 1; held: still), and births go on whatever view
+ring cuts the oldest (`particles_cut`). The clock is
+`FrameInput::particle_seconds` (the game's: the editor passes its game
+seconds, so a paused game's stand still), or `delta_seconds` when that is
+negative (at most 1; 0: still), and births go on whatever view
 is drawn. A frame's births go up in one upload (at most 1 MiB, two copies
 where they wrap); with no upload memory they are taken back and counted
 as dropped ("particles" in the CPU sections).
@@ -2341,6 +2343,32 @@ most 192 a scene, so with the built-ins they fit the renderer's 256 styles).
 Effects name looks loosely: one naming a look found nowhere draws nothing of
 that emitter (get_effects lists it in `missing_looks`), and removing a look
 an effect still needs is refused.
+
+The editor's `EffectsState` (editor/src/effects_state.h) turns them into
+the renderer's particle bursts each frame, on the game's clock (paused:
+nothing born, and those alive stand still: `FrameInput::particle_seconds`;
+a frame not drawn hands its births and seconds to the next). It follows the scene's changes for entities whose effect is
+on (never scanning every entity a frame) and keeps spawned effects
+(`spawn_effect`, at most 256; a copy of the effect as it was). Effects
+farther than 1000 m from the camera run nothing; the rest go nearest first
+within budgets of 8,192 births a frame and 2,048 that stop on the ground
+(where there is ground under them)
+(half the renderer's caps: the rest is kept for events), the farther ones'
+left out and counted. A rate's fractions carry from frame to frame, a long
+frame owes at most a second of them (as the particles' clock steps), a
+spawn's stop with its duration, and each burst's seed hashes
+the entity (or spawn), the emitter and a count of updates, so the same steps
+give the same particles. Points and spheres are one burst each (a sphere is
+the burst's spread); boxes and discs are up to 64 bursts of their own
+points. Where particles stop is the terrain's height under each box or disc
+point, under a sphere's middle less its radius, or where they were born when
+that is under it; with no terrain there they fall on. Its lists are made at
+their caps once. Effects are found by name through an index remade when the
+scene's effects change, and only for those within reach. Each look keeps its
+style slot while it is there (particles alive up to a minute keep their
+index): a changed look is changed in place, a new name takes a new slot, and
+a removed name's slot is reused only once the renderer's 256 are full, the
+one gone longest first.
 
 ## Navigation
 

@@ -56,6 +56,7 @@ class PlayState;
 class AnimationState;
 class ClothState;
 class SwingState;
+class EffectsState;
 class NavState;
 class WalkerState;
 class GameUi;
@@ -239,6 +240,9 @@ struct EditorState {
     // Swinging entities (lanterns, signs) in the wind; set by main (and
     // tests). Null: nothing swings.
     SwingState* swing = nullptr;
+    // Effects given birth to (entities' and spawned: spawn_effect); set by
+    // main (and tests). Null: nothing is emitted.
+    EffectsState* effects = nullptr;
     // Where people can walk and paths over it; set by main (and tests).
     // Null: no navigation.
     NavState* nav = nullptr;
