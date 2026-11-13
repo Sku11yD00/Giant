@@ -298,6 +298,8 @@ void register_weather_commands(ai::CommandRegistry& registry, EditorState& state
 void register_clock_commands(ai::CommandRegistry& registry, EditorState& state);
 // The water commands (water_commands.cpp).
 void register_water_commands(ai::CommandRegistry& registry, EditorState& state);
+// The particle look and effect commands (effects_commands.cpp).
+void register_effects_commands(ai::CommandRegistry& registry, EditorState& state);
 // The physics commands (physics_commands.cpp).
 void register_physics_commands(ai::CommandRegistry& registry, EditorState& state);
 // The animation commands (animation_commands.cpp).

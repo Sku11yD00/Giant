@@ -2321,6 +2321,27 @@ shadow is lit evenly; a particle whose centre is off the screen while its
 quad reaches onto it takes the lamps of the cluster at the screen's edge
 nearest its centre.
 
+## Effects (effects plan FX2)
+
+Effects are world data (`world/effects.h`), saved with the scene and the
+world's world.json like water. A `ParticleLook` is the renderer's
+`ParticleStyle` by name (the world module does not see the renderer; the
+editor turns one into the other). An `Effect` is a named list of up to 16
+`Emitter`s, each a stream of one look: `rate` a second while it runs, a
+`burst` when spawned, from a point, sphere, box or disc at an offset, in a
+cone round a direction, at a speed, stopping on the ground or not. A spawned
+effect runs its rates for its `duration` after its bursts; an entity's
+`EntityEffect` (on, effect name, rate scale) runs it while on, turned with
+the entity. A built-in library (smoke, fire, sparks, dust_kick, spray, mist,
+embers, debris_chips: a look and an effect of each name, made once per
+process) is always there; the scene's own of a name stands in for the
+built-in one (`find_particle_look`, `find_effect`), so a world can retune
+smoke without naming a new look. Looks are bounded as styles are (and at
+most 192 a scene, so with the built-ins they fit the renderer's 256 styles).
+Effects name looks loosely: one naming a look found nowhere draws nothing of
+that emitter (get_effects lists it in `missing_looks`), and removing a look
+an effect still needs is refused.
+
 ## Navigation
 
 `giant/nav/nav.h` says where people can walk and finds the way. The
