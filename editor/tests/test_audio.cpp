@@ -320,3 +320,78 @@ GIANT_TEST("editor audio: snow and fog take the highs sooner; snow on the ground
     GIANT_CHECK(r.value["taps"][0]["lowpass"].get<double>() > dull * 2.0);
     GIANT_CHECK(f.run("get_audio").value["air"] == 1.0);
 }
+
+GIANT_TEST("editor audio: the water is heard where it is: a lake's shore, a river by its speed, under the surface muffled") {
+    // A lake from x 10 to 60 (z -40 to 40) at 0 m; a river along z = 30 from x -60 to -10, 8 m wide, at 0.5 m.
+    std::vector<world::Water> water(2);
+    water[0].name = "lake";
+    water[0].kind = world::WaterKind::lake;
+    water[0].outline = {{10.0, -40.0}, {60.0, -40.0}, {60.0, 40.0}, {10.0, 40.0}};
+    water[1].name = "river";
+    water[1].kind = world::WaterKind::river;
+    water[1].path = {{-60.0, 30.0, 8.0f, 0.5f}, {-10.0, 30.0, 8.0f, 0.5f}};
+    water[1].flow = 4.0f;
+    const WaterLookup at = [&water](double x, double z) { return world::water_at(water, x, z); };
+    const GroundLookup flat = [](double, double) -> std::optional<double> { return -1.0; }; // the ground under it all
+    const auto hear = [&](const DVec3& listener, const std::function<bool(double)>& reached = {}) {
+        WaterHearing h;
+        return h.update(at, flat, listener, 4.0f, reached, k_water_ways); // every way at once
+    };
+    // 4 m west of the lake's shore: its lapping from the east, the river (30 m north-west) quieter.
+    const WaterHeard shore = hear({6.0, 1.7, 0.0});
+    std::printf("    by the shore: lapping %.2f from (%.2f %.2f %.2f) spread %.2f; river %.2f\n", shore.shore,
+                shore.shore_dir.x, shore.shore_dir.y, shore.shore_dir.z, shore.shore_spread, shore.river);
+    GIANT_CHECK(shore.shore > 0.3f && shore.shore_dir.x > 0.6f && shore.sea == 0.0f && !shore.under);
+    // Further off it fades; past the reach, nothing.
+    const WaterHeard back = hear({-5.0, 1.7, -20.0});
+    GIANT_CHECK(back.shore > 0.0f && back.shore < shore.shore * 0.6f);
+    const WaterHeard far = hear({-200.0, 1.7, -200.0});
+    GIANT_CHECK(far.shore == 0.0f && far.river == 0.0f && far.sea == 0.0f);
+    // By the river: heard from it, louder the faster it runs.
+    const WaterHeard river = hear({-35.0, 1.7, 20.0});
+    water[1].flow = 1.0f;
+    const WaterHeard slow = hear({-35.0, 1.7, 20.0});
+    std::printf("    by the river: %.2f at 4 m/s, %.2f at 1 m/s (from z %.2f)\n", river.river, slow.river, river.river_dir.z);
+    GIANT_CHECK(river.river > 0.3f && river.river_dir.z > 0.6f && slow.river < river.river * 0.3f);
+    // Standing in the river by its end: the lake's shore 22 m east still heard past the river's bank.
+    water[1].flow = 4.0f;
+    const WaterHeard in_river = hear({-12.0, 1.0, 30.0});
+    std::printf("    in the river: lapping %.2f from x %.2f, river %.2f\n", in_river.shore, in_river.shore_dir.x,
+                in_river.river);
+    GIANT_CHECK(in_river.shore > 0.05f && in_river.shore_dir.x > 0.5f && in_river.river > 0.5f);
+    // An island: the ground over the water there is dry (no water heard under foot).
+    const GroundLookup island = [](double x, double z) -> std::optional<double> {
+        return std::fabs(x - 35.0) < 5.0 && std::fabs(z) < 5.0 ? 2.0 : -1.0;
+    };
+    WaterHearing on_island;
+    const WaterHeard isle = on_island.update(at, island, {35.0, 3.7, 0.0}, 4.0f, {}, k_water_ways);
+    GIANT_CHECK(isle.shore > 0.3f && isle.shore_spread > 0.7f && !isle.under);
+    // Under the lake: under, its depth; not where the water does not reach (a room under it).
+    const WaterHeard under = hear({35.0, -2.0, 0.0});
+    GIANT_CHECK(under.under && std::fabs(under.depth - 2.0f) < 1e-4f);
+    const WaterHeard dry = hear({35.0, -2.0, 0.0}, [](double) { return false; });
+    GIANT_CHECK(!dry.under);
+    // A few ways a call: a quarter of them looked along each time, the rest kept.
+    WaterHearing slowly;
+    const WaterHeard part = slowly.update(at, flat, {6.0, 1.7, 0.0}, 4.0f, {}, 4);
+    WaterHeard whole = part;
+    for (int i = 0; i < 3; ++i) whole = slowly.update(at, flat, {6.0, 1.7, 0.0}, 4.0f, {}, 4);
+    GIANT_CHECK(std::fabs(whole.shore - shore.shore) < 1e-5f && part.shore <= whole.shore);
+    // Into the mixer: the lapping played round and round; under the surface, all of it muffled.
+    AudioState audio;
+    audio.set_water(shore);
+    EditorCamera camera;
+    for (int i = 0; i < 8; ++i) audio.update(camera, 0.1); // (no speakers: rendered and dropped)
+    GIANT_CHECK(audio.mixer().stats().ambience == 2 && audio.mixer().stats().muffle > 19000.0f); // (the lake, the river)
+    audio.set_water(under);
+    for (int i = 0; i < 8; ++i) audio.update(camera, 0.1);
+    std::printf("    under: %u ambience, muffle %.0f Hz\n", audio.mixer().stats().ambience, audio.mixer().stats().muffle);
+    GIANT_CHECK(audio.mixer().stats().muffle < AudioState::k_under_muffle * 1.05f && audio.mixer().stats().ambience >= 1);
+    // get_audio tells it.
+    Fixture f;
+    f.audio.set_water(under);
+    for (int i = 0; i < 4; ++i) f.audio.update(f.state.camera, 0.1);
+    const ai::CommandResult r = f.run("get_audio");
+    GIANT_CHECK(r.ok && r.value["water"]["under"] == true && std::fabs(r.value["water"]["depth"].get<float>() - 2.0f) < 1e-4f);
+    GIANT_CHECK(r.value["ambience"].get<u32>() >= 1 && r.value["muffle"].get<float>() < 1000.0f);
+}

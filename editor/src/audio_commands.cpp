@@ -218,7 +218,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
          }});
 
     add(registry,
-        {"stop_sounds", "Stops every sound playing (and the reverb tail).",
+        {"stop_sounds", "Stops every sound playing (and the reverb tail). The water heard round the camera carries on (set again each frame from the water still there).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}}, false,
          [&state](const Json&, CommandContext&) {
              if (state.audio == nullptr) return CommandResult::failure("audio is not available");
@@ -231,6 +231,8 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
          "The sound: `device` (the speakers' driver; empty: none, the mix runs silent), the sounds by name, "
          "the listener (the camera), the mixer (`voices` playing, `taps` in them, `frames` rendered, "
          "`dropped` plays, voices `stolen` (cut short for a play no quieter than what they had left), `peak` of the last render before the limiter, `reverb_seconds`), sounds `played`, `shots` heard (fire), bullet `impacts` heard, the weather's `air` (1 dry; rain, snow and fog take the highs sooner) and `snow_cover` (deadening echoes off the ground), "
+         "`ambience` (sounds played round and round heard now), `muffle` (Hz: the whole mix's lowpass; under water a few hundred), "
+         "the `water` heard round the listener (`shore`, `sea` and `river` loudness about 0 to 1.5, `under` the surface, `depth` metres), "
          "and the last one's `heard` (as play_sound returns).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}}, false,
          [&state](const Json&, CommandContext&) {
@@ -252,6 +254,13 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
                          {"impacts", a.impacts()},
                          {"air", a.air()},
                          {"snow_cover", a.snow_cover()},
+                         {"ambience", s.ambience},
+                         {"muffle", s.muffle},
+                         {"water", {{"shore", a.water_heard().shore},
+                                    {"sea", a.water_heard().sea},
+                                    {"river", a.water_heard().river},
+                                    {"under", a.water_heard().under},
+                                    {"depth", a.water_heard().depth}}},
                          {"speed_of_sound", audio::k_speed_of_sound}};
              if (a.last()) {
                  out["heard"] = heard_json(*a.last(), a.listener(), a.listener());

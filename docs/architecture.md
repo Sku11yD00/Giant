@@ -2440,6 +2440,44 @@ board it would go through, or a glance off, are not followed; a resolved
 shot is); the far ground past the terrain's tiles is not met; there is no
 Doppler, and wind does not carry sound.
 
+The water's sound (water plan W5d). The mixer plays up to 8 sounds round
+and round (`Mixer::set_ambience`: a slot's sound, gain, lowpass, the way
+it is heard from and how spread round it is), set each frame by the game
+and eased on the audio thread over about a quarter of a second (a slot
+given another sound, or none, or stopped by `stop_all`, fades the old
+one out in about a quarter second, then the new comes in from silence),
+and can muffle the whole mix through one lowpass (`set_muffle`, eased
+over a tenth of a second). `sounds.h` makes the water's loops (their
+ends cross-faded into their starts): little waves lapping (8 s), a river
+running (6 s: rushing noise and bubbles), under water (6 s: a low rumble
+and a bubble now and then). The editor's `WaterHearing` looks round the
+camera each frame, 2 of 16 ways out (all 16 on the first frame and after
+a jump of over 8 m: another world, a game loaded; 13 places along each to 48 m, 1 m
+apart near and 9 m far, so a pond a few metres across 30 m off can be
+missed: it would be faint; the rest kept from earlier frames and heard
+again from where the camera is now) through the physics' water
+(`PhysicsWorld::water_at`: its index of the bodies, the sea with the
+swell now; kept in step with the scene whether simulating or not, so it
+is heard while editing) and the terrain (dry where the ground is over
+the water: an island): a lake's or the sea's shore where water meets land
+along a way (a river's banks looked past), heard by 1 over the distance
+to it (2 m at least) and louder with the wind and the body's `waves` (the
+sea more), the nearest river each way by its speed ((speed / 2 m/s)^1.5),
+and lapping all round when the camera is on the water (not in a room just
+under it). `AudioState::set_water` plays them with the muffle in one call
+(one lock; slots 0 to 3: lapping, the sea's own lapping
+duller, the river, under water) from where they are, dulled by the
+weather's air, and under the surface (where the water reaches: not in a
+room under it) the whole mix is muffled to 400 Hz with the deep's
+rumble. Under is the camera 5 cm below the physics' surface there (the
+swell's crest counted where it is now); the picture's under-water view
+switches on the renderer's own test, so near the surface in a swell the
+two can part by a few centimetres. `stop_sounds` stops what is playing;
+the water carries on (perhaps after a brief dip), set again each frame
+from the water still there.
+`get_audio` reports `ambience`, `muffle` and the `water` heard. Splashes
+come next; rain on the water is not heard yet.
+
 ## Game saves (E4 part 1a)
 
 A game save is what a play made of the world, kept apart from the world:

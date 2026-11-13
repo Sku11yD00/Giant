@@ -643,11 +643,16 @@ struct PhysicsWorld::Impl {
         world::WaterHere here;
     };
     mutable std::vector<WaterFound> water_found; // (water_over's scratch: the stepping thread's)
+    mutable std::vector<WaterFound> water_asked; // (PhysicsWorld::water_at's: the caller's thread, between steps)
     std::optional<world::WaterHere> water_over(double x, double z, double bottom) const {
+        return water_over(x, z, bottom, water_found);
+    }
+    std::optional<world::WaterHere> water_over(double x, double z, double bottom,
+                                               std::vector<WaterFound>& found) const {
         if (!(static_cast<double>(water_top) + swell_reach() > bottom) || !std::isfinite(x) || !std::isfinite(z)) {
             return std::nullopt;
         }
-        water_found.clear();
+        found.clear();
         const auto offer = [&](u32 n) {
             const WaterPart& part = water_parts[n];
             if (!part.everywhere && (x < part.x0 || x > part.x1 || z < part.z0 || z > part.z1)) return;
@@ -664,20 +669,20 @@ struct PhysicsWorld::Impl {
                     h->slope_z = static_cast<float>(scale * sw.slope_z);
                 }
             }
-            for (WaterFound& f : water_found) {
+            for (WaterFound& f : found) {
                 if (f.water != part.water) continue;
                 if (nearness < f.nearness) f = {part.water, nearness, *h}; // (a nearer stretch of the same river)
                 return;
             }
-            water_found.push_back({part.water, nearness, *h});
+            found.push_back({part.water, nearness, *h});
         };
         for (const u32 n : water_everywhere) offer(n);
-        const auto found = water_grid.find(water_key(water_square(x), water_square(z)));
-        if (found != water_grid.end()) {
-            for (const u32 n : found->second) offer(n);
+        const auto square = water_grid.find(water_key(water_square(x), water_square(z)));
+        if (square != water_grid.end()) {
+            for (const u32 n : square->second) offer(n);
         }
         std::optional<world::WaterHere> best;
-        for (const WaterFound& f : water_found) {
+        for (const WaterFound& f : found) {
             if (!best || f.here.level > best->level) best = f.here;
         }
         if (!best || !(static_cast<double>(best->level) > bottom)) return std::nullopt;
@@ -1678,11 +1683,13 @@ BodyId PhysicsWorld::character_body(CharacterId id) const {
 
 usize PhysicsWorld::characters() const { return m_impl->characters.size(); }
 
-void PhysicsWorld::set_water(std::span<const world::Water> water) {
-    m_impl->wake_in_water(); // where it was (gone or lowered: what floated falls)
+void PhysicsWorld::set_water(std::span<const world::Water> water, bool wake) {
+    if (wake) m_impl->wake_in_water(); // where it was (gone or lowered: what floated falls)
     m_impl->set_water(water);
-    m_impl->wake_in_water(); // and where it is
+    if (wake) m_impl->wake_in_water(); // and where it is
 }
+
+void PhysicsWorld::wake_in_water() { m_impl->wake_in_water(); }
 
 std::span<const world::Water> PhysicsWorld::water() const { return m_impl->water; }
 
@@ -1711,6 +1718,11 @@ bool PhysicsWorld::water_reaches(const DVec3& point, double level) const {
     }
     if (!(point.y < level)) return true; // over it: nothing between
     return !m_impl->roofed(to_jolt(point), level, 0.0f);
+}
+
+std::optional<world::WaterHere> PhysicsWorld::water_at(double x, double z) const {
+    // (Its own scratch, kept: the stepping thread's is not this one's.)
+    return m_impl->water_over(x, z, -std::numeric_limits<double>::infinity(), m_impl->water_asked);
 }
 
 bool PhysicsWorld::is_character_body(BodyId id) const {

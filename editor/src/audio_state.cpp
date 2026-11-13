@@ -7,6 +7,7 @@
 #include "giant/core/log.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace giant::editor {
@@ -53,6 +54,147 @@ audio::RayHit ground_hit(const world::Terrain& terrain, const DVec3& from, const
 }
 
 } // namespace
+
+WaterHeard WaterHearing::update(const WaterLookup& water, const GroundLookup& ground, const DVec3& listener, float wind,
+                                const std::function<bool(double level)>& reached, u32 ways) {
+    WaterHeard out;
+    if (!water || !std::isfinite(listener.x) || !std::isfinite(listener.y) || !std::isfinite(listener.z)) return out;
+    constexpr std::array<double, k_water_steps + 1> k_steps{0.0,  1.0,  2.0,  3.0,  4.5,  6.5,  9.0,
+                                                            12.0, 16.0, 20.0, 25.0, 31.0, 39.0, k_water_heard_reach};
+    const float surf = std::isfinite(wind) ? std::clamp(wind / 8.0f, 0.15f, 1.0f) : 0.15f;
+    struct Sample {
+        bool wet = false;
+        std::optional<world::WaterHere> here;
+    };
+    const auto sample = [&](double x, double z) {
+        Sample s;
+        s.here = water(x, z);
+        if (!s.here || s.here->water == nullptr) return s;
+        const std::optional<double> g = ground ? ground(x, z) : std::nullopt;
+        s.wet = !g || *g < static_cast<double>(s.here->level); // (an island in a lake: dry)
+        return s;
+    };
+    // The waves' strength: a lake's lap with the wind and its waves; the sea's more.
+    const auto lap = [&](const world::Water& w) {
+        const float waves = std::isfinite(w.waves) ? std::clamp(w.waves, 0.0f, 4.0f) : 1.0f;
+        return w.kind == world::WaterKind::sea ? 0.5 + 1.0 * static_cast<double>(surf * waves)
+                                               : 0.25 + 0.75 * static_cast<double>(surf * waves);
+    };
+    const auto running = [](const world::WaterHere& h) {
+        const double speed = std::hypot(static_cast<double>(h.flow_x), static_cast<double>(h.flow_z));
+        return std::pow(std::min(std::isfinite(speed) ? speed : 0.0, 10.0) / 2.0, 1.5);
+    };
+    const Sample here = sample(listener.x, listener.z);
+    // (Under its surface: the water reaches the listener there, not in a room under it.)
+    bool reaches_here = true;
+    if (here.wet) {
+        const double level = here.here->level;
+        if (listener.y < level && reached) reaches_here = reached(level);
+        if (listener.y < level - 0.05 && reaches_here) {
+            out.under = true;
+            out.depth = static_cast<float>(level - listener.y);
+        }
+    }
+    // A few ways looked along again; moved far since the last call (a jump: another world, a game loaded,
+    // a teleport): every way, so nothing found from where it was is heard.
+    const DVec3 moved = listener - m_last;
+    if (!m_looked || dot(moved, moved) > k_water_jump * k_water_jump) ways = k_water_ways;
+    m_looked = true;
+    m_last = listener;
+    for (u32 n = 0; n < std::min(ways, k_water_ways); ++n) {
+        const u32 way = m_next;
+        m_next = (m_next + 1) % k_water_ways;
+        Way& w = m_ways[way];
+        w = Way{};
+        const double angle = 2.0 * 3.14159265358979323846 * static_cast<double>(way) / k_water_ways;
+        const double dx = std::cos(angle), dz = std::sin(angle);
+        Sample last = here;
+        for (usize k = 1; k < k_steps.size(); ++k) {
+            const double r = k_steps[k];
+            const double x = listener.x + dx * r, z = listener.z + dz * r;
+            const Sample now = sample(x, z);
+            // A river, by its speed (the nearest stretch this way).
+            if (!w.river.there && now.wet && now.here->water->kind == world::WaterKind::river) {
+                w.river = {true, {x, now.here->level, z}, running(*now.here)};
+            }
+            // A shore: water meets land between the last step and this one (a lake's or the sea's;
+            // a river's bank is looked past, to a lake or the sea beyond it).
+            if (now.wet != last.wet) {
+                const Sample& wet = now.wet ? now : last;
+                const world::Water& body = *wet.here->water;
+                if (body.kind != world::WaterKind::river) {
+                    const double mid = 0.5 * (k_steps[k - 1] + r);
+                    Found& f = body.kind == world::WaterKind::sea ? w.sea : w.shore;
+                    f = {true, {listener.x + dx * mid, wet.here->level, listener.z + dz * mid}, lap(body)};
+                    break; // (the nearest shore this way)
+                }
+            }
+            last = now;
+        }
+    }
+    struct Sum {
+        DVec3 toward{};
+        double total = 0.0;
+    };
+    Sum shore, sea, river;
+    // Each heard by 1 over the distance to it now (2 m at least, the height over it counted).
+    const auto heard = [&](const Found& f, Sum& sum) {
+        if (!f.there) return;
+        const DVec3 d = f.at - listener;
+        const double c = f.weight / std::max(std::sqrt(dot(d, d)), 2.0);
+        // (Which way round, level: what is below on every side is all round, not from below.)
+        const DVec3 flat{d.x, 0.0, d.z};
+        const double across = std::sqrt(dot(flat, flat));
+        if (across > 1e-6) sum.toward = sum.toward + flat / across * c;
+        sum.total += c;
+    };
+    for (const Way& w : m_ways) {
+        heard(w.shore, shore);
+        heard(w.sea, sea);
+        heard(w.river, river);
+    }
+    // On the water (swimming, afloat): it laps all round, close; a river runs round.
+    if (here.wet && reaches_here && std::fabs(listener.y - static_cast<double>(here.here->level)) < 2.0) {
+        const world::Water& body = *here.here->water;
+        if (body.kind == world::WaterKind::river) river.total += 0.5 * running(*here.here);
+        else (body.kind == world::WaterKind::sea ? sea : shore).total += 0.5 * lap(body);
+    }
+    const auto finish = [](const Sum& sum, float& loud, Vec3& dir, float& spread) {
+        loud = static_cast<float>(std::clamp(sum.total, 0.0, 1.5));
+        const double len = std::sqrt(dot(sum.toward, sum.toward));
+        if (len > 1e-9) {
+            dir = {static_cast<float>(sum.toward.x / len), static_cast<float>(sum.toward.y / len),
+                   static_cast<float>(sum.toward.z / len)};
+        }
+        spread = sum.total > 1e-9 ? static_cast<float>(std::clamp(1.0 - len / sum.total, 0.0, 1.0)) : 1.0f;
+    };
+    finish(shore, out.shore, out.shore_dir, out.shore_spread);
+    finish(sea, out.sea, out.sea_dir, out.sea_spread);
+    finish(river, out.river, out.river_dir, out.river_spread);
+    return out;
+}
+
+void AudioState::set_water(const WaterHeard& heard) {
+    m_water_heard = heard;
+    std::array<audio::Ambience, 4> slots{};
+    const auto slot = [this, &slots](u32 index, const char* name, float gain, const Vec3& dir, float spread,
+                                     float lowpass) {
+        audio::Ambience& a = slots[index];
+        const std::optional<audio::SoundId> id = find(name);
+        a.sound = id ? *id : audio::k_no_sound;
+        a.gain = gain;
+        a.direction = dir;
+        a.spread = spread;
+        a.lowpass = lowpass;
+    };
+    // (The air dulls them as it does every sound.)
+    const float air = 12000.0f / std::max(m_air, 1.0f);
+    slot(0, "lapping", 0.6f * heard.shore, heard.shore_dir, heard.shore_spread, air);
+    slot(1, "sea", 0.8f * heard.sea, heard.sea_dir, heard.sea_spread, std::min(air, 4000.0f));
+    slot(2, "river", 0.7f * heard.river, heard.river_dir, heard.river_spread, air);
+    slot(3, "underwater", heard.under ? 0.6f : 0.0f, {0, 0, 1}, 1.0f, 20000.0f);
+    m_mixer.set_ambience(0, slots, heard.under ? k_under_muffle : 20000.0f); // (one lock for all of it)
+}
 
 float hardness_of(world::Surface surface) {
     switch (surface) {
@@ -135,6 +277,11 @@ AudioState::AudioState() {
     m_names["impact"] = m_mixer.add_sound(audio::synth_impact());
     m_names["click"] = m_mixer.add_sound(audio::synth_click());
     m_names["tone"] = m_mixer.add_sound(audio::synth_tone(440.0f, 1.0f));
+    // The water's, played round and round (set_water).
+    m_names["lapping"] = m_mixer.add_sound(audio::synth_lapping());
+    m_names["sea"] = m_mixer.add_sound(audio::synth_lapping(11));
+    m_names["river"] = m_mixer.add_sound(audio::synth_river());
+    m_names["underwater"] = m_mixer.add_sound(audio::synth_underwater());
     m_scratch.resize(static_cast<usize>(audio::k_sample_rate / 4) * 2);
 }
 

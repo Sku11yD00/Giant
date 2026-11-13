@@ -8,7 +8,10 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <limits>
@@ -528,4 +531,147 @@ GIANT_TEST("audio shot: a rifle round passing 20 m off at 300 m cracks well befo
     // Stood on the line downrange: the crack from back up it.
     const Crack on = trace_crack(f, {200, 0, 0});
     GIANT_CHECK(on.heard && on.direction.x < -0.99f);
+}
+
+namespace {
+// RMS of one channel over frames [from, to).
+float rms_of(const std::vector<float>& out, int channel, usize from, usize to) {
+    double sum = 0.0;
+    to = std::min(to, out.size() / 2);
+    for (usize f = from; f < to; ++f) sum += static_cast<double>(out[f * 2 + static_cast<usize>(channel)]) * out[f * 2 + static_cast<usize>(channel)];
+    return to > from ? static_cast<float>(std::sqrt(sum / static_cast<double>(to - from))) : 0.0f;
+}
+// RMS of the change from one frame to the next on a channel: how much high there is.
+float edge_of(const std::vector<float>& out, int channel, usize from, usize to) {
+    double sum = 0.0;
+    to = std::min(to, out.size() / 2);
+    for (usize f = from + 1; f < to; ++f) {
+        const double d = out[f * 2 + static_cast<usize>(channel)] - out[(f - 1) * 2 + static_cast<usize>(channel)];
+        sum += d * d;
+    }
+    return to > from + 1 ? static_cast<float>(std::sqrt(sum / static_cast<double>(to - from - 1))) : 0.0f;
+}
+} // namespace
+
+GIANT_TEST("audio sounds: make_loop cross-fades the end into the start: round the seam, no jump") {
+    // A ramp from 0 to 1 over 1.5 s, looped at 1 s with 0.5 s of fade: cut plainly it would jump by 2/3.
+    const usize n = k_sample_rate, fade = k_sample_rate / 2;
+    std::vector<float> ramp(n + fade);
+    for (usize i = 0; i < ramp.size(); ++i) ramp[i] = static_cast<float>(i) / static_cast<float>(ramp.size());
+    const Sound loop = make_loop(ramp, n, fade, 0.3f);
+    GIANT_CHECK(loop.samples.size() == n);
+    float step = 0.0f;
+    for (usize i = 1; i < n; ++i) step = std::max(step, std::fabs(loop.samples[i] - loop.samples[i - 1]));
+    const float seam = std::fabs(loop.samples.front() - loop.samples.back());
+    std::printf("    ramp loop: seam %.5f, largest step in it %.5f\n", seam, step);
+    GIANT_CHECK(seam < 1e-3f && step < 1e-3f);
+    // Too short a `made`: cut to what there is, still a loop of finite samples.
+    const Sound shorter = make_loop(std::vector<float>(100, 0.5f), 200, 50, 0.1f);
+    GIANT_CHECK(shorter.samples.size() == 100);
+    for (const float x : shorter.samples) GIANT_CHECK(std::isfinite(x));
+}
+
+GIANT_TEST("audio sounds: water loops play round with no seam and are as loud as each other") {
+    for (const Sound& s : {synth_lapping(), synth_river(), synth_underwater()}) {
+        GIANT_CHECK(s.samples.size() >= k_sample_rate * 6);
+        double sum = 0.0;
+        float peak = 0.0f;
+        std::vector<float> steps;
+        steps.reserve(s.samples.size());
+        for (usize i = 0; i < s.samples.size(); ++i) {
+            sum += static_cast<double>(s.samples[i]) * s.samples[i];
+            peak = std::max(peak, std::fabs(s.samples[i]));
+            if (i > 0) steps.push_back(std::fabs(s.samples[i] - s.samples[i - 1]));
+        }
+        const float rms = static_cast<float>(std::sqrt(sum / static_cast<double>(s.samples.size())));
+        // Round the seam: an ordinary step, not a click (no bigger than 199 in 200 of its own steps).
+        const usize at = steps.size() * 199 / 200;
+        std::nth_element(steps.begin(), steps.begin() + static_cast<std::ptrdiff_t>(at), steps.end());
+        const float seam = std::fabs(s.samples.front() - s.samples.back());
+        std::printf("    loop of %.1f s: rms %.3f, seam step %.4f (199 in 200 under %.4f)\n",
+                    static_cast<double>(s.samples.size()) / k_sample_rate, rms, seam, steps[at]);
+        GIANT_CHECK(rms > 0.08f && rms < 0.2f && peak <= 0.95f && seam <= steps[at]);
+    }
+}
+
+GIANT_TEST("audio mixer: an ambience plays round and round, eased in, from its side, eased out; muffled under water") {
+    Mixer m;
+    const SoundId river = m.add_sound(synth_river());
+    const SoundId lapping = m.add_sound(synth_lapping());
+    m.set_listener({1, 0, 0}, {0, 1, 0});
+    // From the right, not spread: louder in the right ear; eased in over about a quarter second.
+    Ambience a;
+    a.sound = river;
+    a.gain = 1.0f;
+    a.direction = {1, 0, 0};
+    a.spread = 0.0f;
+    m.set_ambience(0, a);
+    const auto out = render(m, 14.0); // (past the 6 s loop, twice)
+    const float early = rms_of(out, 1, 0, k_sample_rate / 20);
+    const float right = rms_of(out, 1, k_sample_rate * 2, k_sample_rate * 14);
+    const float left = rms_of(out, 0, k_sample_rate * 2, k_sample_rate * 14);
+    std::printf("    river: right %.3f left %.4f (first 50 ms %.3f)\n", right, left, early);
+    GIANT_CHECK(right > 0.08f && left < right * 0.05f && early < right * 0.5f);
+    GIANT_CHECK(m.stats().ambience == 1);
+    // Spread all round: both ears alike.
+    a.spread = 1.0f;
+    m.set_ambience(0, a);
+    const auto round = render(m, 2.0);
+    const float l2 = rms_of(round, 0, k_sample_rate, k_sample_rate * 2), r2 = rms_of(round, 1, k_sample_rate, k_sample_rate * 2);
+    GIANT_CHECK(std::fabs(l2 - r2) < 0.1f * r2 && l2 > 0.05f);
+    // Under water: the highs go (the change frame to frame drops far more than the level).
+    const float edge_open = edge_of(round, 0, k_sample_rate, k_sample_rate * 2);
+    m.set_muffle(300.0f);
+    const auto muffled = render(m, 2.0);
+    const float edge_shut = edge_of(muffled, 0, k_sample_rate, k_sample_rate * 2);
+    const float level_shut = rms_of(muffled, 0, k_sample_rate, k_sample_rate * 2);
+    std::printf("    muffled: edge %.4f -> %.4f, level %.3f -> %.3f (muffle %.0f Hz)\n", edge_open, edge_shut, l2,
+                level_shut, m.stats().muffle);
+    GIANT_CHECK(edge_shut < edge_open * 0.15f && level_shut > 0.0f && m.stats().muffle < 320.0f);
+    m.set_muffle(20000.0f);
+    // Another sound in the slot: this one fades out first (in about a quarter second), then the new one in.
+    a.sound = lapping;
+    m.set_ambience(0, a);
+    const auto changed = render(m, 3.0);
+    // A dip to silence between (some 50 ms in the first 0.35 s all but silent), then the new one heard.
+    float dip = 1.0f;
+    for (usize w = k_sample_rate / 20; w + k_sample_rate / 20 <= k_sample_rate * 35 / 100; w += k_sample_rate / 100) {
+        dip = std::min(dip, rms_of(changed, 0, w, w + k_sample_rate / 20));
+    }
+    const float soon = rms_of(changed, 0, k_sample_rate * 6 / 10, k_sample_rate);
+    std::printf("    switched: quietest 50 ms %.4f, %.3f at 0.6-1 s, %.3f at 2-3 s\n", dip, soon,
+                rms_of(changed, 0, k_sample_rate * 2, k_sample_rate * 3));
+    GIANT_CHECK(dip < 0.005f && soon > 0.02f && rms_of(changed, 0, k_sample_rate * 2, k_sample_rate * 3) > 0.02f);
+    // And it is the lapping now, not the river kept on: far fewer highs (frame to frame change) than the river's.
+    const float edge_now = edge_of(changed, 0, k_sample_rate * 2, k_sample_rate * 3);
+    std::printf("    edge: river %.4f, now %.4f\n", edge_open, edge_now);
+    GIANT_CHECK(edge_now < edge_open * 0.6f);
+    // Gone: eased out to silence; bad numbers are none.
+    a.sound = k_no_sound;
+    m.set_ambience(0, a);
+    Ambience bad;
+    bad.sound = river;
+    bad.gain = std::numeric_limits<float>::quiet_NaN();
+    bad.direction = {std::numeric_limits<float>::infinity(), 0, 0};
+    m.set_ambience(1, bad);
+    m.set_ambience(99, a); // (no such slot: nothing)
+    const auto gone = render(m, 3.0);
+    GIANT_CHECK(rms_of(gone, 0, k_sample_rate * 2, k_sample_rate * 3) < 1e-4f && m.stats().ambience == 0);
+    for (const float x : gone) GIANT_CHECK(std::isfinite(x));
+    // stop_all ends them in a moment, faded (no click: checked muffled, where a click would show).
+    a.sound = river;
+    m.set_ambience(2, a);
+    m.set_muffle(400.0f);
+    const auto before = render(m, 1.0);
+    m.stop_all();
+    const auto stopped = render(m, 0.5);
+    float jump = std::fabs(stopped[0] - before[before.size() - 2]);
+    for (usize f = 1; f < 480; ++f) jump = std::max(jump, std::fabs(stopped[f * 2] - stopped[(f - 1) * 2]));
+    std::printf("    stopped: largest step in its first 10 ms %.4f, after 0.3 s %.6f\n", jump,
+                rms_of(stopped, 0, k_sample_rate * 3 / 10, k_sample_rate / 2));
+    GIANT_CHECK(jump < 0.02f && rms_of(stopped, 0, k_sample_rate * 3 / 10, k_sample_rate / 2) < 1e-4f);
+    // Muffled in silence: the filter dies to exactly 0 (no denormals left ringing for ever).
+    const auto silent = render(m, 5.0);
+    for (usize i = silent.size() / 2; i < silent.size(); ++i) GIANT_CHECK(silent[i] == 0.0f);
+    GIANT_CHECK(m.stats().peak == 0.0f);
 }

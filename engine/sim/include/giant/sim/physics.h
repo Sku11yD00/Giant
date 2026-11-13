@@ -24,6 +24,7 @@
 #include "giant/core/jobs.h"
 #include "giant/core/math.h"
 #include "giant/core/types.h"
+#include "giant/world/water.h"
 
 #include <memory>
 #include <functional>
@@ -350,9 +351,12 @@ public:
     // a body all under it and the surface with something fixed under it
     // within 6 m, not the terrain's heightfield (a tunnel under a lake;
     // under a pier over the bed is open water). The
-    // bodies where it was and where it is are woken. Lakes and rivers are
-    // flat; the sea rises and falls with the swell (set_swell).
-    void set_water(std::span<const world::Water> water);
+    // bodies where it was and where it is are woken (`wake` false: not now;
+    // wake_in_water before stepping again). Lakes and rivers are flat; the
+    // sea rises and falls with the swell (set_swell).
+    void set_water(std::span<const world::Water> water, bool wake = true);
+    // The bodies where the water is woken (to float or fall from rest).
+    void wake_in_water();
     std::span<const world::Water> water() const;
     // The sea's swell (world::sea_swell, SwellTrack) at `seconds` on its
     // clock (the clock drawing it keeps: what floats rides what is seen),
@@ -371,6 +375,12 @@ public:
     // not in a room under something fixed (a tunnel under a lake), as
     // set_water keeps it out for bodies. (The camera under water.)
     bool water_reaches(const DVec3& point, double level) const;
+    // The water at (x, z) as the physics has it (world::water_at's answer,
+    // found through its index of where the bodies are, the sea risen or
+    // fallen with the swell now): none there. For the game thread between
+    // steps (what is heard of the water); one thread at a time (it keeps a
+    // scratch list, so a lookup allocates nothing once warm).
+    std::optional<world::WaterHere> water_at(double x, double z) const;
 
     std::optional<RayHit> raycast(const DVec3& origin, const Vec3& direction, double max_distance) const;
     // Only bodies `accept` takes (called with each candidate's id and user

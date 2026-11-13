@@ -60,6 +60,22 @@ struct Play {
     float reverb_seconds = 1.0f; // the tail's length (to -60 dB) where it was made
 };
 
+// A sound played round and round where the listener is (water lapping, a
+// river), set each frame by the game: how loud (0 to 4), how dull (Hz),
+// and where from (`direction`, world, from the listener; `spread` 0: from
+// there, 1: all round, both ears alike). Changes are eased over about a
+// quarter of a second on the audio thread (set at any rate, heard smooth).
+// A slot set to another sound (or none) fades what it plays out sooner (in
+// about a quarter second), then starts the new one from silence.
+struct Ambience {
+    SoundId sound = k_no_sound; // none: the slot fades out
+    float gain = 0.0f;
+    float lowpass = 20000.0f;
+    Vec3 direction{0, 0, 1};
+    float spread = 1.0f;
+};
+inline constexpr usize k_max_ambience = 8;
+
 struct MixerStats {
     u32 voices = 0;      // playing now (or waiting for their first tap)
     u32 taps = 0;        // in those
@@ -68,6 +84,8 @@ struct MixerStats {
     u64 stolen = 0;      // voices cut short (faded over 5 ms) for a play no quieter than what they had left
     float peak = 0.0f;   // of the last render, before the limiter
     float reverb_seconds = 0.0f;
+    u32 ambience = 0;    // slots heard (eased gain over 1e-4)
+    float muffle = 20000.0f; // Hz: the whole mix's lowpass now (20000: none)
 };
 
 class Mixer {
@@ -83,6 +101,17 @@ public:
     void play(Play play);
     // Where the listener faces: its right and up (world, unit) for panning.
     void set_listener(const Vec3& right, const Vec3& up);
+    // Slot `slot` (under k_max_ambience; past it: nothing) of the sounds played round and round.
+    void set_ambience(u32 slot, const Ambience& ambience);
+    // Slots `first` on (those past k_max_ambience: nothing) and the muffle
+    // (as set_muffle) at once: one lock, not one each (the audio thread
+    // taking its work is kept waiting less).
+    void set_ambience(u32 first, std::span<const Ambience> slots, float muffle_hz);
+    // The whole mix heard through a lowpass at `hz` (under water: a few
+    // hundred; 20000: none), eased over about a tenth of a second.
+    void set_muffle(float hz);
+    // (The ambience too: every slot set to none, faded out in a moment, not
+    // cut; set again, it comes back. The muffle is kept.)
     void stop_all();
     std::atomic<float> volume{1.0f}; // any thread
 
@@ -95,6 +124,8 @@ private:
     struct Voice;
     struct Shared;
     struct Reverb;
+    struct Bed; // an ambience slot's state on the audio thread
+    void mix_beds(u32 n, float* chunk);
     void take_work();
     struct Pending;
     void start(const Pending& p);
@@ -109,11 +140,15 @@ private:
     Vec3 m_right{1, 0, 0}, m_up{0, 1, 0};
     u64 m_clock = 0; // frames rendered
     std::unique_ptr<Reverb> m_reverb;
+    std::unique_ptr<std::array<Bed, k_max_ambience>> m_beds;
+    float m_muffle_hz = 20000.0f, m_muffle_target = 20000.0f;
+    std::array<float, 2> m_muffle_z{};
     std::vector<float> m_send; // scratch: the reverb's input, per frame
     // Stats, written by the audio thread.
     std::atomic<u32> m_stat_voices{0}, m_stat_taps{0};
     std::atomic<u64> m_stat_frames{0}, m_stat_dropped{0}, m_stat_stolen{0};
-    std::atomic<float> m_stat_peak{0.0f}, m_stat_reverb{0.0f};
+    std::atomic<float> m_stat_peak{0.0f}, m_stat_reverb{0.0f}, m_stat_muffle{20000.0f};
+    std::atomic<u32> m_stat_ambience{0};
 };
 
 } // namespace giant::audio

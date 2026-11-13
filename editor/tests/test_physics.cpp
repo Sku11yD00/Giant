@@ -8,6 +8,7 @@
 #include "giant_test.h"
 
 #include <cmath>
+#include <optional>
 
 using namespace giant;
 using namespace giant::editor;
@@ -474,4 +475,22 @@ GIANT_TEST("play commands: in the scene's water the player swims, dives and floa
     space.down = false;
     f.play.handle_input({space}, false);
     GIANT_CHECK(f.play.input().up == 0.0f && f.play.input().forward == 0.5f);
+}
+
+GIANT_TEST("physics: the physics keeps the scene's water while not simulating (heard while editing)") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_water", {{"name", "sea"}, {"kind", "sea"}, {"level", 3.0}}).ok);
+    GIANT_CHECK(!f.physics.simulating());
+    f.physics.update(f.state.scene, world::SceneChanges{}, 1.0 / 60.0);
+    std::optional<world::WaterHere> here = f.physics.world().water_at(10.0, -20.0);
+    GIANT_CHECK(here && std::fabs(here->level - 3.0) < 0.5);
+    // Edited: followed.
+    GIANT_CHECK(f.run("set_water", {{"name", "sea"}, {"level", -4.0}}).ok);
+    f.physics.update(f.state.scene, world::SceneChanges{}, 1.0 / 60.0);
+    here = f.physics.world().water_at(10.0, -20.0);
+    GIANT_CHECK(here && std::fabs(here->level + 4.0) < 0.5);
+    // Removed: gone.
+    GIANT_CHECK(f.run("remove_water", {{"name", "sea"}}).ok);
+    f.physics.update(f.state.scene, world::SceneChanges{}, 1.0 / 60.0);
+    GIANT_CHECK(!f.physics.world().water_at(10.0, -20.0));
 }

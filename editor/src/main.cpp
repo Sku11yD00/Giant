@@ -338,6 +338,7 @@ int run(const Options& options) {
     state.walkers = &walkers;
     editor::connect_walkers(state);
     editor::AudioState audio; // the speakers when shown (hidden runs: tests, gates, stay silent)
+    editor::WaterHearing water_hearing; // the water heard round the camera, a few ways a frame
     if (!options.hidden) audio.open_device();
     state.audio = &audio;
     editor::GameSaves saves; // beside the open world; its job waited for before what it reads goes
@@ -678,6 +679,16 @@ int run(const Options& options) {
         swing.update(weather.wind(), state.camera.position, game_delta);
         nav.update(state.scene); // tiles taken and started, searches moved on (bounded)
         audio.set_weather(weather.shown() ? &*weather.shown() : nullptr, weather.ground());
+        {
+            // The water heard round the camera (as the physics has it: the sea with its swell).
+            const sim::PhysicsWorld& pw = physics.world();
+            const Vec3 wind_v = weather.wind().velocity;
+            const float wind = std::sqrt(wind_v.x * wind_v.x + wind_v.z * wind_v.z);
+            audio.set_water(water_hearing.update(
+                [&pw](double x, double z) { return pw.water_at(x, z); },
+                [&state](double x, double z) { return state.scene.terrain.height_at(x, z); }, state.camera.position,
+                wind, [&pw, &state](double level) { return pw.water_reaches(state.camera.position, level); }));
+        }
         audio.update(state.camera, delta); // heard from the camera (where the player's eyes are in play)
         mark(editor::FramePhase::animation);
         // The game's UI from this frame's camera (the player's eyes, in play): markers meet the scene drawn.
