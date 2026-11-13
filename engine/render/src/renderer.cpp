@@ -3983,6 +3983,7 @@ void Renderer::copy_streaming_stats() {
     m_stats.shadow_drawn = m_shadows_on ? sh.drawn : 0u;
     m_stats.shadow_swayed = m_shadows_on ? sh.swayed : 0u;
     m_stats.shadow_waiting = m_shadows_on ? sh.waiting : 0u;
+    m_stats.shadow_behind = m_shadows_on ? sh.behind : 0u;
     m_stats.shadow_missing = m_shadows_on ? sh.missing : 0u;
     m_stats.shadow_draws = m_shadow_draws;
     const VoxelLightStats& gi = m_light_plan->stats();

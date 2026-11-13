@@ -191,10 +191,12 @@ def light_cost(editor, at, rounds=3):
 
 def settle(editor, frames):
     """Up to `frames` frames, until the voxel world, its light and the
-    shadows have caught up. Returns (last frame, whether they caught up)."""
+    shadows have caught up (shadow pages under things moving all the time,
+    as cloth in a storm, are dirty again every frame: those drawn in turn
+    are not behind). Returns (last frame, whether they caught up)."""
     last = editor.last_frame()
     for _ in range(frames // 10):
-        if last["voxels"]["pending"] == 0 and last["gi"]["waiting"] == 0 and last["shadows"]["waiting"] == 0:
+        if last["voxels"]["pending"] == 0 and last["gi"]["waiting"] == 0 and last["shadows"]["behind"] == 0:
             return last, True
         editor.hover(10)
         last = editor.last_frame()

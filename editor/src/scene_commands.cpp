@@ -592,7 +592,7 @@ Json render_settings_json(const EditorState& state) {
               {"far_field", {{"on", s.far_field}, {"culled", s.far_culled}}},
               {"shadows",
                {{"on", s.shadows}, {"pages", s.shadow_pages}, {"capacity", s.shadow_capacity},
-                {"drawn", s.shadow_drawn}, {"swayed", s.shadow_swayed}, {"waiting", s.shadow_waiting}, {"missing", s.shadow_missing},
+                {"drawn", s.shadow_drawn}, {"swayed", s.shadow_swayed}, {"waiting", s.shadow_waiting}, {"behind", s.shadow_behind}, {"missing", s.shadow_missing},
                 {"draws", s.shadow_draws}}},
               {"gi",
                {{"on", s.gi}, {"lit", s.gi_lit}, {"cleared", s.gi_cleared}, {"waiting", s.gi_waiting},

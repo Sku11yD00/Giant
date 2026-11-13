@@ -774,6 +774,7 @@ struct RenderStats {
     u32 shadow_drawn = 0;     // pages drawn this frame
     u32 shadow_swayed = 0;    // of them, drawn again for what sways on them (RenderSettings::wind_shadow_pages_per_frame)
     u32 shadow_waiting = 0;   // pages asked for or changed, not drawn yet
+    u32 shadow_behind = 0;    // of them, never drawn or changed over 30 frames ago (ShadowStats::behind)
     u32 shadow_missing = 0;   // pages asked for that found no room
     u32 shadow_draws = 0;     // raster passes for them (one per level with pages to draw, two with cut-out materials)
     // Global illumination (this frame, on the CPU).

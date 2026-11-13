@@ -227,8 +227,17 @@ def weather_cost(editor, at, rounds=3):
     whether it caught up, whether the parts went on and off as asked)."""
     editor.tool("set_camera", {"position": at[0], "look_at": at[1]})
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 8.0})
-    streamed = wait_streaming(editor, 6000)[2]
-    caught_up = settle(editor, 6000)[1] and streamed
+    world, scatter, streamed = wait_streaming(editor, 6000)
+    last, settled = settle(editor, 6000)
+    caught_up = settled and streamed
+    if not caught_up:  # what was behind, for the report
+        far = world["far_ground"]
+        print(f"n3_gate: behind: cells reading {world['reading']}, waiting {world['waiting']}, "
+              f"far ground reading {far['reading']}, building {[l['building'] for l in far['levels']]}, "
+              f"scatter building {scatter['building']}, voxels {last['voxels']['pending']} pending, "
+              f"gi {last['gi']['waiting']} waiting, shadows {last['shadows']['waiting']} waiting "
+              f"({last['shadows']['behind']} behind, {last['shadows']['drawn']} drawn, "
+              f"{last['shadows']['missing']} missing)")
     editor.tool("set_render_settings", {"voxel_ms_per_frame": 1.0})
     costs = []
     toggled = True

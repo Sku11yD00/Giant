@@ -3191,7 +3191,12 @@ the view, so every mesh casts at the detail its shadow texels need.
   pages dirty longest, so every level gets its turn however often things
   change (a giant walking through dirties pages on every level each
   frame). A dirty page keeps its old content until redrawn, so a moving
-  caster's shadow may lag a few frames when many pages wait. Right after
+  caster's shadow may lag a few frames when many pages wait. Things that
+  move all the time (cloth and swinging lanterns in a storm) dirty their
+  pages again every frame, so pages always wait there; the stats count as
+  `behind` only pages never drawn or dirty over 30 frames, which is what
+  the gates wait on (the N3 gate's street, its banners and lanterns
+  blowing, never had none waiting on a real GPU). Right after
   the camera jumps (or a new scene) pages are missing for the few frames
   their requests take, and shading falls back to coarser ones or lit.
 - Per level with pages to draw: the pages are cleared, then culled and

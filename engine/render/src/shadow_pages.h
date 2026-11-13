@@ -65,6 +65,11 @@ struct ShadowStats {
     u32 capacity = 0;    // the pool, pages
     u32 drawn = 0;       // pages drawn this frame
     u32 waiting = 0;     // pages asked for or dirty, not drawn yet
+    // Of them, those behind: never drawn, or dirty longer than
+    // k_behind_frames (pages under things that move all the time, as
+    // cloth and swinging lanterns in a storm, are dirty again each frame
+    // and drawn in turn: waiting, not behind, while the budget keeps up).
+    u32 behind = 0;
     u32 missing = 0;     // pages asked for that found no room (pool full of pages in use)
     u32 swayed = 0;      // of drawn, pages drawn again for what sways on them (plan's sway budget)
 };
@@ -78,6 +83,7 @@ struct ShadowWindows {
 class ShadowPages {
 public:
     static constexpr u32 k_page_texels = 128;
+    static constexpr u64 k_behind_frames = 30; // dirty longer: behind (ShadowStats::behind)
     static constexpr u32 k_pages_per_axis = 16;
     static constexpr u32 k_slots = k_pages_per_axis * k_pages_per_axis; // per level
     static constexpr u32 k_no_page = ~0u;

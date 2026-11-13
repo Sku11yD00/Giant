@@ -522,6 +522,11 @@ std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget, u32 sway_budget) {
     }
     m_stats.drawn = u32(count);
     m_stats.waiting = u32(m_waiting.size() - count);
+    m_stats.behind = 0;
+    for (size_t k = count; k < m_waiting.size(); ++k) {
+        const Page& p = m_pages[m_waiting[k]];
+        if (!p.drawn || p.dirty_since + k_behind_frames < m_frame) ++m_stats.behind;
+    }
     // The previous view is needed while any page of this one is still to
     // be drawn for the first time (those drawn this frame are read this
     // frame), and until shading's requests in the new view have come back
@@ -561,6 +566,7 @@ std::vector<ShadowPages::Draw> ShadowPages::plan(u32 budget, u32 sway_budget) {
             Page& p = m_pages[i];
             if (p.dirty && m_stats.waiting > 0) {
                 --m_stats.waiting; // it was waiting too: drawn now
+                if (p.dirty_since + k_behind_frames < m_frame && m_stats.behind > 0) --m_stats.behind;
             }
             p.dirty = false;
             p.draw = true;
