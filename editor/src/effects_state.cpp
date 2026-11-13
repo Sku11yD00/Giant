@@ -175,7 +175,7 @@ void EffectsState::reindex_effects(const world::Scene& scene) {
     for (usize i = scene.effects.size(); i-- > 0;) m_effect_index[scene.effects[i].name] = static_cast<i32>(i); // stand in
 }
 
-const world::Effect* EffectsState::effect_named(const world::Scene& scene, const std::string& name) const {
+const world::Effect* EffectsState::effect_named(const world::Scene& scene, std::string_view name) const {
     const auto it = m_effect_index.find(name);
     if (it == m_effect_index.end()) return nullptr;
     if (it->second >= 0) {
@@ -198,7 +198,8 @@ std::optional<u32> EffectsState::spawn(const world::Scene& scene, std::string_vi
     Spawned s;
     s.id = m_next_spawn++;
     if (m_next_spawn == 0) m_next_spawn = 1;
-    s.effect = *effect;
+    std::copy(effect->name.begin(), effect->name.end(), s.name.begin()); // (effect_name_ok: at most k_max_effect_name_bytes)
+    s.name_bytes = static_cast<u8>(effect->name.size());
     s.position = position;
     s.rotation = rotation;
     s.rate = rate;
@@ -259,9 +260,16 @@ void EffectsState::update(const world::Scene& scene, const DVec3& camera, double
     for (Spawned& s : m_spawned) {
         const double d2 = distance2(s.position);
         if (!(d2 <= reach2) || m_jobs.size() == m_jobs.capacity()) continue; // (its time still runs out)
+        const world::Effect* effect = effect_named(scene, s.effect());
+        if (effect == nullptr) { // removed since: it ends
+            ++m_stats.missing;
+            s.burst = false;
+            s.left = 0.0;
+            continue;
+        }
         Job j;
         j.distance2 = d2;
-        j.effect = &s.effect;
+        j.effect = effect;
         j.position = s.position;
         j.rotation = s.rotation;
         j.rate = s.rate;

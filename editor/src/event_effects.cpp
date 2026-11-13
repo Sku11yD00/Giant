@@ -49,14 +49,18 @@ Quat turn_up_to(const Vec3& n) {
     return normalize(Quat{n.z, 0.0f, -n.x, 1.0f + d});
 }
 
-std::optional<DVec3> running_step(double& walked, const sim::CharacterState& player, const world::Ground& ground,
-                                  double seconds) {
-    if (!player.on_ground || player.climbing || player.swimming || player.water_depth > 0.05f) {
+std::optional<DVec3> running_step(double& walked, const sim::CharacterState& player, world::Surface under,
+                                  const world::Ground& ground, double seconds) {
+    if (!player.on_ground || player.climbing || player.swimming || player.water_depth > 0.05f ||
+        player.carrier != sim::k_no_body || under != world::Surface::dirt || !std::isfinite(walked)) {
         walked = 0.0;
         return std::nullopt;
     }
     const float speed = std::sqrt(player.velocity.x * player.velocity.x + player.velocity.z * player.velocity.z);
-    if (!(seconds > 0.0) || !(speed >= k_running) || ground.wetness > 0.3f || ground.snow_cover > 0.2f) return std::nullopt;
+    if (!std::isfinite(seconds) || !(seconds > 0.0) || !std::isfinite(speed) || !(speed >= k_running) ||
+        ground.wetness > 0.3f || ground.snow_cover > 0.2f) {
+        return std::nullopt;
+    }
     walked += static_cast<double>(speed) * seconds;
     if (walked < k_stride) return std::nullopt;
     walked = std::fmod(walked, k_stride);
@@ -64,7 +68,8 @@ std::optional<DVec3> running_step(double& walked, const sim::CharacterState& pla
 }
 
 void connect_event_effects(EditorState& state) {
-    if (state.physics == nullptr) return;
+    if (state.physics == nullptr || state.effects == nullptr || state.effects->events_connected) return;
+    state.effects->events_connected = true;
     std::function<void(std::span<const PhysicsState::ShotHit>)> before = state.physics->on_hits;
     state.physics->on_hits = [&state, before](std::span<const PhysicsState::ShotHit> hits) {
         if (before) before(hits);
@@ -115,7 +120,10 @@ void event_effects_frame(EditorState& state, double seconds) {
         return;
     }
     const world::Ground ground = state.weather != nullptr ? state.weather->ground() : world::Ground{};
-    const std::optional<DVec3> step = running_step(state.effects->walked, *p, ground, seconds);
+    sim::RayHit stood;
+    stood.body = p->ground; // (none: the ground's tiles)
+    const world::Surface under = state.physics->surface_of(stood);
+    const std::optional<DVec3> step = running_step(state.effects->walked, *p, under, ground, seconds);
     if (!step) return;
     ++state.effects->events.steps;
     spawn(state, "dust_kick", *step, {}, 0.25f);

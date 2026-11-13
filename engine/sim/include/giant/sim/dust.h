@@ -60,11 +60,12 @@ inline constexpr Vec3 k_dust_earth{0.42f, 0.37f, 0.3f};
 // What threw it up (effects follow it: chips off rubble, leaves off a tree).
 enum class DustSource : u8 { rubble, ground, tree };
 
-// One emit, kept for what follows them (the editor's particle effects):
-// those taken (not past emits_per_step), at most k_max_dust_events between
-// clear_events() calls (the rest counted in DustStats::events_dropped).
+// One emit making a new puff, kept for what follows them (the editor's
+// particle effects): not those past emits_per_step nor those swelling a
+// young puff (a trunk bouncing: one event), at most k_max_dust_events
+// between clear_events() calls (the rest counted in DustStats::events_dropped).
 struct DustEvent {
-    DVec3 at{};
+    DVec3 at{}; // where it was thrown up from (the puff's middle less `raised`)
     float radius = 1.0f;
     DustSource source = DustSource::rubble;
 };
@@ -76,9 +77,10 @@ public:
 
     // A puff at `at`: `radius` metres, `density` per metre at its centre
     // (about 3 / radius hides what is behind its middle). Bad numbers are
-    // left out. Its life follows its size (8 to 30 seconds).
+    // left out. Its life follows its size (8 to 30 seconds). `raised`:
+    // metres its middle is above where it was thrown up from (its event's).
     void emit(const DVec3& at, float radius, float density, const Vec3& color = k_dust_rubble,
-              DustSource source = DustSource::rubble);
+              DustSource source = DustSource::rubble, float raised = 0.0f);
     // The emits since the last clear_events() (oldest first).
     const std::vector<DustEvent>& events() const { return m_events; }
     void clear_events() { m_events.clear(); }

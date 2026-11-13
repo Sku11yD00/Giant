@@ -34,13 +34,16 @@ HitEffect hit_effect(world::Surface surface, float energy);
 Quat turn_up_to(const Vec3& normal);
 
 // Chained after what is there on the physics' on_hits and on_splashes
-// (call once, after connect_sounds).
+// (after connect_blows, which sets on_hits, and connect_sounds; with the
+// effects there; once only: called again it does nothing).
 // The player's running feet: `walked` (metres since the last step that
 // kicked dust) runs on with its speed over the ground while running (3 m/s
-// or more) on dry bare ground; each 1.6 m, where the dust goes (its feet).
-// Off the ground, climbing or in water starts it over.
-std::optional<DVec3> running_step(double& walked, const sim::CharacterState& player, const world::Ground& ground,
-                                  double seconds);
+// or more) on dry bare ground (`under`, what it stands on, dirt: the
+// terrain, or a thing made of it); each 1.6 m, where the dust goes (its
+// feet). Off the ground, on anything else, carried, climbing or in water
+// starts it over.
+std::optional<DVec3> running_step(double& walked, const sim::CharacterState& player, world::Surface under,
+                                  const world::Ground& ground, double seconds);
 
 void connect_event_effects(EditorState& state);
 // Each frame, before the effects update: the dust thrown up since the last

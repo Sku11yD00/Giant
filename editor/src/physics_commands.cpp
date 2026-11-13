@@ -130,7 +130,8 @@ Json physics_json(const EditorState& state) {
             {"ground",
              {{"dents", p.ground().dents()}, {"tiles", p.ground().tiles()}, {"game", p.game_ground().tiles()}}},
             {"kept", kept_json(state.scene, s, f)},
-            {"dust", {{"puffs", d.puffs}, {"emitted", d.emitted}, {"merged", d.merged}, {"dropped", d.dropped}}},
+            {"dust", {{"puffs", d.puffs}, {"emitted", d.emitted}, {"merged", d.merged}, {"dropped", d.dropped},
+                      {"events_dropped", d.events_dropped}}},
             {"wet", wet_json(p)}};
 }
 

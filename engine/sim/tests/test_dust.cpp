@@ -103,22 +103,24 @@ GIANT_TEST("dust: emits into one puff step after step swell it smoothly, never p
 GIANT_TEST("dust: emits kept as events with what threw them up, bounded, until taken or cleared") {
     DustSettings settings;
     settings.emits_per_step = 4;
+    settings.max_puffs = 1024;
     Dust dust(settings);
-    dust.emit({1.0, 2.0, 3.0}, 500.0f, 0.1f, k_dust_earth, DustSource::tree); // past max_radius: kept at it
-    dust.emit({4.0, 0.0, 0.0}, 1.0f, 0.1f);
+    dust.emit({1.0, 2.0, 3.0}, 500.0f, 0.1f, k_dust_earth, DustSource::tree, 1.5f); // past max_radius: kept at it
+    dust.emit({1.0, 2.0, 3.0}, 10.0f, 0.1f, k_dust_earth, DustSource::tree); // swelling it: no event
+    dust.emit({4000.0, 0.0, 0.0}, 1.0f, 0.1f);
     dust.emit({0.0, 0.0, 0.0}, -1.0f, 0.1f); // bad: no event
     GIANT_CHECK(dust.events().size() == 2);
     GIANT_CHECK(dust.events().size() == 2 && dust.events()[0].source == DustSource::tree &&
-                dust.events()[0].at == (DVec3{1.0, 2.0, 3.0}) && dust.events()[0].radius == settings.max_radius);
+                dust.events()[0].at == (DVec3{1.0, 0.5, 3.0}) && dust.events()[0].radius == settings.max_radius);
     GIANT_CHECK(dust.events().size() == 2 && dust.events()[1].source == DustSource::rubble);
-    for (int i = 0; i < 4; ++i) dust.emit({0.0, 0.0, 10.0 * i}, 1.0f, 0.1f); // past emits_per_step: none
-    GIANT_CHECK(dust.events().size() == 4);
+    for (int i = 0; i < 4; ++i) dust.emit({-5000.0, 0.0, 10.0 * i}, 1.0f, 0.1f); // past emits_per_step: none
+    GIANT_CHECK(dust.events().size() == 3);
     dust.clear_events();
     GIANT_CHECK(dust.events().empty() && !dust.puffs().empty());
     // At most k_max_dust_events between takings, the rest counted.
     for (u32 i = 0; i < k_max_dust_events + 10; ++i) {
         dust.step(0.01f, {});
-        dust.emit({100.0 * i, 0.0, 0.0}, 1.0f, 0.1f, k_dust_earth, DustSource::ground);
+        dust.emit({10000.0 + 100.0 * i, 0.0, 0.0}, 1.0f, 0.1f, k_dust_earth, DustSource::ground);
     }
     GIANT_CHECK(dust.events().size() == k_max_dust_events && dust.stats().events_dropped == 10);
     dust.clear();

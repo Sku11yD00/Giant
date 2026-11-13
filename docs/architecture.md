@@ -2349,7 +2349,8 @@ the renderer's particle bursts each frame, on the game's clock (paused:
 nothing born, and those alive stand still: `FrameInput::particle_seconds`;
 a frame not drawn hands its births and seconds to the next). It follows the scene's changes for entities whose effect is
 on (never scanning every entity a frame) and keeps spawned effects
-(`spawn_effect`, at most 256; a copy of the effect as it was). Effects
+(`spawn_effect`, at most 256, held in place so a spawn never allocates; by
+name, so an edit made while one runs is followed and one removed ends it). Effects
 farther than 1000 m from the camera run nothing; the rest go nearest first
 within budgets of 8,192 births a frame and 2,048 that stop on the ground
 (where there is ground under them)
@@ -2378,12 +2379,15 @@ and the rest; chips off glass; splinters off wood; a few leaves off
 foliage; dust and chips off dirt; nothing off flesh), more for a round
 leaving more energy (a rifle round's 3 kJ as built, 0.3 to 2 times); what
 goes into water throws spray by its size and speed (a person jumping in as
-built, up to four times); every dust emit (`sim::Dust` keeps up to 256 as
-`DustEvent`s between takings, with what threw it up: rubble, ground or a
-tree) throws chips off a collapse, leaves off a felled tree, dust and chips
-off a crater or an uprooting, by its radius; and the player running (3 m/s
-or more) on dry bare ground (not wet past 0.3, snow past 0.2, nor in water)
-kicks a little dust every 1.6 m. They chain after the sounds on the
+built, up to four times); every new dust puff (`sim::Dust` keeps up to 256
+as `DustEvent`s between takings, with what threw it up, rubble, ground or a
+tree, and where from: the ground under the puff; emits swelling a young
+puff, as a trunk bouncing, are none) throws chips off a collapse, leaves off
+a felled tree, dust and chips off a crater or an uprooting, by its radius;
+and the player running (3 m/s or more) on dry bare ground (dirt: the
+terrain, or what is made of it; not wet past 0.3, snow past 0.2, nor in
+water, nor carried) kicks a little dust every 1.6 m. Spawning allocates
+nothing (spawned effects keep their effect's name in place). They chain after the sounds on the
 physics' `on_hits` and `on_splashes`; the dust is taken each frame before
 the effects update. `get_effects` counts them (`emitting.events`), those
 left out past the cap too.

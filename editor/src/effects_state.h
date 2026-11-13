@@ -63,6 +63,7 @@ public:
     };
     EventCounts events;
     double walked = 0.0; // metres the player ran since its last step kicked dust
+    bool events_connected = false; // connect_event_effects done (once only)
 
     double reach = k_default_reach;
     u32 births_per_frame = render::k_max_particles_born / 2;       // the rest for events (FX3)
@@ -106,7 +107,11 @@ private:
     };
     struct Spawned {
         u32 id = 0;
-        world::Effect effect; // a copy: it runs as it was when spawned
+        // Its effect, by name (an edit while it runs is followed; gone, it
+        // ends): held in place, so spawning never allocates.
+        std::array<char, world::k_max_effect_name_bytes> name{};
+        u8 name_bytes = 0;
+        std::string_view effect() const { return {name.data(), name_bytes}; }
         DVec3 position{};
         Quat rotation{};
         float rate = 1.0f;
@@ -133,7 +138,7 @@ private:
     void spawned_in(const world::Scene& scene); // another scene's spawned ones forgotten
     void restyle(const world::Scene& scene);
     void reindex_effects(const world::Scene& scene);
-    const world::Effect* effect_named(const world::Scene& scene, const std::string& name) const;
+    const world::Effect* effect_named(const world::Scene& scene, std::string_view name) const;
     void run(const Job& job, const Ground& ground);
     void emit(const world::Emitter& e, u32 style, u32 count, const Job& job, u32 emitter, const Ground& ground);
 

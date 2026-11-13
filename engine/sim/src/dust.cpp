@@ -16,7 +16,7 @@ float strength(const DustPuff& p) {
 
 } // namespace
 
-void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color, DustSource source) {
+void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color, DustSource source, float raised) {
     if (!finite(at) || !std::isfinite(radius) || !std::isfinite(density) || radius <= 0.0f || density <= 0.0f) return;
     if (m_settings.max_puffs == 0) return;
     if (m_emits >= m_settings.emits_per_step) {
@@ -25,11 +25,6 @@ void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color,
     }
     ++m_emits;
     radius = std::min(radius, m_settings.max_radius);
-    if (m_events.size() < k_max_dust_events) {
-        m_events.push_back({at, radius, source});
-    } else {
-        ++m_events_dropped;
-    }
     density = std::min(density, 10.0f);
     const Vec3 c{std::clamp(color.x, 0.0f, 1.0f), std::clamp(color.y, 0.0f, 1.0f), std::clamp(color.z, 0.0f, 1.0f)};
     // Inside a young puff: it swells to take this one in.
@@ -53,6 +48,13 @@ void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color,
         p.life = std::max(p.life, std::clamp(6.0f + reach, 8.0f, 30.0f));
         ++m_merged;
         return;
+    }
+    // A new puff (not one swelling a young one): an event.
+    if (m_events.size() < k_max_dust_events) {
+        const float lift = std::isfinite(raised) ? std::clamp(raised, 0.0f, 1000.0f) : 0.0f;
+        m_events.push_back({at - DVec3{0.0, static_cast<double>(lift), 0.0}, radius, source});
+    } else {
+        ++m_events_dropped;
     }
     DustPuff p;
     p.position = at;
