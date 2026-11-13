@@ -217,6 +217,37 @@ std::vector<ParticleLook> make_looks() {
         l.soft = 0.02f;
         out.push_back(l);
     }
+    {
+        ParticleLook l = look("rain_splash"); // a raindrop's crown off the ground: tiny drops hopping up
+        l.life_min = 0.15f;
+        l.life_max = 0.3f;
+        l.size_start = 0.015f;
+        l.size_end = 0.01f;
+        l.color_start = {0.75f, 0.8f, 0.85f};
+        l.color_end = {0.75f, 0.8f, 0.85f};
+        l.opacity_start = 0.6f;
+        l.opacity_end = 0.0f;
+        l.form = ParticleForm::streak;
+        l.wind = 0.2f;
+        l.soft = 0.01f;
+        out.push_back(l);
+    }
+    {
+        ParticleLook l = look("grit"); // dust and grit blown along the ground in a storm
+        l.life_min = 1.5f;
+        l.life_max = 3.0f;
+        l.size_start = 0.15f;
+        l.size_end = 0.8f;
+        l.color_start = {0.5f, 0.45f, 0.36f};
+        l.color_end = {0.55f, 0.5f, 0.42f};
+        l.opacity_start = 0.35f;
+        l.opacity_end = 0.0f;
+        l.gravity = 0.05f;
+        l.drag = 3.0f;
+        l.wobble = 0.3f;
+        l.soft = 0.3f;
+        out.push_back(l);
+    }
     return out;
 }
 
@@ -284,6 +315,13 @@ std::vector<Effect> make_effects() {
         e.shape = EmitterShape::sphere;
         e.size = {3.0f, 0.0f, 0.0f};
         out.push_back({"leaves", {e}, 0.0f, {}});
+    }
+    out.push_back({"rain_splash", {emitter("rain_splash", 0.0f, 3, 50.0f, 0.8f, 1.6f, true)}, 0.0f, {}});
+    {
+        Emitter e = emitter("grit", 20.0f, 0, 60.0f, 0.2f, 1.0f, false);
+        e.shape = EmitterShape::disc;
+        e.size = {2.0f, 0.0f, 0.0f};
+        out.push_back({"grit", {e}, 5.0f, {}});
     }
     return out;
 }

@@ -57,6 +57,7 @@ class AnimationState;
 class ClothState;
 class SwingState;
 class EffectsState;
+class WeatherEffects;
 class NavState;
 class WalkerState;
 class GameUi;
@@ -243,6 +244,9 @@ struct EditorState {
     // Effects given birth to (entities' and spawned: spawn_effect); set by
     // main (and tests). Null: nothing is emitted.
     EffectsState* effects = nullptr;
+    // The weather's particles (rain splashes, storm leaves and grit); set by
+    // main (and tests). Null: none.
+    WeatherEffects* weather_effects = nullptr;
     // Where people can walk and paths over it; set by main (and tests).
     // Null: no navigation.
     NavState* nav = nullptr;

@@ -53,6 +53,8 @@ public:
         u32 born = 0;         // particles asked for
         u32 cut = 0;          // particles left out: past the budgets or the burst cap
         u32 missing = 0;      // emitters (or entity effects) naming a look (an effect) found nowhere; spawned ones whose effect went
+        u32 weather = 0;      // particles the weather gave (add_burst)
+        u32 weather_cut = 0;  // the weather's left out: past its budgets, the burst cap, or a look found nowhere
         u32 lights = 0;       // effect lights given (lights())
         u32 lights_cut = 0;   // left out: past k_max_effect_lights
     };
@@ -70,8 +72,11 @@ public:
     bool events_connected = false; // connect_event_effects done (once only)
 
     double reach = k_default_reach;
-    u32 births_per_frame = render::k_max_particles_born / 2;       // the rest for events (FX3)
+    u32 births_per_frame = render::k_max_particles_born / 2;       // shared with the events' spawns; an eighth for the weather
     u32 grounded_per_frame = render::k_max_particles_grounded / 2;
+    // The weather's own budgets (add_burst), apart from the effects' (both within the renderer's caps).
+    u32 weather_births_per_frame = render::k_max_particles_born / 8;
+    u32 weather_grounded_per_frame = render::k_max_particles_grounded / 8;
 
     EffectsState();
 
@@ -89,6 +94,12 @@ public:
     // its rates for its duration. Null: no such effect, bad numbers, or the cap.
     std::optional<u32> spawn(const world::Scene& scene, std::string_view effect, const DVec3& position,
                              const Quat& rotation = {}, float rate = 1.0f, float bursts = 1.0f);
+    // One burst of a look (the scene's, else built-in) from outside the
+    // effects (the weather's splashes, leaves and grit): `burst`'s style is
+    // set here, its ground counts it as landing. Within the weather's budgets
+    // (all or nothing) and the burst cap; false: left out (counted). Call
+    // after update, before the bursts are taken.
+    bool add_burst(std::string_view look, render::ParticleBurst burst);
     // Everything spawned forgotten, carries reset; the next follow looks over
     // every entity again.
     void clear();
@@ -177,6 +188,8 @@ private:
     u32 m_next_spawn = 1;
     u32 m_born = 0;
     u32 m_grounded = 0;
+    u32 m_weather_born = 0;
+    u32 m_weather_grounded = 0;
     bool m_taken = true;
     Stats m_stats;
 };

@@ -4,6 +4,7 @@
 #include "../src/editor_commands.h"
 #include "../src/effects_state.h"
 #include "../src/event_effects.h"
+#include "../src/weather_effects.h"
 #include "../src/physics_state.h"
 #include "../src/mesh_library.h"
 
@@ -855,4 +856,259 @@ GIANT_TEST("effect lights: set_effect sets the light's fields given, refuses bad
     GIANT_CHECK(r.ok && r.value["light"]["on"] == true && f.state.scene.effects.back().light == world::find_effect({}, "fire")->light);
     r = f.run("create_effect", {{"name", "smoke"}, {"emitters", Json::array({{{"look", "smoke"}}})}});
     GIANT_CHECK(r.ok && r.value["light"]["on"] == false);
+}
+
+// --- The weather's particles (effects plan FX4b) --------------------------------
+
+namespace {
+
+world::Weather rain_of(float precipitation, float temperature = 10.0f) {
+    world::Weather w;
+    w.precipitation = precipitation;
+    w.temperature = temperature;
+    return w;
+}
+
+WindState wind_of(float x, float z) {
+    WindState w;
+    w.velocity = {x, 0.0f, z};
+    return w;
+}
+
+const WeatherEffects::Water k_no_water = [](double, double) { return std::optional<double>(); };
+const WeatherEffects::Sheltered k_open = [](const DVec3&) { return false; };
+const WeatherEffects::Surface k_nothing = [](double, double, double, double) { return std::optional<double>(); };
+
+// The bursts of one look this frame.
+u32 bursts_of(const EffectsState& fx, std::string_view look) {
+    const std::optional<u32> style = fx.style_index(look);
+    u32 n = 0;
+    for (const render::ParticleBurst& b : fx.bursts()) n += style && b.style == *style ? 1u : 0u;
+    return n;
+}
+
+} // namespace
+
+GIANT_TEST("weather effects: rain splashes on what it falls on round the camera; none on water, snow or in the cold") {
+    world::Scene scene;
+    EffectsState fx;
+    WeatherEffects wx;
+    const DVec3 camera{100.0, 5.0, -40.0};
+    const auto frame = [&](const std::optional<world::Weather>& w, const world::Ground& g, double seconds,
+                           const WeatherEffects::Water& water, const WeatherEffects::Surface& surface) {
+        fx.update(scene, camera, seconds, k_flat);
+        wx.update(fx, w, g, wind_of(1.0f, 0.0f), camera, seconds, k_flat, water, surface, k_open);
+        (void)fx.take();
+    };
+    // The hardest rain: 600 a second, 64 at most a frame; each 3 drops hopping up off the ground there.
+    u32 total = 0;
+    for (int i = 0; i < 60; ++i) {
+        frame(rain_of(1.0f), {}, 1.0 / 60.0, k_no_water, k_nothing);
+        total += wx.stats().splashes;
+        GIANT_CHECK(bursts_of(fx, "rain_splash") == wx.stats().splashes);
+        for (const render::ParticleBurst& b : fx.bursts()) {
+            const double dx = b.position.x - camera.x, dz = b.position.z - camera.z;
+            GIANT_CHECK(dx * dx + dz * dz <= WeatherEffects::k_splash_radius * WeatherEffects::k_splash_radius + 1e-6);
+            GIANT_CHECK(b.count == 3 && std::abs(b.position.y - 0.02) < 1e-9 && b.ground < 0.0 && b.ground > -0.01);
+        }
+    }
+    GIANT_CHECK(total >= 598 && total <= 601);
+    GIANT_CHECK(fx.stats().weather == 3 * wx.stats().splashes && fx.stats().weather_cut == 0);
+    // Half as hard: half as many. A long frame: no more than 64.
+    total = 0;
+    for (int i = 0; i < 60; ++i) {
+        frame(rain_of(0.5f), {}, 1.0 / 60.0, k_no_water, k_nothing);
+        total += wx.stats().splashes;
+    }
+    GIANT_CHECK(total >= 298 && total <= 302);
+    frame(rain_of(1.0f), {}, 1.0, k_no_water, k_nothing);
+    GIANT_CHECK(wx.stats().splashes == WeatherEffects::k_max_splashes);
+    // A roof 3 m up everywhere: on it, looked down on from 30 m over the camera to under the terrain.
+    double asked_from = 0.0, asked_for = 0.0;
+    const WeatherEffects::Surface roof = [&](double, double, double from_y, double distance) {
+        asked_from = from_y;
+        asked_for = distance;
+        return std::optional<double>(3.0);
+    };
+    frame(rain_of(1.0f), {}, 0.1, k_no_water, roof);
+    GIANT_CHECK(wx.stats().splashes == 60 && asked_from == camera.y + WeatherEffects::k_splash_top &&
+                asked_for == asked_from + 1.0);
+    for (const render::ParticleBurst& b : fx.bursts()) GIANT_CHECK(std::abs(b.position.y - 3.02) < 1e-9);
+    // Begun inside something tall (a tower over the top): blocked, none. Something buried: on the terrain.
+    const WeatherEffects::Surface inside = [](double, double, double from_y, double) { return std::optional<double>(from_y); };
+    frame(rain_of(1.0f), {}, 0.1, k_no_water, inside);
+    GIANT_CHECK(wx.stats().splashes == 0);
+    const WeatherEffects::Surface buried = [](double, double, double, double) { return std::optional<double>(-0.5); };
+    frame(rain_of(1.0f), {}, 0.1, k_no_water, buried);
+    GIANT_CHECK(wx.stats().splashes == 60);
+    for (const render::ParticleBurst& b : fx.bursts()) GIANT_CHECK(std::abs(b.position.y - 0.02) < 1e-9);
+    // In a tunnel 40 m under the ground, or flown 200 m over it: none.
+    const EffectsState::Ground high = [](double, double) { return std::optional<double>(45.0); };
+    fx.update(scene, camera, 0.1, k_flat);
+    wx.update(fx, rain_of(1.0f), {}, wind_of(1.0f, 0.0f), camera, 0.1, high, k_no_water, roof, k_open);
+    GIANT_CHECK(wx.stats().splashes == 0);
+    (void)fx.take();
+    const EffectsState::Ground low = [](double, double) { return std::optional<double>(-200.0); };
+    fx.update(scene, camera, 0.1, k_flat);
+    wx.update(fx, rain_of(1.0f), {}, wind_of(1.0f, 0.0f), camera, 0.1, low, k_no_water, roof, k_open);
+    GIANT_CHECK(wx.stats().splashes == 0);
+    (void)fx.take();
+    // On water, past half snow, below freezing, paused: none.
+    const WeatherEffects::Water pond = [](double, double) { return std::optional<double>(0.5); };
+    frame(rain_of(1.0f), {}, 0.1, pond, k_nothing);
+    GIANT_CHECK(wx.stats().splashes == 0 && wx.stats().on_water == 60);
+    frame(rain_of(1.0f), {0.0f, 0.6f}, 0.1, k_no_water, k_nothing);
+    GIANT_CHECK(wx.stats().splashes == 0);
+    frame(rain_of(1.0f, -3.0f), {}, 0.1, k_no_water, k_nothing);
+    GIANT_CHECK(wx.stats().splashes == 0);
+    frame(rain_of(1.0f), {}, 0.0, k_no_water, k_nothing);
+    GIANT_CHECK(wx.stats().splashes == 0 && fx.bursts().empty());
+    frame(std::nullopt, {}, 0.1, k_no_water, k_nothing); // no weather shown: the default's, dry
+    GIANT_CHECK(wx.stats().splashes == 0);
+    // As the weather draws it: at 1 degree two thirds rain; sleet at -0.5 still a little.
+    GIANT_CHECK(WeatherEffects::rain(rain_of(1.0f, 1.0f)) == world::falling(rain_of(1.0f, 1.0f)).rain);
+    GIANT_CHECK(std::abs(WeatherEffects::rain(rain_of(1.0f, 1.0f)) - 2.0f / 3.0f) < 1e-6f);
+    GIANT_CHECK(WeatherEffects::rain(rain_of(1.0f, -0.5f)) > 0.0f && WeatherEffects::rain(rain_of(1.0f, -1.0f)) == 0.0f);
+}
+
+GIANT_TEST("weather effects: a storm blows leaves and grit past the camera; grit only off dry bare ground") {
+    world::Scene scene;
+    EffectsState fx;
+    WeatherEffects wx;
+    const DVec3 camera{0.0, 2.0, 0.0};
+    WeatherEffects::Sheltered sheltered = k_open;
+    EffectsState::Ground ground = k_flat;
+    const auto frame = [&](const WindState& wind, const world::Ground& g, double seconds) {
+        fx.update(scene, camera, seconds, k_flat);
+        wx.update(fx, rain_of(0.0f), g, wind, camera, seconds, ground, k_no_water, k_nothing, sheltered);
+        (void)fx.take();
+    };
+    // A breeze: nothing. A gale blowing east (+X): 40 leaves and 120 grit a second, from upwind (west).
+    frame(wind_of(6.0f, 0.0f), {}, 1.0 / 60.0);
+    GIANT_CHECK(wx.stats().leaves == 0 && wx.stats().grit == 0);
+    GIANT_CHECK(WeatherEffects::storm(wind_of(14.0f, 0.0f)) == 0.5f);
+    u32 leaves = 0, grit = 0;
+    double mean_x = 0.0;
+    u32 count = 0;
+    for (int i = 0; i < 120; ++i) {
+        frame(wind_of(25.0f, 0.0f), {}, 1.0 / 60.0);
+        leaves += wx.stats().leaves;
+        grit += wx.stats().grit;
+        for (const render::ParticleBurst& b : fx.bursts()) {
+            GIANT_CHECK(b.velocity.x == 20.0f && b.velocity.z == 0.0f && b.position.y > 0.0 && b.position.y < 2.6);
+            mean_x += b.position.x;
+            ++count;
+        }
+    }
+    GIANT_CHECK(leaves >= 78 && leaves <= 81 && grit >= 238 && grit <= 241);
+    GIANT_CHECK(count > 0 && mean_x / count < -6.0); // centred 12 m upwind
+    // Wet or snowy ground: leaves still, no grit.
+    leaves = grit = 0;
+    for (int i = 0; i < 60; ++i) {
+        frame(wind_of(25.0f, 0.0f), {1.0f, 0.0f}, 1.0 / 60.0);
+        leaves += wx.stats().leaves;
+        grit += wx.stats().grit;
+    }
+    GIANT_CHECK(leaves >= 38 && grit == 0);
+    // Off a slab's top (0.4 m over the ground everywhere), looked under from there.
+    WeatherEffects::Surface slab = [](double, double, double, double) { return std::optional<double>(0.4); };
+    double sheltered_from = 0.0;
+    sheltered = [&](const DVec3& p) {
+        sheltered_from = p.y;
+        return false;
+    };
+    fx.update(scene, camera, 0.1, k_flat);
+    wx.update(fx, rain_of(0.0f), {}, wind_of(25.0f, 0.0f), camera, 0.1, k_flat, k_no_water, slab, sheltered);
+    GIANT_CHECK(!fx.bursts().empty() && sheltered_from == 0.4);
+    for (const render::ParticleBurst& b : fx.bursts()) GIANT_CHECK(b.position.y >= 0.4 + 0.2 - 1e-9);
+    (void)fx.take();
+    // Indoors (something overhead everywhere): none, counted.
+    sheltered = [](const DVec3&) { return true; };
+    frame(wind_of(25.0f, 0.0f), {}, 0.5);
+    GIANT_CHECK(wx.stats().leaves == 0 && wx.stats().grit == 0 && wx.stats().sheltered == 2 * WeatherEffects::k_max_debris);
+    sheltered = k_open;
+    // Ground falling away downwind (1 m lower each 10 m east): they stop on the lowest of it ahead, not in the air.
+    ground = [](double x, double) { return std::optional<double>(-0.1 * x); };
+    frame(wind_of(25.0f, 0.0f), {}, 0.1);
+    GIANT_CHECK(!fx.bursts().empty());
+    for (const render::ParticleBurst& b : fx.bursts()) GIANT_CHECK(b.ground < b.position.y - 6.0);
+    // None born under the ground: the spread within the lowest height (and the slope across it).
+    for (const render::ParticleBurst& b : fx.bursts()) {
+        const double s = static_cast<double>(b.spread);
+        GIANT_CHECK(b.position.y - s >= -0.1 * b.position.x - 0.1 * s);
+    }
+}
+
+GIANT_TEST("weather effects: within their own budgets, apart from the effects'; the same frames give the same bursts") {
+    world::Scene scene;
+    EffectsState fx;
+    fx.update(scene, {}, 0.1, k_flat);
+    render::ParticleBurst b;
+    b.count = 1000;
+    GIANT_CHECK(fx.add_burst("grit", b) && fx.add_burst("grit", b));
+    GIANT_CHECK(!fx.add_burst("grit", b) && fx.stats().weather == 2000 && fx.stats().weather_cut == 1000); // 2,048 a frame
+    b.count = 0xFFFFFFF0u; // (no overflow past the budget, nor in the count)
+    GIANT_CHECK(!fx.add_burst("grit", b) && fx.stats().weather_cut == ~0u);
+    // Not drawn: the next update keeps these and their counts (no more room).
+    fx.update(scene, {}, 0.1, k_flat);
+    b.count = 100;
+    GIANT_CHECK(!fx.add_burst("grit", b));
+    (void)fx.take();
+    fx.update(scene, {}, 0.1, k_flat); // drawn: a new frame, budgets anew
+    b.count = 500;
+    b.ground = 0.0;
+    GIANT_CHECK(fx.add_burst("grit", b)); // landing ones: 512 a frame
+    b.count = 13;
+    GIANT_CHECK(!fx.add_burst("grit", b));
+    b.count = 12;
+    GIANT_CHECK(fx.add_burst("grit", b));
+    b.ground = -1.0e30; // not landing: the rest of the 2,048
+    b.count = 1536;
+    GIANT_CHECK(fx.add_burst("grit", b));
+    b.count = 1;
+    GIANT_CHECK(!fx.add_burst("grit", b));
+    GIANT_CHECK(!fx.add_burst("no such look", b));
+    // Determinism: two runs of the same frames give the same bursts.
+    const auto run = [&] {
+        EffectsState a;
+        WeatherEffects w;
+        std::vector<render::ParticleBurst> all;
+        for (int i = 0; i < 30; ++i) {
+            a.update(scene, {}, 1.0 / 30.0, k_flat);
+            w.update(a, rain_of(0.8f), {}, wind_of(18.0f, 5.0f), {}, 1.0 / 30.0, k_flat, k_no_water, k_nothing, k_open);
+            for (const render::ParticleBurst& p : a.take()) all.push_back(p);
+        }
+        return all;
+    };
+    const std::vector<render::ParticleBurst> first = run(), second = run();
+    GIANT_CHECK(!first.empty() && first.size() == second.size());
+    bool same = true;
+    for (usize i = 0; i < first.size() && i < second.size(); ++i) {
+        same = same && first[i].seed == second[i].seed && first[i].position.x == second[i].position.x &&
+               first[i].style == second[i].style;
+    }
+    GIANT_CHECK(same);
+}
+
+GIANT_TEST("weather effects: the physics' probes: the first surface down, something overhead, the water's level") {
+    JobSystem jobs(2);
+    sim::PhysicsWorld physics(jobs);
+    sim::BodyDesc roof;
+    roof.position = {0.0, 4.0, 0.0};
+    roof.parts.push_back({sim::BoxShape{{5.0f, 0.2f, 5.0f}}});
+    physics.add(roof);
+    world::Water pond;
+    pond.name = "pond";
+    pond.kind = world::WaterKind::lake;
+    pond.level = 0.5f;
+    pond.outline = {{20.0, -5.0}, {30.0, -5.0}, {30.0, 5.0}, {20.0, 5.0}};
+    const std::vector<world::Water> water{pond};
+    physics.set_water(water);
+    const std::optional<double> on_roof = WeatherEffects::surface_in(physics, 1.0, 1.0, 30.0, 40.0);
+    GIANT_CHECK(on_roof && std::abs(*on_roof - 4.2) < 1e-3);
+    GIANT_CHECK(!WeatherEffects::surface_in(physics, 10.0, 1.0, 30.0, 40.0)); // past it: nothing (the terrain then)
+    GIANT_CHECK(!WeatherEffects::surface_in(physics, 1.0, 1.0, 30.0, 10.0));  // not that far down
+    GIANT_CHECK(WeatherEffects::sheltered_in(physics, {1.0, 0.0, 1.0}) && !WeatherEffects::sheltered_in(physics, {10.0, 0.0, 1.0}));
+    const std::optional<double> level = WeatherEffects::water_in(physics, 25.0, 0.0);
+    GIANT_CHECK(level && std::abs(*level - 0.5) < 1e-6 && !WeatherEffects::water_in(physics, 0.0, 0.0));
 }
