@@ -942,6 +942,27 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
             GIANT_CHECK(std::abs(int{stamped[lit]} - int{pixels[lit]}) <= 2); // outside the stamp: unchanged
         }
     }
+    // The sphere's lower half wet (a wet decal's box from below it up to
+    // its middle): darker there, untouched above, on both paths.
+    decals[0] = Decal{};
+    decals[0].position = camera + DVec3{0.0, -0.6, -3.0};
+    decals[0].size = {3.0f, 1.2f, 3.0f};
+    decals[0].shape = DecalShape::wet;
+    decals[0].softness = 0.05f;
+    decals[0].base_color = {1.0f, 0.0f, 0.0f}; // (a wet decal's colour is not used)
+    frame.decals = decals;
+    for (const bool gpu : {false, true}) {
+        const auto wet = draw(gpu, false, false);
+        GIANT_CHECK(renderer->last_stats().decals == 1);
+        if (wet.size() == k_w * k_h * 4 && pixels.size() == wet.size()) {
+            const usize below = (static_cast<usize>(k_h / 2 + 6) * k_w + k_w / 2 + 8) * 4;
+            const usize above = (static_cast<usize>(k_h / 2 - 6) * k_w + k_w / 2 + 8) * 4;
+            GIANT_CHECK(pixels[below] > 60);
+            GIANT_CHECK(int{wet[below]} * 100 < int{pixels[below]} * 85); // darker
+            GIANT_CHECK(wet[below] == wet[below + 1] && wet[below] == wet[below + 2]); // still grey
+            GIANT_CHECK(std::abs(int{wet[above]} - int{pixels[above]}) <= 2);
+        }
+    }
     // Anti-aliasing (on by default) only softens edges: with it off the
     // silhouettes are hard steps, and every pixel SMAA changed sits on one.
     frame.decals = {};

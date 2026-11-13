@@ -33,7 +33,9 @@ gpu::Decal to_gpu(const Decal& d, const DVec3& camera) {
     set4(out.emissive_roughness, d.emissive, std::clamp(d.roughness, 0.0f, 1.0f));
     out.metallic = std::clamp(d.metallic, 0.0f, 1.0f);
     out.softness = std::clamp(d.softness, 0.0f, 1.0f);
-    out.shape = std::min(static_cast<u32>(d.shape), static_cast<u32>(DecalShape::cracks));
+    // (A shape past the last known: cracks, as before wet was added.)
+    const u32 shape = static_cast<u32>(d.shape);
+    out.shape = shape <= static_cast<u32>(DecalShape::wet) ? shape : static_cast<u32>(DecalShape::cracks);
     out.seed = d.seed;
     return out;
 }

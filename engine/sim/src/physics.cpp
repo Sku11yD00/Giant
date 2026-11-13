@@ -724,6 +724,7 @@ struct PhysicsWorld::Impl {
     // and carried along (Jolt's buoyancy: the water it displaces under a
     // flat surface at the level over its centre).
     std::vector<WaterEntry> entries; // since the last step() call began (WaterEntry: splashes)
+    std::vector<InWater> in_water;   // and InWater: what is wet
     u64 floated = 0; // float_bodies' calls: the fixed steps
     // The step each awake moving body was last seen dry (above the water:
     // none of its own shape under it; by its id's index, its sequence number
@@ -816,6 +817,7 @@ struct PhysicsWorld::Impl {
                 seen_dry(id);
                 continue;
             }
+            in_water.push_back({to_id(id), 0, static_cast<double>(here->level)});
             // Just gone in, going down fast enough: a splash. Wet now, seen dry the step before (its
             // own shape, as turned), going down at k_entry_speed or more both by itself and against the
             // surface (riding a falling swell is not going in, nor is the swell rising round it). A
@@ -1524,6 +1526,18 @@ std::optional<BodyState> PhysicsWorld::state(BodyId id) const {
     return s;
 }
 
+std::optional<LocalBounds> PhysicsWorld::local_bounds(BodyId id) const {
+    if (!contains(id)) return std::nullopt;
+    const JPH::RefConst<JPH::Shape> shape = m_impl->bodies_interface().GetShape(from_id(id));
+    if (shape == nullptr) return std::nullopt;
+    // (Jolt's are around the centre of mass, which is this far from the body's position.)
+    const JPH::AABox box = shape->GetLocalBounds();
+    const JPH::Vec3 com = shape->GetCenterOfMass();
+    LocalBounds out{from_jolt(box.mMin + com), from_jolt(box.mMax + com)};
+    if (!finite(out.min) || !finite(out.max)) return std::nullopt;
+    return out;
+}
+
 u64 PhysicsWorld::user(BodyId id) const {
     return contains(id) ? m_impl->bodies_interface().GetUserData(from_id(id)) : 0;
 }
@@ -1559,6 +1573,7 @@ u32 PhysicsWorld::step(double seconds) {
     m_moved.clear();
     m_hits.clear();
     m_impl->entries.clear();
+    m_impl->in_water.clear();
     if (!std::isfinite(seconds) || seconds <= 0.0) {
         m_impl->last_step_ms = 0.0;
         return 0;
@@ -1575,10 +1590,13 @@ u32 PhysicsWorld::step(double seconds) {
         }
         m_impl->carried -= k_step_seconds;
         const usize step_entries = m_impl->entries.size();
+        const usize step_in_water = m_impl->in_water.size();
         m_impl->float_bodies(static_cast<float>(k_step_seconds));
         // (This step's bodies in id order: found in the active list's. The characters follow, in id order.)
         std::sort(m_impl->entries.begin() + static_cast<std::ptrdiff_t>(step_entries), m_impl->entries.end(),
                   [](const WaterEntry& x, const WaterEntry& y) { return x.body < y.body; });
+        std::sort(m_impl->in_water.begin() + static_cast<std::ptrdiff_t>(step_in_water), m_impl->in_water.end(),
+                  [](const InWater& x, const InWater& y) { return x.body < y.body; });
         m_impl->swell_seconds += k_step_seconds;
         for (auto& [id, c] : m_impl->characters) {
             c.previous = from_jolt_r(c.body->GetPosition());
@@ -1601,6 +1619,9 @@ u32 PhysicsWorld::step(double seconds) {
                 const float across = std::hypot(c.velocity.x, c.velocity.z);
                 m_impl->step_character(c, static_cast<float>(k_step_seconds));
                 const bool wet = c.water_depth > 0.0f;
+                if (wet) {
+                    m_impl->in_water.push_back({0, id, c.previous.y + static_cast<double>(c.water_depth)});
+                }
                 if (wet && !c.was_wet && std::isfinite(down) && down >= k_entry_speed &&
                     down - c.surface_fall >= k_entry_speed) {
                     // (Its depth was measured from where its feet were as the step began.)
@@ -1776,6 +1797,12 @@ void PhysicsWorld::hold_character(CharacterId id, bool held) {
 
 double PhysicsWorld::step_fraction() const { return std::clamp(m_impl->carried / k_step_seconds, 0.0, 1.0); }
 
+std::optional<CharacterDesc> PhysicsWorld::character_desc(CharacterId id) const {
+    const auto it = m_impl->characters.find(id);
+    if (it == m_impl->characters.end()) return std::nullopt;
+    return it->second.desc;
+}
+
 std::optional<CharacterState> PhysicsWorld::character_state(CharacterId id) const {
     const auto it = m_impl->characters.find(id);
     if (it == m_impl->characters.end()) return std::nullopt;
@@ -1847,6 +1874,8 @@ bool PhysicsWorld::water_reaches(const DVec3& point, double level) const {
 }
 
 const std::vector<WaterEntry>& PhysicsWorld::water_entries() const { return m_impl->entries; }
+
+const std::vector<InWater>& PhysicsWorld::in_water() const { return m_impl->in_water; }
 
 std::optional<world::WaterHere> PhysicsWorld::water_at(double x, double z) const {
     // (Its own scratch, kept: the stepping thread's is not this one's.)

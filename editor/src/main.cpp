@@ -408,6 +408,8 @@ int run(const Options& options) {
     };
     std::vector<sim::DustPuff> dust_near;
     std::vector<render::DustPuff> dust_frame;
+    std::vector<render::Decal> wet_decals;   // what went in the water, wet a while
+    std::vector<render::Decal> frame_decals; // the scene's and those
     float render_seconds = 1.0f / 60.0f; // since the last frame (auto exposure eases over it)
     editor::WaterMeshes water_meshes;    // the scene's lakes, rivers and sea, drawn
     double water_seconds = 0.0;          // the waves' clock (the game's time)
@@ -463,6 +465,13 @@ int run(const Options& options) {
         input.materials = scene_frame.materials;
         input.terrain_layers = scene_frame.terrain_layers;
         input.decals = scene_frame.decals;
+        wet_decals.clear();
+        physics.wet().decals(physics.world(), wet_decals);
+        if (!wet_decals.empty()) { // (after the scene's: wet over a stain)
+            frame_decals.assign(scene_frame.decals.begin(), scene_frame.decals.end());
+            frame_decals.insert(frame_decals.end(), wet_decals.begin(), wet_decals.end());
+            input.decals = frame_decals;
+        }
         input.lights = scene_frame.lights;
         // The sea's swell (floated on by physics at this same clock).
         const world::Swell& swell = swell_track.swell();

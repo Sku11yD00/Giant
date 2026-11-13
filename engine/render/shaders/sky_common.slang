@@ -727,25 +727,35 @@ float open_sky(Sky s, float3 p, float3 n) {
     return saturate((p.y + max(n.y, 0.0) * 0.25 - h + 0.25) / 0.5);
 }
 
+// A surface `wet` (0 to 1): water fills the pores (rough, non-metal
+// surfaces darken most) and films the surface (glossier).
+void wet_surface(float wet, inout float3 base, inout float rough, float metal) {
+    if (wet <= 0.0) {
+        return;
+    }
+    const float porous = saturate(rough * 1.3) * (1.0 - saturate(metal));
+    base *= lerp(1.0, 0.45, wet * porous);
+    rough = lerp(rough, min(rough, 0.2), wet);
+}
+
 // The weather on a surface at camera-relative `p`: wet (darker where it is
 // porous, glossier, puddles in the hollows of flat ground) and snow on
-// what faces up, where the sky is open above it.
-void weather_surface(Sky s, float3 p, inout float3 base, inout float rough, inout float metal, inout float3 n) {
+// what faces up, where the sky is open above it. `wet_already`: how wet it
+// is otherwise (a wet decal: what went in the water), the wetter counted.
+void weather_surface(Sky s, float3 p, float wet_already, inout float3 base, inout float rough, inout float metal,
+                     inout float3 n) {
     if ((s.weather_flags & 2u) == 0u) {
+        wet_surface(wet_already, base, rough, metal);
         return;
     }
     const float open = open_sky(s, p, n);
     if (open <= 0.0) {
+        wet_surface(wet_already, base, rough, metal);
         return;
     }
     const float2 at = s.place + p.xz;
     const float up = n.y;
-    // Wet: water fills the pores (rough, non-metal surfaces darken most)
-    // and films the surface (glossier).
-    const float wet = s.wetness * open;
-    const float porous = saturate(rough * 1.3) * (1.0 - saturate(metal));
-    base *= lerp(1.0, 0.45, wet * porous);
-    rough = lerp(rough, min(rough, 0.2), wet);
+    wet_surface(max(s.wetness * open, wet_already), base, rough, metal);
     // Puddles: in the hollows of a noise on flat ground, spreading as it gets wetter.
     const float hollows = weather_noise(at, 8.0, 7u) * 0.7 + weather_noise(at, 2.0, 11u) * 0.3;
     const float flat = smoothstep(0.9, 0.98, up);

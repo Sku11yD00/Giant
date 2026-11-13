@@ -611,7 +611,10 @@ an offline cooker can use it without a device.
   the surface before lighting. Masks are shapes for now (disc, rectangle,
   ring, seeded splat and cracks), anti-aliased to the pixel's footprint;
   image stamps arrive with textures. Surfaces facing away from the stamp
-  take none of it, and the box's top and bottom fade out.
+  take none of it, and the box's top and bottom fade out. A `wet` decal
+  (water plan W5f) wets every surface inside its box whichever way it
+  faces, as rain does: darker where it is porous, glossier, its top edge
+  (the waterline) soft.
 - **Local lights (lights part L2a, `src/lights.h`, `shaders/lights.slang`).**
   `FrameInput::lights` takes lamps: points, and spots shining down a cone
   (inner and outer half angles, a smooth edge between). Light at distance
@@ -2507,6 +2510,32 @@ from 4.5 m about 29, a person off 2 m about 9.9, a stone about 1), with a
 knock's echoes (16 rays within 300 m), none past 1 km. `get_audio`
 reports `splashes` and the last one's `splash_loudness` and
 `splash_plop`. Spray and rings on the water wait for the effects part.
+
+Wetting (water plan W5f). The physics lists what had some of it under
+water in each step (`PhysicsWorld::in_water`, `sim::InWater`: dynamic
+bodies awake, and characters, with the surface's height over each), and
+gives a body's bounds in its own frame (`local_bounds`) and a
+character's description (`character_desc`). The editor's `WetThings`
+(in `PhysicsState`, after each step) remembers each with how far up it
+got wet: a body along the side of it that was up as it went in (a crate
+floating level is wet to its waterline; one turned over in the water,
+that side no longer up, all over), a character to the water's depth over
+its feet. Out of the water it dries over 90 s of play, the line kept
+(back in within 9 s of coming out, the line kept too; later, from the
+new waterline); a
+body asleep is as it was (sunk to the bed or floating in a lake: still
+in the water). 256 at most, the driest out of the water making way;
+cleared when simulating stops. Each frame every one is a wet decal (a
+box in its frame from just under its bottom, or just over a character's
+feet so the ground is left out, up to the line with the fade above it,
+following it as drawn), after the scene's decals; not the player (no
+body to see). The shading pass takes the most of the wet decals over a
+pixel and wets it with the rain (the wetter counted, not both), after
+the voxel cones' dry roughness is taken (the cones follow the dry
+roughness: wetting adds none; `wet_surfaces` off leaves wet decals on).
+`get_physics` reports `wet`. Not yet: drips, wet voxel colours,
+kinematic bodies; what stands near a wet thing inside its box (the
+ground under a crate's corner) is wetted with it.
 
 ## Game saves (E4 part 1a)
 

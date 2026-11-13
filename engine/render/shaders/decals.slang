@@ -87,10 +87,12 @@ float decal_distance(uint shape, float2 q, uint seed) {
     return 1.0 - r; // disc
 }
 
-// Blends every decal over `pixel` into the surface's material.
+// Blends every decal over `pixel` into the surface's material; `wet`
+// (0 to 1) takes the most of the wet decals there.
 void apply_decals(uint buffer, uint decal_offset, uint tile_offset, uint entry_offset, uint columns,
                   uint rows, uint2 pixel, float3 world, float3 n, float pixel_size, inout float3 base,
-                  inout float roughness, inout float metallic, inout float3 emissive) {
+                  inout float roughness, inout float metallic, inout float3 emissive, out float wet) {
+    wet = 0.0;
     if (columns == 0) {
         return;
     }
@@ -103,6 +105,13 @@ void apply_decals(uint buffer, uint decal_offset, uint tile_offset, uint entry_o
         const float4 p1 = float4(world, 1.0);
         const float3 p = float3(dot(d.rows[0], p1), dot(d.rows[1], p1), dot(d.rows[2], p1));
         if (any(abs(p) > 0.5)) {
+            continue;
+        }
+        if (d.shape == 5) {
+            // Wet: all of the box, its top edge (the waterline) soft; how
+            // wet is handed on (weather_surface wets the surface with it,
+            // as the rain does, after the voxel cones' dry roughness).
+            wet = max(wet, d.color_opacity.a * saturate((0.5 - p.y) / max(d.softness, 1e-3)));
             continue;
         }
         // Surfaces facing away from the stamp's direction take none of it.

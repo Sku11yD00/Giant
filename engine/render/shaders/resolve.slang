@@ -676,7 +676,7 @@ Output shade_pixel(float4 position) {
                 float far_metal = 0.0;
                 float3 far_n = vn;
                 if (sky_on && !lighting_view) {
-                    weather_surface(sky, world, albedo, far_rough, far_metal, far_n);
+                    weather_surface(sky, world, 0.0, albedo, far_rough, far_metal, far_n);
                 }
                 float3 spec_weight;
                 float3 spec_light;
@@ -768,14 +768,17 @@ Output shade_pixel(float4 position) {
     }
     texture_feedback(extras, f, s, pixel);
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
+    float decal_wet;
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
-                 push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive);
+                 push.tile_rows, pixel, world, n, pixel_size, base, rough, metal, emissive, decal_wet);
     // Voxel cones follow the dry surface: rain makes all open ground glossy,
     // and a cone on every wet pixel would cost the frame what a storm must
     // not (the wet gloss shows in the screen's reflections and the sky's).
     const float dry_rough = rough;
     if (sky_on && !lighting_view) {
-        weather_surface(sky, world, base, rough, metal, n); // wet, puddles, snow
+        weather_surface(sky, world, decal_wet, base, rough, metal, n); // wet (the rain's or a wet decal's), puddles, snow
+    } else if (!lighting_view) {
+        wet_surface(decal_wet, base, rough, metal);
     }
     if (lighting_view) {
         base = k_lighting_albedo;

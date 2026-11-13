@@ -24,6 +24,7 @@
 #include "giant/world/scene.h"
 #include "hit_targets.h"
 #include "scatter_placer.h"
+#include "wet_things.h"
 
 #include <deque>
 #include <functional>
@@ -201,6 +202,8 @@ public:
     // Told after each step of what went into water in it (sim::WaterEntry:
     // splashes), and counted.
     std::function<void(std::span<const sim::WaterEntry>)> on_splashes;
+    // What went in the water, wet a while after (drawn with wet decals).
+    const WetThings& wet() const { return m_wet; }
     u64 water_entries() const { return m_water_entries; }
     float blow_per_joule = 0.1f; // N s of wear each joule a bullet leaves in a kit piece
 
@@ -218,6 +221,7 @@ private:
     std::vector<ShotHit> take(std::span<const sim::BulletHit> hits, bool apply);
     void take_hits();
     void take_splashes();
+    void after_step(u32 steps); // the splashes, what is wet
     u64 m_water_entries = 0;
     static std::vector<sim::TreeSpot> trees_of(const ScatterPlacer::Cell& placed);
     // The cell's placement given to the forest, with the scene's kept trees there.
@@ -239,6 +243,7 @@ private:
     sim::ScenePhysics m_bodies;
     sim::Forest m_forest; // after the world: its trunks go first
     sim::Ballistics m_ballistics;
+    WetThings m_wet;
     std::deque<ShotHit> m_recent;
     const HitTargets* m_targets = nullptr;
     u64 m_scene = 0;
