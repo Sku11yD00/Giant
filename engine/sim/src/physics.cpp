@@ -539,6 +539,8 @@ struct PhysicsWorld::Impl {
         // In water (as of its last step).
         bool swimming = false;
         float water_depth = 0.0f;
+        bool was_wet = false; // (in water the step before: going in again is a splash)
+        float surface_fall = 0.0f; // how fast the surface over its feet fell in its last step (m/s; a sea's swell)
     };
     std::map<CharacterId, Character> characters; // in id order: the same steps every run
 
@@ -721,8 +723,56 @@ struct PhysicsWorld::Impl {
     // Before a step: each dynamic body awake in water buoyed up, slowed
     // and carried along (Jolt's buoyancy: the water it displaces under a
     // flat surface at the level over its centre).
+    std::vector<WaterEntry> entries; // since the last step() call began (WaterEntry: splashes)
+    u64 floated = 0; // float_bodies' calls: the fixed steps
+    // The step each awake moving body was last seen dry (above the water:
+    // none of its own shape under it; by its id's index, its sequence number
+    // with it), and the step it last went in: wet now and dry the step
+    // before, it went in. A body asleep is not seen, so one woken wet, or
+    // made under water, was not dry the step before: no splash; nor one in
+    // a room under the water (not dry: under it). One that went in does not
+    // again within k_splash_again steps (landing in a rough sea it touches
+    // and leaves the falling surface a few times over: one splash). (Grown
+    // by doubling up to the most bodies; 12 bytes a body.)
+    struct Dry {
+        u32 sequence = 0;
+        u32 step = 0;
+        u32 splashed = 0; // the step it last went in, plus 1 (0: never)
+    };
+    std::vector<Dry> dry;
+    static constexpr u32 k_splash_again = 30; // half a second
+    Dry& dry_of(JPH::BodyID id) {
+        const u32 index = id.GetIndex();
+        if (index >= dry.size()) {
+            const usize most = std::max<usize>(settings.max_bodies, 64);
+            dry.resize(std::max<usize>(index + 1, std::min<usize>(std::max<usize>(dry.size() * 2, 64), most)));
+        }
+        Dry& d = dry[index];
+        if (d.sequence != id.GetSequenceNumber()) d = {id.GetSequenceNumber(), 0, 0}; // (another body there now)
+        return d;
+    }
+    void seen_dry(JPH::BodyID id) { dry_of(id).step = static_cast<u32>(floated); }
+    bool dry_before(JPH::BodyID id) const {
+        const u32 index = id.GetIndex();
+        return index < dry.size() && dry[index].sequence == id.GetSequenceNumber() &&
+               dry[index].step == static_cast<u32>(floated - 1);
+    }
+
+    // How fast the surface at (x, z) fell over the last `dt` seconds (m/s;
+    // rising: less than 0): a sea's swell; lakes and rivers stand.
+    float surface_fall(const world::WaterHere& here, double x, double z, double dt) const {
+        if (here.water == nullptr || here.water->kind != world::WaterKind::sea) return 0.0f;
+        const double scale = world::swell_scale(*here.water);
+        if (!(scale > 0.0) || !(dt > 0.0)) return 0.0f;
+        const double before = world::swell_height(swell, x, z, swell_seconds - dt);
+        const double now = world::swell_height(swell, x, z, swell_seconds);
+        const double fall = scale * (before - now) / dt;
+        return std::isfinite(fall) ? static_cast<float>(fall) : 0.0f;
+    }
+
     void float_bodies(float dt) {
-        if (water_parts.empty()) return;
+        ++floated;
+        if (water_parts.empty()) return; // (no water: nothing seen dry; water set, the first step makes none)
         JPH::BodyIDVector active;
         system.GetActiveBodies(JPH::EBodyType::RigidBody, active);
         const JPH::Vec3 gravity = system.GetGravity();
@@ -730,6 +780,7 @@ struct PhysicsWorld::Impl {
             // A first look without the lock (only this thread moves bodies
             // between steps): most bodies are in no water.
             std::optional<world::WaterHere> here;
+            bool roofed_over = false; // (in a room under the water: not dry)
             {
                 const JPH::BodyLockRead look(system.GetBodyLockInterfaceNoLock(), id);
                 if (!look.Succeeded() || !look.GetBody().IsDynamic()) continue;
@@ -743,9 +794,13 @@ struct PhysicsWorld::Impl {
                     roofed(JPH::RVec3(centre.GetX(), static_cast<JPH::Real>(box.mMax.GetY()) + 0.01f, centre.GetZ()),
                            static_cast<double>(here->level), box.mMax.GetY() - box.mMin.GetY() + 0.02f)) {
                     here.reset();
+                    roofed_over = true;
                 }
             }
-            if (!here) continue;
+            if (!here) {
+                if (!roofed_over) seen_dry(id);
+                continue;
+            }
             const JPH::BodyLockWrite lock(system.GetBodyLockInterface(), id);
             if (!lock.Succeeded()) continue;
             JPH::Body& b = lock.GetBody();
@@ -757,7 +812,41 @@ struct PhysicsWorld::Impl {
             JPH::Vec3 buoyed_at;
             b.GetSubmergedVolume(surface, up, volume, submerged, buoyed_at);
             const float inverse_mass = b.GetMotionProperties()->GetInverseMass();
-            if (!(volume > 0.0f) || !(submerged > 0.0f) || !(inverse_mass > 0.0f)) continue;
+            if (!(volume > 0.0f) || !(submerged > 0.0f) || !(inverse_mass > 0.0f)) {
+                seen_dry(id);
+                continue;
+            }
+            // Just gone in, going down fast enough: a splash. Wet now, seen dry the step before (its
+            // own shape, as turned), going down at k_entry_speed or more both by itself and against the
+            // surface (riding a falling swell is not going in, nor is the swell rising round it). A
+            // body woken wet, pushed down, or made under water was not seen dry: none. One that went
+            // in lately is not again.
+            if (dry_before(id)) {
+                const JPH::Vec3 v = b.GetLinearVelocity();
+                const float down = -v.GetY();
+                if (down >= PhysicsWorld::k_entry_speed && std::isfinite(down)) {
+                    const double cx = static_cast<double>(centre.GetX()), cz = static_cast<double>(centre.GetZ());
+                    const float against = down - surface_fall(*here, cx, cz, static_cast<double>(dt));
+                    Dry& d = dry_of(id);
+                    const bool lately = d.splashed != 0 && static_cast<u32>(floated) + 1 - d.splashed <= k_splash_again;
+                    if (against >= PhysicsWorld::k_entry_speed && !lately) {
+                        d.splashed = static_cast<u32>(floated) + 1;
+                        const JPH::AABox& box = b.GetWorldSpaceBounds();
+                        WaterEntry& e = entries.emplace_back();
+                        e.body = to_id(id);
+                        // (Where it broke the surface: the middle of what is under so far, a log
+                        // end first at its end.)
+                        // (buoyed_at: from the centre of mass.)
+                        e.point = {cx + (std::isfinite(buoyed_at.GetX()) ? static_cast<double>(buoyed_at.GetX()) : 0.0),
+                                   static_cast<double>(here->level),
+                                   cz + (std::isfinite(buoyed_at.GetZ()) ? static_cast<double>(buoyed_at.GetZ()) : 0.0)};
+                        e.speed = against;
+                        e.across = std::hypot(v.GetX(), v.GetZ());
+                        e.mass = 1.0f / inverse_mass;
+                        e.size = std::max(box.mMax.GetX() - box.mMin.GetX(), box.mMax.GetZ() - box.mMin.GetZ());
+                    }
+                }
+            }
             // Jolt's factor: 1 is a body as dense as the water.
             const float buoyancy = k_water_density * volume * inverse_mass;
             // Riding the swell: kept awake (its turns, where it stops a
@@ -1174,6 +1263,7 @@ struct PhysicsWorld::Impl {
             wet.reset();
         }
         const float deep = swim_depth(c.desc);
+        c.surface_fall = wet ? surface_fall(*wet, static_cast<double>(feet.GetX()), static_cast<double>(feet.GetZ()), dt) : 0.0f;
         c.water_depth = wet ? static_cast<float>(static_cast<double>(wet->level) - static_cast<double>(feet.GetY())) : 0.0f;
         c.swimming = wet && c.water_depth > (c.swimming ? deep - k_swim_leave : deep);
         // Climbing down into water deep enough to swim: lets go of the wall.
@@ -1468,6 +1558,7 @@ u32 PhysicsWorld::step(double seconds) {
     const auto start = std::chrono::steady_clock::now();
     m_moved.clear();
     m_hits.clear();
+    m_impl->entries.clear();
     if (!std::isfinite(seconds) || seconds <= 0.0) {
         m_impl->last_step_ms = 0.0;
         return 0;
@@ -1483,18 +1574,45 @@ u32 PhysicsWorld::step(double seconds) {
             break;
         }
         m_impl->carried -= k_step_seconds;
+        const usize step_entries = m_impl->entries.size();
         m_impl->float_bodies(static_cast<float>(k_step_seconds));
+        // (This step's bodies in id order: found in the active list's. The characters follow, in id order.)
+        std::sort(m_impl->entries.begin() + static_cast<std::ptrdiff_t>(step_entries), m_impl->entries.end(),
+                  [](const WaterEntry& x, const WaterEntry& y) { return x.body < y.body; });
         m_impl->swell_seconds += k_step_seconds;
         for (auto& [id, c] : m_impl->characters) {
             c.previous = from_jolt_r(c.body->GetPosition());
             if (!c.carrier.IsInvalid() || c.held) { // (not stepped: out of the water as far as it knows)
                 c.swimming = false;
                 c.water_depth = 0.0f;
+                // (Held: not moved, so wet or not as it was: let go in the water, no splash. Carried:
+                // as where it is carried, after the step.)
             }
             if (!c.carrier.IsInvalid()) {
                 c.jump_wait = 0.0f; // (carried after the step, below)
             } else if (!c.held) {
+                // Its own speed down as it came (a fall or a jump's; not how a step down
+                // stairs or a slope moved it, nor the ground it stands on going down: a
+                // sinking raft, a lift), and across.
+                float down = -c.vertical;
+                if (c.body->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround) {
+                    down += c.body->GetGroundVelocity().GetY();
+                }
+                const float across = std::hypot(c.velocity.x, c.velocity.z);
                 m_impl->step_character(c, static_cast<float>(k_step_seconds));
+                const bool wet = c.water_depth > 0.0f;
+                if (wet && !c.was_wet && std::isfinite(down) && down >= k_entry_speed &&
+                    down - c.surface_fall >= k_entry_speed) {
+                    // (Its depth was measured from where its feet were as the step began.)
+                    WaterEntry& e = m_impl->entries.emplace_back();
+                    e.character = id;
+                    e.point = {c.previous.x, c.previous.y + static_cast<double>(c.water_depth), c.previous.z};
+                    e.speed = down - c.surface_fall;
+                    e.across = std::isfinite(across) ? across : 0.0f;
+                    e.mass = c.desc.mass;
+                    e.size = 2.0f * c.desc.radius;
+                }
+                c.was_wet = wet;
             } else {
                 // A jump pressed while held still lasts only its fifth of a second.
                 c.jump_wait = std::max(0.0f, c.jump_wait - static_cast<float>(k_step_seconds));
@@ -1504,7 +1622,15 @@ u32 PhysicsWorld::step(double seconds) {
             m_impl->system.Update(static_cast<float>(k_step_seconds), 1, &m_impl->temp, &m_impl->jobs);
         m_impl->jobs.drain();
         for (auto& [id, c] : m_impl->characters) {
-            if (!c.carrier.IsInvalid()) m_impl->carry(c);
+            if (!c.carrier.IsInvalid()) {
+                m_impl->carry(c);
+                // (Carried into the water: wet as let go there, no splash then.)
+                const JPH::RVec3 feet = c.body->GetPosition();
+                c.was_wet = !m_impl->water_parts.empty() &&
+                            m_impl->water_over(static_cast<double>(feet.GetX()), static_cast<double>(feet.GetZ()),
+                                               static_cast<double>(feet.GetY()))
+                                .has_value();
+            }
         }
         m_impl->hits.take(m_hits);
         if (error != JPH::EPhysicsUpdateError::None) {
@@ -1719,6 +1845,8 @@ bool PhysicsWorld::water_reaches(const DVec3& point, double level) const {
     if (!(point.y < level)) return true; // over it: nothing between
     return !m_impl->roofed(to_jolt(point), level, 0.0f);
 }
+
+const std::vector<WaterEntry>& PhysicsWorld::water_entries() const { return m_impl->entries; }
 
 std::optional<world::WaterHere> PhysicsWorld::water_at(double x, double z) const {
     // (Its own scratch, kept: the stepping thread's is not this one's.)

@@ -108,6 +108,11 @@ void connect_sounds(EditorState& state) {
         for (const PhysicsState::ShotHit& h : hits)
             state.audio->impact(state.scene, state.physics, h.hit.point, h.hit.energy);
     };
+    std::function<void(std::span<const sim::WaterEntry>)> before_splash = state.physics->on_splashes;
+    state.physics->on_splashes = [&state, before_splash](std::span<const sim::WaterEntry> entries) {
+        if (before_splash) before_splash(entries);
+        if (state.audio != nullptr) state.audio->splashes_from(state.scene, state.physics, entries);
+    };
 }
 
 Json hear_shot(EditorState& state, const DVec3& origin, const Vec3& velocity, float mass, std::optional<double> range) {
@@ -230,7 +235,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
         {"get_audio",
          "The sound: `device` (the speakers' driver; empty: none, the mix runs silent), the sounds by name, "
          "the listener (the camera), the mixer (`voices` playing, `taps` in them, `frames` rendered, "
-         "`dropped` plays, voices `stolen` (cut short for a play no quieter than what they had left), `peak` of the last render before the limiter, `reverb_seconds`), sounds `played`, `shots` heard (fire), bullet `impacts` heard, the weather's `air` (1 dry; rain, snow and fog take the highs sooner) and `snow_cover` (deadening echoes off the ground), "
+         "`dropped` plays, voices `stolen` (cut short for a play no quieter than what they had left), `peak` of the last render before the limiter, `reverb_seconds`), sounds `played`, `shots` heard (fire), bullet `impacts` heard, `splashes` heard (things gone into water) and the last one's `splash_loudness` and `splash_plop` (a small thing's plop, not a splash), the weather's `air` (1 dry; rain, snow and fog take the highs sooner) and `snow_cover` (deadening echoes off the ground), "
          "`ambience` (sounds played round and round heard now), `muffle` (Hz: the whole mix's lowpass; under water a few hundred), "
          "the `water` heard round the listener (`shore`, `sea` and `river` loudness about 0 to 1.5, `under` the surface, `depth` metres), "
          "and the last one's `heard` (as play_sound returns).",
@@ -252,6 +257,9 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state) 
                          {"played", a.played()},
                          {"shots", a.shots()},
                          {"impacts", a.impacts()},
+                         {"splashes", a.splashes()},
+                         {"splash_loudness", a.last_splash_loudness()},
+                         {"splash_plop", a.last_splash_small()},
                          {"air", a.air()},
                          {"snow_cover", a.snow_cover()},
                          {"ambience", s.ambience},
