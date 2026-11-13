@@ -32,6 +32,31 @@ void normalize(Sound& s, float peak) {
         for (float& x : s.samples) x *= peak / m;
 }
 
+// Made `n` samples long with `fade` more, whose end is cross-faded (equal
+// power) into its start: played round and round, no seam. Then set to
+// `rms` (and no peak past 0.95).
+Sound looped(std::vector<float> made, usize n, usize fade, float rms) {
+    Sound s;
+    s.samples.assign(made.begin(), made.begin() + static_cast<std::ptrdiff_t>(n));
+    for (usize i = 0; i < fade; ++i) {
+        const float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(fade);
+        s.samples[i] = s.samples[i] * std::sin(t * k_pi * 0.5f) + made[n + i] * std::cos(t * k_pi * 0.5f);
+    }
+    double sum = 0.0;
+    for (const float x : s.samples) sum += static_cast<double>(x) * x;
+    const float now = static_cast<float>(std::sqrt(sum / static_cast<double>(std::max<usize>(n, 1))));
+    if (now > 0.0f)
+        for (float& x : s.samples) x *= rms / now;
+    float peak = 0.0f;
+    for (const float x : s.samples) peak = std::max(peak, std::fabs(x));
+    if (peak > 0.95f)
+        for (float& x : s.samples) x *= 0.95f / peak;
+    return s;
+}
+
+// A one-pole lowpass's coefficient at `hz`.
+float pole(float hz) { return 1.0f - std::exp(-2.0f * k_pi * hz / static_cast<float>(k_sample_rate)); }
+
 u32 read_u32(std::span<const u8> b, usize at) {
     return static_cast<u32>(b[at]) | static_cast<u32>(b[at + 1]) << 8 | static_cast<u32>(b[at + 2]) << 16 |
            static_cast<u32>(b[at + 3]) << 24;
@@ -99,6 +124,110 @@ Sound synth_impact(u32 seed) {
     }
     normalize(s, 1.0f);
     return s;
+}
+
+Sound make_loop(std::vector<float> made, usize n, usize fade, float rms) {
+    n = std::min(n, made.size());
+    fade = std::min({fade, made.size() - n, n});
+    return looped(std::move(made), n, fade, std::isfinite(rms) ? std::max(rms, 0.0f) : 0.0f);
+}
+
+Sound synth_lapping(u32 seed) {
+    // 8 s: a wavelet washing in every 0.7 to 1.9 s (a swell of dull noise,
+    // in over 80 ms, back over about half a second, with a splash of
+    // brighter noise at its top), over a low murmur.
+    const usize n = k_sample_rate * 8, fade = k_sample_rate / 2;
+    std::vector<float> out(n + fade, 0.0f);
+    Noise noise(seed);
+    Noise when(seed * 31u + 7u);
+    float low = 0.0f, mid = 0.0f, murmur = 0.0f;
+    const float a_low = pole(500.0f), a_mid = pole(2500.0f), a_murmur = pole(150.0f);
+    double next = 0.2;
+    double start = -10.0;
+    float strength = 0.0f;
+    for (usize i = 0; i < out.size(); ++i) {
+        const double t = static_cast<double>(i) / k_sample_rate;
+        if (t >= next) {
+            start = next;
+            strength = 0.6f + 0.4f * (when.next() * 0.5f + 0.5f);
+            next += 0.7 + 1.2 * (when.next() * 0.5 + 0.5);
+        }
+        const float x = noise.next();
+        low += a_low * (x - low);
+        mid += a_mid * (x - mid);
+        murmur += a_murmur * (x - murmur);
+        const float age = static_cast<float>(t - start);
+        const float wash = age < 0.08f ? age / 0.08f : std::exp(-(age - 0.08f) / 0.25f);
+        const float top = age > 0.05f && age < 0.25f ? std::sin((age - 0.05f) / 0.2f * k_pi) : 0.0f;
+        out[i] = strength * (wash * low * 2.0f + top * mid * 0.6f) + murmur * 1.5f;
+    }
+    return looped(std::move(out), n, fade, 0.12f);
+}
+
+Sound synth_river(u32 seed) {
+    // 6 s: rushing water (noise from 200 Hz to 6 kHz, its level wandering a
+    // little) and bubbles (short rising tones, 300 to 1200 Hz, a few a second).
+    const usize n = k_sample_rate * 6, fade = k_sample_rate / 2;
+    std::vector<float> out(n + fade, 0.0f);
+    Noise noise(seed);
+    Noise when(seed * 17u + 3u);
+    float lo = 0.0f, hi = 0.0f, drift = 0.0f;
+    const float a_lo = pole(200.0f), a_hi = pole(6000.0f), a_drift = pole(1.5f);
+    double next = 0.05, start = -10.0;
+    float pitch = 600.0f, phase = 0.0f;
+    for (usize i = 0; i < out.size(); ++i) {
+        const double t = static_cast<double>(i) / k_sample_rate;
+        const float x = noise.next();
+        hi += a_hi * (x - hi);
+        lo += a_lo * (hi - lo);
+        drift += a_drift * (noise.next() - drift);
+        if (t >= next) {
+            start = next;
+            pitch = 300.0f + 900.0f * (when.next() * 0.5f + 0.5f);
+            next += 0.05 + 0.3 * (when.next() * 0.5 + 0.5);
+        }
+        const float age = static_cast<float>(t - start);
+        float bubble = 0.0f;
+        if (age < 0.03f) {
+            phase += 2.0f * k_pi * pitch * (1.0f + age * 20.0f) / static_cast<float>(k_sample_rate);
+            bubble = std::sin(phase) * std::exp(-age / 0.008f);
+        }
+        out[i] = (hi - lo) * (1.0f + drift * 3.0f) + bubble * 0.15f;
+    }
+    return looped(std::move(out), n, fade, 0.12f);
+}
+
+Sound synth_underwater(u32 seed) {
+    // 6 s: the deep's low rumble (noise under 250 Hz, slowly swelling) and
+    // now and then a bubble rising (a falling knock, low).
+    const usize n = k_sample_rate * 6, fade = k_sample_rate / 2;
+    std::vector<float> out(n + fade, 0.0f);
+    Noise noise(seed);
+    Noise when(seed * 13u + 5u);
+    float lo = 0.0f, lo2 = 0.0f, swell = 0.0f;
+    const float a_lo = pole(250.0f), a_swell = pole(0.3f);
+    double next = 0.5, start = -10.0;
+    float phase = 0.0f, pitch = 200.0f;
+    for (usize i = 0; i < out.size(); ++i) {
+        const double t = static_cast<double>(i) / k_sample_rate;
+        const float x = noise.next();
+        lo += a_lo * (x - lo);
+        lo2 += a_lo * (lo - lo2);
+        swell += a_swell * (noise.next() - swell);
+        if (t >= next) {
+            start = next;
+            pitch = 120.0f + 200.0f * (when.next() * 0.5f + 0.5f);
+            next += 0.6 + 1.5 * (when.next() * 0.5 + 0.5);
+        }
+        const float age = static_cast<float>(t - start);
+        float bubble = 0.0f;
+        if (age < 0.06f) {
+            phase += 2.0f * k_pi * pitch * (1.0f - age * 4.0f) / static_cast<float>(k_sample_rate);
+            bubble = std::sin(phase) * std::exp(-age / 0.02f);
+        }
+        out[i] = lo2 * (1.0f + swell * 8.0f) + bubble * 0.3f;
+    }
+    return looped(std::move(out), n, fade, 0.15f);
 }
 
 Sound synth_click() {

@@ -10,7 +10,11 @@
 #include "giant/audio/shot.h"
 #include "giant/platform/audio_output.h"
 #include "giant/world/scene.h"
+#include "giant/world/water.h"
 #include "giant/world/weather.h"
+
+#include <array>
+#include <functional>
 
 #include <map>
 #include <memory>
@@ -23,9 +27,62 @@ namespace giant::editor {
 struct EditorCamera;
 class PhysicsState;
 
+// What the listener hears of the water round it (water plan W5d): little
+// waves lapping where lakes meet land, the sea's waves on its shore (louder
+// with the wind and its `waves`), rivers running (louder the faster), each
+// from where it is (`*_dir` world, level, from the listener; `*_spread` 0:
+// from there, 1: all round) and how loud (0 to about 1.5), and whether the
+// listener is under the surface (`depth` metres).
+struct WaterHeard {
+    float shore = 0.0f, sea = 0.0f, river = 0.0f;
+    Vec3 shore_dir{0, 0, 1}, sea_dir{0, 0, 1}, river_dir{0, 0, 1};
+    float shore_spread = 1.0f, sea_spread = 1.0f, river_spread = 1.0f;
+    bool under = false;
+    float depth = 0.0f;
+};
+// The water at a place (x, z) and the ground's height there (none: no terrain).
+using WaterLookup = std::function<std::optional<world::WaterHere>(double x, double z)>;
+using GroundLookup = std::function<std::optional<double>(double x, double z)>;
+// Looked for round the listener (k_water_ways ways out, k_water_steps places
+// along each to k_water_heard_reach metres, 1 m apart near, 9 m far): a
+// lake's or the sea's shore where water meets land along a way (dry ground:
+// higher than the water; a river's banks looked past), each heard by 1 over
+// its distance (2 m at least, the height over it counted), a river where it
+// runs, by its speed. Water narrower than the gaps between places (a pond a
+// few metres across 30 m off) can be missed: it would be faint there. A few
+// ways a call (`ways`; what each found kept, heard again from where the
+// listener is now), so a frame looks up a few dozen places, not all of them
+// (a lake's lookup runs over its outline: a few microseconds at most); every
+// way on the first call and after a jump (k_water_jump metres in a call). `wind` the wind's speed (m/s) over the water. `reached`: the
+// water reaches the listener when under its surface (not in a room under
+// it: physics' water_reaches; there no lapping round it either); none: always.
+inline constexpr double k_water_heard_reach = 48.0;
+inline constexpr u32 k_water_ways = 16;
+inline constexpr usize k_water_steps = 13;
+inline constexpr double k_water_jump = 8.0; // moved further in a call: every way looked along again
+class WaterHearing {
+public:
+    WaterHeard update(const WaterLookup& water, const GroundLookup& ground, const DVec3& listener, float wind,
+                      const std::function<bool(double level)>& reached = {}, u32 ways = 2);
+
+private:
+    struct Found {
+        bool there = false;
+        DVec3 at{};          // where (its surface's height)
+        double weight = 0.0; // how loud at 1 m
+    };
+    struct Way {
+        Found shore, sea, river;
+    };
+    std::array<Way, k_water_ways> m_ways{};
+    u32 m_next = 0;
+    DVec3 m_last{};      // the listener at the last call
+    bool m_looked = false;
+};
+
 class AudioState {
 public:
-    AudioState(); // the made sounds added: gunshot, crack, impact, click, tone
+    AudioState(); // the made sounds added: gunshot, crack, impact, click, tone; lapping, sea, river, underwater
     ~AudioState();
     AudioState(const AudioState&) = delete;
     AudioState& operator=(const AudioState&) = delete;
@@ -56,6 +113,14 @@ public:
     void set_weather(const world::Weather* shown, const world::Ground& ground);
     float air() const { return m_air; }
     float snow_cover() const { return m_snow; }
+
+    // The water heard round the listener (WaterHearing::update) as sounds played round
+    // and round (audio::Ambience slots 0 to 3: shore, sea, river, under
+    // water), and under the surface the whole mix muffled (k_under_muffle
+    // Hz). Each frame (cheap: the mixer eases what it is given).
+    void set_water(const WaterHeard& heard);
+    const WaterHeard& water_heard() const { return m_water_heard; }
+    static constexpr float k_under_muffle = 400.0f;
 
     // The scene as a sound meets it: the physics' ray (null: none) within
     // physics_reach, the terrain marched past it, the nearer hit taken.
@@ -120,6 +185,7 @@ public:
     bool sounds_connected = false; // connect_sounds done (once only)
 private:
     float m_air = 1.0f, m_snow = 0.0f;
+    WaterHeard m_water_heard;
     std::optional<audio::Heard> m_last;
     std::vector<float> m_scratch; // headless renders
 };

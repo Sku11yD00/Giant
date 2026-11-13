@@ -16,6 +16,7 @@ constexpr usize k_sound_reserve = 4096;      // sounds the audio thread holds be
 constexpr float k_min_reverb = 0.1f, k_max_reverb = 12.0f;
 constexpr u32 k_fade_frames = 240;           // 5 ms: a voice cut short fades out over this
 constexpr usize k_max_fading = k_max_voices; // as many as one batch of plays can cut short
+constexpr float k_bed_out = 0.025f;          // a going bed's ease (s): 0.6 to silence in ~0.23 s
 constexpr float k_tiny = 1e-20f;             // below this a decaying state is 0 (no denormals)
 
 float lowpass_coefficient(float hz) {
@@ -53,6 +54,21 @@ struct Mixer::Shared {
     std::vector<std::shared_ptr<const Sound>> added; // sounds the audio thread has not taken
     Vec3 right{1, 0, 0}, up{0, 1, 0};
     bool stop = false;
+    std::array<Ambience, k_max_ambience> ambience{};
+    float muffle = 20000.0f;
+};
+
+struct Mixer::Bed {
+    SoundId id = k_no_sound;      // playing
+    const Sound* sound = nullptr;
+    u64 at = 0;                   // the next sample (round and round)
+    SoundId next = k_no_sound;    // asked for (a change waits for this one to fade out)
+    float target = 0.0f;          // gain asked for
+    Vec3 direction{0, 0, 1};
+    float spread = 1.0f;
+    float a = 1.0f, a_target = 1.0f; // lowpass coefficient, eased
+    float z = 0.0f;
+    float left = 0.0f, right = 0.0f; // the pan gains now (gain in them)
 };
 
 struct Mixer::Voice {
@@ -180,7 +196,7 @@ struct Mixer::Reverb {
 
 Mixer::Mixer()
     : m_shared(std::make_unique<Shared>()), m_voices(k_max_voices), m_fading(k_max_fading),
-      m_reverb(std::make_unique<Reverb>()),
+      m_reverb(std::make_unique<Reverb>()), m_beds(std::make_unique<std::array<Bed, k_max_ambience>>()),
       m_send(k_chunk, 0.0f) {
     m_audio_sounds.reserve(k_sound_reserve);
     m_shared->added.reserve(64);
@@ -250,6 +266,49 @@ void Mixer::stop_all() {
     std::lock_guard<std::mutex> lock(m_shared->mutex);
     m_shared->stop = true;
     m_shared->pending_count = 0;
+    m_shared->ambience.fill(Ambience{});
+}
+
+namespace {
+Ambience cleaned(const Ambience& ambience, bool known) {
+    Ambience a = ambience;
+    if (!known) a.sound = k_no_sound;
+    a.gain = std::isfinite(a.gain) ? std::clamp(a.gain, 0.0f, 4.0f) : 0.0f;
+    a.lowpass = std::isfinite(a.lowpass) ? a.lowpass : 20000.0f;
+    a.spread = std::isfinite(a.spread) ? std::clamp(a.spread, 0.0f, 1.0f) : 1.0f;
+    const float len = finite(a.direction) ? length(a.direction) : 0.0f;
+    if (len > 1e-6f) {
+        a.direction = a.direction / len;
+    } else {
+        a.direction = {0, 0, 1};
+        a.spread = 1.0f; // from nowhere in particular: all round
+    }
+    return a;
+}
+float cleaned_muffle(float hz) { return std::isfinite(hz) ? std::clamp(hz, 20.0f, 20000.0f) : 20000.0f; }
+} // namespace
+
+void Mixer::set_ambience(u32 slot, const Ambience& ambience) {
+    if (slot >= k_max_ambience) return;
+    const Ambience a = cleaned(ambience, sound(ambience.sound) != nullptr);
+    std::lock_guard<std::mutex> lock(m_shared->mutex);
+    m_shared->ambience[slot] = a;
+}
+
+void Mixer::set_ambience(u32 first, std::span<const Ambience> slots, float muffle_hz) {
+    std::array<Ambience, k_max_ambience> a{};
+    const usize count = first < k_max_ambience ? std::min<usize>(slots.size(), k_max_ambience - first) : 0;
+    for (usize k = 0; k < count; ++k) a[k] = cleaned(slots[k], sound(slots[k].sound) != nullptr);
+    const float m = cleaned_muffle(muffle_hz);
+    std::lock_guard<std::mutex> lock(m_shared->mutex);
+    for (usize k = 0; k < count; ++k) m_shared->ambience[first + k] = a[k];
+    m_shared->muffle = m;
+}
+
+void Mixer::set_muffle(float hz) {
+    const float h = cleaned_muffle(hz);
+    std::lock_guard<std::mutex> lock(m_shared->mutex);
+    m_shared->muffle = h;
 }
 
 void Mixer::take_work() {
@@ -265,7 +324,20 @@ void Mixer::take_work() {
         for (Voice& v : m_voices) v.active = false;
         for (Voice& v : m_fading) v.active = false;
         m_reverb->clear();
+        // (The beds: their ambience cleared with the stop, each fades out quickly below, not cut: no click.)
     }
+    for (usize k = 0; k < k_max_ambience; ++k) {
+        const Ambience& a = s.ambience[k];
+        Bed& b = (*m_beds)[k];
+        const bool there = a.sound != k_no_sound && a.sound <= m_audio_sounds.size() &&
+                           !m_audio_sounds[a.sound - 1]->samples.empty();
+        b.next = there ? a.sound : k_no_sound;
+        b.target = there && b.next == b.id ? a.gain : 0.0f; // (another sound: this one fades out first)
+        b.direction = a.direction;
+        b.spread = a.spread;
+        b.a_target = lowpass_coefficient(a.lowpass);
+    }
+    m_muffle_target = s.muffle;
     m_stat_dropped.fetch_add(s.refused, std::memory_order_relaxed);
     s.refused = 0;
     for (usize k = 0; k < s.pending_count; ++k) start(s.pending[k]);
@@ -371,6 +443,47 @@ void Mixer::mix(Voice& v, u64 from, u64 to, u64 render_from, u32 render_frames, 
     if (v.end <= to) v.active = false;
 }
 
+void Mixer::mix_beds(u32 n, float* chunk) {
+    const float ease = 1.0f - std::exp(-static_cast<float>(n) / (0.25f * static_cast<float>(k_sample_rate)));
+    // Going (another sound asked for, or none): faded out sooner, in about a quarter second all told.
+    const float ease_out = 1.0f - std::exp(-static_cast<float>(n) / (k_bed_out * static_cast<float>(k_sample_rate)));
+    for (Bed& b : *m_beds) {
+        // Faded out: the sound asked for (if another) starts from silence.
+        if (b.next != b.id && std::max(b.left, b.right) < 1e-4f) {
+            b.id = b.next;
+            b.sound = b.id != k_no_sound ? m_audio_sounds[b.id - 1].get() : nullptr;
+            b.at = 0;
+            b.z = 0.0f;
+            b.left = b.right = 0.0f;
+        }
+        if (b.sound == nullptr) continue;
+        // Equal power left to right, towards both alike as it spreads.
+        const float side = std::clamp(dot(b.direction, m_right), -1.0f, 1.0f);
+        const float angle = (side + 1.0f) * (k_pi / 4.0f);
+        const float l_want = b.target * (std::cos(angle) + (0.70710678f - std::cos(angle)) * b.spread);
+        const float r_want = b.target * (std::sin(angle) + (0.70710678f - std::sin(angle)) * b.spread);
+        const float l0 = b.left, r0 = b.right;
+        const float e = b.next != b.id ? ease_out : ease;
+        const float l1 = l0 + (l_want - l0) * e, r1 = r0 + (r_want - r0) * e;
+        b.a += (b.a_target - b.a) * ease;
+        if (std::max({l0, r0, l1, r1}) > 0.0f) {
+            const std::vector<float>& samples = b.sound->samples;
+            const u64 len = samples.size();
+            const float span = static_cast<float>(std::max<u32>(n, 1));
+            for (u32 c = 0; c < n; ++c) {
+                b.z += b.a * (samples[b.at] - b.z);
+                if (std::fabs(b.z) < k_tiny) b.z = 0.0f;
+                b.at = b.at + 1 == len ? 0 : b.at + 1;
+                const float f = static_cast<float>(c + 1) / span;
+                chunk[c * 2] += b.z * (l0 + (l1 - l0) * f);
+                chunk[c * 2 + 1] += b.z * (r0 + (r1 - r0) * f);
+            }
+        }
+        b.left = l1 < 1e-6f ? 0.0f : l1;
+        b.right = r1 < 1e-6f ? 0.0f : r1;
+    }
+}
+
 void Mixer::render(float* out, u32 frames) {
     take_work();
     // Pan from where each tap is heard: equal power, left to right.
@@ -410,11 +523,25 @@ void Mixer::render(float* out, u32 frames) {
             if (v.active) mix(v, from, to, render_from, frames, chunk);
         for (Voice& v : m_fading)
             if (v.active) mix(v, from, to, render_from, frames, chunk);
+        mix_beds(n, chunk);
         m_reverb->follow(n);
+        m_muffle_hz += (m_muffle_target - m_muffle_hz) *
+                       (1.0f - std::exp(-static_cast<float>(n) / (0.1f * static_cast<float>(k_sample_rate))));
+        const float muffle_a = lowpass_coefficient(m_muffle_hz);
         for (u32 c = 0; c < n; ++c) {
             float& l = chunk[c * 2];
             float& r = chunk[c * 2 + 1];
             m_reverb->process(m_send[c], l, r);
+            if (muffle_a < 1.0f) {
+                m_muffle_z[0] += muffle_a * (l - m_muffle_z[0]);
+                m_muffle_z[1] += muffle_a * (r - m_muffle_z[1]);
+                if (std::fabs(m_muffle_z[0]) < k_tiny) m_muffle_z[0] = 0.0f;
+                if (std::fabs(m_muffle_z[1]) < k_tiny) m_muffle_z[1] = 0.0f;
+                l = m_muffle_z[0];
+                r = m_muffle_z[1];
+            } else {
+                m_muffle_z = {l, r}; // (followed while open, so closing it does not click)
+            }
             peak = std::max({peak, std::fabs(l), std::fabs(r)});
             l = soft_limit(l * volume_now);
             r = soft_limit(r * volume_now);
@@ -433,6 +560,10 @@ void Mixer::render(float* out, u32 frames) {
     m_stat_frames.fetch_add(frames, std::memory_order_relaxed);
     m_stat_peak.store(peak, std::memory_order_relaxed);
     m_stat_reverb.store(m_reverb->seconds, std::memory_order_relaxed);
+    m_stat_muffle.store(m_muffle_hz, std::memory_order_relaxed);
+    u32 beds = 0;
+    for (const Bed& b : *m_beds) beds += b.sound != nullptr && std::max(b.left, b.right) > 1e-4f ? 1u : 0u;
+    m_stat_ambience.store(beds, std::memory_order_relaxed);
 }
 
 MixerStats Mixer::stats() const {
@@ -444,6 +575,8 @@ MixerStats Mixer::stats() const {
     s.stolen = m_stat_stolen.load(std::memory_order_relaxed);
     s.peak = m_stat_peak.load(std::memory_order_relaxed);
     s.reverb_seconds = m_stat_reverb.load(std::memory_order_relaxed);
+    s.ambience = m_stat_ambience.load(std::memory_order_relaxed);
+    s.muffle = m_stat_muffle.load(std::memory_order_relaxed);
     return s;
 }
 
