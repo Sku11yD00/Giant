@@ -124,6 +124,22 @@ float4 clip_position(Frame f, Drawn d, Swayer w, uint local_vertex) {
     return transform(f.view_proj[0], f.view_proj[1], f.view_proj[2], f.view_proj[3], float4(moved, 1.0));
 }
 
+// A lamp's shadow face (local_size set): whether the cluster is inside the
+// face. A light's faces share one culling (the box round its reach), so
+// each face drops here what lies in the others (sun pages: culled per
+// level already, always).
+// Branch-free (as drawn_cluster_flat: a known 0 count could have the
+// compiler copy SetMeshOutputCounts into two arms).
+uint in_face(Frame f, Drawn d) {
+    const float3 centre = to_world(d.inst, d.cluster.bounds.xyz);
+    const float radius = d.cluster.bounds.w * d.inst.max_scale + wind_reach(f, swayer_of(f, d.inst, d.mesh));
+    float worst = 1.0e30;
+    [unroll] for (uint p = 0; p < 5; ++p) {
+        worst = min(worst, dot(f.planes[p].xyz, centre) + f.planes[p].w + radius);
+    }
+    return uint(push.local_size == 0u) | uint(worst >= 0.0);
+}
+
 struct MsVertex {
     float4 position : SV_Position;
 };
@@ -146,10 +162,11 @@ void ms_main(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID,
              OutputVertices<MsVertex, 128> verts, OutputIndices<uint3, 128> tris,
              OutputPrimitives<MsPrimitive, 128> prims) {
     const Drawn d = drawn_cluster_flat(gid.y * 65535 + gid.x);
-    const uint vertex_count = d.cluster.vertex_count * uint(d.valid);
-    const uint triangle_count = d.cluster.triangle_count * uint(d.valid);
-    SetMeshOutputCounts(vertex_count, triangle_count);
     const Frame f = load_frame(push.frame, push.frame_offset);
+    const uint drawn = uint(d.valid) & in_face(f, d);
+    const uint vertex_count = d.cluster.vertex_count * drawn;
+    const uint triangle_count = d.cluster.triangle_count * drawn;
+    SetMeshOutputCounts(vertex_count, triangle_count);
     if (tid < vertex_count) {
         MsVertex v;
         v.position = clip_position(f, d, swayer_of(f, d.inst, d.mesh), tid);
@@ -171,10 +188,11 @@ void ms_cut(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID,
             OutputVertices<MsCutVertex, 128> verts, OutputIndices<uint3, 128> tris,
             OutputPrimitives<MsCutPrimitive, 128> prims) {
     const Drawn d = drawn_cluster_flat(gid.y * 65535 + gid.x);
-    const uint vertex_count = d.cluster.vertex_count * uint(d.valid);
-    const uint triangle_count = d.cluster.triangle_count * uint(d.valid);
-    SetMeshOutputCounts(vertex_count, triangle_count);
     const Frame f = load_frame(push.frame, push.frame_offset);
+    const uint drawn = uint(d.valid) & in_face(f, d);
+    const uint vertex_count = d.cluster.vertex_count * drawn;
+    const uint triangle_count = d.cluster.triangle_count * drawn;
+    SetMeshOutputCounts(vertex_count, triangle_count);
     if (tid < vertex_count) {
         MsCutVertex v;
         v.position = clip_position(f, d, swayer_of(f, d.inst, d.mesh), tid);

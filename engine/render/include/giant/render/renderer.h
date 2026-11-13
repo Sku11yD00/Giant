@@ -813,6 +813,7 @@ struct RenderStats {
     u32 lights_merged = 0;       // of the lights, far lamps merged into one (src/lights.h)
     u32 local_shadows = 0;        // lights shaded with shadows this frame
     u32 local_shadow_drawn = 0;   // shadow tile faces drawn this frame
+    u32 local_shadow_culls = 0;   // GPU cullings they took (one per light: its faces share it)
     u32 local_shadow_waiting = 0; // faces of shadowed lights not drawn yet, or to draw again
     u32 local_shadow_tiles = 0;   // tiles in use (of RendererDesc::local_shadow_tiles)
     u32 gi_lamps = 0;             // lamps lighting the voxel bricks lit this frame (global illumination)
@@ -1316,6 +1317,7 @@ private:
     bool m_decals_logged = false;
     bool m_lights_logged = false;
     u32 m_local_drawn = 0; // shadow tile faces drawn this frame
+    u32 m_local_culls = 0; // GPU cullings for them (one per light)
 
     std::vector<Mesh> m_meshes;
     std::vector<u32> m_free_meshes; // removed slots, reused by add_mesh

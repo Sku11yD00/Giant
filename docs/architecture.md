@@ -670,14 +670,23 @@ an offline cooker can use it without a device.
   degrees so filtering at its edge stays inside it). Depth is near /
   distance along the face's axis, larger nearer, written by the sun's
   shadow raster pipelines (`RasterPush::local_size` switches them to a
-  tile, `InterlockedMax`), culled on the GPU per face like a sun level.
+  tile, `InterlockedMax`). A light's faces drawn in a frame share one GPU
+  culling (the box round its reach, open at the top; a lone face its own
+  four sides and its reach: a face's planes are its four sides and a far
+  plane at the light's range, not a near one, as the sides keep to what
+  is in front and the projection clips what is nearer than `near`), each
+  face rasterising what that found into its tile (the mesh shaders drop
+  the clusters outside the face): the culling is a chain of small dependent dispatches and was
+  most of the cost (the night gate's street: 24 faces each culling the
+  whole world to the horizon, 2.6 ms on an RTX 5090).
   Tiles are kept by id frame to frame: a face is drawn again only when its
   light changes (range, cone, near: unshadowed until drawn), moves (the
   faces drawn from within 1% of its range, or 1 cm, keep shading
   meanwhile, so a swinging lantern over the budget keeps a shadow), or a
   caster near it comes, goes or moves (the sun pages' changed boxes and
-  posed skinned meshes', tested against every kept light, in view or not;
-  the old depths stand in). At most
+  posed skinned meshes', tested against every kept light, in view or not,
+  and only the faces that see the box: a sign swinging beside a lantern
+  redraws the one face looking at it; the old depths stand in). At most
   `RenderSettings::local_shadow_faces_per_frame` faces (24) are drawn a
   frame, for at most 64 lights: faces with nothing to shade with first,
   then those whose old depths stand in, each drawn longest ago first, so
@@ -688,8 +697,10 @@ an offline cooker can use it without a device.
   light's by its major axis), moves the point off the surface by a texel
   and a half along the surface normal and filters four taps bilinearly.
   They go with sun shadows (lit views, GPU culling). No contact shadows
-  for local lights yet, and foliage swaying in the wind casts its rest
-  pose into them.
+  for local lights yet, and foliage swaying in the wind casts the pose
+  it had when the face was last drawn (faces are not redrawn for swaying
+  alone; a caster's changed box is grown by 2 m for what sways when
+  picking the faces that see it).
   In the voxel world (lights part L4, `src/voxel_lamps.h`): each voxel
   has a lamp word beside its light word (a second buffer the size of the
   light pool, 64 MiB by default, made with it). When a

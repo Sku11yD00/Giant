@@ -575,7 +575,8 @@ Json render_settings_json(const EditorState& state) {
                {{"alive", s.particles}, {"born", s.particles_born}, {"dropped", s.particles_dropped},
                 {"cut", s.particles_cut}, {"drawn", s.particles_drawn}}},
               {"lamp_shadows",
-               {{"lights", s.local_shadows}, {"drawn", s.local_shadow_drawn}, {"waiting", s.local_shadow_waiting},
+               {{"lights", s.local_shadows}, {"drawn", s.local_shadow_drawn}, {"culls", s.local_shadow_culls},
+                {"waiting", s.local_shadow_waiting},
                 {"tiles", s.local_shadow_tiles}}},
               {"cells", {{"count", s.cells}, {"changed", s.cells_changed}}},
               {"streaming",
@@ -1828,7 +1829,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "local_shadows: lamps with shadows on cast them (the nearest 64 in view; needs shadows; default on); "
          "their shadow tiles are kept and drawn again only when the lamp or something near it changes, at "
          "most local_shadow_faces_per_frame faces a frame (a spot is one, a point lamp six; default 24); "
-         "last_frame.lamp_shadows has the lamps shaded with shadows, faces drawn and waiting, and tiles in use. "
+         "last_frame.lamp_shadows has the lamps shaded with shadows, faces drawn (and the GPU cullings they took, one a light) and waiting, and tiles in use. "
          "physical_sky: with a weather set, the air's light scattered many times (a deeper sky, the glow "
          "after sunset), the clear air between the camera and what it sees (far land fades blue, out to "
          "aerial_distance metres, default 32000) and the ambient light taken from the sky itself all round "

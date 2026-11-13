@@ -204,7 +204,8 @@ def main() -> int:
         overflow = []
         bad_draws = []
         draws = None
-        most = {"in_view": 0, "shadowed": 0, "voxel": 0, "waiting": 0, "lights": 0, "merged": 0}
+        most = {"in_view": 0, "shadowed": 0, "voxel": 0, "waiting": 0, "lights": 0, "merged": 0, "drawn": 0,
+                "culls": 0}
         widest = [0, STOPS - 1]  # the climb's stop with the most lamps in view (lamps, stop)
         legs = {name: {"in_view": 0, "shadowed": 0} for name in ("low", "street", "climb")}
         low_end, street_end = leg_ends(STOPS)
@@ -224,6 +225,8 @@ def main() -> int:
             most["shadowed"] = max(most["shadowed"], shadows["lights"])
             most["voxel"] = max(most["voxel"], frame["gi"]["lamps"])
             most["waiting"] = max(most["waiting"], shadows["waiting"])
+            most["drawn"] = max(most["drawn"], shadows["drawn"])
+            most["culls"] = max(most["culls"], shadows["culls"])
             if frame["overflow"] or frame["voxels"]["overflow"] or frame["decal_overflow"] or frame["light_overflow"]:
                 overflow.append(stop)
             got = (frame["draws"], frame["post_draws"])
@@ -247,7 +250,8 @@ def main() -> int:
         print(f"night_gate: over the flight at most {most['in_view']} lamps in view (shaded as at most "
               f"{most['lights']} lights, at most {most['merged']} of them far lamps merged), {most['shadowed']} shadowed, "
               f"{most['voxel']} lighting the voxel world's bricks lit in a frame, "
-              f"{most['waiting']} shadow faces waiting")
+              f"{most['waiting']} shadow faces waiting, at most {most['drawn']} drawn in a frame "
+              f"with {most['culls']} cullings (one a lamp)")
         if most["in_view"] < MIN_IN_VIEW:
             failures.append(f"at most {most['in_view']} lamps in view at once, not {MIN_IN_VIEW}")
         if legs["street"]["shadowed"] < SHADOWED:

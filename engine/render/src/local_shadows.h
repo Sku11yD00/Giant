@@ -50,6 +50,7 @@ public:
         float tan_half = 1.0f;
         float near = 0.1f;
         float range = 1.0f; // the light's, for detail
+        u32 first_tile = 0; // its light's first tile (the faces of one light share it)
     };
     // A shadowed light this frame: its GPU record goes beside the lights.
     struct Shadowed {
@@ -65,6 +66,7 @@ public:
     void plan(std::span<const ShadowCandidate> candidates, const DVec3& camera,
               std::span<const std::pair<DVec3, DVec3>> changed, bool all, u32 budget);
     void invalidate_all();
+    // (draws() keeps each light's faces together, in face order.)
     // This frame's faces from `from` on could not be drawn: drawn again
     // later, their lights unshadowed there until then.
     void undo_draws(usize from = 0);
@@ -78,10 +80,18 @@ public:
     // The face set of a light: its axis and right (spot: from its direction).
     static void face_axes(LightKind kind, const Vec3& direction, u32 face, Vec3& forward, Vec3& right);
     static float tan_half(LightKind kind, float outer_angle);
+    // Whether a face of a light at `light` may see the box [lo, hi] (the
+    // box against the face's four sides; conservative).
+    static bool face_sees_box(LightKind kind, const Vec3& direction, float outer, u32 face, const DVec3& light,
+                              const DVec3& lo, const DVec3& hi);
     // Camera-relative world to the face's clip space (reverse depth, no far plane).
     static Mat4 face_matrix(const Face& face, const DVec3& camera);
-    // The face's culling planes (inward; camera-relative): 4 sides and near.
+    // The face's culling planes (inward; camera-relative): 4 sides and far
+    // (at `range` along the face's axis).
     static void face_planes(const Face& face, const DVec3& camera, float out[20]);
+    // Culling planes for all of a light's faces at once: the box round its
+    // reach, open at the top (five planes; what is above it is mostly sky).
+    static void light_planes(const Face& face, const DVec3& camera, float out[20]);
 
 private:
     static constexpr u32 k_free = ~0u;

@@ -141,19 +141,98 @@ GIANT_TEST("local shadows: casters changing near a light draw it again, the old 
     plan(s, lights, 24, far);
     GIANT_CHECK(s.draws().empty());
     Boxes near;
-    near.push_back({DVec3{4.0, -1.0, -1.0}, DVec3{6.0, 1.0, 1.0}}); // 4 m from the first: inside its 5 m
+    near.push_back({DVec3{4.5, -0.1, -0.1}, DVec3{4.8, 0.1, 0.1}}); // 4.5 m from the first: inside its 5 m
     plan(s, lights, 2, near);
+    // Only the face that sees it (+x, the first light's first tile).
+    GIANT_CHECK(s.draws().size() == 1 && s.waiting() == 0);
+    GIANT_CHECK(s.draws().size() == 1 && s.draws()[0].tile == shadowed(s, 0)->record.tile);
+    GIANT_CHECK(shadowed(s, 0)->record.drawn == 0x3fu);
+    // Up a corner (+x, +y, +z): three faces, two drawn now, the old depths standing in for the third.
+    Boxes corner;
+    corner.push_back({DVec3{2.5, 2.5, 2.5}, DVec3{2.6, 2.6, 2.6}});
+    plan(s, lights, 2, corner);
     GIANT_CHECK(s.draws().size() == 2);
-    GIANT_CHECK(s.draws()[0].tile == shadowed(s, 0)->record.tile);
     GIANT_CHECK(shadowed(s, 0)->record.drawn == 0x3fu); // still shaded with the old faces
-    GIANT_CHECK(s.waiting() == 4);
+    GIANT_CHECK(s.waiting() == 1);
     plan(s, lights, 24); // the rest without being asked again
-    GIANT_CHECK(s.draws().size() == 4);
+    GIANT_CHECK(s.draws().size() == 1);
     plan(s, lights, 24, {}, true);
     GIANT_CHECK(s.draws().size() == 12);
     s.invalidate_all();
     plan(s, lights, 24);
     GIANT_CHECK(s.draws().size() == 12);
+}
+
+GIANT_TEST("local shadows: a face sees a box only inside its four sides") {
+    const DVec3 at{10.0, 2.0, -5.0};
+    const auto sees = [&](u32 face, const DVec3& c, double h) {
+        return LocalShadows::face_sees_box(LightKind::point, {}, 0.0f, face, at, at + c - DVec3{h, h, h},
+                                           at + c + DVec3{h, h, h});
+    };
+    // Straight ahead of +x (face 0) only; a box round the light every face.
+    GIANT_CHECK(sees(0, {5.0, 0.0, 0.0}, 0.5) && !sees(1, {5.0, 0.0, 0.0}, 0.5) && !sees(2, {5.0, 0.0, 0.0}, 0.5) &&
+                !sees(3, {5.0, 0.0, 0.0}, 0.5) && !sees(4, {5.0, 0.0, 0.0}, 0.5) && !sees(5, {5.0, 0.0, 0.0}, 0.5));
+    for (u32 f = 0; f < 6; ++f) GIANT_CHECK(sees(f, {0.0, 0.0, 0.0}, 0.5));
+    // On the edge between +x and +y: both.
+    GIANT_CHECK(sees(0, {4.0, 4.0, 0.0}, 0.2) && sees(2, {4.0, 4.0, 0.0}, 0.2) && !sees(1, {4.0, 4.0, 0.0}, 0.2));
+    // A spot looking down sees below, not beside.
+    GIANT_CHECK(LocalShadows::face_sees_box(LightKind::spot, {0.0f, -1.0f, 0.0f}, 0.5f, 0, at,
+                                            at + DVec3{-0.5, -6.0, -0.5}, at + DVec3{0.5, -5.0, 0.5}));
+    GIANT_CHECK(!LocalShadows::face_sees_box(LightKind::spot, {0.0f, -1.0f, 0.0f}, 0.5f, 0, at,
+                                             at + DVec3{5.5, -1.0, -0.5}, at + DVec3{6.5, 0.0, 0.5}));
+    // A bad box: none.
+    GIANT_CHECK(!sees(0, {5.0, 0.0, 0.0}, -1.0));
+}
+
+GIANT_TEST("local shadows: a light's planes hold its reach and every face's part of it") {
+    std::mt19937 rng(5);
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    const DVec3 camera{-200.0, 10.0, 40.0};
+    LocalShadows::Face f;
+    f.position = camera + DVec3{12.0, 3.0, -7.0};
+    f.range = 6.0f;
+    f.near = 0.2f;
+    float planes[20];
+    LocalShadows::light_planes(f, camera, planes);
+    const Vec3 l = to_camera_relative(f.position, camera);
+    for (int k = 0; k < 2000; ++k) {
+        const Vec3 d{u(rng), u(rng), u(rng)};
+        if (length(d) > 1.0f) continue;
+        const Vec3 p = l + d * f.range; // within reach
+        for (u32 i = 0; i < 5; ++i) {
+            GIANT_CHECK(planes[i * 4] * p.x + planes[i * 4 + 1] * p.y + planes[i * 4 + 2] * p.z + planes[i * 4 + 3] >=
+                        -1e-4f);
+        }
+    }
+    // Out of reach beside or below: outside; above: kept (the box is open there).
+    const auto inside = [&](const Vec3& p) {
+        for (u32 i = 0; i < 5; ++i) {
+            if (planes[i * 4] * p.x + planes[i * 4 + 1] * p.y + planes[i * 4 + 2] * p.z + planes[i * 4 + 3] < 0.0f)
+                return false;
+        }
+        return true;
+    };
+    GIANT_CHECK(!inside(l + Vec3{6.5f, 0.0f, 0.0f}) && !inside(l + Vec3{0.0f, 0.0f, -6.5f}) &&
+                !inside(l + Vec3{0.0f, -6.5f, 0.0f}));
+    GIANT_CHECK(inside(l + Vec3{0.0f, 50.0f, 0.0f}));
+}
+
+GIANT_TEST("local shadows: a light cut short by the budget stays in step: its faces drawn together after") {
+    LocalShadows s(32);
+    std::vector<LocalLight> lights{lamp(1, {0.0, 0.0, 0.0}), lamp(2, {100.0, 0.0, 0.0}), lamp(3, {200.0, 0.0, 0.0})};
+    plan(s, lights);
+    // All three move every frame (lanterns swinging); 8 faces a frame.
+    for (int f = 0; f < 30; ++f) {
+        for (LocalLight& l : lights) l.position.y += 0.5;
+        plan(s, lights, 8);
+        GIANT_CHECK(s.draws().size() == 8);
+        // At most two lights a frame: a whole one and part of the next, never three.
+        u32 lights_drawn = 0;
+        for (usize i = 0; i < s.draws().size(); ++i) {
+            if (i == 0 || s.draws()[i].first_tile != s.draws()[i - 1].first_tile) ++lights_drawn;
+        }
+        GIANT_CHECK(lights_drawn <= 2);
+    }
 }
 
 GIANT_TEST("local shadows: out of tiles, lights not wanted this frame give theirs up, oldest first") {
@@ -205,6 +284,7 @@ GIANT_TEST("local shadows: a face's matrix and planes find the texel the shader 
             LocalShadows::face_axes(kind, direction, face, f.forward, f.right);
             f.tan_half = LocalShadows::tan_half(kind, outer);
             f.near = 0.2f;
+            f.range = 7.0f;
             GIANT_CHECK(std::fabs(length(f.forward) - 1.0f) < 1e-4f && std::fabs(length(f.right) - 1.0f) < 1e-4f);
             GIANT_CHECK(std::fabs(dot(f.forward, f.right)) < 1e-4f);
             const Mat4 m = LocalShadows::face_matrix(f, camera);
@@ -229,7 +309,8 @@ GIANT_TEST("local shadows: a face's matrix and planes find the texel the shader 
                 const float y = dot(d, up) / (along * f.tan_half);
                 GIANT_CHECK(std::fabs(nx - x) < 1e-3f && std::fabs(ny - y) < 1e-3f);
                 GIANT_CHECK(std::fabs(nz - f.near / along) < 1e-4f * (1.0f + nz));
-                const bool inside = std::fabs(x) <= 1.0f && std::fabs(y) <= 1.0f && along >= f.near;
+                // In the face and within the light's reach (nearer than `near`: clipped by the projection).
+                const bool inside = std::fabs(x) <= 1.0f && std::fabs(y) <= 1.0f && along <= f.range;
                 bool in_planes = true;
                 for (u32 i = 0; i < 5; ++i) {
                     const float s = planes[i * 4] * p.x + planes[i * 4 + 1] * p.y + planes[i * 4 + 2] * p.z +
@@ -237,7 +318,7 @@ GIANT_TEST("local shadows: a face's matrix and planes find the texel the shader 
                     in_planes = in_planes && s >= -1e-5f;
                 }
                 const float margin = std::min({std::fabs(std::fabs(x) - 1.0f), std::fabs(std::fabs(y) - 1.0f),
-                                               std::fabs(along - f.near)});
+                                               std::fabs(along - f.range)});
                 if (margin > 1e-2f) GIANT_CHECK(inside == in_planes);
             }
         }
@@ -321,12 +402,12 @@ GIANT_TEST("local shadows: casters changing near a light out of view draw it aga
     std::vector<LocalLight> lights{lamp(1, {0.0, 0.0, 0.0})};
     plan(s, lights);
     const std::vector<LocalLight> none;
-    const Boxes at{{DVec3{1.0, -1.0, -1.0}, DVec3{2.0, 1.0, 1.0}}};
+    const Boxes at{{DVec3{4.5, -0.1, -0.1}, DVec3{4.8, 0.1, 0.1}}}; // (grown 2 m for swaying: still +x's alone)
     plan(s, none, 24, at);
     GIANT_CHECK(s.draws().empty());
     plan(s, none);
     plan(s, lights);
-    GIANT_CHECK(s.draws().size() == 6);
+    GIANT_CHECK(s.draws().size() == 1); // the face that sees it (+x)
 }
 
 GIANT_TEST("local shadows: faces that could not be drawn are drawn again, unshadowed meanwhile") {
