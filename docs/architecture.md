@@ -3323,7 +3323,10 @@ reflections are as sharp moving as standing still.
   the mirror direction, as wide as the highlight (tan of the half angle
   from roughness squared, 0.03 to 0.577). Samples are at least a sixth of
   their distance wide and steps an eighth of it or more, so 48 samples
-  reach a hundred metres and more. What they meet shines with its light
+  reach a hundred metres and more. An empty brick is crossed in one
+  step, and a cone rising past the top of every window's filled bricks
+  stops there, so cones through open air (the water's, over the sea)
+  take a handful of steps, not 48. What they meet shines with its light
   word (as GI's cones do); the rest of the cone takes the hemisphere
   colours, dimmed by GI where the sky is hidden (so no sky indoors). The
   surface's own voxels are left out (a plane half a voxel above it), and

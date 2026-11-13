@@ -1918,6 +1918,16 @@ void VoxelScene::write_levels(gpu::VoxelLevel* out, const DVec3& camera) const {
         l.filled_min[3] = 0.0f;
         l.filled_max[3] = 0.0f;
     }
+    // The top of everything from each level up (coarser levels are written
+    // above, so walked from the coarsest down).
+    float top = -1.0e30f;
+    for (u32 level = m_clipmap.levels(); level-- > 0;) {
+        gpu::VoxelLevel& l = out[level];
+        if (l.filled_min[1] <= l.filled_max[1]) {
+            top = std::max(top, l.filled_max[1]);
+        }
+        l.filled_max[3] = top;
+    }
 }
 
 } // namespace giant::render
