@@ -42,6 +42,7 @@ struct Level {
     bool stands;       // the far field need look at it (it, or a coarser level standing in, has stand-ins)
     float3 filled_min; // around the level's bricks (min > max: none)
     float3 filled_max;
+    float top;         // the highest top of this level's bounds and every coarser one's (-1e30: none)
 };
 
 Level load_level(ByteAddressBuffer b, uint offset, uint level) {
@@ -54,7 +55,9 @@ Level load_level(ByteAddressBuffer b, uint offset, uint level) {
     l.brick = brick.xyz;
     l.stands = brick.w != 0;
     l.filled_min = load4(b, at + 32).xyz;
-    l.filled_max = load4(b, at + 48).xyz;
+    const float4 filled_max = load4(b, at + 48);
+    l.filled_max = filled_max.xyz;
+    l.top = filled_max.w;
     return l;
 }
 

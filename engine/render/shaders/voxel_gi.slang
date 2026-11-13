@@ -357,7 +357,8 @@ static const uint k_reflection_steps = 48;
 // normal `n`): a cone through the lit voxel world along the mirror
 // direction `dir`, as wide as the highlight (`cone_tan`, from roughness).
 // Samples are at least a sixth of their distance wide, so steps grow by an
-// eighth or more and 48 reach a hundred metres and more; sharper detail
+// eighth or more and 48 reach a hundred metres and more (an empty brick
+// is crossed in one step, so through open air far further); sharper detail
 // comes from the screen (reflect.slang). The surface's own voxels (centres
 // within a voxel above it) are left out; so are other voxels holding the
 // surface's plane, coarse ones further out holding the foot of what
@@ -386,6 +387,13 @@ float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3
     float3 color = float3(0.0, 0.0, 0.0);
     float a = 0.0;
     float t = 1.5 * own;
+    // The top of the filled bricks of every window it samples: a ray rising
+    // past it has nothing left to meet (the sky, over open sea, at once);
+    // but for the sea's surface above it, seen from under it.
+    float top = load_level(levels, w.levels_offset, first).top;
+    if ((w.stand_ins & k_no_water) == 0u && f.sea_level > k_no_sea && p.y < f.sea_level) {
+        top = max(top, f.sea_level);
+    }
     for (uint s = 0; s < k_reflection_steps && a < 0.95; ++s) {
         const float wanted_size = max(t * cone_tan, t / 6.0);
         const float wanted = ceil(log2(max(wanted_size / voxel0, 1.0)));
@@ -401,10 +409,30 @@ float4 trace_reflection(VoxelWorld w, RWByteAddressBuffer light, Frame f, float3
             a = 1.0;
             break;
         }
+        if (dir.y >= 0.0 && p.y + dir.y * t > top) {
+            break;
+        }
         if (!voxel_at(w, levels, pool, table, p + dir * t, level, used, filled, index, voxel, centre)) {
             break; // past the coarsest window
         }
-        const float size = load_level(levels, w.levels_offset, used).brick_size / 8.0;
+        const Level at_level = load_level(levels, w.levels_offset, used);
+        const float size = at_level.brick_size / 8.0;
+        if (index == k_no_brick && used == level) {
+            // An empty brick: on to where the ray leaves it (open air takes
+            // a dozen steps to the coarsest window's edge, not all 48 a
+            // voxel or less apart). Not a coarser one standing in for an
+            // unbuilt finer slot: finer bricks in it may be built and hold
+            // what it lost.
+            const float3 q = p + dir * t;
+            const float edge = at_level.brick_size;
+            const float3 lo = at_level.origin + floor((q - at_level.origin) / edge) * edge;
+            const float3 hi = lo + edge;
+            const float3 gone = float3(dir.x > 0.0 ? (hi.x - q.x) / dir.x : dir.x < 0.0 ? (lo.x - q.x) / dir.x : 1e30,
+                                       dir.y > 0.0 ? (hi.y - q.y) / dir.y : dir.y < 0.0 ? (lo.y - q.y) / dir.y : 1e30,
+                                       dir.z > 0.0 ? (hi.z - q.z) / dir.z : dir.z < 0.0 ? (lo.z - q.z) / dir.z : 1e30);
+            t += max(max(t * cone_tan, size * 0.75), min(min(gone.x, gone.y), gone.z) + 0.05 * size);
+            continue;
+        }
         if (filled) {
             filled = dot(ground.xyz, centre) - ground.w >= 0.5 * size;
         }

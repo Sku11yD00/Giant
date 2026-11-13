@@ -674,6 +674,8 @@ struct VoxelLevel {
     i32 brick[4];      // xyz: the window's minimum brick (slots wrap on it); w: 1 if the far field need look (stand-ins)
     // Bounds around every brick of the level (camera-relative; may be loose,
     // never tight): rays that miss them skip the level. Empty: min > max.
+    // filled_max.w: the highest top of this level's bounds and every coarser
+    // one's (-1e30: none), above which a rising ray meets nothing.
     float filled_min[4];
     float filled_max[4];
 };

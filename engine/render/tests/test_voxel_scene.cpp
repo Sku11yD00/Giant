@@ -747,6 +747,44 @@ GIANT_TEST("voxel scene: levels say whether the far field need look at them") {
     GIANT_CHECK(stands() == 0);
 }
 
+GIANT_TEST("voxel scene: each level says the top of its filled bricks and every coarser level's") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    std::vector<gpu::VoxelLevel> levels(b.voxels->levels());
+    const auto check_tops = [&] {
+        b.voxels->write_levels(levels.data(), b.camera);
+        float top = -1.0e30f;
+        bool all = true;
+        for (size_t i = levels.size(); i-- > 0;) {
+            const gpu::VoxelLevel& l = levels[i];
+            if (l.filled_min[1] <= l.filled_max[1]) top = std::max(top, l.filled_max[1]);
+            all = all && l.filled_max[3] == top;
+        }
+        return all;
+    };
+    b.step(0.0f);
+    for (int i = 0; i < 100 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(check_tops());
+    // Nothing there: no top anywhere (a rising ray meets nothing at once).
+    for (const gpu::VoxelLevel& l : levels) GIANT_CHECK(l.filled_max[3] <= -1.0e29f);
+    // A cube: every level's top at or over the cube's (1.6 m up, camera-relative).
+    b.instances.resize(1);
+    b.instances[0].position = {0.3, 1.1, 0.2};
+    b.step();
+    for (int i = 0; i < 100 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(check_tops());
+    for (const gpu::VoxelLevel& l : levels) GIANT_CHECK(l.filled_max[3] >= float(1.6 - b.camera.y) - 1e-3f);
+    // One high up, outside the finest window: its top reaches the finest
+    // level from a coarser one's bricks.
+    b.instances.resize(2);
+    b.instances[1].position = {12.0, 10.0, 0.0};
+    b.step();
+    for (int i = 0; i < 100 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(check_tops());
+    GIANT_CHECK(levels[0].filled_max[1] < float(10.0 - b.camera.y));
+    GIANT_CHECK(levels[0].filled_max[3] >= float(10.0 - b.camera.y));
+}
+
 GIANT_TEST("voxel scene: lakes and rivers become water voxels, rebuilt when they change, gone when they go") {
     Bench b;
     GIANT_CHECK(b.voxels->init());
