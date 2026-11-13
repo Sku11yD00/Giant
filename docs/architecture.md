@@ -2245,8 +2245,10 @@ themselves already grow with the wind (W2a), the surf with it (W4b) and
 the sea's swell (W5a). Snow falls into the water and is gone; ice waits
 for a later part.
 
-The rest comes in the following parts (the water plan: W5 sound and
-wetting, W6 the water gate).
+Sound and splashes (W5d, W5e) and wetting (W5f) follow below; the water
+gate (W6, `tools/water_gate.py`) flies the N3 valley with a lake, a river
+past the town and a coast, over and under the water, and holds the water
+to 1.5 ms of GPU time.
 
 ## Navigation
 
@@ -3297,6 +3299,7 @@ over the target frame time). Where it stands:
 | Shadows | 2.0 ms |
 | GI and reflections | 3.5 ms |
 | Weather, clouds, particles | 1.5 ms |
+| Water, where it is seen (its pass, its share of shading and the voxel world; from the headroom) | 1.5 ms |
 | Hair | 1.0 ms |
 | Post and UI | 1.0 ms |
-| Headroom for destruction spikes | 1.6 ms |
+| Headroom for destruction spikes | 0.1 ms (1.6 ms where no water is seen) |

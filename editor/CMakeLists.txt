@@ -117,6 +117,11 @@ if(GIANT_BUILD_TESTS)
         COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/night_gate.py
                 $<TARGET_FILE:giant_editor> --hidden --backend null)
       set_tests_properties(editor_night_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${gate_env}")
+      # The water gate (water plan W6): the valley with a lake, a river past the town and a coast.
+      add_test(NAME editor_water_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/water_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set_tests_properties(editor_water_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${gate_env}")
     endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")
