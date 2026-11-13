@@ -2323,7 +2323,7 @@ shadow is lit evenly; a particle whose centre is off the screen while its
 quad reaches onto it takes the lamps of the cluster at the screen's edge
 nearest its centre.
 
-## Effects (effects plan FX2)
+## Effects (effects plan FX2, FX3)
 
 Effects are world data (`world/effects.h`), saved with the scene and the
 world's world.json like water. A `ParticleLook` is the renderer's
@@ -2335,7 +2335,7 @@ cone round a direction, at a speed, stopping on the ground or not. A spawned
 effect runs its rates for its `duration` after its bursts; an entity's
 `EntityEffect` (on, effect name, rate scale) runs it while on, turned with
 the entity. A built-in library (smoke, fire, sparks, dust_kick, spray, mist,
-embers, debris_chips: a look and an effect of each name, made once per
+embers, debris_chips, splinters, leaves: a look and an effect of each name, made once per
 process) is always there; the scene's own of a name stands in for the
 built-in one (`find_particle_look`, `find_effect`), so a world can retune
 smoke without naming a new look. Looks are bounded as styles are (and at
@@ -2369,6 +2369,24 @@ style slot while it is there (particles alive up to a minute keep their
 index): a changed look is changed in place, a new name takes a new slot, and
 a removed name's slot is reused only once the renderer's 256 are full, the
 one gone longest first.
+
+The world's events set effects off (editor/src/event_effects.h, effects
+plan FX3), as spawned effects, so within the spawned cap and the budgets
+above (nearest first): a shot's hit throws up what its surface is made of,
+turned to the surface (sparks off metal; chips and dust off concrete, brick
+and the rest; chips off glass; splinters off wood; a few leaves off
+foliage; dust and chips off dirt; nothing off flesh), more for a round
+leaving more energy (a rifle round's 3 kJ as built, 0.3 to 2 times); what
+goes into water throws spray by its size and speed (a person jumping in as
+built, up to four times); every dust emit (`sim::Dust` keeps up to 256 as
+`DustEvent`s between takings, with what threw it up: rubble, ground or a
+tree) throws chips off a collapse, leaves off a felled tree, dust and chips
+off a crater or an uprooting, by its radius; and the player running (3 m/s
+or more) on dry bare ground (not wet past 0.3, snow past 0.2, nor in water)
+kicks a little dust every 1.6 m. They chain after the sounds on the
+physics' `on_hits` and `on_splashes`; the dust is taken each frame before
+the effects update. `get_effects` counts them (`emitting.events`), those
+left out past the cap too.
 
 ## Navigation
 

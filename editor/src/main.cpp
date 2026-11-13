@@ -15,6 +15,7 @@
 #include "texture_library.h"
 #include "scene_render.h"
 #include "effects_state.h"
+#include "event_effects.h"
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
 #include "far_ground.h"
@@ -348,6 +349,7 @@ int run(const Options& options) {
     state.saves = &saves;
     editor::connect_blows(state); // shots and blasts reach the swings and the cloth
     editor::connect_sounds(state); // after connect_blows: hits knock and are heard
+    editor::connect_event_effects(state); // after both: hits and splashes throw up particles too
     state.window = window.get();
     state.device = device.get();
     state.log = &log_history;
@@ -699,6 +701,7 @@ int run(const Options& options) {
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
         cloth.update(weather.wind(), state.camera.position, game_delta); // drawn as it moved next frame
         swing.update(weather.wind(), state.camera.position, game_delta);
+        editor::event_effects_frame(state, game_delta); // this frame's dust thrown up, running feet
         effects.follow(state.scene, state.scene.untaken_changes());
         particle_seconds += game_delta; // (a frame not drawn: carried to the next)
         effects.update(state.scene, state.camera.position, game_delta,

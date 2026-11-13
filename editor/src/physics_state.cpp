@@ -324,7 +324,7 @@ usize PhysicsState::dent(world::Scene& scene, const world::Dent& dent, const DVe
     if (!changed.empty() && dent.stretch <= 1.0f && dent.radius >= 2.0) {
         const float r = std::clamp(static_cast<float>(0.8 * dent.radius), 2.0f, 60.0f);
         const std::optional<double> ground = scene.terrain.height_at(at.x, at.z);
-        m_dust.emit({at.x, ground.value_or(at.y) + 0.4 * r, at.z}, r, 1.2f / r, sim::k_dust_earth);
+        m_dust.emit({at.x, ground.value_or(at.y) + 0.4 * r, at.z}, r, 1.2f / r, sim::k_dust_earth, sim::DustSource::ground);
     }
     return changed.size();
 }

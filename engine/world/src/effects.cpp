@@ -185,6 +185,38 @@ std::vector<ParticleLook> make_looks() {
         l.soft = 0.02f;
         out.push_back(l);
     }
+    {
+        ParticleLook l = look("splinters"); // wood torn off by a shot: pale brown slivers thrown and falling
+        l.life_min = 1.0f;
+        l.life_max = 2.0f;
+        l.size_start = 0.05f;
+        l.size_end = 0.05f;
+        l.color_start = {0.45f, 0.33f, 0.2f};
+        l.color_end = {0.45f, 0.33f, 0.2f};
+        l.opacity_start = 1.0f;
+        l.opacity_end = 0.0f;
+        l.drag = 0.3f;
+        l.wind = 0.1f;
+        l.form = ParticleForm::streak;
+        l.soft = 0.02f;
+        out.push_back(l);
+    }
+    {
+        ParticleLook l = look("leaves"); // shaken off a falling tree: fluttering down, carried by the wind
+        l.life_min = 4.0f;
+        l.life_max = 7.0f;
+        l.size_start = 0.07f;
+        l.size_end = 0.07f;
+        l.color_start = {0.16f, 0.24f, 0.07f};
+        l.color_end = {0.3f, 0.25f, 0.1f};
+        l.opacity_start = 1.0f;
+        l.opacity_end = 0.0f;
+        l.gravity = 0.15f;
+        l.drag = 2.0f;
+        l.wobble = 0.5f;
+        l.soft = 0.02f;
+        out.push_back(l);
+    }
     return out;
 }
 
@@ -245,6 +277,13 @@ std::vector<Effect> make_effects() {
         out.push_back({"embers", {e}, 10.0f});
     }
     out.push_back({"debris_chips", {emitter("debris_chips", 0.0f, 24, 60.0f, 2.0f, 6.0f, true)}, 0.0f});
+    out.push_back({"splinters", {emitter("splinters", 0.0f, 16, 50.0f, 2.0f, 6.0f, true)}, 0.0f});
+    {
+        Emitter e = emitter("leaves", 0.0f, 60, 180.0f, 0.5f, 2.0f, true);
+        e.shape = EmitterShape::sphere;
+        e.size = {3.0f, 0.0f, 0.0f};
+        out.push_back({"leaves", {e}, 0.0f});
+    }
     return out;
 }
 

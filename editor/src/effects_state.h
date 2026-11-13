@@ -53,6 +53,17 @@ public:
         u32 missing = 0;      // emitters (or entity effects) naming a look (an effect) found nowhere
     };
 
+    // Effects the world's events set off (event_effects.h), in all.
+    struct EventCounts {
+        u64 hits = 0;     // shots' hits
+        u64 splashes = 0; // things going into water
+        u64 dust = 0;     // collapses, felled trees, craters
+        u64 steps = 0;    // the player's running feet
+        u64 refused = 0;  // left out: the spawned cap
+    };
+    EventCounts events;
+    double walked = 0.0; // metres the player ran since its last step kicked dust
+
     double reach = k_default_reach;
     u32 births_per_frame = render::k_max_particles_born / 2;       // the rest for events (FX3)
     u32 grounded_per_frame = render::k_max_particles_grounded / 2;
@@ -66,10 +77,11 @@ public:
     // bursts and styles from the scene's entity effects and the spawned ones.
     void update(const world::Scene& scene, const DVec3& camera, double seconds, const Ground& ground);
     // A one-shot effect (the scene's, else built-in) at `position`, turned
-    // by `rotation`, its rates times `rate`: its bursts on the next update,
-    // then its rates for its duration. Null: no such effect, or the cap.
+    // by `rotation`, its rates times `rate` and its bursts times `bursts`
+    // (0 to k_max_effect_rate_scale): its bursts on the next update, then
+    // its rates for its duration. Null: no such effect, bad numbers, or the cap.
     std::optional<u32> spawn(const world::Scene& scene, std::string_view effect, const DVec3& position,
-                             const Quat& rotation = {}, float rate = 1.0f);
+                             const Quat& rotation = {}, float rate = 1.0f, float bursts = 1.0f);
     // Everything spawned forgotten, carries reset; the next follow looks over
     // every entity again.
     void clear();
@@ -98,6 +110,7 @@ private:
         DVec3 position{};
         Quat rotation{};
         float rate = 1.0f;
+        float burst_scale = 1.0f;
         double left = 0.0; // seconds of its rates left
         bool burst = true; // its bursts still owed
         std::array<float, world::k_max_emitters> carry{};
@@ -109,6 +122,7 @@ private:
         Quat rotation{};
         float rate = 1.0f;
         double rate_seconds = 0.0; // of its rates this update (a spawn's last: what is left)
+        float burst_scale = 1.0f;
         float* carry = nullptr;
         u64 key = 0;       // the entity's id, or a spawn's
         bool bursts = false;

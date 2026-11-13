@@ -55,7 +55,8 @@ Effect vent() {
 } // namespace
 
 GIANT_TEST("effects: the built-in library is whole, valid, and every look its effects name is there") {
-    const std::set<std::string> names = {"smoke", "fire", "sparks", "dust_kick", "spray", "mist", "embers", "debris_chips"};
+    const std::set<std::string> names = {"smoke", "fire", "sparks", "dust_kick", "spray", "mist", "embers", "debris_chips",
+                                           "splinters", "leaves"};
     std::set<std::string> looks, effects;
     for (const ParticleLook& l : built_in_particle_looks()) {
         GIANT_CHECK(!check_particle_look(l));

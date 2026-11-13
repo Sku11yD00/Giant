@@ -80,6 +80,7 @@ void EffectsState::clear() {
     m_taken = true;
     m_scene = 0; // the next follow looks over every entity again
     m_spawn_scene = 0;
+    walked = 0.0;
 }
 
 void EffectsState::follow_one(const world::Scene& scene, world::EntityId id) {
@@ -187,12 +188,13 @@ const world::Effect* EffectsState::effect_named(const world::Scene& scene, const
 }
 
 std::optional<u32> EffectsState::spawn(const world::Scene& scene, std::string_view name, const DVec3& position,
-                                       const Quat& rotation, float rate) {
+                                       const Quat& rotation, float rate, float bursts) {
     spawned_in(scene);
     const world::Effect* effect = world::find_effect(scene.effects, name);
     if (effect == nullptr || m_spawned.size() >= k_max_spawned) return std::nullopt;
     if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) return std::nullopt;
-    if (!std::isfinite(rate) || rate < 0.0f) return std::nullopt;
+    if (!std::isfinite(rate) || rate < 0.0f || rate > world::k_max_effect_rate_scale) return std::nullopt;
+    if (!std::isfinite(bursts) || bursts < 0.0f || bursts > world::k_max_effect_rate_scale) return std::nullopt;
     Spawned s;
     s.id = m_next_spawn++;
     if (m_next_spawn == 0) m_next_spawn = 1;
@@ -200,6 +202,7 @@ std::optional<u32> EffectsState::spawn(const world::Scene& scene, std::string_vi
     s.position = position;
     s.rotation = rotation;
     s.rate = rate;
+    s.burst_scale = bursts;
     s.left = effect->duration;
     m_spawned.push_back(std::move(s));
     return m_spawned.back().id;
@@ -265,6 +268,7 @@ void EffectsState::update(const world::Scene& scene, const DVec3& camera, double
         j.carry = s.carry.data();
         j.key = (u64{1} << 63) | s.id; // apart from entity ids (under 2^53)
         j.bursts = s.burst;
+        j.burst_scale = s.burst_scale;
         j.rates = s.left > 0.0;
         j.rate_seconds = std::min(seconds, s.left);
         m_jobs.push_back(j);
@@ -294,7 +298,10 @@ void EffectsState::run(const Job& job, const Ground& ground) {
             carry -= whole;
             count = static_cast<u32>(whole);
         }
-        if (job.bursts) count += e.burst;
+        if (job.bursts) {
+            const double scaled = std::round(static_cast<double>(e.burst) * job.burst_scale);
+            count += static_cast<u32>(std::min(scaled, static_cast<double>(world::k_max_emitter_burst)));
+        }
         if (count == 0) continue;
         const std::optional<u32> style = style_index(e.look);
         if (!style) {

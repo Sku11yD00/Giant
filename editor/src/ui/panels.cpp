@@ -266,6 +266,11 @@ void EditorPanels::draw_effects() {
     if (m_state.effects != nullptr) {
         const EffectsState::Stats& st = m_state.effects->stats();
         ImGui::TextDisabled("%u running, %u particles born, %u cut, %u far", st.running, st.born, st.cut, st.far);
+        const EffectsState::EventCounts& ev = m_state.effects->events;
+        ImGui::TextDisabled("From events: %llu hits, %llu splashes, %llu dust, %llu steps, %llu refused",
+                            static_cast<unsigned long long>(ev.hits), static_cast<unsigned long long>(ev.splashes),
+                            static_cast<unsigned long long>(ev.dust), static_cast<unsigned long long>(ev.steps),
+                            static_cast<unsigned long long>(ev.refused));
         if (st.missing > 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%u emitters or entities name nothing (get_effects)",
                                st.missing);
