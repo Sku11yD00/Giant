@@ -6,8 +6,11 @@
 #include "giant/rhi/rhi.h"
 #include "giant_test.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <span>
 #include <vector>
 
 using namespace giant;
@@ -413,4 +416,192 @@ GIANT_TEST("particles: births reach the GPU ring where the ring says, wrapping p
     const std::vector<u8> got = device->read_buffer(renderer->particle_ring());
     GIANT_CHECK(got.size() == want.size() * sizeof(gpu::Particle));
     GIANT_CHECK(std::memcmp(got.data(), want.data(), got.size()) == 0);
+}
+
+GIANT_TEST("particles: drawn after water in the lit view, two passes, only with some alive (null device)") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    rhi::TextureDesc t;
+    t.width = 96;
+    t.height = 64;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(t);
+    const auto draw = [&](const FrameInput& frame) {
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        renderer->render(*cmd, target, frame);
+        device->end_frame();
+        return renderer->last_stats();
+    };
+    std::vector<ParticleStyle> styles{smoke()};
+    FrameInput frame;
+    frame.settings.gpu_culling = false;
+    frame.particle_styles = styles;
+    frame.delta_seconds = 0.0f;
+    const u32 bare = draw(frame).post_draws; // none alive
+    GIANT_CHECK(!renderer->last_stats().particles_drawn);
+    ParticleBurst b = burst_at({0.0, 0.0, -5.0}, 50);
+    frame.particle_bursts = {&b, 1};
+    RenderStats s = draw(frame);
+    GIANT_CHECK(s.particles_drawn && s.post_draws == bare + 2);
+    frame.particle_bursts = {};
+    frame.settings.particles = false; // off: still alive, not drawn
+    s = draw(frame);
+    GIANT_CHECK(!s.particles_drawn && s.post_draws == bare && s.particles == 50);
+    frame.settings.particles = true;
+    frame.settings.debug_view = DebugView::clusters; // not the lit view
+    GIANT_CHECK(!draw(frame).particles_drawn);
+    frame.settings.debug_view = DebugView::lit;
+    frame.particle_styles = {}; // no styles: nothing to draw them with
+    GIANT_CHECK(!draw(frame).particles_drawn);
+}
+
+GIANT_TEST("particles: d3d12 a puff lit by the sun, a glowing spark, hidden behind a wall, still from frame to frame") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    std::vector<ParticleStyle> styles(2);
+    styles[0].life_min = styles[0].life_max = 2.0f; // a white puff, opaque all its life, still
+    styles[0].size_start = styles[0].size_end = 1.5f;
+    styles[0].color_start = styles[0].color_end = {0.8f, 0.8f, 0.8f};
+    styles[0].opacity_start = styles[0].opacity_end = 1.0f;
+    styles[0].gravity = 0.0f;
+    styles[0].soft = 0.0f;
+    styles[1] = styles[0]; // a spark: unlit, glowing, streaking sideways
+    styles[1].lit = false;
+    styles[1].shape = ParticleShape::streak;
+    styles[1].size_start = styles[1].size_end = 1.0f;
+    styles[1].color_start = styles[1].color_end = {0.0f, 0.0f, 0.0f};
+    styles[1].emissive = {8.0f, 4.0f, 1.0f};
+    std::vector<Instance> wall(1);
+    wall[0].mesh = renderer->builtin(BuiltinMesh::cube);
+    wall[0].position = {0.0, 0.0, -3.0};
+    wall[0].scale = {1.0f, 1.0f, 1.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.2f, 0.2f, 0.2f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.materials = materials;
+    frame.particle_styles = styles;
+    frame.lighting.background = {0.5f, 0.5f, 0.5f};
+    frame.lighting.sun_direction = {0.0f, 0.0f, 1.0f}; // behind the camera (it looks down -Z)
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.3f, 0.3f, 0.3f};
+    frame.lighting.ground_light = {0.1f, 0.1f, 0.1f};
+    // A burst born, aged half a second (faded in), then held while
+    // streaming settles; the image read; then all of them aged out.
+    std::vector<u8> again;
+    const auto draw = [&](std::span<const ParticleBurst> bursts) {
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 4 || quiet < 4); ++i) {
+            frame.particle_bursts = i == 0 ? bursts : std::span<const ParticleBurst>{};
+            frame.delta_seconds = i == 1 ? 0.5f : 0.0f;
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        GIANT_CHECK(renderer->last_stats().particles_drawn == !bursts.empty());
+        device->wait_idle();
+        std::vector<u8> image = device->read_texture(target);
+        // One more frame, the clock held: the same image.
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        if (cmd != nullptr) {
+            renderer->render(*cmd, target, frame);
+            device->end_frame();
+        }
+        device->wait_idle();
+        again = device->read_texture(target);
+        // Aged out before the next.
+        frame.delta_seconds = 1.0f;
+        for (int i = 0; i < 3; ++i) {
+            cmd = device->begin_frame(nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        GIANT_CHECK(renderer->last_stats().particles == 0);
+        return image;
+    };
+    const auto channel = [](const std::vector<u8>& image, u32 x, u32 y, u32 c) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        return i + 3 < image.size() ? static_cast<int>(image[i + c]) : -1;
+    };
+    ParticleBurst puff;
+    puff.position = {0.0, 0.0, -5.0};
+    puff.speed_min = puff.speed_max = 0.0f;
+    const std::vector<u8> bare = draw({});
+    const std::vector<u8> lit = draw({&puff, 1});
+    const bool still = again == lit;
+    // The same puff in the dark: no light of its own, it hides the grey.
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    const std::vector<u8> dark = draw({&puff, 1});
+    // The spark glows in the dark.
+    ParticleBurst spark = puff;
+    spark.style = 1;
+    spark.position.x = -3.0; // at the centre half a second on
+    spark.velocity = {6.0f, 0.0f, 0.0f};
+    const std::vector<u8> glowing = draw({&spark, 1});
+    // Behind a wall: not seen.
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.3f, 0.3f, 0.3f};
+    frame.instances = wall;
+    const std::vector<u8> wall_only = draw({});
+    const std::vector<u8> behind = draw({&puff, 1});
+    int corner_change = 0;
+    int wall_change = 0;
+    for (u32 y = 0; y < k_h; ++y) {
+        for (u32 x = 0; x < k_w; ++x) {
+            if ((x < 6 || x >= k_w - 6) && (y < 6 || y >= k_h - 6)) {
+                corner_change = std::max(corner_change, std::abs(channel(lit, x, y, 1) - channel(bare, x, y, 1)));
+            }
+            if (x >= 28 && x < 36 && y >= 28 && y < 36) {
+                wall_change = std::max(wall_change, std::abs(channel(behind, x, y, 1) - channel(wall_only, x, y, 1)));
+            }
+        }
+    }
+    std::printf("    grey %d, lit puff %d, dark puff %d, spark red %d blue %d, corners changed %d, behind the wall changed %d, still %d\n",
+                channel(bare, 32, 32, 1), channel(lit, 32, 32, 1), channel(dark, 32, 32, 1), channel(glowing, 32, 32, 0),
+                channel(glowing, 32, 32, 2), corner_change, wall_change, still ? 1 : 0);
+    GIANT_CHECK(channel(lit, 32, 32, 1) > channel(bare, 32, 32, 1) + 15);
+    GIANT_CHECK(channel(dark, 32, 32, 1) + 30 < channel(bare, 32, 32, 1));
+    GIANT_CHECK(channel(glowing, 32, 32, 0) > 200 && channel(glowing, 32, 32, 0) > channel(glowing, 32, 32, 2) + 40);
+    GIANT_CHECK(corner_change <= 1);
+    GIANT_CHECK(wall_change <= 2);
+    GIANT_CHECK(still);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
 }

@@ -77,6 +77,7 @@ std::vector<u8> encode_clear(Format format, const Color& color, float depth) {
         break;
     }
     case Format::rgba16_float:
+    case Format::rgba32_float:
     case Format::bc1_unorm: // (never targets: sampled only)
     case Format::bc1_srgb:
     case Format::bc4_unorm:

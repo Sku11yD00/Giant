@@ -2289,8 +2289,37 @@ ring cuts the oldest (`particles_cut`). The clock is the frames'
 is drawn. A frame's births go up in one upload (at most 1 MiB, two copies
 where they wrap); with no upload memory they are taken back and counted
 as dropped ("particles" in the CPU sections).
-Drawing them (FX1b) is next: half-resolution weighted blended
-transparency, lit like the surfaces they float among.
+Drawing them (FX1b, `shaders/particles.slang`, timed "particles") comes
+after water and before post, in the lit view, over the light before
+exposure (`RenderSettings::particles`). A compute pass takes each alive
+particle once: where it is (the same closed form, plus its style's seeded
+wobble), its size, opacity and colour over its life, and its light at its
+centre: the sun shadowed (the virtual shadow map, the clouds' shadow), the
+sky and ground round it or the voxel world's bounce light where it has
+some, the lamps listed in its cluster (shadowed), its own emissive light,
+then the air between it and the camera (aerial perspective, fog, clouds,
+what falls, dust) as over a surface there. A soft ball is lit on the side
+the camera sees and a quarter on its far side. Dead, out of the frustum or
+of a bad style, it is not drawn. Then a quad for each (a puff facing the
+camera with a lumpy edge its seed picks; a streak stretched along its
+motion as seen, a sixtieth of a second long) is drawn at half resolution
+into weighted blended transparency's two sums (McGuire and Bavoil 2013;
+no sorting, so nothing pops as the order changes), each pixel testing the
+scene's depth itself (no depth target), fading over its style's `soft`
+metres into what lies behind and over the last half metre before the
+camera. The sums are 32-bit floats (bright sparks near the camera
+outgrow 16-bit ones). Last, the light is copied into a target of its own
+with the sums brought up to full resolution over it, each full pixel
+weighting the four half-size pixels round it by how near their scene
+depth lies to its own (so a particle behind an edge does not bleed over
+it); over the flat background (shown as it is, not exposed) the
+particles are exposed and tone mapped there, as dust is. No temporal
+noise or history: the same clock draws the same image. Known gaps:
+particles under a water surface draw over it (the depth tested is the
+scene's, without the water); lit at their centres, a big puff half in
+shadow is lit evenly; a particle whose centre is off the screen while its
+quad reaches onto it takes the lamps of the cluster at the screen's edge
+nearest its centre.
 
 ## Navigation
 

@@ -47,6 +47,11 @@ giant_shaders(render
     shaders/water.slang:ps_copy:pixel:water_copy_ps
     shaders/water.slang:vs_main:vertex:water_vs
     shaders/water.slang:ps_main:pixel:water_ps
+    shaders/particles.slang:cs_prepare:compute:particles_prepare_cs
+    shaders/particles.slang:vs_main:vertex:particles_vs
+    shaders/particles.slang:ps_main:pixel:particles_ps
+    shaders/particles.slang:vs_full:vertex:particles_full_vs
+    shaders/particles.slang:ps_composite:pixel:particles_composite_ps
     shaders/smaa.slang:vs_main:vertex:smaa_vs
     shaders/smaa.slang:ps_edges:pixel:smaa_edges_ps
     shaders/smaa.slang:ps_weights:pixel:smaa_weights_ps

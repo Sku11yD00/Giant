@@ -498,6 +498,9 @@ struct RenderSettings {
     bool local_lights = true;
     // Water (FrameInput::water_vertices; lit views).
     bool water = true;
+    // Particles drawn (FrameInput::particle_bursts; the lit view). Off,
+    // they are still born and age, unseen.
+    bool particles = true;
     // Their shadows (lights with a shadow_id; needs `shadows` and GPU
     // culling): faces of shadow tiles drawn a frame at most (nearest first;
     // a face not drawn yet lets its light through).
@@ -799,6 +802,7 @@ struct RenderStats {
     u32 particles_born = 0;     // born this frame
     u32 particles_dropped = 0;  // left out this frame: past the caps a frame, bad numbers or styles, too far
     u32 particles_cut = 0;      // alive ones gone early this frame: made way (past k_max_particles), or the camera went over 4 km from where they were kept
+    bool particles_drawn = false; // their passes ran this frame (the lit view, the setting on, some alive)
     u32 lights = 0;             // local lights shaded this frame (in view, near enough)
     bool light_overflow = false; // too many: the furthest were left out of some clusters or of the frame
     u32 light_lamps = 0;         // lamps the lights stand for (far lamps merged: each counted)
@@ -1093,6 +1097,8 @@ private:
     // Water over `light` (water.h, shaders/water.slang): the light to expose next.
     rhi::TextureHandle draw_water(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
                                   rhi::TextureHandle light);
+    // Particles over `light` (src/particles.h, shaders/particles.slang): the light to expose next.
+    rhi::TextureHandle draw_particles(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame, rhi::TextureHandle light);
     // Auto exposure from the newest histogram the GPU is done with, eased;
     // the multiplier this frame's light gets before tone mapping.
     float update_exposure(const FrameInput& frame, bool lit_view);
@@ -1153,6 +1159,14 @@ private:
     rhi::PipelineHandle m_reflect; // screen reflections, into m_scene
     rhi::PipelineHandle m_water_copy; // water (shaders/water.slang): the light under it, then
     rhi::PipelineHandle m_water;      // the surfaces, into m_water_light
+    rhi::PipelineHandle m_particle_prepare;   // particles (shaders/particles.slang): each lit once,
+    rhi::PipelineHandle m_particle_draw;      // their quads into the half-size sums,
+    rhi::PipelineHandle m_particle_composite; // and the sums over the light
+    rhi::BufferHandle m_particle_drawn;       // gpu::ParticleDrawn, k_max_particles (made at init)
+    rhi::TextureHandle m_particle_accum;      // half size: weighted transparency's sums
+    rhi::TextureHandle m_particle_reveal;
+    rhi::TextureHandle m_particle_light;      // the frame's size: the light with them over it
+    bool m_particles_ready = false;           // those three made for this size
     rhi::PipelineHandle m_resolve_direct; // shading without screen reflections: m_radiance alone
     // After shading (post.slang): auto exposure's histogram, bloom, exposure and tone mapping.
     rhi::PipelineHandle m_histogram_clear;

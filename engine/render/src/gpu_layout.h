@@ -854,4 +854,46 @@ inline constexpr u32 k_particle_style_streak = 1u;
 inline constexpr u32 k_particle_style_lit = 2u;
 inline constexpr u32 k_particle_style_usable = 4u;
 
+// One particle as this frame draws it (particles.slang's cs_prepare writes
+// it, vs_main reads it): where, how big, lit and fogged.
+struct ParticleDrawn {
+    float center[3]; // camera-relative
+    float size;      // half its width (metres; 0: not drawn)
+    float light[3];  // the light it gives towards the camera (lit, emissive, fogged; before exposure)
+    float opacity;
+    float axis[3];   // a streak: half its length along its motion (camera-relative); a puff: 0
+    float soft;      // metres it fades into what it meets
+    u32 seed;
+    float view_z;    // its centre's depth along the view
+    u32 streak;      // 1: drawn as a streak (a capsule), even when not moving
+    float pad;
+};
+static_assert(sizeof(ParticleDrawn) == 64);
+
+// The particle passes' push constants (particles.slang's ParticlePush).
+struct ParticlePush {
+    u32 frame;
+    u32 frame_offset;
+    u32 ring;          // read: the particles (gpu::Particle, k_max_particles)
+    u32 drawn;         // cs_prepare: write; vs_main: read (gpu::ParticleDrawn, `count`)
+    u32 styles;        // read: gpu::ParticleStyle at styles_offset
+    u32 styles_offset;
+    u32 style_count;
+    u32 first;         // ring index of the oldest alive
+    u32 count;         // the alive range
+    u32 now;           // the particle clock (microseconds, wrapping)
+    u32 extras;        // shading's ResolveExtras (extras_on 0: none, lit by the frame's flat light)
+    u32 extras_offset;
+    float anchor[3];   // the ring's anchor, camera-relative (16-byte aligned: a float3 in the shader)
+    u32 extras_on;
+    u32 depth;         // the scene depth (reverse-Z), full size
+    u32 accum;         // composite: the half-size sums
+    u32 reveal;
+    u32 half_width;    // the half-size targets
+    u32 half_height;
+    u32 light;         // composite: the light before exposure, read (the result goes to a target of its own)
+    u32 pad[2];
+};
+static_assert(sizeof(ParticlePush) == 96);
+
 } // namespace giant::render::gpu
