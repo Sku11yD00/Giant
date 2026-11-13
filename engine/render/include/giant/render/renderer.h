@@ -63,6 +63,7 @@ struct DecalBins;       // src/decals.h
 struct LightBins;       // src/lights.h
 class LocalShadows;     // src/local_shadows.h
 class VoxelLamps;       // src/voxel_lamps.h
+class ParticleRing;     // src/particles.h
 
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
@@ -309,6 +310,67 @@ struct DustPuff {
 };
 // Puffs one frame draws at most (the first of FrameInput::dust).
 inline constexpr u32 k_max_dust_puffs = 32;
+
+// Particles (effects plan FX1): born in bursts, each moving by a closed
+// form from where and how it was born (no simulation state: the same age
+// is always the same place, so nothing flickers without history), drawn
+// as soft quads. A style is how one looks and moves over its life.
+enum class ParticleShape : u32 {
+    puff,   // a soft round blot (smoke, dust, spray, fire)
+    streak, // stretched along its motion (sparks, rain splashes, chips)
+};
+
+struct ParticleStyle {
+    float life_min = 1.0f; // seconds, each particle between (at most k_max_particle_life)
+    float life_max = 2.0f;
+    float size_start = 0.2f; // metres across, at birth and at the end (linear between)
+    float size_end = 0.6f;
+    Vec3 color_start{0.5f, 0.5f, 0.5f}; // what it gives back of the light (0 to 1)
+    Vec3 color_end{0.5f, 0.5f, 0.5f};
+    float opacity_start = 1.0f; // 0 to 1: eased in over the first tenth of its life, then to the end's
+    float opacity_end = 0.0f;
+    Vec3 emissive{};         // light of its own (sparks, fire, embers), fading with its opacity
+    float emissive_end = 1.0f; // the share of `emissive` left at the end
+    float gravity = 1.0f;    // how much of the world's gravity pulls it (0: none)
+    float buoyancy = 0.0f;   // metres a second squared up (smoke, fire)
+    float drag = 0.0f;       // 1/s: how fast it takes the air's speed (0: none, ballistic)
+    float wind = 1.0f;       // how much of the wind the air it takes the speed of moves with (with drag)
+    float wobble = 0.0f;     // metres it wanders off its path (seeded, slow: smoke curling)
+    ParticleShape shape = ParticleShape::puff;
+    bool lit = true;         // lit by the sun, sky and lamps (false: emissive only)
+    float soft = 0.3f;       // metres over which it fades into what it meets (no hard edge)
+};
+
+// Particles born together: `count` from around `position` (within
+// `spread` metres), going `direction` (within `cone_degrees` of it; 180:
+// any way) at speed_min to speed_max metres a second, plus `velocity` (what
+// they came off). Those that fall to `ground` (a height) stop there. The
+// same seed gives the same particles.
+struct ParticleBurst {
+    u32 style = 0; // into FrameInput::particle_styles
+    u32 count = 1;
+    DVec3 position{};
+    float spread = 0.0f;
+    Vec3 direction{0.0f, 1.0f, 0.0f};
+    float cone_degrees = 30.0f;
+    float speed_min = 1.0f;
+    float speed_max = 2.0f;
+    Vec3 velocity{};
+    float size_scale = 1.0f;
+    double ground = -1.0e30;
+    u32 seed = 0;
+};
+
+inline constexpr u32 k_max_particle_styles = 256;
+inline constexpr u32 k_max_particles = 1u << 18;      // alive at once (the oldest make way)
+// Born a frame (past it: left out). Births cost the CPU about 0.05
+// microseconds each (measured on the build machine).
+inline constexpr u32 k_max_particles_born = 1u << 14;
+// Of those, born a frame with a `ground` (each costs a search for where it
+// lands as well, about 0.3 microseconds; past it: left out). The two caps
+// together hold births to about 2 ms of CPU at worst.
+inline constexpr u32 k_max_particles_grounded = 1u << 12;
+inline constexpr float k_max_particle_life = 60.0f;   // seconds
 
 // A lamp: a point light, or a spot light shining down a cone (lit views,
 // not the far field). Its light at distance d is colour x intensity / d^2
@@ -624,6 +686,12 @@ struct FrameInput {
     std::span<const DustPuff> dust;
     // Lamps (lit views; see LocalLight).
     std::span<const LocalLight> lights;
+    // Particles born this frame (ParticleBurst), and the styles they and
+    // those alive draw with (the same index the same style from frame to
+    // frame; past k_max_particle_styles: left out). Their clock is the
+    // frames' delta_seconds (held: still).
+    std::span<const ParticleBurst> particle_bursts;
+    std::span<const ParticleStyle> particle_styles;
     // What swaying materials move in (WindClock::state).
     WindState wind;
     // Seconds since the last frame, for auto exposure's easing (0: held;
@@ -727,6 +795,10 @@ struct RenderStats {
     bool wet_surfaces = false;  // wet or snowy surfaces
     bool weather_cover = false; // the cover map made (sheltered places stay dry)
     u32 dust_puffs = 0;         // dust puffs drawn
+    u32 particles = 0;          // alive (the ring's span from the oldest alive to the newest)
+    u32 particles_born = 0;     // born this frame
+    u32 particles_dropped = 0;  // left out this frame: past the caps a frame, bad numbers or styles, too far
+    u32 particles_cut = 0;      // alive ones gone early this frame: made way (past k_max_particles), or the camera went over 4 km from where they were kept
     u32 lights = 0;             // local lights shaded this frame (in view, near enough)
     bool light_overflow = false; // too many: the furthest were left out of some clusters or of the frame
     u32 light_lamps = 0;         // lamps the lights stand for (far lamps merged: each counted)
@@ -797,11 +869,12 @@ enum class CpuSection : u8 {
     shadows,     // drawing shadow pages
     sky,         // sky, cloud shadows, clouds
     shading,     // shading, reflections, anti-aliasing
+    particles,   // particles born and sent to the GPU
     count
 };
 inline constexpr std::array<const char*, static_cast<usize>(CpuSection::count)> k_cpu_section_names = {
     "cells", "streaming", "voxels", "gi_plan", "instances", "shadow_plan", "store",
-    "tables", "light",     "culling", "shadows", "sky",       "shading"};
+    "tables", "light",     "culling", "shadows", "sky",       "shading", "particles"};
 using CpuSectionMs = std::array<float, static_cast<usize>(CpuSection::count)>;
 
 class Renderer {
@@ -905,6 +978,8 @@ public:
     void render(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameInput& frame);
 
     const RenderStats& last_stats() const { return m_stats; }
+    // The particles' records on the GPU (src/particles.h; tests read it back).
+    rhi::BufferHandle particle_ring() const { return m_particle_ring; }
     // The last render()'s CPU milliseconds by section.
     const CpuSectionMs& last_cpu_ms() const { return m_cpu_ms; }
     // The voxel world at a world position, finest level first.
@@ -968,6 +1043,8 @@ private:
     bool ensure_cull_buffers(CullBuffers& c, u32 instance_count);
     void destroy(Mesh& mesh);
     MeshId add(geometry::ClusterMesh data, const std::vector<geometry::SkinWeights>* weights, u32 joints);
+    void update_particles(rhi::CommandList& cmd, const FrameInput& frame); // births and the ring's upload
+    void particle_stats(); // into m_stats (again after anything resets it)
     void pose_skins(rhi::CommandList& cmd);           // after streaming, before anything reads the geometry
     void track_skin_shadows(const FrameInput& frame); // after the shadows' own tracking
     void draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
@@ -1038,6 +1115,8 @@ private:
     std::unique_ptr<VoxelScene> m_voxels;
     std::unique_ptr<InstanceStore> m_store; // the instances, on the GPU by cell
     std::unique_ptr<TerrainPaintStore> m_paint; // painted terrain tiles
+    std::unique_ptr<ParticleRing> m_particles;  // the particles alive (their births and spans)
+    rhi::BufferHandle m_particle_ring;          // their records (k_max_particles, made at init)
     u64 m_meshes_version = 0; // changes on every add_mesh and remove_mesh
     std::vector<CellRange> m_seen_cells; // last frame's FrameInput::cells
     std::vector<CellRange> m_changed_cells;
