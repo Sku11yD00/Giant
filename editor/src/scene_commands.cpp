@@ -518,6 +518,7 @@ Json render_settings_json(const EditorState& state) {
             {"local_shadows", state.render_settings.local_shadows},
             {"local_shadow_faces_per_frame", state.render_settings.local_shadow_faces_per_frame},
             {"water", state.render_settings.water},
+            {"particles", state.render_settings.particles},
             {"physical_sky", state.render_settings.physical_sky},
             {"aerial_distance", state.render_settings.aerial_distance},
             {"auto_exposure", state.render_settings.auto_exposure},
@@ -548,7 +549,7 @@ Json render_settings_json(const EditorState& state) {
               {"lights_merged", s.lights_merged},
               {"particles",
                {{"alive", s.particles}, {"born", s.particles_born}, {"dropped", s.particles_dropped},
-                {"cut", s.particles_cut}}},
+                {"cut", s.particles_cut}, {"drawn", s.particles_drawn}}},
               {"lamp_shadows",
                {{"lights", s.local_shadows}, {"drawn", s.local_shadow_drawn}, {"waiting", s.local_shadow_waiting},
                 {"tiles", s.local_shadow_tiles}}},
@@ -1793,6 +1794,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "below and caustics on the bed; caustics show from above too; swell: the most the sea's swell "
          "rises over its still level now, metres, times a sea's waves: longer and higher the stronger the "
          "wind, floating bodies and swimmers ride it). "
+         "particles: smoke, sparks and the like drawn, lit like the scene round them (default on; the lit "
+         "view; off, they are still born and age, unseen; last_frame.particles.drawn says when they were). "
          "local_lights: the lamps entities and kit pieces carry (their lamp settings) light the scene "
          "(default on; lit views; last_frame.lights says how many were in view, light_overflow when the "
          "furthest were left out). "
@@ -1853,6 +1856,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"local_shadow_faces_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 384},
                                                   {"description", "Lamp shadow faces drawn a frame at most. Default 24."}}},
                 {"water", {{"type", "boolean"}}},
+                {"particles", {{"type", "boolean"}}},
                 {"physical_sky", {{"type", "boolean"}}},
                 {"aerial_distance", number(1000, 100000, "Metres the air over the view is worked out to. Default 32000.")},
                 {"auto_exposure", {{"type", "boolean"}}},
@@ -1909,6 +1913,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.local_shadows = args.value("local_shadows", r.local_shadows);
              r.local_shadow_faces_per_frame = args.value("local_shadow_faces_per_frame", r.local_shadow_faces_per_frame);
              r.water = args.value("water", r.water);
+             r.particles = args.value("particles", r.particles);
              r.physical_sky = args.value("physical_sky", r.physical_sky);
              r.aerial_distance = args.value("aerial_distance", r.aerial_distance);
              r.auto_exposure = args.value("auto_exposure", r.auto_exposure);

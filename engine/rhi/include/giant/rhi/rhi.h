@@ -103,6 +103,7 @@ enum class Format {
     rgba8_unorm,   // gamma-space colour as stored (UI)
     rgba8_srgb,    // colour in linear space, stored sRGB-encoded
     rgba16_float,  // HDR colour
+    rgba32_float,  // sums that outgrow 16-bit floats (render target, blendable)
     r32_float,
     r32_uint,
     rg32_uint,     // e.g. a visibility buffer: cluster and triangle ids
@@ -244,6 +245,10 @@ enum class DepthMode {
 enum class BlendMode {
     opaque,
     alpha, // straight alpha: src * a + dst * (1 - a)
+    // Weighted blended transparency's sums (McGuire and Bavoil 2013): the
+    // first target adds (src + dst), the second keeps what shows through
+    // (dst * (1 - src)).
+    weighted_transparency,
 };
 
 constexpr u32 k_max_color_targets = 4;

@@ -117,6 +117,7 @@ DXGI_FORMAT resource_format(Format f) {
     case Format::rgba8_unorm:
     case Format::rgba8_srgb: return DXGI_FORMAT_R8G8B8A8_TYPELESS;
     case Format::rgba16_float: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    case Format::rgba32_float: return DXGI_FORMAT_R32G32B32A32_FLOAT;
     case Format::r32_float: return DXGI_FORMAT_R32_FLOAT;
     case Format::r32_uint: return DXGI_FORMAT_R32_UINT;
     case Format::rg32_uint: return DXGI_FORMAT_R32G32_UINT;
@@ -1872,6 +1873,7 @@ PipelineHandle D3D12Device::create_pipeline(const GraphicsPipelineDesc& desc) {
     pso.pRootSignature = m_root.Get();
     pso.VS = {desc.vertex.data(), desc.vertex.size()};
     pso.PS = {desc.pixel.data(), desc.pixel.size()};
+    pso.BlendState.IndependentBlendEnable = desc.blend == BlendMode::weighted_transparency ? TRUE : FALSE;
     for (u32 i = 0; i < desc.color_count; ++i) {
         auto& blend = pso.BlendState.RenderTarget[i];
         blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
@@ -1883,6 +1885,14 @@ PipelineHandle D3D12Device::create_pipeline(const GraphicsPipelineDesc& desc) {
             blend.BlendOp = D3D12_BLEND_OP_ADD;
             blend.SrcBlendAlpha = D3D12_BLEND_ONE;
             blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+            blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        } else if (desc.blend == BlendMode::weighted_transparency) {
+            blend.BlendEnable = TRUE;
+            blend.SrcBlend = i == 0 ? D3D12_BLEND_ONE : D3D12_BLEND_ZERO;
+            blend.DestBlend = i == 0 ? D3D12_BLEND_ONE : D3D12_BLEND_INV_SRC_COLOR;
+            blend.BlendOp = D3D12_BLEND_OP_ADD;
+            blend.SrcBlendAlpha = i == 0 ? D3D12_BLEND_ONE : D3D12_BLEND_ZERO;
+            blend.DestBlendAlpha = i == 0 ? D3D12_BLEND_ONE : D3D12_BLEND_INV_SRC_ALPHA;
             blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
         }
         pso.RTVFormats[i] = target_format(desc.color_formats[i]);

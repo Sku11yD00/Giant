@@ -65,6 +65,7 @@ u32 bytes_per_pixel(Format format) {
     case Format::depth32_float: return 4;
     case Format::rgba16_float:
     case Format::rg32_uint: return 8;
+    case Format::rgba32_float: return 16;
     case Format::bc1_unorm:
     case Format::bc1_srgb:
     case Format::bc4_unorm:

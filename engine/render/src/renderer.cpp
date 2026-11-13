@@ -278,11 +278,15 @@ Renderer::~Renderer() {
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
           m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
-          m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass, m_water_copy, m_water}) {
+          m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass, m_water_copy, m_water, m_particle_prepare, m_particle_draw, m_particle_composite}) {
         m_device.destroy(p);
     }
     m_device.destroy(m_water_light);
     m_device.destroy(m_particle_ring);
+    m_device.destroy(m_particle_drawn);
+    m_device.destroy(m_particle_accum);
+    m_device.destroy(m_particle_reveal);
+    m_device.destroy(m_particle_light);
     m_device.destroy(m_ao_raw);
     m_device.destroy(m_ao);
     m_device.destroy(m_contact);
@@ -355,7 +359,11 @@ bool Renderer::init() {
         ring.usage = rhi::BufferUsage::shader_read;
         ring.name = "particles";
         m_particle_ring = m_device.create_buffer(ring);
-        if (!m_particle_ring.valid()) {
+        ring.size = u64{k_max_particles} * sizeof(gpu::ParticleDrawn);
+        ring.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
+        ring.name = "particles: as drawn";
+        m_particle_drawn = m_device.create_buffer(ring);
+        if (!m_particle_ring.valid() || !m_particle_drawn.valid()) {
             log_error("render", "could not create the particle ring");
             return false;
         }
@@ -398,6 +406,7 @@ bool Renderer::init() {
     m_ao_gtao = compute(shaders::ao_gtao_cs(), "ambient occlusion");
     m_ao_denoise = compute(shaders::ao_denoise_cs(), "ambient occlusion: denoise");
     m_contact_pass = compute(shaders::ao_contact_cs(), "contact shadows");
+    m_particle_prepare = compute(shaders::particles_prepare_cs(), "particles: light each");
     m_terrain_pass = compute(shaders::terrain_cs(), "terrain layers");
     m_bloom_up = compute(shaders::bloom_up_cs(), "bloom: up");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
@@ -513,6 +522,24 @@ bool Renderer::init() {
     water.pixel = shaders::water_ps();
     water.name = "water";
     m_water = m_device.create_pipeline(water);
+    rhi::GraphicsPipelineDesc particles;
+    particles.vertex = shaders::particles_vs();
+    particles.pixel = shaders::particles_ps();
+    particles.color_formats[0] = rhi::Format::rgba32_float; // (bright sums outgrow 16-bit floats)
+    particles.color_formats[1] = rhi::Format::rgba16_float;
+    particles.color_count = 2;
+    particles.cull = rhi::CullMode::none;
+    particles.blend = rhi::BlendMode::weighted_transparency;
+    particles.name = "particles";
+    m_particle_draw = m_device.create_pipeline(particles);
+    particles.vertex = shaders::particles_full_vs();
+    particles.pixel = shaders::particles_composite_ps();
+    particles.color_formats[0] = rhi::Format::rgba16_float;
+    particles.color_formats[1] = rhi::Format::unknown;
+    particles.color_count = 1;
+    particles.blend = rhi::BlendMode::opaque;
+    particles.name = "particles: over the light";
+    m_particle_composite = m_device.create_pipeline(particles);
     rhi::GraphicsPipelineDesc post;
     post.vertex = shaders::post_vs();
     post.pixel = shaders::post_ps();
@@ -549,7 +576,7 @@ bool Renderer::init() {
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
           m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass, m_water_copy,
-          m_water}) {
+          m_water, m_particle_prepare, m_particle_draw, m_particle_composite}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1270,6 +1297,13 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_device.destroy(m_terrain_normal);
     m_terrain_surface = {};
     m_terrain_normal = {};
+    m_device.destroy(m_particle_accum); // half the frame's size: made again below
+    m_device.destroy(m_particle_reveal);
+    m_device.destroy(m_particle_light);
+    m_particle_accum = {};
+    m_particle_reveal = {};
+    m_particle_light = {};
+    m_particles_ready = false;
     m_device.destroy(m_water_light); // the frame's size: made again when water is drawn
     m_water_light = {};
     m_terrain_ready = false;
@@ -1388,6 +1422,22 @@ bool Renderer::ensure_post_targets() {
     }
     m_ao_ready = m_ao_raw.valid() && m_ao.valid();
     ok = ok && m_ao_ready;
+    // Particles' sums: half the frame's size, as ambient occlusion's; the
+    // light with them over it, the frame's size.
+    for (rhi::TextureHandle* t : {&m_particle_accum, &m_particle_reveal, &m_particle_light}) {
+        if (!t->valid()) {
+            rhi::TextureDesc desc;
+            const bool full = t == &m_particle_light;
+            desc.width = full ? m_width : m_ao_width;
+            desc.height = full ? m_height : m_ao_height;
+            desc.format = t == &m_particle_accum ? rhi::Format::rgba32_float : rhi::Format::rgba16_float;
+            desc.usage = rhi::TextureUsage::sampled | rhi::TextureUsage::render_target;
+            desc.name = full ? "light with particles" : t == &m_particle_accum ? "particles: sums" : "particles: let through";
+            *t = m_device.create_texture(desc);
+        }
+    }
+    m_particles_ready = m_particle_accum.valid() && m_particle_reveal.valid() && m_particle_light.valid();
+    ok = ok && m_particles_ready;
     // Contact shadows: the frame's size.
     if (!m_contact.valid()) {
         rhi::TextureDesc desc;
@@ -1417,7 +1467,7 @@ bool Renderer::ensure_post_targets() {
     if (!ok && !m_post_logged) {
         // Tried again with the next resize.
         m_post_logged = true;
-        log_error("render", "could not create bloom's, ambient occlusion's, contact shadows' or terrain layers' textures (out of GPU memory?)");
+        log_error("render", "could not create bloom's, ambient occlusion's, contact shadows', terrain layers' or particles' textures (out of GPU memory?)");
     }
     return ok;
 }
@@ -3388,6 +3438,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     rhi::TextureHandle exposed = screen_reflections ? m_scene : m_radiance;
     // Water in the lit view only (the light alone shows the scene's light, not the water's own colour).
     if (frame.settings.debug_view == DebugView::lit && frame.settings.water) exposed = draw_water(cmd, data, frame, exposed);
+    // Particles over it all (the lit view only, like water).
+    if (frame.settings.debug_view == DebugView::lit && frame.settings.particles) {
+        exposed = draw_particles(cmd, data, frame, exposed);
+    }
     post(cmd, data, frame, exposed, shaded, lit_view);
     m_stats.reflections = voxel_reflections;
     m_stats.screen_reflections = screen_reflections;
@@ -3564,6 +3618,88 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     cmd.end_render_pass();
     cmd.end_timing();
     return m_water_light;
+}
+
+rhi::TextureHandle Renderer::draw_particles(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
+                                            rhi::TextureHandle light) {
+    const ParticleRing::Frame& ring = m_particles->frame();
+    if (ring.count == 0 || !m_particles_ready || frame.particle_styles.empty()) {
+        return light;
+    }
+    // This frame's styles (the same index the same style; a bad one draws nothing).
+    const u32 style_count = static_cast<u32>(std::min<usize>(frame.particle_styles.size(), k_max_particle_styles));
+    const rhi::TransientMemory styles = cmd.allocate(style_count * static_cast<u32>(sizeof(gpu::ParticleStyle)));
+    if (styles.data == nullptr) {
+        return light; // out of upload memory (logged): not drawn this frame
+    }
+    for (u32 i = 0; i < style_count; ++i) {
+        const ParticleStyle& s = frame.particle_styles[i];
+        const gpu::ParticleStyle g = to_gpu(s, particle_style_ok(s));
+        std::memcpy(styles.data + usize{i} * sizeof(gpu::ParticleStyle), &g, sizeof(g));
+    }
+    cmd.begin_timing("particles");
+    gpu::ParticlePush push{};
+    push.frame = data.frame.descriptor;
+    push.frame_offset = data.frame.offset;
+    push.ring = m_device.read_descriptor(m_particle_ring);
+    push.styles = styles.descriptor;
+    push.styles_offset = styles.offset;
+    push.style_count = style_count;
+    push.first = ring.first;
+    push.count = ring.count;
+    push.now = static_cast<u32>(ring.now_us);
+    const Vec3 anchor = to_camera_relative(ring.anchor, frame.view.position);
+    push.anchor[0] = anchor.x;
+    push.anchor[1] = anchor.y;
+    push.anchor[2] = anchor.z;
+    const bool extras_on = m_shading_extras.data != nullptr;
+    push.extras = extras_on ? m_shading_extras.descriptor : data.frame.descriptor;
+    push.extras_offset = extras_on ? m_shading_extras.offset : 0u;
+    push.extras_on = extras_on ? 1u : 0u;
+    push.depth = m_device.read_descriptor(m_depth);
+    push.half_width = m_ao_width;
+    push.half_height = m_ao_height;
+    // Each lit once.
+    cmd.barrier(m_particle_ring, rhi::ResourceState::shader_read);
+    cmd.barrier(m_particle_drawn, rhi::ResourceState::shader_write);
+    cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+    cmd.set_pipeline(m_particle_prepare);
+    push.drawn = m_device.write_descriptor(m_particle_drawn);
+    cmd.push(push);
+    cmd.dispatch((ring.count + 63) / 64, 1);
+    // Their quads into the sums (half size).
+    cmd.barrier(m_particle_drawn, rhi::ResourceState::shader_read);
+    cmd.barrier(m_particle_accum, rhi::ResourceState::render_target);
+    cmd.barrier(m_particle_reveal, rhi::ResourceState::render_target);
+    rhi::RenderPassDesc sums;
+    sums.colors[0] = {m_particle_accum, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+    sums.colors[1] = {m_particle_reveal, rhi::LoadOp::clear, {1.0f, 1.0f, 1.0f, 1.0f}};
+    sums.color_count = 2;
+    cmd.begin_render_pass(sums);
+    cmd.set_pipeline(m_particle_draw);
+    push.drawn = m_device.read_descriptor(m_particle_drawn);
+    cmd.push(push);
+    cmd.draw(ring.count * 6);
+    cmd.end_render_pass();
+    // The light with the sums over it, into a target of its own.
+    cmd.barrier(m_particle_accum, rhi::ResourceState::shader_read);
+    cmd.barrier(m_particle_reveal, rhi::ResourceState::shader_read);
+    cmd.barrier(light, rhi::ResourceState::shader_read);
+    cmd.barrier(m_particle_light, rhi::ResourceState::render_target);
+    rhi::RenderPassDesc over;
+    over.colors[0] = {m_particle_light, rhi::LoadOp::discard, {}}; // (every pixel written)
+    cmd.begin_render_pass(over);
+    cmd.set_pipeline(m_particle_composite);
+    push.accum = m_device.read_descriptor(m_particle_accum);
+    push.reveal = m_device.read_descriptor(m_particle_reveal);
+    push.light = m_device.read_descriptor(light);
+    cmd.push(push);
+    cmd.draw(3);
+    cmd.end_render_pass();
+    m_stats.post_draws += 2;
+    m_stats.particles_drawn = true;
+    cmd.end_timing();
+    return m_particle_light;
 }
 
 float Renderer::update_exposure(const FrameInput& frame, bool lit_view) {

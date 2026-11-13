@@ -248,6 +248,8 @@ GIANT_TEST("editor: render settings are view state") {
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("overflow"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["streaming"].contains("pool_bytes"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["particles"].contains("alive"));
+    const auto unseen = f.run("set_render_settings", {{"particles", false}});
+    GIANT_CHECK(unseen.ok && unseen.value["particles"] == false && !f.state.render_settings.particles);
 }
 
 GIANT_TEST("editor: frame phases name the slow frames' parts") {
