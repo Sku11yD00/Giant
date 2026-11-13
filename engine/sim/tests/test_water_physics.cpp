@@ -7,7 +7,9 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -357,4 +359,264 @@ GIANT_TEST("water: a body on the sea rides the swell, up and down with the surfa
     physics.step(0.5 / 60.0);
     physics.set_swell(swell, 500.0);
     GIANT_CHECK(std::fabs(physics.swell_seconds() - (500.0 - physics.step_fraction() / 60.0)) < 1e-9);
+}
+
+GIANT_TEST("water: a body or a character falling in is one splash where it broke the surface; one bobbing or set in is none") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(box({0.0, -4.5, 0.0}, {100.0f, 0.5f, 100.0f})); // a bed 4 m down
+    const std::vector<world::Water> water{lake(0.0f)};
+    physics.set_water(water);
+    // A 400 kg crate dropped from 4.5 m over the surface (its bottom); a heavy one set in, still.
+    const BodyId dropped = physics.add(box({3.0, 5.0, -2.0}, {0.5f, 0.5f, 0.5f}, Motion::dynamic, 400.0f));
+    const BodyId set_in = physics.add(box({-6.0, 0.2, 0.0}, {0.5f, 0.5f, 0.5f}, Motion::dynamic, 3000.0f));
+    // A character falling 6 m into it.
+    CharacterDesc d;
+    d.position = {10.0, 6.0, 10.0};
+    const CharacterId diver = physics.add_character(d);
+    std::vector<WaterEntry> seen;
+    for (int i = 0; i < 6 * 60; ++i) {
+        physics.step(1.0 / 60.0);
+        seen.insert(seen.end(), physics.water_entries().begin(), physics.water_entries().end());
+    }
+    for (const WaterEntry& e : seen) {
+        std::printf("    splash: body %u character %u at (%.2f %.2f %.2f) %.2f m/s, %.0f kg, %.2f m\n",
+                    static_cast<unsigned>(e.body), e.character, e.point.x, e.point.y, e.point.z, e.speed, e.mass, e.size);
+    }
+    GIANT_CHECK(seen.size() == 2);
+    if (seen.size() == 2) {
+        const WaterEntry& crate = seen[0].body == dropped ? seen[0] : seen[1];
+        const WaterEntry& person = seen[0].character == diver ? seen[0] : seen[1];
+        GIANT_CHECK(crate.body == dropped && crate.character == 0);
+        // Fallen 4.5 m: about sqrt(2 g h) = 9.4 m/s (a step either side).
+        GIANT_CHECK(std::fabs(crate.speed - 9.4f) < 0.4f && std::fabs(crate.point.y) < 1e-6);
+        GIANT_CHECK(std::fabs(crate.point.x - 3.0) < 0.01 && std::fabs(crate.point.z + 2.0) < 0.01);
+        GIANT_CHECK(std::fabs(crate.mass - 400.0f) < 1.0f && std::fabs(crate.size - 1.0f) < 0.05f);
+        GIANT_CHECK(person.character == diver && person.body == 0 && person.speed > 9.0f);
+        GIANT_CHECK(std::fabs(person.point.y) < 1e-3 && std::fabs(person.mass - d.mass) < 1e-3f);
+    }
+    for (const WaterEntry& e : seen) GIANT_CHECK(e.body != set_in);
+    // A step() call's entries are its own: none since.
+    physics.step(1.0 / 60.0);
+    GIANT_CHECK(physics.water_entries().empty());
+}
+
+GIANT_TEST("water: no splash for a body woken and pushed down, made under water, riding a storm swell, walking in or let go") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(box({0.0, -4.5, 0.0}, {100.0f, 0.5f, 100.0f})); // a bed 4 m down
+    physics.add(box({-40.0, -0.5, 0.0}, {10.0f, 0.5f, 10.0f}));  // a landing, its top 0 (the shore at x -30)
+    const std::vector<world::Water> water{lake(-0.2f)};
+    physics.set_water(water);
+    // A crate floating (asleep after a while), then pushed down hard: none.
+    const BodyId floating = physics.add(box({0.0, 0.0, 0.0}, {0.5f, 0.5f, 0.5f}, Motion::dynamic, 400.0f));
+    std::vector<WaterEntry> seen;
+    const auto go = [&](double seconds, double each = 1.0 / 60.0) {
+        for (int i = 0; i < static_cast<int>(std::lround(seconds / each)); ++i) {
+            physics.step(each);
+            seen.insert(seen.end(), physics.water_entries().begin(), physics.water_entries().end());
+        }
+    };
+    go(8.0);
+    physics.add_impulse(floating, {0.0f, -400.0f, 0.0f}, physics.state(floating)->position);
+    // Made under water going down 3 m/s (a piece knocked off a building standing in it): none.
+    BodyDesc piece = box({5.0, -2.0, 0.0}, {0.3f, 0.3f, 0.3f}, Motion::dynamic, 500.0f);
+    piece.linear_velocity = {0.0f, -3.0f, 0.0f};
+    physics.add(piece);
+    // A character walking off a landing down a 0.3 m step into the lake's edge at 3 m/s: none.
+    // (Along z 30: a step down from the landing, its top -0.3, 0.1 m under the water, on to x -10.)
+    physics.add(box({-20.0, -0.8, 30.0}, {10.0f, 0.5f, 5.0f}));
+    physics.add(box({-40.0, -0.5, 30.0}, {10.0f, 0.5f, 5.0f})); // the landing there
+    CharacterDesc d;
+    d.position = {-34.0, 0.0, 30.0};
+    const CharacterId walker = physics.add_character(d);
+    physics.set_character_input(walker, {{3.0f, 0.0f, 0.0f}});
+    go(3.0);
+    // Several fixed steps in one call: what goes in in them all (a stone dropped in, then one more).
+    physics.add(box({20.0, 3.0, 0.0}, {0.1f, 0.1f, 0.1f}, Motion::dynamic, 1.0f));
+    go(2.0, 5.0 / 60.0);
+    for (const WaterEntry& e : seen) {
+        std::printf("    splash: body %u character %u at (%.2f %.2f %.2f) %.2f m/s\n", static_cast<unsigned>(e.body),
+                    e.character, e.point.x, e.point.y, e.point.z, e.speed);
+    }
+    GIANT_CHECK(seen.size() == 1 && !seen.empty() && std::fabs(seen[0].point.x - 20.0) < 0.01);
+    GIANT_CHECK(physics.character_state(walker)->water_depth > 0.05f && physics.character_state(walker)->position.x > -27.0);
+    // Held in deep water (play waiting for ground) while diving down, then let go: no splash.
+    seen.clear();
+    physics.set_character_input(walker, {});
+    physics.set_character_position(walker, {10.0, -1.5, 10.0});
+    go(0.5);
+    CharacterInput dive;
+    dive.velocity = {0.0f, -3.0f, 0.0f};
+    physics.set_character_input(walker, dive);
+    go(0.3);
+    GIANT_CHECK(physics.character_state(walker)->velocity.y < -1.0f);
+    physics.hold_character(walker, true);
+    go(1.0);
+    physics.hold_character(walker, false);
+    go(1.0);
+    GIANT_CHECK(seen.empty());
+
+    // A raft and a crate riding a storm's swell, 30 s: no splash as they ride it. (A 40 m wave 0.5 m high,
+    // the sea's waves 2: 1 m, as steep as seas stand.) Steeper than waves stand (4: 2 m on 40 m), the raft
+    // is thrown clear now and then and slaps down: at most once a wave (about 5 s).
+    const auto storm = [&jobs](float waves) {
+        PhysicsWorld sea_world(jobs);
+        sea_world.add(box({0.0, -20.5, 0.0}, {200.0f, 0.5f, 200.0f}));
+        world::Water sea;
+        sea.name = "sea";
+        sea.kind = world::WaterKind::sea;
+        sea.waves = waves;
+        sea_world.set_water(std::vector<world::Water>{sea});
+        world::Swell swell;
+        swell.waves[0] = {1.0f, 0.0f, static_cast<float>(6.283185307179586 / 40.0), 0.5f, 0.0f};
+        sea_world.set_swell(swell, 100.0);
+        // Set on the surface where they are (riding from the start).
+        const double h7 = waves * world::swell_height(swell, 7.0, 3.0, 100.0);
+        const double h_7 = waves * world::swell_height(swell, -7.0, 3.0, 100.0);
+        sea_world.add(box({7.0, h7 + 0.12, 3.0}, {1.0f, 0.2f, 1.0f}, Motion::dynamic, 320.0f));
+        sea_world.add(box({-7.0, h_7 + 0.2, 3.0}, {0.5f, 0.5f, 0.5f}, Motion::dynamic, 300.0f));
+        usize count = 0;
+        for (int i = 0; i < 30 * 60; ++i) {
+            sea_world.step(1.0 / 60.0);
+            for (const WaterEntry& e : sea_world.water_entries()) {
+                ++count;
+                std::printf("    waves %.0f: splash at %.2f s, body %u %.2f m/s\n", waves, i / 60.0,
+                            static_cast<unsigned>(e.body), e.speed);
+            }
+        }
+        return count;
+    };
+    GIANT_CHECK(storm(2.0f) == 0);
+    GIANT_CHECK(storm(4.0f) <= 9);
+}
+
+GIANT_TEST("water: rocks tumbling and hulls turned splash as they go in, into a still lake or a rising swell") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(box({0.0, -10.5, 0.0}, {200.0f, 0.5f, 200.0f}));
+    physics.set_water(std::vector<world::Water>{lake(0.0f, 150.0)});
+    // 20 octahedra turned 45 degrees, 20 round rocks spinning: dropped 3 to 4.5 m.
+    ConvexShape octa;
+    octa.points = {{0.5f, 0, 0}, {-0.5f, 0, 0}, {0, 0.5f, 0}, {0, -0.5f, 0}, {0, 0, 0.5f}, {0, 0, -0.5f}};
+    ConvexShape rock;
+    for (int i = 0; i < 26; ++i) {
+        const float a = static_cast<float>(i) * 2.399963f, y = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / 26.0f;
+        const float r = std::sqrt(1.0f - y * y);
+        rock.points.push_back(Vec3{std::cos(a) * r, y, std::sin(a) * r} * 0.3f);
+    }
+    for (int i = 0; i < 20; ++i) {
+        BodyDesc d;
+        d.motion = Motion::dynamic;
+        d.mass = 300.0f;
+        d.parts.push_back({octa});
+        d.position = {-60.0 + 6.0 * i, 4.5 + 0.1 * i, 0.0};
+        d.rotation = quat_from_axis_angle({0.0f, 0.0f, 1.0f}, 0.785398f + 0.05f * static_cast<float>(i));
+        physics.add(d);
+        BodyDesc r;
+        r.motion = Motion::dynamic;
+        r.mass = 200.0f;
+        r.parts.push_back({rock});
+        r.position = {-60.0 + 6.0 * i, 3.0 + 0.07 * i, 20.0};
+        r.angular_velocity = {3.0f + 0.2f * static_cast<float>(i), 1.0f, -2.0f};
+        physics.add(r);
+    }
+    usize seen = 0;
+    for (int i = 0; i < 4 * 60; ++i) {
+        physics.step(1.0 / 60.0);
+        seen += physics.water_entries().size();
+    }
+    std::printf("    turned and tumbling: %zu of 40 splashed\n", seen);
+    GIANT_CHECK(seen == 40);
+    // A 6 m log falling end first (tipped 60 degrees, its low end towards -x): heard where that end went in.
+    {
+        PhysicsWorld log_world(jobs);
+        log_world.add(box({0.0, -10.5, 0.0}, {100.0f, 0.5f, 100.0f}));
+        log_world.set_water(std::vector<world::Water>{lake(0.0f)});
+        BodyDesc log = box({0.0, 6.0, 0.0}, {3.0f, 0.2f, 0.2f}, Motion::dynamic, 200.0f);
+        log.rotation = quat_from_axis_angle({0.0f, 0.0f, 1.0f}, 1.0472f); // its +x end up
+        log_world.add(log);
+        std::vector<WaterEntry> got;
+        for (int i = 0; i < 3 * 60; ++i) {
+            log_world.step(1.0 / 60.0);
+            got.insert(got.end(), log_world.water_entries().begin(), log_world.water_entries().end());
+        }
+        std::printf("    log end first: %zu splashes, the first at x %.2f\n", got.size(), got.empty() ? 0.0 : got[0].point.x);
+        GIANT_CHECK(!got.empty() && got[0].point.x < -1.0);
+    }
+    // Crates dropped 4.5 m into a 2 m swell at 40 phases (the surface rising to meet some): each splashes once.
+    PhysicsWorld sea_world(jobs);
+    sea_world.add(box({0.0, -20.5, 0.0}, {300.0f, 0.5f, 300.0f}));
+    world::Water sea;
+    sea.name = "sea";
+    sea.kind = world::WaterKind::sea;
+    sea.waves = 4.0f;
+    sea_world.set_water(std::vector<world::Water>{sea});
+    world::Swell swell;
+    swell.waves[0] = {1.0f, 0.0f, static_cast<float>(6.283185307179586 / 40.0), 0.5f, 0.0f};
+    sea_world.set_swell(swell, 100.0);
+    for (int i = 0; i < 40; ++i) {
+        const double x = -100.0 + 2.0 * i; // (2 m apart: 2 waves over them all)
+        sea_world.add(box({x, 4.0 * world::swell_height(swell, x, 30.0, 100.0) + 5.0, 30.0}, {0.5f, 0.5f, 0.5f},
+                          Motion::dynamic, 400.0f));
+    }
+    std::vector<u32> by_body;
+    for (int i = 0; i < 3 * 60; ++i) {
+        sea_world.step(1.0 / 60.0);
+        for (const WaterEntry& e : sea_world.water_entries()) by_body.push_back(static_cast<u32>(e.body));
+    }
+    std::sort(by_body.begin(), by_body.end());
+    const usize once = static_cast<usize>(std::unique(by_body.begin(), by_body.end()) - by_body.begin());
+    std::printf("    into the swell: %zu bodies splashed (%zu entries) of 40\n", once, by_body.size());
+    GIANT_CHECK(once == 40);
+}
+
+GIANT_TEST("water: a character carried down into the water and let go there, or standing on a lift going in, makes no splash") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(box({0.0, -10.5, 0.0}, {100.0f, 0.5f, 100.0f}));
+    physics.set_water(std::vector<world::Water>{lake(0.0f)});
+    // A platform (kinematic) carrying a character, lowered 1.5 m/s from 1 m over the water to 2 m under it.
+    const BodyId lift = physics.add(box({0.0, 0.5, 0.0}, {2.0f, 0.25f, 2.0f}, Motion::kinematic));
+    CharacterDesc d;
+    d.position = {0.0, 0.75, 0.0};
+    const CharacterId rider = physics.add_character(d);
+    GIANT_CHECK(physics.carry_character(rider, lift));
+    std::vector<WaterEntry> seen;
+    double y = 0.5;
+    for (int i = 0; i < 2 * 60; ++i) {
+        y -= 1.5 / 60.0;
+        physics.move_kinematic(lift, {0.0, y, 0.0}, Quat{});
+        physics.step(1.0 / 60.0);
+        seen.insert(seen.end(), physics.water_entries().begin(), physics.water_entries().end());
+    }
+    physics.release_character(rider);
+    for (int i = 0; i < 60; ++i) {
+        physics.step(1.0 / 60.0);
+        seen.insert(seen.end(), physics.water_entries().begin(), physics.water_entries().end());
+    }
+    GIANT_CHECK(physics.character_state(rider)->water_depth > 1.0f);
+    GIANT_CHECK(seen.empty());
+    // Standing (not carried) on a lift going down into it at 1.5 and 3 m/s: no splash either.
+    for (const double speed : {1.5, 3.0}) {
+        PhysicsWorld lake_world(jobs);
+        lake_world.add(box({0.0, -10.5, 0.0}, {100.0f, 0.5f, 100.0f}));
+        lake_world.set_water(std::vector<world::Water>{lake(0.0f)});
+        const BodyId floor = lake_world.add(box({0.0, 0.5, 0.0}, {2.0f, 0.25f, 2.0f}, Motion::kinematic));
+        CharacterDesc stand;
+        stand.position = {0.0, 0.75, 0.0};
+        const CharacterId on = lake_world.add_character(stand);
+        for (int i = 0; i < 30; ++i) lake_world.step(1.0 / 60.0); // (settled on it)
+        std::vector<WaterEntry> got;
+        double at = 0.5;
+        for (int i = 0; i < static_cast<int>(2.0 / speed * 60.0); ++i) {
+            at -= speed / 60.0;
+            lake_world.move_kinematic(floor, {0.0, at, 0.0}, Quat{});
+            lake_world.step(1.0 / 60.0);
+            got.insert(got.end(), lake_world.water_entries().begin(), lake_world.water_entries().end());
+        }
+        std::printf("    standing on a lift down at %.1f m/s: %zu splashes, depth %.2f\n", speed, got.size(),
+                    lake_world.character_state(on)->water_depth);
+        GIANT_CHECK(got.empty() && lake_world.character_state(on)->water_depth > 0.5f);
+    }
 }

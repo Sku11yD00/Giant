@@ -3,6 +3,7 @@
 // camera with the cliff's answer; record_audio's file; load_sound.
 #include "../src/audio_state.h"
 #include "../src/editor_commands.h"
+#include "../src/mesh_library.h"
 #include "../src/physics_state.h"
 
 #include "giant_test.h"
@@ -11,6 +12,9 @@
 #include "giant/world/scene.h"
 
 #include <cmath>
+#include <cstdio>
+#include <limits>
+#include <span>
 #include <filesystem>
 #include <random>
 #include <string>
@@ -394,4 +398,77 @@ GIANT_TEST("editor audio: the water is heard where it is: a lake's shore, a rive
     const ai::CommandResult r = f.run("get_audio");
     GIANT_CHECK(r.ok && r.value["water"]["under"] == true && std::fabs(r.value["water"]["depth"].get<float>() - 2.0f) < 1e-4f);
     GIANT_CHECK(r.value["ambience"].get<u32>() >= 1 && r.value["muffle"].get<float>() < 1000.0f);
+}
+
+GIANT_TEST("editor audio: a crate dropped in the water splashes, a stone plops, as loud as their energy going in") {
+    Fixture f(true);
+    register_physics_commands(f.commands, f.state);
+    register_water_commands(f.commands, f.state);
+    connect_sounds(f.state);
+    MeshLibrary meshes{nullptr};
+    f.state.meshes = &meshes;
+    GIANT_CHECK(f.run("create_entity", {{"shape", "plane"}, {"scale", {100, 1, 100}}}).ok);
+    GIANT_CHECK(f.run("create_water", {{"name", "sea"}, {"kind", "sea"}, {"level", 3.0}, {"waves", 0.0}}).ok);
+    // A 300 kg crate 4.5 m over the water (its bottom), a 1 kg stone 2 m over it, 0.2 m across.
+    GIANT_CHECK(f.run("create_entity", {{"shape", "cube"}, {"position", {0, 8, 0}}, {"body", "dynamic"}, {"mass", 300}}).ok);
+    GIANT_CHECK(f.run("create_entity", {{"shape", "cube"}, {"position", {10, 5.1, 0}}, {"scale", {0.2, 0.2, 0.2}},
+                                        {"body", "dynamic"}, {"mass", 1}})
+                    .ok);
+    f.state.camera.position = {0.0, 6.0, -20.0};
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    GIANT_CHECK(f.run("step_physics", {{"seconds", 3}}).ok);
+    const Json a = f.run("get_audio").value;
+    std::printf("    splashes %llu (the last %.2f loud), entries %llu\n",
+                static_cast<unsigned long long>(a["splashes"].get<u64>()), a["splash_loudness"].get<double>(),
+                static_cast<unsigned long long>(f.physics.water_entries()));
+    GIANT_CHECK(a["splashes"] == 2 && f.physics.water_entries() == 2);
+    // The last in was the crate (the stone, nearer the water, first): its splash, about 0.25 sqrt(300 * 9.4^2 / 2) = 29.
+    GIANT_CHECK(std::fabs(a["splash_loudness"].get<double>() - 29.0) < 2.0 && a["splash_plop"] == false);
+    f.audio.update(f.state.camera, 0.05); // (rendered: no speakers)
+    GIANT_CHECK(f.audio.mixer().stats().voices >= 1);
+    // Not simulating, nothing steps: none.
+    GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
+    GIANT_CHECK(f.run("get_audio").value["splashes"] == 2);
+    // Straight to the audio: loudness by energy (a quarter of the speed across counted); a small thing plops;
+    // bad numbers and the far off are not heard.
+    const auto entry = [](float speed, float mass, float size, double z = 5.0, float across = 0.0f) {
+        sim::WaterEntry e;
+        e.point = {0.0, 0.0, z};
+        e.speed = speed;
+        e.across = across;
+        e.mass = mass;
+        e.size = size;
+        return e;
+    };
+    AudioState audio;
+    GIANT_CHECK(audio.splash(f.state.scene, nullptr, entry(9.4f, 300.0f, 1.0f)) && !audio.last_splash_small());
+    GIANT_CHECK(std::fabs(audio.last_splash_loudness() - 0.25f * std::sqrt(0.5f * 300.0f * 9.4f * 9.4f)) < 0.01f);
+    GIANT_CHECK(audio.splash(f.state.scene, nullptr, entry(6.3f, 1.0f, 0.2f)) && audio.last_splash_small());
+    GIANT_CHECK(std::fabs(audio.last_splash_loudness() - 0.25f * std::sqrt(0.5f * 6.3f * 6.3f)) < 0.01f);
+    GIANT_CHECK(audio.splash(f.state.scene, nullptr, entry(1.0f, 500.0f, 4.0f, 5.0, 10.0f))); // a boat off a bank
+    GIANT_CHECK(std::fabs(audio.last_splash_loudness() - 0.25f * std::sqrt(0.5f * 500.0f * (1.0f + 25.0f))) < 0.01f);
+    GIANT_CHECK(!audio.splash(f.state.scene, nullptr, entry(std::numeric_limits<float>::quiet_NaN(), 1.0f, 0.2f)));
+    GIANT_CHECK(!audio.splash(f.state.scene, nullptr, entry(5.0f, 80.0f, 0.6f, 5000.0)));
+    GIANT_CHECK(audio.splashes() == 3);
+    // At most k_max_splashes of a step's, the loudest where the listener is first: a big one far off counts
+    // for less than a small one near; bad entries are left out (not sorted among them).
+    std::vector<sim::WaterEntry> many;
+    for (u32 i = 0; i < AudioState::k_max_splashes + 4; ++i) many.push_back(entry(2.0f + static_cast<float>(i), 50.0f, 0.5f));
+    many.push_back(entry(9.0f, 5000.0f, 3.0f, 900.0)); // far: 5000 * 81 / 2 / 900^2, quieter there than any near one
+    many.push_back(entry(std::numeric_limits<float>::quiet_NaN(), 50.0f, 0.5f));
+    AudioState busy;
+    busy.splashes_from(f.state.scene, nullptr, many);
+    GIANT_CHECK(busy.splashes() == AudioState::k_max_splashes);
+    // (The last heard: the 8th loudest near one.)
+    const float eighth = 2.0f + static_cast<float>(AudioState::k_max_splashes + 4 - AudioState::k_max_splashes);
+    GIANT_CHECK(std::fabs(busy.last_splash_loudness() - 0.25f * std::sqrt(0.5f * 50.0f * eighth * eighth)) < 0.01f);
+    // The next step's: heard too, up to k_max_splashes_frame in the frame; a frame on, again.
+    busy.splashes_from(f.state.scene, nullptr, std::span<const sim::WaterEntry>(many).first(1));
+    GIANT_CHECK(busy.splashes() == AudioState::k_max_splashes + 1);
+    for (int i = 0; i < 4; ++i) busy.splashes_from(f.state.scene, nullptr, many);
+    GIANT_CHECK(busy.splashes() == AudioState::k_max_splashes_frame);
+    EditorCamera camera;
+    busy.update(camera, 1.0 / 60.0);
+    busy.splashes_from(f.state.scene, nullptr, many);
+    GIANT_CHECK(busy.splashes() == AudioState::k_max_splashes_frame + AudioState::k_max_splashes);
 }

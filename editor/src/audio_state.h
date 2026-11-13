@@ -9,6 +9,7 @@
 #include "giant/audio/propagation.h"
 #include "giant/audio/shot.h"
 #include "giant/platform/audio_output.h"
+#include "giant/sim/physics.h"
 #include "giant/world/scene.h"
 #include "giant/world/water.h"
 #include "giant/world/weather.h"
@@ -19,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -158,6 +160,27 @@ public:
     void impact(const world::Scene& scene, const PhysicsState* physics, const DVec3& point, float energy);
     static constexpr u32 k_max_impacts = 8;
     u64 impacts() const { return m_impacts; }
+    // Something gone into water (sim::WaterEntry, water plan W5e) heard
+    // where it broke the surface: a splash, or a plop for something small
+    // (under k_plop_mass kg or k_plop_size m), as loud as the root of its
+    // energy going in (0.25 sqrt(m v^2 / 2), v^2 its speed down squared and
+    // a quarter of its speed across squared: a 300 kg crate from 4.5 m
+    // about 29, a person jumping off 2 m about 9.9, a stone tossed in about
+    // 1), with its echoes (16 rays within 300 m, as a knock); none past 1 km
+    // or with bad numbers (false: not heard).
+    bool splash(const world::Scene& scene, const PhysicsState* physics, const sim::WaterEntry& entry);
+    // A physics step's: at most k_max_splashes of them, the loudest where the
+    // listener is first (energy over distance squared), and at most
+    // k_max_splashes_frame a frame (update with seconds > 0; a command's
+    // many fixed steps are one frame, as for impacts).
+    void splashes_from(const world::Scene& scene, const PhysicsState* physics,
+                       std::span<const sim::WaterEntry> entries);
+    static constexpr u32 k_max_splashes = 8;
+    static constexpr u32 k_max_splashes_frame = 16;
+    static constexpr float k_plop_mass = 2.0f, k_plop_size = 0.25f;
+    u64 splashes() const { return m_splashes; }
+    bool last_splash_small() const { return m_last_splash_small; } // (a plop)
+    float last_splash_loudness() const { return m_last_splash; }
 
     // The same heard alone, rendered for `seconds` into stereo frames (not the speakers).
     struct Recording {
@@ -179,8 +202,15 @@ private:
     DVec3 m_listener{};
     Vec3 m_right{1, 0, 0}, m_up{0, 1, 0};
     u64 m_played = 0;
-    u64 m_shots = 0, m_impacts = 0;
-    u32 m_impacts_this_frame = 0, m_shots_this_frame = 0;
+    u64 m_shots = 0, m_impacts = 0, m_splashes = 0;
+    u32 m_impacts_this_frame = 0, m_shots_this_frame = 0, m_splashes_this_frame = 0;
+    float m_last_splash = 0.0f;
+    bool m_last_splash_small = false;
+    struct SplashOrder {
+        const sim::WaterEntry* entry = nullptr;
+        float heard = 0.0f;
+    };
+    std::vector<SplashOrder> m_splash_order; // (splashes_from's scratch)
 public:
     bool sounds_connected = false; // connect_sounds done (once only)
 private:

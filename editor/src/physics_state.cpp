@@ -113,6 +113,13 @@ void PhysicsState::take_hits() {
     if (!m_ballistics.hits().empty()) take(m_ballistics.hits(), true);
 }
 
+void PhysicsState::take_splashes() {
+    const std::vector<sim::WaterEntry>& entries = m_physics.water_entries();
+    if (entries.empty()) return;
+    m_water_entries += entries.size();
+    if (on_splashes) on_splashes(entries);
+}
+
 void PhysicsState::set_hit_targets(const HitTargets* targets) {
     m_targets = targets;
     m_ballistics.hit_shapes = targets != nullptr ? &targets->shapes() : nullptr;
@@ -494,6 +501,7 @@ void PhysicsState::update(world::Scene& scene, const world::SceneChanges& change
     sync_water(scene); // (simulating or not: the water is heard while editing too)
     if (!m_on) return;
     m_physics.step(seconds);
+    take_splashes();
     m_bodies.update_poses();
     m_forest.after_step();
     m_ballistics.step(seconds);
@@ -586,6 +594,7 @@ u32 PhysicsState::run_steps(u32 steps) {
     for (u32 i = 0; i < steps; ++i) {
         if (before_fixed_step) before_fixed_step(sim::PhysicsWorld::k_step_seconds);
         m_physics.step(sim::PhysicsWorld::k_step_seconds);
+        take_splashes();
         m_bodies.update_poses();
         m_forest.after_step();
         m_ballistics.step(sim::PhysicsWorld::k_step_seconds);

@@ -571,6 +571,58 @@ GIANT_TEST("audio sounds: make_loop cross-fades the end into the start: round th
     for (const float x : shorter.samples) GIANT_CHECK(std::isfinite(x));
 }
 
+GIANT_TEST("audio sounds: a splash is long and low with bubbles after, a plop short; both start and end quiet") {
+    const Sound splash = synth_splash(), plop = synth_plop();
+    GIANT_CHECK(splash.samples.size() == k_sample_rate * 6 / 5 && plop.samples.size() == k_sample_rate / 4);
+    for (const Sound* s : {&splash, &plop}) {
+        float peak = 0.0f;
+        for (const float x : s->samples) {
+            GIANT_CHECK(std::isfinite(x));
+            peak = std::max(peak, std::fabs(x));
+        }
+        GIANT_CHECK(std::fabs(peak - 1.0f) < 1e-5f);
+        GIANT_CHECK(std::fabs(s->samples.front()) < 0.05f && std::fabs(s->samples.back()) < 1e-3f);
+    }
+    // The splash: loud at first, still heard (the bubbles, the spray) at 0.3 to 0.6 s, quiet by its end.
+    const auto rms = [](const Sound& s, double from, double to) {
+        double sum = 0.0;
+        const usize a = static_cast<usize>(from * k_sample_rate), b = static_cast<usize>(to * k_sample_rate);
+        for (usize i = a; i < b; ++i) sum += static_cast<double>(s.samples[i]) * s.samples[i];
+        return static_cast<float>(std::sqrt(sum / static_cast<double>(b - a)));
+    };
+    const float first = rms(splash, 0.0, 0.1), middle = rms(splash, 0.3, 0.6), last = rms(splash, 1.1, 1.2);
+    std::printf("    splash: %.3f first 0.1 s, %.3f at 0.3-0.6 s, %.4f last 0.1 s; plop %.3f first 0.1 s\n", first, middle,
+                last, rms(plop, 0.0, 0.1));
+    GIANT_CHECK(first > 0.15f && middle > 0.01f && middle < first && last < middle * 0.5f);
+    GIANT_CHECK(rms(plop, 0.0, 0.1) > 0.1f && rms(plop, 0.2, 0.25) < 0.05f);
+    // Its parts: the low thump (a 200 Hz lowpass holds much of 60 to 250 ms), the bubbles (a band of 400 to
+    // 1600 Hz in 0.3 to 0.8 s, over the noise there), and no click as each starts or ends (no sample to sample
+    // step past a few times the late part's own level).
+    const auto band = [&](float low_hz, float high_hz, double from, double to) {
+        float a = 0.0f, b = 0.0f;
+        const float pa = 1.0f - std::exp(-2.0f * 3.14159265f * high_hz / k_sample_rate);
+        const float pb = 1.0f - std::exp(-2.0f * 3.14159265f * low_hz / k_sample_rate);
+        double sum = 0.0;
+        const usize from_i = static_cast<usize>(from * k_sample_rate), to_i = static_cast<usize>(to * k_sample_rate);
+        for (usize i = 0; i < to_i; ++i) {
+            a += pa * (splash.samples[i] - a);
+            b += pb * (a - b);
+            if (i >= from_i) sum += static_cast<double>(a - b) * (a - b);
+        }
+        return static_cast<float>(std::sqrt(sum / static_cast<double>(to_i - from_i)));
+    };
+    const float thump = band(1.0f, 200.0f, 0.06, 0.25), bubbles = band(400.0f, 1600.0f, 0.3, 0.8);
+    const float hiss = band(4000.0f, 12000.0f, 0.3, 0.8);
+    float step = 0.0f;
+    for (usize i = k_sample_rate * 7 / 10; i < splash.samples.size(); ++i) {
+        step = std::max(step, std::fabs(splash.samples[i] - splash.samples[i - 1]));
+    }
+    const float late = rms(splash, 0.7, 1.1);
+    std::printf("    splash parts: thump %.3f (of %.3f), bubbles %.4f, hiss %.4f; late step %.4f (level %.4f)\n", thump,
+                rms(splash, 0.06, 0.25), bubbles, hiss, step, late);
+    GIANT_CHECK(thump > 0.3f * rms(splash, 0.06, 0.25) && bubbles > hiss && step < 6.0f * late);
+}
+
 GIANT_TEST("audio sounds: water loops play round with no seam and are as loud as each other") {
     for (const Sound& s : {synth_lapping(), synth_river(), synth_underwater()}) {
         GIANT_CHECK(s.samples.size() >= k_sample_rate * 6);

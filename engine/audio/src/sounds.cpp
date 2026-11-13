@@ -4,6 +4,7 @@
 #include "giant/core/math.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -122,6 +123,87 @@ Sound synth_impact(u32 seed) {
         low += 0.35f * (noise.next() - low);
         s.samples[i] = (low * 1.5f + std::sin(2.0f * k_pi * 180.0f * t) * 0.6f) * std::exp(-t / 0.008f);
     }
+    normalize(s, 1.0f);
+    return s;
+}
+
+Sound synth_splash(u32 seed) {
+    Sound s;
+    s.samples.resize(k_sample_rate * 6 / 5); // 1.2 s
+    Noise noise(seed);
+    Noise when(seed * 29u + 5u);
+    float lo = 0.0f, hi = 0.0f, spray_lo = 0.0f;
+    const float a_lo = pole(300.0f), a_hi = pole(8000.0f), a_spray = pole(1500.0f);
+    // Bubbles: each a rising tone from silence (2 ms in), ringing down, gone smoothly by 50 ms; a few at once.
+    struct Bubble {
+        float start = -1.0f, pitch = 0.0f, phase = 0.0f;
+    };
+    std::array<Bubble, 4> bubbles{};
+    usize next_bubble = 0;
+    double next = 0.06;
+    float thump = 0.0f;
+    for (usize i = 0; i < s.samples.size(); ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(k_sample_rate);
+        const float x = noise.next();
+        hi += a_hi * (x - hi);
+        lo += a_lo * (hi - lo);
+        spray_lo += a_spray * (hi - spray_lo);
+        // The slap: broad noise, in over 3 ms, gone in about 60 ms.
+        const float slap = (hi - 0.5f * lo) * std::min(t / 0.003f, 1.0f) * std::exp(-t / 0.06f);
+        // The spray falling back: brighter noise, rising to 0.1 s, falling over 0.35 s.
+        const float spray = (hi - spray_lo) * (t / 0.1f) * std::exp(1.0f - t / 0.1f) * std::exp(-t / 0.35f) * 1.8f;
+        // The hole closing: a low thump at 60 ms (120 Hz falling to 70).
+        const float since = t - 0.06f;
+        if (since > 0.0f) thump += 2.0f * k_pi * (120.0f - 50.0f * std::min(since / 0.2f, 1.0f)) / k_sample_rate;
+        const float low = since > 0.0f ? std::sin(thump) * std::min(since / 0.004f, 1.0f) * std::exp(-since / 0.09f) : 0.0f;
+        // Bubbles: many at first, fewer later, none started after 0.9 s.
+        if (static_cast<double>(t) >= next && t < 0.9f) {
+            Bubble& b = bubbles[next_bubble];
+            next_bubble = (next_bubble + 1) % bubbles.size();
+            b.start = t;
+            b.pitch = 400.0f + 1100.0f * (when.next() * 0.5f + 0.5f);
+            b.phase = 0.0f;
+            next += (0.015 + 0.06 * (when.next() * 0.5 + 0.5)) * (1.0 + 4.0 * static_cast<double>(t));
+        }
+        float bubble = 0.0f;
+        for (Bubble& b : bubbles) {
+            const float age = t - b.start;
+            if (b.start < 0.0f || age >= 0.05f) continue;
+            b.phase += 2.0f * k_pi * b.pitch * (1.0f + age * 15.0f) / static_cast<float>(k_sample_rate);
+            const float shape = std::min(age / 0.002f, 1.0f) * std::exp(-age / 0.012f) * (1.0f - age / 0.05f);
+            bubble += std::sin(b.phase) * shape * std::exp(-t / 0.5f);
+        }
+        s.samples[i] = slap * 1.2f + spray + low * 0.9f + bubble * 0.6f;
+    }
+    // The end let down to silence (no cut).
+    const usize tail = k_sample_rate / 10;
+    for (usize k = 0; k < tail; ++k) s.samples[s.samples.size() - 1 - k] *= static_cast<float>(k) / tail;
+    normalize(s, 1.0f);
+    return s;
+}
+
+Sound synth_plop(u32 seed) {
+    Sound s;
+    s.samples.resize(k_sample_rate / 4);
+    Noise noise(seed);
+    float hi = 0.0f, phase = 0.0f;
+    const float a_hi = pole(6000.0f);
+    const float pitch = 700.0f + 200.0f * noise.next();
+    for (usize i = 0; i < s.samples.size(); ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(k_sample_rate);
+        hi += a_hi * (noise.next() - hi);
+        const float click = hi * std::min(t / 0.001f, 1.0f) * std::exp(-t / 0.004f);
+        // The bubble: from 15 ms, rising an octave as it rings down.
+        const float age = t - 0.015f;
+        float bubble = 0.0f;
+        if (age > 0.0f) {
+            phase += 2.0f * k_pi * pitch * (1.0f + std::min(age / 0.06f, 1.0f)) / static_cast<float>(k_sample_rate);
+            bubble = std::sin(phase) * std::min(age / 0.002f, 1.0f) * std::exp(-age / 0.05f);
+        }
+        s.samples[i] = click * 0.5f + bubble;
+    }
+    const usize tail = k_sample_rate / 20; // (let down to silence: no cut)
+    for (usize k = 0; k < tail; ++k) s.samples[s.samples.size() - 1 - k] *= static_cast<float>(k) / tail;
     normalize(s, 1.0f);
     return s;
 }

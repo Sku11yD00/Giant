@@ -136,6 +136,28 @@ struct ContactHit {
     Vec3 normal{};
 };
 
+// A body or a character going into water (water plan W5e: a splash):
+// where it broke the surface, how fast it went in (down against the
+// surface, metres a second: the surface rising to meet it counted) and
+// across (level), how heavy (kg) and how big across (metres, level). Only
+// a dynamic body awake and dry (none of its shape under) the step before
+// and wet now, or a character whose feet went under, going down at
+// k_entry_speed or more by itself and against the surface: one woken,
+// pushed down or made under water, riding a falling swell, met by a rising
+// one, walking down into it, or held or carried in makes none; a body that
+// went in within half a second not again. A sea steeper than seas stand
+// (2 m waves 40 m long) throws a light raft clear now and then: it slaps
+// down about once a wave. (Not yet: kinematic bodies.)
+struct WaterEntry {
+    BodyId body = 0;          // the body (0: a character)
+    u32 character = 0;        // the character (0: a body)
+    DVec3 point{};            // on the surface
+    float speed = 0.0f;
+    float across = 0.0f;
+    float mass = 0.0f;
+    float size = 0.0f;
+};
+
 struct PhysicsSettings {
     u32 max_bodies = 1u << 18;
     u32 max_body_pairs = 1u << 18;
@@ -295,6 +317,11 @@ public:
     // Contacts begun in the last step() call at least min_hit_impulse
     // hard, in a fixed order.
     const std::vector<ContactHit>& hits() const { return m_hits; }
+    // Bodies and characters gone into water in the last step() call (each
+    // as it goes in: out again and back in, again, a body not within half a
+    // second), in step order, each step's bodies then characters, each in id order.
+    const std::vector<WaterEntry>& water_entries() const;
+    static constexpr float k_entry_speed = 1.0f;
     // How far time is into the next fixed step (0 to 1): the share of the
     // way from where things were to where they are to draw them at.
     double step_fraction() const;

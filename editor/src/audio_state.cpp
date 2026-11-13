@@ -282,6 +282,9 @@ AudioState::AudioState() {
     m_names["sea"] = m_mixer.add_sound(audio::synth_lapping(11));
     m_names["river"] = m_mixer.add_sound(audio::synth_river());
     m_names["underwater"] = m_mixer.add_sound(audio::synth_underwater());
+    // Things going into it (splash).
+    m_names["splash"] = m_mixer.add_sound(audio::synth_splash());
+    m_names["plop"] = m_mixer.add_sound(audio::synth_plop());
     m_scratch.resize(static_cast<usize>(audio::k_sample_rate / 4) * 2);
 }
 
@@ -326,7 +329,7 @@ void AudioState::update(const EditorCamera& camera, double seconds) {
     m_right = {std::cos(yaw), 0.0f, -std::sin(yaw)}; // yaw 0 looks down -Z: right is +X
     m_up = {0.0f, 1.0f, 0.0f};
     m_mixer.set_listener(m_right, m_up);
-    if (seconds > 0.0) m_impacts_this_frame = m_shots_this_frame = 0; // a frame on (commands pass 0)
+    if (seconds > 0.0) m_impacts_this_frame = m_shots_this_frame = m_splashes_this_frame = 0; // a frame on (commands pass 0)
     if (m_output != nullptr) return;
     // No speakers: the mix moves on with the frames (and is dropped).
     const double s = std::isfinite(seconds) ? std::clamp(seconds, 0.0, 0.25) : 0.0;
@@ -458,6 +461,64 @@ void AudioState::impact(const world::Scene& scene, const PhysicsState* physics, 
     s.diffract = false;
     const audio::Heard heard = trace_only(scene, physics, point, s);
     m_mixer.play(audio::to_play(*knock, heard, std::clamp(0.6f * std::sqrt(energy), 0.5f, 60.0f)));
+}
+
+namespace {
+// How hard it went in (joules): down against the surface, a quarter of the way across counted.
+float splash_energy(const sim::WaterEntry& e) {
+    const float v2 = e.speed * e.speed + 0.25f * e.across * e.across;
+    return 0.5f * e.mass * v2;
+}
+bool splash_finite(const sim::WaterEntry& e) {
+    return std::isfinite(e.point.x) && std::isfinite(e.point.y) && std::isfinite(e.point.z) &&
+           std::isfinite(e.speed) && std::isfinite(e.across) && std::isfinite(e.mass) && std::isfinite(e.size) &&
+           e.speed > 0.0f && e.across >= 0.0f && e.mass > 0.0f && e.size >= 0.0f;
+}
+} // namespace
+
+bool AudioState::splash(const world::Scene& scene, const PhysicsState* physics, const sim::WaterEntry& entry) {
+    if (!splash_finite(entry)) return false;
+    const DVec3 to = entry.point - m_listener;
+    if (!(dot(to, to) <= 1000.0 * 1000.0)) return false;
+    const bool small = entry.mass < k_plop_mass || entry.size < k_plop_size;
+    const std::optional<audio::SoundId> sound = find(small ? "plop" : "splash");
+    if (!sound) return false;
+    ++m_splashes;
+    const float loudness = std::clamp(0.25f * std::sqrt(splash_energy(entry)), 0.2f, 60.0f);
+    m_last_splash = loudness;
+    m_last_splash_small = small;
+    audio::EchoSettings s;
+    s.rays = 16; // as a knock: few echoes, near, no bending
+    s.max_distance = 300.0;
+    s.diffract = false;
+    // (Heard from just over the surface: a ray from on it would start in the water's own plane.)
+    const audio::Heard heard = trace_only(scene, physics, entry.point + DVec3{0.0, 0.05, 0.0}, s);
+    m_mixer.play(audio::to_play(*sound, heard, loudness));
+    return true;
+}
+
+void AudioState::splashes_from(const world::Scene& scene, const PhysicsState* physics,
+                               std::span<const sim::WaterEntry> entries) {
+    // The loudest where the listener is first (energy over the distance squared, 1 m at least): at most
+    // k_max_splashes of a call's (a physics step's: a frame's, or a command's fixed step) are heard, and
+    // k_max_splashes_frame a frame (a command's many steps: counted as one frame, as impacts are).
+    m_splash_order.clear();
+    for (const sim::WaterEntry& e : entries) {
+        if (!splash_finite(e)) continue;
+        const DVec3 to = e.point - m_listener;
+        m_splash_order.push_back({&e, splash_energy(e) / static_cast<float>(std::max(dot(to, to), 1.0))});
+    }
+    std::sort(m_splash_order.begin(), m_splash_order.end(), [](const SplashOrder& a, const SplashOrder& b) {
+        return a.heard != b.heard ? a.heard > b.heard : a.entry < b.entry; // (ties: in their order)
+    });
+    u32 played = 0;
+    for (const SplashOrder& o : m_splash_order) {
+        if (played == k_max_splashes || m_splashes_this_frame >= k_max_splashes_frame) break;
+        if (splash(scene, physics, *o.entry)) {
+            ++played;
+            ++m_splashes_this_frame;
+        }
+    }
 }
 
 audio::Heard AudioState::trace_only(const world::Scene& scene, const PhysicsState* physics, const DVec3& at,

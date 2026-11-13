@@ -2475,8 +2475,38 @@ switches on the renderer's own test, so near the surface in a swell the
 two can part by a few centimetres. `stop_sounds` stops what is playing;
 the water carries on (perhaps after a brief dip), set again each frame
 from the water still there.
-`get_audio` reports `ambience`, `muffle` and the `water` heard. Splashes
-come next; rain on the water is not heard yet.
+`get_audio` reports `ambience`, `muffle` and the `water` heard. Rain on
+the water is not heard yet.
+
+Splashes (water plan W5e). The physics notes what goes into water in
+each step (`PhysicsWorld::water_entries`, `sim::WaterEntry`): a dynamic
+body seen awake and dry the step before (none of its own shape, as
+turned, under the surface: 12 bytes a body, by its id's index; one in a room
+under the water is not dry) and wet
+now, or a character whose feet went under, going down at 1 m/s or more
+both by itself and against the surface (`k_entry_speed`: a sea's swell
+falls and rises). A body asleep is not seen, so one woken wet, pushed
+down, or made under water makes none; riding a falling swell or met by a
+rising one, none; a character walking down stairs or a slope into it,
+none (its own fall speed counts, not how a step down moved it, nor a
+lift or sinking raft it stands on); held or
+carried in and let go, none. A body that splashed does not again for
+half a second; a sea steeper than seas stand (2 m waves 40 m long) throws
+a light raft clear now and then, and it slaps down about once a wave.
+Each entry has where it broke the surface (the middle of what is under
+so far: a log end first, at that end), its speed down (against the
+surface) and across, mass and size. Not yet: kinematic bodies, a
+character held or carried in. The editor's `PhysicsState` passes them on
+after each step (`on_splashes`), and `AudioState::splashes_from` plays at
+most 8 of a step's and 16 a frame, the loudest where the listener is first (energy over
+distance squared): a splash (1.2 s: the slap, the spray falling back, the
+low thump of the hole closing, bubbles) or, for something small (under
+2 kg or 0.25 m), a plop, as loud as 0.25 sqrt(m v^2 / 2) (v^2 the speed
+down squared and a quarter of the speed across squared: a 300 kg crate
+from 4.5 m about 29, a person off 2 m about 9.9, a stone about 1), with a
+knock's echoes (16 rays within 300 m), none past 1 km. `get_audio`
+reports `splashes` and the last one's `splash_loudness` and
+`splash_plop`. Spray and rings on the water wait for the effects part.
 
 ## Game saves (E4 part 1a)
 

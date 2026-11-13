@@ -21,16 +21,22 @@ Sound synth_crack();
 Sound synth_click();
 // A bullet striking: a short knock of noise (about 40 ms).
 Sound synth_impact(u32 seed = 7);
-// Water, made to be played round and round (Ambience: their ends
-// cross-faded into their starts; RMS about 0.12 to 0.15):
-// little waves lapping at a shore (8 s), a river running (6 s: rushing
-// noise and bubbles), and under water (6 s: a low rumble, a bubble now
-// and then).
+// Something going into water (water plan W5e; peak 1): a splash (1.2 s:
+// the slap on the surface, the spray falling back, the low thump of the
+// hole closing and a run of bubbles) for anything big, a plop (0.25 s: a
+// small click and one rising bubble) for something small.
+Sound synth_splash(u32 seed = 13);
+Sound synth_plop(u32 seed = 17);
 // Made into a loop (how the water's loops are): `made` holds `n` samples
 // and `fade` more, which are cross-faded (equal power) into its start, so
 // played round and round there is no seam; then set to `rms` (no peak past
 // 0.95). Too short a `made`: `n` and `fade` cut to what there is.
 Sound make_loop(std::vector<float> made, usize n, usize fade, float rms);
+// Water, made to be played round and round (Ambience: their ends
+// cross-faded into their starts; RMS about 0.12 to 0.15):
+// little waves lapping at a shore (8 s), a river running (6 s: rushing
+// noise and bubbles), and under water (6 s: a low rumble, a bubble now
+// and then).
 Sound synth_lapping(u32 seed = 3);
 Sound synth_river(u32 seed = 5);
 Sound synth_underwater(u32 seed = 9);

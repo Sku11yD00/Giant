@@ -198,6 +198,10 @@ public:
     static constexpr usize k_kept_hits = 256;
     const std::deque<ShotHit>& recent_hits() const { return m_recent; }
     std::function<void(std::span<const ShotHit>)> on_hits;
+    // Told after each step of what went into water in it (sim::WaterEntry:
+    // splashes), and counted.
+    std::function<void(std::span<const sim::WaterEntry>)> on_splashes;
+    u64 water_entries() const { return m_water_entries; }
     float blow_per_joule = 0.1f; // N s of wear each joule a bullet leaves in a kit piece
 
     sim::PhysicsWorld& world() { return m_physics; }
@@ -213,6 +217,8 @@ private:
     // Hits described (what they met), and taken when `apply` (pushes, wear).
     std::vector<ShotHit> take(std::span<const sim::BulletHit> hits, bool apply);
     void take_hits();
+    void take_splashes();
+    u64 m_water_entries = 0;
     static std::vector<sim::TreeSpot> trees_of(const ScatterPlacer::Cell& placed);
     // The cell's placement given to the forest, with the scene's kept trees there.
     void give(world::CellCoord cell, const ScatterPlacer::Cell& placed);
