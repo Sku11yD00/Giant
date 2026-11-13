@@ -152,6 +152,26 @@ float water_surf(const Vec3& velocity) {
     return std::clamp(std::sqrt(x * x + z * z) / 8.0f, 0.15f, 1.0f);
 }
 
+float water_whitecaps(const Vec3& velocity) {
+    const float x = std::isfinite(velocity.x) ? velocity.x : 0.0f;
+    const float z = std::isfinite(velocity.z) ? velocity.z : 0.0f;
+    const float u = std::min(std::sqrt(x * x + z * z), 60.0f);
+    if (u < 3.0f) {
+        return 0.0f;
+    }
+    return std::min(3.84e-6f * std::pow(u, 3.41f), 0.3f);
+}
+
+float water_whitecap_z(float share) {
+    if (!(share > 0.0f)) {
+        return 0.0f;
+    }
+    const double p = std::min(static_cast<double>(share), 0.5);
+    const double t = std::sqrt(-2.0 * std::log(p));
+    return static_cast<float>(t - (2.515517 + 0.802853 * t + 0.010328 * t * t) /
+                                      (1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t));
+}
+
 bool near_plane_under(const Quat& orientation, float tan_y, float aspect, float near_plane, double level_relative) {
     if (!std::isfinite(level_relative)) return false;
     const Vec3 right = rotate(orientation, {1.0f, 0.0f, 0.0f}) * (tan_y * aspect);

@@ -23,6 +23,10 @@ inline constexpr float k_water_flow_period = 2.0f;
 inline constexpr float k_water_slope_most = 10.0f;
 // The surf: a wave runs in to the shore every this many seconds.
 inline constexpr float k_water_surf_period = 6.0f;
+// Seconds before the weather's clock on the water starts over (water.slang's
+// k_rain_cycle: the rain's drops are hashed by their second within it, and
+// the whitecaps' breakup drifts with the wind over it, cross-faded).
+inline constexpr float k_water_rain_period = 64.0f;
 // gpu::WaterVertex::look's top bit: the vertex rides the swell.
 inline constexpr u32 k_water_swell_bit = 0x80000000u;
 // The sea's rings (SeaSurface): from k_sea_first out to k_sea_fine each
@@ -69,6 +73,15 @@ float water_clock(double seconds, float period);
 // How high the surf runs under wind `velocity` (m/s): a calm's ripples
 // lap (0.15) to a strong wind's breakers (1, from 8 m/s over the water).
 float water_surf(const Vec3& velocity);
+// The share of open water whose crests foam under wind `velocity` (m/s
+// over the water): whitecaps, by Monahan and O'Muircheartaigh's fit
+// (3.84e-6 U^3.41: about 1 % at 10 m/s, 10 % at 20 m/s), at most 0.3;
+// none under 3 m/s.
+float water_whitecaps(const Vec3& velocity);
+// The standard normal deviate above which `share` (0 to 1) of a normal
+// spread lies (the inverse of the upper tail; Abramowitz and Stegun
+// 26.2.23, within 5e-4): the whitecaps' line on the crests. 0 for no share.
+float water_whitecap_z(float share);
 
 // A look as the GPU holds it, its numbers kept in range (a bad one: the default's).
 gpu::WaterLook pack_water_look(const WaterLook& look);

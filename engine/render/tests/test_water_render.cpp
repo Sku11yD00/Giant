@@ -463,6 +463,15 @@ GIANT_TEST("water render: rapids packed in range; running water's clock cycles")
     // The surf: a calm laps, a strong wind breaks; bad numbers are calm.
     GIANT_CHECK(water_surf({}) == 0.15f && water_surf({8.0f, 0.0f, 6.0f}) == 1.0f);
     GIANT_CHECK(std::fabs(water_surf({4.0f, 9.0f, 0.0f}) - 0.5f) < 1e-6f && water_surf({std::nanf(""), 0.0f, 0.0f}) == 0.15f);
+    // Whitecaps: none in a breeze, about 1 % at 10 m/s and 10 % at 20, at most 0.3; bad numbers calm.
+    GIANT_CHECK(water_whitecaps({}) == 0.0f && water_whitecaps({2.9f, 0.0f, 0.0f}) == 0.0f);
+    GIANT_CHECK(std::fabs(water_whitecaps({6.0f, 0.0f, 8.0f}) - 0.0099f) < 0.001f);
+    GIANT_CHECK(std::fabs(water_whitecaps({20.0f, 0.0f, 0.0f}) - 0.106f) < 0.005f);
+    GIANT_CHECK(water_whitecaps({100.0f, 0.0f, 0.0f}) == 0.3f && water_whitecaps({std::nanf(""), 0.0f, 0.0f}) == 0.0f);
+    GIANT_CHECK(std::fabs(water_clock(65.5, k_water_rain_period) - 1.5f) < 1e-6f);
+    // The whitecaps' line: the normal deviate of the upper tail.
+    GIANT_CHECK(water_whitecap_z(0.0f) == 0.0f && std::fabs(water_whitecap_z(0.5f)) < 1e-3f);
+    GIANT_CHECK(std::fabs(water_whitecap_z(0.1f) - 1.2816f) < 1e-3f && std::fabs(water_whitecap_z(0.01f) - 2.3263f) < 1e-3f);
 }
 
 GIANT_TEST("water render: under water where the near plane dips under the camera's water; looks packed in range") {
@@ -1119,5 +1128,129 @@ GIANT_TEST("water render: the sea's rings are fine out to 2 km and reach past th
     draw();
     GIANT_CHECK(renderer->last_stats().water_triangles == k_max_seas * sea_triangles());
     GIANT_CHECK(renderer->last_stats().water_overflow);
+    device->destroy(target);
+}
+
+GIANT_TEST("water render: d3d12 rain rings the water near by and roughens it; a storm's crests foam, a breeze's do not") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    std::vector<WaterVertex> v;
+    std::vector<u32> idx;
+    square(v, idx, {0.0, 0.0, 0.0}, 200.0);
+    std::vector<WaterLook> looks(1);
+    looks[0].color = {0.01f, 0.02f, 0.03f};
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.voxel_world = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.water_vertices = v;
+    frame.water_indices = idx;
+    frame.water_looks = looks;
+    frame.lighting.background = {0.3f, 0.3f, 0.3f};
+    frame.lighting.sun_light = {4.0f, 4.0f, 4.0f};
+    frame.lighting.sky_light = {0.5f, 0.5f, 0.5f};
+    frame.lighting.ground_light = {0.02f, 0.02f, 0.02f};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f); // straight down
+    const auto draw = [&] {
+        for (int i = 0; i < 4; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto green = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4 + 1;
+        return i < image.size() ? static_cast<int>(image[i]) : -1000;
+    };
+    // Rain: half a metre over calm water, the sun's glint under the eye;
+    // the rings scatter it. Compared with no rain at the same moments.
+    frame.sky.on = true;
+    frame.sky.fog_density = 0.0f;
+    frame.wind.velocity = {0.2f, 0.0f, 0.0f};
+    frame.view.position = {0.0, 0.5, 0.0};
+    frame.view.vertical_fov_degrees = 20.0f; // pixels of about 3 mm: the rings made out
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.03f, 1.0f, 0.0f});
+    usize rings = 0;
+    usize dry_change = 0;
+    std::vector<u8> before;
+    for (const double t : {10.1, 10.35, 10.6, 10.85}) {
+        frame.water_seconds = t;
+        frame.sky.rain = 0.0f;
+        const auto dry = draw();
+        frame.sky.rain = 1.0f;
+        const auto wet = draw();
+        for (u32 y = 0; y < k_h; ++y) {
+            for (u32 x = 0; x < k_w; ++x) {
+                rings += std::abs(green(wet, x, y) - green(dry, x, y)) > 6 ? usize{1} : usize{0};
+            }
+        }
+        before = dry;
+    }
+    // Rain not drawn falling: no rings.
+    frame.settings.precipitation = false;
+    const auto off = draw(); // (at the last moment, raining)
+    for (u32 y = 0; y < k_h; ++y) {
+        for (u32 x = 0; x < k_w; ++x) {
+            dry_change += std::abs(green(off, x, y) - green(before, x, y)) > 6 ? usize{1} : usize{0};
+        }
+    }
+    frame.settings.precipitation = true;
+    frame.view.vertical_fov_degrees = 60.0f;
+    frame.sky.rain = 0.0f;
+    frame.sky.on = false;
+    // Whitecaps: 10 m over deep dark water, the sun low behind (its glint off the screen).
+    frame.view.position = {0.0, 10.0, 0.0};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.95f, 0.31f, 0.0f});
+    const auto white = [&](const std::vector<u8>& image) {
+        usize n = 0;
+        for (u32 y = 0; y < k_h; ++y) {
+            for (u32 x = 0; x < k_w; ++x) n += green(image, x, y) > 120 ? usize{1} : usize{0};
+        }
+        return n;
+    };
+    usize storm = 0;
+    usize breeze = 0;
+    usize fresh = 0;
+    for (const double t : {20.0, 21.3, 22.6}) {
+        frame.water_seconds = t;
+        frame.wind.velocity = {25.0f, 0.0f, 0.0f};
+        storm += white(draw());
+        frame.wind.velocity = {2.5f, 0.0f, 0.0f};
+        breeze += white(draw());
+        frame.wind.velocity = {4.5f, 0.0f, 0.0f}; // a few caps, a hundredth of a percent
+        fresh += white(draw());
+    }
+    std::printf("    rain changed %zu pixels (not falling: %zu); white pixels in a storm %zu, at 4.5 m/s %zu, in a breeze %zu\n",
+                rings, dry_change, storm, fresh, breeze);
+    GIANT_CHECK(rings > 40 && dry_change == 0);
+    GIANT_CHECK(storm > 1000 && fresh < 40 && breeze == 0);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

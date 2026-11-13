@@ -811,7 +811,11 @@ struct WaterPush {
     u32 sea_rings;      // how many radii
     float sea_level;    // camera-relative
     u32 sea_look;       // its look (an index into the looks)
+    float whitecaps;    // the share of open water foaming on the crests (0 to 0.3, from the wind)
+    float whitecap_z;   // the normal deviate the top `whitecaps` of the crests lie above (water_whitecap_z)
+    float rain;         // how hard it rains on the water (0 to 1)
+    float rain_clock;   // the weather's clock on the water: seconds into its cycle (0 to k_water_rain_period)
 };
-static_assert(sizeof(WaterPush) == 112);
+static_assert(sizeof(WaterPush) == 128); // (all push constants hold)
 
 } // namespace giant::render::gpu

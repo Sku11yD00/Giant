@@ -3461,6 +3461,14 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
     push.flow_clock = water_flow_clock(frame.water_seconds);
     push.surf_clock = water_clock(frame.water_seconds, k_water_surf_period);
     push.surf = water_surf(frame.wind.velocity);
+    push.whitecaps = water_whitecaps(frame.wind.velocity);
+    push.whitecap_z = water_whitecap_z(push.whitecaps);
+    // (Rain's rings: with the sky's weather and its rain drawn falling, as
+    // the cover map that shelters the water under a roof is then made.)
+    push.rain = frame.sky.on && frame.settings.precipitation && std::isfinite(frame.sky.rain)
+                    ? std::clamp(frame.sky.rain, 0.0f, 1.0f)
+                    : 0.0f;
+    push.rain_clock = water_clock(frame.water_seconds, k_water_rain_period);
     push.swell_offset = memory.offset + static_cast<u32>(swell_at);
     push.swell_count = swell_count;
     push.under_swell = under_on && under_swell ? 1u : 0u;

@@ -2211,8 +2211,39 @@ start on a surface riding the swell about it). Waves and the swell are not
 in the voxels (they are flat at the body's level), and dry ground below
 the sea's level is under the sea plane, as the sea is drawn there too.
 
-The rest comes in the following parts (the water plan: W5 weather and
-sound, W6 the water gate).
+Weather on the water (W5c). Rain rings the water where the sky is open
+over it (the cover map's shelter, as for falling rain: without the cover
+map, as without the voxel world, rain rings water under a roof too; none with
+`precipitation` off or without the sky's weather): three layers of cells
+0.5, 0.4 and 0.32 m across on the ground's wrapped place, each with a drop
+a second landing by chance (`Sky::rain` times 0.85) at a hashed place and
+moment, its ring spreading to 0.3 of the cell in 0.6 s as it fades (crests
+3 cm apart, 1.2 mm high), faded out before the cell's edge. Nothing is
+kept from frame to frame: the drops are hashed by their second within the
+weather's 64 s clock on the water (`WaterPush::rain`, `rain_clock`).
+Rings are drawn where a pixel has four to a ring's wavelength (as the
+waves: near by, looking down); past that, and on water running faster than
+half a metre a second (the rings would ride its flow), the rain roughens
+the glint instead.
+
+A strong wind's crests foam: whitecaps over the share of open water
+Monahan and O'Muircheartaigh's fit gives (`water_whitecaps`: 3.84e-6
+U^3.41, about 1 % at 10 m/s, 10 % at 20 m/s, at most 0.3, none under
+3 m/s). Crests are 0.5 plus the mean of the waves' sines, spread normally
+(a quarter with every wave drawn), so the foam is on those above 0.5 plus
+the spread times the share's normal deviate (`water_whitecap_z`); past
+0.97 (crests are clamped at 1) the line stays and the foam thins to the
+share. Where the waves are too fine to draw (far out) the foam is the
+share spread evenly (the crests' line used only once nearly every wave is
+drawn). A noise drifting with the wind breaks it up (thin foam keeps its
+share, solid foam loses about a tenth), each octave smoothed as the pixel
+outgrows it. The waves
+themselves already grow with the wind (W2a), the surf with it (W4b) and
+the sea's swell (W5a). Snow falls into the water and is gone; ice waits
+for a later part.
+
+The rest comes in the following parts (the water plan: W5 sound and
+wetting, W6 the water gate).
 
 ## Navigation
 
