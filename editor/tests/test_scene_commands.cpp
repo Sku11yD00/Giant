@@ -247,6 +247,7 @@ GIANT_TEST("editor: render settings are view state") {
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("post_draws"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("overflow"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["streaming"].contains("pool_bytes"));
+    GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["particles"].contains("alive"));
 }
 
 GIANT_TEST("editor: frame phases name the slow frames' parts") {

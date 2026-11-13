@@ -9,6 +9,7 @@ giant_module(render
     src/voxel_scene.cpp
     src/instance_store.cpp
     src/terrain_paint.cpp
+    src/particles.cpp
     src/shadow_pages.cpp
     src/voxel_light.cpp
     src/voxel_lamps.cpp
@@ -81,6 +82,7 @@ giant_module_tests(render
     tests/test_render.cpp
     tests/test_water_render.cpp
     tests/test_decals.cpp
+    tests/test_particles.cpp
     tests/test_lights.cpp
     tests/test_local_shadows.cpp
     tests/test_streaming.cpp

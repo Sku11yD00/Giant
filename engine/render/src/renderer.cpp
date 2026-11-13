@@ -13,6 +13,7 @@
 #include "exposure.h"
 #include "instance_store.h"
 #include "terrain_paint.h"
+#include "particles.h"
 #include "gpu_layout.h"
 #include "render_shaders.h"
 #include "shadow_pages.h"
@@ -281,6 +282,7 @@ Renderer::~Renderer() {
         m_device.destroy(p);
     }
     m_device.destroy(m_water_light);
+    m_device.destroy(m_particle_ring);
     m_device.destroy(m_ao_raw);
     m_device.destroy(m_ao);
     m_device.destroy(m_contact);
@@ -346,6 +348,18 @@ bool Renderer::init() {
     m_voxels = std::make_unique<VoxelScene>(m_device, m_desc.voxel_clipmap, m_desc.voxel_bricks);
     m_store = std::make_unique<InstanceStore>(m_device);
     m_paint = std::make_unique<TerrainPaintStore>(m_device);
+    m_particles = std::make_unique<ParticleRing>();
+    {
+        rhi::BufferDesc ring;
+        ring.size = u64{k_max_particles} * sizeof(gpu::Particle);
+        ring.usage = rhi::BufferUsage::shader_read;
+        ring.name = "particles";
+        m_particle_ring = m_device.create_buffer(ring);
+        if (!m_particle_ring.valid()) {
+            log_error("render", "could not create the particle ring");
+            return false;
+        }
+    }
     if (!m_voxels->init()) {
         return false;
     }
@@ -2386,6 +2400,42 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
     cmd.end_timing();
 }
 
+void Renderer::update_particles(rhi::CommandList& cmd, const FrameInput& frame) {
+    const ParticleRing::Frame& f = m_particles->update(frame.particle_bursts, frame.particle_styles,
+                                                       frame.delta_seconds, frame.view.position, frame.wind);
+    const std::span<const gpu::Particle> born = m_particles->born_records();
+    if (born.empty()) {
+        return;
+    }
+    // Written into the ring where they go, in two copies where they wrap
+    // past its end. No upload memory (logged): they are taken back, so no
+    // slot is left holding an old record the ring thinks is new.
+    const u32 bytes = static_cast<u32>(born.size() * sizeof(gpu::Particle)); // at most 1 MiB
+    const rhi::TransientMemory up = cmd.allocate(bytes);
+    if (up.data == nullptr) {
+        m_particles->forget_births();
+        return;
+    }
+    std::memcpy(up.data, born.data(), bytes);
+    const u32 first = std::min(static_cast<u32>(born.size()), k_max_particles - f.born_first);
+    cmd.barrier(m_particle_ring, rhi::ResourceState::copy_dest);
+    cmd.copy_buffer(m_particle_ring, u64{f.born_first} * sizeof(gpu::Particle), up.buffer, up.offset,
+                    u64{first} * sizeof(gpu::Particle));
+    if (first < born.size()) {
+        cmd.copy_buffer(m_particle_ring, 0, up.buffer, up.offset + u64{first} * sizeof(gpu::Particle),
+                        u64{born.size() - first} * sizeof(gpu::Particle));
+    }
+    cmd.barrier(m_particle_ring, rhi::ResourceState::shader_read);
+}
+
+void Renderer::particle_stats() {
+    const ParticleRing::Frame& p = m_particles->frame();
+    m_stats.particles = p.count;
+    m_stats.particles_born = p.born;
+    m_stats.particles_dropped = p.dropped;
+    m_stats.particles_cut = p.cut;
+}
+
 void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameInput& frame) {
     // mark(s) gives section s the CPU time since the last mark.
     m_cpu_ms = {};
@@ -2398,6 +2448,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_stats = {};
     m_shadow_draws = 0;
     m_shading_extras = {}; // until shading uploads this frame's
+    // Particles are born whatever is drawn (their clock runs on).
+    update_particles(cmd, frame);
+    particle_stats();
+    mark(CpuSection::particles);
     const rhi::TextureDesc* target_desc = m_device.describe(target);
     GIANT_ASSERT(target_desc != nullptr && target_desc->format == rhi::Format::rgba8_srgb,
                  "the renderer draws into a live rgba8_srgb render target");
@@ -2918,10 +2972,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
                 if (data.entries.data == nullptr || data.range.data == nullptr) {
                     data.entry_count = 0;
                     m_stats = {};
+                    particle_stats();
                 }
             }
         } else {
             m_stats = {}; // GPU culling with nothing to draw
+            particle_stats();
             m_stats.from_gpu = true;
         }
         raster(cmd, data, 0, false); // clears the visibility buffer, draws CPU picks

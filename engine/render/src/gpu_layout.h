@@ -818,4 +818,40 @@ struct WaterPush {
 };
 static_assert(sizeof(WaterPush) == 128); // (all push constants hold)
 
+// One particle in the ring (effects plan FX1, particles.h): where and how
+// it was born, all the closed form needs (particles.slang's Particle).
+struct Particle {
+    float position[3]; // at birth, relative to the ring's anchor (metres)
+    u32 born;          // the particle clock at birth (microseconds, wrapping)
+    float velocity[3]; // at birth (m/s)
+    float life;        // seconds
+    float air[3];      // the air it takes the speed of (m/s, the wind at birth)
+    float stop;        // age it stops at, on the ground (>= life: never)
+    float lift;        // m/s^2 up (gravity down, buoyancy up)
+    float drag;        // 1/s
+    float size;        // its style's sizes are scaled by
+    u32 seed_style;    // seed << 8 | style
+};
+static_assert(sizeof(Particle) == 64);
+
+// A particle style as the shaders read it (particles.slang's ParticleStyle).
+struct ParticleStyle {
+    float size_start;
+    float size_end;
+    float opacity_start;
+    float opacity_end;
+    float color_start[3];
+    float emissive_end;
+    float color_end[3];
+    float soft;
+    float emissive[3];
+    u32 flags; // bit 0: streak, bit 1: lit, bit 2: usable (a bad style draws nothing)
+    float wobble;
+    float pad[3];
+};
+static_assert(sizeof(ParticleStyle) == 80);
+inline constexpr u32 k_particle_style_streak = 1u;
+inline constexpr u32 k_particle_style_lit = 2u;
+inline constexpr u32 k_particle_style_usable = 4u;
+
 } // namespace giant::render::gpu

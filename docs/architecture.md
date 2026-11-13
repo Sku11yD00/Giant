@@ -2250,6 +2250,48 @@ gate (W6, `tools/water_gate.py`) flies the N3 valley with a lake, a river
 past the town and a coast, over and under the water, and holds the water
 to 1.5 ms of GPU time.
 
+## Particles (effects plan FX1a)
+
+Smoke, sparks, spray and the like are particles (`render/src/particles.h`):
+born on the CPU from `FrameInput::particle_bursts`, each written once into
+a ring of `k_max_particles` (262,144) 64-byte records on the GPU, made at
+init, and never simulated after. A particle's place at any age is a closed
+form of how it was born: it takes the speed of the air it was born in (the
+wind times its style's `wind`) at its style's `drag` per second while
+gravity and buoyancy pull on it, so x(t) = x0 + air t + (v0 - air) E1 +
+lift E2 with E1 = (1 - e^-kt)/k and E2 = (t - E1)/k (plain ballistics with
+no drag; series to the 7th power where kt is under a half, so a little
+drag over a long life loses no digits). The same age is always the same place:
+nothing is kept from frame to frame, so particles cannot drift or flicker
+without the history AGENTS.md rule 2 forbids. A burst given a `ground`
+height has each particle's landing age found at birth (its height has one
+top or bottom at most, so Newton within a bracket on one side of it); it
+stops there. Births cost the CPU about 0.05 microseconds a particle and
+that search about 0.3 more (measured on the build machine), so a frame is
+capped at `k_max_particles_born` (16,384) births and
+`k_max_particles_grounded` (4,096) of them with a ground: about 2 ms at
+worst. A style's numbers are
+bounded (gravity and wind shares to 100, buoyancy to 100 g, sizes to
+1 km, colours to 1e4) so nothing overflows a float.
+
+Births are deterministic: a particle's spread, cone direction, speed and
+life come from hashing the burst's `seed` and its index. Bad numbers, a
+missing or bad style, or a burst over 8 km from the camera leave its
+particles out, counted in `RenderStats::particles_dropped`, as are those
+past the caps. Positions are relative to an
+anchor near the camera (floats); a camera over 4 km from the anchor drops
+them all and moves it. Each frame's births are one span of the ring that
+ends when its longest-lived particle dies (lives are at most 60 s); spans
+end from the oldest, so the alive range is known without reading anything
+back (some in it may have died: the shader skips those by age), and a full
+ring cuts the oldest (`particles_cut`). The clock is the frames'
+`delta_seconds` (at most 1; held: still), and births go on whatever view
+is drawn. A frame's births go up in one upload (at most 1 MiB, two copies
+where they wrap); with no upload memory they are taken back and counted
+as dropped ("particles" in the CPU sections).
+Drawing them (FX1b) is next: half-resolution weighted blended
+transparency, lit like the surfaces they float among.
+
 ## Navigation
 
 `giant/nav/nav.h` says where people can walk and finds the way. The
