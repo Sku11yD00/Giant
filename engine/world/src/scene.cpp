@@ -217,7 +217,8 @@ Scene::Identity& Scene::Identity::operator=(const Identity&) {
 
 Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
-      weather(other.weather), clock(other.clock), water(other.water), m_entities(other.m_entities),
+      weather(other.weather), clock(other.clock), water(other.water), particle_looks(other.particle_looks),
+      effects(other.effects), m_entities(other.m_entities),
       m_index(other.m_index),
       m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
       m_game(other.m_game), m_game_kits(other.m_game_kits), m_damage_edits(other.m_damage_edits) {}
@@ -225,7 +226,8 @@ Scene::Scene(const Scene& other)
 Scene::Scene(Scene&& other) noexcept
     : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
       scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock),
-      water(std::move(other.water)), m_entities(std::move(other.m_entities)),
+      water(std::move(other.water)), particle_looks(std::move(other.particle_looks)),
+      effects(std::move(other.effects)), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
       m_kept_kits(std::move(other.m_kept_kits)), m_game(std::move(other.m_game)),
       m_game_kits(std::move(other.m_game_kits)), m_damage_edits(other.m_damage_edits) {
@@ -252,6 +254,8 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         weather = other.weather;
         clock = other.clock;
         water = std::move(other.water);
+        particle_looks = std::move(other.particle_looks);
+        effects = std::move(other.effects);
         m_entities = std::move(other.m_entities);
         m_index = std::move(other.m_index);
         m_next_id = other.m_next_id;
@@ -655,6 +659,55 @@ Json water_json(std::span<const Water> waters) {
     return list;
 }
 
+Json particle_looks_json(std::span<const ParticleLook> looks) {
+    Json list = Json::array();
+    for (const ParticleLook& l : looks) {
+        list.push_back({{"name", l.name},
+                        {"life_min", l.life_min},
+                        {"life_max", l.life_max},
+                        {"size_start", l.size_start},
+                        {"size_end", l.size_end},
+                        {"color_start", vec3_json(l.color_start)},
+                        {"color_end", vec3_json(l.color_end)},
+                        {"opacity_start", l.opacity_start},
+                        {"opacity_end", l.opacity_end},
+                        {"emissive", vec3_json(l.emissive)},
+                        {"emissive_end", l.emissive_end},
+                        {"gravity", l.gravity},
+                        {"buoyancy", l.buoyancy},
+                        {"drag", l.drag},
+                        {"wind", l.wind},
+                        {"wobble", l.wobble},
+                        {"form", to_string(l.form)},
+                        {"lit", l.lit},
+                        {"soft", l.soft}});
+    }
+    return list;
+}
+
+Json effects_json(std::span<const Effect> effects) {
+    Json list = Json::array();
+    for (const Effect& f : effects) {
+        Json emitters = Json::array();
+        for (const Emitter& e : f.emitters) {
+            emitters.push_back({{"look", e.look},
+                                {"rate", e.rate},
+                                {"burst", e.burst},
+                                {"shape", to_string(e.shape)},
+                                {"size", vec3_json(e.size)},
+                                {"offset", vec3_json(e.offset)},
+                                {"direction", vec3_json(e.direction)},
+                                {"cone_degrees", e.cone_degrees},
+                                {"speed_min", e.speed_min},
+                                {"speed_max", e.speed_max},
+                                {"size_scale", e.size_scale},
+                                {"ground", e.ground}});
+        }
+        list.push_back({{"name", f.name}, {"duration", f.duration}, {"emitters", std::move(emitters)}});
+    }
+    return list;
+}
+
 Json clock_json(const Clock& c) {
     return {
         {"on", c.on},
@@ -832,6 +885,9 @@ Json entity_json(const Entity& e) {
                            {"weight", w.weight}, {"limit", w.limit}};
     }
     if (!(e.lamp == Lamp{})) entity["lamp"] = lamp_json(e.lamp);
+    if (!(e.effect == EntityEffect{})) {
+        entity["effect"] = {{"on", e.effect.on}, {"effect", e.effect.effect}, {"rate", e.effect.rate}};
+    }
     // Only when not the default, so older scenes read and write the same.
     if (e.body != BodyKind::fixed) entity["body"] = to_string(e.body);
     if (e.mass != 0.0f) entity["mass"] = e.mass;
@@ -901,6 +957,12 @@ std::string save_scene(const Scene& scene) {
     }
     if (!scene.water.empty()) {
         out["water"] = water_json(scene.water);
+    }
+    if (!scene.particle_looks.empty()) {
+        out["particle_looks"] = particle_looks_json(scene.particle_looks);
+    }
+    if (!scene.effects.empty()) {
+        out["effects"] = effects_json(scene.effects);
     }
     if (const Terrain& t = scene.terrain;
         !t.empty() || t.samples() != k_default_terrain_samples || !(t.material == TerrainMaterial{})) {
@@ -1228,6 +1290,112 @@ void read_water(Reader& root, std::vector<Water>& out, std::string& error) {
     }
 }
 
+// A list of named things: at most `most`, each read by `read_one` (which
+// checks it), names unique.
+template <typename T, typename Read>
+void read_named_list(Reader& root, const char* key, usize most, std::vector<T>& out, std::string& error, Read read_one) {
+    const Json* list = root.get(key, false);
+    if (list == nullptr || !root.ok()) return;
+    if (!list->is_array() || list->size() > most) {
+        root.fail(key, "must be an array of at most " + std::to_string(most));
+        return;
+    }
+    for (usize i = 0; i < list->size() && error.empty(); ++i) {
+        const std::string path = std::string(key) + "[" + std::to_string(i) + "]";
+        Reader r((*list)[i], path, error);
+        T t;
+        read_one(r, path, t);
+        r.finish();
+        if (!error.empty()) return;
+        if (std::any_of(out.begin(), out.end(), [&](const T& o) { return o.name == t.name; })) {
+            error = path + ".name \"" + t.name + "\" is used twice";
+            return;
+        }
+        out.push_back(std::move(t));
+    }
+}
+
+void read_particle_looks(Reader& root, std::vector<ParticleLook>& out, std::string& error) {
+    read_named_list(root, "particle_looks", k_max_particle_looks, out, error,
+                    [&](Reader& r, const std::string& path, ParticleLook& l) {
+        r.string("name", l.name, true, k_max_effect_name_bytes);
+        r.number("life_min", l.life_min, 0, k_max_look_life);
+        r.number("life_max", l.life_max, 0, k_max_look_life);
+        r.number("size_start", l.size_start, 0, k_max_look_size);
+        r.number("size_end", l.size_end, 0, k_max_look_size);
+        r.vec3("color_start", l.color_start, 0, 1);
+        r.vec3("color_end", l.color_end, 0, 1);
+        r.number("opacity_start", l.opacity_start, 0, 1);
+        r.number("opacity_end", l.opacity_end, 0, 1);
+        r.vec3("emissive", l.emissive, 0, k_max_look_light);
+        r.number("emissive_end", l.emissive_end, 0, 1);
+        r.number("gravity", l.gravity, -k_max_look_pull, k_max_look_pull);
+        r.number("buoyancy", l.buoyancy, -k_max_look_buoyancy, k_max_look_buoyancy);
+        r.number("drag", l.drag, 0, k_max_look_drag);
+        r.number("wind", l.wind, -k_max_look_pull, k_max_look_pull);
+        r.number("wobble", l.wobble, 0, k_max_look_size);
+        std::string form = to_string(l.form);
+        r.string("form", form, false, 16);
+        if (r.ok()) {
+            if (const auto f = particle_form_from_string(form)) {
+                l.form = *f;
+            } else {
+                r.fail("form", "must be puff or streak");
+            }
+        }
+        r.boolean("lit", l.lit);
+        r.number("soft", l.soft, 0, k_max_look_size);
+        if (r.ok()) {
+            if (const auto bad = check_particle_look(l)) r.fail("", *bad);
+        }
+        (void)path;
+    });
+}
+
+void read_effects(Reader& root, std::vector<Effect>& out, std::string& error) {
+    read_named_list(root, "effects", k_max_effects, out, error, [&](Reader& r, const std::string& path, Effect& f) {
+        r.string("name", f.name, true, k_max_effect_name_bytes);
+        r.number("duration", f.duration, 0, k_max_effect_seconds);
+        const Json* emitters = r.get("emitters", true);
+        if (emitters == nullptr || !r.ok()) return;
+        if (!emitters->is_array() || emitters->empty() || emitters->size() > k_max_emitters) {
+            r.fail("emitters", "must be an array of 1 to " + std::to_string(k_max_emitters) + " emitters");
+            return;
+        }
+        for (usize k = 0; r.ok() && k < emitters->size(); ++k) {
+            Reader er((*emitters)[k], path + ".emitters[" + std::to_string(k) + "]", error);
+            Emitter e;
+            er.string("look", e.look, true, k_max_effect_name_bytes);
+            er.number("rate", e.rate, 0, k_max_emitter_rate);
+            i32 burst = static_cast<i32>(e.burst);
+            er.integer("burst", burst, 0, static_cast<i32>(k_max_emitter_burst));
+            e.burst = static_cast<u32>(burst);
+            std::string shape = to_string(e.shape);
+            er.string("shape", shape, false, 16);
+            if (er.ok()) {
+                if (const auto parsed = emitter_shape_from_string(shape)) {
+                    e.shape = *parsed;
+                } else {
+                    er.fail("shape", "must be point, sphere, box or disc");
+                }
+            }
+            er.vec3("size", e.size, 0, k_max_emitter_reach);
+            er.vec3("offset", e.offset, -k_max_emitter_reach, k_max_emitter_reach);
+            er.vec3("direction", e.direction, -1e6, 1e6);
+            er.number("cone_degrees", e.cone_degrees, 0, 180);
+            er.number("speed_min", e.speed_min, 0, k_max_emitter_speed);
+            er.number("speed_max", e.speed_max, 0, k_max_emitter_speed);
+            er.number("size_scale", e.size_scale, 0, 1000);
+            er.boolean("ground", e.ground);
+            er.finish();
+            if (er.ok()) f.emitters.push_back(std::move(e));
+        }
+        if (r.ok() && error.empty()) {
+            if (const auto bad = check_effect(f)) r.fail("", *bad);
+        }
+    });
+}
+
 void read_weather(const Json& json, std::optional<Weather>& out, std::string& error) {
     Reader r(json, "weather", error);
     Weather w;
@@ -1431,6 +1599,16 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         ar.finish();
     }
     read_lamp(r, path, e.lamp, error);
+    if (const Json* f = r.get("effect", false); f != nullptr && r.ok()) {
+        Reader fr(*f, path + ".effect", error);
+        fr.boolean("on", e.effect.on);
+        fr.string("effect", e.effect.effect, false, k_max_effect_name_bytes);
+        fr.number("rate", e.effect.rate, 0, k_max_effect_rate_scale);
+        fr.finish();
+        if (fr.ok()) {
+            if (const auto bad = check_entity_effect(e.effect)) fr.fail("", *bad);
+        }
+    }
     r.finish();
 }
 
@@ -1963,6 +2141,8 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     read_kits(root, scene.kits, error);
     read_scatter(root, scene.kits, scene.scatter, error);
     read_water(root, scene.water, error);
+    read_particle_looks(root, scene.particle_looks, error);
+    read_effects(root, scene.effects, error);
     if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
         read_terrain(*terrain, scene.terrain, error);
     }
@@ -2044,6 +2224,12 @@ std::string save_world_index(const WorldIndex& world) {
     if (!world.water.empty()) {
         out["water"] = water_json(world.water);
     }
+    if (!world.particle_looks.empty()) {
+        out["particle_looks"] = particle_looks_json(world.particle_looks);
+    }
+    if (!world.effects.empty()) {
+        out["effects"] = effects_json(world.effects);
+    }
     std::vector<std::string> meshes = world.meshes;
     std::sort(meshes.begin(), meshes.end());
     meshes.erase(std::unique(meshes.begin(), meshes.end()), meshes.end());
@@ -2104,6 +2290,8 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     read_kits(root, world.kits, error);
     read_scatter(root, world.kits, world.scatter, error);
     read_water(root, world.water, error);
+    read_particle_looks(root, world.particle_looks, error);
+    read_effects(root, world.effects, error);
     if (const Json* meshes = root.get("meshes", false); meshes != nullptr && root.ok()) {
         if (!meshes->is_array()) {
             root.fail("meshes", "must be an array of paths");

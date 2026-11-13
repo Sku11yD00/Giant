@@ -11,6 +11,7 @@
 #include "giant/core/types.h"
 #include "giant/world/cell.h"
 #include "giant/world/damage.h"
+#include "giant/world/effects.h"
 #include "giant/world/material_maps.h"
 #include "giant/world/terrain.h"
 
@@ -207,6 +208,7 @@ struct Entity {
     ClothSettings cloth; // used when shape is `cloth` (kept when the shape changes)
     SwingSettings swing; // when on: cube, sphere, plane, mesh and kit entities swing (kept otherwise)
     Lamp lamp;           // when on: it gives light, any shape (hidden entities give none)
+    EntityEffect effect; // when on: it runs the effect where it stands (effects.h), any shape
     bool visible = true;
     BodyKind body = BodyKind::fixed;
     float mass = 0.0f; // kilograms, when dynamic; 0: from its size (as water)
@@ -484,6 +486,9 @@ public:
     Clock clock;
     // Lakes, rivers and the sea (water.h), by name, in order (not tracked: compare).
     std::vector<Water> water;
+    // Particle looks and effects (effects.h), by name, in order (not tracked: compare).
+    std::vector<ParticleLook> particle_looks;
+    std::vector<Effect> effects;
 
     // Damage kept (damage.h), by cell: copied, saved and loaded with the
     // scene, not undone by itself (commands record it). Setting a cell's
@@ -586,6 +591,8 @@ struct WorldIndex {
     std::optional<Weather> weather;
     Clock clock;
     std::vector<Water> water;
+    std::vector<ParticleLook> particle_looks;
+    std::vector<Effect> effects;
     std::vector<std::string> meshes; // imported when the world opens
     std::vector<CellCoord> cells;    // cells that have a file
     // The ground: one sample spacing and material for every tile, and the

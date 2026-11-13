@@ -245,6 +245,7 @@ struct Editor {
         state.world = &w.streaming;
         register_scene_commands(commands, state);
         register_terrain_commands(commands, state);
+        register_effects_commands(commands, state);
     }
     bool run(const char* name, const ai::Json& args = ai::Json::object()) { return commands.execute(name, args).ok; }
     bool script(const char* name, const ai::Json& args = ai::Json::object()) { // outside the history
@@ -1039,6 +1040,32 @@ GIANT_TEST("world streaming: water is saved in world.json, comes back on open, a
     GIANT_CHECK(e.run("close_world") && e.run("new_scene") && e.state.scene.water.empty());
     GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
     GIANT_CHECK(e.state.scene.water.size() == 1 && e.state.scene.water[0] == sea);
+}
+
+GIANT_TEST("world streaming: effects are saved in world.json, come back on open, and renames wait for every cell") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    GIANT_CHECK(e.run("set_particle_look", {{"name", "steam"}, {"buoyancy", 1.5}}));
+    GIANT_CHECK(e.run("create_effect", {{"name", "vent"}, {"emitters", {{{"look", "steam"}}}}}));
+    GIANT_CHECK(e.run("create_entities", {{"entities", {{{"position", {5, 0, 5}}},
+                                                        {{"position", {2570, 0, 5}},
+                                                         {"effect", {{"on", true}, {"effect", "vent"}}}}}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    const std::vector<world::ParticleLook> looks = e.state.scene.particle_looks;
+    const std::vector<world::Effect> effects = e.state.scene.effects;
+    GIANT_CHECK(!e.commands.execute("get_world").value["unsaved_settings"].get<bool>());
+    e.state.scene.effects[0].duration = 2.0f;
+    GIANT_CHECK(e.commands.execute("get_world").value["unsaved_settings"].get<bool>());
+    e.state.scene.effects = effects;
+    e.state.scene.particle_looks[0].drag = 3.0f;
+    GIANT_CHECK(e.commands.execute("get_world").value["unsaved_settings"].get<bool>());
+    GIANT_CHECK(e.run("close_world") && e.run("new_scene") && e.state.scene.effects.empty());
+    GIANT_CHECK(e.run("open_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.state.scene.particle_looks == looks && e.state.scene.effects == effects);
+    e.settle(10.0, 10.0);
+    // The far cell's entity runs it, unseen: renaming it is refused.
+    GIANT_CHECK(!e.run("set_effect", {{"name", "vent"}, {"new_name", "chimney"}}));
+    GIANT_CHECK(e.run("set_effect", {{"name", "vent"}, {"duration", 1}})); // (other changes are fine)
 }
 
 GIANT_TEST("world streaming: unsaved weather, lighting, kits or scatter keep open_world from discarding them") {

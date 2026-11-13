@@ -122,6 +122,9 @@ Json entity_json(const Entity& e) {
                      {"shadows", l.shadows},
                      {"shadow_near", l.shadow_near}};
     }
+    if (!(e.effect == world::EntityEffect{})) {
+        j["effect"] = {{"on", e.effect.on}, {"effect", e.effect.effect}, {"rate", e.effect.rate}}; // kept while off
+    }
     return j;
 }
 
@@ -260,6 +263,20 @@ Json entity_properties() {
                           "lit view out to 4 km, following it as it moves or swings. Any shape; a hidden entity "
                           "gives none. Pair it with emissive for the bulb itself to glow. Without shadows it "
                           "lights through walls. Kept while off. A kit piece's lamp lights every placement (not scatter's); for cloth the offset is in metres (its scale is unused)."}}},
+        {"effect",
+         {{"type", "object"},
+          {"additionalProperties", false},
+          {"properties",
+           {{"on", {{"type", "boolean"}, {"description", "It runs the effect. Default off."}}},
+            {"effect", {{"type", "string"},
+                        {"maxLength", world::k_max_effect_name_bytes},
+                        {"description", "The effect, by name: the scene's (create_effect), else a built-in one "
+                                        "(smoke, fire, sparks, dust_kick, spray, mist, embers, debris_chips)."}}},
+            {"rate", number(0, world::k_max_effect_rate_scale,
+                            "Times its emitters' rates (2: twice the smoke). Default 1.")}}},
+          {"description", "An effect it runs where it stands while on (chimney smoke, a torch's fire, mist at a "
+                          "waterfall's foot): its emitters' rates, turned with the entity (not scaled). Any "
+                          "shape; a hidden entity runs none. Kept while off."}}},
         {"mesh",
          {{"type", "string"},
           {"minLength", 1},
@@ -376,6 +393,13 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         e.lamp.source_radius = l.value("source_radius", e.lamp.source_radius);
         e.lamp.shadows = l.value("shadows", e.lamp.shadows);
         e.lamp.shadow_near = l.value("shadow_near", e.lamp.shadow_near);
+    }
+    if (args.contains("effect")) {
+        const Json& f = args["effect"];
+        e.effect.on = f.value("on", e.effect.on);
+        if (f.contains("effect")) e.effect.effect = f["effect"].get<std::string>();
+        e.effect.rate = f.value("rate", e.effect.rate);
+        if (const auto bad = world::check_entity_effect(e.effect)) return "effect." + *bad;
     }
     if (args.contains("position")) e.transform.position = dvec3_from(args["position"]);
     if (args.contains("rotation")) {
@@ -813,6 +837,7 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
     piece.erase("visible");
     piece.erase("cloth");
     piece.erase("swing"); // the kit entity swings, whole
+    piece.erase("effect"); // the kit entity runs one, whole
     piece["shape"]["enum"] = {"cube", "sphere", "plane", "mesh", "decal"};
     piece["shape"]["description"] = "As for entities; kits do not nest.";
     piece["position"]["description"] = "Relative to the kit's origin, metres.";
@@ -823,7 +848,8 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
          "rocks) that kit entities place any number of times, sharing its meshes and materials "
          "(create_entities with {\"kit\": name} places it). Give the pieces, or take them "
          "from_entities (their positions become relative to origin, by default the first "
-         "entity's). replace_entities swaps those entities for one placement of the new kit. "
+         "entity's; their swing and effect are not kept: give the kit entity those). replace_entities swaps "
+         "those entities for one placement of the new kit. "
          "replace: true changes an existing kit, and so every placement. breakable makes it a building "
          "that breaks while simulating. Undoable.",
          Json{{"type", "object"},
