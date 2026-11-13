@@ -620,3 +620,47 @@ GIANT_TEST("water: a character carried down into the water and let go there, or 
         GIANT_CHECK(got.empty() && lake_world.character_state(on)->water_depth > 0.5f);
     }
 }
+
+GIANT_TEST("water: what has some of it under water is listed with the surface over it; bounds and characters' descriptions") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(box({0.0, -4.5, 0.0}, {100.0f, 0.5f, 100.0f})); // a bed 4 m down
+    const std::vector<world::Water> water{lake(0.0f)};
+    physics.set_water(water);
+    const BodyId floater = physics.add(box({0.0, 1.0, 0.0}, {0.5f, 0.5f, 0.5f}, Motion::dynamic, 400.0f));
+    const BodyId dry = physics.add(box({120.0, -3.5, 0.0}, {0.5f, 0.5f, 0.5f}, Motion::dynamic, 400.0f)); // off the lake
+    CharacterDesc d;
+    d.height = 1.7f;
+    d.radius = 0.35f;
+    d.position = {6.0, -4.0, 0.0}; // on the bed, 4 m under
+    const CharacterId diver = physics.add_character(d);
+    GIANT_CHECK(physics.character_desc(diver).has_value() && physics.character_desc(diver)->height == 1.7f &&
+                physics.character_desc(diver)->radius == 0.35f);
+    GIANT_CHECK(!physics.character_desc(diver + 100).has_value());
+    // Bounds in the body's frame: a box's half sizes either side of its position.
+    const std::optional<LocalBounds> b = physics.local_bounds(floater);
+    GIANT_CHECK(b && std::fabs(b->min.y + 0.5f) < 0.02f && std::fabs(b->max.x - 0.5f) < 0.02f);
+    GIANT_CHECK(!physics.local_bounds(k_no_body).has_value());
+    // A sphere put off its position (a compound with one part, offset): around the part.
+    BodyDesc offset;
+    offset.motion = Motion::dynamic;
+    offset.position = {50.0, 20.0, 0.0};
+    offset.parts.push_back({SphereShape{0.5f}, {2.0f, 0.0f, 0.0f}});
+    offset.parts.push_back({SphereShape{0.5f}, {3.0f, 0.0f, 0.0f}});
+    const std::optional<LocalBounds> ob = physics.local_bounds(physics.add(offset));
+    GIANT_CHECK(ob && std::fabs(ob->min.x - 1.5f) < 0.05f && std::fabs(ob->max.x - 3.5f) < 0.05f);
+    bool floater_seen = false, diver_seen = false, dry_seen = false;
+    for (int i = 0; i < 2 * 60; ++i) {
+        physics.step(1.0 / 60.0);
+        for (const InWater& w : physics.in_water()) {
+            floater_seen = floater_seen || (w.body == floater && w.character == 0 && std::fabs(w.level) < 1e-6);
+            diver_seen = diver_seen || (w.character == diver && w.body == 0 && std::fabs(w.level) < 1e-3);
+            dry_seen = dry_seen || w.body == dry;
+        }
+    }
+    GIANT_CHECK(floater_seen && diver_seen && !dry_seen);
+    // A step() call's list is its own: a character out of the water is not on it.
+    physics.remove_character(diver);
+    physics.step(1.0 / 60.0);
+    for (const InWater& w : physics.in_water()) GIANT_CHECK(w.character == 0);
+}

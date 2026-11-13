@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_set>
+#include <vector>
 
 namespace giant::editor {
 
@@ -70,6 +71,32 @@ Json kept_json(const world::Scene& scene, const sim::ScenePhysicsStats& s, const
     return out;
 }
 
+// What is wet (WetThings), the wettest first (64 at most).
+Json wet_json(const PhysicsState& p) {
+    std::vector<const WetThings::Wet*> list;
+    for (const auto& [key, w] : p.wet().things()) list.push_back(&w);
+    std::sort(list.begin(), list.end(), [](const WetThings::Wet* a, const WetThings::Wet* b) {
+        if (a->amount != b->amount) return a->amount > b->amount;
+        if (a->line != b->line) return a->line > b->line;
+        return a->body != b->body ? a->body < b->body : a->character < b->character;
+    });
+    Json things = Json::array();
+    for (usize i = 0; i < list.size() && i < 64; ++i) {
+        const WetThings::Wet& w = *list[i];
+        const bool character = w.character != sim::k_no_character;
+        // (A walker's entity is its character body's user; the player's is 0.)
+        const u64 entity = character ? p.world().user(p.world().character_body(w.character)) : p.bodies().entity_of(w.body);
+        things.push_back({{"entity", entity},
+                          {"body", w.body},
+                          {"character", character},
+                          {"player", character && entity == 0},
+                          {"line", w.line},
+                          {"amount", w.amount},
+                          {"in_water", w.in_water}});
+    }
+    return {{"count", p.wet().size()}, {"in_water", p.wet().in_water()}, {"things", things}};
+}
+
 Json physics_json(const EditorState& state) {
     const PhysicsState& p = *state.physics;
     const sim::PhysicsStats w = p.world().stats();
@@ -103,7 +130,8 @@ Json physics_json(const EditorState& state) {
             {"ground",
              {{"dents", p.ground().dents()}, {"tiles", p.ground().tiles()}, {"game", p.game_ground().tiles()}}},
             {"kept", kept_json(state.scene, s, f)},
-            {"dust", {{"puffs", d.puffs}, {"emitted", d.emitted}, {"merged", d.merged}, {"dropped", d.dropped}}}};
+            {"dust", {{"puffs", d.puffs}, {"emitted", d.emitted}, {"merged", d.merged}, {"dropped", d.dropped}}},
+            {"wet", wet_json(p)}};
 }
 
 CommandResult no_physics() { return CommandResult::failure("physics is not available"); }
@@ -283,7 +311,11 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "entities that do not collide, such as meshes and decals for now, or the world refused), what is "
          "still `waiting` to be made (the bodies follow the scene a share each frame; ground tiles' shapes "
          "are made in the background), how many entities simulating has `moved`, steps run and the last "
-         "step's CPU milliseconds.",
+         "step's CPU milliseconds; `wet`: what went in the water and is wet a while after (drawn darker and "
+         "glossier up to how far it went in: `line` 0 to 1 of its height, `amount` 1 in the water drying to "
+         "0 over 90 s of play; `count`, `in_water`, and `things` the wettest first, 64 at most, each its "
+         "`entity` (0: none, as for a loose piece of a kit or a tree's trunk, or the player), `body` (0: a "
+         "character), whether a `character` and the `player` (not drawn wet: it has no body to see)).",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
          [&state](const Json&, CommandContext&) {

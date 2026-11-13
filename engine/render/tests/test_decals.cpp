@@ -89,6 +89,14 @@ GIANT_TEST("decals: the GPU record maps the box to the unit cube") {
     GIANT_CHECK(std::fabs(local(top).y - 0.5f) < 1e-5f);
 }
 
+GIANT_TEST("decals: a wet decal keeps its shape; unknown shapes are cracks") {
+    Decal d;
+    d.shape = DecalShape::wet;
+    GIANT_CHECK(to_gpu(d, {}).shape == 5);
+    d.shape = static_cast<DecalShape>(40);
+    GIANT_CHECK(to_gpu(d, {}).shape == static_cast<u32>(DecalShape::cracks));
+}
+
 GIANT_TEST("decals: limits drop decals, not the frame") {
     const Camera cam(4096, 2048);
     std::vector<Decal> decals(k_max_decal_entries / (256 * 128) + 4);

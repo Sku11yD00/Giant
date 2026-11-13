@@ -222,11 +222,17 @@ enum class DecalShape : u32 {
     ring,
     splat,     // an irregular blot (seeded): mud, blood, scorch
     cracks,    // cracked ground (seeded): impacts, giant footfalls
+    // Wet (water plan W5f: what went in the water): every surface inside
+    // the box, whichever way it faces, darkened where it is porous and
+    // made glossier, as rain wets things (its colour, metal and emissive
+    // left out); `softness` fades its top edge (the waterline), as a
+    // fraction of the box's height. `opacity`: how wet (1 soaked).
+    wet,
 };
 
 // A box that stamps a material onto whatever surfaces lie inside it, seen
-// from its local +Y (it projects downwards, along -Y). Later decals in the
-// list draw over earlier ones.
+// from its local +Y (it projects downwards, along -Y; a wet one wets all
+// of what is inside). Later decals in the list draw over earlier ones.
 struct Decal {
     DVec3 position{};
     Quat rotation{};
@@ -474,7 +480,8 @@ struct RenderSettings {
     u32 cloud_steps = 48;
     bool cloud_shadows = true;
     // Rain and snow (with FrameInput::sky on): falling (`precipitation`),
-    // on surfaces (`wet_surfaces`), and kept off what is sheltered
+    // on surfaces (`wet_surfaces`: the weather's only; wet decals, what
+    // went in the water, are decals), and kept off what is sheltered
     // (`weather_cover`: a map from above made from the voxel world).
     bool precipitation = true;
     bool wet_surfaces = true;

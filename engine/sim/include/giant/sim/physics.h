@@ -158,6 +158,22 @@ struct WaterEntry {
     float size = 0.0f;
 };
 
+// A body or a character with some of it under water in a fixed step
+// (water plan W5f: what gets wet): `level` is the surface's height over
+// it then.
+struct InWater {
+    BodyId body = 0;   // the body (0: a character)
+    u32 character = 0; // the character (0: a body)
+    double level = 0.0;
+};
+
+// A body's shape's bounds in the body's own frame (around its position,
+// turning with it).
+struct LocalBounds {
+    Vec3 min{};
+    Vec3 max{};
+};
+
 struct PhysicsSettings {
     u32 max_bodies = 1u << 18;
     u32 max_body_pairs = 1u << 18;
@@ -295,6 +311,7 @@ public:
     usize size() const;
 
     std::optional<BodyState> state(BodyId id) const;
+    std::optional<LocalBounds> local_bounds(BodyId id) const;
     u64 user(BodyId id) const;
     // Puts a body somewhere at once (a teleport; wakes it, and what rested
     // on a fixed body where it was).
@@ -322,6 +339,12 @@ public:
     // second), in step order, each step's bodies then characters, each in id order.
     const std::vector<WaterEntry>& water_entries() const;
     static constexpr float k_entry_speed = 1.0f;
+    // What had some of it under water in the last step() call's fixed
+    // steps: dynamic bodies awake (a body asleep is not looked at: one at
+    // rest stays as it was) and characters (not held or carried), each
+    // step's bodies then characters, each in id order (one in several
+    // steps: listed for each).
+    const std::vector<InWater>& in_water() const;
     // How far time is into the next fixed step (0 to 1): the share of the
     // way from where things were to where they are to draw them at.
     double step_fraction() const;
@@ -361,6 +384,8 @@ public:
     // keeping its speed (a jump asked for still lasts a fifth of a second).
     void hold_character(CharacterId id, bool held);
     std::optional<CharacterState> character_state(CharacterId id) const;
+    // As it was added (its position where it was put then).
+    std::optional<CharacterDesc> character_desc(CharacterId id) const;
     // The body standing for the character (raycasts hit it; falling things
     // land on it): kinematic, moved with it; remove, set_transform,
     // set_velocity and move_kinematic leave it alone. k_no_body when not a character.

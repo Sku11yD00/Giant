@@ -120,6 +120,11 @@ void PhysicsState::take_splashes() {
     if (on_splashes) on_splashes(entries);
 }
 
+void PhysicsState::after_step(u32 steps) {
+    take_splashes();
+    m_wet.after_step(m_physics, static_cast<double>(steps) * sim::PhysicsWorld::k_step_seconds);
+}
+
 void PhysicsState::set_hit_targets(const HitTargets* targets) {
     m_targets = targets;
     m_ballistics.hit_shapes = targets != nullptr ? &targets->shapes() : nullptr;
@@ -210,6 +215,7 @@ void PhysicsState::notice_scene(const world::Scene& scene) {
     m_dust.clear();
     m_ballistics.clear();
     m_recent.clear();
+    m_wet.clear(); // (its bodies' ids made again)
     m_ground.forget(); // another scene's ground
     m_game_ground.forget();
     m_restore_ground = false;
@@ -234,6 +240,7 @@ void PhysicsState::set_simulating(bool on) {
         m_forest.reset();
         m_dust.clear();
         m_ballistics.clear();
+        m_wet.clear(); // (the bodies back where they were: dry)
         m_restore_ground = true; // with the scene, at the next update
     }
 }
@@ -500,8 +507,7 @@ void PhysicsState::update(world::Scene& scene, const world::SceneChanges& change
     m_forest.sync(m_camera);
     sync_water(scene); // (simulating or not: the water is heard while editing too)
     if (!m_on) return;
-    m_physics.step(seconds);
-    take_splashes();
+    after_step(m_physics.step(seconds));
     m_bodies.update_poses();
     m_forest.after_step();
     m_ballistics.step(seconds);
@@ -593,8 +599,7 @@ void PhysicsState::sync_water(const world::Scene& scene) {
 u32 PhysicsState::run_steps(u32 steps) {
     for (u32 i = 0; i < steps; ++i) {
         if (before_fixed_step) before_fixed_step(sim::PhysicsWorld::k_step_seconds);
-        m_physics.step(sim::PhysicsWorld::k_step_seconds);
-        take_splashes();
+        after_step(m_physics.step(sim::PhysicsWorld::k_step_seconds));
         m_bodies.update_poses();
         m_forest.after_step();
         m_ballistics.step(sim::PhysicsWorld::k_step_seconds);
