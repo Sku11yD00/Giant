@@ -502,7 +502,8 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
          "Plays an effect once (the scene's, else built-in) at `position` [x, y, z] metres, turned by `rotation` "
          "(pitch, yaw, roll degrees; its emitters' directions and shapes turn with it), its rates times `rate` "
          "and its bursts times `bursts`: "
-         "its bursts at once, then its rates for its duration (sparks off a hit, a puff of dust, a splash). View "
+         "its bursts at once, then its rates for its duration (sparks off a hit, a puff of dust, a splash); it "
+         "runs the effect by name, so an edit while it runs is followed and removing or renaming it ends it. View "
          "state: not saved, not undoable; at most 256 running at once. Drawn in the lit view (render setting "
          "particles); births while the game's clock runs (not while paused).",
          Json{{"type", "object"},
@@ -550,7 +551,8 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
              "; with built_in true, every field of them too), the entities naming each effect (on or off), and "
              "`emitting`: last update's effects that gave birth (`running`), entities' farther than `reach` m "
              "(`far`), spawned ones still running, bursts, particles asked for (`born`) and left out past the "
-             "budgets (`cut`), and emitters naming a look (or entities an effect) found nowhere (`missing`); "
+             "budgets (`cut`), and emitters naming a look (or entities an effect) found nowhere, or spawned ones "
+             "whose effect was removed or renamed (`missing`); "
              "and `events`: effects the world's events set off so far (shots' `hits`, `splashes` into water, "
              "`dust` thrown up by collapses, felled trees and craters, the player's running `steps`) and those "
              "`refused` past the spawned cap.",

@@ -590,6 +590,7 @@ GIANT_TEST("dent_ground: a crater while simulating, the bodies follow, saving se
     GIANT_CHECK(run("simulate", {{"on", true}}).ok);
     ai::CommandResult r = run("dent_ground", {{"point", {32.0, 0.0, 32.0}}, {"radius", 6.0}, {"depth", 3.0}});
     GIANT_CHECK(r.ok && r.value["tiles"] == 1 && r.value["ground"]["dents"] == 1 && r.value["dust"]["puffs"] == 1);
+    GIANT_CHECK(r.value["dust"]["events_dropped"] == 0);
     GIANT_CHECK(std::fabs(scene.terrain.height_at(32.0, 32.0).value() + 1.0) < 1e-4);
     // The ground's body follows: a ray down finds the crater's floor.
     r = run("raycast", {{"origin", {32.0, 20.0, 32.0}}, {"direction", {0, -1, 0}}});

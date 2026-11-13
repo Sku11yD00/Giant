@@ -113,7 +113,7 @@ GIANT_TEST("dust: emits kept as events with what threw them up, bounded, until t
     GIANT_CHECK(dust.events().size() == 2 && dust.events()[0].source == DustSource::tree &&
                 dust.events()[0].at == (DVec3{1.0, 0.5, 3.0}) && dust.events()[0].radius == settings.max_radius);
     GIANT_CHECK(dust.events().size() == 2 && dust.events()[1].source == DustSource::rubble);
-    for (int i = 0; i < 4; ++i) dust.emit({-5000.0, 0.0, 10.0 * i}, 1.0f, 0.1f); // past emits_per_step: none
+    for (int i = 0; i < 4; ++i) dust.emit({-5000.0, 0.0, 10.0 * i}, 1.0f, 0.1f); // one taken, then past emits_per_step: none
     GIANT_CHECK(dust.events().size() == 3);
     dust.clear_events();
     GIANT_CHECK(dust.events().empty() && !dust.puffs().empty());

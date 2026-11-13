@@ -50,7 +50,7 @@ public:
         u32 bursts = 0;
         u32 born = 0;         // particles asked for
         u32 cut = 0;          // particles left out: past the budgets or the burst cap
-        u32 missing = 0;      // emitters (or entity effects) naming a look (an effect) found nowhere
+        u32 missing = 0;      // emitters (or entity effects) naming a look (an effect) found nowhere; spawned ones whose effect went
     };
 
     // Effects the world's events set off (event_effects.h), in all.

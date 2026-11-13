@@ -198,6 +198,7 @@ std::optional<u32> EffectsState::spawn(const world::Scene& scene, std::string_vi
     Spawned s;
     s.id = m_next_spawn++;
     if (m_next_spawn == 0) m_next_spawn = 1;
+    if (effect->name.size() > s.name.size()) return std::nullopt; // (never: names are checked)
     std::copy(effect->name.begin(), effect->name.end(), s.name.begin()); // (effect_name_ok: at most k_max_effect_name_bytes)
     s.name_bytes = static_cast<u8>(effect->name.size());
     s.position = position;

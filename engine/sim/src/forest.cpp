@@ -490,7 +490,7 @@ usize Forest::lay(std::vector<Topple>& lays) {
             const Vec3 mid = rotate(lying.rotation, Vec3{0.0f, 0.5f * h, 0.0f});
             const float r = std::clamp(0.3f * h, 2.0f, 10.0f);
             m_dust->emit(foot.position + DVec3{mid.x, mid.y + 0.3 * r, mid.z}, r, 0.5f / r, k_dust_earth, DustSource::tree,
-                         mid.y + 0.3f * r);
+                         0.3f * r); // (from the trunk's middle where it lies)
         }
     }
     return laid;

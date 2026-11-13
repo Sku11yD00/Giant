@@ -2350,7 +2350,8 @@ nothing born, and those alive stand still: `FrameInput::particle_seconds`;
 a frame not drawn hands its births and seconds to the next). It follows the scene's changes for entities whose effect is
 on (never scanning every entity a frame) and keeps spawned effects
 (`spawn_effect`, at most 256, held in place so a spawn never allocates; by
-name, so an edit made while one runs is followed and one removed ends it). Effects
+name, so an edit made while one runs is followed and one removed or renamed
+ends it). Effects
 farther than 1000 m from the camera run nothing; the rest go nearest first
 within budgets of 8,192 births a frame and 2,048 that stop on the ground
 (where there is ground under them)

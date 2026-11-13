@@ -50,7 +50,7 @@ struct DustStats {
     u32 emitted = 0; // in all
     u32 merged = 0;  // in all: emits that swelled a puff
     u32 dropped = 0; // in all: emits past emits_per_step, or fainter than all when full
-    u32 events_dropped = 0; // in all: emits not kept as events (past k_max_dust_events)
+    u32 events_dropped = 0; // in all: new puffs not kept as events (past k_max_dust_events)
 };
 
 // Dust thrown up from buildings and from the ground.
@@ -62,7 +62,7 @@ enum class DustSource : u8 { rubble, ground, tree };
 
 // One emit making a new puff, kept for what follows them (the editor's
 // particle effects): not those past emits_per_step nor those swelling a
-// young puff (a trunk bouncing: one event), at most k_max_dust_events
+// young puff (a trunk bouncing: one event) nor those dropped, at most k_max_dust_events
 // between clear_events() calls (the rest counted in DustStats::events_dropped).
 struct DustEvent {
     DVec3 at{}; // where it was thrown up from (the puff's middle less `raised`)
@@ -81,7 +81,7 @@ public:
     // metres its middle is above where it was thrown up from (its event's).
     void emit(const DVec3& at, float radius, float density, const Vec3& color = k_dust_rubble,
               DustSource source = DustSource::rubble, float raised = 0.0f);
-    // The emits since the last clear_events() (oldest first).
+    // The new puffs since the last clear_events() (oldest first).
     const std::vector<DustEvent>& events() const { return m_events; }
     void clear_events() { m_events.clear(); }
     // Time moves on: puffs grow, rise, drift with `wind` (m/s), thin, and
