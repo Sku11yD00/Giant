@@ -3195,8 +3195,12 @@ the view, so every mesh casts at the detail its shadow texels need.
   move all the time (cloth and swinging lanterns in a storm) dirty their
   pages again every frame, so pages always wait there; the stats count as
   `behind` only pages never drawn or dirty over 30 frames, which is what
-  the gates wait on (the N3 gate's street, its banners and lanterns
-  blowing, never had none waiting on a real GPU). Right after
+  the gates wait on (four quiet samples in a row). With the default pool
+  (1024 pages) and budget (64 a frame), pages drawn in turn are redrawn
+  within 16 frames, so `behind` is in effect pages never drawn, or drawn
+  pages starved by a stream of never-drawn ones (the pool thrashing). (The
+  N3 gate's street, its banners and lanterns blowing in the storm, always
+  had pages waiting on a real GPU, so it never counted as caught up.) Right after
   the camera jumps (or a new scene) pages are missing for the few frames
   their requests take, and shading falls back to coarser ones or lit.
 - Per level with pages to draw: the pages are cleared, then culled and
