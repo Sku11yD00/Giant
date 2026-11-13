@@ -10,6 +10,7 @@ namespace {
 
 constexpr u64 k_forget_frames = 600; // an entry unused this long gives its tiles back
 constexpr float k_guard = 2.0f;      // texels of guard band round a cube face
+constexpr double k_sway_margin = 2.0; // metres: what a swaying thing may move from its rest box
 
 bool sphere_touches_box(const DVec3& c, double r, const DVec3& lo, const DVec3& hi) {
     const double dx = std::max({lo.x - c.x, 0.0, c.x - hi.x});
@@ -29,6 +30,28 @@ float clamped_near(const LocalLight& l, float range) {
 }
 
 } // namespace
+
+bool LocalShadows::face_sees_box(LightKind kind, const Vec3& direction, float outer, u32 face, const DVec3& light,
+                                 const DVec3& lo, const DVec3& hi) {
+    if (!(lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z)) return false;
+    Vec3 forward;
+    Vec3 right;
+    face_axes(kind, direction, face, forward, right);
+    const Vec3 up = cross(right, forward);
+    const double t = tan_half(kind, outer);
+    // The box's centre (from the light) and half extents.
+    const DVec3 c{0.5 * (lo.x + hi.x) - light.x, 0.5 * (lo.y + hi.y) - light.y, 0.5 * (lo.z + hi.z) - light.z};
+    const DVec3 e{0.5 * (hi.x - lo.x), 0.5 * (hi.y - lo.y), 0.5 * (hi.z - lo.z)};
+    const auto side = [&](const Vec3& across, double sign) {
+        // Inward normal of the side: forward * t + sign * across, through the
+        // light; the box's corner farthest along it is inside (or on it).
+        const DVec3 n{forward.x * t + sign * across.x, forward.y * t + sign * across.y,
+                      forward.z * t + sign * across.z};
+        const double reach = std::fabs(n.x) * e.x + std::fabs(n.y) * e.y + std::fabs(n.z) * e.z;
+        return n.x * c.x + n.y * c.y + n.z * c.z >= -reach;
+    };
+    return side(right, 1.0) && side(right, -1.0) && side(up, 1.0) && side(up, -1.0);
+}
 
 void LocalShadows::face_axes(LightKind kind, const Vec3& direction, u32 face, Vec3& forward, Vec3& right) {
     if (kind == LightKind::spot) {
@@ -96,7 +119,28 @@ void LocalShadows::face_planes(const Face& f, const DVec3& camera, float out[20]
     plane(1, f.forward * f.tan_half - f.right, 0.0f); // x <= 1
     plane(2, f.forward * f.tan_half + up, 0.0f);
     plane(3, f.forward * f.tan_half - up, 0.0f);
-    plane(4, f.forward, f.near);
+    // Not the near plane (the four sides already keep to what is in front;
+    // the projection clips what is nearer than `near`) but the far one: the
+    // light reaches `range` and no further, so nothing past it is culled in
+    // or drawn (a lamp's side faces would otherwise take in all the land to
+    // the horizon).
+    plane(4, -f.forward, -std::max(f.range, f.near));
+}
+
+void LocalShadows::light_planes(const Face& f, const DVec3& camera, float out[20]) {
+    const Vec3 l = to_camera_relative(f.position, camera);
+    const float r = std::max(f.range, f.near);
+    const auto plane = [&](u32 i, const Vec3& n, float edge) { // inward n, n . p >= edge
+        out[i * 4 + 0] = n.x;
+        out[i * 4 + 1] = n.y;
+        out[i * 4 + 2] = n.z;
+        out[i * 4 + 3] = -edge;
+    };
+    plane(0, {1.0f, 0.0f, 0.0f}, l.x - r);
+    plane(1, {-1.0f, 0.0f, 0.0f}, -(l.x + r));
+    plane(2, {0.0f, 0.0f, 1.0f}, l.z - r);
+    plane(3, {0.0f, 0.0f, -1.0f}, -(l.z + r));
+    plane(4, {0.0f, 1.0f, 0.0f}, l.y - r);
 }
 
 u32 LocalShadows::tiles_used() const {
@@ -166,8 +210,23 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
             e.dirty = every;
             continue;
         }
+        // Only the faces that see it (a caster beside a lantern changes the
+        // face looking at it, not the other five).
         for (u32 i = 0; i < changed.size() && e.dirty != every; ++i) {
-            if (sphere_touches_box(e.position, e.range, changed[i].first, changed[i].second)) e.dirty = every;
+            // (Grown by what swaying things may move: their boxes are at rest,
+            // the faces get them as they sway.)
+            const DVec3 grow{k_sway_margin, k_sway_margin, k_sway_margin};
+            const DVec3 lo = changed[i].first - grow;
+            const DVec3 hi = changed[i].second + grow;
+            if (!sphere_touches_box(e.position, e.range, lo, hi)) continue;
+            const bool finite = std::isfinite(lo.x) && std::isfinite(lo.y) && std::isfinite(lo.z) &&
+                                std::isfinite(hi.x) && std::isfinite(hi.y) && std::isfinite(hi.z);
+            for (u32 face = 0; face < e.count; ++face) {
+                if ((e.dirty & (1u << face)) != 0u) continue;
+                if (!finite || face_sees_box(e.kind, e.direction, e.outer, face, e.position, lo, hi)) {
+                    e.dirty |= 1u << face;
+                }
+            }
         }
     }
     struct Taken {
@@ -262,6 +321,9 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
         u32 stale;  // 0: nothing drawn there, 1: old depths stand in
         u64 frame;  // when last drawn
     };
+    // (A light's faces dirtied together tie, so they go together, one
+    // culling for them; one cut short by the budget finishes first next
+    // time, its rest then the oldest.)
     std::vector<Want> wants;
     for (u32 i = 0; i < taken.size(); ++i) {
         const Entry& e = m_entries.at(taken[i].id);
@@ -276,6 +338,9 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
         return a.order < b.order;
     });
     if (wants.size() > budget) wants.resize(budget);
+    // Drawn a light at a time (its faces share one culling), in face order.
+    std::sort(wants.begin(), wants.end(),
+              [](const Want& a, const Want& b) { return a.order != b.order ? a.order < b.order : a.face < b.face; });
     for (const Want& w : wants) {
         Entry& e = m_entries.at(taken[w.order].id);
         Face f;
@@ -285,6 +350,7 @@ void LocalShadows::plan(std::span<const ShadowCandidate> candidates, const DVec3
         f.tan_half = tan_half(e.kind, e.outer);
         f.near = e.near;
         f.range = e.range;
+        f.first_tile = e.first;
         m_draws.push_back(f);
         e.face_position[w.face] = e.position;
         e.face_direction[w.face] = e.direction;

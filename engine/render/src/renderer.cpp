@@ -2069,8 +2069,18 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
     }
     cmd.barrier(m_local_atlas, rhi::ResourceState::shader_write); // cleared before drawn
     if (data.instance_count == 0) m_local_drawn = static_cast<u32>(faces.size()); // drawn empty
-    for (u32 fi = 0; fi < faces.size() && data.instance_count > 0; ++fi) { // (no casters: left clear)
-        const LocalShadows::Face& f = faces[fi];
+    // A light's faces drawn this frame (plan keeps them together) share one
+    // culling: what is within its reach (a lone face: what it sees), each
+    // face then rasterising that into its tile (the rest clipped). The cull
+    // is a chain of small dependent dispatches, so this is most of the cost.
+    // (The mesh shaders drop each face's clusters outside it: raster.slang
+    // in_face. The vertex path, without mesh shaders, rasterises them all
+    // and the hardware clips them.)
+    CullBuffers& c = m_shadow_cull;
+    const auto same_light = [](const LocalShadows::Face& a, const LocalShadows::Face& b) {
+        return a.first_tile == b.first_tile;
+    };
+    const auto constants = [&](const LocalShadows::Face& f) {
         gpu::FrameConstants k = base;
         const Mat4 m = LocalShadows::face_matrix(f, frame.view.position);
         std::memcpy(k.view_proj, m.m, sizeof(k.view_proj));
@@ -2082,17 +2092,33 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
         k.pixels_per_unit = float(double(k_far) / std::max(texel, 1e-4));
         k.occlusion = 0;
         k.camera_delta[3] = 0.0f;
-        const rhi::TransientMemory frame_k = cmd.upload(bytes_of_one(k));
+        return k;
+    };
+    for (u32 fi = 0; fi < faces.size() && data.instance_count > 0; ++fi) { // (no casters: left clear)
+        const LocalShadows::Face& f = faces[fi];
+        const bool first_of_light = fi == 0 || !same_light(faces[fi - 1], f);
+        if (first_of_light) {
+            gpu::FrameConstants k = constants(f);
+            if (fi + 1 < faces.size() && same_light(faces[fi + 1], f)) {
+                LocalShadows::light_planes(f, frame.view.position, k.planes);
+            }
+            const rhi::TransientMemory cull_k = cmd.upload(bytes_of_one(k));
+            if (cull_k.data == nullptr) {
+                m_local_shadows->undo_draws(fi); // cleared, not drawn: drawn again later
+                break;
+            }
+            const gpu::CullPush push = cull_push(c, data, cull_k, false);
+            cull_first_pass(cmd, c, data, push);
+            ++m_local_culls;
+            cmd.barrier(c.args, rhi::ResourceState::indirect_argument);
+            cmd.barrier(c.counters, rhi::ResourceState::shader_read);
+            cmd.barrier(c.visible, rhi::ResourceState::shader_read);
+        }
+        const rhi::TransientMemory frame_k = cmd.upload(bytes_of_one(constants(f)));
         if (frame_k.data == nullptr) {
             m_local_shadows->undo_draws(fi); // cleared, not drawn: drawn again later
             break;
         }
-        CullBuffers& c = m_shadow_cull;
-        const gpu::CullPush push = cull_push(c, data, frame_k, false);
-        cull_first_pass(cmd, c, data, push);
-        cmd.barrier(c.args, rhi::ResourceState::indirect_argument);
-        cmd.barrier(c.counters, rhi::ResourceState::shader_read);
-        cmd.barrier(c.visible, rhi::ResourceState::shader_read);
         cmd.barrier(m_local_atlas, rhi::ResourceState::shader_write);
         rhi::RenderPassDesc pass;
         pass.color_count = 0;
@@ -2881,6 +2907,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // shadowed lights keep or get tiles, a few faces drawn a frame.
     m_local_planned = false;
     m_local_drawn = 0;
+    m_local_culls = 0;
     if (!m_light_bins->lights.empty() && m_shadows_on && settings.local_shadows) {
         bool any = false;
         for (const u32 s : m_light_bins->sources) any = any || (s != k_merged_light && frame.lights[s].shadow_id != 0);
@@ -3865,6 +3892,7 @@ void Renderer::finish_stats(const FrameData& data) {
     m_stats.lights_merged = data.light_count != 0 ? m_light_bins->merged : 0u;
     m_stats.local_shadows = data.local_shadows;
     m_stats.local_shadow_drawn = m_local_drawn;
+    m_stats.local_shadow_culls = m_local_culls;
     m_stats.local_shadow_waiting = m_local_planned ? m_local_shadows->waiting() : 0u;
     m_stats.local_shadow_tiles = m_local_shadows->tiles_used();
 }

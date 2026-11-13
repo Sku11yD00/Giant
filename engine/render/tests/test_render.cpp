@@ -2177,8 +2177,10 @@ GIANT_TEST("render: lamp shadows are drawn once, again when a caster near moves,
     GIANT_CHECK(st.lights == 2 && st.local_shadows == 2);
     GIANT_CHECK(st.local_shadow_drawn == 7 && st.local_shadow_waiting == 0 && st.local_shadow_tiles == 7);
     GIANT_CHECK(st.shadow_draws == 7); // a pass a face (the sun's pages asked for nothing)
+    GIANT_CHECK(st.local_shadow_culls == 2); // one a light: the point light's six faces share theirs
     st = s.draw(frame);
     GIANT_CHECK(st.local_shadows == 2 && st.local_shadow_drawn == 0 && st.shadow_draws == 0); // kept
+    GIANT_CHECK(st.local_shadow_culls == 0);
     // The cube moves: both lights reach it, both drawn again; the budget
     // leaves some for later, the old depths shading meanwhile.
     frame.settings.local_shadow_faces_per_frame = 4;
