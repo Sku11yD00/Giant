@@ -1064,7 +1064,7 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
         const double across = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
         const float r = std::clamp(static_cast<float>(0.6 * across) + 1.5f, 2.0f, 60.0f);
         const DVec3 at{0.5 * (lo.x + hi.x), lo.y + 0.4 * r, 0.5 * (lo.z + hi.z)};
-        m_dust->emit(at, r, 1.5f / r, k_dust_rubble);
+        m_dust->emit(at, r, 1.5f / r, k_dust_rubble, DustSource::rubble, 0.4f * r);
     }
     m_broken.insert(id);
     m_redraw.push_back(id);

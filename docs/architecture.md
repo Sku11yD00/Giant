@@ -2323,7 +2323,7 @@ shadow is lit evenly; a particle whose centre is off the screen while its
 quad reaches onto it takes the lamps of the cluster at the screen's edge
 nearest its centre.
 
-## Effects (effects plan FX2)
+## Effects (effects plan FX2, FX3)
 
 Effects are world data (`world/effects.h`), saved with the scene and the
 world's world.json like water. A `ParticleLook` is the renderer's
@@ -2335,7 +2335,7 @@ cone round a direction, at a speed, stopping on the ground or not. A spawned
 effect runs its rates for its `duration` after its bursts; an entity's
 `EntityEffect` (on, effect name, rate scale) runs it while on, turned with
 the entity. A built-in library (smoke, fire, sparks, dust_kick, spray, mist,
-embers, debris_chips: a look and an effect of each name, made once per
+embers, debris_chips, splinters, leaves: a look and an effect of each name, made once per
 process) is always there; the scene's own of a name stands in for the
 built-in one (`find_particle_look`, `find_effect`), so a world can retune
 smoke without naming a new look. Looks are bounded as styles are (and at
@@ -2349,7 +2349,9 @@ the renderer's particle bursts each frame, on the game's clock (paused:
 nothing born, and those alive stand still: `FrameInput::particle_seconds`;
 a frame not drawn hands its births and seconds to the next). It follows the scene's changes for entities whose effect is
 on (never scanning every entity a frame) and keeps spawned effects
-(`spawn_effect`, at most 256; a copy of the effect as it was). Effects
+(`spawn_effect`, at most 256, held in place so a spawn never allocates; by
+name, so an edit made while one runs is followed and one removed or renamed
+ends it). Effects
 farther than 1000 m from the camera run nothing; the rest go nearest first
 within budgets of 8,192 births a frame and 2,048 that stop on the ground
 (where there is ground under them)
@@ -2369,6 +2371,27 @@ style slot while it is there (particles alive up to a minute keep their
 index): a changed look is changed in place, a new name takes a new slot, and
 a removed name's slot is reused only once the renderer's 256 are full, the
 one gone longest first.
+
+The world's events set effects off (editor/src/event_effects.h, effects
+plan FX3), as spawned effects, so within the spawned cap and the budgets
+above (nearest first): a shot's hit throws up what its surface is made of,
+turned to the surface (sparks off metal; chips and dust off concrete, brick
+and the rest; chips off glass; splinters off wood; a few leaves off
+foliage; dust and chips off dirt; nothing off flesh), more for a round
+leaving more energy (a rifle round's 3 kJ as built, 0.3 to 2 times); what
+goes into water throws spray by its size and speed (a person jumping in as
+built, up to four times); every new dust puff (`sim::Dust` keeps up to 256
+as `DustEvent`s between takings, with what threw it up, rubble, ground or a
+tree, and where from: the ground under the puff; emits swelling a young
+puff, as a trunk bouncing, are none) throws chips off a collapse, leaves off
+a felled tree, dust and chips off a crater or an uprooting, by its radius;
+and the player running (3 m/s or more) on dry bare ground (dirt: the
+terrain, or what is made of it; not wet past 0.3, snow past 0.2, nor in
+water, nor carried) kicks a little dust every 1.6 m. Spawning allocates
+nothing (spawned effects keep their effect's name in place). They chain after the sounds on the
+physics' `on_hits` and `on_splashes`; the dust is taken each frame before
+the effects update. `get_effects` counts them (`emitting.events`), those
+left out past the cap too.
 
 ## Navigation
 

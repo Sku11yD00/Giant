@@ -50,20 +50,40 @@ struct DustStats {
     u32 emitted = 0; // in all
     u32 merged = 0;  // in all: emits that swelled a puff
     u32 dropped = 0; // in all: emits past emits_per_step, or fainter than all when full
+    u32 events_dropped = 0; // in all: new puffs not kept as events (past k_max_dust_events)
 };
 
 // Dust thrown up from buildings and from the ground.
 inline constexpr Vec3 k_dust_rubble{0.55f, 0.5f, 0.44f};
 inline constexpr Vec3 k_dust_earth{0.42f, 0.37f, 0.3f};
 
+// What threw it up (effects follow it: chips off rubble, leaves off a tree).
+enum class DustSource : u8 { rubble, ground, tree };
+
+// One emit making a new puff, kept for what follows them (the editor's
+// particle effects): not those past emits_per_step nor those swelling a
+// young puff (a trunk bouncing: one event) nor those dropped, at most k_max_dust_events
+// between clear_events() calls (the rest counted in DustStats::events_dropped).
+struct DustEvent {
+    DVec3 at{}; // where it was thrown up from (the puff's middle less `raised`)
+    float radius = 1.0f;
+    DustSource source = DustSource::rubble;
+};
+inline constexpr u32 k_max_dust_events = 256;
+
 class Dust {
 public:
-    explicit Dust(const DustSettings& settings = {}) : m_settings(settings) {}
+    explicit Dust(const DustSettings& settings = {}) : m_settings(settings) { m_events.reserve(k_max_dust_events); }
 
     // A puff at `at`: `radius` metres, `density` per metre at its centre
     // (about 3 / radius hides what is behind its middle). Bad numbers are
-    // left out. Its life follows its size (8 to 30 seconds).
-    void emit(const DVec3& at, float radius, float density, const Vec3& color = k_dust_rubble);
+    // left out. Its life follows its size (8 to 30 seconds). `raised`:
+    // metres its middle is above where it was thrown up from (its event's).
+    void emit(const DVec3& at, float radius, float density, const Vec3& color = k_dust_rubble,
+              DustSource source = DustSource::rubble, float raised = 0.0f);
+    // The new puffs since the last clear_events() (oldest first).
+    const std::vector<DustEvent>& events() const { return m_events; }
+    void clear_events() { m_events.clear(); }
     // Time moves on: puffs grow, rise, drift with `wind` (m/s), thin, and
     // those past their life go.
     void step(float seconds, const Vec3& wind);
@@ -83,6 +103,8 @@ private:
     u32 m_emitted = 0;
     u32 m_merged = 0;
     u32 m_dropped = 0;
+    std::vector<DustEvent> m_events;
+    u32 m_events_dropped = 0;
 };
 
 } // namespace giant::sim

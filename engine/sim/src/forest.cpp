@@ -425,7 +425,7 @@ usize Forest::topple(std::vector<Topple>& topples) {
         if (m_dust != nullptr) {
             // Torn up at the foot.
             const float r = std::clamp(0.2f * tree.spot.height, 1.5f, 6.0f);
-            m_dust->emit(tree.spot.at.position + DVec3{0.0, 0.5 * r, 0.0}, r, 0.6f / r, k_dust_earth);
+            m_dust->emit(tree.spot.at.position + DVec3{0.0, 0.5 * r, 0.0}, r, 0.6f / r, k_dust_earth, DustSource::ground, 0.5f * r);
         }
     }
     return felled.size();
@@ -489,7 +489,8 @@ usize Forest::lay(std::vector<Topple>& lays) {
             // Where it came down: along its middle.
             const Vec3 mid = rotate(lying.rotation, Vec3{0.0f, 0.5f * h, 0.0f});
             const float r = std::clamp(0.3f * h, 2.0f, 10.0f);
-            m_dust->emit(foot.position + DVec3{mid.x, mid.y + 0.3 * r, mid.z}, r, 0.5f / r, k_dust_earth);
+            m_dust->emit(foot.position + DVec3{mid.x, mid.y + 0.3 * r, mid.z}, r, 0.5f / r, k_dust_earth, DustSource::tree,
+                         0.3f * r); // (from the trunk's middle where it lies)
         }
     }
     return laid;
@@ -523,7 +524,7 @@ usize Forest::after_step() {
         const Tree& t = m_cells.at(owner->second.cell).trees[owner->second.index];
         if (!(impulse >= 0.25f * t.spot.strength)) return;
         const float r = std::clamp(0.25f * t.spot.height, 2.0f, 8.0f);
-        m_dust->emit(point + DVec3{0.0, 0.3 * r, 0.0}, r, 0.5f / r, k_dust_earth);
+        m_dust->emit(point + DVec3{0.0, 0.3 * r, 0.0}, r, 0.5f / r, k_dust_earth, DustSource::tree, 0.3f * r);
     };
     for (const ContactHit& h : m_physics.hits()) {
         struck(h.b, h.impulse, h.normal);         // pushed along the normal (a to b)

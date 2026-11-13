@@ -100,6 +100,8 @@ public:
     // The dust in the air (drawn by the renderer), moved by `wind` (m/s:
     // the weather's, set each frame) while simulating; stopping clears it.
     const sim::Dust& dust() const { return m_dust; }
+    // Its emits since the last call forgotten (after the effects have followed them).
+    void clear_dust_events() { m_dust.clear_events(); }
     Vec3 wind{};
     // A dent pressed into the ground at `at` (x, z) while simulating: a
     // crater (with dust), a footprint. The scene's terrain changes, so all

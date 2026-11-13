@@ -16,7 +16,7 @@ float strength(const DustPuff& p) {
 
 } // namespace
 
-void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color) {
+void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color, DustSource source, float raised) {
     if (!finite(at) || !std::isfinite(radius) || !std::isfinite(density) || radius <= 0.0f || density <= 0.0f) return;
     if (m_settings.max_puffs == 0) return;
     if (m_emits >= m_settings.emits_per_step) {
@@ -49,6 +49,15 @@ void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color)
         ++m_merged;
         return;
     }
+    // A new puff (not one swelling a young one, nor one dropped): an event.
+    const auto record = [&] {
+        if (m_events.size() < k_max_dust_events) {
+            const float lift = std::isfinite(raised) ? std::clamp(raised, 0.0f, 1000.0f) : 0.0f;
+            m_events.push_back({at - DVec3{0.0, static_cast<double>(lift), 0.0}, radius, source});
+        } else {
+            ++m_events_dropped;
+        }
+    };
     DustPuff p;
     p.position = at;
     p.radius = radius;
@@ -60,6 +69,7 @@ void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color)
     if (m_puffs.size() < m_settings.max_puffs) {
         m_puffs.push_back(p);
         ++m_emitted;
+        record();
         return;
     }
     // Full: the faintest gives way, if fainter than this one.
@@ -71,6 +81,7 @@ void Dust::emit(const DVec3& at, float radius, float density, const Vec3& color)
     }
     *weakest = p;
     ++m_emitted;
+    record();
 }
 
 void Dust::step(float seconds, const Vec3& wind) {
@@ -97,6 +108,7 @@ void Dust::step(float seconds, const Vec3& wind) {
 
 void Dust::clear() {
     m_puffs.clear();
+    m_events.clear();
     m_emits = 0;
 }
 
@@ -121,6 +133,7 @@ DustStats Dust::stats() const {
     s.emitted = m_emitted;
     s.merged = m_merged;
     s.dropped = m_dropped;
+    s.events_dropped = m_events_dropped;
     return s;
 }
 

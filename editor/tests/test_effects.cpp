@@ -3,6 +3,8 @@
 // given an effect to run.
 #include "../src/editor_commands.h"
 #include "../src/effects_state.h"
+#include "../src/event_effects.h"
+#include "../src/physics_state.h"
 #include "../src/mesh_library.h"
 
 #include "giant_test.h"
@@ -11,6 +13,7 @@
 #include "giant/world/effects.h"
 
 #include <cmath>
+#include <limits>
 
 using namespace giant;
 using namespace giant::editor;
@@ -130,7 +133,7 @@ GIANT_TEST("effects commands: effects made, changed, renamed with their entities
     r = f.run("get_effects");
     GIANT_CHECK(r.ok && r.value["effects"].size() == 2 && r.value["particle_looks"].size() == 1);
     GIANT_CHECK(r.value["effects"][0]["entities"] == Json::array({id}));
-    GIANT_CHECK(r.value["built_in"]["effects"].size() == 8 && !r.value["built_in"]["effects"][0].contains("emitters"));
+    GIANT_CHECK(r.value["built_in"]["effects"].size() == world::built_in_effects().size() && !r.value["built_in"]["effects"][0].contains("emitters"));
     bool fire_stood_in = false;
     for (const Json& j : r.value["built_in"]["effects"]) fire_stood_in |= j["name"] == "fire" && j.value("stood_in_for", false);
     GIANT_CHECK(fire_stood_in);
@@ -494,4 +497,197 @@ GIANT_TEST("effects emitting: a sphere lands under its middle less its radius; h
     tick(fx, scene, {}, 0.1, k_flat);
     GIANT_CHECK(born(fx) == 4 && fx.stats().running == 1);
     (void)id;
+}
+
+GIANT_TEST("effects from events: a spawn's bursts scale; hits throw what their surface is made of, turned to it") {
+    world::Scene scene;
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    GIANT_CHECK(fx.spawn(scene, "sparks", {}, {}, 1.0f, 0.5f).has_value());
+    tick(fx, scene, {}, 1.0 / 60.0, k_flat);
+    GIANT_CHECK(born(fx) == 20);
+    GIANT_CHECK(fx.spawn(scene, "sparks", {}, {}, 1.0f, 2.0f).has_value());
+    tick(fx, scene, {}, 1.0 / 60.0, k_flat);
+    GIANT_CHECK(born(fx) == 80);
+    GIANT_CHECK(fx.spawn(scene, "sparks", {}, {}, 1.0f, 0.0f).has_value()); // none of its bursts
+    tick(fx, scene, {}, 1.0 / 60.0, k_flat);
+    GIANT_CHECK(born(fx) == 0);
+    GIANT_CHECK(!fx.spawn(scene, "sparks", {}, {}, 1.0f, -1.0f).has_value());
+    GIANT_CHECK(!fx.spawn(scene, "sparks", {}, {}, 1.0f, std::nanf("")).has_value());
+    GIANT_CHECK(!fx.spawn(scene, "sparks", {}, {}, 1.0f, world::k_max_effect_rate_scale * 2.0f).has_value());
+    // Spawned by name: an edit while it runs is followed, removing it ends it.
+    world::Effect own = *world::find_effect({}, "mist");
+    own.name = "a very long effect name that is past what a short string holds in place";
+    own.duration = 100.0f;
+    scene.effects.push_back(own);
+    GIANT_CHECK(fx.spawn(scene, own.name, {}).has_value());
+    tick(fx, scene, {}, 1.0, k_flat);
+    GIANT_CHECK(born(fx) == 8 && fx.stats().spawned == 1);
+    scene.effects[0].emitters[0].rate = 16.0f;
+    tick(fx, scene, {}, 1.0, k_flat);
+    GIANT_CHECK(born(fx) == 16);
+    scene.effects.clear();
+    tick(fx, scene, {}, 1.0, k_flat);
+    GIANT_CHECK(born(fx) == 0 && fx.stats().missing == 1 && fx.stats().spawned == 0);
+
+    // Every surface's effects are built-ins; a rifle round's as built, a weak one less, never past twice.
+    const world::Surface all[] = {world::Surface::standard, world::Surface::metal, world::Surface::concrete,
+                                  world::Surface::brick,    world::Surface::glass, world::Surface::wood,
+                                  world::Surface::foliage,  world::Surface::dirt,  world::Surface::flesh};
+    for (const world::Surface s : all) {
+        const HitEffect h = hit_effect(s, 3000.0f);
+        if (h.effect != nullptr) GIANT_CHECK(world::find_effect({}, h.effect) != nullptr);
+        if (h.second != nullptr) GIANT_CHECK(world::find_effect({}, h.second) != nullptr);
+    }
+    GIANT_CHECK(std::string(hit_effect(world::Surface::metal, 3000.0f).effect) == "sparks");
+    GIANT_CHECK(std::string(hit_effect(world::Surface::wood, 3000.0f).effect) == "splinters");
+    GIANT_CHECK(hit_effect(world::Surface::flesh, 3000.0f).effect == nullptr);
+    GIANT_CHECK(hit_effect(world::Surface::metal, 3000.0f).bursts == 1.0f);
+    GIANT_CHECK(hit_effect(world::Surface::metal, 10.0f).bursts == 0.3f);
+    GIANT_CHECK(hit_effect(world::Surface::metal, 1.0e9f).bursts == 2.0f);
+    GIANT_CHECK(hit_effect(world::Surface::metal, std::nanf("")).bursts >= 0.3f);
+
+    // The turn takes up to the normal, any way round.
+    const Vec3 normals[] = {{0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {0, 0, -1}, normalize_or_zero(Vec3{1, 2, -3}), normalize_or_zero(Vec3{0.1f, -1, 0})};
+    for (const Vec3& n : normals) {
+        const Vec3 up = rotate(turn_up_to(n), Vec3{0, 1, 0});
+        GIANT_CHECK(length(up - n) < 1e-4f);
+    }
+    GIANT_CHECK(turn_up_to({}) == Quat{});
+}
+
+GIANT_TEST("effects from events: shots' hits, splashes and dust thrown up spawn effects; the cap counted") {
+    PhysicsState physics;
+    EffectsState fx;
+    EditorState state;
+    state.physics = &physics;
+    state.effects = &fx;
+    int heard = 0;
+    physics.on_hits = [&heard](std::span<const PhysicsState::ShotHit>) { ++heard; }; // the sounds', chained
+    connect_event_effects(state);
+    connect_event_effects(state); // once only
+    fx.follow(state.scene, state.scene.untaken_changes());
+
+    PhysicsState::ShotHit metal;
+    metal.hit.point = {0.0, 1.0, 0.0};
+    metal.hit.normal = {1.0f, 0.0f, 0.0f};
+    metal.hit.surface = world::Surface::metal;
+    metal.hit.energy = 3000.0f;
+    PhysicsState::ShotHit person = metal;
+    person.character = true; // flesh: nothing
+    PhysicsState::ShotHit wall = metal;
+    wall.hit.surface = world::Surface::concrete;
+    const PhysicsState::ShotHit hits[] = {metal, person, wall};
+    physics.on_hits(hits);
+    GIANT_CHECK(heard == 1 && fx.events.hits == 2 && fx.stats().spawned == 0);
+    tick(fx, state.scene, {}, 1.0 / 60.0, k_flat);
+    // sparks (40) turned sideways, chips (24) and dust (12 at half) off the wall.
+    GIANT_CHECK(born(fx) == 40 + 24 + 6);
+    bool sideways = false;
+    for (const render::ParticleBurst& b : fx.bursts()) sideways = sideways || std::abs(b.direction.x - 1.0f) < 1e-4f;
+    GIANT_CHECK(sideways);
+
+    sim::WaterEntry jump;
+    jump.point = {5.0, 0.0, 0.0};
+    jump.size = 1.0f;
+    jump.speed = 4.0f;
+    sim::WaterEntry boulder = jump;
+    boulder.size = 4.0f;
+    boulder.speed = 10.0f;
+    const sim::WaterEntry in[] = {jump};
+    physics.on_splashes(in);
+    tick(fx, state.scene, {}, 1.0 / 60.0, k_flat);
+    GIANT_CHECK(fx.events.splashes == 1 && born(fx) == 60);
+    const sim::WaterEntry big[] = {boulder};
+    physics.on_splashes(big);
+    tick(fx, state.scene, {}, 1.0 / 60.0, k_flat);
+    GIANT_CHECK(born(fx) == 240); // four times, at most
+
+    // A crater throws up earth: dust and chips, once (the events taken).
+    world::Terrain& t = state.scene.terrain;
+    t.set_samples(8);
+    for (int x = -1; x <= 1; ++x)
+        for (int z = -1; z <= 1; ++z) t.set({x, z}, world::Terrain::Heights(64, 0.0f));
+    world::Dent crater;
+    crater.radius = 6.0;
+    crater.depth = 2.0f;
+    GIANT_CHECK(physics.dent(state.scene, crater, {10.0, 0.0, 10.0}) > 0);
+    GIANT_CHECK(physics.dust().events().size() == 1 && physics.dust().events()[0].source == sim::DustSource::ground);
+    // Thrown up from the crater's floor (the puff's middle is above it).
+    GIANT_CHECK(physics.dust().events().size() == 1 && physics.dust().events()[0].at.y < 0.0 &&
+                physics.dust().events()[0].at.y > -2.5 && physics.dust().puffs()[0].position.y > 1.0);
+    event_effects_frame(state, 1.0 / 60.0);
+    GIANT_CHECK(physics.dust().events().empty() && fx.events.dust == 1);
+    tick(fx, state.scene, {}, 1.0 / 60.0, k_flat);
+    GIANT_CHECK(born(fx) > 12);
+    event_effects_frame(state, 1.0 / 60.0);
+    tick(fx, state.scene, {}, 1.0 / 60.0, k_flat);
+    GIANT_CHECK(born(fx) == 0 && fx.events.dust == 1);
+
+    // The cap: what is left out is counted.
+    for (u32 i = 0; i < EffectsState::k_max_spawned; ++i) (void)fx.spawn(state.scene, "mist", {});
+    physics.on_hits(hits);
+    GIANT_CHECK(fx.events.refused == 3 && fx.events.hits == 4);
+    // Without effects: nothing breaks, the sounds still told.
+    state.effects = nullptr;
+    physics.on_hits(hits);
+    physics.on_splashes(in);
+    event_effects_frame(state, 1.0 / 60.0);
+    GIANT_CHECK(heard == 3);
+}
+
+GIANT_TEST("effects from events: running on dry bare ground kicks dust each stride; walking, wet, snow or off it none") {
+    sim::CharacterState p;
+    p.position = {1.0, 2.0, 3.0};
+    p.on_ground = true;
+    p.velocity = {4.0f, -1.0f, 0.0f};
+    double walked = 0.0;
+    int steps = 0;
+    for (int i = 0; i < 60; ++i) { // 4 m/s for a second: 4 m, two strides of 1.6
+        const std::optional<DVec3> at = running_step(walked, p, world::Surface::dirt, {}, 1.0 / 60.0);
+        if (at) {
+            ++steps;
+            GIANT_CHECK(std::abs(at->y - 2.05) < 1e-9 && at->x == 1.0);
+        }
+    }
+    GIANT_CHECK(steps == 2 && std::abs(walked - 0.8) < 1e-6);
+    // Any frame rate: the same strides.
+    walked = 0.0;
+    steps = 0;
+    for (int i = 0; i < 4; ++i) steps += running_step(walked, p, world::Surface::dirt, {}, 0.25).has_value() ? 1 : 0;
+    GIANT_CHECK(steps == 2);
+    const auto none = [&](const sim::CharacterState& c, const world::Ground& g,
+                          world::Surface under = world::Surface::dirt) {
+        double w = 1.5;
+        for (int i = 0; i < 60; ++i)
+            if (running_step(w, c, under, g, 1.0 / 60.0)) return false;
+        return true;
+    };
+    sim::CharacterState walking = p;
+    walking.velocity = {2.0f, 0.0f, 0.0f};
+    GIANT_CHECK(none(walking, {}));
+    GIANT_CHECK(none(p, {0.5f, 0.0f}));
+    GIANT_CHECK(none(p, {0.0f, 0.5f}));
+    sim::CharacterState air = p;
+    air.on_ground = false;
+    double w = 1.5;
+    GIANT_CHECK(!running_step(w, air, world::Surface::dirt, {}, 1.0 / 60.0) && w == 0.0);
+    sim::CharacterState wading = p;
+    wading.water_depth = 0.3f;
+    GIANT_CHECK(none(wading, {}));
+    GIANT_CHECK(none(p, {}, world::Surface::concrete)); // a floor, a deck: no dust
+    GIANT_CHECK(none(p, {}, world::Surface::wood));
+    sim::CharacterState carried = p;
+    carried.carrier = 7; // on a platform that moves it: not running
+    GIANT_CHECK(none(carried, {}));
+    // Bad numbers never leave it kicking every frame.
+    double bad = 1.0;
+    GIANT_CHECK(!running_step(bad, p, world::Surface::dirt, {}, std::numeric_limits<double>::infinity()));
+    bad = std::numeric_limits<double>::infinity();
+    GIANT_CHECK(!running_step(bad, p, world::Surface::dirt, {}, 1.0 / 60.0) && bad == 0.0);
+    sim::CharacterState flying = p;
+    flying.velocity.x = std::numeric_limits<float>::infinity();
+    bad = 0.0;
+    GIANT_CHECK(!running_step(bad, flying, world::Surface::dirt, {}, 1.0 / 60.0) && bad == 0.0);
+    GIANT_CHECK(!running_step(w, p, world::Surface::dirt, {}, 0.0) && !running_step(w, p, world::Surface::dirt, {}, std::nan("")));
 }

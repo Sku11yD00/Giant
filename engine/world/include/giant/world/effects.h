@@ -5,7 +5,7 @@
 // runs one where it stands (EntityEffect), and the editor spawns them.
 //
 // A built-in library (smoke, fire, sparks, dust_kick, spray, mist, embers,
-// debris_chips) is always there, a look and an effect of each name; a
+// debris_chips, splinters, leaves) is always there, a look and an effect of each name; a
 // scene's own of the same name stands in for the built-in one.
 #pragma once
 

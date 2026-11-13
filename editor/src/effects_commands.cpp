@@ -39,7 +39,7 @@ Json name_schema() {
 Json vec3_json(const Vec3& v) { return Json::array({v.x, v.y, v.z}); }
 Vec3 vec(const Json& v) { return {v[0].get<float>(), v[1].get<float>(), v[2].get<float>()}; }
 
-constexpr const char* k_built_ins = "smoke, fire, sparks, dust_kick, spray, mist, embers, debris_chips";
+constexpr const char* k_built_ins = "smoke, fire, sparks, dust_kick, spray, mist, embers, debris_chips, splinters, leaves";
 
 Json look_properties() {
     const double pull = world::k_max_look_pull, size = world::k_max_look_size;
@@ -500,8 +500,10 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
     add(registry,
         {"spawn_effect",
          "Plays an effect once (the scene's, else built-in) at `position` [x, y, z] metres, turned by `rotation` "
-         "(pitch, yaw, roll degrees; its emitters' directions and shapes turn with it), its rates times `rate`: "
-         "its bursts at once, then its rates for its duration (sparks off a hit, a puff of dust, a splash). View "
+         "(pitch, yaw, roll degrees; its emitters' directions and shapes turn with it), its rates times `rate` "
+         "and its bursts times `bursts`: "
+         "its bursts at once, then its rates for its duration (sparks off a hit, a puff of dust, a splash); it "
+         "runs the effect by name, so an edit while it runs is followed and removing or renaming it ends it. View "
          "state: not saved, not undoable; at most 256 running at once. Drawn in the lit view (render setting "
          "particles); births while the game's clock runs (not while paused).",
          Json{{"type", "object"},
@@ -515,7 +517,8 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
                               {"properties", {{"pitch", number(-360, 360, "Degrees.")},
                                               {"yaw", number(-360, 360, "Degrees.")},
                                               {"roll", number(-360, 360, "Degrees.")}}}}},
-                {"rate", number(0, world::k_max_effect_rate_scale, "Times its emitters' rates (default 1).")}}}},
+                {"rate", number(0, world::k_max_effect_rate_scale, "Times its emitters' rates (default 1).")},
+                {"bursts", number(0, world::k_max_effect_rate_scale, "Times its emitters' bursts (default 1).")}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              if (state.effects == nullptr) return CommandResult::failure("effects are not available");
@@ -533,7 +536,7 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
                  r.roll = rot.value("roll", 0.0f);
              }
              const auto id = state.effects->spawn(state.scene, name, position, normalize(quat_from_euler(r)),
-                                                  args.value("rate", 1.0f));
+                                                  args.value("rate", 1.0f), args.value("bursts", 1.0f));
              if (!id) {
                  return CommandResult::failure("at most " + std::to_string(EffectsState::k_max_spawned) +
                                                " spawned effects run at once: wait for some to end");
@@ -548,7 +551,11 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
              "; with built_in true, every field of them too), the entities naming each effect (on or off), and "
              "`emitting`: last update's effects that gave birth (`running`), entities' farther than `reach` m "
              "(`far`), spawned ones still running, bursts, particles asked for (`born`) and left out past the "
-             "budgets (`cut`), and emitters naming a look (or entities an effect) found nowhere (`missing`).",
+             "budgets (`cut`), and emitters naming a look (or entities an effect) found nowhere, or spawned ones "
+             "whose effect was removed or renamed (`missing`); "
+             "and `events`: effects the world's events set off so far (shots' `hits`, `splashes` into water, "
+             "`dust` thrown up by collapses, felled trees and craters, the player's running `steps`) and those "
+             "`refused` past the spawned cap.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties", {{"built_in", {{"type", "boolean"}, {"description", "Every field of the built-in "
@@ -589,6 +596,9 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
                  emitting = {{"running", st.running}, {"far", st.far},       {"spawned", st.spawned},
                              {"bursts", st.bursts},   {"born", st.born},     {"cut", st.cut},
                              {"missing", st.missing}, {"reach", state.effects->reach}};
+                 const EffectsState::EventCounts& ev = state.effects->events;
+                 emitting["events"] = {{"hits", ev.hits},   {"splashes", ev.splashes}, {"dust", ev.dust},
+                                       {"steps", ev.steps}, {"refused", ev.refused}};
              }
              return CommandResult::success({{"emitting", std::move(emitting)},
                                             {"particle_looks", std::move(look_list)},
