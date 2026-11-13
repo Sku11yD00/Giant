@@ -4,7 +4,7 @@
 // a waterfall. Plain data, saved with the scene and the world; an entity
 // runs one where it stands (EntityEffect), and the editor spawns them.
 //
-// A built-in library (smoke, fire, sparks, dust_kick, spray, mist, embers,
+// A built-in library (smoke, fire (with its glow), sparks, dust_kick, spray, mist, embers,
 // debris_chips, splinters, leaves) is always there, a look and an effect of each name; a
 // scene's own of the same name stands in for the built-in one.
 #pragma once
@@ -42,6 +42,8 @@ constexpr float k_max_emitter_speed = 1000.0f;  // m/s
 constexpr float k_max_emitter_reach = 500.0f;   // metres: an emitter's size (a box's corner within the renderer's 1 km spread) and offset
 constexpr float k_max_effect_seconds = 3600.0f; // how long a spawned one runs its rates
 constexpr float k_max_effect_rate_scale = 100.0f;
+constexpr float k_max_effect_light_intensity = 1.0e4f;
+constexpr float k_max_effect_light_range = 1000.0f; // metres
 
 // How particles look and move (render::ParticleStyle, field for field).
 struct ParticleLook {
@@ -92,14 +94,38 @@ struct Emitter {
     bool operator==(const Emitter&) const = default;
 };
 
+// The light an effect gives while it runs (a fire's glow on what is round
+// it), as a point lamp at `offset` in the effect's own space. `flicker`
+// dims it by up to that share, wavering with the effects' running clock
+// (game seconds summed while they run; not saved): the same at the same
+// time (no noise frame to frame), each running one its own way.
+struct EffectLight {
+    bool on = false;
+    Vec3 color{1.0f, 0.55f, 0.25f}; // linear, 0 to 1 (firelight)
+    float intensity = 4.0f;         // its light 1 m away (as a lamp's), 0 to k_max_effect_light_intensity
+    float range = 8.0f;             // metres, 0.1 to k_max_effect_light_range
+    Vec3 offset{0.0f, 0.5f, 0.0f};  // metres, within k_max_emitter_reach
+    float flicker = 0.3f;           // 0 (steady) to 1
+    float source_radius = 0.2f;     // metres, 0 to 10
+    bool shadows = false;           // casts shadows (with the lamps: the nearest few in view)
+    float shadow_near = 0.1f;       // metres, 0.01 to 10
+    bool operator==(const EffectLight&) const = default;
+};
+
 struct Effect {
     std::string name;              // unique among the scene's effects
     std::vector<Emitter> emitters; // 1 to k_max_emitters
     // Spawned (not on an entity): seconds it runs its rates after its
     // bursts (0: bursts only). An entity's runs while it is on.
     float duration = 0.0f;
+    EffectLight light;             // off unless set
     bool operator==(const Effect&) const = default;
 };
+
+// The share of an effect light's intensity it gives at `seconds` of the
+// effects' running clock: 1 - flicker * a waver from 0 to 1 made of three sines whose
+// phases come from `seed` (the running effect's). From 1 - flicker to 1.
+float effect_flicker(float flicker, double seconds, u64 seed);
 
 // An entity running an effect where it stands (any shape; hidden entities
 // run none). Kept while off.
@@ -113,6 +139,7 @@ struct EntityEffect {
 // What is wrong with one, for people and the AI (none: it is fine).
 std::optional<std::string> check_particle_look(const ParticleLook& look);
 std::optional<std::string> check_emitter(const Emitter& emitter);
+std::optional<std::string> check_effect_light(const EffectLight& light);
 std::optional<std::string> check_effect(const Effect& effect);
 std::optional<std::string> check_entity_effect(const EntityEffect& effect);
 // A name the scene's looks and effects may have: 1 to k_max_effect_name_bytes bytes.

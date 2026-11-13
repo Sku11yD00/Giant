@@ -258,6 +258,7 @@ GIANT_TEST("lamps: shadows on give each lamp its own id, the same frame to frame
     std::vector<u32> ids;
     for (const render::LocalLight& l : f.frame.lights) {
         if (l.shadow_id != 0) ids.push_back(l.shadow_id);
+        GIANT_CHECK((l.shadow_id & 0x80000000u) == 0); // (the top bit: effects' lights)
         if (l.shadow_id != 0 && near(l.position, {-2.0, 2.0, 0.0})) GIANT_CHECK(std::fabs(l.shadow_near - 0.4f) < 1e-6f);
     }
     GIANT_CHECK(ids.size() == 3);

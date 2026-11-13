@@ -685,6 +685,18 @@ Json particle_looks_json(std::span<const ParticleLook> looks) {
     return list;
 }
 
+Json effect_light_json(const EffectLight& l) {
+    return {{"on", l.on},
+            {"color", vec3_json(l.color)},
+            {"intensity", l.intensity},
+            {"range", l.range},
+            {"offset", vec3_json(l.offset)},
+            {"flicker", l.flicker},
+            {"source_radius", l.source_radius},
+            {"shadows", l.shadows},
+            {"shadow_near", l.shadow_near}};
+}
+
 Json effects_json(std::span<const Effect> effects) {
     Json list = Json::array();
     for (const Effect& f : effects) {
@@ -703,7 +715,9 @@ Json effects_json(std::span<const Effect> effects) {
                                 {"size_scale", e.size_scale},
                                 {"ground", e.ground}});
         }
-        list.push_back({{"name", f.name}, {"duration", f.duration}, {"emitters", std::move(emitters)}});
+        Json effect = {{"name", f.name}, {"duration", f.duration}, {"emitters", std::move(emitters)}};
+        if (!(f.light == EffectLight{})) effect["light"] = effect_light_json(f.light);
+        list.push_back(std::move(effect));
     }
     return list;
 }
@@ -1356,6 +1370,20 @@ void read_effects(Reader& root, std::vector<Effect>& out, std::string& error) {
     read_named_list(root, "effects", k_max_effects, out, error, [&](Reader& r, const std::string& path, Effect& f) {
         r.string("name", f.name, true, k_max_effect_name_bytes);
         r.number("duration", f.duration, 0, k_max_effect_seconds);
+        if (const Json* light = r.get("light", false); light != nullptr && r.ok()) {
+            Reader lr(*light, path + ".light", error);
+            EffectLight& l = f.light;
+            lr.boolean("on", l.on);
+            lr.vec3("color", l.color, 0, 1);
+            lr.number("intensity", l.intensity, 0, k_max_effect_light_intensity);
+            lr.number("range", l.range, 0.1, k_max_effect_light_range);
+            lr.vec3("offset", l.offset, -k_max_emitter_reach, k_max_emitter_reach);
+            lr.number("flicker", l.flicker, 0, 1);
+            lr.number("source_radius", l.source_radius, 0, 10);
+            lr.boolean("shadows", l.shadows);
+            lr.number("shadow_near", l.shadow_near, 0.01, 10);
+            lr.finish();
+        }
         const Json* emitters = r.get("emitters", true);
         if (emitters == nullptr || !r.ok()) return;
         if (!emitters->is_array() || emitters->empty() || emitters->size() > k_max_emitters) {

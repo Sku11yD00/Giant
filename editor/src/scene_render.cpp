@@ -169,7 +169,7 @@ u32 lamp_shadow_id(const world::Lamp& lamp, world::EntityId entity, u32 which) {
     h ^= h >> 33;
     h *= 0xc4ceb9fe1a85ec53ull;
     h ^= h >> 33;
-    const u32 id = static_cast<u32>(h);
+    const u32 id = static_cast<u32>(h) & 0x7fffffffu; // (the top bit set: effects' lights, effects_state.cpp)
     return id != 0 ? id : 1u;
 }
 

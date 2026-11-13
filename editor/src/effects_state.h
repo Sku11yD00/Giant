@@ -39,6 +39,8 @@ public:
     static constexpr u32 k_max_spawned = 256;             // spawned effects running at once
     static constexpr u32 k_max_bursts_per_emitter = 64;   // a box or disc emitter's a frame (each its own point)
     static constexpr double k_default_reach = 1000.0;     // metres
+    static constexpr u32 k_max_effect_lights = 256;       // effect lights a frame (the nearest)
+    static constexpr double k_min_glow = 0.25;            // seconds a spawned one's light lasts at least (a flash)
 
     // The ground's height at (x, z), or none (particles that stop on the ground then fall on).
     using Ground = std::function<std::optional<double>(double x, double z)>;
@@ -51,6 +53,8 @@ public:
         u32 born = 0;         // particles asked for
         u32 cut = 0;          // particles left out: past the budgets or the burst cap
         u32 missing = 0;      // emitters (or entity effects) naming a look (an effect) found nowhere; spawned ones whose effect went
+        u32 lights = 0;       // effect lights given (lights())
+        u32 lights_cut = 0;   // left out: past k_max_effect_lights
     };
 
     // Effects the world's events set off (event_effects.h), in all.
@@ -75,7 +79,9 @@ public:
     // added, changed or gone). Call before update with the scene's untaken changes.
     void follow(const world::Scene& scene, const world::SceneChanges& changed);
     // Steps `seconds` (0: nothing born, as paused) and builds this frame's
-    // bursts and styles from the scene's entity effects and the spawned ones.
+    // bursts and styles from the scene's entity effects and the spawned ones,
+    // and the lights of those running (paused too: a fire still glows, its
+    // flicker stood still), the nearest k_max_effect_lights within reach.
     void update(const world::Scene& scene, const DVec3& camera, double seconds, const Ground& ground);
     // A one-shot effect (the scene's, else built-in) at `position`, turned
     // by `rotation`, its rates times `rate` and its bursts times `bursts`
@@ -99,6 +105,10 @@ public:
     // removed name's slot reused only when the table is full.
     std::optional<u32> style_index(std::string_view look) const;
     std::span<const render::ParticleStyle> styles() const { return m_styles; }
+    // This frame's effect lights (with the scene's lamps in the frame).
+    std::span<const render::LocalLight> lights() const { return m_lights; }
+    // Seconds of the game clock the effects have run (flickers follow it).
+    double clock() const { return m_clock; }
     const Stats& stats() const { return m_stats; }
 
 private:
@@ -117,6 +127,7 @@ private:
         float rate = 1.0f;
         float burst_scale = 1.0f;
         double left = 0.0; // seconds of its rates left
+        double glow = 0.0; // seconds of its light left (its duration, at least k_min_glow; a flash at rate 0)
         bool burst = true; // its bursts still owed
         std::array<float, world::k_max_emitters> carry{};
     };
@@ -140,6 +151,7 @@ private:
     void reindex_effects(const world::Scene& scene);
     const world::Effect* effect_named(const world::Scene& scene, std::string_view name) const;
     void run(const Job& job, const Ground& ground);
+    void gather_lights(const world::Scene& scene, const DVec3& camera);
     void emit(const world::Emitter& e, u32 style, u32 count, const Job& job, u32 emitter, const Ground& ground);
 
     std::vector<render::ParticleBurst> m_bursts;
@@ -156,6 +168,9 @@ private:
     std::unordered_map<world::EntityId, Runner> m_runners;
     std::vector<Spawned> m_spawned;
     std::vector<Job> m_jobs;
+    std::vector<Job> m_glows;                // effects with a light, this update
+    std::vector<render::LocalLight> m_lights;
+    double m_clock = 0.0;
     u64 m_scene = 0;       // identity the runners follow
     u64 m_spawn_scene = 0; // identity the spawned ones were spawned in
     u64 m_updates = 0;

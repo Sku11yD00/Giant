@@ -180,6 +180,55 @@ Emitter emitter_from(const Json& a) {
     return e;
 }
 
+Json light_schema() {
+    return {{"type", "object"},
+            {"additionalProperties", false},
+            {"properties",
+             {{"on", {{"type", "boolean"}, {"description", "It gives light while it runs (default off)."}}},
+              {"color", triple(0, 1, "Linear RGB. Default firelight [1, 0.55, 0.25].")},
+              {"intensity", number(0, world::k_max_effect_light_intensity,
+                                   "Its light 1 m away, as a lamp's (the default sun is 3). Default 4.")},
+              {"range", number(0.1, world::k_max_effect_light_range, "Metres it reaches. Default 8.")},
+              {"offset", triple(-world::k_max_emitter_reach, world::k_max_emitter_reach,
+                                "Metres from the effect's origin, in its own space. Default [0, 0.5, 0].")},
+              {"flicker", number(0, 1,
+                                 "Up to this share of it wavers away, with the effects' running clock (not saved; "
+                                 "steady at 0; the same at the same time, each running one its own way). Default 0.3.")},
+              {"source_radius", number(0, 10, "Metres: the glow's size. Default 0.2.")},
+              {"shadows", {{"type", "boolean"},
+                           {"description", "It casts shadows (with the lamps: the nearest 64 in view that cast "
+                                           "do). Default off."}}},
+              {"shadow_near", number(0.01, 10, "Metres: nothing nearer the light casts. Default 0.1.")}}},
+            {"description", "The light it gives while it runs (a fire's glow), a point lamp: an entity's or "
+                            "spawn's dimmed by its rate below 1; a spawn's for its duration (at least 0.25 s; only "
+                            "0.25 s at rate 0). Set fields only (the "
+                            "rest kept); an effect made under a built-in one's name starts with its light."}};
+}
+
+Json light_json(const world::EffectLight& l) {
+    return {{"on", l.on},
+            {"color", vec3_json(l.color)},
+            {"intensity", l.intensity},
+            {"range", l.range},
+            {"offset", vec3_json(l.offset)},
+            {"flicker", l.flicker},
+            {"source_radius", l.source_radius},
+            {"shadows", l.shadows},
+            {"shadow_near", l.shadow_near}};
+}
+
+void apply_light(const Json& a, world::EffectLight& l) {
+    l.on = a.value("on", l.on);
+    if (a.contains("color")) l.color = vec(a["color"]);
+    l.intensity = a.value("intensity", l.intensity);
+    l.range = a.value("range", l.range);
+    if (a.contains("offset")) l.offset = vec(a["offset"]);
+    l.flicker = a.value("flicker", l.flicker);
+    l.source_radius = a.value("source_radius", l.source_radius);
+    l.shadows = a.value("shadows", l.shadows);
+    l.shadow_near = a.value("shadow_near", l.shadow_near);
+}
+
 Json effect_properties() {
     return {{"name", name_schema()},
             {"emitters", {{"type", "array"},
@@ -189,7 +238,8 @@ Json effect_properties() {
                           {"description", "Its streams of particles (set_effect: replaces the list)."}}},
             {"duration", number(0, world::k_max_effect_seconds,
                                 "Spawned: seconds it runs its rates after its bursts (default 0: bursts only). "
-                                "On an entity it runs while the entity's effect is on.")}};
+                                "On an entity it runs while the entity's effect is on.")},
+            {"light", light_schema()}};
 }
 
 // The effect's looks found nowhere (the scene's own, else built-in).
@@ -207,7 +257,10 @@ Json missing_looks(const Effect& f, const Looks& looks) {
 Json effect_json(const Effect& f, const Looks& looks) {
     Json emitters = Json::array();
     for (const Emitter& e : f.emitters) emitters.push_back(emitter_json(e));
-    Json j = {{"name", f.name}, {"duration", f.duration}, {"emitters", std::move(emitters)}};
+    Json j = {{"name", f.name},
+              {"duration", f.duration},
+              {"emitters", std::move(emitters)},
+              {"light", light_json(f.light)}};
     if (Json missing = missing_looks(f, looks); !missing.empty()) j["missing_looks"] = std::move(missing);
     return j;
 }
@@ -216,6 +269,7 @@ Json effect_json(const Effect& f, const Looks& looks) {
 std::string apply_effect(const Json& a, Effect& f) {
     if (a.contains("name")) f.name = a["name"].get<std::string>();
     f.duration = a.value("duration", f.duration);
+    if (a.contains("light")) apply_light(a["light"], f.light);
     if (a.contains("emitters")) {
         f.emitters.clear();
         for (const Json& e : a["emitters"]) f.emitters.push_back(emitter_from(e));
@@ -390,6 +444,8 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
                  return CommandResult::failure("there is an effect named \"" + name + "\" already: set_effect changes it");
              }
              Effect f;
+             // Standing in for a built-in one: its light kept unless set (a scene's fire still glows).
+             if (const Effect* built = world::find_effect({}, name)) f.light = built->light;
              if (std::string bad = apply_effect(args, f); !bad.empty()) return CommandResult::failure(bad);
              Effects before = effects;
              effects.push_back(f);
@@ -552,7 +608,8 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
              "`emitting`: last update's effects that gave birth (`running`), entities' farther than `reach` m "
              "(`far`), spawned ones still running, bursts, particles asked for (`born`) and left out past the "
              "budgets (`cut`), and emitters naming a look (or entities an effect) found nowhere, or spawned ones "
-             "whose effect was removed or renamed (`missing`); "
+             "whose effect was removed or renamed (`missing`), effect lights given (`lights`, the nearest "
+             "256; `lights_cut` past them); "
              "and `events`: effects the world's events set off so far (shots' `hits`, `splashes` into water, "
              "`dust` thrown up by collapses, felled trees and craters, the player's running `steps`) and those "
              "`refused` past the spawned cap.",
@@ -595,7 +652,8 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
                  const EffectsState::Stats& st = state.effects->stats();
                  emitting = {{"running", st.running}, {"far", st.far},       {"spawned", st.spawned},
                              {"bursts", st.bursts},   {"born", st.born},     {"cut", st.cut},
-                             {"missing", st.missing}, {"reach", state.effects->reach}};
+                             {"missing", st.missing}, {"reach", state.effects->reach}, {"lights", st.lights},
+                             {"lights_cut", st.lights_cut}};
                  const EffectsState::EventCounts& ev = state.effects->events;
                  emitting["events"] = {{"hits", ev.hits},   {"splashes", ev.splashes}, {"dust", ev.dust},
                                        {"steps", ev.steps}, {"refused", ev.refused}};
