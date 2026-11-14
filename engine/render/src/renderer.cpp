@@ -101,18 +101,6 @@ gpu::Material to_gpu(const Material& m, Descriptor&& descriptor, usize skin_look
     return out;
 }
 
-float finite_in(float v, float lo, float hi, float fallback);
-
-gpu::SkinLook to_gpu(const SkinLook& s) {
-    gpu::SkinLook out{};
-    out.scatter = finite_in(s.scatter, 0.0005f, 0.1f, 0.012f);
-    out.strength = finite_in(s.strength, 0.0f, 1.0f, 1.0f);
-    out.lobe_roughness[0] = finite_in(s.lobe_roughness[0], 0.1f, 4.0f, 0.75f);
-    out.lobe_roughness[1] = finite_in(s.lobe_roughness[1], 0.1f, 4.0f, 1.3f);
-    out.lobe_mix = finite_in(s.lobe_mix, 0.0f, 1.0f, 0.15f);
-    return out;
-}
-
 float finite_in(float v, float lo, float hi, float fallback) {
     return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
 }
@@ -1503,6 +1491,7 @@ void Renderer::read_texture_feedback() {
         for (const TextureId id : m.textures) {
             note_wanted(id, value - 1);
         }
+        note_wanted(m.detail, value - 1 + m.detail_levels);
     }
 }
 
@@ -3200,14 +3189,27 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         m_gpu_materials.push_back(to_gpu(m, texture_descriptor, frame.skin_looks.size()));
         const std::array<TextureId, 4> ids{m.base_color_texture, m.normal_texture, m.roughness_metal_texture,
                                            m.occlusion_texture};
-        if (m.terrain || std::all_of(ids.begin(), ids.end(), [](TextureId id) { return id == k_no_texture; })) {
+        // Skin's detail normals, tiled: finer by the tiling's levels.
+        TextureId detail = k_no_texture;
+        u32 detail_levels = 0;
+        if ((m_gpu_materials.back().flags & gpu::k_material_skin) != 0u) {
+            const gpu::SkinLook g = to_gpu(frame.skin_looks[m.skin_look], rhi::k_no_descriptor);
+            // (Only one it can sample: a linear texture.)
+            if (texture_descriptor(frame.skin_looks[m.skin_look].detail_normal, false) != rhi::k_no_descriptor) {
+                detail = frame.skin_looks[m.skin_look].detail_normal;
+            }
+            detail_levels = static_cast<u32>(std::ceil(std::log2(g.detail_tiling)));
+        }
+        if (m.terrain || (detail == k_no_texture &&
+                          std::all_of(ids.begin(), ids.end(), [](TextureId id) { return id == k_no_texture; }))) {
             continue; // (ground: the layers' textures are wanted below)
         }
         if (i < k_feedback_materials) {
-            m_feedback_now.push_back({static_cast<u32>(i), ids});
+            m_feedback_now.push_back({static_cast<u32>(i), ids, detail, detail_levels});
             m_feedback_count = static_cast<u32>(i + 1);
         } else {
             for (const TextureId id : ids) note_wanted(id, k_sharpest);
+            note_wanted(detail, k_sharpest);
         }
     }
     m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor, 0));
@@ -3219,7 +3221,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         if ((m.flags & gpu::k_material_skin) == 0u) continue;
         data.skin = true;
         const u32 look = ((m.flags >> gpu::k_material_look_shift) & 255u) - 1u;
-        data.spread = data.spread || to_gpu(frame.skin_looks[look]).strength > 0.0f;
+        data.spread = data.spread || to_gpu(frame.skin_looks[look], rhi::k_no_descriptor).strength > 0.0f;
     }
     // Skin looks (only with skin to use them).
     data.skin_look_count = 0;
@@ -3231,7 +3233,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             data.spread = false;
         } else {
             for (usize i = 0; i < looks; ++i) {
-                const gpu::SkinLook g = to_gpu(frame.skin_looks[i]);
+                const SkinLook& look = frame.skin_looks[i];
+                const gpu::SkinLook g = to_gpu(look, texture_descriptor(look.detail_normal, false));
                 std::memcpy(data.skin_looks.data + i * sizeof(gpu::SkinLook), &g, sizeof(g));
             }
             data.skin_look_count = static_cast<u32>(looks);

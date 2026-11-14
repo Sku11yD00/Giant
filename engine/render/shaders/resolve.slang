@@ -149,6 +149,7 @@ struct Hit {
     float2 uv_dy;  // differentials: texture filtering's footprint)
     float4 tangent; // world tangent (along +u) and bitangent sign
     uint4 textures; // the material's (gpu::Material::textures)
+    uint flags;     // and its flags (gpu::Material::flags)
     float3 shading_n; // n bent by the material's normal map (shade_pixel sets it)
     float3 face_n; // the triangle's own normal, on the side its corners' normals lean to
     uint instance; // into the frame's instances
@@ -169,6 +170,7 @@ Hit no_hit() {
     h.uv_dy = float2(0.0, 0.0);
     h.tangent = float4(1.0, 0.0, 0.0, 1.0);
     h.textures = uint4(k_no_texture, k_no_texture, k_no_texture, k_no_texture);
+    h.flags = 0u;
     h.shading_n = h.n;
     h.face_n = h.n;
     h.instance = 0xFFFFFFFFu;
@@ -224,10 +226,13 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     h.world = a * w.x + b * w.y + c * w.z;
     // The material's textures (the CPU keeps the index in range): the
     // texture coordinates and their footprint only for a material with
-    // any, the tangent frame only for one with a normal map.
-    h.textures = read_buffer(push.materials)
-                     .Load4(push.material_offset + min(inst.material, push.material_count) * k_material_bytes + 32);
-    if (any(h.textures != k_no_texture)) {
+    // any, the tangent frame only for one with a normal map (skin's
+    // detail normals need both).
+    const uint material_at = push.material_offset + min(inst.material, push.material_count) * k_material_bytes;
+    h.textures = read_buffer(push.materials).Load4(material_at + 32);
+    h.flags = read_buffer(push.materials).Load(material_at + 48);
+    const bool skin = (h.flags & k_material_skin) != 0u;
+    if (any(h.textures != k_no_texture) || skin) {
         // How far the uv moves to the neighbouring pixels: their rays met
         // with this triangle's plane (unclamped, so the footprint stays
         // right at its edges).
@@ -241,7 +246,7 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
         h.uv_dy = uv_step(plane_barycentrics(dir - f.ray_y.xyz * (2.0 / f.height), a, b, c), uv_here, uv0, uv1, uv2,
                           float2(0.0, 1.0));
     }
-    if (h.textures.y != k_no_texture) {
+    if (h.textures.y != k_no_texture || skin) {
         // The tangent turns with the mesh (not as a normal does); a
         // mirroring instance flips the bitangent.
         const float4 t0 = cluster_tangent(pool, geometry, cluster, corners.x);
@@ -312,7 +317,7 @@ void apply_textures(Hit s, inout float3 base, inout float rough, inout float met
 static const float k_max_anisotropy = 16.0;
 
 void texture_feedback(Extras e, Frame f, Hit s, uint2 pixel) {
-    if (s.material >= e.feedback_materials || all(s.textures == k_no_texture)) {
+    if (s.material >= e.feedback_materials || (all(s.textures == k_no_texture) && (s.flags & k_material_skin) == 0u)) {
         return;
     }
     if (((pixel.x & 3u) | ((pixel.y & 3u) << 2u)) != (f.frame_number & 15u)) {
@@ -485,9 +490,13 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
 // The lamps' light on a surface (lights.slang): the lights listed in the
 // pixel's cluster, each lit like the sun (GGX specular, Lambert diffuse,
 // the same energy compensation), with highlights widened by the source's
-// size (Karis 2013; the widened lobe keeps its energy). No shadows yet.
+// size (Karis 2013; the widened lobe keeps its energy), shadowed by their
+// tiles where they have them. `skin_through`: skin's light through thin
+// parts (x how much, y mm of the profile per metre; x 0: none), from
+// shadowed lights only (the others' tiles do not say how thick it is).
 float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n, float3 surface_n, float3 base,
-                      float rough, float metal, float variance, Lobes lobes, out float3 diffuse_part) {
+                      float rough, float metal, float variance, Lobes lobes, float2 skin_through,
+                      out float3 diffuse_part) {
     float3 sum = float3(0.0, 0.0, 0.0);
     diffuse_part = sum;
     if (e.local.count == 0u) {
@@ -518,11 +527,23 @@ float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n
         const float inv_d = rsqrt(d2);
         const float3 l = to_light * inv_d;
         const float n_dot_l = saturate(dot(n, l));
-        if (n_dot_l <= 0.0) {
+        const bool through =
+            skin_through.x > 0.0 && dot(n, l) < 0.3 && light.shadow != 0u && e.local.atlas_on != 0u;
+        if (n_dot_l <= 0.0 && !through) {
             continue;
         }
         float falloff = light_falloff(light, to_light, l);
         if (falloff <= 0.0) {
+            continue;
+        }
+        if (through) {
+            const float thickness = light_thickness(e.local, b, light, world, surface_n);
+            const float3 t = through_skin(diffuse_color, n, l, light.color, thickness, skin_through.y) *
+                             (falloff * skin_through.x);
+            sum += t;
+            diffuse_part += t;
+        }
+        if (n_dot_l <= 0.0) {
             continue;
         }
         if (light.shadow != 0u && e.local.atlas_on != 0u) {
@@ -655,6 +676,63 @@ Shaded lit_output(float3 color) {
 }
 
 static const uint k_skin_look_bytes = 32; // gpu::SkinLook
+static const float k_skin_reach_mm = 8.1664; // src/subsurface.h's skin_profile_reach_mm: the look's scatter
+
+// Skin's look for a material's flags (the CPU keeps the index in range of
+// its looks; 0: not skin), its byte offset in Extras::skin_looks.
+uint skin_look_at(Extras e, uint flags) {
+    const uint look = (flags >> k_material_look_shift) & 255u;
+    if ((flags & k_material_skin) == 0u || look < 1u || look > e.skin_look_count) {
+        return 0xFFFFFFFFu;
+    }
+    return e.skin_looks_offset + (look - 1u) * k_skin_look_bytes;
+}
+
+// Skin's detail normals (gpu::SkinLook::detail_normal) over the shading
+// normal `n`: the map's bumps, at the look's tiling of the uvs, in the
+// tangent frame turned to `n` (so they ride on the material's own normal
+// map's).
+float3 skin_detail(Extras e, Hit s, float3 n) {
+    const uint at = skin_look_at(e, s.flags);
+    if (at == 0xFFFFFFFFu) {
+        return n;
+    }
+    const uint2 d = read_buffer(e.skin_looks).Load2(at + 24);
+    if (d.x == k_no_texture) {
+        return n;
+    }
+    const float tiling = asfloat(d.y);
+    const float2 xy = read_texture_nonuniform(d.x)
+                          .SampleGrad(get_sampler(k_sampler_anisotropic_wrap), s.uv * tiling, s.uv_dx * tiling,
+                                      s.uv_dy * tiling)
+                          .rg * 2.0 - 1.0;
+    const float z = sqrt(saturate(1.0 - dot(xy, xy)));
+    const float3 t = safe_normalize(s.tangent.xyz - n * dot(n, s.tangent.xyz), float3(1.0, 0.0, 0.0));
+    const float3 b = cross(n, t) * s.tangent.w;
+    return safe_normalize(t * xy.x + b * xy.y + n * z, n);
+}
+
+// How much of each channel passes through `mm` millimetres of skin
+// (Jimenez et al. 2010, from d'Eon's six Gaussians; src/subsurface.h's
+// skin_transmittance).
+float3 skin_transmittance(float mm) {
+    const float s = -mm * mm;
+    return float3(0.233, 0.455, 0.649) * exp(s / 0.0064) + float3(0.100, 0.336, 0.344) * exp(s / 0.0484) +
+           float3(0.118, 0.198, 0.0) * exp(s / 0.187) + float3(0.113, 0.007, 0.007) * exp(s / 0.567) +
+           float3(0.358, 0.004, 0.0) * exp(s / 1.99) + float3(0.078, 0.0, 0.0) * exp(s / 7.41);
+}
+
+// Light through thin skin from a light in direction `l` (unit) whose light
+// is `light`, crossing `thickness` metres of it (negative: not known):
+// the diffuse it gives the far side, wrapped a little past the terminator
+// (Jimenez's 0.3); `mm_per_metre` scales the look's skin to the measured
+// profile.
+float3 through_skin(float3 base, float3 n, float3 l, float3 light, float thickness, float mm_per_metre) {
+    if (thickness < 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    return skin_transmittance(thickness * mm_per_metre) * base * (saturate(0.3 - dot(n, l)) / k_pi) * light;
+}
 
 // `spread`: skin's diffuse light goes to Shaded::subsurface (for
 // subsurface.slang to spread) instead of radiance.
@@ -662,11 +740,12 @@ Shaded shade_pixel(float4 position, bool spread) {
     const uint2 pixel = uint2(position.xy);
     const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
     const Frame f = load_frame(push.frame, push.frame_offset);
+    const Extras extras = load_extras(push.extras, push.extras_offset);
     const bool hit = vis.x != 0;
     Hit s = no_hit();
     if (hit) {
         s = surface_at(f, position, vis);
-        s.shading_n = bent_normal(s);
+        s.shading_n = skin_detail(extras, s, bent_normal(s));
     }
     // Every pixel of the quad reaches this, drawn or not. The shading
     // normal's change: a normal map's bumps widen the highlight too.
@@ -675,7 +754,6 @@ Shaded shade_pixel(float4 position, bool spread) {
     // The far field: past far_start the meshes are left out (the CPU drops
     // instances wholly beyond it) and the voxel world stands in, in front
     // of whatever mesh is drawn there (lit views only).
-    const Extras extras = load_extras(push.extras, push.extras_offset);
     const bool lighting_view = f.debug_view == k_view_lighting;
     const bool lit_path = f.debug_view == 0 || lighting_view;
     const bool sky_on = lit_path && extras.sky_on != 0u;
@@ -797,20 +875,23 @@ Shaded shade_pixel(float4 position, bool spread) {
         surface_n = -surface_n;
         n = -n;
     }
-    // Skin: its look (two lobes; its spread with `spread`).
+    // Skin: its look (two lobes; its spread with `spread`; light through
+    // its thin parts).
     Lobes lobes = one_lobe();
     float scatter = 0.0;
     float scatter_strength = 0.0;
-    const uint skin_look = ((material_flags >> k_material_look_shift) & 255u);
-    if ((material_flags & k_material_skin) != 0u && skin_look >= 1u && skin_look <= extras.skin_look_count) {
+    float2 skin_through = float2(0.0, 0.0); // how much passes, mm of the profile per metre
+    const uint skin_at = skin_look_at(extras, material_flags);
+    if (skin_at != 0xFFFFFFFFu) {
         ByteAddressBuffer looks = read_buffer(extras.skin_looks);
-        const uint at = extras.skin_looks_offset + (skin_look - 1u) * k_skin_look_bytes;
-        const float4 a = asfloat(looks.Load4(at));
+        const float4 a = asfloat(looks.Load4(skin_at));
+        const float2 b = asfloat(looks.Load2(skin_at + 16));
         lobes.on = true;
         lobes.scale = a.zw;
-        lobes.mix = asfloat(looks.Load(at + 16));
+        lobes.mix = b.x;
         scatter = a.x;
         scatter_strength = spread ? saturate(a.y) : 0.0;
+        skin_through = float2(b.y, k_skin_reach_mm / max(a.x, 1e-4));
     }
     const float canopy = asfloat(materials.Load(material_at + 60));
     if (canopy > 0.0) {
@@ -899,7 +980,19 @@ Shaded shade_pixel(float4 position, bool spread) {
     float3 diffuse_lamps;
     float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
                          occlusion, bend, bounced, lobes, spec_weight, spec_light, diffuse_sun);
-    color += local_lighting(extras, f, position.xy, world, n, surface_n, base, rough, metal, variance, lobes, diffuse_lamps);
+    color += local_lighting(extras, f, position.xy, world, n, surface_n, base, rough, metal, variance, lobes,
+                            skin_through, diffuse_lamps);
+    if (skin_through.x > 0.0 && clouds > 0.0 && dot(n, f.sun_direction.xyz) < 0.3 &&
+        any(f.sun_light.rgb > float3(0.0, 0.0, 0.0))) {
+        // The sun through skin's thin parts (dimmed by the clouds; the
+        // pages say how much is in the way, the skin's own and any other).
+        const float thickness = sun_thickness(extras.shadows, world, surface_n, pixel_size);
+        const float3 t = through_skin(base * (1.0 - saturate(metal)), n, f.sun_direction.xyz, f.sun_light.rgb,
+                                      thickness, skin_through.y) *
+                         (skin_through.x * clouds);
+        color += t;
+        diffuse_sun += t;
+    }
     // Skin's spread light, left out here (added back spread, past the fog:
     // dimmed by the fog's average over the channels, and not by falling
     // rain or snow drawn over it; small at the distances skin shows).

@@ -65,17 +65,36 @@ float light_shadow_tap(ByteAddressBuffer atlas, uint tile, int2 texel, float rec
     return stored <= receiver * 1.0005 ? 1.0 : 0.0;
 }
 
-// How much of a light reaches `world` (camera-relative) on a surface
-// facing `surface_n`: 1 lit, 0 shadowed (bilinear between four taps).
-float light_shadow(LocalLights ls, ByteAddressBuffer b, LocalLight light, float3 world, float3 surface_n) {
+// Where a camera-relative point `d` from a shadowed light (d = world -
+// position) falls in its tiles: the tile, the texel position (texel
+// centres at whole numbers), and its depth there (near / along). False:
+// not in a drawn face (or nearer than its near plane, or outside a spot's
+// tile). `push`: moved along `push_n` by that many texels first (off the
+// surface: no acne; or into it).
+struct LightTexel {
+    uint tile;
+    float2 p;
+    float receiver;
+    float near_dist;
+    float along; // the point's distance along the face's axis (before the push)
+    float texel; // a texel's size there, metres
+};
+
+bool light_texel(LocalLights ls, ByteAddressBuffer b, LocalLight light, float3 d, float3 push_n, float push,
+                 out LightTexel o) {
+    o.tile = 0u;
+    o.p = float2(0.0, 0.0);
+    o.receiver = 0.0;
+    o.along = 0.0;
+    o.texel = 0.0;
     const uint at = ls.shadows + (light.shadow - 1u) * k_light_shadow_bytes;
     const float4 a = asfloat(b.Load4(at));
     const float3 spot_right = asfloat(b.Load3(at + 16));
     const float near_dist = a.x;
+    o.near_dist = near_dist;
     const uint tile = asuint(a.y);
     const uint drawn = asuint(a.z);
     const float tan_half = a.w;
-    float3 d = world - light.position;
     uint face = 0;
     float3 forward = light.direction;
     float3 right = spot_right;
@@ -97,36 +116,85 @@ float light_shadow(LocalLights ls, ByteAddressBuffer b, LocalLight light, float3
         }
     }
     if (((drawn >> face) & 1u) == 0u) {
-        return 1.0; // not drawn yet: lit
+        return false; // not drawn yet
     }
     float along = dot(d, forward);
     if (along <= near_dist) {
-        return 1.0;
+        return false;
     }
-    // Moved off the surface by about a texel and a half there (no acne).
     const float texel = 2.0 * tan_half * along / float(k_light_shadow_size);
-    d += surface_n * (1.5 * texel);
+    o.along = along;
+    o.texel = texel;
+    d += push_n * (push * texel);
     along = dot(d, forward);
     if (along <= near_dist) {
-        return 1.0;
+        return false;
     }
     const float3 up = cross(right, forward);
     const float x = dot(d, right) / (along * tan_half);
     const float y = dot(d, up) / (along * tan_half);
     if (abs(x) > 1.0 || abs(y) > 1.0) {
-        return 1.0; // outside the tile (a spot's cone ends before)
+        return false; // outside the tile (a spot's cone ends before)
     }
-    const float2 p = float2(0.5 + 0.5 * x, 0.5 - 0.5 * y) * float(k_light_shadow_size) - 0.5;
-    const int2 i = int2(floor(p));
-    const float2 w = p - floor(p);
-    const float receiver = near_dist / along;
+    o.tile = tile + face;
+    o.p = float2(0.5 + 0.5 * x, 0.5 - 0.5 * y) * float(k_light_shadow_size) - 0.5;
+    o.receiver = near_dist / along;
+    return true;
+}
+
+// How much of a light reaches `world` (camera-relative) on a surface
+// facing `surface_n`: 1 lit, 0 shadowed (bilinear between four taps).
+// Moved off the surface by about a texel and a half (no acne).
+float light_shadow(LocalLights ls, ByteAddressBuffer b, LocalLight light, float3 world, float3 surface_n) {
+    LightTexel t;
+    if (!light_texel(ls, b, light, world - light.position, surface_n, 1.5, t)) {
+        return 1.0; // not drawn yet, or outside it: lit
+    }
+    const int2 i = int2(floor(t.p));
+    const float2 w = t.p - floor(t.p);
     ByteAddressBuffer atlas = read_buffer(ls.atlas);
-    const uint t = tile + face;
-    const float s00 = light_shadow_tap(atlas, t, i, receiver);
-    const float s10 = light_shadow_tap(atlas, t, i + int2(1, 0), receiver);
-    const float s01 = light_shadow_tap(atlas, t, i + int2(0, 1), receiver);
-    const float s11 = light_shadow_tap(atlas, t, i + int2(1, 1), receiver);
+    const float s00 = light_shadow_tap(atlas, t.tile, i, t.receiver);
+    const float s10 = light_shadow_tap(atlas, t.tile, i + int2(1, 0), t.receiver);
+    const float s01 = light_shadow_tap(atlas, t.tile, i + int2(0, 1), t.receiver);
+    const float s11 = light_shadow_tap(atlas, t.tile, i + int2(1, 1), t.receiver);
     return lerp(lerp(s00, s10, w.x), lerp(s01, s11, w.x), w.y);
+}
+
+// How far light from a shadowed light goes through whatever is between it
+// and `world` (camera-relative, on a surface facing `surface_n`), in
+// metres: the distance along the ray from the nearest surface the tile
+// holds to the point (bilinear between four taps), looked up a texel
+// and a half into the surface (so an edge's taps land on it, not past
+// it), with the sideways part of that push put back (shadow_pages.slang's
+// sun_thickness_on says why). -1: not known (not drawn, nothing held,
+// outside, or what the tile holds there lies well beyond the point: lit
+// straight on).
+float light_thickness(LocalLights ls, ByteAddressBuffer b, LocalLight light, float3 world, float3 surface_n) {
+    LightTexel t;
+    if (!light_texel(ls, b, light, world - light.position, -surface_n, 1.5, t)) {
+        return -1.0;
+    }
+    const float along = t.along;
+    // Along the face's axis to along the ray.
+    const float to_ray = length(world - light.position) / along;
+    const float c = saturate(dot(surface_n, normalize(world - light.position)));
+    const float slant = min(1.5 * t.texel * (1.0 - c * c) / max(c, 0.2), 3.0 * t.texel);
+    const int2 i = int2(floor(t.p));
+    const float2 w = t.p - floor(t.p);
+    ByteAddressBuffer atlas = read_buffer(ls.atlas);
+    float through[4];
+    [unroll] for (uint k = 0; k < 4; ++k) {
+        const int2 q = clamp(i + int2(k & 1u, k >> 1u), int2(0, 0),
+                             int2(k_light_shadow_size - 1, k_light_shadow_size - 1));
+        const float stored = asfloat(atlas.Load((t.tile * k_light_shadow_size * k_light_shadow_size +
+                                                 uint(q.y) * k_light_shadow_size + uint(q.x)) * 4));
+        const float raw = (along - t.near_dist / max(stored, 1e-20)) * to_ray + slant;
+        if (stored <= 0.0 || raw < -2.0 * t.texel) {
+            return -1.0;
+        }
+        through[k] = max(raw, 0.0);
+    }
+    return lerp(lerp(through[0], through[1], w.x), lerp(through[2], through[3], w.x), w.y);
 }
 
 // The pixel's cluster: its first entry and how many (count 0: none, or

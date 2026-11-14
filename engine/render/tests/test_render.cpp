@@ -3330,6 +3330,33 @@ GIANT_TEST("render: d3d12 materials sample colour, normal and occlusion textures
     GIANT_CHECK(up_lum * 100 > flat_above * 105);
     GIANT_CHECK(up_right < flat_lum); // a tilt up is a tilt away from a sun on the right
 
+    // Skin's detail normals (tiled 4 times) bend it as a normal map does,
+    // on a material with no textures of its own; an sRGB one is none.
+    const TextureId pores = renderer->add_texture(material_desc(4, 4, rhi::Format::bc5_unorm), bc5(217, 128));
+    const TextureId pores_away = renderer->add_texture(material_desc(4, 4, rhi::Format::bc5_unorm), bc5(38, 128));
+    GIANT_CHECK(pores != k_no_texture && pores_away != k_no_texture);
+    GIANT_CHECK(renderer->texture_residency(pores)->wanted_mip == TextureResidency::k_not_seen);
+    std::vector<SkinLook> looks(1);
+    looks[0].detail_tiling = 4.0f;
+    frame.skin_looks = looks;
+    Material skin = plain;
+    skin.skin_look = 0;
+    const int skin_flat = centre(skin, sun_right, 3.0f, 0.02f);
+    looks[0].detail_normal = pores;
+    const int skin_toward = centre(skin, sun_right, 3.0f, 0.02f);
+    // Streaming's feedback asks for the detail map too.
+    GIANT_CHECK(renderer->texture_residency(pores)->wanted_mip == 0);
+    looks[0].detail_normal = pores_away;
+    const int skin_away = centre(skin, sun_right, 3.0f, 0.02f);
+    looks[0].detail_normal = colour; // sRGB: left out
+    const int skin_srgb = centre(skin, sun_right, 3.0f, 0.02f);
+    std::printf("    skin detail normals: flat %d, toward %d, away %d, sRGB %d\n", skin_flat, skin_toward, skin_away,
+                skin_srgb);
+    GIANT_CHECK(skin_toward * 100 > skin_flat * 105);
+    GIANT_CHECK(skin_away * 2 < skin_flat);
+    GIANT_CHECK(std::abs(skin_srgb - skin_flat) <= 2);
+    frame.skin_looks = {};
+
     // Occlusion dims the ambient light, never the sun's.
     Material occluded = plain;
     occluded.occlusion_texture = dim;
@@ -3747,6 +3774,115 @@ GIANT_TEST("render: d3d12 skin spreads a lamp's light past its cone's edge, red 
     GIANT_CHECK(std::abs(at(skin_on, 64, 1) - at(skin_off, 64, 1)) <= 4);
     GIANT_CHECK(at(skin_on, 120, 0) <= 2);
     GIANT_CHECK(at(skin_on, 86, 0) <= at(skin_off, 86, 0) + 1); // (inside the edge: some goes out)
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("render: d3d12 skin lets the sun and a shadowed lamp through a thin slab, red most; thick or plain stays dark") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A slab of skin 15 mm thick seen from 0.5 m above, lit only from
+    // below: its top is dark but for what comes through it. (Thick enough
+    // for the sun's depths, a millimetre or two apart over their 40 km.)
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[0].position = DVec3{300.0, 0.0, 0.0};
+    instances[0].scale = {1.0f, 0.015f, 1.0f}; // (the cube is 1 m, centred)
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[0].roughness = 0.6f;
+    materials[0].skin_look = 0;
+    std::vector<SkinLook> looks(1);
+    looks[0].scatter = 0.1f; // a broad look: 15 mm passes as 1.2 mm of the profile
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.view.position = {300.0, 0.5, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    std::vector<LocalLight> lights(1);
+    lights[0].position = {300.0, -0.3, 0.0};
+    lights[0].range = 3.0f;
+    lights[0].intensity = 0.3f;
+    lights[0].shadow_id = 1;
+    Vec3 sun_direction = normalize_or_zero(Vec3{0.1f, -1.0f, 0.05f});
+    const auto draw = [&](bool sun, bool lamp) {
+        frame.instances = instances;
+        frame.materials = materials;
+        frame.skin_looks = looks;
+        frame.lighting.sun_direction = sun ? sun_direction : Vec3{0.0f, 1.0f, 0.0f};
+        frame.lighting.sun_light = sun ? Vec3{3.0f, 3.0f, 3.0f} : Vec3{0.0f, 0.0f, 0.0f};
+        frame.lights = lamp ? std::span<const LocalLight>(lights) : std::span<const LocalLight>();
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 16 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 && st.shadow_waiting == 0 && st.local_shadow_waiting == 0
+                        ? quiet + 1
+                        : 0;
+        }
+        device->wait_idle();
+        const std::vector<u8> image = device->read_texture(target);
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + k_w / 2) * 4;
+        return i + 2 < image.size() ? std::array<int, 3>{image[i], image[i + 1], image[i + 2]}
+                                    : std::array<int, 3>{-1, -1, -1};
+    };
+    const auto sun_thin = draw(true, false);
+    // On a slant (45 degrees) the path is longer: dimmer, still red.
+    sun_direction = normalize_or_zero(Vec3{1.0f, -1.0f, 0.0f});
+    const auto sun_slant = draw(true, false);
+    sun_direction = normalize_or_zero(Vec3{0.1f, -1.0f, 0.05f});
+    looks[0].transmission = 0.0f;
+    const auto sun_none = draw(true, false);
+    looks[0].transmission = 1.0f;
+    materials[0].skin_look = k_no_skin_look;
+    const auto sun_plain = draw(true, false);
+    materials[0].skin_look = 0;
+    instances[0].scale.y = 0.3f; // as thick as a body: nothing gets through
+    instances[0].position.y = 0.0075 - 0.15;
+    const auto sun_thick = draw(true, false);
+    instances[0].scale.y = 0.015f;
+    instances[0].position.y = 0.0;
+    const auto lamp_thin = draw(false, true);
+    lights[0].shadow_id = 0; // no tile: how thick it is is not known
+    const auto lamp_unshadowed = draw(false, true);
+    std::printf("    through skin: sun thin %d %d %d, slant %d %d %d, none %d, plain %d, thick %d; lamp thin %d %d %d, "
+                "no shadow %d\n",
+                sun_thin[0], sun_thin[1], sun_thin[2], sun_slant[0], sun_slant[1], sun_slant[2], sun_none[0],
+                sun_plain[0], sun_thick[0], lamp_thin[0], lamp_thin[1], lamp_thin[2], lamp_unshadowed[0]);
+    GIANT_CHECK(sun_thin[0] > 40 && sun_thin[0] > sun_thin[1] + 15 && sun_thin[1] >= sun_thin[2]);
+    GIANT_CHECK(sun_slant[0] > 25 && sun_slant[0] + 5 < sun_thin[0] && sun_slant[1] * 3 < sun_slant[0]);
+    GIANT_CHECK(sun_none[0] <= 3 && sun_plain[0] <= 3 && sun_thick[0] <= 3);
+    GIANT_CHECK(lamp_thin[0] > 40 && lamp_thin[0] > lamp_thin[1] + 15 && lamp_thin[1] >= lamp_thin[2]);
+    GIANT_CHECK(lamp_unshadowed[0] <= 3);
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }
