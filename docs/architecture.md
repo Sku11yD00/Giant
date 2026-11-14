@@ -1720,6 +1720,28 @@ before skinning. The pose's bounds and LOD reach widen by the
 most the morphs can move a vertex (skin_lod.h `morph_reach`: their
 weighted largest moves times the joints' largest stretch).
 
+Skin (C4a). A material with a skin look (`Material::skin_look` into
+`FrameInput::skin_looks`, packed in `gpu::Material::flags` as
+`k_material_skin` and the look's index + 1 in bits 8 to 15) is shaded with
+a two-lobe highlight (GGX at the roughness times 0.75 and 1.3, the second
+15 %) and its diffuse light spreads under the surface. With
+`RenderSettings::subsurface_scattering` on, resolve's `ps_spread` /
+`ps_direct_spread` leave the skin's diffuse light (sun, sky, bounce, lamps;
+times the look's strength, past the fog) out of the radiance and write it
+to a target of its own; `subsurface.slang` then blurs it across and down
+the screen (17 taps of the separable kernel from d'Eon's six-Gaussian skin
+profile, `src/subsurface.h`, scaled by the look's scatter in metres at the
+pixel's distance, at most 64 pixels; a tap off the skin or further in depth
+than the scatter takes the middle's light) and adds it to the radiance into
+that target, which stands for the radiance from there (screen reflections,
+water, post). Its two full-size rgba16f targets are made on the first frame
+whose skin spreads (the setting on, a lit view) and freed after 600 frames
+without. Timed as
+"subsurface scattering"; it runs only on frames with a skin material whose
+look spreads (strength over 0). Approximations: the spread light is dimmed
+by the fog's average over the channels, and falling rain or snow drawn over
+skin does not dim it.
+
 Playing them (editor). `MeshLibrary` keeps a skinned file's skeleton,
 clips and bind-space clusters beside its rest-pose mesh, which every
 entity drawing it shows until it animates. An entity animates when it

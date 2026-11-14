@@ -105,6 +105,23 @@ struct TextureResidency {
     u64 bytes = 0; // on the GPU
 };
 
+inline constexpr u32 k_no_skin_look = ~0u;
+inline constexpr u32 k_max_skin_looks = 255;
+
+// How skin looks (Material::skin_look; FrameInput::skin_looks). The light
+// its pixels take spreads under the surface by a measured skin profile
+// (red furthest, blue least) over `scatter` metres at its widest, in a
+// pass of its own (RenderSettings::subsurface_scattering); `strength` (0
+// to 1) how much of the light spreads. Its highlight is two GGX lobes, at
+// the material's roughness times lobe_roughness[0] and [1], the second
+// lobe_mix of the whole: a sharp sheen over a broad soft one.
+struct SkinLook {
+    float scatter = 0.012f;   // metres (0.0005 to 0.1)
+    float strength = 1.0f;    // 0 to 1
+    float lobe_roughness[2] = {0.75f, 1.3f}; // times the material's (0.1 to 4)
+    float lobe_mix = 0.15f;   // 0 to 1
+};
+
 // How a surface looks (metal/roughness PBR). Instances share them by index
 // into FrameInput::materials, so a kit used a thousand times sends its few
 // materials once.
@@ -168,6 +185,10 @@ struct Material {
     // builds the voxels of its instances again.
     Vec3 base_color_average{1.0f, 1.0f, 1.0f};
     float coverage = 1.0f;
+    // Skin: an index into FrameInput::skin_looks (k_no_skin_look, or past
+    // them: not skin). Light under skin spreads out before it leaves
+    // (subsurface scattering) and its highlight has two lobes.
+    u32 skin_look = k_no_skin_look;
 };
 
 // One of the ground's layers (FrameInput::terrain_layers), for materials
@@ -511,6 +532,11 @@ struct RenderSettings {
     // than 48 pixels.
     bool contact_shadows = true;
     float contact_shadow_length = 0.3f;
+    // Skin's light spread under its surface (lit views, materials with a
+    // skin look): a separable pass over the skin pixels after shading.
+    // Off, skin takes its light where it lands (its two-lobe highlight
+    // stays).
+    bool subsurface_scattering = true;
     // Characters in the light (lit views, FrameInput::occluders): their
     // bodies shut the sky's and bounced light out round them (a person
     // standing on the ground darkens it round their feet) and give back
@@ -734,6 +760,8 @@ struct FrameInput {
     std::span<const u32> water_indices;
     std::span<const WaterLook> water_looks;
     double water_seconds = 0.0;
+    // Skin looks (Material::skin_look; at most k_max_skin_looks count).
+    std::span<const SkinLook> skin_looks;
     // The seas (past k_max_seas: left out, RenderStats::water_overflow).
     std::span<const SeaSurface> seas;
     // How many of water_indices (from the first; whole triangles) are
@@ -812,6 +840,7 @@ struct RenderStats {
     bool screen_reflections = false; // screen-space rays on
     bool ambient_occlusion = false;  // GTAO on
     bool contact_shadows = false;    // the sun's contact shadows marched
+    bool subsurface_scattering = false; // skin's light spread this frame
     u32 occluders = 0;               // characters' capsules shading the light round them
     // The sky (this frame).
     bool sky = false;           // the atmosphere drawn
@@ -1149,6 +1178,10 @@ private:
 
     bool init();
     bool ensure_targets(u32 width, u32 height);
+    bool ensure_subsurface(); // skin's targets (false: none to be had)
+    // Skin's light spread and added to the rest (m_subsurface[0] then
+    // stands for the radiance), with the kernel uploaded.
+    void spread_skin(rhi::CommandList& cmd, const FrameData& data, const rhi::TransientMemory& kernel);
     bool ensure_cull_buffers(CullBuffers& c, u32 instance_count);
     void destroy(Mesh& mesh);
     MeshId add(geometry::ClusterMesh data, const std::vector<geometry::SkinWeights>* weights,
@@ -1299,6 +1332,16 @@ private:
     rhi::TextureHandle m_occlusion;       // its bounce and ambient let through, full size (made on first use)
     bool m_occlusion_logged = false;
     u32 m_occlusion_idle = 0; // frames without the pass (the texture freed after k_occlusion_idle_frames)
+    // Skin's light spread (subsurface.slang): resolve's pipelines setting
+    // it aside, the blur, its two full-size targets (made on first use,
+    // freed after a while without skin) and the kernel.
+    rhi::PipelineHandle m_resolve_spread;
+    rhi::PipelineHandle m_resolve_direct_spread;
+    rhi::PipelineHandle m_subsurface_pass;
+    std::array<rhi::TextureHandle, 2> m_subsurface{};
+    bool m_subsurface_logged = false;
+    u32 m_subsurface_idle = 0;
+    std::array<float, 4 * 17> m_subsurface_kernel{}; // SubsurfaceTap each (src/subsurface.h)
     std::vector<gpu::GpuOccluder> m_gpu_occluders;          // this frame's (scratch)
     std::vector<std::pair<float, u32>> m_occluder_order;    // (scratch)
     rhi::PipelineHandle m_terrain_pass;   // terrain layers (terrain.slang's cs_terrain)

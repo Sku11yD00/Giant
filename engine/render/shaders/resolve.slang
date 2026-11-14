@@ -66,6 +66,8 @@ ConstantBuffer<ResolvePush> push : register(b0);
 static const uint k_material_bytes = 64; // gpu::Material; textures +32, flags +48, translucency +52, alpha cutoff +56, canopy +60
 static const uint k_material_terrain = 1u;
 static const uint k_material_two_sided = 2u;
+static const uint k_material_skin = 8u;      // gpu::k_material_skin (its look + 1 in bits 8 to 15)
+static const uint k_material_look_shift = 8u;
 static const uint k_no_texture = 0xFFFFFFFFu; // rhi::k_no_descriptor
 
 
@@ -354,6 +356,47 @@ float normal_variance(float3 n, uint instance) {
 
 float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
+// Skin's highlight: two GGX lobes (gpu::SkinLook), the second `mix` of
+// the whole; off, one at the material's roughness.
+struct Lobes {
+    bool on;
+    float2 scale; // times the roughness
+    float mix;
+};
+Lobes one_lobe() {
+    Lobes k;
+    k.on = false;
+    k.scale = float2(1.0, 1.0);
+    k.mix = 0.0;
+    return k;
+}
+
+// GGX's alpha at a roughness, widened by the normal's change across the
+// pixel (specular AA).
+float lobe_alpha(float rough, float variance) {
+    const float roughness = clamp(rough, 0.045, 1.0);
+    float alpha = roughness * roughness;
+    if (push.specular_aa != 0) {
+        const float kernel = min(2.0 * k_specular_aa_variance * variance, k_specular_aa_limit);
+        alpha = sqrt(saturate(alpha * alpha + kernel));
+    }
+    return alpha;
+}
+
+// D times V of the highlight (one lobe, or skin's two); `widen`: added
+// to each lobe's alpha (a lamp's size).
+float highlight(Lobes k, float alpha, float rough, float variance, float widen, float n_dot_h, float n_dot_v,
+                float n_dot_l) {
+    if (!k.on) {
+        const float a = saturate(alpha + widen);
+        return d_ggx(n_dot_h, a) * v_smith(n_dot_v, n_dot_l, a);
+    }
+    const float a0 = saturate(lobe_alpha(rough * k.scale.x, variance) + widen);
+    const float a1 = saturate(lobe_alpha(rough * k.scale.y, variance) + widen);
+    return lerp(d_ggx(n_dot_h, a0) * v_smith(n_dot_v, n_dot_l, a0), d_ggx(n_dot_h, a1) * v_smith(n_dot_v, n_dot_l, a1),
+                k.mix);
+}
+
 // Lights a surface: one sun (GGX specular, Lambert diffuse) plus the
 // ambient light, before exposure and tone mapping. `variance`: the
 // normal's change across the pixel (specular AA); `sun`: how much of the
@@ -363,20 +406,17 @@ float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 // how much it met (a: the rest is the hemisphere), weighted `cone_weight`
 // against the hemisphere alone. Out: what the ambient
 // reflection is multiplied by (`spec_weight`) and the reflected light it
-// used (`spec_light`), for the screen's reflections to replace.
+// used (`spec_light`), for the screen's reflections to replace;
+// `diffuse_part`: how much of what it returns is diffuse light (skin
+// spreads it); `lobes`: the highlight's.
 float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
              float sun, float4 bounce, float4 cone, float cone_weight, float occlusion, float3 bend, float3 bounced,
-             out float3 spec_weight, out float3 spec_light) {
+             Lobes lobes, out float3 spec_weight, out float3 spec_light, out float3 diffuse_part) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
     const float3 h = safe_normalize(v + l, n);
     // Clamped so a mirror-smooth surface keeps a visible, stable highlight.
-    const float roughness = clamp(rough, 0.045, 1.0);
-    float alpha = roughness * roughness;
-    if (push.specular_aa != 0) {
-        const float kernel = min(2.0 * k_specular_aa_variance * variance, k_specular_aa_limit);
-        alpha = sqrt(saturate(alpha * alpha + kernel));
-    }
+    const float alpha = lobe_alpha(rough, variance);
     const float metallic = saturate(metal);
     const float3 f0 = lerp(float3(0.04, 0.04, 0.04), base, metallic);
     const float3 diffuse_color = base * (1.0 - metallic);
@@ -399,9 +439,11 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
     const float3 fresnel = f_schlick(f0, v_dot_h);
     // The sun's highlight, compensated the same way (Filament).
     const float3 energy = 1.0 + f0 * (1.0 / max(ess, 0.05) - 1.0);
-    const float3 specular = d_ggx(n_dot_h, alpha) * v_smith(n_dot_v, n_dot_l, alpha) * fresnel * energy;
+    const float3 specular =
+        highlight(lobes, alpha, rough, variance, 0.0, n_dot_h, n_dot_v, n_dot_l) * fresnel * energy;
     const float3 diffuse = (1.0 - fresnel) * diffuse_color / k_pi;
     float3 color = (diffuse + specular) * f.sun_light.rgb * (n_dot_l * sun);
+    diffuse_part = diffuse * f.sun_light.rgb * (n_dot_l * sun);
 
     // Ambient: the sky's light from all round (or the hemisphere of sky
     // above, ground below), for diffuse along the normal and for specular
@@ -436,6 +478,7 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
     // between microfacets comes from all round, like diffuse light.
     const float3 diffuse_weight = diffuse_color * saturate(1.0 - fss_ess - fms_ems);
     color += (diffuse_weight + fms_ems) * ambient_diffuse + spec_weight * ambient_specular;
+    diffuse_part += diffuse_weight * ambient_diffuse;
     return color + emissive;
 }
 
@@ -444,8 +487,9 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
 // the same energy compensation), with highlights widened by the source's
 // size (Karis 2013; the widened lobe keeps its energy). No shadows yet.
 float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n, float3 surface_n, float3 base,
-                      float rough, float metal, float variance) {
+                      float rough, float metal, float variance, Lobes lobes, out float3 diffuse_part) {
     float3 sum = float3(0.0, 0.0, 0.0);
+    diffuse_part = sum;
     if (e.local.count == 0u) {
         return sum;
     }
@@ -456,12 +500,7 @@ float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n
         return sum;
     }
     const float3 v = safe_normalize(-world, n);
-    const float roughness = clamp(rough, 0.045, 1.0);
-    float alpha = roughness * roughness;
-    if (push.specular_aa != 0) {
-        const float kernel = min(2.0 * k_specular_aa_variance * variance, k_specular_aa_limit);
-        alpha = sqrt(saturate(alpha * alpha + kernel));
-    }
+    const float alpha = lobe_alpha(rough, variance);
     const float metallic = saturate(metal);
     const float3 f0 = lerp(float3(0.04, 0.04, 0.04), base, metallic);
     const float3 diffuse_color = base * (1.0 - metallic);
@@ -495,11 +534,13 @@ float3 local_lighting(Extras e, Frame f, float2 position, float3 world, float3 n
         const float3 h = safe_normalize(v + l, n);
         const float n_dot_h = saturate(dot(n, h));
         const float v_dot_h = saturate(dot(v, h));
-        const float wide = saturate(alpha + light.source_radius * inv_d * 0.5);
+        const float widen = light.source_radius * inv_d * 0.5;
         const float3 fresnel = f_schlick(f0, v_dot_h);
-        const float3 specular = d_ggx(n_dot_h, wide) * v_smith(n_dot_v, n_dot_l, wide) * fresnel * energy;
+        const float3 specular =
+            highlight(lobes, alpha, rough, variance, widen, n_dot_h, n_dot_v, n_dot_l) * fresnel * energy;
         const float3 diffuse = (1.0 - fresnel) * diffuse_color / k_pi;
         sum += (diffuse + specular) * light.color * (falloff * n_dot_l);
+        diffuse_part += diffuse * light.color * (falloff * n_dot_l);
     }
     return sum;
 }
@@ -589,27 +630,35 @@ uint pack_octahedral(float3 n) {
     return q.x | (q.y << 16);
 }
 
-struct Output {
-    float4 radiance : SV_Target0; // before exposure; a: 1 to tone map, 0 as it is (background, debug views)
-    uint2 gloss : SV_Target1;     // x: the screen reflection's weight (10:10:10; 0: none), y: the normal
-    float4 reflected : SV_Target2; // rgb: the reflected light shading used, which the screen's replaces
+// What a pixel's shading gives (each entry point writes what it has
+// targets for).
+struct Shaded {
+    float4 radiance;  // before exposure; a: 1 to tone map, 0 as it is (background, debug views)
+    uint2 gloss;      // x: the screen reflection's weight (10:10:10; 0: none), y: the normal
+    float4 reflected; // rgb: the reflected light shading used, which the screen's replaces
+    float4 subsurface; // skin: rgb its light to spread (left out of radiance), a its scatter in metres (0: none)
 };
 
-Output plain_output(float3 color) {
-    Output o;
+Shaded plain_output(float3 color) {
+    Shaded o;
     o.radiance = float4(color, 0.0);
     o.gloss = uint2(0u, 0u);
     o.reflected = float4(0.0, 0.0, 0.0, 0.0);
+    o.subsurface = float4(0.0, 0.0, 0.0, 0.0);
     return o;
 }
 
-Output lit_output(float3 color) {
-    Output o = plain_output(min(color, float3(60000.0, 60000.0, 60000.0)));
+Shaded lit_output(float3 color) {
+    Shaded o = plain_output(min(color, float3(60000.0, 60000.0, 60000.0)));
     o.radiance.a = 1.0;
     return o;
 }
 
-Output shade_pixel(float4 position) {
+static const uint k_skin_look_bytes = 32; // gpu::SkinLook
+
+// `spread`: skin's diffuse light goes to Shaded::subsurface (for
+// subsurface.slang to spread) instead of radiance.
+Shaded shade_pixel(float4 position, bool spread) {
     const uint2 pixel = uint2(position.xy);
     const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
     const Frame f = load_frame(push.frame, push.frame_offset);
@@ -682,9 +731,10 @@ Output shade_pixel(float4 position) {
                 }
                 float3 spec_weight;
                 float3 spec_light;
+                float3 far_diffuse;
                 float3 color = shade(extras, f, world, far_n, albedo, far_rough, far_metal, float3(0.0, 0.0, 0.0), 0.0,
                                      sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, 1.0, float3(0.0, 0.0, 0.0),
-                                     float3(0.0, 0.0, 0.0), spec_weight, spec_light);
+                                     float3(0.0, 0.0, 0.0), one_lobe(), spec_weight, spec_light, far_diffuse);
                 float far_through = 1.0;
                 if (sky_on) {
                     color = under_sky(sky, color, dir, t, pixel, far_through);
@@ -746,6 +796,21 @@ Output shade_pixel(float4 position) {
         // Two-sided, seen from behind: lit as the side facing the viewer.
         surface_n = -surface_n;
         n = -n;
+    }
+    // Skin: its look (two lobes; its spread with `spread`).
+    Lobes lobes = one_lobe();
+    float scatter = 0.0;
+    float scatter_strength = 0.0;
+    const uint skin_look = ((material_flags >> k_material_look_shift) & 255u);
+    if ((material_flags & k_material_skin) != 0u && skin_look >= 1u && skin_look <= extras.skin_look_count) {
+        ByteAddressBuffer looks = read_buffer(extras.skin_looks);
+        const uint at = extras.skin_looks_offset + (skin_look - 1u) * k_skin_look_bytes;
+        const float4 a = asfloat(looks.Load4(at));
+        lobes.on = true;
+        lobes.scale = a.zw;
+        lobes.mix = asfloat(looks.Load(at + 16));
+        scatter = a.x;
+        scatter_strength = spread ? saturate(a.y) : 0.0;
     }
     const float canopy = asfloat(materials.Load(material_at + 60));
     if (canopy > 0.0) {
@@ -830,9 +895,16 @@ Output shade_pixel(float4 position) {
         bounced = c.rgb * occlusion;
         occlusion *= c.a;
     }
+    float3 diffuse_sun;
+    float3 diffuse_lamps;
     float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
-                         occlusion, bend, bounced, spec_weight, spec_light);
-    color += local_lighting(extras, f, position.xy, world, n, surface_n, base, rough, metal, variance);
+                         occlusion, bend, bounced, lobes, spec_weight, spec_light, diffuse_sun);
+    color += local_lighting(extras, f, position.xy, world, n, surface_n, base, rough, metal, variance, lobes, diffuse_lamps);
+    // Skin's spread light, left out here (added back spread, past the fog:
+    // dimmed by the fog's average over the channels, and not by falling
+    // rain or snow drawn over it; small at the distances skin shows).
+    const float3 spread_light = (diffuse_sun + diffuse_lamps) * scatter_strength;
+    color -= spread_light;
     if (translucency > 0.0) {
         // Thin surfaces lit from behind: the sun through them, tinted by
         // their colour, shadowed as the side facing it (the leaf itself
@@ -848,7 +920,10 @@ Output shade_pixel(float4 position) {
         color = under_sky(sky, color, view_dir, length(world), pixel, through);
     }
     color = apply_dust(extras, f, color, view_dir, length(world), through);
-    Output o = lit_output(color);
+    Shaded o = lit_output(color);
+    if (scatter_strength > 0.0) {
+        o.subsurface = float4(min(spread_light * through, float3(60000.0, 60000.0, 60000.0)), scatter);
+    }
     const float screen_weight =
         (extras.reflect_on & 2u) != 0u ? saturate((k_screen_reflection_rough - rough) / k_reflection_fade) : 0.0;
     const uint3 q = uint3(round(saturate(spec_weight * (screen_weight * through)) * 1023.0));
@@ -857,14 +932,59 @@ Output shade_pixel(float4 position) {
     return o;
 }
 
+struct Output {
+    float4 radiance : SV_Target0;
+    uint2 gloss : SV_Target1;
+    float4 reflected : SV_Target2;
+};
+
 // With screen reflections: the three targets for reflect.slang to finish.
 [shader("pixel")]
 Output ps_main(float4 position : SV_Position) {
-    return shade_pixel(position);
+    const Shaded s = shade_pixel(position, false);
+    Output o;
+    o.radiance = s.radiance;
+    o.gloss = s.gloss;
+    o.reflected = s.reflected;
+    return o;
 }
 
 // Without: the light alone, for post.slang.
 [shader("pixel")]
 float4 ps_direct(float4 position : SV_Position) : SV_Target {
-    return shade_pixel(position).radiance;
+    return shade_pixel(position, false).radiance;
+}
+
+// With skin spreading its light (subsurface.slang): the same, and the
+// skin's light to spread.
+struct OutputSpread {
+    float4 radiance : SV_Target0;
+    uint2 gloss : SV_Target1;
+    float4 reflected : SV_Target2;
+    float4 subsurface : SV_Target3;
+};
+
+[shader("pixel")]
+OutputSpread ps_spread(float4 position : SV_Position) {
+    const Shaded s = shade_pixel(position, true);
+    OutputSpread o;
+    o.radiance = s.radiance;
+    o.gloss = s.gloss;
+    o.reflected = s.reflected;
+    o.subsurface = s.subsurface;
+    return o;
+}
+
+struct DirectSpread {
+    float4 radiance : SV_Target0;
+    float4 subsurface : SV_Target1;
+};
+
+[shader("pixel")]
+DirectSpread ps_direct_spread(float4 position : SV_Position) {
+    const Shaded s = shade_pixel(position, true);
+    DirectSpread o;
+    o.radiance = s.radiance;
+    o.subsurface = s.subsurface;
+    return o;
 }
