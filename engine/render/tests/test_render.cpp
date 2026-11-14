@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -3864,6 +3865,45 @@ GIANT_TEST("render: d3d12 skin lets the sun and a shadowed lamp through a thin s
                                     : std::array<int, 3>{-1, -1, -1};
     };
     const auto sun_thin = draw(true, false);
+    {
+        // (Diagnosis: what the pages hold under the middle, against the
+        // slab's top and bottom, millimetres nearer the sun.)
+        ShadowPages& pages = renderer->shadow_pages();
+        const std::vector<u8> atlas = device->read_buffer(renderer->shadow_atlas());
+        const DVec3 camera = frame.view.position;
+        const double range = pages.desc().depth_range;
+        const auto depth_of = [&](const DVec3& p) {
+            return 0.5 - (pages.to_light(p).z - pages.to_light(camera).z) / range + pages.depth_offset(camera);
+        };
+        const DVec3 top{300.0, 0.0075, 0.0};
+        const DVec3 bottom{300.0, -0.0075, 0.0};
+        const ShadowPages::Basis& b = pages.basis();
+        std::printf("    (diagnosis: z %.3f %.3f %.3f, top %.9f bottom %.9f, atlas %zu bytes)\n", b.z.x, b.z.y, b.z.z,
+                    depth_of(top), depth_of(bottom), atlas.size());
+        for (u32 level = 0; level < 4; ++level) {
+            const u32 entry = pages.entry_at(level, top);
+            const DVec3 l = pages.to_light(top);
+            const double texel = pages.texel_size(level);
+            const i64 tx = i64(std::floor(l.x / texel));
+            const i64 ty = i64(std::floor(l.y / texel));
+            std::printf("    (diagnosis: level %u entry %08x texel %lld %lld:", level, entry, static_cast<long long>(tx),
+                        static_cast<long long>(ty));
+            if (entry != ShadowPages::k_no_page) {
+                for (i64 dy = -1; dy <= 1; ++dy) {
+                    for (i64 dx = -1; dx <= 1; ++dx) {
+                        const i64 m = ShadowPages::k_page_texels;
+                        const i64 lx = (((tx + dx) % m) + m) % m;
+                        const i64 ly = (((ty + dy) % m) + m) % m;
+                        const usize at = (usize(entry & ShadowPages::k_page_mask) * usize(m * m) + usize(ly * m + lx)) * 4;
+                        float stored = 0.0f;
+                        if (at + 4 <= atlas.size()) std::memcpy(&stored, atlas.data() + at, 4);
+                        std::printf(" %.2f", (double(stored) - depth_of(top)) * range * 1000.0);
+                    }
+                }
+            }
+            std::printf(")\n");
+        }
+    }
     // On a slant (45 degrees) the path is longer: dimmer, still red.
     sun_direction = normalize_or_zero(Vec3{1.0f, -1.0f, 0.0f});
     const auto sun_slant = draw(true, false);

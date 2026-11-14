@@ -1086,6 +1086,9 @@ public:
     std::vector<VoxelProbeLevel> probe_voxels(const DVec3& position) const;
     // The sun's shadow pages (src/shadow_pages.h; tests and tools).
     ShadowPages& shadow_pages() { return *m_shadows; }
+    // Their depths (u32 per texel, page after page; tests: read after
+    // Device::wait_idle).
+    rhi::BufferHandle shadow_atlas() const { return m_shadow_atlas; }
     // GPU culling: reads the newest GPU counts now. Only after
     // Device::wait_idle (tests, screenshots), outside a frame.
     void read_gpu_stats();
