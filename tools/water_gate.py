@@ -414,7 +414,7 @@ def main() -> int:
 
         flown = editor.fly(path, each_stop, marks=(lake_end, river_end))
         times = frame_stats(flown)
-        slow = slow_frames(flown, editor.slow, editor.typicals)
+        slow = slow_frames(flown, editor.slow, editor.typicals, editor.slow_over_ms)
         if slow:
             print(f"water_gate: {slow}")
         print(f"water_gate: frame time over the flight ({times['frames']} frames sampled): {describe(times)}")
