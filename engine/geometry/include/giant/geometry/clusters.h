@@ -134,6 +134,10 @@ struct LodView {
     float near_plane = 0.1f;
     float threshold_pixels = 1.0f;
     const Frustum* frustum = nullptr; // null: no culling
+    // How far (mesh units) any vertex may sit from where the LOD spheres
+    // have it: a skinned mesh's pose, its spheres at bind. Every sphere
+    // widens by it (the same for all keeps the cut whole).
+    float pose_reach = 0.0f;
 };
 
 // The error of `bounds` on screen, in pixels; larger for coarser geometry

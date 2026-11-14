@@ -323,3 +323,109 @@ GIANT_TEST("streaming: many meshes added in one frame load their coarsest levels
     // At most about 2.5 meshes a frame: the 64 took many frames.
     GIANT_CHECK(frames >= k_meshes * 2 / 5);
 }
+
+GIANT_TEST("streaming: a posed mesh shows its depths from a floor that follows what is asked for") {
+    Bench b(64ull << 20);
+    GIANT_CHECK(b.streamer->init());
+    GIANT_CHECK(b.mesh.levels >= 3);
+    const u32 coarsest = b.mesh.levels - 1;
+    std::vector<gpu::Cluster> clusters(b.mesh.clusters.size());
+    GIANT_CHECK(b.streamer->add(0, b.mesh, clusters, true));
+    GIANT_CHECK(b.add(1)); // the same, not posed
+    // Parents are always deeper (coarser): a floor by depth keeps every
+    // shown group's parents shown, so the cut stays whole.
+    for (u32 g = 0; g < b.mesh.groups.size(); ++g) {
+        for (const u32 p : b.links.parents_of(g)) GIANT_CHECK(b.mesh.groups[p].depth > b.mesh.groups[g].depth);
+    }
+    const auto shown_closed = [&](u32 id) {
+        const std::vector<u8>& s = b.streamer->shown(id);
+        for (u32 g = 0; g < s.size(); ++g) {
+            if (s[g] == 0) continue;
+            for (const u32 p : b.links.parents_of(g)) {
+                if (s[p] == 0) return false;
+            }
+        }
+        return true;
+    };
+    const auto shown_finest = [&](u32 id) {
+        const std::vector<u8>& s = b.streamer->shown(id);
+        u32 finest = ~0u;
+        for (u32 g = 0; g < s.size(); ++g) {
+            if (s[g] != 0 && !geometry::is_root_group(b.mesh.groups[g])) finest = std::min(finest, b.mesh.groups[g].depth);
+        }
+        return finest;
+    };
+    b.step();
+    GIANT_CHECK(b.streamer->ready(0) && b.streamer->ready(1));
+    GIANT_CHECK(b.streamer->floor(0) == coarsest && b.streamer->floor(1) == 0);
+
+    // Asked for the finest groups: they load, the floor drops to them, and
+    // they show (the shown version moves: the pose pass poses them).
+    std::vector<u32> finest;
+    for (u32 g = 0; g < b.mesh.groups.size(); ++g) {
+        if (b.mesh.groups[g].depth == 0) finest.push_back(g);
+    }
+    const u32 version = b.streamer->shown_version(0);
+    b.streamer->want(0, finest);
+    b.streamer->want(1, finest);
+    b.step();
+    GIANT_CHECK(b.loaded(0) == b.mesh.groups.size());
+    GIANT_CHECK(b.streamer->floor(0) == 0 && shown_finest(0) == 0 && shown_closed(0));
+    GIANT_CHECK(b.streamer->shown_version(0) != version);
+    GIANT_CHECK(b.streamer->shown(1) == b.streamer->resident(1)); // unposed: shown is loaded
+
+    // The renderer's aim is coarse, but the finest groups stay in use: the
+    // floor stays.
+    for (u32 i = 0; i < GeometryStreamer::k_keep_frames + 20; ++i) {
+        b.streamer->aim_floor(0, coarsest);
+        b.streamer->touch(0, finest, b.frame + 1);
+        b.step();
+    }
+    GIANT_CHECK(b.streamer->floor(0) == 0);
+    // Used no more: after a while the floor rises to the aim; the groups
+    // stay loaded but hide (raising moves no version: nothing new to pose).
+    const u32 before_rise = b.streamer->shown_version(0);
+    for (u32 i = 0; i < GeometryStreamer::k_keep_frames + 2 * GeometryStreamer::k_usage_interval; ++i) {
+        b.streamer->aim_floor(0, 1);
+        b.step();
+    }
+    GIANT_CHECK(b.streamer->floor(0) == 1);
+    GIANT_CHECK(shown_finest(0) == 1 && shown_closed(0));
+    GIANT_CHECK(b.loaded(0) == b.mesh.groups.size());
+    GIANT_CHECK(b.streamer->shown_version(0) == before_rise);
+    for (const u32 g : finest) GIANT_CHECK(b.streamer->resident(0)[g] != 0 && b.streamer->shown(0)[g] == 0);
+    // An aim below the floor lowers it at the next update.
+    b.streamer->aim_floor(0, 0);
+    b.step();
+    GIANT_CHECK(b.streamer->floor(0) == 0 && shown_finest(0) == 0 && b.streamer->shown_version(0) != before_rise);
+    // Terminal groups always show, whatever the floor.
+    for (u32 i = 0; i < GeometryStreamer::k_keep_frames + 2 * GeometryStreamer::k_usage_interval; ++i) {
+        b.streamer->aim_floor(0, coarsest);
+        b.step();
+    }
+    GIANT_CHECK(b.streamer->floor(0) == coarsest);
+    for (u32 g = 0; g < b.mesh.groups.size(); ++g) {
+        if (geometry::is_root_group(b.mesh.groups[g])) GIANT_CHECK(b.streamer->shown(0)[g] != 0);
+    }
+    // A usage mark on a hidden group (loaded), as a shadow cull leaves
+    // one (it asks for no loads), lowers the floor at the next update.
+    const u32 before_mark = b.streamer->shown_version(0);
+    b.streamer->aim_floor(0, coarsest); // (the renderer aims before the update, which reads the marks)
+    b.streamer->mark_used(0, finest[0], b.frame + 1);
+    b.step();
+    GIANT_CHECK(b.streamer->floor(0) == 0 && shown_finest(0) == 0 && shown_closed(0));
+    GIANT_CHECK(b.streamer->shown_version(0) != before_mark);
+    for (u32 i = 0; i < GeometryStreamer::k_keep_frames + 2 * GeometryStreamer::k_usage_interval; ++i) {
+        b.streamer->aim_floor(0, coarsest);
+        b.step();
+    }
+    GIANT_CHECK(b.streamer->floor(0) == coarsest);
+    // A request for a hidden group (loaded) lowers the floor too.
+    b.streamer->want(0, finest);
+    b.step();
+    GIANT_CHECK(b.streamer->floor(0) == 0 && shown_finest(0) == 0 && shown_closed(0));
+    // Unposed meshes ignore aims.
+    b.streamer->aim_floor(1, coarsest);
+    b.step();
+    GIANT_CHECK(b.streamer->floor(1) == 0);
+}

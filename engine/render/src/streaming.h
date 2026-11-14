@@ -123,13 +123,33 @@ public:
     // Its terminal groups load from the next update on, within the per-frame
     // budget; it draws once they are all in (ready). False (logged) when a
     // cluster is over the limits or the GPU is out of memory.
-    bool add(u32 mesh, const geometry::ClusterMesh& data, std::vector<gpu::Cluster>& clusters);
+    //
+    // A posed mesh (skinned: a pass moves its loaded vertices to a pose)
+    // shows only its groups from a floor depth up, plus its terminal ones:
+    // the rest count as not loaded for culling, so the pose pass need not
+    // move detail no view draws. See aim_floor.
+    bool add(u32 mesh, const geometry::ClusterMesh& data, std::vector<gpu::Cluster>& clusters, bool posed = false);
     void remove(u32 mesh);
 
     // True once a mesh's terminal groups are loaded: only then can it draw.
     bool ready(u32 mesh) const;
-    // Per group of a mesh: nonzero while loaded (CPU culling).
+    // Per group of a mesh: nonzero while loaded and shown (CPU culling;
+    // the residency table on the GPU holds the same).
+    const std::vector<u8>& shown(u32 mesh) const;
+    // Per group of a mesh: nonzero while loaded.
     const std::vector<u8>& resident(u32 mesh) const;
+    // A posed mesh's floor: groups finer (shallower) than this depth are
+    // hidden, terminal groups excepted. A request for a hidden group lowers
+    // it at the next update (coarser clusters stand in meanwhile, as for any
+    // group not loaded); it rises to the aim once no group below the aim
+    // was used or asked for in k_keep_frames. The aim is the coarsest floor
+    // the renderer's own estimate (the camera's) allows: below the floor, it
+    // lowers it at the next update too. Unposed meshes: always 0.
+    void aim_floor(u32 mesh, u32 depth);
+    u32 floor(u32 mesh) const;
+    // Changes whenever one of a mesh's groups starts showing (loaded, or
+    // the floor lowered): a posed mesh's new groups hold the bind pose then.
+    u32 shown_version(u32 mesh) const;
     rhi::BufferHandle residency_table(u32 mesh) const;
     u32 group_base(u32 mesh) const;
 
@@ -140,6 +160,10 @@ public:
     // Wanted and used groups found by CPU culling this frame.
     void want(u32 mesh, std::span<const u32> groups);
     void touch(u32 mesh, std::span<const u32> groups, u32 frame_number);
+    // A usage mark as GPU culling leaves it (read back): `mark` is the
+    // frame that reached the group, loaded or not. read_usage feeds these;
+    // public for tests.
+    void mark_used(u32 mesh, u32 group, u32 mark);
     // Requests GPU culling recorded in a frame whose counters were read back
     // in `slot` (read when the GPU is done with it), `count` as counted.
     void take_gpu_requests(u32 slot, u32 count);
@@ -169,6 +193,13 @@ private:
         std::vector<u32> depth;
         std::vector<u8> root;
         std::vector<u8> resident;
+        std::vector<u8> shown;      // resident, and not hidden under the floor
+        bool posed = false;
+        u32 floor = 0;
+        u32 aim = 0;
+        u32 coarsest = 0;           // the deepest group's depth
+        u32 held_until = 0;         // update count: the floor stays this low until then
+        u32 shown_version = 0;
         std::vector<u64> pool_unit; // per loaded group: first unit in the pool
         std::vector<u32> last_used; // frame number
         std::vector<u32> loaded_children;
@@ -190,9 +221,15 @@ private:
     u64 units_of(const MeshState& m, u32 group) const;
     bool load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 group, u32 frame_number, bool& pool_writable);
     void evict(MeshState& m, u32 group);
+    static bool shows(const MeshState& m, u32 group) {
+        return m.resident[group] != 0 && (m.root[group] != 0 || m.depth[group] >= m.floor);
+    }
+    void set_floor(MeshState& m, u32 floor);
+    void move_floors(u32 frame_number);
     bool make_room(u64 units, u32 frame_number);
     static bool evictable(const MeshState& m, u32 group, u32 frame_number);
     void read_usage();
+    void note_usage(MeshState& m, u32 group, u32 mark);
     bool grow_usage(rhi::CommandList* cmd); // null: at init, nothing to copy
 
     rhi::Device& m_device;

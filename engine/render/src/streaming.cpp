@@ -169,7 +169,8 @@ void ClusterPacking::pack(const geometry::ClusterMesh& data, u32 cluster) {
     }
 }
 
-bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vector<gpu::Cluster>& clusters) {
+bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vector<gpu::Cluster>& clusters,
+                           bool posed) {
     GIANT_ASSERT(clusters.size() == data.clusters.size(), "one gpu cluster per cluster");
     MeshState m;
     const usize groups = data.groups.size();
@@ -217,6 +218,14 @@ bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vec
         m.root[g] = geometry::is_root_group(data.groups[g]) ? 1 : 0;
     }
     m.resident.assign(groups, 0);
+    m.shown.assign(groups, 0);
+    // A posed mesh starts coarsest: views that want more ask for it.
+    for (u32 g = 0; g < groups; ++g) {
+        m.coarsest = std::max(m.coarsest, m.depth[g]);
+    }
+    m.posed = posed;
+    m.floor = posed ? m.coarsest : 0;
+    m.aim = m.floor;
     m.pool_unit.assign(groups, k_no_unit);
     m.last_used.assign(groups, 0);
     m.loaded_children.assign(groups, 0);
@@ -304,6 +313,59 @@ const std::vector<u8>& GeometryStreamer::resident(u32 mesh) const {
     return mesh < m_meshes.size() ? m_meshes[mesh].resident : none;
 }
 
+const std::vector<u8>& GeometryStreamer::shown(u32 mesh) const {
+    static const std::vector<u8> none;
+    return mesh < m_meshes.size() ? m_meshes[mesh].shown : none;
+}
+
+void GeometryStreamer::aim_floor(u32 mesh, u32 depth) {
+    if (mesh < m_meshes.size() && m_meshes[mesh].live && m_meshes[mesh].posed) {
+        m_meshes[mesh].aim = std::min(depth, m_meshes[mesh].coarsest);
+    }
+}
+
+u32 GeometryStreamer::floor(u32 mesh) const { return mesh < m_meshes.size() ? m_meshes[mesh].floor : 0; }
+
+u32 GeometryStreamer::shown_version(u32 mesh) const {
+    return mesh < m_meshes.size() ? m_meshes[mesh].shown_version : 0;
+}
+
+void GeometryStreamer::set_floor(MeshState& m, u32 floor) {
+    if (floor == m.floor) {
+        return;
+    }
+    if (floor < m.floor) {
+        ++m.shown_version; // groups come to show, holding whatever pose they had
+    }
+    m.floor = floor;
+    for (u32 g = 0; g < m.shown.size(); ++g) {
+        m.shown[g] = shows(m, g) ? 1 : 0;
+    }
+    m.table_dirty = true;
+}
+
+void GeometryStreamer::move_floors(u32 frame_number) {
+    // Raising looks at every group of a mesh: only every few updates.
+    const bool raise = m_updates % k_usage_interval == 0;
+    for (MeshState& m : m_meshes) {
+        if (!m.live || !m.posed) continue;
+        if (m.aim < m.floor) {
+            set_floor(m, m.aim);
+            continue;
+        }
+        if (m.aim == m.floor || !raise || later(m.held_until, m_updates)) continue;
+        // As high as the aim, but not over a group in use or asked for of late.
+        u32 floor = m.aim;
+        for (u32 g = 0; g < m.depth.size(); ++g) {
+            if (m.depth[g] < floor && m.root[g] == 0 && m.last_used[g] != 0 &&
+                !(frame_number - m.last_used[g] > k_keep_frames && later(frame_number, m.last_used[g]))) {
+                floor = m.depth[g];
+            }
+        }
+        set_floor(m, std::max(floor, m.floor));
+    }
+}
+
 rhi::BufferHandle GeometryStreamer::residency_table(u32 mesh) const {
     return mesh < m_meshes.size() ? m_meshes[mesh].table : rhi::BufferHandle{};
 }
@@ -379,6 +441,8 @@ bool GeometryStreamer::load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 g
     }
     cmd.copy_buffer(m_pool, at * k_unit, upload.buffer, upload.offset, bytes);
     m.resident[group] = 1;
+    m.shown[group] = shows(m, group) ? 1 : 0;
+    m.shown_version += m.shown[group];
     ++m_stats.resident_groups;
     m.pool_unit[group] = at;
     m.last_used[group] = frame_number;
@@ -395,6 +459,7 @@ void GeometryStreamer::evict(MeshState& m, u32 group) {
                  "evicting a group that must stay");
     m_alloc.free(m.pool_unit[group], units_of(m, group));
     m.resident[group] = 0;
+    m.shown[group] = 0;
     --m_stats.resident_groups;
     m.pool_unit[group] = k_no_unit;
     for (const u32 p : m.links.parents_of(group)) {
@@ -484,6 +549,25 @@ bool GeometryStreamer::grow_usage(rhi::CommandList* cmd) {
     return true;
 }
 
+void GeometryStreamer::note_usage(MeshState& m, u32 g, u32 mark) {
+    if (mark == 0 || !later(mark, m.last_used[g])) {
+        return;
+    }
+    m.last_used[g] = mark;
+    // A view reached a posed mesh's loaded group hidden under its floor
+    // (shadows ask for no loads, but mark it so): it shows at the update.
+    if (m.posed && m.resident[g] != 0 && m.shown[g] == 0) {
+        m.aim = std::min(m.aim, m.depth[g]);
+        m.held_until = m_updates + 1 + k_keep_frames;
+    }
+}
+
+void GeometryStreamer::mark_used(u32 mesh, u32 group, u32 mark) {
+    if (mesh < m_meshes.size() && m_meshes[mesh].live && group < m_meshes[mesh].last_used.size()) {
+        note_usage(m_meshes[mesh], group, mark);
+    }
+}
+
 void GeometryStreamer::read_usage() {
     if (m_usage_readback_frame == ~u64{0} ||
         m_usage_readback_frame + rhi::Device::k_frames_in_flight > m_device.frames_completed()) {
@@ -501,9 +585,7 @@ void GeometryStreamer::read_usage() {
             if (global >= m_usage_readback_groups) break;
             u32 mark;
             std::memcpy(&mark, bytes + global * 4, 4);
-            if (mark != 0 && later(mark, m.last_used[g])) {
-                m.last_used[g] = mark;
-            }
+            note_usage(m, g, mark);
         }
     }
 }
@@ -545,12 +627,20 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
             } else {
                 todo.push_back(q);
             }
+            // Asked for under a posed mesh's floor: it shows once loaded.
+            if (m.posed && m.root[q.group] == 0 && m.depth[q.group] < m.floor) {
+                m.aim = std::min(m.aim, m.depth[q.group]);
+                m.held_until = mark + k_keep_frames;
+            }
             for (const u32 p : m.links.parents_of(q.group)) {
                 stack.push_back({q.mesh, p});
             }
         }
     }
     m_wanted.clear();
+    // Posed meshes' floors, before loading: a group loaded under the floor
+    // stays hidden, so what was asked for shows the update it loads.
+    move_floors(frame_number);
     // This frame's loads, terminal groups and detail alike, stay within the
     // budget; the first load of a frame always goes, so a group larger than
     // the budget still loads (alone).
@@ -640,7 +730,7 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         if (!m.live || !m.table_dirty) continue;
         table.assign(m.resident.size(), gpu::k_not_resident);
         for (u32 g = 0; g < m.resident.size(); ++g) {
-            if (m.resident[g] != 0) {
+            if (m.shown[g] != 0) {
                 table[g] = static_cast<u32>(m.pool_unit[g] * k_unit);
             }
         }

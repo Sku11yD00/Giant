@@ -204,7 +204,7 @@ void test_cluster(Frame f, uint instance, Instance inst, MeshEntry mesh, uint in
     const Cluster c = load_cluster(read_buffer_nonuniform(mesh.clusters), index);
     if (c.refined != k_no_group && group_offset(mesh, c.refined) != k_not_resident) {
         const Group finer = load_group(read_buffer_nonuniform(mesh.groups), c.refined);
-        if (projected_error(f, inst, finer.bounds, finer.error) > f.threshold) {
+        if (projected_error(f, inst, finer.bounds, finer.error, mesh.pose_reach) > f.threshold) {
             return; // a finer version is drawn instead
         }
     }
@@ -241,7 +241,7 @@ void cs_traverse(uint3 id : SV_DispatchThreadID) {
     const MeshEntry mesh = mesh_of(inst);
     const Node node = load_node(read_buffer_nonuniform(mesh.nodes), item.y);
     // Precise enough for this view: everything below is drawn coarser.
-    if (projected_error(f, inst, node.bounds, node.error) <= f.threshold) {
+    if (projected_error(f, inst, node.bounds, node.error, mesh.pose_reach) <= f.threshold) {
         return;
     }
     if (node.group == k_no_group) {
@@ -255,7 +255,7 @@ void cs_traverse(uint3 id : SV_DispatchThreadID) {
         return;
     }
     const Group group = load_group(read_buffer_nonuniform(mesh.groups), node.group);
-    if (projected_error(f, inst, group.bounds, group.error) <= f.threshold) {
+    if (projected_error(f, inst, group.bounds, group.error, mesh.pose_reach) <= f.threshold) {
         return;
     }
     // Needed here. Not loaded: ask for it; the coarser clusters made from

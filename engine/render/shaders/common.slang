@@ -256,7 +256,7 @@ struct MeshEntry {
     uint groups;
     uint nodes;
     uint levels; // 0: no mesh (removed); nothing is drawn
-    uint pad1;
+    float pose_reach; // skinned: how far a pose may move a vertex from bind (LOD spheres widen by it); else 0
     float4 bounds; // whole mesh: centre, radius
 };
 static const uint k_mesh_bytes = 48;
@@ -272,7 +272,7 @@ MeshEntry load_mesh(ByteAddressBuffer b, uint at) {
     m.groups = c.x;
     m.nodes = c.y;
     m.levels = c.z;
-    m.pad1 = c.w;
+    m.pose_reach = asfloat(c.w);
     m.bounds = load4(b, at + 32);
     return m;
 }
@@ -420,12 +420,14 @@ uint3 cluster_triangle(ByteAddressBuffer pool, uint base, Cluster c, uint triang
 // --- LOD and culling (as geometry::projected_error and select_clusters) -------------
 
 // Pixels the error of `bounds` (mesh space) covers for instance `i`.
-float projected_error(Frame f, Instance i, float4 bounds, float error) {
+// `reach` widens the sphere (mesh units): a skinned mesh's LOD spheres are
+// at bind and its pose moves no vertex further than that.
+float projected_error(Frame f, Instance i, float4 bounds, float error, float reach) {
     if (error >= k_terminal_error) {
         return 1.0e30; // never replaced: always "too coarse to swap for something coarser"
     }
     const float3 c = to_world(i, bounds.xyz);
-    const float d = length(c) - bounds.w * i.max_scale;
+    const float d = length(c) - (bounds.w + reach) * i.max_scale;
     return error * i.max_scale / max(d, f.near_plane) * f.pixels_per_unit;
 }
 

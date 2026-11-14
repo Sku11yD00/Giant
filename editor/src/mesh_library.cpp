@@ -132,7 +132,8 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     std::shared_ptr<Skinned> skinned;
     if (imported.skinned) {
         skinned = std::make_shared<Skinned>();
-        skinned->clusters = geometry::build_skinned_clusters(imported.skinned->mesh);
+        // With its levels of detail: far characters draw (and pose) coarse.
+        skinned->clusters = geometry::build_skinned_clusters(imported.skinned->mesh, true);
         imported.skinned->mesh = {};
         if (skinned->clusters.mesh.empty() || imported.skinned->skeleton.size() > render::k_max_skin_joints) {
             return {nullptr, path + ": the file's skinned mesh could not be made into clusters"};

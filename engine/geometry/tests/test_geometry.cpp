@@ -1358,3 +1358,29 @@ GIANT_TEST("geometry: the sphere stays closed at every level of detail") {
     }
     GIANT_CHECK(worst == 0);
 }
+
+GIANT_TEST("geometry: a pose's reach makes the cut finer, never coarser") {
+    const ClusterMesh mesh = build_clusters(make_sphere(128, 64));
+    GIANT_CHECK(mesh.levels >= 3);
+    LodView view;
+    view.pixels_per_unit = 1000.0f;
+    bool finer_somewhere = false;
+    for (float z = 2.0f; z < 3000.0f; z *= 1.25f) {
+        view.position = {0.0f, 0.0f, -z};
+        std::vector<u32> plain, reached;
+        view.pose_reach = 0.0f;
+        select_clusters(mesh, view, plain);
+        view.pose_reach = 1.5f;
+        select_clusters(mesh, view, reached);
+        u32 plain_tris = 0, reached_tris = 0;
+        for (const u32 c : plain) plain_tris += mesh.clusters[c].triangle_count;
+        for (const u32 c : reached) reached_tris += mesh.clusters[c].triangle_count;
+        GIANT_CHECK(reached_tris >= plain_tris);
+        finer_somewhere = finer_somewhere || reached_tris > plain_tris;
+        // No cluster picked twice.
+        std::vector<u32> sorted = reached;
+        std::sort(sorted.begin(), sorted.end());
+        GIANT_CHECK(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
+    }
+    GIANT_CHECK(finer_somewhere);
+}
