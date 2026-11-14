@@ -11,8 +11,8 @@
 // from the uvs (generate_tangents, mesh.h).
 // Materials are read as their metallic-roughness values and images
 // (ImportedMaterial; the mesh itself is one, so a drawer picks one of
-// them); morph targets are skipped with a warning; compressed files (Draco,
-// meshopt) are refused.
+// them); morph targets are read for skinned files only (else skipped with a
+// warning); compressed files (Draco, meshopt) are refused.
 //
 // Skinned files. When a mesh the scene shows is skinned, the file is read
 // as one character: `mesh` is it in its rest pose (as if no clip played),
@@ -23,6 +23,21 @@
 // hang under a joint (a sword in a hand) move rigidly with it, and others
 // with the first root joint. Nodes between two joints become joints too
 // (unweighted), so their transforms and animation count. One skin only.
+//
+// Morph targets (blend shapes) of a skinned file's meshes, its rigid parts'
+// too, go to `skinned->mesh.morphs`: each target's position and normal
+// moves at full weight, in bind space, on the vertices it moves (glTF's
+// NORMAL deltas; flat-shaded meshes take their faces' turn), named by the
+// mesh's targetNames (else "<mesh name>#<index>", "mesh#<index>" for an
+// unnamed mesh, so two unnamed meshes' targets merge too) and merged by
+// name over the file's meshes, so one weight moves a face and its teeth (a
+// name repeated within one mesh: the first stands); the rest weight is the
+// first non-zero default weight a node (else its mesh) gives (a skinned
+// mesh shown by several nodes is read once: its first node's). Names are
+// cut to k_max_morph_name_bytes. At most k_max_morph_targets (a mesh with
+// over four times that is refused); tangent deltas are not read (the posed
+// tangent is made perpendicular to the posed normal). `mesh`, the rest
+// pose, is of the base shape: no morph weight applied.
 #pragma once
 
 #include "giant/anim/skeleton.h"

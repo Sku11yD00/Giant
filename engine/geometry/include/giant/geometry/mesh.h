@@ -7,6 +7,7 @@
 
 #include <array>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace giant::geometry {
@@ -69,10 +70,31 @@ struct SkinWeights {
     bool operator==(const SkinWeights&) const = default;
 };
 
-// A mesh in its bind space (giant/anim/skeleton.h), one weight per vertex.
+// One vertex's move under a morph target (blend shape) at full weight:
+// added to its position, and to its normal (renormalised after).
+struct MorphDelta {
+    u32 vertex = 0;
+    Vec3 position{};
+    Vec3 normal{};
+};
+
+// A morph target: the vertices it moves (sparse, in increasing vertex
+// order, each once), its name (unique in its mesh) and the weight the mesh
+// rests at (glTF's default weights).
+struct MorphTarget {
+    std::string name;
+    float weight = 0.0f;
+    std::vector<MorphDelta> deltas;
+};
+inline constexpr u32 k_max_morph_targets = 256;     // per mesh
+inline constexpr usize k_max_morph_name_bytes = 128; // UTF-8
+
+// A mesh in its bind space (giant/anim/skeleton.h), one weight per vertex,
+// and its morph targets (deltas in bind space, applied before skinning).
 struct SkinnedTriangleMesh {
     TriangleMesh mesh;
     std::vector<SkinWeights> weights;
+    std::vector<MorphTarget> morphs;
 };
 
 TriangleMesh make_cube();                                      // 1 m, centred, flat faces
@@ -93,8 +115,9 @@ void compute_normals(TriangleMesh& mesh);
 // when `weights` holds one per vertex). Where the uvs give no direction
 // (none, or degenerate) the tangent is any perpendicular of the normal.
 // Vertices marked non-zero in `keep` (one per vertex, or empty) keep the
-// tangent they have (a file's own) and are never split.
+// tangent they have (a file's own) and are never split. `split_from`, when
+// given, gets the vertex each appended copy was split from, in order.
 void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights = nullptr,
-                       std::span<const u8> keep = {});
+                       std::span<const u8> keep = {}, std::vector<u32>* split_from = nullptr);
 
 } // namespace giant::geometry

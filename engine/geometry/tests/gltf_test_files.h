@@ -106,6 +106,15 @@ struct SkinOptions {
     usize clip_copies = 0;      // more clips all named copy_name
     std::string copy_name = "a";
     bool sparse_weights = false; // weights sparse over an interleaved view
+    // Morph targets: the arm (mesh "arm") gets "smile" (the middle and top
+    // rows 0.1 m out along +z, the top-left's normal turned toward +x) and
+    // "blink" (sparse over zeros: the bottom-left 0.05 m along +x), resting
+    // at weights 0.25 and 0; the sword gets "smile" too (its tip, (1, 0, 0)
+    // where it hangs, 0.5 m out along +z: its flat face turns).
+    bool morphs = false;
+    bool morph_names = true; // targetNames given (else none)
+    bool repeated_names = false; // the arm's targets both named "smile"
+    bool mirrored_uvs = false; // uvs mirrored across the middle row (its vertices split for tangents)
 };
 
 inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
@@ -182,6 +191,39 @@ inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
         extra_weights = R"(,"JOINTS_1":)" + std::to_string(j1a) + R"(,"WEIGHTS_1":)" + std::to_string(w1a);
     }
     const auto n = [](usize i) { return std::to_string(i); };
+    std::string arm_extra, arm_targets, sword_targets, arm_mesh_extra, sword_mesh_extra;
+    if (o.mirrored_uvs) {
+        const usize uv = add(std::vector<float>{0, 1, 1, 1, 0, 0.5f, 1, 0.5f, 0, 1, 1, 1},
+                             R"("componentType":5126,"count":6,"type":"VEC2")");
+        arm_extra += R"(,"TEXCOORD_0":)" + n(uv);
+    }
+    if (o.morphs) {
+        std::vector<float> dp(18, 0.0f), dn(18, 0.0f);
+        for (usize v = 2; v < 6; ++v) dp[v * 3 + 2] = 0.1f;
+        dn[4 * 3] = 0.5f;
+        const usize sp_ = add(dp, R"("componentType":5126,"count":6,"type":"VEC3")");
+        const usize sn_ = add(dn, R"("componentType":5126,"count":6,"type":"VEC3")");
+        const usize ia = bin.size();
+        append(bin, std::vector<u32>{0});
+        views.push_back(R"({"buffer":0,"byteOffset":)" + std::to_string(ia) + R"(,"byteLength":4})");
+        const usize index_view = views.size() - 1;
+        const usize va = bin.size();
+        append(bin, std::vector<float>{0.05f, 0, 0});
+        views.push_back(R"({"buffer":0,"byteOffset":)" + std::to_string(va) + R"(,"byteLength":12})");
+        const usize value_view = views.size() - 1;
+        accessors.push_back(R"({"componentType":5126,"count":6,"type":"VEC3","sparse":{"count":1,"indices":{"bufferView":)" +
+                            n(index_view) + R"(,"componentType":5125},"values":{"bufferView":)" + n(value_view) + "}}}");
+        const usize blink = accessors.size() - 1;
+        const usize tip = add(std::vector<float>{0, 0, 0, 0, 0, 0.5f, 0, 0, 0}, R"("componentType":5126,"count":3,"type":"VEC3")");
+        arm_targets = R"(,"targets":[{"POSITION":)" + n(sp_) + R"(,"NORMAL":)" + n(sn_) + R"(},{"POSITION":)" + n(blink) + "}]";
+        sword_targets = R"(,"targets":[{"POSITION":)" + n(tip) + "}]";
+        arm_mesh_extra = R"("name":"arm","weights":[0.25,0],)";
+        if (o.morph_names) {
+            arm_mesh_extra += o.repeated_names ? R"("extras":{"targetNames":["smile","smile"]},)"
+                                               : R"("extras":{"targetNames":["smile","blink"]},)";
+            sword_mesh_extra = R"("extras":{"targetNames":["smile"]},)";
+        }
+    }
     std::string more_clips;
     if (o.bogus_clip) {
         accessors.push_back(R"({"componentType":5126,"count":6148914691236517206,"type":"SCALAR"})");
@@ -202,9 +244,10 @@ inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
                        R"({"name":"sword","mesh":1,"translation":[0,0.5,0]})" +
                        std::string(o.second_skin ? R"(,{"mesh":0,"skin":1})" : "") +
                        std::string(o.two_nodes ? R"(,{"mesh":0,"skin":0,"translation":[9,0,0]})" : "") + "]," +
-                       R"("meshes":[{"primitives":[{"attributes":{"POSITION":)" + n(pos) + R"(,"NORMAL":)" + n(nrm) +
-                       R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" + n(wgt) + extra_weights + R"(},"indices":)" + n(idx) +
-                       R"(}]},{"primitives":[{"attributes":{"POSITION":)" + n(sp) + R"(},"indices":)" + n(si) + "}]}]," +
+                       R"("meshes":[{)" + arm_mesh_extra + R"("primitives":[{"attributes":{"POSITION":)" + n(pos) + R"(,"NORMAL":)" + n(nrm) +
+                       R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" + n(wgt) + extra_weights + arm_extra + R"(},"indices":)" + n(idx) +
+                       arm_targets + R"(}]},{)" + sword_mesh_extra + R"("primitives":[{"attributes":{"POSITION":)" + n(sp) +
+                       R"(},"indices":)" + n(si) + sword_targets + "}]}]," +
                        R"("skins":[{"joints":[1,0],"inverseBindMatrices":)" + n(inv) + "}" +
                        std::string(o.second_skin ? R"(,{"joints":[0]})" : "") + "]," +
                        R"("animations":[)" +

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace giant::geometry {
@@ -33,11 +34,88 @@ Vec3 to_view(const LodView& view, const Vec3& p) {
 
 namespace {
 
+// Per vertex, keys of its morph deltas (0: no target moves it): `all`
+// over its position and normal moves, which merging must match, and
+// `moves` over its position moves alone, which tell a seam (corners at
+// one place a morph pulls apart; a hard edge whose normals turn apart is
+// not one).
+struct MorphKeys {
+    std::vector<u64> all;
+    std::vector<u64> moves;
+};
+MorphKeys morph_keys(usize vertex_count, std::span<const MorphTarget> morphs) {
+    MorphKeys keys{std::vector<u64>(vertex_count, 0), std::vector<u64>(vertex_count, 0)};
+    const auto mix = [](u64& h, u64 v) { h = (h ^ v) * 0x100000001b3ull + 0x9e3779b97f4a7c15ull; };
+    const auto bits = [](float f) {
+        u32 b = 0;
+        std::memcpy(&b, &f, sizeof(b));
+        return f == 0.0f ? 0u : b; // -0 and +0 alike
+    };
+    for (usize t = 0; t < morphs.size(); ++t) {
+        u32 last = 0;
+        for (usize d = 0; d < morphs[t].deltas.size(); ++d) {
+            const MorphDelta& delta = morphs[t].deltas[d];
+            GIANT_ASSERT(delta.vertex < vertex_count, "morph delta vertex out of range");
+            GIANT_ASSERT(d == 0 || delta.vertex > last, "morph deltas in increasing vertex order");
+            last = delta.vertex;
+            u64& h = keys.all[delta.vertex];
+            u64& g = keys.moves[delta.vertex];
+            const bool moves = !(delta.position == Vec3{});
+            mix(h, t + 1);
+            if (moves) mix(g, t + 1);
+            for (const float f : {delta.position.x, delta.position.y, delta.position.z}) {
+                mix(h, bits(f));
+                if (moves) mix(g, bits(f));
+            }
+            for (const float f : {delta.normal.x, delta.normal.y, delta.normal.z}) mix(h, bits(f));
+            if (h == 0) h = 1; // (0 stays "unmoved")
+            if (moves && g == 0) g = 1;
+        }
+    }
+    return keys;
+}
+
+// Whether every output vertex's sources had the same deltas (keys are
+// hashes: a collision would merge vertices that move apart).
+bool merged_alike(std::span<const MorphTarget> morphs, std::span<const u32> remap, usize unique) {
+    std::vector<u32> sources(unique, 0);
+    for (const u32 r : remap) {
+        if (r != ~0u) ++sources[r];
+    }
+    std::vector<u32> seen(unique, 0);
+    std::vector<const MorphDelta*> first(unique, nullptr);
+    bool alike = true;
+    for (const MorphTarget& t : morphs) {
+        // (Only the entries a target touches are checked and reset.)
+        for (const MorphDelta& d : t.deltas) {
+            const u32 r = remap[d.vertex];
+            if (r == ~0u) continue;
+            ++seen[r];
+            if (first[r] == nullptr) {
+                first[r] = &d;
+            } else if (!(first[r]->position == d.position) || !(first[r]->normal == d.normal)) {
+                alike = false;
+            }
+        }
+        for (const MorphDelta& d : t.deltas) {
+            const u32 r = remap[d.vertex];
+            if (r == ~0u || seen[r] == 0) continue;
+            if (seen[r] != sources[r]) alike = false;
+            seen[r] = 0;
+            first[r] = nullptr;
+        }
+        if (!alike) return false;
+    }
+    return true;
+}
+
 // build_clusters, and with `weights` (one per source vertex) the skinned
-// form: vertices told apart by their weights too (`out_weights` gets one
-// per output vertex), and without `levels` the original triangles alone.
+// form: vertices told apart by their weights and morph keys too
+// (`out_weights` gets one per output vertex, `out_morphs` the targets
+// renumbered), and without `levels` the original triangles alone.
 ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const SkinWeights* weights,
-                  std::vector<SkinWeights>* out_weights, bool levels) {
+                  std::vector<SkinWeights>* out_weights, std::span<const MorphTarget> morphs,
+                  std::vector<MorphTarget>* out_morphs, bool levels) {
     ClusterMesh out;
     if (source.indices.size() < 3 || source.vertices.empty()) {
         return out;
@@ -52,18 +130,56 @@ ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const 
     // simplifier see the real connectivity.
     std::vector<u32> remap(source.vertices.size());
     usize unique = 0;
+    MorphKeys keys; // per source vertex, then per output vertex
+    if (!morphs.empty()) keys = morph_keys(source.vertices.size(), morphs);
     if (weights == nullptr) {
         unique = meshopt_generateVertexRemap(remap.data(), source.indices.data(), index_count, source.vertices.data(),
                                              source.vertices.size(), sizeof(Vertex));
     } else {
         static_assert(sizeof(SkinWeights) == 12);
-        const meshopt_Stream streams[2] = {{source.vertices.data(), sizeof(Vertex), sizeof(Vertex)},
-                                           {weights, sizeof(SkinWeights), sizeof(SkinWeights)}};
+        const meshopt_Stream streams[3] = {{source.vertices.data(), sizeof(Vertex), sizeof(Vertex)},
+                                           {weights, sizeof(SkinWeights), sizeof(SkinWeights)},
+                                           {keys.all.data(), sizeof(u64), sizeof(u64)}};
+        const usize stream_count = morphs.empty() ? 2 : 3;
         unique = meshopt_generateVertexRemapMulti(remap.data(), source.indices.data(), index_count,
-                                                  source.vertices.size(), streams, 2);
+                                                  source.vertices.size(), streams, stream_count);
+        if (!morphs.empty() && !merged_alike(morphs, remap, unique)) {
+            // (A hash collision: vanishingly rare.) Moved vertices kept
+            // apart, each its own key.
+            for (usize v = 0; v < keys.all.size(); ++v) {
+                if (keys.all[v] != 0) keys.all[v] = v + 1;
+            }
+            unique = meshopt_generateVertexRemapMulti(remap.data(), source.indices.data(), index_count,
+                                                      source.vertices.size(), streams, stream_count);
+        }
         out_weights->resize(unique);
         meshopt_remapVertexBuffer(out_weights->data(), weights, source.vertices.size(), sizeof(SkinWeights),
                                   remap.data());
+        // Each target's deltas on the output vertices (merged vertices had
+        // the same deltas: their keys matched); unused vertices dropped.
+        out_morphs->resize(morphs.size());
+        for (usize t = 0; t < morphs.size(); ++t) {
+            MorphTarget& to = (*out_morphs)[t];
+            to.name = morphs[t].name;
+            to.weight = morphs[t].weight;
+            to.deltas.clear();
+            for (const MorphDelta& d : morphs[t].deltas) {
+                if (remap[d.vertex] == ~0u) continue;
+                to.deltas.push_back({remap[d.vertex], d.position, d.normal});
+            }
+            std::sort(to.deltas.begin(), to.deltas.end(),
+                      [](const MorphDelta& a, const MorphDelta& b) { return a.vertex < b.vertex; });
+            to.deltas.erase(std::unique(to.deltas.begin(), to.deltas.end(),
+                                        [](const MorphDelta& a, const MorphDelta& b) { return a.vertex == b.vertex; }),
+                            to.deltas.end());
+        }
+        if (!morphs.empty()) {
+            std::vector<u64> merged(unique);
+            meshopt_remapVertexBuffer(merged.data(), keys.moves.data(), source.vertices.size(), sizeof(u64),
+                                      remap.data());
+            keys.moves = std::move(merged);
+            keys.all.clear();
+        }
     }
     out.vertices.resize(unique);
     meshopt_remapVertexBuffer(out.vertices.data(), source.vertices.data(), source.vertices.size(),
@@ -80,16 +196,19 @@ ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const 
         }
     }
 
-    // A skinned mesh's weight seams (corners at one place with other
-    // weights) protected at every level: a coarse triangle never takes a
-    // corner from across one, which a pose would tear away.
+    // A skinned mesh's weight and morph seams (corners at one place with
+    // other weights or deltas) protected at every level: a coarse triangle
+    // never takes a corner from across one, which a pose or a morph would
+    // tear away.
     if (weights != nullptr && levels) {
         std::vector<u32> twin(unique);
         meshopt_generatePositionRemap(twin.data(), &out.vertices[0].position.x, unique, sizeof(Vertex));
         for (usize i = 0; i < unique; ++i) {
             const SkinWeights& a = (*out_weights)[i];
             const SkinWeights& b = (*out_weights)[twin[i]];
-            if (a.joints == b.joints && a.weights == b.weights) continue;
+            if (a.joints == b.joints && a.weights == b.weights && (keys.moves.empty() || keys.moves[i] == keys.moves[twin[i]])) {
+                continue;
+            }
             if (locks.empty()) locks.assign(unique, 0);
             locks[i] |= meshopt_SimplifyVertex_Protect;
             locks[twin[i]] |= meshopt_SimplifyVertex_Protect;
@@ -188,7 +307,7 @@ ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const 
 } // namespace
 
 ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locked) {
-    return build(source, locked, nullptr, nullptr, true);
+    return build(source, locked, nullptr, nullptr, {}, nullptr, true);
 }
 
 SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& source, bool levels) {
@@ -196,9 +315,10 @@ SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& source, boo
     if (source.weights.size() != source.mesh.vertices.size()) {
         return out; // one weight per vertex, or nothing
     }
-    out.mesh = build(source.mesh, {}, source.weights.data(), &out.weights, levels);
+    out.mesh = build(source.mesh, {}, source.weights.data(), &out.weights, source.morphs, &out.morphs, levels);
     if (out.mesh.empty()) {
         out.weights.clear();
+        out.morphs.clear();
     }
     return out;
 }
