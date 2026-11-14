@@ -346,7 +346,9 @@ def main() -> int:
                     street_building.append(s["building"])
             if frame["overflow"] or frame["voxels"]["overflow"] or frame["decal_overflow"]:
                 overflow.append(stop)
-            got = (frame["draws"], frame["post_draws"])
+            # (Less the particles' two passes: they run while anything is alive,
+            # as the storm's splashes and leaves come and go.)
+            got = (frame["draws"], frame["post_draws"] - (2 if frame["particles"]["drawn"] else 0))
             if draws is None:
                 draws = got
             elif got != draws:

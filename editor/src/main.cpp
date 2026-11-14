@@ -16,6 +16,7 @@
 #include "scene_render.h"
 #include "effects_state.h"
 #include "event_effects.h"
+#include "weather_effects.h"
 #include "ui/imgui_layer.h"
 #include "viewport_camera.h"
 #include "far_ground.h"
@@ -336,6 +337,8 @@ int run(const Options& options) {
     state.swing = &swing;
     editor::EffectsState effects; // entities' effects and spawned ones, born as particles
     state.effects = &effects;
+    editor::WeatherEffects weather_effects; // rain splashing, a storm's leaves and grit, near the camera
+    state.weather_effects = &weather_effects;
     editor::NavState nav(renderer.get(), &meshes, &scatter); // after what it reads
     state.nav = &nav;
     editor::WalkerState walkers(physics, nav); // after both: its characters and searches go first
@@ -713,6 +716,17 @@ int run(const Options& options) {
         particle_seconds += game_delta; // (a frame not drawn: carried to the next)
         effects.update(state.scene, state.camera.position, game_delta,
                        [&state](double x, double z) { return state.scene.terrain.height_at(x, z); });
+        {
+            const sim::PhysicsWorld& pw = physics.world();
+            weather_effects.update(
+                effects, weather.shown(), weather.ground(), weather.wind(), state.camera.position, game_delta,
+                [&state](double x, double z) { return state.scene.terrain.height_at(x, z); },
+                [&pw](double x, double z) { return editor::WeatherEffects::water_in(pw, x, z); },
+                [&pw](double x, double z, double from_y, double distance) {
+                    return editor::WeatherEffects::surface_in(pw, x, z, from_y, distance);
+                },
+                [&pw](const DVec3& p) { return editor::WeatherEffects::sheltered_in(pw, p); });
+        }
         nav.update(state.scene); // tiles taken and started, searches moved on (bounded)
         audio.set_weather(weather.shown() ? &*weather.shown() : nullptr, weather.ground());
         {

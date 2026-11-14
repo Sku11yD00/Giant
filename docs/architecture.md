@@ -2346,7 +2346,7 @@ cone round a direction, at a speed, stopping on the ground or not. A spawned
 effect runs its rates for its `duration` after its bursts; an entity's
 `EntityEffect` (on, effect name, rate scale) runs it while on, turned with
 the entity. A built-in library (smoke, fire, sparks, dust_kick, spray, mist,
-embers, debris_chips, splinters, leaves: a look and an effect of each name, made once per
+embers, debris_chips, splinters, leaves, rain_splash, grit: a look and an effect of each name, made once per
 process) is always there; the scene's own of a name stands in for the
 built-in one (`find_particle_look`, `find_effect`), so a world can retune
 smoke without naming a new look. Looks are bounded as styles are (and at
@@ -2366,7 +2366,7 @@ ends it). Effects
 farther than 1000 m from the camera run nothing; the rest go nearest first
 within budgets of 8,192 births a frame and 2,048 that stop on the ground
 (where there is ground under them)
-(half the renderer's caps: the rest is kept for events), the farther ones'
+(half the renderer's caps, shared with the events' spawns; an eighth goes to the weather, the rest is headroom), the farther ones'
 left out and counted. A rate's fractions carry from frame to frame, a long
 frame owes at most a second of them (as the particles' clock steps), a
 spawn's stop with its duration, and each burst's seed hashes
@@ -2427,6 +2427,30 @@ editor puts them after the scene's lamps in `FrameInput::lights`, last
 update's as with the particles, so they bin, shade, cast and feed the voxel
 GI as lamps do (a flicker changes no shadow: only a move or a new range
 redraws one).
+
+The weather gives particles near the camera too (editor/src/weather_effects.h,
+effects plan FX4b), on the game clock (paused: none), each from a hash of a
+running count so the same frames give the same bursts. Rain splashes on
+what it falls on within 20 m: 600 a second in the hardest rain (by how much
+of it is rain, as the weather draws it: `world::falling`), at most 64 a
+frame, none on snow lying past half cover, each a crown of 3 tiny drops
+(`rain_splash`) hopping up off the first surface a physics ray down from
+100 m over the camera (or the ground there) meets (a roof, a deck, a slab;
+not under the terrain), else the terrain. A splash at or under the water's
+level (the physics' water, which has its own rings) is left out; so is one
+whose ray begins inside something tall, and all of them with the camera
+over 30 m under the ground there (a tunnel) or over 100 m above it. In a storm (wind from 8 m/s, the most from 20) leaves (40 a second
+at most) and grit (`grit`, 120, only off dry ground: less by its wetness and
+snow) are blown along from a disc of 25 m centred 12 m upwind of the camera,
+already moving at 0.8 of the wind, at most 16 of each a frame, off the top
+of what lies on the ground (a ray down from 3 m), none over water nor where
+something is overhead (a physics ray up 100 m: indoors, under a bridge);
+each stops on the lowest terrain along its way downwind as far as the wind
+takes it in 7 s (sinking from sight over a rise, never resting in the air
+over a fall). They go to `EffectsState::add_burst`,
+within the weather's own budgets of 2,048 births a frame and 512 landing
+(an eighth of the renderer's caps, apart from the effects'), all of a burst
+or none. get_effects reports them (`emitting.weather`).
 
 ## Navigation
 

@@ -271,7 +271,7 @@ Json entity_properties() {
             {"effect", {{"type", "string"},
                         {"maxLength", world::k_max_effect_name_bytes},
                         {"description", "The effect, by name: the scene's (create_effect), else a built-in one "
-                                        "(smoke, fire, sparks, dust_kick, spray, mist, embers, debris_chips, splinters, leaves)."}}},
+                                        "(smoke, fire, sparks, dust_kick, spray, mist, embers, debris_chips, splinters, leaves, rain_splash, grit)."}}},
             {"rate", number(0, world::k_max_effect_rate_scale,
                             "Times its emitters' rates (2: twice the smoke). Default 1.")}}},
           {"description", "An effect it runs where it stands while on (chimney smoke, a torch's fire, mist at a "

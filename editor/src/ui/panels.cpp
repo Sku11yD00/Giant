@@ -268,6 +268,7 @@ void EditorPanels::draw_effects() {
         ImGui::TextDisabled("%u running, %u particles born, %u cut, %u far", st.running, st.born, st.cut, st.far);
         ImGui::TextDisabled("%u effect lights (%u past the nearest %u)", st.lights, st.lights_cut,
                             EffectsState::k_max_effect_lights);
+        ImGui::TextDisabled("Weather: %u particles, %u cut", st.weather, st.weather_cut);
         const EffectsState::EventCounts& ev = m_state.effects->events;
         ImGui::TextDisabled("From events: %llu hits, %llu splashes, %llu dust, %llu steps, %llu refused",
                             static_cast<unsigned long long>(ev.hits), static_cast<unsigned long long>(ev.splashes),

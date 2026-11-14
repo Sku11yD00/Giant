@@ -2,6 +2,7 @@
 // (saved with the scene and the world's world.json, undoable).
 #include "editor_commands.h"
 #include "effects_state.h"
+#include "weather_effects.h"
 #include "world_streaming.h"
 
 #include "giant/core/assert.h"
@@ -39,7 +40,7 @@ Json name_schema() {
 Json vec3_json(const Vec3& v) { return Json::array({v.x, v.y, v.z}); }
 Vec3 vec(const Json& v) { return {v[0].get<float>(), v[1].get<float>(), v[2].get<float>()}; }
 
-constexpr const char* k_built_ins = "smoke, fire, sparks, dust_kick, spray, mist, embers, debris_chips, splinters, leaves";
+constexpr const char* k_built_ins = "smoke, fire, sparks, dust_kick, spray, mist, embers, debris_chips, splinters, leaves, rain_splash, grit";
 
 Json look_properties() {
     const double pull = world::k_max_look_pull, size = world::k_max_look_size;
@@ -610,6 +611,10 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
              "budgets (`cut`), and emitters naming a look (or entities an effect) found nowhere, or spawned ones "
              "whose effect was removed or renamed (`missing`), effect lights given (`lights`, the nearest "
              "256; `lights_cut` past them); "
+             "`weather`: last frame's particles the weather gave (`born`) and left out past its own budgets "
+             "(`cut`; 2,048 a frame, 512 landing), rain `splashes` (on the first surface under them) and those "
+             "left out `on_water`, a storm's `leaves` and `grit` and those left out `sheltered` (something "
+             "overhead); "
              "and `events`: effects the world's events set off so far (shots' `hits`, `splashes` into water, "
              "`dust` thrown up by collapses, felled trees and craters, the player's running `steps`) and those "
              "`refused` past the spawned cap.",
@@ -655,6 +660,12 @@ void register_effects_commands(ai::CommandRegistry& registry, EditorState& state
                              {"missing", st.missing}, {"reach", state.effects->reach}, {"lights", st.lights},
                              {"lights_cut", st.lights_cut}};
                  const EffectsState::EventCounts& ev = state.effects->events;
+                 emitting["weather"] = {{"born", st.weather}, {"cut", st.weather_cut}};
+                 if (state.weather_effects != nullptr) {
+                     const WeatherEffects::Stats& w = state.weather_effects->stats();
+                     emitting["weather"].update({{"splashes", w.splashes}, {"on_water", w.on_water},
+                                                 {"leaves", w.leaves}, {"grit", w.grit}, {"sheltered", w.sheltered}});
+                 }
                  emitting["events"] = {{"hits", ev.hits},   {"splashes", ev.splashes}, {"dust", ev.dust},
                                        {"steps", ev.steps}, {"refused", ev.refused}};
              }

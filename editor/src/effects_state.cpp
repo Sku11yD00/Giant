@@ -81,6 +81,8 @@ void EffectsState::clear() {
     m_stats = {};
     m_born = 0;
     m_grounded = 0;
+    m_weather_born = 0;
+    m_weather_grounded = 0;
     m_taken = true;
     m_scene = 0; // the next follow looks over every entity again
     m_spawn_scene = 0;
@@ -229,6 +231,8 @@ void EffectsState::update(const world::Scene& scene, const DVec3& camera, double
         m_bursts.clear();
         m_born = 0;
         m_grounded = 0;
+        m_weather_born = 0;
+        m_weather_grounded = 0;
         m_taken = false;
     }
     m_stats = {};
@@ -315,6 +319,23 @@ void EffectsState::update(const world::Scene& scene, const DVec3& camera, double
     });
     m_stats.spawned = static_cast<u32>(m_spawned.size());
     m_stats.bursts = static_cast<u32>(m_bursts.size());
+}
+
+bool EffectsState::add_burst(std::string_view look, render::ParticleBurst burst) {
+    const std::optional<u32> style = style_index(look);
+    const bool grounded = burst.ground > -1.0e29; // (as the renderer counts landing ones)
+    if (!style || burst.count == 0 || m_bursts.size() >= k_max_bursts ||
+        burst.count > weather_births_per_frame - std::min(m_weather_born, weather_births_per_frame) ||
+        (grounded && burst.count > weather_grounded_per_frame - std::min(m_weather_grounded, weather_grounded_per_frame))) {
+        m_stats.weather_cut = m_stats.weather_cut + std::min(burst.count, ~0u - m_stats.weather_cut); // (saturating)
+        return false;
+    }
+    burst.style = *style;
+    m_bursts.push_back(burst);
+    m_weather_born += burst.count;
+    if (grounded) m_weather_grounded += burst.count;
+    m_stats.weather += burst.count;
+    return true;
 }
 
 void EffectsState::gather_lights(const world::Scene& scene, const DVec3& camera) {
