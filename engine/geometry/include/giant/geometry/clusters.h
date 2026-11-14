@@ -90,16 +90,29 @@ struct ClusterMesh {
 // their neighbours' at any detail.
 ClusterMesh build_clusters(const TriangleMesh& mesh, std::span<const u8> locked = {});
 
-// A skinned mesh's clusters: its original triangles alone, one level (every
-// group terminal: a pose moves the vertices, so simplification errors
-// measured at bind would not hold), vertices merged only where their
-// weights match too. `weights` is one per ClusterMesh vertex. Empty when the
-// mesh is, or it has not one weight per vertex.
+// A skinned mesh's clusters, vertices merged only where their weights
+// match too. `weights` is one per ClusterMesh vertex. Empty when the mesh
+// is, or it has not one weight per vertex.
+//
+// Without `levels`: its original triangles alone, one level, every group
+// terminal (simplification errors measured at bind need a renderer that
+// allows for the pose). With `levels`: the whole hierarchy as
+// build_clusters makes it, errors and bounds in bind space; simplification
+// only drops vertices, so every level's vertices keep their own weights,
+// and weight seams (corners at one place with other weights) are kept at
+// every level, so no coarse triangle takes a corner from across one.
+// The renderer can leave a depth unposed where none of it is drawn: that
+// is where its tree's root (nodes[depth]: every group of the depth, its
+// worst error) projects under the cut's threshold, the cut's own rule for
+// skipping it whole (whatever is loaded: a group not loaded only makes
+// coarser clusters draw). That holds while the cut uses these bind-space
+// bounds: a renderer widening or refitting them for the pose must treat
+// the roots the same way.
 struct SkinnedClusterMesh {
     ClusterMesh mesh;
     std::vector<SkinWeights> weights;
 };
-SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& mesh);
+SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& mesh, bool levels = false);
 
 // Planes (xyz normal pointing inside, w offset) in camera-relative space.
 struct Frustum {

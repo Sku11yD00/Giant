@@ -1635,7 +1635,16 @@ Drawing them (`render`). A skinned mesh is built by
 `geometry::build_skinned_clusters`: its original triangles alone, one
 level, every group terminal (a pose moves the vertices, so errors measured
 at bind would not hold), vertices merged only where their weights match
-too. Each character adds its own (`Renderer::add_skinned_mesh`: every
+too. Asked for `levels` (N5 C1a), it builds the whole hierarchy instead,
+errors and bounds in bind space: simplification only drops vertices, so
+each level's vertices keep their own weights, and weight seams (corners at
+one place with other weights) are protected from simplification, so no
+coarse triangle takes a corner from across one (the sloppy fallback, which
+ignores protection, is off for them). Where a depth's tree root
+(`nodes[depth]`, every group of the depth and its worst error) projects
+under the cut's threshold, nothing of that depth is drawn, so it needs no
+pose (bounds widened for the pose must widen the roots alike). The renderer draws them so from C1b.
+Each character adds its own (`Renderer::add_skinned_mesh`: every
 instance of one shows its one pose), and it goes through the same cluster
 path as everything else:
 its groups stream into the geometry pool as terminal groups do (loaded
@@ -1653,7 +1662,8 @@ Shadow pages under a skinned mesh's instances are dirtied when its pose
 or place changes. Skinned meshes are never left to the far field, and the
 voxel world does not hold them (they bounce no light yet: a known gap,
 until a coarse pose is voxelized). Later: levels of detail for skinned
-meshes (refitting group bounds too) and morph targets.
+meshes (the geometry from C1a; drawn, allowing for the pose, from C1b) and
+morph targets.
 
 Playing them (editor). `MeshLibrary` keeps a skinned file's skeleton,
 clips and bind-space clusters beside its rest-pose mesh, which every

@@ -12,9 +12,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
-#include <map>
 #include <vector>
 
 using namespace giant;
@@ -1205,6 +1205,101 @@ GIANT_TEST("geometry: skinned clusters are the original triangles alone, weights
     twins.weights.pop_back();
     GIANT_CHECK(build_skinned_clusters(twins).mesh.empty());
     GIANT_CHECK(build_skinned_clusters({}).mesh.empty());
+}
+
+GIANT_TEST("geometry: skinned clusters with levels: the whole hierarchy, each vertex's own weights, depths left unposed") {
+    using namespace giant::geometry;
+    // The finely cut sphere, its top half on joint 1.
+    SkinnedTriangleMesh skinned;
+    skinned.mesh = make_sphere(96, 48);
+    for (const Vertex& v : skinned.mesh.vertices) {
+        SkinWeights w;
+        w.joints = {v.position.y > 0.0f ? u16{1} : u16{0}, 0, 0, 0};
+        w.weights = {255, 0, 0, 0};
+        skinned.weights.push_back(w);
+    }
+    const SkinnedClusterMesh out = build_skinned_clusters(skinned, true);
+    GIANT_CHECK(out.mesh.levels > 2 && out.weights.size() == out.mesh.vertices.size());
+    // The same hierarchy as the plain mesh's (one weight a side changes no connectivity there).
+    const ClusterMesh plain = build_clusters(skinned.mesh);
+    GIANT_CHECK(plain.levels == out.mesh.levels && plain.groups.size() == out.mesh.groups.size());
+    std::vector<usize> per_depth(out.mesh.levels, 0);
+    for (const Cluster& c : out.mesh.clusters) per_depth[out.mesh.groups[c.group].depth] += c.triangle_count;
+    GIANT_CHECK(per_depth[0] == skinned.mesh.indices.size() / 3 && per_depth.back() < per_depth[0] / 4);
+
+    // A depth whose tree root projects under the threshold has nothing drawn,
+    // near or far, with every group loaded or some coarse ones not.
+    // (Unloaded: the depths up to 2 whole, so every loaded group's parents are loaded.)
+    std::vector<u8> resident(out.mesh.groups.size(), 1);
+    for (usize g = 0; g < out.mesh.groups.size(); ++g) {
+        const ClusterGroup& group = out.mesh.groups[g];
+        if (group.depth <= 2 && group.simplified.error < k_terminal_error) resident[g] = 0;
+    }
+    std::vector<u32> wanted;
+    const LodResidency some{&resident, &wanted, nullptr};
+    usize skipped = 0;
+    for (const float distance : {0.8f, 2.0f, 6.0f, 20.0f, 80.0f, 400.0f}) {
+        for (const LodResidency* residency : {static_cast<const LodResidency*>(nullptr), &some}) {
+            LodView view;
+            view.position = {0.0f, 0.0f, -distance};
+            std::vector<u32> picked;
+            select_clusters(out.mesh, view, picked, residency);
+            GIANT_CHECK(!picked.empty());
+            // Each depth's root bounds every group of it, as projected.
+            for (const ClusterGroup& g : out.mesh.groups) {
+                GIANT_CHECK(projected_error(g.simplified, view) <= projected_error(out.mesh.nodes[g.depth].bounds, view));
+            }
+            for (u32 d = 0; d < out.mesh.levels; ++d) {
+                if (projected_error(out.mesh.nodes[d].bounds, view) > view.threshold_pixels) continue;
+                ++skipped;
+                for (const u32 c : picked) GIANT_CHECK(out.mesh.groups[out.mesh.clusters[c].group].depth != d);
+            }
+            if (distance < 1.0f && residency == nullptr) {
+                for (const u32 c : picked) GIANT_CHECK(out.mesh.groups[out.mesh.clusters[c].group].depth == 0);
+            }
+            if (distance > 300.0f) GIANT_CHECK(picked.size() < out.mesh.clusters.size() / 8);
+        }
+    }
+    GIANT_CHECK(skipped > 4); // (some depths do go unposed)
+
+    // A weight seam round the middle: the top half's triangles on joint 1,
+    // the rest on joint 0, the corners along the seam one each side. No
+    // triangle at any level takes a corner from the other side.
+    SkinnedTriangleMesh halves;
+    const TriangleMesh sphere = make_sphere(96, 48);
+    std::map<std::pair<u32, u16>, u32> made;
+    for (usize t = 0; t + 2 < sphere.indices.size(); t += 3) {
+        float y = 0.0f;
+        for (usize k = 0; k < 3; ++k) y += sphere.vertices[sphere.indices[t + k]].position.y;
+        const u16 joint = y > 0.0f ? 1 : 0;
+        for (usize k = 0; k < 3; ++k) {
+            const u32 v = sphere.indices[t + k];
+            const auto [at, fresh] = made.try_emplace({v, joint}, static_cast<u32>(halves.mesh.vertices.size()));
+            if (fresh) {
+                halves.mesh.vertices.push_back(sphere.vertices[v]);
+                SkinWeights w;
+                w.joints = {joint, 0, 0, 0};
+                w.weights = {255, 0, 0, 0};
+                halves.weights.push_back(w);
+            }
+            halves.mesh.indices.push_back(at->second);
+        }
+    }
+    const SkinnedClusterMesh split = build_skinned_clusters(halves, true);
+    GIANT_CHECK(split.mesh.levels > 2 && split.weights.size() == split.mesh.vertices.size());
+    usize mixed = 0, coarse = 0;
+    for (const Cluster& c : split.mesh.clusters) {
+        if (split.mesh.groups[c.group].depth > 0) coarse += c.triangle_count;
+        for (u32 t = 0; t < c.triangle_count; ++t) {
+            const u32* tri = &split.mesh.indices[c.first_index + t * 3];
+            const u16 j0 = split.weights[tri[0]].joints[0];
+            if (split.weights[tri[1]].joints[0] != j0 || split.weights[tri[2]].joints[0] != j0) ++mixed;
+        }
+    }
+    GIANT_CHECK(mixed == 0 && coarse > 0);
+    // Without levels: one level, terminal.
+    const SkinnedClusterMesh flat = build_skinned_clusters(skinned);
+    GIANT_CHECK(flat.mesh.levels == 1 && flat.mesh.groups[0].simplified.error == k_terminal_error);
 }
 
 GIANT_TEST("geometry: the sphere stays closed at every level of detail") {

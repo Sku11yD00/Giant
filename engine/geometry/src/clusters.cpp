@@ -35,9 +35,9 @@ namespace {
 
 // build_clusters, and with `weights` (one per source vertex) the skinned
 // form: vertices told apart by their weights too (`out_weights` gets one
-// per output vertex), and the original triangles alone (base_only).
+// per output vertex), and without `levels` the original triangles alone.
 ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const SkinWeights* weights,
-                  std::vector<SkinWeights>* out_weights) {
+                  std::vector<SkinWeights>* out_weights, bool levels) {
     ClusterMesh out;
     if (source.indices.size() < 3 || source.vertices.empty()) {
         return out;
@@ -80,10 +80,32 @@ ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const 
         }
     }
 
+    // A skinned mesh's weight seams (corners at one place with other
+    // weights) protected at every level: a coarse triangle never takes a
+    // corner from across one, which a pose would tear away.
+    if (weights != nullptr && levels) {
+        std::vector<u32> twin(unique);
+        meshopt_generatePositionRemap(twin.data(), &out.vertices[0].position.x, unique, sizeof(Vertex));
+        for (usize i = 0; i < unique; ++i) {
+            const SkinWeights& a = (*out_weights)[i];
+            const SkinWeights& b = (*out_weights)[twin[i]];
+            if (a.joints == b.joints && a.weights == b.weights) continue;
+            if (locks.empty()) locks.assign(unique, 0);
+            locks[i] |= meshopt_SimplifyVertex_Protect;
+            locks[twin[i]] |= meshopt_SimplifyVertex_Protect;
+        }
+    }
+
     clodConfig config = clodDefaultConfig(k_cluster_max_triangles);
     config.max_vertices = k_cluster_max_vertices;
     config.optimize_bounds = true; // tight culling spheres
-    const bool base_only = weights != nullptr;
+    // Every level indexes the one vertex array, unmoved (skinned meshes'
+    // weights stay each vertex's own): nothing may move vertices.
+    GIANT_ASSERT(!config.simplify_dilate_borders, "simplification must not move vertices");
+    if (weights != nullptr) {
+        config.simplify_fallback_sloppy = false; // (sloppy simplification ignores the seams' protection)
+    }
+    const bool base_only = weights != nullptr && !levels;
     if (base_only) {
         // Every first group counts as stuck: nothing is simplified (a ratio
         // of 1 makes the attempt cheap), so the original triangles are the
@@ -166,15 +188,15 @@ ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const 
 } // namespace
 
 ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locked) {
-    return build(source, locked, nullptr, nullptr);
+    return build(source, locked, nullptr, nullptr, true);
 }
 
-SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& source) {
+SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& source, bool levels) {
     SkinnedClusterMesh out;
     if (source.weights.size() != source.mesh.vertices.size()) {
         return out; // one weight per vertex, or nothing
     }
-    out.mesh = build(source.mesh, {}, source.weights.data(), &out.weights);
+    out.mesh = build(source.mesh, {}, source.weights.data(), &out.weights, levels);
     if (out.mesh.empty()) {
         out.weights.clear();
     }
