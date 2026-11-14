@@ -674,6 +674,7 @@ inline constexpr u32 k_max_water_looks = 256;
 // 65535 groups of 64); the ones past it are not drawn.
 inline constexpr u32 k_max_instances = 65535u * 64u;
 inline constexpr u32 k_max_skin_joints = 1024; // anim::k_max_joints
+inline constexpr float k_max_morph_weight = 1000.0f; // either way (set_pose)
 
 struct CellRange {
     u32 first = 0;
@@ -947,13 +948,25 @@ public:
     // when empty, not one weight per vertex, weights not summing to 255, a
     // weighted joint out of range, no joints or more than
     // k_max_skin_joints, or its clusters not depth by depth.
+    // Its morph targets (mesh.morphs, at most geometry::k_max_morph_targets)
+    // are added to its bind vertices and normals before skinning, by their
+    // weights (set_pose; until then 0: the base shape, as a file's rest-pose
+    // mesh is; callers apply MorphTarget::weight); refused when a delta
+    // names a vertex out of range, twice, moves it past 1 km, or is not
+    // finite.
     MeshId add_skinned_mesh(geometry::SkinnedClusterMesh mesh, u32 joints);
     // The pose for a skinned mesh's next frames: one matrix per joint, from
-    // bind space to the mesh's space (anim::skin_matrices), and a sphere
-    // around the posed mesh in its space (anim::pose_bounds). False (and
-    // nothing changes) for a mesh not skinned, the wrong count, numbers
-    // that are not finite, or a negative radius.
-    bool set_pose(MeshId mesh, std::span<const Mat4> skin, const geometry::Sphere& bounds);
+    // bind space to the mesh's space (anim::skin_matrices), a sphere around
+    // the posed mesh in its space (anim::pose_bounds: without its morphs,
+    // which widen it here by the most they move a vertex), and one weight
+    // per morph target (empty: the weights it has; at most
+    // k_max_morph_weight either way). False (and nothing changes) for a
+    // mesh not skinned, the wrong counts, numbers that are not finite, a
+    // weight past that, or a negative radius.
+    bool set_pose(MeshId mesh, std::span<const Mat4> skin, const geometry::Sphere& bounds,
+                  std::span<const float> morph_weights = {});
+    // A skinned mesh's morph targets (0 for any other id).
+    u32 morph_targets(MeshId mesh) const;
     // Another copy of a skinned mesh, with its own pose (bind until posed),
     // sharing the original's geometry: its CPU clusters, streamed layout,
     // LOD tree and skin source (only its pose, cluster bounds, residency
@@ -1063,12 +1076,17 @@ private:
         // Per depth: around its non-terminal groups (skin_lod.h
         // depth_bounds), for the camera's aim.
         std::vector<geometry::LodBounds> depth_lod;
+        // Per morph target: the most it moves a bind vertex at weight 1.
+        std::vector<float> morph_max;
     };
     // A skinned mesh's pose and its source on the GPU.
     struct Skin {
         rhi::BufferHandle source;     // gpu::SkinVertex each, cluster after cluster
         u32 joints = 0;
         std::vector<float> matrices;  // 12 per joint (3 rows of the 3x4): the pose to draw
+        std::vector<float> morph_weights; // per morph target: the pose to draw
+        rhi::BufferHandle morph_ranges;  // per source vertex: gpu::MorphRange (only where a target moves something)
+        rhi::BufferHandle morph_entries; // gpu::MorphEntry, vertex by vertex
         geometry::Sphere bounds;      // around the pose, in the mesh's space
         u64 version = 1;              // of the pose (set_pose)
         u64 posed = 0;                // the version in the pool; 0: none yet
@@ -1092,6 +1110,8 @@ private:
         rhi::BufferHandle groups;
         rhi::BufferHandle nodes;
         rhi::BufferHandle source; // skinned: the skin source
+        rhi::BufferHandle morph_ranges;  // skinned with morphs
+        rhi::BufferHandle morph_entries;
         SharedBuffers() = default;
         SharedBuffers(const SharedBuffers&) = delete;
         SharedBuffers& operator=(const SharedBuffers&) = delete;
@@ -1131,9 +1151,13 @@ private:
     bool ensure_targets(u32 width, u32 height);
     bool ensure_cull_buffers(CullBuffers& c, u32 instance_count);
     void destroy(Mesh& mesh);
-    MeshId add(geometry::ClusterMesh data, const std::vector<geometry::SkinWeights>* weights, u32 joints);
+    MeshId add(geometry::ClusterMesh data, const std::vector<geometry::SkinWeights>* weights,
+               const std::vector<geometry::MorphTarget>* morphs, u32 joints);
     void update_particles(rhi::CommandList& cmd, const FrameInput& frame); // births and the ring's upload
     void particle_stats(); // into m_stats (again after anything resets it)
+    // A skinned mesh's pose bounds and reach from its matrices and morph
+    // weights, `bounds` around the pose without morphs.
+    static void fit_pose(Skin& skin, const geometry::Sphere& bounds);
     void pose_skins(rhi::CommandList& cmd);           // after streaming, before anything reads the geometry
     void track_skin_shadows(const FrameInput& frame); // after the shadows' own tracking
     void aim_skin_floors(const FrameInput& frame, u32 width, u32 height); // before the streamer's update: the camera's aims
@@ -1226,6 +1250,7 @@ private:
     u32 m_posed = 0;            // skinned meshes posed this frame
     u32 m_posed_clusters = 0;   // clusters the pose pass went over this frame
     std::vector<MeshId> m_skinned; // the skinned meshes live
+    std::vector<float> m_skin_upload; // scratch: a mesh's matrices, then its morph weights
     struct SkinBox {
         DVec3 min{};
         DVec3 max{};

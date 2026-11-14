@@ -41,6 +41,37 @@ geometry::SkinnedClusterMesh two_balls(bool levels = false) {
     return geometry::build_skinned_clusters(m, levels);
 }
 
+// The two balls with morph targets: "reach" takes the hand ball 3 m along
+// +x and 3 m down (to where bent() turns it), its normals turned toward +x;
+// "still" moves nothing, resting at 0.5; "grow" swells the root ball to 5
+// times its size (each vertex its own move).
+geometry::SkinnedClusterMesh morphed_balls(bool levels = false) {
+    geometry::SkinnedTriangleMesh m;
+    for (u16 joint = 0; joint < 2; ++joint) {
+        const geometry::TriangleMesh ball = geometry::make_sphere(64, 32);
+        const u32 base = static_cast<u32>(m.mesh.vertices.size());
+        for (geometry::Vertex v : ball.vertices) {
+            v.position.y += 3.0f * joint;
+            m.mesh.vertices.push_back(v);
+            geometry::SkinWeights w;
+            w.joints = {joint, 0, 0, 0};
+            w.weights = {255, 0, 0, 0};
+            m.weights.push_back(w);
+        }
+        for (const u32 i : ball.indices) m.mesh.indices.push_back(base + i);
+    }
+    geometry::MorphTarget reach{"reach", 0.0f, {}};
+    for (u32 v = 0; v < m.mesh.vertices.size(); ++v) {
+        if (m.weights[v].joints[0] == 1) reach.deltas.push_back({v, {3.0f, -3.0f, 0.0f}, {0.5f, 0.0f, 0.0f}});
+    }
+    geometry::MorphTarget grow{"grow", 0.0f, {}};
+    for (u32 v = 0; v < m.mesh.vertices.size(); ++v) {
+        if (m.weights[v].joints[0] == 0) grow.deltas.push_back({v, m.mesh.vertices[v].position * 4.0f, {}});
+    }
+    m.morphs = {reach, geometry::MorphTarget{"still", 0.5f, {}}, grow};
+    return geometry::build_skinned_clusters(m, levels);
+}
+
 // Joint 1 turned -90 degrees about z round the origin: the hand goes from
 // (0, 3, 0) to (3, 0, 0).
 std::array<Mat4, 2> bent() {
@@ -290,6 +321,33 @@ GIANT_TEST("skin: d3d12 draws the pose, culled by refit clusters, and moves its 
         GIANT_CHECK(green(posed, k_w / 2, k_h / 2)); // the hand, ahead
         GIANT_CHECK(!green(posed, 2, 2));            // the corner: background
     }
+    // Morphs: unposed, the hand's "reach" target takes it to the same place
+    // (its bounds, given without morphs, widened by the renderer).
+    const MeshId morphed = renderer->add_skinned_mesh(morphed_balls(), 2);
+    GIANT_CHECK(morphed != k_no_mesh && renderer->morph_targets(morphed) == 3);
+    instances[0].mesh = morphed;
+    for (usize mode = 0; mode < gpu.size(); ++mode) {
+        frame.settings.gpu_culling = gpu[mode];
+        frame.settings.mesh_shaders = mesh_shaders[mode];
+        const geometry::Sphere at_bind = morphed_balls().mesh.bounds;
+        GIANT_CHECK(renderer->set_pose(morphed, std::array<Mat4, 2>{}, at_bind, std::array<float, 3>{0.0f, 0.0f, 0.0f}));
+        const auto base = render(frame, 8);
+        GIANT_CHECK(!green(base, k_w / 2, k_h / 2) && !green(base, 20, k_h / 2));
+        GIANT_CHECK(renderer->set_pose(morphed, std::array<Mat4, 2>{}, at_bind, std::array<float, 3>{1.0f, 0.0f, 0.0f}));
+        const auto reached = render(frame, 8);
+        GIANT_CHECK(green(reached, k_w / 2, k_h / 2));
+        GIANT_CHECK(!green(reached, 2, 2));
+        // Half way: the hand at (1.5, 1.5, 0), above the middle and left of it.
+        GIANT_CHECK(renderer->set_pose(morphed, std::array<Mat4, 2>{}, at_bind, std::array<float, 3>{0.5f, 0.0f, 0.0f}));
+        GIANT_CHECK(!green(render(frame, 8), k_w / 2, k_h / 2));
+        // Grown, the root ball (2.5 m round, 3 m left of the view's axis)
+        // reaches in from the left: each vertex moved by its own delta.
+        GIANT_CHECK(renderer->set_pose(morphed, std::array<Mat4, 2>{}, at_bind, std::array<float, 3>{0.0f, 0.0f, 1.0f}));
+        const auto grown = render(frame, 8);
+        GIANT_CHECK(green(grown, 20, k_h / 2) && !green(grown, k_w - 3, k_h / 2));
+    }
+    instances[0].mesh = id;
+    renderer->remove_mesh(morphed);
 
     // Shadows: the hand over ground, seen from above, the sun to +X. Moved
     // 3 m by the pose, its shadow goes with it.
@@ -641,4 +699,113 @@ GIANT_TEST("skin: copies share the geometry, pose on their own and outlive the o
     r.remove_mesh(c);
     st = s.draw(frame);
     GIANT_CHECK(st.skinned_meshes == 0 && st.instances == 0);
+}
+
+GIANT_TEST("skin: morph targets: unsound ones refused, weights checked, a change of weight poses again") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    Renderer& r = *s.renderer;
+    // Unsound: a delta out of range, a vertex twice, a move not finite or
+    // past a kilometre, too many targets.
+    geometry::SkinnedClusterMesh bad = morphed_balls();
+    bad.morphs[0].deltas.back().vertex = static_cast<u32>(bad.mesh.vertices.size());
+    GIANT_CHECK(r.add_skinned_mesh(std::move(bad), 2) == k_no_mesh);
+    bad = morphed_balls();
+    bad.morphs[0].deltas.push_back(bad.morphs[0].deltas.front());
+    GIANT_CHECK(r.add_skinned_mesh(std::move(bad), 2) == k_no_mesh);
+    bad = morphed_balls();
+    bad.morphs[0].deltas[3].normal.y = std::numeric_limits<float>::infinity();
+    GIANT_CHECK(r.add_skinned_mesh(std::move(bad), 2) == k_no_mesh);
+    bad = morphed_balls();
+    bad.morphs[2].deltas[0].position.x = 2000.0f; // past a kilometre
+    GIANT_CHECK(r.add_skinned_mesh(std::move(bad), 2) == k_no_mesh);
+    bad = morphed_balls();
+    bad.morphs.resize(geometry::k_max_morph_targets + 1);
+    GIANT_CHECK(r.add_skinned_mesh(std::move(bad), 2) == k_no_mesh);
+    // The same vertex in two targets is fine.
+    geometry::SkinnedClusterMesh twice = morphed_balls();
+    twice.morphs[1].deltas = {twice.morphs[0].deltas.front()};
+    twice.morphs.pop_back();
+    const MeshId two = r.add_skinned_mesh(std::move(twice), 2);
+    GIANT_CHECK(two != k_no_mesh);
+    r.remove_mesh(two);
+
+    const MeshId id = r.add_skinned_mesh(morphed_balls(), 2);
+    GIANT_CHECK(id != k_no_mesh && r.morph_targets(id) == 3);
+    GIANT_CHECK(r.morph_targets(r.builtin(BuiltinMesh::cube)) == 0 && r.morph_targets(k_no_mesh) == 0);
+    const MeshId plain = r.add_skinned_mesh(two_balls(), 2);
+    GIANT_CHECK(r.morph_targets(plain) == 0);
+    const std::array<Mat4, 2> bind{};
+    const geometry::Sphere bounds = morphed_balls().mesh.bounds;
+    GIANT_CHECK(!r.set_pose(id, bind, bounds, std::array<float, 2>{1.0f, 0.0f})); // a weight short
+    GIANT_CHECK(!r.set_pose(plain, bind, bounds, std::array<float, 1>{1.0f})); // it has none
+    GIANT_CHECK(!r.set_pose(id, bind, bounds, std::array<float, 3>{std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f}));
+    GIANT_CHECK(!r.set_pose(id, bind, bounds, std::array<float, 3>{0.0f, -(k_max_morph_weight * 2.0f), 0.0f}));
+    GIANT_CHECK(r.set_pose(id, bind, bounds, std::array<float, 3>{0.0f, k_max_morph_weight, 0.0f}));
+    GIANT_CHECK(r.set_pose(plain, bind, two_balls().mesh.bounds, {}));
+
+    std::vector<Instance> instances(1);
+    instances[0].mesh = id;
+    instances[0].position = {0.0, 1.5, -10.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.settings.gpu_culling = false;
+    RenderStats st = s.draw(frame);
+    for (int i = 0; i < 8 && !r.mesh_ready(id); ++i) st = s.draw(frame);
+    GIANT_CHECK(r.mesh_ready(id));
+    st = s.draw(frame);
+    GIANT_CHECK(st.posed == 0);
+    // A new weight alone poses it again (so does any set_pose).
+    GIANT_CHECK(r.set_pose(id, bind, bounds, std::array<float, 3>{0.25f, -1.0f, 0.0f}));
+    st = s.draw(frame);
+    GIANT_CHECK(st.posed == 1);
+    GIANT_CHECK(r.set_pose(id, bind, bounds));
+    st = s.draw(frame);
+    GIANT_CHECK(st.posed == 1);
+    // Copies have the targets; the original goes, a copy stays drawn and posed.
+    const MeshId copy = r.add_skinned_copy(id);
+    GIANT_CHECK(copy != k_no_mesh && r.morph_targets(copy) == 3);
+    GIANT_CHECK(r.set_pose(copy, bind, bounds, std::array<float, 3>{1.0f, 0.0f, 0.0f}));
+    r.remove_mesh(id);
+    instances[0].mesh = copy;
+    frame.instances = instances;
+    for (int i = 0; i < 8 && !r.mesh_ready(copy); ++i) st = s.draw(frame);
+    GIANT_CHECK(r.mesh_ready(copy));
+    st = s.draw(frame);
+    GIANT_CHECK(st.instances == 1);
+    r.remove_mesh(copy);
+    r.remove_mesh(plain);
+}
+
+GIANT_TEST("skin: how far morphs move a vertex, posed, is bounded by their weights and the joints") {
+    const std::vector<float> spheres = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, -1.0f};
+    std::vector<float> identity(24, 0.0f);
+    for (usize j = 0; j < 2; ++j) identity[j * 12] = identity[j * 12 + 5] = identity[j * 12 + 10] = 1.0f;
+    const std::vector<float> most = {0.2f, 1.0f};
+    GIANT_CHECK(morph_reach(identity, spheres, std::vector<float>{0.0f, 0.0f}, most) == 0.0f);
+    GIANT_CHECK(morph_reach(identity, spheres, {}, most) == 0.0f);
+    // Unturned joints keep a move's length: 0.2 + 0.5.
+    const float one = morph_reach(identity, spheres, std::vector<float>{1.0f, -0.5f}, most);
+    GIANT_CHECK(one >= 0.7f && one < 0.7f * 1.01f);
+    // A turned joint keeps it too, give or take the bound (at most sqrt 2 over).
+    std::vector<float> turned = identity;
+    const float c = std::cos(0.7f), sn = std::sin(0.7f);
+    turned[0] = c;
+    turned[1] = -sn;
+    turned[4] = sn;
+    turned[5] = c;
+    const float turn = morph_reach(turned, spheres, std::vector<float>{1.0f, -0.5f}, most);
+    GIANT_CHECK(turn >= 0.7f && turn < 0.7f * 1.42f);
+    // A joint scaling by 2 doubles it; one moving no vertex counts not.
+    std::vector<float> scaled = identity;
+    for (const usize i : {usize{0}, usize{5}, usize{10}}) scaled[i] = 2.0f;
+    GIANT_CHECK(std::fabs(morph_reach(scaled, spheres, std::vector<float>{1.0f, -0.5f}, most) - 2.0f * one) < 1e-3f);
+    std::vector<float> other = identity;
+    for (const usize i : {usize{12}, usize{17}, usize{22}}) other[i] = 50.0f;
+    GIANT_CHECK(std::fabs(morph_reach(other, spheres, std::vector<float>{1.0f, -0.5f}, most) - one) < 1e-5f);
+    // Not finite: huge, never NaN.
+    std::vector<float> broken = identity;
+    broken[0] = std::numeric_limits<float>::infinity();
+    const float huge = morph_reach(broken, spheres, std::vector<float>{1.0f, 0.0f}, most);
+    GIANT_CHECK(huge >= 1e30f && std::isfinite(huge));
 }

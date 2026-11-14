@@ -297,9 +297,13 @@ struct SkinPush {
     u32 cluster_count;
     u32 joint_count;
     u32 first_cluster; // the dispatch poses clusters first_cluster .. + cluster_count
+    u32 morph_ranges;  // read descriptor: MorphRange per source vertex (morph_count > 0)
+    u32 morph_entries; // read descriptor: MorphEntry
+    u32 weight_offset; // into `matrices`: a float per morph target
+    u32 morph_count;   // 0: no morphs
     u32 pad[3];
 };
-static_assert(sizeof(SkinPush) == 48);
+static_assert(sizeof(SkinPush) == 64);
 
 // A skinned mesh's vertex at bind, in the skin source.
 // Normal and tangent packed as in geometry::PackedVertex.
@@ -311,6 +315,23 @@ struct SkinVertex {
     u8 weights[4]; // 255ths, summing to 255
 };
 static_assert(sizeof(SkinVertex) == 32);
+
+// Where a skin source vertex's morph deltas are: MorphEntry first .. +
+// count (count 0: none).
+struct MorphRange {
+    u32 first;
+    u32 count;
+};
+static_assert(sizeof(MorphRange) == 8);
+// One morph target's move of a vertex at weight 1: the position's in
+// floats, the normal's as three signed 10-bit numbers (x low) over -2..2.
+struct MorphEntry {
+    float position[3];
+    u32 normal;
+    u32 target;
+};
+static_assert(sizeof(MorphEntry) == 20);
+inline constexpr float k_morph_normal_range = 2.0f;
 inline constexpr u32 k_skin_dispatch_width = 65535; // cluster groups along x (skin.slang)
 
 struct HzbPush {

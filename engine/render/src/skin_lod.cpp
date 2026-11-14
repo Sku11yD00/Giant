@@ -34,6 +34,31 @@ float pose_reach(std::span<const float> matrices, std::span<const float> joint_s
     return reach * 1.0001f + 1e-6f;
 }
 
+float morph_reach(std::span<const float> matrices, std::span<const float> joint_spheres,
+                  std::span<const float> weights, std::span<const float> morph_max) {
+    constexpr float k_huge = 1e30f;
+    float moved = 0.0f; // sum(|weight| * morph_max)
+    for (usize t = 0; t < std::min(weights.size(), morph_max.size()); ++t) {
+        moved += std::fabs(weights[t]) * morph_max[t];
+    }
+    if (moved == 0.0f) return 0.0f;
+    float scale2 = 0.0f; // the largest |A|_1 |A|_inf (over |A|_2^2)
+    const usize joints = std::min(matrices.size() / 12, joint_spheres.size() / 4);
+    for (usize j = 0; j < joints; ++j) {
+        if (!(joint_spheres[j * 4 + 3] >= 0.0f)) continue; // moves no vertex
+        const float* m = matrices.data() + j * 12;
+        float rows = 0.0f, columns = 0.0f;
+        for (usize i = 0; i < 3; ++i) {
+            rows = std::max(rows, std::fabs(m[i * 4]) + std::fabs(m[i * 4 + 1]) + std::fabs(m[i * 4 + 2]));
+            columns = std::max(columns, std::fabs(m[i]) + std::fabs(m[4 + i]) + std::fabs(m[8 + i]));
+        }
+        scale2 = std::max(scale2, rows * columns);
+    }
+    const float reach = moved * std::sqrt(scale2);
+    if (!(reach < k_huge)) return k_huge;
+    return reach * 1.0001f + 1e-6f; // (a hair over, for rounding)
+}
+
 std::vector<geometry::LodBounds> depth_bounds(const geometry::ClusterMesh& mesh) {
     std::vector<geometry::LodBounds> out(mesh.levels, geometry::LodBounds{{}, 0.0f, -1.0f});
     for (const geometry::ClusterGroup& g : mesh.groups) {

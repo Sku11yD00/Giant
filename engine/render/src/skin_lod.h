@@ -23,6 +23,15 @@ namespace giant::render {
 // can look further off than the threshold, though the cut stays whole).
 float pose_reach(std::span<const float> matrices, std::span<const float> joint_spheres);
 
+// The most morph targets move a vertex further, posed: morphs add
+// sum(weight * delta) to a bind vertex before skinning, and a joint moves
+// that by its 3x3 A (|A|_2 <= sqrt(|A|_1 |A|_inf) bounds it), so at most
+// that bound's largest over the joints moving any vertex times
+// sum(|weight| * morph_max). 0 with no
+// morphs; a huge finite number when a number is not finite.
+float morph_reach(std::span<const float> matrices, std::span<const float> joint_spheres,
+                  std::span<const float> weights, std::span<const float> morph_max);
+
 // Per depth: a sphere around every non-terminal group's simplified sphere
 // of that depth, with their largest error (error < 0: the depth has none).
 // A depth's clusters are drawn only where its group projects over the
