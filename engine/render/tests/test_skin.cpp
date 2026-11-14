@@ -482,14 +482,21 @@ GIANT_TEST("skin: with levels, far draws and poses coarse, near fine, and the po
         GIANT_CHECK(st.posed == 1 && st.posed_clusters == clusters);
         depth0 = st.clusters;
     }
-    // Bent, at a middle distance: the cut is finer than at bind (the
-    // spheres widen by how far the hand moved).
-    instances[0].position = {0.0, 1.5, -25.0};
-    for (int i = 0; i < 4; ++i) st = s.draw(frame);
-    const u32 bind_triangles = st.triangles;
-    GIANT_CHECK(r.set_pose(id, bent(), k_bent_bounds));
-    for (int i = 0; i < 4; ++i) st = s.draw(frame);
-    GIANT_CHECK(st.triangles > bind_triangles);
+    // Bent, at middle distances: the cut is never coarser than at bind and
+    // somewhere finer (the spheres widen by how far the hand moved; where
+    // exactly depends on the simplifier's levels, so a sweep).
+    bool finer = false;
+    for (const double z : {-12.0, -18.0, -25.0, -35.0, -50.0}) {
+        instances[0].position = {0.0, 1.5, z};
+        GIANT_CHECK(r.set_pose(id, two_balls_bind(), {{0.0f, 1.5f, 0.0f}, 2.2f}));
+        for (int i = 0; i < 4; ++i) st = s.draw(frame);
+        const u32 bind_triangles = st.triangles;
+        GIANT_CHECK(r.set_pose(id, bent(), k_bent_bounds));
+        for (int i = 0; i < 4; ++i) st = s.draw(frame);
+        GIANT_CHECK(st.triangles >= bind_triangles);
+        finer = finer || st.triangles > bind_triangles;
+    }
+    GIANT_CHECK(finer);
     GIANT_CHECK(depth0 > far_clusters);
 
     // Far again: once the fine depths go unused a while, they hide and the
