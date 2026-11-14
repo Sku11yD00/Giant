@@ -1725,9 +1725,17 @@ works out the poses on two workers (`parallel_for`) and hands the renderer
 only poses that differ from the last one sent (a same pose would redraw
 its shadows for nothing). The
 scene frame draws an entity's copy instead of the file's mesh once it is
-loaded and posed. At most 64 animate at once: those animating keep their
+loaded and posed. At most 4096 animate at once: those animating keep their
 place, a free one goes to the lowest id waiting, and the rest stand frozen
-in the rest pose.
+in the rest pose. Crowds are posed by size on screen (animation LOD, C1c-2):
+time moves on for every character every frame, but the pose is worked out
+every frame only for one whose pose sphere's radius is at least 100 pixels
+on screen, and down to four times a second for one under 5 pixels; those posed less than
+every frame share a budget of 256 poses a frame (at least 64 of them however
+many are posed every frame), most overdue first, their phases spread by id so
+a crowd does not pose all on one frame. While time stands still (paused, a
+menu open) what moved since its last pose catches up within the budget. A pose a
+command or a (re)start asks for always goes at once.
 
 ## Ballistics (W1a)
 

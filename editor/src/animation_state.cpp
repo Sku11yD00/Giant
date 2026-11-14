@@ -15,9 +15,54 @@ constexpr u32 k_workers = 2;
 // A saved animation changing fades into the new one (no pop), once posed.
 constexpr float k_saved_fade_seconds = 0.2f;
 
+// Where in its pose interval an entity's poses fall, in [0, 1): by its id,
+// so a crowd started at once (or come into a tier at once) is spread over
+// the frames, not all posed on the same ones.
+double phase_of(world::EntityId id) {
+    return static_cast<double>((static_cast<u64>(id) * 0x9E3779B97F4A7C15ull) >> 11) * 0x1.0p-53;
+}
+
 } // namespace
 
 AnimationState::AnimationState(render::Renderer* renderer) : m_renderer(renderer), m_jobs(k_workers) {}
+
+double AnimationState::pose_interval(float pixels) {
+    if (!(pixels < 100.0f)) return 0.0; // (NaN too) every frame
+    if (pixels >= 40.0f) return 1.0 / 30.0;
+    if (pixels >= 15.0f) return 1.0 / 15.0;
+    if (pixels >= 5.0f) return 1.0 / 8.0;
+    return 1.0 / 4.0;
+}
+
+void AnimationState::set_view(const render::View& view, u32 height_pixels) {
+    const float fov = std::clamp(view.vertical_fov_degrees, 1.0f, 170.0f) * 0.017453292f;
+    m_view_set = height_pixels > 0;
+    m_eye = view.position;
+    m_pixels_per_unit = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(height_pixels);
+}
+
+void AnimationState::lod(const world::Scene& scene) {
+    for (const auto& [id, a] : m_animated) {
+        const world::Entity* e = scene.find(id);
+        if (!m_view_set || e == nullptr) {
+            a->interval = 0.0;
+            a->pixels = 0.0f;
+            continue;
+        }
+        const world::Transform& t = e->transform;
+        const float s = std::max({std::fabs(t.scale.x), std::fabs(t.scale.y), std::fabs(t.scale.z)});
+        const Vec3 c = rotate(t.rotation, Vec3{a->bounds.center.x * t.scale.x, a->bounds.center.y * t.scale.y,
+                                               a->bounds.center.z * t.scale.z});
+        const DVec3 centre = t.position + DVec3{c.x, c.y, c.z};
+        const double r = static_cast<double>(a->bounds.radius * s);
+        const double d = std::max(length(centre - m_eye) - r, 0.1);
+        a->pixels = static_cast<float>(r / d) * m_pixels_per_unit;
+        const double was = a->interval;
+        a->interval = pose_interval(a->pixels);
+        // Come in from every frame: its next pose from its own phase.
+        if (was <= 0.0 && a->interval > 0.0) a->since_pose = phase_of(id) * a->interval;
+    }
+}
 
 AnimationState::~AnimationState() {
     if (m_renderer != nullptr) {
@@ -90,7 +135,7 @@ void AnimationState::follow_all(const world::Scene& scene, const MeshLibrary& me
 
 void AnimationState::follow_now(const world::Scene& scene, const MeshLibrary& meshes,
                                 const world::SceneChanges& changed) {
-    update(scene, meshes, changed, 0.0);
+    run(scene, meshes, changed, 0.0, false);
 }
 
 void AnimationState::restart_saved(const world::Scene& scene, world::EntityId id) {
@@ -181,12 +226,12 @@ void AnimationState::play_saved(Animated& a, float fade) {
 AnimationState::Animated* AnimationState::animate_now(const world::Scene& scene, const MeshLibrary& meshes,
                                                       world::EntityId id, std::string& error) {
     if (scene.identity() != m_scene || meshes.version() != m_meshes_version) {
-        update(scene, meshes, {}, 0.0); // a new scene or meshes first
+        run(scene, meshes, {}, 0.0, false); // a new scene or meshes first
     }
     const auto it = m_animated.find(id);
     if (it != m_animated.end()) return it->second.get();
-    if (m_animated.size() >= k_max_animated) {
-        error = "at most " + std::to_string(k_max_animated) + " entities animate at once";
+    if (m_animated.size() >= max_animated) {
+        error = "at most " + std::to_string(max_animated) + " entities animate at once";
         return nullptr;
     }
     return start(scene, meshes, id, error);
@@ -211,7 +256,7 @@ std::string AnimationState::play(const world::Scene& scene, const MeshLibrary& m
     a->player.set_speed(speed);
     a->dirty = true;
     a->fresh = false; // between frames: the next frame's time counts
-    pose();
+    pose(Timed::none);
     return {};
 }
 
@@ -234,16 +279,16 @@ std::string AnimationState::blend(const world::Scene& scene, const MeshLibrary& 
     a->player.set_blend(a->skinned->clips, ia, ib, weight, sync);
     a->dirty = true;
     a->fresh = false;
-    pose();
+    pose(Timed::none);
     return {};
 }
 
 void AnimationState::fill(const world::Scene& scene, const MeshLibrary& meshes) {
-    if (m_animated.size() >= k_max_animated || m_wanted.size() <= m_animated.size()) return;
+    if (m_animated.size() >= max_animated || m_wanted.size() <= m_animated.size()) return;
     u32 made = 0;
     std::vector<world::EntityId> failed;
     for (const world::EntityId id : m_wanted) {
-        if (m_animated.size() >= k_max_animated || made >= copies_per_frame) break;
+        if (m_animated.size() >= max_animated || made >= copies_per_frame) break;
         if (m_animated.contains(id) || m_refused.contains(id)) continue;
         std::string error;
         if (start(scene, meshes, id, error) == nullptr) {
@@ -261,6 +306,7 @@ void AnimationState::fill(const world::Scene& scene, const MeshLibrary& meshes) 
 void AnimationState::advance(double seconds) {
     if (seconds <= 0.0) return;
     for (const auto& [id, a] : m_animated) {
+        a->since_pose += seconds;
         if (a->fresh) continue; // started this update: from its start
         const anim::ClipState main = a->player.main();
         const anim::ClipState other = a->player.other();
@@ -270,7 +316,7 @@ void AnimationState::advance(double seconds) {
         const anim::ClipState& o = a->player.other();
         if (m.clip != main.clip || m.time != main.time || o.clip != other.clip || o.time != other.time ||
             a->player.other_weight() != weight) {
-            a->dirty = true;
+            a->changed = true; // posed when due
         }
     }
 }
@@ -278,14 +324,56 @@ void AnimationState::advance(double seconds) {
 void AnimationState::step(double seconds) {
     for (const auto& [id, a] : m_animated) a->fresh = false; // by hand: all of them
     advance(seconds);
-    pose();
+    for (const auto& [id, a] : m_animated) a->dirty = a->dirty || a->changed; // by hand: posed now
+    pose(Timed::none);
 }
 
-void AnimationState::pose() {
+void AnimationState::pose(Timed timed) {
+    // Asked for now (a command, a start) or posed every frame: always;
+    // the rest when due, most overdue first, within the budget, and only
+    // once a frame (a command's or follow_now's pose leaves them be).
     m_work.clear();
+    m_due.clear();
     for (const auto& [id, a] : m_animated) {
-        if (a->dirty) m_work.push_back(a.get());
+        if (a->dirty || (a->changed && a->interval <= 0.0)) {
+            // (Asked for now: its next due time from its own phase.)
+            a->since_pose = a->dirty ? phase_of(id) * a->interval : 0.0;
+            m_work.push_back(a.get());
+        } else if (timed != Timed::none && a->changed &&
+                   (timed == Timed::still || a->since_pose >= a->interval)) {
+            // (Time stood still this frame (paused, a menu): what moved
+            // since its last pose catches up now, budget allowing.)
+            m_due.push_back(a.get());
+        }
     }
+    if (timed == Timed::none) {
+        m_due.clear();
+    } else {
+        // At least a quarter of the budget always goes to them, however many
+        // are posed every frame: none waits forever.
+        const usize floor = std::max<usize>(poses_per_frame / 4, 1);
+        const usize budget = std::max(poses_per_frame > m_work.size() ? poses_per_frame - m_work.size() : 0, floor);
+        m_overdue = 0;
+        if (m_due.size() > budget) {
+            const auto later_first = [](const Animated* x, const Animated* y) {
+                return x->since_pose / x->interval > y->since_pose / y->interval;
+            };
+            std::nth_element(m_due.begin(), m_due.begin() + static_cast<std::ptrdiff_t>(budget), m_due.end(),
+                             later_first);
+            m_overdue = static_cast<u32>(m_due.size() - budget);
+            m_due.resize(budget);
+        }
+        for (Animated* a : m_due) {
+            // Keeps its phase; one held back past a whole interval goes
+            // back to its own (else all the held back line up).
+            a->since_pose -= a->interval;
+            if (!(a->since_pose >= 0.0 && a->since_pose < a->interval)) {
+                a->since_pose = phase_of(a->id) * a->interval;
+            }
+        }
+    }
+    m_work.insert(m_work.end(), m_due.begin(), m_due.end());
+    if (timed != Timed::none) m_posed_last = static_cast<u32>(m_work.size());
     if (!m_work.empty()) {
         m_jobs.parallel_for(m_work.size(), 4, [this](usize begin, usize end) {
             for (usize i = begin; i < end; ++i) {
@@ -300,6 +388,7 @@ void AnimationState::pose() {
         });
         for (Animated* a : m_work) {
             a->dirty = false;
+            a->changed = false;
             const bool same = a->posed && a->sent.size() == a->skin.size() &&
                               std::memcmp(a->sent.data(), a->skin.data(), a->skin.size() * sizeof(Mat4)) == 0 &&
                               a->sent_bounds.center == a->bounds.center &&
@@ -331,6 +420,11 @@ void AnimationState::pose() {
 
 void AnimationState::update(const world::Scene& scene, const MeshLibrary& meshes,
                             const world::SceneChanges& changed, double seconds) {
+    run(scene, meshes, changed, seconds, true);
+}
+
+void AnimationState::run(const world::Scene& scene, const MeshLibrary& meshes, const world::SceneChanges& changed,
+                         double seconds, bool by_frame) {
     if (scene.identity() != m_scene) {
         // A new scene: what commands played goes with the old one.
         m_scene = scene.identity();
@@ -350,8 +444,10 @@ void AnimationState::update(const world::Scene& scene, const MeshLibrary& meshes
         for (const world::EntityId id : changed.ids) follow(scene, meshes, id, true);
     }
     fill(scene, meshes);
-    if (!m_paused) advance(seconds);
-    pose();
+    const bool moves = !m_paused && seconds > 0.0;
+    if (moves) advance(seconds);
+    if (by_frame) lod(scene); // (screen sizes: once a frame)
+    pose(by_frame ? (moves ? Timed::frame : Timed::still) : Timed::none);
     for (const auto& [id, a] : m_animated) a->fresh = false;
 }
 
@@ -375,7 +471,7 @@ usize AnimationState::frozen() const { return m_wanted.size() - m_animated.size(
 
 usize AnimationState::waiting() const {
     const usize rest = m_wanted.size() - m_animated.size();
-    return std::min(rest, k_max_animated - m_animated.size());
+    return std::min(rest, max_animated > m_animated.size() ? max_animated - m_animated.size() : 0);
 }
 
 } // namespace giant::editor

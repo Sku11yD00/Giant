@@ -3,11 +3,11 @@
 // An entity whose mesh is a skinned file (MeshLibrary::Mesh::skinned) and
 // that has a clip to play (its saved Entity::animation, or one played by
 // command) is animated: it gets its own copy of the character in the
-// renderer (render::Renderer::add_skinned_mesh), posed each frame, which
+// renderer (render::Renderer::add_skinned_mesh), posed as time moves it, which
 // it draws instead of the file's shared rest-pose mesh once the copy is
 // loaded. Copies of one file share its geometry in the renderer (the
 // first uploads it, the rest are Renderer::add_skinned_copy). At most
-// k_max_animated are animated at once: those animating
+// max_animated (k_max_animated) are animated at once: those animating
 // keep their place, and a free one goes to the lowest id waiting; the rest
 // stand frozen in the rest pose (as do skinned entities with nothing to
 // play, or whose saved clip the file does not have). Copies are made a few
@@ -23,7 +23,8 @@
 // moves it by hand); a clip started this frame starts at its start. Poses
 // are worked out on worker threads and handed to the renderer on the main
 // thread, only when they changed (a pose the same as the last one sent is
-// not sent: it would redraw the shadows under it).
+// not sent: it would redraw the shadows under it), and how often by size on
+// screen (animation LOD: pose_interval, within poses_per_frame).
 #pragma once
 
 #include "mesh_library.h"
@@ -45,7 +46,21 @@ namespace giant::editor {
 
 class AnimationState {
 public:
-    static constexpr usize k_max_animated = 64;
+    static constexpr usize k_max_animated = 4096;
+    usize max_animated = k_max_animated; // (tests lower it)
+    // Animation LOD: how often a character is posed, by its size on screen
+    // (pixels of its pose sphere's radius): every frame near, down to four
+    // times a second far. Time still moves on every frame; only working out
+    // and sending the pose waits.
+    static double pose_interval(float pixels);
+    // Poses worked out per frame for characters posed less than every
+    // frame (most overdue first, a quarter of it kept for them however
+    // many are posed every frame); those posed every frame, and poses a
+    // command or a (re)start asks for, always go.
+    u32 poses_per_frame = 256;
+    // The view whose screen sizes decide (each frame, before update). Never
+    // set (tests): every character is posed every frame.
+    void set_view(const render::View& view, u32 height_pixels);
 
     // Without a renderer (tests) poses are worked out but drawn by nothing.
     explicit AnimationState(render::Renderer* renderer);
@@ -77,7 +92,7 @@ public:
 
     // By command. Each makes the entity animated now if it can be (the
     // copy made at once), and returns an error otherwise: no such entity,
-    // not a skinned mesh, no such clip, or k_max_animated animated already.
+    // not a skinned mesh, no such clip, or max_animated animated already.
     // Plays `clip` from `start` seconds (negative: from its start, or its
     // end when playing once backwards), fading from what showed over
     // `blend_seconds`, at `speed`; until the entity's saved animation is set,
@@ -104,7 +119,11 @@ public:
         std::vector<Mat4> model;
         std::vector<Mat4> skin;
         geometry::Sphere bounds;
-        bool dirty = true;     // its pose must be worked out again
+        bool dirty = true;     // its pose must be worked out again now
+        bool changed = false;  // time moved it since its last pose (posed when due)
+        double since_pose = 0.0; // seconds since its pose was last worked out
+        double interval = 0.0;   // seconds between poses, by its size on screen
+        float pixels = 0.0f;     // its size on screen (pose sphere radius), last update
         bool posed = false;    // at least once
         bool drawn = false;    // its copy drawn (loaded, posed), in copies()
         bool fresh = true;     // (re)started this update: time moves on from the next
@@ -134,6 +153,8 @@ public:
     usize frozen() const;
     usize waiting() const; // to be copied (within the limit), a few a frame
     u64 poses() const { return m_poses; } // handed to the renderer, ever
+    u32 posed_last() const { return m_posed_last; }   // worked out by the last frame's update
+    u32 overdue() const { return m_overdue; }         // due but left for a later frame (the budget)
     // Why the renderer refused the entity's copy (empty: it did not); not
     // tried again until the entity or its file changes.
     std::string refused(world::EntityId id) const;
@@ -159,7 +180,16 @@ private:
                           std::string& error);
     void fill(const world::Scene& scene, const MeshLibrary& meshes);
     void advance(double seconds);
-    void pose();
+    void lod(const world::Scene& scene); // each one's screen size and pose interval
+    // The frame's update (by_frame), or follow_now (seconds 0).
+    void run(const world::Scene& scene, const MeshLibrary& meshes, const world::SceneChanges& changed,
+             double seconds, bool by_frame);
+    // Which timed poses (those posed less than every frame) go: none (a
+    // command, follow_now: only what is asked for now), those due (a frame
+    // that moved time on), or all that moved since their last pose, budget
+    // allowing (a frame where time stood still: paused, a menu open).
+    enum class Timed : u8 { none, frame, still };
+    void pose(Timed timed);
 
     render::Renderer* m_renderer;
     JobSystem m_jobs;
@@ -172,6 +202,12 @@ private:
     std::unordered_map<const MeshLibrary::Skinned*, std::vector<render::MeshId>> m_copies_of;
     std::vector<world::EntityId> m_redraw;
     std::vector<Animated*> m_work; // scratch
+    std::vector<Animated*> m_due;  // scratch
+    bool m_view_set = false;
+    DVec3 m_eye{};
+    float m_pixels_per_unit = 0.0f;
+    u32 m_posed_last = 0;
+    u32 m_overdue = 0;
     struct Refusal {
         std::shared_ptr<const MeshLibrary::Skinned> skinned; // the file refused
         std::string error;
