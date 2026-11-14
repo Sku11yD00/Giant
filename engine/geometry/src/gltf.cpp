@@ -122,6 +122,11 @@ struct NodeTransform {
         return normalize_or_zero(Vec3{m[0] * v.x + m[4] * v.y + m[8] * v.z, m[1] * v.x + m[5] * v.y + m[9] * v.z,
                                       m[2] * v.x + m[6] * v.y + m[10] * v.z});
     }
+    // A difference of two points (a morph's move): the matrix alone, unnormalised.
+    Vec3 linear(const Vec3& v) const {
+        return {m[0] * v.x + m[4] * v.y + m[8] * v.z, m[1] * v.x + m[5] * v.y + m[9] * v.z,
+                m[2] * v.x + m[6] * v.y + m[10] * v.z};
+    }
     Vec3 direction(const Vec3& n) const {
         return normalize_or_zero(Vec3{normal[0] * n.x + normal[1] * n.y + normal[2] * n.z,
                                       normal[3] * n.x + normal[4] * n.y + normal[5] * n.z,
@@ -169,6 +174,18 @@ bool readable(const cgltf_accessor* a) {
            (!a->is_sparse || a->stride == cgltf_calc_size(a->type, a->component_type));
 }
 
+// At most `bytes` of a C string, cut on a UTF-8 character's start, reading
+// no further (names in a file may be huge).
+std::string cut_name(const char* text, usize bytes) {
+    usize size = 0;
+    while (size <= bytes && text[size] != 0) ++size;
+    if (size > bytes) {
+        size = bytes;
+        while (size > 0 && (static_cast<u8>(text[size]) & 0xC0) == 0x80) --size;
+    }
+    return std::string(text, size);
+}
+
 // Where a primitive's vertices go: the mesh, and (skinned) their weights:
 // all on one joint (`rigid`), or read from the primitive's own joints and
 // weights, which index `skin_joints` (the skin's joints, as skeleton joints).
@@ -177,6 +194,9 @@ struct Target {
     std::vector<SkinWeights>* weights = nullptr;
     i32 rigid = -1;
     const std::vector<u16>* skin_joints = nullptr;
+    // Skinned: the mesh's morph targets (merged by name over the file's
+    // meshes); null: morph targets are dropped.
+    std::vector<MorphTarget>* morphs = nullptr;
 };
 
 class Importer {
@@ -200,6 +220,71 @@ public:
     bool mesh(const cgltf_node* node, const NodeTransform& transform, const Target& target) {
         m_unpacked.clear();
         m_unpacked_floats.clear();
+        // Which of the target's morphs each of this mesh's targets adds to
+        // (by name; -1: dropped).
+        m_morph_slot.clear();
+        const cgltf_mesh& gm = *node->mesh;
+        const cgltf_size target_count = gm.primitives_count > 0 ? gm.primitives[0].targets_count : 0;
+        if (target.morphs != nullptr && target_count > 0) {
+            if (target_count > k_max_morph_targets * 4) {
+                return fail("a mesh has more than 1024 morph targets");
+            }
+            // (Bounded per node too: a mesh may be shown by many.)
+            m_morph_values_read += target_count;
+            if (m_morph_values_read > k_max_import_vertices) {
+                return fail("the file's morph targets move more than 48 million vertices");
+            }
+            // Names to slots, kept over the import (not rebuilt per node).
+            if (m_morph_owner != target.morphs) {
+                m_morph_owner = target.morphs;
+                m_morph_slots.clear();
+                for (usize m = 0; m < target.morphs->size(); ++m) {
+                    m_morph_slots.emplace((*target.morphs)[m].name, static_cast<i32>(m));
+                }
+            }
+            m_claimed.resize(k_max_morph_targets, 0);
+            // A node's own weights stand over its mesh's (glTF).
+            const cgltf_float* rest = node->weights_count > 0 ? node->weights : gm.weights;
+            const cgltf_size rest_count = node->weights_count > 0 ? node->weights_count : gm.weights_count;
+            for (cgltf_size k = 0; k < target_count; ++k) {
+                // At most k_max_morph_name_bytes, read no further than that.
+                std::string name;
+                if (k < gm.target_names_count && gm.target_names[k] != nullptr && gm.target_names[k][0] != 0) {
+                    name = cut_name(gm.target_names[k], k_max_morph_name_bytes);
+                } else {
+                    const char* mesh_name = gm.name != nullptr && gm.name[0] != 0 ? gm.name : "mesh";
+                    const std::string suffix = "#" + std::to_string(k);
+                    name = cut_name(mesh_name, k_max_morph_name_bytes - suffix.size()) + suffix;
+                }
+                i32 slot = -1;
+                if (const auto it = m_morph_slots.find(name); it != m_morph_slots.end()) {
+                    slot = it->second;
+                    if (m_claimed[static_cast<usize>(slot)] != 0) {
+                        // Twice in one mesh: the first one stands.
+                        warn_once(m_warned_morph_names, "a mesh's morph targets repeating a name were skipped");
+                        m_morph_slot.push_back(-1);
+                        continue;
+                    }
+                } else if (target.morphs->size() < k_max_morph_targets) {
+                    slot = static_cast<i32>(target.morphs->size());
+                    m_morph_slots.emplace(name, slot);
+                    target.morphs->emplace_back().name = std::move(name);
+                } else {
+                    warn_once(m_warned_morph_count, "morph targets past the 256th were skipped");
+                    m_morph_slot.push_back(-1);
+                    continue;
+                }
+                m_claimed[static_cast<usize>(slot)] = 1;
+                // The rest weight: the first mesh's that gives one not 0.
+                const float w = k < rest_count ? rest[k] : 0.0f;
+                MorphTarget& morph = (*target.morphs)[static_cast<usize>(slot)];
+                if (std::isfinite(w) && morph.weight == 0.0f) morph.weight = w;
+                m_morph_slot.push_back(slot);
+            }
+            for (const i32 slot : m_morph_slot) {
+                if (slot >= 0) m_claimed[static_cast<usize>(slot)] = 0;
+            }
+        }
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
             const usize before = target.mesh->indices.size();
             if (!primitive(node->mesh->primitives[i], transform, target)) {
@@ -376,8 +461,8 @@ private:
         if (prim.has_draco_mesh_compression) {
             return fail("Draco-compressed meshes are not supported; re-export without compression");
         }
-        if (prim.targets_count > 0) {
-            warn_once(m_warned_morph, "morph targets are not imported yet");
+        if (prim.targets_count > 0 && target.morphs == nullptr) {
+            warn_once(m_warned_morph, "morph targets are imported for skinned meshes only: the base shape was kept");
         }
         const cgltf_accessor* positions = cgltf_find_accessor(&prim, cgltf_attribute_type_position, 0);
         if (positions == nullptr || positions->type != cgltf_type_vec3) {
@@ -504,6 +589,8 @@ private:
         // Only the vertices that triangles use are kept, so the mesh stays
         // bounded by its triangle count.
         constexpr u32 unused = ~u32{0};
+        const usize first_vertex = mesh.vertices.size();
+        m_sources.clear(); // per vertex added: the primitive's vertex it came from
         m_remap.assign(vertex_count, unused);
         m_points.resize(vertex_count);
         for (const u32 i : triangles) {
@@ -537,6 +624,7 @@ private:
                     }
                     mesh.vertices.push_back(vertex);
                     m_given.push_back(given);
+                    m_sources.push_back(i);
                     if (!weigh(i)) return false;
                 }
                 mesh.indices.push_back(m_remap[i] - 1);
@@ -556,9 +644,112 @@ private:
                 mesh.vertices.push_back({c, face, uv_of(triangles[t + 2])});
                 m_given.insert(m_given.end(), 3, 0);
                 for (usize k = 0; k < 3; ++k) {
+                    m_sources.push_back(triangles[t + k]);
                     if (!weigh(triangles[t + k])) return false;
                 }
                 mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2});
+            }
+        }
+        if (target.morphs != nullptr && prim.targets_count > 0) {
+            return morphs(prim, transform, *target.morphs, first_vertex, n != nullptr);
+        }
+        return true;
+    }
+
+    // A unit vector, or +Y for zero (as the import does for its normals).
+    static Vec3 up_if_zero(const Vec3& unit) {
+        return !finite(unit) || length_squared(unit) == 0.0f ? Vec3{0, 1, 0} : unit;
+    }
+
+    // A vec3 accessor of a morph target, for one primitive (not cached:
+    // a mesh may have hundreds). Not readable(): a target without a
+    // bufferView is zeros (sparse values over them are common), so its
+    // reads are bounded by the vertices instead.
+    bool unpack_delta(const cgltf_accessor* accessor, cgltf_size vertex_count, std::vector<Vec3>& out) {
+        if (accessor->type != cgltf_type_vec3 || accessor->count != vertex_count) {
+            return fail("a morph target does not match its mesh's vertices");
+        }
+        if (accessor->is_sparse && accessor->stride != cgltf_calc_size(accessor->type, accessor->component_type)) {
+            return fail("sparse accessors on interleaved buffers are not supported");
+        }
+        // Bounded like vertices (a target over zeros costs the file nothing).
+        m_morph_values_read += vertex_count;
+        if (m_morph_values_read > k_max_import_vertices) {
+            return fail("the file's morph targets move more than 48 million vertices");
+        }
+        out.resize(vertex_count);
+        if (vertex_count > 0 && cgltf_accessor_unpack_floats(accessor, &out[0].x, vertex_count * 3) != vertex_count * 3) {
+            return fail("could not read a morph target");
+        }
+        return true;
+    }
+
+    // The primitive's morph targets on the vertices it added (from
+    // `first_vertex`, each from m_sources): what each moves, placed by
+    // `transform`. Flat-shaded vertices (no file normals) take their face's
+    // turn.
+    bool morphs(const cgltf_primitive& prim, const NodeTransform& transform, std::vector<MorphTarget>& out,
+                usize first_vertex, bool smooth) {
+        const cgltf_accessor* positions = cgltf_find_accessor(&prim, cgltf_attribute_type_position, 0);
+        const cgltf_size vertex_count = positions->count;
+        const std::vector<Vec3>* base_n = // (read already: cached)
+            smooth ? unpack(cgltf_find_accessor(&prim, cgltf_attribute_type_normal, 0), false) : nullptr;
+        if (smooth && base_n == nullptr) return false;
+        for (cgltf_size k = 0; k < prim.targets_count && k < m_morph_slot.size(); ++k) {
+            if (m_morph_slot[k] < 0) continue;
+            const cgltf_morph_target& mt = prim.targets[k];
+            const cgltf_accessor* dp = nullptr;
+            const cgltf_accessor* dn = nullptr;
+            for (cgltf_size a = 0; a < mt.attributes_count; ++a) {
+                const cgltf_attribute& attr = mt.attributes[a];
+                if (attr.index != 0) continue;
+                if (attr.type == cgltf_attribute_type_position) dp = attr.data;
+                if (attr.type == cgltf_attribute_type_normal) dn = attr.data;
+            }
+            const bool normals = dn != nullptr && smooth;
+            if (dp == nullptr && !normals) continue;
+            // Every vertex added is visited (flat ones: three per triangle).
+            m_morph_values_read += m_sources.size();
+            if (m_morph_values_read > k_max_import_vertices) {
+                return fail("the file's morph targets move more than 48 million vertices");
+            }
+            if (dp != nullptr && !unpack_delta(dp, vertex_count, m_delta_p)) return false;
+            if (dp == nullptr) m_delta_p.assign(vertex_count, Vec3{});
+            if (normals && !unpack_delta(dn, vertex_count, m_delta_n)) return false;
+            MorphTarget& morph = out[static_cast<usize>(m_morph_slot[k])];
+            // Where a primitive vertex goes at full weight.
+            const auto moved = [&](u32 i) { return m_points[i] + transform.linear(m_delta_p[i]); };
+            for (usize o = 0; o < m_sources.size(); ++o) {
+                const u32 i = m_sources[o];
+                const Vec3 dpos = transform.linear(m_delta_p[i]);
+                Vec3 dnor{};
+                if (normals) {
+                    // (Where the import replaced the normal with +Y, no turn.)
+                    const Vec3 before = transform.direction((*base_n)[i]);
+                    const Vec3 after = transform.direction((*base_n)[i] + m_delta_n[i]);
+                    if (finite(before) && length_squared(before) > 0.0f && length_squared(after) > 0.0f) {
+                        dnor = after - before;
+                    }
+                } else if (!smooth) {
+                    // Flat: its face's normal at full weight, less its own.
+                    const usize c = o - o % 3;
+                    const u32 i0 = m_sources[c], i1 = m_sources[c + 1], i2 = m_sources[c + 2];
+                    const Vec3 before =
+                        up_if_zero(normalize_or_zero(cross(m_points[i1] - m_points[i0], m_points[i2] - m_points[i0])));
+                    const Vec3 after = normalize_or_zero(cross(moved(i1) - moved(i0), moved(i2) - moved(i0)));
+                    if (length_squared(after) > 0.0f) dnor = after - before;
+                }
+                if (!finite(dnor)) {
+                    warn_once(m_warned_morph_values, "morph target values that are not finite numbers were left out");
+                    dnor = {};
+                }
+                if (!finite(dpos)) {
+                    warn_once(m_warned_morph_values, "morph target values that are not finite numbers were left out");
+                    continue;
+                }
+                // Moves under a micrometre, turns under 1e-4: nothing.
+                if (length_squared(dpos) <= 1e-12f && length_squared(dnor) <= 1e-8f) continue;
+                morph.deltas.push_back({static_cast<u32>(first_vertex + o), dpos, dnor});
             }
         }
         return true;
@@ -609,6 +800,16 @@ private:
     std::unordered_map<const cgltf_accessor*, std::vector<float>> m_unpacked_floats; // this node's
     std::vector<u8> m_given; // per target vertex: the file gave its tangent
     std::vector<u32> m_remap;  // per primitive: 0 used, else output index + 1
+    std::vector<u32> m_sources; // per primitive: each added vertex's primitive vertex
+    std::vector<i32> m_morph_slot; // per mesh: each of its targets' morph (-1: dropped)
+    std::vector<Vec3> m_delta_p, m_delta_n; // one morph target's, per primitive vertex
+    u64 m_morph_values_read = 0;
+    bool m_warned_morph_count = false;
+    bool m_warned_morph_names = false;
+    const std::vector<MorphTarget>* m_morph_owner = nullptr; // what m_morph_slots indexes
+    std::unordered_map<std::string, i32> m_morph_slots;
+    std::vector<u8> m_claimed; // per morph: this mesh has one of that name
+    bool m_warned_morph_values = false;
     std::vector<Vec3> m_points; // per primitive: transformed positions
 };
 
@@ -843,6 +1044,7 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
         Target target;
         target.mesh = &out.mesh.mesh;
         target.weights = &out.mesh.weights;
+        target.morphs = &out.mesh.morphs;
         if (node->skin == &skin) {
             if (!skinned_meshes.insert(node->mesh).second) continue;
             // In bind space as written: a skinned mesh's node does not place it.
@@ -864,8 +1066,27 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
     }
     if (!read_clips(data, skeleton, joint_of, importer, out.clips)) return false;
     // Tangents the file did not give, in bind space (split vertices keep
-    // their weights).
-    generate_tangents(out.mesh.mesh, &out.mesh.weights, importer.tangents_given());
+    // their weights and morph deltas).
+    {
+        const usize before = out.mesh.mesh.vertices.size();
+        std::vector<u32> split_from;
+        generate_tangents(out.mesh.mesh, &out.mesh.weights, importer.tangents_given(), &split_from);
+        for (MorphTarget& morph : out.mesh.morphs) {
+            const usize moved = morph.deltas.size();
+            for (usize c = 0; c < split_from.size(); ++c) {
+                const auto it = std::lower_bound(
+                    morph.deltas.begin(), morph.deltas.begin() + static_cast<std::ptrdiff_t>(moved), split_from[c],
+                    [](const MorphDelta& d, u32 v) { return d.vertex < v; });
+                if (it == morph.deltas.begin() + static_cast<std::ptrdiff_t>(moved) || it->vertex != split_from[c]) {
+                    continue;
+                }
+                MorphDelta copy = *it; // (push_back may move the array)
+                copy.vertex = static_cast<u32>(before + c);
+                morph.deltas.push_back(copy);
+            }
+        }
+        // Targets that move nothing are kept (a name animation may drive).
+    }
     // At rest, for whatever draws it unanimated; and each joint's reach.
     const TriangleMesh& bound = out.mesh.mesh;
     result.mesh.indices = bound.indices;

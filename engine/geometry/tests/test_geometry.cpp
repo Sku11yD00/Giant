@@ -784,6 +784,127 @@ GIANT_TEST("geometry: a skinned glTF imports its skeleton, weights, rigid parts 
     GIANT_CHECK(near3(at(tip), {-0.5f, 2.0f, 0.0f}));    // the sword's (1, 1.5) corner
 }
 
+GIANT_TEST("geometry: a skinned glTF's morph targets: named, merged by name, sparse, per vertex in bind space") {
+    SkinOptions o;
+    o.morphs = true;
+    ImportResult r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned.has_value());
+    if (!r.ok() || !r.skinned) return;
+    const SkinnedTriangleMesh& m = r.skinned->mesh;
+    const auto find = [&m](const Vec3& p) {
+        for (usize v = 0; v < m.mesh.vertices.size(); ++v) {
+            if (near3(m.mesh.vertices[v].position, p)) return v;
+        }
+        return usize{99};
+    };
+    const auto delta = [](const MorphTarget& t, usize v) -> const MorphDelta* {
+        for (const MorphDelta& d : t.deltas) {
+            if (d.vertex == v) return &d;
+        }
+        return nullptr;
+    };
+    const auto sorted = [](const MorphTarget& t) {
+        for (usize i = 1; i < t.deltas.size(); ++i) {
+            if (t.deltas[i].vertex <= t.deltas[i - 1].vertex) return false;
+        }
+        return true;
+    };
+    // The sword's "smile" (read first) and the arm's are one; the arm's
+    // rest weight kept.
+    GIANT_CHECK(m.morphs.size() == 2 && m.morphs[0].name == "smile" && m.morphs[1].name == "blink");
+    if (m.morphs.size() != 2) return;
+    GIANT_CHECK(m.morphs[0].weight == 0.25f && m.morphs[1].weight == 0.0f);
+    GIANT_CHECK(sorted(m.morphs[0]) && sorted(m.morphs[1]));
+    GIANT_CHECK(!std::any_of(r.warnings.begin(), r.warnings.end(),
+                             [](const std::string& w) { return w.find("morph") != std::string::npos; }));
+    // Smile: the middle and top rows out along +z, the bottom row unmoved;
+    // the top-left's normal turned toward +x.
+    const usize bottom = find({-0.1f, 0.0f, 0.0f}), bottom_r = find({0.1f, 0.0f, 0.0f});
+    const usize top_left = find({-0.1f, 2.0f, 0.0f}), middle_r = find({0.1f, 1.0f, 0.0f});
+    GIANT_CHECK(bottom < 9 && bottom_r < 9 && top_left < 9 && middle_r < 9);
+    if (bottom >= 9 || bottom_r >= 9 || top_left >= 9 || middle_r >= 9) return;
+    GIANT_CHECK(delta(m.morphs[0], bottom) == nullptr && delta(m.morphs[0], bottom_r) == nullptr);
+    const MorphDelta* tl = delta(m.morphs[0], top_left);
+    const MorphDelta* mr = delta(m.morphs[0], middle_r);
+    GIANT_CHECK(tl != nullptr && mr != nullptr);
+    if (tl == nullptr || mr == nullptr) return;
+    GIANT_CHECK(near3(tl->position, {0.0f, 0.0f, 0.1f}) && near3(mr->position, {0.0f, 0.0f, 0.1f}));
+    GIANT_CHECK(near3(tl->normal, normalize_or_zero(Vec3{0.5f, 0.0f, 1.0f}) - Vec3{0.0f, 0.0f, 1.0f}));
+    GIANT_CHECK(near3(mr->normal, {0.0f, 0.0f, 0.0f}));
+    // The sword (flat, rigid on the elbow): its tip out 0.5 m, and every
+    // corner's normal turning with the face.
+    const usize hilt = find({0.0f, 1.5f, 0.0f}), tip = find({1.0f, 1.5f, 0.0f});
+    GIANT_CHECK(hilt < 9 && tip < 9);
+    if (hilt >= 9 || tip >= 9) return;
+    const MorphDelta* h = delta(m.morphs[0], hilt);
+    const MorphDelta* t = delta(m.morphs[0], tip);
+    GIANT_CHECK(h != nullptr && t != nullptr);
+    if (h == nullptr || t == nullptr) return;
+    GIANT_CHECK(near3(t->position, {0.0f, 0.0f, 0.5f}) && near3(h->position, {0.0f, 0.0f, 0.0f}));
+    const Vec3 turned = normalize_or_zero(Vec3{-0.5f, 0.0f, 1.0f}) - Vec3{0.0f, 0.0f, 1.0f};
+    GIANT_CHECK(near3(h->normal, turned) && near3(t->normal, turned));
+    // Blink, sparse over zeros: the bottom-left alone.
+    GIANT_CHECK(m.morphs[1].deltas.size() == 1 && m.morphs[1].deltas[0].vertex == bottom &&
+                near3(m.morphs[1].deltas[0].position, {0.05f, 0.0f, 0.0f}));
+    // At rest the base shape (weights are the renderer's).
+    GIANT_CHECK(near3(r.mesh.vertices[top_left].position, {-0.1f, 2.0f, 0.0f}));
+
+    // Unnamed: named after their mesh (or "mesh") and index, so nothing merges.
+    o.morph_names = false;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned && r.skinned->mesh.morphs.size() == 3);
+    if (r.skinned && r.skinned->mesh.morphs.size() == 3) {
+        const auto& ms = r.skinned->mesh.morphs;
+        // (The sword is read first: it hangs under the elbow, before the body node.)
+        GIANT_CHECK(ms[0].name == "mesh#0" && ms[1].name == "arm#0" && ms[2].name == "arm#1");
+        GIANT_CHECK(ms[0].deltas.size() == 3 && ms[0].weight == 0.0f && ms[1].weight == 0.25f);
+    }
+
+    // A name repeated in one mesh: the first target stands, the second is
+    // skipped (with a warning), nothing moves twice.
+    o.morph_names = true;
+    o.repeated_names = true;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned && r.skinned->mesh.morphs.size() == 1);
+    if (r.skinned && r.skinned->mesh.morphs.size() == 1) {
+        GIANT_CHECK(sorted(r.skinned->mesh.morphs[0]) && r.skinned->mesh.morphs[0].deltas.size() == 4 + 3);
+        GIANT_CHECK(std::any_of(r.warnings.begin(), r.warnings.end(),
+                                [](const std::string& w) { return w.find("repeating a name") != std::string::npos; }));
+        GIANT_CHECK(!build_skinned_clusters(r.skinned->mesh, true).mesh.empty());
+    }
+    o.repeated_names = false;
+
+    // Uvs mirrored across the middle row split its two vertices for
+    // tangents: the copies move with the morphs too.
+    o.morph_names = true;
+    o.mirrored_uvs = true;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned && r.skinned->mesh.mesh.vertices.size() == 11);
+    if (r.skinned && r.skinned->mesh.morphs.size() == 2) {
+        const SkinnedTriangleMesh& mm = r.skinned->mesh;
+        usize middle = 0;
+        for (const MorphDelta& d : mm.morphs[0].deltas) {
+            if (std::fabs(mm.mesh.vertices[d.vertex].position.y - 1.0f) < 1e-5f) {
+                ++middle;
+                GIANT_CHECK(near3(d.position, {0.0f, 0.0f, 0.1f}));
+            }
+        }
+        GIANT_CHECK(middle == 4 && sorted(mm.morphs[0]));
+        GIANT_CHECK(mm.weights.size() == 11);
+    }
+
+    // A file without a skin is a plain mesh: its targets are dropped, with
+    // a warning.
+    TriangleFile f = triangle_file(false, "");
+    const usize at = f.json.find(R"("mode":4})");
+    GIANT_CHECK(at != std::string::npos);
+    f.json.replace(at, 9, R"("mode":4,"targets":[{"POSITION":0}]})");
+    r = import_gltf_memory(make_glb(f.json, f.bin));
+    GIANT_CHECK(r.ok() && !r.skinned && r.mesh.vertices.size() == 3);
+    GIANT_CHECK(std::any_of(r.warnings.begin(), r.warnings.end(),
+                            [](const std::string& w) { return w.find("skinned meshes only") != std::string::npos; }));
+}
+
 GIANT_TEST("geometry: a skinned mesh shown by two nodes is read once") {
     SkinOptions o;
     o.two_nodes = true;
@@ -1300,6 +1421,123 @@ GIANT_TEST("geometry: skinned clusters with levels: the whole hierarchy, each ve
     // Without levels: one level, terminal.
     const SkinnedClusterMesh flat = build_skinned_clusters(skinned);
     GIANT_CHECK(flat.mesh.levels == 1 && flat.mesh.groups[0].simplified.error == k_terminal_error);
+}
+
+GIANT_TEST("geometry: skinned clusters carry morph targets to their vertices, and keep morph seams") {
+    using namespace giant::geometry;
+    // Twins at one place with the same weights: apart while their deltas
+    // differ, merged when they match (and the delta kept once).
+    SkinnedTriangleMesh twins;
+    twins.mesh.vertices = {{{0, 0, 0}, {0, 0, 1}}, {{1, 0, 0}, {0, 0, 1}}, {{0, 1, 0}, {0, 0, 1}},
+                           {{0, 0, 0}, {0, 0, 1}}, {{0, -1, 0}, {0, 0, 1}}, {{5, 5, 5}, {0, 0, 1}}};
+    twins.mesh.indices = {0, 1, 2, 3, 4, 1};
+    SkinWeights a;
+    a.weights = {255, 0, 0, 0};
+    twins.weights.assign(6, a);
+    MorphTarget open;
+    open.name = "open";
+    open.weight = 0.5f;
+    open.deltas = {{0, {0, 0.1f, 0}, {}}, {3, {0, -0.1f, 0}, {}}, {5, {1, 1, 1}, {}}}; // 5: no triangle uses it
+    twins.morphs = {open, MorphTarget{"still", 0.0f, {}}};
+    SkinnedClusterMesh t = build_skinned_clusters(twins);
+    GIANT_CHECK(t.mesh.vertices.size() == 5 && t.morphs.size() == 2);
+    if (t.morphs.size() == 2) {
+        GIANT_CHECK(t.morphs[0].name == "open" && t.morphs[0].weight == 0.5f && t.morphs[1].name == "still");
+        GIANT_CHECK(t.morphs[0].deltas.size() == 2 && t.morphs[1].deltas.empty());
+        for (const MorphDelta& d : t.morphs[0].deltas) {
+            GIANT_CHECK(d.vertex < t.mesh.vertices.size() && near3(t.mesh.vertices[d.vertex].position, {0, 0, 0}));
+        }
+        GIANT_CHECK(t.morphs[0].deltas.size() == 2 && t.morphs[0].deltas[0].vertex < t.morphs[0].deltas[1].vertex);
+    }
+    twins.morphs[0].deltas[1].position = {0, 0.1f, 0};
+    t = build_skinned_clusters(twins);
+    GIANT_CHECK(t.mesh.vertices.size() == 4 && t.morphs.size() == 2 && t.morphs[0].deltas.size() == 1);
+    // Without any morphs: as before.
+    twins.morphs.clear();
+    GIANT_CHECK(build_skinned_clusters(twins).mesh.vertices.size() == 4 && build_skinned_clusters(twins).morphs.empty());
+
+    // Lips: a sphere's top half moves up and its bottom half down, the
+    // corners along the middle one each side (same weights). At every
+    // level, no triangle takes corners from both, and every delta names a
+    // vertex of its own half.
+    SkinnedTriangleMesh lips;
+    const TriangleMesh sphere = make_sphere(96, 48);
+    std::map<std::pair<u32, int>, u32> made;
+    MorphTarget part;
+    part.name = "part";
+    std::vector<int> side_of;
+    for (usize i = 0; i + 2 < sphere.indices.size(); i += 3) {
+        float y = 0.0f;
+        for (usize k = 0; k < 3; ++k) y += sphere.vertices[sphere.indices[i + k]].position.y;
+        const int side = y > 0.0f ? 1 : 0;
+        for (usize k = 0; k < 3; ++k) {
+            const u32 v = sphere.indices[i + k];
+            const auto [it, fresh] = made.try_emplace({v, side}, static_cast<u32>(lips.mesh.vertices.size()));
+            if (fresh) {
+                lips.mesh.vertices.push_back(sphere.vertices[v]);
+                lips.weights.push_back(a);
+                side_of.push_back(side);
+            }
+            lips.mesh.indices.push_back(it->second);
+        }
+    }
+    for (usize v = 0; v < lips.mesh.vertices.size(); ++v) {
+        part.deltas.push_back({static_cast<u32>(v), {0.0f, side_of[v] == 1 ? 0.05f : -0.05f, 0.0f}, {}});
+    }
+    lips.morphs = {part};
+    const SkinnedClusterMesh split = build_skinned_clusters(lips, true);
+    GIANT_CHECK(split.mesh.levels > 2 && split.morphs.size() == 1);
+    if (split.morphs.size() != 1) return;
+    // Every output vertex moves (all did), one delta each, its own side's.
+    GIANT_CHECK(split.morphs[0].deltas.size() == split.mesh.vertices.size());
+    std::vector<int> out_side(split.mesh.vertices.size(), -1);
+    for (const MorphDelta& d : split.morphs[0].deltas) {
+        GIANT_CHECK(d.vertex < out_side.size());
+        if (d.vertex < out_side.size()) out_side[d.vertex] = d.position.y > 0.0f ? 1 : 0;
+    }
+    usize mixed = 0, coarse = 0;
+    for (const Cluster& c : split.mesh.clusters) {
+        if (split.mesh.groups[c.group].depth > 0) coarse += c.triangle_count;
+        for (u32 i = 0; i < c.triangle_count; ++i) {
+            const u32* tri = &split.mesh.indices[c.first_index + i * 3];
+            if (out_side[tri[1]] != out_side[tri[0]] || out_side[tri[2]] != out_side[tri[0]]) ++mixed;
+        }
+    }
+    GIANT_CHECK(mixed == 0 && coarse > 0);
+    // Each vertex's delta is its own side's, coarse levels' vertices included.
+    usize wrong = 0;
+    for (usize v = 0; v < out_side.size(); ++v) {
+        const float y = split.mesh.vertices[v].position.y;
+        if (out_side[v] < 0 || (std::fabs(y) > 1e-3f && out_side[v] != (y > 0.0f ? 1 : 0))) ++wrong;
+    }
+    GIANT_CHECK(wrong == 0);
+    // Normals turning apart where moves agree (a hard edge) make no seam:
+    // a morph that swells every vertex, its normal deltas alternating,
+    // still simplifies far down.
+    SkinnedTriangleMesh faceted;
+    faceted.mesh = make_sphere(96, 48);
+    faceted.weights.assign(faceted.mesh.vertices.size(), a);
+    MorphTarget swell;
+    swell.name = "swell";
+    for (usize v = 0; v < faceted.mesh.vertices.size(); ++v) {
+        swell.deltas.push_back({static_cast<u32>(v), faceted.mesh.vertices[v].position * 0.1f,
+                                {0.0f, v % 2 == 0 ? 0.01f : -0.01f, 0.0f}});
+    }
+    faceted.morphs = {swell};
+    const SkinnedClusterMesh f = build_skinned_clusters(faceted, true);
+    GIANT_CHECK(f.mesh.levels > 2 && f.morphs.size() == 1 && f.morphs[0].deltas.size() == f.mesh.vertices.size());
+    usize f_coarse = 0;
+    for (const Cluster& c : f.mesh.clusters) f_coarse += f.mesh.groups[c.group].depth == f.mesh.levels - 1 ? c.triangle_count : 0;
+    GIANT_CHECK(f_coarse < faceted.mesh.indices.size() / 3 / 8);
+    // Normal turns alone (a flat face turning, its corners unmoved) make no
+    // seam either.
+    for (MorphDelta& d : faceted.morphs[0].deltas) d.position = {};
+    const SkinnedClusterMesh turned = build_skinned_clusters(faceted, true);
+    usize t_coarse = 0;
+    for (const Cluster& c : turned.mesh.clusters) {
+        t_coarse += turned.mesh.groups[c.group].depth == turned.mesh.levels - 1 ? c.triangle_count : 0;
+    }
+    GIANT_CHECK(turned.mesh.levels > 2 && t_coarse < faceted.mesh.indices.size() / 3 / 8);
 }
 
 GIANT_TEST("geometry: the sphere stays closed at every level of detail") {

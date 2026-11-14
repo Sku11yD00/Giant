@@ -107,7 +107,8 @@ Vertex unpack_vertex(const PackedVertex& packed) {
     return v;
 }
 
-void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, std::span<const u8> keep) {
+void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, std::span<const u8> keep,
+                       std::vector<u32>* split_from) {
     const usize count = mesh.vertices.size();
     GIANT_ASSERT(keep.empty() || keep.size() == count, "one keep flag per vertex");
     const bool split_weights = weights != nullptr && weights->size() == count;
@@ -204,6 +205,7 @@ void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, st
             copy[v] = static_cast<u32>(mesh.vertices.size());
             mesh.vertices.push_back(other);
             if (split_weights) weights->push_back((*weights)[v]);
+            if (split_from != nullptr) split_from->push_back(static_cast<u32>(v));
         }
         Vertex& self = mesh.vertices[v];
         self.tangent = frame(mirrored_only ? flipped : direct);

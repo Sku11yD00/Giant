@@ -91,16 +91,21 @@ struct ClusterMesh {
 ClusterMesh build_clusters(const TriangleMesh& mesh, std::span<const u8> locked = {});
 
 // A skinned mesh's clusters, vertices merged only where their weights
-// match too. `weights` is one per ClusterMesh vertex. Empty when the mesh
-// is, or it has not one weight per vertex.
+// and morph deltas match too. `weights` is one per ClusterMesh vertex;
+// `morphs` are the mesh's targets, in its order, their deltas renumbered to
+// ClusterMesh vertices (every level's: they index the one array). Empty
+// when the mesh is, or it has not one weight per vertex. Morph deltas must
+// name vertices in range, in increasing order (asserted).
 //
 // Without `levels`: its original triangles alone, one level, every group
 // terminal (simplification errors measured at bind need a renderer that
 // allows for the pose). With `levels`: the whole hierarchy as
 // build_clusters makes it, errors and bounds in bind space; simplification
-// only drops vertices, so every level's vertices keep their own weights,
-// and weight seams (corners at one place with other weights) are kept at
-// every level, so no coarse triangle takes a corner from across one.
+// only drops vertices, so every level's vertices keep their own weights
+// and deltas, and weight and morph seams (corners at one place with other
+// weights or deltas: lips that part) are kept at every level, so no coarse
+// triangle takes a corner from across one. Errors are measured on the base
+// shape: a renderer allows for how far its morphs move it.
 // The renderer can leave a depth unposed where none of it is drawn: that
 // is where its tree's root (nodes[depth]: every group of the depth, its
 // worst error) projects under the cut's threshold, the cut's own rule for
@@ -111,6 +116,7 @@ ClusterMesh build_clusters(const TriangleMesh& mesh, std::span<const u8> locked 
 struct SkinnedClusterMesh {
     ClusterMesh mesh;
     std::vector<SkinWeights> weights;
+    std::vector<MorphTarget> morphs;
 };
 SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& mesh, bool levels = false);
 

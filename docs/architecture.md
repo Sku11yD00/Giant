@@ -1704,8 +1704,12 @@ does. Shadow pages under a skinned mesh's instances are dirtied when its
 pose or place changes. Skinned meshes are never left to the far field, and
 the voxel world does not hold them (they bounce no light yet: a known gap,
 until a coarse pose is voxelized). The editor imports skinned files with
-their levels (cloth sheets stay one level). Later: animation LOD and
-thousands of characters (C1c), morph targets.
+their levels (cloth sheets stay one level). Morph targets (C3a) come in
+with a skinned file (`SkinnedTriangleMesh::morphs`, sparse deltas per
+vertex, gltf.h) and are carried through the cluster build to its vertices:
+vertices merge only where their deltas match too, and morph seams (a
+lip's corners, one per side at one place) are protected like weight seams
+at every level; the renderer applies them before skinning (C3b).
 
 Playing them (editor). `MeshLibrary` keeps a skinned file's skeleton,
 clips and bind-space clusters beside its rest-pose mesh, which every
