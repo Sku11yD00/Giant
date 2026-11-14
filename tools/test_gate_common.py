@@ -53,9 +53,14 @@ def main():
     check("the GPU device" not in slow_frames(times, slow, typicals), "older editors: no device line")
     # No hitches but uneven pacing: the frames over the 99th percentile's limit.
     uneven = [10.0] * 190 + [22.0] * 10
-    pacing = slow_frames(uneven, [frame(22.0, 21.0, render=20.0, render__voxels=13.0)] * 10, typicals)
+    pacing = slow_frames(uneven, [frame(22.0, 21.0, render=20.0, render__voxels=13.0)] * 10, typicals,
+                         slow_over_ms=20.0)
     check(pacing is not None and pacing.startswith("10 slow frames (over 20.8 ms)"), f"slow frames named: {pacing}")
     check("inside render, most over: render/voxels 10" in pacing, f"their part named: {pacing}")
+    # Not kept that low (a software adapter), or every frame slow: nothing to say.
+    check(slow_frames(uneven, [frame(22.0, 21.0, render=20.0)] * 10, typicals) is None, "not kept: nothing")
+    check(slow_frames([22.0] * 200, [frame(22.0, 21.0, render=20.0)] * 200, typicals, slow_over_ms=20.0) is None,
+          "all slow: nothing stands out")
     # No hitches, or no samples: nothing to say.
     check(slow_frames([10.0] * 50, [frame(20.0, 19.0, render=18.0)], typicals) is None, "no hitches")
     check(slow_frames(times, slow, []) is None, "no samples")

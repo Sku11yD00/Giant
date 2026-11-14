@@ -86,7 +86,7 @@ WAIT_PHASES = ("begin_frame", "end_frame", "tail")
 STALL_MS = 5.0
 
 
-def slow_frames(times, slow, typicals):
+def slow_frames(times, slow, typicals, slow_over_ms=25.0):
     """Where the main thread's time went in a flight's hitches: `times` as
     Editor.fly gives them, `slow` its slow frames' phases and `typicals` each
     sample's typical frame (Editor.fly's self.slow, self.typicals). Lines
@@ -94,13 +94,17 @@ def slow_frames(times, slow, typicals):
     of a hitch the thread spent neither working nor waiting on the GPU
     (preempted, or blocked on a lock or the disk). With no hitches but the
     99th percentile over its limit (uneven pacing), the same of the frames
-    over that limit. None when there is neither."""
+    over that limit, when `slow` holds every frame over it (`slow_over_ms`,
+    Editor.fly's self.slow_over_ms) and the typical frame is under it (else
+    every frame is slow: nothing stands out). None when there is neither."""
     if not times or not typicals:
         return None
     limit = hitch_limit(times)
     hitches = [f for f in slow if f["ms"] > limit]
     what = "hitches"
-    if not hitches and frame_stats(times)["p99_ms"] > P99_LIMIT_MS:
+    stats = frame_stats(times)
+    if (not hitches and stats["p99_ms"] > P99_LIMIT_MS and slow_over_ms <= P99_LIMIT_MS and
+            _median(times) < P99_LIMIT_MS):
         limit = P99_LIMIT_MS
         hitches = [f for f in slow if f["ms"] > limit]
         what = "slow frames"
@@ -252,7 +256,8 @@ class Editor:
         self.hover(240)
         # Frames over the 99th percentile's limit kept in full on a real GPU
         # (uneven pacing explained too); else only those near a hitch.
-        over_ms = P99_LIMIT_MS * 0.95 if self.real_gpu() else 25.0
+        over_ms = P99_LIMIT_MS if self.real_gpu() else 25.0
+        self.slow_over_ms = over_ms
         times = []
         recorded = self.tool("get_engine_info")["frame_times"]["recorded"]
         for stop, (position, look_at) in enumerate(path):
