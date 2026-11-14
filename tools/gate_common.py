@@ -92,12 +92,18 @@ def slow_frames(times, slow, typicals):
     sample's typical frame (Editor.fly's self.slow, self.typicals). Lines
     naming the phase most over its typical time in each hitch, and how much
     of a hitch the thread spent neither working nor waiting on the GPU
-    (preempted, or blocked on a lock or the disk); None when there were no
-    hitches."""
+    (preempted, or blocked on a lock or the disk). With no hitches but the
+    99th percentile over its limit (uneven pacing), the same of the frames
+    over that limit. None when there is neither."""
     if not times or not typicals:
         return None
     limit = hitch_limit(times)
     hitches = [f for f in slow if f["ms"] > limit]
+    what = "hitches"
+    if not hitches and frame_stats(times)["p99_ms"] > P99_LIMIT_MS:
+        limit = P99_LIMIT_MS
+        hitches = [f for f in slow if f["ms"] > limit]
+        what = "slow frames"
     if not hitches:
         return None
     names = set()
@@ -133,7 +139,7 @@ def slow_frames(times, slow, typicals):
         return ", ".join(f"{n} {c}" for n, c in sorted(table.items(), key=lambda x: -x[1]))
 
     over = sorted(((n, _median(v)) for n, v in excess.items() if "/" not in n), key=lambda x: -x[1])
-    lines = [f"{len(hitches)} hitches (over {limit:.1f} ms); the phase most over its typical time in each: "
+    lines = [f"{len(hitches)} {what} (over {limit:.1f} ms); the phase most over its typical time in each: "
              f"{counts(blamed)}",
              "  median ms over typical: " + ", ".join(f"{n} +{e:.1f}" for n, e in over if e >= 0.5)]
     if inner_blamed:
@@ -244,13 +250,16 @@ class Editor:
         # came before (a scene build is one long frame).
         self.tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
         self.hover(240)
+        # Frames over the 99th percentile's limit kept in full on a real GPU
+        # (uneven pacing explained too); else only those near a hitch.
+        over_ms = P99_LIMIT_MS * 0.95 if self.real_gpu() else 25.0
         times = []
         recorded = self.tool("get_engine_info")["frame_times"]["recorded"]
         for stop, (position, look_at) in enumerate(path):
             self.tool("set_camera", {"position": position, "look_at": look_at})
             each_stop(stop, self.last_frame())
             if stop % 100 == 99 or stop == len(path) - 1 or stop in marks:
-                now = self.tool("get_engine_info", {"phases_since": recorded})["frame_times"]
+                now = self.tool("get_engine_info", {"phases_since": recorded, "phases_over_ms": over_ms})["frame_times"]
                 new = now["recorded"] - recorded
                 recorded = now["recorded"]
                 if new > len(now["recent_ms"]):
