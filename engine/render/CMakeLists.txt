@@ -2,6 +2,7 @@ giant_module(render
   SOURCES
     src/renderer.cpp
     src/decals.cpp
+    src/occluders.cpp
     src/lights.cpp
     src/local_shadows.cpp
     src/streaming.cpp
@@ -72,6 +73,7 @@ giant_shaders(render
     shaders/ao.slang:cs_gtao:compute:ao_gtao_cs
     shaders/ao.slang:cs_denoise:compute:ao_denoise_cs
     shaders/ao.slang:cs_contact:compute:ao_contact_cs
+    shaders/occluders.slang:cs_occlusion:compute:occlusion_cs
     shaders/terrain.slang:cs_terrain:compute:terrain_cs
     shaders/post.slang:cs_histogram_clear:compute:histogram_clear_cs
     shaders/post.slang:cs_histogram:compute:histogram_cs
@@ -88,6 +90,7 @@ giant_module_tests(render
     tests/test_render.cpp
     tests/test_water_render.cpp
     tests/test_decals.cpp
+    tests/test_occluders.cpp
     tests/test_particles.cpp
     tests/test_lights.cpp
     tests/test_local_shadows.cpp

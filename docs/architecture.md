@@ -3438,6 +3438,29 @@ as standing still.
   coarse voxels are fuller than what they hold, so cones far out see a
   little too much blocked; emissive surfaces do not light the voxels yet;
   light lags changes by up to a round of the pool.
+- Characters are not in the voxel world (their pose changes every frame,
+  which would keep it rebuilding); their bodies shade the light round them
+  instead (characters plan C2a, `src/occluders.h`,
+  `shaders/occluders.slang`): `FrameInput::occluders` are capsules (a
+  segment and a radius, with a colour), of which the nearest 1024 in view
+  within 150 m are used. A compute pass after contact shadows (timed
+  "character occlusion", only with some in view; the capsules go up in
+  view space) lists per 8 x 8 pixel tile those whose reach (a sphere round
+  the capsule and 4 radii round it) touches the tile's box of points, in
+  their order, so with more than 64 a tile keeps the nearest 64 (the same
+  every frame), then per pixel takes each listed capsule as a sphere on its
+  axis (nearest the point lifted along its normal by the axis's distance,
+  so a leg over the ground shades it from above) and the share of the
+  cosine-weighted sky it hides, cos x (r / d)^2, faded over the last
+  quarter of the reach, at most 0.9 of it (a point inside a capsule, where
+  body parts overlap at a joint or a sunk capsule reaches under the ground,
+  is shaded less the deeper it is: (depth from the axis / r)^2). Shading multiplies the ambient diffuse light (and
+  the reflections' occlusion) by what is let through and adds half the
+  hidden share back in the capsules' colour, as light bounced off them.
+  Nothing is kept between frames, so it follows the pose exactly.
+  `RenderSettings::character_occlusion`, `RenderStats::occluders`. The
+  texture (full size, rgba8) is made the first frame with occluders and
+  freed after 600 frames without.
 
 ## Reflections
 
