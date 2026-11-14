@@ -429,6 +429,79 @@ GIANT_TEST("animation: copies on the renderer: frozen ones draw the rest pose, e
                 mesh_of(ids[10]) == a->copy && f.renderer->skinned(a->copy));
 }
 
+GIANT_TEST("character light: capsules of characters near the camera, where they are drawn, in their colour") {
+    Fixture f;
+    const world::EntityId arm = f.add_arm(3.0);
+    const world::EntityId decor = f.add_arm(-3.0); // no body (as walkers): still shades the light
+    const world::EntityId far_arm = f.add_arm(3000.0);
+    const world::EntityId hidden = f.add_arm(6.0);
+    const world::EntityId gone = f.add_arm(9.0);
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"base_color", {1, 0, 0}}}).ok);
+    GIANT_CHECK(f.run("set_entity", {{"id", decor}, {"body", "none"}}).ok);
+    GIANT_CHECK(f.run("set_entity", {{"id", hidden}, {"visible", false}}).ok);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {gone}}}).ok);
+    GIANT_CHECK(f.run("play_animation", {{"id", arm}, {"clip", "bend"}, {"blend_seconds", 0}, {"loop", false}}).ok);
+    GIANT_CHECK(f.run("step_animation", {{"seconds", 1.0}}).ok);
+    f.frame_step(0.0);
+    std::vector<render::Occluder> out(5); // (cleared first)
+    const DVec3 camera{0.0, 1.0, 0.0};
+    character_occluders(f.state.scene, *f.meshes, *f.animation, nullptr, nullptr, nullptr, nullptr, camera, out);
+    // The two near arms' two bones each; not the far, hidden or deleted ones.
+    GIANT_CHECK(out.size() == 4);
+    usize red = 0;
+    for (const render::Occluder& o : out) {
+        GIANT_CHECK(o.radius > 0.05f && (near(o.a.x, 3.0, 1.5) || near(o.a.x, -3.0, 0.5)));
+        if (o.albedo.x == 1.0f && o.albedo.y == 0.0f) {
+            ++red;
+            GIANT_CHECK(near(o.a.x, 3.0, 1.5));
+        } else {
+            GIANT_CHECK(o.albedo.x == 0.8f && near(o.a.x, -3.0, 0.5));
+        }
+    }
+    GIANT_CHECK(red == 2);
+    // The bent arm's elbow capsule as posed: swung over toward x = 2 (as its hit shape).
+    float lowest_x = 10.0f;
+    for (const render::Occluder& o : out) {
+        if (near(o.a.x, 3.0, 1.5)) lowest_x = std::min({lowest_x, static_cast<float>(o.a.x), static_cast<float>(o.b.x)});
+    }
+    GIANT_CHECK(lowest_x < 2.5f);
+    // Drawn elsewhere (walking): placed there.
+    std::unordered_map<world::EntityId, world::Transform> walking;
+    walking[decor] = f.state.scene.find(decor)->transform;
+    walking[decor].position = {-3.0, 0.0, -20.0};
+    character_occluders(f.state.scene, *f.meshes, *f.animation, nullptr, nullptr, &walking, nullptr, camera, out);
+    usize moved = 0;
+    for (const render::Occluder& o : out) moved += near(o.a.z, -20.0, 0.5) ? 1u : 0u;
+    GIANT_CHECK(out.size() == 4 && moved == 2);
+    // Moved by physics (or swinging): there; physics first, as drawn.
+    std::unordered_map<world::EntityId, world::Transform> moving;
+    moving[decor] = walking[decor];
+    moving[decor].position = {-3.0, 0.0, -30.0};
+    std::unordered_map<world::EntityId, world::Transform> swinging;
+    swinging[arm] = f.state.scene.find(arm)->transform;
+    swinging[arm].position = {3.0, 0.0, -40.0};
+    character_occluders(f.state.scene, *f.meshes, *f.animation, nullptr, &moving, &walking, &swinging, camera, out);
+    usize by_physics = 0;
+    usize swung = 0;
+    for (const render::Occluder& o : out) {
+        by_physics += near(o.a.z, -30.0, 0.5) ? 1u : 0u;
+        swung += near(o.a.z, -40.0, 1.5) ? 1u : 0u;
+    }
+    GIANT_CHECK(out.size() == 4 && by_physics == 2 && swung == 2);
+    // By the far one: its two only; nobody near: none.
+    character_occluders(f.state.scene, *f.meshes, *f.animation, nullptr, nullptr, nullptr, nullptr, DVec3{3000.0, 1.0, 0.0}, out);
+    GIANT_CHECK(out.size() == 2 && near(out[0].a.x, 3000.0, 0.5));
+    character_occluders(f.state.scene, *f.meshes, *f.animation, nullptr, nullptr, nullptr, nullptr, DVec3{1500.0, 1.0, 0.0}, out);
+    GIANT_CHECK(out.empty());
+    GIANT_CHECK(f.state.scene.find(far_arm) != nullptr);
+    // The render setting and the frame's count over MCP.
+    GIANT_CHECK(f.run("set_render_settings", {{"character_occlusion", false}}).ok);
+    GIANT_CHECK(!f.state.render_settings.character_occlusion);
+    const auto settings = f.run("get_render_settings");
+    GIANT_CHECK(settings.ok && settings.value["character_occlusion"] == false &&
+                settings.value["last_frame"].contains("occluders"));
+}
+
 GIANT_TEST("hit zones: a skinned arm's bones have capsules, named by zone, posed as drawn; bullets report them") {
     Fixture f;
     HitTargets hits;

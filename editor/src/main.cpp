@@ -416,6 +416,7 @@ int run(const Options& options) {
     };
     std::vector<sim::DustPuff> dust_near;
     std::vector<render::DustPuff> dust_frame;
+    std::vector<render::Occluder> occluder_frame;
     std::vector<render::Decal> wet_decals;   // what went in the water, wet a while
     std::vector<render::Decal> frame_decals; // the scene's and those
     std::vector<render::LocalLight> frame_lights; // the scene's lamps and the effects' lights
@@ -524,6 +525,13 @@ int run(const Options& options) {
         dust_frame.clear();
         for (const sim::DustPuff& d : dust_near) dust_frame.push_back({d.position, d.radius, d.density, d.color});
         input.dust = dust_frame;
+        // Characters' bodies, for the light round them (where they are drawn).
+        occluder_frame.clear();
+        if (input.settings.character_occlusion) {
+            editor::character_occluders(state.scene, meshes, animation, &textures, &physics.poses(), &walkers.poses(),
+                                        &swing.poses(), state.camera.position, occluder_frame);
+        }
+        input.occluders = occluder_frame;
         input.wind = weather.wind();
         input.particle_styles = effects.styles();
         if (!in_screenshot) { // (a screenshot's frame gives no births again, and stands still)

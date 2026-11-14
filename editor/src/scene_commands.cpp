@@ -538,6 +538,7 @@ Json render_settings_json(const EditorState& state) {
             {"ambient_occlusion_radius", state.render_settings.ambient_occlusion_radius},
             {"contact_shadows", state.render_settings.contact_shadows},
             {"contact_shadow_length", state.render_settings.contact_shadow_length},
+            {"character_occlusion", state.render_settings.character_occlusion},
             {"local_lights", state.render_settings.local_lights},
             {"local_shadows", state.render_settings.local_shadows},
             {"local_shadow_faces_per_frame", state.render_settings.local_shadow_faces_per_frame},
@@ -601,6 +602,7 @@ Json render_settings_json(const EditorState& state) {
               {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}},
               {"ambient_occlusion", s.ambient_occlusion},
               {"contact_shadows", s.contact_shadows},
+              {"occluders", s.occluders},
               {"water", {{"triangles", s.water_triangles}, {"dropped", s.water_dropped}, {"overflow", s.water_overflow},
                          {"broken_lakes", state.water_broken_lakes}, {"underwater", s.underwater},
                          {"swell", state.water_swell}}},
@@ -1814,6 +1816,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "the crease under a rock), from this frame's depth marched towards the sun for "
          "contact_shadow_length metres (default 0.3, never past 48 pixels; default on; lit views; "
          "last_frame.contact_shadows). "
+         "character_occlusion: characters' bodies (their hit capsules) shut the sky's and bounced light out "
+         "round them, a person darkening the ground about their feet, and give some back in their own colour "
+         "(default on; lit views; last_frame.occluders: capsules used, the nearest 1024 in view within 150 m). "
          "water: the scene's lakes, rivers and sea drawn (waves from the wind, the bed seen through shallow "
          "water, reflections, foam at the shore; default on; the lit view; last_frame.water: triangles drawn, "
          "dropped bad ones, overflow past the caps, broken_lakes: lakes not drawn as their shore crosses itself, "
@@ -1878,6 +1883,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"ambient_occlusion_radius", number(0.1, 4, "Metres creases and contact are looked for out to. Default 1.")},
                 {"contact_shadows", {{"type", "boolean"}}},
                 {"contact_shadow_length", number(0.05, 2, "Metres contact shadows are looked for towards the sun. Default 0.3.")},
+                {"character_occlusion", {{"type", "boolean"}}},
                 {"local_lights", {{"type", "boolean"}}},
                 {"local_shadows", {{"type", "boolean"}}},
                 {"local_shadow_faces_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 384},
@@ -1936,6 +1942,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.ambient_occlusion_radius = args.value("ambient_occlusion_radius", r.ambient_occlusion_radius);
              r.contact_shadows = args.value("contact_shadows", r.contact_shadows);
              r.contact_shadow_length = args.value("contact_shadow_length", r.contact_shadow_length);
+             r.character_occlusion = args.value("character_occlusion", r.character_occlusion);
              r.local_lights = args.value("local_lights", r.local_lights);
              r.local_shadows = args.value("local_shadows", r.local_shadows);
              r.local_shadow_faces_per_frame = args.value("local_shadow_faces_per_frame", r.local_shadow_faces_per_frame);

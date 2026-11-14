@@ -12,7 +12,9 @@
 
 #include "animation_state.h"
 #include "mesh_library.h"
+#include "texture_library.h"
 
+#include "giant/render/renderer.h"
 #include "giant/sim/hit_shapes.h"
 #include "giant/world/scene.h"
 
@@ -55,5 +57,21 @@ private:
     u64 m_seen_zones = ~u64{0};
     u64 m_updates = 0;
 };
+
+// Characters' bodies for the light round them (characters plan C2b,
+// render::Occluder): every visible skinned entity's bone capsules, posed as
+// drawn (as hit shapes are: its animation's pose once its copy shows, else
+// the rest pose), whatever its body (walkers have none), placed where it is
+// drawn (as the scene frame: `moving` the physics' poses, then `walking`
+// the walkers', then `swinging` the swings', else its transform; each may
+// be null), for those within render::k_occluder_distance of `camera` (5 m x
+// its scale allowed for its reach from its origin), in the colour it is
+// drawn in: its base colour, times its base colour map's average (by its
+// alpha cutoff) once that is ready, for a mesh with texture coordinates
+// (`textures` may be null). `out` is cleared first.
+using DrawnPoses = std::unordered_map<world::EntityId, world::Transform>;
+void character_occluders(const world::Scene& scene, const MeshLibrary& meshes, const AnimationState& animation,
+                         TextureLibrary* textures, const DrawnPoses* moving, const DrawnPoses* walking,
+                         const DrawnPoses* swinging, const DVec3& camera, std::vector<render::Occluder>& out);
 
 } // namespace giant::editor

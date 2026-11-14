@@ -1241,6 +1241,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::Checkbox("Contact shadows", &contact)) {
             run("set_render_settings", {{"contact_shadows", contact}});
         }
+        bool characters = r.character_occlusion;
+        if (ImGui::Checkbox("Characters shade the light round them", &characters)) {
+            run("set_render_settings", {{"character_occlusion", characters}});
+        }
         bool water = r.water;
         if (ImGui::Checkbox("Water", &water)) {
             run("set_render_settings", {{"water", water}});
