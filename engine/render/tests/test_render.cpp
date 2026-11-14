@@ -3837,6 +3837,8 @@ GIANT_TEST("render: d3d12 skin lets the sun and a shadowed lamp through a thin s
         frame.lighting.sun_light = sun ? Vec3{3.0f, 3.0f, 3.0f} : Vec3{0.0f, 0.0f, 0.0f};
         frame.lights = lamp ? std::span<const LocalLight>(lights) : std::span<const LocalLight>();
         int quiet = 0;
+        u32 drawn_pages = 0; // (diagnosis)
+        int frames = 0;
         for (int i = 0; i < 64 && (i < 16 || quiet < 4); ++i) {
             rhi::CommandList* cmd = device->begin_frame(nullptr);
             GIANT_CHECK(cmd != nullptr);
@@ -3845,10 +3847,16 @@ GIANT_TEST("render: d3d12 skin lets the sun and a shadowed lamp through a thin s
                 device->end_frame();
             }
             const RenderStats& st = renderer->last_stats();
+            drawn_pages += st.shadow_drawn;
+            ++frames;
             quiet = st.streamed_in == 0 && st.waiting == 0 && st.shadow_waiting == 0 && st.local_shadow_waiting == 0
                         ? quiet + 1
                         : 0;
         }
+        const RenderStats& st = renderer->last_stats();
+        std::printf("    (diagnosis: %d frames, %u pages drawn, shadows %d, pages %u, waiting %u, missing %u, draws %u)\n",
+                    frames, drawn_pages, st.shadows ? 1 : 0, st.shadow_pages, st.shadow_waiting, st.shadow_missing,
+                    st.shadow_draws);
         device->wait_idle();
         const std::vector<u8> image = device->read_texture(target);
         const usize i = (static_cast<usize>(k_h / 2) * k_w + k_w / 2) * 4;
@@ -3869,8 +3877,26 @@ GIANT_TEST("render: d3d12 skin lets the sun and a shadowed lamp through a thin s
     instances[0].scale.y = 0.3f; // as thick as a body: nothing gets through
     instances[0].position.y = 0.0075 - 0.15;
     const auto sun_thick = draw(true, false);
+    // (Diagnosis, for the Windows run: 3 m of skin; plain thick with
+    // translucency; thin without mesh shaders.)
+    instances[0].scale.y = 3.0f;
+    instances[0].position.y = 0.0075 - 1.5;
+    const auto diag_3m = draw(true, false);
+    instances[0].scale.y = 0.3f;
+    instances[0].position.y = 0.0075 - 0.15;
+    materials[0].skin_look = k_no_skin_look;
+    materials[0].translucency = 1.0f;
+    const auto diag_translucent = draw(true, false);
+    materials[0].translucency = 0.0f;
+    materials[0].skin_look = 0;
     instances[0].scale.y = 0.015f;
     instances[0].position.y = 0.0;
+    frame.settings.mesh_shaders = false;
+    const auto diag_vertex = draw(true, false);
+    frame.settings.mesh_shaders = true;
+    std::printf("    (diagnosis: 3 m %d %d %d, translucent thick %d %d %d, thin by vertex shaders %d %d %d)\n", diag_3m[0],
+                diag_3m[1], diag_3m[2], diag_translucent[0], diag_translucent[1], diag_translucent[2], diag_vertex[0],
+                diag_vertex[1], diag_vertex[2]);
     const auto lamp_thin = draw(false, true);
     lights[0].shadow_id = 0; // no tile: how thick it is is not known
     const auto lamp_unshadowed = draw(false, true);
