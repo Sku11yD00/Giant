@@ -24,6 +24,10 @@ struct SkinPush {
     uint matrix_offset;
     uint cluster_count;
     uint joint_count;
+    uint first_cluster; // this dispatch: clusters first_cluster .. + cluster_count
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 ConstantBuffer<SkinPush> push : register(b0);
 
@@ -49,10 +53,11 @@ float3 row_apply(float4 r0, float4 r1, float4 r2, float3 p, float w) {
 [numthreads(128, 1, 1)]
 void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
     // Whole groups leave together (before any barrier).
-    const uint index = group_id.x + group_id.y * k_skin_dispatch_width;
-    if (index >= push.cluster_count) {
+    const uint nth = group_id.x + group_id.y * k_skin_dispatch_width;
+    if (nth >= push.cluster_count) {
         return;
     }
+    const uint index = push.first_cluster + nth;
     RWByteAddressBuffer clusters = write_buffer(push.clusters);
     const uint at = index * k_cluster_bytes;
     const uint4 a = clusters.Load4(at);

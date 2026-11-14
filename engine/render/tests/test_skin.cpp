@@ -6,6 +6,7 @@
 #include "giant/render/renderer.h"
 
 #include "giant_test.h"
+#include "skin_lod.h"
 
 #include <array>
 #include <cmath>
@@ -20,7 +21,7 @@ namespace {
 
 // Two balls 1 m wide, each cut into many clusters: one at the origin moved
 // by joint 0, one at (0, 3, 0) moved by joint 1 (the "hand").
-geometry::SkinnedClusterMesh two_balls() {
+geometry::SkinnedClusterMesh two_balls(bool levels = false) {
     geometry::SkinnedTriangleMesh m;
     for (u16 joint = 0; joint < 2; ++joint) {
         const geometry::TriangleMesh ball = geometry::make_sphere(64, 32);
@@ -37,7 +38,7 @@ geometry::SkinnedClusterMesh two_balls() {
             m.mesh.indices.push_back(base + i);
         }
     }
-    return geometry::build_skinned_clusters(m);
+    return geometry::build_skinned_clusters(m, levels);
 }
 
 // Joint 1 turned -90 degrees about z round the origin: the hand goes from
@@ -92,12 +93,15 @@ GIANT_TEST("skin: unsound skinned meshes and poses are refused") {
     geometry::SkinnedClusterMesh heavy = two_balls();
     heavy.weights[5].weights = {200, 100, 0, 0};
     GIANT_CHECK(r.add_skinned_mesh(std::move(heavy), 2) == k_no_mesh);
-    // A mesh with levels of detail (not built for skinning).
-    geometry::SkinnedClusterMesh levels;
-    levels.mesh = geometry::build_clusters(geometry::make_sphere(64, 32));
-    levels.weights.assign(levels.mesh.vertices.size(), geometry::SkinWeights{{0, 0, 0, 0}, {255, 0, 0, 0}});
-    GIANT_CHECK(levels.mesh.levels > 1);
-    GIANT_CHECK(r.add_skinned_mesh(std::move(levels), 1) == k_no_mesh);
+    // Clusters not group by group (the pose pass takes runs of them by depth).
+    geometry::SkinnedClusterMesh shuffled = two_balls(true);
+    GIANT_CHECK(shuffled.mesh.levels > 1 && shuffled.mesh.groups.size() > 2);
+    std::swap(shuffled.mesh.groups[0], shuffled.mesh.groups.back());
+    GIANT_CHECK(r.add_skinned_mesh(std::move(shuffled), 2) == k_no_mesh);
+    // With levels of detail, it is taken.
+    const MeshId levels = r.add_skinned_mesh(two_balls(true), 2);
+    GIANT_CHECK(levels != k_no_mesh && r.skinned(levels) && r.mesh(levels)->levels > 1);
+    r.remove_mesh(levels);
     // An unused joint slot may name anything (its weight is 0).
     geometry::SkinnedClusterMesh spare = two_balls();
     spare.weights[0].joints[3] = 999;
@@ -394,4 +398,198 @@ GIANT_TEST("skin: a pose changing under a lamp draws the lamp's shadow again") {
     GIANT_CHECK(st.local_shadow_drawn == 6);
     st = s.draw(frame);
     GIANT_CHECK(st.local_shadow_drawn == 0);
+}
+
+GIANT_TEST("skin: how far a pose moves a vertex is bounded from the joints") {
+    // Joint 0 moves a sphere at (0, 3, 0), radius 0.5; joint 1 nothing.
+    const std::vector<float> spheres = {0.0f, 3.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, -1.0f};
+    const auto rows = [](const Mat4& m) {
+        std::vector<float> out(12);
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 4; ++c) out[static_cast<usize>(r * 4 + c)] = m.at(r, c);
+        }
+        return out;
+    };
+    const auto both = [&](const Mat4& a, const Mat4& b) {
+        std::vector<float> m = rows(a);
+        const std::vector<float> n = rows(b);
+        m.insert(m.end(), n.begin(), n.end());
+        return m;
+    };
+    const Mat4 far_away = mat4_from_transform({100.0f, 0.0f, 0.0f}, {}, {1.0f, 1.0f, 1.0f});
+    GIANT_CHECK(pose_reach(both(Mat4{}, Mat4{}), spheres) < 1e-4f); // bind
+    GIANT_CHECK(pose_reach(both(Mat4{}, far_away), spheres) < 1e-4f); // the joint moving nothing
+    const float moved = pose_reach(both(mat4_from_transform({0.0f, 0.0f, 2.0f}, {}, {1.0f, 1.0f, 1.0f}), Mat4{}),
+                                   spheres);
+    GIANT_CHECK(std::fabs(moved - 2.0f) < 1e-3f); // a shift moves everything by itself
+    // A quarter turn about z: no point of the sphere moves further than the
+    // bound, which is not far over the true most.
+    const Mat4 turn = mat4_from_transform({}, quat_from_axis_angle({0.0f, 0.0f, 1.0f}, k_pi * 0.5f), {1.0f, 1.0f, 1.0f});
+    const float reach = pose_reach(both(turn, Mat4{}), spheres);
+    float most = 0.0f;
+    for (int i = 0; i < 2000; ++i) {
+        const float u = static_cast<float>(i) * 0.61803f, v = static_cast<float>(i % 97) / 96.0f * 2.0f - 1.0f;
+        const float s = std::sqrt(std::max(0.0f, 1.0f - v * v));
+        const Vec3 p = Vec3{0.0f, 3.0f, 0.0f} + Vec3{s * std::cos(u * 6.2832f), v, s * std::sin(u * 6.2832f)} * 0.5f;
+        const Vec4 q = turn * Vec4{p.x, p.y, p.z, 1.0f};
+        most = std::max(most, length(Vec3{q.x, q.y, q.z} - p));
+    }
+    GIANT_CHECK(reach >= most && reach < most * 1.5f);
+    std::vector<float> broken = both(turn, Mat4{});
+    broken[3] = std::numeric_limits<float>::quiet_NaN();
+    GIANT_CHECK(pose_reach(broken, spheres) >= 1e30f && std::isfinite(pose_reach(broken, spheres)));
+}
+
+GIANT_TEST("skin: with levels, far draws and poses coarse, near fine, and the pose widens the cut") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    Renderer& r = *s.renderer;
+    const MeshId id = r.add_skinned_mesh(two_balls(true), 2);
+    GIANT_CHECK(id != k_no_mesh);
+    const geometry::ClusterMesh& data = *r.mesh(id);
+    const usize clusters = data.clusters.size();
+    GIANT_CHECK(data.levels >= 3);
+    usize originals = 0; // the clusters of depth 0
+    for (const geometry::ClusterGroup& g : data.groups) originals += g.depth == 0 ? g.cluster_count : 0;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = id;
+    instances[0].position = {0.0, 1.5, -1000.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.settings.gpu_culling = false;
+    frame.view.vertical_fov_degrees = 30.0f;
+    RenderStats st = s.draw(frame);
+    for (int i = 0; i < 8 && !r.mesh_ready(id); ++i) st = s.draw(frame);
+    GIANT_CHECK(r.mesh_ready(id));
+    // Far: a few coarse clusters drawn, and only the coarse depths posed.
+    for (int i = 0; i < 4; ++i) st = s.draw(frame);
+    GIANT_CHECK(st.instances == 1 && st.clusters > 0 && st.clusters < originals / 4);
+    GIANT_CHECK(r.set_pose(id, two_balls_bind(), {{0.0f, 1.5f, 0.0f}, 2.2f}));
+    st = s.draw(frame);
+    GIANT_CHECK(st.posed == 1 && st.posed_clusters > 0 && st.posed_clusters < clusters - originals);
+    const u32 far_clusters = st.clusters;
+
+    // Near: the finest depth is asked for, shows and is posed a frame or
+    // two later (the next update), then drawn.
+    instances[0].position = {0.0, 0.0, -2.5}; // the lower ball fills the middle of the view
+    for (int i = 0; i < 4; ++i) st = s.draw(frame);
+    GIANT_CHECK(st.clusters > far_clusters);
+    u32 depth0 = 0;
+    {
+        // Every pose since covers the whole mesh.
+        GIANT_CHECK(r.set_pose(id, two_balls_bind(), {{0.0f, 1.5f, 0.0f}, 2.2f}));
+        st = s.draw(frame);
+        GIANT_CHECK(st.posed == 1 && st.posed_clusters == clusters);
+        depth0 = st.clusters;
+    }
+    // Bent, at middle distances: the cut is never coarser than at bind and
+    // somewhere finer (the spheres widen by how far the hand moved; where
+    // exactly depends on the simplifier's levels, so a sweep).
+    bool finer = false;
+    for (const double z : {-12.0, -18.0, -25.0, -35.0, -50.0}) {
+        instances[0].position = {0.0, 1.5, z};
+        GIANT_CHECK(r.set_pose(id, two_balls_bind(), {{0.0f, 1.5f, 0.0f}, 2.2f}));
+        for (int i = 0; i < 4; ++i) st = s.draw(frame);
+        const u32 bind_triangles = st.triangles;
+        GIANT_CHECK(r.set_pose(id, bent(), k_bent_bounds));
+        for (int i = 0; i < 4; ++i) st = s.draw(frame);
+        GIANT_CHECK(st.triangles >= bind_triangles);
+        finer = finer || st.triangles > bind_triangles;
+    }
+    GIANT_CHECK(finer);
+    GIANT_CHECK(depth0 > far_clusters);
+
+    // Far again: once the fine depths go unused a while, they hide and the
+    // pose pass skips them.
+    instances[0].position = {0.0, 1.5, -1000.0};
+    for (int i = 0; i < 60; ++i) st = s.draw(frame);
+    GIANT_CHECK(r.set_pose(id, two_balls_bind(), {{0.0f, 1.5f, 0.0f}, 2.2f}));
+    st = s.draw(frame);
+    GIANT_CHECK(st.posed == 1 && st.posed_clusters < clusters - originals);
+    GIANT_CHECK(st.clusters == far_clusters);
+    // Not drawn at all: the coarsest only.
+    instances[0].position = {0.0, 0.0, 1000.0};
+    for (int i = 0; i < 60; ++i) st = s.draw(frame);
+    GIANT_CHECK(r.set_pose(id, bent(), k_bent_bounds));
+    st = s.draw(frame);
+    GIANT_CHECK(st.posed == 1 && st.instances == 0 && st.posed_clusters < clusters - originals);
+}
+
+namespace {
+
+// A ball skinned to joint 0 beside a second, smaller one whose vertices
+// are all locked: its groups cannot simplify, so they are terminal at
+// depth 0 (as stuck parts of a real mesh are).
+geometry::SkinnedClusterMesh ball_and_stuck_ball() {
+    geometry::TriangleMesh m = geometry::make_sphere(64, 32);
+    std::vector<u8> locked(m.vertices.size(), 0);
+    const geometry::TriangleMesh b = geometry::make_sphere(64, 32);
+    const u32 base = static_cast<u32>(m.vertices.size());
+    for (geometry::Vertex v : b.vertices) {
+        v.position = v.position * 0.5f + Vec3{3.0f, 0.0f, 0.0f};
+        m.vertices.push_back(v);
+        locked.push_back(1);
+    }
+    for (const u32 i : b.indices) m.indices.push_back(base + i);
+    geometry::SkinnedClusterMesh out;
+    out.mesh = geometry::build_clusters(m, locked);
+    out.weights.assign(out.mesh.vertices.size(), geometry::SkinWeights{{0, 0, 0, 0}, {255, 0, 0, 0}});
+    return out;
+}
+
+} // namespace
+
+GIANT_TEST("skin: terminal groups finer than the rest are always posed, and do not make far meshes pose everything") {
+    const geometry::SkinnedClusterMesh stuck = ball_and_stuck_ball();
+    const geometry::ClusterMesh& data = stuck.mesh;
+    GIANT_CHECK(data.levels >= 3);
+    usize shallow_terminal = 0;
+    for (const geometry::ClusterGroup& g : data.groups) {
+        shallow_terminal += geometry::is_root_group(g) && g.depth + 1 < data.levels ? g.cluster_count : 0;
+    }
+    GIANT_CHECK(shallow_terminal > 0);
+    // The depths' bounds leave the terminal groups out: far away, only the
+    // coarsest depth; near, the finest.
+    const std::vector<geometry::LodBounds> depths = depth_bounds(data);
+    geometry::LodView view;
+    view.pixels_per_unit = 1000.0f;
+    view.position = {0.0f, 0.0f, -5000.0f};
+    GIANT_CHECK(finest_depth(depths, view) == data.levels - 1);
+    view.position = {0.0f, 0.0f, -2.0f};
+    GIANT_CHECK(finest_depth(depths, view) == 0);
+    // The cut never takes a non-terminal cluster finer than finest_depth.
+    for (const float z : {2.0f, 10.0f, 60.0f, 300.0f, 1000.0f}) {
+        view.position = {0.0f, 0.0f, -z};
+        std::vector<u32> cut;
+        geometry::select_clusters(data, view, cut);
+        const u32 finest = finest_depth(depths, view);
+        for (const u32 c : cut) {
+            const geometry::ClusterGroup& g = data.groups[data.clusters[c].group];
+            GIANT_CHECK(geometry::is_root_group(g) || g.depth >= finest);
+        }
+    }
+
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    Renderer& r = *s.renderer;
+    const MeshId id = r.add_skinned_mesh(stuck, 1);
+    GIANT_CHECK(id != k_no_mesh);
+    std::vector<Instance> instances(1);
+    instances[0].mesh = id;
+    instances[0].position = {0.0, 0.0, -1000.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.settings.gpu_culling = false;
+    frame.view.vertical_fov_degrees = 30.0f;
+    RenderStats st = s.draw(frame);
+    for (int i = 0; i < 8 && !r.mesh_ready(id); ++i) st = s.draw(frame);
+    for (int i = 0; i < 4; ++i) st = s.draw(frame);
+    const Mat4 one[1] = {};
+    GIANT_CHECK(r.set_pose(id, one, {{1.5f, 0.0f, 0.0f}, 2.5f}));
+    st = s.draw(frame);
+    // Far: the coarsest depth and the stuck ball's groups, nothing between.
+    usize coarsest = 0;
+    for (const geometry::ClusterGroup& g : data.groups) coarsest += g.depth + 1 == data.levels ? g.cluster_count : 0;
+    GIANT_CHECK(st.posed == 1 && st.posed_clusters == coarsest + shallow_terminal);
+    GIANT_CHECK(st.instances == 1 && st.clusters >= shallow_terminal);
 }

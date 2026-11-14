@@ -236,7 +236,7 @@ float projected_error(const LodBounds& bounds, const LodView& view) {
     }
     const float s = max_abs_scale(view.scale);
     const Vec3 c = to_view(view, bounds.center);
-    const float d = length(c) - bounds.radius * s;
+    const float d = length(c) - (bounds.radius + view.pose_reach) * s;
     // A positive floor: with 0 the camera inside a zero-error sphere gives
     // 0 / 0, and NaN would pass neither side of the cut (drawing both).
     const float near_plane = std::max(1e-6f, view.near_plane); // NaN gives the floor too
@@ -250,7 +250,7 @@ void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u
     }
     const float s = max_abs_scale(view.scale);
     if (view.frustum != nullptr &&
-        !sphere_in_frustum(*view.frustum, to_view(view, mesh.bounds.center), mesh.bounds.radius * s)) {
+        !sphere_in_frustum(*view.frustum, to_view(view, mesh.bounds.center), (mesh.bounds.radius + view.pose_reach) * s)) {
         return;
     }
     const std::vector<u8>* resident =
@@ -304,7 +304,7 @@ void select_clusters(const ClusterMesh& mesh, const LodView& view, std::vector<u
                 continue; // a finer version is drawn instead
             }
             if (view.frustum != nullptr &&
-                !sphere_in_frustum(*view.frustum, to_view(view, c.bounds.center), c.bounds.radius * s)) {
+                !sphere_in_frustum(*view.frustum, to_view(view, c.bounds.center), (c.bounds.radius + view.pose_reach) * s)) {
                 continue;
             }
             out.push_back(index);

@@ -1643,27 +1643,62 @@ coarse triangle takes a corner from across one (the sloppy fallback, which
 ignores protection, is off for them). Where a depth's tree root
 (`nodes[depth]`, every group of the depth and its worst error) projects
 under the cut's threshold, nothing of that depth is drawn, so it needs no
-pose (bounds widened for the pose must widen the roots alike). The renderer draws them so from C1b.
+pose (bounds widened for the pose must widen the roots alike; a depth
+holding a terminal group has an infinite root error, so the renderer keeps
+its own per-depth bounds without them, below).
 Each character adds its own (`Renderer::add_skinned_mesh`: every
-instance of one shows its one pose), and it goes through the same cluster
-path as everything else:
-its groups stream into the geometry pool as terminal groups do (loaded
-first, never evicted), and a source buffer keeps its vertices at bind
-with their joints and weights, cluster by cluster in the pool's order.
+instance of one shows its one pose; its clusters must come group by group,
+depth by depth, as the builder makes them), and it goes through the same
+cluster path as everything else: its groups stream into the geometry pool
+as any mesh's do (terminal groups first and kept, finer ones loaded when
+asked for and evicted when unused), and a source buffer keeps its vertices
+at bind with their joints and weights, cluster by cluster in the pool's
+order. With every level, a character copy holds about twice the clusters,
+source and CPU copy of the original triangles alone.
 `set_pose` takes one skin matrix per joint and a sphere around the pose;
 in the frame after, before anything reads geometry, `skin.slang` (a
 thread group per cluster) writes the posed vertices and normals into the
 mesh's place in the pool and refits each cluster's culling sphere to
 them, so culling, raster, shadows and shading read posed geometry with no
-change of their own. It runs only for a new pose (or once the mesh has
-loaded), not every frame. Instance culling uses the pose's sphere; the
-CPU cut (GPU culling off) tests that sphere and then takes every cluster.
-Shadow pages under a skinned mesh's instances are dirtied when its pose
-or place changes. Skinned meshes are never left to the far field, and the
-voxel world does not hold them (they bounce no light yet: a known gap,
-until a coarse pose is voxelized). Later: levels of detail for skinned
-meshes (the geometry from C1a; drawn, allowing for the pose, from C1b) and
-morph targets.
+change of their own. It runs for a new pose, and when groups start to show
+(loaded, or the floor below lowered), not every frame; an instance whose
+shown groups were not all posed (out of transient memory) is not drawn
+that frame. Instance culling uses the pose's sphere.
+
+Levels of detail for skinned meshes (C1b). The LOD spheres and errors stay
+at bind. `set_pose` bounds how far the pose moves any vertex from bind
+(`skin_lod.h` `pose_reach`: per joint, from the bind sphere around the
+vertices it moves, |(A - I) c + t| + |A - I|_F r; a vertex blends joints
+with weights summing to one, so it moves no further than its farthest
+joint alone), and every LOD sphere, GPU (`MeshEntry::pose_reach`,
+`projected_error`) and CPU (`LodView::pose_reach`), widens by it. The same
+widening everywhere keeps the cut whole and monotonic; it covers where
+things went, not how a pose bends them (errors stay the bind pose's, so a
+stretched joint or a coarse triangle across a bent joint can look a little
+past the threshold). The CPU cut (GPU culling off) tests the pose's sphere,
+then takes the cut by the widened spheres, frustum off.
+Only depths some view draws are posed. `GeometryStreamer` keeps a floor
+per posed mesh: groups finer than it (terminal ones excepted) are hidden,
+written "not loaded" in the residency table culling and `skin.slang` read
+(`shown()`; parents are always one depth coarser, so what shows stays
+closed under parents and the cut whole), so the pose pass skips them and
+coarser clusters stand in, as for any group not loaded. The pose pass
+dispatches only the clusters from the floor's depth on, plus runs of
+terminal clusters finer than it. The camera aims the floor
+(`Renderer::aim_skin_floors`, before the streamer's update: per mesh, the
+nearest instance in view, the first depth whose bounds over its
+non-terminal groups project over the threshold; none in view: the
+coarsest). A request for a hidden group, or a usage mark on a loaded hidden
+one (shadow culls ask for no loads but mark what they reach), lowers it at
+the next update; it rises to the aim once no group below was used or asked
+for in `k_keep_frames` (checked every `k_usage_interval` updates). A
+character coming close draws coarser for a frame or two, as streaming
+does. Shadow pages under a skinned mesh's instances are dirtied when its
+pose or place changes. Skinned meshes are never left to the far field, and
+the voxel world does not hold them (they bounce no light yet: a known gap,
+until a coarse pose is voxelized). The editor imports skinned files with
+their levels (cloth sheets stay one level). Later: animation LOD and
+thousands of characters (C1c), morph targets.
 
 Playing them (editor). `MeshLibrary` keeps a skinned file's skeleton,
 clips and bind-space clusters beside its rest-pose mesh, which every

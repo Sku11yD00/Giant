@@ -17,6 +17,7 @@
 #include "gpu_layout.h"
 #include "render_shaders.h"
 #include "shadow_pages.h"
+#include "skin_lod.h"
 #include "smaa.h"
 #include "streaming.h"
 #include "voxel_light.h"
@@ -673,16 +674,24 @@ MeshId Renderer::add_mesh(geometry::ClusterMesh data) { return add(std::move(dat
 
 MeshId Renderer::add_skinned_mesh(geometry::SkinnedClusterMesh skinned, u32 joints) {
     const geometry::ClusterMesh& data = skinned.mesh;
-    if (data.empty() || joints == 0 || joints > k_max_skin_joints || data.levels != 1 ||
+    if (data.empty() || joints == 0 || joints > k_max_skin_joints ||
         skinned.weights.size() != data.vertices.size()) {
-        log_error("render", "a skinned mesh must be one level, one weight per vertex, 1 to 1024 joints; not added");
+        log_error("render", "a skinned mesh must have one weight per vertex and 1 to 1024 joints; not added");
         return k_no_mesh;
     }
-    for (const geometry::ClusterGroup& g : data.groups) {
-        if (!geometry::is_root_group(g)) {
-            log_error("render", "a skinned mesh must be its original triangles alone; not added");
-            return k_no_mesh;
-        }
+    // The pose pass takes the shown depths as runs of clusters.
+    bool ordered = data.levels >= 1 && data.levels <= gpu::k_max_tree_levels && data.nodes.size() >= data.levels &&
+                   !data.groups.empty() && data.groups.back().depth + 1 == data.levels &&
+                   data.groups.back().first_cluster + data.groups.back().cluster_count == data.clusters.size();
+    for (usize g = 0; ordered && g < data.groups.size(); ++g) {
+        const geometry::ClusterGroup& gr = data.groups[g];
+        const u32 expected = g == 0 ? 0 : data.groups[g - 1].first_cluster + data.groups[g - 1].cluster_count;
+        ordered = gr.first_cluster == expected && gr.depth < data.levels &&
+                  (g == 0 || gr.depth >= data.groups[g - 1].depth);
+    }
+    if (!ordered) {
+        log_error("render", "a skinned mesh's clusters must come group by group, depth by depth; not added");
+        return k_no_mesh;
     }
     for (const geometry::SkinWeights& w : skinned.weights) {
         if (u32{w.weights[0]} + w.weights[1] + w.weights[2] + w.weights[3] != 255) {
@@ -730,6 +739,7 @@ bool Renderer::set_pose(MeshId id, std::span<const Mat4> skin, const geometry::S
         }
     }
     s.bounds = bounds;
+    s.reach = pose_reach(s.matrices, s.joint_spheres);
     ++s.version;
     return true;
 }
@@ -806,7 +816,7 @@ MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::Ski
     // A removed mesh's slot first, so meshes coming and going (terrain
     // tiles rebuilt) do not grow the mesh table every frame walks.
     const u32 id = m_free_meshes.empty() ? static_cast<u32>(m_meshes.size()) : m_free_meshes.back();
-    if (!m_streamer->add(id, data, clusters)) {
+    if (!m_streamer->add(id, data, clusters, weights != nullptr)) {
         return k_no_mesh;
     }
     // A skinned mesh's source: its vertices at bind, cluster by cluster in
@@ -833,6 +843,57 @@ MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::Ski
         }
         mesh.skin = std::make_unique<Skin>();
         mesh.skin->joints = joints;
+        // Each joint's sphere around the bind vertices it moves: a box,
+        // then the farthest from its centre.
+        std::vector<float>& spheres = mesh.skin->joint_spheres;
+        std::vector<Vec3> lo(joints, Vec3{1e30f, 1e30f, 1e30f}), hi(joints, Vec3{-1e30f, -1e30f, -1e30f});
+        for (usize v = 0; v < data.vertices.size(); ++v) {
+            const Vec3 p = data.vertices[v].position;
+            for (usize k = 0; k < 4; ++k) {
+                if ((*weights)[v].weights[k] == 0) continue;
+                const u32 j = (*weights)[v].joints[k];
+                lo[j] = Vec3{std::min(lo[j].x, p.x), std::min(lo[j].y, p.y), std::min(lo[j].z, p.z)};
+                hi[j] = Vec3{std::max(hi[j].x, p.x), std::max(hi[j].y, p.y), std::max(hi[j].z, p.z)};
+            }
+        }
+        spheres.assign(usize{joints} * 4, 0.0f);
+        for (u32 j = 0; j < joints; ++j) {
+            const bool any = lo[j].x <= hi[j].x;
+            const Vec3 c = any ? (lo[j] + hi[j]) * 0.5f : Vec3{};
+            spheres[j * 4 + 0] = c.x;
+            spheres[j * 4 + 1] = c.y;
+            spheres[j * 4 + 2] = c.z;
+            spheres[j * 4 + 3] = any ? 0.0f : -1.0f;
+        }
+        for (usize v = 0; v < data.vertices.size(); ++v) {
+            const Vec3 p = data.vertices[v].position;
+            for (usize k = 0; k < 4; ++k) {
+                if ((*weights)[v].weights[k] == 0) continue;
+                float* s = spheres.data() + usize{(*weights)[v].joints[k]} * 4;
+                s[3] = std::max(s[3], length(p - Vec3{s[0], s[1], s[2]}));
+            }
+        }
+        for (u32 j = 0; j < joints; ++j) {
+            float& r = spheres[j * 4 + 3];
+            if (r >= 0.0f) r = r * 1.0001f + 1e-6f; // a hair over, for rounding
+        }
+        mesh.skin->depth_first.assign(data.levels + 1, static_cast<u32>(data.clusters.size()));
+        for (u32 g = static_cast<u32>(data.groups.size()); g-- > 0;) {
+            mesh.skin->depth_first[data.groups[g].depth] = data.groups[g].first_cluster;
+        }
+        for (u32 d = data.levels; d-- > 0;) { // a depth without groups starts where the next does
+            mesh.skin->depth_first[d] = std::min(mesh.skin->depth_first[d], mesh.skin->depth_first[d + 1]);
+        }
+        for (const geometry::ClusterGroup& g : data.groups) {
+            if (!geometry::is_root_group(g)) continue;
+            std::vector<std::array<u32, 3>>& runs = mesh.skin->terminal_runs;
+            if (!runs.empty() && runs.back()[1] == g.first_cluster) {
+                runs.back()[1] += g.cluster_count; // (groups come depth by depth: the run's first is its finest)
+            } else {
+                runs.push_back({g.first_cluster, g.first_cluster + g.cluster_count, g.depth});
+            }
+        }
+        mesh.skin->depth_lod = depth_bounds(data);
         mesh.skin->bounds = data.bounds;
         mesh.skin->posed_bounds = data.bounds;
         // Until posed: the identity (the bind pose).
@@ -1593,6 +1654,7 @@ void Renderer::read_gpu_stats() {
 
 void Renderer::pose_skins(rhi::CommandList& cmd) {
     m_posed = 0;
+    m_posed_clusters = 0;
     if (m_skinned.empty() || !m_streamer->tables_current()) {
         return; // (stale tables: posed once they are current)
     }
@@ -1600,8 +1662,10 @@ void Renderer::pose_skins(rhi::CommandList& cmd) {
     for (const MeshId id : m_skinned) {
         Mesh& mesh = m_meshes[id];
         Skin& skin = *mesh.skin;
-        // A new pose, or just loaded (the pool holds the bind pose): pose it.
-        if (skin.posed == skin.version || !m_streamer->ready(id)) {
+        // A new pose, or groups that came to show (loaded, or the floor
+        // lowered: they hold the bind pose, or an old one): pose it.
+        const u32 shown = m_streamer->shown_version(id);
+        if ((skin.posed == skin.version && skin.posed_shown == shown) || !m_streamer->ready(id)) {
             continue;
         }
         const rhi::TransientMemory matrices = cmd.upload(bytes_of(skin.matrices));
@@ -1622,14 +1686,32 @@ void Renderer::pose_skins(rhi::CommandList& cmd) {
         push.pool = m_device.write_descriptor(m_streamer->pool());
         push.matrices = matrices.descriptor;
         push.matrix_offset = matrices.offset;
-        push.cluster_count = static_cast<u32>(mesh.data.clusters.size());
         push.joint_count = skin.joints;
-        cmd.push(push);
-        const u32 n = push.cluster_count;
-        cmd.dispatch(std::min(n, gpu::k_skin_dispatch_width), (n + gpu::k_skin_dispatch_width - 1) / gpu::k_skin_dispatch_width);
+        // The shown depths (from the floor down to the coarsest), then any
+        // terminal group finer than the floor (always shown). Groups not
+        // shown inside these runs are skipped by the pass itself.
+        const auto run = [&](u32 first, u32 end) {
+            if (end <= first) return;
+            push.first_cluster = first;
+            push.cluster_count = end - first;
+            m_posed_clusters += push.cluster_count;
+            cmd.push(push);
+            const u32 n = push.cluster_count;
+            cmd.dispatch(std::min(n, gpu::k_skin_dispatch_width),
+                         (n + gpu::k_skin_dispatch_width - 1) / gpu::k_skin_dispatch_width);
+        };
+        const u32 floor = std::min(m_streamer->floor(id), mesh.data.levels > 0 ? mesh.data.levels - 1 : 0u);
+        const u32 from = skin.depth_first[floor];
+        run(from, static_cast<u32>(mesh.data.clusters.size()));
+        for (const std::array<u32, 3>& t : skin.terminal_runs) {
+            if (t[2] >= floor || t[0] >= from) break; // (the rest are in the run above)
+            run(t[0], std::min(t[1], from));
+        }
         cmd.barrier(mesh.clusters, rhi::ResourceState::shader_read);
         skin.posed = skin.version;
+        skin.posed_shown = shown;
         skin.posed_bounds = skin.bounds;
+        skin.posed_reach = skin.reach;
         ++m_posed;
     }
     if (begun) {
@@ -1672,7 +1754,8 @@ void Renderer::track_skin_shadows(const FrameInput& frame) {
         const SkinBox& box = m_skin_boxes[id];
         // The pose drawn is the one in the pool.
         const bool same = skin.shadow_known == box.any &&
-                          (!box.any || (skin.shadow_version == skin.posed && skin.shadow_min == box.min &&
+                          (!box.any || (skin.shadow_version == skin.posed && skin.shadow_shown == skin.posed_shown &&
+                                        skin.shadow_min == box.min &&
                                         skin.shadow_max == box.max));
         if (same) {
             continue;
@@ -1689,6 +1772,50 @@ void Renderer::track_skin_shadows(const FrameInput& frame) {
         skin.shadow_min = box.min;
         skin.shadow_max = box.max;
         skin.shadow_version = skin.posed;
+        skin.shadow_shown = skin.posed_shown;
+    }
+}
+
+void Renderer::aim_skin_floors(const FrameInput& frame, u32 width, u32 height) {
+    if (m_skinned.empty()) {
+        return;
+    }
+    // The finest depth the camera may draw of each skinned mesh, over its
+    // instances in view (its nearest decides); the streamer hides finer ones
+    // (after a while), so the pose pass skips them. Shadows draw no finer
+    // than what shows, but keep shown what they draw (and bring back what
+    // they reach hidden: the streamer's usage marks).
+    const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
+    const geometry::Frustum frustum = geometry::frustum_from_view_projection(
+        view_projection(frame.view, static_cast<float>(width) / static_cast<float>(std::max(height, 1u))));
+    geometry::LodView lod;
+    lod.pixels_per_unit = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(height);
+    lod.near_plane = std::max(frame.view.near_plane, 1e-4f);
+    lod.threshold_pixels = std::clamp(frame.settings.lod_error_pixels, 0.01f, 1000.0f);
+    m_skin_aims.assign(m_meshes.size(), ~0u);
+    const usize count = std::min<usize>(frame.instances.size(), k_max_instances);
+    for (usize i = 0; i < count; ++i) {
+        const Instance& in = frame.instances[i];
+        if (!skinned(in.mesh) || m_skin_aims[in.mesh] == 0) {
+            continue;
+        }
+        const Skin& skin = *m_meshes[in.mesh].skin;
+        lod.position = to_camera_relative(in.position, frame.view.position);
+        lod.rotation = in.rotation;
+        lod.scale = in.scale;
+        const geometry::Sphere& b = skin.bounds;
+        const Vec3 c = lod.position + rotate(in.rotation, Vec3{b.center.x * in.scale.x, b.center.y * in.scale.y,
+                                                                b.center.z * in.scale.z});
+        const float s = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
+        if (!geometry::sphere_in_frustum(frustum, c, b.radius * s)) {
+            continue;
+        }
+        lod.pose_reach = std::max(skin.reach, skin.posed_reach);
+        m_skin_aims[in.mesh] = std::min(m_skin_aims[in.mesh], finest_depth(skin.depth_lod, lod));
+    }
+    for (const MeshId id : m_skinned) {
+        // Not drawn: the coarsest (the streamer clamps it).
+        m_streamer->aim_floor(id, m_skin_aims[id]);
     }
 }
 
@@ -1711,17 +1838,20 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
         m_selected.clear();
         m_wanted.clear();
         m_touched.clear();
-        const geometry::LodResidency residency{&m_streamer->resident(in.mesh), &m_wanted, &m_touched};
+        const geometry::LodResidency residency{&m_streamer->shown(in.mesh), &m_wanted, &m_touched};
         if (mesh.skin != nullptr) {
             // The CPU's cluster spheres are at bind: the pose's sphere
-            // decides, then every cluster is drawn (one level, all terminal).
+            // decides, then every cluster of the cut is drawn (LOD by the
+            // bind spheres widened by how far the pose moved them).
             const geometry::Sphere& b = mesh.skin->posed_bounds;
             const Vec3 c = lod.position + rotate(in.rotation, Vec3{b.center.x * in.scale.x, b.center.y * in.scale.y,
                                                                     b.center.z * in.scale.z});
             const float s = std::max({std::fabs(in.scale.x), std::fabs(in.scale.y), std::fabs(in.scale.z)});
             if (geometry::sphere_in_frustum(frustum, c, b.radius * s)) {
                 lod.frustum = nullptr;
+                lod.pose_reach = mesh.skin->posed_reach;
                 geometry::select_clusters(data, lod, m_selected, &residency);
+                lod.pose_reach = 0.0f;
                 lod.frustum = &frustum;
             }
         } else if (const float reach = wind_reach(frame, in, mesh.top); reach > 0.0f) {
@@ -2575,6 +2705,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // before anything reads the geometry.
     const u32 frame_number = static_cast<u32>(m_device.frames_completed() + 1); // 0 means never
     cmd.begin_timing("streaming");
+    aim_skin_floors(frame, width, height);
     m_streamer->update(cmd, frame_number);
     cmd.end_timing();
     pose_skins(cmd);
@@ -2658,6 +2789,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         const Instance& in = frame.instances[i];
         const geometry::ClusterMesh* m = mesh(in.mesh);
         if (m == nullptr || !m_streamer->ready(in.mesh) || !m_streamer->tables_current()) {
+            continue;
+        }
+        // A skinned mesh whose shown groups were not all posed (out of
+        // transient memory): some would draw at bind or an old pose.
+        if (const Skin* skin = m_meshes[in.mesh].skin.get();
+            skin != nullptr && skin->posed_shown != m_streamer->shown_version(in.mesh)) {
             continue;
         }
         if (far_field && left_to_voxels(i, in, m)) {
@@ -2987,6 +3124,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         e.nodes = m_device.read_descriptor(m.nodes);
         e.levels = m.data.levels;
         e.top = m.skin != nullptr ? 0.0f : m.top; // characters do not sway
+        e.pose_reach = m.skin != nullptr ? m.skin->posed_reach : 0.0f;
         const geometry::Sphere& bounds = m.skin != nullptr ? m.skin->posed_bounds : m.data.bounds;
         set_bounds(e.bounds, bounds.center, bounds.radius);
         if (used[id]) {
@@ -3988,6 +4126,7 @@ void Renderer::copy_streaming_stats() {
     }
     m_stats.skinned_meshes = static_cast<u32>(m_skinned.size());
     m_stats.posed = m_posed;
+    m_stats.posed_clusters = m_posed_clusters;
     const StreamingStats& s = m_streamer->stats();
     m_stats.pool_bytes = s.pool_bytes;
     m_stats.pool_used_bytes = s.used_bytes;

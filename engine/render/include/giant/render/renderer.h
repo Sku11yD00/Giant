@@ -823,6 +823,7 @@ struct RenderStats {
     bool underwater = false;      // some of the view was under water (FrameInput::underwater)
     u32 skinned_meshes = 0;     // skinned meshes added (live)
     u32 posed = 0;              // of them, posed on the GPU this frame (a new pose, or just loaded)
+    u32 posed_clusters = 0;     // clusters the pose pass went over (shown depths only; hidden groups among them skipped)
 };
 
 // What the voxel world holds at a point, on one clipmap level
@@ -905,16 +906,22 @@ public:
     // an id once they remove it (an instance left with it would draw
     // whatever mesh comes next). Safe mid-frame.
     MeshId add_mesh(geometry::ClusterMesh mesh);
-    // A skinned mesh (geometry::build_skinned_clusters: its original
-    // triangles alone), with `joints` joints. Each is its own copy, one per
-    // character: set_pose poses it on the GPU (its vertices, and each
-    // cluster's culling sphere refit), and every instance of it shows that
-    // pose. It shows the bind pose until posed. It is never left to the far
-    // field and the voxel world does not hold it (no bounce light from
-    // it); it casts shadows, its pages drawn again when the pose changes.
-    // k_no_mesh when empty, not one level, not one weight per vertex, weights
-    // not summing to 255, a weighted joint out of range, or no joints or more
-    // than k_max_skin_joints.
+    // A skinned mesh (geometry::build_skinned_clusters, its original
+    // triangles alone or with its levels of detail), with `joints` joints.
+    // Each is its own copy, one per character: set_pose poses it on the GPU
+    // (its vertices, and each cluster's culling sphere refit), and every
+    // instance of it shows that pose. It shows the bind pose until posed.
+    // With levels, it is drawn with LOD like any mesh: the LOD spheres stay
+    // at bind, widened by how far the pose moves any vertex (from the
+    // joints; errors stay the bind pose's), and only depths a view draws are
+    // posed (the streamer's floor, aimed by the camera: finer ones show a
+    // frame or a few after the camera, or shadows already drawing them,
+    // first need them, coarser clusters standing in meanwhile). It is never left to the far field
+    // and the voxel world does not hold it (no bounce light from it); it
+    // casts shadows, its pages drawn again when the pose changes. k_no_mesh
+    // when empty, not one weight per vertex, weights not summing to 255, a
+    // weighted joint out of range, no joints or more than
+    // k_max_skin_joints, or its clusters not depth by depth.
     MeshId add_skinned_mesh(geometry::SkinnedClusterMesh mesh, u32 joints);
     // The pose for a skinned mesh's next frames: one matrix per joint, from
     // bind space to the mesh's space (anim::skin_matrices), and a sphere
@@ -1015,12 +1022,31 @@ private:
         u64 version = 1;              // of the pose (set_pose)
         u64 posed = 0;                // the version in the pool; 0: none yet
         geometry::Sphere posed_bounds; // bounds of the pose in the pool (culling and shadows use these)
+        // Per joint, 4 floats: the bind-space sphere around the vertices it
+        // moves (radius < 0: none). How far a pose moves any vertex from
+        // bind follows from them (set_pose): LOD spheres, at bind, widen by
+        // that, so the cut stays whole and is never coarser where things
+        // went (errors stay the bind pose's: skin_lod.h pose_reach).
+        std::vector<float> joint_spheres;
+        float reach = 0.0f;        // of the pose to draw
+        float posed_reach = 0.0f;  // of the pose in the pool
+        u32 posed_shown = 0;       // the streamer's shown_version the pool's pose covers
+        // Per depth, plus the end: the first cluster of that depth (clusters
+        // come depth by depth), so the pass poses only shown depths; and the
+        // runs of clusters of terminal groups (first, end, finest depth in
+        // it), posed too where finer than the floor.
+        std::vector<u32> depth_first;
+        std::vector<std::array<u32, 3>> terminal_runs;
+        // Per depth: around its non-terminal groups (skin_lod.h
+        // depth_bounds), for the camera's aim.
+        std::vector<geometry::LodBounds> depth_lod;
         // Where its instances were when their shadows were last drawn
         // (world box), and with which pose: a change dirties both places.
         bool shadow_known = false;
         DVec3 shadow_min{};
         DVec3 shadow_max{};
         u64 shadow_version = 0;
+        u32 shadow_shown = 0;  // and with which groups shown (finer ones loaded or shown redraw it)
     };
     struct Mesh {
         geometry::ClusterMesh data; // the CPU copy (CPU culling, stats, editor)
@@ -1056,6 +1082,7 @@ private:
     void particle_stats(); // into m_stats (again after anything resets it)
     void pose_skins(rhi::CommandList& cmd);           // after streaming, before anything reads the geometry
     void track_skin_shadows(const FrameInput& frame); // after the shadows' own tracking
+    void aim_skin_floors(const FrameInput& frame, u32 width, u32 height); // before the streamer's update: the camera's aims
     void draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
                      const Vec3& background); // the voxel debug view, in place of shading
     void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number);
@@ -1143,6 +1170,7 @@ private:
     rhi::PipelineHandle m_resolve;
     rhi::PipelineHandle m_skin; // skin.slang
     u32 m_posed = 0;            // skinned meshes posed this frame
+    u32 m_posed_clusters = 0;   // clusters the pose pass went over this frame
     std::vector<MeshId> m_skinned; // the skinned meshes live
     struct SkinBox {
         DVec3 min{};
@@ -1150,6 +1178,7 @@ private:
         bool any = false;
     };
     std::vector<SkinBox> m_skin_boxes; // scratch, by MeshId: around a skinned mesh's instances drawn
+    std::vector<u32> m_skin_aims;      // scratch, by MeshId: the finest depth the camera may draw (~0: none in view)
     rhi::PipelineHandle m_cull_reset;
     rhi::PipelineHandle m_cull_prepare;
     rhi::PipelineHandle m_cull_instances;

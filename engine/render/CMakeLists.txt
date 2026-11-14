@@ -5,6 +5,7 @@ giant_module(render
     src/lights.cpp
     src/local_shadows.cpp
     src/streaming.cpp
+    src/skin_lod.cpp
     src/smaa.cpp
     src/voxel_scene.cpp
     src/instance_store.cpp

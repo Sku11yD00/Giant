@@ -166,7 +166,9 @@ struct MeshEntry {
     u32 groups;
     u32 nodes;
     u32 levels; // 0: removed
-    u32 pad1;
+    // Skinned meshes: how far the pose may move any vertex from bind (mesh
+    // units), so the LOD spheres (at bind) are widened by it; else 0.
+    float pose_reach;
     float bounds[4];
 };
 inline constexpr u32 k_not_resident = 0xFFFF'FFFFu;
@@ -294,8 +296,10 @@ struct SkinPush {
     u32 matrix_offset;
     u32 cluster_count;
     u32 joint_count;
+    u32 first_cluster; // the dispatch poses clusters first_cluster .. + cluster_count
+    u32 pad[3];
 };
-static_assert(sizeof(SkinPush) == 32);
+static_assert(sizeof(SkinPush) == 48);
 
 // A skinned mesh's vertex at bind, in the skin source.
 // Normal and tangent packed as in geometry::PackedVertex.
