@@ -708,6 +708,7 @@ int run(const Options& options) {
         walkers.after_step(); // drawn where they walked
         if (playing) play.after_step(state.camera, game_delta); // the camera at its eyes
         mark(editor::FramePhase::physics);
+        animation.set_view(editor::to_view(state.camera), window->pixel_height()); // animation LOD by screen size
         animation.update(state.scene, meshes, scene_frame.take_for_animation(), game_delta);
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
         cloth.update(weather.wind(), state.camera.position, game_delta); // drawn as it moved next frame

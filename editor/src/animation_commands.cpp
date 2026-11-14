@@ -94,7 +94,7 @@ Json animation_json(const EditorState& state, world::EntityId id) {
         } else if (!e->visible) {
             out["why"] = "hidden";
         } else {
-            out["why"] = "waiting for a place (at most " + std::to_string(AnimationState::k_max_animated) +
+            out["why"] = "waiting for a place (at most " + std::to_string(state.animation->max_animated) +
                          " animate at once): it stands in its rest pose";
         }
         return out;
@@ -110,6 +110,8 @@ Json animation_json(const EditorState& state, world::EntityId id) {
     out["speed"] = a->player.speed();
     out["drawn"] = a->drawn; // its own posed copy drawn (loaded), not the rest pose
     out["poses"] = a->poses;
+    out["pixels"] = a->pixels;               // its size on screen (pose sphere radius)
+    out["pose_interval"] = a->interval;      // seconds between poses (0: every frame)
     out["bounds"] = {{"center", Json::array({a->bounds.center.x, a->bounds.center.y, a->bounds.center.z})},
                      {"radius", a->bounds.radius}};
     return out;
@@ -121,7 +123,10 @@ Json summary_json(const AnimationState& a) {
             {"frozen", a.frozen()},
             {"paused", a.paused()},
             {"poses", a.poses()},
-            {"max_animated", AnimationState::k_max_animated}};
+            {"max_animated", a.max_animated},
+            {"posed_last_frame", a.posed_last()},
+            {"overdue", a.overdue()},
+            {"poses_per_frame", a.poses_per_frame}};
 }
 
 } // namespace

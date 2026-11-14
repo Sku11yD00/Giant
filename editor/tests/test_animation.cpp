@@ -262,8 +262,9 @@ GIANT_TEST("animation: commands play and blend in the view until the saved anima
     GIANT_CHECK(f.animation->find(arm) == nullptr);
 }
 
-GIANT_TEST("animation: at most 64 animate; the rest stand frozen until a place frees") {
+GIANT_TEST("animation: at most 64 animate (as set); the rest stand frozen until a place frees") {
     Fixture f;
+    f.animation->max_animated = 64;
     std::vector<world::EntityId> ids;
     for (int i = 0; i < 66; ++i) ids.push_back(f.add_arm(3.0 * i));
     for (const world::EntityId id : ids) {
@@ -390,6 +391,7 @@ GIANT_TEST("animation: copies on the renderer: frozen ones draw the rest pose, e
     for (int i = 0; i < 65; ++i) ids.push_back(f.add_arm(3.0 * i));
     for (const world::EntityId id : ids) f.state.scene.modify(id)->animation.clip = "bend";
     f.animation->copies_per_frame = 64;
+    f.animation->max_animated = 64;
     const auto mesh_of = [&](world::EntityId id) {
         const world::Entity* e = f.state.scene.find(id);
         for (const render::Instance& i : f.frame.instances) {
@@ -523,4 +525,142 @@ GIANT_TEST("animation: copies of one file share its geometry, whichever uploaded
     GIANT_CHECK(f.run("set_animation", {{"id", ids[1]}, {"clip", "bend"}}).ok);
     f.frame_step(0.0);
     GIANT_CHECK(f.renderer->skinned(copy_of(ids[1])));
+}
+
+GIANT_TEST("animation: LOD poses near characters every frame, far ones a few times a second, within a budget") {
+    // By size on screen: every frame big, slower as it shrinks.
+    GIANT_CHECK(AnimationState::pose_interval(500.0f) == 0.0 && AnimationState::pose_interval(100.0f) == 0.0);
+    double last = 0.0;
+    for (float px = 99.0f; px > 0.1f; px *= 0.8f) {
+        const double i = AnimationState::pose_interval(px);
+        GIANT_CHECK(i >= last && i <= 0.25);
+        last = i;
+    }
+    GIANT_CHECK(AnimationState::pose_interval(1.0f) == 0.25);
+
+    Fixture f;
+    render::View view;
+    view.position = {0.0, 1.0, 4.0};
+    view.vertical_fov_degrees = 60.0f;
+    // How big an arm is 400 m off, to place the rest by the size wanted.
+    const world::EntityId probe = f.add_arm(400.0);
+    GIANT_CHECK(f.run("set_animation", {{"id", probe}, {"clip", "bend"}}).ok);
+    f.animation->set_view(view, 1080);
+    f.frame_step(1.0 / 60.0);
+    f.animation->set_view(view, 1080);
+    f.frame_step(1.0 / 60.0);
+    const float probe_pixels = f.animation->find(probe)->pixels;
+    GIANT_CHECK(probe_pixels > 0.0f && probe_pixels < 100.0f);
+    const auto at_pixels = [&](float px) { return 400.0 * static_cast<double>(probe_pixels / px); };
+    // One arm by the camera; ten in each slower tier (1/15 s, 1/8 s, 1/4 s).
+    std::vector<world::EntityId> ids;
+    ids.push_back(f.add_arm(0.0));
+    const double tiers[3] = {1.0 / 15.0, 1.0 / 8.0, 1.0 / 4.0};
+    const float tier_pixels[3] = {25.0f, 9.0f, 2.0f};
+    for (usize t = 0; t < 3; ++t) {
+        for (usize i = 0; i < 10; ++i) ids.push_back(f.add_arm(at_pixels(tier_pixels[t]) + 0.01 * static_cast<double>(i)));
+    }
+    for (const world::EntityId id : ids) GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", "bend"}}).ok);
+    const auto frame = [&] {
+        f.animation->set_view(view, 1080); // as main, each frame
+        f.frame_step(1.0 / 60.0);
+        // As main does after the update (before the cells): follows the
+        // latest edits, posing only what is asked for now.
+        f.animation->follow_now(f.state.scene, *f.meshes, world::SceneChanges{});
+    };
+    frame();
+    frame();
+    for (usize t = 0; t < 3; ++t) {
+        for (usize i = 0; i < 10; ++i) GIANT_CHECK(f.get(ids[1 + 10 * t + i])["pose_interval"].get<double>() == tiers[t]);
+    }
+    std::vector<u64> before;
+    for (const world::EntityId id : ids) before.push_back(f.animation->find(id)->poses);
+    // A second: each posed about as often as its tier says, and no tier's
+    // crowd posed all on the same frames (spread by id).
+    u32 most[3] = {0, 0, 0};
+    for (int frame_n = 0; frame_n < 60; ++frame_n) {
+        std::vector<u64> was;
+        for (const world::EntityId id : ids) was.push_back(f.animation->find(id)->poses);
+        frame();
+        for (usize t = 0; t < 3; ++t) {
+            u32 n = 0;
+            for (usize i = 0; i < 10; ++i) n += f.animation->find(ids[1 + 10 * t + i])->poses != was[1 + 10 * t + i];
+            most[t] = std::max(most[t], n);
+        }
+    }
+    const Json near_one = f.get(ids[0]);
+    GIANT_CHECK(near_one["pose_interval"].get<double>() == 0.0 && near_one["pixels"].get<float>() >= 100.0f);
+    GIANT_CHECK(f.animation->find(ids[0])->poses - before[0] >= 55); // every frame (bar a held key)
+    for (usize t = 0; t < 3; ++t) {
+        const double per_second = 1.0 / tiers[t];
+        for (usize i = 0; i < 10; ++i) {
+            const usize k = 1 + 10 * t + i;
+            const double n = static_cast<double>(f.animation->find(ids[k])->poses - before[k]);
+            GIANT_CHECK(n >= per_second * 0.7 - 1.0 && n <= per_second * 1.1 + 1.0);
+        }
+        GIANT_CHECK(most[t] <= 5); // 10 at once would be lock-step
+    }
+    // A crowd leaving the every-frame tier together (the camera walks away
+    // from it) keeps its poses spread too.
+    {
+        render::View by_them = view;
+        by_them.position = {at_pixels(2.0f), 1.0, 4.0};
+        f.animation->set_view(by_them, 1080);
+        f.frame_step(1.0 / 60.0);
+        f.animation->follow_now(f.state.scene, *f.meshes, world::SceneChanges{});
+        frame(); // back: far again
+        frame();
+        GIANT_CHECK(f.get(ids[21])["pose_interval"].get<double>() == tiers[2]);
+        u32 most_far = 0;
+        for (int frame_n = 0; frame_n < 30; ++frame_n) {
+            std::vector<u64> was;
+            for (usize i = 0; i < 10; ++i) was.push_back(f.animation->find(ids[21 + i])->poses);
+            frame();
+            u32 n = 0;
+            for (usize i = 0; i < 10; ++i) n += f.animation->find(ids[21 + i])->poses != was[i];
+            most_far = std::max(most_far, n);
+        }
+        GIANT_CHECK(most_far <= 5);
+    }
+    // The frame's stats are the frame's, not follow_now's (which posed nothing).
+    GIANT_CHECK(f.animation->posed_last() >= 1);
+    const auto stats = f.run("get_animation");
+    GIANT_CHECK(stats.ok && stats.value["posed_last_frame"].get<u32>() == f.animation->posed_last());
+
+    // A budget of 4 a frame, with more near ones than that: the near ones
+    // still every frame; the far ones wait their turn (overdue), but a share
+    // of the budget is always theirs, so all get posed over time.
+    for (int i = 0; i < 5; ++i) {
+        const world::EntityId id = f.add_arm(0.2 * (i + 1));
+        GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", "bend"}}).ok);
+    }
+    f.animation->poses_per_frame = 4;
+    frame();
+    for (usize k = 0; k < ids.size(); ++k) before[k] = f.animation->find(ids[k])->poses;
+    u32 overdue = 0;
+    for (int i = 0; i < 240; ++i) {
+        frame();
+        GIANT_CHECK(f.animation->posed_last() == 7); // 6 near + the 1 always theirs
+        overdue = std::max(overdue, f.animation->overdue());
+    }
+    GIANT_CHECK(overdue > 0);
+    GIANT_CHECK(f.animation->find(ids[0])->poses - before[0] >= 220);
+    for (usize k = 1; k < ids.size(); ++k) GIANT_CHECK(f.animation->find(ids[k])->poses > before[k]);
+    const auto summary = f.run("get_animation");
+    GIANT_CHECK(summary.ok && summary.value["max_animated"].get<u32>() == AnimationState::k_max_animated &&
+                summary.value["poses_per_frame"].get<u32>() == 4 && summary.value["overdue"].get<u32>() > 0);
+    // A command's pose goes at once, whatever the LOD.
+    const u64 far_poses = f.animation->find(ids[25])->poses;
+    GIANT_CHECK(f.run("play_animation", {{"id", ids[25]}, {"clip", "hop"}, {"blend_seconds", 0.0}}).ok);
+    GIANT_CHECK(f.animation->find(ids[25])->poses == far_poses + 1 && !f.animation->find(ids[25])->dirty);
+
+    // Time standing still (paused): what moved since its last pose catches
+    // up within the budget, then nothing more is posed.
+    f.animation->poses_per_frame = 256;
+    f.animation->set_paused(true);
+    frame();
+    for (int i = 0; i < 3; ++i) frame();
+    for (const world::EntityId id : ids) GIANT_CHECK(!f.animation->find(id)->changed);
+    frame();
+    GIANT_CHECK(f.animation->posed_last() == 0);
 }
