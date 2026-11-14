@@ -665,7 +665,7 @@ bool Renderer::init() {
 
 Renderer::SharedBuffers::~SharedBuffers() {
     if (device != nullptr) {
-        for (const rhi::BufferHandle b : {groups, nodes, source}) device->destroy(b);
+        for (const rhi::BufferHandle b : {groups, nodes, source, morph_ranges, morph_entries}) device->destroy(b);
     }
 }
 
@@ -674,7 +674,7 @@ void Renderer::destroy(Mesh& mesh) {
     mesh = {};
 }
 
-MeshId Renderer::add_mesh(geometry::ClusterMesh data) { return add(std::move(data), nullptr, 0); }
+MeshId Renderer::add_mesh(geometry::ClusterMesh data) { return add(std::move(data), nullptr, nullptr, 0); }
 
 MeshId Renderer::add_skinned_mesh(geometry::SkinnedClusterMesh skinned, u32 joints) {
     const geometry::ClusterMesh& data = skinned.mesh;
@@ -709,7 +709,47 @@ MeshId Renderer::add_skinned_mesh(geometry::SkinnedClusterMesh skinned, u32 join
             }
         }
     }
-    return add(std::move(skinned.mesh), &skinned.weights, joints);
+    if (skinned.morphs.size() > geometry::k_max_morph_targets) {
+        log_error("render", "a skinned mesh has more than 256 morph targets; not added");
+        return k_no_mesh;
+    }
+    {
+        std::vector<u8> seen(data.vertices.size(), 0);
+        for (const geometry::MorphTarget& t : skinned.morphs) {
+            bool sound = true;
+            for (const geometry::MorphDelta& d : t.deltas) {
+                const Vec3& p = d.position;
+                const Vec3& n = d.normal;
+                // (Moves past a kilometre are no body's: refused, as their
+                // bounds would cover everything.)
+                if (d.vertex >= seen.size() || seen[d.vertex] != 0 || !(length(p) <= 1000.0f) ||
+                    !(length(n) <= 1000.0f)) {
+                    sound = false;
+                    break;
+                }
+                seen[d.vertex] = 1;
+            }
+            for (const geometry::MorphDelta& d : t.deltas) {
+                if (d.vertex < seen.size()) seen[d.vertex] = 0;
+            }
+            if (!sound) {
+                log_error("render", "a skinned mesh's morph target moves a vertex out of range, twice, past a "
+                                    "kilometre or by a number that is not finite; not added");
+                return k_no_mesh;
+            }
+        }
+    }
+    return add(std::move(skinned.mesh), &skinned.weights, skinned.morphs.empty() ? nullptr : &skinned.morphs, joints);
+}
+
+u32 Renderer::morph_targets(MeshId id) const {
+    return skinned(id) ? static_cast<u32>(m_meshes[id].skin->morph_weights.size()) : 0u;
+}
+
+void Renderer::fit_pose(Skin& skin, const geometry::Sphere& bounds) {
+    const float morphs = morph_reach(skin.matrices, skin.shape->joint_spheres, skin.morph_weights, skin.shape->morph_max);
+    skin.bounds = {bounds.center, bounds.radius + morphs};
+    skin.reach = pose_reach(skin.matrices, skin.shape->joint_spheres) + morphs;
 }
 
 MeshId Renderer::add_skinned_copy(MeshId of) {
@@ -733,15 +773,18 @@ MeshId Renderer::add_skinned_copy(MeshId of) {
     mesh.skin = std::make_unique<Skin>();
     Skin& skin = *mesh.skin;
     skin.source = from.source;
+    skin.morph_ranges = from.morph_ranges;
+    skin.morph_entries = from.morph_entries;
     skin.joints = from.joints;
     skin.shape = from.shape;
-    skin.bounds = mesh.data->bounds;
-    skin.posed_bounds = mesh.data->bounds;
-    skin.matrices.assign(usize{skin.joints} * 12, 0.0f); // until posed: the bind pose
+    skin.matrices.assign(usize{skin.joints} * 12, 0.0f); // until posed: the bind pose, the base shape
     for (u32 j = 0; j < skin.joints; ++j) {
         float* rows = skin.matrices.data() + usize{j} * 12;
         rows[0] = rows[5] = rows[10] = 1.0f;
     }
+    skin.morph_weights.assign(skin.shape->morph_max.size(), 0.0f);
+    fit_pose(skin, mesh.data->bounds);
+    skin.posed_bounds = skin.bounds;
     // Its own clusters: their spheres are refit to its pose.
     rhi::BufferDesc desc;
     desc.usage = rhi::BufferUsage::shader_read | rhi::BufferUsage::shader_write;
@@ -769,7 +812,8 @@ bool Renderer::skinned(MeshId id) const {
     return id < m_meshes.size() && m_meshes[id].live && m_meshes[id].skin != nullptr;
 }
 
-bool Renderer::set_pose(MeshId id, std::span<const Mat4> skin, const geometry::Sphere& bounds) {
+bool Renderer::set_pose(MeshId id, std::span<const Mat4> skin, const geometry::Sphere& bounds,
+                        std::span<const float> morph_weights) {
     if (!skinned(id)) {
         return false;
     }
@@ -777,6 +821,12 @@ bool Renderer::set_pose(MeshId id, std::span<const Mat4> skin, const geometry::S
     if (skin.size() != s.joints || !std::isfinite(bounds.center.x) || !std::isfinite(bounds.center.y) ||
         !std::isfinite(bounds.center.z) || !std::isfinite(bounds.radius) || !(bounds.radius >= 0.0f)) {
         return false;
+    }
+    if (!morph_weights.empty() && morph_weights.size() != s.morph_weights.size()) {
+        return false;
+    }
+    for (const float w : morph_weights) {
+        if (!(std::fabs(w) <= k_max_morph_weight)) return false; // (NaN too)
     }
     for (const Mat4& m : skin) {
         for (int r = 0; r < 3; ++r) {
@@ -795,13 +845,14 @@ bool Renderer::set_pose(MeshId id, std::span<const Mat4> skin, const geometry::S
             }
         }
     }
-    s.bounds = bounds;
-    s.reach = pose_reach(s.matrices, s.shape->joint_spheres);
+    std::copy(morph_weights.begin(), morph_weights.end(), s.morph_weights.begin());
+    fit_pose(s, bounds);
     ++s.version;
     return true;
 }
 
-MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::SkinWeights>* weights, u32 joints) {
+MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::SkinWeights>* weights,
+                     const std::vector<geometry::MorphTarget>* morphs, u32 joints) {
     if (data.empty() || m_meshes.size() >= k_no_mesh) {
         return k_no_mesh;
     }
@@ -879,12 +930,41 @@ MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::Ski
     // A skinned mesh's source: its vertices at bind, cluster by cluster in
     // the order the pool has them (skin.slang poses them into it).
     std::vector<gpu::SkinVertex> source;
+    // Its morphs: each vertex's moves, vertex by vertex (`first` per mesh
+    // vertex, plus the end), and per source vertex where its are.
+    std::vector<gpu::MorphEntry> morph_entries;
+    std::vector<u32> morph_first;
+    std::vector<gpu::MorphRange> morph_ranges;
+    if (morphs != nullptr) {
+        morph_first.assign(data.vertices.size() + 1, 0);
+        for (const geometry::MorphTarget& t : *morphs) {
+            for (const geometry::MorphDelta& d : t.deltas) ++morph_first[d.vertex + 1];
+        }
+        for (usize v = 0; v < data.vertices.size(); ++v) morph_first[v + 1] += morph_first[v];
+        morph_entries.resize(morph_first.back());
+        std::vector<u32> at(morph_first.begin(), morph_first.end() - 1);
+        const auto snorm10 = [](float x) {
+            const float c = std::clamp(x / gpu::k_morph_normal_range, -1.0f, 1.0f);
+            return static_cast<u32>(static_cast<i32>(std::lround(c * 511.0f))) & 0x3FFu;
+        };
+        for (u32 t = 0; t < morphs->size(); ++t) {
+            for (const geometry::MorphDelta& d : (*morphs)[t].deltas) {
+                gpu::MorphEntry& e = morph_entries[at[d.vertex]++];
+                e.position[0] = d.position.x;
+                e.position[1] = d.position.y;
+                e.position[2] = d.position.z;
+                e.normal = snorm10(d.normal.x) | (snorm10(d.normal.y) << 10) | (snorm10(d.normal.z) << 20);
+                e.target = t;
+            }
+        }
+    }
     if (weights != nullptr) {
         ClusterPacking packing;
         for (u32 ci = 0; ci < data.clusters.size(); ++ci) {
             packing.pack(data, ci);
             clusters[ci].skin_first = static_cast<u32>(source.size());
             for (const u32 v : packing.order) {
+                if (morphs != nullptr) morph_ranges.push_back({morph_first[v], morph_first[v + 1] - morph_first[v]});
                 const geometry::PackedVertex p = geometry::pack_vertex(data.vertices[v]);
                 const geometry::SkinWeights& w = (*weights)[v];
                 gpu::SkinVertex out{};
@@ -953,15 +1033,27 @@ MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::Ski
             }
         }
         shape->depth_lod = depth_bounds(data);
-        mesh.skin->bounds = data.bounds;
-        mesh.skin->posed_bounds = data.bounds;
-        // Until posed: the identity (the bind pose).
+        if (morphs != nullptr) {
+            for (const geometry::MorphTarget& t : *morphs) {
+                float most = 0.0f;
+                for (const geometry::MorphDelta& d : t.deltas) most = std::max(most, length(d.position));
+                shape->morph_max.push_back(most);
+            }
+        }
+        // Until posed: the identity (the bind pose), the base shape.
         mesh.skin->matrices.assign(usize{joints} * 12, 0.0f);
         for (u32 j = 0; j < joints; ++j) {
             float* rows = mesh.skin->matrices.data() + usize{j} * 12;
             rows[0] = rows[5] = rows[10] = 1.0f;
         }
+        mesh.skin->morph_weights.assign(shape->morph_max.size(), 0.0f);
+        fit_pose(*mesh.skin, data.bounds);
+        mesh.skin->posed_bounds = mesh.skin->bounds;
         mesh.skin->source = upload(bytes_of(source), "skinned mesh source");
+        if (!morph_entries.empty()) { // (targets that move nothing need nothing on the GPU)
+            mesh.skin->morph_ranges = upload(bytes_of(morph_ranges), "skinned mesh morph ranges");
+            mesh.skin->morph_entries = upload(bytes_of(morph_entries), "skinned mesh morph moves");
+        }
         const std::span<const u8> laid_out = bytes_of(clusters);
         mesh.bind_clusters = std::make_shared<const std::vector<u8>>(laid_out.begin(), laid_out.end());
     }
@@ -982,8 +1074,15 @@ MeshId Renderer::add(geometry::ClusterMesh data, const std::vector<geometry::Ski
     mesh.shared->groups = mesh.groups;
     mesh.shared->nodes = mesh.nodes;
     mesh.shared->source = mesh.skin != nullptr ? mesh.skin->source : rhi::BufferHandle{};
+    const bool morphed = mesh.skin != nullptr && morphs != nullptr && !morph_entries.empty();
+    if (morphed) {
+        mesh.shared->morph_ranges = mesh.skin->morph_ranges;
+        mesh.shared->morph_entries = mesh.skin->morph_entries;
+    }
     for (const rhi::BufferHandle b : {mesh.clusters, mesh.groups, mesh.nodes,
-                                      mesh.skin != nullptr ? mesh.skin->source : mesh.nodes}) {
+                                      mesh.skin != nullptr ? mesh.skin->source : mesh.nodes,
+                                      morphed ? mesh.skin->morph_ranges : mesh.nodes,
+                                      morphed ? mesh.skin->morph_entries : mesh.nodes}) {
         if (!b.valid()) {
             destroy(mesh);
             m_streamer->remove(id);
@@ -1736,7 +1835,15 @@ void Renderer::pose_skins(rhi::CommandList& cmd) {
         if ((skin.posed == skin.version && skin.posed_shown == shown) || !m_streamer->ready(id)) {
             continue;
         }
-        const rhi::TransientMemory matrices = cmd.upload(bytes_of(skin.matrices));
+        // Its matrices, then any morph weights that move it, in one upload.
+        const bool morphing = skin.morph_ranges.valid() &&
+                              std::any_of(skin.morph_weights.begin(), skin.morph_weights.end(),
+                                          [](float w) { return w != 0.0f; });
+        if (morphing) {
+            m_skin_upload.assign(skin.matrices.begin(), skin.matrices.end());
+            m_skin_upload.insert(m_skin_upload.end(), skin.morph_weights.begin(), skin.morph_weights.end());
+        }
+        const rhi::TransientMemory matrices = cmd.upload(morphing ? bytes_of(m_skin_upload) : bytes_of(skin.matrices));
         if (matrices.data == nullptr) {
             break; // out of transient memory: next frame
         }
@@ -1755,6 +1862,12 @@ void Renderer::pose_skins(rhi::CommandList& cmd) {
         push.matrices = matrices.descriptor;
         push.matrix_offset = matrices.offset;
         push.joint_count = skin.joints;
+        if (morphing) {
+            push.morph_ranges = m_device.read_descriptor(skin.morph_ranges);
+            push.morph_entries = m_device.read_descriptor(skin.morph_entries);
+            push.weight_offset = matrices.offset + skin.joints * 48u;
+            push.morph_count = static_cast<u32>(skin.morph_weights.size());
+        }
         // The shown depths (from the floor down to the coarsest), then any
         // terminal group finer than the floor (always shown). Groups not
         // shown inside these runs are skipped by the pass itself.

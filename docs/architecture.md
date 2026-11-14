@@ -1709,7 +1709,16 @@ with a skinned file (`SkinnedTriangleMesh::morphs`, sparse deltas per
 vertex, gltf.h) and are carried through the cluster build to its vertices:
 vertices merge only where their deltas match too, and morph seams (a
 lip's corners, one per side at one place) are protected like weight seams
-at every level; the renderer applies them before skinning (C3b).
+at every level. The renderer (C3b) keeps a morphed mesh's moves on the
+GPU, shared by its copies: per skin source vertex a range (8 bytes) of
+entries (20 bytes: the position's move in floats, the normal's in three
+signed 10-bit numbers over -2..2, the target); `set_pose` takes a weight
+per target (0, the base shape, until then; callers apply the rest
+weights), uploaded after the joint matrices when any is not 0, and
+the pose pass adds the weighted moves to the bind position and normal
+before skinning. The pose's bounds and LOD reach widen by the
+most the morphs can move a vertex (skin_lod.h `morph_reach`: their
+weighted largest moves times the joints' largest stretch).
 
 Playing them (editor). `MeshLibrary` keeps a skinned file's skeleton,
 clips and bind-space clusters beside its rest-pose mesh, which every

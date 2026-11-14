@@ -7,8 +7,13 @@
 // Cluster::skin_first): bind position, bind normal and tangent (packed as in
 // the pool, common.slang), four joints (u16) and
 // four weights (u8, in 255ths summing to 255). The matrices: one per joint,
-// three rows of float4 (a 3x4 affine matrix), bind space to the mesh's.
-// Layouts match engine/render/src/gpu_layout.h (SkinPush, Cluster).
+// three rows of float4 (a 3x4 affine matrix), bind space to the mesh's;
+// after them, a weight per morph target. A morphed mesh's source vertex
+// has a MorphRange (8 bytes: first, count) of MorphEntries (20 bytes: the
+// position's move as floats, the normal's as three signed 10-bit numbers
+// over -2..2, the target), added by their weights to the bind position and
+// normal before skinning. Layouts match engine/render/src/gpu_layout.h
+// (SkinPush, Cluster, MorphRange, MorphEntry).
 #include "common.slang"
 
 static const uint k_skin_vertex_bytes = 32;
@@ -25,6 +30,10 @@ struct SkinPush {
     uint cluster_count;
     uint joint_count;
     uint first_cluster; // this dispatch: clusters first_cluster .. + cluster_count
+    uint morph_ranges;  // read descriptor (morph_count > 0)
+    uint morph_entries; // read descriptor
+    uint weight_offset; // into matrices: a float per morph target
+    uint morph_count;   // 0: no morphs
     uint pad0;
     uint pad1;
     uint pad2;
@@ -43,6 +52,15 @@ float unordered(uint u) {
 groupshared uint g_lo[3];
 groupshared uint g_hi[3];
 groupshared uint g_radius;
+
+static const uint k_morph_entry_bytes = 20;
+static const float k_morph_normal_range = 2.0;
+
+// A signed 10-bit number (bits `shift` up) over -1..1.
+float snorm10(uint packed, uint shift) {
+    const int v = int(packed << (22u - shift)) >> 22;
+    return max(float(v) / 511.0, -1.0);
+}
 
 float3 row_apply(float4 r0, float4 r1, float4 r2, float3 p, float w) {
     const float4 h = float4(p, w);
@@ -84,9 +102,27 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
     if (mine) {
         ByteAddressBuffer source = read_buffer(push.source);
         const uint s = (first + tid) * k_skin_vertex_bytes;
-        const float3 bind = asfloat(source.Load3(s));
+        const float3 rest = asfloat(source.Load3(s)); // (unmorphed)
+        float3 bind = rest;
         const uint2 frame = source.Load2(s + 12);
-        const float3 bind_normal = unpack_vertex_normal(frame.x);
+        float3 bind_normal = unpack_vertex_normal(frame.x);
+        if (push.morph_count > 0) {
+            // Its morphs' moves, by their weights, before the joints.
+            ByteAddressBuffer morph_weights = read_buffer(push.matrices);
+            const uint2 range = read_buffer(push.morph_ranges).Load2((first + tid) * 8);
+            ByteAddressBuffer entries = read_buffer(push.morph_entries);
+            const uint count = min(range.y, 256u);
+            for (uint k = 0; k < count; ++k) {
+                const uint e = (range.x + k) * k_morph_entry_bytes;
+                const uint target = entries.Load(e + 16);
+                if (target >= push.morph_count) continue;
+                const float w = asfloat(morph_weights.Load(push.weight_offset + target * 4));
+                if (w == 0.0) continue;
+                const uint turn = entries.Load(e + 12);
+                bind += asfloat(entries.Load3(e)) * w;
+                bind_normal += float3(snorm10(turn, 0u), snorm10(turn, 10u), snorm10(turn, 20u)) * (k_morph_normal_range * w);
+            }
+        }
         const float4 bind_tangent = unpack_vertex_tangent(frame.y);
         const uint2 joints = source.Load2(s + 20);
         const uint weights = source.Load(s + 28);
@@ -122,7 +158,7 @@ void cs_skin(uint3 group_id : SV_GroupID, uint tid : SV_GroupIndex) {
         t = tlen2 > 1e-24 ? t * rsqrt(tlen2) : (abs(n.x) < 0.9 ? normalize(float3(1.0, 0.0, 0.0) - n * n.x)
                                                                 : normalize(float3(0.0, 1.0, 0.0) - n * n.y));
         if (!all(isfinite(p))) {
-            p = bind; // a broken matrix: left at bind rather than spread over the screen
+            p = rest; // a broken matrix: left at bind rather than spread over the screen
         }
         RWByteAddressBuffer pool = write_buffer(push.pool);
         // The uv (at 20) never moves.
