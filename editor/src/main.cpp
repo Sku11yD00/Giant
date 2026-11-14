@@ -461,7 +461,8 @@ int run(const Options& options) {
         textures.update(); // cooked since last frame: uploaded, a budget's worth
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
-                            &animation.copies(), &cloth.meshes(), moved, &swing.poses(), &walkers.poses());
+                            &animation.copies(), &cloth.meshes(), moved, &swing.poses(), &walkers.poses(),
+                            &physics.moving());
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);

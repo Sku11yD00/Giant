@@ -7,6 +7,7 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <random>
@@ -92,6 +93,37 @@ GIANT_TEST("scene physics: a dynamic cube falls onto a plane, a sphere onto a ki
     GIANT_CHECK(physics.state(follow.body_of(cube))->position == DVec3(0.0, 4.0, 0.0));
     run(physics, follow, scene, 180); // and they fall again
     GIANT_CHECK(std::fabs(at(follow, scene, cube).y - 1.0) < 0.03);
+}
+
+GIANT_TEST("scene physics: a falling body is moving until it has lain still a while, then drawn again") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    ScenePhysics follow(physics);
+    Scene scene;
+    scene.add(make(world::Shape::plane, {0.0, 0.0, 0.0}, {100.0f, 1.0f, 100.0f}));
+    const EntityId cube =
+        scene.add(make(world::Shape::cube, {0.0, 4.0, 0.0}, {1.0f, 1.0f, 1.0f}, world::BodyKind::dynamic));
+    run(physics, follow, scene, 10);
+    GIANT_CHECK(follow.moving().contains(cube));
+    (void)follow.take_redraw();
+    // Down and asleep: no longer moving, and to be drawn again once it stopped.
+    bool redrawn = false;
+    for (int i = 0; i < 400 && follow.moving().contains(cube); ++i) {
+        run(physics, follow, scene, 1);
+        const std::vector<EntityId> r = follow.take_redraw();
+        redrawn = std::find(r.begin(), r.end(), cube) != r.end();
+    }
+    GIANT_CHECK(!follow.moving().contains(cube) && redrawn && follow.poses().contains(cube));
+    GIANT_CHECK(std::fabs(at(follow, scene, cube).y - 0.5) < 0.03);
+    // Lying still: stays so.
+    run(physics, follow, scene, 60);
+    GIANT_CHECK(follow.moving().empty());
+    // Knocked: moving again; put back, nothing moving.
+    physics.set_velocity(follow.body_of(cube), {0.0f, 3.0f, 0.0f}, {});
+    run(physics, follow, scene, 2);
+    GIANT_CHECK(follow.moving().contains(cube));
+    follow.reset_poses();
+    GIANT_CHECK(follow.moving().empty());
 }
 
 GIANT_TEST("scene physics: edits follow: moved, resized, made still, deleted, a new scene") {

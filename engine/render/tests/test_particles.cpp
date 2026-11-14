@@ -384,6 +384,23 @@ GIANT_TEST("particles: born and alive reach the frame's stats on the null device
     GIANT_CHECK(s.particles == 300 && s.particles_born == 0);
     for (int i = 0; i < 6; ++i) s = draw(frame); // 3.5 s: all dead
     GIANT_CHECK(s.particles == 0);
+    // GPU culling with something to cull: the GPU's counts take over the
+    // stats, the particles' stay (they are the CPU's own).
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::cube);
+    instances[0].position = {0.0, 0.0, -8.0};
+    frame.instances = instances;
+    frame.settings.gpu_culling = true;
+    bursts = {burst_at({0.0, 0.0, -5.0}, 40)};
+    frame.particle_bursts = bursts;
+    s = draw(frame);
+    GIANT_CHECK(s.particles == 40 && s.particles_born == 40);
+    frame.particle_bursts = {};
+    for (int i = 0; i < 4; ++i) s = draw(frame); // the GPU's readbacks come back meanwhile
+    GIANT_CHECK(s.particles == 40 && s.particles_born == 0);
+    renderer->read_gpu_stats(); // the GPU's counts read back: the particles' kept
+    s = renderer->last_stats();
+    GIANT_CHECK(s.from_gpu && s.particles == 40 && s.particles_born == 0 && s.particles_drawn);
 }
 
 GIANT_TEST("particles: births reach the GPU ring where the ring says, wrapping past its end") {

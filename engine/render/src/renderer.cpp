@@ -1585,6 +1585,8 @@ void Renderer::read_gpu_stats() {
         m_stats.local_shadow_drawn = cpu.local_shadow_drawn;
         m_stats.local_shadow_waiting = cpu.local_shadow_waiting;
         m_stats.local_shadow_tiles = cpu.local_shadow_tiles;
+        particle_stats();
+        m_stats.particles_drawn = cpu.particles_drawn;
         copy_streaming_stats();
     }
 }
@@ -3024,6 +3026,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         const u32 draws = m_stats.draws;
         m_stats = m_gpu_stats;
         m_stats.draws = draws;
+        particle_stats(); // (the CPU's: the GPU's counts never hold them)
         m_stats.from_gpu = true;
     } else {
         // No GPU counts are made this frame: forget older ones, so turning

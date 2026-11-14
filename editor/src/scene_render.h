@@ -15,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace giant::editor {
@@ -68,6 +69,9 @@ struct SceneFrame {
     const std::unordered_map<world::EntityId, world::Transform>* poses = nullptr;
     // Breakable kits' loose pieces, drawn where they are (likewise).
     const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>* piece_poses = nullptr;
+    // Posed entities whose bodies are moving (sim::ScenePhysics::moving),
+    // kept out of the voxel world (likewise).
+    const std::unordered_set<world::EntityId>* moving = nullptr;
     // Fallen scatter trees, drawn where they lie (likewise).
     const sim::FallenTrees* fallen = nullptr;
     // Animated skinned entities' own posed meshes, drawn instead of their
@@ -213,7 +217,10 @@ struct SceneFrame {
 // rebuilt. With `swings`, a swinging entity the physics does not pose is
 // drawn there (SwingState); swinging entities' instances are marked
 // render::Instance::moves (kept out of the voxel world). With `walkers`,
-// a walking entity (WalkerState) is drawn there, marked moving too.
+// a walking entity (WalkerState) is drawn there, marked moving too. With
+// `moving`, posed entities whose bodies moved lately are marked moving, as
+// are loose kit pieces moving (sim::PiecePose::moving); still again, they
+// are drawn into the voxel world.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
@@ -225,7 +232,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr,
                  std::span<const world::EntityId> moved = {},
                  const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr,
-                 const std::unordered_map<world::EntityId, world::Transform>* walkers = nullptr);
+                 const std::unordered_map<world::EntityId, world::Transform>* walkers = nullptr,
+                 const std::unordered_set<world::EntityId>* moving = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

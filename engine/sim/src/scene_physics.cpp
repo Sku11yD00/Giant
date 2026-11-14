@@ -269,6 +269,9 @@ bool ScenePhysics::clear(usize others) {
     m_entities = {};
     m_by_body = {};
     m_poses.clear();
+    m_moving.clear();
+    m_still.clear();
+    m_settling.clear();
     m_piece_poses.clear();
     m_piece_bodies.clear();
     m_broken.clear();
@@ -292,6 +295,8 @@ bool ScenePhysics::clear(usize others) {
 }
 
 void ScenePhysics::drop_pose(world::EntityId id) {
+    m_moving.erase(id); // (drawn again where the scene puts it: into the voxel world)
+    m_still.erase(id);
     if (m_poses.erase(id) != 0) m_redraw.push_back(id);
 }
 
@@ -386,6 +391,8 @@ u32 ScenePhysics::sync_entity(const world::Scene& scene, world::EntityId id, std
         }
         m_worn.erase(id);
         m_poses.erase(id); // gone from the scene: nothing to draw
+        m_moving.erase(id);
+        m_still.erase(id);
         return 1;
     }
     if (it != m_entities.end() && !it->second.remake && kept_same && same_body(it->second.look, *e)) {
@@ -672,6 +679,7 @@ void ScenePhysics::flush(world::Scene& scene, std::span<const world::EntityId> c
 }
 
 usize ScenePhysics::update_poses() {
+    settle_poses(); // (first: what moves in this update counts from 0)
     break_from_hits(); // the last step's blows
     usize moved = 0;
     for (const BodyId body : m_physics.moved()) {
@@ -682,7 +690,9 @@ usize ScenePhysics::update_poses() {
                 if (pose.piece != piece->second.piece) continue;
                 pose.at.position = s->position;
                 pose.at.rotation = normalize(s->rotation);
+                pose.still = 0;
             }
+            m_settling.insert(piece->second.entity);
             m_redraw.push_back(piece->second.entity);
             continue;
         }
@@ -699,9 +709,43 @@ usize ScenePhysics::update_poses() {
         pose.rotation = normalize(s->rotation);
         pose.scale = it->second.look.transform.scale;
         m_redraw.push_back(owner->second);
+        m_moving.insert(owner->second); // kept out of the voxel world until still
+        m_still[owner->second] = 0;
         ++moved;
     }
     return moved;
+}
+
+void ScenePhysics::settle_poses() {
+    // Moving pieces and entities, an update further from their last move
+    // (one that moved k_still updates ago and not since is still now):
+    // still long enough, drawn again (into the voxel world).
+    for (auto kit = m_settling.begin(); kit != m_settling.end();) {
+        const auto poses = m_piece_poses.find(*kit);
+        bool any = false;
+        if (poses != m_piece_poses.end()) {
+            for (PiecePose& pose : poses->second) {
+                if (!pose.moving()) continue;
+                if (++pose.still == PiecePose::k_still) m_redraw.push_back(*kit);
+                any = any || pose.moving();
+            }
+        }
+        kit = any ? std::next(kit) : m_settling.erase(kit);
+    }
+    for (auto it = m_still.begin(); it != m_still.end();) {
+        const world::EntityId id = it->first;
+        if (m_poses.count(id) == 0) { // its pose gone: drawn again where the scene puts it
+            m_moving.erase(id);
+            m_redraw.push_back(id);
+            it = m_still.erase(it);
+        } else if (++it->second >= PiecePose::k_still) {
+            m_moving.erase(id);
+            m_redraw.push_back(id);
+            it = m_still.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 bool ScenePhysics::place(world::EntityId entity, const DVec3& position, const Quat& rotation) {
@@ -771,6 +815,8 @@ void ScenePhysics::reset_poses() {
         m_redraw.push_back(id);
     }
     m_poses.clear();
+    m_moving.clear();
+    m_still.clear();
 }
 
 std::vector<world::EntityId> ScenePhysics::take_redraw() {
@@ -1023,7 +1069,8 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
         };
         add_part(p.shape, {shrink(at.scale.x), shrink(at.scale.y), shrink(at.scale.z)}, {}, {}, d.parts);
         descs.push_back(std::move(d));
-        poses.push_back({i, at});
+        poses.push_back({i, at, 0}); // moving (thrown loose)
+        m_settling.insert(id);
         bodied.push_back(i);
     }
     const std::vector<BodyId> ids = m_physics.add_many(descs);
@@ -1048,8 +1095,10 @@ usize ScenePhysics::loosen(world::EntityId id, Tracked& t, const std::vector<std
     for (const u32 i : rubbled) {
         b.pieces[i].rubble = true;
         ++m_rubble;
-        poses.push_back({i, rubble_at(id, kit->pieces[i], piece_place(t.look.transform, kit->pieces[i].transform),
-                                      push[i], i, t.look.transform.position.y + b.lowest)});
+        poses.push_back({i,
+                         rubble_at(id, kit->pieces[i], piece_place(t.look.transform, kit->pieces[i].transform),
+                                   push[i], i, t.look.transform.position.y + b.lowest),
+                         PiecePose::k_still});
     }
     std::sort(poses.begin(), poses.end(), [](const PiecePose& x, const PiecePose& y) { return x.piece < y.piece; });
     // Dust thrown up at the foot of what came down.
@@ -1099,7 +1148,7 @@ BodyDesc ScenePhysics::make_kept(world::EntityId id, Tracked& t, const world::Ki
         at.position = k.position;
         at.rotation = k.rotation;
         at.scale = k.scale;
-        poses.push_back({k.piece, at});
+        poses.push_back({k.piece, at, PiecePose::k_still});
     }
     std::sort(poses.begin(), poses.end(), [](const PiecePose& x, const PiecePose& y) { return x.piece < y.piece; });
     t.kept.assign(kept.begin(), kept.end());

@@ -104,8 +104,8 @@ jobs:
           Copy-Item -Recurse build/msvc-release/managed giant-editor-windows/managed
           Remove-Item -Recurse -Force giant-editor-windows/managed/tests
           Copy-Item README.md giant-editor-windows/
-          # The performance gates: python n1_gate.py giant_editor.exe (and n2_gate.py, n3_gate.py, night_gate.py, water_gate.py)
-          Copy-Item tools/gate_common.py, tools/n1_gate.py, tools/n2_gate.py, tools/n3_gate.py, tools/night_gate.py, tools/water_gate.py giant-editor-windows/
+          # The performance gates: python n1_gate.py giant_editor.exe (and n2_gate.py, n3_gate.py, night_gate.py, water_gate.py, effects_gate.py)
+          Copy-Item tools/gate_common.py, tools/n1_gate.py, tools/n2_gate.py, tools/n3_gate.py, tools/night_gate.py, tools/water_gate.py, tools/effects_gate.py giant-editor-windows/
       - uses: actions/upload-artifact@v4
         with:
           name: giant-editor-windows

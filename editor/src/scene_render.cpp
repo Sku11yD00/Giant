@@ -385,6 +385,14 @@ void emit_ground(const world::Scene& scene, const TerrainMeshes* terrain, const 
     }
 }
 
+// Whether an entity's instances are kept out of the voxel world as moving
+// (render::Instance::moves): swinging, walking, or its body moving (a
+// floating crate drifting). Its kit's loose pieces: also each moving one.
+bool entity_moves(const SceneFrame& out, const world::Entity& e) {
+    return (e.swing.on && sim::can_swing(e.shape)) || (out.walkers != nullptr && out.walkers->contains(e.id)) ||
+           (out.moving != nullptr && out.moving->contains(e.id));
+}
+
 // Where an entity is drawn: the physics' pose, else its walker's, else its
 // swing's, else where the scene has it.
 const world::Transform& drawn_at(const SceneFrame& out, const world::Entity& e) {
@@ -434,7 +442,7 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
         }
         const world::Transform& at = drawn_at(out, *e);
         // Swinging, or walking.
-        const bool moves = (e->swing.on && sim::can_swing(e->shape)) || (out.walkers != nullptr && out.walkers->contains(id));
+        const bool moves = entity_moves(out, *e);
         // What it draws, for moving it in place later (rebuild_moved).
         const u32 first = static_cast<u32>(cell.instances.size());
         const usize decals = cell.decals.size();
@@ -477,7 +485,8 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
             while (loose != nullptr && next < loose->size() && (*loose)[next].piece < i) ++next;
             const bool fell = loose != nullptr && next < loose->size() && (*loose)[next].piece == i;
             const world::Transform t = fell ? (*loose)[next].at : place(at, p.transform);
-            emit(p.shape, p.mesh, t, p.material, p.decal, renderer, meshes, out, cell, render::k_no_mesh, moves);
+            emit(p.shape, p.mesh, t, p.material, p.decal, renderer, meshes, out, cell, render::k_no_mesh,
+                 moves || (fell && (*loose)[next].moving()));
             emit_lamp(p.lamp, t, cell, lamp_shadow_id(p.lamp, id, i + 1));
         }
         slot();
@@ -600,10 +609,11 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
     u32 hi = 0;
     bool decals_moved = false;
     bool lights_moved = false;
-    const auto put = [](render::Instance& i, const world::Transform& t, bool scaled) {
+    const auto put = [](render::Instance& i, const world::Transform& t, bool scaled, bool moves) {
         i.position = t.position;
         i.rotation = t.rotation;
         if (scaled) i.scale = t.scale;
+        i.moves = moves; // (moving bodies come to rest: into the voxel world again)
     };
     const auto put_decal = [](render::Decal& d, const world::Transform& t) {
         d.position = t.position;
@@ -624,6 +634,7 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
             return false;
         }
         const world::Transform& at = drawn_at(out, *e);
+        const bool moves = entity_moves(out, *e);
         if (e->shape == world::Shape::kit) {
             const world::Kit* kit = scene.find_kit(e->kit);
             const u32 own_lamp = e->lamp.on ? 1u : 0u;
@@ -663,7 +674,7 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
                 if (p.shape == world::Shape::decal) {
                     put_decal(cell.decals[decal++], t);
                 } else {
-                    put(cell.instances[instance++], t, true);
+                    put(cell.instances[instance++], t, true, moves || (fell && (*loose)[next].moving()));
                 }
                 if (p.lamp.on) put_lamp(cell.lights[light++], p.lamp, t, lamp_shadow_id(p.lamp, id, k + 1));
             }
@@ -679,7 +690,7 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
             if (slot->decals == 1) {
                 put_decal(cell.decals[slot->decal_first], at);
             } else {
-                put(cell.instances[slot->first], at, e->shape != world::Shape::cloth);
+                put(cell.instances[slot->first], at, e->shape != world::Shape::cloth, moves);
             }
         }
         decals_moved = decals_moved || slot->decals > 0;
@@ -902,7 +913,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, render::MeshId>* cloth,
                  std::span<const world::EntityId> moved,
                  const std::unordered_map<world::EntityId, world::Transform>* swings,
-                 const std::unordered_map<world::EntityId, world::Transform>* walkers) {
+                 const std::unordered_map<world::EntityId, world::Transform>* walkers,
+                 const std::unordered_set<world::EntityId>* moving) {
     out.cells_rebuilt = 0;
     out.maps_seen.clear(); // the scene may have changed since: its materials' addresses with it
     out.poses = poses;
@@ -911,6 +923,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.skinned = skinned;
     out.cloth = cloth;
     out.piece_poses = piece_poses;
+    out.moving = moving;
     out.fallen = fallen;
     world::SceneChanges changes = scene.take_changes();
     for (world::SceneChanges* follower : {&out.for_followers, &out.for_animation}) {
@@ -1108,6 +1121,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.swings = nullptr;
     out.walkers = nullptr;
     out.piece_poses = nullptr;
+    out.moving = nullptr;
     out.skinned = nullptr;
     out.cloth = nullptr;
     out.fallen = nullptr;

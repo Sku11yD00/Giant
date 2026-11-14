@@ -97,7 +97,13 @@ GIANT_TEST("breakage: a blow knocks out the middle of a tower, the top falls wit
     ScenePhysicsStats s = follow.stats();
     GIANT_CHECK(s.broken_kits == 1 && s.loose_pieces == 2 && loose(follow, t, 0) == nullptr);
     GIANT_CHECK(loose(follow, t, 1) != nullptr && loose(follow, t, 2) != nullptr);
+    GIANT_CHECK(loose(follow, t, 1)->moving() && loose(follow, t, 2)->moving()); // thrown loose
     run(physics, follow, scene, 240);
+    // Down: still again (drawn into the voxel world).
+    for (int i = 0; i < 400 && (loose(follow, t, 1)->moving() || loose(follow, t, 2)->moving()); ++i) {
+        run(physics, follow, scene, 1);
+    }
+    GIANT_CHECK(!loose(follow, t, 1)->moving() && !loose(follow, t, 2)->moving());
     // Knocked away from the blow (-x), down on the ground; the bottom block stands.
     const PiecePose* middle = loose(follow, t, 1);
     const PiecePose* top = loose(follow, t, 2);
