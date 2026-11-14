@@ -37,6 +37,10 @@ void AnimationPlayer::play(const Skeleton& skeleton, std::span<const Clip> clips
         // A blend or a fade under way: caught as it stands, and that fades out.
         m_frozen.resize(skeleton.size());
         evaluate(skeleton, clips, m_catch, m_frozen);
+        // (Into another buffer: the caught weights may be what shows now.)
+        m_caught_morphs.resize(m_morph_rest.size());
+        evaluate_morphs(clips, m_catch, m_caught_morphs);
+        std::swap(m_frozen_morphs, m_caught_morphs);
         m_other = {};
         m_frozen_fading = true;
     }
@@ -151,6 +155,29 @@ void AnimationPlayer::evaluate(const Skeleton& skeleton, std::span<const Clip> c
     scratch.b.resize(n);
     sample(skeleton, clips[m_other.clip], m_other.time, scratch.b);
     blend(scratch.a, scratch.b, m_weight, local.first(n));
+}
+
+void AnimationPlayer::evaluate_morphs(std::span<const Clip> clips, PoseScratch& scratch,
+                                      std::span<float> weights) const {
+    const usize n = std::min(weights.size(), m_morph_rest.size());
+    std::copy_n(m_morph_rest.begin(), n, weights.begin());
+    std::fill(weights.begin() + static_cast<std::ptrdiff_t>(n), weights.end(), 0.0f);
+    if (n == 0) return;
+    const std::span<float> out = weights.first(n);
+    if (m_main.clip < clips.size()) sample_morphs(clips[m_main.clip], m_main.time, out);
+    const bool frozen = m_frozen_fading && m_weight > 0.0f && m_frozen_morphs.size() >= n;
+    const bool has_other = !frozen && m_other.clip < clips.size() && m_weight > 0.0f;
+    if (!frozen && !has_other) return;
+    // The other (or the caught weights) by its share, as the pose blends.
+    scratch.morphs.resize(n);
+    if (frozen) {
+        std::copy_n(m_frozen_morphs.begin(), n, scratch.morphs.begin());
+    } else {
+        std::copy_n(m_morph_rest.begin(), n, scratch.morphs.begin());
+        sample_morphs(clips[m_other.clip], m_other.time, scratch.morphs);
+    }
+    const float t = std::clamp(m_weight, 0.0f, 1.0f);
+    for (usize i = 0; i < n; ++i) out[i] += (scratch.morphs[i] - out[i]) * t;
 }
 
 } // namespace giant::anim

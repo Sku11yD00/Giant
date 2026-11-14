@@ -905,6 +905,69 @@ GIANT_TEST("geometry: a skinned glTF's morph targets: named, merged by name, spa
                             [](const std::string& w) { return w.find("skinned meshes only") != std::string::npos; }));
 }
 
+GIANT_TEST("geometry: a skinned glTF's morph weight animation: a channel per target, by its merged morph") {
+    SkinOptions o;
+    o.morphs = true;
+    o.morph_clip = true;
+    ImportResult r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned.has_value());
+    if (!r.ok() || !r.skinned) return;
+    const auto& clips = r.skinned->clips;
+    const auto clip = [&clips](const std::string& name) -> const anim::Clip* {
+        for (const anim::Clip& c : clips) {
+            if (c.name == name) return &c;
+        }
+        return nullptr;
+    };
+    GIANT_CHECK(!std::any_of(r.warnings.begin(), r.warnings.end(),
+                             [](const std::string& w) { return w.find("morph") != std::string::npos; }));
+    // The body's two targets (smile, blink): two channels, one per morph.
+    const anim::Clip* smile = clip("smile");
+    GIANT_CHECK(smile != nullptr);
+    if (smile == nullptr) return;
+    GIANT_CHECK(smile->channels.size() == 2 && smile->duration == 1.0f);
+    for (const anim::Channel& c : smile->channels) GIANT_CHECK(c.path == anim::Path::morph);
+    std::vector<float> w(2, 0.0f);
+    anim::sample_morphs(*smile, 0.5f, w);
+    GIANT_CHECK(std::fabs(w[0] - 0.5f) < 1e-6f && std::fabs(w[1] - 0.25f) < 1e-6f);
+    // The pose is untouched by it.
+    std::vector<anim::JointTransform> local(r.skinned->skeleton.size());
+    anim::sample(r.skinned->skeleton, *smile, 0.5f, local);
+    GIANT_CHECK(local == r.skinned->skeleton.rest);
+    // The sword's one "smile" target went to the shared smile morph (0), stepping.
+    const anim::Clip* wink = clip("wink");
+    GIANT_CHECK(wink != nullptr && wink->channels.size() == 1);
+    if (wink == nullptr || wink->channels.size() != 1) return;
+    GIANT_CHECK(wink->channels[0].joint == 0 && wink->channels[0].interpolation == anim::Interpolation::step);
+    w = {0.0f, 0.0f};
+    anim::sample_morphs(*wink, 0.5f, w);
+    GIANT_CHECK(std::fabs(w[0] - 0.2f) < 1e-6f && w[1] == 0.0f);
+    anim::sample_morphs(*wink, 1.0f, w);
+    GIANT_CHECK(std::fabs(w[0] - 0.8f) < 1e-6f);
+    // Cubic: values at the keys, Hermite between (dt 1: half of each value,
+    // an eighth of the first's out tangent less an eighth of the second's in).
+    const anim::Clip* pout = clip("pout");
+    GIANT_CHECK(pout != nullptr && pout->channels.size() == 2);
+    if (pout == nullptr) return;
+    anim::sample_morphs(*pout, 0.0f, w);
+    GIANT_CHECK(std::fabs(w[0]) < 1e-6f && std::fabs(w[1] - 0.1f) < 1e-6f);
+    anim::sample_morphs(*pout, 1.0f, w);
+    GIANT_CHECK(std::fabs(w[0] - 1.0f) < 1e-6f && std::fabs(w[1] - 0.3f) < 1e-6f);
+    anim::sample_morphs(*pout, 0.5f, w);
+    GIANT_CHECK(std::fabs(w[0] - 0.625f) < 1e-5f && std::fabs(w[1] + 0.05f) < 1e-5f);
+
+    // A repeated name in the body: its second target (blink) dropped, so
+    // the body's clip keeps one channel.
+    o.repeated_names = true;
+    r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned.has_value());
+    if (r.skinned) {
+        for (const anim::Clip& c : r.skinned->clips) {
+            if (c.name == "smile") GIANT_CHECK(c.channels.size() == 1 && c.channels[0].joint == 0);
+        }
+    }
+}
+
 GIANT_TEST("geometry: a skinned mesh shown by two nodes is read once") {
     SkinOptions o;
     o.two_nodes = true;

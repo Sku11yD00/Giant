@@ -397,3 +397,103 @@ GIANT_TEST("anim: bone capsules fit round the vertices each joint moves most, al
     GIANT_CHECK(fit_capsules(s, points, dominant, 1000).empty());
     GIANT_CHECK(fit_capsules(s, points, std::span<const u16>(dominant.data(), 3)).empty());
 }
+
+namespace {
+
+// Morph target `target` going from `from` to `to` over a second.
+Clip morph_clip(const char* name, u32 target, float from, float to) {
+    Clip c;
+    c.name = name;
+    c.duration = 1.0f;
+    Channel ch;
+    ch.joint = target;
+    ch.path = Path::morph;
+    ch.times = {0.0f, 1.0f};
+    ch.values = {{from, 0, 0, 0}, {to, 0, 0, 0}};
+    c.channels.push_back(ch);
+    return c;
+}
+
+} // namespace
+
+GIANT_TEST("anim: morph weight channels sample, are checked against the mesh, and leave the pose alone") {
+    const Skeleton s = arm();
+    Clip c = morph_clip("smile", 1, 0.0f, 1.0f);
+    c.channels.push_back(bend().channels[0]);
+    GIANT_CHECK(validate(c, s, 2).empty());
+    GIANT_CHECK(validate(c, s, 1).find("morph target") != std::string::npos);
+    GIANT_CHECK(validate(c, s).find("morph target") != std::string::npos); // a mesh with none
+    // Only its target moves; others keep what they had.
+    std::vector<float> w{0.3f, 0.0f};
+    sample_morphs(c, 0.25f, w);
+    GIANT_CHECK(w[0] == 0.3f && std::fabs(w[1] - 0.25f) < 1e-6f);
+    sample_morphs(c, 9.0f, w); // clamped
+    GIANT_CHECK(w[1] == 1.0f);
+    sample_morphs(c, std::nanf(""), w);
+    GIANT_CHECK(w[1] == 0.0f);
+    std::vector<float> one(1, 0.5f); // a target past the weights: skipped
+    sample_morphs(c, 0.5f, one);
+    GIANT_CHECK(one[0] == 0.5f);
+    // The pose sampling ignores the morph channel (its joint 1 is not the elbow's).
+    std::vector<JointTransform> local(2);
+    sample(s, morph_clip("only", 1, 0.0f, 1.0f), 0.5f, local);
+    GIANT_CHECK(local == s.rest);
+}
+
+GIANT_TEST("anim: the player's morph weights rest, play, fade and blend as the pose does") {
+    const Skeleton s = arm();
+    // Target 0 by clip 0 (0 to 1), target 1 by clip 1 (1 to 0); target 2 by none.
+    std::vector<Clip> clips{morph_clip("a", 0, 0.0f, 1.0f), morph_clip("b", 1, 1.0f, 0.0f)};
+    PoseScratch scratch;
+    std::vector<float> w(3);
+    AnimationPlayer player;
+    const std::vector<float> rest{0.1f, 0.2f, 0.7f};
+    // No rest weights set: nothing morphs (zeros).
+    w = {9, 9, 9};
+    player.evaluate_morphs(clips, scratch, w);
+    GIANT_CHECK(w == std::vector<float>(3, 0.0f));
+    player.set_morph_rest(rest);
+    player.evaluate_morphs(clips, scratch, w);
+    GIANT_CHECK(w == rest);
+    // Playing a: its target follows it, the others rest.
+    player.play(s, clips, 0);
+    player.advance(0.5f, clips);
+    player.evaluate_morphs(clips, scratch, w);
+    GIANT_CHECK(std::fabs(w[0] - 0.5f) < 1e-6f && w[1] == 0.2f && w[2] == 0.7f);
+    // Fading to b over a second, halfway: a's targets half back to rest, b's half in.
+    player.play(s, clips, 1, 1.0f);
+    player.advance(0.5f, clips);
+    player.evaluate_morphs(clips, scratch, w);
+    // a at 1.0 (looped 1.0 wraps to 0.0): sampled at its time.
+    const float a0 = player.other().time;
+    GIANT_CHECK(std::fabs(w[0] - (0.1f + (a0 - 0.1f) * 0.5f)) < 1e-5f);
+    GIANT_CHECK(std::fabs(w[1] - (0.5f + (0.2f - 0.5f) * 0.5f)) < 1e-5f); // b at 0.5 is 0.5
+    GIANT_CHECK(std::fabs(w[2] - 0.7f) < 1e-6f);
+    // Starting again mid-fade: the weights shown are caught and carry on unchanged.
+    const std::vector<float> before = w;
+    player.play(s, clips, 0, 1.0f);
+    player.evaluate_morphs(clips, scratch, w);
+    for (usize i = 0; i < 3; ++i) GIANT_CHECK(std::fabs(w[i] - before[i]) < 1e-5f);
+    player.advance(1.5f, clips);
+    player.evaluate_morphs(clips, scratch, w);
+    GIANT_CHECK(!player.fading() && std::fabs(w[0] - 0.5f) < 1e-5f && w[1] == 0.2f);
+    // A held blend: a quarter b.
+    player.set_time(0.0f, clips);
+    player.set_blend(clips, 0, 1, 0.25f, false);
+    player.set_time(0.0f, clips);
+    player.evaluate_morphs(clips, scratch, w);
+    const float b1 = 1.0f - player.other().time;
+    GIANT_CHECK(std::fabs(w[0] - 0.75f * 0.0f - 0.25f * 0.1f) < 1e-5f);
+    GIANT_CHECK(std::fabs(w[1] - (0.75f * 0.2f + 0.25f * b1)) < 1e-5f);
+    // From the blend, a fade: no jump.
+    const std::vector<float> held = w;
+    player.play(s, clips, 1, 1.0f);
+    player.evaluate_morphs(clips, scratch, w);
+    for (usize i = 0; i < 3; ++i) GIANT_CHECK(std::fabs(w[i] - held[i]) < 1e-5f);
+    // Fewer weights asked than targets: the first ones; more: zeros past them.
+    std::vector<float> few(1), many(5, 9.0f);
+    player.stop();
+    player.evaluate_morphs(clips, scratch, few);
+    player.evaluate_morphs(clips, scratch, many);
+    GIANT_CHECK(few[0] == 0.1f && many[2] == 0.7f && many[3] == 0.0f && many[4] == 0.0f);
+}

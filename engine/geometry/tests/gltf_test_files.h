@@ -115,6 +115,13 @@ struct SkinOptions {
     bool morph_names = true; // targetNames given (else none)
     bool repeated_names = false; // the arm's targets both named "smile"
     bool mirrored_uvs = false; // uvs mirrored across the middle row (its vertices split for tangents)
+    // With morphs: clips "smile" (the body's weights, linear over bend's
+    // keys: smile 0 to 1, blink 0 to 0.5), "wink" (the sword's one target,
+    // stepping 0.2 then 0.8) and "pout" (the body's, cubic: values smile
+    // 0 then 1, blink 0.1 then 0.3; out tangents at the first key 1 and 0,
+    // in tangents at the second 0 and 2), after the others.
+    bool morph_clip = false;
+    float smile_rest = 0.25f; // the arm's "smile" rest weight
 };
 
 inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
@@ -217,7 +224,7 @@ inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
         const usize tip = add(std::vector<float>{0, 0, 0, 0, 0, 0.5f, 0, 0, 0}, R"("componentType":5126,"count":3,"type":"VEC3")");
         arm_targets = R"(,"targets":[{"POSITION":)" + n(sp_) + R"(,"NORMAL":)" + n(sn_) + R"(},{"POSITION":)" + n(blink) + "}]";
         sword_targets = R"(,"targets":[{"POSITION":)" + n(tip) + "}]";
-        arm_mesh_extra = R"("name":"arm","weights":[0.25,0],)";
+        arm_mesh_extra = R"("name":"arm","weights":[)" + std::to_string(o.smile_rest) + R"(,0],)";
         if (o.morph_names) {
             arm_mesh_extra += o.repeated_names ? R"("extras":{"targetNames":["smile","smile"]},)"
                                                : R"("extras":{"targetNames":["smile","blink"]},)";
@@ -231,6 +238,19 @@ inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
         more_clips += R"(,{"name":"bogus","samplers":[{"input":)" + n(accessors.size() - 2) + R"(,"output":)" +
                       n(accessors.size() - 1) +
                       R"(,"interpolation":"CUBICSPLINE"}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]})";
+    }
+    if (o.morphs && o.morph_clip) {
+        const usize body = add(std::vector<float>{0, 0, 1, 0.5f}, R"("componentType":5126,"count":4,"type":"SCALAR")");
+        const usize sword = add(std::vector<float>{0.2f, 0.8f}, R"("componentType":5126,"count":2,"type":"SCALAR")");
+        more_clips += R"(,{"name":"smile","samplers":[{"input":)" + n(bt) + R"(,"output":)" + n(body) +
+                      R"(}],"channels":[{"sampler":0,"target":{"node":2,"path":"weights"}}]})";
+        more_clips += R"(,{"name":"wink","samplers":[{"input":)" + n(bt) + R"(,"output":)" + n(sword) +
+                      R"(,"interpolation":"STEP"}],"channels":[{"sampler":0,"target":{"node":3,"path":"weights"}}]})";
+        // Per key: both in tangents, both values, both out tangents.
+        const usize cubic = add(std::vector<float>{9, 9, 0, 0.1f, 1, 0, 0, 2, 1, 0.3f, 9, 9},
+                                R"("componentType":5126,"count":12,"type":"SCALAR")");
+        more_clips += R"(,{"name":"pout","samplers":[{"input":)" + n(bt) + R"(,"output":)" + n(cubic) +
+                      R"(,"interpolation":"CUBICSPLINE"}],"channels":[{"sampler":0,"target":{"node":2,"path":"weights"}}]})";
     }
     for (usize i = 0; i < o.clip_copies; ++i) {
         more_clips += R"(,{"name":")" + o.copy_name + R"(","samplers":[{"input":)" + n(bt) + R"(,"output":)" + n(br) +

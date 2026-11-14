@@ -18,7 +18,7 @@
 // as one character: `mesh` is it in its rest pose (as if no clip played),
 // and `skinned` the same triangles in bind space with each vertex's joints
 // and weights (the four heaviest, of JOINTS_0/WEIGHTS_0 and _1), the
-// skeleton and every animation's joint channels. Skinned meshes ignore
+// skeleton and every animation's joint channels (and morph weights). Skinned meshes ignore
 // their node's transform (glTF's rule); meshes that are not skinned but
 // hang under a joint (a sword in a hand) move rigidly with it, and others
 // with the first root joint. Nodes between two joints become joints too
@@ -38,6 +38,10 @@
 // over four times that is refused); tangent deltas are not read (the posed
 // tangent is made perpendicular to the posed normal). `mesh`, the rest
 // pose, is of the base shape: no morph weight applied.
+// Animated weights (a node's `weights` channel) become one Path::morph
+// channel per target the import kept, pointing at its merged morph (a
+// mesh's dropped target's weights are skipped; a mesh shown by two
+// nodes has one set of morphs, so both nodes' channels move the same ones).
 #pragma once
 
 #include "giant/anim/skeleton.h"

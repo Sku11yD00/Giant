@@ -36,10 +36,12 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace giant::editor {
@@ -104,6 +106,14 @@ public:
     // following a's when `sync`.
     std::string blend(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id, const std::string& a,
                       const std::string& b, float weight, bool sync);
+    // Holds morph targets of the entity's file at weights of its own, over
+    // what its clips and rest weights give (a face held smiling while it
+    // walks): by name, a weight (within +-k_max_morph_set) or released
+    // (nullopt); `release_all` releases every one first. View state, as
+    // play: it lasts as long as a command's play would.
+    static constexpr float k_max_morph_set = 10.0f;
+    std::string set_morphs(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
+                           std::span<const std::pair<std::string, std::optional<float>>> weights, bool release_all);
 
     struct Animated {
         world::EntityId id = 0;
@@ -129,6 +139,12 @@ public:
         bool fresh = true;     // (re)started this update: time moves on from the next
         std::vector<Mat4> sent; // the pose last handed to the renderer
         geometry::Sphere sent_bounds;
+        // Morph weights (one per target of the file; none without):
+        // worked out with the pose, those held by set_morphs over them.
+        std::vector<float> morphs;
+        std::vector<float> held;      // set_morphs' weights
+        std::vector<u8> holding;      // per target: held
+        std::vector<float> sent_morphs;
         u64 poses = 0;         // handed to the renderer
         u64 pose_serial = 0;   // when it last changed (as skinned()'s serials: never the same twice)
     };

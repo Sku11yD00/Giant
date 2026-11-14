@@ -129,12 +129,15 @@ std::string validate(const Skeleton& s) {
     return {};
 }
 
-std::string validate(const Clip& clip, const Skeleton& skeleton) {
+std::string validate(const Clip& clip, const Skeleton& skeleton, usize morph_targets) {
     if (!std::isfinite(clip.duration) || clip.duration < 0.0f || clip.duration > k_max_clip_seconds) {
         return "the clip " + clip.name + " is longer than an hour (or its length is not a number)";
     }
     for (const Channel& c : clip.channels) {
-        if (c.joint >= skeleton.size()) return "the clip " + clip.name + " animates a joint the skeleton lacks";
+        if (c.path == Path::morph ? c.joint >= morph_targets : c.joint >= skeleton.size()) {
+            return "the clip " + clip.name + (c.path == Path::morph ? " animates a morph target the mesh lacks"
+                                                                    : " animates a joint the skeleton lacks");
+        }
         if (c.times.empty()) return "the clip " + clip.name + " has a channel with no keys";
         const usize per = c.interpolation == Interpolation::cubic ? 3 : 1;
         if (c.values.size() != c.times.size() * per) {
@@ -158,13 +161,22 @@ void sample(const Skeleton& skeleton, const Clip& clip, float time, std::span<Jo
     std::copy_n(skeleton.rest.begin(), n, local.begin());
     if (!std::isfinite(time)) time = 0.0f;
     for (const Channel& c : clip.channels) {
-        if (c.joint >= n || c.times.empty()) continue;
+        if (c.path == Path::morph || c.joint >= n || c.times.empty()) continue;
         JointTransform& j = local[c.joint];
         switch (c.path) {
         case Path::translation: j.translation = to_vec3(value_at(c, time, false)); break;
         case Path::rotation: j.rotation = to_quat(value_at(c, time, true)); break;
         case Path::scale: j.scale = to_vec3(value_at(c, time, false)); break;
+        case Path::morph: break; // (skipped above: sample_morphs)
         }
+    }
+}
+
+void sample_morphs(const Clip& clip, float time, std::span<float> weights) {
+    if (!std::isfinite(time)) time = 0.0f;
+    for (const Channel& c : clip.channels) {
+        if (c.path != Path::morph || c.joint >= weights.size() || c.times.empty()) continue;
+        weights[c.joint] = value_at(c, time, false).x;
     }
 }
 
