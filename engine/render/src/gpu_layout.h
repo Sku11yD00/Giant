@@ -84,6 +84,8 @@ inline constexpr u32 k_material_bytes = 64; // resolve.slang's k_material_bytes
 inline constexpr u32 k_material_terrain = 1;
 inline constexpr u32 k_material_two_sided = 2;
 inline constexpr u32 k_material_cut_out = 4;
+inline constexpr u32 k_material_skin = 8;        // Material::flags: skin (its look index + 1 in bits 8 to 15)
+inline constexpr u32 k_material_look_shift = 8;
 // A material's kind, as the visibility raster draws it in its own pass
 // (RasterPush::kinds): opaque one-sided 0, opaque two-sided 1, cut-out
 // one-sided 2, cut-out two-sided 3.
@@ -508,8 +510,42 @@ struct ResolveExtras {
     // rgba8_unorm (occlusion_on 0: none this frame).
     u32 occlusion;
     u32 occlusion_on;
+    // Skin looks (gpu::SkinLook each; skin_look_count 0: none).
+    u32 skin_looks;
+    u32 skin_looks_offset;
+    u32 skin_look_count;
+    u32 skin_pad;
 };
-static_assert(sizeof(ResolveExtras) == 304);
+static_assert(sizeof(ResolveExtras) == 320);
+
+// A skin look (render::SkinLook, cleaned): resolve.slang's two-lobe
+// highlight and subsurface.slang's spread.
+struct SkinLook {
+    float scatter;  // metres
+    float strength; // 0 to 1
+    float lobe_roughness[2];
+    float lobe_mix;
+    float pad[3];
+};
+static_assert(sizeof(SkinLook) == 32);
+inline constexpr u32 k_skin_look_bytes = 32; // resolve.slang's
+
+// The separable skin blur (subsurface.slang): one direction a dispatch.
+struct SubsurfacePush {
+    u32 frame;
+    u32 frame_offset;
+    u32 source;   // what is spread: rgb the skin's light, a its scatter in metres (0: not skin)
+    u32 depth;
+    u32 radiance; // the vertical pass: the rest of the pixels' light, added to
+    u32 target;
+    u32 kernel;   // the profile's taps (float4 each: rgb weight, a offset in scatter widths)
+    u32 kernel_offset;
+    u32 width;
+    u32 height;
+    u32 direction; // 0 across, 1 down (and adds to radiance)
+    u32 taps;
+};
+static_assert(sizeof(SubsurfacePush) == 48);
 
 // resolve.slang's dust puff: centre camera-relative.
 struct GpuDustPuff {

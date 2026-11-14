@@ -489,6 +489,66 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     GIANT_CHECK(!s.renderer->last_stats().contact_shadows);
 }
 
+GIANT_TEST("render: skin spreads its light in a pass of its own after shading, with a skin material and the setting on") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(1);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+    instances[0].position = {0.0, 0.0, -5.0};
+    std::vector<Material> materials(2);
+    materials[1].skin_look = 0;
+    std::vector<SkinLook> looks(1);
+    looks[0].scatter = NAN; // (kept in range)
+    looks[0].lobe_roughness[1] = -3.0f;
+    FrameInput frame;
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.skin_looks = looks;
+    frame.settings.gpu_culling = false;
+    frame.settings.antialiasing = false;
+    const auto names = [&s] {
+        std::vector<std::string> out;
+        for (const rhi::GpuTiming& t : s.device->gpu_timings()) out.push_back(t.name);
+        return out;
+    };
+    s.draw(frame);
+    GIANT_CHECK(s.renderer->last_stats().subsurface_scattering);
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion",
+                                                     "contact shadows", "shading", "subsurface scattering",
+                                                     "screen reflections", "post"}));
+    // Without screen reflections: straight on to post.
+    frame.settings.screen_space_reflections = false;
+    s.draw(frame);
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion",
+                                                     "contact shadows", "shading", "subsurface scattering", "post"}));
+    frame.settings.screen_space_reflections = true;
+    // The setting off, a debug view, no looks, or a look past them: no pass.
+    frame.settings.subsurface_scattering = false;
+    s.draw(frame);
+    GIANT_CHECK(!s.renderer->last_stats().subsurface_scattering);
+    frame.settings.subsurface_scattering = true;
+    frame.settings.debug_view = DebugView::clusters;
+    s.draw(frame);
+    GIANT_CHECK(!s.renderer->last_stats().subsurface_scattering);
+    frame.settings.debug_view = DebugView::lit;
+    frame.skin_looks = {};
+    s.draw(frame);
+    GIANT_CHECK(!s.renderer->last_stats().subsurface_scattering);
+    frame.skin_looks = looks;
+    materials[1].skin_look = 1;
+    s.draw(frame);
+    GIANT_CHECK(!s.renderer->last_stats().subsurface_scattering);
+    // Back again.
+    materials[1].skin_look = 0;
+    s.draw(frame);
+    GIANT_CHECK(s.renderer->last_stats().subsurface_scattering);
+    // A look that spreads nothing (strength 0): two lobes, no pass.
+    looks[0].strength = 0.0f;
+    s.draw(frame);
+    GIANT_CHECK(!s.renderer->last_stats().subsurface_scattering);
+    GIANT_CHECK(!s.device->device_lost());
+}
+
 GIANT_TEST("render: terrain layers stack by slope and height") {
     NullScene s;
     if (s.renderer == nullptr) return;
@@ -3581,6 +3641,115 @@ GIANT_TEST("render: d3d12 contact shadows darken the floor by a low block toward
     device->destroy(target);
 }
 
+
+GIANT_TEST("render: d3d12 skin spreads a lamp's light past its cone's edge, red furthest; plain floor stays sharp") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 128, k_h = 128;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // The camera 1 m above a floor looking straight down (60 degree view:
+    // some 9 mm a pixel, +x to the right); a spot 0.5 m up lights a disc
+    // 25 cm in radius on the floor (its edge about column 92), sharp-edged.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = DVec3{300.0, 0.0, 0.0};
+    instances[0].scale = {10.0f, 1.0f, 10.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.8f, 0.8f, 0.8f};
+    materials[0].roughness = 0.9f;
+    std::vector<SkinLook> looks(1);
+    looks[0].scatter = 0.08f; // a broad spread (some 9 pixels), to see
+    std::vector<LocalLight> lights(1);
+    lights[0].kind = LightKind::spot;
+    lights[0].position = {300.0, 0.5, 0.0};
+    lights[0].range = 3.0f;
+    lights[0].intensity = 2.0f;
+    lights[0].direction = {0.0f, -1.0f, 0.0f};
+    lights[0].inner_angle = 0.46f;
+    lights[0].outer_angle = 0.465f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.view.position = {300.0, 1.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lights = lights;
+    frame.skin_looks = looks;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    const auto draw = [&](bool skin, bool spread) {
+        materials[0].skin_look = skin ? 0u : k_no_skin_look;
+        frame.settings.subsurface_scattering = spread;
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        GIANT_CHECK(renderer->last_stats().subsurface_scattering == (skin && spread));
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto at = [](const std::vector<u8>& image, u32 x, u32 c) {
+        const usize i = (static_cast<usize>(k_h / 2) * k_w + x) * 4 + c;
+        return i < image.size() ? static_cast<int>(image[i]) : -1;
+    };
+    const std::vector<u8> plain_off = draw(false, false);
+    const std::vector<u8> plain_on = draw(false, true);
+    const std::vector<u8> skin_off = draw(true, false);
+    const std::vector<u8> skin_on = draw(true, true);
+    // Columns: 64 under the lamp, 86 inside its edge, 94 just outside (a
+    // quarter of the reach), 120 far out.
+    std::printf("    skin red/blue: under %d/%d -> %d/%d, inside %d/%d -> %d/%d, outside %d/%d -> %d/%d, far %d -> %d\n",
+                at(skin_off, 64, 0), at(skin_off, 64, 2), at(skin_on, 64, 0), at(skin_on, 64, 2), at(skin_off, 86, 0),
+                at(skin_off, 86, 2), at(skin_on, 86, 0), at(skin_on, 86, 2), at(skin_off, 94, 0), at(skin_off, 94, 2),
+                at(skin_on, 94, 0), at(skin_on, 94, 2), at(skin_off, 120, 0), at(skin_on, 120, 0));
+    // A plain floor: the setting changes nothing.
+    for (const u32 x : {64u, 86u, 94u, 120u}) {
+        for (u32 c = 0; c < 3; ++c) GIANT_CHECK(std::abs(at(plain_on, x, c) - at(plain_off, x, c)) <= 1);
+    }
+    // Skin without the spread: lit inside, dark outside, sharp.
+    GIANT_CHECK(at(skin_off, 64, 1) > 60 && at(skin_off, 86, 1) > 60);
+    GIANT_CHECK(at(skin_off, 94, 0) <= 2 && at(skin_off, 120, 0) <= 2);
+    // Spread: light past the edge, red most; under the lamp much the same;
+    // far out still dark.
+    GIANT_CHECK(at(skin_on, 94, 0) >= at(skin_off, 94, 0) + 10);
+    GIANT_CHECK(at(skin_on, 94, 0) > at(skin_on, 94, 2) + 5);
+    GIANT_CHECK(std::abs(at(skin_on, 64, 1) - at(skin_off, 64, 1)) <= 4);
+    GIANT_CHECK(at(skin_on, 120, 0) <= 2);
+    GIANT_CHECK(at(skin_on, 86, 0) <= at(skin_off, 86, 0) + 1); // (inside the edge: some goes out)
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
 
 GIANT_TEST("render: d3d12 terrain layers: grass on the level, rock on the steep, snow up high") {
     rhi::DeviceDesc desc;

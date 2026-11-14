@@ -21,6 +21,7 @@
 #include "skin_lod.h"
 #include "smaa.h"
 #include "streaming.h"
+#include "subsurface.h"
 #include "voxel_light.h"
 #include "voxel_scene.h"
 
@@ -72,7 +73,7 @@ u32 groups_of(u32 items, u32 per_group) { return (items + per_group - 1) / per_g
 // `descriptor(id, srgb)`: the read descriptor of a live texture in that
 // colour space, else rhi::k_no_descriptor.
 template <class Descriptor>
-gpu::Material to_gpu(const Material& m, Descriptor&& descriptor) {
+gpu::Material to_gpu(const Material& m, Descriptor&& descriptor, usize skin_looks) {
     gpu::Material out{};
     set4(out.base_roughness, m.base_color, m.roughness);
     set4(out.emissive_metallic, m.emissive, m.metallic);
@@ -94,6 +95,21 @@ gpu::Material to_gpu(const Material& m, Descriptor&& descriptor) {
         out.alpha_cutoff = cutoff;
     }
     out.canopy = std::isfinite(m.canopy) ? std::clamp(m.canopy, 0.0f, 1.0f) : 0.0f;
+    if (m.skin_look < std::min<usize>(skin_looks, k_max_skin_looks) && !m.terrain) {
+        out.flags |= gpu::k_material_skin | ((m.skin_look + 1) << gpu::k_material_look_shift);
+    }
+    return out;
+}
+
+float finite_in(float v, float lo, float hi, float fallback);
+
+gpu::SkinLook to_gpu(const SkinLook& s) {
+    gpu::SkinLook out{};
+    out.scatter = finite_in(s.scatter, 0.0005f, 0.1f, 0.012f);
+    out.strength = finite_in(s.strength, 0.0f, 1.0f, 1.0f);
+    out.lobe_roughness[0] = finite_in(s.lobe_roughness[0], 0.1f, 4.0f, 0.75f);
+    out.lobe_roughness[1] = finite_in(s.lobe_roughness[1], 0.1f, 4.0f, 1.3f);
+    out.lobe_mix = finite_in(s.lobe_mix, 0.0f, 1.0f, 0.15f);
     return out;
 }
 
@@ -196,6 +212,10 @@ struct Renderer::FrameData {
     rhi::TransientMemory materials; // the frame's, then the default
     u32 material_count = 0;         // the frame's
     u32 kinds = 1;                  // bit k: a material of gpu::material_kind k (each kind is a visibility pass)
+    bool skin = false;              // a skin material this frame (with its looks)
+    bool spread = false;            // one whose look spreads its light (strength over 0)
+    rhi::TransientMemory skin_looks; // gpu::SkinLook each
+    u32 skin_look_count = 0;
     rhi::TransientMemory terrain_layers; // gpu::TerrainLayer each (terrain_count of them)
     u32 terrain_count = 0;
     rhi::TransientMemory decals;    // decals, tiles, entries (DecalBins)
@@ -280,9 +300,11 @@ Renderer::~Renderer() {
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
           m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
-          m_ao_gtao, m_ao_denoise, m_contact_pass, m_occlusion_pass, m_terrain_pass, m_water_copy, m_water, m_particle_prepare, m_particle_draw, m_particle_composite}) {
+          m_ao_gtao, m_ao_denoise, m_contact_pass, m_occlusion_pass, m_terrain_pass, m_water_copy, m_water, m_particle_prepare, m_particle_draw, m_particle_composite,
+          m_resolve_spread, m_resolve_direct_spread, m_subsurface_pass}) {
         m_device.destroy(p);
     }
+    for (const rhi::TextureHandle t : m_subsurface) m_device.destroy(t);
     m_device.destroy(m_water_light);
     m_device.destroy(m_particle_ring);
     m_device.destroy(m_particle_drawn);
@@ -412,6 +434,12 @@ bool Renderer::init() {
     m_occlusion_pass = compute(shaders::occlusion_cs(), "character occlusion");
     m_particle_prepare = compute(shaders::particles_prepare_cs(), "particles: light each");
     m_terrain_pass = compute(shaders::terrain_cs(), "terrain layers");
+    m_subsurface_pass = compute(shaders::subsurface_cs(), "subsurface scattering");
+    {
+        const SubsurfaceKernel kernel = subsurface_kernel();
+        static_assert(sizeof(kernel) == sizeof(m_subsurface_kernel));
+        std::memcpy(m_subsurface_kernel.data(), kernel.data(), sizeof(kernel));
+    }
     m_bloom_up = compute(shaders::bloom_up_cs(), "bloom: up");
     m_light_plan = std::make_unique<VoxelLight>(m_voxels->capacity());
     m_voxel_lamp_lists = std::make_unique<VoxelLamps>();
@@ -508,6 +536,20 @@ bool Renderer::init() {
     resolve.color_count = 1;
     resolve.name = "shade visibility (no screen reflections)";
     m_resolve_direct = m_device.create_pipeline(resolve);
+    // With skin's light set aside for subsurface.slang (a target more).
+    resolve.pixel = shaders::resolve_direct_spread_ps();
+    resolve.color_formats[1] = rhi::Format::rgba16_float;
+    resolve.color_count = 2;
+    resolve.name = "shade visibility, skin set aside (no screen reflections)";
+    m_resolve_direct_spread = m_device.create_pipeline(resolve);
+    resolve.pixel = shaders::resolve_spread_ps();
+    resolve.color_formats[0] = rhi::Format::rgba16_float;
+    resolve.color_formats[1] = rhi::Format::rg32_uint;
+    resolve.color_formats[2] = rhi::Format::rgba16_float;
+    resolve.color_formats[3] = rhi::Format::rgba16_float;
+    resolve.color_count = 4;
+    resolve.name = "shade visibility, skin set aside";
+    m_resolve_spread = m_device.create_pipeline(resolve);
     rhi::GraphicsPipelineDesc reflect;
     reflect.vertex = shaders::reflect_vs();
     reflect.pixel = shaders::reflect_ps();
@@ -580,7 +622,8 @@ bool Renderer::init() {
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
           m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass, m_occlusion_pass, m_terrain_pass, m_water_copy,
-          m_water, m_particle_prepare, m_particle_draw, m_particle_composite}) {
+          m_water, m_particle_prepare, m_particle_draw, m_particle_composite, m_resolve_spread,
+          m_resolve_direct_spread, m_subsurface_pass}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -1521,6 +1564,10 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_contact_ready = false;
     m_device.destroy(m_occlusion); // the frame's size: made again when next used
     m_occlusion = {};
+    for (rhi::TextureHandle& t : m_subsurface) {
+        m_device.destroy(t); // the frame's size: made again when next used
+        t = {};
+    }
     m_device.destroy(m_terrain_surface); // the frame's size: made again below
     m_device.destroy(m_terrain_normal);
     m_terrain_surface = {};
@@ -3150,7 +3197,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_feedback_count = 0;
     for (usize i = 0; i < material_limit; ++i) {
         const Material& m = frame.materials[i];
-        m_gpu_materials.push_back(to_gpu(m, texture_descriptor));
+        m_gpu_materials.push_back(to_gpu(m, texture_descriptor, frame.skin_looks.size()));
         const std::array<TextureId, 4> ids{m.base_color_texture, m.normal_texture, m.roughness_metal_texture,
                                            m.occlusion_texture};
         if (m.terrain || std::all_of(ids.begin(), ids.end(), [](TextureId id) { return id == k_no_texture; })) {
@@ -3163,9 +3210,33 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             for (const TextureId id : ids) note_wanted(id, k_sharpest);
         }
     }
-    m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor));
+    m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor, 0));
     data.kinds = 0;
-    for (const gpu::Material& m : m_gpu_materials) data.kinds |= 1u << gpu::material_kind(m.flags);
+    data.skin = false;
+    data.spread = false;
+    for (const gpu::Material& m : m_gpu_materials) {
+        data.kinds |= 1u << gpu::material_kind(m.flags);
+        if ((m.flags & gpu::k_material_skin) == 0u) continue;
+        data.skin = true;
+        const u32 look = ((m.flags >> gpu::k_material_look_shift) & 255u) - 1u;
+        data.spread = data.spread || to_gpu(frame.skin_looks[look]).strength > 0.0f;
+    }
+    // Skin looks (only with skin to use them).
+    data.skin_look_count = 0;
+    if (data.skin) {
+        const usize looks = std::min<usize>(frame.skin_looks.size(), k_max_skin_looks);
+        data.skin_looks = cmd.allocate(static_cast<u32>(looks * sizeof(gpu::SkinLook)));
+        if (data.skin_looks.data == nullptr) {
+            data.skin = false; // (out of memory: shaded as plain this frame)
+            data.spread = false;
+        } else {
+            for (usize i = 0; i < looks; ++i) {
+                const gpu::SkinLook g = to_gpu(frame.skin_looks[i]);
+                std::memcpy(data.skin_looks.data + i * sizeof(gpu::SkinLook), &g, sizeof(g));
+            }
+            data.skin_look_count = static_cast<u32>(looks);
+        }
+    }
     data.material_count = static_cast<u32>(material_limit);
     data.materials = cmd.upload(bytes_of(m_gpu_materials));
     // The ground's layers (their textures always wanted at their finest:
@@ -3616,6 +3687,24 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.barrier(m_terrain_normal, rhi::ResourceState::shader_read);
         cmd.end_timing();
     }
+    // Skin's light spread under its surface (lit views, with a skin
+    // material this frame): shading sets it aside into m_subsurface[0].
+    // (Its kernel uploaded first: once shading has set the light aside, the
+    // pass must run.)
+    rhi::TransientMemory spread_kernel{};
+    if (settings.subsurface_scattering && lit_view && data.spread && ensure_subsurface()) {
+        spread_kernel =
+            cmd.upload({reinterpret_cast<const u8*>(m_subsurface_kernel.data()), sizeof(m_subsurface_kernel)});
+    }
+    const bool spread = spread_kernel.data != nullptr;
+    m_subsurface_idle = spread ? 0u : m_subsurface_idle + 1u;
+    constexpr u32 k_subsurface_idle_frames = 600;
+    if (m_subsurface[0].valid() && m_subsurface_idle > k_subsurface_idle_frames) {
+        for (rhi::TextureHandle& t : m_subsurface) {
+            m_device.destroy(t);
+            t = {};
+        }
+    }
     cmd.begin_timing("shading");
     // Shading writes the light before exposure into m_radiance (with
     // screen reflections, also what they need, and their pass adds them
@@ -3629,6 +3718,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         pass.colors[2] = {m_fallback, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
         pass.color_count = 3;
     }
+    if (spread) {
+        pass.colors[pass.color_count] = {m_subsurface[0], rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+        ++pass.color_count;
+    }
     // Texture streaming's feedback, cleared for this frame's pixels (lit views).
     const bool feedback = lit_view && m_feedback_count > 0;
     m_feedback_on = feedback;
@@ -3639,7 +3732,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.barrier(m_feedback, rhi::ResourceState::shader_write);
     }
     cmd.begin_render_pass(pass);
-    cmd.set_pipeline(screen_reflections ? m_resolve : m_resolve_direct);
+    cmd.set_pipeline(screen_reflections ? (spread ? m_resolve_spread : m_resolve)
+                                        : (spread ? m_resolve_direct_spread : m_resolve_direct));
     gpu::ResolvePush push{};
     set4(push.background, bg, 1.0f);
     push.frame = data.frame.descriptor;
@@ -3789,6 +3883,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const bool local_atlas = data.local_shadows != 0 && m_local_atlas.valid();
     extras.local_atlas = local_atlas ? m_device.read_descriptor(m_local_atlas) : data.frame.descriptor;
     extras.local_atlas_on = local_atlas ? 1u : 0u;
+    extras.skin_looks = data.skin_look_count != 0 ? data.skin_looks.descriptor : data.frame.descriptor;
+    extras.skin_looks_offset = data.skin_look_count != 0 ? data.skin_looks.offset : 0u;
+    extras.skin_look_count = data.skin_look_count;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     m_shading_extras = extras_memory; // the water's lighting too (this frame's)
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
@@ -3813,11 +3910,19 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         std::swap(m_feedback_materials[slot], m_feedback_now);
     }
     cmd.end_timing();
+    // The skin's light spread, then added to the rest: m_subsurface[0]
+    // stands for the radiance from here on.
+    rhi::TextureHandle radiance = m_radiance;
+    if (spread) {
+        spread_skin(cmd, data, spread_kernel);
+        radiance = m_subsurface[0];
+    }
+    m_stats.subsurface_scattering = radiance == m_subsurface[0];
     if (screen_reflections) {
         // Screen reflections from this frame's radiance (timed apart from
         // shading, so the light's cost can be read pass by pass).
         cmd.begin_timing("screen reflections");
-        cmd.barrier(m_radiance, rhi::ResourceState::shader_read);
+        cmd.barrier(radiance, rhi::ResourceState::shader_read);
         cmd.barrier(m_gloss, rhi::ResourceState::shader_read);
         cmd.barrier(m_fallback, rhi::ResourceState::shader_read);
         cmd.barrier(m_depth, rhi::ResourceState::shader_read);
@@ -3829,7 +3934,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         gpu::ReflectPush reflect{};
         reflect.frame = data.frame.descriptor;
         reflect.frame_offset = data.frame.offset;
-        reflect.radiance = m_device.read_descriptor(m_radiance);
+        reflect.radiance = m_device.read_descriptor(radiance);
         reflect.gloss = m_device.read_descriptor(m_gloss);
         reflect.fallback = m_device.read_descriptor(m_fallback);
         reflect.depth = m_device.read_descriptor(m_depth);
@@ -3840,7 +3945,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.end_render_pass();
         cmd.end_timing();
     }
-    rhi::TextureHandle exposed = screen_reflections ? m_scene : m_radiance;
+    rhi::TextureHandle exposed = screen_reflections ? m_scene : radiance;
     // Water in the lit view only (the light alone shows the scene's light, not the water's own colour).
     if (frame.settings.debug_view == DebugView::lit && frame.settings.water) exposed = draw_water(cmd, data, frame, exposed);
     // Particles over it all (the lit view only, like water).
@@ -4429,6 +4534,63 @@ bool Renderer::ensure_voxel_light() {
         }
     }
     return m_voxel_light.valid();
+}
+
+bool Renderer::ensure_subsurface() {
+    if (m_subsurface[0].valid() && m_subsurface[1].valid()) return true;
+    for (u32 i = 0; i < 2; ++i) {
+        if (m_subsurface[i].valid()) continue;
+        rhi::TextureDesc desc;
+        desc.width = m_width;
+        desc.height = m_height;
+        desc.format = rhi::Format::rgba16_float;
+        desc.usage = rhi::TextureUsage::sampled | rhi::TextureUsage::shader_write |
+                     (i == 0 ? rhi::TextureUsage::render_target : rhi::TextureUsage{});
+        desc.name = i == 0 ? "skin: light to spread, then all the light" : "skin: light spread across";
+        m_subsurface[i] = m_device.create_texture(desc);
+    }
+    if (m_subsurface[0].valid() && m_subsurface[1].valid()) return true;
+    if (!m_subsurface_logged) {
+        m_subsurface_logged = true; // (tried again each frame, logged once)
+        log_error("render", "could not create the skin's subsurface scattering textures (out of GPU memory?)");
+    }
+    return false;
+}
+
+void Renderer::spread_skin(rhi::CommandList& cmd, const FrameData& data, const rhi::TransientMemory& kernel) {
+    cmd.begin_timing("subsurface scattering");
+    gpu::SubsurfacePush p{};
+    p.frame = data.frame.descriptor;
+    p.frame_offset = data.frame.offset;
+    p.depth = m_device.read_descriptor(m_depth);
+    p.kernel = kernel.descriptor;
+    p.kernel_offset = kernel.offset;
+    p.width = m_width;
+    p.height = m_height;
+    p.taps = k_subsurface_taps;
+    cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+    cmd.set_pipeline(m_subsurface_pass);
+    // Across: [0] into [1].
+    cmd.barrier(m_subsurface[0], rhi::ResourceState::shader_read);
+    cmd.barrier(m_subsurface[1], rhi::ResourceState::shader_write);
+    p.source = m_device.read_descriptor(m_subsurface[0]);
+    p.radiance = p.source;
+    p.target = m_device.write_descriptor(m_subsurface[1]);
+    p.direction = 0;
+    cmd.push(p);
+    cmd.dispatch((m_width + 7) / 8, (m_height + 7) / 8);
+    // Down, added to the rest of the light: [1] and the radiance into [0].
+    cmd.barrier(m_subsurface[1], rhi::ResourceState::shader_read);
+    cmd.barrier(m_radiance, rhi::ResourceState::shader_read);
+    cmd.barrier(m_subsurface[0], rhi::ResourceState::shader_write);
+    p.source = m_device.read_descriptor(m_subsurface[1]);
+    p.radiance = m_device.read_descriptor(m_radiance);
+    p.target = m_device.write_descriptor(m_subsurface[0]);
+    p.direction = 1;
+    cmd.push(p);
+    cmd.dispatch((m_width + 7) / 8, (m_height + 7) / 8);
+    cmd.barrier(m_subsurface[0], rhi::ResourceState::shader_read);
+    cmd.end_timing();
 }
 
 bool Renderer::light_voxels(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame) {

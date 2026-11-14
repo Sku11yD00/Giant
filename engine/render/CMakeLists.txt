@@ -18,6 +18,7 @@ giant_module(render
     src/exposure.cpp
     src/brdf.cpp
     src/water.cpp
+    src/subsurface.cpp
   DEPENDS core rhi geometry voxel
 )
 giant_shaders(render
@@ -43,6 +44,8 @@ giant_shaders(render
     shaders/resolve.slang:vs_main:vertex:resolve_vs
     shaders/resolve.slang:ps_main:pixel:resolve_ps
     shaders/resolve.slang:ps_direct:pixel:resolve_direct_ps
+    shaders/resolve.slang:ps_spread:pixel:resolve_spread_ps
+    shaders/resolve.slang:ps_direct_spread:pixel:resolve_direct_spread_ps
     shaders/reflect.slang:vs_main:vertex:reflect_vs
     shaders/reflect.slang:ps_main:pixel:reflect_ps
     shaders/water.slang:vs_copy:vertex:water_copy_vs
@@ -75,6 +78,7 @@ giant_shaders(render
     shaders/ao.slang:cs_contact:compute:ao_contact_cs
     shaders/occluders.slang:cs_occlusion:compute:occlusion_cs
     shaders/terrain.slang:cs_terrain:compute:terrain_cs
+    shaders/subsurface.slang:cs_spread:compute:subsurface_cs
     shaders/post.slang:cs_histogram_clear:compute:histogram_clear_cs
     shaders/post.slang:cs_histogram:compute:histogram_cs
     shaders/post.slang:cs_bloom_down:compute:bloom_down_cs
@@ -103,6 +107,7 @@ giant_module_tests(render
     tests/test_skin.cpp
     tests/test_exposure.cpp
     tests/test_brdf.cpp
+    tests/test_subsurface.cpp
 )
 if(GIANT_BUILD_TESTS)
   # The streaming tests check the module's own streamer directly.

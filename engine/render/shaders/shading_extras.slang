@@ -48,6 +48,9 @@ struct Extras {
     uint gi_lamps_on;
     uint occlusion;          // characters in the light (occluders.slang), full size rgba8 (occlusion_on 0: none)
     uint occlusion_on;
+    uint skin_looks;         // gpu::SkinLook each (skin_look_count 0: none)
+    uint skin_looks_offset;
+    uint skin_look_count;
 };
 
 Extras load_extras(uint descriptor, uint offset) {
@@ -134,6 +137,10 @@ Extras load_extras(uint descriptor, uint offset) {
     o.gi_lamps_on = gl.y;
     o.occlusion = gl.z;
     o.occlusion_on = gl.w;
+    const uint3 sk = b.Load3(at + 304);
+    o.skin_looks = sk.x;
+    o.skin_looks_offset = sk.y;
+    o.skin_look_count = sk.z;
     return o;
 }
 
