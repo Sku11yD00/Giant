@@ -365,7 +365,7 @@ float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 // reflection is multiplied by (`spec_weight`) and the reflected light it
 // used (`spec_light`), for the screen's reflections to replace.
 float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough, float metal, float3 emissive, float variance,
-             float sun, float4 bounce, float4 cone, float cone_weight, float occlusion, float3 bend,
+             float sun, float4 bounce, float4 cone, float cone_weight, float occlusion, float3 bend, float3 bounced,
              out float3 spec_weight, out float3 spec_light) {
     const float3 v = safe_normalize(-world, n);
     const float3 l = f.sun_direction.xyz;
@@ -423,7 +423,9 @@ float3 shade(Extras e, Frame f, float3 world, float3 n, float3 base, float rough
     // The material's occlusion: small creases the voxels are too coarse to
     // see dim the ambient light, and the reflections by how much of the
     // reflection's cone the occlusion's cone hides (Lagarde 2014).
-    ambient_diffuse *= occlusion;
+    // (`bounced`: what characters' bodies near it give back of the light
+    // they shut out, occluders.slang, a share of the open light.)
+    ambient_diffuse = ambient_diffuse * occlusion + ambient_diffuse * bounced;
     const float spec_occlusion =
         saturate(pow(n_dot_v + occlusion, exp2(-16.0 * alpha - 1.0)) - 1.0 + occlusion); // (alpha: roughness squared)
     // The voxel cone: what it met, and the dimmed hemisphere past it.
@@ -682,7 +684,7 @@ Output shade_pixel(float4 position) {
                 float3 spec_light;
                 float3 color = shade(extras, f, world, far_n, albedo, far_rough, far_metal, float3(0.0, 0.0, 0.0), 0.0,
                                      sun, bounce, float4(0.0, 0.0, 0.0, 0.0), 0.0, 1.0, float3(0.0, 0.0, 0.0),
-                                     spec_weight, spec_light);
+                                     float3(0.0, 0.0, 0.0), spec_weight, spec_light);
                 float far_through = 1.0;
                 if (sky_on) {
                     color = under_sky(sky, color, dir, t, pixel, far_through);
@@ -821,8 +823,15 @@ Output shade_pixel(float4 position) {
         ambient_occlusion(extras, f, pixel, world, surface_n, ao, bend);
         occlusion *= ao;
     }
+    float3 bounced = float3(0.0, 0.0, 0.0);
+    if (extras.occlusion_on != 0u) {
+        // Characters near: the light their bodies shut out, and give back.
+        const float4 c = read_texture(extras.occlusion).Load(int3(int2(pixel), 0));
+        bounced = c.rgb * occlusion;
+        occlusion *= c.a;
+    }
     float3 color = shade(extras, f, world, n, base, rough, metal, emissive, variance, sun, bounce, cone, cone_weight,
-                         occlusion, bend, spec_weight, spec_light);
+                         occlusion, bend, bounced, spec_weight, spec_light);
     color += local_lighting(extras, f, position.xy, world, n, surface_n, base, rough, metal, variance);
     if (translucency > 0.0) {
         // Thin surfaces lit from behind: the sun through them, tinted by

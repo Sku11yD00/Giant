@@ -482,7 +482,11 @@ struct ResolveExtras {
     // beside the light pool, for the far field (gi_lamps_on 0: none).
     u32 gi_lamps;
     u32 gi_lamps_on;
-    u32 pad_lamps[2];
+    // Characters in the light (occluders.slang): rgb the light their
+    // bodies bounce back, a the ambient light let through, full size
+    // rgba8_unorm (occlusion_on 0: none this frame).
+    u32 occlusion;
+    u32 occlusion_on;
 };
 static_assert(sizeof(ResolveExtras) == 304);
 
@@ -607,6 +611,31 @@ struct PostPush {
     u32 pad[2];
 };
 static_assert(sizeof(PostPush) == 48);
+
+// occluders.slang's capsule: view space (camera at the origin looking down -Z); albedo rgb8 (r in the low byte).
+struct GpuOccluder {
+    float a[3];
+    float radius;
+    float b[3];
+    u32 albedo;
+};
+static_assert(sizeof(GpuOccluder) == 32);
+
+// occluders.slang's OccluderPush.
+struct OccluderPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 depth;     // read: the scene depth (reverse-Z, full size)
+    u32 target;    // write: rgba8_unorm, full size
+    u32 occluders; // read: count GpuOccluder at offset
+    u32 offset;
+    u32 count;
+    u32 width;
+    u32 height;
+    float reach; // k_occluder_reach
+    u32 pad[2];
+};
+static_assert(sizeof(OccluderPush) == 48);
 
 // ao.slang's AoPush (all its passes; cs_contact: radius is the contact length, target full size).
 struct AoPush {

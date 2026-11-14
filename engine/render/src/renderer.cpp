@@ -5,6 +5,7 @@
 #include "giant/geometry/mesh.h"
 #include "cells.h"
 #include "decals.h"
+#include "occluders.h"
 #include "lights.h"
 #include "local_shadows.h"
 #include "voxel_lamps.h"
@@ -279,7 +280,7 @@ Renderer::~Renderer() {
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
           m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
-          m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass, m_water_copy, m_water, m_particle_prepare, m_particle_draw, m_particle_composite}) {
+          m_ao_gtao, m_ao_denoise, m_contact_pass, m_occlusion_pass, m_terrain_pass, m_water_copy, m_water, m_particle_prepare, m_particle_draw, m_particle_composite}) {
         m_device.destroy(p);
     }
     m_device.destroy(m_water_light);
@@ -291,6 +292,7 @@ Renderer::~Renderer() {
     m_device.destroy(m_ao_raw);
     m_device.destroy(m_ao);
     m_device.destroy(m_contact);
+    m_device.destroy(m_occlusion);
     m_device.destroy(m_terrain_surface);
     m_device.destroy(m_terrain_normal);
     for (const rhi::TextureHandle t : m_bloom_downs) {
@@ -407,6 +409,7 @@ bool Renderer::init() {
     m_ao_gtao = compute(shaders::ao_gtao_cs(), "ambient occlusion");
     m_ao_denoise = compute(shaders::ao_denoise_cs(), "ambient occlusion: denoise");
     m_contact_pass = compute(shaders::ao_contact_cs(), "contact shadows");
+    m_occlusion_pass = compute(shaders::occlusion_cs(), "character occlusion");
     m_particle_prepare = compute(shaders::particles_prepare_cs(), "particles: light each");
     m_terrain_pass = compute(shaders::terrain_cs(), "terrain layers");
     m_bloom_up = compute(shaders::bloom_up_cs(), "bloom: up");
@@ -576,7 +579,7 @@ bool Renderer::init() {
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
-          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass, m_terrain_pass, m_water_copy,
+          m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass, m_occlusion_pass, m_terrain_pass, m_water_copy,
           m_water, m_particle_prepare, m_particle_draw, m_particle_composite}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
@@ -1417,6 +1420,8 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_device.destroy(m_contact); // the frame's size: made again below
     m_contact = {};
     m_contact_ready = false;
+    m_device.destroy(m_occlusion); // the frame's size: made again when next used
+    m_occlusion = {};
     m_device.destroy(m_terrain_surface); // the frame's size: made again below
     m_device.destroy(m_terrain_normal);
     m_terrain_surface = {};
@@ -3375,6 +3380,59 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         cmd.end_timing();
     }
     m_stats.contact_shadows = contact_shadows;
+    // Characters in the light (lit views, with occluders in view): their
+    // capsules dim the ambient light round them and give some back.
+    bool character_occlusion = false;
+    m_stats.occluders = 0;
+    if (settings.character_occlusion && lit_view && !frame.occluders.empty()) {
+        pick_occluders(frame.occluders, frame.view.position, view, frustum, m_gpu_occluders, m_occluder_order);
+        if (!m_gpu_occluders.empty() && !m_occlusion.valid()) {
+            rhi::TextureDesc desc;
+            desc.width = m_width;
+            desc.height = m_height;
+            desc.format = rhi::Format::rgba8_unorm;
+            desc.usage = rhi::TextureUsage::sampled | rhi::TextureUsage::shader_write;
+            desc.name = "character occlusion";
+            m_occlusion = m_device.create_texture(desc);
+            if (!m_occlusion.valid() && !m_occlusion_logged) {
+                m_occlusion_logged = true; // (tried again each frame, logged once)
+                log_error("render", "could not create the character occlusion texture (out of GPU memory?)");
+            }
+        }
+        const rhi::TransientMemory list =
+            m_gpu_occluders.empty() || !m_occlusion.valid() ? rhi::TransientMemory{} : cmd.upload(bytes_of(m_gpu_occluders));
+        if (list.data != nullptr) {
+            cmd.begin_timing("character occlusion");
+            cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+            cmd.barrier(m_occlusion, rhi::ResourceState::shader_write);
+            gpu::OccluderPush op{};
+            op.frame = data.frame.descriptor;
+            op.frame_offset = data.frame.offset;
+            op.depth = m_device.read_descriptor(m_depth);
+            op.target = m_device.write_descriptor(m_occlusion);
+            op.occluders = list.descriptor;
+            op.offset = list.offset;
+            op.count = static_cast<u32>(m_gpu_occluders.size());
+            op.width = m_width;
+            op.height = m_height;
+            op.reach = k_occluder_reach;
+            cmd.set_pipeline(m_occlusion_pass);
+            cmd.push(op);
+            cmd.dispatch((m_width + 7) / 8, (m_height + 7) / 8);
+            cmd.barrier(m_occlusion, rhi::ResourceState::shader_read);
+            cmd.end_timing();
+            character_occlusion = true;
+            m_stats.occluders = op.count;
+        }
+    }
+    // Its texture goes after a while with no characters in view (made
+    // again when one comes).
+    constexpr u32 k_occlusion_idle_frames = 600;
+    m_occlusion_idle = character_occlusion ? 0u : m_occlusion_idle + 1u;
+    if (m_occlusion.valid() && m_occlusion_idle > k_occlusion_idle_frames) {
+        m_device.destroy(m_occlusion);
+        m_occlusion = {};
+    }
     // Terrain layers (lit views, with layers given): the ground's colour,
     // roughness and shading normal, for resolve to read where a material
     // is terrain (its own pass: in resolve it slowed every pixel).
@@ -3602,6 +3660,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.ao_on = ambient_occlusion ? 1u : 0u;
     extras.contact = contact_shadows ? m_device.read_descriptor(m_contact) : data.frame.descriptor;
     extras.contact_on = contact_shadows ? 1u : 0u;
+    extras.occlusion = character_occlusion ? m_device.read_descriptor(m_occlusion) : data.frame.descriptor;
+    extras.occlusion_on = character_occlusion ? 1u : 0u;
     extras.terrain_surface = terrain ? m_device.read_descriptor(m_terrain_surface) : data.frame.descriptor;
     extras.terrain_normal = terrain ? m_device.read_descriptor(m_terrain_normal) : data.frame.descriptor;
     extras.terrain_on = terrain ? 1u : 0u;

@@ -47,6 +47,7 @@ namespace gpu {
 struct MeshEntry; // src/gpu_layout.h
 struct Material;
 struct MaterialWind;
+struct GpuOccluder;
 struct VoxelLevel;
 struct ShadowLevel;
 struct FrameConstants;
@@ -311,6 +312,22 @@ struct DustPuff {
 // Puffs one frame draws at most (the first of FrameInput::dust).
 inline constexpr u32 k_max_dust_puffs = 32;
 
+// A part of a character's body for the light round it (characters plan C2):
+// a capsule (the segment a to b, `radius` round it) that shuts the sky's and
+// the bounced light out of what is near it, and gives some back as its own
+// colour (`albedo`, 0 to 1: light bounced off it). Worked out per pixel from
+// the capsules themselves, so it follows the pose with no lag.
+struct Occluder {
+    DVec3 a{};
+    DVec3 b{};
+    float radius = 0.1f; // metres (at most 10)
+    Vec3 albedo{0.5f, 0.5f, 0.5f};
+};
+// Occluders one frame uses at most (the nearest of those in view), and how
+// far from the camera they count.
+inline constexpr u32 k_max_occluders = 1024;
+inline constexpr float k_occluder_distance = 150.0f;
+
 // Particles (effects plan FX1): born in bursts, each moving by a closed
 // form from where and how it was born (no simulation state: the same age
 // is always the same place, so nothing flickers without history), drawn
@@ -494,6 +511,11 @@ struct RenderSettings {
     // than 48 pixels.
     bool contact_shadows = true;
     float contact_shadow_length = 0.3f;
+    // Characters in the light (lit views, FrameInput::occluders): their
+    // bodies shut the sky's and bounced light out round them (a person
+    // standing on the ground darkens it round their feet) and give back
+    // their own colour.
+    bool character_occlusion = true;
     // Local lights (FrameInput::lights; lit views).
     bool local_lights = true;
     // Water (FrameInput::water_vertices; lit views).
@@ -687,6 +709,8 @@ struct FrameInput {
     std::span<const Decal> decals;
     // Dust in the air, nearest first (lit views; past k_max_dust_puffs left out).
     std::span<const DustPuff> dust;
+    // Characters' bodies in the light (lit views; see Occluder).
+    std::span<const Occluder> occluders;
     // Lamps (lit views; see LocalLight).
     std::span<const LocalLight> lights;
     // Particles born this frame (ParticleBurst), and the styles they and
@@ -787,6 +811,7 @@ struct RenderStats {
     bool screen_reflections = false; // screen-space rays on
     bool ambient_occlusion = false;  // GTAO on
     bool contact_shadows = false;    // the sun's contact shadows marched
+    u32 occluders = 0;               // characters' capsules shading the light round them
     // The sky (this frame).
     bool sky = false;           // the atmosphere drawn
     bool physical_sky = false;  // with light scattered many times, the air over the view and the sky's ambient light
@@ -1245,6 +1270,12 @@ private:
     rhi::PipelineHandle m_contact_pass; // contact shadows (ao.slang's cs_contact)
     rhi::TextureHandle m_contact;       // the sun let through, full size
     bool m_contact_ready = false;
+    rhi::PipelineHandle m_occlusion_pass; // characters in the light (occluders.slang)
+    rhi::TextureHandle m_occlusion;       // its bounce and ambient let through, full size (made on first use)
+    bool m_occlusion_logged = false;
+    u32 m_occlusion_idle = 0; // frames without the pass (the texture freed after k_occlusion_idle_frames)
+    std::vector<gpu::GpuOccluder> m_gpu_occluders;          // this frame's (scratch)
+    std::vector<std::pair<float, u32>> m_occluder_order;    // (scratch)
     rhi::PipelineHandle m_terrain_pass;   // terrain layers (terrain.slang's cs_terrain)
     rhi::TextureHandle m_terrain_surface; // their colour and roughness, full size
     rhi::TextureHandle m_terrain_normal;  // and shading normal

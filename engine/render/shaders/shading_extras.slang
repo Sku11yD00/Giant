@@ -46,6 +46,8 @@ struct Extras {
     LocalLights local;       // lamps (lights.slang; count 0: none)
     uint gi_lamps;           // the lamp words beside the voxel light pool (gi_lamps_on 0: none)
     uint gi_lamps_on;
+    uint occlusion;          // characters in the light (occluders.slang), full size rgba8 (occlusion_on 0: none)
+    uint occlusion_on;
 };
 
 Extras load_extras(uint descriptor, uint offset) {
@@ -127,9 +129,11 @@ Extras load_extras(uint descriptor, uint offset) {
     o.local.shadows = ls.y;
     o.local.atlas = ls.z;
     o.local.atlas_on = ls.w;
-    const uint2 gl = b.Load2(at + 288);
+    const uint4 gl = b.Load4(at + 288);
     o.gi_lamps = gl.x;
     o.gi_lamps_on = gl.y;
+    o.occlusion = gl.z;
+    o.occlusion_on = gl.w;
     return o;
 }
 
