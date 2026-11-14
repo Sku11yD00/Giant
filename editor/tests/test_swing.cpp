@@ -87,7 +87,8 @@ struct Fixture {
         const std::vector<world::EntityId> swung = swing->take_moved();
         moved.insert(moved.end(), swung.begin(), swung.end());
         scene_frame(state.scene, *renderer, *meshes, frame, nullptr, nullptr, nullptr, &physics.poses(), redraw,
-                    &physics.piece_poses(), nullptr, {}, nullptr, &cloth->meshes(), moved, &swing->poses());
+                    &physics.piece_poses(), nullptr, {}, nullptr, &cloth->meshes(), moved, &swing->poses(), nullptr,
+                    &physics.moving());
         frame.take_for_animation();
         physics.update(state.scene, frame.take_for_followers(), 1.0 / 60.0);
         cloth->update(wind(wind_speed), {0.0, 1.0, 6.0}, 1.0 / 60.0);
@@ -259,4 +260,47 @@ GIANT_TEST("swing: a shot knocks a lantern; a blast throws lanterns and cloth; t
     GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
     f.frame_step(0.0f);
     GIANT_CHECK(f.cell_of(lantern).instances[1].position.y > 1.5); // swinging again, where it hangs
+}
+
+GIANT_TEST("swing: falling bodies and loose pieces are kept out of voxels while they move, put back once still") {
+    Fixture f;
+    f.create({{"shape", "plane"}, {"scale", {100, 1, 100}}});
+    const world::EntityId cube = f.create({{"shape", "cube"}, {"position", {3, 3, 0}}, {"body", "dynamic"}});
+    const Json wall = {{"shape", "cube"}, {"position", {0, 0.5, 0}}, {"scale", {1, 1, 1}}};
+    GIANT_CHECK(f.run("create_kit", {{"name", "block"}, {"pieces", {wall}}}).ok);
+    GIANT_CHECK(f.run("set_kit_breakable", {{"name", "block"}, {"breakable", true}, {"strength", 100}}).ok);
+    const world::EntityId block = f.create({{"kit", "block"}, {"position", {-3, 0, 0}}});
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    // (The plane shares the cube's cell: each entity's own instance.)
+    const auto drawn = [&f](world::EntityId id) -> const render::Instance& {
+        const SceneFrame::Cell& c = f.cell_of(id);
+        for (const SceneFrame::Slot& slot : c.slots) {
+            if (slot.id == id) return c.instances[slot.first];
+        }
+        GIANT_CHECK(false); // drawn: each has its slot
+        static const render::Instance none;
+        return none;
+    };
+    for (int i = 0; i < 10; ++i) f.frame_step(0.0f);
+    // Falling: drawn moving (in place); the block standing: not.
+    GIANT_CHECK(drawn(cube).moves && !drawn(block).moves);
+    GIANT_CHECK(f.run("impact", {{"point", {-2.4, 0.5, 0}}, {"radius", 1}, {"impulse", 2000}}).value["loosened"] == 1);
+    for (int i = 0; i < 3; ++i) f.frame_step(0.0f);
+    GIANT_CHECK(drawn(block).moves); // knocked loose, tumbling
+    // Down and still a while: back in the voxel world, both.
+    for (int i = 0; i < 600 && (drawn(cube).moves || drawn(block).moves); ++i) {
+        f.frame_step(0.0f);
+    }
+    GIANT_CHECK(!drawn(cube).moves && !drawn(block).moves);
+    GIANT_CHECK(std::fabs(drawn(cube).position.y - 0.5) < 0.05);
+    // Knocked again, then made fixed while moving, a command catching the
+    // physics up between frames: drawn where the scene has it, in the voxels.
+    const world::EntityId ball = f.create({{"shape", "sphere"}, {"position", {6, 3, 0}}, {"body", "dynamic"}});
+    for (int i = 0; i < 6; ++i) f.frame_step(0.0f);
+    GIANT_CHECK(drawn(ball).moves);
+    GIANT_CHECK(f.run("set_entity", {{"id", ball}, {"body", "fixed"}}).ok);
+    GIANT_CHECK(f.run("impact", {{"point", {40, 0.5, 40}}, {"radius", 1}, {"impulse", 10}}).ok); // (catches up)
+    for (int i = 0; i < 3; ++i) f.frame_step(0.0f);
+    GIANT_CHECK(!f.physics.moving().contains(ball) && !drawn(ball).moves);
+    GIANT_CHECK(drawn(ball).position == DVec3(6.0, 3.0, 0.0));
 }

@@ -126,6 +126,10 @@ if(GIANT_BUILD_TESTS)
         COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/water_gate.py
                 $<TARGET_FILE:giant_editor> --hidden --backend null)
       set_tests_properties(editor_water_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${gate_env}")
+      add_test(NAME editor_effects_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/effects_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set_tests_properties(editor_effects_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${gate_env}")
     endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")

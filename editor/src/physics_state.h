@@ -84,6 +84,8 @@ public:
     const std::unordered_map<world::EntityId, std::vector<sim::PiecePose>>& piece_poses() const {
         return m_bodies.piece_poses();
     }
+    // Of the posed entities, those whose bodies moved lately (kept out of the voxel world).
+    const std::unordered_set<world::EntityId>& moving() const { return m_bodies.moving(); }
     // A blow (impact command): breakable kits' pieces in reach come loose,
     // and trees in reach topple (the scatter cells in the blow given to the
     // forest first, at most points_per_impact points: far ones are laid down).

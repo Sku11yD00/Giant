@@ -80,9 +80,16 @@ struct ScenePhysicsStats {
 };
 
 // A breakable kit's piece, come loose: where it is (its world transform).
+// Moving (its body moved in one of the last k_still updates: drifting down
+// a river, still falling) it is drawn kept out of the voxel world, so it
+// costs the voxels nothing each frame; once still, it is drawn into it
+// again (once).
 struct PiecePose {
+    static constexpr u32 k_still = 30; // update_poses calls without moving
     u32 piece = 0; // its index in the kit
     world::Transform at;
+    u32 still = k_still; // update_poses calls since its body last moved (rubble and kept pieces: still)
+    bool moving() const { return still < k_still; }
 };
 
 class ScenePhysics {
@@ -111,6 +118,10 @@ public:
     // rotation; the scale is the entity's). Entities not in it are where
     // the scene puts them.
     const std::unordered_map<world::EntityId, world::Transform>& poses() const { return m_poses; }
+    // Of those, the ones whose bodies moved in one of the last
+    // PiecePose::k_still update_poses calls (drawn kept out of the voxel
+    // world; once still, they are to be drawn again, into it).
+    const std::unordered_set<world::EntityId>& moving() const { return m_moving; }
     // A dynamic entity's body put at `position` and `rotation` (unit), at
     // rest, and posed there (a game save's bodies loaded). False, changing
     // nothing: not a dynamic entity with a body now, an edit of it waiting
@@ -217,6 +228,8 @@ private:
     void sync_tiles(world::Terrain& terrain, u32 budget);
     void finish_tiles(bool wait);
     void drop_pose(world::EntityId id);
+    // update_poses' start: an update further for what moves (moving()).
+    void settle_poses();
     const world::Kit* find_kit(const std::string& name) const;
     BodyDesc entity_body(const world::Kit* kit, const world::Entity& e) const;
     // The scene's kept record of `e` while it still matches it (null: none).
@@ -244,6 +257,9 @@ private:
     std::unordered_map<world::EntityId, Tracked> m_entities;
     std::unordered_map<BodyId, world::EntityId> m_by_body;
     std::unordered_map<world::EntityId, world::Transform> m_poses;
+    std::unordered_set<world::EntityId> m_moving;           // of m_poses (moving())
+    std::unordered_map<world::EntityId, u32> m_still;       // m_moving's update_poses calls since they moved
+    std::unordered_set<world::EntityId> m_settling;         // kits with moving pieces (PiecePose::moving)
     std::vector<world::EntityId> m_redraw;
     std::unordered_map<world::EntityId, std::vector<PiecePose>> m_piece_poses;
     struct PieceOf {

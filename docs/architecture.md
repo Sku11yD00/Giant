@@ -1916,6 +1916,15 @@ holding still) and the far field never stands in for them. Their shadows move wi
 pages under moved instances are drawn again). While the physics poses an
 entity (a dynamic body, simulating), its pose wins over the swing's.
 
+Bodies moving are kept out of the voxel world the same way: a dynamic
+entity whose body moved in one of the last 30 `update_poses` calls
+(`ScenePhysics::moving`), and a breakable kit's loose piece likewise
+(`PiecePose::moving`; rubble and kept damage lie still), are drawn with
+`moves`; once still that long they are drawn again, into the voxel world
+(once). So a piece drifting down a river, a crate bobbing, costs the voxel
+world nothing for as long as it goes on moving, instead of its cell's
+bricks being made again every frame.
+
 `PhysicsState::on_hits` and `on_impact` (set by `connect_blows`) carry the
 shots' hits and the `impact` command's blows out: a hit on a swinging
 entity knocks it; a blow throws the swings and cloth in reach. The
@@ -2451,6 +2460,16 @@ over a fall). They go to `EffectsState::add_burst`,
 within the weather's own budgets of 2,048 births a frame and 512 landing
 (an eighth of the renderer's caps, apart from the effects'), all of a burst
 or none. get_effects reports them (`emitting.weather`).
+
+The effects gate (FX5, `tools/effects_gate.py`) flies the N3 flight over
+the water gate's valley with smoke from every chimney, fires along the
+street and the river, a breakable boathouse knocked into the river and
+shots fired from the street, in a storm, simulating. It holds the flight
+to 60 fps without micro stutter and the "particles" pass to 1.0 ms in the
+street (caught up first), and checks every kind of effect went off (all
+but grit, which the rain keeps down). The
+gates that fly the storm count draws less the particles' two passes, which
+come and go with what is alive.
 
 ## Navigation
 
