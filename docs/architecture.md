@@ -1653,8 +1653,15 @@ cluster path as everything else: its groups stream into the geometry pool
 as any mesh's do (terminal groups first and kept, finer ones loaded when
 asked for and evicted when unused), and a source buffer keeps its vertices
 at bind with their joints and weights, cluster by cluster in the pool's
-order. With every level, a character copy holds about twice the clusters,
-source and CPU copy of the original triangles alone.
+order. Copies of one character share its geometry
+(`Renderer::add_skinned_copy`, C1c-1): the CPU clusters, the streamer's
+laid-out groups (`GeometryStreamer::add_copy`, a shared `Layout`), the
+groups, LOD tree and skin source on the GPU and the per-file skin data
+(`SkinShape`); each copy has its own pose, refit cluster bounds, residency,
+floor and place in the pool, so a crowd of one character costs its
+geometry once (its levels, about twice the original triangles alone). The
+original may go before its copies (the shared buffers go with the last).
+The editor uploads a file's first animated copy and copies the rest.
 `set_pose` takes one skin matrix per joint and a sphere around the pose;
 in the frame after, before anything reads geometry, `skin.slang` (a
 thread group per cluster) writes the posed vertices and normals into the

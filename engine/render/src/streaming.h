@@ -38,6 +38,7 @@
 #include "gpu_layout.h"
 
 #include <map>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -129,6 +130,11 @@ public:
     // the rest count as not loaded for culling, so the pose pass need not
     // move detail no view draws. See aim_floor.
     bool add(u32 mesh, const geometry::ClusterMesh& data, std::vector<gpu::Cluster>& clusters, bool posed = false);
+    // Another mesh streaming the same geometry as `of` (a posed copy: a
+    // character drawn in its own pose), sharing its laid-out geometry; its
+    // own residency, floor and place in the pool. The clusters' offsets are
+    // those `of` was given. False when `of` is not live.
+    bool add_copy(u32 mesh, u32 of);
     void remove(u32 mesh);
 
     // True once a mesh's terminal groups are loaded: only then can it draw.
@@ -183,21 +189,26 @@ public:
     const StreamingStats& stats() const { return m_stats; }
 
 private:
-    struct MeshState {
-        bool live = false;
-        bool roots_loaded = false;
-        u32 group_base = 0;
+    // A mesh's geometry laid out for the pool, and its group structure:
+    // the same for every copy of it.
+    struct Layout {
         std::vector<u8> blob;          // every group's geometry, back to back
         std::vector<u64> blob_offsets; // per group, plus the end: bytes into blob
         geometry::GroupLinks links;
         std::vector<u32> depth;
         std::vector<u8> root;
+        u32 coarsest = 0; // the deepest group's depth
+    };
+    struct MeshState {
+        bool live = false;
+        bool roots_loaded = false;
+        u32 group_base = 0;
+        std::shared_ptr<const Layout> lay; // shared by copies
         std::vector<u8> resident;
         std::vector<u8> shown;      // resident, and not hidden under the floor
         bool posed = false;
         u32 floor = 0;
         u32 aim = 0;
-        u32 coarsest = 0;           // the deepest group's depth
         u32 held_until = 0;         // update count: the floor stays this low until then
         u32 shown_version = 0;
         std::vector<u64> pool_unit; // per loaded group: first unit in the pool
@@ -221,8 +232,9 @@ private:
     u64 units_of(const MeshState& m, u32 group) const;
     bool load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 group, u32 frame_number, bool& pool_writable);
     void evict(MeshState& m, u32 group);
+    bool start(u32 mesh, MeshState m, bool posed); // its own state, on m.lay
     static bool shows(const MeshState& m, u32 group) {
-        return m.resident[group] != 0 && (m.root[group] != 0 || m.depth[group] >= m.floor);
+        return m.resident[group] != 0 && (m.lay->root[group] != 0 || m.lay->depth[group] >= m.floor);
     }
     void set_floor(MeshState& m, u32 floor);
     void move_floors(u32 frame_number);

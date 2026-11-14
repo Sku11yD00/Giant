@@ -173,16 +173,18 @@ bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vec
                            bool posed) {
     GIANT_ASSERT(clusters.size() == data.clusters.size(), "one gpu cluster per cluster");
     MeshState m;
+    const std::shared_ptr<Layout> lay = std::make_shared<Layout>();
+    Layout& L = *lay;
     const usize groups = data.groups.size();
-    m.blob_offsets.reserve(groups + 1);
+    L.blob_offsets.reserve(groups + 1);
     ClusterPacking packing;
-    const auto append = [&m](const void* bytes, usize size) {
+    const auto append = [&L](const void* bytes, usize size) {
         const auto* p = static_cast<const u8*>(bytes);
-        m.blob.insert(m.blob.end(), p, p + size);
+        L.blob.insert(L.blob.end(), p, p + size);
     };
     for (u32 g = 0; g < groups; ++g) {
-        const u64 start = m.blob.size();
-        m.blob_offsets.push_back(start);
+        const u64 start = L.blob.size();
+        L.blob_offsets.push_back(start);
         const geometry::ClusterGroup& group = data.groups[g];
         for (u32 i = 0; i < group.cluster_count; ++i) {
             const u32 ci = group.first_cluster + i;
@@ -199,32 +201,47 @@ bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vec
             }
             out.vertex_count = static_cast<u32>(order.size());
             out.triangle_count = c.triangle_count;
-            out.vertex_offset = static_cast<u32>(m.blob.size() - start);
+            out.vertex_offset = static_cast<u32>(L.blob.size() - start);
             for (const u32 v : order) {
                 const geometry::PackedVertex packed = geometry::pack_vertex(data.vertices[v]);
                 append(&packed, sizeof(packed));
             }
-            out.triangle_offset = static_cast<u32>(m.blob.size() - start);
+            out.triangle_offset = static_cast<u32>(L.blob.size() - start);
             append(triangles.data(), triangles.size() * 4);
         }
-        m.blob.resize((m.blob.size() + k_unit - 1) / k_unit * k_unit, 0);
+        L.blob.resize((L.blob.size() + k_unit - 1) / k_unit * k_unit, 0);
     }
-    m.blob_offsets.push_back(m.blob.size());
-    m.links = geometry::link_groups(data);
-    m.depth.resize(groups);
-    m.root.resize(groups);
+    L.blob_offsets.push_back(L.blob.size());
+    L.links = geometry::link_groups(data);
+    L.depth.resize(groups);
+    L.root.resize(groups);
     for (u32 g = 0; g < groups; ++g) {
-        m.depth[g] = data.groups[g].depth;
-        m.root[g] = geometry::is_root_group(data.groups[g]) ? 1 : 0;
+        L.depth[g] = data.groups[g].depth;
+        L.root[g] = geometry::is_root_group(data.groups[g]) ? 1 : 0;
     }
+    for (u32 g = 0; g < groups; ++g) {
+        L.coarsest = std::max(L.coarsest, L.depth[g]);
+    }
+    m.lay = lay;
+    return start(mesh, std::move(m), posed);
+}
+
+bool GeometryStreamer::add_copy(u32 mesh, u32 of) {
+    if (of >= m_meshes.size() || !m_meshes[of].live || mesh == of) {
+        return false;
+    }
+    MeshState m;
+    m.lay = m_meshes[of].lay;
+    return start(mesh, std::move(m), m_meshes[of].posed);
+}
+
+bool GeometryStreamer::start(u32 mesh, MeshState m, bool posed) {
+    const usize groups = m.lay->depth.size();
     m.resident.assign(groups, 0);
     m.shown.assign(groups, 0);
     // A posed mesh starts coarsest: views that want more ask for it.
-    for (u32 g = 0; g < groups; ++g) {
-        m.coarsest = std::max(m.coarsest, m.depth[g]);
-    }
     m.posed = posed;
-    m.floor = posed ? m.coarsest : 0;
+    m.floor = posed ? m.lay->coarsest : 0;
     m.aim = m.floor;
     m.pool_unit.assign(groups, k_no_unit);
     m.last_used.assign(groups, 0);
@@ -320,7 +337,7 @@ const std::vector<u8>& GeometryStreamer::shown(u32 mesh) const {
 
 void GeometryStreamer::aim_floor(u32 mesh, u32 depth) {
     if (mesh < m_meshes.size() && m_meshes[mesh].live && m_meshes[mesh].posed) {
-        m_meshes[mesh].aim = std::min(depth, m_meshes[mesh].coarsest);
+        m_meshes[mesh].aim = std::min(depth, m_meshes[mesh].lay->coarsest);
     }
 }
 
@@ -356,10 +373,10 @@ void GeometryStreamer::move_floors(u32 frame_number) {
         if (m.aim == m.floor || !raise || later(m.held_until, m_updates)) continue;
         // As high as the aim, but not over a group in use or asked for of late.
         u32 floor = m.aim;
-        for (u32 g = 0; g < m.depth.size(); ++g) {
-            if (m.depth[g] < floor && m.root[g] == 0 && m.last_used[g] != 0 &&
+        for (u32 g = 0; g < m.lay->depth.size(); ++g) {
+            if (m.lay->depth[g] < floor && m.lay->root[g] == 0 && m.last_used[g] != 0 &&
                 !(frame_number - m.last_used[g] > k_keep_frames && later(frame_number, m.last_used[g]))) {
-                floor = m.depth[g];
+                floor = m.lay->depth[g];
             }
         }
         set_floor(m, std::max(floor, m.floor));
@@ -404,7 +421,7 @@ void GeometryStreamer::take_gpu_requests(u32 slot, u32 count) {
 }
 
 u64 GeometryStreamer::units_of(const MeshState& m, u32 group) const {
-    return (m.blob_offsets[group + 1] - m.blob_offsets[group]) / k_unit;
+    return (m.lay->blob_offsets[group + 1] - m.lay->blob_offsets[group]) / k_unit;
 }
 
 bool GeometryStreamer::load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 group, u32 frame_number,
@@ -422,7 +439,7 @@ bool GeometryStreamer::load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 g
     if (at == PoolAllocator::k_none) {
         return false;
     }
-    for (const u32 p : m.links.parents_of(group)) {
+    for (const u32 p : m.lay->links.parents_of(group)) {
         if (m.resident[p] == 0) { // never (parents were in use, so kept): stay whole regardless
             m_alloc.free(at, units);
             return false;
@@ -430,7 +447,7 @@ bool GeometryStreamer::load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 g
     }
     const u64 bytes = units * k_unit;
     const rhi::TransientMemory upload =
-        cmd.upload({m.blob.data() + m.blob_offsets[group], static_cast<usize>(bytes)});
+        cmd.upload({m.lay->blob.data() + m.lay->blob_offsets[group], static_cast<usize>(bytes)});
     if (upload.data == nullptr) {
         m_alloc.free(at, units);
         return false;
@@ -446,7 +463,7 @@ bool GeometryStreamer::load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 g
     ++m_stats.resident_groups;
     m.pool_unit[group] = at;
     m.last_used[group] = frame_number;
-    for (const u32 p : m.links.parents_of(group)) {
+    for (const u32 p : m.lay->links.parents_of(group)) {
         ++m.loaded_children[p];
     }
     m.table_dirty = true;
@@ -455,14 +472,14 @@ bool GeometryStreamer::load(rhi::CommandList& cmd, MeshState& m, u32 mesh, u32 g
 }
 
 void GeometryStreamer::evict(MeshState& m, u32 group) {
-    GIANT_ASSERT(m.resident[group] != 0 && m.root[group] == 0 && m.loaded_children[group] == 0,
+    GIANT_ASSERT(m.resident[group] != 0 && m.lay->root[group] == 0 && m.loaded_children[group] == 0,
                  "evicting a group that must stay");
     m_alloc.free(m.pool_unit[group], units_of(m, group));
     m.resident[group] = 0;
     m.shown[group] = 0;
     --m_stats.resident_groups;
     m.pool_unit[group] = k_no_unit;
-    for (const u32 p : m.links.parents_of(group)) {
+    for (const u32 p : m.lay->links.parents_of(group)) {
         --m.loaded_children[p];
     }
     m.table_dirty = true;
@@ -470,7 +487,7 @@ void GeometryStreamer::evict(MeshState& m, u32 group) {
 }
 
 bool GeometryStreamer::evictable(const MeshState& m, u32 g, u32 frame_number) {
-    return m.resident[g] != 0 && m.root[g] == 0 && m.loaded_children[g] == 0 &&
+    return m.resident[g] != 0 && m.lay->root[g] == 0 && m.loaded_children[g] == 0 &&
            frame_number - m.last_used[g] > k_keep_frames && later(frame_number, m.last_used[g]);
 }
 
@@ -503,7 +520,7 @@ bool GeometryStreamer::make_room(u64 units, u32 frame_number) {
         if (!m.live || c.group >= m.resident.size() || !evictable(m, c.group, frame_number)) continue;
         freed += units_of(m, c.group);
         evict(m, c.group);
-        for (const u32 p : m.links.parents_of(c.group)) {
+        for (const u32 p : m.lay->links.parents_of(c.group)) {
             if (evictable(m, p, frame_number)) {
                 m_candidates.push_back({frame_number - m.last_used[p], c.mesh, p});
                 std::push_heap(m_candidates.begin(), m_candidates.end(), candidate_order);
@@ -557,7 +574,7 @@ void GeometryStreamer::note_usage(MeshState& m, u32 g, u32 mark) {
     // A view reached a posed mesh's loaded group hidden under its floor
     // (shadows ask for no loads, but mark it so): it shows at the update.
     if (m.posed && m.resident[g] != 0 && m.shown[g] == 0) {
-        m.aim = std::min(m.aim, m.depth[g]);
+        m.aim = std::min(m.aim, m.lay->depth[g]);
         m.held_until = m_updates + 1 + k_keep_frames;
     }
 }
@@ -628,11 +645,11 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
                 todo.push_back(q);
             }
             // Asked for under a posed mesh's floor: it shows once loaded.
-            if (m.posed && m.root[q.group] == 0 && m.depth[q.group] < m.floor) {
-                m.aim = std::min(m.aim, m.depth[q.group]);
+            if (m.posed && m.lay->root[q.group] == 0 && m.lay->depth[q.group] < m.floor) {
+                m.aim = std::min(m.aim, m.lay->depth[q.group]);
                 m.held_until = mark + k_keep_frames;
             }
-            for (const u32 p : m.links.parents_of(q.group)) {
+            for (const u32 p : m.lay->links.parents_of(q.group)) {
                 stack.push_back({q.mesh, p});
             }
         }
@@ -661,8 +678,8 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         if (!m.live || m.roots_loaded) continue;
         bool all = true;
         bool no_room = false;
-        for (u32 g = 0; g < m.root.size(); ++g) {
-            if (m.root[g] == 0 || m.resident[g] != 0) continue;
+        for (u32 g = 0; g < m.lay->root.size(); ++g) {
+            if (m.lay->root[g] == 0 || m.resident[g] != 0) continue;
             const u64 size = units_of(m, g) * k_unit;
             if (roots_full || !fits(size)) {
                 roots_full = true;
@@ -691,8 +708,8 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
     }
 
     std::sort(todo.begin(), todo.end(), [this](const Request& a, const Request& b) {
-        const u32 da = m_meshes[a.mesh].depth[a.group];
-        const u32 db = m_meshes[b.mesh].depth[b.group];
+        const u32 da = m_meshes[a.mesh].lay->depth[a.group];
+        const u32 db = m_meshes[b.mesh].lay->depth[b.group];
         return da != db ? da > db : (a.mesh != b.mesh ? a.mesh < b.mesh : a.group < b.group);
     });
     bool full = roots_full;
@@ -701,7 +718,7 @@ void GeometryStreamer::update(rhi::CommandList& cmd, u32 frame_number) {
         if (m.resident[r.group] != 0) continue; // a terminal group the loop above loaded
         const u64 size = units_of(m, r.group) * k_unit;
         bool parents_in = true;
-        for (const u32 p : m.links.parents_of(r.group)) {
+        for (const u32 p : m.lay->links.parents_of(r.group)) {
             parents_in = parents_in && m.resident[p] != 0;
         }
         if (full || !m.roots_loaded || !parents_in || !fits(size)) {

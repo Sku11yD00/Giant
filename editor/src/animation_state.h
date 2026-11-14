@@ -5,7 +5,9 @@
 // command) is animated: it gets its own copy of the character in the
 // renderer (render::Renderer::add_skinned_mesh), posed each frame, which
 // it draws instead of the file's shared rest-pose mesh once the copy is
-// loaded. At most k_max_animated are animated at once: those animating
+// loaded. Copies of one file share its geometry in the renderer (the
+// first uploads it, the rest are Renderer::add_skinned_copy). At most
+// k_max_animated are animated at once: those animating
 // keep their place, and a free one goes to the lowest id waiting; the rest
 // stand frozen in the rest pose (as do skinned entities with nothing to
 // play, or whose saved clip the file does not have). Copies are made a few
@@ -165,6 +167,9 @@ private:
     std::set<world::EntityId> m_commanded; // playing by command (kept wanted)
     std::map<world::EntityId, std::unique_ptr<Animated>> m_animated;
     std::unordered_map<world::EntityId, render::MeshId> m_copies;
+    // Per skinned file (as copied), its live copies in the renderer: a new
+    // one shares their geometry (Renderer::add_skinned_copy).
+    std::unordered_map<const MeshLibrary::Skinned*, std::vector<render::MeshId>> m_copies_of;
     std::vector<world::EntityId> m_redraw;
     std::vector<Animated*> m_work; // scratch
     struct Refusal {

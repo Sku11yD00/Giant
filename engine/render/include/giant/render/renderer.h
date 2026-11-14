@@ -929,6 +929,13 @@ public:
     // nothing changes) for a mesh not skinned, the wrong count, numbers
     // that are not finite, or a negative radius.
     bool set_pose(MeshId mesh, std::span<const Mat4> skin, const geometry::Sphere& bounds);
+    // Another copy of a skinned mesh, with its own pose (bind until posed),
+    // sharing the original's geometry: its CPU clusters, streamed layout,
+    // LOD tree and skin source (only its pose, cluster bounds, residency
+    // and place in the geometry pool are its own). A crowd of one character
+    // costs its geometry once. The original may be removed before its
+    // copies. k_no_mesh when `of` is not a skinned mesh.
+    MeshId add_skinned_copy(MeshId of);
     bool skinned(MeshId mesh) const;
     // Built-in meshes stay. Unknown or removed ids are ignored.
     void remove_mesh(MeshId mesh);
@@ -1013,24 +1020,15 @@ public:
     Renderer(ConstructKey, rhi::Device& device, const RendererDesc& desc);
 
 private:
-    // A skinned mesh's pose and its source on the GPU.
-    struct Skin {
-        rhi::BufferHandle source;     // gpu::SkinVertex each, cluster after cluster
-        u32 joints = 0;
-        std::vector<float> matrices;  // 12 per joint (3 rows of the 3x4): the pose to draw
-        geometry::Sphere bounds;      // around the pose, in the mesh's space
-        u64 version = 1;              // of the pose (set_pose)
-        u64 posed = 0;                // the version in the pool; 0: none yet
-        geometry::Sphere posed_bounds; // bounds of the pose in the pool (culling and shadows use these)
+    // What a skinned mesh's pose pass and LOD need of its geometry: the same
+    // for every copy (shared).
+    struct SkinShape {
         // Per joint, 4 floats: the bind-space sphere around the vertices it
         // moves (radius < 0: none). How far a pose moves any vertex from
         // bind follows from them (set_pose): LOD spheres, at bind, widen by
         // that, so the cut stays whole and is never coarser where things
         // went (errors stay the bind pose's: skin_lod.h pose_reach).
         std::vector<float> joint_spheres;
-        float reach = 0.0f;        // of the pose to draw
-        float posed_reach = 0.0f;  // of the pose in the pool
-        u32 posed_shown = 0;       // the streamer's shown_version the pool's pose covers
         // Per depth, plus the end: the first cluster of that depth (clusters
         // come depth by depth), so the pass poses only shown depths; and the
         // runs of clusters of terminal groups (first, end, finest depth in
@@ -1040,6 +1038,20 @@ private:
         // Per depth: around its non-terminal groups (skin_lod.h
         // depth_bounds), for the camera's aim.
         std::vector<geometry::LodBounds> depth_lod;
+    };
+    // A skinned mesh's pose and its source on the GPU.
+    struct Skin {
+        rhi::BufferHandle source;     // gpu::SkinVertex each, cluster after cluster
+        u32 joints = 0;
+        std::vector<float> matrices;  // 12 per joint (3 rows of the 3x4): the pose to draw
+        geometry::Sphere bounds;      // around the pose, in the mesh's space
+        u64 version = 1;              // of the pose (set_pose)
+        u64 posed = 0;                // the version in the pool; 0: none yet
+        geometry::Sphere posed_bounds; // bounds of the pose in the pool (culling and shadows use these)
+        float reach = 0.0f;        // of the pose to draw
+        float posed_reach = 0.0f;  // of the pose in the pool
+        u32 posed_shown = 0;       // the streamer's shown_version the pool's pose covers
+        std::shared_ptr<const SkinShape> shape; // the file's, shared by copies
         // Where its instances were when their shadows were last drawn
         // (world box), and with which pose: a change dirties both places.
         bool shadow_known = false;
@@ -1048,12 +1060,29 @@ private:
         u64 shadow_version = 0;
         u32 shadow_shown = 0;  // and with which groups shown (finer ones loaded or shown redraw it)
     };
+    // Buffers copies of a skinned mesh share with it (add_skinned_copy):
+    // destroyed with the last mesh holding them.
+    struct SharedBuffers {
+        rhi::Device* device = nullptr;
+        rhi::BufferHandle groups;
+        rhi::BufferHandle nodes;
+        rhi::BufferHandle source; // skinned: the skin source
+        SharedBuffers() = default;
+        SharedBuffers(const SharedBuffers&) = delete;
+        SharedBuffers& operator=(const SharedBuffers&) = delete;
+        ~SharedBuffers();
+    };
     struct Mesh {
-        geometry::ClusterMesh data; // the CPU copy (CPU culling, stats, editor)
+        // The CPU copy (CPU culling, stats, editor); copies share it.
+        std::shared_ptr<const geometry::ClusterMesh> data;
         std::unique_ptr<Skin> skin; // skinned meshes only
-        rhi::BufferHandle clusters;   // gpu::Cluster (geometry streams: GeometryStreamer)
-        rhi::BufferHandle groups;     // gpu::Group
-        rhi::BufferHandle nodes;      // gpu::Node
+        std::shared_ptr<SharedBuffers> shared; // owns groups, nodes and the skin source
+        // Skinned: its gpu::Clusters as laid out, before any pose (a copy's
+        // own clusters, refit to its pose, start from these).
+        std::shared_ptr<const std::vector<u8>> bind_clusters;
+        rhi::BufferHandle clusters;   // gpu::Cluster (streamed: GeometryStreamer); a skinned copy's own
+        rhi::BufferHandle groups;     // gpu::Group (shared)
+        rhi::BufferHandle nodes;      // gpu::Node (shared)
         u32 tree_levels = 0;          // deepest node, plus one
         float top = 0.0f;             // the highest vertex's y (wind: what sways bends from 0 to this)
         bool live = false;
