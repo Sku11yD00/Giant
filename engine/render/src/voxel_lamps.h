@@ -13,8 +13,10 @@
 // the small lamps inside each eighth of it merged into one (summed, at
 // their centre, reaching as far as they all do; a spot as the point light
 // sending as much light), so a town far off lights it whole. Lamps
-// are found through a grid of k_voxel_lamp_cell cells (a lamp too big for
-// it, or a brick too big for it, looks at all).
+// are found through grids of cells k_voxel_lamp_cell across and doubling
+// to k_voxel_lamp_grids sizes: a brick looks in the finest whose cells are
+// at least its size (a few cells), a lamp too big for a grid's cells is
+// looked at by every brick using that grid.
 #pragma once
 
 #include "giant/core/math.h"
@@ -31,7 +33,8 @@
 namespace giant::render {
 
 inline constexpr u32 k_max_voxel_lamps = 8;        // per brick
-inline constexpr double k_voxel_lamp_cell = 32.0;  // metres
+inline constexpr double k_voxel_lamp_cell = 32.0;  // metres: the finest grid's cells
+inline constexpr u32 k_voxel_lamp_grids = 7;       // 32 m to 2048 m cells
 inline constexpr double k_voxel_lamp_merge = 2.0;  // metres: voxels this big merge lamps
 
 class VoxelLamps {
@@ -56,6 +59,11 @@ private:
         DVec3 center; // world, its bounding sphere
         double radius;
         float power;  // brightest channel x intensity
+        // For merging (worked out once a frame): the light it sends (a
+        // spot's as the point light sending as much), where, how far.
+        Vec3 sent;
+        DVec3 position;
+        float range;
         u32 gpu = ~0u; // index in m_lights this frame
         u64 stamp = 0;
         bool counted = false; // in lit() this frame (listed or merged)
@@ -79,8 +87,9 @@ private:
     std::array<std::vector<u32>, 8> m_parts; // a coarse brick's lamps by eighth
     u32 m_listed = 0;
     u32 m_merged = 0;
-    std::vector<u32> m_big; // lamps too big for the grid
-    std::unordered_map<u64, std::vector<u32>> m_grid;
+    u32 m_filled = 0; // grids holding lamps (since the last list)
+    std::array<std::vector<u32>, k_voxel_lamp_grids> m_big; // per grid: lamps too big for its cells
+    std::array<std::unordered_map<u64, std::vector<u32>>, k_voxel_lamp_grids> m_grid;
     std::vector<gpu::LightJob> m_jobs;
     std::vector<gpu::Light> m_lights;
     std::vector<u32> m_entries;

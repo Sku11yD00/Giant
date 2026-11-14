@@ -172,3 +172,51 @@ GIANT_TEST("voxel lamps: a coarse brick merges its small lamps by eighth; big or
     v.list(lights, fine, clip, {});
     GIANT_CHECK(v.merged() == 0 && v.jobs()[0].lamp_count <= k_max_voxel_lamps);
 }
+
+GIANT_TEST("voxel lamps: bricks of every size find the lamps reaching them through the grids, small and big") {
+    const voxel::Clipmap clip;
+    const DVec3 camera{-700.0, 40.0, 900.0};
+    // Few enough that no brick has more than it takes (nothing merges):
+    // small lamps on cell edges, one reaching 300 m (too big for the fine
+    // grids' cells), one 3 km off.
+    std::vector<LocalLight> lights{lamp({-704.0, 2.0, 896.0}, 6.0f), lamp({-640.0, 1.0, 960.0}, 3.0f),
+                                   lamp({-512.0, 31.9, 1024.0}, 1.0f), lamp({-700.0, 10.0, 600.0}, 300.0f),
+                                   lamp({2300.0, 5.0, 900.0}, 20.0f), lamp({-1100.0, 64.0, 1300.0}, 40.0f)};
+    lights.push_back(lamp({-31000.0, 3.0, -30500.0}, 8.0f)); // far out
+    const DVec3 spots[] = {{-704.0, 2.0, 896.0}, {-640.0, 1.0, 960.0}, {-512.0, 31.0, 1024.0},
+                           {-700.0, 10.0, 640.0}, {2300.0, 5.0, 900.0}, {-1100.0, 64.0, 1300.0},
+                           {-900.0, 20.0, 700.0}, {-31000.0, 3.0, -30500.0}};
+    VoxelLamps v;
+    // Every level at once, then (the same lists kept) only the coarse ones,
+    // then only the fine ones with the lamps moved: the grids used change.
+    for (const int pass : {0, 1, 2}) {
+        if (pass == 2) {
+            for (LocalLight& l : lights) l.position = l.position + DVec3{3.0, 0.0, -2.0};
+        }
+        std::vector<gpu::LightJob> jobs;
+        for (u32 level = 0; level < clip.levels(); ++level) {
+            if ((pass == 1 && level < 6) || (pass == 2 && level >= 6)) continue;
+            for (const DVec3& p : spots) jobs.push_back(job_at(clip, level, p + (pass == 2 ? DVec3{3.0, 0.0, -2.0} : DVec3{})));
+        }
+        v.list(lights, jobs, clip, camera);
+        GIANT_CHECK(v.jobs().size() == jobs.size() && v.merged() == 0);
+        for (const gpu::LightJob& j : v.jobs()) {
+            // By hand: every lamp whose sphere (its range round it) touches the brick.
+            const DVec3 lo = clip.brick_min(j.level, {j.brick[0], j.brick[1], j.brick[2]});
+            const double size = clip.brick_size(j.level);
+            std::vector<u32> want;
+            for (u32 i = 0; i < lights.size(); ++i) {
+                const DVec3 p = lights[i].position;
+                const double dx = std::max({lo.x - p.x, 0.0, p.x - lo.x - size});
+                const double dy = std::max({lo.y - p.y, 0.0, p.y - lo.y - size});
+                const double dz = std::max({lo.z - p.z, 0.0, p.z - lo.z - size});
+                if (std::sqrt(dx * dx + dy * dy + dz * dz) < double(lights[i].range) * 0.999) want.push_back(i);
+            }
+            std::vector<u32> got = sources(v, j, lights, camera);
+            std::sort(got.begin(), got.end());
+            // (A lamp just past its range may be listed: bounds are padded.)
+            GIANT_CHECK(std::includes(got.begin(), got.end(), want.begin(), want.end()));
+            GIANT_CHECK(got.size() <= want.size() + 1);
+        }
+    }
+}
