@@ -3460,7 +3460,15 @@ as standing still.
   Nothing is kept between frames, so it follows the pose exactly.
   `RenderSettings::character_occlusion`, `RenderStats::occluders`. The
   texture (full size, rgba8) is made the first frame with occluders and
-  freed after 600 frames without.
+  freed after 600 frames without. The editor (C2b, `character_occluders` in
+  `editor/src/hit_targets.h`) hands over every visible skinned entity's
+  bone capsules (those bullets meet, posed as drawn, frozen ones in the
+  rest pose; walkers and other bodiless characters too), placed where it
+  is drawn (moved by physics, walking, swinging, or where it stands, as
+  the scene frame draws it), for those within 150 m of the camera, in the
+  colour it is drawn in (its base colour times its base colour map's
+  average, by its alpha cutoff, once that is ready), each frame the
+  setting is on.
 
 ## Reflections
 

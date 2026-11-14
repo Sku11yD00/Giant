@@ -121,4 +121,59 @@ void HitTargets::update(const world::Scene& scene, const MeshLibrary& meshes, co
     }
 }
 
+void character_occluders(const world::Scene& scene, const MeshLibrary& meshes, const AnimationState& animation,
+                         TextureLibrary* textures, const DrawnPoses* moving, const DrawnPoses* walking,
+                         const DrawnPoses* swinging, const DVec3& camera, std::vector<render::Occluder>& out) {
+    out.clear();
+    constexpr double k_reach_from_origin = 5.0; // metres at scale 1: a body's capsules from its origin, at most
+    for (const auto& [id, serial] : animation.skinned()) {
+        const world::Entity* e = scene.find(id);
+        if (e == nullptr || !e->visible) continue;
+        // Where it is drawn (as the scene frame's drawn_at), and near enough.
+        const world::Transform* drawn = &e->transform;
+        for (const DrawnPoses* poses : {moving, walking, swinging}) {
+            if (poses == nullptr) continue;
+            if (const auto it = poses->find(id); it != poses->end()) {
+                drawn = &it->second;
+                break;
+            }
+        }
+        const world::Transform& t = *drawn;
+        const float scale = std::max({std::fabs(t.scale.x), std::fabs(t.scale.y), std::fabs(t.scale.z)});
+        if (!(length(t.position - camera) - k_reach_from_origin * static_cast<double>(scale) <=
+              static_cast<double>(render::k_occluder_distance))) {
+            continue;
+        }
+        const MeshLibrary::Mesh* mesh = meshes.find_normalized(e->mesh);
+        if (mesh == nullptr || mesh->skinned == nullptr) continue;
+        const MeshLibrary::Skinned& s = *mesh->skinned;
+        const AnimationState::Animated* a = animation.find(id);
+        const bool posed = a != nullptr && a->posed && (a->drawn || !animation.draws()) && a->skinned == mesh->skinned &&
+                           a->model.size() == s.skeleton.size();
+        const std::vector<Mat4>& model = posed ? a->model : s.rest_model;
+        Vec3 albedo = e->material.base_color;
+        if (textures != nullptr && mesh->has_uvs && !e->material.maps.base_color.empty()) {
+            // (The scene frame asks for the same texture to draw it.)
+            TextureLibrary::Key key;
+            key.path = e->material.maps.base_color;
+            key.slot = TextureLibrary::Slot::base_color;
+            const TextureLibrary::Entry* map = textures->entry(textures->request(key));
+            if (map != nullptr && map->status == TextureLibrary::Status::ready) {
+                const Vec3 m = map->summary.average_at(e->material.alpha_cutoff);
+                albedo = {albedo.x * m.x, albedo.y * m.y, albedo.z * m.z};
+            }
+        }
+        for (const anim::BoneCapsule& b : s.capsules) {
+            if (b.joint >= model.size()) continue;
+            const Mat4& m = model[b.joint];
+            render::Occluder o;
+            o.a = place(t, apply(m, b.a));
+            o.b = place(t, apply(m, b.b));
+            o.radius = b.radius * stretch(m) * scale;
+            o.albedo = albedo;
+            out.push_back(o); // (the renderer leaves out what is not finite)
+        }
+    }
+}
+
 } // namespace giant::editor
