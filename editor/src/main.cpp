@@ -415,6 +415,8 @@ int run(const Options& options) {
     std::vector<render::DustPuff> dust_frame;
     std::vector<render::Decal> wet_decals;   // what went in the water, wet a while
     std::vector<render::Decal> frame_decals; // the scene's and those
+    std::vector<render::LocalLight> frame_lights; // the scene's lamps and the effects' lights
+    frame_lights.reserve(render::k_max_lights + editor::EffectsState::k_max_effect_lights);
     float render_seconds = 1.0f / 60.0f; // since the last frame (auto exposure eases over it)
     float particle_seconds = 0.0f;       // the game's since the last frame (particles move by it)
     editor::WaterMeshes water_meshes;    // the scene's lakes, rivers and sea, drawn
@@ -480,6 +482,11 @@ int run(const Options& options) {
             input.decals = frame_decals;
         }
         input.lights = scene_frame.lights;
+        if (!effects.lights().empty()) { // (a fire's glow: last update's, as its particles)
+            frame_lights.assign(scene_frame.lights.begin(), scene_frame.lights.end());
+            frame_lights.insert(frame_lights.end(), effects.lights().begin(), effects.lights().end());
+            input.lights = frame_lights;
+        }
         // The sea's swell (floated on by physics at this same clock).
         const world::Swell& swell = swell_track.swell();
         for (u32 i = 0; i < world::k_swell_waves; ++i) {

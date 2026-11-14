@@ -67,6 +67,8 @@ EffectsState::EffectsState() {
     m_styles.reserve(render::k_max_particle_styles);
     m_spawned.reserve(k_max_spawned);
     m_jobs.reserve(k_max_spawned);
+    m_glows.reserve(k_max_spawned);
+    m_lights.reserve(k_max_effect_lights);
 }
 
 void EffectsState::clear() {
@@ -74,6 +76,8 @@ void EffectsState::clear() {
     m_spawned.clear();
     m_bursts.clear();
     m_jobs.clear();
+    m_glows.clear();
+    m_lights.clear();
     m_stats = {};
     m_born = 0;
     m_grounded = 0;
@@ -96,6 +100,8 @@ void EffectsState::follow(const world::Scene& scene, const world::SceneChanges& 
     if (scene.identity() != m_scene || changed.all) {
         if (scene.identity() != m_scene) {
             m_runners.clear(); // another scene's: nothing carries over (the same ids are other things)
+            m_lights.clear();  // (nor its lights, drawn before the next update)
+            m_stats.lights = m_stats.lights_cut = 0;
             m_scene = scene.identity();
         }
         spawned_in(scene);
@@ -111,11 +117,14 @@ void EffectsState::follow(const world::Scene& scene, const world::SceneChanges& 
         for (const world::EntityId id : changed.ids) follow_one(scene, id);
     }
     if (m_jobs.capacity() < m_runners.size() + k_max_spawned) m_jobs.reserve(m_runners.size() + k_max_spawned);
+    if (m_glows.capacity() < m_runners.size() + k_max_spawned) m_glows.reserve(m_runners.size() + k_max_spawned);
 }
 
 void EffectsState::spawned_in(const world::Scene& scene) {
     if (scene.identity() != m_spawn_scene) {
         m_spawned.clear();
+        m_lights.clear();
+        m_stats.lights = m_stats.lights_cut = 0;
         m_spawn_scene = scene.identity();
     }
 }
@@ -206,6 +215,8 @@ std::optional<u32> EffectsState::spawn(const world::Scene& scene, std::string_vi
     s.rate = rate;
     s.burst_scale = bursts;
     s.left = effect->duration;
+    // (Set lit or not: a light turned on while it runs is followed.)
+    s.glow = rate > 0.0f ? std::max(static_cast<double>(effect->duration), k_min_glow) : k_min_glow;
     m_spawned.push_back(std::move(s));
     return m_spawned.back().id;
 }
@@ -221,7 +232,10 @@ void EffectsState::update(const world::Scene& scene, const DVec3& camera, double
         m_taken = false;
     }
     m_stats = {};
-    if (!std::isfinite(seconds) || seconds <= 0.0) { // paused: nothing born, nothing spent
+    const bool paused = !std::isfinite(seconds) || seconds <= 0.0;
+    if (!paused) m_clock += std::min(seconds, k_most_seconds);
+    gather_lights(scene, camera); // (paused too: the glow stays, its flicker stands still)
+    if (paused) { // nothing born, nothing spent
         m_stats.spawned = static_cast<u32>(m_spawned.size());
         return;
     }
@@ -266,6 +280,7 @@ void EffectsState::update(const world::Scene& scene, const DVec3& camera, double
             ++m_stats.missing;
             s.burst = false;
             s.left = 0.0;
+            s.glow = 0.0;
             continue;
         }
         Job j;
@@ -289,10 +304,79 @@ void EffectsState::update(const world::Scene& scene, const DVec3& camera, double
     for (Spawned& s : m_spawned) {
         s.burst = false;
         s.left -= seconds;
+        s.glow -= seconds;
     }
-    std::erase_if(m_spawned, [](const Spawned& s) { return !s.burst && s.left <= 0.0; });
+    // (Kept past its rates only while it glows: its effect lit.)
+    std::erase_if(m_spawned, [&](const Spawned& s) {
+        if (s.burst || s.left > 0.0) return false;
+        if (!(s.glow > 0.0)) return true;
+        const world::Effect* effect = effect_named(scene, s.effect());
+        return effect == nullptr || !effect->light.on;
+    });
     m_stats.spawned = static_cast<u32>(m_spawned.size());
     m_stats.bursts = static_cast<u32>(m_bursts.size());
+}
+
+void EffectsState::gather_lights(const world::Scene& scene, const DVec3& camera) {
+    m_lights.clear();
+    m_glows.clear();
+    const double reach2 = reach * reach;
+    const auto distance2 = [&](const DVec3& p) {
+        const double dx = p.x - camera.x, dy = p.y - camera.y, dz = p.z - camera.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+    const auto add = [&](const world::Effect* effect, const DVec3& position, const Quat& rotation, u64 key,
+                         float rate) {
+        if (effect == nullptr || !effect->light.on || m_glows.size() == m_glows.capacity()) return;
+        const double d2 = distance2(position);
+        if (!(d2 <= reach2)) return;
+        Job j;
+        j.distance2 = d2;
+        j.effect = effect;
+        j.position = position;
+        j.rotation = rotation;
+        j.key = key;
+        j.rate = rate;
+        m_glows.push_back(j);
+    };
+    for (const auto& [id, runner] : m_runners) {
+        const world::Entity* e = scene.find(id);
+        if (e == nullptr || !e->visible || !e->effect.on || !(e->effect.rate > 0.0f)) continue;
+        add(effect_named(scene, e->effect.effect), e->transform.position, e->transform.rotation, id, e->effect.rate);
+    }
+    for (const Spawned& s : m_spawned) {
+        if (!s.burst && !(s.glow > 0.0)) continue;
+        // (Bursts only, at rate 0: a flash at full strength.)
+        add(effect_named(scene, s.effect()), s.position, s.rotation, (u64{1} << 63) | s.id,
+            s.rate > 0.0f ? s.rate : 1.0f);
+    }
+    std::sort(m_glows.begin(), m_glows.end(), [](const Job& a, const Job& b) {
+        return a.distance2 != b.distance2 ? a.distance2 < b.distance2 : a.key < b.key;
+    });
+    for (const Job& j : m_glows) {
+        if (m_lights.size() == k_max_effect_lights) {
+            ++m_stats.lights_cut;
+            continue;
+        }
+        const world::EffectLight& l = j.effect->light;
+        render::LocalLight out;
+        out.position = plus(j.position, rotate(j.rotation, l.offset));
+        out.color = l.color;
+        // (A fire run at a fraction of its rate glows as much less.)
+        out.intensity = l.intensity * std::min(j.rate, 1.0f) * world::effect_flicker(l.flicker, m_clock, j.key);
+        out.range = l.range;
+        out.kind = render::LightKind::point;
+        out.source_radius = l.source_radius;
+        out.shadow_near = l.shadow_near;
+        if (l.shadows) { // kept by the running effect: the top bit set, the lamps' clear (scene_render.cpp)
+            u32 h = mix(static_cast<u32>(j.key) ^ 0x6a09e667u);
+            h = mix(h ^ static_cast<u32>(j.key >> 32) ^ 0xbb67ae85u);
+            const u32 id = h | 0x80000000u;
+            out.shadow_id = id != ~0u ? id : 0x80000001u; // (~0: the renderer's free tile)
+        }
+        m_lights.push_back(out);
+    }
+    m_stats.lights = static_cast<u32>(m_lights.size());
 }
 
 void EffectsState::run(const Job& job, const Ground& ground) {

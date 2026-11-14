@@ -347,7 +347,7 @@ GIANT_TEST("effects emitting: every built-in and stood-in look and effect is dra
     far_box.size_scale = 1000.0f;
     world::Emitter ball = far_box;
     ball.shape = world::EmitterShape::sphere;
-    scene.effects = {{"edge", {far_box, ball}, 0.0f}};
+    scene.effects = {{"edge", {far_box, ball}, 0.0f, {}}};
     EffectsState fx;
     fx.follow(scene, scene.untaken_changes());
     for (const world::Effect& f : world::built_in_effects()) GIANT_CHECK(fx.spawn(scene, f.name, {}).has_value());
@@ -435,7 +435,7 @@ GIANT_TEST("effects emitting: ground under each point of a box, none without ter
     world::Emitter drip;
     drip.look = "spray";
     drip.rate = 100.0f;
-    scene.effects = {{"slope", {e}, 0.0f}, {"drip", {drip}, 0.05f}};
+    scene.effects = {{"slope", {e}, 0.0f, {}}, {"drip", {drip}, 0.05f, {}}};
     EffectsState fx;
     fx.follow(scene, scene.untaken_changes());
     const EffectsState::Ground slope = [](double x, double) { return std::optional<double>(x * 0.1); };
@@ -468,7 +468,7 @@ GIANT_TEST("effects emitting: a sphere lands under its middle less its radius; h
     ball.shape = world::EmitterShape::sphere;
     ball.size = {2.0f, 0.0f, 0.0f};
     ball.direction = {0.0f, 1e-3f, 0.0f}; // short, but a heading
-    scene.effects = {{"ball", {ball}, 0.0f}};
+    scene.effects = {{"ball", {ball}, 0.0f, {}}};
     EffectsState fx;
     fx.follow(scene, scene.untaken_changes());
     const Quat turn = normalize(quat_from_euler({0.0f, 0.0f, 90.0f}));
@@ -488,7 +488,7 @@ GIANT_TEST("effects emitting: a sphere lands under its middle less its radius; h
     scene.effects[0].emitters[0].burst = 0;
     tick(fx, scene, {}, 0.1, k_flat);
     GIANT_CHECK(born(fx) == 4);
-    scene.effects.insert(scene.effects.begin(), world::Effect{"other", {ball}, 0.0f}); // indices move
+    scene.effects.insert(scene.effects.begin(), world::Effect{"other", {ball}, 0.0f, {}}); // indices move
     tick(fx, scene, {}, 0.1, k_flat);
     GIANT_CHECK(born(fx) == 4);
     // Cleared: entities' effects still run (looked over again).
@@ -690,4 +690,169 @@ GIANT_TEST("effects from events: running on dry bare ground kicks dust each stri
     bad = 0.0;
     GIANT_CHECK(!running_step(bad, flying, world::Surface::dirt, {}, 1.0 / 60.0) && bad == 0.0);
     GIANT_CHECK(!running_step(w, p, world::Surface::dirt, {}, 0.0) && !running_step(w, p, world::Surface::dirt, {}, std::nan("")));
+}
+
+// --- Effect lights (effects plan FX4a) -----------------------------------------
+
+GIANT_TEST("effect lights: a fire glows where it stands, flickering with the clock; paused it stays; off, none") {
+    world::Scene scene;
+    world::Entity e;
+    e.transform.position = {4.0, 1.0, -2.0};
+    e.transform.rotation = quat_from_axis_angle({0.0f, 1.0f, 0.0f}, 1.5707963f); // turned: the offset turns with it
+    e.effect = {true, "fire", 1.0f};
+    const world::EntityId id = scene.add(e);
+    world::Effect lit{"lit", {}, 0.0f, {}};
+    lit.emitters.push_back(world::find_effect({}, "smoke")->emitters[0]);
+    lit.light.on = true;
+    lit.light.offset = {1.0f, 0.0f, 0.0f};
+    lit.light.flicker = 0.0f;
+    lit.light.shadows = true;
+    scene.effects.push_back(lit);
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    tick(fx, scene, {}, 0.1, k_flat);
+    const world::EffectLight& glow = world::find_effect({}, "fire")->light;
+    GIANT_CHECK(fx.lights().size() == 1 && fx.stats().lights == 1);
+    render::LocalLight l = fx.lights()[0];
+    GIANT_CHECK(std::abs(l.position.x - 4.0) < 1e-5 && std::abs(l.position.y - (1.0 + glow.offset.y)) < 1e-5);
+    GIANT_CHECK(l.color == glow.color && l.range == glow.range && l.shadow_id == 0 && l.kind == render::LightKind::point);
+    GIANT_CHECK(l.intensity <= glow.intensity && l.intensity >= glow.intensity * (1.0f - glow.flicker) - 1e-5f);
+    GIANT_CHECK(l.intensity == glow.intensity * world::effect_flicker(glow.flicker, fx.clock(), id));
+    // It wavers as the clock runs; paused, it stands (and stays).
+    bool changed = false;
+    for (int i = 0; i < 20; ++i) {
+        tick(fx, scene, {}, 0.05, k_flat);
+        changed = changed || fx.lights()[0].intensity != l.intensity;
+    }
+    GIANT_CHECK(changed);
+    l = fx.lights()[0];
+    const double clock = fx.clock();
+    tick(fx, scene, {}, 0.0, k_flat);
+    GIANT_CHECK(fx.lights().size() == 1 && fx.lights()[0].intensity == l.intensity && fx.clock() == clock);
+    // Off, hidden, at rate 0 or past reach: none.
+    scene.modify(id)->effect.on = false;
+    fx.follow(scene, scene.take_changes());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.lights().empty());
+    scene.modify(id)->effect.on = true;
+    scene.modify(id)->effect.rate = 0.0f;
+    fx.follow(scene, scene.take_changes());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.lights().empty());
+    scene.modify(id)->effect.rate = 1.0f;
+    fx.follow(scene, scene.take_changes());
+    fx.reach = 2.0;
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.lights().empty());
+    fx.reach = EffectsState::k_default_reach;
+    // The scene's own: turned with the entity, steady, casting, its shadow kept by the entity.
+    scene.modify(id)->effect.effect = "lit";
+    fx.follow(scene, scene.take_changes());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.lights().size() == 1 && fx.lights()[0].intensity == lit.light.intensity);
+    l = fx.lights()[0];
+    GIANT_CHECK(std::abs(l.position.x - 4.0) < 1e-5 && std::abs(l.position.z - (-3.0)) < 1e-5); // +X turned to -Z
+    GIANT_CHECK(l.shadow_id != 0);
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.lights()[0].shadow_id == l.shadow_id);
+}
+
+GIANT_TEST("effect lights: spawned ones glow while they run; the nearest 256 given, the rest counted") {
+    world::Scene scene;
+    EffectsState fx;
+    // A fire spawned runs its duration (10 s), then its light goes with it.
+    GIANT_CHECK(fx.spawn(scene, "fire", {0.0, 0.0, 0.0}).has_value());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.lights().size() == 1);
+    for (int i = 0; i < 12; ++i) tick(fx, scene, {}, 1.0, k_flat);
+    GIANT_CHECK(fx.lights().empty() && fx.stats().spawned == 0);
+    // 300 fires on entities in a row: the nearest 256 lit, nearest first.
+    for (int i = 0; i < 300; ++i) add_runner(scene, {static_cast<double>(i), 0.0, 0.0}, "fire");
+    fx.follow(scene, scene.untaken_changes());
+    tick(fx, scene, {-0.5, 0.0, 0.0}, 0.1, k_flat);
+    GIANT_CHECK(fx.lights().size() == EffectsState::k_max_effect_lights && fx.stats().lights_cut == 300 - EffectsState::k_max_effect_lights);
+    bool nearest = true;
+    for (usize i = 0; i < fx.lights().size(); ++i) nearest = nearest && std::abs(fx.lights()[i].position.x - static_cast<double>(i)) < 1e-6;
+    GIANT_CHECK(nearest);
+    // Cleared: none until the next update follows them again.
+    fx.clear();
+    GIANT_CHECK(fx.lights().empty());
+    // Bursts only (duration 0, or rate 0): a flash of k_min_glow on the game clock, whatever the frame rate.
+    world::Scene flashes;
+    world::Effect flash{"flash", {}, 0.0f, {}};
+    flash.emitters.push_back(world::find_effect({}, "sparks")->emitters[0]);
+    flash.light.on = true;
+    flash.light.flicker = 0.0f;
+    flashes.effects.push_back(flash);
+    EffectsState fy;
+    GIANT_CHECK(fy.spawn(flashes, "flash", {}).has_value());
+    int lit_frames = 0;
+    for (int i = 0; i < 100; ++i) { // 1 s at 100 frames a second
+        tick(fy, flashes, {}, 0.01, k_flat);
+        lit_frames += fy.lights().empty() ? 0 : 1;
+    }
+    GIANT_CHECK(lit_frames >= 24 && lit_frames <= 26 && fy.stats().spawned == 0);
+    GIANT_CHECK(fy.spawn(flashes, "fire", {}, {}, 0.0f).has_value()); // rate 0: its bursts (none) and a flash
+    tick(fy, flashes, {}, 0.01, k_flat);
+    GIANT_CHECK(fy.lights().size() == 1 && fy.lights()[0].intensity > 0.0f);
+    for (int i = 0; i < 30; ++i) tick(fy, flashes, {}, 0.01, k_flat);
+    GIANT_CHECK(fy.lights().empty());
+    // Lit while it runs: followed (an unlit spawn of 10 s glows once its effect's light is on).
+    world::Effect later{"later", {}, 10.0f, {}};
+    later.emitters.push_back(world::find_effect({}, "smoke")->emitters[0]);
+    flashes.effects.push_back(later);
+    GIANT_CHECK(fy.spawn(flashes, "later", {}).has_value());
+    tick(fy, flashes, {}, 0.1, k_flat);
+    GIANT_CHECK(fy.lights().empty());
+    flashes.effects.back().light.on = true;
+    tick(fy, flashes, {}, 0.1, k_flat);
+    GIANT_CHECK(fy.lights().size() == 1);
+    // Another scene: the old one's lights go at once (before any update).
+    world::Scene other;
+    fy.follow(other, other.untaken_changes());
+    GIANT_CHECK(fy.lights().empty() && fy.stats().lights == 0);
+}
+
+GIANT_TEST("effect lights: a fire run at a fraction of its rate glows as much less; casting, ids of their own") {
+    world::Scene scene;
+    world::Effect lit{"lit", {}, 0.0f, {}};
+    lit.emitters.push_back(world::find_effect({}, "smoke")->emitters[0]);
+    lit.light.on = true;
+    lit.light.flicker = 0.0f;
+    lit.light.shadows = true;
+    scene.effects.push_back(lit);
+    const world::EntityId half = add_runner(scene, {1.0, 0.0, 0.0}, "lit", 0.5f);
+    add_runner(scene, {2.0, 0.0, 0.0}, "lit", 3.0f);
+    EffectsState fx;
+    fx.follow(scene, scene.untaken_changes());
+    tick(fx, scene, {}, 0.1, k_flat);
+    GIANT_CHECK(fx.lights().size() == 2);
+    GIANT_CHECK(fx.lights()[0].intensity == 0.5f * lit.light.intensity); // (nearest first)
+    GIANT_CHECK(fx.lights()[1].intensity == lit.light.intensity);        // (over 1: no brighter)
+    GIANT_CHECK((fx.lights()[0].shadow_id & 0x80000000u) != 0 && (fx.lights()[1].shadow_id & 0x80000000u) != 0);
+    GIANT_CHECK(fx.lights()[0].shadow_id != fx.lights()[1].shadow_id);
+    (void)half;
+}
+
+GIANT_TEST("effect lights: set_effect sets the light's fields given, refuses bad ones; get_effects counts them") {
+    Fixture f;
+    ai::CommandResult r = f.run("create_effect", {{"name", "torch"}, {"emitters", Json::array({{{"look", "fire"}}})},
+                                                   {"light", {{"on", true}, {"intensity", 6}, {"flicker", 0.5}}}});
+    GIANT_CHECK(r.ok);
+    const world::Effect& torch = f.state.scene.effects.back();
+    GIANT_CHECK(torch.light.on && torch.light.intensity == 6.0f && torch.light.flicker == 0.5f && torch.light.range == 8.0f);
+    r = f.run("set_effect", {{"name", "torch"}, {"light", {{"range", 3}, {"shadows", true}}}});
+    GIANT_CHECK(r.ok && r.value["light"]["range"] == 3.0f && r.value["light"]["intensity"] == 6.0f &&
+                r.value["light"]["shadows"] == true);
+    GIANT_CHECK(!f.run("set_effect", {{"name", "torch"}, {"light", {{"flicker", 2}}}}).ok);
+    GIANT_CHECK(f.state.scene.effects.back().light.flicker == 0.5f);
+    r = f.run("get_effects");
+    GIANT_CHECK(r.ok && r.value["effects"][0]["light"]["on"] == true);
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.effects.back().light.range == 8.0f &&
+                !f.state.scene.effects.back().light.shadows);
+    // A scene's own "fire" stands in for the built-in one: its glow kept unless set.
+    r = f.run("create_effect", {{"name", "fire"}, {"emitters", Json::array({{{"look", "fire"}}})}});
+    GIANT_CHECK(r.ok && r.value["light"]["on"] == true && f.state.scene.effects.back().light == world::find_effect({}, "fire")->light);
+    r = f.run("create_effect", {{"name", "smoke"}, {"emitters", Json::array({{{"look", "smoke"}}})}});
+    GIANT_CHECK(r.ok && r.value["light"]["on"] == false);
 }

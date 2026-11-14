@@ -6,6 +6,7 @@
 #include "giant/world/effects.h"
 #include "giant/world/scene.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -49,7 +50,7 @@ Effect vent() {
     b.burst = 30;
     b.shape = EmitterShape::disc;
     b.size = {0.4f, 0.0f, 0.0f};
-    return {"vent", {a, b}, 4.0f};
+    return {"vent", {a, b}, 4.0f, {}};
 }
 
 } // namespace
@@ -223,4 +224,54 @@ GIANT_TEST("effects: saved and loaded with the scene and the world, refused when
     empty.replace(at, end + 8 - at, "\"emitters\": []");
     const auto error = load_scene(empty, out);
     GIANT_CHECK(error.has_value() && error->message.find("emitters") != std::string::npos);
+}
+
+GIANT_TEST("effects: an effect's light is checked, saved off by default, and its flicker wavers within its share") {
+    const auto fire = find_effect({}, "fire");
+    GIANT_CHECK(fire != nullptr && fire->light.on && !check_effect_light(fire->light));
+    GIANT_CHECK(!find_effect({}, "smoke")->light.on);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    Emitter puff;
+    puff.look = "smoke";
+    const auto bad = [&](auto change) {
+        EffectLight l;
+        change(l);
+        Effect f{"lit", {puff}, 0.0f, l};
+        return check_effect_light(l).has_value() && check_effect(f).value_or("").rfind("light.", 0) == 0;
+    };
+    GIANT_CHECK(bad([](EffectLight& l) { l.color.x = 1.5f; }));
+    GIANT_CHECK(bad([](EffectLight& l) { l.intensity = -1.0f; }));
+    GIANT_CHECK(bad([](EffectLight& l) { l.intensity = 2.0f * k_max_effect_light_intensity; }));
+    GIANT_CHECK(bad([](EffectLight& l) { l.range = 0.05f; }));
+    GIANT_CHECK(bad([&](EffectLight& l) { l.range = nan; }));
+    GIANT_CHECK(bad([](EffectLight& l) { l.offset.y = 2.0f * k_max_emitter_reach; }));
+    GIANT_CHECK(bad([](EffectLight& l) { l.flicker = 1.1f; }));
+    GIANT_CHECK(bad([](EffectLight& l) { l.source_radius = 11.0f; }));
+    GIANT_CHECK(bad([](EffectLight& l) { l.shadow_near = 0.0f; }));
+    // Saved only when set; read back the same.
+    Scene scene;
+    scene.effects.push_back({"plain", {puff}, 0.0f, {}});
+    Effect lit{"lit", {puff}, 0.0f, {}};
+    lit.light = {true, {0.2f, 0.4f, 1.0f}, 12.0f, 20.0f, {0.0f, 2.0f, 1.0f}, 0.0f, 0.5f, true, 0.3f};
+    scene.effects.push_back(lit);
+    const std::string saved = save_scene(scene);
+    GIANT_CHECK(saved.find("\"light\"") != std::string::npos && saved.find("\"light\"") == saved.rfind("\"light\""));
+    Scene loaded;
+    GIANT_CHECK(!load_scene(saved, loaded).has_value() && loaded.effects == scene.effects);
+    // Flicker: steady at 0; within [1 - flicker, 1]; the same at the same time and seed; seeds apart differ.
+    GIANT_CHECK(effect_flicker(0.0f, 12.5, 7) == 1.0f);
+    float lo = 1.0f, hi = 0.0f;
+    bool apart = false;
+    for (int i = 0; i < 2000; ++i) {
+        const double t = i * 0.01;
+        const float a = effect_flicker(0.4f, t, 7);
+        GIANT_CHECK(a >= 0.6f - 1e-6f && a <= 1.0f + 1e-6f && a == effect_flicker(0.4f, t, 7));
+        lo = std::min(lo, a);
+        hi = std::max(hi, a);
+        apart = apart || std::abs(a - effect_flicker(0.4f, t, 8)) > 0.05f;
+    }
+    GIANT_CHECK(hi - lo > 0.2f && apart); // it wavers, each its own way
+    // A long clock keeps it in bounds; a bad one is the clock's start.
+    GIANT_CHECK(effect_flicker(1.0f, 1.0e7, 3) >= 0.0f && effect_flicker(1.0f, 1.0e7, 3) <= 1.0f);
+    GIANT_CHECK(effect_flicker(0.5f, std::numeric_limits<double>::infinity(), 3) == effect_flicker(0.5f, 0.0, 3));
 }

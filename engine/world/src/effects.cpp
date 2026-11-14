@@ -235,7 +235,7 @@ Emitter emitter(const char* look_name, float rate, u32 burst, float cone, float 
 std::vector<Effect> make_effects() {
     std::vector<Effect> out;
     {
-        Effect f{"smoke", {}, 10.0f};
+        Effect f{"smoke", {}, 10.0f, {}};
         Emitter e = emitter("smoke", 6.0f, 0, 15.0f, 0.5f, 1.0f, false);
         e.shape = EmitterShape::disc;
         e.size = {0.3f, 0.0f, 0.0f};
@@ -243,7 +243,7 @@ std::vector<Effect> make_effects() {
         out.push_back(f);
     }
     {
-        Effect f{"fire", {}, 10.0f};
+        Effect f{"fire", {}, 10.0f, {}};
         Emitter flames = emitter("fire", 40.0f, 0, 20.0f, 0.3f, 0.8f, false);
         flames.shape = EmitterShape::disc;
         flames.size = {0.3f, 0.0f, 0.0f};
@@ -254,35 +254,36 @@ std::vector<Effect> make_effects() {
         smoke.offset = {0.0f, 1.0f, 0.0f};
         smoke.size_scale = 0.6f;
         f.emitters = {flames, embers, smoke};
+        f.light.on = true; // its glow, flickering (the defaults: firelight)
         out.push_back(f);
     }
-    out.push_back({"sparks", {emitter("sparks", 0.0f, 40, 60.0f, 3.0f, 8.0f, true)}, 0.0f});
+    out.push_back({"sparks", {emitter("sparks", 0.0f, 40, 60.0f, 3.0f, 8.0f, true)}, 0.0f, {}});
     {
         Emitter e = emitter("dust_kick", 0.0f, 12, 70.0f, 0.5f, 2.0f, true);
         e.shape = EmitterShape::sphere;
         e.size = {0.2f, 0.0f, 0.0f};
-        out.push_back({"dust_kick", {e}, 0.0f});
+        out.push_back({"dust_kick", {e}, 0.0f, {}});
     }
-    out.push_back({"spray", {emitter("spray", 0.0f, 60, 25.0f, 3.0f, 6.0f, true)}, 0.0f});
+    out.push_back({"spray", {emitter("spray", 0.0f, 60, 25.0f, 3.0f, 6.0f, true)}, 0.0f, {}});
     {
         Emitter e = emitter("mist", 8.0f, 0, 180.0f, 0.1f, 0.4f, false);
         e.shape = EmitterShape::box;
         e.size = {2.0f, 0.5f, 2.0f};
-        out.push_back({"mist", {e}, 10.0f});
+        out.push_back({"mist", {e}, 10.0f, {}});
     }
     {
         Emitter e = emitter("embers", 4.0f, 0, 25.0f, 0.5f, 1.5f, false);
         e.shape = EmitterShape::disc;
         e.size = {0.4f, 0.0f, 0.0f};
-        out.push_back({"embers", {e}, 10.0f});
+        out.push_back({"embers", {e}, 10.0f, {}});
     }
-    out.push_back({"debris_chips", {emitter("debris_chips", 0.0f, 24, 60.0f, 2.0f, 6.0f, true)}, 0.0f});
-    out.push_back({"splinters", {emitter("splinters", 0.0f, 16, 50.0f, 2.0f, 6.0f, true)}, 0.0f});
+    out.push_back({"debris_chips", {emitter("debris_chips", 0.0f, 24, 60.0f, 2.0f, 6.0f, true)}, 0.0f, {}});
+    out.push_back({"splinters", {emitter("splinters", 0.0f, 16, 50.0f, 2.0f, 6.0f, true)}, 0.0f, {}});
     {
         Emitter e = emitter("leaves", 0.0f, 60, 180.0f, 0.5f, 2.0f, true);
         e.shape = EmitterShape::sphere;
         e.size = {3.0f, 0.0f, 0.0f};
-        out.push_back({"leaves", {e}, 0.0f});
+        out.push_back({"leaves", {e}, 0.0f, {}});
     }
     return out;
 }
@@ -375,12 +376,45 @@ std::optional<std::string> check_emitter(const Emitter& e) {
     return std::nullopt;
 }
 
+std::optional<std::string> check_effect_light(const EffectLight& l) {
+    return first({vec("color", l.color, 0.0f, 1.0f),
+                  number("intensity", l.intensity, 0.0f, k_max_effect_light_intensity),
+                  number("range", l.range, 0.1f, k_max_effect_light_range),
+                  vec("offset", l.offset, -k_max_emitter_reach, k_max_emitter_reach),
+                  number("flicker", l.flicker, 0.0f, 1.0f),
+                  number("source_radius", l.source_radius, 0.0f, 10.0f),
+                  number("shadow_near", l.shadow_near, 0.01f, 10.0f)});
+}
+
+float effect_flicker(float flicker, double seconds, u64 seed) {
+    if (!(flicker > 0.0f)) return 1.0f;
+    if (!std::isfinite(seconds)) seconds = 0.0;
+    // Phases from the seed (splitmix64), frequencies apart so it never repeats soon.
+    u64 z = seed + 0x9e3779b97f4a7c15ull;
+    const auto next = [&] {
+        z += 0x9e3779b97f4a7c15ull;
+        u64 x = z;
+        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+        x ^= x >> 31;
+        return static_cast<double>(x >> 11) * (6.283185307179586 / 9007199254740992.0);
+    };
+    const double p1 = next(), p2 = next(), p3 = next();
+    constexpr double k_tau = 6.283185307179586;
+    // (Each sine's turns kept small before the sine: a long clock keeps its precision.)
+    const auto wave = [&](double hz, double phase) { return std::sin(k_tau * std::fmod(seconds * hz, 1.0) + phase); };
+    const double w = 0.5 * wave(1.7, p1) + 0.3 * wave(4.3, p2) + 0.2 * wave(9.1, p3); // -1 to 1
+    const float waver = static_cast<float>(0.5 + 0.5 * w);
+    return std::clamp(1.0f - std::min(flicker, 1.0f) * waver, 0.0f, 1.0f);
+}
+
 std::optional<std::string> check_effect(const Effect& f) {
     if (!effect_name_ok(f.name)) return "name must be 1 to " + std::to_string(k_max_effect_name_bytes) + " bytes";
     if (f.emitters.empty() || f.emitters.size() > k_max_emitters) {
         return "emitters must be 1 to " + std::to_string(k_max_emitters);
     }
     if (auto bad = first({number("duration", f.duration, 0.0f, k_max_effect_seconds)})) return bad;
+    if (auto bad = check_effect_light(f.light)) return "light." + *bad;
     for (usize i = 0; i < f.emitters.size(); ++i) {
         if (auto bad = check_emitter(f.emitters[i])) return "emitters[" + std::to_string(i) + "]." + *bad;
     }

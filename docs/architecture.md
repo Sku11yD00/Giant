@@ -2334,7 +2334,7 @@ shadow is lit evenly; a particle whose centre is off the screen while its
 quad reaches onto it takes the lamps of the cluster at the screen's edge
 nearest its centre.
 
-## Effects (effects plan FX2, FX3)
+## Effects (effects plan FX2, FX3, FX4)
 
 Effects are world data (`world/effects.h`), saved with the scene and the
 world's world.json like water. A `ParticleLook` is the renderer's
@@ -2403,6 +2403,30 @@ nothing (spawned effects keep their effect's name in place). They chain after th
 physics' `on_hits` and `on_splashes`; the dust is taken each frame before
 the effects update. `get_effects` counts them (`emitting.events`), those
 left out past the cap too.
+
+An effect may give light while it runs (`EffectLight`, effects plan FX4a):
+a point lamp at an offset in the effect's own space, of a colour,
+intensity, range and size, casting shadows or not, dimmed by up to its
+`flicker` share. The built-in fire glows (firelight, 4 at 1 m, 8 m,
+flicker 0.3), and a scene's own effect made under a built-in one's name
+starts with its light. The flicker is three sines (1.7, 4.3 and 9.1 Hz) of
+the effects' running clock (the game's seconds summed while they run, at
+most a second a frame; not saved) whose phases hash the running effect
+(entity id or spawn), so it is the same at the same time, apart frame to
+frame only as the clock runs (no noise), each fire its own; paused, it
+stands and the glow stays. `EffectsState` gives the lights of the effects
+running within reach, dimmed by their rate below 1: an entity's while on,
+visible and at a rate over 0; a spawn's for its duration, at least a
+quarter second on the game clock (only that at rate 0: a flash from bursts,
+the same at any frame rate), holding its spawned slot while it glows and
+following its effect's light turned on or off meanwhile. Another scene's
+lights go when it does. The nearest 256 a frame are given (the rest counted as
+`lights_cut`), from lists made once; a casting one's shadow is kept by its
+entity or spawn (ids with the top bit set; the lamps' have it clear). The
+editor puts them after the scene's lamps in `FrameInput::lights`, last
+update's as with the particles, so they bin, shade, cast and feed the voxel
+GI as lamps do (a flicker changes no shadow: only a move or a new range
+redraws one).
 
 ## Navigation
 
