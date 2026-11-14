@@ -429,3 +429,38 @@ GIANT_TEST("streaming: a posed mesh shows its depths from a floor that follows w
     b.step();
     GIANT_CHECK(b.streamer->floor(1) == 0);
 }
+
+GIANT_TEST("streaming: a copy shares the geometry's layout but loads, shows and is removed on its own") {
+    Bench b(64ull << 20);
+    GIANT_CHECK(b.streamer->init());
+    std::vector<gpu::Cluster> clusters(b.mesh.clusters.size());
+    GIANT_CHECK(b.streamer->add(0, b.mesh, clusters, true));
+    GIANT_CHECK(!b.streamer->add_copy(1, 5)); // no such mesh
+    GIANT_CHECK(!b.streamer->add_copy(0, 0)); // itself
+    GIANT_CHECK(b.streamer->add_copy(1, 0));
+    GIANT_CHECK(b.streamer->add_copy(2, 1)); // a copy of a copy
+    b.step();
+    GIANT_CHECK(b.streamer->ready(0) && b.streamer->ready(1) && b.streamer->ready(2));
+    GIANT_CHECK(b.streamer->floor(1) == b.mesh.levels - 1); // posed, as the original
+    GIANT_CHECK(b.streamer->group_base(1) != b.streamer->group_base(0));
+    // The copy asks for detail: only it loads it.
+    std::vector<u32> finest;
+    for (u32 g = 0; g < b.mesh.groups.size(); ++g) {
+        if (b.mesh.groups[g].depth == 0) finest.push_back(g);
+    }
+    const u32 roots = b.loaded(0);
+    b.streamer->want(1, finest);
+    b.step();
+    GIANT_CHECK(b.loaded(1) == b.mesh.groups.size() && b.loaded(0) == roots && b.loaded(2) == roots);
+    GIANT_CHECK(b.closed(1));
+    // The original goes; the copies keep the layout and go on loading.
+    b.streamer->remove(0);
+    b.streamer->want(2, finest);
+    b.step();
+    GIANT_CHECK(b.loaded(2) == b.mesh.groups.size() && b.closed(2));
+    GIANT_CHECK(!b.streamer->add_copy(3, 0)); // removed
+    b.streamer->remove(1);
+    b.streamer->remove(2);
+    b.step();
+    GIANT_CHECK(b.streamer->stats().used_bytes == 0 && b.streamer->stats().resident_groups == 0);
+}

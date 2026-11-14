@@ -118,7 +118,13 @@ AnimationState::Animated* AnimationState::start(const world::Scene& scene, const
     a->mesh = mesh;
     a->skinned = mesh->skinned;
     if (m_renderer != nullptr) {
-        a->copy = m_renderer->add_skinned_mesh(a->skinned->clusters, static_cast<u32>(a->skinned->skeleton.size()));
+        // The first of a file uploads its geometry; the rest share it.
+        std::vector<render::MeshId>& same = m_copies_of[a->skinned.get()];
+        a->copy = same.empty() ? m_renderer->add_skinned_mesh(a->skinned->clusters,
+                                                              static_cast<u32>(a->skinned->skeleton.size()))
+                               : m_renderer->add_skinned_copy(same.front());
+        if (a->copy != render::k_no_mesh) same.push_back(a->copy);
+        if (same.empty()) m_copies_of.erase(a->skinned.get());
         if (a->copy == render::k_no_mesh) {
             error = mesh->path + ": the renderer refused its skinned mesh (see the log)";
             m_refused[id] = {mesh->skinned, error};
@@ -144,7 +150,14 @@ void AnimationState::stop(world::EntityId id) {
         m_copies.erase(id);
         m_redraw.push_back(id);
     }
-    if (m_renderer != nullptr) m_renderer->remove_mesh(it->second->copy);
+    if (m_renderer != nullptr) {
+        m_renderer->remove_mesh(it->second->copy);
+        const auto same = m_copies_of.find(it->second->skinned.get());
+        if (same != m_copies_of.end()) {
+            std::erase(same->second, it->second->copy);
+            if (same->second.empty()) m_copies_of.erase(same);
+        }
+    }
     m_animated.erase(it);
 }
 

@@ -593,3 +593,52 @@ GIANT_TEST("skin: terminal groups finer than the rest are always posed, and do n
     GIANT_CHECK(st.posed == 1 && st.posed_clusters == coarsest + shallow_terminal);
     GIANT_CHECK(st.instances == 1 && st.clusters >= shallow_terminal);
 }
+
+GIANT_TEST("skin: copies share the geometry, pose on their own and outlive the original") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    Renderer& r = *s.renderer;
+    GIANT_CHECK(r.add_skinned_copy(r.builtin(BuiltinMesh::cube)) == k_no_mesh); // not skinned
+    GIANT_CHECK(r.add_skinned_copy(k_no_mesh) == k_no_mesh);
+    const MeshId original = r.add_skinned_mesh(two_balls(true), 2);
+    const MeshId a = r.add_skinned_copy(original);
+    const MeshId b = r.add_skinned_copy(a);
+    GIANT_CHECK(a != k_no_mesh && b != k_no_mesh && r.skinned(a) && r.skinned(b));
+    GIANT_CHECK(r.mesh(a) == r.mesh(original) && r.mesh(b) == r.mesh(original)); // one CPU copy
+    std::vector<Instance> instances(2);
+    instances[0].mesh = a;
+    instances[0].position = {-2.0, 0.0, -12.0};
+    instances[1].mesh = b;
+    instances[1].position = {2.0, 0.0, -12.0};
+    FrameInput frame;
+    frame.instances = instances;
+    frame.settings.gpu_culling = false;
+    frame.view.vertical_fov_degrees = 40.0f;
+    RenderStats st = s.draw(frame);
+    for (int i = 0; i < 8 && !(r.mesh_ready(a) && r.mesh_ready(b)); ++i) st = s.draw(frame);
+    GIANT_CHECK(r.mesh_ready(a) && r.mesh_ready(b));
+    for (int i = 0; i < 4; ++i) st = s.draw(frame);
+    GIANT_CHECK(st.instances == 2 && st.skinned_meshes == 3);
+    const u32 both = st.clusters;
+    // Each its own pose: posing one poses that one alone, and its bent
+    // hand widens its own cut only.
+    GIANT_CHECK(r.set_pose(a, bent(), k_bent_bounds));
+    st = s.draw(frame);
+    GIANT_CHECK(st.posed == 1);
+    for (int i = 0; i < 4; ++i) st = s.draw(frame);
+    GIANT_CHECK(st.posed == 0 && st.clusters >= both);
+    // The original goes; its copies stay drawn and posed.
+    r.remove_mesh(original);
+    GIANT_CHECK(r.skinned(a) && r.mesh(a) != nullptr && r.mesh(a)->clusters.size() > 0);
+    GIANT_CHECK(r.set_pose(b, bent(), k_bent_bounds));
+    st = s.draw(frame);
+    GIANT_CHECK(st.posed == 1 && st.instances == 2 && st.skinned_meshes == 2);
+    // A slot freed by the original is taken by a new copy of a copy.
+    const MeshId c = r.add_skinned_copy(b);
+    GIANT_CHECK(c == original && r.skinned(c));
+    r.remove_mesh(a);
+    r.remove_mesh(b);
+    r.remove_mesh(c);
+    st = s.draw(frame);
+    GIANT_CHECK(st.skinned_meshes == 0 && st.instances == 0);
+}

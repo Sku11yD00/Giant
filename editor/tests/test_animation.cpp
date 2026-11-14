@@ -486,3 +486,41 @@ GIANT_TEST("hit zones: a skinned arm's bones have capsules, named by zone, posed
     r = f.run("fire", {{"origin", {0, 1.0, 0}}, {"direction", {1, 0, 0}}, {"resolve", true}});
     GIANT_CHECK(r.ok && r.value["hits"].empty());
 }
+
+GIANT_TEST("animation: copies of one file share its geometry, whichever uploaded it goes first") {
+    Fixture f(true);
+    if (f.renderer == nullptr) return;
+    std::vector<world::EntityId> ids;
+    for (int i = 0; i < 3; ++i) ids.push_back(f.add_arm(3.0 * i));
+    for (const world::EntityId id : ids) GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", "bend"}}).ok);
+    f.frame_step(0.0);
+    const auto copy_of = [&](world::EntityId id) {
+        const AnimationState::Animated* a = f.animation->find(id);
+        return a != nullptr ? a->copy : render::k_no_mesh;
+    };
+    const render::MeshId first = copy_of(ids[0]);
+    GIANT_CHECK(first != render::k_no_mesh && copy_of(ids[1]) != first && copy_of(ids[2]) != first);
+    // One CPU copy of the clusters for all three.
+    GIANT_CHECK(f.renderer->mesh(first) == f.renderer->mesh(copy_of(ids[1])) &&
+                f.renderer->mesh(first) == f.renderer->mesh(copy_of(ids[2])));
+    // The one that uploaded stops; a new one still shares (copied from those left).
+    GIANT_CHECK(f.run("set_animation", {{"id", ids[0]}, {"clip", ""}}).ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(!f.renderer->skinned(first));
+    const world::EntityId late = f.add_arm(20.0);
+    GIANT_CHECK(f.run("set_animation", {{"id", late}, {"clip", "bend"}}).ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(copy_of(late) != render::k_no_mesh &&
+                f.renderer->mesh(copy_of(late)) == f.renderer->mesh(copy_of(ids[1])));
+    for (int i = 0; i < 8 && !f.get(late)["drawn"].get<bool>(); ++i) f.frame_step(1.0 / 60.0);
+    GIANT_CHECK(f.get(late)["drawn"].get<bool>());
+    // All stopped, then one again: uploaded afresh.
+    for (const world::EntityId id : {ids[1], ids[2], late}) {
+        GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", ""}}).ok);
+    }
+    f.frame_step(0.0);
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 0);
+    GIANT_CHECK(f.run("set_animation", {{"id", ids[1]}, {"clip", "bend"}}).ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.renderer->skinned(copy_of(ids[1])));
+}
