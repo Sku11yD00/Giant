@@ -8,7 +8,11 @@
 
 #include "giant/core/assert.h"
 
+#include <algorithm>
 #include <cmath>
+#include <optional>
+#include <utility>
+#include <vector>
 
 namespace giant::editor {
 
@@ -62,7 +66,12 @@ const MeshLibrary::Mesh* skinned_of(const EditorState& state, world::EntityId id
 Json clips_json(const MeshLibrary::Skinned& s) {
     Json clips = Json::array();
     for (const anim::Clip& c : s.clips) {
-        clips.push_back({{"name", c.name}, {"seconds", c.duration}, {"channels", c.channels.size()}});
+        const usize morphs = static_cast<usize>(std::count_if(
+            c.channels.begin(), c.channels.end(), [](const anim::Channel& ch) { return ch.path == anim::Path::morph; }));
+        clips.push_back({{"name", c.name},
+                         {"seconds", c.duration},
+                         {"channels", c.channels.size() - morphs},
+                         {"morph_channels", morphs}});
     }
     return clips;
 }
@@ -114,6 +123,15 @@ Json animation_json(const EditorState& state, world::EntityId id) {
     out["pose_interval"] = a->interval;      // seconds between poses (0: every frame)
     out["bounds"] = {{"center", Json::array({a->bounds.center.x, a->bounds.center.y, a->bounds.center.z})},
                      {"radius", a->bounds.radius}};
+    // Its morph targets' weights as last worked out, and those held.
+    Json morphs = Json::object();
+    Json held = Json::object();
+    for (usize t = 0; t < s.clusters.morphs.size() && t < a->morphs.size(); ++t) {
+        morphs[s.clusters.morphs[t].name] = a->morphs[t];
+        if (a->holding[t] != 0) held[s.clusters.morphs[t].name] = a->held[t];
+    }
+    out["morphs"] = morphs;
+    out["held_morphs"] = held;
     return out;
 }
 
@@ -134,7 +152,8 @@ Json summary_json(const AnimationState& a) {
 void register_animation_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"list_animations",
-         "Lists a skinned glTF/GLB file's animation clips (name, seconds long, joint channels) and its "
+         "Lists a skinned glTF/GLB file's animation clips (name, seconds long, joint channels, morph "
+         "weight channels), its morph targets (blend shapes: name, rest weight, vertices moved) and its "
          "skeleton's joints: by `path` (imported first if need be) or by the mesh entity `id` draws. "
          "A file that is not skinned has none.",
          Json{{"type", "object"},
@@ -164,10 +183,16 @@ void register_animation_commands(ai::CommandRegistry& registry, EditorState& sta
              Json out{{"path", mesh->path}, {"skinned", mesh->skinned != nullptr}};
              if (mesh->skinned == nullptr) {
                  out["clips"] = Json::array();
+                 out["morph_targets"] = Json::array();
                  out["joints"] = 0;
                  return CommandResult::success(out);
              }
              out["clips"] = clips_json(*mesh->skinned);
+             Json targets = Json::array();
+             for (const geometry::MorphTarget& t : mesh->skinned->clusters.morphs) {
+                 targets.push_back({{"name", t.name}, {"rest_weight", t.weight}, {"vertices", t.deltas.size()}});
+             }
+             out["morph_targets"] = targets;
              out["joints"] = mesh->skinned->skeleton.size();
              out["joint_names"] = mesh->skinned->skeleton.names;
              return CommandResult::success(out);
@@ -279,6 +304,49 @@ void register_animation_commands(ai::CommandRegistry& registry, EditorState& sta
              const std::string error = state.animation->blend(state.scene, *state.meshes, id, args["a"].get<std::string>(),
                                                               args["b"].get<std::string>(), args["weight"].get<float>(),
                                                               args.value("sync", true));
+             if (!error.empty()) return CommandResult::failure(error);
+             return CommandResult::success(animation_json(state, id));
+         }});
+
+    add(registry,
+        {"set_morphs",
+         "Holds morph targets (blend shapes: list_animations names them) of a skinned mesh entity at "
+         "weights of its own, in the view, over what its clips and rest weights give: a face held "
+         "smiling while it walks. `weights` maps a target's name to a weight (usually 0 to 1; within "
+         "+-10), or null to let it go back to its clips; `release_all` lets every held one go first. "
+         "View state, as play_animation (set_animation on the entity lets them go too). Returns "
+         "get_animation's report (morphs: every target's weight now; held_morphs).",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"id"}},
+              {"properties",
+               {{"id", id_schema()},
+                {"weights", {{"type", "object"},
+                             {"maxProperties", geometry::k_max_morph_targets},
+                             {"additionalProperties",
+                              {{"type", {"number", "null"}},
+                               {"minimum", -AnimationState::k_max_morph_set},
+                               {"maximum", AnimationState::k_max_morph_set}}}}},
+                {"release_all", {{"type", "boolean"}, {"description", "Default false."}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.animation == nullptr || state.meshes == nullptr) return no_animation();
+             const world::EntityId id = args["id"].get<world::EntityId>();
+             std::vector<std::pair<std::string, std::optional<float>>> weights;
+             if (args.contains("weights")) {
+                 if (args["weights"].size() > geometry::k_max_morph_targets) {
+                     return CommandResult::failure("at most 256 morph targets at once");
+                 }
+                 for (const auto& [name, value] : args["weights"].items()) {
+                     if (!value.is_null() && !value.is_number()) {
+                         return CommandResult::failure("weights." + name + ": must be a number or null");
+                     }
+                     weights.emplace_back(name, value.is_null() ? std::nullopt : std::optional<float>(value.get<float>()));
+                 }
+             }
+             state.animation->follow_now(state.scene, *state.meshes, state.scene.untaken_changes());
+             const std::string error =
+                 state.animation->set_morphs(state.scene, *state.meshes, id, weights, args.value("release_all", false));
              if (!error.empty()) return CommandResult::failure(error);
              return CommandResult::success(animation_json(state, id));
          }});

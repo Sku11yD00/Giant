@@ -48,7 +48,9 @@ struct Skeleton {
 // joints, at most k_max_joints, parents before children, finite numbers.
 std::string validate(const Skeleton& skeleton);
 
-enum class Path : u8 { translation, rotation, scale };
+// A channel moves a joint's translation, rotation or scale, or (morph) a
+// morph target's weight: `joint` then names the target, the value is x.
+enum class Path : u8 { translation, rotation, scale, morph };
 enum class Interpolation : u8 { linear, step, cubic };
 
 // One joint's translation, rotation or scale over time. Values are xyz (w
@@ -68,15 +70,18 @@ struct Clip {
     std::vector<Channel> channels;
 };
 
-// Empty when sound for `skeleton`: joints in range, times finite and
-// increasing within [0, k_max_clip_seconds], one value (three when cubic)
-// per key, finite values.
-std::string validate(const Clip& clip, const Skeleton& skeleton);
+// Empty when sound for `skeleton` (and a mesh with `morph_targets`):
+// joints and targets in range, times finite and increasing within [0,
+// k_max_clip_seconds], one value (three when cubic) per key, finite values.
+std::string validate(const Clip& clip, const Skeleton& skeleton, usize morph_targets = 0);
 
 // The clip's pose at `time` (seconds, clamped to the clip; each channel
 // holds its first and last keys before and after them): the rest pose,
 // with what the clip animates replaced. `local` is one per joint.
 void sample(const Skeleton& skeleton, const Clip& clip, float time, std::span<JointTransform> local);
+// The clip's morph weights at `time`: each target it animates set in
+// `weights` (one per target), the others left as they are.
+void sample_morphs(const Clip& clip, float time, std::span<float> weights);
 
 // `a` toward `b` by `t` (0 is a, 1 is b): translations and scales lerped,
 // rotations along the shorter way (normalised lerp).

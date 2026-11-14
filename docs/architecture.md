@@ -1750,6 +1750,17 @@ a crowd does not pose all on one frame. While time stands still (paused, a
 menu open) what moved since its last pose catches up within the budget. A pose a
 command or a (re)start asks for always goes at once.
 
+Morph weights play as the pose does (C3c). A clip's channel can animate a
+morph target's weight (`anim::Path::morph`, the channel's `joint` naming
+the target; glTF's `weights` channels are split per target and point at
+the merged morphs). `AnimationPlayer::evaluate_morphs` starts from the rest
+weights (`set_morph_rest`), sets what the main clip animates and blends
+toward the other clip, or toward the weights caught when a fade began, by
+the pose's own share, so a face fades and blends with the body. The editor
+works the weights out with the pose, lays the ones `set_morphs` holds over
+them (view state, as `play_animation`'s, let go when the saved animation
+changes) and hands them to `set_pose` beside the joints.
+
 ## Ballistics (W1a)
 
 `sim::Ballistics` flies bullets through the physics world as point masses:

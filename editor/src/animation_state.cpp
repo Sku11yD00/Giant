@@ -109,6 +109,7 @@ void AnimationState::follow(const world::Scene& scene, const MeshLibrary& meshes
             a.saved = e->animation;
             a.by_command = false;
             m_commanded.erase(id);
+            std::fill(a.holding.begin(), a.holding.end(), u8{0}); // (held morphs go with commands)
             play_saved(a, a.posed ? k_saved_fade_seconds : 0.0f);
         }
     }
@@ -146,6 +147,7 @@ void AnimationState::restart_saved(const world::Scene& scene, world::EntityId id
     Animated& a = *it->second;
     a.saved = e->animation;
     a.by_command = false;
+    std::fill(a.holding.begin(), a.holding.end(), u8{0});
     play_saved(a, a.posed ? k_saved_fade_seconds : 0.0f);
     a.fresh = false;
 }
@@ -182,6 +184,13 @@ AnimationState::Animated* AnimationState::start(const world::Scene& scene, const
     a->skin.resize(joints);
     a->saved = e->animation;
     a->sent.assign(joints, Mat4{});
+    // Its morph targets: at their rest weights where nothing animates them.
+    const std::vector<geometry::MorphTarget>& targets = a->skinned->clusters.morphs;
+    a->morphs.resize(targets.size());
+    for (usize t = 0; t < targets.size(); ++t) a->morphs[t] = targets[t].weight;
+    a->player.set_morph_rest(a->morphs);
+    a->held.assign(targets.size(), 0.0f);
+    a->holding.assign(targets.size(), 0);
     play_saved(*a, 0.0f);
     Animated* out = a.get();
     m_animated[id] = std::move(a);
@@ -277,6 +286,45 @@ std::string AnimationState::blend(const world::Scene& scene, const MeshLibrary& 
     m_wanted.insert(id);
     a->by_command = true;
     a->player.set_blend(a->skinned->clips, ia, ib, weight, sync);
+    a->dirty = true;
+    a->fresh = false;
+    pose(Timed::none);
+    return {};
+}
+
+std::string AnimationState::set_morphs(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
+                                       std::span<const std::pair<std::string, std::optional<float>>> weights,
+                                       bool release_all) {
+    const world::Entity* e = scene.find(id);
+    if (e == nullptr) return "no entity " + std::to_string(id);
+    const MeshLibrary::Mesh* mesh = skinned_mesh(*e, meshes);
+    if (mesh == nullptr) return "entity " + std::to_string(id) + " does not draw a skinned mesh (or is hidden)";
+    const std::vector<geometry::MorphTarget>& targets = mesh->skinned->clusters.morphs;
+    // All checked before anything changes.
+    std::vector<u32> index(weights.size());
+    for (usize i = 0; i < weights.size(); ++i) {
+        const auto& [name, weight] = weights[i];
+        const auto it = std::find_if(targets.begin(), targets.end(),
+                                     [&name](const geometry::MorphTarget& t) { return t.name == name; });
+        if (it == targets.end()) return mesh->path + " has no morph target named \"" + name + "\"";
+        if (weight && !(std::fabs(*weight) <= k_max_morph_set)) {
+            return "a morph weight must be a number within +-" + std::to_string(static_cast<int>(k_max_morph_set));
+        }
+        index[i] = static_cast<u32>(it - targets.begin());
+    }
+    // Nothing to hold on one not animating: nothing to start.
+    const bool holds = std::any_of(weights.begin(), weights.end(), [](const auto& w) { return w.second.has_value(); });
+    if (!holds && m_animated.find(id) == m_animated.end()) return {};
+    std::string error;
+    Animated* a = animate_now(scene, meshes, id, error);
+    if (a == nullptr) return error;
+    m_commanded.insert(id);
+    m_wanted.insert(id);
+    if (release_all) std::fill(a->holding.begin(), a->holding.end(), u8{0});
+    for (usize i = 0; i < weights.size(); ++i) {
+        a->holding[index[i]] = weights[i].second ? 1 : 0;
+        a->held[index[i]] = weights[i].second.value_or(0.0f);
+    }
     a->dirty = true;
     a->fresh = false;
     pose(Timed::none);
@@ -384,6 +432,17 @@ void AnimationState::pose(Timed timed) {
                 anim::skin_matrices(s.skeleton, a.model, a.skin);
                 const anim::Bounds b = anim::pose_bounds(a.model, a.skin, s.joint_radius);
                 a.bounds = {b.center, b.radius};
+                if (!a.morphs.empty()) {
+                    a.player.evaluate_morphs(s.clips, a.scratch, a.morphs);
+                    // Within what the renderer takes (a file's weight or a
+                    // cubic key's overshoot past it would lose the whole pose).
+                    for (usize t = 0; t < a.morphs.size(); ++t) {
+                        if (a.holding[t] != 0) a.morphs[t] = a.held[t];
+                        a.morphs[t] = !std::isnan(a.morphs[t]) ? std::clamp(a.morphs[t], -render::k_max_morph_weight,
+                                                                               render::k_max_morph_weight)
+                                                                 : 0.0f;
+                    }
+                }
             }
         });
         for (Animated* a : m_work) {
@@ -392,14 +451,15 @@ void AnimationState::pose(Timed timed) {
             const bool same = a->posed && a->sent.size() == a->skin.size() &&
                               std::memcmp(a->sent.data(), a->skin.data(), a->skin.size() * sizeof(Mat4)) == 0 &&
                               a->sent_bounds.center == a->bounds.center &&
-                              a->sent_bounds.radius == a->bounds.radius;
+                              a->sent_bounds.radius == a->bounds.radius && a->sent_morphs == a->morphs;
             a->posed = true;
             if (same) continue; // a clip that moves nothing (or time that moved within one key)
-            if (m_renderer != nullptr && !m_renderer->set_pose(a->copy, a->skin, a->bounds)) {
+            if (m_renderer != nullptr && !m_renderer->set_pose(a->copy, a->skin, a->bounds, a->morphs)) {
                 continue; // a pose the renderer refuses (not finite): the last one stays
             }
             a->sent = a->skin;
             a->sent_bounds = a->bounds;
+            a->sent_morphs = a->morphs;
             ++a->poses;
             ++m_poses;
             a->pose_serial = ++m_serial;

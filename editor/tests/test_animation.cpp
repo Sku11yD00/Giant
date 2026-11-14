@@ -737,3 +737,116 @@ GIANT_TEST("animation: LOD poses near characters every frame, far ones a few tim
     frame();
     GIANT_CHECK(f.animation->posed_last() == 0);
 }
+
+namespace {
+
+// The arm with morph targets ("smile" resting at 0.25, "blink" at 0) and
+// clips animating them: "smile" (smile 0 to 1, blink 0 to 0.5 over 1 s)
+// and "wink" (smile stepping 0.2 then 0.8).
+std::string morph_arm_file(float smile_rest = 0.25f) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "giant_animation_tests";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path = dir / (smile_rest == 0.25f ? "morph_arm.glb" : "big_morph_arm.glb");
+    geometry::testing::SkinOptions o;
+    o.morphs = true;
+    o.morph_clip = true;
+    o.smile_rest = smile_rest;
+    const std::vector<u8> bytes = geometry::testing::skinned_arm(o);
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
+                                                static_cast<std::streamsize>(bytes.size()));
+    return path.generic_string();
+}
+
+} // namespace
+
+GIANT_TEST("animation: morph targets: listed, played by clips, held by set_morphs and let go") {
+    for (const bool gpu : {false, true}) {
+        Fixture f(gpu);
+        f.arm = morph_arm_file();
+        const auto listed = f.run("list_animations", {{"path", f.arm}});
+        GIANT_CHECK(listed.ok);
+        if (!listed.ok) return;
+        const Json& targets = listed.value["morph_targets"];
+        GIANT_CHECK(targets.size() == 2 && targets[0]["name"] == "smile" && targets[1]["name"] == "blink");
+        GIANT_CHECK(near(targets[0]["rest_weight"].get<double>(), 0.25) && targets[1]["vertices"].get<u32>() == 1);
+        const Json& clips = listed.value["clips"];
+        GIANT_CHECK(clips.size() == 6 && clips[3]["name"] == "smile" && clips[3]["morph_channels"].get<u32>() == 2 &&
+                    clips[3]["channels"].get<u32>() == 0 && clips[0]["morph_channels"].get<u32>() == 0);
+        // A plain arm lists none.
+        const auto plain = f.run("list_animations", {{"path", arm_file()}});
+        GIANT_CHECK(plain.ok && plain.value["morph_targets"].empty());
+
+        const world::EntityId arm = f.add_arm();
+        // Bending: no morph channels, so the rest weights.
+        GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "bend"}}).ok);
+        f.frame_step(0.0);
+        Json a = f.get(arm);
+        GIANT_CHECK(near(a["morphs"]["smile"].get<double>(), 0.25) && near(a["morphs"]["blink"].get<double>(), 0.0));
+        GIANT_CHECK(a["held_morphs"].empty());
+        // Smiling: halfway in, half of each.
+        GIANT_CHECK(f.run("play_animation", {{"id", arm}, {"clip", "smile"}, {"blend_seconds", 0}, {"start", 0.5}}).ok);
+        a = f.get(arm);
+        GIANT_CHECK(near(a["morphs"]["smile"].get<double>(), 0.5) && near(a["morphs"]["blink"].get<double>(), 0.25));
+        // Held: blink stays where it is put while the clip runs; smile keeps playing.
+        auto held = f.run("set_morphs", {{"id", arm}, {"weights", {{"blink", 0.9}}}});
+        GIANT_CHECK(held.ok && near(held.value["morphs"]["blink"].get<double>(), 0.9) &&
+                    near(held.value["held_morphs"]["blink"].get<double>(), 0.9));
+        f.frame_step(0.25);
+        a = f.get(arm);
+        GIANT_CHECK(near(a["morphs"]["blink"].get<double>(), 0.9) && near(a["morphs"]["smile"].get<double>(), 0.75));
+        // Let go (null): back to its clip.
+        held = f.run("set_morphs", {{"id", arm}, {"weights", {{"blink", nullptr}, {"smile", -2.0}}}});
+        GIANT_CHECK(held.ok && near(held.value["morphs"]["blink"].get<double>(), 0.375) &&
+                    near(held.value["morphs"]["smile"].get<double>(), -2.0) && held.value["held_morphs"].size() == 1);
+        GIANT_CHECK(f.run("set_morphs", {{"id", arm}, {"release_all", true}}).ok);
+        GIANT_CHECK(f.get(arm)["held_morphs"].empty());
+        // Refused, with nothing changed: a name it lacks, a weight past +-10, not a skinned mesh.
+        GIANT_CHECK(f.run("set_morphs", {{"id", arm}, {"weights", {{"smile", 1.0}}}}).ok);
+        const auto missing = f.run("set_morphs", {{"id", arm}, {"weights", {{"blink", 0.5}, {"frown", 1.0}}}});
+        GIANT_CHECK(!missing.ok && missing.error.find("frown") != std::string::npos);
+        GIANT_CHECK(!f.run("set_morphs", {{"id", arm}, {"weights", {{"blink", 11.0}}}}).ok);
+        GIANT_CHECK(!f.run("set_morphs", {{"id", arm}, {"weights", {{"blink", "x"}}}}).ok);
+        a = f.get(arm);
+        GIANT_CHECK(a["held_morphs"].size() == 1 && near(a["held_morphs"]["smile"].get<double>(), 1.0));
+        const world::EntityId cube = f.run("create_entity").value["id"].get<world::EntityId>();
+        GIANT_CHECK(!f.run("set_morphs", {{"id", cube}, {"weights", {{"smile", 1.0}}}}).ok);
+        GIANT_CHECK(!f.run("set_morphs", {{"id", 999}}).ok);
+        // A new saved animation lets the held ones go.
+        GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "wink"}}).ok);
+        f.frame_step(0.0);
+        GIANT_CHECK(f.get(arm)["held_morphs"].empty());
+        f.frame_step(0.5); // past its fade in, before the step
+        a = f.get(arm);
+        GIANT_CHECK(a["held_morphs"].empty() && near(a["morphs"]["smile"].get<double>(), 0.2));
+        // A plain arm: no morphs, and set_morphs names none.
+        f.arm = arm_file();
+        const world::EntityId plain_arm = f.add_arm(3.0);
+        GIANT_CHECK(f.run("set_animation", {{"id", plain_arm}, {"clip", "bend"}}).ok);
+        GIANT_CHECK(f.get(plain_arm)["morphs"].empty());
+        GIANT_CHECK(!f.run("set_morphs", {{"id", plain_arm}, {"weights", {{"smile", 1.0}}}}).ok);
+        GIANT_CHECK(f.run("set_morphs", {{"id", plain_arm}}).ok); // nothing to hold: fine
+        f.frame_step(0.1);
+        // Nothing held on one not animating: it is not started for it.
+        const world::EntityId idle = f.add_arm(6.0);
+        GIANT_CHECK(f.run("set_morphs", {{"id", idle}, {"release_all", true}}).ok);
+        GIANT_CHECK(f.animation->find(idle) == nullptr);
+        // A hold on one not animating starts it, at its rest pose with the hold.
+        f.arm = morph_arm_file();
+        const world::EntityId still = f.add_arm(12.0);
+        const auto started = f.run("set_morphs", {{"id", still}, {"weights", {{"blink", 0.5}}}});
+        GIANT_CHECK(started.ok && started.value["animated"].get<bool>() &&
+                    near(started.value["morphs"]["blink"].get<double>(), 0.5) &&
+                    near(started.value["morphs"]["smile"].get<double>(), 0.25));
+        // A file's weight past what the renderer takes (2000): held to its
+        // limit, so the joints still pose.
+        f.arm = morph_arm_file(2000.0f);
+        const world::EntityId big = f.add_arm(9.0);
+        GIANT_CHECK(f.run("set_animation", {{"id", big}, {"clip", "bend"}}).ok);
+        f.frame_step(0.25);
+        a = f.get(big);
+        GIANT_CHECK(near(a["morphs"]["smile"].get<double>(), render::k_max_morph_weight));
+        const u64 poses = a["poses"].get<u64>();
+        f.frame_step(0.25);
+        GIANT_CHECK(f.get(big)["poses"].get<u64>() > poses); // handed to the renderer
+    }
+}

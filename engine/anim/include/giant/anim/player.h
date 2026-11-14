@@ -28,6 +28,7 @@ struct ClipState {
 struct PoseScratch {
     std::vector<JointTransform> a;
     std::vector<JointTransform> b;
+    std::vector<float> morphs;
 };
 
 class AnimationPlayer {
@@ -57,6 +58,15 @@ public:
     void evaluate(const Skeleton& skeleton, std::span<const Clip> clips, PoseScratch& scratch,
                   std::span<JointTransform> local) const;
 
+    // The mesh's morph targets' rest weights (one per target; none: no
+    // morphs): what shows where no clip playing animates a target. Set it
+    // before playing (a fade caught as it stands keeps its weights too).
+    void set_morph_rest(std::span<const float> rest) { m_morph_rest.assign(rest.begin(), rest.end()); }
+    std::span<const float> morph_rest() const { return m_morph_rest; }
+    // The morph weights now, into `weights` (one per target), blended and
+    // faded as the pose is.
+    void evaluate_morphs(std::span<const Clip> clips, PoseScratch& scratch, std::span<float> weights) const;
+
     const ClipState& main() const { return m_main; }
     // The other clip (fading out, or held blended); none while a caught
     // pose fades out (fading() is then true).
@@ -81,6 +91,9 @@ private:
     bool m_paused = false;
     bool m_frozen_fading = false;           // the caught pose fades out
     std::vector<JointTransform> m_frozen;   // the pose caught when a fade began
+    std::vector<float> m_morph_rest;
+    std::vector<float> m_frozen_morphs;     // its morph weights
+    std::vector<float> m_caught_morphs;     // (catching them)
     PoseScratch m_catch;                    // for catching it
 };
 

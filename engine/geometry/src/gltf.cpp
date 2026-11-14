@@ -284,6 +284,7 @@ public:
             for (const i32 slot : m_morph_slot) {
                 if (slot >= 0) m_claimed[static_cast<usize>(slot)] = 0;
             }
+            m_mesh_slots[node->mesh] = m_morph_slot;
         }
         for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
             const usize before = target.mesh->indices.size();
@@ -294,6 +295,13 @@ public:
             if (added > 0) m_material_triangles[node->mesh->primitives[i].material] += added; // null: glTF's default
         }
         return true;
+    }
+
+    // Which morph each of a mesh's targets went to (-1: dropped), for
+    // weight animation; null for a mesh read without morphs.
+    const std::vector<i32>* morph_slots(const cgltf_mesh* mesh) const {
+        const auto it = m_mesh_slots.find(mesh);
+        return it == m_mesh_slots.end() ? nullptr : &it->second;
     }
 
     // Triangles drawn with each material (of the meshes read; null: none given).
@@ -809,6 +817,7 @@ private:
     const std::vector<MorphTarget>* m_morph_owner = nullptr; // what m_morph_slots indexes
     std::unordered_map<std::string, i32> m_morph_slots;
     std::vector<u8> m_claimed; // per morph: this mesh has one of that name
+    std::unordered_map<const cgltf_mesh*, std::vector<i32>> m_mesh_slots;
     bool m_warned_morph_values = false;
     std::vector<Vec3> m_points; // per primitive: transformed positions
 };
@@ -934,10 +943,10 @@ anim::Interpolation interpolation(cgltf_interpolation_type t) {
     }
 }
 
-// Every animation's joint channels, as clips.
+// Every animation's joint channels and morph weight channels, as clips.
 bool read_clips(const cgltf_data& data, const anim::Skeleton& skeleton,
                 const std::unordered_map<const cgltf_node*, u32>& joint_of, Importer& importer,
-                std::vector<anim::Clip>& clips) {
+                usize morph_targets, std::vector<anim::Clip>& clips) {
     bool warned_morph = false;
     bool warned_other = false;
     usize keys = 0;
@@ -969,7 +978,58 @@ bool read_clips(const cgltf_data& data, const anim::Skeleton& skeleton,
         for (cgltf_size c = 0; c < animation.channels_count; ++c) {
             const cgltf_animation_channel& ch = animation.channels[c];
             if (ch.target_path == cgltf_animation_path_type_weights) {
-                importer.warn_once(warned_morph, "morph target animation is not imported yet");
+                // A node's mesh's weights, every target's in one sampler: a
+                // channel per target the import kept (by its morph).
+                const std::vector<i32>* slots =
+                    ch.target_node != nullptr && ch.target_node->mesh != nullptr
+                        ? importer.morph_slots(ch.target_node->mesh)
+                        : nullptr;
+                if (slots == nullptr || slots->empty() || ch.sampler == nullptr) {
+                    importer.warn_once(warned_morph, "morph weight animation of meshes with no morph targets imported is skipped");
+                    continue;
+                }
+                const cgltf_animation_sampler& sampler = *ch.sampler;
+                const anim::Interpolation how = interpolation(sampler.interpolation);
+                const cgltf_accessor* in = sampler.input;
+                const cgltf_accessor* values = sampler.output;
+                const usize per = how == anim::Interpolation::cubic ? 3 : 1;
+                const usize targets = slots->size();
+                if (!readable(in) || !readable(values) || in->type != cgltf_type_scalar ||
+                    values->type != cgltf_type_scalar || in->count > anim::k_max_keys ||
+                    values->count != in->count * per * targets) {
+                    return importer.fail("the clip " + clip.name + " has a channel whose values do not match its keys");
+                }
+                keys += in->count * per * targets;
+                if (keys > anim::k_max_keys) {
+                    return importer.fail("the file's animations have more than 8 million keys");
+                }
+                if (in->count == 0) continue;
+                std::vector<float> times(in->count);
+                if (cgltf_accessor_unpack_floats(in, times.data(), in->count) != in->count) {
+                    return importer.fail("could not read the clip " + clip.name);
+                }
+                std::vector<float> raw(values->count);
+                if (cgltf_accessor_unpack_floats(values, raw.data(), raw.size()) != raw.size()) {
+                    return importer.fail("could not read the clip " + clip.name);
+                }
+                // Laid out key by key: (cubic: in tangents, values, out
+                // tangents, each) one per target.
+                for (usize t = 0; t < targets; ++t) {
+                    if ((*slots)[t] < 0) continue;
+                    anim::Channel out;
+                    out.joint = static_cast<u32>((*slots)[t]);
+                    out.path = anim::Path::morph;
+                    out.interpolation = how;
+                    out.times = times;
+                    out.values.resize(in->count * per);
+                    for (usize k = 0; k < in->count; ++k) {
+                        for (usize part = 0; part < per; ++part) {
+                            out.values[k * per + part] = {raw[(k * per + part) * targets + t], 0.0f, 0.0f, 0.0f};
+                        }
+                    }
+                    clip.duration = std::max(clip.duration, out.times.back());
+                    clip.channels.push_back(std::move(out));
+                }
                 continue;
             }
             const auto joint = joint_of.find(ch.target_node);
@@ -1016,7 +1076,7 @@ bool read_clips(const cgltf_data& data, const anim::Skeleton& skeleton,
             clip.duration = std::max(clip.duration, out.times.back());
             clip.channels.push_back(std::move(out));
         }
-        const std::string error = anim::validate(clip, skeleton);
+        const std::string error = anim::validate(clip, skeleton, morph_targets);
         if (!error.empty()) return importer.fail(error);
         clips.push_back(std::move(clip));
     }
@@ -1064,7 +1124,7 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
         const Mat4 bind = anim::affine_inverse(rest[static_cast<usize>(joint)]) * world_matrix(node);
         if (!importer.mesh(node, matrix_transform(bind.m), target)) return false;
     }
-    if (!read_clips(data, skeleton, joint_of, importer, out.clips)) return false;
+    if (!read_clips(data, skeleton, joint_of, importer, out.mesh.morphs.size(), out.clips)) return false;
     // Tangents the file did not give, in bind space (split vertices keep
     // their weights and morph deltas).
     {
