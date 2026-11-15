@@ -645,6 +645,7 @@ Json hair_json(const Hair& h) {
             {"strands", h.strands},
             {"guides", h.guides},
             {"top", h.top},
+            {"joint", h.joint},
             {"length", h.length},
             {"length_variation", h.length_variation},
             {"droop", h.droop},
@@ -1686,6 +1687,7 @@ void read_hair(Reader& r, const std::string& path, Hair& h, std::string& error) 
         hr.integer("strands", h.strands, 1, k_max_hair_strands);
         hr.integer("guides", h.guides, 1, k_max_hair_guides);
         hr.number("top", h.top, 0.01, 1);
+        hr.string("joint", h.joint, false, k_max_hair_joint_bytes);
         hr.number("length", h.length, 0.001, 10);
         hr.number("length_variation", h.length_variation, 0, 1);
         hr.number("droop", h.droop, 0, 1);

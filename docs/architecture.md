@@ -2084,10 +2084,35 @@ renderer in one (each is a GPU buffer made; the first hair ever also makes
 the renderer's shared hair buffers, once). The rest hang as grown. Entities wear hair lowest ids
 first, up to 256 and 2,000,000 strands in all; the rest are left out.
 Closing the editor does not grow what was still waiting. `get_hair` reads
-it. View state: not saved, not undoable. Limits until C6e part 2: only
-cubes and spheres grow hair (not mesh files, so not animated characters or
-their joints), hair meets no capsules, entities carried by the physics, a
-swing or a walker leave their hair where the scene has them, kits made
+it. View state: not saved, not undoable.
+
+On a character (a mesh entity whose file has a skeleton) hair grows from
+the skin: `hair.joint` names a joint (none named: the first with "head" in
+its name), and the scalp is the original triangles the joint and the
+joints under it move by half their weight or more, as they stand at rest
+in model space (so y is up and sizes are true whatever way the file's bind
+space or the joint's own axes turn, or a node above the skeleton scales),
+about the joint's place, cut at `top`'s share of their height and sized by
+the entity's largest scale. The groom is drawn at the joint as the body
+is drawn (`HairState::place`, each frame before the draws are read: the
+animation's pose once its copy shows, else the rest pose, under the
+entity's drawn transform), turned as the joint has turned since rest. A
+joint's own scale in a clip does not resize it, a mirrored entity turns
+its hair the wrong way and a non-uniformly scaled one wears hair of its
+largest scale. Hair answers its head a frame late (it steps after the
+frame is drawn). While a groom is grown again for another joint the old
+one stays on the joint it was grown round.
+The body's 16 capsules nearest the joint at rest (`sim::HairCapsule`,
+posed each frame) push the hair aside. Every entity's hair is drawn where
+its entity is drawn: carried by the physics, a walker or a swing it goes
+along (the same order as the scene frame). A mesh entity whose file has no
+skeleton, or no such joint, grows none and `get_hair` says why
+(`problem`: file not loaded, no skeleton, no such joint); it is looked up
+again whenever the mesh library changes. Everything the joint's skin holds
+above the cut grows hair, eyes and all: name a joint whose skin is the
+scalp, or lower `top`.
+Limits until C6e part 3: mesh files without a skeleton grow no hair, a
+file's own hair curves (glTF line primitives) are not read, kits made
 from entities do not carry hair, and there is no panel or button for it
 yet (commands only).
 

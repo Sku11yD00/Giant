@@ -29,9 +29,13 @@ void register_hair_commands(ai::CommandRegistry& registry, EditorState& state) {
          "renderer is given, strands in all, entities left out (more than 256 wear hair, or more than "
          "2000000 strands in all: lowest ids first), simulations put back at rest after going wrong. With "
          "`id`, that entity's too: whether it is grown, growing, ready (the renderer has all of its groom, so "
-         "it is drawn from the next frame on), simulated and left out, its strands and guides, its longest "
-         "strand (metres), its bounds, and with `points` true where its guides' points are (16 a guide, root "
-         "first, in the entity's space without its scale: as simulated, or as grown). `wait` true waits for "
+         "it is drawn from the next frame on), simulated and left out, its `problem` (why a mesh entity grows "
+         "none: its file is not loaded or has no skeleton, or no such joint; empty otherwise), a character's `joint` and the "
+         "`capsules` of its body the hair is pushed aside by, where it is drawn (`position`, `rotation` x y z "
+         "w: its entity's, as the physics, a walker or a swing moves it, or its joint's as animated), its "
+         "strands and guides, its longest strand (metres), its bounds, and with `points` true where its "
+         "guides' points are (16 a guide, root first, in the entity's or joint's space without its scale: as "
+         "simulated, or as grown). `wait` true waits for "
          "every groom being grown first and shows it at once; the renderer still needs a few frames to draw "
          "it (`ready`).",
          Json{{"type", "object"},
@@ -53,13 +57,19 @@ void register_hair_commands(ai::CommandRegistry& registry, EditorState& state) {
                  const world::EntityId id = args["id"].get<world::EntityId>();
                  HairState::View v;
                  if (!state.hair->view(id, v)) {
-                     return CommandResult::failure("entity " + std::to_string(id) + " wears no hair (hair.on, a visible cube or sphere)");
+                     return CommandResult::failure("entity " + std::to_string(id) +
+                                                   " wears no hair (hair.on, a visible cube, sphere or character)");
                  }
                  Json one = {{"id", id},
                              {"grown", v.grown},
                              {"growing", v.growing},
                              {"ready", v.ready},
                              {"left_out", v.left_out},
+                             {"problem", v.problem},
+                             {"joint", v.joint},
+                             {"position", {v.position.x, v.position.y, v.position.z}},
+                             {"rotation", {v.rotation.x, v.rotation.y, v.rotation.z, v.rotation.w}},
+                             {"capsules", v.capsules},
                              {"simulated", v.simulated},
                              {"strands", v.strands},
                              {"guides", v.guides},

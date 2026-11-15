@@ -134,6 +134,7 @@ Json entity_json(const Entity& e) {
                      {"strands", h.strands},
                      {"guides", h.guides},
                      {"top", h.top},
+                     {"joint", h.joint},
                      {"length", h.length},
                      {"length_variation", h.length_variation},
                      {"droop", h.droop},
@@ -309,7 +310,14 @@ Json entity_properties() {
             {"guides", whole(1, world::k_max_hair_guides,
                              "Strands that are simulated; the rest follow the nearest three. Default 256.")},
             {"top", number(0.01, 1, "The share of the shape's height, from its top, that grows hair (0.5: the upper "
-                                    "half of a sphere). Default 0.5.")},
+                                    "half of a sphere; on a character, of the height of the skin its joint moves). "
+                                    "Default 0.5.")},
+            {"joint", {{"type", "string"},
+                       {"maxLength", world::k_max_hair_joint_bytes},
+                       {"description", "For a character (a mesh entity whose file has a skeleton): the joint whose "
+                                       "skin grows the hair and which the hair rides, by name (list_meshes / "
+                                       "get_animation name them). Empty: the first joint with \"head\" in its "
+                                       "name. Default empty."}}},
             {"length", number(0.001, 10, "Metres. Default 0.25.")},
             {"length_variation", number(0, 1, "Strands are shorter by up to this share. Default 0.2.")},
             {"droop", number(0, 1, "0 stands on end, 1 hangs. Default 0.8.")},
@@ -330,11 +338,14 @@ Json entity_properties() {
                                        "moves); off, it keeps its shape. Default on."}}},
             {"stiffness", number(0, 60, "How firmly the roots hold the style (Hz; the tips an eighth of it). Default 8.")},
             {"damping", number(0, 60, "How fast its swing dies away (1/s). Default 2.")}}},
-          {"description", "Hair it wears: strands grown from the top of its shape (cube and sphere entities; other "
-                          "shapes keep the settings and grow none), drawn strand by strand in the lit view, shading "
-                          "itself and what is under it. Changing how it grows (strands to seed, or the entity's "
-                          "scale) grows it again over a few frames; its look and motion change at once. Kept while "
-                          "off. See get_hair."}}},
+          {"description", "Hair it wears: strands grown from the top of its shape (cube and sphere entities) or "
+                          "from a character's skin round its head joint (mesh entities whose file has a skeleton: "
+                          "`joint`; the hair rides the joint as the character is animated and is pushed aside by "
+                          "its body), drawn strand by strand in the lit view, shading itself and what is under "
+                          "it. Other shapes and mesh files without a skeleton keep the settings and grow none. "
+                          "Changing how it grows (strands to seed, the joint, or the entity's scale) grows it "
+                          "again over a few frames; its look and motion change at once. Kept while off. See "
+                          "get_hair."}}},
         {"effect",
          {{"type", "object"},
           {"additionalProperties", false},
@@ -475,6 +486,7 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         o.strands = h.value("strands", o.strands);
         o.guides = h.value("guides", o.guides);
         o.top = h.value("top", o.top);
+        o.joint = h.value("joint", o.joint);
         o.length = h.value("length", o.length);
         o.length_variation = h.value("length_variation", o.length_variation);
         o.droop = h.value("droop", o.droop);

@@ -5,12 +5,18 @@
 #include "../src/hair_state.h"
 #include "../src/mesh_library.h"
 
+#include "../src/animation_state.h"
+
 #include "giant_test.h"
+#include "gltf_test_files.h"
 
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <random>
 
 using namespace giant;
 using namespace giant::editor;
@@ -306,4 +312,188 @@ GIANT_TEST("hair: more wear it than are kept or moved, the lowest ids and the ne
     state.scene = world::Scene{};
     hair.follow(state.scene, state.scene.untaken_changes());
     GIANT_CHECK(hair.stats().wearing == 0 && hair.stats().growing == 0 && hair.draws().empty());
+}
+
+namespace {
+
+// The two-joint arm (geometry tests): a strip 0.2 m wide from y = 0 to 2,
+// facing +z, its lower half the shoulder's and its upper the elbow's (at
+// y = 1), which also carries a sword; clip "bend" turns the elbow a quarter turn about z over 1 s.
+std::string hair_file(const char* name, const std::vector<u8>& bytes) {
+    // (A folder of this run's own: two build trees may test at once.)
+    static const std::string own = "giant_hair_tests_" + std::to_string(std::random_device{}());
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / own;
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path = dir / name;
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
+                                                static_cast<std::streamsize>(bytes.size()));
+    return path.generic_string();
+}
+
+} // namespace
+
+GIANT_TEST("hair: on a character it grows from the skin its joint moves, rides the joint and feels the body") {
+    const std::string arm = hair_file("arm.glb", geometry::testing::skinned_arm());
+    MeshLibrary meshes(nullptr);
+    AnimationState animation(nullptr);
+    HairState hair(nullptr, &meshes);
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.meshes = &meshes;
+    state.animation = &animation;
+    state.hair = &hair;
+    register_scene_commands(commands, state);
+    register_animation_commands(commands, state);
+    register_hair_commands(commands, state);
+    ai::ExecuteOptions options;
+    options.record_history = true;
+    const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, options); };
+
+    // The scalp: the elbow's half of the strip, its upper half by `top`, in
+    // the elbow's space (its origin at y = 1), twice the size at scale 2.
+    const MeshLibrary::Loaded loaded = meshes.load(arm);
+    GIANT_CHECK(loaded.mesh != nullptr && loaded.mesh->skinned != nullptr);
+    if (loaded.mesh == nullptr || loaded.mesh->skinned == nullptr) return;
+    const MeshLibrary::Skinned& character = *loaded.mesh->skinned;
+    const u32 elbow = hair_joint(character.skeleton, "elbow");
+    const u32 shoulder = hair_joint(character.skeleton, "shoulder");
+    GIANT_CHECK(elbow != k_no_hair_joint && shoulder != k_no_hair_joint && elbow != shoulder);
+    GIANT_CHECK(hair_joint(character.skeleton, "") == k_no_hair_joint); // none named like a head
+    GIANT_CHECK(hair_joint(character.skeleton, "Elbow") == k_no_hair_joint);
+    const geometry::TriangleMesh scalp = hair_scalp(character, elbow, 2.0f, 0.5f);
+    float low = 10.0f, high = -10.0f, wide = 0.0f;
+    double area = 0.0;
+    for (usize i = 0; i + 2 < scalp.vertices.size(); i += 3) {
+        for (usize c = 0; c < 3; ++c) {
+            const geometry::Vertex& v = scalp.vertices[i + c];
+            low = std::min(low, v.position.y);
+            high = std::max(high, v.position.y);
+            wide = std::max(wide, std::abs(v.position.x));
+            GIANT_CHECK_NEAR(v.normal.z, 1.0, 1e-4);
+        }
+        area += 0.5 * static_cast<double>(length(cross(scalp.vertices[i + 1].position - scalp.vertices[i].position,
+                                                       scalp.vertices[i + 2].position - scalp.vertices[i].position)));
+    }
+    // (With the sword the elbow carries, its skin runs from y = 1 to 2.5 as
+    // bound: the upper half from 1.75, so 0.75 to 1.5 above the joint, x 2.)
+    GIANT_CHECK_NEAR(low, 1.5, 1e-4);
+    GIANT_CHECK_NEAR(high, 3.0, 1e-4);
+    GIANT_CHECK(wide >= 0.2f - 1e-4f && area > 0.1);
+    // A skeleton under a scaled node with its joints' own axes turned (inverse binds 100 times and
+    // turned back, joints a hundredth and turned: as exported in centimetres, z up) grows the same
+    // scalp: the size it is drawn, upright as it stands.
+    MeshLibrary::Skinned exported = character;
+    const Quat quarter = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, 1.5707963f);
+    const Mat4 turned = mat4_from_transform({}, quarter, {0.01f, 0.01f, 0.01f});
+    const Mat4 back = mat4_from_transform({}, Quat{-quarter.x, -quarter.y, -quarter.z, quarter.w}, {100.0f, 100.0f, 100.0f});
+    for (Mat4& m : exported.skeleton.inverse_bind) m = back * m;
+    for (Mat4& m : exported.rest_model) m = m * turned;
+    const geometry::TriangleMesh same = hair_scalp(exported, elbow, 2.0f, 0.5f);
+    GIANT_CHECK(same.vertices.size() == scalp.vertices.size());
+    for (usize i = 0; i < same.vertices.size() && i < scalp.vertices.size(); ++i) {
+        GIANT_CHECK(length(same.vertices[i].position - scalp.vertices[i].position) < 1e-3f);
+    }
+    // From the shoulder down it is the whole arm's skin; a joint past the skeleton has none.
+    GIANT_CHECK(hair_scalp(character, shoulder, 1.0f, 1.0f).indices.size() > hair_scalp(character, elbow, 1.0f, 1.0f).indices.size());
+    GIANT_CHECK(hair_scalp(character, 99, 1.0f, 0.5f).indices.empty());
+
+    // On an entity: grown in the joint's space, drawn at the joint.
+    ai::CommandResult made = run("create_entity", {{"shape", "mesh"},
+                                                   {"mesh", arm},
+                                                   {"position", {10.0, 0.0, 0.0}},
+                                                   {"hair", {{"on", true}, {"joint", "elbow"}, {"strands", 300}, {"guides", 8}, {"length", 0.2}}}});
+    GIANT_CHECK(made.ok);
+    const world::EntityId id = made.ok ? made.value["id"].get<world::EntityId>() : 0;
+    Json got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 1 && got["hair"]["strands"] == 300 && got["hair"]["problem"] == "" && got["hair"]["joint"] == "elbow");
+    GIANT_CHECK_NEAR(got["hair"]["position"][0].get<double>(), 10.0, 1e-4);
+    GIANT_CHECK_NEAR(got["hair"]["position"][1].get<double>(), 1.0, 1e-4);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_min"][1].get<double>(), 0.75, 0.21); // roots from 0.75 up, hanging at most 0.2 below
+    GIANT_CHECK(got["hair"]["capsules"].get<u32>() <= 16);
+    GIANT_CHECK(got["hair"]["capsules"].get<usize>() == std::min<usize>(character.capsules.size(), 16));
+
+    // Animated, it rides the joint: bent a quarter turn about z, the joint's up points along -x.
+    GIANT_CHECK(run("set_animation", {{"id", id}, {"clip", "bend"}, {"loop", false}}).ok);
+    for (int i = 0; i < 80; ++i) animation.update(state.scene, meshes, state.scene.untaken_changes(), 1.0 / 60.0);
+    hair.follow(state.scene, state.scene.untaken_changes());
+    hair.place(&animation, nullptr, nullptr, nullptr);
+    HairState::View view;
+    GIANT_CHECK(hair.view(id, view));
+    Vec3 up = rotate(view.rotation, Vec3{0.0f, 1.0f, 0.0f});
+    GIANT_CHECK(up.x < -0.95f && std::abs(up.y) < 0.2f);
+    GIANT_CHECK_NEAR(view.position.x, 10.0, 1e-3);
+    GIANT_CHECK_NEAR(view.position.y, 1.0, 1e-3);
+    // Carried (as the physics or a walker moves its entity) it goes along; then it moves, pushed by the body.
+    DrawnPoses carried;
+    world::Transform there;
+    there.position = {20.0, 3.0, 0.0};
+    carried[id] = there;
+    hair.place(&animation, nullptr, &carried, nullptr);
+    GIANT_CHECK(hair.view(id, view));
+    GIANT_CHECK_NEAR(view.position.x, 20.0, 1e-3);
+    GIANT_CHECK_NEAR(view.position.y, 4.0, 1e-3);
+    WindState still;
+    for (int i = 0; i < 30; ++i) hair.update(still, DVec3{20.0, 4.0, 2.0}, 1.0 / 60.0);
+    // Another file loaded meanwhile (every character is looked up again) leaves it where it was placed.
+    std::vector<u8> other;
+    geometry::testing::append(other, std::vector<float>{0, 0, 0, 2, 0, 0, 0, 2, 0});
+    geometry::testing::append(other, std::vector<u32>{0, 1, 2});
+    const std::string loaded_since = hair_file(
+        "other.glb",
+        geometry::testing::make_glb(
+            R"({"asset":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
+            R"("meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],"buffers":[{"byteLength":48}],)"
+            R"("bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12}],)"
+            R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[2,2,0]},)"
+            R"({"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"}]})",
+            other));
+    GIANT_CHECK(meshes.load(loaded_since).mesh != nullptr);
+    hair.update(still, DVec3{20.0, 4.0, 2.0}, 1.0 / 60.0);
+    GIANT_CHECK(hair.view(id, view));
+    GIANT_CHECK_NEAR(view.position.x, 20.0, 1e-3);
+    GIANT_CHECK_NEAR(view.position.y, 4.0, 1e-3);
+    GIANT_CHECK(hair.stats().simulated == 1 && hair.stats().resets == 0);
+    GIANT_CHECK(hair.view(id, view) && view.simulated && view.guide_points.size() == 8 * 16);
+    for (const Vec3& p : view.guide_points) GIANT_CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+
+    // Another joint: grown again from that joint's skin (the whole arm, so lower in its space). Until
+    // it is grown the old groom stays on the joint it was grown round.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"joint", "shoulder"}, {"top", 1.0}}}}).ok);
+    hair.follow(state.scene, state.scene.untaken_changes());
+    hair.place(&animation, nullptr, &carried, nullptr);
+    GIANT_CHECK(hair.view(id, view) && view.grown);
+    GIANT_CHECK_NEAR(view.position.y, 4.0, 1e-3); // the elbow's
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    hair.place(&animation, nullptr, &carried, nullptr);
+    GIANT_CHECK(hair.view(id, view));
+    GIANT_CHECK_NEAR(view.position.y, 3.0, 1e-3); // the shoulder's
+    GIANT_CHECK(got["hair"]["joint"] == "shoulder" && got["hair"]["grown"] == true);
+    GIANT_CHECK(got["hair"]["bounds_min"][1].get<double>() < 0.1);
+    // No such joint, none named like a head, a file without a skeleton: nothing grown, and why.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"joint", "nose"}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["wearing"] == 1 && got["grown"] == 0 && got["growing"] == 0 && got["left_out"] == 0);
+    GIANT_CHECK(got["hair"]["problem"].get<std::string>().find("nose") != std::string::npos && got["hair"]["grown"] == false);
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"joint", ""}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["hair"]["problem"].get<std::string>().find("head") != std::string::npos);
+    std::vector<u8> bin;
+    geometry::testing::append(bin, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
+    geometry::testing::append(bin, std::vector<u32>{0, 1, 2});
+    const std::string plain = hair_file(
+        "triangle.glb",
+        geometry::testing::make_glb(
+            R"({"asset":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
+            R"("meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],"buffers":[{"byteLength":48}],)"
+            R"("bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12}],)"
+            R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},)"
+            R"({"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"}]})",
+            bin));
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", plain}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["hair"]["problem"].get<std::string>().find("skeleton") != std::string::npos && got["grown"] == 0);
+    // Back on the arm with its joint named: it grows again.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", arm}, {"hair", {{"joint", "elbow"}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 1 && got["hair"]["problem"] == "" && got["hair"]["strands"] == 300);
 }

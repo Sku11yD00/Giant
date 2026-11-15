@@ -334,7 +334,7 @@ int run(const Options& options) {
     state.animation = &animation;
     editor::ClothState cloth(renderer.get()); // likewise
     state.cloth = &cloth;
-    editor::HairState hair(renderer.get()); // likewise: its grooms leave first
+    editor::HairState hair(renderer.get(), &meshes); // likewise: its grooms leave first
     state.hair = &hair;
     editor::SwingState swing(renderer.get(), &meshes);
     state.swing = &swing;
@@ -540,6 +540,7 @@ int run(const Options& options) {
         input.occluders = occluder_frame;
         input.wind = weather.wind();
         input.particle_styles = effects.styles();
+        hair.place(&animation, &physics.poses(), &walkers.poses(), &swing.poses()); // where each is drawn this frame
         input.hair = hair.draws();
         if (!in_screenshot) { // (a screenshot's frame gives no births again, and stands still)
             input.particle_bursts = effects.take();

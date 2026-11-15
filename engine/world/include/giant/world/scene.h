@@ -126,17 +126,20 @@ struct Lamp {
     bool operator==(const Lamp&) const = default;
 };
 
-// Hair an entity wears (when on; cube and sphere entities): strands grown
-// from the top of its shape, simulated near the camera and drawn by the
-// renderer's hair passes. The shape of the hair is geometry::GroomParams',
+// Hair an entity wears (when on): strands grown from the top of its shape
+// (cube and sphere entities) or from a character's skin round one of its
+// joints (mesh entities with a skinned file: `joint`), simulated near the
+// camera and drawn by the renderer's hair passes. The shape of the hair is geometry::GroomParams',
 // its look render::HairLook's. Kept while off.
 constexpr i32 k_max_hair_strands = 200000;
 constexpr i32 k_max_hair_guides = 1024;
+constexpr usize k_max_hair_joint_bytes = 128;
 struct Hair {
     bool on = false;
     i32 strands = 20000;            // 1 to k_max_hair_strands
     i32 guides = 256;               // 1 to k_max_hair_guides (and at most `strands`): the strands that are simulated
     float top = 0.5f;               // 0.01 to 1: the share of the shape's height, from its top, that grows hair
+    std::string joint;              // a character's joint it grows round and rides (empty: the first named like a head)
     float length = 0.25f;           // metres, 0.001 to 10
     float length_variation = 0.2f;  // 0 to 1: strands are shorter by up to this share
     float droop = 0.8f;             // 0 to 1: stands on end to hangs
