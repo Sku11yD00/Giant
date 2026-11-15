@@ -1890,6 +1890,63 @@ curves), resampled evenly along their length and shuffled.
 is deterministic and CPU only; the simulation, drawing, shadows and the
 editor's side follow in C6b to C6e.
 
+The guides are simulated by `sim::HairSim` (`giant/sim/hair.h`, C6b), one
+per groom, from the guides' rest points alone (the sim module does not
+know grooms). Position-based, as the cloth is. Each fixed step a point
+keeps its speed less `damping` (1/s, measured against its root's move, so
+hair on a running head is not held back), falls, is dragged toward the
+wind's speed (the share grows with how fast the air passes, capped so it
+never overshoots), and is pulled back toward where it rests in the style
+by a spring of `root_stiffness` Hz by the root down to `tip_stiffness` Hz
+at the tip, taken implicitly (curls stay curls, long hair still swings;
+finer steps sag a little less and swing longer, so a style is tuned at
+the step it runs at). Then each piece is set to exactly its length from
+root to tip, so hair does not stretch (sharing a piece's error between
+its ends first, as cloth does, was measured to make hanging hair wriggle
+and was left out). In that pass the point above gives up speed for the
+move (Mueller's follow-the-leader
+correction): without it a strand let go whips up higher than it began,
+with all of it hanging hair wriggles for ever once a step's fall is large
+against a piece's length, so the share is `1 - 0.7 cbrt(fall / piece
+length)`, measured to do neither for even and uneven pieces of 3 mm to
+6 cm at steps of 1/30 to 1/240 s (the range `step_seconds` takes). In a storm loose hair flutters, as hair does.
+
+Capsules (`HairFrame::capsules`, at most 16, known by their place in the
+list, taken to ride the head between frames; each guide tests only those
+within its reach) are kept out in the strict pass: a point is put out by
+the radius and the hair's `thickness`, held from sliding by `friction`
+(by how hard it was pressed in), and its piece set to its length again, a
+few times over, ending on the length. So pieces keep their length and
+may lie a little into the stand-off; a point still pressed after that is
+put out of the capsule itself, which is the one case where a piece
+stretches (a capsule driven into hair faster than it can get out of the
+way; a capsule faster than its own width a step can pass through). A
+point is
+never kept further out than it rested when the hair was placed, so a
+head's capsule does not lift hair off its own scalp while a shoulder
+brought against hanging hair still pushes it aside; the price is that a
+limb crossing the rest shape at the moment of placing is let through
+there until the hair is placed again, so hair is placed with the
+character at rest.
+
+Points live in the world's directions about the place the hair hangs
+from (`HairFrame::position`, rotation, uniform scale), so moving the head
+swings the hair and floats stay exact far from the origin; `points()`
+gives them in the groom's space, ready for `pose_strand` and the
+renderer. The hair is simulated up to the last whole step before now and
+rides the head from there; each step sees the head where it was at that
+step's time (between the last frame's place and this one's). So a frame
+shorter than a step changes nothing, and frames of any length up to
+`max_steps` steps neither stretch the hair nor show it a head faster or
+slower than it is (time past that is dropped: the hair moves in slow
+motion on such a frame). A new scale resizes the hair as it hangs. A
+jump (over 5 m plus 100 m/s for the frame's time) or numbers gone wrong
+carry the hair whole at rest (`HairStats::resets`). Moves
+under a hundredth of a millimetre are not shown, so hair at rest keeps
+its `version()`. Work is bounded: steps of `step_seconds` (1/240 to 1/30
+s), at most `max_steps` a frame, nothing allocated after construction.
+Not saved (view state, as cloth).
+
 ## Ballistics (W1a)
 
 `sim::Ballistics` flies bullets through the physics world as point masses:
