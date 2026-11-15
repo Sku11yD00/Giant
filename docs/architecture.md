@@ -2111,10 +2111,13 @@ skeleton, or no such joint, grows none and `get_hair` says why
 again whenever the mesh library changes. Everything the joint's skin holds
 above the cut grows hair, eyes and all: name a joint whose skin is the
 scalp, or lower `top`.
-Limits until C6e part 3: mesh files without a skeleton grow no hair, a
-file's own hair curves (glTF line primitives) are not read, kits made
-from entities do not carry hair, and there is no panel or button for it
-yet (commands only).
+In the editor the "+ Hair" button adds a head of hair (a sized ball), and
+an entity's settings have "Wears hair" with its growth, look and motion,
+a character's joint by name, and what the hair is doing (strands, growing,
+moving, or why none grew); each change is a `set_entity`, so it undoes.
+`tools/mcp_smoke.py` grows hair on a ball. Limits until C6e part 4: mesh
+files without a skeleton grow no hair, a file's own hair curves (glTF line
+primitives) are not read, and kits made from entities do not carry hair.
 
 ## Ballistics (W1a)
 
