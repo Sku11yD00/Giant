@@ -992,17 +992,6 @@ Shaded shade_pixel(float4 position, bool spread) {
                          (skin_through.x * clouds);
         color += t;
         diffuse_sun += t;
-        if (pixel.y >= 24u) { // (diagnosis only, not to merge)
-            float r = thickness;
-            if (pixel.y >= 44u) {
-                r = sun_thickness_flat(extras.shadows, world, surface_n, pixel_size);
-            } else if (pixel.y >= 34u) {
-                r = sun_thickness_direct(extras.shadows, world, surface_n, pixel_size);
-            }
-            color = float3(r > 0.005 ? 10.0 : 0.0, r > 1e-5 ? 10.0 : 0.0, r < 0.0 ? 10.0 : 0.0);
-            diffuse_sun = float3(0.0, 0.0, 0.0);
-            diffuse_lamps = float3(0.0, 0.0, 0.0);
-        }
     }
     // Skin's spread light, left out here (added back spread, past the fog:
     // dimmed by the fog's average over the channels, and not by falling

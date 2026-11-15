@@ -23,6 +23,22 @@ void report_failure(const char* file, int line, const char* expression) {
 
 } // namespace giant::test
 
+#if defined(__SANITIZE_THREAD__)
+#define GIANT_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define GIANT_TSAN 1
+#endif
+#endif
+#if defined(GIANT_TSAN)
+// Jolt's Mutex (built with its asserts) reads the thread that holds it
+// before taking it, to assert a thread never takes it twice: a race only
+// in that check, never in what the lock guards.
+extern "C" const char* __tsan_default_suppressions() {
+    return "race:JPH::Mutex::try_lock\n";
+}
+#endif
+
 int main(int argc, char** argv) {
     using namespace giant::test;
     const char* filter = argc > 1 ? argv[1] : nullptr;

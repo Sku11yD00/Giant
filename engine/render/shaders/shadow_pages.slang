@@ -280,18 +280,13 @@ float sun_thickness_on(Shadows s, ByteAddressBuffer levels, ByteAddressBuffer ta
     return lerp(lerp(through[0], through[1], f.x), lerp(through[2], through[3], f.x), f.y);
 }
 
-// (Diagnosis only, not to merge.)
-float sun_thickness_direct(Shadows s, float3 world, float3 n, float pixel_size) {
-    if (s.level_count == 0u) {
-        return -1.0;
-    }
-    const uint count = min(s.level_count, k_shadow_max_levels);
-    const float wanted = log2(max(pixel_size / s.texel, 1.0));
-    const uint level = min(uint(wanted), count - 1);
-    return sun_thickness_on(s, read_buffer(s.levels), read_buffer(s.table), read_buffer(s.atlas), level, s.x, s.y, s.z,
-                            s.depth_offset, world, n);
-}
-float sun_thickness_flat(Shadows s, float3 world, float3 n, float pixel_size) {
+// How far the sun's light goes through whatever is between the sun and a
+// camera-relative point with normal `n` (unit), in metres
+// (sun_thickness_on), on the finest level its pixel needs whose page is
+// drawn, the previous view's page on a level standing in where the
+// current's is not drawn yet (as for sun_visibility; no pages are asked
+// for here: sun_visibility asks for the same). -1: not known.
+float sun_thickness(Shadows s, float3 world, float3 n, float pixel_size) {
     if (s.level_count == 0u) {
         return -1.0;
     }
@@ -301,6 +296,9 @@ float sun_thickness_flat(Shadows s, float3 world, float3 n, float pixel_size) {
     const uint count = min(s.level_count, k_shadow_max_levels);
     const float wanted = log2(max(pixel_size / s.texel, 1.0));
     const uint first = min(uint(wanted), count - 1);
+    // One way out, the loop from 0: starting at `first` and returning from
+    // inside read as no thickness at all on the software adapter (the same
+    // lookups, called on their own, were right).
     float result = -1.0;
     bool found = false;
     for (uint level = 0; level < count; ++level) {
@@ -318,32 +316,4 @@ float sun_thickness_flat(Shadows s, float3 world, float3 n, float pixel_size) {
         }
     }
     return result;
-}
-
-// How far the sun's light goes through whatever is between the sun and a
-// camera-relative point with normal `n` (unit), in metres
-// (sun_thickness_on), on the finest level its pixel needs whose page is
-// drawn, the previous view's page on a level standing in where the
-// current's is not drawn yet (as for sun_visibility; no pages are asked
-// for here: sun_visibility asks for the same). -1: not known.
-float sun_thickness(Shadows s, float3 world, float3 n, float pixel_size) {
-    if (s.level_count == 0u) {
-        return -1.0;
-    }
-    ByteAddressBuffer levels = read_buffer(s.levels);
-    ByteAddressBuffer table = read_buffer(s.table);
-    ByteAddressBuffer atlas = read_buffer(s.atlas);
-    const uint count = min(s.level_count, k_shadow_max_levels);
-    const float wanted = log2(max(pixel_size / s.texel, 1.0));
-    for (uint level = min(uint(wanted), count - 1); level < count; ++level) {
-        float t = sun_thickness_on(s, levels, table, atlas, level, s.x, s.y, s.z, s.depth_offset, world, n);
-        if (t == -2.0 && s.prev_on != 0u) {
-            t = sun_thickness_on(s, levels, table, atlas, count + level, s.prev_x, s.prev_y, s.prev_z,
-                                 s.prev_depth_offset, world, n);
-        }
-        if (t != -2.0) {
-            return t;
-        }
-    }
-    return -1.0;
 }
