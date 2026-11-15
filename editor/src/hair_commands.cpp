@@ -22,7 +22,8 @@ void register_hair_commands(ai::CommandRegistry& registry, EditorState& state) {
         {"get_hair",
          "The entities' hair (set with create_entity / set_entity `hair`) and what it is doing: entities "
          "wearing it, grooms grown, `reading` (waiting for a groom file, `hair.file`, to be read on a worker: "
-         "seconds for a large one; at most 8 different files are held at once and hair past them waits) and "
+         "seconds for a large one; at most 8 different files are held at once and hair past them waits: its "
+         "`waiting` is then true too) and "
          "still growing (a groom grows on a worker after it is put on or "
          "changed: a few frames, about a second for 200000 strands; changed hair shows its old groom until "
          "the new one is grown and sent to the GPU, and hair changed every frame keeps the old one until the "
@@ -31,7 +32,7 @@ void register_hair_commands(ai::CommandRegistry& registry, EditorState& state) {
          "renderer is given, strands in all, entities left out (more than 256 wear hair, or more than "
          "2000000 strands in all: lowest ids first), simulations put back at rest after going wrong. With "
          "`id`, that entity's too: whether it is grown, reading, growing, ready (the renderer has all of its groom, so "
-         "it is drawn from the next frame on), simulated and left out, its `problem` (why a mesh entity grows "
+         "it is drawn from the next frame on), simulated and left out, its `problem` (why it grows "
          "none: its file is not loaded or has no skeleton, no such joint, or a groom file that cannot be read, which is "
          "not tried again until the setting changes; empty otherwise), a character's `joint` and the "
          "`capsules` of its body the hair is pushed aside by, where it is drawn (`position`, `rotation` x y z "
@@ -67,6 +68,7 @@ void register_hair_commands(ai::CommandRegistry& registry, EditorState& state) {
                              {"grown", v.grown},
                              {"growing", v.growing},
                              {"reading", v.reading},
+                             {"waiting", v.waiting},
                              {"ready", v.ready},
                              {"left_out", v.left_out},
                              {"problem", v.problem},

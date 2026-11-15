@@ -743,6 +743,8 @@ void EditorPanels::draw_properties() {
                     ImGui::TextWrapped("No hair: %s", view.problem.c_str());
                 } else if (view.left_out) {
                     ImGui::TextDisabled("Left out: too much hair in this world");
+                } else if (view.waiting) {
+                    ImGui::TextDisabled("Waiting: as many groom files as may be held are worn");
                 } else if (view.reading) {
                     ImGui::TextDisabled("Reading its groom file...");
                 } else {

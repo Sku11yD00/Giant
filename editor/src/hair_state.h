@@ -102,6 +102,8 @@ public:
     static constexpr u32 k_sims_made_per_update = 2;
     static constexpr u32 k_taken_per_update = 2; // grown grooms handed to the renderer
     static constexpr usize k_max_groom_files = 8; // different ones held at once (hair past them waits)
+    static constexpr usize k_max_groom_names = 64; // with those that could not be read (they hold no curves)
+    static constexpr u32 k_groom_file_kept_updates = 600; // one no hair wears is kept this long (hidden and shown again, undo)
     static constexpr double k_simulate_within = 30.0;
     static constexpr double k_keep_simulating_within = 33.0; // one already moving
 
@@ -144,6 +146,7 @@ public:
         bool grown = false;
         bool growing = false;
         bool reading = false; // its groom file is being read, or waits its turn (the hair it had shows until then)
+        bool waiting = false; // reading, and not begun: as many files as may be held are
         bool ready = false; // drawn from now on: the renderer has all of its groom
         bool simulated = false;
         bool left_out = false;
@@ -165,7 +168,8 @@ private:
     struct Grown; // a job's result
     struct GroomFile; // a groom file read on a worker
     std::shared_ptr<GroomFile> groom_file(const std::string& path);
-    void let_go_of_files(bool wait);
+    void let_go_of_files(bool now);
+    bool room_for_file() const;
     void follow_one(const world::Scene& scene, world::EntityId id);
     void drop(world::EntityId id);
     void shed(Worn& worn);

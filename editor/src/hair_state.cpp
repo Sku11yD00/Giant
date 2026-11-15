@@ -314,7 +314,8 @@ struct HairState::Grown {
 struct HairState::GroomFile {
     std::string path; // normalised
     WaitGroup done;
-    std::atomic<bool> cancel{false};
+    std::atomic<bool> cancel{false}; // let go: not read if not yet begun, and not found again
+    u32 unworn = 0;                  // updates no hair has worn it
     // The worker's, read once `done`:
     std::shared_ptr<const std::vector<std::vector<Vec3>>> curves;
     std::string problem; // why it has none
@@ -582,7 +583,7 @@ std::shared_ptr<HairState::GroomFile> HairState::groom_file(const std::string& n
     for (const std::shared_ptr<GroomFile>& file : m_files) {
         if (file->path == path && !file->cancel.load()) return file;
     }
-    if (m_files.size() >= k_max_groom_files) return nullptr;
+    if (!room_for_file()) return nullptr;
     auto file = std::make_shared<GroomFile>();
     file->path = std::move(path);
     m_files.push_back(file);
@@ -614,16 +615,34 @@ std::shared_ptr<HairState::GroomFile> HairState::groom_file(const std::string& n
     return file;
 }
 
-// Groom files no hair wears any more are let go: one not yet read is not
-// read (or with `wait`, waited for), and none of them is found again.
-void HairState::let_go_of_files(bool wait) {
+// Whether another groom file may be read: those that could not be read
+// hold nothing, and count only as names.
+bool HairState::room_for_file() const {
+    usize held = 0;
+    for (const std::shared_ptr<GroomFile>& file : m_files) {
+        if (!(file->done.done() && file->curves == nullptr)) ++held;
+    }
+    return held < k_max_groom_files && m_files.size() < k_max_groom_names;
+}
+
+// Groom files no hair wears any more are let go: at once one that could
+// not be read (so it is tried again when next worn), the others after
+// k_groom_file_kept_updates calls (hair hidden and shown again, or put back
+// by an undo, does not read its file again), or `now`: all of them, those
+// still being read waited for (room is needed). None let go is found again.
+void HairState::let_go_of_files(bool now) {
     for (const std::shared_ptr<GroomFile>& file : m_files) {
         if (file->cancel.load()) continue;
         bool worn = false;
         for (const auto& [id, held] : m_worn) worn = worn || held->file == file;
-        if (!worn) file->cancel.store(true);
+        if (worn) {
+            file->unworn = 0;
+            continue;
+        }
+        const bool failed = file->done.done() && file->curves == nullptr;
+        if (now || failed || ++file->unworn > k_groom_file_kept_updates) file->cancel.store(true);
     }
-    if (wait) {
+    if (now) {
         for (const std::shared_ptr<GroomFile>& file : m_files) {
             if (file->cancel.load()) m_jobs.wait(file->done);
         }
@@ -682,7 +701,7 @@ void HairState::resolve(Worn& worn) {
             curves = file->curves;
         }
     }
-    if (worn.file != file) worn.file_name = file != nullptr ? worn.hair.file : std::string();
+    worn.file_name = file != nullptr ? worn.hair.file : std::string();
     worn.file = std::move(file);
     worn.reading = reading;
     if (!worn.problem.empty()) shed(worn);
@@ -808,6 +827,8 @@ void HairState::finish() {
         m_meshes_seen = m_meshes->version();
         for (const auto& [id, worn] : m_worn) resolve(*worn);
     }
+    // (Files that could not be read and no hair wears now are tried again when next worn.)
+    if (!m_files.empty()) let_go_of_files(false);
     rank();
     for (const auto& [id, worn] : m_worn) {
         // (One waiting for room: files no hair wears are let go, then it is asked for again.)
@@ -836,7 +857,12 @@ void HairState::finish() {
 
 void HairState::update(const WindState& wind, const DVec3& camera, double seconds) {
     std::erase_if(m_abandoned, [](const std::shared_ptr<Grown>& job) { return job->done.done(); });
-    if (!m_files.empty()) let_go_of_files(false);
+    if (!m_files.empty()) {
+        // (Hair waiting for room: files no hair wears are not kept for later.)
+        bool waiting = false;
+        for (const auto& [id, worn] : m_worn) waiting = waiting || (worn->reading && worn->file == nullptr);
+        let_go_of_files(waiting && !room_for_file());
+    }
     // (A file loaded or loaded again since: characters found, or changed.)
     if (m_meshes != nullptr && m_meshes->version() != m_meshes_seen) {
         m_meshes_seen = m_meshes->version();
@@ -850,7 +876,7 @@ void HairState::update(const WindState& wind, const DVec3& camera, double second
         const bool moving = worn.simulated;
         worn.simulated = false;
         // (Read since, or room made for its file.)
-        if (worn.reading && (worn.file != nullptr ? worn.file->done.done() : m_files.size() < k_max_groom_files)) resolve(worn);
+        if (worn.reading && (worn.file != nullptr ? worn.file->done.done() : room_for_file())) resolve(worn);
         if (worn.left_out || !worn.problem.empty()) continue;
         // (A groom taken is a GPU buffer made: a few an update.)
         if (worn.job != nullptr && taken < k_taken_per_update && worn.job->done.done()) {
@@ -963,6 +989,7 @@ bool HairState::view(world::EntityId id, View& out) const {
     out.grown = coat.grown && coat.strands > 0;
     out.growing = worn.job != nullptr || worn.has_next;
     out.reading = worn.reading;
+    out.waiting = worn.reading && worn.file == nullptr;
     out.ready = coat.groom != render::k_no_groom && m_renderer != nullptr && m_renderer->groom_ready(coat.groom);
     out.simulated = worn.simulated;
     out.left_out = worn.left_out;
