@@ -25,6 +25,7 @@
 
 #include <array>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace giant::render {
@@ -68,6 +69,12 @@ struct PackedGroom {
 // Empty for a groom with a groom_problem or no strands. Strands past
 // k_max_groom_strands are left out.
 PackedGroom pack_groom(const geometry::Groom& groom);
+
+// A groom packed away from the renderer's thread (Renderer::prepare_groom).
+struct PreparedGroom {
+    PackedGroom packed;
+    std::string problem; // why `packed` is empty
+};
 
 // A packed point back in the groom's space (as the shader reads it).
 Vec3 unpack_point(const PackedGroom& groom, u32 strand, u32 point);

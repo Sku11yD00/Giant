@@ -58,6 +58,14 @@ HairSettings clean(const HairSettings& s) {
     return c;
 }
 
+void HairSim::set_motion(float root_stiffness, float tip_stiffness, float damping) {
+    HairSettings wanted = m_settings;
+    wanted.root_stiffness = root_stiffness;
+    wanted.tip_stiffness = tip_stiffness;
+    wanted.damping = damping;
+    m_settings = clean(wanted);
+}
+
 HairSim::HairSim(std::span<const Vec3> rest_guides, const HairSettings& settings) : m_settings(clean(settings)) {
     m_guides = static_cast<u32>(rest_guides.size() / k_hair_points);
     const usize count = static_cast<usize>(m_guides) * k_hair_points;

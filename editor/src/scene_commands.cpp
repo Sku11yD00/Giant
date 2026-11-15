@@ -128,6 +128,31 @@ Json entity_json(const Entity& e) {
                      {"shadows", l.shadows},
                      {"shadow_near", l.shadow_near}};
     }
+    if (!(e.hair == world::Hair{})) {
+        const world::Hair& h = e.hair; // kept while off
+        j["hair"] = {{"on", h.on},
+                     {"strands", h.strands},
+                     {"guides", h.guides},
+                     {"top", h.top},
+                     {"length", h.length},
+                     {"length_variation", h.length_variation},
+                     {"droop", h.droop},
+                     {"curl_radius", h.curl_radius},
+                     {"curl_turns", h.curl_turns},
+                     {"frizz", h.frizz},
+                     {"clump", h.clump},
+                     {"seed", h.seed},
+                     {"melanin", h.melanin},
+                     {"redness", h.redness},
+                     {"tint", vec3_json(h.tint)},
+                     {"roughness", h.roughness},
+                     {"width", h.width},
+                     {"tip_width", h.tip_width},
+                     {"variation", h.variation},
+                     {"moves", h.moves},
+                     {"stiffness", h.stiffness},
+                     {"damping", h.damping}};
+    }
     if (!(e.effect == world::EntityEffect{})) {
         j["effect"] = {{"on", e.effect.on}, {"effect", e.effect.effect}, {"rate", e.effect.rate}}; // kept while off
     }
@@ -160,6 +185,10 @@ Json number(double minimum, double maximum, const char* description) {
     return {{"type", "number"}, {"minimum", minimum}, {"maximum", maximum},
             {"description", description}};
 }
+Json whole(i32 minimum, i32 maximum, const char* description) {
+    return {{"type", "integer"}, {"minimum", minimum}, {"maximum", maximum}, {"description", description}};
+}
+
 Json triple(double minimum, double maximum, const char* description) {
     return {{"type", "array"},
             {"items", {{"type", "number"}, {"minimum", minimum}, {"maximum", maximum}}},
@@ -269,6 +298,43 @@ Json entity_properties() {
                           "lit view out to 4 km, following it as it moves or swings. Any shape; a hidden entity "
                           "gives none. Pair it with emissive for the bulb itself to glow. Without shadows it "
                           "lights through walls. Kept while off. A kit piece's lamp lights every placement (not scatter's); for cloth the offset is in metres (its scale is unused)."}}},
+        {"hair",
+         {{"type", "object"},
+          {"additionalProperties", false},
+          {"properties",
+           {{"on", {{"type", "boolean"}, {"description", "It wears hair. Default off."}}},
+            {"strands", whole(1, world::k_max_hair_strands,
+                              "Strands grown (a head of hair is 100000; fewer, each drawn wider, look the same from "
+                              "a few metres). Default 20000.")},
+            {"guides", whole(1, world::k_max_hair_guides,
+                             "Strands that are simulated; the rest follow the nearest three. Default 256.")},
+            {"top", number(0.01, 1, "The share of the shape's height, from its top, that grows hair (0.5: the upper "
+                                    "half of a sphere). Default 0.5.")},
+            {"length", number(0.001, 10, "Metres. Default 0.25.")},
+            {"length_variation", number(0, 1, "Strands are shorter by up to this share. Default 0.2.")},
+            {"droop", number(0, 1, "0 stands on end, 1 hangs. Default 0.8.")},
+            {"curl_radius", number(0, 1, "Metres: the helix each strand winds round its line. Default 0 (straight).")},
+            {"curl_turns", number(0, 100, "Turns along a full-length strand. Default 0.")},
+            {"frizz", number(0, 1, "Metres a strand wanders by its tip. Default 0.")},
+            {"clump", number(0, 1, "How far tips are drawn together into locks. Default 0.")},
+            {"seed", whole(1, 1000000, "Another seed, another head of the same hair. Default 1.")},
+            {"melanin", number(0, 1, "0 white, 0.2 blond, 0.6 brown, 1 black. Default 0.5.")},
+            {"redness", number(0, 1, "Towards ginger. Default 0.2.")},
+            {"tint", triple(0, 1, "Linear RGB over the colour (dye). Default [1, 1, 1].")},
+            {"roughness", number(0.05, 1, "How wide its highlights spread along a strand. Default 0.3.")},
+            {"width", number(0.00001, 0.01, "Metres across a strand at its root. Default 0.00008.")},
+            {"tip_width", number(0, 1, "Its width at the tip, as a share of that. Default 0.3.")},
+            {"variation", number(0, 1, "How much strands differ in shade. Default 0.15.")},
+            {"moves", {{"type", "boolean"},
+                       {"description", "Simulated near the camera (gravity, the weather's wind, the entity's own "
+                                       "moves); off, it keeps its shape. Default on."}}},
+            {"stiffness", number(0, 60, "How firmly the roots hold the style (Hz; the tips an eighth of it). Default 8.")},
+            {"damping", number(0, 60, "How fast its swing dies away (1/s). Default 2.")}}},
+          {"description", "Hair it wears: strands grown from the top of its shape (cube and sphere entities; other "
+                          "shapes keep the settings and grow none), drawn strand by strand in the lit view, shading "
+                          "itself and what is under it. Changing how it grows (strands to seed, or the entity's "
+                          "scale) grows it again over a few frames; its look and motion change at once. Kept while "
+                          "off. See get_hair."}}},
         {"effect",
          {{"type", "object"},
           {"additionalProperties", false},
@@ -401,6 +467,32 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         e.lamp.source_radius = l.value("source_radius", e.lamp.source_radius);
         e.lamp.shadows = l.value("shadows", e.lamp.shadows);
         e.lamp.shadow_near = l.value("shadow_near", e.lamp.shadow_near);
+    }
+    if (args.contains("hair")) {
+        const Json& h = args["hair"];
+        world::Hair& o = e.hair;
+        o.on = h.value("on", o.on);
+        o.strands = h.value("strands", o.strands);
+        o.guides = h.value("guides", o.guides);
+        o.top = h.value("top", o.top);
+        o.length = h.value("length", o.length);
+        o.length_variation = h.value("length_variation", o.length_variation);
+        o.droop = h.value("droop", o.droop);
+        o.curl_radius = h.value("curl_radius", o.curl_radius);
+        o.curl_turns = h.value("curl_turns", o.curl_turns);
+        o.frizz = h.value("frizz", o.frizz);
+        o.clump = h.value("clump", o.clump);
+        o.seed = h.value("seed", o.seed);
+        o.melanin = h.value("melanin", o.melanin);
+        o.redness = h.value("redness", o.redness);
+        if (h.contains("tint")) o.tint = vec3_from(h["tint"]);
+        o.roughness = h.value("roughness", o.roughness);
+        o.width = h.value("width", o.width);
+        o.tip_width = h.value("tip_width", o.tip_width);
+        o.variation = h.value("variation", o.variation);
+        o.moves = h.value("moves", o.moves);
+        o.stiffness = h.value("stiffness", o.stiffness);
+        o.damping = h.value("damping", o.damping);
     }
     if (args.contains("effect")) {
         const Json& f = args["effect"];

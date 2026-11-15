@@ -2058,6 +2058,39 @@ clouds and dust are); hair is in no reflection; a groom has one place (one
 joint). At most 4 MiB of guides are taken as simulated a frame (the
 nearest grooms'); the rest draw at rest.
 
+In a world (C6e) hair is `world::Hair` on an entity: whether it is on, how
+it grows (`geometry::GroomParams`' fields and `top`, the share of the
+shape's height that grows hair), its look (`render::HairLook`'s) and its
+motion (`moves`, `stiffness`, `damping`), saved with the entity only when
+set and kept while off. The editor's `HairState` (`hair_state.h`) follows
+the scene: for each visible cube or sphere wearing hair it grows a groom on
+a worker from the top of the shape as the entity scales it (so scale
+stretches the head, not the strands; the shape is cut at the height `top`
+gives and its normals are the sized shape's), packs it there too
+(`Renderer::prepare_groom`: packing 200,000 strands takes tens of
+milliseconds), hands it to the renderer, and lists it in
+`FrameInput::hair` at the entity's place and turn. A change to what it
+grows from grows it again: one job an entity at a time, the old groom
+shown and moved until the new one is grown and the renderer has all of it
+(`groom_ready`), a result no longer wanted thrown away (hair changed every
+frame keeps its old groom until the changes stop); look and motion change
+at once, without putting the hair back at rest (`HairSim::set_motion`).
+The nearest within 30 m with `moves` on are simulated under the weather's
+wind (`sim::HairSim`), up to 16 of them and 4096 guides in all, stepped
+side by side on two workers of their own; one already moving keeps its
+place to 33 m and until another is clearly nearer, and at most two start
+moving in an update, and at most two grown grooms are handed to the
+renderer in one (each is a GPU buffer made; the first hair ever also makes
+the renderer's shared hair buffers, once). The rest hang as grown. Entities wear hair lowest ids
+first, up to 256 and 2,000,000 strands in all; the rest are left out.
+Closing the editor does not grow what was still waiting. `get_hair` reads
+it. View state: not saved, not undoable. Limits until C6e part 2: only
+cubes and spheres grow hair (not mesh files, so not animated characters or
+their joints), hair meets no capsules, entities carried by the physics, a
+swing or a walker leave their hair where the scene has them, kits made
+from entities do not carry hair, and there is no panel or button for it
+yet (commands only).
+
 ## Ballistics (W1a)
 
 `sim::Ballistics` flies bullets through the physics world as point masses:

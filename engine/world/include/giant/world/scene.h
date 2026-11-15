@@ -126,6 +126,38 @@ struct Lamp {
     bool operator==(const Lamp&) const = default;
 };
 
+// Hair an entity wears (when on; cube and sphere entities): strands grown
+// from the top of its shape, simulated near the camera and drawn by the
+// renderer's hair passes. The shape of the hair is geometry::GroomParams',
+// its look render::HairLook's. Kept while off.
+constexpr i32 k_max_hair_strands = 200000;
+constexpr i32 k_max_hair_guides = 1024;
+struct Hair {
+    bool on = false;
+    i32 strands = 20000;            // 1 to k_max_hair_strands
+    i32 guides = 256;               // 1 to k_max_hair_guides (and at most `strands`): the strands that are simulated
+    float top = 0.5f;               // 0.01 to 1: the share of the shape's height, from its top, that grows hair
+    float length = 0.25f;           // metres, 0.001 to 10
+    float length_variation = 0.2f;  // 0 to 1: strands are shorter by up to this share
+    float droop = 0.8f;             // 0 to 1: stands on end to hangs
+    float curl_radius = 0.0f;       // metres, 0 to 1
+    float curl_turns = 0.0f;        // 0 to 100, along a full-length strand
+    float frizz = 0.0f;             // metres, 0 to 1: a strand's wander by its tip
+    float clump = 0.0f;             // 0 to 1: tips drawn in to locks
+    i32 seed = 1;                   // 1 to 1000000
+    float melanin = 0.5f;           // 0 to 1: white through blond and brown to black
+    float redness = 0.2f;           // 0 to 1: ginger
+    Vec3 tint{1.0f, 1.0f, 1.0f};    // linear, 0 to 1 (dye)
+    float roughness = 0.3f;         // 0.05 to 1
+    float width = 0.00008f;         // metres across a strand at its root, 0.00001 to 0.01
+    float tip_width = 0.3f;         // 0 to 1: its width at the tip, as a share
+    float variation = 0.15f;        // 0 to 1: how much strands differ in shade
+    bool moves = true;              // simulated (near the camera); off, it keeps its shape
+    float stiffness = 8.0f;         // Hz, 0 to 60: how firmly the roots hold the style
+    float damping = 2.0f;           // 1/s, 0 to 60
+    bool operator==(const Hair&) const = default;
+};
+
 struct Transform {
     DVec3 position{};  // metres; doubles so a 20 km world keeps millimetres
     Quat rotation{};   // unit quaternion
@@ -256,6 +288,7 @@ struct Entity {
     SwingSettings swing; // when on: cube, sphere, plane, mesh and kit entities swing (kept otherwise)
     Lamp lamp;           // when on: it gives light, any shape (hidden entities give none)
     EntityEffect effect; // when on: it runs the effect where it stands (effects.h), any shape
+    Hair hair;           // when on: cube and sphere entities wear hair (kept otherwise)
     bool visible = true;
     BodyKind body = BodyKind::fixed;
     float mass = 0.0f; // kilograms, when dynamic; 0: from its size (as water)
