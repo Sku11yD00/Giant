@@ -341,7 +341,8 @@ Json entity_properties() {
                                       "on a character it is taken as in the character's model space and rides "
                                       "`joint`; on other entities it is in the entity's space. Set file_scale and "
                                       "file_axes to match the file. Wins over from_file. Empty: none (the default)."}}},
-            {"file_scale", number(0.0001, 10000, "The groom file's units in metres: 1 for metres (the default), "
+            // (As a float holds it, so what get_entity gives can be set again.)
+            {"file_scale", number(static_cast<double>(0.0001f), 10000, "The groom file's units in metres: 1 for metres (the default), "
                                                  "0.01 for centimetres (grooms made for Unreal).")},
             {"file_axes",
              {{"enum", {"y_up", "z_up", "z_up_left"}},

@@ -17,7 +17,9 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
 #include <random>
+#include <thread>
 
 using namespace giant;
 using namespace giant::editor;
@@ -621,7 +623,7 @@ GIANT_TEST("hair: a groom file is read on a worker and worn, in its units and ax
     GIANT_CHECK(made.ok);
     const world::EntityId id = made.ok ? made.value["id"].get<world::EntityId>() : 0;
     Json got = run("get_hair", {{"id", id}}).value;
-    GIANT_CHECK(got["hair"]["problem"] == "" && (got["hair"]["reading"] == true || got["hair"]["growing"] == true));
+    GIANT_CHECK(got["hair"]["problem"] == ""); // (read on a worker: it may or may not be `reading` still)
     got = run("get_hair", {{"wait", true}, {"id", id}}).value;
     GIANT_CHECK(got["grown"] == 1 && got["reading"] == 0 && got["hair"]["reading"] == false && got["hair"]["problem"] == "");
     GIANT_CHECK(got["hair"]["strands"] == 4 && got["hair"]["guides"] == 2);
@@ -679,4 +681,60 @@ GIANT_TEST("hair: a groom file is read on a worker and worn, in its units and ax
     hair.update(wind(0.0f), {0.0, 0.0, 0.0}, 1.0 / 60.0);
     got = run("get_hair", {{"wait", true}, {"id", id}}).value;
     GIANT_CHECK(got["grown"] == 2 && got["reading"] == 0 && got["hair"]["strands"] == 4);
+    // The smallest units, as get_entity gives them back, can be set again.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"file_scale", 0.0001}}}}).ok);
+    const Json least = run("get_entity", {{"id", id}}).value["hair"]["file_scale"];
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"file_scale", least}}}}).ok);
+    GIANT_CHECK(!run("set_entity", {{"id", id}, {"hair", {{"file_scale", 0.0}}}}).ok);
+}
+
+GIANT_TEST("hair: more groom files than are held at once: the hair past them waits, and is read when one is let go") {
+    geometry::testing::Ogawa abc;
+    const u64 strands = geometry::testing::curves(abc, {0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0}, {2, 2});
+    geometry::testing::Compound none;
+    const std::vector<u8> bytes = abc.finish(geometry::testing::object(abc, none.write(abc), {strands}));
+    HairState hair(nullptr, nullptr);
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.hair = &hair;
+    register_scene_commands(commands, state);
+    register_hair_commands(commands, state);
+    ai::ExecuteOptions options;
+    options.record_history = true;
+    const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, options); };
+    std::vector<world::EntityId> ids;
+    for (usize i = 0; i <= HairState::k_max_groom_files; ++i) {
+        const std::string file = hair_file(("many" + std::to_string(i) + ".abc").c_str(), bytes);
+        const ai::CommandResult made =
+            run("create_entity", {{"shape", "cube"}, {"hair", {{"on", true}, {"file", file}, {"strands", 10}, {"guides", 1}}}});
+        GIANT_CHECK(made.ok);
+        ids.push_back(made.ok ? made.value["id"].get<world::EntityId>() : 0);
+    }
+    Json got = run("get_hair", {{"wait", true}, {"id", ids.back()}}).value;
+    GIANT_CHECK(got["grown"] == HairState::k_max_groom_files && got["reading"] == 1);
+    GIANT_CHECK(got["hair"]["reading"] == true && got["hair"]["grown"] == false && got["hair"]["problem"] == "");
+    // Two wearing one file take one place: the first's file on the last is read at once.
+    GIANT_CHECK(run("set_entity", {{"id", ids.back()}, {"hair", {{"file", hair_file("many0.abc", bytes)}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", ids.back()}}).value;
+    GIANT_CHECK(got["reading"] == 0 && got["hair"]["strands"] == 2);
+    // Back to its own: it waits again, showing what it had, until another's hair is gone.
+    GIANT_CHECK(run("set_entity", {{"id", ids.back()}, {"hair", {{"file", hair_file("many8.abc", bytes)}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", ids.back()}}).value;
+    GIANT_CHECK(got["hair"]["reading"] == true && got["hair"]["strands"] == 2);
+    GIANT_CHECK(run("set_entity", {{"id", ids[3]}, {"hair", {{"on", false}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", ids.back()}}).value;
+    GIANT_CHECK(got["reading"] == 0 && got["grown"] == HairState::k_max_groom_files);
+    GIANT_CHECK(got["hair"]["reading"] == false && got["hair"]["strands"] == 2 && got["hair"]["problem"] == "");
+    // Without waiting: an update makes the room, the next ones read and grow it.
+    GIANT_CHECK(run("set_entity", {{"id", ids[3]}, {"hair", {{"on", true}}}}).ok);
+    GIANT_CHECK(run("set_entity", {{"id", ids[4]}, {"hair", {{"on", false}}}}).ok);
+    bool read = false;
+    for (int frame = 0; frame < 2000 && !read; ++frame) {
+        hair.follow(state.scene, state.scene.take_changes());
+        hair.update(wind(0.0f), {0.0, 0.0, 0.0}, 1.0 / 60.0);
+        HairState::View view;
+        read = hair.view(ids[3], view) && !view.reading && view.grown;
+        if (!read) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    GIANT_CHECK(read);
 }

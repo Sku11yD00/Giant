@@ -741,10 +741,10 @@ void EditorPanels::draw_properties() {
             if (m_state.hair != nullptr && m_state.hair->view(e->id, view)) {
                 if (!view.problem.empty()) {
                     ImGui::TextWrapped("No hair: %s", view.problem.c_str());
-                } else if (view.reading) {
-                    ImGui::TextDisabled("Reading its groom file...");
                 } else if (view.left_out) {
                     ImGui::TextDisabled("Left out: too much hair in this world");
+                } else if (view.reading) {
+                    ImGui::TextDisabled("Reading its groom file...");
                 } else {
                     ImGui::TextDisabled("%u strands, %u guides%s%s", view.strands, view.guides, view.growing ? ", growing" : "",
                                         view.simulated ? ", moving" : "");
@@ -759,8 +759,8 @@ void EditorPanels::draw_properties() {
             }
             if (!h.file.empty()) {
                 float file_scale = h.file_scale;
-                if (ImGui::InputFloat("File units (m)", &file_scale, 0.0f, 0.0f, "%.4f", ImGuiInputTextFlags_EnterReturnsTrue)) {
-                    set("hair", {{"file_scale", static_cast<double>(std::clamp(file_scale, 0.0001f, 10000.0f))}});
+                if (ImGui::InputFloat("File units (m)", &file_scale, 0.0f, 0.0f, "%g", ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    set("hair", {{"file_scale", std::clamp(static_cast<double>(file_scale), 0.0001, 10000.0)}});
                 }
                 const std::array<const char*, 3> axes_names{"y_up", "z_up", "z_up_left"};
                 const std::array<const char*, 3> axes_labels{"Y up", "Z up", "Z up, left-handed (Unreal)"};

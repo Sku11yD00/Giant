@@ -35,6 +35,8 @@ struct Seed {
     const void* character = nullptr; // a mesh entity's skinned file as loaded (resolve)
     u32 joint = 0;                   // and its joint
     const void* curves = nullptr;    // its file's hair curves, when it wears those (resolve)
+    float units = 1.0f;              // a groom file's: metres a unit
+    world::HairAxes axes = world::HairAxes::y_up; // and its axes
     bool operator==(const Seed&) const = default;
 };
 
@@ -42,7 +44,7 @@ Seed seed_of(const world::Entity& e) {
     const world::Hair& h = e.hair;
     return {e.shape,     e.transform.scale, h.strands,     h.guides, h.top,   h.length, h.length_variation,
             h.droop,     h.curl_radius,     h.curl_turns,  h.frizz,  h.clump, h.seed,   nullptr,
-            0,           nullptr};
+            0,           nullptr,           1.0f,          world::HairAxes::y_up};
 }
 
 bool finite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
@@ -212,9 +214,10 @@ geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joi
 }
 
 std::vector<std::vector<Vec3>> hair_strands(const std::vector<std::vector<Vec3>>& curves,
-                                            const MeshLibrary::Skinned* character, u32 joint, const Vec3& scale, u32 most) {
+                                            const MeshLibrary::Skinned* character, u32 joint, const Vec3& scale, u32 most,
+                                            float units, world::HairAxes axes) {
     std::vector<std::vector<Vec3>> strands;
-    if (curves.empty() || most == 0 || !finite(scale)) return strands;
+    if (curves.empty() || most == 0 || !finite(scale) || !std::isfinite(units)) return strands;
     const bool rides = character != nullptr && joint < character->rest_model.size();
     const Vec3 origin = rides ? apply(character->rest_model[joint], Vec3{}) : Vec3{};
     const float all = largest(scale);
@@ -227,7 +230,11 @@ std::vector<std::vector<Vec3>> hair_strands(const std::vector<std::vector<Vec3>>
         std::vector<Vec3>& strand = strands.emplace_back();
         strand.reserve(curve.size());
         for (const Vec3& p : curve) {
-            const Vec3 at = p - origin;
+            // (As geometry::to_engine_space turns them.)
+            const Vec3 turned = axes == world::HairAxes::z_up        ? Vec3{p.x, p.z, -p.y}
+                                : axes == world::HairAxes::z_up_left ? Vec3{p.x, p.z, p.y}
+                                                                     : p;
+            const Vec3 at = turned * units - origin;
             strand.push_back({at.x * size.x, at.y * size.y, at.z * size.z});
         }
     }
@@ -302,12 +309,10 @@ struct HairState::Grown {
     std::shared_ptr<render::PreparedGroom> packed;
 };
 
-// A groom file read on a worker, for all the hair that wears it at this
-// scale and these axes: its curves in the engine's space.
+// A groom file read on a worker, for all the hair that wears it: its
+// curves in the file's own space (each hair turns and sizes its strands).
 struct HairState::GroomFile {
     std::string path; // normalised
-    float scale = 1.0f;
-    world::HairAxes axes = world::HairAxes::y_up;
     WaitGroup done;
     std::atomic<bool> cancel{false};
     // The worker's, read once `done`:
@@ -349,7 +354,8 @@ struct HairState::Worn {
     std::shared_ptr<const MeshLibrary::Skinned> character; // that file's, once found (resolve)
     std::shared_ptr<const std::vector<std::vector<Vec3>>> curves; // that file's hair curves, or its groom file's, when it wears those
     std::shared_ptr<HairState::GroomFile> file;            // its groom file (hair.file), read or being read
-    bool reading = false;                                  // waiting for it: nothing is grown until it is read
+    std::string file_name;                                 // hair.file as `file` was found by
+    bool reading = false;                                  // waiting for it (or for room for it): nothing is grown until it is read
     u32 joint = k_no_hair_joint;                           // of it: the one the hair rides
     std::string problem;        // why it grows none (a mesh entity)
     DVec3 position{};           // where it is drawn (place)
@@ -365,15 +371,16 @@ struct HairState::Worn {
 HairState::HairState(render::Renderer* renderer, const MeshLibrary* meshes) : m_renderer(renderer), m_meshes(meshes) {}
 
 HairState::~HairState() {
-    // Jobs not yet started do nothing; those running are waited for.
+    // Jobs not yet started do nothing (all told so first: a thread waiting
+    // runs queued jobs itself); those running are waited for.
     for (const auto& [id, worn] : m_worn) {
         if (worn->job != nullptr) worn->job->cancel.store(true);
     }
+    for (const std::shared_ptr<GroomFile>& file : m_files) file->cancel.store(true);
     for (const auto& [id, worn] : m_worn) {
         if (worn->job != nullptr) m_jobs.wait(worn->job->done);
     }
     for (const std::shared_ptr<Grown>& job : m_abandoned) m_jobs.wait(job->done);
-    for (const std::shared_ptr<GroomFile>& file : m_files) file->cancel.store(true);
     for (const std::shared_ptr<GroomFile>& file : m_files) m_jobs.wait(file->done);
     if (m_renderer != nullptr) {
         for (const auto& [id, worn] : m_worn) {
@@ -381,6 +388,12 @@ HairState::~HairState() {
             if (worn->next.groom != render::k_no_groom) m_renderer->remove_groom(worn->next.groom);
         }
     }
+    // (Groom files' curves free themselves through the workers: let go of
+    // while those are still there.)
+    m_worn.clear();
+    m_abandoned.clear();
+    m_files.clear();
+    m_jobs.wait(m_freed);
 }
 
 // Everything grown or being grown for it let go.
@@ -450,7 +463,8 @@ void HairState::grow(Worn& worn) {
         geometry::Groom groom;
         if (job->curves != nullptr) {
             groom = geometry::groom_from_strands(
-                hair_strands(*job->curves, job->character.get(), job->seed.joint, job->seed.scale, job->params.strands),
+                hair_strands(*job->curves, job->character.get(), job->seed.joint, job->seed.scale, job->params.strands,
+                             job->seed.units, job->seed.axes),
                 job->params.guides, job->params.seed);
         } else {
             const geometry::TriangleMesh scalp =
@@ -474,7 +488,8 @@ void HairState::grow(Worn& worn) {
 void HairState::take(Worn& worn) {
     const std::shared_ptr<Grown> job = std::move(worn.job);
     worn.job = nullptr;
-    if (!job->made || !(job->seed == worn.wanted)) return; // (the next is grown instead)
+    // (The next is grown instead; while its groom file is read, nothing new is shown.)
+    if (!job->made || worn.reading || !(job->seed == worn.wanted)) return;
     Coat coat;
     coat.grown = true;
     coat.seed = job->seed;
@@ -559,20 +574,23 @@ void place_one(HairState::Worn& worn, const world::Transform& t, const MeshLibra
 
 } // namespace
 
-// The groom file hair wears, read on a worker the first time it is asked
-// for (one reading for all that wear it at one scale and axes).
-std::shared_ptr<HairState::GroomFile> HairState::groom_file(const world::Hair& hair) {
-    std::string path = MeshLibrary::normalize(hair.file);
+// The groom file of that name (as hair gives it), read on a worker the
+// first time it is asked for: one reading for all the hair that wears it.
+// Null while as many as may be held are (the hair waits).
+std::shared_ptr<HairState::GroomFile> HairState::groom_file(const std::string& name) {
+    std::string path = MeshLibrary::normalize(name);
     for (const std::shared_ptr<GroomFile>& file : m_files) {
-        if (file->path == path && file->scale == hair.file_scale && file->axes == hair.file_axes) return file;
+        if (file->path == path && !file->cancel.load()) return file;
     }
     if (m_files.size() >= k_max_groom_files) return nullptr;
     auto file = std::make_shared<GroomFile>();
     file->path = std::move(path);
-    file->scale = hair.file_scale;
-    file->axes = hair.file_axes;
     m_files.push_back(file);
-    m_jobs.submit(file->done, [file] {
+    // (Its curves are freed on a worker, wherever the last of them is let
+    // go: tens of thousands of strands are not the main thread's to free.)
+    JobSystem* jobs = &m_jobs;
+    WaitGroup* freed = &m_freed;
+    m_jobs.submit(file->done, [file, jobs, freed] {
         if (file->cancel.load()) return;
         std::string ending = file->path.size() >= 4 ? file->path.substr(file->path.size() - 4) : std::string();
         for (char& c : ending) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -587,14 +605,30 @@ std::shared_ptr<HairState::GroomFile> HairState::groom_file(const world::Hair& h
         } else if (read.curves.empty()) {
             file->problem = read.guides > 0 ? "all of its curves are marked as guides" : "it has no hair curves";
         } else {
-            const geometry::FileAxes axes = file->axes == world::HairAxes::z_up        ? geometry::FileAxes::z_up
-                                            : file->axes == world::HairAxes::z_up_left ? geometry::FileAxes::z_up_left
-                                                                                       : geometry::FileAxes::y_up;
-            geometry::to_engine_space(read.curves, file->scale, axes);
-            file->curves = std::make_shared<const std::vector<std::vector<Vec3>>>(std::move(read.curves));
+            using Curves = std::vector<std::vector<Vec3>>;
+            file->curves = std::shared_ptr<const Curves>(new Curves(std::move(read.curves)), [jobs, freed](const Curves* curves) {
+                jobs->submit(*freed, [curves] { delete curves; });
+            });
         }
     });
     return file;
+}
+
+// Groom files no hair wears any more are let go: one not yet read is not
+// read (or with `wait`, waited for), and none of them is found again.
+void HairState::let_go_of_files(bool wait) {
+    for (const std::shared_ptr<GroomFile>& file : m_files) {
+        if (file->cancel.load()) continue;
+        bool worn = false;
+        for (const auto& [id, held] : m_worn) worn = worn || held->file == file;
+        if (!worn) file->cancel.store(true);
+    }
+    if (wait) {
+        for (const std::shared_ptr<GroomFile>& file : m_files) {
+            if (file->cancel.load()) m_jobs.wait(file->done);
+        }
+    }
+    std::erase_if(m_files, [](const std::shared_ptr<GroomFile>& file) { return file->cancel.load() && file->done.done(); });
 }
 
 // A mesh entity's character and joint found, and its groom file's curves
@@ -604,9 +638,12 @@ void HairState::resolve(Worn& worn) {
     std::shared_ptr<const MeshLibrary::Skinned> character;
     std::shared_ptr<const std::vector<std::vector<Vec3>>> curves;
     u32 joint = k_no_hair_joint;
-    // (Asked for before the old one is let go: one worn again is not read again.)
+    // (The one it has, while its name stands: no name is looked up every frame.)
     const bool wears_file = !worn.hair.file.empty();
-    std::shared_ptr<GroomFile> file = wears_file ? groom_file(worn.hair) : nullptr;
+    std::shared_ptr<GroomFile> file;
+    if (wears_file) {
+        file = worn.file != nullptr && worn.file_name == worn.hair.file ? worn.file : groom_file(worn.hair.file);
+    }
     if (worn.shape == world::Shape::mesh) {
         const MeshLibrary::Mesh* mesh = m_meshes != nullptr ? m_meshes->find_normalized(worn.mesh) : nullptr;
         const bool brought = mesh != nullptr && mesh->curves != nullptr && !mesh->curves->empty();
@@ -633,12 +670,9 @@ void HairState::resolve(Worn& worn) {
             }
         }
     }
-    if (worn.problem.empty() && wears_file && file == nullptr) {
-        worn.problem = "too many different groom files are worn at once";
-        character = nullptr;
-    }
-    // Its groom file's curves, once read (until then nothing new is grown).
-    const bool reading = worn.problem.empty() && file != nullptr && !file->done.done();
+    // Its groom file's curves, once read (until then, or while it waits for
+    // room among the files held, nothing new is grown).
+    const bool reading = worn.problem.empty() && wears_file && (file == nullptr || !file->done.done());
     if (worn.problem.empty() && file != nullptr && !reading) {
         if (file->curves == nullptr) {
             worn.problem = "its groom file \"" + file->path + "\": " +
@@ -648,6 +682,7 @@ void HairState::resolve(Worn& worn) {
             curves = file->curves;
         }
     }
+    if (worn.file != file) worn.file_name = file != nullptr ? worn.hair.file : std::string();
     worn.file = std::move(file);
     worn.reading = reading;
     if (!worn.problem.empty()) shed(worn);
@@ -672,6 +707,9 @@ void HairState::resolve(Worn& worn) {
     }
     worn.curves = std::move(curves);
     worn.wanted.curves = worn.curves.get();
+    const bool files = worn.curves != nullptr && worn.file != nullptr && worn.curves == worn.file->curves;
+    worn.wanted.units = files ? worn.hair.file_scale : 1.0f;
+    worn.wanted.axes = files ? worn.hair.file_axes : world::HairAxes::y_up;
     worn.wanted.character = worn.character.get();
     worn.wanted.joint = worn.character != nullptr ? worn.joint : 0;
     // Until a frame places it (place), it is at its entity, a character's at its joint at rest.
@@ -772,12 +810,16 @@ void HairState::finish() {
     }
     rank();
     for (const auto& [id, worn] : m_worn) {
-        if (worn->left_out) continue;
-        if (worn->reading) {
+        // (One waiting for room: files no hair wears are let go, then it is asked for again.)
+        if (worn->reading && worn->file == nullptr) {
+            let_go_of_files(true);
+            resolve(*worn);
+        }
+        if (worn->reading && worn->file != nullptr) {
             m_jobs.wait(worn->file->done);
             resolve(*worn);
         }
-        if (!worn->problem.empty()) continue;
+        if (worn->left_out || worn->reading || !worn->problem.empty()) continue;
         // (A job taken may not be the one wanted any more: until one is.)
         for (int tries = 0; tries < 4; ++tries) {
             if (worn->job != nullptr) {
@@ -794,8 +836,7 @@ void HairState::finish() {
 
 void HairState::update(const WindState& wind, const DVec3& camera, double seconds) {
     std::erase_if(m_abandoned, [](const std::shared_ptr<Grown>& job) { return job->done.done(); });
-    // (Groom files no hair wears any more: only this list holds them.)
-    std::erase_if(m_files, [](const std::shared_ptr<GroomFile>& file) { return file.use_count() == 1 && file->done.done(); });
+    if (!m_files.empty()) let_go_of_files(false);
     // (A file loaded or loaded again since: characters found, or changed.)
     if (m_meshes != nullptr && m_meshes->version() != m_meshes_seen) {
         m_meshes_seen = m_meshes->version();
@@ -808,9 +849,9 @@ void HairState::update(const WindState& wind, const DVec3& camera, double second
         Worn& worn = *held;
         const bool moving = worn.simulated;
         worn.simulated = false;
-        if (worn.left_out) continue;
-        if (worn.reading && worn.file->done.done()) resolve(worn); // (read since)
-        if (!worn.problem.empty()) continue;
+        // (Read since, or room made for its file.)
+        if (worn.reading && (worn.file != nullptr ? worn.file->done.done() : m_files.size() < k_max_groom_files)) resolve(worn);
+        if (worn.left_out || !worn.problem.empty()) continue;
         // (A groom taken is a GPU buffer made: a few an update.)
         if (worn.job != nullptr && taken < k_taken_per_update && worn.job->done.done()) {
             take(worn);

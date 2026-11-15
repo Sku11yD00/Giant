@@ -4,7 +4,7 @@
 // (geometry::generate_groom), or made of the hair curves its mesh file
 // brings (world::Hair::from_file, geometry::groom_from_strands) or of a
 // groom file's (world::Hair::file: an Alembic file read on a worker, once
-// for all that wear it alike, and let go when none does), and
+// for all that wear it, let go when none does and freed on a worker), and
 // packed for the renderer on a worker,
 // handed to the renderer (render::Renderer::add_groom), simulated near the
 // camera (giant/sim/hair.h) and named to the renderer each frame
@@ -67,9 +67,12 @@ geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joi
 // A file's hair curves as strands for geometry::groom_from_strands: at
 // most `most` of them (evenly over the file's), sized by `scale`; a
 // character's about `joint`'s place at rest and by the largest of `scale`
-// (the space hair_scalp's is in), else in the entity's space.
+// (the space hair_scalp's is in), else in the entity's space. A groom
+// file's curves are first turned from its `axes` and sized by its `units`
+// (metres a unit): a mesh file's are in the engine's already.
 std::vector<std::vector<Vec3>> hair_strands(const std::vector<std::vector<Vec3>>& curves,
-                                            const MeshLibrary::Skinned* character, u32 joint, const Vec3& scale, u32 most);
+                                            const MeshLibrary::Skinned* character, u32 joint, const Vec3& scale, u32 most,
+                                            float units = 1.0f, world::HairAxes axes = world::HairAxes::y_up);
 // The joint hair grows round: the one of that name, or for no name the
 // first with "head" in its name (any case). None: k_no_hair_joint.
 inline constexpr u32 k_no_hair_joint = ~0u;
@@ -98,7 +101,7 @@ public:
     static constexpr usize k_max_simulated_guides = 4096;
     static constexpr u32 k_sims_made_per_update = 2;
     static constexpr u32 k_taken_per_update = 2; // grown grooms handed to the renderer
-    static constexpr usize k_max_groom_files = 8; // different ones (by path, scale and axes) worn at once
+    static constexpr usize k_max_groom_files = 8; // different ones held at once (hair past them waits)
     static constexpr double k_simulate_within = 30.0;
     static constexpr double k_keep_simulating_within = 33.0; // one already moving
 
@@ -140,7 +143,7 @@ public:
     struct View {
         bool grown = false;
         bool growing = false;
-        bool reading = false; // its groom file is being read (the hair it had shows until then)
+        bool reading = false; // its groom file is being read, or waits its turn (the hair it had shows until then)
         bool ready = false; // drawn from now on: the renderer has all of its groom
         bool simulated = false;
         bool left_out = false;
@@ -161,7 +164,8 @@ public:
 private:
     struct Grown; // a job's result
     struct GroomFile; // a groom file read on a worker
-    std::shared_ptr<GroomFile> groom_file(const world::Hair& hair);
+    std::shared_ptr<GroomFile> groom_file(const std::string& path);
+    void let_go_of_files(bool wait);
     void follow_one(const world::Scene& scene, world::EntityId id);
     void drop(world::EntityId id);
     void shed(Worn& worn);
@@ -185,8 +189,9 @@ private:
     u32 m_simulated = 0;
     u32 m_left_out = 0;
     u64 m_resets = 0; // of simulations since dropped
+    WaitGroup m_freed; // groom files' curves let go: freed on a worker (65,000 strands take milliseconds)
     // (Last, so the workers are gone before what their jobs may touch.)
-    JobSystem m_jobs{2};   // grows grooms
+    JobSystem m_jobs{2};   // grows grooms, reads groom files
     JobSystem m_movers{2}; // steps simulations (apart: a thread waiting on a
                            // pool runs its queued jobs, and growing a groom takes a second)
 };
