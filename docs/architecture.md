@@ -2144,6 +2144,23 @@ file orders them. Limits: mesh files without a skeleton grow no hair of
 their own (they can wear their file's), and kits made from entities do not
 carry hair.
 
+Or hair wears a groom file (`hair.file`: an Alembic `.abc`, read by
+`geometry::read_alembic_curves_file`), which wins over `from_file` and
+grown hair on any entity that may wear hair. `HairState` reads a file on
+its growing workers, never on the main thread (an 84 MB groom of 65,000
+strands takes a few seconds from disk), once for all the hair that wears
+it at one `file_scale` and `file_axes` (`to_engine_space`: the file says
+neither its units nor its axes), and lets it go once no hair wears it; at
+most `k_max_groom_files` (8) different ones are held. Until it is read the
+hair is `reading`: nothing new is grown and what it had still shows. Its
+curves then go the way a mesh file's do (`hair_strands`): a groom is
+modelled round the head it is for, so on a character they are taken as in
+its model space, about the joint the hair rides; on a shape, in the
+entity's space. A file that cannot be read is the hair's `problem`, and is
+not tried again until the setting changes or nothing wears it. A file
+changed on disk is likewise read again only once nothing wears the old
+reading.
+
 ## Ballistics (W1a)
 
 `sim::Ballistics` flies bullets through the physics world as point masses:

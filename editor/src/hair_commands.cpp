@@ -50,7 +50,7 @@ void register_hair_commands(ai::CommandRegistry& registry, EditorState& state) {
              state.hair->follow(state.scene, state.scene.untaken_changes()); // the latest edits first
              if (args.value("wait", false)) state.hair->finish();
              const HairStats s = state.hair->stats();
-             Json out = {{"wearing", s.wearing},     {"grown", s.grown},   {"growing", s.growing},
+             Json out = {{"wearing", s.wearing},     {"grown", s.grown},   {"growing", s.growing},   {"reading", s.reading},
                          {"simulated", s.simulated}, {"drawn", s.drawn},   {"strands", s.strands},
                          {"left_out", s.left_out},   {"resets", s.resets}};
              if (args.contains("id")) {
@@ -63,6 +63,7 @@ void register_hair_commands(ai::CommandRegistry& registry, EditorState& state) {
                  Json one = {{"id", id},
                              {"grown", v.grown},
                              {"growing", v.growing},
+                             {"reading", v.reading},
                              {"ready", v.ready},
                              {"left_out", v.left_out},
                              {"problem", v.problem},

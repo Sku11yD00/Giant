@@ -461,6 +461,9 @@ GIANT_TEST("world: hair on entities saves and loads, only when set, within its r
     head.hair.top = 0.4f;
     head.hair.joint = "Head";
     head.hair.from_file = true;
+    head.hair.file = "hair/long.abc";
+    head.hair.file_scale = 0.01f;
+    head.hair.file_axes = HairAxes::z_up_left;
     head.hair.length = 0.45f;
     head.hair.length_variation = 0.1f;
     head.hair.droop = 0.6f;
@@ -497,6 +500,8 @@ GIANT_TEST("world: hair on entities saves and loads, only when set, within its r
     for (const char* bad_scene :
          {R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"strands": 0}}]})",
           R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"strands": 200001}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"file_axes": "x_up"}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"file_scale": 0}}]})",
           R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"guides": 2000}}]})",
           R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"length": 11}}]})",
           R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"tint": [2, 1, 1]}}]})",

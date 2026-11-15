@@ -94,6 +94,24 @@ const char* to_string(LampKind kind) {
     return "point";
 }
 
+const char* to_string(HairAxes axes) {
+    switch (axes) {
+    case HairAxes::y_up: return "y_up";
+    case HairAxes::z_up: return "z_up";
+    case HairAxes::z_up_left: return "z_up_left";
+    }
+    return "y_up";
+}
+
+std::optional<HairAxes> hair_axes_from_string(std::string_view name) {
+    for (const HairAxes a : {HairAxes::y_up, HairAxes::z_up, HairAxes::z_up_left}) {
+        if (name == to_string(a)) {
+            return a;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<LampKind> lamp_kind_from_string(std::string_view name) {
     for (const LampKind k : {LampKind::point, LampKind::spot}) {
         if (name == to_string(k)) {
@@ -647,6 +665,9 @@ Json hair_json(const Hair& h) {
             {"top", h.top},
             {"joint", h.joint},
             {"from_file", h.from_file},
+            {"file", h.file},
+            {"file_scale", h.file_scale},
+            {"file_axes", to_string(h.file_axes)},
             {"length", h.length},
             {"length_variation", h.length_variation},
             {"droop", h.droop},
@@ -1690,6 +1711,17 @@ void read_hair(Reader& r, const std::string& path, Hair& h, std::string& error) 
         hr.number("top", h.top, 0.01, 1);
         hr.string("joint", h.joint, false, k_max_hair_joint_bytes);
         hr.boolean("from_file", h.from_file);
+        hr.string("file", h.file, false, k_max_mesh_path_bytes);
+        hr.number("file_scale", h.file_scale, 0.0001, 10000);
+        std::string axes = to_string(h.file_axes);
+        hr.string("file_axes", axes, false, 16);
+        if (hr.ok()) {
+            if (const auto parsed = hair_axes_from_string(axes)) {
+                h.file_axes = *parsed;
+            } else {
+                hr.fail("file_axes", "must be y_up, z_up or z_up_left");
+            }
+        }
         hr.number("length", h.length, 0.001, 10);
         hr.number("length_variation", h.length_variation, 0, 1);
         hr.number("droop", h.droop, 0, 1);

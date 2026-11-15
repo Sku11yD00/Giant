@@ -2,7 +2,9 @@
 // grown from the top of their shape (cubes and spheres) or from a
 // character's skin round a joint (mesh entities with a skinned file)
 // (geometry::generate_groom), or made of the hair curves its mesh file
-// brings (world::Hair::from_file, geometry::groom_from_strands), and
+// brings (world::Hair::from_file, geometry::groom_from_strands) or of a
+// groom file's (world::Hair::file: an Alembic file read on a worker, once
+// for all that wear it alike, and let go when none does), and
 // packed for the renderer on a worker,
 // handed to the renderer (render::Renderer::add_groom), simulated near the
 // camera (giant/sim/hair.h) and named to the renderer each frame
@@ -80,6 +82,7 @@ struct HairStats {
     u32 wearing = 0;   // visible entities with hair on of a shape that may wear it (a mesh's may yet have a problem)
     u32 grown = 0;     // with a groom
     u32 growing = 0;   // with a job running, or a new groom on its way to the GPU
+    u32 reading = 0;   // waiting for their groom file to be read
     u32 simulated = 0; // moved in the last update
     u32 drawn = 0;     // named to the renderer
     u64 strands = 0;   // of the grown grooms
@@ -95,6 +98,7 @@ public:
     static constexpr usize k_max_simulated_guides = 4096;
     static constexpr u32 k_sims_made_per_update = 2;
     static constexpr u32 k_taken_per_update = 2; // grown grooms handed to the renderer
+    static constexpr usize k_max_groom_files = 8; // different ones (by path, scale and axes) worn at once
     static constexpr double k_simulate_within = 30.0;
     static constexpr double k_keep_simulating_within = 33.0; // one already moving
 
@@ -136,10 +140,11 @@ public:
     struct View {
         bool grown = false;
         bool growing = false;
+        bool reading = false; // its groom file is being read (the hair it had shows until then)
         bool ready = false; // drawn from now on: the renderer has all of its groom
         bool simulated = false;
         bool left_out = false;
-        std::string problem; // why it cannot grow (a mesh file not loaded or without a skeleton, no such joint); empty: none
+        std::string problem; // why it cannot grow (a mesh file not loaded or without a skeleton, no such joint, a groom file that cannot be read); empty: none
         std::string joint;   // a character's: the joint it rides
         DVec3 position{};    // where it is drawn (as last placed; never placed: at its entity, a character's joint at rest)
         Quat rotation{};
@@ -155,6 +160,8 @@ public:
 
 private:
     struct Grown; // a job's result
+    struct GroomFile; // a groom file read on a worker
+    std::shared_ptr<GroomFile> groom_file(const world::Hair& hair);
     void follow_one(const world::Scene& scene, world::EntityId id);
     void drop(world::EntityId id);
     void shed(Worn& worn);
@@ -170,6 +177,7 @@ private:
     u64 m_meshes_seen = ~u64{0}; // the library's version as last resolved
     std::map<world::EntityId, std::unique_ptr<Worn>> m_worn;
     std::vector<std::shared_ptr<Grown>> m_abandoned; // jobs of hair since removed: kept until they finish
+    std::vector<std::shared_ptr<GroomFile>> m_files;  // read or being read, while hair wears them
     std::vector<render::HairDraw> m_draws;
     std::vector<std::pair<double, Worn*>> m_near; // scratch
     std::vector<Worn*> m_stepped;                 // scratch

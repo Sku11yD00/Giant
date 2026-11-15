@@ -741,11 +741,32 @@ void EditorPanels::draw_properties() {
             if (m_state.hair != nullptr && m_state.hair->view(e->id, view)) {
                 if (!view.problem.empty()) {
                     ImGui::TextWrapped("No hair: %s", view.problem.c_str());
+                } else if (view.reading) {
+                    ImGui::TextDisabled("Reading its groom file...");
                 } else if (view.left_out) {
                     ImGui::TextDisabled("Left out: too much hair in this world");
                 } else {
                     ImGui::TextDisabled("%u strands, %u guides%s%s", view.strands, view.guides, view.growing ? ", growing" : "",
                                         view.simulated ? ", moving" : "");
+                }
+            }
+            // A groom file (Alembic) worn instead of grown hair, and how its points are meant.
+            std::array<char, world::k_max_mesh_path_bytes + 1> groom{};
+            std::snprintf(groom.data(), groom.size(), "%s", h.file.c_str());
+            if (ImGui::InputTextWithHint("Groom file", "assets/hair.abc", groom.data(), groom.size(),
+                                         ImGuiInputTextFlags_EnterReturnsTrue)) {
+                set("hair", {{"file", std::string(groom.data())}});
+            }
+            if (!h.file.empty()) {
+                float file_scale = h.file_scale;
+                if (ImGui::InputFloat("File units (m)", &file_scale, 0.0f, 0.0f, "%.4f", ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    set("hair", {{"file_scale", static_cast<double>(std::clamp(file_scale, 0.0001f, 10000.0f))}});
+                }
+                const std::array<const char*, 3> axes_names{"y_up", "z_up", "z_up_left"};
+                const std::array<const char*, 3> axes_labels{"Y up", "Z up", "Z up, left-handed (Unreal)"};
+                int axes = static_cast<int>(h.file_axes);
+                if (ImGui::Combo("File axes", &axes, axes_labels.data(), static_cast<int>(axes_labels.size()))) {
+                    set("hair", {{"file_axes", axes_names[static_cast<usize>(std::clamp(axes, 0, 2))]}});
                 }
             }
             if (e->shape == world::Shape::mesh) {
