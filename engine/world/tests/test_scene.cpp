@@ -1130,3 +1130,81 @@ GIANT_TEST("world: skin saves and loads, only when set, and is checked") {
         GIANT_CHECK(error.has_value() && contains(error->message, "skin"));
     }
 }
+
+GIANT_TEST("world: an eye saves and loads, only when set, is checked, and is never skin too") {
+    Scene scene;
+    Entity ball = named("Eye");
+    EyeLook eye;
+    eye.iris_radius = 0.2f;
+    eye.pupil_radius = 0.4f;
+    eye.iris_depth = 0.25f;
+    eye.limbal = 0.1f;
+    eye.limbal_darkness = 0.5f;
+    eye.iris_color = {0.5f, 0.25f, 0.125f};
+    eye.painted = true;
+    eye.cornea_roughness = 0.1f;
+    eye.bulge = 0.5f;
+    eye.shade = 0.25f;
+    ball.material.eye = eye;
+    scene.add(ball);
+    scene.add(named("Rock"));
+    ScatterLayer layer;
+    layer.name = "eyes";
+    ScatterItem item;
+    item.material.eye = EyeLook{};
+    layer.items.push_back(item);
+    scene.scatter.push_back(layer);
+    Kit kit;
+    kit.name = "head";
+    KitPiece piece;
+    piece.material.eye = eye;
+    piece.material.eye->bulge = 0.75f;
+    kit.pieces.push_back(piece);
+    scene.kits.push_back(kit);
+    const std::string text = save_scene(scene);
+    usize eyes = 0; // the ball's, the item's and the piece's, not the rock's
+    for (usize at = text.find("\"eye\""); at != std::string::npos; at = text.find("\"eye\"", at + 1)) ++eyes;
+    GIANT_CHECK(eyes == 3);
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->material.eye == eye);
+    GIANT_CHECK(loaded.find(2) && !loaded.find(2)->material.eye);
+    GIANT_CHECK(loaded.scatter.size() == 1 && loaded.scatter[0].items[0].material.eye == EyeLook{});
+    GIANT_CHECK(loaded.kits.size() == 1 && loaded.kits[0].pieces[0].material.eye == piece.material.eye);
+    GIANT_CHECK(save_scene(loaded) == text);
+    // Fields left out take their defaults.
+    Scene sparse;
+    GIANT_CHECK(!load_scene(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"eye": {"bulge": 0.5}}}]})",
+                            sparse)
+                     .has_value());
+    GIANT_CHECK(sparse.find(1) && sparse.find(1)->material.eye && sparse.find(1)->material.eye->bulge == 0.5f &&
+                sparse.find(1)->material.eye->iris_radius == 0.15f && !sparse.find(1)->material.eye->painted);
+    for (const char* bad_eye : {R"({"iris_radius": 0.9})", R"({"iris_depth": 0.8})", R"({"iris_color": [1, 2, 0]})",
+                                R"({"iris_color": [1, 1]})", R"({"cornea_roughness": 0.01})", R"({"lashes": 1})"}) {
+        Scene bad;
+        const std::string json = std::string(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"eye": )") +
+                                 bad_eye + "}}]}";
+        const auto error = load_scene(json, bad);
+        GIANT_CHECK(error.has_value() && contains(error->message, "eye"));
+    }
+    Scene both;
+    const auto error = load_scene(
+        R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"skin": {}, "eye": {}}}]})", both);
+    GIANT_CHECK(error.has_value() && contains(error->message, "not both"));
+    // Set both in code, the eye alone is saved, so the file still loads.
+    Scene two;
+    Entity twice = named("Both");
+    twice.material.skin = SkinLook{};
+    twice.material.eye = eye;
+    two.add(twice);
+    Scene one;
+    GIANT_CHECK(!load_scene(save_scene(two), one).has_value());
+    GIANT_CHECK(one.find(1) && one.find(1)->material.eye == eye && !one.find(1)->material.skin);
+    for (const char* elsewhere :
+         {R"({"format": "giant-scene", "version": 1, "scatter": [{"name": "s", "items": [{"material": {"skin": {}, "eye": {}}}]}]})",
+          R"({"format": "giant-scene", "version": 1, "kits": [{"name": "k", "pieces": [{"material": {"skin": {}, "eye": {}}}]}]})"}) {
+        Scene refused;
+        const auto both_error = load_scene(elsewhere, refused);
+        GIANT_CHECK(both_error.has_value() && contains(both_error->message, "not both"));
+    }
+}

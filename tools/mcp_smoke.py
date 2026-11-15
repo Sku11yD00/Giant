@@ -890,6 +890,13 @@ def gi_gate(tool, call, check):
     check("skin" not in tool("get_entity", {"id": face}), "skin comes off")
     last = settle()
     check(not last["subsurface_scattering"], f"with no skin the pass stops, got {last['subsurface_scattering']}")
+    # Part C5: an eye (drawn in shading itself: no pass of its own).
+    tool("set_entity", {"id": face, "eye": {"iris_radius": 0.2, "iris_color": [0.1, 0.3, 0.9]}})
+    eye = tool("get_entity", {"id": face}).get("eye", {})
+    check(abs(eye.get("iris_radius", 0) - 0.2) < 1e-6 and abs(eye.get("iris_depth", 0) - 0.35) < 1e-6
+          and "skin" not in tool("get_entity", {"id": face}),
+          f"an entity keeps its eye, fields left out at their defaults, and is not skin, got {eye}")
+    settle()
     tool("delete_entities", {"ids": [face]})
     tool("set_render_settings", {"debug_view": "lighting"})
     check(tool("get_render_settings")["debug_view"] == "lighting", "the lighting view can be picked")

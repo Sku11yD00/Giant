@@ -560,7 +560,8 @@ void write_wind(Json& material, const Material& m) {
     if (m.alpha_cutoff != 0.0f) material["alpha_cutoff"] = m.alpha_cutoff;
     if (m.canopy != 0.0f) material["canopy"] = m.canopy;
     write_maps(material, m.maps);
-    if (m.skin) {
+    // An eye is never skin too (a file with both is refused), so the eye alone is kept.
+    if (m.skin && !m.eye) {
         const SkinLook& s = *m.skin;
         Json skin = Json::object();
         skin["scatter"] = s.scatter;
@@ -572,6 +573,21 @@ void write_wind(Json& material, const Material& m) {
         skin["detail_tiling"] = s.detail_tiling;
         if (s.detail_green_down) skin["detail_green_down"] = true;
         material["skin"] = std::move(skin);
+    }
+    if (m.eye) {
+        const EyeLook& e = *m.eye;
+        Json eye = Json::object();
+        eye["iris_radius"] = e.iris_radius;
+        eye["pupil_radius"] = e.pupil_radius;
+        eye["iris_depth"] = e.iris_depth;
+        eye["limbal"] = e.limbal;
+        eye["limbal_darkness"] = e.limbal_darkness;
+        eye["iris_color"] = vec3_json(e.iris_color);
+        if (e.painted) eye["painted"] = true;
+        eye["cornea_roughness"] = e.cornea_roughness;
+        eye["bulge"] = e.bulge;
+        eye["shade"] = e.shade;
+        material["eye"] = std::move(eye);
     }
 }
 
@@ -1511,6 +1527,30 @@ void read_skin(Reader& r, const std::string& path, std::optional<SkinLook>& out,
     }
 }
 
+// A material's eye, when it has one (never with skin).
+void read_eye(Reader& r, const std::string& path, Material& material, std::string& error) {
+    if (const Json* m = r.get("eye", false); m != nullptr && r.ok()) {
+        if (material.skin) {
+            r.fail("eye", "a material is skin or an eye, not both");
+            return;
+        }
+        Reader er(*m, path + ".eye", error);
+        EyeLook e;
+        er.number("iris_radius", e.iris_radius, 0.02, 0.5);
+        er.number("pupil_radius", e.pupil_radius, 0, 0.95);
+        er.number("iris_depth", e.iris_depth, 0, 0.45);
+        er.number("limbal", e.limbal, 0, 0.5);
+        er.number("limbal_darkness", e.limbal_darkness, 0, 1);
+        er.vec3("iris_color", e.iris_color, 0, 1);
+        er.boolean("painted", e.painted);
+        er.number("cornea_roughness", e.cornea_roughness, 0.045, 1);
+        er.number("bulge", e.bulge, 0, 1);
+        er.number("shade", e.shade, 0, 1);
+        er.finish();
+        if (er.ok()) material.eye = e;
+    }
+}
+
 // Shape, files, transform, material and decal of an entity or kit piece.
 void read_look(Reader& r, const std::string& path, Shape& shape, std::string& mesh, std::string* kit,
                Transform& t, Material& material, DecalSettings& decal, std::string& error) {
@@ -1558,6 +1598,7 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
         mr.number("canopy", material.canopy, 0, 1);
         read_maps(mr, path + ".material", material.maps, error);
         read_skin(mr, path + ".material", material.skin, error);
+        read_eye(mr, path + ".material", material, error);
         mr.finish();
     }
     if (const Json* d = r.get("decal", false); d != nullptr && r.ok()) {
@@ -2104,6 +2145,7 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
                 mr.number("canopy", item.material.canopy, 0, 1);
                 read_maps(mr, at + ".material", item.material.maps, error);
                 read_skin(mr, at + ".material", item.material.skin, error);
+                read_eye(mr, at + ".material", item.material, error);
                 mr.finish();
             }
             ir.number("weight", item.weight, 1e-6, 1e6);

@@ -1793,6 +1793,17 @@ to its pixel. The iris is lit as the cornea is (no caustic inside it yet),
 the normal map is read at the unshifted uv, and the parallax takes the uvs
 to run evenly along the tangent and bitangent.
 
+Eyes in worlds and the editor (C5b). `world::Material::eye`
+(`world::EyeLook`, optional) is saved with entity, kit piece and scatter
+item materials as an `eye` object (fields left out on load take their
+defaults; values out of range, or skin on the same material, refuse the
+file). The scene frame keeps an eye look beside each eye material
+(`SceneFrame::eye_looks`, shared by eyes alike whatever their whites, at
+most `render::k_max_eye_looks`: later ones draw plain until a look frees,
+as skin's do), and a material with an eye is never given a skin look. Over
+MCP `eye` sits beside `skin` on entities and scatter items
+(`editor/src/material_maps.h`): setting one takes the other off.
+
 Skin in worlds and the editor (C4c). `world::Material::skin`
 (`world::SkinLook`, optional: none is not skin) is saved with entity, kit
 piece and scatter item materials as a `skin` object (its numbers all written, the

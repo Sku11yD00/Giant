@@ -162,6 +162,30 @@ struct SkinLook {
     bool operator==(const SkinLook&) const = default;
 };
 
+// An eye (characters): a mesh with uvs whose iris is centred at uv
+// (0.5, 0.5), `iris_radius` wide in uv (0.02 to 0.5), under a clear cornea:
+// the iris lies `iris_depth` (0 to 0.45 of its radius) below it and shifts
+// as the eye turns. `painted`: the material's base colour map holds the
+// iris and pupil; else they are drawn, `iris_color` with a black pupil
+// `pupil_radius` (0 to 0.95 of the iris) wide over the material's base
+// colour as the white. A dark ring `limbal` wide (0 to 0.5 of the iris
+// radius), `limbal_darkness` deep (0 to 1), rims the iris. The eye is wet:
+// its highlight at `cornea_roughness` (0.045 to 1) off a cornea bulging by
+// `bulge` (0 to 1); `shade` (0 to 1) darkens the white toward the lids.
+struct EyeLook {
+    float iris_radius = 0.15f;
+    float pupil_radius = 0.3f;
+    float iris_depth = 0.35f;
+    float limbal = 0.15f;
+    float limbal_darkness = 0.7f;
+    Vec3 iris_color{0.25f, 0.4f, 0.55f};
+    bool painted = false;
+    float cornea_roughness = 0.06f;
+    float bulge = 0.3f;
+    float shade = 0.5f;
+    bool operator==(const EyeLook&) const = default;
+};
+
 // A physically based material (metal/roughness, as artists know it).
 struct Material {
     Vec3 base_color{0.8f, 0.8f, 0.8f}; // linear, 0 to 1
@@ -188,6 +212,7 @@ struct Material {
     float canopy = 0.0f;
     MaterialMaps maps; // entities, kit pieces and scatter items (kept, not drawn, on decals and cloth)
     std::optional<SkinLook> skin; // skin (none: not skin); not on the ground
+    std::optional<EyeLook> eye;   // an eye (none: not one; never with skin); not on the ground
     bool operator==(const Material&) const = default;
 };
 

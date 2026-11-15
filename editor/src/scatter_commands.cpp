@@ -74,6 +74,7 @@ Json item_schema() {
               {"canopy", number(0, 1, "Crown light bent outward (set_entity's canopy). Default 0.")},
               {"maps", maps_schema()},
               {"skin", skin_schema()},
+              {"eye", eye_schema()},
               {"weight", number(1e-6, 1e6, "How often it is picked, against the layer's other items. Default 1.")},
               {"scale", pair(0.0001, 10000, "[min, max] uniform scale, picked evenly. Default [1, 1].")},
               {"align", number(0, 1, "0 upright (trees), 1 along the ground's slope (rocks). Default 0.")},
@@ -156,9 +157,7 @@ std::string apply_layer(const Json& args, ScatterLayer& l, EditorState& state) {
             if (j.contains("maps")) {
                 if (std::string bad = apply_maps(j["maps"], i.material.maps); !bad.empty()) return bad;
             }
-            if (j.contains("skin")) {
-                if (std::string bad = apply_skin(j["skin"], i.material.skin); !bad.empty()) return bad;
-            }
+            if (std::string bad = apply_skin_and_eye(j, i.material); !bad.empty()) return bad;
             i.weight = j.value("weight", i.weight);
             if (j.contains("scale")) {
                 i.scale_min = j["scale"][0].get<float>();
@@ -233,6 +232,7 @@ Json layer_json(const ScatterLayer& l) {
         if (i.material.canopy != 0.0f) j["canopy"] = i.material.canopy;
         if (!i.material.maps.empty() || i.material.maps.normal_green_down) j["maps"] = maps_json(i.material.maps);
         if (i.material.skin) j["skin"] = skin_json(*i.material.skin);
+        if (i.material.eye) j["eye"] = eye_json(*i.material.eye);
         j["weight"] = i.weight;
         j["scale"] = {i.scale_min, i.scale_max};
         j["align"] = i.align;
