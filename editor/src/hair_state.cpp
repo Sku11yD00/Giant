@@ -33,6 +33,7 @@ struct Seed {
     i32 seed = 0;
     const void* character = nullptr; // a mesh entity's skinned file as loaded (resolve)
     u32 joint = 0;                   // and its joint
+    const void* curves = nullptr;    // its file's hair curves, when it wears those (resolve)
     bool operator==(const Seed&) const = default;
 };
 
@@ -40,7 +41,7 @@ Seed seed_of(const world::Entity& e) {
     const world::Hair& h = e.hair;
     return {e.shape,     e.transform.scale, h.strands,     h.guides, h.top,   h.length, h.length_variation,
             h.droop,     h.curl_radius,     h.curl_turns,  h.frizz,  h.clump, h.seed,   nullptr,
-            0};
+            0,           nullptr};
 }
 
 bool finite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
@@ -209,6 +210,29 @@ geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joi
     return scalp;
 }
 
+std::vector<std::vector<Vec3>> hair_strands(const std::vector<std::vector<Vec3>>& curves,
+                                            const MeshLibrary::Skinned* character, u32 joint, const Vec3& scale, u32 most) {
+    std::vector<std::vector<Vec3>> strands;
+    if (curves.empty() || most == 0 || !finite(scale)) return strands;
+    const bool rides = character != nullptr && joint < character->rest_model.size();
+    const Vec3 origin = rides ? apply(character->rest_model[joint], Vec3{}) : Vec3{};
+    const float all = largest(scale);
+    const Vec3 size = rides ? Vec3{all, all, all} : Vec3{std::fabs(scale.x), std::fabs(scale.y), std::fabs(scale.z)};
+    const usize count = std::min(curves.size(), static_cast<usize>(most));
+    strands.reserve(count);
+    for (usize i = 0; i < count; ++i) {
+        // (Evenly over the file's: i * all / kept.)
+        const std::vector<Vec3>& curve = curves[static_cast<usize>(u64{i} * curves.size() / count)];
+        std::vector<Vec3>& strand = strands.emplace_back();
+        strand.reserve(curve.size());
+        for (const Vec3& p : curve) {
+            const Vec3 at = p - origin;
+            strand.push_back({at.x * size.x, at.y * size.y, at.z * size.z});
+        }
+    }
+    return strands;
+}
+
 u32 hair_joint(const anim::Skeleton& skeleton, const std::string& name) {
     for (usize j = 0; j < skeleton.names.size() && j < skeleton.size(); ++j) {
         if (!name.empty()) {
@@ -266,6 +290,7 @@ struct HairState::Grown {
     geometry::GroomParams params;
     bool pack = false; // for a renderer
     std::shared_ptr<const MeshLibrary::Skinned> character; // grown from its skin (else from the shape)
+    std::shared_ptr<const std::vector<std::vector<Vec3>>> curves; // or made of these (its file's hair curves)
     // The worker's, read once `done`:
     bool made = false;
     u32 strands = 0;
@@ -283,6 +308,7 @@ struct Coat {
     bool grown = false;
     Seed seed; // what it was grown from
     std::shared_ptr<const MeshLibrary::Skinned> character; // whose joint's space it is in (kept: `seed` names it)
+    std::shared_ptr<const std::vector<std::vector<Vec3>>> curves; // likewise
     render::GroomId groom = render::k_no_groom;
     u32 strands = 0;
     float longest = 0.0f;
@@ -307,6 +333,7 @@ struct HairState::Worn {
     world::Shape shape = world::Shape::cube;
     std::string mesh;           // a mesh entity's file
     std::shared_ptr<const MeshLibrary::Skinned> character; // that file's, once found (resolve)
+    std::shared_ptr<const std::vector<std::vector<Vec3>>> curves; // that file's hair curves, when it wears those
     u32 joint = k_no_hair_joint;                           // of it: the one the hair rides
     std::string problem;        // why it grows none (a mesh entity)
     DVec3 position{};           // where it is drawn (place)
@@ -398,14 +425,22 @@ void HairState::grow(Worn& worn) {
     job->params = hair_params(worn.hair);
     job->pack = m_renderer != nullptr;
     job->character = worn.character;
+    job->curves = worn.curves;
     worn.job = job;
     m_jobs.submit(job->done, [job] {
         if (job->cancel.load()) return;
-        const geometry::TriangleMesh scalp =
-            job->character != nullptr
-                ? hair_scalp(*job->character, job->seed.joint, largest(job->seed.scale), job->seed.top)
-                : hair_scalp(job->seed.shape, job->seed.scale, job->seed.top);
-        const geometry::Groom groom = geometry::generate_groom(scalp, job->params);
+        geometry::Groom groom;
+        if (job->curves != nullptr) {
+            groom = geometry::groom_from_strands(
+                hair_strands(*job->curves, job->character.get(), job->seed.joint, job->seed.scale, job->params.strands),
+                job->params.guides, job->params.seed);
+        } else {
+            const geometry::TriangleMesh scalp =
+                job->character != nullptr
+                    ? hair_scalp(*job->character, job->seed.joint, largest(job->seed.scale), job->seed.top)
+                    : hair_scalp(job->seed.shape, job->seed.scale, job->seed.top);
+            groom = geometry::generate_groom(scalp, job->params);
+        }
         job->strands = groom.strand_count();
         job->longest = groom.longest;
         job->bounds_min = groom.bounds_min;
@@ -426,6 +461,7 @@ void HairState::take(Worn& worn) {
     coat.grown = true;
     coat.seed = job->seed;
     coat.character = job->character;
+    coat.curves = job->curves;
     coat.strands = job->strands;
     coat.longest = job->longest;
     coat.bounds_min = job->bounds_min;
@@ -509,14 +545,22 @@ void place_one(HairState::Worn& worn, const world::Transform& t, const MeshLibra
 void HairState::resolve(Worn& worn) {
     worn.problem.clear();
     std::shared_ptr<const MeshLibrary::Skinned> character;
+    std::shared_ptr<const std::vector<std::vector<Vec3>>> curves;
     u32 joint = k_no_hair_joint;
     if (worn.shape == world::Shape::mesh) {
         const MeshLibrary::Mesh* mesh = m_meshes != nullptr ? m_meshes->find_normalized(worn.mesh) : nullptr;
+        const bool brought = mesh != nullptr && mesh->curves != nullptr && !mesh->curves->empty();
         if (mesh == nullptr) {
             worn.problem = "its mesh file is not loaded";
+        } else if (worn.hair.from_file && !brought) {
+            worn.problem = "its mesh file brings no hair curves (line primitives): turn hair.from_file off to grow hair";
+        } else if (mesh->skinned == nullptr && !worn.hair.from_file) {
+            worn.problem = "its mesh file has no skeleton (hair grows on characters, cubes and spheres; hair.from_file "
+                           "wears a file's own curves)";
         } else if (mesh->skinned == nullptr) {
-            worn.problem = "its mesh file has no skeleton (hair grows on characters, cubes and spheres)";
+            curves = mesh->curves; // (a file without a skeleton: its curves ride the entity)
         } else {
+            if (worn.hair.from_file) curves = mesh->curves;
             character = mesh->skinned;
             joint = hair_joint(character->skeleton, worn.hair.joint);
             if (joint == k_no_hair_joint || joint >= character->rest_model.size()) {
@@ -524,6 +568,7 @@ void HairState::resolve(Worn& worn) {
                                    ? "no joint of its skeleton has \"head\" in its name: name one (hair.joint)"
                                    : "its skeleton has no joint named \"" + worn.hair.joint + "\"";
                 character = nullptr;
+                curves = nullptr;
             }
         }
         if (!worn.problem.empty()) shed(worn);
@@ -547,6 +592,8 @@ void HairState::resolve(Worn& worn) {
         }
         worn.capsules.assign(worn.felt.size(), sim::HairCapsule{});
     }
+    worn.curves = std::move(curves);
+    worn.wanted.curves = worn.curves.get();
     worn.wanted.character = worn.character.get();
     worn.wanted.joint = worn.character != nullptr ? worn.joint : 0;
     // Until a frame places it (place), it is at its entity, a character's at its joint at rest.

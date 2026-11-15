@@ -59,6 +59,9 @@ public:
         std::optional<world::Material> material;
         u32 file_materials = 0; // materials the file's shown meshes use
         std::shared_ptr<const Skinned> skinned; // null: not skinned
+        // The file's hair curves (its line primitives; geometry::ImportResult::curves:
+        // the file's space, at rest), shared with what grows hair from them. Null: none.
+        std::shared_ptr<const std::vector<std::vector<Vec3>>> curves;
     };
     struct Loaded {
         const Mesh* mesh = nullptr; // null on failure

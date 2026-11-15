@@ -375,6 +375,27 @@ GIANT_TEST("geometry: glTF's default material is counted; lines do not count; sp
     const ImportResult l =
         import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":1})"));
     GIANT_CHECK(l.ok() && l.materials.size() == 1 && l.materials[0].name == "paint");
+    // The lines are kept as hair curves (rust's two triangles' six indices): as a list three
+    // segments, joined where one starts on the vertex the last ended on; as a strip one curve
+    // through all six, where the node stands.
+    usize points = 0;
+    for (const std::vector<Vec3>& curve : l.curves) points += curve.size();
+    GIANT_CHECK(r.curves.empty() && !l.curves.empty() && l.curves.size() <= 3 && points == 3 + l.curves.size());
+    const ImportResult strip =
+        import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":3})"));
+    GIANT_CHECK(strip.ok() && strip.curves.size() == 1 && strip.curves[0].size() == 6);
+    if (strip.curves.size() == 1 && strip.curves[0].size() == 6 && !l.curves.empty()) {
+        GIANT_CHECK(near3(strip.curves[0][0], l.curves[0][0]) && near3(strip.curves[0][1], l.curves[0][1]));
+        GIANT_CHECK(length(strip.curves[0][1] - strip.curves[0][0]) > 1e-3f);
+    }
+    // A loop is read as a strip (not closed).
+    const ImportResult loop =
+        import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":2})"));
+    GIANT_CHECK(loop.ok() && loop.curves.size() == 1 && loop.curves[0].size() == 6);
+    // Points are still skipped, with a warning.
+    const ImportResult dots =
+        import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":0})"));
+    GIANT_CHECK(dots.ok() && dots.curves.empty() && !dots.warnings.empty());
     // Paint as specular-glossiness: its diffuse colour, no metal, roughness from glossiness.
     const ImportResult sg = import_gltf_memory(replace_json(
         glb, R"({"name":"paint","pbrMetallicRoughness":{"metallicRoughnessTexture":{"index":0,"texCoord":1}}})",
@@ -782,6 +803,44 @@ GIANT_TEST("geometry: a skinned glTF imports its skeleton, weights, rigid parts 
     GIANT_CHECK(near3(at(top), {-1.0f, 1.1f, 0.0f}));
     GIANT_CHECK(near3(at(bottom), {-0.1f, 0.0f, 0.0f})); // the shoulder's rows stay
     GIANT_CHECK(near3(at(tip), {-0.5f, 2.0f, 0.0f}));    // the sword's (1, 1.5) corner
+}
+
+GIANT_TEST("geometry: a skinned glTF's lines are hair curves where its joints hold them at rest") {
+    SkinOptions o;
+    o.hair_lines = true;
+    const ImportResult r = import_gltf_memory(skinned_arm(o));
+    GIANT_CHECK(r.ok() && r.skinned.has_value());
+    // The triangles are as they were without the lines.
+    GIANT_CHECK(r.mesh.vertices.size() == 9 && r.mesh.indices.size() == 15);
+    // Two strips over the arm's own vertices (one read of their joints and
+    // weights), skinned like its triangles: in bind space, not 5 m along.
+    GIANT_CHECK(r.curves.size() == 4);
+    usize arms = 0, blades = 0, lists = 0;
+    for (const std::vector<Vec3>& curve : r.curves) {
+        if (curve.size() == 6) {
+            bool held = true;
+            for (usize v = 0; v < 6; ++v) {
+                held = held && near3(curve[v], {v % 2 == 0 ? -0.1f : 0.1f, static_cast<float>(v / 2), 0.0f});
+            }
+            arms += held ? 1u : 0u;
+        } else if (curve.size() == 3) {
+            // The sword's, rigid on the elbow: where it hangs at rest (1.5 m
+            // up). Its list without indices joins where a segment starts at
+            // the place the last ended; the one of no length is no strand.
+            blades += near3(curve[0], {0.0f, 1.5f, 0.0f}) && near3(curve[1], {1.0f, 1.5f, 0.0f}) &&
+                              near3(curve[2], {0.0f, 2.5f, 0.0f})
+                          ? 1u
+                          : 0u;
+            lists += near3(curve[0], {0.0f, 1.5f, 0.0f}) && near3(curve[1], {0.0f, 1.5f, 1.0f}) &&
+                             near3(curve[2], {0.0f, 1.5f, 2.0f})
+                         ? 1u
+                         : 0u;
+        }
+    }
+    GIANT_CHECK(arms == 2 && blades == 1 && lists == 1);
+    // Lines without data are skipped with a warning: hair never refuses a file.
+    GIANT_CHECK(std::any_of(r.warnings.begin(), r.warnings.end(),
+                            [](const std::string& w) { return w.find("lines without data") != std::string::npos; }));
 }
 
 GIANT_TEST("geometry: a skinned glTF's morph targets: named, merged by name, sparse, per vertex in bind space") {

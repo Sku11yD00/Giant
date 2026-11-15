@@ -2115,9 +2115,23 @@ In the editor the "+ Hair" button adds a head of hair (a sized ball), and
 an entity's settings have "Wears hair" with its growth, look and motion,
 a character's joint by name, and what the hair is doing (strands, growing,
 moving, or why none grew); each change is a `set_entity`, so it undoes.
-`tools/mcp_smoke.py` grows hair on a ball. Limits until C6e part 4: mesh
-files without a skeleton grow no hair, a file's own hair curves (glTF line
-primitives) are not read, and kits made from entities do not carry hair.
+`tools/mcp_smoke.py` grows hair on a ball.
+
+A file may bring its own hair: the glTF importer keeps line primitives as
+curves (`ImportResult::curves`: a strip or loop is one curve, a list's
+segments are joined end to start, or where they meet; where they stand at
+rest in the file's space, a skinned mesh's own lines skinned to the rest
+pose; none of no length; the first 262,144 and 16 million points), `MeshLibrary::Mesh::curves`
+shares them, and an entity with `hair.from_file` wears them instead of
+grown hair: `hair_strands` takes up to `strands` of them evenly, about the
+joint's place at rest and by the entity's largest scale on a character
+(the space the scalp is in), else in the entity's space by its scale, and
+`geometry::groom_from_strands` makes the groom on the worker (`guides` and
+`seed` choose the simulated ones; the growth settings are unused). A file
+still needs triangles to be imported, and curves are root first as the
+file orders them. Limits: mesh files without a skeleton grow no hair of
+their own (they can wear their file's), and kits made from entities do not
+carry hair.
 
 ## Ballistics (W1a)
 

@@ -1,7 +1,9 @@
 // The editor's hair: entities that wear hair (world::Hair) have a groom
 // grown from the top of their shape (cubes and spheres) or from a
 // character's skin round a joint (mesh entities with a skinned file)
-// (geometry::generate_groom) and packed for the renderer on a worker,
+// (geometry::generate_groom), or made of the hair curves its mesh file
+// brings (world::Hair::from_file, geometry::groom_from_strands), and
+// packed for the renderer on a worker,
 // handed to the renderer (render::Renderer::add_groom), simulated near the
 // camera (giant/sim/hair.h) and named to the renderer each frame
 // (render::FrameInput::hair).
@@ -60,6 +62,12 @@ geometry::TriangleMesh hair_scalp(world::Shape shape, const Vec3& scale, float t
 // rest in model space (y up) about the joint's place, above the top `top`
 // share of their height, times `scale`. A joint past the skeleton: empty.
 geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joint, float scale, float top);
+// A file's hair curves as strands for geometry::groom_from_strands: at
+// most `most` of them (evenly over the file's), sized by `scale`; a
+// character's about `joint`'s place at rest and by the largest of `scale`
+// (the space hair_scalp's is in), else in the entity's space.
+std::vector<std::vector<Vec3>> hair_strands(const std::vector<std::vector<Vec3>>& curves,
+                                            const MeshLibrary::Skinned* character, u32 joint, const Vec3& scale, u32 most);
 // The joint hair grows round: the one of that name, or for no name the
 // first with "head" in its name (any case). None: k_no_hair_joint.
 inline constexpr u32 k_no_hair_joint = ~0u;

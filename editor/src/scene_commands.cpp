@@ -135,6 +135,7 @@ Json entity_json(const Entity& e) {
                      {"guides", h.guides},
                      {"top", h.top},
                      {"joint", h.joint},
+                     {"from_file", h.from_file},
                      {"length", h.length},
                      {"length_variation", h.length_variation},
                      {"droop", h.droop},
@@ -164,6 +165,7 @@ Json mesh_json(const MeshLibrary::Mesh& m) {
     Json j = {{"path", m.path},
               {"triangles", m.triangles},
               {"clusters", m.clusters},
+              {"hair_curves", m.curves != nullptr ? m.curves->size() : usize{0}},
               {"levels", m.levels},
               {"coarsest_triangles", m.coarsest_triangles},
               {"import_seconds", m.import_seconds},
@@ -318,6 +320,13 @@ Json entity_properties() {
                                        "skin grows the hair and which the hair rides, by name (list_meshes / "
                                        "get_animation name them). Empty: the first joint with \"head\" in its "
                                        "name. Default empty."}}},
+            {"from_file", {{"type", "boolean"},
+                           {"description", "For a mesh entity: wear the hair curves its file brings (glTF line "
+                                           "primitives, one strand a curve, root first; list_meshes counts them as "
+                                           "hair_curves) instead of growing hair. `strands` is then the most of them "
+                                           "kept (evenly), `guides` and `seed` choose the simulated ones, and the "
+                                           "growth settings (top, length to clump) are unused. On a character they "
+                                           "ride `joint`; on a file without a skeleton, the entity. Default off."}}},
             {"length", number(0.001, 10, "Metres. Default 0.25.")},
             {"length_variation", number(0, 1, "Strands are shorter by up to this share. Default 0.2.")},
             {"droop", number(0, 1, "0 stands on end, 1 hangs. Default 0.8.")},
@@ -487,6 +496,7 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         o.guides = h.value("guides", o.guides);
         o.top = h.value("top", o.top);
         o.joint = h.value("joint", o.joint);
+        o.from_file = h.value("from_file", o.from_file);
         o.length = h.value("length", o.length);
         o.length_variation = h.value("length_variation", o.length_variation);
         o.droop = h.value("droop", o.droop);

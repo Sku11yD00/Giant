@@ -122,6 +122,11 @@ struct SkinOptions {
     // in tangents at the second 0 and 2), after the others.
     bool morph_clip = false;
     float smile_rest = 0.25f; // the arm's "smile" rest weight
+    // Hair lines: the arm's vertices again as two strips (skinned as it
+    // is); on the sword a strip of its three vertices, a list without
+    // indices of (0,0,0)-(0,0,1), (0,0,1)-(0,0,2) and (3,3,3)-(3,3,3), and
+    // a list whose positions have no data.
+    bool hair_lines = false;
 };
 
 inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
@@ -198,6 +203,18 @@ inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
         extra_weights = R"(,"JOINTS_1":)" + std::to_string(j1a) + R"(,"WEIGHTS_1":)" + std::to_string(w1a);
     }
     const auto n = [](usize i) { return std::to_string(i); };
+    std::string arm_lines, sword_lines;
+    if (o.hair_lines) {
+        const usize lp = add(std::vector<float>{0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 2, 3, 3, 3, 3, 3, 3},
+                             R"("componentType":5126,"count":6,"type":"VEC3","min":[0,0,0],"max":[3,3,3])");
+        accessors.push_back(R"({"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[0,0,0]})");
+        const usize none = accessors.size() - 1;
+        const std::string strip = R"(,{"attributes":{"POSITION":)" + n(pos) + R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" +
+                                  n(wgt) + R"(},"mode":3})";
+        arm_lines = strip + strip;
+        sword_lines = R"(,{"attributes":{"POSITION":)" + n(sp) + R"(},"mode":3},{"attributes":{"POSITION":)" + n(lp) +
+                      R"(},"mode":1},{"attributes":{"POSITION":)" + n(none) + R"(},"mode":1})";
+    }
     std::string arm_extra, arm_targets, sword_targets, arm_mesh_extra, sword_mesh_extra;
     if (o.mirrored_uvs) {
         const usize uv = add(std::vector<float>{0, 1, 1, 1, 0, 0.5f, 1, 0.5f, 0, 1, 1, 1},
@@ -266,8 +283,8 @@ inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
                        std::string(o.two_nodes ? R"(,{"mesh":0,"skin":0,"translation":[9,0,0]})" : "") + "]," +
                        R"("meshes":[{)" + arm_mesh_extra + R"("primitives":[{"attributes":{"POSITION":)" + n(pos) + R"(,"NORMAL":)" + n(nrm) +
                        R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" + n(wgt) + extra_weights + arm_extra + R"(},"indices":)" + n(idx) +
-                       arm_targets + R"(}]},{)" + sword_mesh_extra + R"("primitives":[{"attributes":{"POSITION":)" + n(sp) +
-                       R"(},"indices":)" + n(si) + sword_targets + "}]}]," +
+                       arm_targets + "}" + arm_lines + R"(]},{)" + sword_mesh_extra + R"("primitives":[{"attributes":{"POSITION":)" + n(sp) +
+                       R"(},"indices":)" + n(si) + sword_targets + "}" + sword_lines + "]}]," +
                        R"("skins":[{"joints":[1,0],"inverseBindMatrices":)" + n(inv) + "}" +
                        std::string(o.second_skin ? R"(,{"joints":[0]})" : "") + "]," +
                        R"("animations":[)" +
