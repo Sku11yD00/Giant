@@ -69,7 +69,7 @@ render::HairLook hair_look(const world::Hair& hair);
 sim::HairSettings hair_motion(const world::Hair& hair);
 
 struct HairStats {
-    u32 wearing = 0;   // entities with hair on that can wear it
+    u32 wearing = 0;   // visible entities with hair on of a shape that may wear it (a mesh's may yet have a problem)
     u32 grown = 0;     // with a groom
     u32 growing = 0;   // with a job running, or a new groom on its way to the GPU
     u32 simulated = 0; // moved in the last update
@@ -102,8 +102,11 @@ public:
     // Before a frame is drawn: where each is drawn (the first of `moving`,
     // `walking`, `swinging` that poses its entity, else its transform; a
     // character's at its joint as `animation` poses it, or at rest), and
-    // its body's capsules. Each may be null. Without it hair is at its
-    // entity's transform (a character's at its joint at rest).
+    // its body's capsules. Each may be null. Until first called hair is at
+    // its entity's transform (a character's at its joint at rest); from
+    // then on only this moves it. update() steps with the place of the
+    // frame just drawn, so hair answers its head a frame late (its roots
+    // stay on).
     void place(const AnimationState* animation, const DrawnPoses* moving, const DrawnPoses* walking,
                const DrawnPoses* swinging);
     // Each frame: grooms grown since are taken, the nearest move under
@@ -128,9 +131,9 @@ public:
         bool ready = false; // drawn from now on: the renderer has all of its groom
         bool simulated = false;
         bool left_out = false;
-        std::string problem; // why it cannot grow (a mesh file without a skeleton, no such joint); empty: none
+        std::string problem; // why it cannot grow (a mesh file not loaded or without a skeleton, no such joint); empty: none
         std::string joint;   // a character's: the joint it rides
-        DVec3 position{};    // where it is drawn
+        DVec3 position{};    // where it is drawn (as last placed; never placed: at its entity, a character's joint at rest)
         Quat rotation{};
         u32 capsules = 0;    // of its body, felt
         u32 strands = 0;

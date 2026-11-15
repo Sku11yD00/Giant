@@ -30,7 +30,7 @@ void register_hair_commands(ai::CommandRegistry& registry, EditorState& state) {
          "2000000 strands in all: lowest ids first), simulations put back at rest after going wrong. With "
          "`id`, that entity's too: whether it is grown, growing, ready (the renderer has all of its groom, so "
          "it is drawn from the next frame on), simulated and left out, its `problem` (why a mesh entity grows "
-         "none: its file has no skeleton, or no such joint; empty otherwise), a character's `joint` and the "
+         "none: its file is not loaded or has no skeleton, or no such joint; empty otherwise), a character's `joint` and the "
          "`capsules` of its body the hair is pushed aside by, where it is drawn (`position`, `rotation` x y z "
          "w: its entity's, as the physics, a walker or a swing moves it, or its joint's as animated), its "
          "strands and guides, its longest strand (metres), its bounds, and with `points` true where its "

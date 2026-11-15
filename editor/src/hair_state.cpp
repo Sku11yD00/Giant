@@ -1,5 +1,7 @@
 #include "hair_state.h"
 
+#include "pose_math.h"
+
 #include "giant/core/log.h"
 
 #include <algorithm>
@@ -51,31 +53,13 @@ bool wears(const world::Entity& e) {
            finite(e.transform.scale);
 }
 
-Vec3 apply(const Mat4& m, const Vec3& p) {
-    return {m.at(0, 0) * p.x + m.at(0, 1) * p.y + m.at(0, 2) * p.z + m.at(0, 3),
-            m.at(1, 0) * p.x + m.at(1, 1) * p.y + m.at(1, 2) * p.z + m.at(1, 3),
-            m.at(2, 0) * p.x + m.at(2, 1) * p.y + m.at(2, 2) * p.z + m.at(2, 3)};
-}
+using pose::apply;
+using pose::stretch;
 
 // A direction through a matrix (no move).
 Vec3 turn(const Mat4& m, const Vec3& d) {
     return {m.at(0, 0) * d.x + m.at(0, 1) * d.y + m.at(0, 2) * d.z, m.at(1, 0) * d.x + m.at(1, 1) * d.y + m.at(1, 2) * d.z,
             m.at(2, 0) * d.x + m.at(2, 1) * d.y + m.at(2, 2) * d.z};
-}
-
-// The most a matrix stretches a length (its largest column).
-float stretch(const Mat4& m) {
-    float most = 0.0f;
-    for (int c = 0; c < 3; ++c) {
-        most = std::max(most, std::sqrt(m.at(0, c) * m.at(0, c) + m.at(1, c) * m.at(1, c) + m.at(2, c) * m.at(2, c)));
-    }
-    return most;
-}
-
-DVec3 place_at(const world::Transform& t, const Vec3& model) {
-    const Vec3 scaled{model.x * t.scale.x, model.y * t.scale.y, model.z * t.scale.z};
-    const Vec3 r = rotate(t.rotation, scaled);
-    return t.position + DVec3{static_cast<double>(r.x), static_cast<double>(r.y), static_cast<double>(r.z)};
 }
 
 float largest(const Vec3& scale) { return std::max({std::fabs(scale.x), std::fabs(scale.y), std::fabs(scale.z)}); }
@@ -196,7 +180,11 @@ geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joi
     const float share = std::isfinite(top) ? std::clamp(top, 0.01f, 1.0f) : 0.5f;
     const float from = high - share * (high - low);
     const Mat4& to_joint = skeleton.inverse_bind[joint];
-    const float size = std::fabs(scale);
+    // (The joint's own size at rest goes with it: a skeleton under a scaled
+    // node binds through that scale and poses back through it, and the
+    // hair is drawn at the joint's place and turn only.)
+    const float joint_size = joint < character.rest_model.size() ? stretch(character.rest_model[joint]) : 1.0f;
+    const float size = std::fabs(scale) * (std::isfinite(joint_size) && joint_size > 0.0f ? joint_size : 1.0f);
     const auto put = [&](geometry::Vertex v) {
         v.position = apply(to_joint, v.position) * size;
         const Vec3 n = normalize_or_zero(turn(to_joint, v.normal));
@@ -290,6 +278,7 @@ namespace {
 struct Coat {
     bool grown = false;
     Seed seed; // what it was grown from
+    std::shared_ptr<const MeshLibrary::Skinned> character; // whose joint's space it is in (kept: `seed` names it)
     render::GroomId groom = render::k_no_groom;
     u32 strands = 0;
     float longest = 0.0f;
@@ -318,6 +307,7 @@ struct HairState::Worn {
     std::string problem;        // why it grows none (a mesh entity)
     DVec3 position{};           // where it is drawn (place)
     Quat rotation{};
+    bool placed = false;        // by place(): from then on only place() says where it is
     std::vector<u32> felt;      // the character's capsules nearest the joint (indices)
     std::vector<sim::HairCapsule> capsules; // those, as posed, about `position`
     bool simulated = false;     // in the last update
@@ -431,6 +421,7 @@ void HairState::take(Worn& worn) {
     Coat coat;
     coat.grown = true;
     coat.seed = job->seed;
+    coat.character = job->character;
     coat.strands = job->strands;
     coat.longest = job->longest;
     coat.bounds_min = job->bounds_min;
@@ -470,27 +461,31 @@ namespace {
 
 // Where it is drawn when its entity is at `t` and its character's joints
 // at `model` (null: no character), and its body's capsules there.
-void place_one(HairState::Worn& worn, const world::Transform& t, const std::vector<Mat4>* model) {
-    if (worn.character == nullptr || model == nullptr || worn.joint >= model->size()) {
+void place_one(HairState::Worn& worn, const world::Transform& t, const MeshLibrary::Skinned* shown, u32 joint,
+               const std::vector<Mat4>* model) {
+    for (sim::HairCapsule& capsule : worn.capsules) {
+        capsule = {};
+        capsule.radius = std::numeric_limits<float>::quiet_NaN(); // (not felt, unless placed below)
+    }
+    if (shown == nullptr || model == nullptr || joint >= model->size()) {
         worn.position = t.position;
         worn.rotation = t.rotation;
         return;
     }
-    const anim::JointTransform joint = anim::decompose((*model)[worn.joint]);
-    worn.position = place_at(t, joint.translation);
-    worn.rotation = t.rotation * joint.rotation;
+    const anim::JointTransform at = anim::decompose((*model)[joint]);
+    worn.position = pose::place(t, at.translation);
+    worn.rotation = t.rotation * at.rotation;
+    if (shown != worn.character.get()) return; // (an older groom still shown: the new body's capsules are not its)
     const float scale = largest(t.scale);
     const std::vector<anim::BoneCapsule>& bones = worn.character->capsules;
     for (usize k = 0; k < worn.felt.size() && k < worn.capsules.size(); ++k) {
         sim::HairCapsule& out = worn.capsules[k];
-        out = {};
-        out.radius = std::numeric_limits<float>::quiet_NaN(); // (not felt, unless placed)
         if (worn.felt[k] >= bones.size()) continue;
         const anim::BoneCapsule& b = bones[worn.felt[k]];
         if (b.joint >= model->size()) continue;
         const Mat4& m = (*model)[b.joint];
-        const DVec3 a = place_at(t, apply(m, b.a)) - worn.position;
-        const DVec3 c = place_at(t, apply(m, b.b)) - worn.position;
+        const DVec3 a = pose::place(t, apply(m, b.a)) - worn.position;
+        const DVec3 c = pose::place(t, apply(m, b.b)) - worn.position;
         out.a = {static_cast<float>(a.x), static_cast<float>(a.y), static_cast<float>(a.z)};
         out.b = {static_cast<float>(c.x), static_cast<float>(c.y), static_cast<float>(c.z)};
         out.radius = b.radius * stretch(m) * scale;
@@ -543,7 +538,12 @@ void HairState::resolve(Worn& worn) {
     }
     worn.wanted.character = worn.character.get();
     worn.wanted.joint = worn.character != nullptr ? worn.joint : 0;
-    place_one(worn, worn.transform, worn.character != nullptr ? &worn.character->rest_model : nullptr);
+    // Until a frame places it (place), it is at its entity, a character's at its joint at rest.
+    if (!worn.placed) {
+        const MeshLibrary::Skinned* shown = worn.coat.grown ? worn.coat.character.get() : worn.character.get();
+        place_one(worn, worn.transform, shown, worn.coat.grown ? worn.coat.seed.joint : worn.joint,
+                  shown != nullptr ? &shown->rest_model : nullptr);
+    }
 }
 
 void HairState::place(const AnimationState* animation, const DrawnPoses* moving, const DrawnPoses* walking,
@@ -559,15 +559,20 @@ void HairState::place(const AnimationState* animation, const DrawnPoses* moving,
                 break;
             }
         }
+        // The groom shown is in the space of the joint it was grown round
+        // (while another grows, still the old one's).
+        const MeshLibrary::Skinned* shown = worn.coat.grown ? worn.coat.character.get() : worn.character.get();
+        const u32 joint = worn.coat.grown ? worn.coat.seed.joint : worn.joint;
         const std::vector<Mat4>* model = nullptr;
-        if (worn.character != nullptr) {
+        if (shown != nullptr) {
             // (As its body is drawn: its animation's pose once its copy shows, else at rest.)
             const AnimationState::Animated* a = animation != nullptr ? animation->find(id) : nullptr;
-            const bool posed = a != nullptr && a->posed && (a->drawn || !animation->draws()) && a->skinned == worn.character &&
-                               a->model.size() == worn.character->skeleton.size();
-            model = posed ? &a->model : &worn.character->rest_model;
+            const bool posed = a != nullptr && a->posed && (a->drawn || !animation->draws()) && a->skinned.get() == shown &&
+                               a->model.size() == shown->skeleton.size();
+            model = posed ? &a->model : &shown->rest_model;
         }
-        place_one(worn, *drawn, model);
+        place_one(worn, *drawn, shown, joint, model);
+        worn.placed = true;
     }
     list_draws();
 }

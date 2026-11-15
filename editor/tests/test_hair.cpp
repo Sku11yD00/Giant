@@ -376,6 +376,24 @@ GIANT_TEST("hair: on a character it grows from the skin its joint moves, rides t
     GIANT_CHECK_NEAR(low, 1.5, 1e-4);
     GIANT_CHECK_NEAR(high, 3.0, 1e-4);
     GIANT_CHECK(wide >= 0.2f - 1e-4f && area > 0.1);
+    // A skeleton under a scaled node (inverse binds 100 times, joints a hundredth: as exported in
+    // centimetres) grows the same scalp, not one 100 times the size.
+    MeshLibrary::Skinned exported = character;
+    for (Mat4& m : exported.skeleton.inverse_bind) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 4; ++c) m.at(r, c) *= 100.0f;
+        }
+    }
+    for (Mat4& m : exported.rest_model) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) m.at(r, c) *= 0.01f;
+        }
+    }
+    const geometry::TriangleMesh same = hair_scalp(exported, elbow, 2.0f, 0.5f);
+    GIANT_CHECK(same.vertices.size() == scalp.vertices.size());
+    for (usize i = 0; i < same.vertices.size() && i < scalp.vertices.size(); ++i) {
+        GIANT_CHECK(length(same.vertices[i].position - scalp.vertices[i].position) < 1e-3f);
+    }
     // From the shoulder down it is the whole arm's skin; a joint past the skeleton has none.
     GIANT_CHECK(hair_scalp(character, shoulder, 1.0f, 1.0f).indices.size() > hair_scalp(character, elbow, 1.0f, 1.0f).indices.size());
     GIANT_CHECK(hair_scalp(character, 99, 1.0f, 0.5f).indices.empty());
@@ -417,6 +435,24 @@ GIANT_TEST("hair: on a character it grows from the skin its joint moves, rides t
     GIANT_CHECK_NEAR(view.position.y, 4.0, 1e-3);
     WindState still;
     for (int i = 0; i < 30; ++i) hair.update(still, DVec3{20.0, 4.0, 2.0}, 1.0 / 60.0);
+    // Another file loaded meanwhile (every character is looked up again) leaves it where it was placed.
+    std::vector<u8> other;
+    geometry::testing::append(other, std::vector<float>{0, 0, 0, 2, 0, 0, 0, 2, 0});
+    geometry::testing::append(other, std::vector<u32>{0, 1, 2});
+    const std::string loaded_since = hair_file(
+        "other.glb",
+        geometry::testing::make_glb(
+            R"({"asset":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
+            R"("meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],"buffers":[{"byteLength":48}],)"
+            R"("bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12}],)"
+            R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[2,2,0]},)"
+            R"({"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"}]})",
+            other));
+    GIANT_CHECK(meshes.load(loaded_since).mesh != nullptr);
+    hair.update(still, DVec3{20.0, 4.0, 2.0}, 1.0 / 60.0);
+    GIANT_CHECK(hair.view(id, view));
+    GIANT_CHECK_NEAR(view.position.x, 20.0, 1e-3);
+    GIANT_CHECK_NEAR(view.position.y, 4.0, 1e-3);
     GIANT_CHECK(hair.stats().simulated == 1 && hair.stats().resets == 0);
     GIANT_CHECK(hair.view(id, view) && view.simulated && view.guide_points.size() == 8 * 16);
     for (const Vec3& p : view.guide_points) GIANT_CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
