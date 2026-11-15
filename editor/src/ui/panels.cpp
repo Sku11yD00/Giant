@@ -753,9 +753,13 @@ void EditorPanels::draw_properties() {
                 if (mesh != nullptr && mesh->skinned != nullptr) {
                     if (ImGui::BeginCombo("Hair joint", h.joint.empty() ? "(the head)" : h.joint.c_str())) {
                         if (ImGui::Selectable("(the head)", h.joint.empty())) set("hair", {{"joint", ""}});
+                        int joint_index = 0;
                         for (const std::string& joint_name : mesh->skinned->skeleton.names) {
+                            ++joint_index;
                             if (joint_name.empty() || joint_name.size() > world::k_max_hair_joint_bytes) continue;
+                            ImGui::PushID(joint_index); // (files may name two joints alike)
                             if (ImGui::Selectable(joint_name.c_str(), joint_name == h.joint)) set("hair", {{"joint", joint_name}});
+                            ImGui::PopID();
                         }
                         ImGui::EndCombo();
                     }
@@ -766,8 +770,9 @@ void EditorPanels::draw_properties() {
                 set("hair", {{"strands", std::clamp(strands, 1, world::k_max_hair_strands)}});
             }
             float top = h.top;
-            if (ImGui::SliderFloat("Grows from the top", &top, 0.01f, 1.0f, "%.2f")) {
-                set("hair", {{"top", std::clamp(top, 0.01f, 1.0f)}});
+            if (ImGui::SliderFloat("Grows from the top", &top, 0.02f, 1.0f, "%.2f")) {
+                // (0.01f as a double is under the command's least of 0.01.)
+                set("hair", {{"top", std::clamp(top, 0.02f, 1.0f)}});
             }
             float length = h.length;
             if (ImGui::SliderFloat("Hair length", &length, 0.005f, 2.0f, "%.3f m", ImGuiSliderFlags_Logarithmic)) {
@@ -867,7 +872,8 @@ void EditorPanels::draw_properties() {
             if (e->lamp.shadows) {
                 float near = e->lamp.shadow_near;
                 if (ImGui::SliderFloat("Shadow start", &near, 0.01f, 10.0f, "%.2f m", ImGuiSliderFlags_Logarithmic)) {
-                    set("lamp", {{"shadow_near", std::clamp(near, 0.01f, 10.0f)}});
+                    // (0.01f as a double is under the command's least of 0.01.)
+                    set("lamp", {{"shadow_near", std::max(static_cast<double>(std::clamp(near, 0.01f, 10.0f)), 0.01)}});
                 }
             }
         }
