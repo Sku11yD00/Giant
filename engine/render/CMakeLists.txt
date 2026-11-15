@@ -12,6 +12,7 @@ giant_module(render
     src/instance_store.cpp
     src/terrain_paint.cpp
     src/particles.cpp
+    src/hair.cpp
     src/shadow_pages.cpp
     src/voxel_light.cpp
     src/voxel_lamps.cpp
@@ -57,6 +58,13 @@ giant_shaders(render
     shaders/particles.slang:ps_main:pixel:particles_ps
     shaders/particles.slang:vs_full:vertex:particles_full_vs
     shaders/particles.slang:ps_composite:pixel:particles_composite_ps
+    shaders/hair.slang:cs_prepare:compute:hair_prepare_cs
+    shaders/hair.slang:vs_ribbon:vertex:hair_ribbon_vs
+    shaders/hair.slang:ps_front:pixel:hair_front_ps
+    shaders/hair.slang:ps_main:pixel:hair_ps
+    shaders/hair.slang:vs_full:vertex:hair_full_vs
+    shaders/hair.slang:ps_composite:pixel:hair_composite_ps
+    shaders/hair.slang:ps_depth:pixel:hair_depth_ps
     shaders/smaa.slang:vs_main:vertex:smaa_vs
     shaders/smaa.slang:ps_edges:pixel:smaa_edges_ps
     shaders/smaa.slang:ps_weights:pixel:smaa_weights_ps
@@ -96,6 +104,7 @@ giant_module_tests(render
     tests/test_decals.cpp
     tests/test_occluders.cpp
     tests/test_particles.cpp
+    tests/test_hair_render.cpp
     tests/test_lights.cpp
     tests/test_local_shadows.cpp
     tests/test_streaming.cpp

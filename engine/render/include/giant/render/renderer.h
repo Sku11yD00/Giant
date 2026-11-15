@@ -30,6 +30,7 @@
 #include "giant/core/types.h"
 #include "giant/core/wind.h"
 #include "giant/geometry/clusters.h"
+#include "giant/geometry/groom.h"
 #include "giant/rhi/rhi.h"
 #include "giant/voxel/clipmap.h"
 
@@ -65,6 +66,8 @@ struct LightBins;       // src/lights.h
 class LocalShadows;     // src/local_shadows.h
 class VoxelLamps;       // src/voxel_lamps.h
 class ParticleRing;     // src/particles.h
+class Grooms;           // src/hair.h
+struct HairPlan;
 
 // A mesh loaded into the renderer: a built-in shape or one added with
 // add_mesh.
@@ -454,6 +457,51 @@ inline constexpr u32 k_max_particles_born = 1u << 14;
 inline constexpr u32 k_max_particles_grounded = 1u << 12;
 inline constexpr float k_max_particle_life = 60.0f;   // seconds
 
+// Hair (characters plan C6c): a groom (giant/geometry/groom.h) added with
+// add_groom, drawn as strands wherever a frame's HairDraw puts it. The id
+// is a slot (low 20 bits) and that slot's generation (high 12), as a
+// TextureId is.
+using GroomId = u32;
+inline constexpr GroomId k_no_groom = ~0u;
+inline constexpr u32 k_max_grooms = 4096;             // added at once
+inline constexpr u32 k_max_groom_strands = 1u << 18;  // of one groom kept (its first: an even thinning)
+inline constexpr u32 k_max_hair_draws = 256;          // grooms drawn a frame (the nearest)
+inline constexpr u32 k_max_hair_strands = 1u << 18;   // strands drawn a frame (past it every groom is thinned alike)
+
+// How hair looks. Its colour is what its pigment leaves of white light:
+// `melanin` from none (white) to black, `redness` the share of it that is
+// the red kind (0 brown to black, 1 ginger), times `tint` (dyed hair: no
+// melanin and the dye's colour).
+struct HairLook {
+    float melanin = 0.5f;   // 0..1
+    float redness = 0.2f;   // 0..1
+    Vec3 tint{1.0f, 1.0f, 1.0f};
+    float roughness = 0.3f; // 0.05..1: how wide its highlights spread along a strand
+    float width = 0.00008f; // metres across a strand at its root (0.00001..0.01)
+    float tip_width = 0.3f; // 0..1: its width at the tip, as a share of that
+    float variation = 0.15f; // 0..1: how much strands differ in shade, by their seeds
+};
+
+// The colour of hair of this look (linear; what a thick lock of it gives
+// back of white light).
+Vec3 hair_color(const HairLook& look);
+
+// A groom drawn this frame: where it hangs (a head joint's place, turn and
+// uniform size) and its guides as simulated (sim::HairSim::points(): the
+// groom's guide_count * 16 points in its own space; empty or of another
+// size: at rest).
+struct HairDraw {
+    GroomId groom = k_no_groom;
+    DVec3 position{};
+    Quat rotation{};
+    float scale = 1.0f;
+    std::span<const Vec3> guides{};
+    HairLook look{};
+    // The most strands of it to draw (0: all it has). Fewer are drawn the
+    // smaller it is on screen, each wider, so it covers the same.
+    u32 strands = 0;
+};
+
 // A lamp: a point light, or a spot light shining down a cone (lit views,
 // not the far field). Its light at distance d is colour x intensity / d^2
 // (the same relative units as Lighting::sun_light, so intensity 3 at 1 m
@@ -593,6 +641,12 @@ struct RenderSettings {
     // Particles drawn (FrameInput::particle_bursts; the lit view). Off,
     // they are still born and age, unseen.
     bool particles = true;
+    // Hair drawn (FrameInput::hair; the lit view), and how finely: the
+    // strands of a groom drawn are those needed for each to be about
+    // 1 / hair_detail of a pixel wide (0.5 to 16; more: finer and softer,
+    // and more to draw).
+    bool hair = true;
+    float hair_detail = 3.0f;
     // Their shadows (lights with a shadow_id; needs `shadows` and GPU
     // culling): faces of shadow tiles drawn a frame at most (nearest first;
     // a face not drawn yet lets its light through).
@@ -790,6 +844,8 @@ struct FrameInput {
     // particle_seconds (or delta_seconds when that is negative; 0: still).
     std::span<const ParticleBurst> particle_bursts;
     std::span<const ParticleStyle> particle_styles;
+    // Hair (see HairDraw; the nearest k_max_hair_draws in view).
+    std::span<const HairDraw> hair;
     // What swaying materials move in (WindClock::state).
     WindState wind;
     // Seconds since the last frame, for auto exposure's easing (0: held;
@@ -908,6 +964,11 @@ struct RenderStats {
     u32 particles_dropped = 0;  // left out this frame: past the caps a frame, bad numbers or styles, too far
     u32 particles_cut = 0;      // alive ones gone early this frame: made way (past k_max_particles), or the camera went over 4 km from where they were kept
     bool particles_drawn = false; // their passes ran this frame (the lit view, the setting on, some alive)
+    u32 hair_grooms = 0;          // grooms of hair drawn this frame
+    u32 hair_strands = 0;         // their strands drawn (thinned by size on screen)
+    u32 hair_segments = 0;        // and those strands' pieces (two triangles each, a pass)
+    u32 hair_left_out = 0;        // draws not drawn: unknown or not yet uploaded grooms, bad numbers, past k_max_hair_draws or the frame's strands
+    u32 hair_draws = 0;           // draw calls and dispatches the hair took
     u32 lights = 0;             // local lights shaded this frame (in view, near enough)
     bool light_overflow = false; // too many: the furthest were left out of some clusters or of the frame
     u32 light_lamps = 0;         // lamps the lights stand for (far lamps merged: each counted)
@@ -1082,6 +1143,16 @@ public:
     // its id then never resolves again (until its slot's generations wrap,
     // after 4094 reuses).
     void remove_texture(TextureId texture);
+
+    // Hair: a groom kept for drawing (its first k_max_groom_strands
+    // strands). Its data goes to the GPU over the next frames, under
+    // groom_bytes_per_frame; until then it is not drawn (groom_ready).
+    // k_no_groom (logged) for a groom with no strands or with a
+    // groom_problem, or past k_max_grooms.
+    GroomId add_groom(const geometry::Groom& groom);
+    void remove_groom(GroomId groom);
+    bool groom_ready(GroomId groom) const;
+    static constexpr u32 groom_bytes_per_frame = 4u << 20;
 
     // Painted terrain layers: the ground is tiles `tile_size` metres square
     // from the origin on x and z, `samples` a side (tile_size / samples
@@ -1284,6 +1355,12 @@ private:
     bool ensure_sky_targets();
     bool ensure_post_targets(); // bloom's levels, sized to the frame
     // Water over `light` (water.h, shaders/water.slang): the light to expose next.
+    // Hair (src/hair.h, shaders/hair.slang): grooms' data sent, under the frame's budget.
+    void upload_grooms(rhi::CommandList& cmd);
+    bool ensure_hair_targets();
+    // Hair over `light`, its depth into the scene's: the light to draw over next.
+    rhi::TextureHandle draw_hair(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
+                                 rhi::TextureHandle light);
     rhi::TextureHandle draw_water(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
                                   rhi::TextureHandle light);
     // Particles over `light` (src/particles.h, shaders/particles.slang): the light to expose next.
@@ -1414,6 +1491,19 @@ private:
     rhi::TextureHandle m_fallback; // rgba16_float
     rhi::TextureHandle m_scene;    // rgba16_float: the light with screen reflections, before exposure
     rhi::TextureHandle m_water_light; // rgba16_float: and with water (made when first drawn)
+    std::unique_ptr<Grooms> m_grooms;      // hair: the grooms added (src/hair.h)
+    u32 m_groom_slots_made = 0;            // slots that ever held a groom
+    std::unique_ptr<HairPlan> m_hair_plan; // this frame's plan (its memory kept)
+    rhi::PipelineHandle m_hair_prepare;    // hair (shaders/hair.slang): strands posed and lit,
+    rhi::PipelineHandle m_hair_front;      // their ribbons' nearest depth,
+    rhi::PipelineHandle m_hair_draw;       // their light summed by nearness to it,
+    rhi::PipelineHandle m_hair_composite;  // the sums over the light,
+    rhi::PipelineHandle m_hair_depth_pass; // and thick hair's depth into the scene's
+    rhi::BufferHandle m_hair_drawn;        // gpu::HairPoint, k_max_hair_strands * 16 (made with the first groom)
+    rhi::TextureHandle m_hair_depth;       // the frame's size, made when hair is first drawn: the nearest hair
+    rhi::TextureHandle m_hair_accum;       // rgba16_float: light x cover x weight (exposed), cover x weight
+    rhi::TextureHandle m_hair_reveal;      // rgba16_float: what shows through
+    rhi::TextureHandle m_hair_light;       // rgba16_float: the light with hair over it
     rhi::TransientMemory m_shading_extras; // this frame's gpu::ResolveExtras (data null: none yet), which the water reads too
     // Bloom: the light halved k_bloom_levels times (down), and back up
     // (up[i]: down[i] plus up[i + 1] spread; the last level is down's own).
