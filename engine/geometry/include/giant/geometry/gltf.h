@@ -114,13 +114,13 @@ struct ImportResult {
     std::vector<ImportedMaterial> materials;
     u64 default_material_triangles = 0;
     // Hair curves: the shown meshes' line primitives (a strip or loop is
-    // one curve, a list's segments are joined end to start), each two or
-    // more points, root first as the file orders them, in the file's
-    // space where they stand at rest (a skinned mesh's own lines skinned
-    // to the rest pose; a list without indices joins where a segment
-    // starts at the very place the last ended). Curves of no length are
-    // left out. For geometry::groom_from_strands. A file still needs
-    // triangles to be imported.
+    // one curve, a list's segments are joined where one starts on the
+    // vertex, or at the very place, the last ended), each two or more
+    // points, root first as the file orders them, in the file's space
+    // where they stand at rest (a skinned mesh's own lines skinned to the
+    // rest pose). Curves of no length are left out, and lines that cannot
+    // be read are skipped with a warning. For geometry::groom_from_strands.
+    // A file still needs triangles to be imported.
     std::vector<std::vector<Vec3>> curves;
     std::string error;                 // empty on success
     bool ok() const { return error.empty(); }

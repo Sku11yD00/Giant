@@ -226,6 +226,7 @@ public:
     bool mesh(const cgltf_node* node, const NodeTransform& transform, const Target& target) {
         m_unpacked.clear();
         m_unpacked_floats.clear();
+        m_unpacked4.clear();
         // Which of the target's morphs each of this mesh's targets adds to
         // (by name; -1: dropped).
         m_morph_slot.clear();
@@ -409,22 +410,34 @@ private:
         return true;
     }
 
-    // A vec4 accessor as floats (joints and weights), for one primitive.
-    bool unpack4(const cgltf_accessor* accessor, usize count, std::vector<Vec4>& out, bool joints) {
-        out.assign(count, Vec4{});
+    // A vec4 accessor as floats (joints and weights), read once per node:
+    // a file of hair strips is a primitive a strand over shared vertices.
+    // Null (and failed) when it cannot be used.
+    const std::vector<Vec4>* unpack4(const cgltf_accessor* accessor, usize count, bool joints) {
         if (accessor->type != cgltf_type_vec4 || accessor->count != count) {
-            return fail("a skinned mesh's joints or weights do not match its vertices");
+            fail("a skinned mesh's joints or weights do not match its vertices");
+            return nullptr;
         }
-        if (!readable(accessor)) return fail("a skinned mesh's joints or weights have no data, or are sparse and interleaved");
+        if (!readable(accessor)) {
+            fail("a skinned mesh's joints or weights have no data, or are sparse and interleaved");
+            return nullptr;
+        }
         if (joints && ((accessor->component_type != cgltf_component_type_r_8u &&
                         accessor->component_type != cgltf_component_type_r_16u) ||
                        accessor->normalized)) {
-            return fail("a skinned mesh's joint indices are not unsigned bytes or shorts");
+            fail("a skinned mesh's joint indices are not unsigned bytes or shorts");
+            return nullptr;
         }
+        if (const auto it = m_unpacked4.find(accessor); it != m_unpacked4.end()) {
+            return &it->second;
+        }
+        std::vector<Vec4>& out = m_unpacked4[accessor];
+        out.assign(count, Vec4{});
         if (count > 0 && cgltf_accessor_unpack_floats(accessor, &out[0].x, count * 4) != count * 4) {
-            return fail("could not read joints or weights");
+            fail("could not read joints or weights");
+            return nullptr;
         }
-        return true;
+        return &out;
     }
 
     // A uv (2) or tangent (4) accessor as floats, read once per node. Its
@@ -445,8 +458,9 @@ private:
 
     // A line primitive's curves (hair strands): a strip or loop is one, the
     // segments of a list are joined where one starts at the vertex the last
-    // ended on. Kept where `transform` places them; curves with a point
-    // that is no number, or under two points, are left out.
+    // ended on (or at the very same place). Kept where `transform` places
+    // them; curves with a point that is no number, under two points or of
+    // no length are left out.
     bool curves(const cgltf_primitive& prim, const NodeTransform& transform, const Target& target) {
         const cgltf_accessor* positions = cgltf_find_accessor(&prim, cgltf_attribute_type_position, 0);
         if (positions == nullptr || positions->type != cgltf_type_vec3) {
@@ -459,25 +473,25 @@ private:
         // lines may be shown by many nodes, and index data costs a byte an
         // index): once the curves are full nothing more is read, a strip
         // that cannot fit is not read, and lines read in all are counted.
+        // Hair is extra: lines that cannot be read are skipped with a
+        // warning, where triangles would refuse the file.
         const bool list = prim.type == cgltf_primitive_type_lines;
         if (m_result.curves.size() >= k_max_import_curves || m_curve_points >= k_max_import_curve_points ||
+            index_count > k_max_import_curve_points * 2 - m_line_indices ||
             (!list && index_count > k_max_import_curve_points - m_curve_points)) {
             warn_once(m_warned_curves, "hair curves past the first 262144 (or 16 million points) were skipped");
             return true;
         }
-        m_line_indices += index_count;
-        if (m_line_indices > k_max_import_curve_points * 2) {
-            return fail("the file's lines have more than 32 million indices");
-        }
         // (As for triangles: real data only, and no sparse values on interleaved buffers.)
-        if (positions->buffer_view == nullptr || (prim.indices != nullptr && prim.indices->buffer_view == nullptr)) {
-            return fail("a mesh has positions or indices without data");
-        }
+        bool readable_lines = positions->buffer_view != nullptr && (prim.indices == nullptr || prim.indices->buffer_view != nullptr);
         for (const cgltf_accessor* a : std::initializer_list<const cgltf_accessor*>{positions, prim.indices}) {
-            if (a != nullptr && a->is_sparse && a->stride != cgltf_calc_size(a->type, a->component_type)) {
-                return fail("sparse accessors on interleaved buffers are not supported");
-            }
+            readable_lines = readable_lines && (a == nullptr || !a->is_sparse || a->stride == cgltf_calc_size(a->type, a->component_type));
         }
+        if (!readable_lines) {
+            warn_once(m_warned_lines, "lines without data, or sparse on interleaved buffers, were skipped");
+            return true;
+        }
+        m_line_indices += index_count;
         const std::vector<Vec3>* p = unpack(positions, true);
         if (p == nullptr) {
             return false;
@@ -499,7 +513,6 @@ private:
             }
         }
         // A skinned mesh's lines: each point where its joints hold it at rest.
-        std::array<std::vector<Vec4>, 4> skin_data; // JOINTS_0, WEIGHTS_0, JOINTS_1, WEIGHTS_1
         std::array<const std::vector<Vec4>*, 2> joint_sets{};
         std::array<const std::vector<Vec4>*, 2> weight_sets{};
         const bool skinned = target.curve_skin != nullptr && target.skin_joints != nullptr;
@@ -508,12 +521,13 @@ private:
                 const cgltf_accessor* j = cgltf_find_accessor(&prim, cgltf_attribute_type_joints, set);
                 const cgltf_accessor* w = cgltf_find_accessor(&prim, cgltf_attribute_type_weights, set);
                 if (j == nullptr || w == nullptr) continue;
-                const usize s2 = static_cast<usize>(set) * 2;
-                if (!unpack4(j, vertex_count, skin_data[s2], true) || !unpack4(w, vertex_count, skin_data[s2 + 1], false)) {
+                const std::vector<Vec4>* joints = unpack4(j, vertex_count, true);
+                const std::vector<Vec4>* weights = joints != nullptr ? unpack4(w, vertex_count, false) : nullptr;
+                if (weights == nullptr) {
                     return false;
                 }
-                joint_sets[static_cast<usize>(set)] = &skin_data[s2];
-                weight_sets[static_cast<usize>(set)] = &skin_data[s2 + 1];
+                joint_sets[static_cast<usize>(set)] = joints;
+                weight_sets[static_cast<usize>(set)] = weights;
             }
         }
         std::vector<Vec3> curve;
@@ -712,7 +726,6 @@ private:
             return fail("the mesh has more than 16 million triangles");
         }
         // Skinned: each vertex's joints and weights, read like its position.
-        std::array<std::vector<Vec4>, 4> skin_data; // JOINTS_0, WEIGHTS_0, JOINTS_1, WEIGHTS_1
         std::array<const std::vector<Vec4>*, 2> joint_sets{};
         std::array<const std::vector<Vec4>*, 2> weight_sets{};
         if (target.weights != nullptr && target.rigid < 0) {
@@ -720,12 +733,13 @@ private:
                 const cgltf_accessor* j = cgltf_find_accessor(&prim, cgltf_attribute_type_joints, set);
                 const cgltf_accessor* w = cgltf_find_accessor(&prim, cgltf_attribute_type_weights, set);
                 if (j == nullptr || w == nullptr) continue;
-                const usize s2 = static_cast<usize>(set) * 2;
-                if (!unpack4(j, vertex_count, skin_data[s2], true) || !unpack4(w, vertex_count, skin_data[s2 + 1], false)) {
+                const std::vector<Vec4>* joints = unpack4(j, vertex_count, true);
+                const std::vector<Vec4>* weights = joints != nullptr ? unpack4(w, vertex_count, false) : nullptr;
+                if (weights == nullptr) {
                     return false;
                 }
-                joint_sets[static_cast<usize>(set)] = &skin_data[s2];
-                weight_sets[static_cast<usize>(set)] = &skin_data[s2 + 1];
+                joint_sets[static_cast<usize>(set)] = joints;
+                weight_sets[static_cast<usize>(set)] = weights;
             }
             if (cgltf_find_accessor(&prim, cgltf_attribute_type_joints, 2) != nullptr) {
                 warn_once(m_warned_weights, "vertices moved by more than four joints keep the four heaviest");
@@ -948,6 +962,7 @@ private:
     bool m_warned_weights = false;
     bool m_warned_type = false;
     bool m_warned_curves = false;
+    bool m_warned_lines = false;
     u64 m_curve_points = 0;
     u64 m_line_indices = 0; // read, over the whole file
     bool m_warned_morph = false;
@@ -958,6 +973,7 @@ private:
     u64 m_vertices_read = 0; // over the whole file
     std::unordered_map<const cgltf_accessor*, std::vector<Vec3>> m_unpacked; // this node's
     std::unordered_map<const cgltf_accessor*, std::vector<float>> m_unpacked_floats; // this node's
+    std::unordered_map<const cgltf_accessor*, std::vector<Vec4>> m_unpacked4; // this node's
     std::vector<u8> m_given; // per target vertex: the file gave its tangent
     std::vector<u32> m_remap;  // per primitive: 0 used, else output index + 1
     std::vector<u32> m_sources; // per primitive: each added vertex's primitive vertex
