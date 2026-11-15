@@ -11,6 +11,7 @@
 #include "giant/world/water.h"
 #include "giant/world/effects.h"
 #include "../effects_state.h"
+#include "../hair_state.h"
 #include "giant/world/weather.h"
 
 #include <imgui.h>
@@ -513,6 +514,14 @@ void EditorPanels::draw_outliner() {
                       {"lamp", {{"on", true}}}});
     }
     ImGui::SameLine();
+    if (ImGui::SmallButton("+ Hair")) {
+        // A head of brown hair to the shoulders (put hair on a character in its own settings).
+        create_ahead({{"shape", "sphere"},
+                      {"scale", {0.18, 0.22, 0.2}},
+                      {"base_color", {0.8, 0.6, 0.5}},
+                      {"hair", {{"on", true}, {"strands", 40000}, {"top", 0.55}, {"length", 0.3}, {"clump", 0.2}, {"melanin", 0.6}}}});
+    }
+    ImGui::SameLine();
     ImGui::BeginDisabled(m_state.scene.find(m_state.selected) == nullptr);
     if (ImGui::SmallButton("Delete")) {
         run("delete_entities", {{"ids", {m_state.selected}}});
@@ -720,6 +729,99 @@ void EditorPanels::draw_properties() {
             }
         }
     }
+    if (e->shape == world::Shape::cube || e->shape == world::Shape::sphere || e->shape == world::Shape::mesh) {
+        const world::Hair& h = e->hair;
+        bool wears = h.on;
+        if (ImGui::Checkbox("Wears hair", &wears)) {
+            set("hair", {{"on", wears}});
+        }
+        if (h.on) {
+            // What it is doing (grown on a worker; a character's joint may be missing).
+            HairState::View view;
+            if (m_state.hair != nullptr && m_state.hair->view(e->id, view)) {
+                if (!view.problem.empty()) {
+                    ImGui::TextWrapped("No hair: %s", view.problem.c_str());
+                } else if (view.left_out) {
+                    ImGui::TextDisabled("Left out: too much hair in this world");
+                } else {
+                    ImGui::TextDisabled("%u strands, %u guides%s%s", view.strands, view.guides, view.growing ? ", growing" : "",
+                                        view.simulated ? ", moving" : "");
+                }
+            }
+            if (e->shape == world::Shape::mesh) {
+                const MeshLibrary::Mesh* mesh = m_state.meshes != nullptr ? m_state.meshes->find_normalized(e->mesh) : nullptr;
+                if (mesh != nullptr && mesh->skinned != nullptr) {
+                    if (ImGui::BeginCombo("Hair joint", h.joint.empty() ? "(the head)" : h.joint.c_str())) {
+                        if (ImGui::Selectable("(the head)", h.joint.empty())) set("hair", {{"joint", ""}});
+                        int joint_index = 0;
+                        for (const std::string& joint_name : mesh->skinned->skeleton.names) {
+                            ++joint_index;
+                            if (joint_name.empty() || joint_name.size() > world::k_max_hair_joint_bytes) continue;
+                            ImGui::PushID(joint_index); // (files may name two joints alike)
+                            if (ImGui::Selectable(joint_name.c_str(), joint_name == h.joint)) set("hair", {{"joint", joint_name}});
+                            ImGui::PopID();
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+            }
+            int strands = h.strands;
+            if (ImGui::SliderInt("Strands", &strands, 100, world::k_max_hair_strands, "%d", ImGuiSliderFlags_Logarithmic)) {
+                set("hair", {{"strands", std::clamp(strands, 1, world::k_max_hair_strands)}});
+            }
+            float top = h.top;
+            if (ImGui::SliderFloat("Grows from the top", &top, 0.02f, 1.0f, "%.2f")) {
+                // (0.01f as a double is under the command's least of 0.01.)
+                set("hair", {{"top", std::clamp(top, 0.02f, 1.0f)}});
+            }
+            float length = h.length;
+            if (ImGui::SliderFloat("Hair length", &length, 0.005f, 2.0f, "%.3f m", ImGuiSliderFlags_Logarithmic)) {
+                set("hair", {{"length", std::clamp(length, 0.001f, 10.0f)}});
+            }
+            float droop = h.droop;
+            if (ImGui::SliderFloat("Droop", &droop, 0.0f, 1.0f, "%.2f")) set("hair", {{"droop", std::clamp(droop, 0.0f, 1.0f)}});
+            float curl = h.curl_radius;
+            if (ImGui::SliderFloat("Curl radius", &curl, 0.0f, 0.05f, "%.3f m")) {
+                set("hair", {{"curl_radius", std::clamp(curl, 0.0f, 1.0f)}});
+            }
+            float turns = h.curl_turns;
+            if (ImGui::SliderFloat("Curl turns", &turns, 0.0f, 30.0f, "%.1f")) {
+                set("hair", {{"curl_turns", std::clamp(turns, 0.0f, 100.0f)}});
+            }
+            float frizz = h.frizz;
+            if (ImGui::SliderFloat("Frizz", &frizz, 0.0f, 0.05f, "%.3f m")) set("hair", {{"frizz", std::clamp(frizz, 0.0f, 1.0f)}});
+            float clump = h.clump;
+            if (ImGui::SliderFloat("Clump", &clump, 0.0f, 1.0f, "%.2f")) set("hair", {{"clump", std::clamp(clump, 0.0f, 1.0f)}});
+            float melanin = h.melanin;
+            if (ImGui::SliderFloat("Darkness", &melanin, 0.0f, 1.0f, "%.2f")) {
+                set("hair", {{"melanin", std::clamp(melanin, 0.0f, 1.0f)}});
+            }
+            float redness = h.redness;
+            if (ImGui::SliderFloat("Redness", &redness, 0.0f, 1.0f, "%.2f")) {
+                set("hair", {{"redness", std::clamp(redness, 0.0f, 1.0f)}});
+            }
+            float tint[3] = {h.tint.x, h.tint.y, h.tint.z};
+            if (ImGui::ColorEdit3("Dye", tint)) {
+                set("hair", {{"tint", {std::clamp(tint[0], 0.0f, 1.0f), std::clamp(tint[1], 0.0f, 1.0f), std::clamp(tint[2], 0.0f, 1.0f)}}});
+            }
+            float shine = h.roughness;
+            if (ImGui::SliderFloat("Hair roughness", &shine, 0.05f, 1.0f, "%.2f")) {
+                set("hair", {{"roughness", std::clamp(shine, 0.05f, 1.0f)}});
+            }
+            bool moves = h.moves;
+            if (ImGui::Checkbox("Hair moves", &moves)) set("hair", {{"moves", moves}});
+            if (h.moves) {
+                float stiffness = h.stiffness;
+                if (ImGui::SliderFloat("Hair stiffness", &stiffness, 0.0f, 60.0f, "%.1f Hz")) {
+                    set("hair", {{"stiffness", std::clamp(stiffness, 0.0f, 60.0f)}});
+                }
+                float damping = h.damping;
+                if (ImGui::SliderFloat("Hair damping", &damping, 0.0f, 60.0f, "%.1f /s")) {
+                    set("hair", {{"damping", std::clamp(damping, 0.0f, 60.0f)}});
+                }
+            }
+        }
+    }
     {
         bool lit = e->lamp.on;
         if (ImGui::Checkbox("Gives light", &lit)) {
@@ -770,7 +872,8 @@ void EditorPanels::draw_properties() {
             if (e->lamp.shadows) {
                 float near = e->lamp.shadow_near;
                 if (ImGui::SliderFloat("Shadow start", &near, 0.01f, 10.0f, "%.2f m", ImGuiSliderFlags_Logarithmic)) {
-                    set("lamp", {{"shadow_near", std::clamp(near, 0.01f, 10.0f)}});
+                    // (0.01f as a double is under the command's least of 0.01.)
+                    set("lamp", {{"shadow_near", std::max(static_cast<double>(std::clamp(near, 0.01f, 10.0f)), 0.01)}});
                 }
             }
         }

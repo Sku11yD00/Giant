@@ -159,6 +159,16 @@ def build_scene(tool, call, check):
         check(bad.get("isError") is True and "shap is not a known key" in bad["content"][0]["text"],
               "a broken scene file is refused with the reason")
         check(tool("list_entities")["count"] == 3, "a failed load changes nothing")
+    # Hair: put on a ball it grows on a worker and is handed to the renderer.
+    tool("new_scene")
+    head = tool("create_entity", {"shape": "sphere", "position": [0, 1, 0], "scale": [0.2, 0.2, 0.2],
+                                  "hair": {"on": True, "strands": 400, "guides": 16, "length": 0.2}})["id"]
+    hair = tool("get_hair", {"id": head, "wait": True})
+    check(hair["wearing"] == 1 and hair["grown"] == 1 and hair["hair"]["strands"] == 400
+          and hair["hair"]["guides"] == 16 and hair["hair"]["problem"] == "", "hair grows on an entity")
+    check(abs(tool("get_entity", {"id": head})["hair"]["length"] - 0.2) < 1e-6, "an entity keeps its hair's settings")
+    tool("undo")
+    check(tool("get_hair")["wearing"] == 0, "undo takes the hair with its entity")
     tool("new_scene")  # leave the default empty scene for the checks after this
 
 
