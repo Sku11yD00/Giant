@@ -1,13 +1,18 @@
-// The editor's hair: entities that wear hair (world::Hair, on cube and
-// sphere entities) have a groom grown from the top of their shape
+// The editor's hair: entities that wear hair (world::Hair) have a groom
+// grown from the top of their shape (cubes and spheres) or from a
+// character's skin round a joint (mesh entities with a skinned file)
 // (geometry::generate_groom) and packed for the renderer on a worker,
 // handed to the renderer (render::Renderer::add_groom), simulated near the
 // camera (giant/sim/hair.h) and named to the renderer each frame
 // (render::FrameInput::hair).
 //
 // A groom is grown from the shape as the entity scales it, so the entity's
-// scale stretches the head and not the strands; it is drawn at the
-// entity's place and turn. Changing what it grows from grows it again: the
+// scale stretches the head and not the strands; it is drawn where the
+// entity is drawn (place(): the physics', a walker's or a swing's pose,
+// else its transform). A character's is grown in its joint's space from
+// the skin the joint and the joints under it move (by half its weight or
+// more), sized by the entity's largest scale, and rides the joint as it is
+// posed; the body's capsules nearest the joint push it aside. Changing what it grows from grows it again: the
 // old groom shows (and moves) until the new one is grown and the renderer
 // has all of it, then they are swapped. One job an entity at a time; a
 // result no longer wanted when it arrives is thrown away and the next
@@ -26,6 +31,9 @@
 // View state, as the cloth: nothing of it is saved or undoable.
 #pragma once
 
+#include "hit_targets.h"
+#include "mesh_library.h"
+
 #include "giant/core/jobs.h"
 #include "giant/core/wind.h"
 #include "giant/geometry/groom.h"
@@ -37,6 +45,7 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace giant::editor {
@@ -46,6 +55,15 @@ namespace giant::editor {
 // cut at that height, its normals those of the sized shape. Other shapes:
 // empty.
 geometry::TriangleMesh hair_scalp(world::Shape shape, const Vec3& scale, float top);
+// A character's: the triangles of its skin that `joint` and the joints
+// under it move (half the triangle's weight or more), above the top `top`
+// share of their height (model space y, as bound), in the joint's space
+// (Skeleton::inverse_bind) times `scale`. A joint past the skeleton: empty.
+geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joint, float scale, float top);
+// The joint hair grows round: the one of that name, or for no name the
+// first with "head" in its name (any case). None: k_no_hair_joint.
+inline constexpr u32 k_no_hair_joint = ~0u;
+u32 hair_joint(const anim::Skeleton& skeleton, const std::string& name);
 geometry::GroomParams hair_params(const world::Hair& hair);
 render::HairLook hair_look(const world::Hair& hair);
 sim::HairSettings hair_motion(const world::Hair& hair);
@@ -73,13 +91,21 @@ public:
     static constexpr double k_keep_simulating_within = 33.0; // one already moving
 
     // Without a renderer (tests) hair grows and moves but nothing draws it.
-    explicit HairState(render::Renderer* renderer);
+    // Without a mesh library no character grows hair.
+    explicit HairState(render::Renderer* renderer, const MeshLibrary* meshes = nullptr);
     ~HairState(); // the grooms leave the renderer; jobs not yet started are not run
     HairState(const HairState&) = delete;
     HairState& operator=(const HairState&) = delete;
 
     // The scene's changes followed (hair put on, changed, moved, gone).
     void follow(const world::Scene& scene, const world::SceneChanges& changed);
+    // Before a frame is drawn: where each is drawn (the first of `moving`,
+    // `walking`, `swinging` that poses its entity, else its transform; a
+    // character's at its joint as `animation` poses it, or at rest), and
+    // its body's capsules. Each may be null. Without it hair is at its
+    // entity's transform (a character's at its joint at rest).
+    void place(const AnimationState* animation, const DrawnPoses* moving, const DrawnPoses* walking,
+               const DrawnPoses* swinging);
     // Each frame: grooms grown since are taken, the nearest move under
     // `wind`, and the frame's draws are listed.
     void update(const WindState& wind, const DVec3& camera, double seconds);
@@ -102,6 +128,11 @@ public:
         bool ready = false; // drawn from now on: the renderer has all of its groom
         bool simulated = false;
         bool left_out = false;
+        std::string problem; // why it cannot grow (a mesh file without a skeleton, no such joint); empty: none
+        std::string joint;   // a character's: the joint it rides
+        DVec3 position{};    // where it is drawn
+        Quat rotation{};
+        u32 capsules = 0;    // of its body, felt
         u32 strands = 0;
         u32 guides = 0;
         float longest = 0.0f;
@@ -117,12 +148,15 @@ private:
     void drop(world::EntityId id);
     void shed(Worn& worn);
     void rank();
+    void resolve(Worn& worn);
     void grow(Worn& worn);
     void take(Worn& worn);
     void swap(Worn& worn, bool now);
     void list_draws();
 
     render::Renderer* m_renderer;
+    const MeshLibrary* m_meshes;
+    u64 m_meshes_seen = ~u64{0}; // the library's version as last resolved
     std::map<world::EntityId, std::unique_ptr<Worn>> m_worn;
     std::vector<std::shared_ptr<Grown>> m_abandoned; // jobs of hair since removed: kept until they finish
     std::vector<render::HairDraw> m_draws;
