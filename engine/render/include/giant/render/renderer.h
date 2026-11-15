@@ -53,6 +53,7 @@ struct VoxelLevel;
 struct ShadowLevel;
 struct FrameConstants;
 struct CullPush;
+struct HairPush;
 }
 class GeometryStreamer; // src/streaming.h
 class VoxelScene;       // src/voxel_scene.h
@@ -1362,6 +1363,10 @@ private:
     void upload_grooms(rhi::CommandList& cmd);
     bool ensure_hair_targets();
     bool ensure_hair_shadows();
+    // Before shading: what this frame draws of its hair, posed, and the
+    // hair shadows' tiles. draw_hair lights and draws it after.
+    void prepare_hair(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame);
+    void hair_push(const FrameData& data, const FrameInput& frame, gpu::HairPush& push);
     // Hair over `light`, its depth into the scene's: the light to draw over next.
     rhi::TextureHandle draw_hair(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
                                  rhi::TextureHandle light);

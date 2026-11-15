@@ -8,6 +8,7 @@
 #include "shadow_pages.slang"
 #include "lights.slang"
 #include "sky_common.slang"
+#include "hair_shadow.slang"
 
 // gpu::ResolveExtras.
 struct Extras {
@@ -54,6 +55,11 @@ struct Extras {
     uint eye_look_count;     // gpu::EyeLook each, in eye_looks at eye_looks_offset (0: none)
     uint eye_looks;
     uint eye_looks_offset;
+    uint hair_grooms;        // gpu::HairGroom each at hair_grooms_offset: the frame's drawn grooms, nearest first
+    uint hair_grooms_offset;
+    uint hair_casters;       // the first so many of them shade the world by their tiles (0: none)
+    uint hair_depth;         // the hair shadows' tiles (hair_shadow.slang)
+    uint hair_opacity;
 };
 
 Extras load_extras(uint descriptor, uint offset) {
@@ -148,7 +154,39 @@ Extras load_extras(uint descriptor, uint offset) {
     const uint2 ey = b.Load2(at + 320);
     o.eye_looks = ey.x;
     o.eye_looks_offset = ey.y;
+    const uint2 hg = b.Load2(at + 328);
+    o.hair_grooms = hg.x;
+    o.hair_grooms_offset = hg.y;
+    const uint3 hc = b.Load3(at + 336);
+    o.hair_casters = hc.x;
+    o.hair_depth = hc.y;
+    o.hair_opacity = hc.z;
     return o;
+}
+
+// How much of the sun the hair near `world` (camera-relative) lets
+// through to it: the nearest grooms' hair, each by its own tile (1: all).
+// A groom shades what lies in the column behind the ball round it, as the
+// sun sees it, and within the ball behind its hair.
+float hair_shade(Extras e, float3 sun_direction, float3 world) {
+    float before = 0.0;
+    if (e.hair_casters == 0u) {
+        return 1.0;
+    }
+    // (As hair.slang takes it for the tiles.)
+    const float3 l = safe_normalize(sun_direction, float3(0.0, 1.0, 0.0));
+    ByteAddressBuffer b = read_buffer(e.hair_grooms);
+    [loop] for (uint i = 0u; i < e.hair_casters; ++i) {
+        // (gpu::HairGroom is 160 bytes, its ball the last 16.)
+        const float4 ball = asfloat(b.Load4(e.hair_grooms_offset + i * 160u + 144u));
+        const float3 q = world - ball.xyz;
+        const float along = dot(q, l);
+        if (along >= ball.w || dot(q, q) - along * along >= ball.w * ball.w) {
+            continue;
+        }
+        before += hair_before(e.hair_depth, e.hair_opacity, i, in_hair_tile(ball, l, world));
+    }
+    return exp(-before);
 }
 
 // The clouds in front of what a pixel shows `distance` metres away, then

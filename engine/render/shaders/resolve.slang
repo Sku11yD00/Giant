@@ -1038,6 +1038,9 @@ Shaded shade_pixel(float4 position, bool spread) {
         emissive = float3(0.0, 0.0, 0.0);
     }
     float sun = sun_visibility(extras.shadows, world, surface_n, f.sun_direction.xyz, pixel_size);
+    if (sun > 0.0) {
+        sun *= hair_shade(extras, f.sun_direction.xyz, world); // a head's own hair on its face, on the ground
+    }
     float clouds = 1.0;
     if (sky_on) {
         clouds = cloud_shadow(sky, world);

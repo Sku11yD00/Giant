@@ -775,8 +775,22 @@ GIANT_TEST("hair: d3d12 thick hair shades itself from the sun, and lamps light i
     GIANT_CHECK(channel(back, 32, 32, 1) < channel(back_bare, 32, 32, 1) - 30);
     GIANT_CHECK(channel(back, 32, 24, 1) < channel(back_bare, 32, 24, 1) - 30);
     GIANT_CHECK(channel(back, 32, 32, 1) < channel(front, 32, 32, 1) - 20);
-    // The wall beside it is the same either way (hair's shadows are on hair alone).
+    // The wall beside it is the same either way (it faces away from this sun).
     for (u32 c = 0; c < 3; ++c) GIANT_CHECK(channel(back, 3, 3, c) == channel(back_bare, 3, 3, c));
+    // The sun from the right: the hair's shadow falls on the wall to its
+    // left (the furthest curtain's 0.9 m, the nearest's 2 m), and nowhere
+    // else; without hair's shadows the wall there is in the sun.
+    frame.lighting.sun_direction = {0.6f, 0.0f, 0.8f};
+    const std::vector<u8> cast = draw();
+    const bool cast_still = again == cast;
+    frame.settings.hair_shadows = false;
+    const std::vector<u8> cast_bare = draw();
+    frame.settings.hair_shadows = true;
+    std::printf("hair shadows: on the wall: in its shadow %d (without %d), out of it %d (without %d)\n", channel(cast, 5, 32, 1),
+                channel(cast_bare, 5, 32, 1), channel(cast, 60, 32, 1), channel(cast_bare, 60, 32, 1));
+    GIANT_CHECK(cast_still);
+    GIANT_CHECK(channel(cast, 5, 32, 1) < channel(cast_bare, 5, 32, 1) - 30);
+    for (u32 c = 0; c < 3; ++c) GIANT_CHECK(channel(cast, 60, 32, c) == channel(cast_bare, 60, 32, c));
     // No sun: a lamp between the camera and the hair lights it.
     frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
     const std::vector<u8> night = draw();

@@ -2020,8 +2020,24 @@ middle) light it through the same lobes at six places along the strand;
 they have no map of the hair, so against a lamp hair shades itself as a
 ball round the groom's middle would (the side turned away dark).
 
-Limits: one groom's hair does not shade another's, and hair does not yet
-shadow the world (C6d part 2); only the sun has deep shadows of hair;
+Hair shades the world the same way (C6d part 2, the same setting). The
+strands are posed and the tiles drawn before shading (`prepare_hair`,
+timed "hair shadows"; the lighting and ribbons come after shading, timed
+"hair"), and shading multiplies the sun on each pixel by `hair_shade`
+(`shading_extras.slang`): for each of the 16 nearest drawn grooms whose
+ball's column, as the sun sees it, holds the pixel, the hair before it by
+that groom's tile, as `exp(-hair)`. So a fringe shades the face under it
+softly and by how thick it is, a head of hair lays a hair-shaped shadow on
+the shoulders and the ground, and nothing is drawn into the sun's shadow
+pages (which would have to be redrawn whenever hair stirs).
+
+Limits: one groom's hair does not shade another's; hair further than the
+16 nearest grooms casts nothing on the world, nor does any hair on water,
+particles, the far field or the voxel light; hair out of view casts
+nothing either, so a shadow on the ground goes when its head leaves the
+view; the sun through skin (ears, the thin back-lit shine) is not shaded
+by hair; only the sun has deep
+shadows of hair;
 the sky's light reaches inner hair as it does outer; a tile's texel is
 4 mm on a head of hair 0.5 m across, so shade is soft at that scale; a
 strand blown past the ball round its guides takes the shade at the tile's

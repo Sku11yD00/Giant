@@ -209,6 +209,9 @@ struct Renderer::FrameData {
     u32 skin_look_count = 0;
     rhi::TransientMemory eye_looks; // gpu::EyeLook each
     u32 eye_look_count = 0;
+    rhi::TransientMemory hair;      // prepare_hair's: gpu::HairGroom each of the plan, then posed guides (null: no hair this frame)
+    bool hair_tiles = false;        // the hair shadows' tiles are drawn
+    u32 hair_draws = 0;             // dispatches and draws so far
     rhi::TransientMemory terrain_layers; // gpu::TerrainLayer each (terrain_count of them)
     u32 terrain_count = 0;
     rhi::TransientMemory decals;    // decals, tiles, entries (DecalBins)
@@ -3802,6 +3805,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             t = {};
         }
     }
+    // Hair posed, and its shadow tiles (the lit view): shading reads them
+    // for hair's shade on the world, draw_hair for its shade on itself.
+    if (settings.debug_view == DebugView::lit && settings.hair && !frame.hair.empty()) {
+        prepare_hair(cmd, data, frame);
+    }
     cmd.begin_timing("shading");
     // Shading writes the light before exposure into m_radiance (with
     // screen reflections, also what they need, and their pass adds them
@@ -3986,6 +3994,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.eye_looks = data.eye_look_count != 0 ? data.eye_looks.descriptor : data.frame.descriptor;
     extras.eye_looks_offset = data.eye_look_count != 0 ? data.eye_looks.offset : 0u;
     extras.eye_look_count = data.eye_look_count;
+    extras.hair_grooms = data.hair_tiles ? data.hair.descriptor : data.frame.descriptor;
+    extras.hair_grooms_offset = data.hair_tiles ? data.hair.offset : 0u;
+    extras.hair_casters =
+        data.hair_tiles ? std::min(static_cast<u32>(m_hair_plan->grooms.size()), k_hair_casters) : 0u;
+    extras.hair_depth = data.hair_tiles ? m_device.read_descriptor(m_hair_shadow_depth) : data.frame.descriptor;
+    extras.hair_opacity = data.hair_tiles ? m_device.read_descriptor(m_hair_shadow_opacity) : data.frame.descriptor;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     m_shading_extras = extras_memory; // the water's lighting too (this frame's)
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
@@ -4439,8 +4453,7 @@ bool Renderer::ensure_hair_shadows() {
     return m_hair_shadow_depth.valid() && m_hair_shadow_opacity.valid();
 }
 
-rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
-                                       rhi::TextureHandle light) {
+void Renderer::prepare_hair(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame) {
     // What to draw: the nearest grooms in view, thinned by their size on screen.
     const float aspect = static_cast<float>(m_width) / static_cast<float>(std::max(m_height, 1u));
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
@@ -4454,7 +4467,7 @@ rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& d
     const HairPlan& plan = *m_hair_plan;
     m_stats.hair_left_out = plan.left_out;
     if (plan.grooms.empty() || plan.strands == 0 || !m_hair_drawn.valid() || !ensure_hair_targets()) {
-        return light;
+        return;
     }
     // One upload: the grooms as drawn, then the guides of those that are posed (16-byte aligned).
     const auto aligned = [](usize n) { return (n + 15) & ~usize{15}; };
@@ -4464,7 +4477,7 @@ rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& d
     }
     const rhi::TransientMemory memory = cmd.allocate(static_cast<u32>(aligned(total)));
     if (memory.data == nullptr) {
-        return light; // out of upload memory (logged): not drawn this frame
+        return; // out of upload memory (logged): not drawn this frame
     }
     usize at = plan.grooms.size() * sizeof(gpu::HairGroom);
     for (usize i = 0; i < plan.grooms.size(); ++i) {
@@ -4484,33 +4497,21 @@ rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& d
         }
         std::memcpy(memory.data + i * sizeof(gpu::HairGroom), &g, sizeof(g));
     }
-    cmd.begin_timing("hair");
+    data.hair = memory;
+    cmd.begin_timing("hair shadows");
     gpu::HairPush push{};
-    push.frame = data.frame.descriptor;
-    push.frame_offset = data.frame.offset;
-    push.grooms = memory.descriptor;
-    push.grooms_offset = memory.offset;
-    const bool extras_on = m_shading_extras.data != nullptr;
-    push.extras = extras_on ? m_shading_extras.descriptor : data.frame.descriptor;
-    push.extras_offset = extras_on ? m_shading_extras.offset : 0u;
-    push.extras_on = extras_on ? 1u : 0u;
-    push.depth = m_device.read_descriptor(m_depth);
-    push.lamps_on = frame.settings.local_lights ? 1u : 0u;
-    u32 draws = 0;
-    const auto each_strand = [&](rhi::PipelineHandle pipeline) {
-        cmd.set_pipeline(pipeline);
-        for (usize i = 0; i < plan.grooms.size(); ++i) {
-            push.groom = static_cast<u32>(i);
-            cmd.push(push);
-            cmd.dispatch((plan.grooms[i].lod.strands + 63) / 64, 1);
-            ++draws;
-        }
-    };
+    hair_push(data, frame, push);
+    u32& draws = data.hair_draws;
     // Each strand posed.
     cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_write);
-    cmd.barrier(m_depth, rhi::ResourceState::shader_read);
     push.drawn = m_device.write_descriptor(m_hair_drawn);
-    each_strand(m_hair_pose);
+    cmd.set_pipeline(m_hair_pose);
+    for (usize i = 0; i < plan.grooms.size(); ++i) {
+        push.groom = static_cast<u32>(i);
+        cmd.push(push);
+        cmd.dispatch((plan.grooms[i].lod.strands + 63) / 64, 1);
+        ++draws;
+    }
     // Each groom as the sun sees it, into its tile: the depth nearest the
     // sun, then the hair within depths of that.
     const Vec3& sun = frame.lighting.sun_light;
@@ -4550,18 +4551,49 @@ rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& d
         tiles();
         cmd.end_render_pass();
         cmd.barrier(m_hair_shadow_opacity, rhi::ResourceState::shader_read);
-        push.shadow_opacity = m_device.read_descriptor(m_hair_shadow_opacity);
-        push.shadows_on = 1;
-        cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_write);
-        push.drawn = m_device.write_descriptor(m_hair_drawn);
-    } else {
-        // (Bound, never read.)
-        push.shadow_depth = push.depth;
-        push.shadow_opacity = push.depth;
-        cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_write); // (written, then read: in that order)
+        data.hair_tiles = true;
     }
-    // Each strand lit, once.
-    each_strand(m_hair_light_pass);
+    cmd.end_timing();
+}
+
+void Renderer::hair_push(const FrameData& data, const FrameInput& frame, gpu::HairPush& push) {
+    push.frame = data.frame.descriptor;
+    push.frame_offset = data.frame.offset;
+    push.grooms = data.hair.descriptor;
+    push.grooms_offset = data.hair.offset;
+    const bool extras_on = m_shading_extras.data != nullptr;
+    push.extras = extras_on ? m_shading_extras.descriptor : data.frame.descriptor;
+    push.extras_offset = extras_on ? m_shading_extras.offset : 0u;
+    push.extras_on = extras_on ? 1u : 0u;
+    push.depth = m_device.read_descriptor(m_depth);
+    push.lamps_on = frame.settings.local_lights ? 1u : 0u;
+    // (The tiles, or textures bound and never read.)
+    push.shadow_depth = data.hair_tiles ? m_device.read_descriptor(m_hair_shadow_depth) : push.depth;
+    push.shadow_opacity = data.hair_tiles ? m_device.read_descriptor(m_hair_shadow_opacity) : push.depth;
+    push.shadows_on = data.hair_tiles ? 1u : 0u;
+}
+
+rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
+                                       rhi::TextureHandle light) {
+    if (data.hair.data == nullptr) {
+        return light; // nothing planned (prepare_hair)
+    }
+    const HairPlan& plan = *m_hair_plan;
+    cmd.begin_timing("hair");
+    gpu::HairPush push{};
+    hair_push(data, frame, push);
+    u32 draws = data.hair_draws;
+    // Each strand lit, once (after shading: its extras are this frame's).
+    cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_write); // (posed before: in that order)
+    cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+    push.drawn = m_device.write_descriptor(m_hair_drawn);
+    cmd.set_pipeline(m_hair_light_pass);
+    for (usize i = 0; i < plan.grooms.size(); ++i) {
+        push.groom = static_cast<u32>(i);
+        cmd.push(push);
+        cmd.dispatch((plan.grooms[i].lod.strands + 63) / 64, 1);
+        ++draws;
+    }
     cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_read);
     push.drawn = m_device.read_descriptor(m_hair_drawn);
     const auto ribbons = [&] {
