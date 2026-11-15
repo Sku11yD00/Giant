@@ -519,9 +519,17 @@ struct ResolveExtras {
     u32 eye_look_count;
     u32 eye_looks;
     u32 eye_looks_offset;
-    u32 eye_pad[2];
+    // Hair's shadows on the world (hair_shadow.slang): the frame's drawn
+    // grooms (gpu::HairGroom each, nearest first), the first hair_casters
+    // of which shade what is behind them by their tiles (0: none).
+    u32 hair_grooms;
+    u32 hair_grooms_offset;
+    u32 hair_casters;
+    u32 hair_depth;
+    u32 hair_opacity;
+    u32 hair_pad;
 };
-static_assert(sizeof(ResolveExtras) == 336);
+static_assert(sizeof(ResolveExtras) == 352);
 
 // An eye look (render::EyeLook, cleaned): resolve.slang's eye_surface.
 struct EyeLook {
@@ -1048,6 +1056,7 @@ struct HairGroom {
     float ball[4];        // camera-relative centre and radius: what its shadow tile spans
 };
 static_assert(sizeof(HairGroom) == 160);
+static_assert(offsetof(HairGroom, ball) == 144); // (shading_extras.slang's hair_shade reads it there)
 
 // A strand's point as drawn (cs_pose writes where it is, cs_light its light; the ribbons read it).
 struct HairPoint {

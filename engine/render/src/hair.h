@@ -51,6 +51,8 @@ static_assert(k_hair_shadow_tiles_across * k_hair_shadow_tiles_across >= k_max_h
 // standing for the rest), and the points a piece of them spans at least.
 inline constexpr u32 k_hair_shadow_strands = 4096;
 inline constexpr u32 k_hair_shadow_stride = 3;
+// The grooms whose hair shades the world (the nearest drawn).
+inline constexpr u32 k_hair_casters = 16;
 
 struct PackedGroom {
     std::vector<u8> bytes; // gpu::HairStrand a strand, then the points; empty: not a groom to draw

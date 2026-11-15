@@ -53,6 +53,7 @@ struct VoxelLevel;
 struct ShadowLevel;
 struct FrameConstants;
 struct CullPush;
+struct HairPush;
 }
 class GeometryStreamer; // src/streaming.h
 class VoxelScene;       // src/voxel_scene.h
@@ -647,8 +648,9 @@ struct RenderSettings {
     // and more to draw).
     bool hair = true;
     float hair_detail = 3.0f;
-    // Hair shades itself from the sun (each drawn groom's own hair; off,
-    // the sun reaches every strand the world lets it).
+    // Hair shades itself from the sun (each drawn groom's own hair), and
+    // the world behind it (the nearest grooms'; off, the sun reaches every
+    // strand and surface the world lets it).
     bool hair_shadows = true;
     // Their shadows (lights with a shadow_id; needs `shadows` and GPU
     // culling): faces of shadow tiles drawn a frame at most (nearest first;
@@ -1362,6 +1364,10 @@ private:
     void upload_grooms(rhi::CommandList& cmd);
     bool ensure_hair_targets();
     bool ensure_hair_shadows();
+    // Before shading: what this frame draws of its hair, posed, and the
+    // hair shadows' tiles. draw_hair lights and draws it after.
+    void prepare_hair(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame);
+    void hair_push(const FrameData& data, const FrameInput& frame, gpu::HairPush& push);
     // Hair over `light`, its depth into the scene's: the light to draw over next.
     rhi::TextureHandle draw_hair(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
                                  rhi::TextureHandle light);
