@@ -9,10 +9,10 @@
 // A groom is grown from the shape as the entity scales it, so the entity's
 // scale stretches the head and not the strands; it is drawn where the
 // entity is drawn (place(): the physics', a walker's or a swing's pose,
-// else its transform). A character's is grown in its joint's space from
-// the skin the joint and the joints under it move (by half its weight or
-// more), sized by the entity's largest scale, and rides the joint as it is
-// posed; the body's capsules nearest the joint push it aside. Changing what it grows from grows it again: the
+// else its transform). A character's is grown from the skin the joint and
+// the joints under it move (by half its weight or more) as it stands at
+// rest, about the joint, sized by the entity's largest scale; it rides the
+// joint and turns as the joint has turned since rest; the body's capsules nearest the joint push it aside. Changing what it grows from grows it again: the
 // old groom shows (and moves) until the new one is grown and the renderer
 // has all of it, then they are swapped. One job an entity at a time; a
 // result no longer wanted when it arrives is thrown away and the next
@@ -56,9 +56,9 @@ namespace giant::editor {
 // empty.
 geometry::TriangleMesh hair_scalp(world::Shape shape, const Vec3& scale, float top);
 // A character's: the triangles of its skin that `joint` and the joints
-// under it move (half the triangle's weight or more), above the top `top`
-// share of their height (model space y, as bound), in the joint's space
-// (Skeleton::inverse_bind) times `scale`. A joint past the skeleton: empty.
+// under it move (half the triangle's weight or more), as they stand at
+// rest in model space (y up) about the joint's place, above the top `top`
+// share of their height, times `scale`. A joint past the skeleton: empty.
 geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joint, float scale, float top);
 // The joint hair grows round: the one of that name, or for no name the
 // first with "head" in its name (any case). None: k_no_hair_joint.
@@ -119,7 +119,7 @@ public:
     void finish();
 
     // What the renderer draws this frame (valid until the next follow,
-    // update or finish).
+    // place, update or finish).
     std::span<const render::HairDraw> draws() const { return m_draws; }
     HairStats stats() const;
 

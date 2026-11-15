@@ -157,8 +157,15 @@ geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joi
         }
         return all > 0 ? static_cast<float>(in) / static_cast<float>(all) : 0.0f;
     };
-    // The skin they move: the original triangles held by half or more.
-    std::vector<u32> skin;
+    // The skin they move: the original triangles held by half or more, as
+    // the joint holds them at rest in model space (y up, true sizes,
+    // whatever way the file's bind space or the joint's own axes turn),
+    // about the joint.
+    if (joint >= character.rest_model.size()) return scalp;
+    const Mat4 to_rest = character.rest_model[joint] * skeleton.inverse_bind[joint];
+    const Vec3 origin = apply(character.rest_model[joint], Vec3{});
+    const float size = std::fabs(scale);
+    std::vector<geometry::Vertex> skin;
     float low = std::numeric_limits<float>::max();
     float high = std::numeric_limits<float>::lowest();
     for (const geometry::Cluster& cluster : mesh.clusters) {
@@ -170,30 +177,27 @@ geometry::TriangleMesh hair_scalp(const MeshLibrary::Skinned& character, u32 joi
             if (corners[0] >= weights.size() || corners[1] >= weights.size() || corners[2] >= weights.size()) continue;
             if (held(corners[0]) + held(corners[1]) + held(corners[2]) < 1.5f) continue;
             for (const u32 corner : corners) {
-                skin.push_back(corner);
-                low = std::min(low, mesh.vertices[corner].position.y);
-                high = std::max(high, mesh.vertices[corner].position.y);
+                geometry::Vertex v = mesh.vertices[corner];
+                v.position = apply(to_rest, v.position) - origin;
+                const Vec3 n = normalize_or_zero(turn(to_rest, v.normal));
+                v.normal = n.x == 0.0f && n.y == 0.0f && n.z == 0.0f ? Vec3{0.0f, 1.0f, 0.0f} : n;
+                if (!finite(v.position)) v.position = {};
+                low = std::min(low, v.position.y);
+                high = std::max(high, v.position.y);
+                skin.push_back(v);
             }
         }
     }
     if (skin.empty()) return scalp;
     const float share = std::isfinite(top) ? std::clamp(top, 0.01f, 1.0f) : 0.5f;
     const float from = high - share * (high - low);
-    const Mat4& to_joint = skeleton.inverse_bind[joint];
-    // (The joint's own size at rest goes with it: a skeleton under a scaled
-    // node binds through that scale and poses back through it, and the
-    // hair is drawn at the joint's place and turn only.)
-    const float joint_size = joint < character.rest_model.size() ? stretch(character.rest_model[joint]) : 1.0f;
-    const float size = std::fabs(scale) * (std::isfinite(joint_size) && joint_size > 0.0f ? joint_size : 1.0f);
     const auto put = [&](geometry::Vertex v) {
-        v.position = apply(to_joint, v.position) * size;
-        const Vec3 n = normalize_or_zero(turn(to_joint, v.normal));
-        v.normal = n.x == 0.0f && n.y == 0.0f && n.z == 0.0f ? Vec3{0.0f, 1.0f, 0.0f} : n;
+        v.position = v.position * size;
         scalp.indices.push_back(static_cast<u32>(scalp.vertices.size()));
         scalp.vertices.push_back(v);
     };
     for (usize i = 0; i + 2 < skin.size(); i += 3) {
-        const geometry::Vertex* v[3] = {&mesh.vertices[skin[i]], &mesh.vertices[skin[i + 1]], &mesh.vertices[skin[i + 2]]};
+        const geometry::Vertex* v[3] = {&skin[i], &skin[i + 1], &skin[i + 2]};
         std::array<geometry::Vertex, 4> kept;
         const usize count = cut_above(v, from, kept);
         for (usize c = 2; c < count; ++c) {
@@ -472,9 +476,16 @@ void place_one(HairState::Worn& worn, const world::Transform& t, const MeshLibra
         worn.rotation = t.rotation;
         return;
     }
+    // The groom keeps model space's directions about the joint at rest:
+    // it turns as the joint has turned since.
     const anim::JointTransform at = anim::decompose((*model)[joint]);
+    Quat since = at.rotation;
+    if (joint < shown->rest_model.size()) {
+        const Quat rest = anim::decompose(shown->rest_model[joint]).rotation;
+        since = at.rotation * Quat{-rest.x, -rest.y, -rest.z, rest.w};
+    }
     worn.position = pose::place(t, at.translation);
-    worn.rotation = t.rotation * at.rotation;
+    worn.rotation = t.rotation * since;
     if (shown != worn.character.get()) return; // (an older groom still shown: the new body's capsules are not its)
     const float scale = largest(t.scale);
     const std::vector<anim::BoneCapsule>& bones = worn.character->capsules;
@@ -567,7 +578,8 @@ void HairState::place(const AnimationState* animation, const DrawnPoses* moving,
         if (shown != nullptr) {
             // (As its body is drawn: its animation's pose once its copy shows, else at rest.)
             const AnimationState::Animated* a = animation != nullptr ? animation->find(id) : nullptr;
-            const bool posed = a != nullptr && a->posed && (a->drawn || !animation->draws()) && a->skinned.get() == shown &&
+            // (A file loaded again while the old groom still shows: the new body's pose, if it has as many joints.)
+            const bool posed = a != nullptr && a->posed && (a->drawn || !animation->draws()) && a->skinned != nullptr &&
                                a->model.size() == shown->skeleton.size();
             model = posed ? &a->model : &shown->rest_model;
         }

@@ -16,6 +16,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <random>
 
 using namespace giant;
 using namespace giant::editor;
@@ -319,7 +320,9 @@ namespace {
 // facing +z, its lower half the shoulder's and its upper the elbow's (at
 // y = 1), which also carries a sword; clip "bend" turns the elbow a quarter turn about z over 1 s.
 std::string hair_file(const char* name, const std::vector<u8>& bytes) {
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "giant_hair_tests";
+    // (A folder of this run's own: two build trees may test at once.)
+    static const std::string own = "giant_hair_tests_" + std::to_string(std::random_device{}());
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / own;
     std::filesystem::create_directories(dir);
     const std::filesystem::path path = dir / name;
     std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
@@ -376,19 +379,15 @@ GIANT_TEST("hair: on a character it grows from the skin its joint moves, rides t
     GIANT_CHECK_NEAR(low, 1.5, 1e-4);
     GIANT_CHECK_NEAR(high, 3.0, 1e-4);
     GIANT_CHECK(wide >= 0.2f - 1e-4f && area > 0.1);
-    // A skeleton under a scaled node (inverse binds 100 times, joints a hundredth: as exported in
-    // centimetres) grows the same scalp, not one 100 times the size.
+    // A skeleton under a scaled node with its joints' own axes turned (inverse binds 100 times and
+    // turned back, joints a hundredth and turned: as exported in centimetres, z up) grows the same
+    // scalp: the size it is drawn, upright as it stands.
     MeshLibrary::Skinned exported = character;
-    for (Mat4& m : exported.skeleton.inverse_bind) {
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 4; ++c) m.at(r, c) *= 100.0f;
-        }
-    }
-    for (Mat4& m : exported.rest_model) {
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) m.at(r, c) *= 0.01f;
-        }
-    }
+    const Quat quarter = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, 1.5707963f);
+    const Mat4 turned = mat4_from_transform({}, quarter, {0.01f, 0.01f, 0.01f});
+    const Mat4 back = mat4_from_transform({}, Quat{-quarter.x, -quarter.y, -quarter.z, quarter.w}, {100.0f, 100.0f, 100.0f});
+    for (Mat4& m : exported.skeleton.inverse_bind) m = back * m;
+    for (Mat4& m : exported.rest_model) m = m * turned;
     const geometry::TriangleMesh same = hair_scalp(exported, elbow, 2.0f, 0.5f);
     GIANT_CHECK(same.vertices.size() == scalp.vertices.size());
     for (usize i = 0; i < same.vertices.size() && i < scalp.vertices.size(); ++i) {
@@ -457,9 +456,17 @@ GIANT_TEST("hair: on a character it grows from the skin its joint moves, rides t
     GIANT_CHECK(hair.view(id, view) && view.simulated && view.guide_points.size() == 8 * 16);
     for (const Vec3& p : view.guide_points) GIANT_CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
 
-    // Another joint: grown again from that joint's skin (the whole arm, so lower in its space).
+    // Another joint: grown again from that joint's skin (the whole arm, so lower in its space). Until
+    // it is grown the old groom stays on the joint it was grown round.
     GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"joint", "shoulder"}, {"top", 1.0}}}}).ok);
+    hair.follow(state.scene, state.scene.untaken_changes());
+    hair.place(&animation, nullptr, &carried, nullptr);
+    GIANT_CHECK(hair.view(id, view) && view.grown);
+    GIANT_CHECK_NEAR(view.position.y, 4.0, 1e-3); // the elbow's
     got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    hair.place(&animation, nullptr, &carried, nullptr);
+    GIANT_CHECK(hair.view(id, view));
+    GIANT_CHECK_NEAR(view.position.y, 3.0, 1e-3); // the shoulder's
     GIANT_CHECK(got["hair"]["joint"] == "shoulder" && got["hair"]["grown"] == true);
     GIANT_CHECK(got["hair"]["bounds_min"][1].get<double>() < 0.1);
     // No such joint, none named like a head, a file without a skeleton: nothing grown, and why.

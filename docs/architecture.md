@@ -2089,19 +2089,20 @@ it. View state: not saved, not undoable.
 On a character (a mesh entity whose file has a skeleton) hair grows from
 the skin: `hair.joint` names a joint (none named: the first with "head" in
 its name), and the scalp is the original triangles the joint and the
-joints under it move by half their weight or more, cut at `top`'s share of
-their height as bound, brought into the joint's space
-(`Skeleton::inverse_bind`) and sized by the entity's largest scale. The
-groom lives in the joint's space and is drawn at the joint as the body is
-drawn (`HairState::place`, each frame before the draws are read: the
+joints under it move by half their weight or more, as they stand at rest
+in model space (so y is up and sizes are true whatever way the file's bind
+space or the joint's own axes turn, or a node above the skeleton scales),
+about the joint's place, cut at `top`'s share of their height and sized by
+the entity's largest scale. The groom is drawn at the joint as the body
+is drawn (`HairState::place`, each frame before the draws are read: the
 animation's pose once its copy shows, else the rest pose, under the
-entity's drawn transform). The joint's size at rest is baked into the
-groom (skeletons under a scaled node), a joint's own scale in a clip does
-not resize it, a mirrored entity turns its hair the wrong way and a
-non-uniformly scaled one wears hair of its largest scale. Hair answers its
-head a frame late (it steps after the frame is drawn). While a groom is
-grown again for another joint the old one stays on the joint it was grown
-round. The body's 16 capsules nearest the joint at rest (`sim::HairCapsule`,
+entity's drawn transform), turned as the joint has turned since rest. A
+joint's own scale in a clip does not resize it, a mirrored entity turns
+its hair the wrong way and a non-uniformly scaled one wears hair of its
+largest scale. Hair answers its head a frame late (it steps after the
+frame is drawn). While a groom is grown again for another joint the old
+one stays on the joint it was grown round.
+The body's 16 capsules nearest the joint at rest (`sim::HairCapsule`,
 posed each frame) push the hair aside. Every entity's hair is drawn where
 its entity is drawn: carried by the physics, a walker or a swing it goes
 along (the same order as the scene frame). A mesh entity whose file has no
