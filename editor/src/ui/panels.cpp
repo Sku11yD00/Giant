@@ -750,7 +750,7 @@ void EditorPanels::draw_properties() {
             }
             if (e->shape == world::Shape::mesh) {
                 const MeshLibrary::Mesh* mesh = m_state.meshes != nullptr ? m_state.meshes->find_normalized(e->mesh) : nullptr;
-                if (mesh != nullptr && mesh->curves != nullptr) {
+                if ((mesh != nullptr && mesh->curves != nullptr) || h.from_file) { // (shown while on, to turn it off)
                     bool brought = h.from_file;
                     if (ImGui::Checkbox("Hair from its file", &brought)) set("hair", {{"from_file", brought}});
                 }

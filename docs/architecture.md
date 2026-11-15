@@ -2119,8 +2119,9 @@ moving, or why none grew); each change is a `set_entity`, so it undoes.
 
 A file may bring its own hair: the glTF importer keeps line primitives as
 curves (`ImportResult::curves`: a strip or loop is one curve, a list's
-segments are joined end to start; where they stand at rest in the file's
-space; the first 262,144 and 16 million points), `MeshLibrary::Mesh::curves`
+segments are joined end to start, or where they meet; where they stand at
+rest in the file's space, a skinned mesh's own lines skinned to the rest
+pose; none of no length; the first 262,144 and 16 million points), `MeshLibrary::Mesh::curves`
 shares them, and an entity with `hair.from_file` wears them instead of
 grown hair: `hair_strands` takes up to `strands` of them evenly, about the
 joint's place at rest and by the entity's largest scale on a character

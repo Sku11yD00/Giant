@@ -222,7 +222,7 @@ std::vector<std::vector<Vec3>> hair_strands(const std::vector<std::vector<Vec3>>
     strands.reserve(count);
     for (usize i = 0; i < count; ++i) {
         // (Evenly over the file's: i * all / kept.)
-        const std::vector<Vec3>& curve = curves[i * curves.size() / count];
+        const std::vector<Vec3>& curve = curves[static_cast<usize>(u64{i} * curves.size() / count)];
         std::vector<Vec3>& strand = strands.emplace_back();
         strand.reserve(curve.size());
         for (const Vec3& p : curve) {

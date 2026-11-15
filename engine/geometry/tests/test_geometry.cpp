@@ -388,6 +388,10 @@ GIANT_TEST("geometry: glTF's default material is counted; lines do not count; sp
         GIANT_CHECK(near3(strip.curves[0][0], l.curves[0][0]) && near3(strip.curves[0][1], l.curves[0][1]));
         GIANT_CHECK(length(strip.curves[0][1] - strip.curves[0][0]) > 1e-3f);
     }
+    // A loop is read as a strip (not closed); a curve's index past its vertices refuses the file.
+    const ImportResult loop =
+        import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":2})"));
+    GIANT_CHECK(loop.ok() && loop.curves.size() == 1 && loop.curves[0].size() == 6);
     // Points are still skipped, with a warning.
     const ImportResult dots =
         import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":0})"));
