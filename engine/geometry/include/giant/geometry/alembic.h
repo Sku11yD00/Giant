@@ -9,13 +9,16 @@
 // read through their control points. Nothing else in a file is read (no
 // meshes, no animation, no widths or colours yet).
 //
-// The points stay in the file's space, units and up axis: a groom exported
-// for Unreal is in centimetres, left-handed with +Z up. to_engine_space
-// turns one.
+// The points stay in the file's space, units and up axis, which the file
+// does not state: a groom meant for Unreal's default import is in
+// centimetres, left-handed with +Z up. to_engine_space turns one.
 //
 // A file is never trusted: every offset and count is checked against the
-// file's size, and the work is bounded (k_max_alembic_bytes, objects and
-// properties visited, k_max_import_curves and k_max_import_curve_points).
+// file's size, and the work is bounded (k_max_alembic_bytes; objects,
+// their children and properties visited; a transform's steps; curves and
+// points looked at, and kept: k_max_import_curves and
+// k_max_import_curve_points). Reading a file blocks: never on the main
+// thread.
 #pragma once
 
 #include "giant/core/math.h"
@@ -34,7 +37,7 @@ struct AlembicCurves {
     // Each two or more points, root first as the file orders them. Curves
     // with a point that is no number, or of no length, are left out.
     std::vector<std::vector<Vec3>> curves;
-    u64 guides = 0;                    // curves left out as guides
+    u64 guides = 0;                    // curves left out as guides (hidden ones are not counted)
     std::vector<std::string> warnings; // things that were skipped
     std::string error;                 // empty when the file was read
 
@@ -49,7 +52,7 @@ AlembicCurves read_alembic_curves(std::span<const u8> data);
 // The axes a file's points are in.
 enum class FileAxes : u8 {
     y_up,       // the engine's own (glTF's): nothing turns
-    z_up,       // right-handed with +Z up (Blender, Houdini, Maya set so): (x, z, -y)
+    z_up,       // right-handed with +Z up (Houdini or Maya set so): (x, z, -y)
     z_up_left,  // left-handed with +Z up (Unreal's, as its grooms are exported): (x, z, y)
 };
 

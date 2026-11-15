@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -123,9 +126,10 @@ u64 object(Ogawa& file, u64 properties, const std::vector<u64>& children) {
 }
 
 // A transform object's properties: its ops and their values.
-u64 xform(Ogawa& file, const std::vector<u8>& ops, const std::vector<double>& values, bool wide, int visible = -1) {
+u64 xform(Ogawa& file, const std::vector<u8>& ops, const std::vector<double>& values, bool wide, int visible = -1,
+          bool inherits = true) {
     Compound x;
-    x.add(file.sample({1}, false), header(1, k_bool, 1, ".inherits", wide));
+    x.add(file.sample({static_cast<u8>(inherits ? 1 : 0)}, false), header(1, k_bool, 1, ".inherits", wide));
     x.add(file.sample(ops, false), header(1, k_u8, static_cast<u32>(ops.size()), ".ops", wide));
     x.add(file.sample(bytes_of(values), false), header(1, k_f64, static_cast<u32>(values.size()), ".vals", wide));
     Compound own;
@@ -135,7 +139,8 @@ u64 xform(Ogawa& file, const std::vector<u8>& ops, const std::vector<double>& va
 }
 
 struct CurveOptions {
-    std::vector<u8> guide;  // groom_guide, when not empty
+    std::vector<u8> guide;  // groom_guide's bytes, when not empty
+    u32 guide_pod = k_i8;
     bool wide = false;
     u8 basis = 1;           // 1 linear
     u32 point_pod = k_f32;
@@ -148,7 +153,7 @@ u64 curves(Ogawa& file, const std::vector<float>& points, const std::vector<i32>
     geom.add(file.sample({o.basis, 0, 0, 0}, false), header(1, k_u8, 4, "curveBasisAndType", o.wide));
     if (!o.guide.empty()) {
         Compound params;
-        params.add(file.sample(o.guide, true), header(2, k_i8, 1, "groom_guide", o.wide));
+        params.add(file.sample(o.guide, true), header(2, o.guide_pod, 1, "groom_guide", o.wide));
         geom.add(params.write(file), header(0, 0, 0, ".arbGeomParams", o.wide));
     }
     Compound own;
@@ -197,6 +202,15 @@ GIANT_TEST("alembic: one groom_guide value stands for every curve; odd curves wa
     o.guide = {1};
     AlembicCurves r = read_alembic_curves(groom(false, o));
     GIANT_CHECK(r.ok() && r.curves.empty() && r.guides == 5);
+    // Whole numbers of four bytes (Houdini's): the second strand is a guide.
+    o.guide = bytes_of(std::vector<i32>{0, 256, 0});
+    o.guide_pod = k_i32;
+    r = read_alembic_curves(groom(false, o));
+    GIANT_CHECK(r.ok() && r.curves.size() == 2 && r.guides == 3 && r.warnings.empty());
+    o.guide = bytes_of(std::vector<i32>{0, 0, 1});
+    r = read_alembic_curves(groom(false, o));
+    GIANT_CHECK(r.ok() && r.curves.size() == 1 && r.guides == 3 && r.warnings.empty());
+    o.guide_pod = k_i8;
     // A value count that fits nothing is ignored.
     o.guide = {1, 0};
     r = read_alembic_curves(groom(false, o));
@@ -236,6 +250,29 @@ GIANT_TEST("alembic: rotations turn as Alembic's do") {
         const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {turned})));
         GIANT_CHECK(r.ok() && r.curves.size() == 1);
         if (r.curves.size() == 1) GIANT_CHECK(near3(r.curves[0][1], {0, 1, 0}));
+    }
+    // About x: +y to +z. About y: +z to +x.
+    for (const bool about_x : {false, true}) {
+        Ogawa file;
+        const u64 c = about_x ? curves(file, {0, 0, 0, 0, 1, 0}, {2}) : curves(file, {0, 0, 0, 0, 0, 1}, {2});
+        const u64 turned = object(file, xform(file, {static_cast<u8>(about_x ? 0x40 : 0x50)}, {90}, false), {c});
+        Compound none;
+        const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {turned})));
+        GIANT_CHECK(r.ok() && r.curves.size() == 1);
+        if (r.curves.size() == 1) GIANT_CHECK(near3(r.curves[0][1], about_x ? Vec3{0, 0, 1} : Vec3{1, 0, 0}));
+    }
+    // Steps of one transform: the last listed moves a point first (doubled,
+    // then 1 m along x: 3, not 4). A transform that does not inherit
+    // forgets those above it.
+    for (const bool inherits : {true, false}) {
+        Ogawa file;
+        const u64 c = curves(file, {0, 0, 0, 1, 0, 0}, {2});
+        const u64 inner = object(file, xform(file, {0x10, 0x00}, {1, 0, 0, 2, 2, 2}, false, -1, inherits), {c});
+        const u64 outer = object(file, xform(file, {0x10}, {0, 5, 0}, false), {inner});
+        Compound none;
+        const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {outer})));
+        GIANT_CHECK(r.ok() && r.curves.size() == 1);
+        if (r.curves.size() == 1) GIANT_CHECK(near3(r.curves[0][1], {3, inherits ? 5.0f : 0.0f, 0}));
     }
     // A matrix: its last row moves.
     Ogawa file;
@@ -283,6 +320,73 @@ GIANT_TEST("alembic: files that are not Alembic, unfinished, cut short or damage
     loop.group({properties, self, self, names});
     const AlembicCurves r = read_alembic_curves(loop.finish(self));
     GIANT_CHECK(!r.ok());
+}
+
+GIANT_TEST("alembic: an object said to be shown is, under a hidden one") {
+    for (const int visible : {1, -1}) {
+        Ogawa file;
+        const u64 c = curves(file, {0, 0, 0, 1, 0, 0}, {2});
+        const u64 inner = object(file, xform(file, {}, {}, false, visible), {c});
+        const u64 outer = object(file, xform(file, {}, {}, false, 0), {inner});
+        Compound none;
+        const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {outer})));
+        GIANT_CHECK(r.ok() && r.curves.size() == (visible == 1 ? 1u : 0u));
+    }
+}
+
+GIANT_TEST("alembic: the work a file can ask for is bounded") {
+    // A transform of more steps than Alembic can write is ignored, not worked through.
+    {
+        Ogawa file;
+        const u64 c = curves(file, {0, 0, 0, 1, 0, 0}, {2});
+        const u64 turned = object(file, xform(file, std::vector<u8>(256, 0x40), std::vector<double>(256, 1.0), false), {c});
+        Compound none;
+        const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {turned})));
+        GIANT_CHECK(r.ok() && r.curves.size() == 1 && r.warnings.size() == 1);
+        if (r.curves.size() == 1) GIANT_CHECK(near3(r.curves[0][1], {1, 0, 0}));
+    }
+    // An object of many children listed many times over: refused.
+    {
+        Ogawa file;
+        Compound none;
+        const u64 properties = none.write(file);
+        std::vector<u64> many(4096, k_data);
+        many[0] = properties;
+        const u64 wide = file.group(many);
+        std::vector<u64> listed(4098, wide);
+        listed[0] = properties;
+        listed.back() = file.data(std::vector<u8>(32, 0));
+        const AlembicCurves r = read_alembic_curves(file.finish(file.group(listed)));
+        GIANT_CHECK(!r.ok());
+    }
+    // Objects nested past any real file's depth: refused.
+    {
+        Ogawa file;
+        Compound none;
+        const u64 properties = none.write(file);
+        u64 inner = object(file, properties, {});
+        for (int i = 0; i < 100; ++i) inner = object(file, properties, {inner});
+        GIANT_CHECK(!read_alembic_curves(file.finish(inner)).ok());
+    }
+}
+
+GIANT_TEST("alembic: a file is read from disk; a missing one and the old HDF5 kind say so") {
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / ("giant_alembic_tests_" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(dir);
+    const std::vector<u8> whole = groom(false);
+    {
+        std::ofstream out(dir / "groom.abc", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(whole.data()), static_cast<std::streamsize>(whole.size()));
+    }
+    const AlembicCurves r = read_alembic_curves_file(dir / "groom.abc");
+    GIANT_CHECK(r.ok() && r.curves.size() == 2 && r.guides == 2);
+    GIANT_CHECK(!read_alembic_curves_file(dir / "none.abc").ok());
+    GIANT_CHECK(!read_alembic_curves_file(dir).ok());
+    const std::vector<u8> old{0x89, 'H', 'D', 'F', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0, 0, 0, 0, 0};
+    GIANT_CHECK(read_alembic_curves(old).error.find("HDF5") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 GIANT_TEST("alembic: curves turn to the engine's space") {

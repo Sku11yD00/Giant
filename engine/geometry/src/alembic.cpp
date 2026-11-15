@@ -29,7 +29,7 @@
 //
 // A property header is a u32 of bits (0-1 kind: 0 compound, 1 scalar, else
 // array; 2-3 the width of the sizes that follow: 1, 2 or 4 bytes; 4-7 the
-// value type; 8, 9 and 11 which sample fields follow; 12-19 the values per
+// value type; 8 and 9 which sample fields follow; 12-19 the values per
 // element; 20-27 the index of its shared words, 0xff when its own follow),
 // the sample fields, then its name's size and name.
 
@@ -41,6 +41,8 @@ constexpr u64 k_data_bit = u64{1} << 63;
 constexpr u32 k_max_depth = 64;
 constexpr u32 k_max_objects = 65536;
 constexpr u32 k_max_properties = 1u << 20;
+constexpr u64 k_max_children = u64{1} << 24; // child places looked at, over all objects
+constexpr usize k_max_transform_ops = 255;   // (Alembic's own limit: their count is a byte)
 // Curves and points looked at, kept or not (one array may be shown by many
 // objects, and guides and curves of no length cost their reading too).
 constexpr u64 k_max_looked_at = 8 * k_max_import_curve_points;
@@ -101,6 +103,10 @@ public:
     Reader(std::span<const u8> data, AlembicCurves& out) : m_data(data), m_out(out) {}
 
     void read() {
+        if (m_data.size() >= 8 && std::memcmp(m_data.data(), "\x89HDF\r\n\x1a\n", 8) == 0) {
+            fail("an Alembic file of the old HDF5 kind: export it again as Ogawa");
+            return;
+        }
         if (m_data.size() < 16 || std::memcmp(m_data.data(), "Ogawa", 5) != 0) {
             fail("not an Alembic (Ogawa) file");
             return;
@@ -115,7 +121,7 @@ public:
             fail("the Alembic file has no objects");
             return;
         }
-        object(child(first, 2), Mat{}, 0);
+        object(child(first, 2), Mat{}, false, 0);
     }
 
 private:
@@ -255,6 +261,10 @@ private:
             warn_once(m_warned_transform, "an Alembic transform that is not doubles was ignored");
             return true;
         }
+        if (op_bytes.size() > k_max_transform_ops) {
+            warn_once(m_warned_transform, "an Alembic transform that could not be read was ignored");
+            return true;
+        }
         usize at = 0;
         const auto take = [&](double& v) {
             v = 0.0;
@@ -311,6 +321,7 @@ private:
             return true;
         }
         std::span<const u8> point_bytes, count_bytes, guide_bytes, bytes;
+        usize guide_width = 1;
         if (!sample(*points, point_bytes) || !sample(*counts, count_bytes)) return false;
         if (const Property* kind = find(parts, "curveBasisAndType"); kind != nullptr && kind->kind != 0) {
             if (!sample(*kind, bytes)) return false;
@@ -323,25 +334,36 @@ private:
             std::vector<Property> params;
             if (!properties(more->place, params)) return false;
             if (const Property* guide = find(params, "groom_guide"); guide != nullptr) {
-                if (guide->kind >= 2 && guide->extent == 1 &&
-                    (guide->pod == Pod::i8 || guide->pod == Pod::u8 || guide->pod == Pod::boolean)) {
+                // (A byte in Unreal's own files; Houdini's whole numbers are 4.)
+                const usize width = guide->pod <= Pod::i8 ? 1 : guide->pod <= Pod::i16 ? 2 : guide->pod <= Pod::i32 ? 4 : 0;
+                if (guide->kind >= 2 && guide->extent == 1 && width != 0) {
+                    guide_width = width;
                     if (!sample(*guide, guide_bytes)) return false;
                 } else {
-                    warn_once(m_warned_guides, "a groom_guide that is not a byte a curve was ignored");
+                    warn_once(m_warned_guides, "a groom_guide that is not a whole number a curve was ignored");
                 }
             }
         }
         const usize point_count = point_bytes.size() / 12;
         const usize curve_count = count_bytes.size() / 4;
-        if (!guide_bytes.empty() && guide_bytes.size() != 1 && guide_bytes.size() != curve_count) {
-            warn_once(m_warned_guides, "a groom_guide that is not a byte a curve was ignored");
+        const usize guide_count = guide_bytes.size() / guide_width;
+        if (!guide_bytes.empty() && guide_count != 1 && guide_count != curve_count) {
+            warn_once(m_warned_guides, "a groom_guide that is not a whole number a curve was ignored");
             guide_bytes = {};
         }
+        const auto is_guide = [&](usize c) {
+            if (guide_bytes.empty()) return false;
+            const u8* value = guide_bytes.data() + (guide_count == 1 ? 0 : c) * guide_width;
+            for (usize i = 0; i < guide_width; ++i) {
+                if (value[i] != 0) return true;
+            }
+            return false;
+        };
         usize at = 0;
         std::vector<Vec3> curve;
         for (usize c = 0; c < curve_count; ++c) {
             if (++m_looked_at > k_max_looked_at) {
-                warn_once(m_warned_full, "hair curves past the first 262144 (or 16 million points) were skipped");
+                warn_once(m_warned_work, "the Alembic file shows its curves too many times: the rest were skipped");
                 return true;
             }
             i32 length_given = 0;
@@ -353,7 +375,7 @@ private:
             const usize n = static_cast<usize>(length_given);
             const usize from = at;
             at += n;
-            if (!guide_bytes.empty() && guide_bytes[guide_bytes.size() == 1 ? 0 : c] != 0) {
+            if (is_guide(c)) {
                 ++m_out.guides;
                 continue;
             }
@@ -385,11 +407,16 @@ private:
         return true;
     }
 
-    bool object(u64 place, const Mat& above, u32 depth) {
-        if (depth > k_max_depth || ++m_objects > k_max_objects) return fail("the Alembic file has too many objects");
+    // `hidden`: an object above is, and none between says it is shown.
+    bool object(u64 place, const Mat& above, bool hidden, u32 depth) {
+        if (depth > k_max_depth) return fail("the Alembic file's objects are nested too deep");
+        if (++m_objects > k_max_objects) return fail("the Alembic file has too many objects");
         u64 count = 0, first = 0;
         if (!group(place, count, first)) return false;
         if (count == 0) return true;
+        // (One object may be listed by many, and a list may be long.)
+        m_children += count;
+        if (m_children > k_max_children) return fail("the Alembic file has too many objects");
         Mat world = above;
         const u64 own = child(first, 0);
         if ((own & k_data_bit) == 0) {
@@ -398,7 +425,8 @@ private:
             if (const Property* shown = find(parts, "visible"); shown != nullptr && shown->kind != 0) {
                 std::span<const u8> bytes;
                 if (!sample(*shown, bytes)) return false;
-                if (!bytes.empty() && bytes[0] == 0) return true; // hidden, with all under it
+                // (0 hidden, 1 shown whatever is above, else as its parent.)
+                if (!bytes.empty() && (bytes[0] == 0 || bytes[0] == 1)) hidden = bytes[0] == 0;
             }
             if (const Property* xform = find(parts, ".xform"); xform != nullptr && xform->kind == 0) {
                 Mat local;
@@ -406,7 +434,7 @@ private:
                 if (!transform(*xform, local, inherits)) return false;
                 world = inherits ? local * above : local;
             }
-            if (const Property* geom = find(parts, ".geom"); geom != nullptr && geom->kind == 0) {
+            if (const Property* geom = find(parts, ".geom"); !hidden && geom != nullptr && geom->kind == 0) {
                 if (!curves(*geom, world)) return false;
             }
         }
@@ -414,7 +442,7 @@ private:
         for (u64 i = 1; i < count; ++i) {
             const u64 next = child(first, i);
             if ((next & k_data_bit) != 0) continue;
-            if (!object(next, world, depth + 1)) return false;
+            if (!object(next, world, hidden, depth + 1)) return false;
         }
         return true;
     }
@@ -423,6 +451,7 @@ private:
     AlembicCurves& m_out;
     u64 m_points = 0;
     u64 m_looked_at = 0;
+    u64 m_children = 0;
     u32 m_objects = 0;
     u32 m_properties = 0;
     bool m_warned_transform = false;
@@ -431,6 +460,7 @@ private:
     bool m_warned_guides = false;
     bool m_warned_counts = false;
     bool m_warned_full = false;
+    bool m_warned_work = false;
 };
 
 } // namespace
