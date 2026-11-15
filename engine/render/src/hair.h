@@ -41,6 +41,16 @@ inline constexpr u32 k_hair_least_strands = 64;
 inline constexpr usize k_hair_posed_bytes = 4u << 20;
 // Pieces are joined until one is this many pixels long.
 inline constexpr float k_hair_piece_pixels = 3.0f;
+// The sun's shadows of hair on itself (C6d): a square of tiles, one a
+// drawn groom, each spanning the ball round its groom as the sun sees it.
+inline constexpr u32 k_hair_shadow_tile = 128;                      // texels a side
+inline constexpr u32 k_hair_shadow_tiles_across = 16;               // 16 x 16 tiles: k_max_hair_draws
+inline constexpr u32 k_hair_shadow_size = k_hair_shadow_tile * k_hair_shadow_tiles_across;
+static_assert(k_hair_shadow_tiles_across * k_hair_shadow_tiles_across >= k_max_hair_draws);
+// The most strands of a groom drawn into its tile (its first, each
+// standing for the rest), and the points a piece of them spans at least.
+inline constexpr u32 k_hair_shadow_strands = 4096;
+inline constexpr u32 k_hair_shadow_stride = 3;
 
 struct PackedGroom {
     std::vector<u8> bytes; // gpu::HairStrand a strand, then the points; empty: not a groom to draw
@@ -108,6 +118,8 @@ struct HairPlanned {
     u32 first = 0; // its first strand among the frame's
     bool posed = false; // its guides are given, and good (and fit the frame's k_hair_posed_bytes)
     double distance = 0.0;
+    Vec3 centre{};      // camera-relative: the middle of the ball its shadow tile spans
+    float reach = 0.0f; // that ball's radius: round its guides as posed (or its bounds at rest)
 };
 
 struct HairPlan {

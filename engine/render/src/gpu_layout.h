@@ -1042,11 +1042,14 @@ struct HairGroom {
     float variation;
     u32 count;            // strands drawn
     u32 stride;           // points a piece spans (1, 3, 5 or 15)
-    float pad[3];
+    u32 shadow_count;     // strands drawn into its tile of the sun's hair shadows (its first)
+    u32 shadow_stride;    // points a piece of those spans
+    float shadow_stands;  // the strands each of those stands for (count / shadow_count)
+    float ball[4];        // camera-relative centre and radius: what its shadow tile spans
 };
-static_assert(sizeof(HairGroom) == 144);
+static_assert(sizeof(HairGroom) == 160);
 
-// A strand's point as drawn (cs_prepare writes it, the ribbons read it).
+// A strand's point as drawn (cs_pose writes where it is, cs_light its light; the ribbons read it).
 struct HairPoint {
     float position[3]; // camera-relative
     u32 light;         // towards the camera, before exposure: rgb 9 bits each and a shared 5-bit exponent
@@ -1060,7 +1063,7 @@ struct HairPush {
     u32 grooms;        // read: gpu::HairGroom at grooms_offset
     u32 grooms_offset;
     u32 groom;         // which of them this draw or dispatch is
-    u32 drawn;         // cs_prepare: write; the ribbons: read (gpu::HairPoint)
+    u32 drawn;         // cs_pose, cs_light: write; the ribbons: read (gpu::HairPoint)
     u32 extras;        // shading's ResolveExtras (extras_on 0: none)
     u32 extras_offset;
     u32 extras_on;
@@ -1069,8 +1072,12 @@ struct HairPush {
     u32 accum;         // composite: the sums
     u32 reveal;
     u32 light;         // composite: the light before exposure
+    u32 shadow_depth;  // the hair shadows' tiles: the depth nearest the sun (shadows_on 1)
+    u32 shadow_opacity; // and how much hair lies within three depths of it, and in all
+    u32 shadows_on;
+    u32 lamps_on;      // the frame's lamps light hair (with extras_on)
     u32 pad[2];
 };
-static_assert(sizeof(HairPush) == 64);
+static_assert(sizeof(HairPush) == 80);
 
 } // namespace giant::render::gpu

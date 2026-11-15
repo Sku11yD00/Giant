@@ -58,7 +58,11 @@ giant_shaders(render
     shaders/particles.slang:ps_main:pixel:particles_ps
     shaders/particles.slang:vs_full:vertex:particles_full_vs
     shaders/particles.slang:ps_composite:pixel:particles_composite_ps
-    shaders/hair.slang:cs_prepare:compute:hair_prepare_cs
+    shaders/hair.slang:cs_pose:compute:hair_pose_cs
+    shaders/hair.slang:cs_light:compute:hair_light_cs
+    shaders/hair.slang:vs_shadow:vertex:hair_shadow_vs
+    shaders/hair.slang:ps_shadow_front:pixel:hair_shadow_front_ps
+    shaders/hair.slang:ps_shadow_sums:pixel:hair_shadow_sums_ps
     shaders/hair.slang:vs_ribbon:vertex:hair_ribbon_vs
     shaders/hair.slang:ps_front:pixel:hair_front_ps
     shaders/hair.slang:ps_main:pixel:hair_ps

@@ -337,6 +337,57 @@ GIANT_TEST("hair: a frame draws the nearest grooms in view, thinned to fit, thei
     GIANT_CHECK_NEAR(g.half_width, 0.5 * 0.00008 * 2.0 * 4.0, 1e-8);
 }
 
+GIANT_TEST("hair: a groom's shadow tile spans its hair as posed, and holds its first strands") {
+    Grooms grooms;
+    const geometry::Groom groom = curtain(1000, 10);
+    const GroomId id = held(grooms, groom);
+    std::vector<HairDraw> draws(1);
+    draws[0].groom = id;
+    draws[0].position = {0.0, 0.0, -2.0};
+    draws[0].scale = 2.0f;
+    HairPlan plan;
+    plan_hair(grooms, draws, looking(), plan);
+    GIANT_CHECK(plan.grooms.size() == 1);
+    if (plan.grooms.size() != 1) return;
+    const Vec3 size = grooms.find(id)->groom.bounds_size;
+    const Vec3 middle = grooms.find(id)->groom.bounds_min + size * 0.5f;
+    // At rest: the ball round its bounds (sized as drawn), a little over.
+    GIANT_CHECK_NEAR(plan.grooms[0].centre.x, middle.x * 2.0f, 1e-4);
+    GIANT_CHECK_NEAR(plan.grooms[0].centre.z, -2.0 + middle.z * 2.0f, 1e-4);
+    GIANT_CHECK_NEAR(plan.grooms[0].reach, 0.5 * length(size) * 2.0 * 1.05, 1e-4);
+    const float rest = plan.grooms[0].reach;
+    // Blown 0.7 m to one side: the ball reaches its guides.
+    std::vector<Vec3> guides(groom.points.begin(), groom.points.begin() + 10 * 16);
+    float furthest = 0.0f;
+    for (Vec3& p : guides) {
+        p.x += 0.7f;
+        furthest = std::max(furthest, length(p - middle));
+    }
+    draws[0].guides = guides;
+    plan_hair(grooms, draws, looking(), plan);
+    GIANT_CHECK(plan.grooms.size() == 1 && plan.grooms[0].posed);
+    GIANT_CHECK_NEAR(plan.grooms[0].reach, furthest * 2.0 * 1.05, 1e-3);
+    GIANT_CHECK(plan.grooms[0].reach > rest);
+    // As the shaders take it: its first strands (4096 at most, each
+    // standing for the rest), in pieces of three points or more.
+    HairPlanned planned = plan.grooms[0];
+    planned.lod.strands = 10000;
+    planned.lod.stride = 1;
+    gpu::HairGroom g = to_gpu(planned, *grooms.find(id), draws[0], {});
+    GIANT_CHECK(g.shadow_count == k_hair_shadow_strands && g.shadow_stride == 3);
+    GIANT_CHECK_NEAR(g.shadow_stands, 10000.0 / 4096.0, 1e-5);
+    GIANT_CHECK_NEAR(g.ball[3], planned.reach, 1e-6);
+    GIANT_CHECK_NEAR(g.ball[2], planned.centre.z, 1e-6);
+    planned.lod.strands = 300;
+    planned.lod.stride = 15;
+    g = to_gpu(planned, *grooms.find(id), draws[0], {});
+    GIANT_CHECK(g.shadow_count == 300 && g.shadow_stride == 15);
+    GIANT_CHECK_NEAR(g.shadow_stands, 1.0, 1e-6);
+    // Every drawn groom has a tile.
+    GIANT_CHECK(k_hair_shadow_tiles_across * k_hair_shadow_tiles_across >= k_max_hair_draws);
+    GIANT_CHECK(k_hair_shadow_tile * k_hair_shadow_tiles_across == k_hair_shadow_size);
+}
+
 GIANT_TEST("hair: grooms go to the GPU under a budget and draw in the lit view once there (null device)") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::null;
@@ -378,8 +429,18 @@ GIANT_TEST("hair: grooms go to the GPU under a budget and draw in the lit view o
     GIANT_CHECK(renderer->groom_ready(big) && renderer->groom_ready(small));
     s = draw();
     GIANT_CHECK(s.hair_grooms == 2 && s.hair_left_out == 0 && s.hair_strands > 100 && s.hair_segments >= s.hair_strands);
-    // A dispatch and two draws a groom, the composite and the depth.
-    GIANT_CHECK(s.hair_draws == 2 * 3 + 2 && s.post_draws == bare_post);
+    // Two dispatches and four draws a groom (two of them into its shadow
+    // tile), the composite and the depth.
+    GIANT_CHECK(s.hair_draws == 2 * 6 + 2 && s.post_draws == bare_post);
+    // Without its own shadows, or without a sun to cast them: two draws a groom fewer.
+    frame.settings.hair_shadows = false;
+    GIANT_CHECK(draw().hair_draws == 2 * 4 + 2);
+    frame.settings.hair_shadows = true;
+    const Vec3 sun = frame.lighting.sun_light;
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    GIANT_CHECK(draw().hair_draws == 2 * 4 + 2);
+    frame.lighting.sun_light = sun;
+    GIANT_CHECK(draw().hair_draws == 2 * 6 + 2);
     frame.settings.hair = false;
     GIANT_CHECK(draw().hair_grooms == 0);
     frame.settings.hair = true;
@@ -590,6 +651,162 @@ GIANT_TEST("hair: d3d12 a curtain of hair covers what is behind it, by its colou
     show("a puff behind the hair", puff_behind);
     GIANT_CHECK(channel(puff_alone, 32, 32, 0) > channel(bare, 32, 32, 0) + 40);
     GIANT_CHECK(std::abs(channel(puff_behind, 32, 32, 0) - channel(dark, 32, 32, 0)) < 12);
+    renderer->remove_groom(id);
+    device->destroy(target);
+}
+
+GIANT_TEST("hair: d3d12 thick hair shades itself from the sun, and lamps light it") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    std::vector<Instance> things(1);
+    things[0].mesh = renderer->builtin(BuiltinMesh::cube);
+    things[0].position = {0.0, 0.0, -4.5};
+    things[0].scale = {8.0f, 8.0f, 1.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.materials = materials;
+    frame.instances = things;
+    frame.delta_seconds = 0.0f;
+    frame.lighting.background = {0.5f, 0.5f, 0.5f};
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.3f, 0.3f, 0.3f};
+    frame.lighting.ground_light = {0.1f, 0.1f, 0.1f};
+    // Blond hair 1 m square and 1.5 m deep, its middle 2 m away: four
+    // curtains half a metre one behind the other (far enough apart that a
+    // pixel's colour is the nearest one's alone), each a wall of hair
+    // twice over on its own.
+    std::vector<std::vector<Vec3>> lines;
+    for (u32 layer = 0; layer < 4; ++layer) {
+        const float z = 0.75f - 0.5f * static_cast<float>(layer);
+        for (u32 s = 0; s < 1000; ++s) {
+            const float x = (static_cast<float>(s) + 0.5f) / 1000.0f - 0.5f;
+            lines.push_back({{x, 0.5f, z}, {x, -0.5f, z}});
+        }
+    }
+    const GroomId id = renderer->add_groom(geometry::groom_from_strands(lines, 40));
+    GIANT_CHECK(id != k_no_groom);
+    std::vector<HairDraw> hair(1);
+    hair[0].groom = id;
+    hair[0].position = {0.0, 0.0, -2.0};
+    hair[0].look.width = 0.002f;
+    hair[0].look.variation = 0.0f;
+    hair[0].look.melanin = 0.2f;
+    hair[0].look.tip_width = 1.0f;
+    frame.settings.hair_detail = 16.0f; // nearly every strand drawn
+    frame.hair = hair;
+    std::vector<u8> again;
+    const auto draw = [&] {
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 4 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 && st.hair_grooms == 1 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        std::vector<u8> image = device->read_texture(target);
+        rhi::CommandList* cmd = device->begin_frame(nullptr);
+        if (cmd != nullptr) {
+            renderer->render(*cmd, target, frame);
+            device->end_frame();
+        }
+        device->wait_idle();
+        again = device->read_texture(target);
+        return image;
+    };
+    const auto channel = [](const std::vector<u8>& image, u32 x, u32 y, u32 c) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        return i + 3 < image.size() ? static_cast<int>(image[i + c]) : -1;
+    };
+    const auto show = [&](const char* what, const std::vector<u8>& image) {
+        std::printf("hair shadows: %s: middle %d %d %d, above it %d %d %d, corner %d %d %d\n", what, channel(image, 32, 32, 0),
+                    channel(image, 32, 32, 1), channel(image, 32, 32, 2), channel(image, 32, 24, 0), channel(image, 32, 24, 1),
+                    channel(image, 32, 24, 2), channel(image, 3, 3, 0), channel(image, 3, 3, 1), channel(image, 3, 3, 2));
+    };
+    // The sun behind the camera: the curtain seen is the one the sun
+    // strikes first, as bright with the hair's shadows as without.
+    frame.lighting.sun_direction = {0.0f, 0.0f, 1.0f};
+    const std::vector<u8> front = draw();
+    const bool still = again == front;
+    show("lit from the front", front);
+    GIANT_CHECK(still);
+    frame.settings.hair_shadows = false;
+    const std::vector<u8> front_bare = draw();
+    show("lit from the front, no hair shadows", front_bare);
+    for (u32 c = 0; c < 3; ++c) {
+        GIANT_CHECK(std::abs(channel(front, 32, 32, c) - channel(front_bare, 32, 32, c)) <= 6);
+        GIANT_CHECK(std::abs(channel(front, 32, 24, c) - channel(front_bare, 32, 24, c)) <= 6);
+    }
+    // The sun behind the hair: the curtain seen lies under three others.
+    // Without the hair's shadows the sun shines through it as if alone.
+    frame.lighting.sun_direction = {0.0f, 0.0f, -1.0f};
+    const std::vector<u8> back_bare = draw();
+    show("lit from behind, no hair shadows", back_bare);
+    frame.settings.hair_shadows = true;
+    const std::vector<u8> back = draw();
+    show("lit from behind", back);
+    GIANT_CHECK(channel(back, 32, 32, 1) < channel(back_bare, 32, 32, 1) - 30);
+    GIANT_CHECK(channel(back, 32, 24, 1) < channel(back_bare, 32, 24, 1) - 30);
+    GIANT_CHECK(channel(back, 32, 32, 1) < channel(front, 32, 32, 1) - 20);
+    // The wall beside it is the same either way (hair's shadows are on hair alone).
+    for (u32 c = 0; c < 3; ++c) GIANT_CHECK(channel(back, 3, 3, c) == channel(back_bare, 3, 3, c));
+    // No sun: a lamp between the camera and the hair lights it.
+    frame.lighting.sun_light = {0.0f, 0.0f, 0.0f};
+    const std::vector<u8> night = draw();
+    show("no sun", night);
+    std::vector<LocalLight> lamps(1);
+    lamps[0].position = {0.0, 0.0, -1.0};
+    lamps[0].range = 6.0f;
+    lamps[0].intensity = 20.0f;
+    frame.lights = lamps;
+    const std::vector<u8> lamp = draw();
+    const bool lamp_still = again == lamp;
+    show("a lamp before it", lamp);
+    GIANT_CHECK(lamp_still);
+    GIANT_CHECK(channel(lamp, 32, 32, 1) > channel(night, 32, 32, 1) + 20);
+    // A red lamp: red hair.
+    lamps[0].color = {1.0f, 0.1f, 0.1f};
+    const std::vector<u8> red = draw();
+    show("a red lamp before it", red);
+    GIANT_CHECK(channel(red, 32, 32, 0) > channel(red, 32, 32, 2) + 20);
+    // Out of its range, or with lamps off: as with none.
+    frame.settings.local_lights = false;
+    const std::vector<u8> off = draw();
+    GIANT_CHECK(off == night);
+    frame.settings.local_lights = true;
+    lamps[0].range = 0.2f; // (the nearest curtain is 0.25 m from it)
+    const std::vector<u8> short_of = draw();
+    for (u32 c = 0; c < 3; ++c) GIANT_CHECK(channel(short_of, 32, 32, c) == channel(night, 32, 32, c));
     renderer->remove_groom(id);
     device->destroy(target);
 }

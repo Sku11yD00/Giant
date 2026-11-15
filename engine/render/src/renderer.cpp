@@ -294,14 +294,17 @@ Renderer::~Renderer() {
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
           m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
           m_ao_gtao, m_ao_denoise, m_contact_pass, m_occlusion_pass, m_terrain_pass, m_water_copy, m_water, m_particle_prepare, m_particle_draw, m_particle_composite,
-          m_resolve_spread, m_resolve_direct_spread, m_subsurface_pass, m_hair_prepare, m_hair_front, m_hair_draw,
-          m_hair_composite, m_hair_depth_pass}) {
+          m_resolve_spread, m_resolve_direct_spread, m_subsurface_pass, m_hair_pose, m_hair_shadow_front,
+          m_hair_shadow_sums, m_hair_light_pass, m_hair_front, m_hair_draw, m_hair_composite, m_hair_depth_pass}) {
         m_device.destroy(p);
     }
     for (const rhi::TextureHandle t : m_subsurface) m_device.destroy(t);
     m_device.destroy(m_water_light);
     for (u32 i = 0; m_grooms != nullptr && i < m_groom_slots_made; ++i) m_device.destroy(m_grooms->slot(i).buffer);
-    for (const rhi::TextureHandle t : {m_hair_depth, m_hair_accum, m_hair_reveal, m_hair_light}) m_device.destroy(t);
+    for (const rhi::TextureHandle t :
+         {m_hair_depth, m_hair_accum, m_hair_reveal, m_hair_light, m_hair_shadow_depth, m_hair_shadow_opacity}) {
+        m_device.destroy(t);
+    }
     m_device.destroy(m_hair_drawn);
     m_device.destroy(m_particle_ring);
     m_device.destroy(m_particle_drawn);
@@ -586,8 +589,27 @@ bool Renderer::init() {
     particles.name = "particles: over the light";
     m_particle_composite = m_device.create_pipeline(particles);
     // Hair (shaders/hair.slang).
-    m_hair_prepare = compute(shaders::hair_prepare_cs(), "hair: strands posed and lit");
+    m_hair_pose = compute(shaders::hair_pose_cs(), "hair: strands posed");
+    m_hair_light_pass = compute(shaders::hair_light_cs(), "hair: strands lit");
     rhi::GraphicsPipelineDesc hair;
+    hair.vertex = shaders::hair_shadow_vs();
+    hair.pixel = shaders::hair_shadow_front_ps();
+    hair.color_count = 0;
+    hair.depth_format = rhi::Format::depth32_float;
+    hair.depth = rhi::DepthMode::test_write;
+    hair.cull = rhi::CullMode::none;
+    hair.name = "hair shadows: nearest the sun";
+    m_hair_shadow_front = m_device.create_pipeline(hair);
+    hair.pixel = shaders::hair_shadow_sums_ps();
+    hair.color_formats[0] = rhi::Format::rgba16_float;
+    hair.color_count = 1;
+    hair.depth_format = rhi::Format::unknown;
+    hair.depth = rhi::DepthMode::none;
+    hair.blend = rhi::BlendMode::weighted_transparency; // (its first target: added up)
+    hair.name = "hair shadows: hair by depth";
+    m_hair_shadow_sums = m_device.create_pipeline(hair);
+    hair.color_formats[0] = rhi::Format::unknown;
+    hair.blend = rhi::BlendMode::opaque;
     hair.vertex = shaders::hair_ribbon_vs();
     hair.pixel = shaders::hair_front_ps();
     hair.color_count = 0;
@@ -656,8 +678,8 @@ bool Renderer::init() {
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
           m_bloom_down, m_bloom_up, m_post, m_ao_gtao, m_ao_denoise, m_contact_pass, m_occlusion_pass, m_terrain_pass, m_water_copy,
           m_water, m_particle_prepare, m_particle_draw, m_particle_composite, m_resolve_spread,
-          m_resolve_direct_spread, m_subsurface_pass, m_hair_prepare, m_hair_front, m_hair_draw, m_hair_composite,
-          m_hair_depth_pass}) {
+          m_resolve_direct_spread, m_subsurface_pass, m_hair_pose, m_hair_shadow_front, m_hair_shadow_sums,
+          m_hair_light_pass, m_hair_front, m_hair_draw, m_hair_composite, m_hair_depth_pass}) {
         if (!p.valid()) {
             log_error("render", "could not create the renderer's pipelines");
             return false;
@@ -4316,6 +4338,9 @@ GroomId Renderer::add_groom(const geometry::Groom& groom) {
         if (!m_hair_drawn.valid()) {
             return k_no_groom; // the device logged why
         }
+        // And the hair's shadow tiles, now and not on the first frame the
+        // sun strikes hair (without them hair draws unshaded by itself).
+        ensure_hair_shadows();
     }
     rhi::BufferDesc desc;
     desc.size = packed.bytes.size();
@@ -4395,6 +4420,25 @@ bool Renderer::ensure_hair_targets() {
     return m_hair_depth.valid() && m_hair_accum.valid() && m_hair_reveal.valid() && m_hair_light.valid();
 }
 
+bool Renderer::ensure_hair_shadows() {
+    rhi::TextureDesc desc;
+    desc.width = k_hair_shadow_size;
+    desc.height = k_hair_shadow_size;
+    if (!m_hair_shadow_depth.valid()) {
+        desc.format = rhi::Format::depth32_float;
+        desc.usage = rhi::TextureUsage::depth_target | rhi::TextureUsage::sampled;
+        desc.name = "hair shadows: nearest the sun";
+        m_hair_shadow_depth = m_device.create_texture(desc);
+    }
+    if (!m_hair_shadow_opacity.valid()) {
+        desc.format = rhi::Format::rgba16_float;
+        desc.usage = rhi::TextureUsage::render_target | rhi::TextureUsage::sampled;
+        desc.name = "hair shadows: hair by depth";
+        m_hair_shadow_opacity = m_device.create_texture(desc);
+    }
+    return m_hair_shadow_depth.valid() && m_hair_shadow_opacity.valid();
+}
+
 rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
                                        rhi::TextureHandle light) {
     // What to draw: the nearest grooms in view, thinned by their size on screen.
@@ -4451,18 +4495,72 @@ rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& d
     push.extras_offset = extras_on ? m_shading_extras.offset : 0u;
     push.extras_on = extras_on ? 1u : 0u;
     push.depth = m_device.read_descriptor(m_depth);
+    push.lamps_on = frame.settings.local_lights ? 1u : 0u;
     u32 draws = 0;
-    // Each strand posed and lit, once.
+    const auto each_strand = [&](rhi::PipelineHandle pipeline) {
+        cmd.set_pipeline(pipeline);
+        for (usize i = 0; i < plan.grooms.size(); ++i) {
+            push.groom = static_cast<u32>(i);
+            cmd.push(push);
+            cmd.dispatch((plan.grooms[i].lod.strands + 63) / 64, 1);
+            ++draws;
+        }
+    };
+    // Each strand posed.
     cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_write);
     cmd.barrier(m_depth, rhi::ResourceState::shader_read);
-    cmd.set_pipeline(m_hair_prepare);
     push.drawn = m_device.write_descriptor(m_hair_drawn);
-    for (usize i = 0; i < plan.grooms.size(); ++i) {
-        push.groom = static_cast<u32>(i);
-        cmd.push(push);
-        cmd.dispatch((plan.grooms[i].lod.strands + 63) / 64, 1);
-        ++draws;
+    each_strand(m_hair_pose);
+    // Each groom as the sun sees it, into its tile: the depth nearest the
+    // sun, then the hair within depths of that.
+    const Vec3& sun = frame.lighting.sun_light;
+    if (frame.settings.hair_shadows && std::max({sun.x, sun.y, sun.z}) > 0.0f && ensure_hair_shadows()) {
+        cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_read);
+        push.drawn = m_device.read_descriptor(m_hair_drawn);
+        const auto tiles = [&] {
+            for (usize i = 0; i < plan.grooms.size(); ++i) {
+                const HairLod& lod = plan.grooms[i].lod;
+                const u32 strands = std::min(lod.strands, k_hair_shadow_strands);
+                const u32 stride = std::max(lod.stride, k_hair_shadow_stride);
+                const u32 tile = static_cast<u32>(i);
+                cmd.set_scissor((tile % k_hair_shadow_tiles_across) * k_hair_shadow_tile,
+                                (tile / k_hair_shadow_tiles_across) * k_hair_shadow_tile, k_hair_shadow_tile, k_hair_shadow_tile);
+                push.groom = tile;
+                cmd.push(push);
+                cmd.draw(strands * ((geometry::k_strand_points - 1) / stride) * 6);
+                ++draws;
+            }
+        };
+        cmd.barrier(m_hair_shadow_depth, rhi::ResourceState::depth_write);
+        rhi::RenderPassDesc front;
+        front.color_count = 0;
+        front.depth = {m_hair_shadow_depth, rhi::LoadOp::clear, 0.0f};
+        cmd.begin_render_pass(front);
+        cmd.set_pipeline(m_hair_shadow_front);
+        tiles();
+        cmd.end_render_pass();
+        cmd.barrier(m_hair_shadow_depth, rhi::ResourceState::shader_read);
+        cmd.barrier(m_hair_shadow_opacity, rhi::ResourceState::render_target);
+        push.shadow_depth = m_device.read_descriptor(m_hair_shadow_depth);
+        rhi::RenderPassDesc sums;
+        sums.colors[0] = {m_hair_shadow_opacity, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+        cmd.begin_render_pass(sums);
+        cmd.set_pipeline(m_hair_shadow_sums);
+        tiles();
+        cmd.end_render_pass();
+        cmd.barrier(m_hair_shadow_opacity, rhi::ResourceState::shader_read);
+        push.shadow_opacity = m_device.read_descriptor(m_hair_shadow_opacity);
+        push.shadows_on = 1;
+        cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_write);
+        push.drawn = m_device.write_descriptor(m_hair_drawn);
+    } else {
+        // (Bound, never read.)
+        push.shadow_depth = push.depth;
+        push.shadow_opacity = push.depth;
+        cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_write); // (written, then read: in that order)
     }
+    // Each strand lit, once.
+    each_strand(m_hair_light_pass);
     cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_read);
     push.drawn = m_device.read_descriptor(m_hair_drawn);
     const auto ribbons = [&] {
