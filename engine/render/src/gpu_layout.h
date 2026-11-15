@@ -1011,4 +1011,66 @@ struct ParticlePush {
 };
 static_assert(sizeof(ParticlePush) == 96);
 
+// Hair (characters plan C6c, src/hair.h, shaders/hair.slang). A groom's
+// buffer holds its strands (HairStrand each), then their points: 8 bytes
+// each (x, y, z as 16 bits across the groom's bounds, 16 spare), 16 a
+// strand, root first.
+struct HairStrand {
+    u32 guides01;       // the guides it follows: the first | the second << 16
+    u32 guide2_weight0; // the third | the first's weight (16 bits of 0 to 1) << 16
+    u32 weight1;        // the second's weight (the third's: what is left of 1)
+    u32 seed;
+};
+static_assert(sizeof(HairStrand) == 16);
+inline constexpr u32 k_hair_point_bytes = 8;
+
+// A groom as a frame draws it (hair.slang's Groom).
+struct HairGroom {
+    float to_world[12];   // rows: the groom's space to camera-relative world (turn, size, place)
+    float bounds_min[3];  // what its points' 16 bits span (the groom's space)
+    u32 buffer;           // read descriptor: its strands and points
+    float bounds_size[3];
+    u32 points_offset;    // bytes into `buffer`
+    u32 posed;            // read descriptor: its guides as simulated (float3 each, 12 bytes), with posed_on
+    u32 posed_offset;
+    u32 posed_on;         // 0: at rest
+    u32 first;            // its first strand's place among the frame's drawn strands
+    float color[3];
+    float roughness;
+    float half_width;     // metres, at the root: half a strand's width, sized and widened for the strands left out
+    float tip_width;      // the share of it at the tip
+    float variation;
+    u32 count;            // strands drawn
+    u32 stride;           // points a piece spans (1, 3, 5 or 15)
+    float pad[3];
+};
+static_assert(sizeof(HairGroom) == 144);
+
+// A strand's point as drawn (cs_prepare writes it, the ribbons read it).
+struct HairPoint {
+    float position[3]; // camera-relative
+    u32 light;         // towards the camera, before exposure: rgb 9 bits each and a shared 5-bit exponent
+};
+static_assert(sizeof(HairPoint) == 16);
+
+// The hair passes' push constants (hair.slang's HairPush).
+struct HairPush {
+    u32 frame;
+    u32 frame_offset;
+    u32 grooms;        // read: gpu::HairGroom at grooms_offset
+    u32 grooms_offset;
+    u32 groom;         // which of them this draw or dispatch is
+    u32 drawn;         // cs_prepare: write; the ribbons: read (gpu::HairPoint)
+    u32 extras;        // shading's ResolveExtras (extras_on 0: none)
+    u32 extras_offset;
+    u32 extras_on;
+    u32 depth;         // the scene's depth (reverse-Z)
+    u32 front;         // the nearest hair's depth
+    u32 accum;         // composite: the sums
+    u32 reveal;
+    u32 light;         // composite: the light before exposure
+    u32 pad[2];
+};
+static_assert(sizeof(HairPush) == 64);
+
 } // namespace giant::render::gpu

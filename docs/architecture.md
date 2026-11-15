@@ -1947,6 +1947,60 @@ its `version()`. Work is bounded: steps of `step_seconds` (1/240 to 1/30
 s), at most `max_steps` a frame, nothing allocated after construction.
 Not saved (view state, as cloth).
 
+The renderer draws it (C6c, `src/hair.h`, `shaders/hair.slang`).
+`Renderer::add_groom` packs a groom (16 bytes a strand for its guides,
+weights and seed; 8 bytes a point, 16 bits an axis across the groom's
+bounds) and sends it to the GPU over the next frames under
+`groom_bytes_per_frame` (4 MiB); `groom_ready` says when it draws. A frame
+names what hangs where in `FrameInput::hair` (`HairDraw`: the groom, a
+place, turn and uniform size, the guides as `sim::HairSim::points()` gives
+them or none for rest, a `HairLook`, a cap on strands). The nearest 256 in
+view are drawn, in the lit view, after opaque shading and before water and
+particles, timed "hair".
+
+Strands are far thinner than a pixel, so hair is a matter of coverage, and
+one surface a pixel (the visibility buffer) cannot hold it without history.
+It has passes of its own, with nothing kept from frame to frame:
+
+1. A compute pass poses and lights each drawn strand once: its 16 points
+   moved as its guides moved from rest, put in the world, and lit by the
+   sun through Marschner's three lobes in Karis's fitted form (R off the
+   surface, TT through the strand, TRT the coloured highlight) plus a
+   scattered term, shadowed by the scene's sun shadow at three places along
+   the strand, with the sky's or the voxel world's light once and the air
+   in front over it. The result is 16 bytes a point (place, light as 9 bits
+   a channel with a shared exponent). No later pass lights anything.
+2. Ribbons facing the camera are made from the vertex id alone (no vertex
+   buffer), half a pixel wider each side than the strand; each pixel takes
+   the share of itself the strand's width covers, so a strand a tenth of a
+   pixel wide is a smooth line a tenth as opaque. They are drawn twice:
+   into a depth target of hair's own (the nearest hair), then into
+   weighted sums (the blend mode particles use) where a pixel's weight
+   falls off by e for each 3 mm behind the nearest hair. So the colour is
+   the outer layer's, averaged where strands share a pixel, and what shows
+   through is the exact product of every layer, in any order.
+3. The sums go over the light, and where hair covers more than half a
+   pixel its depth is written into the scene's, so water, particles and
+   post treat it as a surface.
+
+LOD is by strand count (`hair_lod`): a groom draws as many strands as make
+each about 1 / `hair_detail` (a render setting, default 3) of a pixel wide,
+the first of the groom, each widened by the share left out, so it covers
+the same; at least 64. A strand's 15 pieces are joined to 5, 3 or 1 while a
+piece is under 3 pixels. A frame draws at most 2^18 strands (past it every
+groom is thinned alike). `HairLook`: `melanin` and `redness` give the
+colour (`hair_color`: white through blond and brown to black, ginger with
+redness; `tint` for dye), `roughness`, `width` and `tip_width`,
+`variation` by the strand's seed. Stats: `hair_grooms`, `hair_strands`,
+`hair_segments`, `hair_left_out`, `hair_draws`. Limits until C6d: hair does
+not shadow itself or the world and lamps do not light it; inner layers
+take the outer layer's colour where they show through (a stray strand
+in front of a lock of another colour tints its pixel); hair thinner than
+half a pixel's cover leaves no depth, so water and particles behind it
+draw over it; hair is in no reflection; a groom has one place (one
+joint). At most 4 MiB of guides are taken as simulated a frame (the
+nearest grooms'); the rest draw at rest.
+
 ## Ballistics (W1a)
 
 `sim::Ballistics` flies bullets through the physics world as point masses:
