@@ -3861,7 +3861,7 @@ GIANT_TEST("render: d3d12 skin lets the sun and a shadowed lamp through a thin s
         device->wait_idle();
         const std::vector<u8> image = device->read_texture(target);
         std::printf("    (diagnosis pixels:");
-        for (const u32 y : {16u, 32u, 48u}) {
+        for (const u32 y : {16u, 28u, 38u, 48u}) {
             for (const u32 x : {10u, 32u, 53u}) {
                 const usize j = (static_cast<usize>(y) * k_w + x) * 4;
                 if (j + 2 < image.size()) std::printf(" %u,%u=%d/%d/%d", x, y, image[j], image[j + 1], image[j + 2]);

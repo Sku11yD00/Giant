@@ -993,10 +993,13 @@ Shaded shade_pixel(float4 position, bool spread) {
         color += t;
         diffuse_sun += t;
         if (pixel.y >= 24u) { // (diagnosis only, not to merge)
-            const uint mode = pixel.x / 21u;
-            color = mode == 0u ? float3(thickness > 0.005 ? 10.0 : 0.0, thickness > 1e-5 ? 10.0 : 0.0,
-                                        thickness < 0.0 ? 10.0 : 0.0)
-                               : sun_debug(extras.shadows, world, surface_n, pixel_size, mode);
+            float r = thickness;
+            if (pixel.y >= 44u) {
+                r = sun_thickness_flat(extras.shadows, world, surface_n, pixel_size);
+            } else if (pixel.y >= 34u) {
+                r = sun_thickness_direct(extras.shadows, world, surface_n, pixel_size);
+            }
+            color = float3(r > 0.005 ? 10.0 : 0.0, r > 1e-5 ? 10.0 : 0.0, r < 0.0 ? 10.0 : 0.0);
             diffuse_sun = float3(0.0, 0.0, 0.0);
             diffuse_lamps = float3(0.0, 0.0, 0.0);
         }

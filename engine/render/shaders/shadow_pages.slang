@@ -281,19 +281,43 @@ float sun_thickness_on(Shadows s, ByteAddressBuffer levels, ByteAddressBuffer ta
 }
 
 // (Diagnosis only, not to merge.)
-float3 sun_debug(Shadows s, float3 world, float3 n, float pixel_size, uint mode) {
+float sun_thickness_direct(Shadows s, float3 world, float3 n, float pixel_size) {
     if (s.level_count == 0u) {
-        return float3(10.0, 10.0, 10.0);
+        return -1.0;
     }
     const uint count = min(s.level_count, k_shadow_max_levels);
     const float wanted = log2(max(pixel_size / s.texel, 1.0));
     const uint level = min(uint(wanted), count - 1);
-    if (mode == 1u) {
-        return float3(level >= 1u ? 10.0 : 0.0, count >= 4u ? 10.0 : 0.0, s.prev_on != 0u ? 10.0 : 0.0);
+    return sun_thickness_on(s, read_buffer(s.levels), read_buffer(s.table), read_buffer(s.atlas), level, s.x, s.y, s.z,
+                            s.depth_offset, world, n);
+}
+float sun_thickness_flat(Shadows s, float3 world, float3 n, float pixel_size) {
+    if (s.level_count == 0u) {
+        return -1.0;
     }
-    const float r = sun_thickness_on(s, read_buffer(s.levels), read_buffer(s.table), read_buffer(s.atlas), level, s.x,
-                                     s.y, s.z, s.depth_offset, world, n);
-    return float3(r == -2.0 ? 10.0 : 0.0, r == -1.0 ? 10.0 : 0.0, r > 1e-5 ? 10.0 : 0.0);
+    ByteAddressBuffer levels = read_buffer(s.levels);
+    ByteAddressBuffer table = read_buffer(s.table);
+    ByteAddressBuffer atlas = read_buffer(s.atlas);
+    const uint count = min(s.level_count, k_shadow_max_levels);
+    const float wanted = log2(max(pixel_size / s.texel, 1.0));
+    const uint first = min(uint(wanted), count - 1);
+    float result = -1.0;
+    bool found = false;
+    for (uint level = 0; level < count; ++level) {
+        if (found || level < first) {
+            continue;
+        }
+        float t = sun_thickness_on(s, levels, table, atlas, level, s.x, s.y, s.z, s.depth_offset, world, n);
+        if (t == -2.0 && s.prev_on != 0u) {
+            t = sun_thickness_on(s, levels, table, atlas, count + level, s.prev_x, s.prev_y, s.prev_z,
+                                 s.prev_depth_offset, world, n);
+        }
+        if (t != -2.0) {
+            result = t;
+            found = true;
+        }
+    }
+    return result;
 }
 
 // How far the sun's light goes through whatever is between the sun and a
