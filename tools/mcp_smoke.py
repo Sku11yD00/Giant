@@ -21,7 +21,7 @@ import time
 
 from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
-TIMEOUT = 2400  # seconds for the whole run (the gates are heavy on the software renderer with GPU validation: 1300-1500 s on Windows CI runners by N3 part 4, whose speed varies 2x; each gate prints its time)
+TIMEOUT = 3000  # seconds for the whole run (the gates are heavy on the software renderer with GPU validation: 1300-1500 s on Windows CI runners by N3 part 4, whose speed varies 2x; each gate prints its time)
 
 
 def decode_png(data):
@@ -842,7 +842,8 @@ def gi_gate(tool, call, check):
     tool("set_lighting", {"sun_elevation_degrees": 37, "sun_azimuth_degrees": 270})
     tool("set_camera", {"position": [-2, 8, 6], "look_at": [1, 0, 0]})
     tool("set_render_settings", {"gi": True, "gi_bricks_per_frame": 64, "screen_space_reflections": True,
-                                 "ambient_occlusion": True, "contact_shadows": True})
+                                 "ambient_occlusion": True, "contact_shadows": True,
+                                 "subsurface_scattering": True})
 
     def settle():
         last = None
@@ -869,6 +870,27 @@ def gi_gate(tool, call, check):
     check(not last["reflections"]["voxel"] and not last["reflections"]["screen"],
           f"reflections turn off, got {last['reflections']}")
     tool("set_render_settings", {"reflections": True, "screen_space_reflections": False})
+    # Characters part C4: skin spreads its light under the surface in a
+    # pass of its own (on here, off in the other gates like the passes above).
+    face = tool("create_entity", {"name": "Face", "shape": "sphere", "position": [0, 1, 2], "scale": [0.3, 0.3, 0.3],
+                                  "base_color": [0.8, 0.6, 0.5],
+                                  "skin": {"scatter": 0.02, "lobe_roughness": [0.7, 1.4]}})["id"]
+    skin = tool("get_entity", {"id": face}).get("skin", {})
+    check(abs(skin.get("scatter", 0) - 0.02) < 1e-6 and abs(skin.get("lobe_roughness", [0, 0])[1] - 1.4) < 1e-6
+          and skin.get("transmission") == 1 and skin.get("detail_tiling") == 16,
+          f"an entity keeps its skin, fields left out at their defaults, got {skin}")
+    last = settle()
+    check(last["subsurface_scattering"], f"skin spreads its light, got {last['subsurface_scattering']}")
+    tool("set_render_settings", {"subsurface_scattering": False})
+    check(not tool("get_render_settings")["subsurface_scattering"], "skin's spread turns off")
+    last = settle()
+    check(not last["subsurface_scattering"], f"the pass stops with the setting, got {last['subsurface_scattering']}")
+    tool("set_render_settings", {"subsurface_scattering": True})
+    tool("set_entity", {"id": face, "skin": {"on": False}})
+    check("skin" not in tool("get_entity", {"id": face}), "skin comes off")
+    last = settle()
+    check(not last["subsurface_scattering"], f"with no skin the pass stops, got {last['subsurface_scattering']}")
+    tool("delete_entities", {"ids": [face]})
     tool("set_render_settings", {"debug_view": "lighting"})
     check(tool("get_render_settings")["debug_view"] == "lighting", "the lighting view can be picked")
     last = settle()
@@ -876,7 +898,8 @@ def gi_gate(tool, call, check):
     tool("set_render_settings", {"debug_view": "clusters"})
     last = settle()
     check(not last["gi"]["on"] and last["gi"]["lit"] == 0, f"debug views of the geometry have none, got {last['gi']}")
-    tool("set_render_settings", {"debug_view": "lit", "gi": False, "ambient_occlusion": False, "contact_shadows": False})
+    tool("set_render_settings", {"debug_view": "lit", "gi": False, "ambient_occlusion": False, "contact_shadows": False,
+                                 "subsurface_scattering": False})
     last = settle()
     check(not last["gi"]["on"], f"global illumination turns off, got {last['gi']}")
     tool("new_scene")
@@ -1046,11 +1069,13 @@ def main() -> int:
         check(settings["reflections"] is True and settings["screen_space_reflections"] is True,
               "reflections are on by default")
         # Lighting the voxel world, the screen reflections pass, ambient
-        # occlusion and contact shadows are heavy on the software GPU CI runs
-        # on (full-size passes, with GPU validation): off for the other gates
-        # (the renderer's own d3d12 tests check them), on in gi_gate.
+        # occlusion, contact shadows and skin's spread are heavy on the
+        # software GPU CI runs on (full-size passes, with GPU validation): off
+        # for the other gates (the renderer's own d3d12 tests check them), on
+        # in gi_gate.
         tool("set_render_settings", {"gi": False, "screen_space_reflections": False,
-                                     "ambient_occlusion": False, "contact_shadows": False})
+                                     "ambient_occlusion": False, "contact_shadows": False,
+                                     "subsurface_scattering": False})
         for gate in (build_scene, world_gate, lod_gate, kit_gate, voxel_gate, far_field_gate,
                      terrain_gate, shadow_gate, weather_gate, physics_gate, player_gate, gi_gate, n1_gate):
             # Each gate's time, so a run near the timeout shows which one grew.

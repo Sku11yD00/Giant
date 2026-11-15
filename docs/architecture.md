@@ -1769,6 +1769,24 @@ in the tangent frame turned to it, over the material's own normal map
 streaming's feedback asks for it the tiling's levels finer than the
 material's maps.
 
+Skin in worlds and the editor (C4c). `world::Material::skin`
+(`world::SkinLook`, optional: none is not skin) is saved with entity, kit
+piece and scatter item materials as a `skin` object (its numbers all written, the
+detail map and its green-down flag only when set;
+fields left out on load take their defaults; values out of range refuse
+the file). The scene frame keeps a skin look beside each skin material in
+its table (`SceneFrame::skin_looks`, shared by materials whose skin is
+alike, whatever their colours; an unused material is not skin for the
+renderer, so a character gone stops skin's pass; past
+`render::k_max_skin_looks` later skin draws as plain, and the table is
+made again once an unused material holds a look) and asks the texture library for
+the detail map as a normal map (only on things with uvs), its renderer id
+filled in when ready. MCP: `skin` on `create_entity`/`set_entity` and
+scatter items (`skin_schema` in `editor/src/material_maps.h`),
+`set_render_settings`' `subsurface_scattering` and
+`last_frame.subsurface_scattering`; the panel has its toggle. The MCP
+smoke turns it off outside `gi_gate` with the other full-size passes.
+
 Playing them (editor). `MeshLibrary` keeps a skinned file's skeleton,
 clips and bind-space clusters beside its rest-pose mesh, which every
 entity drawing it shows until it animates. An entity animates when it

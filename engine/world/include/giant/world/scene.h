@@ -141,6 +141,27 @@ constexpr usize k_surface_count = 9;
 const char* to_string(Surface surface);
 std::optional<Surface> surface_from_string(std::string_view name);
 
+// Skin (characters): light under it spreads out before it leaves (red
+// furthest) over `scatter` metres at its widest (0.0005 to 0.1), `strength`
+// (0 to 1) of its diffuse light; its highlight is two lobes, at the
+// roughness times lobe_roughness[0] and [1] (0.1 to 4), the second
+// `lobe_mix` (0 to 1) of it; `transmission` (0 to 1) of the light from the
+// sun or a shadow-casting lamp passes through its thin parts (ears,
+// fingers); `detail_normal` (an image file, as MaterialMaps' paths; empty:
+// none) is a fine normal map (pores, wrinkles) over the uvs times
+// `detail_tiling` (1 to 256), on top of the material's own.
+struct SkinLook {
+    float scatter = 0.012f;
+    float strength = 1.0f;
+    float lobe_roughness[2] = {0.75f, 1.3f};
+    float lobe_mix = 0.15f;
+    float transmission = 1.0f;
+    std::string detail_normal;
+    float detail_tiling = 16.0f;
+    bool detail_green_down = false; // the detail map is DirectX-authored
+    bool operator==(const SkinLook&) const = default;
+};
+
 // A physically based material (metal/roughness, as artists know it).
 struct Material {
     Vec3 base_color{0.8f, 0.8f, 0.8f}; // linear, 0 to 1
@@ -166,6 +187,7 @@ struct Material {
     // rounded mass instead of a scatter of flat cards. 0: as modelled.
     float canopy = 0.0f;
     MaterialMaps maps; // entities, kit pieces and scatter items (kept, not drawn, on decals and cloth)
+    std::optional<SkinLook> skin; // skin (none: not skin); not on the ground
     bool operator==(const Material&) const = default;
 };
 

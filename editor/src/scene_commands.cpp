@@ -87,6 +87,9 @@ Json entity_json(const Entity& e) {
     if (!e.material.maps.empty() || e.material.maps.normal_green_down) {
         j["maps"] = maps_json(e.material.maps);
     }
+    if (e.material.skin) {
+        j["skin"] = skin_json(*e.material.skin);
+    }
     if (!e.kit.empty()) {
         j["kit"] = e.kit;
     }
@@ -322,6 +325,7 @@ Json entity_properties() {
                                 "mass, near and far (0.5 to 0.8 for leaves on a tree split from its trunk). "
                                 "Default 0: as modelled.")},
         {"maps", maps_schema()},
+        {"skin", skin_schema()},
         {"visible", {{"type", "boolean"}}},
         {"body",
          {{"enum", {"fixed", "dynamic", "none"}},
@@ -427,6 +431,9 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("canopy")) e.material.canopy = args["canopy"].get<float>();
     if (args.contains("maps")) {
         if (std::string bad = apply_maps(args["maps"], e.material.maps); !bad.empty()) return bad;
+    }
+    if (args.contains("skin")) {
+        if (std::string bad = apply_skin(args["skin"], e.material.skin); !bad.empty()) return bad;
     }
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
     if (args.contains("body")) {
@@ -539,6 +546,7 @@ Json render_settings_json(const EditorState& state) {
             {"contact_shadows", state.render_settings.contact_shadows},
             {"contact_shadow_length", state.render_settings.contact_shadow_length},
             {"character_occlusion", state.render_settings.character_occlusion},
+            {"subsurface_scattering", state.render_settings.subsurface_scattering},
             {"local_lights", state.render_settings.local_lights},
             {"local_shadows", state.render_settings.local_shadows},
             {"local_shadow_faces_per_frame", state.render_settings.local_shadow_faces_per_frame},
@@ -602,6 +610,7 @@ Json render_settings_json(const EditorState& state) {
               {"reflections", {{"voxel", s.reflections}, {"screen", s.screen_reflections}}},
               {"ambient_occlusion", s.ambient_occlusion},
               {"contact_shadows", s.contact_shadows},
+              {"subsurface_scattering", s.subsurface_scattering},
               {"occluders", s.occluders},
               {"water", {{"triangles", s.water_triangles}, {"dropped", s.water_dropped}, {"overflow", s.water_overflow},
                          {"broken_lakes", state.water_broken_lakes}, {"underwater", s.underwater},
@@ -792,13 +801,15 @@ world::KitPiece piece_from(const Entity& e) {
 void request_scene_textures(EditorState& state) {
     if (state.textures == nullptr) return;
     const auto ask = [&](world::Shape shape, const std::string& mesh, const world::Material& m) {
-        if (m.maps.empty()) return;
+        if (m.maps.empty() && (!m.skin || m.skin->detail_normal.empty())) return;
         bool uvs = shape == world::Shape::cube || shape == world::Shape::sphere || shape == world::Shape::plane;
         if (shape == world::Shape::mesh && state.meshes != nullptr) {
             const MeshLibrary::Mesh* found = state.meshes->find_normalized(mesh);
             uvs = found != nullptr && found->has_uvs;
         }
-        if (uvs) state.textures->request(m.maps);
+        if (!uvs) return;
+        if (!m.maps.empty()) state.textures->request(m.maps);
+        if (m.skin && !m.skin->detail_normal.empty()) state.textures->request(*m.skin);
     };
     for (const Entity& e : state.scene.entities()) {
         if (e.visible) ask(e.shape, e.mesh, e.material);
@@ -1816,6 +1827,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "the crease under a rock), from this frame's depth marched towards the sun for "
          "contact_shadow_length metres (default 0.3, never past 48 pixels; default on; lit views; "
          "last_frame.contact_shadows). "
+         "subsurface_scattering: skin (set_entity's skin) spreads its light under the surface in a pass of "
+         "its own after shading, red furthest (default on; lit views; last_frame.subsurface_scattering: it "
+         "ran); off, skin takes its light where it lands (its two-lobe highlight and light through thin "
+         "parts stay). "
          "character_occlusion: characters' bodies (their hit capsules) shut the sky's and bounced light out "
          "round them, a person darkening the ground about their feet, and give some back in their own colour "
          "(default on; lit views; last_frame.occluders: capsules used, the nearest 1024 in view within 150 m). "
@@ -1884,6 +1899,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"contact_shadows", {{"type", "boolean"}}},
                 {"contact_shadow_length", number(0.05, 2, "Metres contact shadows are looked for towards the sun. Default 0.3.")},
                 {"character_occlusion", {{"type", "boolean"}}},
+                {"subsurface_scattering", {{"type", "boolean"}}},
                 {"local_lights", {{"type", "boolean"}}},
                 {"local_shadows", {{"type", "boolean"}}},
                 {"local_shadow_faces_per_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 384},
@@ -1943,6 +1959,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.contact_shadows = args.value("contact_shadows", r.contact_shadows);
              r.contact_shadow_length = args.value("contact_shadow_length", r.contact_shadow_length);
              r.character_occlusion = args.value("character_occlusion", r.character_occlusion);
+             r.subsurface_scattering = args.value("subsurface_scattering", r.subsurface_scattering);
              r.local_lights = args.value("local_lights", r.local_lights);
              r.local_shadows = args.value("local_shadows", r.local_shadows);
              r.local_shadow_faces_per_frame = args.value("local_shadow_faces_per_frame", r.local_shadow_faces_per_frame);

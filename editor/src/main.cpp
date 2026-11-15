@@ -477,6 +477,7 @@ int run(const Options& options) {
         input.instances = scene_frame.instances;
         input.cells = scene_frame.cells;
         input.materials = scene_frame.materials;
+        input.skin_looks = scene_frame.skin_looks;
         input.terrain_layers = scene_frame.terrain_layers;
         input.decals = scene_frame.decals;
         wet_decals.clear();

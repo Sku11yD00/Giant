@@ -500,6 +500,11 @@ GIANT_TEST("character light: capsules of characters near the camera, where they 
     const auto settings = f.run("get_render_settings");
     GIANT_CHECK(settings.ok && settings.value["character_occlusion"] == false &&
                 settings.value["last_frame"].contains("occluders"));
+    // Skin's spread, the same way.
+    GIANT_CHECK(settings.ok && settings.value["subsurface_scattering"] == true &&
+                settings.value["last_frame"].contains("subsurface_scattering"));
+    GIANT_CHECK(f.run("set_render_settings", {{"subsurface_scattering", false}}).ok);
+    GIANT_CHECK(!f.state.render_settings.subsurface_scattering);
 }
 
 GIANT_TEST("hit zones: a skinned arm's bones have capsules, named by zone, posed as drawn; bullets report them") {

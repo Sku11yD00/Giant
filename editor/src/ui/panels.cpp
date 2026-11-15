@@ -1245,6 +1245,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::Checkbox("Characters shade the light round them", &characters)) {
             run("set_render_settings", {{"character_occlusion", characters}});
         }
+        bool skin = r.subsurface_scattering;
+        if (ImGui::Checkbox("Skin light spreads under its surface", &skin)) {
+            run("set_render_settings", {{"subsurface_scattering", skin}});
+        }
         bool water = r.water;
         if (ImGui::Checkbox("Water", &water)) {
             run("set_render_settings", {{"water", water}});

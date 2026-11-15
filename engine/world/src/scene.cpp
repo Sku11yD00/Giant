@@ -560,6 +560,19 @@ void write_wind(Json& material, const Material& m) {
     if (m.alpha_cutoff != 0.0f) material["alpha_cutoff"] = m.alpha_cutoff;
     if (m.canopy != 0.0f) material["canopy"] = m.canopy;
     write_maps(material, m.maps);
+    if (m.skin) {
+        const SkinLook& s = *m.skin;
+        Json skin = Json::object();
+        skin["scatter"] = s.scatter;
+        skin["strength"] = s.strength;
+        skin["lobe_roughness"] = Json::array({s.lobe_roughness[0], s.lobe_roughness[1]});
+        skin["lobe_mix"] = s.lobe_mix;
+        skin["transmission"] = s.transmission;
+        if (!s.detail_normal.empty()) skin["detail_normal"] = s.detail_normal;
+        skin["detail_tiling"] = s.detail_tiling;
+        if (s.detail_green_down) skin["detail_green_down"] = true;
+        material["skin"] = std::move(skin);
+    }
 }
 
 } // namespace
@@ -1470,6 +1483,34 @@ void read_maps(Reader& r, const std::string& path, MaterialMaps& out, std::strin
     }
 }
 
+bool read_pair(const Json& v, double limit, double& a, double& b); // ([a, b], each finite within limit)
+
+// A material's skin, when it has one.
+void read_skin(Reader& r, const std::string& path, std::optional<SkinLook>& out, std::string& error) {
+    if (const Json* m = r.get("skin", false); m != nullptr && r.ok()) {
+        Reader sr(*m, path + ".skin", error);
+        SkinLook s;
+        sr.number("scatter", s.scatter, 0.0005, 0.1);
+        sr.number("strength", s.strength, 0, 1);
+        if (const Json* lobes = sr.get("lobe_roughness", false); lobes != nullptr && sr.ok()) {
+            double lo = 0.0, hi = 0.0;
+            if (!read_pair(*lobes, 4.0, lo, hi) || lo < 0.1 || hi < 0.1) {
+                sr.fail("lobe_roughness", "must be two numbers from 0.1 to 4");
+            } else {
+                s.lobe_roughness[0] = static_cast<float>(lo);
+                s.lobe_roughness[1] = static_cast<float>(hi);
+            }
+        }
+        sr.number("lobe_mix", s.lobe_mix, 0, 1);
+        sr.number("transmission", s.transmission, 0, 1);
+        sr.string("detail_normal", s.detail_normal, false, k_max_mesh_path_bytes);
+        sr.number("detail_tiling", s.detail_tiling, 1, 256);
+        sr.boolean("detail_green_down", s.detail_green_down);
+        sr.finish();
+        if (sr.ok()) out = std::move(s);
+    }
+}
+
 // Shape, files, transform, material and decal of an entity or kit piece.
 void read_look(Reader& r, const std::string& path, Shape& shape, std::string& mesh, std::string* kit,
                Transform& t, Material& material, DecalSettings& decal, std::string& error) {
@@ -1516,6 +1557,7 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
         mr.number("alpha_cutoff", material.alpha_cutoff, 0, 1);
         mr.number("canopy", material.canopy, 0, 1);
         read_maps(mr, path + ".material", material.maps, error);
+        read_skin(mr, path + ".material", material.skin, error);
         mr.finish();
     }
     if (const Json* d = r.get("decal", false); d != nullptr && r.ok()) {
@@ -2061,6 +2103,7 @@ void read_scatter_layer(const Json& json, const std::string& path, ScatterLayer&
                 mr.number("alpha_cutoff", item.material.alpha_cutoff, 0, 1);
                 mr.number("canopy", item.material.canopy, 0, 1);
                 read_maps(mr, at + ".material", item.material.maps, error);
+                read_skin(mr, at + ".material", item.material.skin, error);
                 mr.finish();
             }
             ir.number("weight", item.weight, 1e-6, 1e6);
