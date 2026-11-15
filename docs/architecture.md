@@ -2079,7 +2079,9 @@ The nearest within 30 m with `moves` on are simulated under the weather's
 wind (`sim::HairSim`), up to 16 of them and 4096 guides in all, stepped
 side by side on two workers of their own; one already moving keeps its
 place to 33 m and until another is clearly nearer, and at most two start
-moving in an update. The rest hang as grown. Entities wear hair lowest ids
+moving in an update, and at most two grown grooms are handed to the
+renderer in one (each is a GPU buffer made; the first hair ever also makes
+the renderer's shared hair buffers, once). The rest hang as grown. Entities wear hair lowest ids
 first, up to 256 and 2,000,000 strands in all; the rest are left out.
 Closing the editor does not grow what was still waiting. `get_hair` reads
 it. View state: not saved, not undoable. Limits until C6e part 2: only

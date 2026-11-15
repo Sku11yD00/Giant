@@ -241,11 +241,14 @@ void HairState::rank() {
     m_left_out = 0;
     usize count = 0;
     u64 strands = 0;
+    bool full = false;
     for (const auto& [id, held] : m_worn) {
         Worn& worn = *held;
         const u64 own = static_cast<u64>(std::clamp(worn.hair.strands, 1, world::k_max_hair_strands));
-        const bool left = count >= k_max_hair || strands + own > k_max_strands;
+        // (Past the first that does not fit all are left out: lowest ids first, strictly.)
+        const bool left = full || count >= k_max_hair || strands + own > k_max_strands;
         if (left) {
+            full = true;
             ++m_left_out;
             if (!worn.left_out) shed(worn);
         } else {
@@ -390,12 +393,17 @@ void HairState::update(const WindState& wind, const DVec3& camera, double second
     std::erase_if(m_abandoned, [](const std::shared_ptr<Grown>& job) { return job->done.done(); });
     rank();
     m_near.clear();
+    u32 taken = 0;
     for (const auto& [id, held] : m_worn) {
         Worn& worn = *held;
         const bool moving = worn.simulated;
         worn.simulated = false;
         if (worn.left_out) continue;
-        if (worn.job != nullptr && worn.job->done.done()) take(worn);
+        // (A groom taken is a GPU buffer made: a few an update.)
+        if (worn.job != nullptr && taken < k_taken_per_update && worn.job->done.done()) {
+            take(worn);
+            ++taken;
+        }
         swap(worn, false);
         if (worn.job == nullptr && wants_growing(worn)) grow(worn);
         if (!worn.coat.grown || worn.coat.strands == 0) continue;
@@ -418,7 +426,6 @@ void HairState::update(const WindState& wind, const DVec3& camera, double second
     for (const auto& [distance, worn] : m_near) {
         const usize own = worn->coat.rest.size() / geometry::k_strand_points;
         if (m_stepped.size() >= k_max_simulated || (!m_stepped.empty() && guides + own > k_max_simulated_guides)) break;
-        guides += own;
         if (worn->sim == nullptr) {
             if (made >= k_sims_made_per_update) continue; // (in a later update: it hangs as grown until then)
             ++made;
@@ -428,6 +435,7 @@ void HairState::update(const WindState& wind, const DVec3& camera, double second
             worn->sim->set_motion(motion.root_stiffness, motion.tip_stiffness, motion.damping);
             if (worn->idle > 0) worn->sim->reset(); // (it hung as grown meanwhile: from there)
         }
+        guides += own;
         worn->idle = 0;
         worn->frame = {};
         worn->frame.position = worn->transform.position;
@@ -440,7 +448,8 @@ void HairState::update(const WindState& wind, const DVec3& camera, double second
     if (m_stepped.size() == 1) {
         m_stepped[0]->sim->step(seconds, m_stepped[0]->frame);
     } else if (!m_stepped.empty()) {
-        m_movers.parallel_for(m_stepped.size(), 1, [this, seconds](usize begin, usize end) {
+        // (Three shares: the two workers' and this thread's.)
+        m_movers.parallel_for(m_stepped.size(), (m_stepped.size() + 2) / 3, [this, seconds](usize begin, usize end) {
             for (usize i = begin; i < end; ++i) m_stepped[i]->sim->step(seconds, m_stepped[i]->frame);
         });
     }

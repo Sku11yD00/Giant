@@ -4342,13 +4342,7 @@ std::shared_ptr<PreparedGroom> Renderer::prepare_groom(const geometry::Groom& gr
 }
 
 GroomId Renderer::add_groom(const geometry::Groom& groom) {
-    PreparedGroom prepared;
-    prepared.packed = pack_groom(groom);
-    if (prepared.packed.bytes.empty()) {
-        prepared.problem = geometry::groom_problem(groom);
-        if (prepared.problem.empty()) prepared.problem = "it has no strands";
-    }
-    return add_groom(prepared);
+    return add_groom(*prepare_groom(groom));
 }
 
 GroomId Renderer::add_groom(PreparedGroom& prepared) {

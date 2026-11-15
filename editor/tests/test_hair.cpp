@@ -126,7 +126,7 @@ GIANT_TEST("hair: the scalp is the top of the shape, sized as its entity") {
         GIANT_CHECK_NEAR(bottom, 0.5f - share, 1e-5);
         GIANT_CHECK_NEAR(area, 1.0 + 4.0 * static_cast<double>(share), 1e-4);
     }
-    // No size: nothing to grow from, and no number in it.
+    // No size one way: flat, and still no number that is none in it.
     for (const geometry::Vertex& v : hair_scalp(world::Shape::cube, {0.0f, 1.0f, 1.0f}, 0.5f).vertices) {
         GIANT_CHECK(std::isfinite(v.normal.x) && std::isfinite(v.position.x));
     }

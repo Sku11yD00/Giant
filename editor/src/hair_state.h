@@ -68,6 +68,7 @@ public:
     static constexpr usize k_max_simulated = 16;
     static constexpr usize k_max_simulated_guides = 4096;
     static constexpr u32 k_sims_made_per_update = 2;
+    static constexpr u32 k_taken_per_update = 2; // grown grooms handed to the renderer
     static constexpr double k_simulate_within = 30.0;
     static constexpr double k_keep_simulating_within = 33.0; // one already moving
 
