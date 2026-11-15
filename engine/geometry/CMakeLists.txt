@@ -2,6 +2,7 @@ giant_module(geometry
   SOURCES
     src/clusters.cpp
     src/gltf.cpp
+    src/groom.cpp
     src/shapes.cpp
     src/vertex.cpp
   DEPENDS core anim
@@ -12,4 +13,5 @@ target_link_libraries(giant_geometry PRIVATE third_party::meshoptimizer third_pa
 giant_module_tests(geometry
   SOURCES
     tests/test_geometry.cpp
+    tests/test_groom.cpp
 )

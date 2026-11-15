@@ -1863,6 +1863,33 @@ works the weights out with the pose, lays the ones `set_morphs` holds over
 them (view state, as `play_animation`'s, let go when the saved animation
 changes) and hands them to `set_pose` beside the joints.
 
+### Hair (C6)
+
+Hair is strands, not cards (plan: C6, five parts). C6a is the data.
+`geometry::Groom` (`giant/geometry/groom.h`) holds every strand as
+`k_strand_points` (16) points, root first, in the space of what the hair
+hangs on at rest, with the scalp's normal at the root and a seed for the
+look. The first `guide_count` strands are the guides, the few (a few percent)
+that are simulated; every strand follows its three nearest guides by
+inverse-square weights (`StrandFollow`), and `pose_strand` moves each of
+its points as the weighted guides' points moved from rest. Strands after
+the guides come in an order whose every run from the first covers the scalp, so
+drawing the first N thins the hair evenly (LOD by strand count).
+
+`generate_groom(scalp, params)` grows a groom from a mesh, so nobody
+models strands: roots spread over the triangles by area with a
+low-discrepancy sequence (that is what makes prefixes even), each strand
+leaving along the normal and bending down point by point (`droop`), with a
+helix (`curl_radius`, `curl_turns`), a wander (`frizz`) and tips drawn in
+to the nearest guide (`clump`). Guides are picked far apart from one
+another among the first strands and moved to the front. Values out of
+range are clamped; a scalp without area grows nothing.
+`groom_from_strands` builds the same from lines made elsewhere (a file's
+curves), resampled evenly along their length and shuffled.
+`groom_problem` says what is wrong with a groom from outside. All of it
+is deterministic and CPU only; the simulation, drawing, shadows and the
+editor's side follow in C6b to C6e.
+
 ## Ballistics (W1a)
 
 `sim::Ballistics` flies bullets through the physics world as point masses:
