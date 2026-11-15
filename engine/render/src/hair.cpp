@@ -194,9 +194,10 @@ void plan_hair(const Grooms& grooms, std::span<const HairDraw> draws, const Hair
                     std::abs(at.z) <= geometry::k_max_groom_reach; // (false for no number)
             reach2 = std::max(reach2, length_squared(at - middle));
         }
-        if (!posed) reach2 = 0.25f * length_squared(g.bounds_size);
-        // In view: the ball round it against the frustum.
-        const float radius = std::sqrt(reach2) * draw.scale;
+        // In view: the ball round it against the frustum (posed, round its
+        // guides and as far again as a strand lies from them at rest).
+        const float rest_radius = 0.5f * length(g.bounds_size);
+        const float radius = (posed ? std::sqrt(reach2) + rest_radius : rest_radius) * draw.scale;
         const Vec3 centre = to_camera_relative(draw.position, view.position) + rotate(normalize(q), middle) * draw.scale;
         bool seen = std::isfinite(centre.x + centre.y + centre.z);
         for (const Vec4& plane : view.planes) {
@@ -237,19 +238,18 @@ void plan_hair(const Grooms& grooms, std::span<const HairDraw> draws, const Hair
             p.posed = posed_bytes + bytes <= k_hair_posed_bytes;
             if (p.posed) posed_bytes += bytes;
         }
-        if (keep < 1.0) {
-            const u32 was = p.lod.strands;
-            p.lod.strands = std::max(static_cast<u32>(static_cast<double>(was) * keep), 1u);
-            p.lod.widen *= static_cast<float>(was) / static_cast<float>(p.lod.strands);
-        }
+        const u32 was = p.lod.strands;
+        if (keep < 1.0) p.lod.strands = std::max(static_cast<u32>(static_cast<double>(was) * keep), 1u);
         p.lod.strands = std::min(p.lod.strands, k_max_hair_strands - first);
+        // (Each strand left stands for those thinned away.)
+        if (p.lod.strands > 0) p.lod.widen *= static_cast<float>(was) / static_cast<float>(p.lod.strands);
         p.first = first;
         first += p.lod.strands;
         plan.segments += p.lod.strands * ((geometry::k_strand_points - 1) / p.lod.stride);
     }
     plan.strands = first;
-    // (None left of a groom once the frame's strands ran out: not drawn.)
-    std::erase_if(plan.grooms, [](const HairPlanned& p) { return p.lod.strands == 0; });
+    // (None left of a groom once the frame's strands ran out: left out.)
+    plan.left_out += static_cast<u32>(std::erase_if(plan.grooms, [](const HairPlanned& p) { return p.lod.strands == 0; }));
 }
 
 gpu::HairGroom to_gpu(const HairPlanned& planned, const GroomSlot& slot, const HairDraw& draw, const DVec3& camera) {

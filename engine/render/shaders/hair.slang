@@ -301,8 +301,10 @@ void cs_prepare(uint3 id : SV_DispatchThreadID) {
         float3 all = float3(1.0, 1.0, 1.0);
         if (sky_on) {
             float through;
-            none = under_sky(sky, none, from_eye, distance, pixel, through);
-            all = under_sky(sky, all, from_eye, distance, pixel, through);
+            // (Clouds and fog, not what falls: a drop or flake is a dot on
+            // screen, and taken once a strand it would streak the strand.)
+            none = clouds_and_fog(sky, none, from_eye, distance, pixel, through);
+            all = clouds_and_fog(sky, all, from_eye, distance, pixel, through);
         }
         if (have) {
             float through = 1.0;
@@ -369,9 +371,19 @@ RibbonVaryings vs_ribbon(uint vertex_id : SV_VertexID) {
     const float3 pv = float3(dot(f.view_rows[0].xyz, p), dot(f.view_rows[1].xyz, p), dot(f.view_rows[2].xyz, p));
     const float3 tv = float3(dot(f.view_rows[0].xyz, t), dot(f.view_rows[1].xyz, t), dot(f.view_rows[2].xyz, t));
     const float view_z = max(-pv.z, f.near_plane);
-    const float2 runs = float2((tv.x * view_z + pv.x * tv.z) * f.p00 * f.width, -(tv.y * view_z + pv.y * tv.z) * f.p11 * f.height);
+    float2 runs = float2((tv.x * -pv.z + pv.x * tv.z) * f.p00 * f.width, -(tv.y * -pv.z + pv.y * tv.z) * f.p11 * f.height);
+    // The piece's own run (this point to its other end), as seen from here:
+    // the two ends of a piece must take the same side, or the piece is a
+    // bow tie. Where the strand turns back on screen within a piece (seen
+    // end on), the piece's run decides.
+    const float3 chord = (c & 2u) != 0u ? p - behind : ahead - p;
+    const float3 cv = float3(dot(f.view_rows[0].xyz, chord), dot(f.view_rows[1].xyz, chord), dot(f.view_rows[2].xyz, chord));
+    const float2 piece_runs = float2((cv.x * -pv.z + pv.x * cv.z) * f.p00 * f.width, -(cv.y * -pv.z + pv.y * cv.z) * f.p11 * f.height);
+    if (dot(runs, piece_runs) <= 0.0) {
+        runs = piece_runs;
+    }
     const float run = length(runs);
-    const float2 sideways = run > 1e-12 ? float2(-runs.y, runs.x) / run : float2(1.0, 0.0); // (end on: any way)
+    const float2 sideways = run > 1e-20 ? float2(-runs.y, runs.x) / run : float2(1.0, 0.0); // (a piece of no length as seen: any way)
     const float pixel = view_z * 2.0 / max(f.p11 * f.height, 1e-6); // metres a pixel spans there
     const float share = float(k) / float(k_strand_points - 1u);
     const float half_width = g.half_width * lerp(1.0, g.tip_width, share);

@@ -967,7 +967,7 @@ struct RenderStats {
     u32 hair_grooms = 0;          // grooms of hair drawn this frame
     u32 hair_strands = 0;         // their strands drawn (thinned by size on screen)
     u32 hair_segments = 0;        // and those strands' pieces (two triangles each, a pass)
-    u32 hair_left_out = 0;        // draws not drawn: unknown or not yet uploaded grooms, bad numbers, past k_max_hair_draws
+    u32 hair_left_out = 0;        // draws not drawn: unknown or not yet uploaded grooms, bad numbers, past k_max_hair_draws or the frame's strands
     u32 hair_draws = 0;           // draw calls and dispatches the hair took
     u32 lights = 0;             // local lights shaded this frame (in view, near enough)
     bool light_overflow = false; // too many: the furthest were left out of some clusters or of the frame

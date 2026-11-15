@@ -1976,7 +1976,8 @@ It has passes of its own, with nothing kept from frame to frame:
    pixel wide is a smooth line a tenth as opaque. They are drawn twice:
    into a depth target of hair's own (the nearest hair), then into
    weighted sums (the blend mode particles use) where a pixel's weight
-   falls off by e for each 3 mm behind the nearest hair. So the colour is
+   falls off by e for each 3 mm (or two pixels' width there, if more)
+   behind the nearest hair. So the colour is
    the outer layer's, averaged where strands share a pixel, and what shows
    through is the exact product of every layer, in any order.
 3. The sums go over the light, and where hair covers more than half a
@@ -1997,7 +1998,8 @@ not shadow itself or the world and lamps do not light it; inner layers
 take the outer layer's colour where they show through (a stray strand
 in front of a lock of another colour tints its pixel); hair thinner than
 half a pixel's cover leaves no depth, so water and particles behind it
-draw over it; hair is in no reflection; a groom has one place (one
+draw over it; falling rain and snow are not drawn over hair (fog,
+clouds and dust are); hair is in no reflection; a groom has one place (one
 joint). At most 4 MiB of guides are taken as simulated a frame (the
 nearest grooms'); the rest draw at rest.
 

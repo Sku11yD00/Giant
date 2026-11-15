@@ -261,6 +261,46 @@ GIANT_TEST("hair: a frame draws the nearest grooms in view, thinned to fit, thei
         plan_hair(many, {&aside, 1}, looking(), seen);
         GIANT_CHECK(seen.grooms.size() == 1 && seen.grooms[0].posed);
     }
+    // When the frame's strands run out part way down the list, what is
+    // left of a groom is widened for what was cut, and one with none left
+    // counts as left out.
+    {
+        Grooms mixed;
+        PackedGroom tiny;
+        tiny.bytes.resize(16);
+        tiny.strands = tiny.authored = 1;
+        tiny.guides = 1;
+        tiny.bounds_min = {-0.5f, -0.5f, 0.0f};
+        tiny.bounds_size = {1.0f, 1.0f, 1e-6f};
+        tiny.longest = 1.0f;
+        PackedGroom huge = tiny;
+        huge.strands = huge.authored = k_max_groom_strands;
+        const GroomId small_id = mixed.add(std::move(tiny));
+        const GroomId huge_id = mixed.add(std::move(huge));
+        for (GroomId each : {small_id, huge_id}) {
+            mixed.find(each)->uploaded = mixed.find(each)->size;
+            mixed.find(each)->buffer = {1, 1};
+        }
+        std::vector<HairDraw> list(203);
+        for (usize i = 0; i < list.size(); ++i) {
+            list[i].groom = i < 200 ? small_id : huge_id;
+            list[i].position = {0.0, 0.0, -1.5 - 0.001 * static_cast<double>(i)};
+            list[i].look.width = 0.01f;
+        }
+        HairPlan tight;
+        plan_hair(mixed, list, looking(), tight);
+        GIANT_CHECK(tight.strands <= k_max_hair_strands);
+        u32 covered = 0;
+        for (const HairPlanned& p : tight.grooms) {
+            GIANT_CHECK(p.lod.strands > 0 && p.first + p.lod.strands <= k_max_hair_strands);
+            if (p.draw >= 200) {
+                GIANT_CHECK_NEAR(p.lod.widen * static_cast<float>(p.lod.strands), static_cast<double>(k_max_groom_strands),
+                                 static_cast<double>(k_max_groom_strands) * 1e-3);
+            }
+            ++covered;
+        }
+        GIANT_CHECK(covered + tight.left_out == list.size());
+    }
     // More grooms than a frame draws: the nearest.
     std::vector<HairDraw> crowd(k_max_hair_draws + 40);
     for (usize i = 0; i < crowd.size(); ++i) {
@@ -480,9 +520,14 @@ GIANT_TEST("hair: d3d12 a curtain of hair covers what is behind it, by its colou
         GIANT_CHECK(channel(dark, 3, 3, c) == channel(bare, 3, 3, c));
         GIANT_CHECK(channel(dark, 60, 32, c) == channel(bare, 60, 32, c));
     }
-    // It covers the wall whole: the same all across its middle, and no
+    // It covers the wall whole: the same along a row across its middle
+    // (its highlight runs across the strands, so rows differ), with no
     // wall showing between strands.
-    GIANT_CHECK(std::abs(channel(dark, 28, 30, 0) - channel(dark, 36, 34, 0)) < 12);
+    std::printf("hair: across the curtain's middle row: %d %d %d %d %d\n", channel(dark, 22, 32, 0), channel(dark, 27, 32, 0),
+                channel(dark, 32, 32, 0), channel(dark, 37, 32, 0), channel(dark, 42, 32, 0));
+    for (u32 x : {22u, 27u, 37u, 42u}) {
+        GIANT_CHECK(std::abs(channel(dark, x, 32, 0) - channel(dark, 32, 32, 0)) < 12);
+    }
     // Brown hair is lighter and warm, blond lighter still.
     hair[0].look.melanin = 0.6f;
     const std::vector<u8> brown = draw(true, false);
