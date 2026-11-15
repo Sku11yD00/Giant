@@ -3887,6 +3887,157 @@ GIANT_TEST("render: d3d12 skin lets the sun and a shadowed lamp through a thin s
     device->destroy(target);
 }
 
+GIANT_TEST("render: d3d12 an eye: a black pupil in a coloured iris with a dark rim on the white, wet, the iris "
+           "shifting under its cornea as the view turns") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 64, k_h = 64;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // A 1 m square as the eye (its uvs 0 to 1: the iris in the middle, 0.2
+    // wide each way), seen from 0.5 m.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].position = DVec3{300.0, 0.0, 0.0};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.9f, 0.9f, 0.9f};
+    materials[0].roughness = 0.9f;
+    materials[0].eye_look = 0;
+    std::vector<EyeLook> looks(1);
+    looks[0].iris_radius = 0.2f;
+    looks[0].iris_color = {0.1f, 0.3f, 0.9f};
+    looks[0].shade = 0.0f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.view.position = {300.0, 0.5, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.0f, 1.0f, 1.0f}); // (its highlight away from what is sampled)
+    frame.lighting.sun_light = {3.0f, 3.0f, 3.0f};
+    frame.lighting.sky_light = {0.0f, 0.0f, 0.0f};
+    frame.lighting.ground_light = {0.0f, 0.0f, 0.0f};
+    const auto draw = [&] {
+        frame.instances = instances;
+        frame.materials = materials;
+        frame.eye_looks = looks;
+        for (int i = 0; i < 4; ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+        }
+        device->wait_idle();
+        return device->read_texture(target);
+    };
+    const auto at = [](const std::vector<u8>& image, u32 x, u32 y) {
+        const usize i = (static_cast<usize>(y) * k_w + x) * 4;
+        return i + 2 < image.size() ? std::array<int, 3>{image[i], image[i + 1], image[i + 2]}
+                                    : std::array<int, 3>{-1, -1, -1};
+    };
+    // The first dark run down the middle column with lit rows above it
+    // (not the background past the square's far edge): the pupil's rows.
+    const auto pupil_rows = [&](const std::vector<u8>& image) {
+        int first = -1, last = -1;
+        bool lit = false;
+        for (u32 y = 0; y < k_h; ++y) {
+            const auto p = at(image, k_w / 2, y);
+            const bool dark = p[0] >= 0 && std::max({p[0], p[1], p[2]}) < 24;
+            if (!dark) {
+                if (first >= 0) break;
+                lit = true;
+            } else if (lit) {
+                if (first < 0) first = static_cast<int>(y);
+                last = static_cast<int>(y);
+            }
+        }
+        return std::array<int, 2>{first, last};
+    };
+    const std::vector<u8> on = draw();
+    const auto centre = at(on, 32, 32);
+    const auto iris = at(on, 20, 32); // about 0.6 of the iris radius out
+    const auto white = at(on, 4, 32);
+    const auto rows = pupil_rows(on);
+    // The rim: the darkest of the iris's outer part and just past it.
+    int rim = 255;
+    for (u32 x = 8; x <= 16; ++x) rim = std::min(rim, at(on, x, 32)[2]);
+    // Straight under the sun, seen from where its light mirrors: the wet
+    // cornea's highlight over the black pupil.
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    const auto glint = at(draw(), 32, 32);
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{0.0f, 1.0f, 1.0f});
+    // Not an eye: the plain white all over.
+    materials[0].eye_look = k_no_eye_look;
+    const auto plain = at(draw(), 32, 32);
+    // A look that is not there: plain too. An eye that is also skin: an eye.
+    materials[0].eye_look = 5;
+    const auto missing = at(draw(), 32, 32);
+    materials[0].eye_look = 0;
+    materials[0].skin_look = 0;
+    const std::vector<SkinLook> skins(1);
+    frame.skin_looks = skins;
+    const auto both = at(draw(), 32, 32);
+    const auto both_iris = at(draw(), 20, 32);
+    materials[0].skin_look = k_no_skin_look;
+    frame.skin_looks = {};
+    // From 45 degrees (the camera toward +Z of it): the pupil shows nearer
+    // the viewer than it does with no depth under the cornea.
+    frame.view.position = {300.0, 0.35, 0.35};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -0.7853982f);
+    frame.lighting.sun_direction = normalize_or_zero(Vec3{1.0f, 1.0f, 0.0f});
+    looks[0].iris_depth = 0.45f;
+    const auto deep = pupil_rows(draw());
+    looks[0].iris_depth = 0.0f;
+    const auto flat = pupil_rows(draw());
+    // The same with the square turned a quarter round (its u along the
+    // view now): the shift is the eye's, not the uvs'.
+    instances[0].rotation = quat_from_axis_angle({0.0f, 1.0f, 0.0f}, 1.5707963f);
+    const auto flat_turned = pupil_rows(draw());
+    looks[0].iris_depth = 0.45f;
+    const auto deep_turned = pupil_rows(draw());
+    instances[0].rotation = Quat{};
+    std::printf("    eye: centre %d %d %d, iris %d %d %d, rim %d, white %d %d %d, pupil rows %d-%d, glint %d, plain %d; "
+                "from the side: rows %d-%d deep, %d-%d flat, turned %d-%d deep, %d-%d flat; missing %d, both %d\n",
+                centre[0], centre[1], centre[2], iris[0], iris[1], iris[2], rim, white[0], white[1], white[2], rows[0],
+                rows[1], glint[0], plain[0], deep[0], deep[1], flat[0], flat[1], deep_turned[0], deep_turned[1], flat_turned[0],
+                flat_turned[1], missing[0], both[0]);
+    GIANT_CHECK(std::max({centre[0], centre[1], centre[2]}) < 12);
+    GIANT_CHECK(iris[2] > iris[0] + 40 && iris[2] > 60);
+    GIANT_CHECK(rim + 15 < iris[2]);
+    GIANT_CHECK(white[0] > 120 && std::abs(white[0] - white[2]) <= 3);
+    GIANT_CHECK(rows[0] > 20 && rows[1] < 44 && rows[1] - rows[0] >= 6 && std::abs(rows[0] + rows[1] - 63) <= 2);
+    GIANT_CHECK(glint[0] > 150);
+    GIANT_CHECK(std::abs(plain[0] - white[0]) <= 3 && std::abs(plain[0] - plain[2]) <= 3);
+    GIANT_CHECK(flat[0] >= 0 && deep[0] >= 0 && deep[0] + deep[1] >= flat[0] + flat[1] + 4);
+    GIANT_CHECK(flat_turned[0] >= 0 && deep_turned[0] >= 0 &&
+                deep_turned[0] + deep_turned[1] >= flat_turned[0] + flat_turned[1] + 4);
+    GIANT_CHECK(std::abs(missing[0] - plain[0]) <= 3);
+    GIANT_CHECK(std::max({both[0], both[1], both[2]}) < 12 && both_iris[2] > both_iris[0] + 40);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: d3d12 terrain layers: grass on the level, rock on the steep, snow up high") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::d3d12;

@@ -51,6 +51,9 @@ struct Extras {
     uint skin_looks;         // gpu::SkinLook each (skin_look_count 0: none)
     uint skin_looks_offset;
     uint skin_look_count;
+    uint eye_look_count;     // gpu::EyeLook each, in eye_looks at eye_looks_offset (0: none)
+    uint eye_looks;
+    uint eye_looks_offset;
 };
 
 Extras load_extras(uint descriptor, uint offset) {
@@ -137,10 +140,14 @@ Extras load_extras(uint descriptor, uint offset) {
     o.gi_lamps_on = gl.y;
     o.occlusion = gl.z;
     o.occlusion_on = gl.w;
-    const uint3 sk = b.Load3(at + 304);
+    const uint4 sk = b.Load4(at + 304);
     o.skin_looks = sk.x;
     o.skin_looks_offset = sk.y;
     o.skin_look_count = sk.z;
+    o.eye_look_count = sk.w;
+    const uint2 ey = b.Load2(at + 320);
+    o.eye_looks = ey.x;
+    o.eye_looks_offset = ey.y;
     return o;
 }
 

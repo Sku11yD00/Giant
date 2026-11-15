@@ -85,6 +85,7 @@ inline constexpr u32 k_material_terrain = 1;
 inline constexpr u32 k_material_two_sided = 2;
 inline constexpr u32 k_material_cut_out = 4;
 inline constexpr u32 k_material_skin = 8;        // Material::flags: skin (its look index + 1 in bits 8 to 15)
+inline constexpr u32 k_material_eye = 16;        // Material::flags: an eye (its look index + 1 in the same bits; never with skin)
 inline constexpr u32 k_material_look_shift = 8;
 // A material's kind, as the visibility raster draws it in its own pass
 // (RasterPush::kinds): opaque one-sided 0, opaque two-sided 1, cut-out
@@ -514,9 +515,29 @@ struct ResolveExtras {
     u32 skin_looks;
     u32 skin_looks_offset;
     u32 skin_look_count;
-    u32 skin_pad;
+    // Eye looks (gpu::EyeLook each; eye_look_count 0: none).
+    u32 eye_look_count;
+    u32 eye_looks;
+    u32 eye_looks_offset;
+    u32 eye_pad[2];
 };
-static_assert(sizeof(ResolveExtras) == 320);
+static_assert(sizeof(ResolveExtras) == 336);
+
+// An eye look (render::EyeLook, cleaned): resolve.slang's eye_surface.
+struct EyeLook {
+    float iris_radius;
+    float pupil_radius;
+    float iris_depth;
+    float limbal;
+    float iris_color[3];
+    float painted; // 1: the base colour texture holds iris and pupil
+    float limbal_darkness;
+    float cornea_roughness;
+    float bulge;
+    float shade;
+};
+static_assert(sizeof(EyeLook) == 48);
+inline constexpr u32 k_eye_look_bytes = 48; // resolve.slang's
 
 // A skin look (render::SkinLook, cleaned): resolve.slang's two-lobe
 // highlight and subsurface.slang's spread.

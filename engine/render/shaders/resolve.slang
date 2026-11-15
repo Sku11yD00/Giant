@@ -67,6 +67,7 @@ static const uint k_material_bytes = 64; // gpu::Material; textures +32, flags +
 static const uint k_material_terrain = 1u;
 static const uint k_material_two_sided = 2u;
 static const uint k_material_skin = 8u;      // gpu::k_material_skin (its look + 1 in bits 8 to 15)
+static const uint k_material_eye = 16u;      // gpu::k_material_eye (its look + 1 in the same bits)
 static const uint k_material_look_shift = 8u;
 static const uint k_no_texture = 0xFFFFFFFFu; // rhi::k_no_descriptor
 
@@ -227,11 +228,11 @@ Hit surface_at(Frame f, float4 position, uint2 vis) {
     // The material's textures (the CPU keeps the index in range): the
     // texture coordinates and their footprint only for a material with
     // any, the tangent frame only for one with a normal map (skin's
-    // detail normals need both).
+    // detail normals and an eye's cornea need both).
     const uint material_at = push.material_offset + min(inst.material, push.material_count) * k_material_bytes;
     h.textures = read_buffer(push.materials).Load4(material_at + 32);
     h.flags = read_buffer(push.materials).Load(material_at + 48);
-    const bool skin = (h.flags & k_material_skin) != 0u;
+    const bool skin = (h.flags & (k_material_skin | k_material_eye)) != 0u; // (an eye needs both as well)
     if (any(h.textures != k_no_texture) || skin) {
         // How far the uv moves to the neighbouring pixels: their rays met
         // with this triangle's plane (unclamped, so the footprint stays
@@ -734,6 +735,104 @@ float3 through_skin(float3 base, float3 n, float3 l, float3 light, float thickne
     return skin_transmittance(thickness * mm_per_metre) * base * (saturate(0.3 - dot(n, l)) / k_pi) * light;
 }
 
+static const uint k_eye_look_bytes = 48; // gpu::EyeLook
+static const float k_cornea_index = 1.376;
+
+// What an eye pixel shows (gpu::EyeLook).
+struct Eye {
+    bool on;
+    float ring;    // the bent ray's distance from the iris's centre, in iris radii
+    float edge;    // 0 over the iris to 1 at the texture's edge (the lids' shade)
+    float pupil_radius;
+    float limbal;
+    float limbal_darkness;
+    float3 iris_color;
+    bool painted;
+    float roughness;
+    float shade;
+    float variance; // the cornea's normal's change over the pixel (specular anti-aliasing's)
+};
+
+// An eye's surface (Material::eye_look): the iris is centred at uv
+// (0.5, 0.5) under a cornea. The view ray (`view`: unit, from the surface
+// to the viewer) bends at the cornea, whose normal leans out from the
+// centre, and meets the iris plane below: `s.uv` moves to where it lands
+// (so the material's textures show the iris there: its parallax), and `n`
+// becomes the cornea's normal.
+Eye eye_surface(Extras e, inout Hit s, float3 view, inout float3 n) {
+    Eye o;
+    o.on = false;
+    o.ring = 0.0;
+    o.edge = 0.0;
+    o.pupil_radius = 0.0;
+    o.limbal = 0.0;
+    o.limbal_darkness = 0.0;
+    o.iris_color = float3(0.0, 0.0, 0.0);
+    o.painted = true;
+    o.roughness = 1.0;
+    o.shade = 0.0;
+    o.variance = 0.0;
+    const uint look = (s.flags >> k_material_look_shift) & 255u;
+    // (Seen from behind, a two-sided one: not an eye.)
+    if ((s.flags & k_material_eye) == 0u || look < 1u || look > e.eye_look_count || dot(n, view) <= 0.0) {
+        return o;
+    }
+    ByteAddressBuffer looks = read_buffer(e.eye_looks);
+    const uint at = e.eye_looks_offset + (look - 1u) * k_eye_look_bytes;
+    const float4 a = asfloat(looks.Load4(at));      // iris radius, pupil radius, iris depth, limbal
+    const float4 b = asfloat(looks.Load4(at + 16)); // iris colour, painted
+    const float4 c = asfloat(looks.Load4(at + 32)); // limbal darkness, cornea roughness, bulge, shade
+    const float radius = max(a.x, 1e-3);
+    const float2 from_centre = (s.uv - 0.5) / radius;
+    const float r = length(from_centre);
+    const float3 t = safe_normalize(s.tangent.xyz - n * dot(n, s.tangent.xyz), float3(1.0, 0.0, 0.0));
+    // Along +v (the bitangent the normal maps use runs toward smaller v).
+    const float3 along_v = -cross(n, t) * s.tangent.w;
+    // The cornea: its normal leans out more toward the rim, where it
+    // meets the white.
+    const float lean = c.z * r * (1.0 - smoothstep(0.85, 1.05, r));
+    const float3 cornea = safe_normalize(n + (t * from_centre.x + along_v * from_centre.y) * (lean / max(r, 1e-3)), n);
+    // The chamber under it: deepest at the centre, none at the rim.
+    const float depth = a.z * radius * saturate(1.0 - r * r);
+    const float3 bent = refract(-view, cornea, 1.0 / k_cornea_index);
+    const float3 into = float3(dot(bent, t), dot(bent, along_v), dot(bent, n));
+    s.uv += into.xy * (depth / max(-into.z, 0.3));
+    o.on = true;
+    o.ring = length(s.uv - 0.5) / radius;
+    o.edge = saturate((length(s.uv - 0.5) - 1.5 * radius) / max(0.5 - 1.5 * radius, 1e-3));
+    o.pupil_radius = a.y;
+    o.limbal = a.w;
+    o.limbal_darkness = c.x;
+    o.iris_color = b.rgb;
+    o.painted = b.a > 0.5;
+    o.roughness = c.y;
+    o.shade = c.w;
+    // Its normal turns by about bulge / radius a uv over the iris: a small
+    // far eye's highlight is widened to its pixel, not left to flicker.
+    const float turn = r < 1.05 ? c.z / radius : 0.0;
+    o.variance = turn * turn * (dot(s.uv_dx, s.uv_dx) + dot(s.uv_dy, s.uv_dy));
+    n = cornea;
+    return o;
+}
+
+// The eye's colours over the material's (after its textures): the drawn
+// iris and pupil (not painted), the limbal ring, the lids' shade; wet all
+// over.
+void eye_colors(Eye o, inout float3 base, inout float rough, inout float metal) {
+    if (!o.on) {
+        return;
+    }
+    if (!o.painted) {
+        const float pupil = smoothstep(o.pupil_radius * 0.92, o.pupil_radius * 1.08 + 1e-3, o.ring);
+        const float3 iris = o.iris_color * (lerp(0.7, 1.0, smoothstep(o.pupil_radius, 1.0, o.ring)) * pupil);
+        base = lerp(iris, base, smoothstep(0.97, 1.03, o.ring));
+    }
+    const float ring = smoothstep(1.0 - o.limbal, 1.0, o.ring) * (1.0 - smoothstep(1.0, 1.0 + 0.5 * o.limbal + 1e-3, o.ring));
+    base *= (1.0 - o.limbal_darkness * ring) * (1.0 - o.shade * o.edge * o.edge);
+    rough = o.roughness;
+    metal = 0.0;
+}
+
 // `spread`: skin's diffuse light goes to Shaded::subsurface (for
 // subsurface.slang to spread) instead of radiance.
 Shaded shade_pixel(float4 position, bool spread) {
@@ -749,7 +848,7 @@ Shaded shade_pixel(float4 position, bool spread) {
     }
     // Every pixel of the quad reaches this, drawn or not. The shading
     // normal's change: a normal map's bumps widen the highlight too.
-    const float variance = normal_variance(s.shading_n, s.instance);
+    float variance = normal_variance(s.shading_n, s.instance);
 
     // The far field: past far_start the meshes are left out (the CPU drops
     // instances wholly beyond it) and the voxel world stands in, in front
@@ -866,7 +965,12 @@ Shaded shade_pixel(float4 position, bool spread) {
     float metal = emissive_metallic.a;
     float3 emissive = emissive_metallic.rgb;
     float occlusion = 1.0;
-    apply_textures(s, base, rough, metal, occlusion);
+    // An eye: its textures where the ray bent at the cornea lands.
+    Hit textured = s;
+    const Eye eye = eye_surface(extras, textured, safe_normalize(-world, n), n);
+    apply_textures(textured, base, rough, metal, occlusion);
+    eye_colors(eye, base, rough, metal);
+    variance += eye.variance;
     const uint material_flags = materials.Load(material_at + 48);
     const float translucency = asfloat(materials.Load(material_at + 52));
     const bool from_behind = (material_flags & k_material_two_sided) != 0u && dot(s.face_n, world) > 0.0;

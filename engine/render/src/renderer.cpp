@@ -73,7 +73,7 @@ u32 groups_of(u32 items, u32 per_group) { return (items + per_group - 1) / per_g
 // `descriptor(id, srgb)`: the read descriptor of a live texture in that
 // colour space, else rhi::k_no_descriptor.
 template <class Descriptor>
-gpu::Material to_gpu(const Material& m, Descriptor&& descriptor, usize skin_looks) {
+gpu::Material to_gpu(const Material& m, Descriptor&& descriptor, usize skin_looks, usize eye_looks) {
     gpu::Material out{};
     set4(out.base_roughness, m.base_color, m.roughness);
     set4(out.emissive_metallic, m.emissive, m.metallic);
@@ -95,7 +95,9 @@ gpu::Material to_gpu(const Material& m, Descriptor&& descriptor, usize skin_look
         out.alpha_cutoff = cutoff;
     }
     out.canopy = std::isfinite(m.canopy) ? std::clamp(m.canopy, 0.0f, 1.0f) : 0.0f;
-    if (m.skin_look < std::min<usize>(skin_looks, k_max_skin_looks) && !m.terrain) {
+    if (m.eye_look < std::min<usize>(eye_looks, k_max_eye_looks) && !m.terrain) {
+        out.flags |= gpu::k_material_eye | ((m.eye_look + 1) << gpu::k_material_look_shift);
+    } else if (m.skin_look < std::min<usize>(skin_looks, k_max_skin_looks) && !m.terrain) {
         out.flags |= gpu::k_material_skin | ((m.skin_look + 1) << gpu::k_material_look_shift);
     }
     return out;
@@ -204,6 +206,8 @@ struct Renderer::FrameData {
     bool spread = false;            // one whose look spreads its light (strength over 0)
     rhi::TransientMemory skin_looks; // gpu::SkinLook each
     u32 skin_look_count = 0;
+    rhi::TransientMemory eye_looks; // gpu::EyeLook each
+    u32 eye_look_count = 0;
     rhi::TransientMemory terrain_layers; // gpu::TerrainLayer each (terrain_count of them)
     u32 terrain_count = 0;
     rhi::TransientMemory decals;    // decals, tiles, entries (DecalBins)
@@ -3186,7 +3190,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     m_feedback_count = 0;
     for (usize i = 0; i < material_limit; ++i) {
         const Material& m = frame.materials[i];
-        m_gpu_materials.push_back(to_gpu(m, texture_descriptor, frame.skin_looks.size()));
+        m_gpu_materials.push_back(to_gpu(m, texture_descriptor, frame.skin_looks.size(), frame.eye_looks.size()));
         const std::array<TextureId, 4> ids{m.base_color_texture, m.normal_texture, m.roughness_metal_texture,
                                            m.occlusion_texture};
         // Skin's detail normals, tiled: finer by the tiling's levels.
@@ -3212,12 +3216,14 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             note_wanted(detail, k_sharpest);
         }
     }
-    m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor, 0));
+    m_gpu_materials.push_back(to_gpu(Material{}, texture_descriptor, 0, 0));
     data.kinds = 0;
     data.skin = false;
     data.spread = false;
+    bool eyes = false;
     for (const gpu::Material& m : m_gpu_materials) {
         data.kinds |= 1u << gpu::material_kind(m.flags);
+        eyes = eyes || (m.flags & gpu::k_material_eye) != 0u;
         if ((m.flags & gpu::k_material_skin) == 0u) continue;
         data.skin = true;
         const u32 look = ((m.flags >> gpu::k_material_look_shift) & 255u) - 1u;
@@ -3238,6 +3244,20 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
                 std::memcpy(data.skin_looks.data + i * sizeof(gpu::SkinLook), &g, sizeof(g));
             }
             data.skin_look_count = static_cast<u32>(looks);
+        }
+    }
+    // Eye looks (only with eyes to use them; out of memory: their
+    // materials shade as plain this frame, the count 0).
+    data.eye_look_count = 0;
+    if (eyes) {
+        const usize looks = std::min<usize>(frame.eye_looks.size(), k_max_eye_looks);
+        data.eye_looks = cmd.allocate(static_cast<u32>(looks * sizeof(gpu::EyeLook)));
+        if (data.eye_looks.data != nullptr) {
+            for (usize i = 0; i < looks; ++i) {
+                const gpu::EyeLook g = to_gpu(frame.eye_looks[i]);
+                std::memcpy(data.eye_looks.data + i * sizeof(gpu::EyeLook), &g, sizeof(g));
+            }
+            data.eye_look_count = static_cast<u32>(looks);
         }
     }
     data.material_count = static_cast<u32>(material_limit);
@@ -3889,6 +3909,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.skin_looks = data.skin_look_count != 0 ? data.skin_looks.descriptor : data.frame.descriptor;
     extras.skin_looks_offset = data.skin_look_count != 0 ? data.skin_looks.offset : 0u;
     extras.skin_look_count = data.skin_look_count;
+    extras.eye_looks = data.eye_look_count != 0 ? data.eye_looks.descriptor : data.frame.descriptor;
+    extras.eye_looks_offset = data.eye_look_count != 0 ? data.eye_looks.offset : 0u;
+    extras.eye_look_count = data.eye_look_count;
     const rhi::TransientMemory extras_memory = cmd.upload(bytes_of_one(extras));
     m_shading_extras = extras_memory; // the water's lighting too (this frame's)
     push.extras = extras_memory.data != nullptr ? extras_memory.descriptor : data.frame.descriptor;
