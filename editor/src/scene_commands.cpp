@@ -90,6 +90,9 @@ Json entity_json(const Entity& e) {
     if (e.material.skin) {
         j["skin"] = skin_json(*e.material.skin);
     }
+    if (e.material.eye) {
+        j["eye"] = eye_json(*e.material.eye);
+    }
     if (!e.kit.empty()) {
         j["kit"] = e.kit;
     }
@@ -326,6 +329,7 @@ Json entity_properties() {
                                 "Default 0: as modelled.")},
         {"maps", maps_schema()},
         {"skin", skin_schema()},
+        {"eye", eye_schema()},
         {"visible", {{"type", "boolean"}}},
         {"body",
          {{"enum", {"fixed", "dynamic", "none"}},
@@ -432,9 +436,7 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
     if (args.contains("maps")) {
         if (std::string bad = apply_maps(args["maps"], e.material.maps); !bad.empty()) return bad;
     }
-    if (args.contains("skin")) {
-        if (std::string bad = apply_skin(args["skin"], e.material.skin); !bad.empty()) return bad;
-    }
+    if (std::string bad = apply_skin_and_eye(args, e.material); !bad.empty()) return bad;
     if (args.contains("visible")) e.visible = args["visible"].get<bool>();
     if (args.contains("body")) {
         e.body = world::body_from_string(args["body"].get<std::string>()).value_or(e.body);
@@ -801,7 +803,9 @@ world::KitPiece piece_from(const Entity& e) {
 void request_scene_textures(EditorState& state) {
     if (state.textures == nullptr) return;
     const auto ask = [&](world::Shape shape, const std::string& mesh, const world::Material& m) {
-        if (m.maps.empty() && (!m.skin || m.skin->detail_normal.empty())) return;
+        // An eye is never skin too, so its skin (only code can set both) asks for nothing.
+        const bool detail = m.skin && !m.eye && !m.skin->detail_normal.empty();
+        if (m.maps.empty() && !detail) return;
         bool uvs = shape == world::Shape::cube || shape == world::Shape::sphere || shape == world::Shape::plane;
         if (shape == world::Shape::mesh && state.meshes != nullptr) {
             const MeshLibrary::Mesh* found = state.meshes->find_normalized(mesh);
@@ -809,7 +813,7 @@ void request_scene_textures(EditorState& state) {
         }
         if (!uvs) return;
         if (!m.maps.empty()) state.textures->request(m.maps);
-        if (m.skin && !m.skin->detail_normal.empty()) state.textures->request(*m.skin);
+        if (detail) state.textures->request(*m.skin);
     };
     for (const Entity& e : state.scene.entities()) {
         if (e.visible) ask(e.shape, e.mesh, e.material);

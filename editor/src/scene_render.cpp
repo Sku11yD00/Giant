@@ -86,7 +86,7 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
     std::memcpy(&key.bits[17], &m.alpha_cutoff, 4);
     std::memcpy(&key.bits[18], &m.canopy, 4);
     u32 detail = TextureLibrary::k_no_ref;
-    if (m.skin && !terrain) {
+    if (m.skin && !m.eye && !terrain) {
         const world::SkinLook& s = *m.skin;
         // Its detail map, as the material's own maps are asked for (only
         // drawn on something with uvs).
@@ -100,6 +100,14 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
                                s.lobe_mix,  s.transmission, s.detail_tiling};
         std::memcpy(&key.bits[20], skin, sizeof(skin));
         key.bits[27] = detail;
+    }
+    if (m.eye && !terrain) {
+        const world::EyeLook& e = *m.eye;
+        key.bits[28] = 1u;
+        const float eye[12] = {e.iris_radius,  e.pupil_radius, e.iris_depth,  e.limbal,
+                               e.limbal_darkness, e.iris_color.x, e.iris_color.y, e.iris_color.z,
+                               e.painted ? 1.0f : 0.0f, e.cornea_roughness, e.bulge, e.shade};
+        std::memcpy(&key.bits[29], eye, sizeof(eye));
     }
     const auto [it, added] = out.lookup.try_emplace(key, static_cast<u32>(out.materials.size()));
     if (added) {
@@ -147,10 +155,37 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
             out.skin_looks.push_back(look);
             out.skin_detail.push_back(detail);
         }
+        // An eye: looks alike shared the same way.
+        if (key.bits[28] != 0u) {
+            for (usize l = 0; l < out.eye_looks.size() && r.eye_look == render::k_no_eye_look; ++l) {
+                if (std::memcmp(&out.eye_key[l * 12], &key.bits[29], 12 * sizeof(u32)) == 0) {
+                    r.eye_look = static_cast<u32>(l);
+                }
+            }
+            if (r.eye_look == render::k_no_eye_look && out.eye_looks.size() >= render::k_max_eye_looks) {
+                out.eye_refused = true; // drawn as plain for now
+            } else if (r.eye_look == render::k_no_eye_look) {
+                const world::EyeLook& e = *m.eye;
+                out.eye_key.insert(out.eye_key.end(), &key.bits[29], &key.bits[41]);
+                render::EyeLook look;
+                look.iris_radius = e.iris_radius;
+                look.pupil_radius = e.pupil_radius;
+                look.iris_depth = e.iris_depth;
+                look.limbal = e.limbal;
+                look.limbal_darkness = e.limbal_darkness;
+                look.iris_color = e.iris_color;
+                look.painted = e.painted;
+                look.cornea_roughness = e.cornea_roughness;
+                look.bulge = e.bulge;
+                look.shade = e.shade;
+                r.eye_look = static_cast<u32>(out.eye_looks.size());
+                out.eye_looks.push_back(look);
+            }
+        }
         if (out.textures != nullptr) set_textures(r, refs, *out.textures, m.alpha_cutoff);
         out.materials.push_back(r);
         out.material_textures.push_back(refs);
-        out.material_kind.push_back({m.two_sided, m.alpha_cutoff, r.skin_look});
+        out.material_kind.push_back({m.two_sided, m.alpha_cutoff, r.skin_look, r.eye_look});
         out.users.push_back(0);
     }
     ++out.users[it->second];
@@ -781,6 +816,9 @@ void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const F
     out.skin_detail.clear();
     out.skin_key.clear();
     out.skin_refused = false;
+    out.eye_looks.clear();
+    out.eye_key.clear();
+    out.eye_refused = false;
     out.material_textures.clear();
     out.material_kind.clear();
     out.users.clear();
@@ -902,6 +940,7 @@ bool same_kit(const world::Kit& a, const world::Kit& b) {
             p.material.two_sided != q.material.two_sided || p.material.translucency != q.material.translucency ||
             p.material.alpha_cutoff != q.material.alpha_cutoff || p.material.canopy != q.material.canopy ||
             !(p.material.maps == q.material.maps) || !(p.material.skin == q.material.skin) ||
+            !(p.material.eye == q.material.eye) ||
             p.decal.shape != q.decal.shape || p.decal.opacity != q.decal.opacity ||
             p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed || !(p.lamp == q.lamp)) {
             return false;
@@ -1162,6 +1201,15 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         // (Kept asking while any skin is refused: a look frees when its
         // last user goes; after the table is made again it asks afresh.)
     }
+    if (!compact && out.eye_refused) { // eyes, the same
+        std::array<bool, render::k_max_eye_looks> used{};
+        std::array<bool, render::k_max_eye_looks> held{};
+        for (usize i = 0; i < out.users.size(); ++i) {
+            const u32 look = out.material_kind[i].eye_look;
+            if (look < render::k_max_eye_looks) (out.users[i] != 0 ? used : held)[look] = true;
+        }
+        for (usize l = 0; l < held.size() && !compact; ++l) compact = held[l] && !used[l];
+    }
     if (compact) {
         start_over(scene, terrain, far, scatter, out);
         out.cells_rebuilt = 0; // counted once, by the full rebuild
@@ -1225,6 +1273,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         out.materials[i].alpha_cutoff = used ? out.material_kind[i].alpha_cutoff : 0.0f;
         // (and skin: one lingering would keep skin's pass running)
         out.materials[i].skin_look = used ? out.material_kind[i].skin_look : render::k_no_skin_look;
+        out.materials[i].eye_look = used ? out.material_kind[i].eye_look : render::k_no_eye_look;
     }
     // Textures that came (or changed) since: every material asking for them
     // draws them from now on.

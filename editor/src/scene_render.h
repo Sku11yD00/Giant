@@ -47,6 +47,10 @@ struct SceneFrame {
     std::vector<render::SkinLook> skin_looks;
     std::vector<u32> skin_detail;
     std::vector<u32> skin_key; // each look's eight key words (MaterialKey bits 20 to 27)
+    // Eye materials' looks (render::Material::eye_look), shared and capped
+    // the same way.
+    std::vector<render::EyeLook> eye_looks;
+    std::vector<u32> eye_key; // each look's twelve key words (MaterialKey bits 29 to 40)
     std::vector<render::Decal> decals;
     std::vector<render::LocalLight> lights; // the lamps entities and kit pieces carry (world::Lamp)
     u32 cells_rebuilt = 0; // by the last scene_frame
@@ -114,6 +118,7 @@ struct SceneFrame {
         bool two_sided = false;
         float alpha_cutoff = 0.0f;
         u32 skin_look = render::k_no_skin_look; // (materials[i] has it only while used)
+        u32 eye_look = render::k_no_eye_look;   // (the same)
     };
     std::vector<MaterialKind> material_kind;
     u64 textures_version = ~u64{0};
@@ -124,12 +129,14 @@ struct SceneFrame {
     // A skin material found the looks full (the table is made again when
     // an unused material holds one, freeing it).
     bool skin_refused = false;
+    bool eye_refused = false; // (the same, for eyes)
 
     struct MaterialKey {
         // The values, the texture refs, 1 for the ground's terrain material,
         // then two-sided, translucency, alpha cutoff and canopy; then skin:
-        // 1 when it is, its seven values and its detail map's ref.
-        u32 bits[28];
+        // 1 when it is, its seven values and its detail map's ref; then an
+        // eye: 1 when it is, and its twelve values.
+        u32 bits[41];
         bool operator==(const MaterialKey&) const = default;
     };
     struct MaterialHash {

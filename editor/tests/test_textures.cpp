@@ -652,6 +652,121 @@ GIANT_TEST("textures: skin looks go to the renderer, one per skin material; thei
     GIANT_CHECK(frame.materials.size() < rows && plain() == 2);
 }
 
+GIANT_TEST("textures: eye looks go to the renderer, shared by eyes alike; an eye is not skin; a full table draws plain") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    MeshLibrary meshes(renderer.get());
+    SceneFrame frame;
+    world::Scene scene;
+    world::Entity left;
+    left.shape = world::Shape::sphere;
+    world::EyeLook look;
+    look.iris_radius = 0.2f;
+    look.iris_color = {0.1f, 0.3f, 0.9f};
+    look.painted = true;
+    left.material.eye = look;
+    left.material.skin = world::SkinLook{}; // (an eye all the same)
+    const world::EntityId left_id = scene.add(left);
+    world::Entity right = left; // the same eye: the same material and look
+    right.transform.position = {0.07, 0.0, 0.0};
+    scene.add(right);
+    world::Entity bloodshot = left; // the same look on another white: its own material
+    bloodshot.transform.position = {2.0, 0.0, 0.0};
+    bloodshot.material.base_color = {0.9f, 0.6f, 0.6f};
+    const world::EntityId bloodshot_id = scene.add(bloodshot);
+    world::Entity brown = left; // another look
+    brown.transform.position = {4.0, 0.0, 0.0};
+    brown.material.eye->iris_color = {0.3f, 0.2f, 0.1f};
+    scene.add(brown);
+    world::Entity rock;
+    rock.transform.position = {6.0, 0.0, 0.0};
+    scene.add(rock);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials.size() == 4 && frame.eye_looks.size() == 2 && frame.skin_looks.empty());
+    const auto eyes = [&] {
+        usize n = 0;
+        for (const render::Material& m : frame.materials) {
+            if (m.eye_look == render::k_no_eye_look) continue;
+            ++n;
+            GIANT_CHECK(m.eye_look < frame.eye_looks.size() && m.skin_look == render::k_no_skin_look);
+        }
+        return n;
+    };
+    GIANT_CHECK(eyes() == 3);
+    bool found = false;
+    for (const render::EyeLook& l : frame.eye_looks) {
+        if (l.iris_color.z != 0.9f) continue;
+        found = true;
+        GIANT_CHECK(l.iris_radius == 0.2f && l.painted && l.iris_depth == 0.35f && l.cornea_roughness == 0.06f);
+    }
+    GIANT_CHECK(found);
+    // Unused, a material is not an eye for the renderer; used again, it is.
+    scene.remove(bloodshot_id);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials.size() == 4 && eyes() == 2);
+    scene.add(bloodshot);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(eyes() == 3 && frame.eye_looks.size() == 2);
+    // A full table: later eyes draw plain until a look is freed.
+    std::vector<world::EntityId> crowd;
+    for (u32 i = 0; i < render::k_max_eye_looks; ++i) {
+        world::Entity e = brown;
+        e.material.eye->bulge = 0.001f * static_cast<float>(i + 1);
+        e.transform.position = {10.0 + i, 0.0, 0.0};
+        crowd.push_back(scene.add(e));
+    }
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.eye_looks.size() == render::k_max_eye_looks);
+    const auto plain = [&] {
+        usize n = 0;
+        for (usize i = 0; i < frame.materials.size(); ++i) {
+            n += frame.materials[i].eye_look == render::k_no_eye_look && frame.users[i] > 0 ? 1u : 0u;
+        }
+        return n;
+    };
+    GIANT_CHECK(plain() == 3); // the rock's and the two eyes past the table's end
+    scene.remove(crowd[0]);
+    scene.remove(crowd[1]);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(plain() == 1); // the rock's alone
+    eyes(); // every look still in the table
+    (void)left_id;
+    // A kit's piece is an eye too, and a change to its eye alone is drawn.
+    scene.remove(crowd[2]);
+    scene.remove(crowd[3]);
+    world::Kit kit;
+    kit.name = "head";
+    world::KitPiece ball;
+    ball.shape = world::Shape::sphere;
+    ball.material.eye = world::EyeLook{};
+    ball.material.eye->shade = 0.875f;
+    kit.pieces.push_back(ball);
+    scene.kits.push_back(kit);
+    world::Entity placed;
+    placed.shape = world::Shape::kit;
+    placed.kit = "head";
+    placed.transform.position = {-20.0, 0.0, 0.0};
+    scene.add(placed);
+    scene_frame(scene, *renderer, meshes, frame);
+    const auto shaded = [&](float shade) {
+        usize n = 0;
+        for (usize i = 0; i < frame.materials.size(); ++i) {
+            const u32 at = frame.materials[i].eye_look;
+            n += frame.users[i] > 0 && at != render::k_no_eye_look && frame.eye_looks[at].shade == shade ? 1u : 0u;
+        }
+        return n;
+    };
+    GIANT_CHECK(shaded(0.875f) == 1 && shaded(0.625f) == 0);
+    scene.kits[0].pieces[0].material.eye->shade = 0.625f;
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(shaded(0.875f) == 0 && shaded(0.625f) == 1);
+    eyes();
+}
+
 GIANT_TEST("textures: set_entity takes maps, refuses missing files, and get_textures reports them") {
     const std::filesystem::path dir = fresh_dir("giant_texture_commands");
     const std::string albedo = write_png(dir / "albedo.png", 16, 16, 255, 0, 0);
@@ -700,6 +815,32 @@ GIANT_TEST("textures: set_entity takes maps, refuses missing files, and get_text
     GIANT_CHECK(commands.undo());
     GIANT_CHECK(state.scene.find(id)->material.skin && state.scene.find(id)->material.skin->detail_tiling == 8.0f);
     GIANT_CHECK(run("set_entity", {{"id", id}, {"skin", {{"on", false}}}}).ok);
+    // An eye: fields left out keep theirs; it takes skin off, and skin it.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"skin", {{"scatter", 0.02}}}}).ok);
+    const auto eyed = run("set_entity", {{"id", id}, {"eye", {{"iris_radius", 0.2}, {"iris_color", {0.1, 0.3, 0.9}}}}});
+    GIANT_CHECK(eyed.ok && !eyed.value.contains("skin") && eyed.value["eye"]["iris_radius"].get<float>() == 0.2f &&
+                eyed.value["eye"]["iris_color"][2].get<float>() == 0.9f &&
+                eyed.value["eye"]["iris_depth"].get<float>() == 0.35f && !eyed.value["eye"].contains("painted"));
+    const auto painted = run("set_entity", {{"id", id}, {"eye", {{"painted", true}}}});
+    GIANT_CHECK(painted.ok && painted.value["eye"]["painted"] == true &&
+                painted.value["eye"]["iris_radius"].get<float>() == 0.2f);
+    GIANT_CHECK(!run("set_entity", {{"id", id}, {"eye", {{"iris_depth", 0.9}}}}).ok);
+    GIANT_CHECK(!run("set_entity", {{"id", id}, {"eye", {{"iris_color", {1.0, 1.0}}}}}).ok);
+    const auto back = run("set_entity", {{"id", id}, {"skin", {{"scatter", 0.02}}}});
+    GIANT_CHECK(back.ok && back.value.contains("skin") && !back.value.contains("eye"));
+    GIANT_CHECK(commands.undo());
+    GIANT_CHECK(state.scene.find(id)->material.eye && state.scene.find(id)->material.eye->painted &&
+                !state.scene.find(id)->material.skin);
+    const auto eye_off = run("set_entity", {{"id", id}, {"eye", {{"on", false}}}});
+    GIANT_CHECK(eye_off.ok && !eye_off.value.contains("eye") && !eye_off.value.contains("skin"));
+    // Skin given with the eye taken off is skin; skin taken off leaves an eye be.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"eye", {{"bulge", 0.5}}}}).ok);
+    const auto swapped = run("set_entity", {{"id", id}, {"skin", {{"scatter", 0.02}}}, {"eye", {{"on", false}}}});
+    GIANT_CHECK(swapped.ok && swapped.value.contains("skin") && !swapped.value.contains("eye"));
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"eye", {{"bulge", 0.5}}}}).ok);
+    const auto kept = run("set_entity", {{"id", id}, {"skin", {{"on", false}}}});
+    GIANT_CHECK(kept.ok && !kept.value.contains("skin") && kept.value["eye"]["bulge"].get<float>() == 0.5f);
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"eye", {{"on", false}}}}).ok);
 
     // Waiting asks for what the scene names, before any frame has drawn it.
     GIANT_CHECK(run("create_entity", {{"name", "ball"}, {"shape", "sphere"}, {"maps", {{"base_color", albedo}}}}).ok);

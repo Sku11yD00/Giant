@@ -695,6 +695,13 @@ GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable"
                        {{"name", "bad"}, {"items", {{{"shape", "sphere"}, {"skin", {{"scatter", 0.5}}}}}}})
                      .ok);
     GIANT_CHECK(f.run("remove_scatter_layer", {{"name", "hands"}}).ok && f.state.scene.scatter.size() == 1);
+    r = f.run("add_scatter_layer",
+              {{"name", "eyes"}, {"items", {{{"shape", "sphere"}, {"eye", {{"iris_radius", 0.2}}}, {"skin", {{"scatter", 0.02}}}}}}});
+    GIANT_CHECK(r.ok && r.value["items"][0]["eye"]["iris_radius"].get<float>() == 0.2f &&
+                !r.value["items"][0].contains("skin")); // (given both: the eye)
+    GIANT_CHECK(f.state.scene.scatter.size() == 2 && f.state.scene.scatter[1].items[0].material.eye &&
+                !f.state.scene.scatter[1].items[0].material.skin);
+    GIANT_CHECK(f.run("remove_scatter_layer", {{"name", "eyes"}}).ok && f.state.scene.scatter.size() == 1);
     // Errors change nothing.
     GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "stones"}, {"items", {{{"shape", "cube"}}}}}).ok);
     GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "trees"}, {"items", {{{"kit", "oak"}}}}}).ok);

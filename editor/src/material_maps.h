@@ -170,6 +170,94 @@ inline ai::Json skin_json(const world::SkinLook& s) {
     return j;
 }
 
+// A material's eye over MCP (world::EyeLook): the "eye" argument entities
+// and scatter items share, and how it reads back.
+inline ai::Json eye_schema() {
+    const auto number = [](double lo, double hi, const char* description) {
+        return ai::Json{{"type", "number"}, {"minimum", lo}, {"maximum", hi}, {"description", description}};
+    };
+    return {{"type", "object"},
+            {"additionalProperties", false},
+            {"properties",
+             {{"on", {{"type", "boolean"}, {"description", "false: not an eye any more. Default true."}}},
+              {"iris_radius", number(0.02, 0.5, "The iris's radius in uv, about (0.5, 0.5). Default 0.15.")},
+              {"pupil_radius", number(0, 0.95, "The drawn pupil's radius, of the iris's. Default 0.3.")},
+              {"iris_depth", number(0, 0.45, "How far the iris lies under the cornea, of its radius: it "
+                                             "shifts as the eye turns. Default 0.35.")},
+              {"limbal", number(0, 0.5, "The dark ring round the iris: its width, of the iris radius. "
+                                        "Default 0.15.")},
+              {"limbal_darkness", number(0, 1, "How dark that ring is. Default 0.7.")},
+              {"iris_color", {{"type", "array"},
+                              {"items", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
+                              {"minItems", 3},
+                              {"maxItems", 3},
+                              {"description", "The drawn iris, linear RGB. Default a grey blue."}}},
+              {"painted", {{"type", "boolean"},
+                           {"description", "The base_color map holds the iris and pupil (an eye texture): "
+                                           "none are drawn. Default false."}}},
+              {"cornea_roughness", number(0.045, 1, "The wet highlight's roughness. Default 0.06.")},
+              {"bulge", number(0, 1, "How far the cornea bulges over the iris. Default 0.3.")},
+              {"shade", number(0, 1, "Darkens the white toward its edge, where the lids shade it. "
+                                     "Default 0.5.")}}},
+            {"description",
+             "An eye (characters): a mesh with uvs whose iris is centred at uv (0.5, 0.5). The iris and "
+             "pupil show through a clear, wet cornea and shift under it as the eye turns; base_color is "
+             "the white. Fields left out keep their value (the defaults when it was not an eye). A "
+             "material is skin or an eye: setting one takes the other off. Not on the ground."}};
+}
+
+// Nothing here can fail: eye_schema's ranges are the only check, and the
+// renderer clamps again (render::to_gpu).
+inline void apply_eye(const ai::Json& json, std::optional<world::EyeLook>& eye) {
+    if (!json.value("on", true)) {
+        eye.reset();
+        return;
+    }
+    world::EyeLook e = eye.value_or(world::EyeLook{});
+    e.iris_radius = json.value("iris_radius", e.iris_radius);
+    e.pupil_radius = json.value("pupil_radius", e.pupil_radius);
+    e.iris_depth = json.value("iris_depth", e.iris_depth);
+    e.limbal = json.value("limbal", e.limbal);
+    e.limbal_darkness = json.value("limbal_darkness", e.limbal_darkness);
+    if (const auto c = json.find("iris_color"); c != json.end()) {
+        e.iris_color = {(*c)[0].get<float>(), (*c)[1].get<float>(), (*c)[2].get<float>()};
+    }
+    e.painted = json.value("painted", e.painted);
+    e.cornea_roughness = json.value("cornea_roughness", e.cornea_roughness);
+    e.bulge = json.value("bulge", e.bulge);
+    e.shade = json.value("shade", e.shade);
+    eye = e;
+}
+
+inline ai::Json eye_json(const world::EyeLook& e) {
+    ai::Json j = {{"iris_radius", e.iris_radius},
+                  {"pupil_radius", e.pupil_radius},
+                  {"iris_depth", e.iris_depth},
+                  {"limbal", e.limbal},
+                  {"limbal_darkness", e.limbal_darkness},
+                  {"iris_color", ai::Json::array({e.iris_color.x, e.iris_color.y, e.iris_color.z})},
+                  {"cornea_roughness", e.cornea_roughness},
+                  {"bulge", e.bulge},
+                  {"shade", e.shade}};
+    if (e.painted) j["painted"] = true;
+    return j;
+}
+
+// Skin and eye arguments onto a material: a material is one or the
+// other, the one given last here (the eye, given both) taking the other
+// off. Returns what is wrong, or "".
+inline std::string apply_skin_and_eye(const ai::Json& args, world::Material& material) {
+    if (args.contains("skin")) {
+        if (std::string bad = apply_skin(args["skin"], material.skin); !bad.empty()) return bad;
+        if (material.skin) material.eye.reset();
+    }
+    if (args.contains("eye")) {
+        apply_eye(args["eye"], material.eye);
+        if (material.eye) material.skin.reset();
+    }
+    return {};
+}
+
 // A mesh's file's own look (its material's values and maps) onto
 // `material`, keeping what files do not say (surface, wind), then what
 // `args` give over it (base colour, roughness, metallic, emissive, maps:
