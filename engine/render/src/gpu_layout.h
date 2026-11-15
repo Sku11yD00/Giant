@@ -525,7 +525,9 @@ struct SkinLook {
     float strength; // 0 to 1
     float lobe_roughness[2];
     float lobe_mix;
-    float pad[3];
+    float transmission; // 0 to 1
+    u32 detail_normal;  // a texture's read descriptor (rhi::k_no_descriptor: none)
+    float detail_tiling;
 };
 static_assert(sizeof(SkinLook) == 32);
 inline constexpr u32 k_skin_look_bytes = 32; // resolve.slang's

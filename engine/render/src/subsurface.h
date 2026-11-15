@@ -11,9 +11,15 @@
 // in units of the profile's widest reach (three standard deviations of
 // its widest Gaussian), which SkinLook::scatter sets in metres; each
 // channel's weights sum to 1, the middle tap first.
+//
+// Light through thin parts (C4b, Jimenez et al. 2010, "Real-Time Realistic
+// Skin Translucency"): the same Gaussians, each dimming with the depth of
+// skin crossed, sum to how much of each channel gets through.
 #pragma once
 
 #include "giant/core/types.h"
+#include "giant/render/renderer.h"
+#include "gpu_layout.h"
 
 #include <array>
 
@@ -39,5 +45,14 @@ std::array<float, 3> skin_profile(float mm);
 // The profile's widest reach in millimetres (three standard deviations of
 // its widest Gaussian): an offset of 1.
 float skin_profile_reach_mm();
+
+// How much of each channel passes through `mm` millimetres of skin (1 at
+// 0, red furthest): resolve.slang's skin_transmittance.
+std::array<float, 3> skin_transmittance(float mm);
+
+// A skin look for the GPU, its values kept in range (and non-finite ones
+// taken as the defaults); `detail`: its detail normal map's read
+// descriptor (rhi::k_no_descriptor: none).
+gpu::SkinLook to_gpu(const SkinLook& look, u32 detail);
 
 } // namespace giant::render

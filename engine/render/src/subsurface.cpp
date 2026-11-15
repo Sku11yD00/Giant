@@ -1,5 +1,6 @@
 #include "subsurface.h"
 
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 
@@ -17,6 +18,10 @@ float gaussian(float variance, float x) {
     return std::exp(-x * x / (2.0f * variance)) / std::sqrt(2.0f * std::numbers::pi_v<float> * variance);
 }
 
+float finite_in(float v, float lo, float hi, float fallback) {
+    return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
+}
+
 float offset_at(u32 i) {
     const float t = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(k_subsurface_taps - 1);
     return t * std::fabs(t);
@@ -32,6 +37,28 @@ std::array<float, 3> skin_profile(float mm) {
         const float v = gaussian(k_variance[g], mm);
         for (u32 c = 0; c < 3; ++c) out[c] += k_weight[g][c] * v;
     }
+    return out;
+}
+
+std::array<float, 3> skin_transmittance(float mm) {
+    std::array<float, 3> out{};
+    for (u32 g = 0; g < 6; ++g) {
+        const float e = std::exp(-mm * mm / k_variance[g]);
+        for (u32 c = 0; c < 3; ++c) out[c] += k_weight[g][c] * e;
+    }
+    return out;
+}
+
+gpu::SkinLook to_gpu(const SkinLook& look, u32 detail) {
+    gpu::SkinLook out{};
+    out.scatter = finite_in(look.scatter, 0.0005f, 0.1f, 0.012f);
+    out.strength = finite_in(look.strength, 0.0f, 1.0f, 1.0f);
+    out.lobe_roughness[0] = finite_in(look.lobe_roughness[0], 0.1f, 4.0f, 0.75f);
+    out.lobe_roughness[1] = finite_in(look.lobe_roughness[1], 0.1f, 4.0f, 1.3f);
+    out.lobe_mix = finite_in(look.lobe_mix, 0.0f, 1.0f, 0.15f);
+    out.transmission = finite_in(look.transmission, 0.0f, 1.0f, 1.0f);
+    out.detail_normal = detail;
+    out.detail_tiling = finite_in(look.detail_tiling, 1.0f, 256.0f, 16.0f);
     return out;
 }
 

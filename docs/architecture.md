@@ -1742,6 +1742,33 @@ look spreads (strength over 0). Approximations: the spread light is dimmed
 by the fog's average over the channels, and falling rain or snow drawn over
 skin does not dim it.
 
+Skin through thin parts and detail normals (C4b). Light also passes
+through skin where little of it lies between the point and a light (Jimenez
+et al. 2010): the thickness is how far the point lies behind the nearest
+surface the light's shadow depths hold, looked up a texel and a half into
+the surface (an edge's taps land on it), taken at the point itself with
+the push's sideways part put back (else slanted thin skin reads as none)
+(`sun_thickness` in `shadow_pages.slang` on the finest drawn level its
+pixel needs, the previous view's page standing in as for shadows;
+`light_thickness` in `lights.slang` for lamps with a shadow tile). It dims each channel by the six Gaussians
+of the same profile (`skin_transmittance`, red furthest; the look's
+scatter scales the skin to it, as it scales the spread), times the
+diffuse colour, the light, `saturate(0.3 - n.l)` (on through the shade side
+a little past the terminator) and the look's `transmission`; the sun's is
+dimmed by the clouds. It counts as diffuse light, so it spreads with the
+rest. Unknown (nothing drawn, nothing held, or what is held lies more
+than two texels beyond the point: lit straight on), nothing passes;
+lamps without shadows pass none. Approximations: the sun's depths are
+32-bit over 40 km, so thickness is known to a millimetre or two (lamps'
+much finer; at the default scatter a step is some 1.6 mm of the profile,
+so light through a slowly thickening part can band), and to a texel's
+slope across the nearer surface (8 mm texels on the finest level). A look's `detail_normal` (linear, e.g. BC5)
+is sampled at the uvs times `detail_tiling` and bends the shading normal
+in the tangent frame turned to it, over the material's own normal map
+(skin pixels rebuild uvs and tangents even without material textures);
+streaming's feedback asks for it the tiling's levels finer than the
+material's maps.
+
 Playing them (editor). `MeshLibrary` keeps a skinned file's skeleton,
 clips and bind-space clusters beside its rest-pose mesh, which every
 entity drawing it shows until it animates. An entity animates when it

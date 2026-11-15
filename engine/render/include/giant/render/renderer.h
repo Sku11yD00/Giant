@@ -115,11 +115,21 @@ inline constexpr u32 k_max_skin_looks = 255;
 // to 1) how much of the light spreads. Its highlight is two GGX lobes, at
 // the material's roughness times lobe_roughness[0] and [1], the second
 // lobe_mix of the whole: a sharp sheen over a broad soft one.
+// Light also passes through its thin parts (ears, nostrils, fingers held up
+// to the light): how much skin lies between a point and the sun or a
+// shadowed lamp, from their shadow depths, dims it by the same profile
+// (red passes furthest), `transmission` (0 to 1) of it. `detail_normal`: a
+// linear normal map (pores, fine wrinkles) over the mesh's uvs times
+// `detail_tiling`, bending the shading normal on top of the material's own
+// normal map (an unknown, removed or sRGB texture: none).
 struct SkinLook {
     float scatter = 0.012f;   // metres (0.0005 to 0.1)
     float strength = 1.0f;    // 0 to 1
     float lobe_roughness[2] = {0.75f, 1.3f}; // times the material's (0.1 to 4)
     float lobe_mix = 0.15f;   // 0 to 1
+    float transmission = 1.0f; // 0 to 1
+    TextureId detail_normal = k_no_texture;
+    float detail_tiling = 16.0f; // 1 to 256
 };
 
 // How a surface looks (metal/roughness PBR). Instances share them by index
@@ -1527,6 +1537,8 @@ private:
     struct FeedbackMaterial {
         u32 material = 0;
         std::array<TextureId, 4> textures{};
+        TextureId detail = k_no_texture; // skin's detail normals
+        u32 detail_levels = 0;           // finer than the uvs' by its tiling
     };
     std::vector<FeedbackMaterial> m_feedback_materials[3];
     std::vector<FeedbackMaterial> m_feedback_now; // this frame's (moved into its slot)

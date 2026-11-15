@@ -152,5 +152,5 @@ if(GIANT_BUILD_TESTS)
   giant_apply_warnings(giant_editor_tests)
   giant_apply_sanitizers(giant_editor_tests)
   add_test(NAME editor_commands COMMAND giant_editor_tests)
-  set_tests_properties(editor_commands PROPERTIES TIMEOUT 300) # ~70 s under ThreadSanitizer
+  set_tests_properties(editor_commands PROPERTIES TIMEOUT 900) # ~300 s under ThreadSanitizer on CI runners
 endif()

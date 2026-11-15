@@ -226,3 +226,94 @@ float sun_visibility(Shadows s, float3 world, float3 n, float3 l, float pixel_si
     }
     return 1.0;
 }
+
+// The sun's path through what lies before a camera-relative point with
+// normal `n` (unit) on one level of a view (its axes `x`, `y`, `z` and depth
+// offset; `index`: the level's index in the levels and table, past the
+// current view's for the previous one): from the nearest surface the page
+// holds to the point, metres (bilinear between four taps). Looked up a
+// texel and a half into the surface (so an edge's taps land on it, not
+// past it), its depth taken at the point itself, and the sideways part of
+// that push put back (on a slant the push moves the lookup to where the
+// nearer surface is further along: without it, slanted thin skin would
+// read as no thickness at all). -2: the page is not drawn; -1: not known
+// (nothing held, or what is held lies well beyond the point: lit straight
+// on).
+float sun_thickness_on(Shadows s, ByteAddressBuffer levels, ByteAddressBuffer table, ByteAddressBuffer atlas,
+                       uint index, float3 x, float3 y, float3 z, float depth_offset, float3 world, float3 n) {
+    const ShadowLevel lv = load_shadow_level(levels, s.levels_offset, index);
+    const float push = lv.texel_size * 1.5;
+    const float3 p = world - n * push;
+    const float2 uv = (float2(dot(p, x), dot(p, y)) - lv.origin) / lv.texel_size;
+    if (any(uv < float2(2.0, 2.0)) || any(uv >= float2(k_shadow_window - 2, k_shadow_window - 2))) {
+        return -2.0;
+    }
+    const uint level_at = s.table_offset + (index * 256) * 4;
+    const float2 start = uv - 0.5;
+    const int2 base = int2(floor(start));
+    const float2 f = start - floor(start);
+    const float depth = 0.5 - dot(world, z) * s.depth_scale + depth_offset;
+    // z points away from the sun: c is how squarely the shade side faces away.
+    const float c = saturate(dot(n, z));
+    // (At most two pushes: near a thin part's rim a bigger one would take
+    // a surface well behind the point for the part's own.)
+    const float slant = min(push * (1.0 - c * c) / max(c, 0.2), 2.0 * push);
+    float through[4];
+    bool known = true;
+    [unroll] for (uint k = 0; k < 4; ++k) {
+        const int2 texel = base + int2(k & 1u, k >> 1u);
+        const uint entry = table.Load(level_at + shadow_slot(lv, texel) * 4);
+        if (entry == k_shadow_no_page || (entry & k_shadow_drawn_bit) == 0u) {
+            return -2.0;
+        }
+        const uint2 local = uint2(texel) % k_shadow_texels;
+        const uint at = (entry & 0xFFFFu) * (k_shadow_texels * k_shadow_texels) + local.y * k_shadow_texels + local.x;
+        const float stored = asfloat(atlas.Load(at * 4));
+        // Nothing held (0): nothing in the way, not even the surface.
+        const float raw = (stored - depth) / s.depth_scale + slant;
+        known = known && stored > 0.0 && raw >= -2.0 * lv.texel_size;
+        through[k] = max(raw, 0.0);
+    }
+    if (!known) {
+        return -1.0;
+    }
+    return lerp(lerp(through[0], through[1], f.x), lerp(through[2], through[3], f.x), f.y);
+}
+
+// How far the sun's light goes through whatever is between the sun and a
+// camera-relative point with normal `n` (unit), in metres
+// (sun_thickness_on), on the finest level its pixel needs whose page is
+// drawn, the previous view's page on a level standing in where the
+// current's is not drawn yet (as for sun_visibility; no pages are asked
+// for here: sun_visibility asks for the same). -1: not known.
+float sun_thickness(Shadows s, float3 world, float3 n, float pixel_size) {
+    if (s.level_count == 0u) {
+        return -1.0;
+    }
+    ByteAddressBuffer levels = read_buffer(s.levels);
+    ByteAddressBuffer table = read_buffer(s.table);
+    ByteAddressBuffer atlas = read_buffer(s.atlas);
+    const uint count = min(s.level_count, k_shadow_max_levels);
+    const float wanted = log2(max(pixel_size / s.texel, 1.0));
+    const uint first = min(uint(wanted), count - 1);
+    // One way out, the loop from 0: starting at `first` and returning from
+    // inside read as no thickness at all on the software adapter (the same
+    // lookups, called on their own, were right).
+    float result = -1.0;
+    bool found = false;
+    for (uint level = 0; level < count; ++level) {
+        if (found || level < first) {
+            continue;
+        }
+        float t = sun_thickness_on(s, levels, table, atlas, level, s.x, s.y, s.z, s.depth_offset, world, n);
+        if (t == -2.0 && s.prev_on != 0u) {
+            t = sun_thickness_on(s, levels, table, atlas, count + level, s.prev_x, s.prev_y, s.prev_z,
+                                 s.prev_depth_offset, world, n);
+        }
+        if (t != -2.0) {
+            result = t;
+            found = true;
+        }
+    }
+    return result;
+}
