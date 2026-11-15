@@ -1956,7 +1956,8 @@ names what hangs where in `FrameInput::hair` (`HairDraw`: the groom, a
 place, turn and uniform size, the guides as `sim::HairSim::points()` gives
 them or none for rest, a `HairLook`, a cap on strands). The nearest 256 in
 view are drawn, in the lit view, after opaque shading and before water and
-particles, timed "hair".
+particles, timed "hair" (their strands are posed, and their shadow tiles
+drawn, before shading: see below).
 
 Strands are far thinner than a pixel, so hair is a matter of coverage, and
 one surface a pixel (the visibility buffer) cannot hold it without history.
@@ -1997,7 +1998,7 @@ redness; `tint` for dye), `roughness`, `width` and `tip_width`,
 `hair_segments`, `hair_left_out`, `hair_draws`.
 
 Hair shades itself from the sun (C6d, `hair_shadows`, a render setting) by
-deep opacity maps (Yuksel and Keyser). Between the two compute passes each
+deep opacity maps (Yuksel and Keyser). After the strands are posed each
 drawn groom is drawn as the sun sees it into a tile of its own (128 x 128
 of a 2048 x 2048 pair of targets, 48 MiB, made with the first groom added):
 the tile spans the ball round the groom's hair as posed. One pass keeps
@@ -2028,12 +2029,14 @@ timed "hair shadows"; the lighting and ribbons come after shading, timed
 ball's column, as the sun sees it, holds the pixel, the hair before it by
 that groom's tile, as `exp(-hair)`. So a fringe shades the face under it
 softly and by how thick it is, a head of hair lays a hair-shaped shadow on
-the shoulders and the ground, and nothing is drawn into the sun's shadow
+the shoulders and the ground (fading out over 40 times the ball's width
+behind it), and nothing is drawn into the sun's shadow
 pages (which would have to be redrawn whenever hair stirs).
 
 Limits: one groom's hair does not shade another's; hair further than the
 16 nearest grooms casts nothing on the world, nor does any hair on water,
-particles, the far field or the voxel light; hair out of view casts
+particles, the far field or the voxel light; hair lying closer to the skin than a texel's depth (4 mm on a head 0.5 m
+across: stubble, brows) casts nothing on it; hair out of view casts
 nothing either, so a shadow on the ground goes when its head leaves the
 view; the sun through skin (ears, the thin back-lit shine) is not shaded
 by hair; only the sun has deep

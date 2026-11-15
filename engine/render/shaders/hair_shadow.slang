@@ -65,10 +65,10 @@ float hair_before(uint front_texture, uint sums_texture, uint tile, float3 at) {
         } else if (behind < k_hair_layers.z) {
             before = lerp(o.y, o.z, (behind - k_hair_layers.y) / (k_hair_layers.z - k_hair_layers.y));
         } else {
-            before = lerp(o.z, o.w, saturate((behind - k_hair_layers.z) / (k_hair_layers_end - k_hair_layers.z)));
-        }
-        if (at.z <= 0.0) {
-            before = o.w; // behind the ball: behind all of it
+            // (All of it by the end of the ball at the latest: a point
+            // behind the ball is behind all its hair.)
+            const float end = min(k_hair_layers_end, max(z0 - k_hair_slack, k_hair_layers.z + 1e-4));
+            before = lerp(o.z, o.w, saturate((behind - k_hair_layers.z) / (end - k_hair_layers.z)));
         }
         const float weight = ((j & 1u) != 0u ? share.x : 1.0 - share.x) * ((j >> 1) != 0u ? share.y : 1.0 - share.y);
         total += max(before, 0.0) * weight;

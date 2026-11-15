@@ -184,7 +184,10 @@ float hair_shade(Extras e, float3 sun_direction, float3 world) {
         if (along >= ball.w || dot(q, q) - along * along >= ball.w * ball.w) {
             continue;
         }
-        before += hair_before(e.hair_depth, e.hair_opacity, i, in_hair_tile(ball, l, world));
+        // (Fading out by 40 balls' width behind it: so far off a tile's
+        // texels are finer than a pixel, and the head's own shadow is soft.)
+        const float fade = saturate(1.0 - max(-along - ball.w, 0.0) / (40.0 * ball.w));
+        before += fade * hair_before(e.hair_depth, e.hair_opacity, i, in_hair_tile(ball, l, world));
     }
     return exp(-before);
 }

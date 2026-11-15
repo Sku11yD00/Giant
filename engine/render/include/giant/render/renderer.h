@@ -648,8 +648,9 @@ struct RenderSettings {
     // and more to draw).
     bool hair = true;
     float hair_detail = 3.0f;
-    // Hair shades itself from the sun (each drawn groom's own hair; off,
-    // the sun reaches every strand the world lets it).
+    // Hair shades itself from the sun (each drawn groom's own hair), and
+    // the world behind it (the nearest grooms'; off, the sun reaches every
+    // strand and surface the world lets it).
     bool hair_shadows = true;
     // Their shadows (lights with a shadow_id; needs `shadows` and GPU
     // culling): faces of shadow tiles drawn a frame at most (nearest first;
