@@ -79,6 +79,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     register_physics_commands(registry, state);
     register_animation_commands(registry, state);
     register_cloth_commands(registry, state);
+    register_hair_commands(registry, state);
     register_swing_commands(registry, state);
     register_nav_commands(registry, state);
     register_walker_commands(registry, state);

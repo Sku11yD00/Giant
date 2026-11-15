@@ -640,6 +640,31 @@ Json lamp_json(const Lamp& l) {
             {"shadow_near", l.shadow_near}};
 }
 
+Json hair_json(const Hair& h) {
+    return {{"on", h.on},
+            {"strands", h.strands},
+            {"guides", h.guides},
+            {"top", h.top},
+            {"length", h.length},
+            {"length_variation", h.length_variation},
+            {"droop", h.droop},
+            {"curl_radius", h.curl_radius},
+            {"curl_turns", h.curl_turns},
+            {"frizz", h.frizz},
+            {"clump", h.clump},
+            {"seed", h.seed},
+            {"melanin", h.melanin},
+            {"redness", h.redness},
+            {"tint", vec3_json(h.tint)},
+            {"roughness", h.roughness},
+            {"width", h.width},
+            {"tip_width", h.tip_width},
+            {"variation", h.variation},
+            {"moves", h.moves},
+            {"stiffness", h.stiffness},
+            {"damping", h.damping}};
+}
+
 Json weather_json(const Weather& w) {
     return {
         {"cloud_cover", w.cloud_cover},
@@ -928,6 +953,7 @@ Json entity_json(const Entity& e) {
                            {"weight", w.weight}, {"limit", w.limit}};
     }
     if (!(e.lamp == Lamp{})) entity["lamp"] = lamp_json(e.lamp);
+    if (!(e.hair == Hair{})) entity["hair"] = hair_json(e.hair);
     if (!(e.effect == EntityEffect{})) {
         entity["effect"] = {{"on", e.effect.on}, {"effect", e.effect.effect}, {"rate", e.effect.rate}};
     }
@@ -1653,6 +1679,35 @@ void read_lamp(Reader& r, const std::string& path, Lamp& l, std::string& error) 
     }
 }
 
+void read_hair(Reader& r, const std::string& path, Hair& h, std::string& error) {
+    if (const Json* j = r.get("hair", false); j != nullptr && r.ok()) {
+        Reader hr(*j, path + ".hair", error);
+        hr.boolean("on", h.on);
+        hr.integer("strands", h.strands, 1, k_max_hair_strands);
+        hr.integer("guides", h.guides, 1, k_max_hair_guides);
+        hr.number("top", h.top, 0.01, 1);
+        hr.number("length", h.length, 0.001, 10);
+        hr.number("length_variation", h.length_variation, 0, 1);
+        hr.number("droop", h.droop, 0, 1);
+        hr.number("curl_radius", h.curl_radius, 0, 1);
+        hr.number("curl_turns", h.curl_turns, 0, 100);
+        hr.number("frizz", h.frizz, 0, 1);
+        hr.number("clump", h.clump, 0, 1);
+        hr.integer("seed", h.seed, 1, 1000000);
+        hr.number("melanin", h.melanin, 0, 1);
+        hr.number("redness", h.redness, 0, 1);
+        hr.vec3("tint", h.tint, 0, 1);
+        hr.number("roughness", h.roughness, 0.05, 1);
+        hr.number("width", h.width, 0.00001, 0.01);
+        hr.number("tip_width", h.tip_width, 0, 1);
+        hr.number("variation", h.variation, 0, 1);
+        hr.boolean("moves", h.moves);
+        hr.number("stiffness", h.stiffness, 0, 60);
+        hr.number("damping", h.damping, 0, 60);
+        hr.finish();
+    }
+}
+
 void read_entity(const Json& json, const std::string& path, Entity& e, std::string& error) {
     Reader r(json, path, error);
     r.id("id", e.id, true);
@@ -1710,6 +1765,7 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         ar.finish();
     }
     read_lamp(r, path, e.lamp, error);
+    read_hair(r, path, e.hair, error);
     if (const Json* f = r.get("effect", false); f != nullptr && r.ok()) {
         Reader fr(*f, path + ".effect", error);
         fr.boolean("on", e.effect.on);

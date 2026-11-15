@@ -106,6 +106,17 @@ GIANT_TEST("hair: with nothing pulling, hair stays in its style; gravity makes i
     GIANT_CHECK(length(tip(styled) - before) < 1e-4f);
     GIANT_CHECK(styled.version() == version); // at rest nothing changes
     GIANT_CHECK(stretch(styled) < 1e-3f && stretch(stiff) < 1e-3f);
+    // Made stiffer as it hangs it rises to where the stiff one rests, from
+    // where it was (no reset); numbers that are none are clamped.
+    HairSim changed(rest);
+    run(changed, HairFrame{}, 10.0f);
+    const Vec3 hung_at = tip(changed);
+    changed.set_motion(60.0f, 30.0f, stiff_settings.damping);
+    GIANT_CHECK(length(tip(changed) - hung_at) < 1e-6f);
+    run(changed, HairFrame{}, 10.0f);
+    GIANT_CHECK(length(tip(changed) - tip(stiff)) < 2e-3f && changed.stats().resets == 0);
+    changed.set_motion(1000.0f, -5.0f, 2.0f);
+    GIANT_CHECK(changed.settings().root_stiffness == 60.0f && changed.settings().tip_stiffness == 0.0f);
     // The style is the same whatever the step: finer steps sag alike.
     HairSettings coarse;
     coarse.step_seconds = 1.0f / 30.0f;

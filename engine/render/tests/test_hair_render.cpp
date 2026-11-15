@@ -408,7 +408,11 @@ GIANT_TEST("hair: grooms go to the GPU under a budget and draw in the lit view o
     GIANT_CHECK(renderer->add_groom(geometry::Groom{}) == k_no_groom);
     // 60,000 strands are 8.6 MiB: three frames at 4 MiB a frame.
     const GroomId big = renderer->add_groom(curtain(60000, 100));
-    const GroomId small = renderer->add_groom(curtain(500, 10));
+    // (Packed away from the renderer's thread, then added: once.)
+    const std::shared_ptr<PreparedGroom> packed = Renderer::prepare_groom(curtain(500, 10));
+    const GroomId small = renderer->add_groom(*packed);
+    GIANT_CHECK(renderer->add_groom(*packed) == k_no_groom);
+    GIANT_CHECK(renderer->add_groom(*Renderer::prepare_groom(geometry::Groom{})) == k_no_groom);
     GIANT_CHECK(big != k_no_groom && small != k_no_groom && big != small);
     GIANT_CHECK(!renderer->groom_ready(big) && !renderer->groom_ready(small));
     std::vector<HairDraw> hair(2);

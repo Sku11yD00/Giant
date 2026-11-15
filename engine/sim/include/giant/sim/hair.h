@@ -108,6 +108,9 @@ public:
     std::span<const Vec3> points() const { return m_local; }
     std::span<const Vec3> rest() const { return m_rest; }
     const HairSettings& settings() const { return m_settings; }
+    // How stiff and how damped from the next step on (clamped as the
+    // constructor's); the hair stays where it is.
+    void set_motion(float root_stiffness, float tip_stiffness, float damping);
     HairStats stats() const { return m_stats; }
     // Changes whenever points() does (moves under a hundredth of a
     // millimetre are not shown until they add up, so hair at rest keeps

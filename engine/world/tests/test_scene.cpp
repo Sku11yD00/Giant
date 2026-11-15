@@ -451,6 +451,60 @@ GIANT_TEST("world: swing settings save and load, only when set, within their ran
     }
 }
 
+GIANT_TEST("world: hair on entities saves and loads, only when set, within its ranges") {
+    Scene scene;
+    Entity head = named("Head");
+    head.shape = Shape::sphere;
+    head.hair.on = true;
+    head.hair.strands = 60000;
+    head.hair.guides = 300;
+    head.hair.top = 0.4f;
+    head.hair.length = 0.45f;
+    head.hair.length_variation = 0.1f;
+    head.hair.droop = 0.6f;
+    head.hair.curl_radius = 0.01f;
+    head.hair.curl_turns = 6.0f;
+    head.hair.frizz = 0.004f;
+    head.hair.clump = 0.3f;
+    head.hair.seed = 77;
+    head.hair.melanin = 0.85f;
+    head.hair.redness = 0.4f;
+    head.hair.tint = {0.9f, 0.5f, 0.7f};
+    head.hair.roughness = 0.4f;
+    head.hair.width = 0.0001f;
+    head.hair.tip_width = 0.5f;
+    head.hair.variation = 0.3f;
+    head.hair.moves = false;
+    head.hair.stiffness = 12.0f;
+    head.hair.damping = 4.0f;
+    scene.add(head);
+    Entity off = named("Off");
+    off.hair.length = 0.1f; // kept while off
+    scene.add(off);
+    scene.add(named("Rock"));
+    const std::string text = save_scene(scene);
+    usize hairs = 0;
+    for (usize at = text.find("\"hair\": {"); at != std::string::npos; at = text.find("\"hair\": {", at + 1)) ++hairs;
+    GIANT_CHECK(hairs == 2); // the head's and the off one's; not the rock's
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->hair == head.hair);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->hair == off.hair && !loaded.find(2)->hair.on);
+    GIANT_CHECK(loaded.find(3) && loaded.find(3)->hair == Hair{});
+    GIANT_CHECK(save_scene(loaded) == text);
+    for (const char* bad_scene :
+         {R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"strands": 0}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"strands": 200001}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"guides": 2000}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"length": 11}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"tint": [2, 1, 1]}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"width": 0}}]})",
+          R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "hair": {"colour": 1}}]})"}) {
+        Scene bad;
+        GIANT_CHECK(load_scene(bad_scene, bad).has_value());
+    }
+}
+
 GIANT_TEST("world: lamps on entities and kit pieces save and load, only when set, within their ranges") {
     Scene scene;
     Entity lamp = named("Street lamp");

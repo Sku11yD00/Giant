@@ -23,6 +23,7 @@
 #include "scatter_placer.h"
 #include "animation_state.h"
 #include "cloth_state.h"
+#include "hair_state.h"
 #include "swing_state.h"
 #include "nav_state.h"
 #include "walker_state.h"
@@ -333,6 +334,8 @@ int run(const Options& options) {
     state.animation = &animation;
     editor::ClothState cloth(renderer.get()); // likewise
     state.cloth = &cloth;
+    editor::HairState hair(renderer.get()); // likewise: its grooms leave first
+    state.hair = &hair;
     editor::SwingState swing(renderer.get(), &meshes);
     state.swing = &swing;
     editor::EffectsState effects; // entities' effects and spawned ones, born as particles
@@ -443,6 +446,7 @@ int run(const Options& options) {
         // first, so no cell is built with a copy its entity should no longer draw.
         animation.follow_now(state.scene, meshes, state.scene.untaken_changes());
         cloth.follow(state.scene, state.scene.untaken_changes());
+        hair.follow(state.scene, state.scene.untaken_changes());
         swing.follow(state.scene, state.scene.untaken_changes());
         effects.follow(state.scene, state.scene.untaken_changes());
         nav.follow(state.scene, state.scene.untaken_changes());
@@ -536,6 +540,7 @@ int run(const Options& options) {
         input.occluders = occluder_frame;
         input.wind = weather.wind();
         input.particle_styles = effects.styles();
+        input.hair = hair.draws();
         if (!in_screenshot) { // (a screenshot's frame gives no births again, and stands still)
             input.particle_bursts = effects.take();
             input.particle_seconds = particle_seconds; // the game's clock: paused, they stand still
@@ -722,6 +727,7 @@ int run(const Options& options) {
         animation.update(state.scene, meshes, scene_frame.take_for_animation(), game_delta);
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
         cloth.update(weather.wind(), state.camera.position, game_delta); // drawn as it moved next frame
+        hair.update(weather.wind(), state.camera.position, game_delta);  // likewise
         swing.update(weather.wind(), state.camera.position, game_delta);
         editor::event_effects_frame(state, game_delta); // this frame's dust thrown up, running feet
         effects.follow(state.scene, state.scene.untaken_changes());

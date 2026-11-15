@@ -4331,15 +4331,35 @@ rhi::TextureHandle Renderer::draw_particles(rhi::CommandList& cmd, const FrameDa
     return m_particle_light;
 }
 
+std::shared_ptr<PreparedGroom> Renderer::prepare_groom(const geometry::Groom& groom) {
+    auto prepared = std::make_shared<PreparedGroom>();
+    prepared->packed = pack_groom(groom);
+    if (prepared->packed.bytes.empty()) {
+        prepared->problem = geometry::groom_problem(groom);
+        if (prepared->problem.empty()) prepared->problem = "it has no strands";
+    }
+    return prepared;
+}
+
 GroomId Renderer::add_groom(const geometry::Groom& groom) {
-    PackedGroom packed = pack_groom(groom);
+    PreparedGroom prepared;
+    prepared.packed = pack_groom(groom);
+    if (prepared.packed.bytes.empty()) {
+        prepared.problem = geometry::groom_problem(groom);
+        if (prepared.problem.empty()) prepared.problem = "it has no strands";
+    }
+    return add_groom(prepared);
+}
+
+GroomId Renderer::add_groom(PreparedGroom& prepared) {
+    PackedGroom packed = std::move(prepared.packed);
+    prepared.packed = {};
     if (packed.authored > packed.strands) {
         log_info("render", "groom: its first " + std::to_string(packed.strands) + " strands of " +
                                std::to_string(packed.authored) + " are kept, each drawn wider to cover the same");
     }
     if (packed.bytes.empty()) {
-        const std::string problem = geometry::groom_problem(groom);
-        log_error("render", "groom refused: " + (problem.empty() ? std::string("it has no strands") : problem));
+        log_error("render", "groom refused: " + (prepared.problem.empty() ? std::string("it was added before") : prepared.problem));
         return k_no_groom;
     }
     // The strands as drawn, for every groom: made with the first.

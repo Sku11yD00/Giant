@@ -68,6 +68,7 @@ class LocalShadows;     // src/local_shadows.h
 class VoxelLamps;       // src/voxel_lamps.h
 class ParticleRing;     // src/particles.h
 class Grooms;           // src/hair.h
+struct PreparedGroom;   // src/hair.h: a groom packed for add_groom
 struct HairPlan;
 
 // A mesh loaded into the renderer: a built-in shape or one added with
@@ -1155,6 +1156,12 @@ public:
     // k_no_groom (logged) for a groom with no strands or with a
     // groom_problem, or past k_max_grooms.
     GroomId add_groom(const geometry::Groom& groom);
+    // The same in two halves, for large grooms (packing 200,000 strands
+    // takes tens of milliseconds): prepare_groom on any thread, then
+    // add_groom on the renderer's, which takes the packed data out of
+    // `prepared` (adding it again adds nothing: k_no_groom).
+    static std::shared_ptr<PreparedGroom> prepare_groom(const geometry::Groom& groom);
+    GroomId add_groom(PreparedGroom& prepared);
     void remove_groom(GroomId groom);
     bool groom_ready(GroomId groom) const;
     static constexpr u32 groom_bytes_per_frame = 4u << 20;
