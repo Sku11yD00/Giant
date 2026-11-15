@@ -158,6 +158,9 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     }
     mesh->warnings = std::move(imported.warnings);
     mesh->has_uvs = imported.has_uvs;
+    if (!imported.curves.empty()) {
+        mesh->curves = std::make_shared<const std::vector<std::vector<Vec3>>>(std::move(imported.curves));
+    }
     // The file's look: its busiest material, if that covers more than glTF's
     // default does; its maps only if it covers most of the mesh (else they
     // would land on the other parts' uvs).

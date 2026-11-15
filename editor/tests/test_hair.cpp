@@ -497,3 +497,89 @@ GIANT_TEST("hair: on a character it grows from the skin its joint moves, rides t
     got = run("get_hair", {{"wait", true}, {"id", id}}).value;
     GIANT_CHECK(got["grown"] == 1 && got["hair"]["problem"] == "" && got["hair"]["strands"] == 300);
 }
+
+GIANT_TEST("hair: a file's own hair curves are worn instead of grown ones, sized and placed as its entity") {
+    // A triangle and four hair curves of three points each (a list of
+    // segments, joined), 0.1 m apart along x, each 0.2 m straight up.
+    std::vector<float> positions{0, 0, 0, 1, 0, 0, 0, 1, 0};
+    std::vector<u32> lines;
+    for (u32 k = 0; k < 4; ++k) {
+        for (u32 i = 0; i < 3; ++i) positions.insert(positions.end(), {0.1f * static_cast<float>(k), 0.1f * static_cast<float>(i), 0.0f});
+        lines.insert(lines.end(), {3 + k * 3, 4 + k * 3, 4 + k * 3, 5 + k * 3});
+    }
+    std::vector<u8> bin;
+    geometry::testing::append(bin, positions);
+    geometry::testing::append(bin, std::vector<u32>{0, 1, 2});
+    geometry::testing::append(bin, lines);
+    const std::string file = hair_file(
+        "curves.glb",
+        geometry::testing::make_glb(
+            R"({"asset":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
+            R"("meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1},)"
+            R"({"attributes":{"POSITION":0},"indices":2,"mode":1}]}],"buffers":[{"byteLength":256}],)"
+            R"("bufferViews":[{"buffer":0,"byteLength":180},{"buffer":0,"byteOffset":180,"byteLength":76}],)"
+            R"("accessors":[{"bufferView":0,"componentType":5126,"count":15,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},)"
+            R"({"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"},)"
+            R"({"bufferView":1,"byteOffset":12,"componentType":5125,"count":16,"type":"SCALAR"}]})",
+            bin));
+    const std::string arm = hair_file("arm.glb", geometry::testing::skinned_arm());
+    MeshLibrary meshes(nullptr);
+    HairState hair(nullptr, &meshes);
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.meshes = &meshes;
+    state.hair = &hair;
+    register_scene_commands(commands, state);
+    register_hair_commands(commands, state);
+    ai::ExecuteOptions options;
+    options.record_history = true;
+    const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, options); };
+
+    const MeshLibrary::Loaded loaded = meshes.load(file);
+    GIANT_CHECK(loaded.mesh != nullptr && loaded.mesh->curves != nullptr && loaded.mesh->curves->size() == 4);
+    if (loaded.mesh == nullptr || loaded.mesh->curves == nullptr) return;
+    for (const std::vector<Vec3>& curve : *loaded.mesh->curves) GIANT_CHECK(curve.size() == 3);
+
+    // Worn at twice the size: every curve a strand, as long and as far out as the entity makes it.
+    ai::CommandResult made = run("create_entity", {{"shape", "mesh"},
+                                                   {"mesh", file},
+                                                   {"scale", {2.0, 2.0, 2.0}},
+                                                   {"hair", {{"on", true}, {"from_file", true}, {"strands", 100}, {"guides", 2}}}});
+    GIANT_CHECK(made.ok);
+    const world::EntityId id = made.ok ? made.value["id"].get<world::EntityId>() : 0;
+    Json got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 1 && got["hair"]["strands"] == 4 && got["hair"]["guides"] == 2 && got["hair"]["problem"] == "");
+    GIANT_CHECK_NEAR(got["hair"]["longest"].get<double>(), 0.4, 1e-3);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_max"][0].get<double>(), 0.6, 1e-3);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_max"][1].get<double>(), 0.4, 1e-3);
+    GIANT_CHECK(run("get_entity", {{"id", id}}).value["hair"]["from_file"] == true);
+    // `strands` is the most kept, evenly over the file's.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"strands", 2}, {"guides", 1}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["hair"]["strands"] == 2);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_max"][0].get<double>(), 0.4, 1e-3); // the first and the third
+    // Not from its file: a file without a skeleton grows none. A file without curves brings none.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"from_file", false}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 0 && got["hair"]["problem"].get<std::string>().find("skeleton") != std::string::npos);
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", arm}, {"hair", {{"from_file", true}, {"joint", "elbow"}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 0 && got["hair"]["problem"].get<std::string>().find("curves") != std::string::npos);
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"from_file", false}}}}).ok);
+    GIANT_CHECK(run("get_hair", {{"wait", true}, {"id", id}}).value["grown"] == 1); // grown on the arm instead
+
+    // On a character the curves are taken about its joint at rest, by its largest scale.
+    const MeshLibrary::Mesh* body = meshes.find(arm);
+    GIANT_CHECK(body != nullptr && body->skinned != nullptr);
+    if (body == nullptr || body->skinned == nullptr) return;
+    const std::vector<std::vector<Vec3>> one{{{0.0f, 1.0f, 0.0f}, {0.5f, 2.0f, 0.0f}}};
+    const u32 elbow = hair_joint(body->skinned->skeleton, "elbow");
+    const std::vector<std::vector<Vec3>> placed = hair_strands(one, body->skinned.get(), elbow, {2.0f, 1.0f, -1.0f}, 10);
+    GIANT_CHECK(placed.size() == 1 && placed[0].size() == 2);
+    if (placed.size() == 1 && placed[0].size() == 2) {
+        GIANT_CHECK(length(placed[0][0]) < 1e-5f); // the elbow is at y = 1
+        GIANT_CHECK(length(placed[0][1] - Vec3{1.0f, 2.0f, 0.0f}) < 1e-5f);
+    }
+    GIANT_CHECK(hair_strands(one, nullptr, 0, {2.0f, 1.0f, 1.0f}, 0).empty());
+    GIANT_CHECK(hair_strands({}, nullptr, 0, {1.0f, 1.0f, 1.0f}, 10).empty());
+}

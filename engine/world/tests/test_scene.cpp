@@ -460,6 +460,7 @@ GIANT_TEST("world: hair on entities saves and loads, only when set, within its r
     head.hair.guides = 300;
     head.hair.top = 0.4f;
     head.hair.joint = "Head";
+    head.hair.from_file = true;
     head.hair.length = 0.45f;
     head.hair.length_variation = 0.1f;
     head.hair.droop = 0.6f;

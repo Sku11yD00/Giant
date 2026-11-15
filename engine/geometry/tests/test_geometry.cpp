@@ -375,6 +375,23 @@ GIANT_TEST("geometry: glTF's default material is counted; lines do not count; sp
     const ImportResult l =
         import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":1})"));
     GIANT_CHECK(l.ok() && l.materials.size() == 1 && l.materials[0].name == "paint");
+    // The lines are kept as hair curves (rust's two triangles' six indices): as a list three
+    // segments, joined where one starts on the vertex the last ended on; as a strip one curve
+    // through all six, where the node stands.
+    usize points = 0;
+    for (const std::vector<Vec3>& curve : l.curves) points += curve.size();
+    GIANT_CHECK(r.curves.empty() && !l.curves.empty() && l.curves.size() <= 3 && points == 3 + l.curves.size());
+    const ImportResult strip =
+        import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":3})"));
+    GIANT_CHECK(strip.ok() && strip.curves.size() == 1 && strip.curves[0].size() == 6);
+    if (strip.curves.size() == 1 && strip.curves[0].size() == 6 && !l.curves.empty()) {
+        GIANT_CHECK(near3(strip.curves[0][0], l.curves[0][0]) && near3(strip.curves[0][1], l.curves[0][1]));
+        GIANT_CHECK(length(strip.curves[0][1] - strip.curves[0][0]) > 1e-3f);
+    }
+    // Points are still skipped, with a warning.
+    const ImportResult dots =
+        import_gltf_memory(replace_json(glb, R"("indices":3,"material":1})", R"("indices":3,"material":1,"mode":0})"));
+    GIANT_CHECK(dots.ok() && dots.curves.empty() && !dots.warnings.empty());
     // Paint as specular-glossiness: its diffuse colour, no metal, roughness from glossiness.
     const ImportResult sg = import_gltf_memory(replace_json(
         glb, R"({"name":"paint","pbrMetallicRoughness":{"metallicRoughnessTexture":{"index":0,"texCoord":1}}})",

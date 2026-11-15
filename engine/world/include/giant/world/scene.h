@@ -140,6 +140,7 @@ struct Hair {
     i32 guides = 256;               // 1 to k_max_hair_guides (and at most `strands`): the strands that are simulated
     float top = 0.5f;               // 0.01 to 1: the share of the shape's height, from its top, that grows hair
     std::string joint;              // a character's joint it grows round and rides (empty: the first named like a head)
+    bool from_file = false;         // a mesh entity's: its file's own hair curves (line primitives) instead of grown ones
     float length = 0.25f;           // metres, 0.001 to 10
     float length_variation = 0.2f;  // 0 to 1: strands are shorter by up to this share
     float droop = 0.8f;             // 0 to 1: stands on end to hangs

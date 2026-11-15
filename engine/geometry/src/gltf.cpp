@@ -197,6 +197,9 @@ struct Target {
     // Skinned: the mesh's morph targets (merged by name over the file's
     // meshes); null: morph targets are dropped.
     std::vector<MorphTarget>* morphs = nullptr;
+    // Where the node's line primitives (hair curves) stand at rest in the
+    // file's space; null: as `transform` places its triangles.
+    const NodeTransform* curves = nullptr;
 };
 
 class Importer {
@@ -437,6 +440,86 @@ private:
         return &out;
     }
 
+    // A line primitive's curves (hair strands): a strip or loop is one, the
+    // segments of a list are joined where one starts at the vertex the last
+    // ended on. Kept where `transform` places them; curves with a point
+    // that is no number, or under two points, are left out.
+    bool curves(const cgltf_primitive& prim, const NodeTransform& transform) {
+        const cgltf_accessor* positions = cgltf_find_accessor(&prim, cgltf_attribute_type_position, 0);
+        if (positions == nullptr || positions->type != cgltf_type_vec3) {
+            warn_once(m_warned_positions, "a primitive without vec3 positions was skipped");
+            return true;
+        }
+        const cgltf_size vertex_count = positions->count;
+        const cgltf_size index_count = prim.indices != nullptr ? prim.indices->count : vertex_count;
+        if (index_count > k_max_import_curve_points * 2) {
+            return fail("a mesh's lines have more than 32 million indices");
+        }
+        // (As for triangles: real data only, and no sparse values on interleaved buffers.)
+        if (positions->buffer_view == nullptr || (prim.indices != nullptr && prim.indices->buffer_view == nullptr)) {
+            return fail("a mesh has positions or indices without data");
+        }
+        for (const cgltf_accessor* a : std::initializer_list<const cgltf_accessor*>{positions, prim.indices}) {
+            if (a != nullptr && a->is_sparse && a->stride != cgltf_calc_size(a->type, a->component_type)) {
+                return fail("sparse accessors on interleaved buffers are not supported");
+            }
+        }
+        const std::vector<Vec3>* p = unpack(positions, true);
+        if (p == nullptr) {
+            return false;
+        }
+        std::vector<u32> indices(index_count);
+        if (prim.indices != nullptr) {
+            if (index_count > 0 &&
+                cgltf_accessor_unpack_indices(prim.indices, indices.data(), sizeof(u32), index_count) != index_count) {
+                return fail("could not read line indices");
+            }
+            for (const u32 i : indices) {
+                if (i >= vertex_count) {
+                    return fail("a line index is out of range");
+                }
+            }
+        } else {
+            for (cgltf_size i = 0; i < index_count; ++i) {
+                indices[i] = static_cast<u32>(i);
+            }
+        }
+        std::vector<Vec3> curve;
+        bool sound = true;
+        const auto add = [&](u32 index) {
+            const Vec3 at = transform.point((*p)[index]);
+            sound = sound && std::isfinite(at.x) && std::isfinite(at.y) && std::isfinite(at.z);
+            curve.push_back(at);
+        };
+        const auto end = [&] {
+            if (sound && curve.size() >= 2) {
+                if (m_result.curves.size() >= k_max_import_curves || m_curve_points + curve.size() > k_max_import_curve_points) {
+                    warn_once(m_warned_curves, "hair curves past the first 262144 (or 16 million points) were skipped");
+                } else {
+                    m_curve_points += curve.size();
+                    m_result.curves.push_back(curve);
+                }
+            }
+            curve.clear();
+            sound = true;
+        };
+        if (prim.type == cgltf_primitive_type_lines) {
+            u32 last = 0;
+            for (usize i = 0; i + 1 < indices.size(); i += 2) {
+                if (curve.empty() || indices[i] != last) {
+                    end();
+                    add(indices[i]);
+                }
+                add(indices[i + 1]);
+                last = indices[i + 1];
+            }
+        } else {
+            for (const u32 index : indices) add(index);
+        }
+        end();
+        return true;
+    }
+
     // A vec3 accessor as floats, read once per node (primitives often share
     // one). Positions are counted against the file's vertex budget; normals
     // match them in count, so they are not counted again.
@@ -460,10 +543,14 @@ private:
     }
 
     bool primitive(const cgltf_primitive& prim, const NodeTransform& transform, const Target& target) {
+        if (prim.type == cgltf_primitive_type_lines || prim.type == cgltf_primitive_type_line_strip ||
+            prim.type == cgltf_primitive_type_line_loop) {
+            return curves(prim, target.curves != nullptr ? *target.curves : transform);
+        }
         if (prim.type != cgltf_primitive_type_triangles &&
             prim.type != cgltf_primitive_type_triangle_strip &&
             prim.type != cgltf_primitive_type_triangle_fan) {
-            warn_once(m_warned_type, "points and lines are skipped: only triangles are imported");
+            warn_once(m_warned_type, "points are skipped: only triangles and lines are imported");
             return true;
         }
         if (prim.has_draco_mesh_compression) {
@@ -798,6 +885,8 @@ private:
     bool m_warned_unweighted = false;
     bool m_warned_weights = false;
     bool m_warned_type = false;
+    bool m_warned_curves = false;
+    u64 m_curve_points = 0;
     bool m_warned_morph = false;
     bool m_warned_positions = false;
     bool m_warned_normals = false;
@@ -1109,6 +1198,7 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
             if (!skinned_meshes.insert(node->mesh).second) continue;
             // In bind space as written: a skinned mesh's node does not place it.
             target.skin_joints = &skin_joints;
+            // (Its hair curves likewise: bind space stands for the rest pose.)
             float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
             if (!importer.mesh(node, matrix_transform(identity), target)) return false;
             continue;
@@ -1121,7 +1211,11 @@ bool import_skinned(const cgltf_data& data, const cgltf_skin& skin, const std::v
         }
         if (joint < 0) joint = 0; // (joint 0 is a root: parents come first)
         target.rigid = joint;
-        const Mat4 bind = anim::affine_inverse(rest[static_cast<usize>(joint)]) * world_matrix(node);
+        const Mat4 world = world_matrix(node);
+        const Mat4 bind = anim::affine_inverse(rest[static_cast<usize>(joint)]) * world;
+        // (Its hair curves stay where they stand at rest: the hair's side picks their joint.)
+        const NodeTransform at_rest = matrix_transform(world.m);
+        target.curves = &at_rest;
         if (!importer.mesh(node, matrix_transform(bind.m), target)) return false;
     }
     if (!read_clips(data, skeleton, joint_of, importer, out.mesh.morphs.size(), out.clips)) return false;

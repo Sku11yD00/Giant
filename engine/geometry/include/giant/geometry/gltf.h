@@ -6,7 +6,8 @@
 // glTF spec asks). Units are metres and +Y is up, as in the engine.
 //
 // Read for now: positions, normals, texture coordinates (TEXCOORD_0),
-// tangents and indices of triangle, strip and fan primitives, and one skin
+// tangents and indices of triangle, strip and fan primitives, the
+// positions of line primitives (hair curves: ImportResult::curves), and one skin
 // with its skeleton and animation clips. Tangents the file lacks are made
 // from the uvs (generate_tangents, mesh.h).
 // Materials are read as their metallic-roughness values and images
@@ -61,6 +62,8 @@ namespace giant::geometry {
 inline constexpr u64 k_max_import_triangles = 16'000'000;
 inline constexpr u64 k_max_import_vertices = 3 * k_max_import_triangles; // read, over all nodes
 inline constexpr u64 k_max_import_file_bytes = u64{2} << 30; // 2 GiB, buffers included
+inline constexpr u64 k_max_import_curves = 262144;          // hair curves kept (the first)
+inline constexpr u64 k_max_import_curve_points = 16'000'000; // over all of them
 
 // An image a material uses: a file beside the glTF (`path`, relative to its
 // folder, forward slashes, never leaving it) or one inside it (`embedded`:
@@ -110,6 +113,13 @@ struct ImportResult {
     // its triangles are counted apart).
     std::vector<ImportedMaterial> materials;
     u64 default_material_triangles = 0;
+    // Hair curves: the shown meshes' line primitives (a strip or loop is
+    // one curve, a list's segments are joined end to start), each two or
+    // more points, root first as the file orders them, in the file's
+    // space where they stand at rest (a skinned mesh's own lines as
+    // bound). For geometry::groom_from_strands. A file still needs
+    // triangles to be imported.
+    std::vector<std::vector<Vec3>> curves;
     std::string error;                 // empty on success
     bool ok() const { return error.empty(); }
 };

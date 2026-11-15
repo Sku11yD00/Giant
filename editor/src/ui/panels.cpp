@@ -750,6 +750,10 @@ void EditorPanels::draw_properties() {
             }
             if (e->shape == world::Shape::mesh) {
                 const MeshLibrary::Mesh* mesh = m_state.meshes != nullptr ? m_state.meshes->find_normalized(e->mesh) : nullptr;
+                if (mesh != nullptr && mesh->curves != nullptr) {
+                    bool brought = h.from_file;
+                    if (ImGui::Checkbox("Hair from its file", &brought)) set("hair", {{"from_file", brought}});
+                }
                 if (mesh != nullptr && mesh->skinned != nullptr) {
                     if (ImGui::BeginCombo("Hair joint", h.joint.empty() ? "(the head)" : h.joint.c_str())) {
                         if (ImGui::Selectable("(the head)", h.joint.empty())) set("hair", {{"joint", ""}});
