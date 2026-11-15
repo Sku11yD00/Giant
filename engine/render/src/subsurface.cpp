@@ -62,6 +62,25 @@ gpu::SkinLook to_gpu(const SkinLook& look, u32 detail) {
     return out;
 }
 
+gpu::EyeLook to_gpu(const EyeLook& look) {
+    const EyeLook d;
+    gpu::EyeLook out{};
+    out.iris_radius = finite_in(look.iris_radius, 0.02f, 0.5f, d.iris_radius);
+    out.pupil_radius = finite_in(look.pupil_radius, 0.0f, 0.95f, d.pupil_radius);
+    // (Deeper, the iris would fold over itself at its near rim seen from the side.)
+    out.iris_depth = finite_in(look.iris_depth, 0.0f, 0.45f, d.iris_depth);
+    out.limbal = finite_in(look.limbal, 0.0f, 0.5f, d.limbal);
+    out.iris_color[0] = finite_in(look.iris_color.x, 0.0f, 1.0f, d.iris_color.x);
+    out.iris_color[1] = finite_in(look.iris_color.y, 0.0f, 1.0f, d.iris_color.y);
+    out.iris_color[2] = finite_in(look.iris_color.z, 0.0f, 1.0f, d.iris_color.z);
+    out.painted = look.painted ? 1.0f : 0.0f;
+    out.limbal_darkness = finite_in(look.limbal_darkness, 0.0f, 1.0f, d.limbal_darkness);
+    out.cornea_roughness = finite_in(look.cornea_roughness, 0.045f, 1.0f, d.cornea_roughness);
+    out.bulge = finite_in(look.bulge, 0.0f, 1.0f, d.bulge);
+    out.shade = finite_in(look.shade, 0.0f, 1.0f, d.shade);
+    return out;
+}
+
 SubsurfaceKernel subsurface_kernel() {
     // Each tap stands for the stretch halfway to its neighbours; the
     // profile is integrated over it (a few samples), so the narrow

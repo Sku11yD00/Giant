@@ -91,3 +91,38 @@ GIANT_TEST("subsurface: a skin look for the GPU keeps its values in range, its d
     const gpu::SkinLook low = to_gpu(look, 3u);
     GIANT_CHECK(low.transmission == 0.0f && low.detail_tiling == 256.0f);
 }
+
+GIANT_TEST("eyes: an eye look for the GPU keeps its values in range, the defaults for what is not a number") {
+    EyeLook look;
+    const gpu::EyeLook plain = to_gpu(look);
+    GIANT_CHECK(plain.iris_radius == 0.15f && plain.pupil_radius == 0.3f && plain.iris_depth == 0.35f);
+    GIANT_CHECK(plain.limbal == 0.15f && plain.limbal_darkness == 0.7f && plain.painted == 0.0f);
+    GIANT_CHECK(plain.iris_color[0] == 0.25f && plain.iris_color[2] == 0.55f);
+    GIANT_CHECK(plain.cornea_roughness == 0.06f && plain.bulge == 0.3f && plain.shade == 0.5f);
+    look.iris_radius = 9.0f;
+    look.pupil_radius = 2.0f;
+    look.iris_depth = -1.0f;
+    EyeLook deep;
+    deep.iris_depth = 3.0f;
+    GIANT_CHECK(to_gpu(deep).iris_depth == 0.45f);
+    look.limbal = 3.0f;
+    look.limbal_darkness = 7.0f;
+    look.iris_color = {-1.0f, 0.5f, 4.0f};
+    look.painted = true;
+    look.cornea_roughness = 0.0f;
+    look.bulge = 5.0f;
+    look.shade = -2.0f;
+    const gpu::EyeLook kept = to_gpu(look);
+    GIANT_CHECK(kept.iris_radius == 0.5f && kept.pupil_radius == 0.95f && kept.iris_depth == 0.0f);
+    GIANT_CHECK(kept.limbal == 0.5f && kept.limbal_darkness == 1.0f && kept.painted == 1.0f);
+    GIANT_CHECK(kept.iris_color[0] == 0.0f && kept.iris_color[1] == 0.5f && kept.iris_color[2] == 1.0f);
+    GIANT_CHECK(kept.cornea_roughness == 0.045f && kept.bulge == 1.0f && kept.shade == 0.0f);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    look.iris_radius = nan;
+    look.iris_depth = std::numeric_limits<float>::infinity();
+    look.iris_color.y = nan;
+    look.cornea_roughness = nan;
+    const gpu::EyeLook fixed = to_gpu(look);
+    GIANT_CHECK(fixed.iris_radius == 0.15f && fixed.iris_depth == 0.35f && fixed.iris_color[1] == 0.4f &&
+                fixed.cornea_roughness == 0.06f);
+}

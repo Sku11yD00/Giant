@@ -55,4 +55,8 @@ std::array<float, 3> skin_transmittance(float mm);
 // descriptor (rhi::k_no_descriptor: none).
 gpu::SkinLook to_gpu(const SkinLook& look, u32 detail);
 
+// An eye look for the GPU, its values kept in range (non-finite ones
+// taken as the defaults).
+gpu::EyeLook to_gpu(const EyeLook& look);
+
 } // namespace giant::render

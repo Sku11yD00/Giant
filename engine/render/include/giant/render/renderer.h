@@ -105,6 +105,37 @@ struct TextureResidency {
     u64 bytes = 0; // on the GPU
 };
 
+inline constexpr u32 k_no_eye_look = ~0u;
+inline constexpr u32 k_max_eye_looks = 255;
+
+// How an eye looks (Material::eye_look; FrameInput::eye_looks). An eye is
+// a mesh with uvs whose iris is centred at uv (0.5, 0.5), `iris_radius`
+// wide in uv (the usual eye texture layout; any transform, skinned too).
+// The iris lies under the cornea: what shows through it is where the view
+// ray, bent at the cornea (index 1.376), meets the iris plane
+// `iris_depth` (of the iris radius) below, so the iris and pupil shift and
+// foreshorten as the eye turns, as real ones do. `painted`: the material's
+// base colour texture holds the iris and pupil (sampled where the bent ray
+// lands); else they are drawn: `iris_color` with a black pupil
+// `pupil_radius` (of the iris) wide, the material's base colour the white.
+// A dark ring `limbal` (of the iris radius) wide, `limbal_darkness` deep,
+// rims the iris. The whole eye is wet: non-metal, its highlight at
+// `cornea_roughness`, off a cornea bulging out over the iris (`bulge`: how
+// far its normal leans from the centre at the rim). `shade` darkens the
+// white toward its edge, where lids and lashes shade it.
+struct EyeLook {
+    float iris_radius = 0.15f;      // uv (0.02 to 0.5)
+    float pupil_radius = 0.3f;      // of the iris radius (0 to 0.95)
+    float iris_depth = 0.35f;       // of the iris radius (0 to 0.45)
+    float limbal = 0.15f;           // of the iris radius (0 to 0.5)
+    float limbal_darkness = 0.7f;   // 0 to 1
+    Vec3 iris_color{0.25f, 0.4f, 0.55f};
+    bool painted = false;
+    float cornea_roughness = 0.06f; // 0.045 to 1
+    float bulge = 0.3f;             // 0 to 1
+    float shade = 0.5f;             // 0 to 1
+};
+
 inline constexpr u32 k_no_skin_look = ~0u;
 inline constexpr u32 k_max_skin_looks = 255;
 
@@ -199,6 +230,9 @@ struct Material {
     // them: not skin). Light under skin spreads out before it leaves
     // (subsurface scattering) and its highlight has two lobes.
     u32 skin_look = k_no_skin_look;
+    // An eye: an index into FrameInput::eye_looks (k_no_eye_look, or past
+    // them: not an eye; an eye is not skin, whatever skin_look says).
+    u32 eye_look = k_no_eye_look;
 };
 
 // One of the ground's layers (FrameInput::terrain_layers), for materials
@@ -772,6 +806,8 @@ struct FrameInput {
     double water_seconds = 0.0;
     // Skin looks (Material::skin_look; at most k_max_skin_looks count).
     std::span<const SkinLook> skin_looks;
+    // Eye looks (Material::eye_look; at most k_max_eye_looks count).
+    std::span<const EyeLook> eye_looks;
     // The seas (past k_max_seas: left out, RenderStats::water_overflow).
     std::span<const SeaSurface> seas;
     // How many of water_indices (from the first; whole triangles) are

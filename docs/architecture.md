@@ -1769,6 +1769,30 @@ in the tangent frame turned to it, over the material's own normal map
 streaming's feedback asks for it the tiling's levels finer than the
 material's maps.
 
+Eyes (C5a). A material with an eye look (`render::EyeLook`,
+`FrameInput::eye_looks`, `Material::eye_look`; an eye is never skin) is a
+mesh with uvs whose iris is centred at uv (0.5, 0.5): uv-based, so it
+holds under any transform and on skinned meshes. `resolve.slang`'s
+`eye_surface` bends the view ray at the cornea (index 1.376, its normal
+leaning out toward the rim by `bulge`) and carries it down to the iris
+plane, `iris_depth` (at most 0.45 of the iris radius: deeper would fold
+the iris over itself at its near rim) below at the centre and none at the rim; the
+material's textures are sampled where it lands, so the iris and pupil
+shift under the cornea as the eye turns. `eye_colors` then draws the iris
+and pupil (unless `painted`: the base colour texture holds them), the
+limbal ring and the lids' shade toward the texture's edge, and makes the
+whole eye wet: non-metal at `cornea_roughness`, lit by the cornea's
+normal. Looks reach the GPU as `gpu::EyeLook` (48 bytes each, cleaned by
+`to_gpu`), uploaded only on frames with eye materials; the material's
+flags carry `k_material_eye` and the look's index in the bits skin uses.
+Along v the frame is minus the normal maps' bitangent (which runs toward
+smaller v), so the shift is the eye's whatever way its uvs lie or its
+instance is turned. The cornea's turn over a pixel is added to
+specular anti-aliasing's variance, so a small far eye's highlight widens
+to its pixel. The iris is lit as the cornea is (no caustic inside it yet),
+the normal map is read at the unshifted uv, and the parallax takes the uvs
+to run evenly along the tangent and bitangent.
+
 Skin in worlds and the editor (C4c). `world::Material::skin`
 (`world::SkinLook`, optional: none is not skin) is saved with entity, kit
 piece and scatter item materials as a `skin` object (its numbers all written, the
