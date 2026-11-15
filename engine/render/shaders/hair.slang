@@ -425,14 +425,12 @@ void cs_light(uint3 id : SV_DispatchThreadID) {
         [loop] for (uint i = 0u; i < count; ++i) {
             const uint index = lb.Load(e.local.entries + (listed.x + i) * 4u);
             const LocalLight lamp = load_light(lb, e.local.lights + index * k_light_bytes);
+            // (Its range is taken at each place below: a lamp may reach a
+            // strand's tip and not its middle.)
             const float3 to_middle = lamp.position - middle;
-            const float d2 = dot(to_middle, to_middle);
-            if (d2 >= lamp.range * lamp.range || d2 < 1e-8) {
-                continue;
-            }
             float reaches = 1.0;
             if (lamp.shadow != 0u && e.local.atlas_on != 0u) {
-                reaches = light_shadow(e.local, lb, lamp, middle, to_middle * rsqrt(d2));
+                reaches = light_shadow(e.local, lb, lamp, middle, safe_normalize(to_middle, float3(0.0, 1.0, 0.0)));
             }
             if (reaches <= 0.0) {
                 continue;
@@ -441,9 +439,12 @@ void cs_light(uint3 id : SV_DispatchThreadID) {
                 const uint k = j * 3u;
                 const float3 p = points[k];
                 const float3 to_light = lamp.position - p;
-                const float3 ll = safe_normalize(to_light, float3(0.0, 1.0, 0.0));
+                if (dot(to_light, to_light) < 1e-8) {
+                    continue; // (at the lamp itself: no way to it)
+                }
+                const float3 ll = normalize(to_light);
                 const float falloff = light_falloff(lamp, to_light, ll) * reaches;
-                if (falloff <= 0.0) {
+                if (!(falloff > 0.0)) {
                     continue;
                 }
                 const float3 t = safe_normalize(points[min(k + 1u, k_strand_points - 1u)] - points[k > 0u ? k - 1u : 0u],
@@ -512,6 +513,7 @@ struct ShadowVaryings {
     float4 position : SV_Position; // z: its depth in the tile (more nearer the sun)
     float across : ACROSS;         // texels from the strand's middle line
     float width : WIDTH;           // the strand's width there, texels
+    float stands : STANDS;         // the strands it stands for
 };
 
 // A groom's first shadow_count strands as ribbons facing the sun, into
@@ -554,6 +556,7 @@ ShadowVaryings vs_shadow(uint vertex_id : SV_VertexID) {
     o.position = float4(at.x / size * 2.0 - 1.0, 1.0 - at.y / size * 2.0, clamp(here.z, 0.001, 1.0), 1.0);
     o.across = side * drawn_half;
     o.width = 2.0 * half_width;
+    o.stands = g.shadow_stands;
     return o;
 }
 
@@ -574,8 +577,7 @@ float4 ps_shadow_sums(ShadowVaryings i) : SV_Target0 {
     if (cover <= 0.0) {
         discard;
     }
-    const Groom g = load_groom();
-    const float amount = cover * g.shadow_stands;
+    const float amount = cover * i.stands;
     const float z0 = read_texture_float(push.shadow_depth).Load(int3(int2(i.position.xy), 0));
     const float behind = max(z0 - i.position.z - k_hair_slack, 0.0);
     return float4(behind < k_hair_layers.x ? amount : 0.0, behind < k_hair_layers.y ? amount : 0.0,

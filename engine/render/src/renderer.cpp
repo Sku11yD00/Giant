@@ -4514,7 +4514,8 @@ rhi::TextureHandle Renderer::draw_hair(rhi::CommandList& cmd, const FrameData& d
     // Each groom as the sun sees it, into its tile: the depth nearest the
     // sun, then the hair within depths of that.
     const Vec3& sun = frame.lighting.sun_light;
-    if (frame.settings.hair_shadows && std::max({sun.x, sun.y, sun.z}) > 0.0f && ensure_hair_shadows()) {
+    if (frame.settings.hair_shadows && std::max({sun.x, sun.y, sun.z}) > 0.0f && m_hair_shadow_depth.valid() &&
+        m_hair_shadow_opacity.valid()) {
         cmd.barrier(m_hair_drawn, rhi::ResourceState::shader_read);
         push.drawn = m_device.read_descriptor(m_hair_drawn);
         const auto tiles = [&] {

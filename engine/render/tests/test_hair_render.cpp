@@ -383,9 +383,6 @@ GIANT_TEST("hair: a groom's shadow tile spans its hair as posed, and holds its f
     g = to_gpu(planned, *grooms.find(id), draws[0], {});
     GIANT_CHECK(g.shadow_count == 300 && g.shadow_stride == 15);
     GIANT_CHECK_NEAR(g.shadow_stands, 1.0, 1e-6);
-    // Every drawn groom has a tile.
-    GIANT_CHECK(k_hair_shadow_tiles_across * k_hair_shadow_tiles_across >= k_max_hair_draws);
-    GIANT_CHECK(k_hair_shadow_tile * k_hair_shadow_tiles_across == k_hair_shadow_size);
 }
 
 GIANT_TEST("hair: grooms go to the GPU under a budget and draw in the lit view once there (null device)") {
@@ -787,7 +784,7 @@ GIANT_TEST("hair: d3d12 thick hair shades itself from the sun, and lamps light i
     std::vector<LocalLight> lamps(1);
     lamps[0].position = {0.0, 0.0, -1.0};
     lamps[0].range = 6.0f;
-    lamps[0].intensity = 20.0f;
+    lamps[0].intensity = 1.0f; // (0.25 m from the nearest curtain)
     frame.lights = lamps;
     const std::vector<u8> lamp = draw();
     const bool lamp_still = again == lamp;

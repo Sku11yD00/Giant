@@ -2009,7 +2009,8 @@ strand never shades itself; a point within a texel's depth of the front
 counts as at it, so a sheet of hair struck at a slant does not shade
 itself either) and deepens smoothly inwards. Past the third depth the
 shade runs up to all the hair in the texel by half the ball's width, so
-the middle of a very deep groom is shaded a little by hair behind it. The three lobes lose `exp(-hair before)`; the scattered term
+the middle of a very deep groom is shaded a little by hair behind it, as
+is hair lying far behind a stray strand that is the front of its texel. The three lobes lose `exp(-hair before)`; the scattered term
 loses less the lighter the hair (light hair passes light on), which is
 what makes blond hair glow where black hair is dark. At most 4096 strands
 of a groom go into its tile (its first, in pieces of three points or more,
@@ -2025,7 +2026,10 @@ the sky's light reaches inner hair as it does outer; a tile's texel is
 4 mm on a head of hair 0.5 m across, so shade is soft at that scale; a
 strand blown past the ball round its guides takes the shade at the tile's
 edge; against a lamp a flat sheet of hair darkens away from the point
-nearest the lamp; a strand's lamps are those listed at its middle;
+nearest the lamp; a strand's lamps are those listed at its middle; the
+shadow passes are bounded but not free (at most 2^18 strands in pieces of
+five, twice, and both targets cleared whole each frame), and are not yet
+in a gate;
 inner layers
 take the outer layer's colour where they show through (a stray strand
 in front of a lock of another colour tints its pixel); hair thinner than
