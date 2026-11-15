@@ -69,7 +69,7 @@ struct Ogawa {
 };
 
 // Value types, as Alembic numbers them.
-constexpr u32 k_bool = 0, k_u8 = 1, k_i8 = 2, k_i32 = 6, k_f32 = 10, k_f64 = 11;
+constexpr u32 k_bool = 0, k_u8 = 1, k_i8 = 2, k_i16 = 4, k_i32 = 6, k_f32 = 10, k_f64 = 11;
 
 // A property header: kind 0 compound, 1 scalar, 2 array. `wide` writes
 // sizes as 4 bytes with every optional field and words of its own.
@@ -210,6 +210,19 @@ GIANT_TEST("alembic: one groom_guide value stands for every curve; odd curves wa
     o.guide = bytes_of(std::vector<i32>{0, 0, 1});
     r = read_alembic_curves(groom(false, o));
     GIANT_CHECK(r.ok() && r.curves.size() == 1 && r.guides == 3 && r.warnings.empty());
+    // Of two bytes; and a size that is no whole count of them is ignored.
+    o.guide = bytes_of(std::vector<i16>{0, 256, 0});
+    o.guide_pod = k_i16;
+    r = read_alembic_curves(groom(false, o));
+    GIANT_CHECK(r.ok() && r.curves.size() == 2 && r.guides == 3 && r.warnings.empty());
+    o.guide.push_back(1);
+    r = read_alembic_curves(groom(false, o));
+    GIANT_CHECK(r.ok() && r.curves.size() == 2 && r.guides == 2 && r.warnings.size() == 1);
+    // Numbers that are not whole are ignored.
+    o.guide = bytes_of(std::vector<float>{1, 1, 1});
+    o.guide_pod = k_f32;
+    r = read_alembic_curves(groom(false, o));
+    GIANT_CHECK(r.ok() && r.curves.size() == 2 && r.guides == 2 && r.warnings.size() == 1);
     o.guide_pod = k_i8;
     // A value count that fits nothing is ignored.
     o.guide = {1, 0};
@@ -311,7 +324,7 @@ GIANT_TEST("alembic: files that are not Alembic, unfinished, cut short or damage
         GIANT_CHECK(r.ok() || r.curves.empty());
         GIANT_CHECK(r.curves.size() <= 8);
     }
-    // A group that holds itself is stopped by the object limit.
+    // A group that holds itself is stopped by the depth limit.
     Ogawa loop;
     Compound none;
     const u64 properties = none.write(loop);
@@ -332,18 +345,51 @@ GIANT_TEST("alembic: an object said to be shown is, under a hidden one") {
         const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {outer})));
         GIANT_CHECK(r.ok() && r.curves.size() == (visible == 1 ? 1u : 0u));
     }
+    // Guides under a hidden object are not counted.
+    Ogawa file;
+    CurveOptions marked;
+    marked.guide = {1};
+    const u64 c = curves(file, {0, 0, 0, 1, 0, 0}, {2}, marked);
+    const u64 outer = object(file, xform(file, {}, {}, false, 0), {c});
+    Compound none;
+    const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {outer, c})));
+    GIANT_CHECK(r.ok() && r.curves.empty() && r.guides == 1);
 }
 
 GIANT_TEST("alembic: the work a file can ask for is bounded") {
-    // A transform of more steps than Alembic can write is ignored, not worked through.
-    {
+    // A transform of more steps than Alembic can write (255) is ignored,
+    // not worked through: 255 turns of a degree about x are taken.
+    for (const usize steps : {usize{255}, usize{256}}) {
         Ogawa file;
-        const u64 c = curves(file, {0, 0, 0, 1, 0, 0}, {2});
-        const u64 turned = object(file, xform(file, std::vector<u8>(256, 0x40), std::vector<double>(256, 1.0), false), {c});
+        const u64 c = curves(file, {0, 0, 0, 0, 1, 0}, {2});
+        const u64 turned =
+            object(file, xform(file, std::vector<u8>(steps, 0x40), std::vector<double>(steps, 1.0), false), {c});
         Compound none;
         const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {turned})));
-        GIANT_CHECK(r.ok() && r.curves.size() == 1 && r.warnings.size() == 1);
-        if (r.curves.size() == 1) GIANT_CHECK(near3(r.curves[0][1], {1, 0, 0}));
+        GIANT_CHECK(r.ok() && r.curves.size() == 1 && r.warnings.size() == (steps == 256 ? 1u : 0u));
+        if (r.curves.size() == 1) {
+            GIANT_CHECK(near3(r.curves[0][1], steps == 256 ? Vec3{0, 1, 0} : Vec3{0, -0.258819f, -0.965926f}, 1e-3f));
+        }
+    }
+    // Numbers too small to matter are none (they are slow to work with): a
+    // scale of 1e-120 and one of 1e120 after it do not give 1 back.
+    {
+        Ogawa file;
+        const u64 c = curves(file, {1, 0, 0, 1, 1, 0}, {2});
+        const u64 scaled = object(file, xform(file, {0x00, 0x00}, {1e120, 1, 1, 1e-120, 1, 1}, false), {c});
+        Compound none;
+        const AlembicCurves r = read_alembic_curves(file.finish(object(file, none.write(file), {scaled})));
+        GIANT_CHECK(r.ok() && r.curves.size() == 1);
+        if (r.curves.size() == 1) GIANT_CHECK(near3(r.curves[0][0], {0, 0, 0}) && near3(r.curves[0][1], {0, 1, 0}));
+    }
+    // One empty object listed 65536 times is as many as are read; once more is refused.
+    for (const usize listings : {usize{65535}, usize{65536}}) {
+        Ogawa file;
+        Compound none;
+        const u64 properties = none.write(file);
+        const u64 leaf = object(file, properties, {});
+        const AlembicCurves r = read_alembic_curves(file.finish(object(file, properties, std::vector<u64>(listings, leaf))));
+        GIANT_CHECK(r.ok() == (listings == 65535));
     }
     // An object of many children listed many times over: refused.
     {
@@ -359,14 +405,15 @@ GIANT_TEST("alembic: the work a file can ask for is bounded") {
         const AlembicCurves r = read_alembic_curves(file.finish(file.group(listed)));
         GIANT_CHECK(!r.ok());
     }
-    // Objects nested past any real file's depth: refused.
-    {
+    // Objects nested 64 deep are read; deeper than any real file's are refused.
+    for (const int depth : {64, 65}) {
         Ogawa file;
         Compound none;
         const u64 properties = none.write(file);
-        u64 inner = object(file, properties, {});
-        for (int i = 0; i < 100; ++i) inner = object(file, properties, {inner});
-        GIANT_CHECK(!read_alembic_curves(file.finish(inner)).ok());
+        u64 inner = curves(file, {0, 0, 0, 1, 0, 0}, {2});
+        for (int i = 0; i < depth; ++i) inner = object(file, properties, {inner});
+        const AlembicCurves r = read_alembic_curves(file.finish(inner));
+        GIANT_CHECK(r.ok() == (depth == 64) && r.curves.size() == (depth == 64 ? 1u : 0u));
     }
 }
 

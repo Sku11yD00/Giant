@@ -57,13 +57,19 @@ struct Mat {
     double& at(usize r, usize c) { return m[r * 4 + c]; }
 };
 
+// A number too small to matter is none: numbers near the smallest a double
+// (or a float) can hold cost a processor some hundred times a sum's time,
+// which a file could ask for millions of times. With every transform value
+// 0 or at least this, no product or sum of two can come near them.
+double settled(double v, double least = 1e-100) { return std::fabs(v) < least ? 0.0 : v; }
+
 Mat operator*(const Mat& a, const Mat& b) {
     Mat out;
     for (usize r = 0; r < 4; ++r) {
         for (usize c = 0; c < 4; ++c) {
             double sum = 0.0;
             for (usize k = 0; k < 4; ++k) sum += a.at(r, k) * b.at(k, c);
-            out.at(r, c) = sum;
+            out.at(r, c) = settled(sum);
         }
     }
     return out;
@@ -270,6 +276,7 @@ private:
             v = 0.0;
             if (val_bytes.size() - at < 8) return false;
             std::memcpy(&v, val_bytes.data() + at, 8);
+            v = settled(v);
             at += 8;
             return true;
         };
@@ -347,7 +354,8 @@ private:
         const usize point_count = point_bytes.size() / 12;
         const usize curve_count = count_bytes.size() / 4;
         const usize guide_count = guide_bytes.size() / guide_width;
-        if (!guide_bytes.empty() && guide_count != 1 && guide_count != curve_count) {
+        if (!guide_bytes.empty() &&
+            (guide_bytes.size() % guide_width != 0 || (guide_count != 1 && guide_count != curve_count))) {
             warn_once(m_warned_guides, "a groom_guide that is not a whole number a curve was ignored");
             guide_bytes = {};
         }
@@ -360,7 +368,6 @@ private:
             return false;
         };
         usize at = 0;
-        std::vector<Vec3> curve;
         for (usize c = 0; c < curve_count; ++c) {
             if (++m_looked_at > k_max_looked_at) {
                 warn_once(m_warned_work, "the Alembic file shows its curves too many times: the rest were skipped");
@@ -385,24 +392,37 @@ private:
                 return true;
             }
             m_looked_at += n;
-            curve.clear();
+            // (Straight into the result: a curve may be most of the file.)
+            std::vector<Vec3>& curve = m_out.curves.emplace_back();
+            curve.reserve(n);
             bool sound = true;
-            float run = 0.0f;
+            double run = 0.0;
+            std::array<double, 3> last{};
             for (usize i = 0; i < n && sound; ++i) {
                 std::array<float, 3> p{};
                 std::memcpy(p.data(), point_bytes.data() + (from + i) * 12, 12);
                 const double x = p[0], y = p[1], z = p[2];
-                const Vec3 placed{
-                    static_cast<float>(x * world.at(0, 0) + y * world.at(1, 0) + z * world.at(2, 0) + world.at(3, 0)),
-                    static_cast<float>(x * world.at(0, 1) + y * world.at(1, 1) + z * world.at(2, 1) + world.at(3, 1)),
-                    static_cast<float>(x * world.at(0, 2) + y * world.at(1, 2) + z * world.at(2, 2) + world.at(3, 2))};
-                sound = std::isfinite(placed.x) && std::isfinite(placed.y) && std::isfinite(placed.z);
-                if (sound && !curve.empty()) run += length(placed - curve.back());
-                curve.push_back(placed);
+                // (Nothing under 1e-25 m: a float's squares stay whole numbers.)
+                const std::array<double, 3> placed{
+                    settled(x * world.at(0, 0) + y * world.at(1, 0) + z * world.at(2, 0) + world.at(3, 0), 1e-25),
+                    settled(x * world.at(0, 1) + y * world.at(1, 1) + z * world.at(2, 1) + world.at(3, 1), 1e-25),
+                    settled(x * world.at(0, 2) + y * world.at(1, 2) + z * world.at(2, 2) + world.at(3, 2), 1e-25)};
+                // (Beyond a float is no place either.)
+                sound = std::fabs(placed[0]) < 1e30 && std::fabs(placed[1]) < 1e30 && std::fabs(placed[2]) < 1e30;
+                if (!sound) break;
+                if (i > 0) {
+                    const double dx = placed[0] - last[0], dy = placed[1] - last[1], dz = placed[2] - last[2];
+                    run += std::sqrt(dx * dx + dy * dy + dz * dz);
+                }
+                last = placed;
+                curve.push_back(Vec3{static_cast<float>(placed[0]), static_cast<float>(placed[1]),
+                                     static_cast<float>(placed[2])});
             }
-            if (!sound || !std::isfinite(run) || !(run > 0.0f)) continue;
+            if (!sound || !(run > 0.0)) {
+                m_out.curves.pop_back();
+                continue;
+            }
             m_points += n;
-            m_out.curves.push_back(curve);
         }
         return true;
     }
