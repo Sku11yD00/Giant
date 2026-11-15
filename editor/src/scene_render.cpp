@@ -85,6 +85,22 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
     std::memcpy(&key.bits[16], &m.translucency, 4);
     std::memcpy(&key.bits[17], &m.alpha_cutoff, 4);
     std::memcpy(&key.bits[18], &m.canopy, 4);
+    u32 detail = TextureLibrary::k_no_ref;
+    if (m.skin && !terrain) {
+        const world::SkinLook& s = *m.skin;
+        // Its detail map, as the material's own maps are asked for (only
+        // drawn on something with uvs).
+        if (out.textures != nullptr && textured && !s.detail_normal.empty()) {
+            const auto [seen, added] = out.skin_seen.try_emplace(&s);
+            if (added) seen->second = out.textures->request(s);
+            detail = seen->second;
+        }
+        key.bits[19] = 1u;
+        const float skin[7] = {s.scatter, s.strength, s.lobe_roughness[0], s.lobe_roughness[1],
+                               s.lobe_mix,  s.transmission, s.detail_tiling};
+        std::memcpy(&key.bits[20], skin, sizeof(skin));
+        key.bits[27] = detail;
+    }
     const auto [it, added] = out.lookup.try_emplace(key, static_cast<u32>(out.materials.size()));
     if (added) {
         render::Material r;
@@ -99,10 +115,42 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
         r.translucency = m.translucency;
         r.alpha_cutoff = m.alpha_cutoff;
         r.canopy = m.canopy;
+        // Skin: a look alike (values and detail map) is shared, so a crowd
+        // of one look in many colours takes one.
+        u32 look_index = render::k_no_skin_look;
+        if (key.bits[19] != 0u) {
+            for (usize l = 0; l < out.skin_looks.size(); ++l) {
+                if (std::memcmp(&out.skin_key[l * 8], &key.bits[20], 8 * sizeof(u32)) == 0) {
+                    look_index = static_cast<u32>(l);
+                    break;
+                }
+            }
+            if (look_index == render::k_no_skin_look && out.skin_looks.size() >= render::k_max_skin_looks) {
+                out.skin_refused = true; // drawn as plain for now
+            }
+        }
+        if (look_index != render::k_no_skin_look) {
+            r.skin_look = look_index;
+        } else if (key.bits[19] != 0u && out.skin_looks.size() < render::k_max_skin_looks) {
+            const world::SkinLook& s = *m.skin;
+            out.skin_key.insert(out.skin_key.end(), &key.bits[20], &key.bits[28]);
+            render::SkinLook look;
+            look.scatter = s.scatter;
+            look.strength = s.strength;
+            look.lobe_roughness[0] = s.lobe_roughness[0];
+            look.lobe_roughness[1] = s.lobe_roughness[1];
+            look.lobe_mix = s.lobe_mix;
+            look.transmission = s.transmission;
+            look.detail_tiling = s.detail_tiling;
+            look.detail_normal = out.textures != nullptr ? out.textures->id(detail) : render::k_no_texture;
+            r.skin_look = static_cast<u32>(out.skin_looks.size());
+            out.skin_looks.push_back(look);
+            out.skin_detail.push_back(detail);
+        }
         if (out.textures != nullptr) set_textures(r, refs, *out.textures, m.alpha_cutoff);
         out.materials.push_back(r);
         out.material_textures.push_back(refs);
-        out.material_kind.push_back({m.two_sided, m.alpha_cutoff});
+        out.material_kind.push_back({m.two_sided, m.alpha_cutoff, r.skin_look});
         out.users.push_back(0);
     }
     ++out.users[it->second];
@@ -729,6 +777,10 @@ void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const F
     out.where.clear();
     out.lookup.clear();
     out.materials.clear();
+    out.skin_looks.clear();
+    out.skin_detail.clear();
+    out.skin_key.clear();
+    out.skin_refused = false;
     out.material_textures.clear();
     out.material_kind.clear();
     out.users.clear();
@@ -849,7 +901,7 @@ bool same_kit(const world::Kit& a, const world::Kit& b) {
             p.material.sway != q.material.sway || p.material.flutter != q.material.flutter ||
             p.material.two_sided != q.material.two_sided || p.material.translucency != q.material.translucency ||
             p.material.alpha_cutoff != q.material.alpha_cutoff || p.material.canopy != q.material.canopy ||
-            !(p.material.maps == q.material.maps) ||
+            !(p.material.maps == q.material.maps) || !(p.material.skin == q.material.skin) ||
             p.decal.shape != q.decal.shape || p.decal.opacity != q.decal.opacity ||
             p.decal.softness != q.decal.softness || p.decal.seed != q.decal.seed || !(p.lamp == q.lamp)) {
             return false;
@@ -917,6 +969,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_set<world::EntityId>* moving) {
     out.cells_rebuilt = 0;
     out.maps_seen.clear(); // the scene may have changed since: its materials' addresses with it
+    out.skin_seen.clear();
     out.poses = poses;
     out.swings = swings;
     out.walkers = walkers;
@@ -1094,6 +1147,21 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         for (const u32 u : out.users) unused += u == 0 ? 1 : 0;
         compact = unused > out.compact_unused_over && unused > out.users.size() - unused;
     }
+    // Skin looks full while an unused material holds one: made again, so
+    // the skin drawn as plain gets its look (a few thousand materials at
+    // most, only while some skin is refused).
+    if (!compact && out.skin_refused) {
+        // Only when that frees a look: one no used material shares.
+        std::array<bool, render::k_max_skin_looks> used{};
+        std::array<bool, render::k_max_skin_looks> held{};
+        for (usize i = 0; i < out.users.size(); ++i) {
+            const u32 look = out.material_kind[i].skin_look;
+            if (look < render::k_max_skin_looks) (out.users[i] != 0 ? used : held)[look] = true;
+        }
+        for (usize l = 0; l < held.size() && !compact; ++l) compact = held[l] && !used[l];
+        // (Kept asking while any skin is refused: a look frees when its
+        // last user goes; after the table is made again it asks afresh.)
+    }
     if (compact) {
         start_over(scene, terrain, far, scatter, out);
         out.cells_rebuilt = 0; // counted once, by the full rebuild
@@ -1136,6 +1204,10 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             for (const u32 ref : out.material_textures[i]) {
                 if (ref != TextureLibrary::k_no_ref) used.push_back(ref);
             }
+            const u32 look = out.material_kind[i].skin_look;
+            if (look < out.skin_detail.size() && out.skin_detail[look] != TextureLibrary::k_no_ref) {
+                used.push_back(out.skin_detail[look]);
+            }
         }
         for (const std::array<u32, 4>& refs : out.terrain_layer_textures) {
             for (const u32 ref : refs) {
@@ -1151,6 +1223,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         const bool used = out.users[i] > 0;
         out.materials[i].two_sided = used && out.material_kind[i].two_sided;
         out.materials[i].alpha_cutoff = used ? out.material_kind[i].alpha_cutoff : 0.0f;
+        // (and skin: one lingering would keep skin's pass running)
+        out.materials[i].skin_look = used ? out.material_kind[i].skin_look : render::k_no_skin_look;
     }
     // Textures that came (or changed) since: every material asking for them
     // draws them from now on.
@@ -1158,6 +1232,9 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         out.textures_version = out.textures->version();
         for (usize i = 0; i < out.materials.size(); ++i) {
             set_textures(out.materials[i], out.material_textures[i], *out.textures, out.material_kind[i].alpha_cutoff);
+        }
+        for (usize i = 0; i < out.skin_looks.size(); ++i) {
+            out.skin_looks[i].detail_normal = out.textures->id(out.skin_detail[i]);
         }
     }
     if (!layout && out.cells_rebuilt == 0) {

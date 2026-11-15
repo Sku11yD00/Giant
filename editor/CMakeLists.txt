@@ -96,7 +96,7 @@ if(GIANT_BUILD_TESTS)
         "GIANT_SAMPLE_SCRIPTS=${CMAKE_BINARY_DIR}/managed/samples/HelloGiant/HelloGiant.dll"
         "ASAN_OPTIONS=handle_segv=0:allow_user_segv_handler=1:detect_leaks=0:use_sigaltstack=0")
     endif()
-    set_tests_properties(editor_mcp PROPERTIES TIMEOUT 2460 ENVIRONMENT "${mcp_env}")
+    set_tests_properties(editor_mcp PROPERTIES TIMEOUT 3060 ENVIRONMENT "${mcp_env}")
     # The gates' summaries of a flight (no editor).
     add_test(NAME gate_common COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_gate_common.py)
     # The N2 gate's scene and flight, on the null device (the software

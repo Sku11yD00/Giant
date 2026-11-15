@@ -9,6 +9,7 @@
 #include "giant/world/scene.h"
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -77,6 +78,96 @@ inline std::string apply_maps(const ai::Json& json, world::MaterialMaps& maps) {
     }
     maps.normal_green_down = json.value("normal_green_down", maps.normal_green_down);
     return {};
+}
+
+// A material's skin over MCP (world::SkinLook): the "skin" argument
+// entities and scatter items share, and how it reads back.
+inline ai::Json skin_schema() {
+    const auto number = [](double lo, double hi, const char* description) {
+        return ai::Json{{"type", "number"}, {"minimum", lo}, {"maximum", hi}, {"description", description}};
+    };
+    return {{"type", "object"},
+            {"additionalProperties", false},
+            {"properties",
+             {{"on", {{"type", "boolean"},
+                      {"description", "false: not skin any more (its values dropped). Default true."}}},
+              {"scatter", number(0.0005, 0.1, "How far light spreads under it at its widest, metres (red "
+                                              "furthest, blue least). Default 0.012: a face.")},
+              {"strength", number(0, 1, "How much of its diffuse light spreads. Default 1.")},
+              {"lobe_roughness",
+               {{"type", "array"},
+                {"items", {{"type", "number"}, {"minimum", 0.1}, {"maximum", 4}}},
+                {"minItems", 2},
+                {"maxItems", 2},
+                {"description", "Its highlight's two lobes, each the roughness times this: a sharp sheen "
+                                "and a broad soft one. Default [0.75, 1.3]."}}},
+              {"lobe_mix", number(0, 1, "How much of the highlight the second (broad) lobe is. Default 0.15.")},
+              {"transmission", number(0, 1, "How much light from the sun or a lamp casting shadows passes "
+                                            "through its thin parts (ears, fingers), reddened. Default 1.")},
+              {"detail_normal", {{"type", "string"},
+                                 {"maxLength", world::k_max_mesh_path_bytes},
+                                 {"description", "A fine normal map (pores, wrinkles; green up unless "
+                                                 "detail_green_down) tiled over the uvs on top of the "
+                                                 "material's own normal map; \"\" for none (the default)."}}},
+              {"detail_tiling", number(1, 256, "How many times the detail map repeats across the uvs. "
+                                               "Default 16.")},
+              {"detail_green_down", {{"type", "boolean"},
+                                     {"description", "The detail map was made for DirectX. Default false."}}}}},
+            {"description",
+             "Skin (characters): its light spreads under the surface and passes through thin parts, "
+             "with a two-lobe highlight (render setting subsurface_scattering spreads it). Fields "
+             "left out keep their value (the defaults when it was not skin). Not on the ground."}};
+}
+
+// Applies `json` (skin_schema) to `skin`; returns what is wrong (a detail
+// map file that does not exist), or "".
+inline std::string apply_skin(const ai::Json& json, std::optional<world::SkinLook>& skin) {
+    if (!json.value("on", true)) {
+        skin.reset();
+        return {};
+    }
+    world::SkinLook s = skin.value_or(world::SkinLook{});
+    s.scatter = json.value("scatter", s.scatter);
+    s.strength = json.value("strength", s.strength);
+    if (const auto lobes = json.find("lobe_roughness"); lobes != json.end()) {
+        s.lobe_roughness[0] = (*lobes)[0].get<float>();
+        s.lobe_roughness[1] = (*lobes)[1].get<float>();
+    }
+    s.lobe_mix = json.value("lobe_mix", s.lobe_mix);
+    s.transmission = json.value("transmission", s.transmission);
+    s.detail_tiling = json.value("detail_tiling", s.detail_tiling);
+    s.detail_green_down = json.value("detail_green_down", s.detail_green_down);
+    if (const auto detail = json.find("detail_normal"); detail != json.end()) {
+        const std::string given = detail->get<std::string>();
+        if (given.empty()) {
+            s.detail_normal.clear();
+        } else {
+            const std::string path = MeshLibrary::normalize(given);
+            std::string file = path;
+            u32 image = 0;
+            TextureLibrary::split_image_ref(path, file, image);
+            std::error_code ec;
+            const std::u8string utf8(file.begin(), file.end());
+            if (!std::filesystem::is_regular_file(std::filesystem::path(utf8), ec)) {
+                return "skin.detail_normal: no file " + path;
+            }
+            s.detail_normal = path;
+        }
+    }
+    skin = std::move(s);
+    return {};
+}
+
+inline ai::Json skin_json(const world::SkinLook& s) {
+    ai::Json j = {{"scatter", s.scatter},
+                  {"strength", s.strength},
+                  {"lobe_roughness", ai::Json::array({s.lobe_roughness[0], s.lobe_roughness[1]})},
+                  {"lobe_mix", s.lobe_mix},
+                  {"transmission", s.transmission},
+                  {"detail_tiling", s.detail_tiling}};
+    if (!s.detail_normal.empty()) j["detail_normal"] = s.detail_normal;
+    if (s.detail_green_down) j["detail_green_down"] = true;
+    return j;
 }
 
 // A mesh's file's own look (its material's values and maps) onto

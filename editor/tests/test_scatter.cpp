@@ -683,6 +683,18 @@ GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable"
     GIANT_CHECK(f.state.scene.scatter[0].items.size() == 2 && !f.state.scene.scatter[0].area);
     GIANT_CHECK(f.run("undo").ok && f.state.scene.scatter[0].name == "rocks" && f.state.scene.scatter[0].area);
     GIANT_CHECK(f.run("redo").ok && f.state.scene.scatter[0].name == "stones");
+    // An item's skin: kept, listed, and checked like an entity's.
+    r = f.run("add_scatter_layer",
+              {{"name", "hands"}, {"items", {{{"shape", "sphere"}, {"skin", {{"scatter", 0.02}, {"transmission", 0.5}}}}}}});
+    GIANT_CHECK(r.ok && r.value["items"][0]["skin"]["scatter"].get<float>() == 0.02f &&
+                r.value["items"][0]["skin"]["transmission"].get<float>() == 0.5f);
+    GIANT_CHECK(f.state.scene.scatter.size() == 2 && f.state.scene.scatter[1].items[0].material.skin &&
+                f.state.scene.scatter[1].items[0].material.skin->scatter == 0.02f);
+    GIANT_CHECK(!r.value["items"][0].contains("tree") || r.value["items"][0]["tree"].is_null());
+    GIANT_CHECK(!f.run("add_scatter_layer",
+                       {{"name", "bad"}, {"items", {{{"shape", "sphere"}, {"skin", {{"scatter", 0.5}}}}}}})
+                     .ok);
+    GIANT_CHECK(f.run("remove_scatter_layer", {{"name", "hands"}}).ok && f.state.scene.scatter.size() == 1);
     // Errors change nothing.
     GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "stones"}, {"items", {{{"shape", "cube"}}}}}).ok);
     GIANT_CHECK(!f.run("add_scatter_layer", {{"name", "trees"}, {"items", {{{"kit", "oak"}}}}}).ok);

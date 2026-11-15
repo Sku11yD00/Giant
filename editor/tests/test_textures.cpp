@@ -519,6 +519,139 @@ GIANT_TEST("textures: a mesh's material draws its maps once they are ready; a fi
     GIANT_CHECK(frame.materials.size() == 3);
 }
 
+GIANT_TEST("textures: skin looks go to the renderer, one per skin material; their detail maps cooked as normal maps") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    const std::filesystem::path dir = fresh_dir("giant_skin_scene");
+    const std::string pores = write_png(dir / "pores.png", 32, 32, 128, 140, 255);
+    MeshLibrary meshes(renderer.get());
+    TextureLibrary textures(renderer.get(), {});
+    SceneFrame frame;
+    frame.textures = &textures;
+    world::Scene scene;
+    world::Entity face;
+    face.shape = world::Shape::sphere;
+    world::SkinLook look;
+    look.scatter = 0.02f;
+    look.transmission = 0.4f;
+    look.detail_normal = pores;
+    look.detail_tiling = 8.0f;
+    look.detail_green_down = true;
+    face.material.skin = look;
+    scene.add(face);
+    world::Entity twin = face; // the same skin: the same material and look
+    twin.transform.position = {2.0, 0.0, 0.0};
+    scene.add(twin);
+    world::Entity arm = face; // another skin
+    arm.transform.position = {4.0, 0.0, 0.0};
+    arm.material.skin->scatter = 0.03f;
+    arm.material.skin->detail_normal.clear();
+    scene.add(arm);
+    world::Entity rock;
+    rock.transform.position = {6.0, 0.0, 0.0};
+    scene.add(rock);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials.size() == 3 && frame.skin_looks.size() == 2);
+    usize skins = 0;
+    for (const render::Material& m : frame.materials) {
+        if (m.skin_look == render::k_no_skin_look) continue;
+        ++skins;
+        GIANT_CHECK(m.skin_look < frame.skin_looks.size());
+    }
+    GIANT_CHECK(skins == 2);
+    const auto find_look = [&](float scatter) -> const render::SkinLook* {
+        for (const render::SkinLook& l : frame.skin_looks) {
+            if (l.scatter == scatter) return &l;
+        }
+        return nullptr;
+    };
+    const render::SkinLook* face_look = find_look(0.02f);
+    GIANT_CHECK(face_look != nullptr && face_look->transmission == 0.4f && face_look->detail_tiling == 8.0f &&
+                face_look->strength == 1.0f && face_look->lobe_roughness[1] == 1.3f);
+    GIANT_CHECK(face_look != nullptr && face_look->detail_normal == render::k_no_texture); // cooking still
+    // Asked for once, as a DirectX-authored normal map.
+    GIANT_CHECK(textures.entries().size() == 1);
+    if (!textures.entries().empty()) {
+        const TextureLibrary::Entry& e = textures.entries()[0];
+        GIANT_CHECK(e.key.slot == TextureLibrary::Slot::normal && e.key.green_down && e.key.path == pores);
+    }
+    textures.finish();
+    scene_frame(scene, *renderer, meshes, frame);
+    face_look = find_look(0.02f);
+    GIANT_CHECK(face_look != nullptr && face_look->detail_normal != render::k_no_texture &&
+                renderer->texture(face_look->detail_normal) != nullptr);
+    const render::SkinLook* arm_look = find_look(0.03f);
+    GIANT_CHECK(arm_look != nullptr && arm_look->detail_normal == render::k_no_texture);
+    // The same skin in another colour: its own material, the same look.
+    world::Entity tinted = arm;
+    tinted.material.base_color = {0.5f, 0.3f, 0.2f};
+    tinted.transform.position = {8.0, 0.0, 0.0};
+    const world::EntityId tinted_id = scene.add(tinted);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials.size() == 4 && frame.skin_looks.size() == 2);
+    // Unused, its material is not skin for the renderer (skin's pass would
+    // run for it); used again, it is.
+    const auto skin_materials = [&] {
+        usize n = 0;
+        for (const render::Material& m : frame.materials) n += m.skin_look != render::k_no_skin_look ? 1u : 0u;
+        return n;
+    };
+    GIANT_CHECK(skin_materials() == 3);
+    scene.remove(tinted_id);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials.size() == 4 && skin_materials() == 2);
+    const world::EntityId tinted_again = scene.add(tinted);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(skin_materials() == 3);
+    scene.remove(tinted_again);
+    // A full table: later skin draws as plain, until a look is freed (its
+    // last user gone) and the table made again.
+    std::vector<world::EntityId> crowd;
+    for (u32 i = 0; i < render::k_max_skin_looks + 4; ++i) {
+        world::Entity e = arm;
+        e.material.skin->scatter = 0.001f + 0.0001f * static_cast<float>(i);
+        e.transform.position = {10.0 + i, 0.0, 0.0};
+        crowd.push_back(scene.add(e));
+    }
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.skin_looks.size() == render::k_max_skin_looks);
+    const auto plain = [&] {
+        usize n = 0;
+        for (usize i = 0; i < frame.materials.size(); ++i) {
+            n += frame.materials[i].skin_look == render::k_no_skin_look && frame.users[i] > 0 ? 1u : 0u;
+        }
+        return n;
+    };
+    GIANT_CHECK(plain() == 7); // the rock's and the six skins past the table's end (two looks were there)
+    for (usize i = 0; i < 8; ++i) scene.remove(crowd[i]);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(plain() == 1); // the rock's alone
+    // Full again, with a look two materials share: one of them going frees
+    // no look, so the table stays as it is (no cell is drawn again for it).
+    world::Entity shared = arm;
+    shared.material.skin->scatter = 0.001f + 0.0001f * 20.0f; // crowd[20]'s look
+    shared.material.base_color = {0.1f, 0.2f, 0.3f};
+    const world::EntityId tint = scene.add(shared);
+    for (u32 i = 0; i < 4; ++i) {
+        world::Entity e = arm;
+        e.material.skin->scatter = 0.05f + 0.001f * static_cast<float>(i);
+        crowd.push_back(scene.add(e));
+    }
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.skin_looks.size() == render::k_max_skin_looks && plain() == 3);
+    const usize rows = frame.materials.size();
+    scene.remove(tint);
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials.size() == rows && plain() == 3); // (its row lingers, unused)
+    scene.remove(crowd[20]); // the look's last user: one refused skin takes its place
+    scene_frame(scene, *renderer, meshes, frame);
+    GIANT_CHECK(frame.materials.size() < rows && plain() == 2);
+}
+
 GIANT_TEST("textures: set_entity takes maps, refuses missing files, and get_textures reports them") {
     const std::filesystem::path dir = fresh_dir("giant_texture_commands");
     const std::string albedo = write_png(dir / "albedo.png", 16, 16, 255, 0, 0);
@@ -549,6 +682,24 @@ GIANT_TEST("textures: set_entity takes maps, refuses missing files, and get_text
     GIANT_CHECK(!state.scene.find(id)->material.maps.normal_green_down);
     const auto cleared = run("set_entity", {{"id", id}, {"maps", {{"base_color", ""}}}});
     GIANT_CHECK(cleared.ok && !cleared.value.contains("maps"));
+    // Skin: fields left out keep theirs (the defaults when new), a missing
+    // detail map is refused, "on": false takes it off; undoable.
+    const auto skinned = run("set_entity", {{"id", id}, {"skin", {{"scatter", 0.02}, {"lobe_roughness", {0.6, 1.5}}}}});
+    GIANT_CHECK(skinned.ok && skinned.value["skin"]["scatter"].get<float>() == 0.02f &&
+                skinned.value["skin"]["lobe_roughness"][1].get<float>() == 1.5f &&
+                skinned.value["skin"]["transmission"].get<float>() == 1.0f);
+    const auto detail = run("set_entity", {{"id", id}, {"skin", {{"detail_normal", albedo}, {"detail_tiling", 8}}}});
+    GIANT_CHECK(detail.ok && detail.value["skin"]["detail_normal"] == albedo &&
+                detail.value["skin"]["scatter"].get<float>() == 0.02f);
+    const auto no_file = run("set_entity", {{"id", id}, {"skin", {{"detail_normal", (dir / "none.png").generic_string()}}}});
+    GIANT_CHECK(!no_file.ok && no_file.error.find("none.png") != std::string::npos);
+    GIANT_CHECK(!run("set_entity", {{"id", id}, {"skin", {{"scatter", 0.5}}}}).ok);
+    GIANT_CHECK(!run("set_entity", {{"id", id}, {"skin", {{"lobe_roughness", {1.0}}}}}).ok);
+    const auto off = run("set_entity", {{"id", id}, {"skin", {{"on", false}}}});
+    GIANT_CHECK(off.ok && !off.value.contains("skin") && !state.scene.find(id)->material.skin);
+    GIANT_CHECK(commands.undo());
+    GIANT_CHECK(state.scene.find(id)->material.skin && state.scene.find(id)->material.skin->detail_tiling == 8.0f);
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"skin", {{"on", false}}}}).ok);
 
     // Waiting asks for what the scene names, before any frame has drawn it.
     GIANT_CHECK(run("create_entity", {{"name", "ball"}, {"shape", "sphere"}, {"maps", {{"base_color", albedo}}}}).ok);

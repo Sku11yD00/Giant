@@ -124,6 +124,8 @@ public:
     // A material's four maps, as a mesh drawing it asks for them: base
     // colour, normal, roughness-metal (with the normal map), occlusion.
     std::array<Ref, 4> request(const world::MaterialMaps& maps);
+    // Skin's detail normal map (k_no_ref for none).
+    Ref request(const world::SkinLook& skin);
     // Its renderer id once ready and uploaded; k_no_texture before (or on
     // failure, once unloaded, or without a renderer).
     render::TextureId id(Ref ref) const;

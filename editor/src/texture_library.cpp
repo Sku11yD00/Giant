@@ -248,6 +248,14 @@ TextureLibrary::Ref TextureLibrary::request(const Key& given) {
     return it->second;
 }
 
+TextureLibrary::Ref TextureLibrary::request(const world::SkinLook& skin) {
+    Key key;
+    key.path = skin.detail_normal;
+    key.slot = Slot::normal;
+    key.green_down = skin.detail_green_down;
+    return request(key);
+}
+
 std::array<TextureLibrary::Ref, 4> TextureLibrary::request(const world::MaterialMaps& maps) {
     const bool green_down = maps.normal_green_down && !maps.normal.empty();
     return {request({maps.base_color, Slot::base_color, false, {}}),

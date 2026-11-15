@@ -40,6 +40,13 @@ struct SceneFrame {
     std::vector<render::Instance> instances;
     std::vector<render::CellRange> cells;
     std::vector<render::Material> materials;
+    // Skin materials' looks (render::Material::skin_look; at most
+    // render::k_max_skin_looks, later skin materials draw as plain until the
+    // table is made again), and each look's detail normal map's texture
+    // (TextureLibrary ref, k_no_ref for none).
+    std::vector<render::SkinLook> skin_looks;
+    std::vector<u32> skin_detail;
+    std::vector<u32> skin_key; // each look's eight key words (MaterialKey bits 20 to 27)
     std::vector<render::Decal> decals;
     std::vector<render::LocalLight> lights; // the lamps entities and kit pieces carry (world::Lamp)
     u32 cells_rebuilt = 0; // by the last scene_frame
@@ -106,16 +113,23 @@ struct SceneFrame {
     struct MaterialKind {
         bool two_sided = false;
         float alpha_cutoff = 0.0f;
+        u32 skin_look = render::k_no_skin_look; // (materials[i] has it only while used)
     };
     std::vector<MaterialKind> material_kind;
     u64 textures_version = ~u64{0};
     // Each material's maps' refs, by address, within one scene_frame call.
     std::unordered_map<const world::MaterialMaps*, std::array<u32, 4>> maps_seen;
+    // Each skin's detail map's ref, by address, the same way.
+    std::unordered_map<const world::SkinLook*, u32> skin_seen;
+    // A skin material found the looks full (the table is made again when
+    // an unused material holds one, freeing it).
+    bool skin_refused = false;
 
     struct MaterialKey {
         // The values, the texture refs, 1 for the ground's terrain material,
-        // then two-sided, translucency, alpha cutoff and canopy.
-        u32 bits[19];
+        // then two-sided, translucency, alpha cutoff and canopy; then skin:
+        // 1 when it is, its seven values and its detail map's ref.
+        u32 bits[28];
         bool operator==(const MaterialKey&) const = default;
     };
     struct MaterialHash {

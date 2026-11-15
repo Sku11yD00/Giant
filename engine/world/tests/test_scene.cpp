@@ -1083,3 +1083,50 @@ GIANT_TEST("world: canopy normals save and load, only when set, and are checked"
         R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"canopy": 2}}]})", bad);
     GIANT_CHECK(error.has_value() && contains(error->message, "canopy"));
 }
+
+GIANT_TEST("world: skin saves and loads, only when set, and is checked") {
+    Scene scene;
+    Entity face = named("Face");
+    SkinLook skin;
+    skin.scatter = 0.02f;
+    skin.strength = 0.8f;
+    skin.lobe_roughness[0] = 0.6f;
+    skin.lobe_roughness[1] = 1.5f;
+    skin.lobe_mix = 0.2f;
+    skin.transmission = 0.5f;
+    skin.detail_normal = "maps/pores.png";
+    skin.detail_tiling = 32.0f;
+    skin.detail_green_down = true;
+    face.material.skin = skin;
+    scene.add(face);
+    scene.add(named("Rock"));
+    ScatterLayer layer;
+    layer.name = "hands";
+    ScatterItem hand;
+    hand.material.skin = SkinLook{};
+    layer.items.push_back(hand);
+    scene.scatter.push_back(layer);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(text.find("\"skin\"") != text.rfind("\"skin\"")); // the face's and the hand's, not the rock's
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->material.skin == skin);
+    GIANT_CHECK(loaded.find(2) && !loaded.find(2)->material.skin);
+    GIANT_CHECK(loaded.scatter.size() == 1 && loaded.scatter[0].items[0].material.skin == SkinLook{});
+    GIANT_CHECK(save_scene(loaded) == text);
+    // Fields left out take their defaults.
+    Scene sparse;
+    GIANT_CHECK(!load_scene(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"skin": {"scatter": 0.03}}}]})",
+                            sparse)
+                     .has_value());
+    GIANT_CHECK(sparse.find(1) && sparse.find(1)->material.skin && sparse.find(1)->material.skin->scatter == 0.03f &&
+                sparse.find(1)->material.skin->transmission == 1.0f && sparse.find(1)->material.skin->detail_tiling == 16.0f);
+    for (const char* bad_skin : {R"({"scatter": 0.5})", R"({"lobe_roughness": [0.05, 1]})", R"({"lobe_roughness": [1]})",
+                                 R"({"transmission": 2})", R"({"detail_tiling": 0.5})", R"({"glow": 1})"}) {
+        Scene bad;
+        const std::string json = std::string(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "material": {"skin": )") +
+                                 bad_skin + "}}]}";
+        const auto error = load_scene(json, bad);
+        GIANT_CHECK(error.has_value() && contains(error->message, "skin"));
+    }
+}
