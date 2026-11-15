@@ -1886,6 +1886,17 @@ another among the first strands and moved to the front. Values out of
 range are clamped; a scalp without area grows nothing.
 `groom_from_strands` builds the same from lines made elsewhere (a file's
 curves), resampled evenly along their length and shuffled.
+Such curves come from a glTF file's line primitives
+(`ImportResult::curves`) or from an Alembic groom (`alembic.h`,
+`read_alembic_curves`): a small reader of our own for the Ogawa kind of
+.abc file, with no Alembic library. It reads every shown curves object's
+first sample, placed by the transforms above it, leaves out the curves
+the file marks as guides (`groom_guide`, the Unreal groom convention: the
+engine picks its own) and keeps the file's units and axes, which
+`to_engine_space` turns (`FileAxes`: y up, z up, or Unreal's left-handed
+z up; 0.01 for centimetres). Widths, colours, root uvs and animation are
+not read yet. The file is never trusted: every offset and count is
+checked against its size, and the work is bounded.
 `groom_problem` says what is wrong with a groom from outside. All of it
 is deterministic and CPU only; the simulation, drawing, shadows and the
 editor's side follow in C6b to C6e.
