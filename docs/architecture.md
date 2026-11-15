@@ -1962,14 +1962,15 @@ Strands are far thinner than a pixel, so hair is a matter of coverage, and
 one surface a pixel (the visibility buffer) cannot hold it without history.
 It has passes of its own, with nothing kept from frame to frame:
 
-1. A compute pass poses and lights each drawn strand once: its 16 points
-   moved as its guides moved from rest, put in the world, and lit by the
-   sun through Marschner's three lobes in Karis's fitted form (R off the
-   surface, TT through the strand, TRT the coloured highlight) plus a
+1. A compute pass poses each drawn strand: its 16 points moved as its
+   guides moved from rest and put in the world. A second lights it, once:
+   the sun through Marschner's three lobes in Karis's fitted form (R off
+   the surface, TT through the strand, TRT the coloured highlight) plus a
    scattered term, shadowed by the scene's sun shadow at three places along
-   the strand, with the sky's or the voxel world's light once and the air
-   in front over it. The result is 16 bytes a point (place, light as 9 bits
-   a channel with a shared exponent). No later pass lights anything.
+   the strand and by its own groom's hair at four (below); the lamps listed
+   where it is; the sky's or the voxel world's light once; and the air in
+   front over it. The result is 16 bytes a point (place, light as 9 bits a
+   channel with a shared exponent). No later pass lights anything.
 2. Ribbons facing the camera are made from the vertex id alone (no vertex
    buffer), half a pixel wider each side than the strand; each pixel takes
    the share of itself the strand's width covers, so a strand a tenth of a
@@ -1993,8 +1994,43 @@ groom is thinned alike). `HairLook`: `melanin` and `redness` give the
 colour (`hair_color`: white through blond and brown to black, ginger with
 redness; `tint` for dye), `roughness`, `width` and `tip_width`,
 `variation` by the strand's seed. Stats: `hair_grooms`, `hair_strands`,
-`hair_segments`, `hair_left_out`, `hair_draws`. Limits until C6d: hair does
-not shadow itself or the world and lamps do not light it; inner layers
+`hair_segments`, `hair_left_out`, `hair_draws`.
+
+Hair shades itself from the sun (C6d, `hair_shadows`, a render setting) by
+deep opacity maps (Yuksel and Keyser). Between the two compute passes each
+drawn groom is drawn as the sun sees it into a tile of its own (128 x 128
+of a 2048 x 2048 pair of targets, 48 MiB, made with the first groom added):
+the tile spans the ball round the groom's hair as posed. One pass keeps
+the depth nearest the sun at each texel, the next adds up (an additive
+blend) how much hair lies within 2 %, 6 % and 18 % of the ball's width
+behind that, and in all. A point's shade is read between those sums by
+its own depth (four texels, blended), so it is none at the front (a
+strand never shades itself; a point within a texel's depth of the front
+counts as at it, so a sheet of hair struck at a slant does not shade
+itself either) and deepens smoothly inwards. Past the third depth the
+shade runs up to all the hair in the texel by half the ball's width, so
+the middle of a very deep groom is shaded a little by hair behind it, as
+is hair lying far behind a stray strand that is the front of its texel. The three lobes lose `exp(-hair before)`; the scattered term
+loses less the lighter the hair (light hair passes light on), which is
+what makes blond hair glow where black hair is dark. At most 4096 strands
+of a groom go into its tile (its first, in pieces of three points or more,
+each standing for the rest). Lamps (the first 32 listed in the strand's
+cluster, with each lamp's own shadow looked up once at the strand's
+middle) light it through the same lobes at six places along the strand;
+they have no map of the hair, so against a lamp hair shades itself as a
+ball round the groom's middle would (the side turned away dark).
+
+Limits: one groom's hair does not shade another's, and hair does not yet
+shadow the world (C6d part 2); only the sun has deep shadows of hair;
+the sky's light reaches inner hair as it does outer; a tile's texel is
+4 mm on a head of hair 0.5 m across, so shade is soft at that scale; a
+strand blown past the ball round its guides takes the shade at the tile's
+edge; against a lamp a flat sheet of hair darkens away from the point
+nearest the lamp; a strand's lamps are those listed at its middle; the
+shadow passes are bounded but not free (at most 2^18 strands in pieces of
+five, twice, and both targets cleared whole each frame), and are not yet
+in a gate;
+inner layers
 take the outer layer's colour where they show through (a stray strand
 in front of a lock of another colour tints its pixel); hair thinner than
 half a pixel's cover leaves no depth, so water and particles behind it

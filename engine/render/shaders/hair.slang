@@ -5,13 +5,18 @@
 // and the visibility buffer's one surface a pixel cannot hold it without
 // history (AGENTS.md rule 2). It has passes of its own:
 //
-// - cs_prepare: each drawn strand once. Its 16 points posed (each moves as
-//   its guides' points moved from rest, by its weights), put in the world,
-//   and lit: the sun through three lobes along the strand (Marschner's R,
-//   TT and TRT as Karis fits them, "Physically based hair shading in
-//   Unreal") and a scattered term, shadowed at three places along it; the
-//   sky (or the voxel world's bounce light) once; the air between it and
-//   the camera over it. Nothing downstream lights anything.
+// - cs_pose: each drawn strand's 16 points posed (each moves as its
+//   guides' points moved from rest, by its weights) and put in the world.
+// - vs_shadow, ps_shadow_front, ps_shadow_sums: each groom's hair as the
+//   sun sees it, into a small tile of its own: how much hair lies before
+//   each depth there (deep opacity maps).
+// - cs_light: each drawn strand lit, once: the sun through three lobes
+//   along the strand (Marschner's R, TT and TRT as Karis fits them,
+//   "Physically based hair shading in Unreal") and a scattered term,
+//   shadowed by the world at three places along it and by its own groom's
+//   hair at four; the lamps listed where it is, the same way; the sky (or
+//   the voxel world's bounce light) once; the air between it and the
+//   camera over it. Nothing downstream lights anything.
 // - vs_ribbon: a ribbon facing the camera along each strand, from the
 //   vertex id alone. It is drawn half a pixel wider each side than the
 //   strand is, and each pixel takes the share of itself the strand covers
@@ -50,17 +55,23 @@ struct HairPush {
     uint accum;
     uint reveal;
     uint light;
+    uint shadow_depth;
+    uint shadow_opacity;
+    uint shadows_on;
+    uint lamps_on;
     uint pad0;
     uint pad1;
 };
 ConstantBuffer<HairPush> push : register(b0);
 
 static const uint k_strand_points = 16u;
-static const uint k_groom_bytes = 144u;   // gpu::HairGroom
+static const uint k_groom_bytes = 160u;   // gpu::HairGroom
 static const uint k_strand_bytes = 16u;   // gpu::HairStrand
 static const uint k_point_bytes = 8u;     // a packed rest point
 static const uint k_drawn_bytes = 16u;    // gpu::HairPoint
 static const float k_pi = 3.14159265;
+// The lamps a strand takes light from: the first so many listed where it is.
+static const uint k_hair_lamps = 32u;
 // Behind the nearest hair a layer counts for 1/e as much each this many
 // metres (or two pixels' width there, if that is more).
 static const float k_layer = 0.003;
@@ -85,6 +96,10 @@ struct Groom {
     float variation;
     uint count;
     uint stride;
+    uint shadow_count;
+    uint shadow_stride;
+    float shadow_stands;
+    float4 ball;
 };
 
 Groom load_groom() {
@@ -113,7 +128,12 @@ Groom load_groom() {
     g.tip_width = asfloat(h.y);
     g.variation = asfloat(h.z);
     g.count = h.w;
-    g.stride = b.Load(at + 128u);
+    const uint4 m = b.Load4(at + 128u);
+    g.stride = m.x;
+    g.shadow_count = m.y;
+    g.shadow_stride = m.z;
+    g.shadow_stands = asfloat(m.w);
+    g.ball = asfloat(b.Load4(at + 144u));
     return g;
 }
 
@@ -212,14 +232,83 @@ void hair_light(float3 color, float roughness, float3 t, float3 l, float3 v, out
     scattered = sqrt(max(color, float3(0.0, 0.0, 0.0))) * (lerp(wrap, along, 0.33) / k_pi);
 }
 
+// The sun's shadows of hair on itself (C6d): deep opacity maps (Yuksel and
+// Keyser), a small tile a drawn groom. A tile spans the ball round its
+// groom as the sun sees it; it holds the depth nearest the sun at each
+// texel, and how much hair lies within three depths behind that, and in
+// all. A point's shade is read between those: none at the front (a strand
+// never shades itself), deepening smoothly inwards.
+static const uint k_hair_tile = 128u;          // texels a side (src/hair.h's k_hair_shadow_tile)
+static const uint k_hair_tiles_across = 16u;
+// The depths behind the front, as shares of the tile's depth (the ball
+// across): for a head of hair 0.5 m across, 1, 3 and 9 cm.
+static const float3 k_hair_layers = float3(0.02, 0.06, 0.18);
+static const float k_hair_layers_end = 0.5;    // by here, all of it
+// A point this far behind a texel's front still counts as at it: the front
+// is the nearest in the whole texel, and a sheet of hair the sun strikes
+// at a slant is that much deeper from one texel to the next.
+static const float k_hair_slack = 1.0 / 128.0;
+// What a strand lets of the scattered light through, of what it took in.
+static const float k_hair_forward = 0.8;
+
+void sun_axes(float3 l, out float3 u, out float3 v) {
+    const float3 up = abs(l.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    u = normalize(cross(up, l));
+    v = cross(l, u);
+}
+
+// Where `p` (camera-relative) lies in the groom's tile: texels across and
+// down it, and its depth (0 to 1, more nearer the sun).
+float3 in_hair_tile(Groom g, float3 l, float3 p) {
+    float3 u;
+    float3 v;
+    sun_axes(l, u, v);
+    const float3 q = (p - g.ball.xyz) / g.ball.w;
+    return float3((0.5 + 0.5 * dot(q, u)) * float(k_hair_tile), (0.5 - 0.5 * dot(q, v)) * float(k_hair_tile),
+                  0.5 + 0.5 * dot(q, l));
+}
+
+// How much hair lies between `at` (in_hair_tile) and the sun: strands
+// thick, as if each covered its texel whole.
+float hair_before(uint tile, float3 at) {
+    Texture2D<float> front = read_texture_float(push.shadow_depth);
+    Texture2D<float4> sums = read_texture(push.shadow_opacity);
+    const int2 origin = int2(int(tile % k_hair_tiles_across), int(tile / k_hair_tiles_across)) * int(k_hair_tile);
+    const float2 t = clamp(at.xy - 0.5, float2(0.0, 0.0), float2(float(k_hair_tile) - 1.0, float(k_hair_tile) - 1.0));
+    const int2 base = int2(floor(t));
+    const float2 share = t - floor(t);
+    const float depth = saturate(at.z);
+    float total = 0.0;
+    [unroll] for (uint j = 0u; j < 4u; ++j) {
+        const int2 texel = min(base + int2(int(j & 1u), int(j >> 1)), int2(int(k_hair_tile) - 1, int(k_hair_tile) - 1));
+        const float z0 = front.Load(int3(origin + texel, 0));
+        const float4 o = sums.Load(int3(origin + texel, 0));
+        const float behind = max(z0 - depth - k_hair_slack, 0.0);
+        float before;
+        if (behind < k_hair_layers.x) {
+            before = o.x * (behind / k_hair_layers.x);
+        } else if (behind < k_hair_layers.y) {
+            before = lerp(o.x, o.y, (behind - k_hair_layers.x) / (k_hair_layers.y - k_hair_layers.x));
+        } else if (behind < k_hair_layers.z) {
+            before = lerp(o.y, o.z, (behind - k_hair_layers.y) / (k_hair_layers.z - k_hair_layers.y));
+        } else {
+            before = lerp(o.z, o.w, saturate((behind - k_hair_layers.z) / (k_hair_layers_end - k_hair_layers.z)));
+        }
+        const float weight = ((j & 1u) != 0u ? share.x : 1.0 - share.x) * ((j >> 1) != 0u ? share.y : 1.0 - share.y);
+        total += max(before, 0.0) * weight;
+    }
+    return total;
+}
+
+// Each drawn strand's 16 points posed (each moves as its guides' points
+// moved from rest, by its weights) and put in the world.
 [numthreads(64, 1, 1)]
-void cs_prepare(uint3 id : SV_DispatchThreadID) {
+void cs_pose(uint3 id : SV_DispatchThreadID) {
     const Groom g = load_groom();
     const uint strand = id.x;
     if (strand >= g.count) {
         return;
     }
-    const Frame f = load_frame(push.frame, push.frame_offset);
     ByteAddressBuffer b = read_buffer(g.buffer);
     const uint4 follow = b.Load4(strand * k_strand_bytes);
     const uint3 guides = uint3(follow.x & 0xffffu, follow.x >> 16, follow.y & 0xffffu);
@@ -227,22 +316,40 @@ void cs_prepare(uint3 id : SV_DispatchThreadID) {
     weights.x = float(follow.y >> 16) * (1.0 / 65535.0);
     weights.y = float(follow.z & 0xffffu) * (1.0 / 65535.0);
     weights.z = saturate(1.0 - weights.x - weights.y);
-    const uint seed = follow.w;
-    // Posed, in the world (camera-relative).
+    // (The frame's descriptor when at rest: read, never used.)
+    ByteAddressBuffer posed = read_buffer(g.posed_on != 0u ? g.posed : push.frame);
+    RWByteAddressBuffer out_buffer = write_buffer(push.drawn);
+    [loop] for (uint k = 0u; k < k_strand_points; ++k) {
+        float3 p = rest_point(g, b, strand, k);
+        if (g.posed_on != 0u) {
+            [unroll] for (uint j = 0u; j < 3u; ++j) {
+                const float3 now = asfloat(posed.Load3(g.posed_offset + (guides[j] * k_strand_points + k) * 12u));
+                p += (now - rest_point(g, b, guides[j], k)) * weights[j];
+            }
+        }
+        const float3 world = float3(dot(g.to_world[0].xyz, p) + g.to_world[0].w, dot(g.to_world[1].xyz, p) + g.to_world[1].w,
+                                    dot(g.to_world[2].xyz, p) + g.to_world[2].w);
+        // (Camera-relative. Its light comes with cs_light.)
+        out_buffer.Store4(((g.first + strand) * k_strand_points + k) * k_drawn_bytes, uint4(asuint(world), 0u));
+    }
+}
+
+// Each drawn strand lit, once: where cs_pose put it.
+[numthreads(64, 1, 1)]
+void cs_light(uint3 id : SV_DispatchThreadID) {
+    const Groom g = load_groom();
+    const uint strand = id.x;
+    if (strand >= g.count) {
+        return;
+    }
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const uint seed = read_buffer(g.buffer).Load(strand * k_strand_bytes + 12u);
+    RWByteAddressBuffer out_buffer = write_buffer(push.drawn);
+    const uint out_at = (g.first + strand) * k_strand_points * k_drawn_bytes;
     float3 points[16];
     {
-        // (The frame's descriptor when at rest: read, never used.)
-        ByteAddressBuffer posed = read_buffer(g.posed_on != 0u ? g.posed : push.frame);
         [loop] for (uint k = 0u; k < k_strand_points; ++k) {
-            float3 p = rest_point(g, b, strand, k);
-            if (g.posed_on != 0u) {
-                [unroll] for (uint j = 0u; j < 3u; ++j) {
-                    const float3 now = asfloat(posed.Load3(g.posed_offset + (guides[j] * k_strand_points + k) * 12u));
-                    p += (now - rest_point(g, b, guides[j], k)) * weights[j];
-                }
-            }
-            points[k] = float3(dot(g.to_world[0].xyz, p) + g.to_world[0].w, dot(g.to_world[1].xyz, p) + g.to_world[1].w,
-                               dot(g.to_world[2].xyz, p) + g.to_world[2].w);
+            points[k] = asfloat(out_buffer.Load3(out_at + k * k_drawn_bytes));
         }
     }
     const bool have = push.extras_on != 0u;
@@ -250,8 +357,8 @@ void cs_prepare(uint3 id : SV_DispatchThreadID) {
     const Extras e = load_extras(have ? push.extras : push.frame, have ? push.extras_offset : 0u);
     const bool sky_on = have && e.sky_on != 0u;
     const Sky sky = load_sky(have ? e.sky_params : push.frame, have ? e.sky_params_offset : 0u);
-    const float3 l = f.sun_direction.xyz;
-    // The sun's way to it, at three places along it.
+    const float3 l = safe_normalize(f.sun_direction.xyz, float3(0.0, 1.0, 0.0));
+    // The sun's way to it through the world, at three places along it.
     float sun[3];
     [unroll] for (uint q = 0u; q < 3u; ++q) {
         const float3 at = points[2u + q * 6u];
@@ -260,6 +367,11 @@ void cs_prepare(uint3 id : SV_DispatchThreadID) {
             reaches *= cloud_shadow(sky, at);
         }
         sun[q] = reaches;
+    }
+    // And through its own groom's hair, at four (points 0, 5, 10 and 15).
+    float before[4];
+    [unroll] for (uint h = 0u; h < 4u; ++h) {
+        before[h] = push.shadows_on != 0u && g.shadow_count != 0u ? hair_before(push.groom, in_hair_tile(g, l, points[h * 5u])) : 0.0;
     }
     // From all round, once: the sky and ground, or the voxel world's
     // bounce light where it has some.
@@ -287,10 +399,66 @@ void cs_prepare(uint3 id : SV_DispatchThreadID) {
     // Its own shade, by its seed.
     const float shade = 1.0 + g.variation * (unit(mix(seed ^ 0x2f6b4c1du)) - 0.5);
     const float3 color = saturate(g.color * shade);
+    // What of the scattered light a strand's worth of hair takes: less of
+    // light hair's, which passes it on.
+    const float3 takes = float3(1.0, 1.0, 1.0) - k_hair_forward * sqrt(color);
     const float4 clip = to_clip(f, middle);
     const float2 ndc = clip.w > 1e-6 ? clip.xy / clip.w : float2(0.0, 0.0);
     const float2 position = float2(saturate(ndc.x * 0.5 + 0.5) * f.width, saturate(0.5 - ndc.y * 0.5) * f.height);
     const uint2 pixel = uint2(min(position, float2(f.width, f.height) - 1.0));
+    // The lamps listed where its middle is (the first k_hair_lamps of
+    // them), at six places along it (points 0, 3, .. 15). A lamp's own
+    // shadow is looked up once, at the middle. Lamps have no map of the
+    // hair: it shades itself from them as a ball round the groom's middle
+    // would, the side turned away dark.
+    float3 lamps[6];
+    {
+        [unroll] for (uint j = 0u; j < 6u; ++j) {
+            lamps[j] = float3(0.0, 0.0, 0.0);
+        }
+    }
+    if (have && push.lamps_on != 0u && e.local.count != 0u) {
+        ByteAddressBuffer lb = read_buffer(e.local.buffer);
+        const float view_z = max(-dot(f.view_rows[2].xyz, middle), f.near_plane);
+        const uint2 listed = light_cluster(e.local, lb, position, f.width, f.height, view_z);
+        const uint count = min(listed.y, k_hair_lamps);
+        [loop] for (uint i = 0u; i < count; ++i) {
+            const uint index = lb.Load(e.local.entries + (listed.x + i) * 4u);
+            const LocalLight lamp = load_light(lb, e.local.lights + index * k_light_bytes);
+            // (Its range is taken at each place below: a lamp may reach a
+            // strand's tip and not its middle.)
+            const float3 to_middle = lamp.position - middle;
+            float reaches = 1.0;
+            if (lamp.shadow != 0u && e.local.atlas_on != 0u) {
+                reaches = light_shadow(e.local, lb, lamp, middle, safe_normalize(to_middle, float3(0.0, 1.0, 0.0)));
+            }
+            if (reaches <= 0.0) {
+                continue;
+            }
+            [loop] for (uint j = 0u; j < 6u; ++j) {
+                const uint k = j * 3u;
+                const float3 p = points[k];
+                const float3 to_light = lamp.position - p;
+                if (dot(to_light, to_light) < 1e-8) {
+                    continue; // (at the lamp itself: no way to it)
+                }
+                const float3 ll = normalize(to_light);
+                const float falloff = light_falloff(lamp, to_light, ll) * reaches;
+                if (!(falloff > 0.0)) {
+                    continue;
+                }
+                const float3 t = safe_normalize(points[min(k + 1u, k_strand_points - 1u)] - points[k > 0u ? k - 1u : 0u],
+                                                float3(0.0, -1.0, 0.0));
+                const float3 v = -safe_normalize(p, f.view_rows[2].xyz);
+                float3 direct;
+                float3 scattered;
+                hair_light(color, g.roughness, t, ll, v, direct, scattered);
+                const float turned = dot(safe_normalize(p - g.ball.xyz, ll), ll);
+                const float deep = 3.0 * (1.0 - smoothstep(-0.3, 0.5, turned));
+                lamps[j] += lamp.color * falloff * (direct * exp(-deep) + scattered * exp(-deep * takes));
+            }
+        }
+    }
     // The air between it and the camera, as over a surface there: what it
     // adds and what it lets through are the same for every point of the
     // strand (the air is taken at its middle), so they are found once.
@@ -315,7 +483,6 @@ void cs_prepare(uint3 id : SV_DispatchThreadID) {
         air_adds = none;
         air_keeps = all - none;
     }
-    RWByteAddressBuffer out_buffer = write_buffer(push.drawn);
     [loop] for (uint k = 0u; k < k_strand_points; ++k) {
         const float3 p = points[k];
         const float3 ahead = points[min(k + 1u, k_strand_points - 1u)];
@@ -329,11 +496,92 @@ void cs_prepare(uint3 id : SV_DispatchThreadID) {
         const float along = float(k) - 2.0;
         const float reaches = along <= 6.0 ? lerp(sun[0], sun[1], saturate(along / 6.0))
                                            : lerp(sun[1], sun[2], saturate((along - 6.0) / 6.0));
-        float3 light = f.sun_light.rgb * reaches * (direct + scattered);
+        // And the hair before it: between the four.
+        const uint piece = min(k / 5u, 2u);
+        const float deep = lerp(before[piece], before[piece + 1u], (float(k) - float(piece * 5u)) / 5.0);
+        float3 light = f.sun_light.rgb * reaches * (direct * exp(-deep) + scattered * exp(-deep * takes));
+        // The lamps: between the six.
+        const uint span = min(k / 3u, 4u);
+        light += lerp(lamps[span], lamps[span + 1u], (float(k) - float(span * 3u)) / 3.0);
         light += color * round_light;
         light = air_adds + light * air_keeps;
-        out_buffer.Store4(((g.first + strand) * k_strand_points + k) * k_drawn_bytes, uint4(asuint(p), pack_hair_light(light)));
+        out_buffer.Store(out_at + k * k_drawn_bytes + 12u, pack_hair_light(light));
     }
+}
+
+struct ShadowVaryings {
+    float4 position : SV_Position; // z: its depth in the tile (more nearer the sun)
+    float across : ACROSS;         // texels from the strand's middle line
+    float width : WIDTH;           // the strand's width there, texels
+    float stands : STANDS;         // the strands it stands for
+};
+
+// A groom's first shadow_count strands as ribbons facing the sun, into
+// its tile (the pass's scissor is the tile).
+ShadowVaryings vs_shadow(uint vertex_id : SV_VertexID) {
+    const Groom g = load_groom();
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const float3 l = safe_normalize(f.sun_direction.xyz, float3(0.0, 1.0, 0.0));
+    const uint pieces = (k_strand_points - 1u) / g.shadow_stride;
+    const uint strand = vertex_id / (pieces * 6u);
+    const uint within = vertex_id % (pieces * 6u);
+    const uint piece = within / 6u;
+    const uint corner_index = within % 6u;
+    const uint c = corner_index < 3u ? corner_index : (corner_index == 3u ? 2u : (corner_index == 4u ? 1u : 3u));
+    const float side = (c & 1u) != 0u ? 1.0 : -1.0;
+    const uint k = (piece + ((c & 2u) != 0u ? 1u : 0u)) * g.shadow_stride;
+    ByteAddressBuffer drawn = read_buffer(push.drawn);
+    const uint base = (g.first + strand) * k_strand_points;
+    const uint k_ahead = min(k + g.shadow_stride, k_strand_points - 1u);
+    const uint k_behind = k >= g.shadow_stride ? k - g.shadow_stride : 0u;
+    const float3 here = in_hair_tile(g, l, asfloat(drawn.Load3((base + k) * k_drawn_bytes)));
+    const float2 ahead = in_hair_tile(g, l, asfloat(drawn.Load3((base + k_ahead) * k_drawn_bytes))).xy;
+    const float2 behind = in_hair_tile(g, l, asfloat(drawn.Load3((base + k_behind) * k_drawn_bytes))).xy;
+    float2 runs = ahead - behind;
+    // (The piece's own run decides the side, as in vs_ribbon.)
+    const float2 piece_runs = (c & 2u) != 0u ? here.xy - behind : ahead - here.xy;
+    if (dot(runs, piece_runs) <= 0.0) {
+        runs = piece_runs;
+    }
+    const float run = length(runs);
+    const float2 sideways = run > 1e-20 ? float2(-runs.y, runs.x) / run : float2(1.0, 0.0);
+    const float texel = 2.0 * g.ball.w / float(k_hair_tile); // metres
+    const float share = float(k) / float(k_strand_points - 1u);
+    const float half_width = g.half_width * lerp(1.0, g.tip_width, share) / texel; // texels
+    const float drawn_half = half_width + 0.5;
+    const float2 origin = float2(float(push.groom % k_hair_tiles_across), float(push.groom / k_hair_tiles_across)) * float(k_hair_tile);
+    const float2 at = origin + here.xy + sideways * (side * drawn_half);
+    const float size = float(k_hair_tile * k_hair_tiles_across);
+    ShadowVaryings o;
+    o.position = float4(at.x / size * 2.0 - 1.0, 1.0 - at.y / size * 2.0, clamp(here.z, 0.001, 1.0), 1.0);
+    o.across = side * drawn_half;
+    o.width = 2.0 * half_width;
+    o.stands = g.shadow_stands;
+    return o;
+}
+
+float shadow_cover(ShadowVaryings i) {
+    return clamp(0.5 * i.width + 0.5 - abs(i.across), 0.0, min(1.0, i.width));
+}
+
+void ps_shadow_front(ShadowVaryings i) {
+    if (shadow_cover(i) <= 0.0) {
+        discard;
+    }
+}
+
+// Added up (the blend adds): the hair within each of the three depths of
+// the texel's front, and all of it.
+float4 ps_shadow_sums(ShadowVaryings i) : SV_Target0 {
+    const float cover = shadow_cover(i);
+    if (cover <= 0.0) {
+        discard;
+    }
+    const float amount = cover * i.stands;
+    const float z0 = read_texture_float(push.shadow_depth).Load(int3(int2(i.position.xy), 0));
+    const float behind = max(z0 - i.position.z - k_hair_slack, 0.0);
+    return float4(behind < k_hair_layers.x ? amount : 0.0, behind < k_hair_layers.y ? amount : 0.0,
+                  behind < k_hair_layers.z ? amount : 0.0, amount);
 }
 
 struct RibbonVaryings {

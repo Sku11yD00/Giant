@@ -216,6 +216,11 @@ void plan_hair(const Grooms& grooms, std::span<const HairDraw> draws, const Hair
         // (A groom cut to what the renderer keeps: each kept strand stands for several.)
         planned.lod.widen *= static_cast<float>(std::max(g.authored, g.strands)) / static_cast<float>(g.strands);
         planned.posed = posed;
+        planned.centre = centre;
+        // (A strand lies between its guides, a little past them at most
+        // unless they are blown far apart; one past the ball is not in
+        // the tile, and takes the shade at the tile's edge.)
+        planned.reach = std::sqrt(reach2) * draw.scale * 1.05f;
         plan.grooms.push_back(planned);
     }
     // The nearest, nearest first (ties as given, so the same frame is the same plan).
@@ -237,6 +242,11 @@ void plan_hair(const Grooms& grooms, std::span<const HairDraw> draws, const Hair
             const usize bytes = draws[p.draw].guides.size() * 12;
             p.posed = posed_bytes + bytes <= k_hair_posed_bytes;
             if (p.posed) posed_bytes += bytes;
+        }
+        if (!p.posed) {
+            // (Drawn at rest: within its bounds.)
+            const GroomSlot* slot = grooms.find(draws[p.draw].groom);
+            if (slot != nullptr) p.reach = 0.5f * length(slot->groom.bounds_size) * draws[p.draw].scale * 1.05f;
         }
         const u32 was = p.lod.strands;
         if (keep < 1.0) p.lod.strands = std::max(static_cast<u32>(static_cast<double>(was) * keep), 1u);
@@ -280,6 +290,13 @@ gpu::HairGroom to_gpu(const HairPlanned& planned, const GroomSlot& slot, const H
     g.variation = safe(draw.look.variation, 0.0f, 1.0f, 0.0f);
     g.count = planned.lod.strands;
     g.stride = planned.lod.stride;
+    g.shadow_count = std::min(planned.lod.strands, k_hair_shadow_strands);
+    g.shadow_stride = std::max(planned.lod.stride, k_hair_shadow_stride);
+    g.shadow_stands = g.shadow_count > 0 ? static_cast<float>(g.count) / static_cast<float>(g.shadow_count) : 0.0f;
+    g.ball[0] = planned.centre.x;
+    g.ball[1] = planned.centre.y;
+    g.ball[2] = planned.centre.z;
+    g.ball[3] = std::max(planned.reach, 1e-6f);
     return g;
 }
 

@@ -647,6 +647,9 @@ struct RenderSettings {
     // and more to draw).
     bool hair = true;
     float hair_detail = 3.0f;
+    // Hair shades itself from the sun (each drawn groom's own hair; off,
+    // the sun reaches every strand the world lets it).
+    bool hair_shadows = true;
     // Their shadows (lights with a shadow_id; needs `shadows` and GPU
     // culling): faces of shadow tiles drawn a frame at most (nearest first;
     // a face not drawn yet lets its light through).
@@ -1358,6 +1361,7 @@ private:
     // Hair (src/hair.h, shaders/hair.slang): grooms' data sent, under the frame's budget.
     void upload_grooms(rhi::CommandList& cmd);
     bool ensure_hair_targets();
+    bool ensure_hair_shadows();
     // Hair over `light`, its depth into the scene's: the light to draw over next.
     rhi::TextureHandle draw_hair(rhi::CommandList& cmd, const FrameData& data, const FrameInput& frame,
                                  rhi::TextureHandle light);
@@ -1494,7 +1498,10 @@ private:
     std::unique_ptr<Grooms> m_grooms;      // hair: the grooms added (src/hair.h)
     u32 m_groom_slots_made = 0;            // slots that ever held a groom
     std::unique_ptr<HairPlan> m_hair_plan; // this frame's plan (its memory kept)
-    rhi::PipelineHandle m_hair_prepare;    // hair (shaders/hair.slang): strands posed and lit,
+    rhi::PipelineHandle m_hair_pose;       // hair (shaders/hair.slang): strands posed,
+    rhi::PipelineHandle m_hair_shadow_front; // each groom as the sun sees it: the nearest depth in its tile,
+    rhi::PipelineHandle m_hair_shadow_sums;  // and the hair within depths of that, added up,
+    rhi::PipelineHandle m_hair_light_pass; // strands lit,
     rhi::PipelineHandle m_hair_front;      // their ribbons' nearest depth,
     rhi::PipelineHandle m_hair_draw;       // their light summed by nearness to it,
     rhi::PipelineHandle m_hair_composite;  // the sums over the light,
@@ -1504,6 +1511,8 @@ private:
     rhi::TextureHandle m_hair_accum;       // rgba16_float: light x cover x weight (exposed), cover x weight
     rhi::TextureHandle m_hair_reveal;      // rgba16_float: what shows through
     rhi::TextureHandle m_hair_light;       // rgba16_float: the light with hair over it
+    rhi::TextureHandle m_hair_shadow_depth; // the sun's hair shadow tiles (k_hair_shadow_size square, made when first drawn)
+    rhi::TextureHandle m_hair_shadow_opacity; // rgba16_float beside it
     rhi::TransientMemory m_shading_extras; // this frame's gpu::ResolveExtras (data null: none yet), which the water reads too
     // Bloom: the light halved k_bloom_levels times (down), and back up
     // (up[i]: down[i] plus up[i + 1] spread; the last level is down's own).
