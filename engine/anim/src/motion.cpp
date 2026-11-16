@@ -173,15 +173,23 @@ constexpr Group k_groups[] = {
     {k_motion_ahead_facings, 6, &MotionSettings::ahead_facing_weight},
 };
 
-// How far `query` is from a box, squared.
-float box_cost(const float* least, const float* most, const MotionFeatures& query, usize from) {
-    float cost = 0.0f;
-    for (usize i = from; i < k_motion_features; ++i) {
-        const float q = query[i];
-        const float d = q < least[i] ? least[i] - q : (q > most[i] ? q - most[i] : 0.0f);
-        cost += d * d;
-    }
-    return cost;
+// How much the pose counts, kept to what leaves every cost a float.
+float pose_weight(float pose) { return pose >= 0.0f ? std::min(pose, 1000.0f) : 0.0f; }
+
+// How far `query` is from a box, squared: the way ahead's numbers, and the
+// pose's `pose` times over (0: not looked at).
+float box_cost(const float* least, const float* most, const MotionFeatures& query, float pose) {
+    const auto part = [&](usize from, usize to) {
+        float cost = 0.0f;
+        for (usize i = from; i < to; ++i) {
+            const float q = query[i];
+            const float d = q < least[i] ? least[i] - q : (q > most[i] ? q - most[i] : 0.0f);
+            cost += d * d;
+        }
+        return cost;
+    };
+    const float ahead = part(k_motion_ahead_places, k_motion_features);
+    return pose > 0.0f ? ahead + pose * part(0, k_motion_ahead_places) : ahead;
 }
 
 } // namespace
@@ -482,19 +490,24 @@ MotionFeatures motion_query(const MotionDatabase& db, u32 now, const MotionAhead
     return q;
 }
 
-float motion_cost(const MotionDatabase& db, u32 f, const MotionFeatures& query, bool pose) {
+float motion_cost(const MotionDatabase& db, u32 f, const MotionFeatures& query, float pose) {
     const auto frame = db.frame(f);
-    float cost = 0.0f;
-    for (usize i = pose ? 0 : k_motion_ahead_places; i < k_motion_features; ++i) {
-        const float d = frame[i] - query[i];
-        cost += d * d;
-    }
-    return cost;
+    const auto part = [&](usize from, usize to) {
+        float cost = 0.0f;
+        for (usize i = from; i < to; ++i) {
+            const float d = frame[i] - query[i];
+            cost += d * d;
+        }
+        return cost;
+    };
+    const float weight = pose_weight(pose);
+    const float ahead = part(k_motion_ahead_places, k_motion_features);
+    return weight > 0.0f ? ahead + weight * part(0, k_motion_ahead_places) : ahead;
 }
 
-MotionMatch motion_search(const MotionDatabase& db, const MotionFeatures& query, MotionMatch best, bool pose) {
+MotionMatch motion_search(const MotionDatabase& db, const MotionFeatures& query, MotionMatch best, float pose) {
     const float* features = db.features.data();
-    const usize from = pose ? 0 : k_motion_ahead_places;
+    const float weight = pose_weight(pose);
     for (const MotionRange& r : db.ranges) {
         usize i = r.first;
         const usize end = usize{r.first} + r.startable;
@@ -502,7 +515,7 @@ MotionMatch motion_search(const MotionDatabase& db, const MotionFeatures& query,
             const usize big = i / k_large;
             const usize large_end = std::min((big + 1) * k_large, end);
             if (box_cost(db.large_least.data() + big * k_motion_features,
-                         db.large_most.data() + big * k_motion_features, query, from) >= best.cost) {
+                         db.large_most.data() + big * k_motion_features, query, weight) >= best.cost) {
                 i = large_end;
                 continue;
             }
@@ -510,16 +523,27 @@ MotionMatch motion_search(const MotionDatabase& db, const MotionFeatures& query,
                 const usize little = i / k_small;
                 const usize small_end = std::min((little + 1) * k_small, large_end);
                 if (box_cost(db.small_least.data() + little * k_motion_features,
-                             db.small_most.data() + little * k_motion_features, query, from) >= best.cost) {
+                             db.small_most.data() + little * k_motion_features, query, weight) >= best.cost) {
                     i = small_end;
                     continue;
                 }
                 for (; i < small_end; ++i) {
                     const float* frame = features + i * k_motion_features;
+                    // The way ahead first (it tells frames apart soonest), then the pose: summed
+                    // apart, as motion_cost does, so both give a frame the very same cost.
                     float cost = 0.0f;
-                    for (usize k = from; k < k_motion_features && cost < best.cost; ++k) {
+                    for (usize k = k_motion_ahead_places; k < k_motion_features && cost < best.cost; ++k) {
                         const float d = frame[k] - query[k];
                         cost += d * d;
+                    }
+                    if (weight > 0.0f && cost < best.cost) {
+                        const float ahead = cost;
+                        float posed = 0.0f;
+                        for (usize k = 0; k < k_motion_ahead_places && cost < best.cost; ++k) {
+                            const float d = frame[k] - query[k];
+                            posed += d * d;
+                            cost = ahead + weight * posed;
+                        }
                     }
                     if (cost < best.cost) best = {static_cast<u32>(i), cost};
                 }

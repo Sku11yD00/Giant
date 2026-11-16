@@ -4,6 +4,8 @@
 // search against checking every frame.
 #include "giant/anim/motion.h"
 
+#include "motion_test_clips.h"
+
 #include "giant_test.h"
 
 #include <algorithm>
@@ -15,130 +17,12 @@
 
 using namespace giant;
 using namespace giant::anim;
+using namespace giant::anim::testing;
 
 namespace {
 
-constexpr float k_tau = 2.0f * std::numbers::pi_v<float>;
-
-// Hips a metre up with a foot under each side (left is +x, facing +z).
-Skeleton biped(const char* hips = "Hips", const char* left = "LeftFoot", const char* right = "RightFoot") {
-    Skeleton s;
-    s.names = {hips, left, right};
-    s.parents = {-1, 0, 0};
-    s.rest = {JointTransform{{0.0f, 1.0f, 0.0f}}, JointTransform{{0.1f, -1.0f, 0.0f}},
-              JointTransform{{-0.1f, -1.0f, 0.0f}}};
-    s.inverse_bind = {Mat4{}, Mat4{}, Mat4{}};
-    return s;
-}
-
-Channel channel(u32 joint, Path path) {
-    Channel c;
-    c.joint = joint;
-    c.path = path;
-    return c;
-}
-
-Vec4 q4(const Quat& q) { return {q.x, q.y, q.z, q.w}; }
-
-// Feet swinging fore and aft `stride` either way, `steps` cycles over the clip.
-void swing_feet(Clip& clip, float stride, float steps) {
-    Channel left = channel(1, Path::translation);
-    Channel right = channel(2, Path::translation);
-    const int keys = 32;
-    for (int i = 0; i <= keys; ++i) {
-        const float u = static_cast<float>(i) / static_cast<float>(keys);
-        const float swing = stride * std::sin(k_tau * steps * u);
-        left.times.push_back(u * clip.duration);
-        right.times.push_back(u * clip.duration);
-        left.values.push_back({0.1f, -1.0f, swing, 0.0f});
-        right.values.push_back({-0.1f, -1.0f, -swing, 0.0f});
-    }
-    clip.channels.push_back(left);
-    clip.channels.push_back(right);
-}
-
-// Going straight along `along` (level, unit) at `speed` for `seconds`.
-Clip go(const char* name, float speed, float seconds, const Vec3& along = {0.0f, 0.0f, 1.0f}) {
-    Clip c;
-    c.name = name;
-    c.duration = seconds;
-    Channel hips = channel(0, Path::translation);
-    hips.times = {0.0f, seconds};
-    hips.values = {{0.0f, 1.0f, 0.0f, 0.0f},
-                   {along.x * speed * seconds, 1.0f, along.z * speed * seconds, 0.0f}};
-    c.channels.push_back(hips);
-    swing_feet(c, 0.2f * speed, 1.0f);
-    return c;
-}
-
-// Standing, shifting its feet a little.
-Clip idle() {
-    Clip c;
-    c.name = "idle";
-    c.duration = 2.0f;
-    swing_feet(c, 0.01f, 1.0f);
-    return c;
-}
-
-// Slowing from `speed` to a stand over `seconds` (a one-off), stepping once a second.
-Clip stop(float speed, float seconds) {
-    Clip c;
-    c.name = "stop";
-    c.duration = seconds;
-    Channel hips = channel(0, Path::translation);
-    const int keys = 30;
-    for (int i = 0; i <= keys; ++i) {
-        const float t = seconds * static_cast<float>(i) / static_cast<float>(keys);
-        hips.times.push_back(t);
-        hips.values.push_back({0.0f, 1.0f, speed * (t - 0.5f * t * t / seconds), 0.0f});
-    }
-    c.channels.push_back(hips);
-    swing_feet(c, 0.3f, seconds); // in step with a walk at 1.5 m/s
-    return c;
-}
-
-constexpr float k_turn_speed = 1.5f;
-constexpr float k_turn_rate = 0.25f * std::numbers::pi_v<float>; // a quarter turn in 2 s
-
-// Walking a quarter of a circle toward +x: a loop that turns.
-Clip turn() {
-    Clip c;
-    c.name = "turn";
-    c.duration = 2.0f;
-    Channel place = channel(0, Path::translation);
-    Channel facing = channel(0, Path::rotation);
-    const int keys = 64;
-    const float radius = k_turn_speed / k_turn_rate;
-    for (int i = 0; i <= keys; ++i) {
-        const float t = c.duration * static_cast<float>(i) / static_cast<float>(keys);
-        const float a = k_turn_rate * t;
-        place.times.push_back(t);
-        facing.times.push_back(t);
-        place.values.push_back({radius * (1.0f - std::cos(a)), 1.0f, radius * std::sin(a), 0.0f});
-        facing.values.push_back(q4(quat_from_axis_angle({0.0f, 1.0f, 0.0f}, a)));
-    }
-    c.channels.push_back(place);
-    c.channels.push_back(facing);
-    swing_feet(c, 0.3f, 2.0f);
-    return c;
-}
-
-struct Set {
-    Skeleton skeleton = biped();
-    std::vector<Clip> clips{idle(), go("walk", 1.5f, 1.0f), go("run", 4.0f, 0.5f), turn(), stop(1.5f, 1.5f)};
-    std::vector<MotionClip> chosen{{0, true}, {1, true}, {2, true}, {3, true}, {4, false}};
-    MotionDatabase db;
-    std::string problem;
-
-    explicit Set(const MotionSettings& settings = {}) {
-        problem = build_motion_database(skeleton, clips, chosen, find_motion_joints(skeleton), settings, db);
-    }
-};
-
-bool near(float a, float b, float tolerance) { return std::fabs(a - b) <= tolerance; }
-
 // Checking every startable frame.
-MotionMatch slow_search(const MotionDatabase& db, const MotionFeatures& query, bool pose = true) {
+MotionMatch slow_search(const MotionDatabase& db, const MotionFeatures& query, float pose = 1.0f) {
     MotionMatch best;
     for (const MotionRange& r : db.ranges) {
         for (u32 f = r.first; f < r.first + r.startable; ++f) {
@@ -147,13 +31,6 @@ MotionMatch slow_search(const MotionDatabase& db, const MotionFeatures& query, b
         }
     }
     return best;
-}
-
-MotionAhead straight(float speed) {
-    MotionAhead ahead;
-    const MotionSettings settings;
-    for (usize h = 0; h < k_motion_horizons; ++h) ahead.place[h] = {0.0f, speed * settings.horizons[h]};
-    return ahead;
 }
 
 } // namespace
@@ -312,7 +189,7 @@ GIANT_TEST("motion: the search finds the clip that goes as wanted") {
     Set set;
     const MotionDatabase& db = set.db;
     const auto clip_for = [&](const MotionAhead& ahead) {
-        const MotionMatch m = motion_search(db, motion_query(db, k_no_frame, ahead), {}, false);
+        const MotionMatch m = motion_search(db, motion_query(db, k_no_frame, ahead), {}, 0.0f);
         GIANT_CHECK(m.frame != k_no_frame);
         return db.range_of(m.frame).clip;
     };
@@ -362,7 +239,9 @@ GIANT_TEST("motion: the search is the nearest startable frame, as checking every
         }
         const u32 now = i % 3 == 0 ? k_no_frame : static_cast<u32>(random(0.0f, static_cast<float>(db.frames() - 1)));
         const MotionFeatures query = motion_query(db, now, ahead);
-        const bool pose = now != k_no_frame;
+        // (With no frame playing only the way ahead counts; else the pose by some weight.)
+        const float weights[] = {1.0f, 0.3f, 2.5f, 0.0f};
+        const float pose = now != k_no_frame ? weights[(i / 3) % 4] : 0.0f;
         const MotionMatch fast = motion_search(db, query, {}, pose);
         const MotionMatch slow = slow_search(db, query, pose);
         GIANT_CHECK(fast.frame == slow.frame);
@@ -472,7 +351,7 @@ GIANT_TEST("motion: a pose of no length is a loop of one frame, standing") {
     GIANT_CHECK(db.time_of(0) == 0.0f);
     GIANT_CHECK(near(db.raw(0, k_motion_hips_velocity + 2), 0.0f, 1e-5f));
     GIANT_CHECK(near(db.raw(0, k_motion_ahead_places + 5), 0.0f, 1e-5f));
-    const MotionMatch m = motion_search(db, motion_query(db, k_no_frame, straight(0.0f)), {}, false);
+    const MotionMatch m = motion_search(db, motion_query(db, k_no_frame, straight(0.0f)), {}, 0.0f);
     GIANT_CHECK(m.frame == 0);
 }
 
@@ -578,7 +457,7 @@ GIANT_TEST("motion: a way ahead that is no number, or beyond reach, still finds 
         const MotionMatch m = motion_search(db, query);
         GIANT_CHECK(m.frame < db.frames());
         GIANT_CHECK(std::isfinite(m.cost));
-        GIANT_CHECK(motion_search(db, query, {}, false).frame < db.frames());
+        GIANT_CHECK(motion_search(db, query, {}, 0.0f).frame < db.frames());
     }
     // The pose handed on is the frame's own.
     const MotionFeatures query = motion_query(db, 70, straight(1.5f));
@@ -601,4 +480,26 @@ GIANT_TEST("motion: runs of frames with none to jump into are skipped, far from 
     }
     const MotionMatch m = motion_search(db, motion_query(db, 120, straight(0.0f)));
     GIANT_CHECK(m.frame < 91);
+}
+
+GIANT_TEST("motion: the pose counts by its weight beside the way ahead") {
+    Set set;
+    const MotionDatabase& db = set.db;
+    const u32 walking = db.ranges[1].first + 18;
+    const u32 running = db.ranges[2].first + 3;
+    const MotionFeatures query = motion_query(db, walking, straight(4.0f));
+    const float ahead = motion_cost(db, running, query, 0.0f);
+    const float whole = motion_cost(db, running, query);
+    GIANT_CHECK(whole > ahead);
+    GIANT_CHECK(near(motion_cost(db, running, query, 0.25f), ahead + 0.25f * (whole - ahead), 1e-3f * whole));
+    GIANT_CHECK(motion_cost(db, running, query, -3.0f) == ahead); // under 0, or no number: 0
+    GIANT_CHECK(motion_cost(db, running, query, std::nanf("")) == ahead);
+    GIANT_CHECK(std::isfinite(motion_cost(db, running, query, 1e30f))); // kept to 1000
+
+    // Posed as a walk and wanting a run's way: the walk is stayed in while the pose counts in full
+    // (nothing here goes from one to the other), and left once it counts for little.
+    const MotionMatch staying = motion_search(db, query, {walking, motion_cost(db, walking, query)});
+    GIANT_CHECK(staying.frame == walking);
+    const MotionMatch leaving = motion_search(db, query, {walking, motion_cost(db, walking, query, 0.25f)}, 0.25f);
+    GIANT_CHECK(db.range_of(leaving.frame).clip == 2);
 }

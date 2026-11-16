@@ -1634,8 +1634,24 @@ simulation share one definition and none of it needs a GPU.
   Measured: 180,000 frames (100 minutes of clips) searched in about
   0.26 ms, built in 0.1 s; building belongs on a job. `find_motion_joints`
   finds the hips and feet by the usual rig names, `clip_loops` tells a
-  loop from a one-off clip. The matcher that plays the frames (C7b) and
-  the editor's use of it (C7c) come next.
+  loop from a one-off clip. A search takes how much the pose counts
+  beside the way ahead (0 for a first frame, when no pose shows yet).
+- **The matcher** (`matcher.h`, C7b). `MotionMatcher` keeps one frame
+  playing, looks every tenth of a second for a better one (at once when
+  asked, or when a one-off clip has ended, which is never stayed on) and
+  jumps to it unless it is within a few frames in the same clip or less
+  than a twentieth better. A jump never shows and two clips are never
+  mixed: the difference between the pose left and the pose landed on, and
+  between how fast each was changing, is kept per joint as an offset that
+  a critically damped spring takes to nothing (halving in a tenth of a
+  second). The pose it gives stands in place (`motion_pose`: the
+  database's root taken out of every root joint), so whatever moves the
+  character owns where it is; `root_motion` says how the clip would have
+  moved it. `motion_ahead` eases a way ahead from the velocity now to the
+  one wanted. With few clips, none recorded going from one to the next,
+  being posed alike outweighs going the wanted way and a walk never
+  becomes a run, so the matcher counts the pose half (`pose_weight`).
+  The editor's use of it (C7c) comes next.
 
 The glTF importer reads one skin per file (a second is refused). Its
 skeleton is the skin's joints plus any node between two of them (their
