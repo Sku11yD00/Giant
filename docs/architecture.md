@@ -590,7 +590,9 @@ an offline cooker can use it without a device.
   skin or eye, sides and cut-out), still bending as the entity does, so
   one character file is skin, cloth, eyes and hair cards at once. Names
   the file lacks do nothing (kept, for when the file has them again). A
-  kit's pieces take no such looks yet. A scene saved
+  kit's pieces take no such looks yet, and a character's hair still
+  takes its scalp from the whole file (every part the head joint holds):
+  give `hair.top` a share that clears the eyes. A scene saved
   before parts keeps the look its entities stored then (the busiest
   material, perhaps without maps) on the first part until its maps are
   set, or it is given another mesh and then this one again (the same
