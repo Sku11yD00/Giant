@@ -12,7 +12,9 @@
 // its first bone (the hips) has gone (handed to the scene's drawing as
 // the walkers' poses are: moved in place, kept out of the voxel world);
 // the scene keeps where it was put. A walker goes limp where it walks and
-// walks no more.
+// walks no more. Each bone starts moving as its joint was (the animation's
+// last two poses: an arm mid-swing swings on), over the character's own
+// velocity.
 //
 // Bullets meet the bones' bodies (as flesh, naming the entity, and its bone
 // and zone: PhysicsState::ragdoll_joint) instead of the character's hit

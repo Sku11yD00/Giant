@@ -731,3 +731,111 @@ GIANT_TEST("ragdolls: a shot and a blast on one both push it; walkers are shot d
     if (blown == nullptr) return;
     GIANT_CHECK(f.physics.world().state(f.physics.world().ragdoll_bodies(blown->id)[0])->linear_velocity.z < -2.0f);
 }
+
+GIANT_TEST("ragdolls: each bone starts moving as its joint was (an arm on its way up goes on up), over the character's own velocity") {
+    Fixture f;
+    f.floor();
+    const world::EntityId id = f.person(0.0, 0.0, 0.0);
+    const world::EntityId still = f.person(4.0, 0.0, 0.0);
+    const world::EntityId cut = f.person(8.0, 0.0, 0.0);
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    f.frames(0.3);
+    // Its left arm fading up to "raise" (60 degrees in half a second): caught halfway.
+    GIANT_CHECK(f.run("play_animation", {{"id", id}, {"clip", "raise"}, {"blend_seconds", 0.5}}).ok);
+    f.frames(0.25);
+    const usize forearm = joint_named(f, "LeftForeArm");
+    const DVec3 was = f.joint(id, forearm);
+    f.frame();
+    const DVec3 now = f.joint(id, forearm);
+    const Vec3 moving = Vec3{static_cast<float>(now.x - was.x), static_cast<float>(now.y - was.y), static_cast<float>(now.z - was.z)} * 60.0f;
+    GIANT_CHECK(length(moving) > 0.3f); // (the clip does move it)
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", id}, {"velocity", {0.0, 0.0, 2.0}}}).ok);
+    const RagdollState::Ragdoll* r = f.ragdolls.find(id);
+    GIANT_CHECK(r != nullptr);
+    if (r == nullptr) return;
+    const std::span<const sim::BodyId> bodies = f.physics.world().ragdoll_bodies(r->id);
+    const sim::BodyState arm = *f.physics.world().state(bodies[r->bone_of[joint_named(f, "LeftArm")]]);
+    const sim::BodyState lower = *f.physics.world().state(bodies[r->bone_of[forearm]]);
+    const sim::BodyState hips = *f.physics.world().state(bodies[0]);
+    // The hips and the other arm at the velocity given; the raised arm's bones over it, the way the joint went, turning.
+    GIANT_CHECK(length(hips.linear_velocity - Vec3{0.0f, 0.0f, 2.0f}) < 1e-3f && length(hips.angular_velocity) < 1e-3f);
+    const sim::BodyState other = *f.physics.world().state(bodies[r->bone_of[joint_named(f, "RightForeArm")]]);
+    GIANT_CHECK(length(other.linear_velocity - Vec3{0.0f, 0.0f, 2.0f}) < 1e-3f);
+    const Vec3 own = lower.linear_velocity - Vec3{0.0f, 0.0f, 2.0f};
+    GIANT_CHECK(length(own) > 0.3f && dot(own, moving) > 0.7f * length(own) * length(moving));
+    GIANT_CHECK(length(own) > length(arm.linear_velocity - Vec3{0.0f, 0.0f, 2.0f})); // farther from the shoulder: faster
+    GIANT_CHECK(length(arm.angular_velocity) > 1.0f && length(arm.angular_velocity) < 4.0f); // (about 2 rad/s)
+    GIANT_CHECK(length(lower.angular_velocity - arm.angular_velocity) < 0.2f);                // (the elbow does not bend)
+    // One standing still starts at rest; so does one whose clip was only just started (a cut: no motion to
+    // carry), a frame ago or this very moment, though it was moving until then.
+    const world::EntityId cut_now = f.person(12.0, 0.0, 0.0);
+    f.frame();
+    GIANT_CHECK(f.run("play_animation", {{"id", cut_now}, {"clip", "raise"}, {"blend_seconds", 0.5}}).ok);
+    f.frames(0.25);
+    GIANT_CHECK(f.run("play_animation", {{"id", cut}, {"clip", "raise"}, {"blend_seconds", 0.0}}).ok);
+    f.frame();
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", still}}).ok);
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", cut}}).ok);
+    GIANT_CHECK(f.run("play_animation", {{"id", cut_now}, {"clip", "idle"}, {"blend_seconds", 0.0}}).ok);
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", cut_now}}).ok);
+    for (const world::EntityId e : {still, cut, cut_now}) {
+        const RagdollState::Ragdoll* one = f.ragdolls.find(e);
+        GIANT_CHECK(one != nullptr);
+        if (one == nullptr) continue;
+        for (const sim::BodyId b : f.physics.world().ragdoll_bodies(one->id)) {
+            const sim::BodyState s = *f.physics.world().state(b);
+            GIANT_CHECK(length(s.linear_velocity) < 1e-3f && length(s.angular_velocity) < 1e-3f);
+        }
+    }
+    // One turned a quarter about: its arm's motion turned with it.
+    const world::EntityId turned_one = f.create({{"shape", "mesh"}, {"mesh", f.file}, {"position", {16.0, 0.0, 0.0}},
+                                                 {"rotation", {{"yaw", 90.0}}},  {"body", "fixed"}});
+    GIANT_CHECK(f.run("set_animation", {{"id", turned_one}, {"clip", "idle"}}).ok);
+    f.frames(0.1);
+    GIANT_CHECK(f.run("play_animation", {{"id", turned_one}, {"clip", "raise"}, {"blend_seconds", 0.5}}).ok);
+    f.frames(0.25);
+    const DVec3 from = f.joint(turned_one, forearm);
+    f.frame();
+    const DVec3 to = f.joint(turned_one, forearm);
+    const Vec3 went = Vec3{static_cast<float>(to.x - from.x), static_cast<float>(to.y - from.y), static_cast<float>(to.z - from.z)} * 60.0f;
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", turned_one}}).ok);
+    const RagdollState::Ragdoll* q = f.ragdolls.find(turned_one);
+    GIANT_CHECK(q != nullptr);
+    if (q == nullptr) return;
+    const sim::BodyState swung = *f.physics.world().state(f.physics.world().ragdoll_bodies(q->id)[q->bone_of[forearm]]);
+    GIANT_CHECK(length(went) > 0.3f && dot(swung.linear_velocity, went) > 0.95f * length(swung.linear_velocity) * length(went));
+    GIANT_CHECK(length(swung.linear_velocity) > 0.3f && length(swung.angular_velocity) > 1.0f);
+    // (Its spin is about the way it faces now, as its arm rises in the plane across that.)
+    const Vec3 facing = rotate(f.state.scene.find(turned_one)->transform.rotation, Vec3{0.0f, 0.0f, 1.0f});
+    GIANT_CHECK(std::fabs(facing.x) > 0.9f); // (turned indeed)
+    GIANT_CHECK(std::fabs(dot(swung.angular_velocity, facing)) > 0.9f * length(swung.angular_velocity));
+    // Faster than a limb moves is no motion but a pop: the same fade on a giant sixty times the size swings
+    // its forearm at over 20 m/s, and the whole of it starts at rest.
+    const world::EntityId popped = f.create({{"shape", "mesh"}, {"mesh", f.file}, {"position", {200.0, 0.0, 0.0}},
+                                             {"scale", {60.0, 60.0, 60.0}},  {"body", "fixed"}});
+    GIANT_CHECK(f.run("set_animation", {{"id", popped}, {"clip", "idle"}}).ok);
+    const world::EntityId frozen = f.person(24.0, 0.0, 0.0);
+    f.frames(0.1);
+    for (const world::EntityId e : {popped, frozen}) {
+        GIANT_CHECK(f.run("play_animation", {{"id", e}, {"clip", "raise"}, {"blend_seconds", 0.5}}).ok);
+    }
+    f.frames(0.25);
+    for (const world::EntityId e : {popped, frozen}) {
+        const AnimationState::Animated* a = f.animation.find(e);
+        GIANT_CHECK(a != nullptr && !a->cut && a->moved_seconds > 0.0); // (two poses that follow: motion to carry, were it one)
+    }
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", popped}}).ok);
+    // The animation paused: one frozen mid-swing starts at rest too.
+    f.animation.set_paused(true);
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", frozen}}).ok);
+    f.animation.set_paused(false);
+    for (const world::EntityId e : {popped, frozen}) {
+        const RagdollState::Ragdoll* one = f.ragdolls.find(e);
+        GIANT_CHECK(one != nullptr);
+        if (one == nullptr) continue;
+        for (const sim::BodyId b : f.physics.world().ragdoll_bodies(one->id)) {
+            const sim::BodyState state = *f.physics.world().state(b);
+            GIANT_CHECK(length(state.linear_velocity) < 1e-3f && length(state.angular_velocity) < 1e-3f);
+        }
+    }
+}

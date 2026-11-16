@@ -204,6 +204,15 @@ public:
         std::vector<anim::JointTransform> local;
         std::vector<Mat4> model;
         std::vector<Mat4> skin;
+        // How it was moving: the pose worked out before `model`, and the
+        // seconds between the two (0: none, or a cut between them: a clip
+        // started, the matcher taking over), and the seconds since `model`
+        // was worked out (one long still was last moving long ago). What
+        // a ragdoll's bones start with.
+        std::vector<Mat4> before;
+        double moved_seconds = 0.0;
+        double since_model = 0.0;
+        bool cut = true; // the next pose does not follow from the last
         geometry::Sphere bounds;
         bool dirty = true;     // its pose must be worked out again now
         bool changed = false;  // time moved it since its last pose (posed when due)
