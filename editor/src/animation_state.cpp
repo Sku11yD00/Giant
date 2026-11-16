@@ -99,6 +99,7 @@ const char* AnimationState::motion_state(const Animated& a) {
 
 void AnimationState::release_motion(Animated& a) {
     a.matching = false;
+    a.cut = true;
     if (a.motion == nullptr) return;
     // (A build not yet begun is then skipped; one running keeps its own hold and ends unseen.)
     const bool unmatchable = a.motion->ready.load(std::memory_order_acquire) && !a.motion->problem.empty();
@@ -127,6 +128,7 @@ void AnimationState::match() {
         if (can == a->matching) continue;
         if (!can) {
             a->matching = false;
+            a->cut = true;
             a->dirty = true;
             continue;
         }
@@ -136,6 +138,7 @@ void AnimationState::match() {
         if (begun >= matches_per_frame) continue;
         ++begun;
         a->matching = true;
+        a->cut = true;
         a->dirty = true;
         a->matcher.reset();
         a->match_seconds = 0.0;
@@ -314,6 +317,7 @@ AnimationState::Animated* AnimationState::start(const world::Scene& scene, const
     const usize joints = a->skinned->skeleton.size();
     a->local.resize(joints);
     a->model.resize(joints);
+    a->before.resize(joints);
     a->skin.resize(joints);
     a->saved = e->animation;
     a->sent.assign(joints, Mat4{});
@@ -365,6 +369,7 @@ void AnimationState::play_saved(Animated& a, float fade) {
     a.player.set_speed(a.saved.speed);
     a.dirty = true;
     a.fresh = true;
+    a.cut = true;
     // Its database: kept when it is matched among the same clips still.
     a.matching = false; // (match() takes it up again, from a first frame)
     if (a.motion != nullptr && a.motion->names == a.saved.matched) return;
@@ -413,6 +418,7 @@ std::string AnimationState::play(const world::Scene& scene, const MeshLibrary& m
     m_wanted.insert(id);
     a->by_command = true;
     a->matching = false; // the command's play shows, not the matcher's
+    a->cut = true;
     const float from = start >= 0.0f ? start : start_of(a->skinned->clips[index], loop, speed);
     a->player.play(a->skinned->skeleton, a->skinned->clips, index, blend_seconds, loop, from);
     a->player.set_speed(speed);
@@ -439,6 +445,7 @@ std::string AnimationState::blend(const world::Scene& scene, const MeshLibrary& 
     m_wanted.insert(id);
     a->by_command = true;
     a->matching = false;
+    a->cut = true;
     a->player.set_blend(a->skinned->clips, ia, ib, weight, sync);
     a->dirty = true;
     a->fresh = false;
@@ -521,6 +528,8 @@ void AnimationState::release_pose(const world::Scene& scene, const MeshLibrary& 
     const auto it = m_animated.find(id);
     if (it == m_animated.end()) return;
     it->second->held_pose = false;
+    it->second->cut = true; // (its clips' pose does not follow from a ragdoll's)
+    it->second->moved_seconds = 0.0;
     it->second->drawn_at.reset();
     it->second->dirty = true;
     it->second->pose_serial = ++m_serial;
@@ -558,6 +567,7 @@ void AnimationState::advance(double seconds) {
     if (seconds <= 0.0) return;
     for (const auto& [id, a] : m_animated) {
         a->since_pose += seconds;
+        a->since_model += seconds;
         if (a->fresh) continue; // started this update: from its start
         if (a->held_pose) {
             // Its clip's time moves on underneath, but that changes nothing shown: no pose to work out.
@@ -641,6 +651,14 @@ void AnimationState::pose(Timed timed) {
             for (usize i = begin; i < end; ++i) {
                 Animated& a = *m_work[i];
                 const MeshLibrary::Skinned& s = *a.skinned;
+                // The pose it had kept beside the new one (when time has moved: one worked out
+                // again at the same moment stands for the same pose).
+                if (!a.held_pose && a.since_model > 0.0 && a.before.size() == a.model.size()) {
+                    std::swap(a.model, a.before);
+                    a.moved_seconds = a.posed && !a.cut ? a.since_model : 0.0;
+                    a.since_model = 0.0;
+                    a.cut = false;
+                }
                 if (a.held_pose) {
                     a.model = a.given; // (as many as its joints: nothing allocated)
                 } else if (a.matching) {

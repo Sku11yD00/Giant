@@ -114,7 +114,8 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
          "way, the rest leaning about the rest pose as far as a bone of that name does), which falls, is "
          "pushed about and comes to rest as bodies do, and poses the character from then on instead of its "
          "clips. `id` (required): a visible mesh entity whose file has a skeleton (the character faces +z); "
-         "`velocity` [x, y, z] m/s every bone starts with (default: a walker's own, else at rest). A walker "
+         "`velocity` [x, y, z] m/s every bone starts with (default: a walker's own, else at rest); over it each "
+         "bone moves as its joint was moving in its animation. A walker "
          "goes limp where it walks and walks no more. Bullets meet its bones (as flesh) and push them. It is "
          "drawn where its hips have gone; the scene keeps where it was put. Until `stop_ragdoll`, the "
          "simulation stopping, or the entity hidden, removed or given another file. At most 256. View state.",

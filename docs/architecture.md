@@ -1337,9 +1337,21 @@ flesh, naming the entity, and the bone's joint and its zone by the file's
 zone map: `PhysicsState::ragdoll_joint`) and push them. Let go (`stop_ragdoll`, the
 simulation stopped, another scene, a game loaded, the entity hidden,
 removed or drawing another file) it stands where the scene has it and its
-clips pose it again (one with nothing to play is animated no more). Limits:
-bones start with one velocity (the joints' own motion is not carried over
-yet); let go standing straight on level ground it can balance on its
+clips pose it again (one with nothing to play is animated no more). Each
+bone starts moving as its joint was, over the character's velocity: the
+animation keeps the pose it worked out before the one it shows
+(`Animated::before`, `moved_seconds` apart; none across a cut: a clip
+started, the matcher taking over), and a bone's speed (at its middle) and
+spin are the change between the two, when they are a moment apart (at most
+half a second: animation LOD poses far ones seldom) and fresh (worked out
+within a quarter second: one long still starts at rest), with no cut
+since and the animation not paused. A bone moving faster than 20 m/s or
+30 radians a second between the two is a pop, not motion (a loop whose
+end does not meet its start): the whole character starts as one then (a
+smaller pop still passes for motion: two poses cannot tell). Every
+`play_animation` and `blend_animations` call is a cut, so one driven by
+such calls each frame starts at rest. Not for a mirrored character. Limits:
+let go standing straight on level ground it can balance on its
 shins; joints give some degrees under hard landings; not saved (C8c).
 
 Shots and blasts drop characters (C8b part 2; `connect_blows`). A shot

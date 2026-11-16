@@ -95,6 +95,11 @@ float segment_distance(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec
     return length((p1 + d1 * s) - (p2 + d2 * t));
 }
 
+// How fast a bone can start, over its character's own speed (an animation's limb: m/s, radians a second). One
+// faster is no motion but a pop (a loop's end not meeting its start): the whole character starts as one then.
+constexpr float k_max_bone_speed = 20.0f;
+constexpr float k_max_bone_spin = 30.0f;
+
 struct Capsule {
     Vec3 a{};
     Vec3 b{};
@@ -116,9 +121,11 @@ struct Made {
 };
 
 // The ragdoll of a character posed as `model` (its joints' model matrices)
-// and drawn at `at`. Empty when no bone is worth a body.
+// and drawn at `at`, every bone moving at `velocity` and, over that, as its
+// joint moved from the pose `before` to this one in `seconds` (0: no such
+// pose). Empty when no bone is worth a body.
 std::optional<Made> make(const MeshLibrary::Skinned& s, std::span<const Mat4> model, const world::Transform& at,
-                         const Vec3& velocity) {
+                         const Vec3& velocity, std::span<const Mat4> before, float seconds) {
     const usize joints = s.skeleton.size();
     if (model.size() != joints || s.rest_model.size() != joints) return std::nullopt;
     // Each joint's capsule (the first, should a file have two), as posed and at rest, in the entity's space.
@@ -157,6 +164,7 @@ std::optional<Made> make(const MeshLibrary::Skinned& s, std::span<const Mat4> mo
     std::vector<Quat> rest_turn; // and at rest
     std::vector<Vec3> origin;    // per bone: its joint's place in the entity's space, as posed
     std::vector<Capsule> at_rest; // per bone
+    bool wild = false;            // a bone moved as no limb does between the two poses
     for (u32 j = 0; j < joints; ++j) {
         const i32 parent_joint = s.skeleton.parents[j];
         const u32 above = parent_joint >= 0 ? r.bone_of[static_cast<usize>(parent_joint)] : k_none;
@@ -190,6 +198,26 @@ std::optional<Made> make(const MeshLibrary::Skinned& s, std::span<const Mat4> mo
         const Vec3 along = far - near;
         const float span = length(along);
         const Vec3 middle = (near + far) * 0.5f;
+        // Moving as its joint was: its middle's speed and its spin, from the pose before (not for
+        // a mirrored character, whose spin that would turn about).
+        if (seconds > 0.0f && before.size() == joints && at.scale.x > 0.0f && at.scale.y > 0.0f && at.scale.z > 0.0f) {
+            const Mat4 was = scaled(before[j], at.scale);
+            const Vec3 o_was = origin_of(was);
+            Quat dq = normalize(q * conjugate(turn_of(was)));
+            if (dq.w < 0.0f) dq = {-dq.x, -dq.y, -dq.z, -dq.w};
+            const Vec3 axis{dq.x, dq.y, dq.z};
+            const float sine = length(axis);
+            const Vec3 spin = sine > 1e-6f ? axis * (2.0f * std::atan2(sine, dq.w) / (sine * seconds)) : Vec3{};
+            const Vec3 speed = (o - o_was) * (1.0f / seconds) + cross(spin, rotate(q, middle));
+            // (A joint squashed to nothing in the pose before has no turn to tell a spin from.)
+            if (finite(o_was) && finite(speed) && finite(spin) && stretch(was) > 1e-6f && length(speed) <= k_max_bone_speed &&
+                length(spin) <= k_max_bone_spin) {
+                b.linear_velocity = velocity + rotate(at.rotation, speed);
+                b.angular_velocity = rotate(at.rotation, spin);
+            } else {
+                wild = true;
+            }
+        }
         if (span > 0.02f * c.radius && span > 1e-4f) {
             const Vec3 dir = along * (1.0f / span);
             b.part = {sim::CapsuleShape{0.5f * span, c.radius}, middle, from_up(dir)};
@@ -270,6 +298,12 @@ std::optional<Made> make(const MeshLibrary::Skinned& s, std::span<const Mat4> mo
     r.root_start = d.bones.front().position;
     r.placed.resize(r.bones.size());
     r.model.assign(model.begin(), model.end());
+    if (wild) {
+        for (sim::RagdollBone& b : d.bones) {
+            b.linear_velocity = velocity;
+            b.angular_velocity = {};
+        }
+    }
     return out;
 }
 
@@ -413,7 +447,16 @@ std::string RagdollState::start(const world::Scene& scene, const MeshLibrary& me
     const bool held_before = m_animation.holds_pose(id);
     if (const std::string error = m_animation.hold_pose(scene, meshes, id); !error.empty()) return error;
     const AnimationState::Animated* a = m_animation.find(id);
-    std::optional<Made> made = a != nullptr ? make(*a->skinned, a->model, at, moving) : std::nullopt;
+    // How its joints were moving, when its last two poses tell (worked out lately, a moment apart, no cut between
+    // them or since; not while the animation is paused: it stands frozen).
+    std::span<const Mat4> before;
+    float gap = 0.0f;
+    if (a != nullptr && !held_before && !a->cut && !m_animation.paused() && a->moved_seconds >= 1e-3 && a->moved_seconds <= 0.5 && a->since_model <= 0.25 &&
+        a->before.size() == a->model.size()) {
+        before = a->before;
+        gap = static_cast<float>(a->moved_seconds);
+    }
+    std::optional<Made> made = a != nullptr ? make(*a->skinned, a->model, at, moving, before, gap) : std::nullopt;
     sim::RagdollId ragdoll = sim::k_no_ragdoll;
     if (made) {
         made->desc.user = id; // a shot or a ray that meets a bone names the entity
