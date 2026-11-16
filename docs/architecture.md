@@ -1411,6 +1411,28 @@ the section's text is made on the frame, as the bodies' and walkers' is;
 one skipped before those lying on it were made is covered, one skipped
 after is not (the one on it sleeps on in the air until touched).
 
+The characters gate (C9, `tools/characters_gate.py`) flies the N3 flight
+over that valley with a crowd in its town: the gates' person
+(`tools/gate_person.py`, a skinned glTF written from nothing, about 44
+thousand triangles, with idle, walk and run clips) as walkers in the
+alleys, each wearing hair, motion matched and kept walking (each in its
+turn sent to the other end of its way), people standing round the town,
+and a few by the street seen close, whose skin, clothes and eyes are
+three entities in one place (a mesh entity takes one look; `write_person`
+writes a file per material for that). A blast and shots in the street
+drop walkers, who lie and get up. It holds the flight to 60 fps without
+micro stutter and the characters' own passes ("skin", "character occlusion",
+"subsurface scattering", "hair", "hair shadows") to 2.0 ms half a metre
+from a face, and checks that all animate, walkers play their walk and
+those standing their idle, that from up the river the crowd (drawn with it less drawn
+with it hidden) takes under a fiftieth of its triangles and is posed
+less than every frame, that
+none struck down was left waiting to be made a ragdoll and at least one
+got up, and that skin, eyes,
+occlusion and hair were there. Off a real GPU the crowd is smaller (the
+null device clears every target on the CPU). It does not hold the draw
+count still: skin's and hair's passes come and go with what is in view.
+
 Getting up (C8c part 2; `RagdollState::get_up`, the `get_up` command, or
 by itself after `Settings::get_up_seconds` at rest, two a step). Only an
 entity that can walk rises (body none): it has no body of its own to be

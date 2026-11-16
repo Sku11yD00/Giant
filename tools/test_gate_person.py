@@ -161,6 +161,24 @@ def main():
         full = write_person(path, 1.0)
         check(30000 < full["triangles"] < 60000, f"a whole one has {full['triangles']} triangles")
         read(path)
+        # A file apiece: only that material's triangles, the skeleton and clips whole; the three add up.
+        apiece = 0
+        for name in ("skin", "clothes", "eye"):
+            one = write_person(path, 1.0, materials=[name])
+            part, _ = read(path)
+            check(one["materials"] == [name] == [m["name"] for m in part["materials"]] and
+                  len(part["meshes"][0]["primitives"]) == 1 and part["meshes"][0]["primitives"][0]["material"] == 0,
+                  f"a file of the {name} alone")
+            check(len(part["skins"][0]["joints"]) == len(JOINTS) and len(part["animations"]) == 3,
+                  f"the {name} alone keeps the skeleton and clips")
+            apiece += one["triangles"]
+        check(apiece == full["triangles"], f"the parts have {apiece} triangles, the whole {full['triangles']}")
+        for bad in ([], ["hat"], ["skin", "skin"]):
+            try:
+                write_person(path, 0.1, materials=bad)
+                check(False, f"materials {bad} were taken")
+            except ValueError:
+                pass
     for f in failures:
         print(f"FAIL: {f}")
     print("test_gate_person: " + ("FAILED" if failures else "ok"))
