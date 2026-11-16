@@ -262,10 +262,12 @@ inline std::string apply_skin_and_eye(const ai::Json& args, world::Material& mat
 // `material`, keeping what files do not say (surface, wind), then what
 // `args` give over it (base colour, roughness, metallic, emissive, maps:
 // already applied to `material`, kept). The default look if the file has
-// none (so a look taken from another file does not stay).
-inline void take_file_look(const MeshLibrary::Mesh& mesh, world::Material& material, const ai::Json& args) {
+// none (so a look taken from another file does not stay). `whole`: for
+// what draws the file as one mesh with one look (scatter), not in parts.
+inline void take_file_look(const MeshLibrary::Mesh& mesh, world::Material& material, const ai::Json& args,
+                           bool whole = false) {
     const world::Material given = material;
-    const world::Material file = mesh.material.value_or(world::Material{});
+    const world::Material file = (whole ? mesh.whole_material : mesh.material).value_or(world::Material{});
     material.base_color = args.contains("base_color") ? given.base_color : file.base_color;
     material.roughness = args.contains("roughness") ? given.roughness : file.roughness;
     material.metallic = args.contains("metallic") ? given.metallic : file.metallic;

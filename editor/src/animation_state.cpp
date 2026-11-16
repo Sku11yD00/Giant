@@ -198,8 +198,41 @@ AnimationState::~AnimationState() {
     m_motions.clear();
     finish_motions();
     if (m_renderer != nullptr) {
-        for (const auto& [id, a] : m_animated) m_renderer->remove_mesh(a->copy);
+        for (const auto& [id, a] : m_animated) {
+            m_renderer->remove_mesh(a->copy);
+            for (const render::MeshId part : a->part_copies) m_renderer->remove_mesh(part);
+        }
     }
+}
+
+render::MeshId AnimationState::make_copy(const geometry::SkinnedClusterMesh& clusters, u32 joints) {
+    // The first of a file's part uploads its geometry; the rest share it.
+    std::vector<render::MeshId>& same = m_copies_of[&clusters];
+    const render::MeshId copy = same.empty() ? m_renderer->add_skinned_mesh(clusters, joints)
+                                             : m_renderer->add_skinned_copy(same.front());
+    if (copy != render::k_no_mesh) same.push_back(copy);
+    if (same.empty()) m_copies_of.erase(&clusters);
+    return copy;
+}
+
+void AnimationState::drop_copy(const geometry::SkinnedClusterMesh& clusters, render::MeshId copy) {
+    if (copy == render::k_no_mesh) return;
+    m_renderer->remove_mesh(copy);
+    const auto same = m_copies_of.find(&clusters);
+    if (same != m_copies_of.end()) {
+        std::erase(same->second, copy);
+        if (same->second.empty()) m_copies_of.erase(same);
+    }
+}
+
+// (Its skinned file is the one its copies were made from: `skinned` is kept as copied.)
+void AnimationState::drop_copies(Animated& a) {
+    if (m_renderer == nullptr) return;
+    const bool in_parts = !a.skinned->parts.empty();
+    drop_copy(in_parts ? a.skinned->parts.front() : a.skinned->clusters, a.copy);
+    for (usize p = 0; p < a.part_copies.size(); ++p) drop_copy(a.skinned->parts[p + 1], a.part_copies[p]);
+    a.copy = render::k_no_mesh;
+    a.part_copies.clear();
 }
 
 const MeshLibrary::Mesh* AnimationState::skinned_mesh(const world::Entity& e, const MeshLibrary& meshes) {
@@ -305,14 +338,21 @@ AnimationState::Animated* AnimationState::start(const world::Scene& scene, const
     a->mesh = mesh;
     a->skinned = mesh->skinned;
     if (m_renderer != nullptr) {
-        // The first of a file uploads its geometry; the rest share it.
-        std::vector<render::MeshId>& same = m_copies_of[a->skinned.get()];
-        a->copy = same.empty() ? m_renderer->add_skinned_mesh(a->skinned->clusters,
-                                                              static_cast<u32>(a->skinned->skeleton.size()))
-                               : m_renderer->add_skinned_copy(same.front());
-        if (a->copy != render::k_no_mesh) same.push_back(a->copy);
-        if (same.empty()) m_copies_of.erase(a->skinned.get());
-        if (a->copy == render::k_no_mesh) {
+        // Whole, or a copy of each of its parts (all of them, or none).
+        const u32 joint_count = static_cast<u32>(a->skinned->skeleton.size());
+        const std::vector<geometry::SkinnedClusterMesh>& parts = a->skinned->parts;
+        a->copy = make_copy(parts.empty() ? a->skinned->clusters : parts.front(), joint_count);
+        bool made = a->copy != render::k_no_mesh;
+        for (usize p = 1; made && p < parts.size(); ++p) {
+            const render::MeshId part = make_copy(parts[p], joint_count);
+            if (part == render::k_no_mesh) {
+                made = false;
+            } else {
+                a->part_copies.push_back(part);
+            }
+        }
+        if (!made) {
+            drop_copies(*a);
             error = mesh->path + ": the renderer refused its skinned mesh (see the log)";
             m_refused[id] = {mesh->skinned, error};
             return nullptr;
@@ -343,18 +383,12 @@ void AnimationState::stop(world::EntityId id) {
     if (it == m_animated.end()) return;
     if (it->second->drawn) {
         m_copies.erase(id);
+        m_part_copies.erase(id);
         m_redraw.push_back(id);
     }
     release_motion(*it->second);
     m_held.erase(id); // (a pose held on it goes with it)
-    if (m_renderer != nullptr) {
-        m_renderer->remove_mesh(it->second->copy);
-        const auto same = m_copies_of.find(it->second->skinned.get());
-        if (same != m_copies_of.end()) {
-            std::erase(same->second, it->second->copy);
-            if (same->second.empty()) m_copies_of.erase(same);
-        }
-    }
+    drop_copies(*it->second);
     m_animated.erase(it);
 }
 
@@ -581,11 +615,13 @@ void AnimationState::fill(const world::Scene& scene, const MeshLibrary& meshes) 
             continue;
         }
         std::string error;
-        if (start(scene, meshes, id, error) == nullptr) {
+        const Animated* started = start(scene, meshes, id, error);
+        if (started == nullptr) {
             log_warning("editor", "animation: " + error);
             failed.push_back(id); // tried again when the entity changes
         }
-        ++made;
+        // Counted by what went up: a mesh in parts is a copy a part.
+        made += 1 + (started != nullptr ? static_cast<u32>(started->part_copies.size()) : 0u);
     }
     for (const world::EntityId id : failed) {
         m_wanted.erase(id);
@@ -752,6 +788,8 @@ void AnimationState::pose(Timed timed) {
             if (m_renderer != nullptr && !m_renderer->set_pose(a->copy, a->skin, a->bounds, a->morphs)) {
                 continue; // a pose the renderer refuses (not finite): the last one stays
             }
+            // (What it took for the first part it takes for the rest: the same joints and targets.)
+            for (const render::MeshId part : a->part_copies) m_renderer->set_pose(part, a->skin, a->bounds, a->morphs);
             a->sent = a->skin;
             a->sent_bounds = a->bounds;
             a->sent_morphs = a->morphs;
@@ -763,10 +801,13 @@ void AnimationState::pose(Timed timed) {
     // Copies loaded and posed are drawn instead of the file's mesh.
     if (m_renderer != nullptr) {
         for (const auto& [id, a] : m_animated) {
-            if (!a->drawn && a->posed && m_renderer->mesh_ready(a->copy)) {
+            if (!a->drawn && a->posed && m_renderer->mesh_ready(a->copy) &&
+                std::all_of(a->part_copies.begin(), a->part_copies.end(),
+                            [this](render::MeshId part) { return m_renderer->mesh_ready(part); })) {
                 a->drawn = true;
                 a->pose_serial = ++m_serial; // drawn posed from now: what is hit
                 m_copies[id] = a->copy;
+                if (!a->part_copies.empty()) m_part_copies[id] = a->part_copies;
                 m_redraw.push_back(id);
             }
         }

@@ -567,10 +567,47 @@ an offline cooker can use it without a device.
   inside it (a buffer view or a base64 data URI). Specular-glossiness
   materials read as non-metals (roughness 1 - glossiness, diffuse image).
   Triangles drawn with no material count for the default one. A mesh is
-  one material in the renderer, so `MeshLibrary` keeps the one with the
+  one material in the renderer (its raster pipeline, shadows, cut-outs
+  and wind go by the instance's material), so a file that uses two to
+  sixteen materials is drawn in **parts**: the importer keeps each
+  triangle's material (`ImportResult::triangle_materials`),
+  `geometry::part_of` takes one material's triangles out as a mesh of
+  its own (a skinned one with its weights and every morph target by
+  name), and `MeshLibrary::Mesh::parts` holds one cluster mesh per
+  material, most triangles first (glTF's default material's triangles are
+  a part named "" with the default look), each with that material's look
+  and maps. An entity or a placed kit's piece draws one instance per
+  part: the first with the entity's own look (which it took from that
+  part when given the file), the rest with the file's base colour,
+  roughness, metal, glow and maps under the entity's wind and surface
+  settings (sway, flutter, two sides, translucency, cut-out, canopy:
+  what files do not say, so the whole thing sways as one). A scene saved
+  before parts keeps the look its entities stored then (the busiest
+  material, perhaps without maps) on the first part until its maps are
+  set, or it is given another mesh and then this one again (the same
+  file given again keeps the look it has). An animated one
+  has a posed copy per part (`AnimationState::Animated::part_copies`,
+  shared between characters part by part), all given the one pose and
+  drawn once all are ready; everything else about a character (its
+  skeleton, capsules, hair's scalp, ragdoll) still reads the whole mesh,
+  which is kept beside the parts (so such a file is clustered twice at
+  import, and a character in three parts is three skinned meshes of the
+  renderer's count). Parts are simplified apart, but where two meet
+  (`geometry::part_seams`: corners at a place another part uses too)
+  both keep every corner at every level of detail, locked as terrain
+  tiles' edges are, so they never crack apart; a long seam therefore
+  holds its triangles far away, and a file whose materials are woven
+  through each other (a checkerboard) hardly thins at all: the import
+  warns of any part of 4096 triangles or more with a quarter of its
+  corners on seams. A character in parts uploads a copy of every part
+  in the frame it starts animating (all or none), which then counts
+  against the frame's budget of copies for the next. Scatter items and the pieces of scattered kits
+  draw the whole mesh with one look (a scattered piece that took the
+  first part's maps from the file draws them only where the whole look
+  keeps them), as does a file with more than
+  sixteen materials: for those `MeshLibrary` keeps the one with the
   most triangles as the file's look (none if the default has more), with
-  its maps only when it covers at least three quarters of the triangles
-  (warning to split the file otherwise). Images inside the file are named
+  its maps only when it covers at least three quarters of the triangles. Images inside the file are named
   `"<mesh path>#image<N>"` and never copied out: texture workers read
   them through `geometry::read_gltf_image`, and the cache keys them by the
   glTF file's size and time (and a .gltf's buffer files'), so worlds stay

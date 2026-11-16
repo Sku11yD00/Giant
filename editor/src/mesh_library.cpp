@@ -84,6 +84,7 @@ MeshLibrary::~MeshLibrary() {
     if (m_renderer != nullptr) {
         for (const auto& mesh : m_meshes) {
             m_renderer->remove_mesh(mesh->id);
+            for (const Part& part : mesh->parts) m_renderer->remove_mesh(part.id);
         }
     }
 }
@@ -124,6 +125,50 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     if (!imported.ok()) {
         return {nullptr, path + ": " + imported.error};
     }
+    // Its parts: with two or more materials in use, each one's triangles as a mesh of its own.
+    struct PartSource {
+        u16 material = geometry::k_default_material;
+        u64 triangles = 0;
+    };
+    std::vector<PartSource> sources;
+    for (usize m = 0; m < imported.materials.size() && m < geometry::k_default_material; ++m) {
+        sources.push_back({static_cast<u16>(m), imported.materials[m].triangles});
+    }
+    if (imported.default_material_triangles > 0) {
+        sources.push_back({geometry::k_default_material, imported.default_material_triangles});
+    }
+    // Most triangles first (a named material before the default at a tie; else the file's order).
+    std::stable_sort(sources.begin(), sources.end(),
+                     [](const PartSource& a, const PartSource& b) { return a.triangles > b.triangles; });
+    const bool in_parts = sources.size() >= 2 && sources.size() <= k_max_parts &&
+                          imported.triangle_materials.size() == imported.mesh.indices.size() / 3;
+    std::vector<geometry::ClusterMesh> part_clusters;
+    std::vector<std::string> seam_warnings;
+    if (in_parts) {
+        const std::vector<u8> seam_vertices = geometry::seam_vertices(imported.mesh, imported.triangle_materials);
+        for (const PartSource& source : sources) {
+            // Where it meets the other parts it keeps every corner at every level, so
+            // the parts never crack apart however coarse each is drawn.
+            const std::vector<u8> seams =
+                geometry::part_seams(imported.mesh, imported.triangle_materials, source.material, seam_vertices);
+            part_clusters.push_back(geometry::build_clusters(
+                geometry::part_of(imported.mesh, imported.triangle_materials, source.material), seams));
+            // Much of a big part on seams (materials woven through each other): it cannot
+            // thin with distance, which the file's author should hear of.
+            const usize on_seams = static_cast<usize>(std::count_if(seams.begin(), seams.end(), [](u8 s) { return s != 0; }));
+            if (source.triangles >= k_seam_warning_triangles && on_seams * 4 >= seams.size()) {
+                const std::string name = source.material == geometry::k_default_material
+                                             ? std::string("the triangles with no material")
+                                             : "\"" + imported.materials[source.material].name + "\"";
+                seam_warnings.push_back(name + ": " + std::to_string(on_seams * 100 / seams.size()) +
+                                        "% of its corners lie where it meets other materials, and those stay at every "
+                                        "distance: it will hardly thin far away (fewer, larger areas of one material fix it)");
+            }
+            if (part_clusters.back().empty()) {
+                return {nullptr, path + ": a material's triangles could not be made into clusters"};
+            }
+        }
+    }
     geometry::ClusterMesh clusters = geometry::build_clusters(imported.mesh);
     imported.mesh = {}; // free the source triangles before uploading
     if (clusters.empty()) {
@@ -132,6 +177,19 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     std::shared_ptr<Skinned> skinned;
     if (imported.skinned) {
         skinned = std::make_shared<Skinned>();
+        if (in_parts) {
+            const std::vector<u8> seam_vertices =
+                geometry::seam_vertices(imported.skinned->mesh.mesh, imported.triangle_materials);
+            for (const PartSource& source : sources) {
+                skinned->parts.push_back(geometry::build_skinned_clusters(
+                    geometry::part_of(imported.skinned->mesh, imported.triangle_materials, source.material), true,
+                    geometry::part_seams(imported.skinned->mesh.mesh, imported.triangle_materials, source.material,
+                                         seam_vertices)));
+                if (skinned->parts.back().mesh.empty()) {
+                    return {nullptr, path + ": a material's skinned triangles could not be made into clusters"};
+                }
+            }
+        }
         // With its levels of detail: far characters draw (and pose) coarse.
         skinned->clusters = geometry::build_skinned_clusters(imported.skinned->mesh, true);
         imported.skinned->mesh = {};
@@ -157,6 +215,7 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
         }
     }
     mesh->warnings = std::move(imported.warnings);
+    for (std::string& w : seam_warnings) mesh->warnings.push_back(std::move(w));
     mesh->has_uvs = imported.has_uvs;
     if (!imported.curves.empty()) {
         mesh->curves = std::make_shared<const std::vector<std::vector<Vec3>>>(std::move(imported.curves));
@@ -165,7 +224,32 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     // default does; its maps only if it covers most of the mesh (else they
     // would land on the other parts' uvs).
     mesh->file_materials = static_cast<u32>(imported.materials.size());
-    if (!imported.materials.empty()) {
+    if (in_parts) {
+        for (usize p = 0; p < sources.size(); ++p) {
+            Part& part = mesh->parts.emplace_back();
+            part.triangles = part_clusters[p].source_triangles;
+            if (sources[p].material != geometry::k_default_material) {
+                const geometry::ImportedMaterial& m = imported.materials[sources[p].material];
+                part.name = m.name;
+                part.material = file_material(m, path, true, mesh->warnings);
+            }
+        }
+        // Entities given the file take its biggest part's look for their own fields.
+        mesh->material = mesh->parts.front().material;
+        if (sources.front().material != geometry::k_default_material) {
+            const geometry::ImportedMaterial& busiest = imported.materials[sources.front().material];
+            u64 total = imported.default_material_triangles;
+            for (const geometry::ImportedMaterial& m : imported.materials) total += m.triangles;
+            // (Mostly the same warnings as the part's look gave: only the new ones told.)
+            std::vector<std::string> told;
+            mesh->whole_material = file_material(busiest, path, busiest.triangles * 4 >= total * 3, told);
+            for (std::string& w : told) {
+                if (std::find(mesh->warnings.begin(), mesh->warnings.end(), w) == mesh->warnings.end()) {
+                    mesh->warnings.push_back("drawn whole (scattered): " + std::move(w));
+                }
+            }
+        }
+    } else if (!imported.materials.empty()) {
         const geometry::ImportedMaterial& busiest = imported.materials[0];
         u64 total = imported.default_material_triangles;
         for (const geometry::ImportedMaterial& m : imported.materials) total += m.triangles;
@@ -179,14 +263,23 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
                     "the file has " + std::to_string(imported.materials.size() + (imported.default_material_triangles > 0 ? 1 : 0)) +
                     " materials; entities take the one with the most triangles (\"" + busiest.name + "\")" +
                     (maps ? "" : " without its maps (it covers under three quarters of the mesh)") +
-                    ": split the file into one mesh per material to keep them all");
+                    ": it has more than " + std::to_string(k_max_parts) + " materials, too many to draw each as a part");
             }
         }
     }
+    if (mesh->parts.empty()) mesh->whole_material = mesh->material;
     if (m_renderer != nullptr) {
         mesh->id = m_renderer->add_mesh(std::move(clusters));
         if (mesh->id == render::k_no_mesh) {
             return {nullptr, path + ": could not upload the mesh to the GPU"};
+        }
+        for (usize p = 0; p < mesh->parts.size(); ++p) {
+            mesh->parts[p].id = m_renderer->add_mesh(std::move(part_clusters[p]));
+            if (mesh->parts[p].id == render::k_no_mesh) {
+                m_renderer->remove_mesh(mesh->id);
+                for (usize made = 0; made < p; ++made) m_renderer->remove_mesh(mesh->parts[made].id);
+                return {nullptr, path + ": could not upload the mesh's parts to the GPU"};
+            }
         }
     }
     mesh->import_seconds =
@@ -196,6 +289,7 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     log_info("editor", "imported " + path + ": " + std::to_string(mesh->triangles) + " triangles, " +
                            std::to_string(mesh->clusters) + " clusters in " +
                            std::to_string(mesh->levels) + " levels (" + seconds + " s)" +
+                           (mesh->parts.empty() ? std::string() : ", " + std::to_string(mesh->parts.size()) + " parts") +
                            (mesh->skinned ? ", skinned: " + std::to_string(mesh->skinned->skeleton.size()) +
                                                 " joints, " + std::to_string(mesh->skinned->clips.size()) + " clips"
                                           : std::string()));
@@ -205,6 +299,7 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     if (replace != nullptr) {
         if (m_renderer != nullptr) {
             m_renderer->remove_mesh(replace->id);
+            for (const Part& part : replace->parts) m_renderer->remove_mesh(part.id);
         }
         *replace = std::move(*mesh);
         ++m_version;

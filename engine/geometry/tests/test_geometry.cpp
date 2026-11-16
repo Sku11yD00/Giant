@@ -12,8 +12,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -278,6 +280,71 @@ GIANT_TEST("geometry: glTF texture coordinates and tangents are read, or tangent
     for (const Vertex& v : mirrored_made.mesh.vertices) {
         GIANT_CHECK(near3(v.tangent, {-1, 0, 0}) && near3(bitangent(v), {0, 1, 0}));
     }
+}
+
+GIANT_TEST("geometry: each triangle's material is kept, and a mesh comes apart by it") {
+    const ImportResult r = import_gltf_memory(two_material_quad("n.png"));
+    GIANT_CHECK(r.ok() && r.materials.size() == 2 && r.triangle_materials.size() == r.mesh.indices.size() / 3);
+    if (!r.ok() || r.triangle_materials.size() != 3) return;
+    // "rust" (two triangles) is material 0, "paint" (one) is 1; none uses glTF's default.
+    GIANT_CHECK(std::count(r.triangle_materials.begin(), r.triangle_materials.end(), u16{0}) == 2 &&
+                std::count(r.triangle_materials.begin(), r.triangle_materials.end(), u16{1}) == 1);
+    const TriangleMesh rust = part_of(r.mesh, r.triangle_materials, 0);
+    const TriangleMesh paint = part_of(r.mesh, r.triangle_materials, 1);
+    GIANT_CHECK(rust.indices.size() == 6 && paint.indices.size() == 3 && paint.vertices.size() == 3);
+    GIANT_CHECK(rust.vertices.size() + paint.vertices.size() <= r.mesh.vertices.size() + 3);
+    // Each part's triangles are the mesh's, corner for corner.
+    usize next_rust = 0, next_paint = 0;
+    for (usize t = 0; t < r.triangle_materials.size(); ++t) {
+        const TriangleMesh& part = r.triangle_materials[t] == 0 ? rust : paint;
+        usize& next = r.triangle_materials[t] == 0 ? next_rust : next_paint;
+        for (usize c = 0; c < 3; ++c) {
+            const Vertex& from = r.mesh.vertices[r.mesh.indices[t * 3 + c]];
+            const Vertex& to = part.vertices[part.indices[next * 3 + c]];
+            GIANT_CHECK(from.position == to.position && from.normal == to.normal && from.uv == to.uv);
+        }
+        ++next;
+    }
+    // No such part, or a list that is not one per triangle: nothing.
+    GIANT_CHECK(part_of(r.mesh, r.triangle_materials, k_default_material).indices.empty());
+    GIANT_CHECK(part_of(r.mesh, std::span<const u16>(r.triangle_materials).first(2), 0).indices.empty());
+}
+
+GIANT_TEST("geometry: a skinned mesh's part keeps its weights and every morph target by name") {
+    // Two triangles sharing no vertex; a target moving one vertex of each, another moving only the second's.
+    SkinnedTriangleMesh mesh;
+    for (u32 v = 0; v < 6; ++v) {
+        Vertex vertex;
+        vertex.position = {static_cast<float>(v), 0.0f, 0.0f};
+        vertex.normal = {0.0f, 1.0f, 0.0f};
+        mesh.mesh.vertices.push_back(vertex);
+        SkinWeights w;
+        w.joints[0] = static_cast<u16>(v);
+        w.weights[0] = 255;
+        mesh.weights.push_back(w);
+    }
+    mesh.mesh.indices = {0, 1, 2, 5, 4, 3};
+    mesh.morphs.push_back({"smile", 0.25f, {{1, {0, 1, 0}, {}}, {3, {0, 2, 0}, {}}, {5, {0, 3, 0}, {}}}});
+    mesh.morphs.push_back({"frown", 0.0f, {{4, {0, 4, 0}, {}}}});
+    const std::vector<u16> parts = {7, 9};
+    const SkinnedTriangleMesh first = part_of(mesh, parts, 7);
+    const SkinnedTriangleMesh second = part_of(mesh, parts, 9);
+    GIANT_CHECK(first.mesh.vertices.size() == 3 && first.weights.size() == 3 && first.mesh.indices == std::vector<u32>({0, 1, 2}));
+    GIANT_CHECK(second.mesh.vertices.size() == 3 && second.mesh.indices == std::vector<u32>({0, 1, 2}));
+    if (second.weights.size() != 3 || first.morphs.size() != 2 || second.morphs.size() != 2) {
+        GIANT_CHECK(false);
+        return;
+    }
+    // The second part's vertices are in the order first used: 5, 4, 3.
+    GIANT_CHECK(second.weights[0].joints[0] == 5 && second.weights[1].joints[0] == 4 && second.weights[2].joints[0] == 3);
+    GIANT_CHECK(second.mesh.vertices[0].position.x == 5.0f);
+    // Both keep both targets, by name and rest weight, in order; each with its own vertices' moves, rising.
+    GIANT_CHECK(first.morphs[0].name == "smile" && first.morphs[0].weight == 0.25f && first.morphs[1].name == "frown");
+    GIANT_CHECK(first.morphs[0].deltas.size() == 1 && first.morphs[0].deltas[0].vertex == 1 && first.morphs[1].deltas.empty());
+    GIANT_CHECK(second.morphs[0].deltas.size() == 2 && second.morphs[0].deltas[0].vertex == 0 &&
+                second.morphs[0].deltas[0].position.y == 3.0f && second.morphs[0].deltas[1].vertex == 2 &&
+                second.morphs[0].deltas[1].position.y == 2.0f);
+    GIANT_CHECK(second.morphs[1].deltas.size() == 1 && second.morphs[1].deltas[0].vertex == 1);
 }
 
 GIANT_TEST("geometry: glTF materials are read with their images, most triangles first") {
@@ -1388,6 +1455,74 @@ GIANT_TEST("geometry: locked vertices keep their place at every level") {
     const ClusterMesh plain = build_clusters(mesh);
     const ClusterMesh empty_locks = build_clusters(mesh, {});
     GIANT_CHECK(plain.clusters.size() == empty_locks.clusters.size() && plain.indices == empty_locks.indices);
+}
+
+GIANT_TEST("geometry: the parts of a mesh keep the corners where they meet at every level") {
+    // A bumpy 64 x 64 grid in two halves by material, the vertices doubled along the seam (as
+    // files write them: each material its own).
+    const u32 n = 64;
+    TriangleMesh mesh;
+    std::vector<u16> parts;
+    for (u32 j = 0; j < n; ++j) {
+        for (u32 i = 0; i < n; ++i) {
+            const u32 base = static_cast<u32>(mesh.vertices.size());
+            for (u32 corner = 0; corner < 4; ++corner) {
+                const float x = static_cast<float>(i + (corner & 1));
+                const float z = static_cast<float>(j + (corner >> 1));
+                mesh.vertices.push_back({{x, 2.0f * std::sin(x * 0.3f) * std::cos(z * 0.2f), z}, {0.0f, 1.0f, 0.0f}});
+            }
+            mesh.indices.insert(mesh.indices.end(), {base, base + 2, base + 3, base, base + 3, base + 1});
+            parts.insert(parts.end(), 2, i < n / 2 ? u16{0} : u16{1});
+        }
+    }
+    compute_normals(mesh);
+    SkinnedTriangleMesh skinned;
+    skinned.mesh = mesh;
+    skinned.weights.resize(mesh.vertices.size());
+    for (SkinWeights& w : skinned.weights) w.weights[0] = 255;
+
+    GIANT_CHECK(part_seams(mesh, std::span<const u16>(parts).first(3), 0).empty()); // not one per triangle
+    {
+        // Every vertex's flag at once (for many parts of one mesh), and a place that is not a
+        // number: no seam, nothing read that is not there.
+        const std::vector<u8> all = seam_vertices(mesh, parts);
+        GIANT_CHECK(all.size() == mesh.vertices.size() && part_seams(mesh, parts, 1, all) == part_seams(mesh, parts, 1));
+        GIANT_CHECK(part_seams(mesh, parts, 1, std::span<const u8>(all).first(5)).empty());
+        TriangleMesh odd = mesh;
+        odd.vertices[0].position.x = std::numeric_limits<float>::quiet_NaN();
+        const std::vector<u8> flags = seam_vertices(odd, parts);
+        GIANT_CHECK(flags.size() == odd.vertices.size() && flags[0] == 0);
+    }
+    std::set<float> seam_left;
+    for (const bool with_weights : {false, true}) {
+        for (const u16 part : {u16{0}, u16{1}}) {
+            const TriangleMesh half = part_of(mesh, parts, part);
+            const std::vector<u8> seams = part_seams(mesh, parts, part);
+            GIANT_CHECK(seams.size() == half.vertices.size());
+            std::set<float> seam; // the seam's corners, by z
+            for (usize v = 0; v < seams.size(); ++v) {
+                GIANT_CHECK((seams[v] != 0) == (half.vertices[v].position.x == static_cast<float>(n / 2)));
+                if (seams[v] != 0) seam.insert(half.vertices[v].position.z);
+            }
+            GIANT_CHECK(seam.size() == n + 1);
+            if (part == 0) seam_left = seam;
+            GIANT_CHECK(seam == seam_left);
+            const ClusterMesh built = with_weights ? build_skinned_clusters(part_of(skinned, parts, part), true, seams).mesh
+                                                   : build_clusters(half, seams);
+            GIANT_CHECK(built.levels >= 3);
+            for (u32 depth = 0; depth < built.levels; ++depth) {
+                std::set<float> seen;
+                for (const Cluster& c : built.clusters) {
+                    if (built.groups[c.group].depth != depth) continue;
+                    for (u32 k = 0; k < c.triangle_count * 3; ++k) {
+                        const Vec3 p = built.vertices[built.indices[c.first_index + k]].position;
+                        if (p.x == static_cast<float>(n / 2)) seen.insert(p.z);
+                    }
+                }
+                GIANT_CHECK(seen == seam); // both halves, every level: the same corners along the seam
+            }
+        }
+    }
 }
 
 GIANT_TEST("geometry: skinned clusters are the original triangles alone, weights kept per vertex") {

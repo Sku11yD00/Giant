@@ -475,7 +475,7 @@ int run(const Options& options) {
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
                             &animation.copies(), &cloth.meshes(), moved, &swing.poses(), &walkers.poses(),
-                            &physics.moving(), &ragdolls.poses());
+                            &physics.moving(), &ragdolls.poses(), &animation.part_copies());
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);

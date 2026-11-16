@@ -128,6 +128,9 @@ struct SkinOptions {
     // indices of (0,0,0)-(0,0,1), (0,0,1)-(0,0,2) and (3,3,3)-(3,3,3), and
     // a list whose positions have no data.
     bool hair_lines = false;
+    // The arm drawn with material "sleeve" (base colour (0.2, 0.4, 0.6), roughness 0.5, non-metal) and
+    // the sword with "steel" ((0.8, 0.8, 0.8), roughness 0.25, metal).
+    bool materials = false;
 };
 
 inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
@@ -284,8 +287,13 @@ inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
                        std::string(o.two_nodes ? R"(,{"mesh":0,"skin":0,"translation":[9,0,0]})" : "") + "]," +
                        R"("meshes":[{)" + arm_mesh_extra + R"("primitives":[{"attributes":{"POSITION":)" + n(pos) + R"(,"NORMAL":)" + n(nrm) +
                        R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" + n(wgt) + extra_weights + arm_extra + R"(},"indices":)" + n(idx) +
+                       std::string(o.materials ? R"(,"material":0)" : "") +
                        arm_targets + "}" + arm_lines + R"(]},{)" + sword_mesh_extra + R"("primitives":[{"attributes":{"POSITION":)" + n(sp) +
-                       R"(},"indices":)" + n(si) + sword_targets + "}" + sword_lines + "]}]," +
+                       R"(},"indices":)" + n(si) + std::string(o.materials ? R"(,"material":1)" : "") + sword_targets + "}" + sword_lines + "]}]," +
+                       std::string(o.materials
+                                       ? R"("materials":[{"name":"sleeve","pbrMetallicRoughness":{"baseColorFactor":[0.2,0.4,0.6,1],"roughnessFactor":0.5,"metallicFactor":0}},)"
+                                         R"({"name":"steel","pbrMetallicRoughness":{"baseColorFactor":[0.8,0.8,0.8,1],"roughnessFactor":0.25,"metallicFactor":1}}],)"
+                                       : "") +
                        R"("skins":[{"joints":[1,0],"inverseBindMatrices":)" + n(inv) + "}" +
                        std::string(o.second_skin ? R"(,{"joints":[0]})" : "") + "]," +
                        R"("animations":[)" +

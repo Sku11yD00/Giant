@@ -97,6 +97,28 @@ struct SkinnedTriangleMesh {
     std::vector<MorphTarget> morphs;
 };
 
+// The triangles of `mesh` whose entry in `triangle_parts` (one per
+// triangle) is `part`, in their order, with the vertices they use (in the
+// order first used). Empty when there are none, or when `triangle_parts`
+// is not one per triangle.
+TriangleMesh part_of(const TriangleMesh& mesh, std::span<const u16> triangle_parts, u16 part);
+// The same of a skinned mesh: its vertices' weights with them, and every
+// morph target kept by name and rest weight (so the parts of one mesh take
+// the same weights in the same order), each with the moves of the vertices
+// this part kept.
+SkinnedTriangleMesh part_of(const SkinnedTriangleMesh& mesh, std::span<const u16> triangle_parts, u16 part);
+// Where a part meets the others: one flag per vertex of part_of's mesh (in
+// its order), non-zero where another part has a corner at the same place.
+// Given to build_clusters as its locked vertices, the parts keep those
+// corners at every level of detail, so they meet without cracks however
+// coarse each is drawn. Empty when `triangle_parts` is not one per triangle.
+std::vector<u8> part_seams(const TriangleMesh& mesh, std::span<const u16> triangle_parts, u16 part);
+// The same in two steps, for many parts of one big mesh (the first is the
+// slow one): the flags of every vertex of the mesh, once, then a part's.
+std::vector<u8> seam_vertices(const TriangleMesh& mesh, std::span<const u16> triangle_parts);
+std::vector<u8> part_seams(const TriangleMesh& mesh, std::span<const u16> triangle_parts, u16 part,
+                           std::span<const u8> seam_vertices_of_mesh);
+
 TriangleMesh make_cube();                                      // 1 m, centred, flat faces
 TriangleMesh make_sphere(u32 segments = 48, u32 rings = 24);   // 1 m wide, centred
 TriangleMesh make_plane();                                     // 1 m square, y = 0, facing +Y

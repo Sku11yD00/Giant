@@ -88,6 +88,9 @@ struct SceneFrame {
     // Animated skinned entities' own posed meshes, drawn instead of their
     // files' (likewise).
     const std::unordered_map<world::EntityId, render::MeshId>* skinned = nullptr;
+    // Those of them drawn in parts (MeshLibrary::Mesh::parts): `skinned` has
+    // the first part's posed mesh, this the rest's in order (likewise).
+    const std::unordered_map<world::EntityId, std::vector<render::MeshId>>* skinned_parts = nullptr;
     // Cloth entities' meshes (likewise).
     const std::unordered_map<world::EntityId, render::MeshId>* cloth = nullptr;
     // Where swinging entities are drawn when the physics does not pose them (likewise).
@@ -149,6 +152,7 @@ struct SceneFrame {
     // again) until more than this many, and more than the used ones.
     usize compact_unused_over = 256;
     std::vector<u32> scratch;
+    std::vector<u32> piece_counts; // scratch: instances each piece of a moved kit draws
 
     struct Cell {
         std::vector<world::EntityId> ids; // the entities in it
@@ -258,7 +262,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr,
                  const std::unordered_map<world::EntityId, world::Transform>* walkers = nullptr,
                  const std::unordered_set<world::EntityId>* moving = nullptr,
-                 const std::unordered_map<world::EntityId, world::Transform>* ragdolls = nullptr);
+                 const std::unordered_map<world::EntityId, world::Transform>* ragdolls = nullptr,
+                 const std::unordered_map<world::EntityId, std::vector<render::MeshId>>* skinned_parts = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches
