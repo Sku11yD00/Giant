@@ -1617,6 +1617,25 @@ simulation share one definition and none of it needs a GPU.
   blended (a walk and a run), the second one's phase following the
   first's when asked. It owns nothing but the clip numbers and times, and
   `PoseScratch` keeps evaluation free of allocation once grown.
+- **Motion matching's database** (`motion.h`, N5 C7a).
+  `build_motion_database` samples a character's chosen clips 30 times a
+  second and keeps 27 numbers per frame: both feet's places and
+  velocities, the hips' velocity, and where the character will be and
+  face a third, two thirds and a whole second on. All are in the
+  character's space: its root is the hips' place on the ground and their
+  facing, averaged over a quarter second either side (hips sway with each
+  step), so clips must carry root motion. Looping clips go round (the next
+  round moved on and turned by what one round does, so a walk in a circle
+  loops too); one-off clips cannot be jumped into within their last second.
+  Each group of numbers is divided by how much it spreads and multiplied by
+  its weight. `motion_search` returns the nearest frame that may be jumped
+  into, skipping whole runs of 64 and 16 frames whose least and most
+  already lie further off than the best found; it allocates nothing.
+  Measured: 180,000 frames (100 minutes of clips) searched in about
+  0.26 ms, built in 0.1 s; building belongs on a job. `find_motion_joints`
+  finds the hips and feet by the usual rig names, `clip_loops` tells a
+  loop from a one-off clip. The matcher that plays the frames (C7b) and
+  the editor's use of it (C7c) come next.
 
 The glTF importer reads one skin per file (a second is refused). Its
 skeleton is the skin's joints plus any node between two of them (their
