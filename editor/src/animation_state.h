@@ -143,13 +143,17 @@ public:
     // due as any other (only when it changed), and with `drawn_at` where
     // the entity's origin is drawn now (its size on screen is told from
     // there, not from where the scene has it); `release_pose` gives it
-    // back to its clips (a cut), or lets its place go when it has nothing
-    // to play. Its clips' time moves on underneath (a matcher waits where it
+    // back to its clips (a cut; or, given `from`, each joint's model matrix
+    // to begin at, and `fade` seconds over 0: faded from that pose into
+    // what its clips or its matcher give, joint by joint, as one getting up
+    // from where it lay), or lets its place go when it has nothing
+    // to play (no fade then: it stands at rest). Its clips' time moves on underneath (a matcher waits where it
     // was). View state: held until
     // released, the entity hidden or drawing another file, or a new scene.
     std::string hold_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
     bool set_held_pose(world::EntityId id, std::span<const Mat4> model, const DVec3* drawn_at = nullptr);
-    void release_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
+    void release_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
+                      std::span<const Mat4> from = {}, float fade = 0.0f);
     bool holds_pose(world::EntityId id) const { return m_held.contains(id); }
 
     // How a matched entity is being moved, in its own space: metres a
@@ -243,6 +247,11 @@ public:
         bool held_pose = false;
         std::vector<Mat4> given;
         std::optional<DVec3> drawn_at; // where its origin is drawn while held, when told
+        // Let go with a fade (release_pose): the pose it fades from, joint
+        // by joint in its parent's space, and the seconds left of how many.
+        std::vector<anim::JointTransform> rise_from;
+        float rise_left = 0.0f;
+        float rise_seconds = 0.0f;
         u64 poses = 0;         // handed to the renderer
         u64 pose_serial = 0;   // when it last changed (as skinned()'s serials: never the same twice)
     };

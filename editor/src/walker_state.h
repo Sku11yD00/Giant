@@ -94,6 +94,8 @@ public:
     bool stop(world::EntityId id);
     void clear();
     const Walker* find(world::EntityId id) const;
+    // Where a walker is drawn standing on its feet as they are (as poses() has it once it has stepped).
+    static world::Transform stands(const Walker& w);
     usize size() const { return m_walkers.size(); }
     // Of this scene and the physics' run now (else they are let go on the next step).
     bool current(const world::Scene& scene) const {

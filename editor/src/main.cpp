@@ -720,7 +720,7 @@ int run(const Options& options) {
             }
         }
         walkers.before_step(state.scene, game_delta); // steered towards their paths' corners
-        ragdolls.before_step(state.scene, meshes);    // those whose entity went let go
+        ragdolls.before_step(state.scene, meshes, game_delta); // those gone let go, those struck down made, those rested risen
         // The sea's swell from the wind, at the water's clock, then the clock
         // moved on with the game (paused: the sea stands still with what floats).
         // (Physics stepped on by a command, step_physics or step_play: the clock with it.)

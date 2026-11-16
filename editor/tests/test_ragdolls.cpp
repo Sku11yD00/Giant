@@ -97,7 +97,7 @@ struct Fixture {
     void frame(double seconds = 1.0 / 60.0) {
         const world::SceneChanges changed = state.scene.take_changes();
         walkers.before_step(state.scene, seconds);
-        ragdolls.before_step(state.scene, meshes);
+        ragdolls.before_step(state.scene, meshes, seconds);
         physics.update(state.scene, changed, seconds);
         walkers.after_step();
         ragdolls.after_step();
@@ -838,4 +838,101 @@ GIANT_TEST("ragdolls: each bone starts moving as its joint was (an arm on its wa
             GIANT_CHECK(length(state.linear_velocity) < 1e-3f && length(state.angular_velocity) < 1e-3f);
         }
     }
+}
+
+GIANT_TEST("ragdolls: one that can walk gets up where it lies, by command or after lying still, and walks on") {
+    Fixture f;
+    f.floor();
+    const world::EntityId id = f.person(-10.0, 0.0, 0.0, "none");
+    const world::EntityId post = f.person(0.0, 0.0, 12.0); // (a body of its own: it cannot stand elsewhere)
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    f.frames(0.5);
+    GIANT_CHECK(f.run("walk_to", {{"id", id}, {"to", {10.0, 0.0, 0.0}}, {"speed", 2.0}}).ok);
+    for (int k = 0; k < 600 && f.run("get_walker", {{"id", id}}).value["walker"]["phase"] != "walking"; ++k) f.frame();
+    f.frames(1.0);
+    GIANT_CHECK(!f.run("get_up", {{"id", id}}).ok); // not a ragdoll
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", id}}).ok && f.run("ragdoll_entity", {{"id", post}, {"velocity", {1.0, 0.0, 0.0}}}).ok);
+    const auto asleep = [&f](world::EntityId e) {
+        const ai::CommandResult got = f.run("get_ragdoll", {{"id", e}});
+        return got.ok && got.value["ragdoll"]["asleep"].get<bool>();
+    };
+    for (int k = 0; k < 60 && !(asleep(id) && asleep(post)); ++k) f.frames(0.25);
+    GIANT_CHECK(asleep(id) && asleep(post));
+    GIANT_CHECK(f.run("get_ragdoll", {{"id", id}}).value["ragdoll"]["lying"].get<double>() > 0.0);
+    // Stirred as it lies (a blast near), it has lain no time.
+    const DVec3 stirred = f.joint(id, joint_named(f, "Hips"));
+    GIANT_CHECK(f.run("impact", {{"point", {stirred.x, 0.0, stirred.z + 1.0}}, {"radius", 4.0}, {"impulse", 200.0}}).ok);
+    f.frames(0.1);
+    GIANT_CHECK(!asleep(id) && f.run("get_ragdoll", {{"id", id}}).value["ragdoll"]["lying"] == 0.0);
+    for (int k = 0; k < 60 && !asleep(id); ++k) f.frames(0.25);
+    GIANT_CHECK(asleep(id));
+    const usize hips = joint_named(f, "Hips"), head = joint_named(f, "Head");
+    const DVec3 lay_hips = f.joint(id, hips), lay_head = f.joint(id, head);
+    GIANT_CHECK(lay_hips.y < 0.6 && lay_head.y < 0.8 && lay_hips.x > -9.0); // down, on from where it was put
+    // The way it will face, from how it lies (it faces +z and its left is +x standing: its front is its left
+    // crossed with its spine): that way if it is more upright than not, else toward its feet on its back, its head on its front.
+    const DVec3 across = f.joint(id, joint_named(f, "LeftUpLeg")) - f.joint(id, joint_named(f, "RightUpLeg"));
+    const DVec3 along = lay_head - lay_hips;
+    const auto unit = [](const Vec3& v) { return v * (1.0f / std::max(length(v), 1e-6f)); };
+    const Vec3 left = unit(Vec3{static_cast<float>(across.x), static_cast<float>(across.y), static_cast<float>(across.z)});
+    const Vec3 spine = unit(Vec3{static_cast<float>(along.x), static_cast<float>(along.y), static_cast<float>(along.z)});
+    const Vec3 front = unit(cross(left, spine));
+    const Vec3 facing = front.x * front.x + front.z * front.z >= 0.25f ? front : (front.y > 0.0f ? spine * -1.0f : spine);
+    const float expected_yaw = std::atan2(facing.x, facing.z);
+    const auto angle_between = [](float a, float b) { return std::remainder(a - b, 6.2831853f); };
+    GIANT_CHECK(std::fabs(spine.y) < 0.5f); // (it does lie)
+    // One with a body of its own lies on.
+    GIANT_CHECK(!f.run("get_up", {{"id", post}}).ok && f.ragdolls.find(post) != nullptr);
+    // Up: a walker standing where it lay, its pose as it lay at first.
+    const ai::CommandResult up = f.run("get_up", {{"id", id}});
+    GIANT_CHECK(up.ok);
+    if (!up.ok) return;
+    GIANT_CHECK(f.ragdolls.find(id) == nullptr && !f.animation.holds_pose(id) && f.ragdolls.risen() == 1);
+    const WalkerState::Walker* w = f.walkers.find(id);
+    GIANT_CHECK(w != nullptr && w->phase == WalkerState::Phase::arrived);
+    if (w == nullptr) return;
+    GIANT_CHECK(std::fabs(angle_between(w->yaw, expected_yaw)) < 0.6f); // (its hips' own turn, near what its limbs tell)
+    GIANT_CHECK(std::fabs(w->feet.x - lay_hips.x) < 0.05 && std::fabs(w->feet.z - lay_hips.z) < 0.05 && std::fabs(w->feet.y) < 0.05);
+    GIANT_CHECK(f.physics.world().ragdolls() == 1); // (the post's)
+    f.frame();
+    GIANT_CHECK(length(f.joint(id, hips) - lay_hips) < 0.08 && length(f.joint(id, head) - lay_head) < 0.08);
+    // Struck down again that moment (before the walkers have drawn it once): limp where it stands, not where the scene has it.
+    {
+        const world::EntityId again = f.person(-10.0, 0.0, 20.0, "none");
+        f.frames(0.2);
+        GIANT_CHECK(f.run("ragdoll_entity", {{"id", again}, {"velocity", {3.0, 0.0, 0.0}}}).ok);
+        for (int k = 0; k < 60 && !asleep(again); ++k) f.frames(0.25);
+        const DVec3 fell = f.joint(again, hips);
+        GIANT_CHECK(asleep(again) && fell.x > -9.5);
+        GIANT_CHECK(f.run("get_up", {{"id", again}}).ok && f.run("ragdoll_entity", {{"id", again}}).ok);
+        GIANT_CHECK(length(f.joint(again, hips) - fell) < 0.1);
+        f.frame();
+        GIANT_CHECK(length(f.joint(again, hips) - fell) < 0.2 && f.walkers.find(again) == nullptr);
+    }
+    // Then standing as its clip has it, over where its hips were.
+    f.frames(0.4);
+    const double rising = f.joint(id, head).y;
+    GIANT_CHECK(rising > lay_head.y + 0.1 && rising < 1.6);
+    f.frames(1.0);
+    const DVec3 up_hips = f.joint(id, hips), up_head = f.joint(id, head);
+    GIANT_CHECK(std::fabs(up_hips.y - 1.0) < 0.05 && std::fabs(up_head.y - 1.5) < 0.05);
+    GIANT_CHECK(std::fabs(up_hips.x - lay_hips.x) < 0.1 && std::fabs(up_hips.z - lay_hips.z) < 0.1);
+    GIANT_CHECK(std::fabs(up_head.x - up_hips.x) < 0.02 && std::fabs(up_head.z - up_hips.z) < 0.02); // upright
+    // It walks on from there.
+    GIANT_CHECK(f.run("walk_to", {{"id", id}, {"to", {10.0, 0.0, 0.0}}, {"speed", 2.0}}).ok);
+    for (int k = 0; k < 600 && f.run("get_walker", {{"id", id}}).value["walker"]["phase"] != "walking"; ++k) f.frame();
+    f.frames(1.0);
+    GIANT_CHECK(f.walkers.poses().at(id).position.x > lay_hips.x + 1.0);
+    // Struck down again, it rises by itself after lying still as long as the settings say; the post never.
+    GIANT_CHECK(!f.run("set_ragdoll_settings", {{"get_up_fade", 6.0}}).ok);
+    const ai::CommandResult set = f.run("set_ragdoll_settings", {{"get_up_seconds", 1.0}, {"get_up_fade", 0.3}});
+    GIANT_CHECK(set.ok && set.value["get_up_seconds"] == 1.0);
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", id}}).ok);
+    f.frames(0.5);
+    GIANT_CHECK(f.ragdolls.find(id) != nullptr); // (still falling)
+    for (int k = 0; k < 80 && f.ragdolls.find(id) != nullptr; ++k) f.frames(0.25);
+    GIANT_CHECK(f.ragdolls.find(id) == nullptr && f.walkers.find(id) != nullptr && f.ragdolls.risen() >= 3);
+    GIANT_CHECK(f.ragdolls.find(post) != nullptr && f.run("get_ragdoll").value["risen"] == f.ragdolls.risen());
+    f.frames(1.0);
+    GIANT_CHECK(std::fabs(f.joint(id, head).y - 1.5) < 0.05);
 }

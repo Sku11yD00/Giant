@@ -507,6 +507,7 @@ std::string AnimationState::hold_pose(const world::Scene& scene, const MeshLibra
     m_held.insert(id);
     m_wanted.insert(id);
     a->held_pose = true;
+    a->rise_left = 0.0f;
     a->given = a->model;
     a->pose_serial = ++m_serial; // (what follows poses sees it held)
     return {};
@@ -523,11 +524,34 @@ bool AnimationState::set_held_pose(world::EntityId id, std::span<const Mat4> mod
     return true;
 }
 
-void AnimationState::release_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id) {
+void AnimationState::release_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
+                                  std::span<const Mat4> from, float fade) {
     if (m_held.erase(id) == 0) return;
     const auto it = m_animated.find(id);
     if (it == m_animated.end()) return;
     it->second->held_pose = false;
+    // Faded from a pose given: each joint as it lies in its parent's space.
+    Animated& let = *it->second;
+    let.rise_left = 0.0f;
+    const anim::Skeleton& skeleton = let.skinned->skeleton;
+    if (from.size() == skeleton.size() && std::isfinite(fade) && fade > 0.0f) {
+        let.rise_from.resize(from.size());
+        bool sound = true;
+        for (usize j = 0; j < from.size() && sound; ++j) {
+            const i32 p = skeleton.parents[j];
+            // (A first joint hangs from the skeleton's root, as model_matrices has it.)
+            const Mat4 local = anim::affine_inverse(p >= 0 ? from[static_cast<usize>(p)] : skeleton.root) * from[j];
+            const anim::JointTransform t = anim::decompose(local);
+            sound = std::isfinite(t.translation.x) && std::isfinite(t.translation.y) && std::isfinite(t.translation.z) &&
+                    std::isfinite(t.rotation.x) && std::isfinite(t.rotation.y) && std::isfinite(t.rotation.z) &&
+                    std::isfinite(t.rotation.w) && std::isfinite(t.scale.x) && std::isfinite(t.scale.y) && std::isfinite(t.scale.z);
+            let.rise_from[j] = t;
+        }
+        if (sound) {
+            let.rise_seconds = std::min(fade, 10.0f);
+            let.rise_left = let.rise_seconds;
+        }
+    }
     it->second->cut = true; // (its clips' pose does not follow from a ragdoll's)
     it->second->moved_seconds = 0.0;
     it->second->drawn_at.reset();
@@ -568,6 +592,10 @@ void AnimationState::advance(double seconds) {
     for (const auto& [id, a] : m_animated) {
         a->since_pose += seconds;
         a->since_model += seconds;
+        if (a->rise_left > 0.0f && !a->held_pose) { // fading from the pose it was let go with
+            a->rise_left = std::max(0.0f, a->rise_left - static_cast<float>(seconds));
+            a->changed = true;
+        }
         if (a->fresh) continue; // started this update: from its start
         if (a->held_pose) {
             // Its clip's time moves on underneath, but that changes nothing shown: no pose to work out.
@@ -673,6 +701,10 @@ void AnimationState::pose(Timed timed) {
                     a.matcher.evaluate(db, s.skeleton, s.clips, a.local);
                 } else {
                     a.player.evaluate(s.skeleton, s.clips, a.scratch, a.local);
+                }
+                if (!a.held_pose && a.rise_left > 0.0f && a.rise_from.size() == a.local.size()) {
+                    const float t = 1.0f - a.rise_left / a.rise_seconds;
+                    anim::blend(a.rise_from, a.local, t * t * (3.0f - 2.0f * t), a.local); // eased at both ends
                 }
                 if (!a.held_pose) anim::model_matrices(s.skeleton, a.local, a.model);
                 anim::skin_matrices(s.skeleton, a.model, a.skin);

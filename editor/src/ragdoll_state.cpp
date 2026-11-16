@@ -5,6 +5,7 @@
 #include "giant/anim/skeleton.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -435,7 +436,9 @@ std::string RagdollState::start(const world::Scene& scene, const MeshLibrary& me
     Vec3 moving = velocity.value_or(Vec3{});
     const WalkerState::Walker* walker = m_walkers != nullptr ? m_walkers->find(id) : nullptr;
     if (walker != nullptr) {
-        if (const auto p = m_walkers->poses().find(id); p != m_walkers->poses().end()) at = p->second;
+        // (One made a walker this moment, got up or put back, has no pose yet: where it stands.)
+        const auto p = m_walkers->poses().find(id);
+        at = p != m_walkers->poses().end() ? p->second : WalkerState::stands(*walker);
         if (!velocity) {
             const auto s = m_physics.world().character_state(walker->character);
             moving = s ? s->velocity : walker->velocity;
@@ -483,6 +486,8 @@ std::string RagdollState::set_settings(const Settings& settings) {
     if (!(settings.shot_drop >= 0.0f && settings.shot_drop <= 1e6f)) return "shot_drop is not within 0 to 1e6 N s";
     if (!(settings.blast_drop >= 0.0f && settings.blast_drop <= 1e6f)) return "blast_drop is not within 0 to 1e6 N s";
     if (settings.starts_per_step < 1 || settings.starts_per_step > 64) return "starts_per_step is not within 1 to 64";
+    if (!(settings.get_up_seconds >= 0.0f && settings.get_up_seconds <= 1e6f)) return "get_up_seconds is not within 0 to 1e6";
+    if (!(settings.get_up_fade >= 0.0f && settings.get_up_fade <= 5.0f)) return "get_up_fade is not within 0 to 5 s";
     m_settings = settings;
     return {};
 }
@@ -669,11 +674,108 @@ void RagdollState::make_waiting(const world::Scene& scene, const MeshLibrary& me
     m_waiting.erase(m_waiting.begin(), m_waiting.begin() + static_cast<std::ptrdiff_t>(done));
 }
 
-void RagdollState::before_step(const world::Scene& scene, const MeshLibrary& meshes) {
+void RagdollState::before_step(const world::Scene& scene, const MeshLibrary& meshes, double seconds) {
     // Drops asked for in another scene or run, or with the simulation stopped since: never made.
     if (scene.identity() != m_waiting_scene || !m_physics.simulating() || m_physics.runs() != m_waiting_run) m_waiting.clear();
     follow(scene, meshes);
     if (!m_waiting.empty()) make_waiting(scene, meshes);
+    // How long each has lain still; those long enough get up (those that can: a couple a step).
+    if (m_ragdolls.empty() || !(seconds > 0.0)) return;
+    std::array<world::EntityId, 2> rise{};
+    usize rising = 0;
+    for (auto& [id, r] : m_ragdolls) {
+        r.lying = r.asleep ? r.lying + seconds : 0.0;
+        if (m_settings.get_up_seconds > 0.0f && r.lying >= static_cast<double>(m_settings.get_up_seconds) &&
+            rising < rise.size() && m_walkers != nullptr) {
+            const world::Entity* e = scene.find(id);
+            if (e == nullptr || e->body != world::BodyKind::none) continue;
+            // (Struck since it was last looked at, a blast's or a shot's this step: it lies on.)
+            const std::span<const sim::BodyId> bodies = m_physics.world().ragdoll_bodies(r.id);
+            const std::optional<sim::BodyState> root = !bodies.empty() ? m_physics.world().state(bodies.front()) : std::nullopt;
+            if (!root || root->active) {
+                r.lying = 0.0;
+                continue;
+            }
+            rise[rising++] = id;
+        }
+    }
+    for (usize k = 0; k < rising; ++k) {
+        // (One the walkers refuse lies on, and is asked again only after as long.)
+        if (!get_up(scene, meshes, rise[k]).empty()) {
+            if (const auto it = m_ragdolls.find(rise[k]); it != m_ragdolls.end()) it->second.lying = 0.0;
+        }
+    }
+}
+
+std::string RagdollState::get_up(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id) {
+    follow_world(scene, meshes);
+    const auto it = current(scene) ? m_ragdolls.find(id) : m_ragdolls.end();
+    if (it == m_ragdolls.end()) return "entity " + std::to_string(id) + " is not a ragdoll";
+    if (m_walkers == nullptr) return "walkers are not available: one that gets up stands as a walker";
+    const world::Entity* e = scene.find(id);
+    if (e == nullptr) return "no entity " + std::to_string(id);
+    if (e->body != world::BodyKind::none) {
+        return "entity " + std::to_string(id) + " has a body where the scene has it (only one with body \"none\" gets up, as a walker)";
+    }
+    if (m_walkers->find(id) == nullptr && m_walkers->size() >= WalkerState::k_max_walkers) {
+        return "too many walkers (" + std::to_string(WalkerState::k_max_walkers) + "): it lies on";
+    }
+    Ragdoll& r = it->second;
+    sim::PhysicsWorld& world = m_physics.world();
+    const std::span<const sim::BodyId> bodies = world.ragdoll_bodies(r.id);
+    const std::optional<sim::BodyState> root = bodies.size() == r.bones.size() ? world.state(bodies.front()) : std::nullopt;
+    if (!root || r.bones.empty() || r.bones.front().joint >= r.skinned->rest_model.size()) {
+        return "entity " + std::to_string(id) + "'s ragdoll has gone";
+    }
+    r.asleep = false;
+    r.posed = false;
+    pose(r); // as its bones are now
+    const auto drawn = m_poses.find(id);
+    if (drawn == m_poses.end() || !r.posed) return "entity " + std::to_string(id) + "'s ragdoll has gone";
+    const world::Transform lay = drawn->second;
+    // The way its hips face and its spine points, by how its first bone has turned from rest.
+    const Quat rest = turn_of(scaled(r.skinned->rest_model[r.bones.front().joint], r.start.scale));
+    const Quat turned = normalize(root->rotation * conjugate(rest));
+    const Vec3 forward = rotate(turned, Vec3{0.0f, 0.0f, 1.0f});
+    const Vec3 spine = rotate(turned, Vec3{0.0f, 1.0f, 0.0f});
+    // Standing it faces that way; lying on its back it sits up toward its feet, on its front it rises toward its head.
+    Vec3 facing = forward;
+    if (forward.x * forward.x + forward.z * forward.z < 0.25f) facing = forward.y > 0.0f ? spine * -1.0f : spine;
+    const Vec3 before = rotate(lay.rotation, Vec3{0.0f, 0.0f, 1.0f});
+    if (facing.x * facing.x + facing.z * facing.z < 1e-4f) facing = before; // (on its head: as it was put)
+    const float yaw = std::atan2(facing.x, facing.z);
+    // Its feet come on what is under its hips for good (the ground, what stands fixed: not another lying there).
+    DVec3 feet = root->position - DVec3{0.0, 0.1, 0.0};
+    sim::PhysicsWorld::RayFilter standing;
+    standing.fixed_only = true;
+    if (const auto ground = world.raycast(root->position + DVec3{0.0, 0.3, 0.0}, Vec3{0.0f, -1.0f, 0.0f}, 3.0, standing)) {
+        feet = ground->point;
+    }
+    WalkerState::Resume stand;
+    stand.feet = feet;
+    stand.yaw = yaw;
+    stand.target = feet;
+    stand.phase = WalkerState::Phase::arrived;
+    m_walkers->stop(id);
+    const std::string refused = m_walkers->resume(scene, id, stand);
+    const WalkerState::Walker* w = refused.empty() ? m_walkers->find(id) : nullptr;
+    if (w == nullptr) return refused.empty() ? "the walkers refused entity " + std::to_string(id) : refused; // it lies on
+    world.remove_ragdoll(r.id); // (its bodies and its character never met: no step between)
+    r.id = sim::k_no_ragdoll;
+    // Where it is drawn standing (as the walkers draw it), and its pose as it lay seen from there.
+    const world::Transform stood = WalkerState::stands(*w);
+    const Quat back = conjugate(stood.rotation);
+    const DVec3 from = lay.position - stood.position;
+    const Mat4 across = mat4_from_transform(rotate(back, Vec3{static_cast<float>(from.x), static_cast<float>(from.y), static_cast<float>(from.z)}),
+                                            normalize(back * lay.rotation), {1.0f, 1.0f, 1.0f});
+    const Vec3 shrink{1.0f / stood.scale.x, 1.0f / stood.scale.y, 1.0f / stood.scale.z};
+    for (Mat4& m : r.model) m = scaled(across * scaled(m, lay.scale), shrink);
+    m_animation.release_pose(scene, meshes, id, r.model, m_settings.get_up_fade);
+    m_ragdolls.erase(it);
+    m_poses.erase(id);
+    m_redraw.push_back(id);
+    ++m_risen;
+    return {};
 }
 
 void RagdollState::follow(const world::Scene& scene, const MeshLibrary& meshes) {

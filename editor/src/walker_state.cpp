@@ -310,6 +310,14 @@ void WalkerState::before_step(const world::Scene& scene, double seconds) {
     }
 }
 
+world::Transform WalkerState::stands(const Walker& w) {
+    world::Transform t;
+    t.position = w.feet + DVec3{0.0, w.lift, 0.0};
+    t.rotation = normalize(quat_from_axis_angle({0.0f, 1.0f, 0.0f}, w.yaw) * w.rotation);
+    t.scale = w.scale;
+    return t;
+}
+
 void WalkerState::after_step() {
     const sim::PhysicsWorld& world = m_physics.world();
     const double f = world.step_fraction();

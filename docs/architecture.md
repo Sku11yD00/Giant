@@ -1325,7 +1325,7 @@ to the bone at rest and to that way), the rest cones about the rest pose
 bone, or are two apart never collide. Each frame after the physics steps,
 a ragdoll whose bodies are awake hands its joints' model matrices to the
 animation (`AnimationState::hold_pose` / `set_held_pose` /
-`release_pose`: a pose from outside shown instead of the clips' or the
+`release_pose` (which can fade from a pose given: getting up, below): a pose from outside shown instead of the clips' or the
 matcher's: a clip's time moves on underneath, a matcher waits; posed when due, as any other,
 and only when it changed: one asleep works out no pose; its size on
 screen for animation LOD is told from where it is drawn), and is drawn where
@@ -1378,7 +1378,31 @@ forgotten as it starts (`HitTargets::forget`), so a bullet in flight meets
 its bones only. Those waiting are stamped with the scene and the run they were asked in
 and forgotten when the simulation stops, runs anew or the scene is another; one gone or hidden before its turn
 stays as it was. A weaker shot does nothing to a standing character yet
-(staggering under the animation comes with C8c).
+(staggering under the animation is left until a game wants it).
+
+Getting up (C8c part 2; `RagdollState::get_up`, the `get_up` command, or
+by itself after `Settings::get_up_seconds` at rest, two a step). Only an
+entity that can walk rises (body none): it has no body of its own to be
+left behind where the scene has it. A ray down from its hips (from 0.3 m
+over them, 3 m long, fixed bodies and the ground only: not another lying
+under it; else 0.1 m under the hips) finds what its feet come on, it is
+handed to the walkers standing there (`WalkerState::resume`, arrived),
+facing the way its hips do, or toward its feet lying on its back, its head
+on its front, and only then is its ragdoll removed: one the walkers refuse
+lies on (and, rising by itself, is asked again after as long). Its pose
+as it lay is carried into the space it is drawn in standing and handed to
+`AnimationState::release_pose` with a fade: each joint, in its parent's
+space, goes from how it lay to what its clips or its matcher give, eased
+over `Settings::get_up_fade` (0.8 s), in the pose job, with nothing
+allocated after the first time. So what shows does not jump as the ragdoll
+is let go, and it ends standing as its animation has it. Limits: there are
+no get-up clips, so limbs take the short way and may pass through the
+ground; one with nothing to play stands at once at rest; an entity with a
+body lies until `stop_ragdoll`; nothing looks for headroom (under a low
+fixed roof it stands up through it); one at rest on a crate or a moving
+platform comes to stand on the fixed ground under that, if within the
+ray; one told to get up in the air has its feet put on the ground under
+it.
 
 ## The player (N4 part 2)
 

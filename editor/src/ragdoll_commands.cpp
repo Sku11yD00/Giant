@@ -6,6 +6,7 @@
 #include "mesh_library.h"
 #include "physics_state.h"
 #include "ragdoll_state.h"
+#include "walker_state.h"
 
 #include "giant/core/assert.h"
 
@@ -40,7 +41,8 @@ Json ragdoll_json(const EditorState& state, const RagdollState::Ragdoll& r, bool
                 {"bones", r.bones.size()},
                 {"joints", r.bone_of.size()},
                 {"mass", mass},
-                {"asleep", r.asleep}};
+                {"asleep", r.asleep},
+                {"lying", r.lying}};
     if (const auto p = state.ragdolls->poses().find(r.entity); p != state.ragdolls->poses().end()) {
         out["position"] = dvec(p->second.position);
     }
@@ -79,7 +81,11 @@ void follow_hits(EditorState& state) {
 }
 
 Json settings_json(const RagdollState::Settings& s) {
-    return {{"shot_drop", s.shot_drop}, {"blast_drop", s.blast_drop}, {"starts_per_step", s.starts_per_step}};
+    return {{"shot_drop", s.shot_drop},
+            {"blast_drop", s.blast_drop},
+            {"starts_per_step", s.starts_per_step},
+            {"get_up_seconds", s.get_up_seconds},
+            {"get_up_fade", s.get_up_fade}};
 }
 
 std::string unavailable(const EditorState& state) {
@@ -94,7 +100,7 @@ void connect_ragdolls(EditorState& state) {
     // Round each fixed step run by hand (step_physics), after what was connected before (the walkers).
     state.physics->before_fixed_step = [&state, before = std::move(state.physics->before_fixed_step)](double seconds) {
         if (before) before(seconds);
-        state.ragdolls->before_step(state.scene, *state.meshes);
+        state.ragdolls->before_step(state.scene, *state.meshes, seconds);
     };
     state.physics->after_fixed_step = [&state, after = std::move(state.physics->after_fixed_step)] {
         if (after) after();
@@ -146,6 +152,32 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
              return CommandResult::success(ragdoll_json(state, *state.ragdolls->find(id), true));
          }});
     add(registry,
+        {"get_up",
+         "A ragdoll gets up where it lies: it is let go as a walker standing there (as walk_to's, arrived: "
+         "`get_walker` has it, `walk_to` sends it on), its feet on the ground or fixed body under its hips, facing the way its "
+         "hips do (lying on its back, toward its feet; on its front, toward its head), its pose fading from "
+         "how it lay into its animation's over the settings' `get_up_fade` seconds. Only an entity with body "
+         "\"none\" (one that can walk): another's body stands where the scene has it. One with nothing to "
+         "play stands at once in its rest pose. `set_ragdoll_settings`'s `get_up_seconds` has them rise by "
+         "themselves. View state.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", Json::array({"id"})},
+              {"properties", {{"id", id_schema()}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (const std::string error = unavailable(state); !error.empty()) return CommandResult::failure(error);
+             const world::EntityId id = args["id"].get<world::EntityId>();
+             if (const std::string error = state.ragdolls->get_up(state.scene, *state.meshes, id); !error.empty()) {
+                 return CommandResult::failure(error);
+             }
+             Json out = {{"id", id}};
+             if (const auto feet = state.walkers != nullptr ? state.walkers->feet_of(state.scene, id) : std::nullopt) {
+                 out["feet"] = dvec(*feet);
+             }
+             return CommandResult::success(std::move(out));
+         }});
+    add(registry,
         {"stop_ragdoll",
          "Lets a ragdoll go: the character is drawn where the scene has it again, playing its own clips. View state.",
          Json{{"type", "object"},
@@ -172,13 +204,18 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
          "by its impulse where it reaches the character (default 150; 0: blasts drop none); a blast also "
          "throws ragdolls already lying in its reach. `starts_per_step`: how many of those struck down are "
          "made ragdolls each step, 1 to 64 (default 4: the rest wait their turn standing, oldest first). "
+         "`get_up_seconds`: a ragdoll that can get up (see get_up) does so by itself after lying still this "
+         "long (default 0: never). `get_up_fade`: the seconds its pose takes from how it lay to its "
+         "animation's, 0 to 5 (default 0.8). "
          "Fields left out stay. Returns the settings. View state.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
                {{"shot_drop", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1e6}}},
                 {"blast_drop", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1e6}}},
-                {"starts_per_step", {{"type", "integer"}, {"minimum", 1}, {"maximum", 64}}}}}},
+                {"starts_per_step", {{"type", "integer"}, {"minimum", 1}, {"maximum", 64}}},
+                {"get_up_seconds", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1e6}}},
+                {"get_up_fade", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 5.0}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              if (const std::string error = unavailable(state); !error.empty()) return CommandResult::failure(error);
@@ -186,6 +223,8 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
              if (args.contains("shot_drop")) s.shot_drop = static_cast<float>(args["shot_drop"].get<double>());
              if (args.contains("blast_drop")) s.blast_drop = static_cast<float>(args["blast_drop"].get<double>());
              if (args.contains("starts_per_step")) s.starts_per_step = args["starts_per_step"].get<u32>();
+             if (args.contains("get_up_seconds")) s.get_up_seconds = static_cast<float>(args["get_up_seconds"].get<double>());
+             if (args.contains("get_up_fade")) s.get_up_fade = static_cast<float>(args["get_up_fade"].get<double>());
              if (const std::string error = state.ragdolls->set_settings(s); !error.empty()) return CommandResult::failure(error);
              return CommandResult::success(settings_json(state.ragdolls->settings()));
          }});
@@ -214,6 +253,7 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
                  }
                  Json none = {{"ragdolls", 0}, {"asleep", 0}, {"bodies", 0}, {"waiting", state.ragdolls->waiting()}};
                  none["dropped"] = state.ragdolls->dropped();
+                 none["risen"] = state.ragdolls->risen();
                  none["settings"] = settings_json(state.ragdolls->settings());
                  return CommandResult::success(std::move(none));
              }
@@ -224,6 +264,7 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
              Json out = {{"ragdolls", state.ragdolls->size()}, {"asleep", asleep}, {"bodies", bodies}};
              out["waiting"] = state.ragdolls->waiting();
              out["dropped"] = state.ragdolls->dropped();
+             out["risen"] = state.ragdolls->risen();
              out["settings"] = settings_json(state.ragdolls->settings());
              if (args.contains("id")) {
                  const world::EntityId id = args["id"].get<world::EntityId>();
