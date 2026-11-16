@@ -60,6 +60,10 @@ Json status_json(const EditorState& state) {
                 {"walkers_applied", s.walkers_applied},
                 {"walkers_skipped", s.walkers_skipped},
                 {"walkers_waiting", g.walkers_waiting()},
+                {"ragdolls", s.ragdolls},
+                {"ragdolls_applied", s.ragdolls_applied},
+                {"ragdolls_skipped", s.ragdolls_skipped},
+                {"ragdolls_waiting", g.ragdolls_waiting()},
                 {"autosave_seconds", g.autosave_seconds},
                 {"autosaves", s.autosaves},
                 {"autosave_error", s.autosave_error},
@@ -90,7 +94,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"save_game",
          "Saves the game to `slot` beside the open world (<world>/saves/<slot>/), never into the world's own "
-         "files: the player (feet, speed, climbing, carried by), whether simulating and where the dynamic bodies it moved are, the walkers (where each stands, faces and moves, where it is going, how far it got); by cell, the damage shown (broken buildings' pieces where they lie, felled trees; what "
+         "files: the player (feet, speed, climbing, carried by), whether simulating and where the dynamic bodies it moved are, the walkers (where each stands, faces and moves, where it is going, how far it got), the ragdolls (where each bone lies and how it moves, how long it has lain still); by cell, the damage shown (broken buildings' pieces where they lie, felled trees; what "
          "simulating broke and a loaded save's) and the ground dented (craters, footprints: each tile whole), and the camera, whether playing, and the weather it is "
          "going to with the ground (wet, snow). A save to the slot last saved or loaded writes only the cells "
          "changed since. Written on a job (a crash never loses the last save): `wait` (default false) "
@@ -119,7 +123,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
          "camera and the weather come back (shown over the scene's own until set_weather, clear_weather or "
          "close_game), and play (or simulating) starts again if it was on (the player as it was), the moved bodies put back where they were (a share a "
          "frame, after `wait` too: each once its body is made) and the walkers walking again from where they were "
-         "(the way looked for again; each once its entity and the ground under it are in). A save of another world, or of the world with "
+         "(the way looked for again; each once its entity and the ground under it are in), and the ragdolls lying again as they lay (four a frame, each once its entity, the ground under it and its file are in). A save of another world, or of the world with "
          "other kits, scatter or ground samples, is refused unless `force`. Read on a job: `wait` (default false) returns once it "
          "is all shown. Returns get_save.",
          Json{{"type", "object"},
@@ -203,7 +207,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
          "`bodies_skipped` (gone, moved in the world since, or the simulation stopped), `bodies_waiting` (for "
          "their body), `walkers` (the last save's or load's), `walkers_applied` (walking again), `walkers_skipped` "
          "(moved in the world since, given a body, sent walking since, or the simulation stopped), "
-         "`walkers_waiting` (for their entity or the ground under them), `autosave_seconds`, `autosaves`, `autosave_error`, `gather_ms` (the last save's cost on "
+         "`walkers_waiting` (for their entity or the ground under them), `ragdolls` (the last save's or load's), `ragdolls_applied` (lying again), `ragdolls_skipped` (moved or scaled in the world since, hidden, walking or limp since, other bones now, its file never read, or the simulation stopped), `ragdolls_waiting`, `autosave_seconds`, `autosaves`, `autosave_error`, `gather_ms` (the last save's cost on "
          "the frame), "
          "`play_seconds`, `weather_override`, `game_cells` (cells showing a game's damage) and `folder`.",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},

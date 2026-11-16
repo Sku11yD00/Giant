@@ -498,6 +498,14 @@ public:
     // about the root, and its velocity turned with it. False: no such
     // ragdoll, or a number that is none.
     bool move_ragdoll(RagdollId id, const DVec3& position, const Quat& rotation);
+    // Every bone put where `bones[bone]` has it, moving as it says (a
+    // saved game's ragdoll lying as it lay): left asleep when none of
+    // them is `active`, else awake. `made_now`: it was added this moment
+    // and nothing can have come to rest on it where it was made, so what
+    // sleeps there is left asleep. False (and nothing changed): no such
+    // ragdoll, not a state for each bone, a number that is none, or a
+    // speed past 1000 m/s or rad/s.
+    bool place_ragdoll(RagdollId id, std::span<const BodyState> bones, bool made_now = false);
     // How many times clear() has made the world afresh: an owner of
     // ragdolls (which clear lets go) sees by it that its own are gone.
     u64 clears() const { return m_clears; }

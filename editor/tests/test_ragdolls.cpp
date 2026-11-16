@@ -936,3 +936,51 @@ GIANT_TEST("ragdolls: one that can walk gets up where it lies, by command or aft
     f.frames(1.0);
     GIANT_CHECK(std::fabs(f.joint(id, head).y - 1.5) < 0.05);
 }
+
+GIANT_TEST("ragdolls: one is made lying as another lay (a saved game's); other bones or bad numbers leave it standing") {
+    Fixture f;
+    f.floor();
+    const world::EntityId a = f.person(0.0, 0.0, 0.0, "none");
+    const world::EntityId b = f.person(5.0, 0.0, 0.0, "none");
+    f.frame();
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    f.frame();
+    GIANT_CHECK(!f.ragdolls.lies(f.state.scene, a)); // standing: nothing to keep
+    GIANT_CHECK(f.run("ragdoll_entity", {{"id", a}, {"velocity", {0.0, 0.0, 2.0}}}).ok);
+    for (int i = 0; i < 1200 && !f.ragdolls.find(a)->asleep; ++i) f.frame();
+    GIANT_CHECK(f.ragdolls.find(a)->asleep);
+    const RagdollState::Resume lay = *f.ragdolls.lies(f.state.scene, a);
+    GIANT_CHECK(lay.bones.size() == f.ragdolls.find(a)->bones.size() && lay.joints.size() == lay.bones.size() && lay.bones.size() > 3);
+    // b made as a lay, 5 m along: bone for bone, asleep, drawn there with its hips where a's are.
+    RagdollState::Resume there = lay;
+    for (sim::BodyState& s : there.bones) s.position.x += 5.0;
+    there.lying = 7.0;
+    GIANT_CHECK(f.ragdolls.resume(f.state.scene, f.meshes, b, there).empty());
+    const RagdollState::Ragdoll* r = f.ragdolls.find(b);
+    GIANT_CHECK(r != nullptr && r->asleep && r->posed && r->lying == 7.0 && f.animation.holds_pose(b));
+    const usize hips = joint_named(f, "Hips");
+    const usize head = joint_named(f, "Head");
+    f.frame(); // (the pose handed on is worked out with the frame's)
+    GIANT_CHECK(length(f.joint(b, hips) - (f.joint(a, hips) + DVec3{5.0, 0.0, 0.0})) < 0.02);
+    GIANT_CHECK(length(f.joint(b, head) - (f.joint(a, head) + DVec3{5.0, 0.0, 0.0})) < 0.02);
+    f.frames(0.5);
+    GIANT_CHECK(f.ragdolls.find(b)->asleep && f.ragdolls.find(b)->lying > 7.4);
+    GIANT_CHECK(length(f.joint(b, head) - (f.joint(a, head) + DVec3{5.0, 0.0, 0.0})) < 0.02);
+    // A ragdoll already: refused, and it lies on.
+    GIANT_CHECK(!f.ragdolls.resume(f.state.scene, f.meshes, b, there).empty() && f.ragdolls.find(b) != nullptr);
+    // Other bones than its file makes, a number that is none, no bones: it stands as it was.
+    GIANT_CHECK(f.ragdolls.stop(f.state.scene, f.meshes, b));
+    RagdollState::Resume other = there;
+    other.joints[1] = other.joints[1] + 1000;
+    GIANT_CHECK(!f.ragdolls.resume(f.state.scene, f.meshes, b, other).empty());
+    other = there;
+    other.bones.pop_back();
+    other.joints.pop_back();
+    GIANT_CHECK(!f.ragdolls.resume(f.state.scene, f.meshes, b, other).empty());
+    other = there;
+    other.bones[2].position.y = std::nan("");
+    GIANT_CHECK(!f.ragdolls.resume(f.state.scene, f.meshes, b, other).empty());
+    GIANT_CHECK(!f.ragdolls.resume(f.state.scene, f.meshes, b, RagdollState::Resume{}).empty());
+    GIANT_CHECK(f.ragdolls.find(b) == nullptr && !f.animation.holds_pose(b) && f.ragdolls.size() == 1);
+    GIANT_CHECK(f.physics.world().ragdolls() == 1);
+}

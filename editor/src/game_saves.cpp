@@ -53,6 +53,19 @@ bool finite_in(const Json& j, double lo, double hi, double& out) {
 
 constexpr usize k_max_saved_poses = 65536;
 constexpr usize k_max_reason = 256;
+constexpr float k_max_bone_speed = 1000.0f; // m/s and rad/s, each part (what the physics takes back)
+constexpr double k_max_lying = 1e9;         // seconds
+constexpr u32 k_max_joint = 65535;
+
+// As the physics takes a bone's speed back (PhysicsWorld::place_ragdoll).
+bool slow_enough(const Vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && length(v) <= k_max_bone_speed;
+}
+
+bool sound_scale(const Vec3& v) {
+    return std::fabs(v.x) >= 1e-3f && std::fabs(v.y) >= 1e-3f && std::fabs(v.z) >= 1e-3f && std::fabs(v.x) <= 1e3f &&
+           std::fabs(v.y) <= 1e3f && std::fabs(v.z) <= 1e3f;
+}
 
 std::optional<WalkerState::Phase> phase_of(const Json& j) {
     if (!j.is_string()) return std::nullopt;
@@ -141,6 +154,7 @@ struct GameSaves::Sections {
     bool simulating = false;
     std::vector<SavedPose> poses;
     std::vector<SavedWalker> walkers;
+    std::vector<SavedRagdoll> ragdolls;
 };
 
 struct GameSaves::Pending {
@@ -345,6 +359,87 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
         walking = walkers.size();
         sections["walkers"] = Json{{"walkers", std::move(walkers)}}.dump(1) + "\n";
     }
+    // The ragdolls (only while simulating: they lie in it), those of a load not lying again yet too.
+    usize lying = 0;
+    {
+        Json ragdolls = Json::array();
+        const auto in = [](const DVec3& v) {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::fabs(v.x) <= 1e8 &&
+                   std::fabs(v.y) <= 1e8 && std::fabs(v.z) <= 1e8;
+        };
+        const auto unit = [](const Quat& q) {
+            const double len = std::sqrt(static_cast<double>(q.x) * q.x + static_cast<double>(q.y) * q.y +
+                                         static_cast<double>(q.z) * q.z + static_cast<double>(q.w) * q.w);
+            return std::fabs(len - 1.0) <= 1e-3;
+        };
+        const auto slow = [](const Vec3& v) { return slow_enough(v); };
+        const auto sized = [](const Vec3& v) { return sound_scale(v); };
+        const auto add = [&](const SavedRagdoll& g) {
+            const RagdollState::Resume& r = g.resume;
+            // Only what a load reads back (one fallen out of the world is not kept: it would refuse the save).
+            if (ragdolls.size() >= RagdollState::k_max_ragdolls || r.bones.empty() || r.bones.size() != r.joints.size() ||
+                r.bones.size() > sim::k_max_ragdoll_bones || !in(g.of_position) || !unit(g.of_rotation) || !sized(g.of_scale) ||
+                !(r.lying >= 0.0 && r.lying <= k_max_lying))
+                return;
+            Json bones = Json::array();
+            bool awake = false;
+            for (usize b = 0; b < r.bones.size(); ++b) {
+                const sim::BodyState& s = r.bones[b];
+                Quat q = s.rotation;
+                if (!unit(q)) q = normalize(q);
+                if (r.joints[b] > k_max_joint || !in(s.position) || !unit(q) || !slow(s.linear_velocity) || !slow(s.angular_velocity))
+                    return;
+                awake = awake || s.active;
+            }
+            // Each bone a row of numbers (a field of the fallen is many): its joint, where, its turn, and for
+            // one not asleep how it moves and spins.
+            for (usize b = 0; b < r.bones.size(); ++b) {
+                const sim::BodyState& s = r.bones[b];
+                const Quat q = unit(s.rotation) ? s.rotation : normalize(s.rotation);
+                Json row = Json::array({r.joints[b], s.position.x, s.position.y, s.position.z, q.x, q.y, q.z, q.w});
+                if (awake) {
+                    for (const float v : {s.linear_velocity.x, s.linear_velocity.y, s.linear_velocity.z, s.angular_velocity.x,
+                                          s.angular_velocity.y, s.angular_velocity.z})
+                        row.push_back(v);
+                }
+                bones.push_back(std::move(row));
+            }
+            ragdolls.push_back({{"entity", g.entity},
+                                {"asleep", !awake},
+                                {"lying", r.lying},
+                                {"bones", std::move(bones)},
+                                {"of",
+                                 {{"position", vec_json(g.of_position)},
+                                  {"rotation", quat_json(g.of_rotation)},
+                                  {"scale", Json::array({g.of_scale.x, g.of_scale.y, g.of_scale.z})}}}});
+        };
+        if (state.physics != nullptr && state.physics->simulating() && state.ragdolls != nullptr) {
+            std::vector<world::EntityId> ids;
+            // (Of a run stopped since, not this game's: let go on the next step.)
+            if (state.ragdolls->current(state.scene))
+                for (const auto& [id, r] : state.ragdolls->ragdolls()) ids.push_back(id);
+            std::sort(ids.begin(), ids.end());
+            for (const world::EntityId id : ids) {
+                const world::Entity* e = state.scene.find(id);
+                std::optional<RagdollState::Resume> r = state.ragdolls->lies(state.scene, id);
+                if (e == nullptr || !r) continue; // (gone: let go on the next step)
+                SavedRagdoll saved;
+                saved.entity = id;
+                saved.resume = std::move(*r);
+                saved.of_position = e->transform.position;
+                saved.of_rotation = e->transform.rotation;
+                saved.of_scale = e->transform.scale;
+                add(saved);
+            }
+            if (state.physics->runs() == m_ragdolls_run) {
+                for (const auto& [id, g] : m_ragdolls_waiting) {
+                    if (!std::binary_search(ids.begin(), ids.end(), id)) add(g);
+                }
+            }
+        }
+        lying = ragdolls.size();
+        sections["ragdolls"] = Json{{"ragdolls", std::move(ragdolls)}}.dump(1) + "\n";
+    }
     save::Meta meta;
     meta.world_name = state.world->folder().filename().string();
     meta.world_hash = world_identity(state.world->index());
@@ -369,6 +464,7 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
     }
     m_status.bodies = posed;
     m_status.walkers = walking;
+    m_status.ragdolls = lying;
     m_status.gather_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gather_from).count();
     m_autosaved_at = m_play_seconds;
@@ -542,6 +638,52 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     r.reason = e.value("reason", std::string());
                     p->sections.walkers.push_back(std::move(w));
                 }
+            } else if (name == "ragdolls") {
+                if (!only_keys(j, {"ragdolls"}) || !j.value("ragdolls", Json::array()).is_array() ||
+                    j.value("ragdolls", Json::array()).size() > RagdollState::k_max_ragdolls)
+                    return fail(file + ": bad ragdolls");
+                std::set<world::EntityId> ids;
+                for (const Json& e : j.value("ragdolls", Json::array())) {
+                    SavedRagdoll g;
+                    RagdollState::Resume& r = g.resume;
+                    const Json* of = e.is_object() && e.contains("of") ? &e["of"] : nullptr;
+                    const Json* bones = e.is_object() && e.contains("bones") ? &e["bones"] : nullptr;
+                    if (!e.is_object() || !only_keys(e, {"entity", "asleep", "lying", "bones", "of"}) || of == nullptr ||
+                        !of->is_object() || !only_keys(*of, {"position", "rotation", "scale"}) || !of->contains("scale") ||
+                        !read_vec3f((*of)["scale"], 1e3, g.of_scale) || !sound_scale(g.of_scale) || !e.contains("entity") ||
+                        !e["entity"].is_number_unsigned() || e["entity"].get<u64>() == 0 ||
+                        e["entity"].get<u64>() > world::k_max_entity_id || !e.contains("asleep") || !e["asleep"].is_boolean() ||
+                        !e.contains("lying") || !finite_in(e["lying"], 0.0, k_max_lying, r.lying) || bones == nullptr ||
+                        !bones->is_array() || bones->empty() || bones->size() > sim::k_max_ragdoll_bones ||
+                        !of->contains("position") || !read_vec((*of)["position"], g.of_position) || !of->contains("rotation") ||
+                        !read_quat((*of)["rotation"], g.of_rotation))
+                        return fail(file + ": a bad ragdoll");
+                    const bool asleep = e["asleep"].get<bool>();
+                    for (const Json& b : *bones) {
+                        // A row: joint, place, turn, and for one awake its velocity and spin.
+                        sim::BodyState s;
+                        double v[13] = {};
+                        const usize count = asleep ? 8 : 14;
+                        bool good = b.is_array() && b.size() == count && b[0].is_number_unsigned() && b[0].get<u64>() <= k_max_joint;
+                        for (usize k = 1; good && k < count; ++k) {
+                            const double limit = k < 4 ? 1e8 : k < 8 ? 1.01 : static_cast<double>(k_max_bone_speed);
+                            good = finite_in(b[k], -limit, limit, v[k - 1]);
+                        }
+                        if (!good || !read_quat(Json::array({v[3], v[4], v[5], v[6]}), s.rotation))
+                            return fail(file + ": a bad ragdoll bone");
+                        s.position = {v[0], v[1], v[2]};
+                        s.linear_velocity = {static_cast<float>(v[7]), static_cast<float>(v[8]), static_cast<float>(v[9])};
+                        s.angular_velocity = {static_cast<float>(v[10]), static_cast<float>(v[11]), static_cast<float>(v[12])};
+                        if (!slow_enough(s.linear_velocity) || !slow_enough(s.angular_velocity))
+                            return fail(file + ": a bad ragdoll bone");
+                        s.active = !asleep;
+                        r.joints.push_back(b[0].get<u32>());
+                        r.bones.push_back(s);
+                    }
+                    g.entity = e["entity"].get<u64>();
+                    if (!ids.insert(g.entity).second) return fail(file + ": a ragdoll twice");
+                    p->sections.ragdolls.push_back(std::move(g));
+                }
             } // (another engine's sections: left)
         }
         auto cells = std::make_shared<std::map<save::CellKey, GameCell>>();
@@ -589,6 +731,7 @@ void GameSaves::close(EditorState& state) {
     m_poses_from.reset();
     m_carried_feet.reset();
     forget_walkers();
+    forget_ragdolls();
     drop_weather();
     if (state.clock != nullptr) state.clock->show(state.scene.clock); // the scene's time again
     m_applying.clear();
@@ -690,6 +833,7 @@ void GameSaves::take(EditorState& state) {
     m_poses_from.reset();
     m_carried_feet.reset();
     forget_walkers();
+    forget_ragdolls();
     if (state.walkers != nullptr) state.walkers->clear(); // (walking in the game being left)
     if (state.ragdolls != nullptr && state.meshes != nullptr) state.ragdolls->clear(state.scene, *state.meshes); // (lying in it)
     forget_base(); // (another game now: the other base is not of it)
@@ -716,6 +860,9 @@ void GameSaves::take(EditorState& state) {
     m_status.walkers = m_sections->walkers.size();
     m_status.walkers_applied = 0;
     m_status.walkers_skipped = 0;
+    m_status.ragdolls = m_sections->ragdolls.size();
+    m_status.ragdolls_applied = 0;
+    m_status.ragdolls_skipped = 0;
     m_play_generation = p->generation;
     m_play_session = p->session;
     ++m_status.loads;
@@ -768,6 +915,86 @@ void GameSaves::finish_load(EditorState& state) {
     } else {
         m_status.walkers_skipped += s.walkers.size();
     }
+    if (state.physics != nullptr && state.ragdolls != nullptr && state.meshes != nullptr && state.physics->simulating()) {
+        for (const SavedRagdoll& g : s.ragdolls) m_ragdolls_waiting[g.entity] = g;
+        m_ragdolls_run = state.physics->runs();
+        m_ragdolls_unsure = false;
+    } else {
+        m_status.ragdolls_skipped += s.ragdolls.size();
+    }
+}
+
+void GameSaves::forget_ragdolls() {
+    m_ragdolls_waiting.clear();
+    m_ragdolls_from.reset();
+}
+
+void GameSaves::place_ragdolls(EditorState& state) {
+    if (m_ragdolls_waiting.empty()) return;
+    // Only for the simulation they were for (stopped since: ragdolls let go).
+    if (state.physics == nullptr || state.ragdolls == nullptr || state.meshes == nullptr || !state.physics->simulating() ||
+        state.physics->runs() != m_ragdolls_run) {
+        m_status.ragdolls_skipped += m_ragdolls_waiting.size();
+        forget_ragdolls();
+        return;
+    }
+    // Each waits for what it lies on, as the walkers do for what they stand on, and then for its file
+    // to be read (k_file_frames more at most); asked once: one refused then is not this save's.
+    constexpr u32 k_hold_frames = 120;
+    constexpr u32 k_file_frames = 600;
+    // What one slept on may not be there (a body or another ragdoll of the load skipped): those made
+    // from then on are made awake, to settle on what is.
+    if (m_status.bodies_skipped != 0 || m_status.ragdolls_skipped != 0) m_ragdolls_unsure = true;
+    const bool settling = state.physics->bodies().entities_waiting() || !m_poses_waiting.empty();
+    constexpr usize k_looks = 256;
+    usize budget = std::max<usize>(ragdolls_per_frame, 1);
+    auto it = m_ragdolls_from ? m_ragdolls_waiting.lower_bound(*m_ragdolls_from) : m_ragdolls_waiting.begin();
+    const usize looks = std::min(k_looks, m_ragdolls_waiting.size());
+    for (usize looked = 0; looked < looks && budget > 0 && !m_ragdolls_waiting.empty(); ++looked) {
+        if (it == m_ragdolls_waiting.end()) it = m_ragdolls_waiting.begin();
+        SavedRagdoll& g = it->second;
+        const world::Entity* e = state.scene.find(g.entity);
+        if (e == nullptr) {
+            ++it; // (its cell not streamed in yet)
+            continue;
+        }
+        if (g.seen < k_hold_frames) ++g.seen;
+        if (g.seen == 1 || (settling && g.seen < k_hold_frames)) {
+            ++it;
+            continue;
+        }
+        // Moved or scaled in the world since, hidden, or walking or limp since: not this save's.
+        if (state.ragdolls->find(g.entity) != nullptr || (state.walkers != nullptr && state.walkers->find(g.entity) != nullptr) ||
+            !(e->transform.position == g.of_position) || !(e->transform.rotation == g.of_rotation) ||
+            !(e->transform.scale == g.of_scale) || !e->visible) {
+            ++m_status.ragdolls_skipped;
+            m_ragdolls_unsure = true; // (another may have slept on it)
+            it = m_ragdolls_waiting.erase(it);
+            continue;
+        }
+        const DVec3& root = g.resume.bones.front().position;
+        if (state.physics->bodies().ground_waiting(state.scene.terrain, root) ||
+            m_ground_waiting.count(key_of(world::cell_of(root))) != 0) {
+            ++it; // (its ground not in yet)
+            continue;
+        }
+        if (!state.ragdolls->ready(state.scene, *state.meshes, g.entity) && g.unread++ < k_file_frames) {
+            ++it; // (its file not read yet)
+            continue;
+        }
+        --budget;
+        if (m_ragdolls_unsure) {
+            for (sim::BodyState& s : g.resume.bones) s.active = true;
+        }
+        if (state.ragdolls->resume(state.scene, *state.meshes, g.entity, g.resume).empty()) {
+            ++m_status.ragdolls_applied;
+        } else {
+            ++m_status.ragdolls_skipped; // (other bones now, no room: asking again would not help)
+            m_ragdolls_unsure = true;
+        }
+        it = m_ragdolls_waiting.erase(it);
+    }
+    m_ragdolls_from = it != m_ragdolls_waiting.end() ? std::optional<world::EntityId>(it->first) : std::nullopt;
 }
 
 void GameSaves::forget_walkers() {
@@ -904,6 +1131,7 @@ void GameSaves::update(EditorState& state, double seconds) {
     if (m_applying.empty() && m_sections != nullptr) finish_load(state);
     place_bodies(state);
     place_walkers(state);
+    place_ragdolls(state);
     const bool playing = state.play != nullptr && state.play->playing();
     if (playing && std::isfinite(seconds) && seconds > 0.0)
         m_play_seconds = std::min(m_play_seconds + seconds, save::k_max_play_seconds);
@@ -964,6 +1192,7 @@ void GameSaves::follow(EditorState& state) {
         m_poses_from.reset();
         m_carried_feet.reset();
         forget_walkers();
+        forget_ragdolls();
         forget_base();
         if (m_status.doing == "applying") m_status.doing.clear();
         m_generation = 0;

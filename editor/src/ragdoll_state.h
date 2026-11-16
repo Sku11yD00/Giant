@@ -32,9 +32,10 @@
 // Its morph weights stay as they were when it went limp (its clips'
 // weight tracks are not played under a held pose).
 //
-// View state: not undone, not saved. Stopping the simulation (or another
-// scene) lets every ragdoll go: drawn where the scene has it, playing its
-// clips again.
+// View state: not undone, not saved with the scene; a game save keeps who
+// lies where (GameSaves: lies and resume). Stopping the simulation (or
+// another scene) lets every ragdoll go: drawn where the scene has it,
+// playing its clips again.
 #pragma once
 
 #include "animation_state.h"
@@ -134,6 +135,26 @@ public:
     // walkers refused: it lies on).
     std::string get_up(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
     u64 risen() const { return m_risen; } // got up, ever
+    // How one lies, for a saved game: its bones' joints (of the file's
+    // skeleton), where each bone's body is and how it moves, and how long
+    // it has lain still.
+    struct Resume {
+        std::vector<u32> joints;
+        std::vector<sim::BodyState> bones;
+        double lying = 0.0;
+    };
+    // None: not a ragdoll (of this scene and run).
+    std::optional<Resume> lies(const world::Scene& scene, world::EntityId id) const;
+    // Whether `id` could be made a ragdoll this moment as far as its file
+    // goes (a visible entity whose skinned mesh is loaded): resume is not
+    // worth asking before.
+    bool ready(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id) const;
+    // Makes `id` a ragdoll (as start) lying as `resume` has it: asleep if
+    // it slept (what sleeps where it stands is not woken). Empty: done;
+    // else why not (as start; a walker: stop it first; or its file makes
+    // other bones now than the save's, or the numbers are none: it stays
+    // as it was).
+    std::string resume(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id, const Resume& resume);
     // Lets it go (drawn where the scene has it, its clips playing again). False: not a ragdoll.
     bool stop(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
     void clear(const world::Scene& scene, const MeshLibrary& meshes);
