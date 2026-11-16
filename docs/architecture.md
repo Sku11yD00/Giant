@@ -575,13 +575,22 @@ an offline cooker can use it without a device.
   its own (a skinned one with its weights and every morph target by
   name), and `MeshLibrary::Mesh::parts` holds one cluster mesh per
   material, most triangles first (glTF's default material's triangles are
-  a part named "" with the default look), each with that material's look
-  and maps. An entity or a placed kit's piece draws one instance per
+  a part named "" with the default look; a name already had by a part
+  before it gets a number, "steel (2)", so every part's name is its own),
+  each with that material's look and maps. An entity or a placed kit's piece draws one instance per
   part: the first with the entity's own look (which it took from that
   part when given the file), the rest with the file's base colour,
   roughness, metal, glow and maps under the entity's wind and surface
   settings (sway, flutter, two sides, translucency, cut-out, canopy:
-  what files do not say, so the whole thing sways as one). A scene saved
+  what files do not say, so the whole thing sways as one). An entity
+  may give any part but the first a look of its own
+  (`world::Entity::parts`, a `PartLook` by the part's name: saved with
+  the scene, set by the `parts` argument of `create_entity` and
+  `set_entity`): that part then draws with it whole (its colour, maps,
+  skin or eye, sides and cut-out), still bending as the entity does, so
+  one character file is skin, cloth, eyes and hair cards at once. Names
+  the file lacks do nothing (kept, for when the file has them again). A
+  kit's pieces take no such looks yet. A scene saved
   before parts keeps the look its entities stored then (the busiest
   material, perhaps without maps) on the first part until its maps are
   set, or it is given another mesh and then this one again (the same
@@ -1454,9 +1463,9 @@ over that valley with a crowd in its town: the gates' person
 thousand triangles, with idle, walk and run clips) as walkers in the
 alleys, each wearing hair, motion matched and kept walking (each in its
 turn sent to the other end of its way), people standing round the town,
-and a few by the street seen close, whose skin, clothes and eyes are
-three entities in one place (a mesh entity takes one look; `write_person`
-writes a file per material for that). A blast and shots in the street
+and a few by the street seen close, each one entity whose skin, clothes
+and eyes are the three parts of the person's file, with a look apiece
+(`parts`). A blast and shots in the street
 drop walkers, who lie and get up. It holds the flight to 60 fps without
 micro stutter and the characters' own passes ("skin", "character occlusion",
 "subsurface scattering", "hair", "hair shadows") to 2.0 ms half a metre

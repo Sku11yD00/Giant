@@ -2,6 +2,9 @@
 
 #include "giant_test.h"
 
+#include <cstdio>
+#include <string>
+
 using namespace giant::ai;
 
 namespace {
@@ -59,12 +62,36 @@ GIANT_TEST("json: each rule rejects bad arguments with a path") {
 }
 
 GIANT_TEST("json: odd schemas do not throw") {
-    // additionalProperties as a schema object, a non-object schema, a huge
-    // whole number given as a float.
-    const Json schema = Json::parse(R"({"type": "object", "additionalProperties": {"type": "string"},
+    // A non-object schema, a huge whole number given as a float.
+    const Json schema = Json::parse(R"({"type": "object", "additionalProperties": true,
         "properties": {"n": {"type": "integer"}}})");
     GIANT_CHECK(validate_args(schema, Json::parse(R"({"x": 1, "n": 1e15})")).empty());
     GIANT_CHECK(validate_args(Json(42), Json::object()).empty());
+}
+
+GIANT_TEST("json: a map by name checks every other key against one schema, and counts its keys") {
+    const Json schema = Json::parse(R"({"type": "object", "properties": {"looks": {"type": "object", "maxProperties": 2,
+        "properties": {"fixed": {"type": "integer"}},
+        "additionalProperties": {"type": ["object", "null"], "additionalProperties": false,
+                                 "properties": {"size": {"type": "number", "maximum": 4}}}}}})");
+    const auto check = [&](const char* args, const char* expected) {
+        const std::string error = validate_args(schema, Json::parse(args));
+        GIANT_CHECK(error == expected);
+        if (error != expected) std::fprintf(stderr, "    %s\n", error.c_str());
+    };
+    check(R"({"looks": {"a": {"size": 1}, "b": null}})", "");
+    check(R"({"looks": {"fixed": 3, "": {}}})", ""); // (named properties keep their own schema)
+    check(R"({"looks": {"a": 3}})", "looks.a: must be one of the types [\"object\",\"null\"]");
+    check(R"({"looks": {"a": {"size": 5}}})", "looks.a.size: above the maximum 4");
+    check(R"({"looks": {"a": {"more": 1}}})", "looks.a.more: is not a known argument");
+    check(R"({"looks": {"a": {}, "b": {}, "c": {}}})", "looks: allows at most 2 keys");
+}
+
+GIANT_TEST("json: a number may have to be above its minimum, not at it") {
+    const Json schema = Json::parse(R"({"type": "object", "properties": {"speed": {"type": "number", "exclusiveMinimum": 0}}})");
+    GIANT_CHECK(validate_args(schema, Json::parse(R"({"speed": 0.001})")).empty());
+    GIANT_CHECK(validate_args(schema, Json::parse(R"({"speed": 0})")) == "speed: must be above 0");
+    GIANT_CHECK(validate_args(schema, Json::parse(R"({"speed": -1})")) == "speed: must be above 0");
 }
 
 GIANT_TEST("json: deeply nested input is refused instead of overflowing the stack") {

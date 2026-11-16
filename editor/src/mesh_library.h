@@ -49,6 +49,8 @@ public:
     // part the triangles of one material with that material's look (values
     // and maps); the triangles glTF's default material draws are a part
     // named "" with the default look. Most triangles first.
+    // (`name`: the material's, "" for triangles with none; one alike before it in the list
+    // makes it "name (2)", "name (3)": every part's name is its own.)
     struct Part {
         std::string name;                      // the material's
         u32 triangles = 0;

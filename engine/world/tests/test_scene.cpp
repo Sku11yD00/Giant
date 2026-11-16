@@ -650,6 +650,56 @@ GIANT_TEST("world: the clips an entity is matched among save and load") {
     GIANT_CHECK(most.find(1) && most.find(1)->animation.matched.size() == 256);
 }
 
+GIANT_TEST("world: an entity's looks for the parts of its mesh save and load, only when set, and are checked") {
+    Scene scene;
+    Entity person = named("Person");
+    person.shape = Shape::mesh;
+    person.mesh = "assets/person.glb";
+    PartLook eyes;
+    eyes.name = "eyes";
+    eyes.material.eye = EyeLook{};
+    eyes.material.eye->bulge = 0.5f;
+    PartLook hair;
+    hair.name = ""; // (triangles with no material)
+    hair.material.base_color = {0.1f, 0.05f, 0.02f};
+    hair.material.two_sided = true;
+    hair.material.alpha_cutoff = 0.5f;
+    hair.material.maps.base_color = "assets/hair.png";
+    PartLook face;
+    face.name = "face";
+    face.material.skin = SkinLook{};
+    person.parts = {eyes, hair, face};
+    scene.add(person);
+    scene.add(named("Plain"));
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(contains(text, "\"parts\""));
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->parts == person.parts);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->parts.empty());
+    GIANT_CHECK(save_scene(loaded) == text);
+    Scene plain;
+    plain.add(named("One"));
+    GIANT_CHECK(!contains(save_scene(plain), "parts"));
+    const auto refused = [](const std::string& parts, const char* expected) {
+        const std::string json = R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "parts": )" + parts + "}]}";
+        Scene bad;
+        const auto error = load_scene(json, bad);
+        GIANT_CHECK(error.has_value() && contains(error->message, expected));
+        if (error.has_value() && !contains(error->message, expected)) std::fprintf(stderr, "    %s\n", error->message.c_str());
+    };
+    refused(R"({"eyes": {}})", "parts must be a list of at most 16 parts' looks");
+    refused(R"([{"material": {}}])", "name is missing");
+    refused(R"([{"name": "a"}])", "material is missing");
+    refused(R"([{"name": "a", "material": {}}, {"name": "a", "material": {}}])", "parts names \"a\" twice");
+    refused(R"([{"name": "a", "material": {"roughness": 2}}])", "parts[0].material");
+    refused(R"([{"name": "a", "material": {}, "more": 1}])", "more is not a known key");
+    refused(R"([{"name": "a", "material": {"skin": {}, "eye": {}}}])", "skin or an eye, not both");
+    std::string many = "[";
+    for (int i = 0; i < 17; ++i) many += std::string(i ? "," : "") + R"({"name": "p)" + std::to_string(i) + R"(", "material": {}})";
+    refused(many + "]", "parts must be a list of at most 16 parts' looks");
+}
+
 GIANT_TEST("world: kits and decals save and load") {
     Scene scene;
     Kit kit;

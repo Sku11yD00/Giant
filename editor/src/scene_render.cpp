@@ -73,15 +73,17 @@ void set_textures(render::Material& r, const std::array<u32, 4>& refs, const Tex
 
 // The material's index in the table, adding it if new, and one more user.
 // `terrain`: the ground's, shaded from the frame's terrain layers.
-// `surface`: another material's wind and surface settings (sway, flutter,
-// two sides, translucency, cut-out, canopy) in place of `m`'s own: a mesh
-// part's file look, on an entity that sways.
+// `wind`: another material's sway and flutter in place of `m`'s own, and
+// `surface`: another's surface settings (two sides, translucency, cut-out,
+// canopy): a mesh part's look on an entity (every part bends as the entity
+// does; a part's file look says nothing of its surface, so the entity's).
 u32 material_index(const world::Material& m, SceneFrame& out, bool textured = false, bool terrain = false,
-                   const world::Material* surface = nullptr) {
+                   const world::Material* wind = nullptr, const world::Material* surface = nullptr) {
+    const world::Material& bends = wind != nullptr ? *wind : m;
     const world::Material& w = surface != nullptr ? *surface : m;
     SceneFrame::MaterialKey key{};
     const float values[10] = {m.base_color.x, m.base_color.y, m.base_color.z, m.roughness, m.metallic,
-                              m.emissive.x,   m.emissive.y,   m.emissive.z,   w.sway,      w.flutter};
+                              m.emissive.x,   m.emissive.y,   m.emissive.z,   bends.sway,      bends.flutter};
     std::memcpy(key.bits, values, sizeof(values));
     const std::array<u32, 4> refs = texture_refs(m, textured, out);
     std::copy(refs.begin(), refs.end(), key.bits + 10);
@@ -121,8 +123,8 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
         r.roughness = m.roughness;
         r.metallic = m.metallic;
         r.emissive = m.emissive;
-        r.sway = w.sway;
-        r.flutter = w.flutter;
+        r.sway = bends.sway;
+        r.flutter = bends.flutter;
         r.terrain = terrain;
         r.two_sided = w.two_sided;
         r.translucency = w.translucency;
@@ -292,7 +294,8 @@ void emit_lamp(const world::Lamp& lamp, const world::Transform& t, SceneFrame::C
 void emit(world::Shape shape, const std::string& mesh_path, const world::Transform& t, const world::Material& m,
           const world::DecalSettings& d, const render::Renderer& renderer, const MeshLibrary& meshes,
           SceneFrame& out, SceneFrame::Cell& cell, render::MeshId own = render::k_no_mesh, bool moves = false,
-          const std::vector<render::MeshId>* own_parts = nullptr) {
+          const std::vector<render::MeshId>* own_parts = nullptr,
+          const std::vector<world::PartLook>* looks = nullptr) {
     if (shape == world::Shape::decal) {
         render::Decal decal;
         decal.position = t.position;
@@ -345,8 +348,20 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
             if (i.mesh == render::k_no_mesh) continue;
             // The others keep what files do not say (how it sways, its sides and cut-out) from
             // the entity, so the whole thing moves as one.
-            const world::Material& look = p == 0 ? m : part.material ? *part.material : plain;
-            i.material = material_index(look, out, file->has_uvs, false, p == 0 ? nullptr : &m);
+            // A part the entity names (`looks`) takes that look whole, but for how it bends.
+            const world::Material* own_look = nullptr;
+            if (p > 0 && looks != nullptr) {
+                for (const world::PartLook& named : *looks) {
+                    if (named.name == part.name) own_look = &named.material;
+                }
+            }
+            if (p == 0) {
+                i.material = material_index(m, out, file->has_uvs);
+            } else if (own_look != nullptr) {
+                i.material = material_index(*own_look, out, file->has_uvs, false, &m);
+            } else {
+                i.material = material_index(part.material ? *part.material : plain, out, file->has_uvs, false, &m, &m);
+            }
             cell.instances.push_back(i);
         }
         return;
@@ -587,7 +602,8 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
                 const auto c = out.cloth->find(id);
                 if (c != out.cloth->end()) own = c->second;
             }
-            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own, moves, own_parts);
+            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own, moves, own_parts,
+                 e->parts.empty() ? nullptr : &e->parts);
             emit_lamp(e->lamp, at, cell, lamp_shadow_id(e->lamp, id, 0), e->shape != world::Shape::cloth);
             slot();
             continue;

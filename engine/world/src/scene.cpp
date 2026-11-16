@@ -613,6 +613,19 @@ void write_wind(Json& material, const Material& m) {
 
 namespace {
 
+// A material as entities, kit pieces and entities' parts save it.
+Json material_json(const Material& m) {
+    Json material = {
+        {"base_color", vec3_json(m.base_color)},
+        {"roughness", m.roughness},
+        {"metallic", m.metallic},
+        {"emissive", vec3_json(m.emissive)},
+    };
+    if (m.surface != Surface::standard) material["surface"] = to_string(m.surface);
+    write_wind(material, m);
+    return material;
+}
+
 // What entities and kit pieces share: shape, files, transform, material.
 void write_look(Json& out, Shape shape, const std::string& mesh, const std::string& kit,
                 const Transform& t, const Material& m, const DecalSettings& d) {
@@ -621,14 +634,7 @@ void write_look(Json& out, Shape shape, const std::string& mesh, const std::stri
     out["position"] = dvec3_json(t.position);
     out["rotation"] = Json::array({q.x, q.y, q.z, q.w});
     out["scale"] = vec3_json(t.scale);
-    out["material"] = {
-        {"base_color", vec3_json(m.base_color)},
-        {"roughness", m.roughness},
-        {"metallic", m.metallic},
-        {"emissive", vec3_json(m.emissive)},
-    };
-    if (m.surface != Surface::standard) out["material"]["surface"] = to_string(m.surface);
-    write_wind(out["material"], m);
+    out["material"] = material_json(m);
     if (!mesh.empty()) {
         out["mesh"] = mesh;
     }
@@ -976,6 +982,11 @@ Json entity_json(const Entity& e) {
                            {"weight", w.weight}, {"limit", w.limit}};
     }
     if (!(e.lamp == Lamp{})) entity["lamp"] = lamp_json(e.lamp);
+    if (!e.parts.empty()) {
+        Json parts = Json::array();
+        for (const PartLook& p : e.parts) parts.push_back({{"name", p.name}, {"material", material_json(p.material)}});
+        entity["parts"] = std::move(parts);
+    }
     if (!(e.hair == Hair{})) entity["hair"] = hair_json(e.hair);
     if (!(e.effect == EntityEffect{})) {
         entity["effect"] = {{"on", e.effect.on}, {"effect", e.effect.effect}, {"rate", e.effect.rate}};
@@ -1601,6 +1612,26 @@ void read_eye(Reader& r, const std::string& path, Material& material, std::strin
     }
 }
 
+// A material (material_json): keys left out keep `material`'s values.
+void read_material(const Json& json, const std::string& path, Material& material, std::string& error) {
+    Reader mr(json, path, error);
+    mr.vec3("base_color", material.base_color, 0, 1);
+    mr.number("roughness", material.roughness, 0, 1);
+    mr.number("metallic", material.metallic, 0, 1);
+    mr.vec3("emissive", material.emissive, 0, 1000);
+    read_surface(mr, material.surface);
+    mr.number("sway", material.sway, 0, 4);
+    mr.number("flutter", material.flutter, 0, 4);
+    mr.boolean("two_sided", material.two_sided);
+    mr.number("translucency", material.translucency, 0, 1);
+    mr.number("alpha_cutoff", material.alpha_cutoff, 0, 1);
+    mr.number("canopy", material.canopy, 0, 1);
+    read_maps(mr, path, material.maps, error);
+    read_skin(mr, path, material.skin, error);
+    read_eye(mr, path, material, error);
+    mr.finish();
+}
+
 // Shape, files, transform, material and decal of an entity or kit piece.
 void read_look(Reader& r, const std::string& path, Shape& shape, std::string& mesh, std::string* kit,
                Transform& t, Material& material, DecalSettings& decal, std::string& error) {
@@ -1634,22 +1665,7 @@ void read_look(Reader& r, const std::string& path, Shape& shape, std::string& me
     r.quat("rotation", t.rotation);
     r.vec3("scale", t.scale, 0.0001, 1e6);
     if (const Json* m = r.get("material", false); m != nullptr && r.ok()) {
-        Reader mr(*m, path + ".material", error);
-        mr.vec3("base_color", material.base_color, 0, 1);
-        mr.number("roughness", material.roughness, 0, 1);
-        mr.number("metallic", material.metallic, 0, 1);
-        mr.vec3("emissive", material.emissive, 0, 1000);
-        read_surface(mr, material.surface);
-        mr.number("sway", material.sway, 0, 4);
-        mr.number("flutter", material.flutter, 0, 4);
-        mr.boolean("two_sided", material.two_sided);
-        mr.number("translucency", material.translucency, 0, 1);
-        mr.number("alpha_cutoff", material.alpha_cutoff, 0, 1);
-        mr.number("canopy", material.canopy, 0, 1);
-        read_maps(mr, path + ".material", material.maps, error);
-        read_skin(mr, path + ".material", material.skin, error);
-        read_eye(mr, path + ".material", material, error);
-        mr.finish();
+        read_material(*m, path + ".material", material, error);
     }
     if (const Json* d = r.get("decal", false); d != nullptr && r.ok()) {
         Reader dr(*d, path + ".decal", error);
@@ -1823,6 +1839,30 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
             }
         }
         ar.finish();
+    }
+    if (const Json* parts = r.get("parts", false); parts != nullptr && r.ok()) {
+        if (!parts->is_array() || parts->size() > k_max_entity_parts) {
+            r.fail("parts", "must be a list of at most " + std::to_string(k_max_entity_parts) + " parts' looks");
+        } else {
+            for (usize i = 0; i < parts->size() && r.ok(); ++i) {
+                const std::string part_path = path + ".parts[" + std::to_string(i) + "]";
+                Reader pr((*parts)[i], part_path, error);
+                PartLook look;
+                pr.string("name", look.name, true, k_max_name_bytes);
+                if (const Json* m = pr.get("material", true); m != nullptr && pr.ok()) {
+                    read_material(*m, part_path + ".material", look.material, error);
+                }
+                pr.finish();
+                if (!pr.ok()) break;
+                for (const PartLook& had : e.parts) {
+                    if (had.name == look.name) {
+                        r.fail("parts", "names \"" + look.name + "\" twice");
+                        break;
+                    }
+                }
+                e.parts.push_back(std::move(look));
+            }
+        }
     }
     read_lamp(r, path, e.lamp, error);
     read_hair(r, path, e.hair, error);

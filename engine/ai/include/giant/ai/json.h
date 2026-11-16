@@ -22,8 +22,10 @@ std::optional<Json> parse_json(std::string_view text);
 std::string to_json_text(const Json& value, int indent = -1);
 
 // Checks `args` against the subset of JSON Schema that commands use:
-// type (object, string, number, integer, boolean, array), properties,
-// required, additionalProperties: false, enum, minimum, maximum, items,
+// type (object, string, number, integer, boolean, array, null, or a list
+// of those: any one of them), properties,
+// required, additionalProperties: false or a schema for every other key
+// (a map by name), maxProperties, enum, minimum, exclusiveMinimum, maximum, items,
 // minItems, maxItems, minLength, maxLength. Returns an empty string when the
 // value matches, otherwise what is wrong and where ("color.r: above 1").
 std::string validate_args(const Json& schema, const Json& args);

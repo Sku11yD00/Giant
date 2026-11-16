@@ -11,9 +11,9 @@ thousand triangles each): walkers in the alleys between the houses, each
 wearing strand hair, sent walking from crossing to crossing and kept at it
 all flight long, each in its turn sent back (motion matched: they stand,
 walk and stand again by themselves); people standing
-round the town; and a few by the street to be seen close: their skin, their
-clothes and their eyes each an entity of its own in one place (a mesh takes
-one look), with long hair that moves. It saves that as a world and opens it
+round the town; and a few by the street to be seen close: each one entity
+whose skin, clothes and eyes are parts of the one file with a look apiece
+(`parts`), with long hair that moves. It saves that as a world and opens it
 again, simulating, with every N2 feature on, and flies the N3 gate's
 flight (up the river towards the town, down its street at head height
 through the crowd and past those close-ups, spiralling up and out) at
@@ -61,7 +61,7 @@ WALKERS = 160              # in the alleys, walking
 STANDING = 240             # round the town
 # Off a real GPU (CI's null device, which clears every target on the CPU): a smaller crowd, the same checks.
 SMALL_WALKERS, SMALL_STANDING = 48, 72
-CLOSE_UPS = 4              # by the street, each three entities (skin, clothes, eyes)
+CLOSE_UPS = 4              # by the street, each one entity with a look a part (skin, clothes, eyes)
 WALKER_STRANDS = 2000      # of hair each (too far to move: not simulated)
 CLOSE_UP_STRANDS = 30000
 CHARACTERS_BUDGET_MS = 2.0
@@ -109,15 +109,15 @@ def close_up_spots():
     return [(TOWN[0] + (1.3 if i % 2 else -1.3), round(TOWN[1] + 9.0 - i * 6.0, 2)) for i in range(CLOSE_UPS)]
 
 
-def people(tool, files, town_h, walking, stood):
+def people(tool, whole, first_part, town_h, walking, stood):
     """The crowd: `walking` walkers, `stood` standing, the close-ups. Returns (walker ids, standing ids,
-    close-ups as (skin id, clothes id, eye id))."""
-    whole, skin_file, clothes_file, eye_file = files
+    close-up ids). `first_part`: the name of the person file's first part (the one that takes an
+    entity's own look; the others take theirs by name, in `parts`)."""
     plan = walker_plan(walking)
     walkers = tool("create_entities", {"entities": [
         {"name": f"Walker {i}", "shape": "mesh", "mesh": whole, "position": [x, town_h, z], "body": "none",
          "base_color": [0.2 + 0.05 * (i % 7), 0.22 + 0.04 * (i % 5), 0.3 - 0.03 * (i % 4)], "roughness": 0.85,
-         "hair": {"on": True, "strands": WALKER_STRANDS, "guides": 16, "length": 0.12, "melanin": 0.2 + 0.1 * (i % 8),
+         "hair": {"on": True, "strands": WALKER_STRANDS, "guides": 16, "length": 0.12, "top": 0.3, "melanin": 0.2 + 0.1 * (i % 8),
                   "moves": False}}
         for i, ((x, z), _) in enumerate(plan)]})["ids"]
     ring = []
@@ -133,25 +133,24 @@ def people(tool, files, town_h, walking, stood):
         for i, ((x, z), h) in enumerate(zip(ring, heights))]})["ids"]
     close_ups = []
     for i, (x, z) in enumerate(close_up_spots()):
-        at = {"shape": "mesh", "position": [x, town_h, z], "body": "none"}
-        skin = tool("create_entity", {**at, "name": f"Close-up {i} skin", "mesh": skin_file,
-                                      "base_color": [0.78 - 0.1 * i, 0.57 - 0.08 * i, 0.46 - 0.07 * i],
-                                      "roughness": 0.5, "skin": {"scatter": 0.012},
-                                      "hair": {"on": True, "strands": CLOSE_UP_STRANDS, "guides": 128, "length": 0.3,
-                                               "melanin": 0.25 + 0.2 * i, "moves": True}})["id"]
-        clothes = tool("create_entity", {**at, "name": f"Close-up {i} clothes", "mesh": clothes_file,
-                                         "base_color": [0.4, 0.12, 0.1], "roughness": 0.85})["id"]
-        eyes = tool("create_entity", {**at, "name": f"Close-up {i} eyes", "mesh": eye_file,
-                                      "base_color": [0.9, 0.9, 0.88], "roughness": 0.1,
-                                      "eye": {"iris_radius": 0.3, "iris_color": [0.1 + 0.1 * i, 0.3, 0.5 - 0.1 * i]}})["id"]
-        close_ups.append((skin, clothes, eyes))
+        # One entity, a look a part: skin, clothes and eyes (the person file's three materials).
+        looks = {"skin": {"base_color": [0.78 - 0.1 * i, 0.57 - 0.08 * i, 0.46 - 0.07 * i], "roughness": 0.5,
+                          "skin": {"scatter": 0.012}},
+                 "clothes": {"base_color": [0.4, 0.12, 0.1], "roughness": 0.85},
+                 "eye": {"base_color": [0.9, 0.9, 0.88], "roughness": 0.1,
+                         "eye": {"iris_radius": 0.3, "iris_color": [0.1 + 0.1 * i, 0.3, 0.5 - 0.1 * i]}}}
+        own = looks.pop(first_part)
+        close_ups.append(tool("create_entity", {
+            "name": f"Close-up {i}", "shape": "mesh", "mesh": whole, "position": [x, town_h, z], "body": "none",
+            **own, "parts": looks,
+            # (`top`: the crown of the head, above the eyes, which are part of the one file now.)
+            "hair": {"on": True, "strands": CLOSE_UP_STRANDS, "guides": 128, "length": 0.3, "top": 0.3,
+                     "melanin": 0.25 + 0.2 * i, "moves": True}})["id"])
     # Motion matched, all of them: one sent walking stands, walks and stands again; the rest stand in their idle.
     for id_ in walkers + standing:
         tool("set_animation", {"id": id_, "clip": "idle", "matched": ["*"]})
-    # A close-up's three play the one clip, started together: one person.
-    for trio in close_ups:
-        for id_ in trio:
-            tool("set_animation", {"id": id_, "clip": "idle"})
+    for id_ in close_ups:
+        tool("set_animation", {"id": id_, "clip": "idle"})
     return walkers, standing, close_ups
 
 
@@ -190,11 +189,8 @@ def main() -> int:
     editor = None
     folder = tempfile.TemporaryDirectory()
     try:
-        files = tuple(os.path.join(folder.name, name).replace("\\", "/")
-                      for name in ("person.glb", "person_skin.glb", "person_clothes.glb", "person_eyes.glb"))
-        person = write_person(files[0])
-        for path, material in zip(files[1:], ("skin", "clothes", "eye")):
-            write_person(path, materials=[material])
+        whole = os.path.join(folder.name, "person.glb").replace("\\", "/")
+        person = write_person(whole)
         editor = Editor(sys.argv[1], sys.argv[2:], "characters_gate", timeout=1800)
         tool = editor.tool
         info = tool("get_engine_info")
@@ -207,9 +203,14 @@ def main() -> int:
         if real_gpu and (width, height) != RESOLUTION:
             print(f"characters_gate: warning: the budgets are for {RESOLUTION[0]}x{RESOLUTION[1]}")
         town_h = build_valley(tool)
-        walkers, standing, close_ups = people(tool, files, town_h, *((WALKERS, STANDING) if real_gpu else
+        # The person's file uses three materials: drawn in three parts, each with its look.
+        parts = [part["name"] for part in tool("import_mesh", {"path": whole}).get("parts", [])]
+        if sorted(parts) != ["clothes", "eye", "skin"]:
+            raise RuntimeError(f"the person is not drawn in its three parts (skin, clothes, eye): {parts}")
+        first_part = parts[0]
+        walkers, standing, close_ups = people(tool, whole, first_part, town_h, *((WALKERS, STANDING) if real_gpu else
                                                                     (SMALL_WALKERS, SMALL_STANDING)))
-        crowd = len(walkers) + len(standing) + 3 * len(close_ups)
+        crowd = len(walkers) + len(standing) + len(close_ups)
 
         def ground(points):
             heights = []
@@ -267,7 +268,6 @@ def main() -> int:
         editor.hover(30)
         far = triangles_drawn()
         far_one = tool("get_animation", {"id": standing[0]})
-        # (Not the close-ups: shown again a frame apart, a close-up's three would play out of step.)
         for id_ in walkers + standing:
             tool("set_entity", {"id": id_, "visible": False})
         editor.hover(30)
@@ -445,10 +445,10 @@ def main() -> int:
         x, z = close_up_spots()[0]
         face = ([x + 0.1, town_h + 1.72, z + 0.55], [x, town_h + 1.7, z])
         cost, parts, caught_up, near = characters_cost(editor, face)
-        skin_id, _, eye_id = close_ups[0]
-        near_one = tool("get_animation", {"id": skin_id})
-        near_hair = tool("get_hair", {"id": skin_id})["hair"]
-        eye = tool("get_entity", {"id": eye_id}).get("eye")
+        near_one = tool("get_animation", {"id": close_ups[0]})
+        near_hair = tool("get_hair", {"id": close_ups[0]})["hair"]
+        near_entity = tool("get_entity", {"id": close_ups[0]})
+        eye = near_entity.get("eye") or near_entity.get("parts", {}).get("eye", {}).get("eye")
         if not caught_up:
             failures.append("streaming, the scatter or the voxel world did not catch up at the close-up")
         # (The frame's flag says a skin look was given and its pass ran, in view or not: so the skin must

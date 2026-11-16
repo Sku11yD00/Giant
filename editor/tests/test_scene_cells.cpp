@@ -563,7 +563,9 @@ GIANT_TEST("mesh parts: triangles with no material are a part of their own; more
                 c.frame.materials[now[1].material].base_color == Vec3(1.0f, 1.0f, 1.0f));
 
     // One triangle a material: sixteen is still in parts, seventeen is drawn whole (and says so).
-    const auto many = [&](u32 materials) {
+    // (`names`: the materials', one each; a null one has no name.)
+    const auto many_named = [&](const std::string& file, const std::vector<const char*>& names) {
+        const u32 materials = static_cast<u32>(names.size());
         std::vector<u8> bin;
         geometry::testing::append(bin, std::vector<float>{0, 0, 0, 1, 0, 0, 1, 1, 0});
         geometry::testing::append(bin, std::vector<u32>{0, 1, 2});
@@ -571,7 +573,8 @@ GIANT_TEST("mesh parts: triangles with no material are a part of their own; more
         for (u32 m = 0; m < materials; ++m) {
             primitives += std::string(m == 0 ? "" : ",") + R"({"attributes":{"POSITION":0},"indices":1,"material":)" +
                           std::to_string(m) + "}";
-            list += std::string(m == 0 ? "" : ",") + R"({"name":"m)" + std::to_string(m) + R"("})";
+            list += std::string(m == 0 ? "" : ",") +
+                    (names[m] != nullptr ? R"({"name":")" + std::string(names[m]) + R"("})" : std::string("{}"));
         }
         const std::string json =
             R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
@@ -581,13 +584,34 @@ GIANT_TEST("mesh parts: triangles with no material are a part of their own; more
             R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},)"
             R"({"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"}]})";
         const std::vector<u8> glb = geometry::testing::make_glb(json, bin);
-        const std::filesystem::path path = dir / ("many" + std::to_string(materials) + ".glb");
+        const std::filesystem::path path = dir / (file + ".glb");
         std::ofstream(path, std::ios::binary)
             .write(reinterpret_cast<const char*>(glb.data()), static_cast<std::streamsize>(glb.size()));
         return c.meshes->load(path.generic_string());
     };
+    const auto many = [&](u32 materials) {
+        std::vector<std::string> made;
+        for (u32 m = 0; m < materials; ++m) made.push_back("m" + std::to_string(m));
+        std::vector<const char*> names;
+        for (const std::string& name : made) names.push_back(name.c_str());
+        return many_named("many" + std::to_string(materials), names);
+    };
     const MeshLibrary::Loaded sixteen = many(16);
     GIANT_CHECK(sixteen.mesh != nullptr && sixteen.mesh->parts.size() == 16 && sixteen.mesh->file_materials == 16);
+    // Materials with no names: every part still has a name of its own.
+    const MeshLibrary::Loaded unnamed = many_named("unnamed", {nullptr, nullptr, nullptr});
+    GIANT_CHECK(unnamed.mesh != nullptr && unnamed.mesh->parts.size() == 3);
+    if (unnamed.mesh != nullptr && unnamed.mesh->parts.size() == 3) {
+        GIANT_CHECK(unnamed.mesh->parts[0].name.empty() && unnamed.mesh->parts[1].name == " (2)" &&
+                    unnamed.mesh->parts[2].name == " (3)");
+    }
+    // Names alike get a number no material of the file has: the one the file calls "a (2)" keeps it.
+    const MeshLibrary::Loaded alike = many_named("alike", {"a", "a", "a (2)", "a"});
+    GIANT_CHECK(alike.mesh != nullptr && alike.mesh->parts.size() == 4);
+    if (alike.mesh != nullptr && alike.mesh->parts.size() == 4) {
+        GIANT_CHECK(alike.mesh->parts[0].name == "a" && alike.mesh->parts[1].name == "a (3)" &&
+                    alike.mesh->parts[2].name == "a (2)" && alike.mesh->parts[3].name == "a (4)");
+    }
     const MeshLibrary::Loaded seventeen = many(17);
     GIANT_CHECK(seventeen.mesh != nullptr && seventeen.mesh->parts.empty() && seventeen.mesh->file_materials == 17 &&
                 seventeen.mesh->material && seventeen.mesh->whole_material == seventeen.mesh->material);

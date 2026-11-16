@@ -1531,3 +1531,139 @@ GIANT_TEST("mesh parts: a frame's budget of copies counts every part's") {
     f.frame_step(0.0);
     GIANT_CHECK(f.animation->animated() == 9);
 }
+
+GIANT_TEST("mesh parts: an entity gives a part a look of its own, by name; the rest stay the file's") {
+    Fixture f(true);
+    if (f.renderer == nullptr) return;
+    f.arm = two_material_arm_file();
+    const world::EntityId arm = f.add_arm();
+    const MeshLibrary::Mesh* mesh = f.meshes->find(f.arm);
+    GIANT_CHECK(mesh != nullptr && mesh->parts.size() == 2 && mesh->parts[1].name == "steel");
+    if (mesh == nullptr || mesh->parts.size() != 2) return;
+    const auto second = [&] { // the second part's material as drawn
+        f.frame_step(0.0);
+        std::vector<render::Material> out;
+        for (const render::Instance& i : f.frame.instances) {
+            if (i.mesh != render::k_no_mesh) out.push_back(f.frame.materials[i.material]);
+        }
+        GIANT_CHECK(out.size() == 2);
+        return out.size() == 2 ? out[1] : render::Material{};
+    };
+    // The entity sways and is drawn from both sides: the file's look for the sword takes both.
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"sway", 0.5}, {"two_sided", true}}).ok);
+    render::Material steel = second();
+    GIANT_CHECK(steel.metallic == 1.0f && steel.sway == 0.5f && steel.two_sided);
+
+    // A look of its own: it starts as the part draws (the file's values, the entity's sides),
+    // what is given changes it.
+    const auto set = f.run("set_entity", {{"id", arm}, {"parts", {{"steel", {{"base_color", {0.0, 1.0, 0.0}}, {"eye", Json::object()}}}}}});
+    GIANT_CHECK(set.ok);
+    if (!set.ok) {
+        std::fprintf(stderr, "    %s\n", set.error.c_str());
+        return;
+    }
+    GIANT_CHECK(set.value["parts"]["steel"]["roughness"] == 0.25f && set.value["parts"]["steel"]["two_sided"] == true &&
+                set.value["parts"]["steel"].contains("eye"));
+    steel = second();
+    GIANT_CHECK(steel.base_color == Vec3(0.0f, 1.0f, 0.0f) && steel.metallic == 1.0f && steel.roughness == 0.25f &&
+                steel.eye_look != render::k_no_eye_look && steel.two_sided);
+    // Its surface is now its own; how it bends is always the entity's.
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"sway", 1.5}, {"two_sided", false}}).ok);
+    steel = second();
+    GIANT_CHECK(steel.sway == 1.5f && steel.two_sided);
+    // Fields left out keep their value; the entity's own look is untouched.
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"parts", {{"steel", {{"two_sided", false}}}}}}).ok);
+    steel = second();
+    GIANT_CHECK(!steel.two_sided && steel.base_color == Vec3(0.0f, 1.0f, 0.0f) && steel.eye_look != render::k_no_eye_look);
+    GIANT_CHECK(f.state.scene.find(arm)->material.base_color == Vec3(0.2f, 0.4f, 0.6f) && !f.state.scene.find(arm)->material.eye);
+    // Undone and done again as one step.
+    GIANT_CHECK(f.run("undo", Json::object()).ok);
+    GIANT_CHECK(second().two_sided);
+    GIANT_CHECK(f.run("redo", Json::object()).ok);
+    GIANT_CHECK(!second().two_sided);
+    // Saved with the scene.
+    {
+        world::Scene loaded;
+        GIANT_CHECK(!world::load_scene(world::save_scene(f.state.scene), loaded).has_value());
+        GIANT_CHECK(loaded.find(arm) != nullptr && loaded.find(arm)->parts == f.state.scene.find(arm)->parts &&
+                    loaded.find(arm)->parts.size() == 1);
+    }
+    // Animated, the part's copy draws with it too.
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "bend"}}).ok);
+    for (int i = 0; i < 8 && !f.get(arm)["drawn"].get<bool>(); ++i) f.frame_step(1.0 / 60.0);
+    GIANT_CHECK(second().base_color == Vec3(0.0f, 1.0f, 0.0f));
+
+    // What cannot be: the first part (the entity's own look), a name the file lacks, a thing that is no mesh.
+    const auto refused = [&](const Json& args, const char* expected) {
+        const auto r = f.run("set_entity", args);
+        GIANT_CHECK(!r.ok && r.error.find(expected) != std::string::npos);
+        if (r.ok || r.error.find(expected) == std::string::npos) std::fprintf(stderr, "    %s\n", r.error.c_str());
+    };
+    refused({{"id", arm}, {"parts", {{"sleeve", {{"roughness", 0.1}}}}}}, "is the mesh's first part");
+    refused({{"id", arm}, {"parts", {{"blade", {{"roughness", 0.1}}}}}}, "has no part named \"blade\"; it has \"sleeve\", \"steel\"");
+    refused({{"id", arm}, {"parts", {{"steel", {{"sway", 1.0}}}}}}, "sway");
+    GIANT_CHECK(f.state.scene.find(arm)->parts.size() == 1); // (refusals changed nothing)
+    // null: the file's look again (under the entity's surface, now one-sided).
+    const auto off = f.run("set_entity", {{"id", arm}, {"parts", {{"steel", nullptr}, {"never", nullptr}}}});
+    GIANT_CHECK(off.ok && !off.value.contains("parts"));
+    steel = second();
+    GIANT_CHECK(steel.base_color == Vec3(0.8f, 0.8f, 0.8f) && steel.eye_look == render::k_no_eye_look && !steel.two_sided);
+    const auto cube = f.run("create_entity", {{"shape", "cube"}});
+    GIANT_CHECK(cube.ok);
+    if (cube.ok) refused({{"id", cube.value["id"]}, {"parts", {{"steel", Json::object()}}}}, "only a mesh has parts");
+    // Given when made, with the mesh.
+    const auto made = f.run("create_entity", {{"mesh", f.arm}, {"parts", {{"steel", {{"metallic", 0.0}}}}}});
+    GIANT_CHECK(made.ok && made.value["parts"]["steel"]["metallic"] == 0.0f);
+    // Several at once: one that cannot be takes the whole batch back.
+    const usize before = f.state.scene.entities().size();
+    const auto batch = f.run("create_entities", {{"entities", {{{"mesh", f.arm}, {"parts", {{"steel", {{"roughness", 0.9}}}}}},
+                                                               {{"mesh", f.arm}, {"parts", {{"blade", Json::object()}}}}}}});
+    GIANT_CHECK(!batch.ok && f.state.scene.entities().size() == before);
+    const auto both = f.run("create_entities", {{"entities", {{{"mesh", f.arm}, {"parts", {{"steel", {{"roughness", 0.9}}}}}},
+                                                              {{"mesh", f.arm}}}}});
+    GIANT_CHECK(both.ok && f.state.scene.entities().size() == before + 2);
+    // More looks than an entity keeps, and a kit's piece (which takes none): refused as arguments.
+    Json many = Json::object();
+    for (int i = 0; i < 17; ++i) many["p" + std::to_string(i)] = nullptr;
+    refused({{"id", arm}, {"parts", many}}, "parts: allows at most 16 keys");
+    const Json with_parts = {{"mesh", f.arm}, {"parts", {{"steel", Json::object()}}}};
+    const auto piece = f.run("create_kit", {{"name", "k"}, {"pieces", Json::array({with_parts})}});
+    GIANT_CHECK(!piece.ok && piece.error.find("parts") != std::string::npos);
+
+    // Kept when the shape or the file changes: a name the new file lacks does nothing, and comes
+    // back with the file; while not a mesh a look can still be taken off, not given.
+    const world::EntityId kept = made.value["id"].get<u64>();
+    GIANT_CHECK(f.run("set_entity", {{"id", kept}, {"shape", "cube"}}).ok);
+    GIANT_CHECK(f.state.scene.find(kept)->parts.size() == 1);
+    GIANT_CHECK(f.run("set_entity", {{"id", kept}, {"shape", "mesh"}}).ok);
+    GIANT_CHECK(f.state.scene.find(kept)->parts.size() == 1 && f.state.scene.find(kept)->parts[0].material.metallic == 0.0f);
+    GIANT_CHECK(f.run("set_entity", {{"id", kept}, {"shape", "cube"}, {"parts", {{"steel", nullptr}}}}).ok);
+    GIANT_CHECK(f.state.scene.find(kept)->parts.empty());
+    // A kit made from an entity with looks: its piece draws the file's (said in the command's words).
+    GIANT_CHECK(f.state.scene.find(both.value["ids"][0].get<u64>())->parts.size() == 1);
+    const auto kit = f.run("create_kit", {{"name", "arms"}, {"from_entities", Json::array({both.value["ids"][0]})}});
+    GIANT_CHECK(kit.ok);
+    const auto pieces = f.run("get_kit", {{"name", "arms"}});
+    GIANT_CHECK(pieces.ok && pieces.value["pieces"].size() == 1 && !pieces.value["pieces"][0].contains("parts"));
+
+    // Another file, of one material: the look is kept and does nothing; back, it draws again.
+    for (const world::Entity& e : std::vector<world::Entity>(f.state.scene.entities().begin(), f.state.scene.entities().end())) {
+        if (e.id != arm) GIANT_CHECK(f.run("delete_entities", {{"ids", {e.id}}}).ok);
+    }
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", ""}}).ok);
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"parts", {{"steel", {{"base_color", {0.0, 0.0, 1.0}}}}}}}).ok);
+    GIANT_CHECK(second().base_color == Vec3(0.0f, 0.0f, 1.0f));
+    const std::string plain_arm = arm_file();
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"mesh", plain_arm}}).ok);
+    GIANT_CHECK(f.state.scene.find(arm)->parts.size() == 1);
+    f.frame_step(0.0);
+    usize drawn_whole = 0;
+    for (const render::Instance& i : f.frame.instances) {
+        if (i.mesh == render::k_no_mesh) continue;
+        ++drawn_whole;
+        GIANT_CHECK(f.frame.materials[i.material].base_color != Vec3(0.0f, 0.0f, 1.0f));
+    }
+    GIANT_CHECK(drawn_whole == 1);
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"mesh", f.arm}}).ok);
+    GIANT_CHECK(second().base_color == Vec3(0.0f, 0.0f, 1.0f));
+}

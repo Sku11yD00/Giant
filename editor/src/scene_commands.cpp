@@ -58,6 +58,22 @@ Json decal_json(const world::DecalSettings& d) {
             {"seed", d.seed}};
 }
 
+// The look an entity gives a part of its mesh (world::PartLook), as `parts` takes it.
+Json part_look_json(const world::Material& m) {
+    Json j = {{"base_color", vec3_json(m.base_color)},
+              {"roughness", m.roughness},
+              {"metallic", m.metallic},
+              {"emissive", vec3_json(m.emissive)},
+              {"two_sided", m.two_sided},
+              {"translucency", m.translucency},
+              {"alpha_cutoff", m.alpha_cutoff},
+              {"canopy", m.canopy}};
+    if (!m.maps.empty() || m.maps.normal_green_down) j["maps"] = maps_json(m.maps);
+    if (m.skin) j["skin"] = skin_json(*m.skin);
+    if (m.eye) j["eye"] = eye_json(*m.eye);
+    return j;
+}
+
 Json entity_json(const Entity& e) {
     const EulerDegrees r = euler_from_quat(e.transform.rotation);
     Json j = {{"id", e.id},
@@ -96,6 +112,11 @@ Json entity_json(const Entity& e) {
     }
     if (!e.kit.empty()) {
         j["kit"] = e.kit;
+    }
+    if (!e.parts.empty()) {
+        Json parts = Json::object(); // kept when the shape or file changes
+        for (const world::PartLook& p : e.parts) parts[p.name] = part_look_json(p.material);
+        j["parts"] = std::move(parts);
     }
     if (!(e.animation == world::EntityAnimation{})) {
         j["animation"] = {{"clip", e.animation.clip}, {"speed", e.animation.speed}, {"loop", e.animation.loop}}; // set_animation
@@ -446,6 +467,34 @@ Json entity_properties() {
         {"maps", maps_schema()},
         {"skin", skin_schema()},
         {"eye", eye_schema()},
+        {"parts",
+         {{"type", "object"},
+          {"maxProperties", world::k_max_entity_parts},
+          {"additionalProperties",
+           {{"type", {"object", "null"}},
+            {"additionalProperties", false},
+            {"properties",
+             {{"base_color", triple(0, 1, "Linear RGB albedo.")},
+              {"roughness", number(0, 1, "0 mirror-smooth, 1 matte.")},
+              {"metallic", number(0, 1, "0 for non-metals, 1 for metals.")},
+              {"emissive", triple(0, 1000, "Linear RGB light it gives off.")},
+              {"two_sided", {{"type", "boolean"}, {"description", "Drawn from both sides (hair cards, lashes)."}}},
+              {"translucency", number(0, 1, "How much sun shines through it.")},
+              {"alpha_cutoff", number(0, 1, "Cut-outs: nothing where the base colour map's alpha is under this.")},
+              {"canopy", number(0, 1, "As the entity's.")},
+              {"maps", maps_schema()},
+              {"skin", skin_schema()},
+              {"eye", eye_schema()}}}}},
+          {"description",
+           "Looks of its own for the parts of a mesh drawn in parts (a file using 2 to 16 materials; "
+           "import_mesh and list_meshes name the parts, each a material of the file), by part name: "
+           "{\"eyes\": {\"eye\": {}}, \"hair\": {\"two_sided\": true, \"alpha_cutoff\": 0.5}}. The first "
+           "part (most triangles) is the entity's own look, set by the entity's fields, not here. A part "
+           "named here starts from the file's look for it under the entity's two_sided, translucency, "
+           "alpha_cutoff and canopy; fields given change it, fields left out keep their value; null takes "
+           "the entity's look for the part off again (back to the file's). Every part sways and flutters "
+           "as the entity does. Needs shape mesh with its file imported; kept when the mesh changes "
+           "(names the new file lacks do nothing)."}}},
         {"visible", {{"type", "boolean"}}},
         {"body",
          {{"enum", {"fixed", "dynamic", "none"}},
@@ -456,6 +505,72 @@ Json entity_properties() {
         {"mass", number(0, world::k_max_body_mass,
                         "Kilograms, for a dynamic body. Default 0: from its size, as water.")},
     };
+}
+
+// The `parts` argument: looks for the parts of the entity's mesh, by name.
+// Returns what is wrong (and may have changed `e` partly), or "".
+std::string apply_parts(const Json& parts, Entity& e, EditorState& state) {
+    const MeshLibrary::Mesh* file = nullptr;
+    for (const auto& [name, given] : parts.items()) {
+        const auto had = std::find_if(e.parts.begin(), e.parts.end(), [&](const world::PartLook& p) { return p.name == name; });
+        if (given.is_null()) {
+            if (had != e.parts.end()) e.parts.erase(had);
+            continue;
+        }
+        if (e.shape != world::Shape::mesh) return "parts: only a mesh has parts (shape is " + std::string(world::to_string(e.shape)) + ")";
+        if (file == nullptr && state.meshes != nullptr) file = state.meshes->find_normalized(e.mesh);
+        if (file == nullptr) return "parts: " + e.mesh + " is not imported (import_mesh), so its parts are not known";
+        if (file->parts.empty()) {
+            return "parts: " + e.mesh + " is not drawn in parts (it uses " + std::to_string(file->file_materials) +
+                   " materials; files using 2 to " + std::to_string(MeshLibrary::k_max_parts) + " are)";
+        }
+        usize index = file->parts.size();
+        for (usize p = 0; p < file->parts.size(); ++p) {
+            if (file->parts[p].name == name) index = p;
+        }
+        if (index == file->parts.size()) {
+            std::string names;
+            for (const MeshLibrary::Part& p : file->parts) names += (names.empty() ? "\"" : ", \"") + p.name + "\"";
+            return "parts: " + e.mesh + " has no part named \"" + name + "\"; it has " + names;
+        }
+        if (index == 0) {
+            return "parts: \"" + name + "\" is the mesh's first part, which takes the entity's own look: set "
+                   "base_color, maps, skin and the rest on the entity itself";
+        }
+        if (name.size() > world::k_max_name_bytes) return "parts: the part's name is too long to keep a look for";
+        world::Material look;
+        if (had != e.parts.end()) {
+            look = had->material;
+        } else {
+            // As it draws without a look of its own: the file's, under the entity's surface settings.
+            if (file->parts[index].material) look = *file->parts[index].material;
+            look.two_sided = e.material.two_sided;
+            look.translucency = e.material.translucency;
+            look.alpha_cutoff = e.material.alpha_cutoff;
+            look.canopy = e.material.canopy;
+        }
+        if (given.contains("base_color")) look.base_color = vec3_from(given["base_color"]);
+        if (given.contains("roughness")) look.roughness = given["roughness"].get<float>();
+        if (given.contains("metallic")) look.metallic = given["metallic"].get<float>();
+        if (given.contains("emissive")) look.emissive = vec3_from(given["emissive"]);
+        if (given.contains("two_sided")) look.two_sided = given["two_sided"].get<bool>();
+        if (given.contains("translucency")) look.translucency = given["translucency"].get<float>();
+        if (given.contains("alpha_cutoff")) look.alpha_cutoff = given["alpha_cutoff"].get<float>();
+        if (given.contains("canopy")) look.canopy = given["canopy"].get<float>();
+        if (given.contains("maps")) {
+            if (std::string bad = apply_maps(given["maps"], look.maps); !bad.empty()) return "parts." + name + "." + bad;
+        }
+        if (std::string bad = apply_skin_and_eye(given, look); !bad.empty()) return "parts." + name + "." + bad;
+        if (had != e.parts.end()) {
+            had->material = std::move(look);
+        } else {
+            if (e.parts.size() >= world::k_max_entity_parts) {
+                return "parts: at most " + std::to_string(world::k_max_entity_parts) + " parts' looks an entity";
+            }
+            e.parts.push_back({name, std::move(look)});
+        }
+    }
+    return {};
 }
 
 // Returns what is wrong (and may have changed `e` partly), or "".
@@ -618,6 +733,9 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         // A new file brings its look, under what the arguments give (giving
         // the same file again keeps the look the entity has).
         if (e.mesh != mesh_before) take_file_look(*loaded.mesh, e.material, args);
+    }
+    if (args.contains("parts")) {
+        if (std::string bad = apply_parts(args["parts"], e, state); !bad.empty()) return bad;
     }
     return {};
 }
@@ -965,24 +1083,32 @@ void request_scene_textures(EditorState& state) {
         if (detail) state.textures->request(*m.skin);
     };
     // The other parts of a mesh drawn in parts: the file's looks (entities and placed kits' pieces).
-    const auto ask_parts = [&](world::Shape shape, const std::string& mesh) {
+    // (`looks`: an entity's own for the parts it names, in place of the file's.)
+    const auto ask_parts = [&](world::Shape shape, const std::string& mesh, const std::vector<world::PartLook>* looks) {
         if (shape != world::Shape::mesh || state.meshes == nullptr) return;
         const MeshLibrary::Mesh* found = state.meshes->find_normalized(mesh);
         if (found == nullptr || !found->has_uvs) return;
         for (usize p = 1; p < found->parts.size(); ++p) {
-            const std::optional<world::Material>& look = found->parts[p].material;
-            if (look && !look->maps.empty()) state.textures->request(look->maps);
+            const world::Material* look = found->parts[p].material ? &*found->parts[p].material : nullptr;
+            if (looks != nullptr) {
+                for (const world::PartLook& named : *looks) {
+                    if (named.name == found->parts[p].name) look = &named.material;
+                }
+            }
+            if (look == nullptr) continue;
+            if (!look->maps.empty()) state.textures->request(look->maps);
+            if (look->skin && !look->eye && !look->skin->detail_normal.empty()) state.textures->request(*look->skin);
         }
     };
     for (const Entity& e : state.scene.entities()) {
         if (!e.visible) continue;
         ask(e.shape, e.mesh, e.material);
-        ask_parts(e.shape, e.mesh);
+        ask_parts(e.shape, e.mesh, &e.parts);
     }
     for (const world::Kit& k : state.scene.kits) {
         for (const world::KitPiece& p : k.pieces) {
             ask(p.shape, p.mesh, p.material);
-            ask_parts(p.shape, p.mesh);
+            ask_parts(p.shape, p.mesh, nullptr);
         }
     }
     for (const world::ScatterLayer& l : state.scene.scatter) {
@@ -1018,6 +1144,7 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
     piece.erase("kit");
     piece.erase("visible");
     piece.erase("cloth");
+    piece.erase("parts"); // (pieces draw their file's parts with the file's looks)
     piece.erase("swing"); // the kit entity swings, whole
     piece.erase("effect"); // the kit entity runs one, whole
     piece["shape"]["enum"] = {"cube", "sphere", "plane", "mesh", "decal"};
@@ -1030,7 +1157,8 @@ void register_kit_commands(ai::CommandRegistry& registry, EditorState& state, co
          "rocks) that kit entities place any number of times, sharing its meshes and materials "
          "(create_entities with {\"kit\": name} places it). Give the pieces, or take them "
          "from_entities (their positions become relative to origin, by default the first "
-         "entity's; their swing and effect are not kept: give the kit entity those). replace_entities swaps "
+         "entity's; their swing and effect are not kept: give the kit entity those; nor are their parts' looks: pieces draw "
+         "their files' own). replace_entities swaps "
          "those entities for one placement of the new kit. "
          "replace: true changes an existing kit, and so every placement. breakable makes it a building "
          "that breaks while simulating. Undoable.",
@@ -1839,7 +1967,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "\"file.glb#image2\"), which entities given this mesh take, under any base_color, roughness, metallic, "
          "emissive or maps given with it. A file using 2 to 16 materials is drawn in parts (parts: each "
          "material's name and triangles, most first): the first part takes the entity's look, the others "
-         "the file's own looks, all with the entity's sway, flutter, sides and cut-out. (More than 16: drawn whole with "
+         "the file's own looks under the entity's sway, flutter, sides and cut-out (or a look the entity gives "
+         "it by name: parts on create_entity and set_entity). (More than 16: drawn whole with "
          "the busiest material, its maps only if it covers three quarters of the triangles.) Not undoable: it loads an asset and changes no entity.",
          Json{{"type", "object"},
               {"additionalProperties", false},
