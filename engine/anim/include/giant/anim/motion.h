@@ -152,13 +152,15 @@ struct MotionAhead {
 // What to look for: the pose of frame `now` (the frame playing) with
 // `ahead` as its way ahead; normalised as the database's frames are. With
 // no frame playing yet (k_no_frame) the pose is no one's: search with
-// `pose` false. A place or facing that is no number counts as 0, and a
+// `pose` 0. A place or facing that is no number counts as 0, and a
 // place is kept within a kilometre, so a search always finds a frame.
 MotionFeatures motion_query(const MotionDatabase& db, u32 now, const MotionAhead& ahead);
 
 // How far frame `f` is from `query` (squared, over the normalised
-// numbers). `pose` false: only the way ahead counts.
-float motion_cost(const MotionDatabase& db, u32 f, const MotionFeatures& query, bool pose = true);
+// numbers). `pose` is how much the pose's numbers count beside the way
+// ahead's (0 to 1000): 0, only the way ahead counts; under 1, a frame
+// posed less alike is taken sooner for going the wanted way.
+float motion_cost(const MotionDatabase& db, u32 f, const MotionFeatures& query, float pose = 1.0f);
 
 struct MotionMatch {
     u32 frame = k_no_frame;
@@ -167,10 +169,10 @@ struct MotionMatch {
 
 // The startable frame nearest `query`, if nearer than `best` (hand in the
 // frame playing and its cost to stay on it unless another is better; a
-// tie keeps `best`). `pose` false: only the way ahead counts (a first
-// frame to play). k_no_frame only from an empty database, or when `best`
-// was handed in so (with a cost no frame is under).
+// tie keeps `best`). `pose` as motion_cost has it (0: a first frame to
+// play). k_no_frame only from an empty database, or when `best` was
+// handed in so (with a cost no frame is under).
 MotionMatch motion_search(const MotionDatabase& db, const MotionFeatures& query, MotionMatch best = {},
-                          bool pose = true);
+                          float pose = 1.0f);
 
 } // namespace giant::anim
