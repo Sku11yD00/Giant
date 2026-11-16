@@ -122,6 +122,7 @@ Json animation_json(const EditorState& state, world::EntityId id) {
     }
     const MeshLibrary::Skinned& s = *a->skinned;
     out["by_command"] = a->by_command;
+    out["held"] = a->held_pose; // posed from outside (a ragdoll), not by its clips
     // Matched among its saved clips: how that stands, and what the matcher plays.
     if (a->motion != nullptr) {
         const AnimationState::Motion& m = *a->motion;

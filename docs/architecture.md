@@ -1298,11 +1298,52 @@ leave bones be, as a bone moved alone tears its joints). Bones are bodies like a
 (`ragdoll_bodies`, `ragdoll_bone`: rays, contacts, `add_impulse` and
 `state` work on them), but `remove` leaves them: they go with
 `remove_ragdoll`. A description that cannot be is refused whole. `clear`
-lets every ragdoll go (their owner sees `clears()` move on and makes them
-again; `ScenePhysics::clear` only takes the fresh-world path when every
-body is accounted for, so a ragdolls' owner counts its bones into
-`others` as the forest does). `sim` does not see
-`anim`: the editor builds descriptions from skeletons (C8b).
+lets every ragdoll go (their owner sees `clears()` move on and forgets
+them; `ScenePhysics::clear` only takes the fresh-world path when every
+body is accounted for, so the editor's physics counts the bones,
+`ragdoll_bones()`, into `others` with the forest's trunks). A bone with a
+`hinge_axis` folds one way (an elbow, a knee): up to `swing_degrees`
+either way about that axis and `side_degrees` the other way (0: not at
+all), so a knee that folds 140 degrees is a hinge of 70 whose `centre` is
+the leg half folded. `sim` does not see
+`anim`: the editor builds descriptions from skeletons.
+
+Editor ragdolls (C8b part 1, `editor/src/ragdoll_state.h`).
+`ragdoll_entity` makes a visible skinned mesh entity a ragdoll while
+simulating, as it is posed and drawn at that moment (a walker where it
+walks, with its velocity; it walks no more). Bones come from the capsules
+fitted round the joints at import (the hit shapes): a joint gets a body
+when its capsule is at least a twenty-fifth of the character's size, so
+fingers and toes ride the hand and foot (every joint follows its own bone
+or the nearest above it, keeping its place in that bone's space); mass is
+the capsule's volume as water, none lighter than a fiftieth of the
+heaviest. Joints are told apart by name (`RagdollState::kind_of`: the
+Mixamo, Unreal and Blender names): forearms and shins are hinges folding
+140 degrees, forward and back (the character faces +z; the axis is square
+to the bone at rest and to that way), the rest cones about the rest pose
+(`limits_of`). Bones that overlap in the rest pose, hang from the same
+bone, or are two apart never collide. Each frame after the physics steps,
+a ragdoll whose bodies are awake hands its joints' model matrices to the
+animation (`AnimationState::hold_pose` / `set_held_pose` /
+`release_pose`: a pose from outside shown instead of the clips' or the
+matcher's: a clip's time moves on underneath, a matcher waits; posed when due, as any other,
+and only when it changed: one asleep works out no pose; its size on
+screen for animation LOD is told from where it is drawn), and is drawn where
+its first bone has carried the entity's transform (`RagdollState::poses`,
+handed to the scene frame, the occluders and the hair before the walkers'
+poses; always marked moving). The scene keeps where the entity was put.
+While it is one it has no hit capsules: bullets meet the bones' bodies (as
+flesh, naming the entity) and push them. Let go (`stop_ragdoll`, the
+simulation stopped, another scene, a game loaded, the entity hidden,
+removed or drawing another file) it stands where the scene has it and its
+clips pose it again (one with nothing to play is animated no more). Limits:
+bones start with one velocity (the joints' own motion is not carried over
+yet); let go standing straight on level ground it can balance on its
+shins; joints give some degrees under hard landings; a hit on a bone
+names no zone or bone yet; starting one makes its bodies and, for a
+character not yet animated, its copy at once on the main thread (a crowd
+dropped in one frame wants a budget: with the shots, part 2); not saved
+(C8c).
 
 ## The player (N4 part 2)
 

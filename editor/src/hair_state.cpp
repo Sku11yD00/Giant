@@ -740,12 +740,12 @@ void HairState::resolve(Worn& worn) {
 }
 
 void HairState::place(const AnimationState* animation, const DrawnPoses* moving, const DrawnPoses* walking,
-                      const DrawnPoses* swinging) {
+                      const DrawnPoses* swinging, const DrawnPoses* fallen) {
     for (const auto& [id, held] : m_worn) {
         Worn& worn = *held;
         // (As the scene frame draws its entity.)
         const world::Transform* drawn = &worn.transform;
-        for (const DrawnPoses* poses : {moving, walking, swinging}) {
+        for (const DrawnPoses* poses : {moving, fallen, walking, swinging}) {
             if (poses == nullptr) continue;
             if (const auto it = poses->find(id); it != poses->end()) {
                 drawn = &it->second;

@@ -336,6 +336,33 @@ GIANT_TEST("scene cells: entities drawn at their poses, the posed one's cell reb
     GIANT_CHECK(c.frame.poses == nullptr);
 }
 
+GIANT_TEST("scene cells: a ragdoll is drawn where it lies, before its walker's pose, marked moving; let go, where the scene has it") {
+    Cells c;
+    if (c.renderer == nullptr) return;
+    const world::EntityId a = c.add(10.0, 10.0);
+    c.build();
+    GIANT_CHECK(!c.live()[0].moves);
+    std::unordered_map<world::EntityId, world::Transform> walking, lying;
+    walking[a].position = {11.0, 0.0, 10.0};
+    lying[a].position = {12.0, -0.5, 11.0};
+    const std::vector<world::EntityId> redraw{a};
+    scene_frame(c.scene, *c.renderer, *c.meshes, c.frame, nullptr, nullptr, nullptr, nullptr, redraw, nullptr, nullptr, {}, nullptr,
+                nullptr, {}, nullptr, &walking, nullptr, &lying);
+    GIANT_CHECK(c.frame.cells_rebuilt == 1 && c.live()[0].position.x == 12.0 && c.live()[0].position.y == -0.5);
+    GIANT_CHECK(c.live()[0].moves); // kept out of the voxel world while it is one
+    // Moved on (in place).
+    lying[a].position = {12.5, -0.5, 11.0};
+    scene_frame(c.scene, *c.renderer, *c.meshes, c.frame, nullptr, nullptr, nullptr, nullptr, {}, nullptr, nullptr, {}, nullptr,
+                nullptr, redraw, nullptr, &walking, nullptr, &lying);
+    GIANT_CHECK(c.live()[0].position.x == 12.5 && c.live()[0].moves);
+    // Let go.
+    lying.clear();
+    walking.clear();
+    scene_frame(c.scene, *c.renderer, *c.meshes, c.frame, nullptr, nullptr, nullptr, nullptr, redraw, nullptr, nullptr, {}, nullptr,
+                nullptr, {}, nullptr, &walking, nullptr, &lying);
+    GIANT_CHECK(c.live()[0].position.x == 10.0 && !c.live()[0].moves && c.frame.ragdolls == nullptr);
+}
+
 GIANT_TEST("scene cells: a material is two-sided for the renderer only while something uses it") {
     Cells c;
     if (c.renderer == nullptr) return;

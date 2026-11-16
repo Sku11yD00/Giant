@@ -135,6 +135,23 @@ public:
     std::string set_morphs(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
                            std::span<const std::pair<std::string, std::optional<float>>> weights, bool release_all);
 
+    // A pose from outside held on the entity (a ragdoll's bones) instead
+    // of what its clips or its matcher give: `hold_pose` makes it animated
+    // now if it can be (as play: its copy made; an error otherwise) and
+    // holds the pose it shows; `set_held_pose` gives each joint's model
+    // matrix from then on (false: not held, or not one a joint), posed when
+    // due as any other (only when it changed), and with `drawn_at` where
+    // the entity's origin is drawn now (its size on screen is told from
+    // there, not from where the scene has it); `release_pose` gives it
+    // back to its clips (a cut), or lets its place go when it has nothing
+    // to play. Its clips' time moves on underneath (a matcher waits where it
+    // was). View state: held until
+    // released, the entity hidden or drawing another file, or a new scene.
+    std::string hold_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
+    bool set_held_pose(world::EntityId id, std::span<const Mat4> model, const DVec3* drawn_at = nullptr);
+    void release_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
+    bool holds_pose(world::EntityId id) const { return m_held.contains(id); }
+
     // How a matched entity is being moved, in its own space: metres a
     // second across (+x) and along (+z) its facing, and how far it will
     // have turned (radians about +y, +z toward +x) over the next second.
@@ -213,6 +230,10 @@ public:
         MotionGoal goal;
         bool goal_set = false; // since the last frame's update
         double match_seconds = 0.0;
+        // A pose held from outside (hold_pose): `given` shows instead.
+        bool held_pose = false;
+        std::vector<Mat4> given;
+        std::optional<DVec3> drawn_at; // where its origin is drawn while held, when told
         u64 poses = 0;         // handed to the renderer
         u64 pose_serial = 0;   // when it last changed (as skinned()'s serials: never the same twice)
     };
@@ -298,6 +319,7 @@ private:
     std::vector<world::EntityId> m_unmatched; // scratch
     std::set<world::EntityId> m_wanted;   // would animate (lowest ids get to)
     std::set<world::EntityId> m_commanded; // playing by command (kept wanted)
+    std::set<world::EntityId> m_held;      // posed from outside (kept wanted)
     std::map<world::EntityId, std::unique_ptr<Animated>> m_animated;
     std::unordered_map<world::EntityId, render::MeshId> m_copies;
     // Per skinned file (as copied), its live copies in the renderer: a new

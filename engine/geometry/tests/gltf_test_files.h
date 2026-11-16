@@ -3,6 +3,7 @@
 
 #include "giant/core/types.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -388,6 +389,136 @@ inline std::vector<u8> skinned_walker() {
                        R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" + n(wgt) + R"(},"indices":)" + n(idx) + "}]}]," +
                        R"("skins":[{"joints":[0,1,2],"inverseBindMatrices":)" + n(inv) + "}]," +
                        R"("animations":[)" + animations + "]," +
+                       R"("buffers":[{"byteLength":)" + n(bin.size()) + R"(}],"bufferViews":[)";
+    for (usize i = 0; i < views.size(); ++i) json += (i ? "," : "") + views[i];
+    json += R"(],"accessors":[)";
+    for (usize i = 0; i < accessors.size(); ++i) json += (i ? "," : "") + accessors[i];
+    json += "]}";
+    return make_glb(json, bin);
+}
+
+// --- A skinned person --------------------------------------------------------
+//
+// A figure 1.7 m tall standing in a T, facing +z (+x its left), a box of
+// eight vertices round each bone, by the usual names: "Hips" (1 m up),
+// "Spine", "Head", "LeftArm" and "LeftForeArm" out along +x (0.3 m each),
+// "RightArm" and "RightForeArm" along -x, "LeftUpLeg" and "LeftLeg" down
+// (0.45 m each), "RightUpLeg" and "RightLeg", and a finger 3 cm long,
+// "LeftHandIndex1", at the left forearm's end. Clips: "idle" (1 s,
+// standing as at rest) and "raise" (1 s: the left arm held 60 degrees up).
+struct PersonJoint {
+    const char* name;
+    int parent;
+    float at[3];   // in model space
+    float to[3];   // its box runs from `at` to here
+    float thick;   // half its box's width across
+};
+inline constexpr PersonJoint k_person[] = {
+    {"Hips", -1, {0.0f, 1.0f, 0.0f}, {0.0f, 1.15f, 0.0f}, 0.12f},
+    {"Spine", 0, {0.0f, 1.2f, 0.0f}, {0.0f, 1.45f, 0.0f}, 0.11f},
+    {"Head", 1, {0.0f, 1.5f, 0.0f}, {0.0f, 1.7f, 0.0f}, 0.09f},
+    {"LeftArm", 1, {0.2f, 1.45f, 0.0f}, {0.5f, 1.45f, 0.0f}, 0.04f},
+    {"LeftForeArm", 3, {0.5f, 1.45f, 0.0f}, {0.8f, 1.45f, 0.0f}, 0.035f},
+    {"RightArm", 1, {-0.2f, 1.45f, 0.0f}, {-0.5f, 1.45f, 0.0f}, 0.04f},
+    {"RightForeArm", 5, {-0.5f, 1.45f, 0.0f}, {-0.8f, 1.45f, 0.0f}, 0.035f},
+    {"LeftUpLeg", 0, {0.1f, 0.95f, 0.0f}, {0.1f, 0.5f, 0.0f}, 0.07f},
+    {"LeftLeg", 7, {0.1f, 0.5f, 0.0f}, {0.1f, 0.05f, 0.0f}, 0.055f},
+    {"RightUpLeg", 0, {-0.1f, 0.95f, 0.0f}, {-0.1f, 0.5f, 0.0f}, 0.07f},
+    {"RightLeg", 9, {-0.1f, 0.5f, 0.0f}, {-0.1f, 0.05f, 0.0f}, 0.055f},
+    {"LeftHandIndex1", 4, {0.8f, 1.45f, 0.0f}, {0.83f, 1.45f, 0.0f}, 0.008f},
+};
+inline constexpr usize k_person_joints = sizeof(k_person) / sizeof(k_person[0]);
+
+inline std::vector<u8> skinned_person() {
+    std::vector<u8> bin;
+    std::vector<std::string> views;
+    std::vector<std::string> accessors;
+    const auto add = [&](const auto& values, const std::string& accessor) {
+        const usize at = bin.size();
+        append(bin, values);
+        views.push_back(R"({"buffer":0,"byteOffset":)" + std::to_string(at) + R"(,"byteLength":)" +
+                        std::to_string(bin.size() - at) + "}");
+        accessors.push_back(R"({"bufferView":)" + std::to_string(views.size() - 1) + "," + accessor + "}");
+        return accessors.size() - 1;
+    };
+    const auto n = [](usize i) { return std::to_string(i); };
+    std::vector<float> positions, normals, weights, inverse;
+    std::vector<u16> joints;
+    std::vector<u32> indices;
+    float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+    for (usize j = 0; j < k_person_joints; ++j) {
+        const PersonJoint& p = k_person[j];
+        // The box: `thick` across the two axes it does not run along.
+        int along = 0;
+        for (int a = 1; a < 3; ++a) {
+            if (std::fabs(p.to[a] - p.at[a]) > std::fabs(p.to[along] - p.at[along])) along = a;
+        }
+        const u32 first = static_cast<u32>(positions.size() / 3);
+        for (int corner = 0; corner < 8; ++corner) {
+            float v[3];
+            for (int a = 0; a < 3; ++a) {
+                const bool high = (corner >> a & 1) != 0;
+                v[a] = a == along ? (high ? p.to[a] : p.at[a]) : p.at[a] + (high ? p.thick : -p.thick);
+                lo[a] = std::min(lo[a], v[a]);
+                hi[a] = std::max(hi[a], v[a]);
+            }
+            positions.insert(positions.end(), {v[0], v[1], v[2]});
+            float out[3], len = 0.0f;
+            for (int a = 0; a < 3; ++a) {
+                out[a] = v[a] - 0.5f * (p.at[a] + p.to[a]);
+                len += out[a] * out[a];
+            }
+            len = std::sqrt(len);
+            normals.insert(normals.end(), {out[0] / len, out[1] / len, out[2] / len});
+            joints.insert(joints.end(), {static_cast<u16>(j), 0, 0, 0});
+            weights.insert(weights.end(), {1.0f, 0.0f, 0.0f, 0.0f});
+        }
+        // (Corner bits: x 1, y 2, z 4.)
+        for (const u32 i : {0u, 2u, 1u, 1u, 2u, 3u, 4u, 5u, 6u, 5u, 7u, 6u, 0u, 1u, 4u, 1u, 5u, 4u,
+                            2u, 6u, 3u, 3u, 6u, 7u, 0u, 4u, 2u, 2u, 4u, 6u, 1u, 3u, 5u, 3u, 7u, 5u}) {
+            indices.push_back(first + i);
+        }
+        inverse.insert(inverse.end(), {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -p.at[0], -p.at[1], -p.at[2], 1});
+    }
+    const usize count = positions.size() / 3;
+    const auto list = [](const float v[3]) {
+        return "[" + std::to_string(v[0]) + "," + std::to_string(v[1]) + "," + std::to_string(v[2]) + "]";
+    };
+    const usize pos = add(positions, R"("componentType":5126,"count":)" + n(count) + R"(,"type":"VEC3","min":)" + list(lo) +
+                                         R"(,"max":)" + list(hi));
+    const usize nrm = add(normals, R"("componentType":5126,"count":)" + n(count) + R"(,"type":"VEC3")");
+    const usize jnt = add(joints, R"("componentType":5123,"count":)" + n(count) + R"(,"type":"VEC4")");
+    const usize wgt = add(weights, R"("componentType":5126,"count":)" + n(count) + R"(,"type":"VEC4")");
+    const usize idx = add(indices, R"("componentType":5125,"count":)" + n(indices.size()) + R"(,"type":"SCALAR")");
+    const usize inv = add(inverse, R"("componentType":5126,"count":)" + n(k_person_joints) + R"(,"type":"MAT4")");
+    const usize times = add(std::vector<float>{0.0f, 1.0f}, R"("componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1])");
+    const usize stand = add(std::vector<float>{0, 1, 0, 0, 1, 0}, R"("componentType":5126,"count":2,"type":"VEC3")");
+    // (60 degrees about +z: the left arm, out along +x, goes up.)
+    const usize up = add(std::vector<float>{0, 0, 0.5f, 0.8660254f, 0, 0, 0.5f, 0.8660254f},
+                         R"("componentType":5126,"count":2,"type":"VEC4")");
+    std::string nodes;
+    std::string skin_joints;
+    for (usize j = 0; j < k_person_joints; ++j) {
+        const PersonJoint& p = k_person[j];
+        float local[3];
+        for (int a = 0; a < 3; ++a) local[a] = p.at[a] - (p.parent >= 0 ? k_person[p.parent].at[a] : 0.0f);
+        std::string children;
+        for (usize c = 0; c < k_person_joints; ++c) {
+            if (k_person[c].parent == static_cast<int>(j)) children += (children.empty() ? "" : ",") + n(c);
+        }
+        nodes += std::string(R"({"name":")") + p.name + R"(","translation":)" + list(local) +
+                 (children.empty() ? "" : R"(,"children":[)" + children + "]") + "},";
+        skin_joints += (j ? "," : "") + n(j);
+    }
+    std::string json = std::string(R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,)") + n(k_person_joints) +
+                       R"(]}],"nodes":[)" + nodes + R"({"name":"body","mesh":0,"skin":0}],)" +
+                       R"("meshes":[{"primitives":[{"attributes":{"POSITION":)" + n(pos) + R"(,"NORMAL":)" + n(nrm) +
+                       R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" + n(wgt) + R"(},"indices":)" + n(idx) + "}]}]," +
+                       R"("skins":[{"joints":[)" + skin_joints + R"(],"inverseBindMatrices":)" + n(inv) + "}]," +
+                       R"("animations":[{"name":"idle","samplers":[{"input":)" + n(times) + R"(,"output":)" + n(stand) +
+                       R"(}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]},)" +
+                       R"({"name":"raise","samplers":[{"input":)" + n(times) + R"(,"output":)" + n(up) +
+                       R"(}],"channels":[{"sampler":0,"target":{"node":3,"path":"rotation"}}]}],)" +
                        R"("buffers":[{"byteLength":)" + n(bin.size()) + R"(}],"bufferViews":[)";
     for (usize i = 0; i < views.size(); ++i) json += (i ? "," : "") + views[i];
     json += R"(],"accessors":[)";

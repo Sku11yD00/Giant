@@ -297,6 +297,15 @@ struct RagdollBone {
     float swing_degrees = 45.0f;
     float twist_degrees = 20.0f;
     std::optional<Quat> centre;
+    // A joint that folds one way (an elbow, a knee): with a `hinge_axis`
+    // (in the bone's space; its length 0.001 to 1000, and not along
+    // twist_axis: what of it is square to that counts), the bone leans up
+    // to `swing_degrees` either way about it and only `side_degrees` (0 to
+    // 179; 0: not at all) the other way. All zeros: none, the bone leans
+    // `swing_degrees` all round. (A knee that folds 140 degrees one way is
+    // a hinge of 70 whose `centre` is the leg half folded.)
+    Vec3 hinge_axis{};
+    float side_degrees = 0.0f;
 };
 
 constexpr usize k_max_ragdoll_bones = 128;
@@ -468,6 +477,7 @@ public:
     void remove_ragdoll(RagdollId id);
     bool contains_ragdoll(RagdollId id) const;
     usize ragdolls() const;
+    usize ragdoll_bones() const; // bodies that are bones, in all
     // Its bones' bodies, in the description's order (none: no such ragdoll).
     // remove() leaves them be: they go with remove_ragdoll.
     std::span<const BodyId> ragdoll_bodies(RagdollId id) const;

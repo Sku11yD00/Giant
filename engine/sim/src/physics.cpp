@@ -1449,6 +1449,14 @@ bool valid_ragdoll(const RagdollDesc& d) {
             return false;
         }
         if (b.centre && !finite(*b.centre)) return false;
+        if (!finite(b.hinge_axis) || !(b.side_degrees >= 0.0f && b.side_degrees <= 179.0f)) return false;
+        if (b.hinge_axis.x != 0.0f || b.hinge_axis.y != 0.0f || b.hinge_axis.z != 0.0f) {
+            // (Square enough to the twist axis to tell which way it folds.)
+            const float along = length(b.hinge_axis);
+            if (!(along >= 1e-3f && along <= 1e3f)) return false;
+            const float square = length(cross(b.hinge_axis, b.twist_axis)) / (along * length(b.twist_axis));
+            if (!(square >= 1e-3f)) return false;
+        }
     }
     for (const auto& [a, b] : d.no_collide) {
         if (a >= d.bones.size() || b >= d.bones.size() || a == b) return false;
@@ -1522,7 +1530,13 @@ RagdollId PhysicsWorld::add_ragdoll(const RagdollDesc& desc) {
         s.mSpace = JPH::EConstraintSpace::WorldSpace;
         s.mPosition1 = s.mPosition2 = to_jolt(b.position);
         const JPH::Vec3 twist = to_jolt(b.twist_axis).Normalized();
-        const JPH::Vec3 plane = square_to(twist);
+        // A hinge folds about its axis (made square to the twist axis): the plane axis.
+        const bool hinge = b.hinge_axis.x != 0.0f || b.hinge_axis.y != 0.0f || b.hinge_axis.z != 0.0f;
+        JPH::Vec3 plane = square_to(twist);
+        if (hinge) {
+            const JPH::Vec3 axis = to_jolt(b.hinge_axis);
+            plane = (axis - twist * axis.Dot(twist)).Normalized();
+        }
         const JPH::Quat own = to_jolt(b.rotation);
         // The parent's side of the joint: where the bone's axes are at the middle of its range.
         const JPH::Quat middle = b.centre ? to_jolt(parent.rotation) * to_jolt(*b.centre) : own;
@@ -1530,7 +1544,9 @@ RagdollId PhysicsWorld::add_ragdoll(const RagdollDesc& desc) {
         s.mPlaneAxis1 = middle * plane;
         s.mTwistAxis2 = own * twist;
         s.mPlaneAxis2 = own * plane;
-        s.mNormalHalfConeAngle = s.mPlaneHalfConeAngle = b.swing_degrees * 0.017453292f;
+        // (Jolt's "normal" angle is the lean toward the normal axis: the turn about the plane axis.)
+        s.mNormalHalfConeAngle = b.swing_degrees * 0.017453292f;
+        s.mPlaneHalfConeAngle = (hinge ? b.side_degrees : b.swing_degrees) * 0.017453292f;
         s.mTwistMinAngle = -b.twist_degrees * 0.017453292f;
         s.mTwistMaxAngle = b.twist_degrees * 0.017453292f;
         s.mMaxFrictionTorque = desc.joint_friction;
@@ -1575,6 +1591,8 @@ void PhysicsWorld::remove_ragdoll(RagdollId id) {
 bool PhysicsWorld::contains_ragdoll(RagdollId id) const { return m_impl->ragdolls.contains(id); }
 
 usize PhysicsWorld::ragdolls() const { return m_impl->ragdolls.size(); }
+
+usize PhysicsWorld::ragdoll_bones() const { return m_impl->ragdoll_bones.size(); }
 
 std::span<const BodyId> PhysicsWorld::ragdoll_bodies(RagdollId id) const {
     const auto it = m_impl->ragdolls.find(id);

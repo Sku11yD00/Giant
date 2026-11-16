@@ -93,6 +93,7 @@ struct SceneFrame {
     // Where swinging entities are drawn when the physics does not pose them (likewise).
     const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr;
     const std::unordered_map<world::EntityId, world::Transform>* walkers = nullptr;
+    const std::unordered_map<world::EntityId, world::Transform>* ragdolls = nullptr;
 
     // What an entity drew in its cell (instances from `first`, decals from
     // `decal_first`, within the cell's), so moving it can be done in place.
@@ -241,7 +242,9 @@ struct SceneFrame {
 // a walking entity (WalkerState) is drawn there, marked moving too. With
 // `moving`, posed entities whose bodies moved lately are marked moving, as
 // are loose kit pieces moving (sim::PiecePose::moving); still again, they
-// are drawn into the voxel world.
+// are drawn into the voxel world. With `ragdolls`, a character gone limp
+// (RagdollState) is drawn there (before a walker's or a swing's pose),
+// marked moving for as long as it is one.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
@@ -254,7 +257,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  std::span<const world::EntityId> moved = {},
                  const std::unordered_map<world::EntityId, world::Transform>* swings = nullptr,
                  const std::unordered_map<world::EntityId, world::Transform>* walkers = nullptr,
-                 const std::unordered_set<world::EntityId>* moving = nullptr);
+                 const std::unordered_set<world::EntityId>* moving = nullptr,
+                 const std::unordered_map<world::EntityId, world::Transform>* ragdolls = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

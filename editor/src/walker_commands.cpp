@@ -3,6 +3,7 @@
 #include "editor_commands.h"
 #include "nav_state.h"
 #include "physics_state.h"
+#include "ragdoll_state.h"
 #include "walker_state.h"
 
 #include "giant/core/assert.h"
@@ -85,6 +86,9 @@ void register_walker_commands(ai::CommandRegistry& registry, EditorState& state)
              const Json& t = args["to"];
              const DVec3 to{t[0].get<double>(), t[1].get<double>(), t[2].get<double>()};
              const float speed = args.contains("speed") ? args["speed"].get<float>() : 1.4f;
+             if (state.ragdolls != nullptr && state.ragdolls->current(state.scene) && state.ragdolls->find(id) != nullptr) {
+                 return CommandResult::failure("entity " + std::to_string(id) + " is a ragdoll (stop_ragdoll first)");
+             }
              state.nav->follow(state.scene, state.scene.untaken_changes());
              // The way now, if it is near enough to find at once.
              std::vector<DVec3> path;

@@ -63,7 +63,7 @@ private:
 // drawn (as hit shapes are: its animation's pose once its copy shows, else
 // the rest pose), whatever its body (walkers have none), placed where it is
 // drawn (as the scene frame: `moving` the physics' poses, then `walking`
-// the walkers', then `swinging` the swings', else its transform; each may
+// the walkers' (before them `fallen`, the ragdolls'), then `swinging` the swings', else its transform; each may
 // be null), for those within render::k_occluder_distance of `camera` (5 m x
 // its scale allowed for its reach from its origin), in the colour it is
 // drawn in: its base colour, times its base colour map's average (by its
@@ -72,6 +72,7 @@ private:
 using DrawnPoses = std::unordered_map<world::EntityId, world::Transform>;
 void character_occluders(const world::Scene& scene, const MeshLibrary& meshes, const AnimationState& animation,
                          TextureLibrary* textures, const DrawnPoses* moving, const DrawnPoses* walking,
-                         const DrawnPoses* swinging, const DVec3& camera, std::vector<render::Occluder>& out);
+                         const DrawnPoses* swinging, const DVec3& camera, std::vector<render::Occluder>& out,
+                         const DrawnPoses* fallen = nullptr);
 
 } // namespace giant::editor

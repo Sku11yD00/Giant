@@ -11,6 +11,9 @@
 #include "giant_test.h"
 #include "gltf_test_files.h"
 
+#include <cstring>
+#include <span>
+
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
 
@@ -1220,4 +1223,84 @@ GIANT_TEST("animation: a matched character is no obstacle to walk round, as one 
     out.clear();
     nav_obstacles(f.state.scene, *f.state.scene.find(id), nullptr, f.meshes.get(), out);
     GIANT_CHECK(out.empty());
+}
+
+GIANT_TEST("animation: a pose held from outside shows instead of the clips', until released") {
+    Fixture f;
+    const world::EntityId arm = f.add_arm();
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "bend"}}).ok);
+    f.frame_step(0.1);
+    const AnimationState::Animated* a = f.animation->find(arm);
+    GIANT_CHECK(a != nullptr && !a->held_pose && !f.animation->holds_pose(arm));
+    if (a == nullptr) return;
+    // Held: what it showed stays, while its clip's time moves on underneath.
+    const u64 serial = f.animation->serial();
+    GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, arm).empty());
+    GIANT_CHECK(a->held_pose && f.animation->holds_pose(arm) && f.animation->serial() != serial);
+    GIANT_CHECK(f.get(arm)["held"].get<bool>());
+    const std::vector<Mat4> held = a->model;
+    const u64 poses = a->poses;
+    const float time = a->player.main().time;
+    f.frame_step(0.2);
+    GIANT_CHECK(a->player.main().time != time);
+    GIANT_CHECK(std::memcmp(a->model.data(), held.data(), held.size() * sizeof(Mat4)) == 0 && a->poses == poses);
+    // A pose given: shown from the next frame; the same again is no new pose; not one a joint is none.
+    std::vector<Mat4> given = held;
+    given[1].at(1, 3) += 0.25f;
+    GIANT_CHECK(!f.animation->set_held_pose(arm, std::span<const Mat4>(given).first(1)));
+    GIANT_CHECK(f.animation->set_held_pose(arm, given));
+    f.frame_step(1.0 / 60.0);
+    GIANT_CHECK(std::memcmp(a->model.data(), given.data(), given.size() * sizeof(Mat4)) == 0 && a->poses == poses + 1);
+    GIANT_CHECK(f.animation->set_held_pose(arm, given));
+    f.frame_step(1.0 / 60.0);
+    GIANT_CHECK(a->poses == poses + 1);
+    // Its size on screen is told from where it is drawn when that is given (a ragdoll far from where the scene has it).
+    {
+        render::View view;
+        view.position = {0.0, 1.0, 4.0};
+        view.vertical_fov_degrees = 60.0f;
+        const DVec3 far_off{2000.0, 0.0, 0.0}, here{0.0, 0.0, 0.0};
+        f.animation->set_view(view, 1080);
+        f.frame_step(1.0 / 60.0);
+        GIANT_CHECK(a->interval == 0.0); // near: every frame
+        GIANT_CHECK(f.animation->set_held_pose(arm, given, &far_off));
+        f.animation->set_view(view, 1080);
+        f.frame_step(1.0 / 60.0);
+        GIANT_CHECK(a->interval > 0.1);
+        GIANT_CHECK(f.animation->set_held_pose(arm, given, &here));
+        f.animation->set_view(view, 1080);
+        f.frame_step(1.0 / 60.0);
+        GIANT_CHECK(a->interval == 0.0 && a->poses == poses + 1);
+    }
+    // Its own animation set meanwhile plays underneath: still held.
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "hop"}}).ok);
+    f.frame_step(0.1);
+    GIANT_CHECK(f.animation->find(arm) == a && a->held_pose && std::memcmp(a->model.data(), given.data(), given.size() * sizeof(Mat4)) == 0);
+    // Released: its clips pose it again.
+    f.animation->release_pose(f.state.scene, *f.meshes, arm);
+    GIANT_CHECK(!f.animation->holds_pose(arm) && f.animation->find(arm) == a && !a->held_pose);
+    f.frame_step(0.1);
+    GIANT_CHECK(std::memcmp(a->model.data(), given.data(), given.size() * sizeof(Mat4)) != 0);
+    GIANT_CHECK(!f.animation->set_held_pose(arm, given)); // (held no more)
+
+    // One with nothing to play is animated only while held.
+    const world::EntityId bare = f.add_arm(3.0);
+    f.frame_step(0.1);
+    GIANT_CHECK(f.animation->find(bare) == nullptr && f.animation->animated() == 1);
+    GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, bare).empty());
+    GIANT_CHECK(f.animation->find(bare) != nullptr && f.animation->animated() == 2);
+    f.frame_step(0.1);
+    GIANT_CHECK(f.animation->find(bare) != nullptr && f.animation->holds_pose(bare)); // (kept, with nothing of its own to play)
+    f.animation->release_pose(f.state.scene, *f.meshes, bare);
+    GIANT_CHECK(f.animation->find(bare) == nullptr && f.animation->animated() == 1);
+    // Hidden, the hold goes with its copy. Not a skinned mesh, no room: refused.
+    GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, bare).empty());
+    GIANT_CHECK(f.run("set_entity", {{"id", bare}, {"visible", false}}).ok);
+    f.frame_step(0.1);
+    GIANT_CHECK(!f.animation->holds_pose(bare) && f.animation->find(bare) == nullptr);
+    GIANT_CHECK(!f.animation->hold_pose(f.state.scene, *f.meshes, bare).empty());
+    GIANT_CHECK(!f.animation->hold_pose(f.state.scene, *f.meshes, 987654).empty());
+    const world::EntityId more = f.add_arm(6.0);
+    f.animation->max_animated = 1;
+    GIANT_CHECK(!f.animation->hold_pose(f.state.scene, *f.meshes, more).empty() && !f.animation->holds_pose(more));
 }
