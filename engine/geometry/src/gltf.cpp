@@ -299,7 +299,10 @@ public:
                 return false;
             }
             const u64 added = (target.mesh->indices.size() - before) / 3;
-            if (added > 0) m_material_triangles[node->mesh->primitives[i].material] += added; // null: glTF's default
+            if (added > 0) {
+                m_material_triangles[node->mesh->primitives[i].material] += added; // null: glTF's default
+                m_triangle_material.insert(m_triangle_material.end(), added, node->mesh->primitives[i].material);
+            }
         }
         return true;
     }
@@ -313,6 +316,8 @@ public:
 
     // Triangles drawn with each material (of the meshes read; null: none given).
     const std::unordered_map<const cgltf_material*, u64>& material_triangles() const { return m_material_triangles; }
+    // Each triangle's, in the order the triangles were read.
+    const std::vector<const cgltf_material*>& triangle_material() const { return m_triangle_material; }
 
     bool fail(std::string text) {
         m_result.error = std::move(text);
@@ -328,6 +333,7 @@ public:
 
 private:
     std::unordered_map<const cgltf_material*, u64> m_material_triangles;
+    std::vector<const cgltf_material*> m_triangle_material;
     // A vertex's joints and weights from up to two sets: the four heaviest,
     // in 255ths summing to 255.
     bool vertex_weights(const std::array<const std::vector<Vec4>*, 2>& joints,
@@ -1589,13 +1595,25 @@ ImportResult import(std::span<const u8> bytes, const std::string& path_utf8, boo
     std::sort(used.begin(), used.end(), [&](const auto& a, const auto& b) {
         return a.second != b.second ? a.second > b.second : a.first < b.first; // (pointers: file order)
     });
+    std::unordered_map<const cgltf_material*, u16> index_of;
     for (const auto& [material, triangles] : used) {
         if (material == nullptr) {
             result.default_material_triangles = triangles;
             continue;
         }
+        // (Past the 65535th, which no file has, triangles count as the default's.)
+        if (result.materials.size() < k_default_material) index_of[material] = static_cast<u16>(result.materials.size());
         result.materials.push_back(read_material(*data, *material, result.warnings));
         result.materials.back().triangles = triangles;
+    }
+    // Each triangle's material (the triangles were appended primitive by primitive, never reordered).
+    const std::vector<const cgltf_material*>& of_triangle = importer.triangle_material();
+    if (of_triangle.size() == result.mesh.indices.size() / 3) {
+        result.triangle_materials.reserve(of_triangle.size());
+        for (const cgltf_material* material : of_triangle) {
+            const auto it = index_of.find(material);
+            result.triangle_materials.push_back(it != index_of.end() ? it->second : k_default_material);
+        }
     }
     // Repeated warnings (one per material) once.
     std::vector<std::string> unique;

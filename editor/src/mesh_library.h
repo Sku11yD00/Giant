@@ -38,9 +38,28 @@ public:
         std::vector<anim::BoneCapsule> capsules; // hit shapes round the bones (joint space)
         std::vector<Mat4> rest_model;            // each joint's model matrix in the rest pose
         geometry::SkinnedClusterMesh clusters; // bind space, base level
+        // The same by part (Mesh::parts, one each in that order; none when
+        // the file is drawn whole): what is copied to the renderer for an
+        // animated entity then, each with every morph target of `clusters`.
+        std::vector<geometry::SkinnedClusterMesh> parts;
         // The clip of that name, or anim::k_no_clip.
         u32 find_clip(std::string_view name) const;
     };
+    // A file that uses two or more materials is drawn part by part, each
+    // part the triangles of one material with that material's look (values
+    // and maps); the triangles glTF's default material draws are a part
+    // named "" with the default look. Most triangles first.
+    struct Part {
+        std::string name;                      // the material's
+        u32 triangles = 0;
+        render::MeshId id = render::k_no_mesh; // in its rest pose; k_no_mesh without a renderer
+        std::optional<world::Material> material; // the file's look for it; none: the default look
+    };
+    static constexpr usize k_max_parts = 16; // a file with more materials is drawn whole, with one look
+    // A part of at least this many triangles with a quarter of its corners
+    // where it meets other parts (kept at every level of detail) is warned of.
+    static constexpr u64 k_seam_warning_triangles = 4096;
+
     struct Mesh {
         std::string path;                      // normalised, as entities store it
         render::MeshId id = render::k_no_mesh; // k_no_mesh without a renderer
@@ -52,12 +71,25 @@ public:
         std::vector<std::string> warnings;
         bool has_uvs = false; // the file has texture coordinates (material maps draw only then)
         // The file's own look: its material with the most triangles (values,
-        // and maps when it covers three quarters of the mesh: an image inside
-        // the file named "<path>#image<N>", one beside it by its path).
-        // Entities given this file take it, under the look fields given.
-        // None if the file has no materials, or glTF's default covers most.
+        // and maps: an image inside the file named "<path>#image<N>", one
+        // beside it by its path). Entities given this file take it, under
+        // the look fields given. Drawn in parts (`parts` below), it is the
+        // first part's look, maps and all; drawn whole (one material, or more
+        // than k_max_parts), its maps are kept only when it covers three
+        // quarters of the mesh. None if the file has no materials, or glTF's
+        // default covers most.
         std::optional<world::Material> material;
         u32 file_materials = 0; // materials the file's shown meshes use
+        // Its parts (empty: drawn whole, `id`, with one look). The first is
+        // the one an entity's own look fields are drawn on (`material` is
+        // its look, with its maps); the rest take the file's. Scatter
+        // items and scatter kits' pieces draw the whole mesh with one look.
+        std::vector<Part> parts;
+        // The look for drawing it whole as one (scatter): as `material`
+        // without parts; with them the first part's, its maps only when it
+        // covers three quarters of the triangles (else they would land on
+        // the other parts' uvs).
+        std::optional<world::Material> whole_material;
         std::shared_ptr<const Skinned> skinned; // null: not skinned
         // The file's hair curves (its line primitives; geometry::ImportResult::curves:
         // the file's space, at rest), shared with what grows hair from them. Null: none.

@@ -106,6 +106,7 @@ ClusterMesh build_clusters(const TriangleMesh& mesh, std::span<const u8> locked 
 // weights or deltas: lips that part) are kept at every level, so no coarse
 // triangle takes a corner from across one. Errors are measured on the base
 // shape: a renderer allows for how far its morphs move it.
+// `locked` is build_clusters' (one per mesh vertex, or empty; with `levels`).
 // The renderer can leave a depth unposed where none of it is drawn: that
 // is where its tree's root (nodes[depth]: every group of the depth, its
 // worst error) projects under the cut's threshold, the cut's own rule for
@@ -118,7 +119,8 @@ struct SkinnedClusterMesh {
     std::vector<SkinWeights> weights;
     std::vector<MorphTarget> morphs;
 };
-SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& mesh, bool levels = false);
+SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& mesh, bool levels = false,
+                                         std::span<const u8> locked = {});
 
 // Planes (xyz normal pointing inside, w offset) in camera-relative space.
 struct Frustum {

@@ -73,18 +73,23 @@ void set_textures(render::Material& r, const std::array<u32, 4>& refs, const Tex
 
 // The material's index in the table, adding it if new, and one more user.
 // `terrain`: the ground's, shaded from the frame's terrain layers.
-u32 material_index(const world::Material& m, SceneFrame& out, bool textured = false, bool terrain = false) {
+// `surface`: another material's wind and surface settings (sway, flutter,
+// two sides, translucency, cut-out, canopy) in place of `m`'s own: a mesh
+// part's file look, on an entity that sways.
+u32 material_index(const world::Material& m, SceneFrame& out, bool textured = false, bool terrain = false,
+                   const world::Material* surface = nullptr) {
+    const world::Material& w = surface != nullptr ? *surface : m;
     SceneFrame::MaterialKey key{};
     const float values[10] = {m.base_color.x, m.base_color.y, m.base_color.z, m.roughness, m.metallic,
-                              m.emissive.x,   m.emissive.y,   m.emissive.z,   m.sway,      m.flutter};
+                              m.emissive.x,   m.emissive.y,   m.emissive.z,   w.sway,      w.flutter};
     std::memcpy(key.bits, values, sizeof(values));
     const std::array<u32, 4> refs = texture_refs(m, textured, out);
     std::copy(refs.begin(), refs.end(), key.bits + 10);
     key.bits[14] = terrain ? 1u : 0u;
-    key.bits[15] = m.two_sided ? 1u : 0u;
-    std::memcpy(&key.bits[16], &m.translucency, 4);
-    std::memcpy(&key.bits[17], &m.alpha_cutoff, 4);
-    std::memcpy(&key.bits[18], &m.canopy, 4);
+    key.bits[15] = w.two_sided ? 1u : 0u;
+    std::memcpy(&key.bits[16], &w.translucency, 4);
+    std::memcpy(&key.bits[17], &w.alpha_cutoff, 4);
+    std::memcpy(&key.bits[18], &w.canopy, 4);
     u32 detail = TextureLibrary::k_no_ref;
     if (m.skin && !m.eye && !terrain) {
         const world::SkinLook& s = *m.skin;
@@ -116,13 +121,13 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
         r.roughness = m.roughness;
         r.metallic = m.metallic;
         r.emissive = m.emissive;
-        r.sway = m.sway;
-        r.flutter = m.flutter;
+        r.sway = w.sway;
+        r.flutter = w.flutter;
         r.terrain = terrain;
-        r.two_sided = m.two_sided;
-        r.translucency = m.translucency;
-        r.alpha_cutoff = m.alpha_cutoff;
-        r.canopy = m.canopy;
+        r.two_sided = w.two_sided;
+        r.translucency = w.translucency;
+        r.alpha_cutoff = w.alpha_cutoff;
+        r.canopy = w.canopy;
         // Skin: a look alike (values and detail map) is shared, so a crowd
         // of one look in many colours takes one.
         u32 look_index = render::k_no_skin_look;
@@ -182,10 +187,10 @@ u32 material_index(const world::Material& m, SceneFrame& out, bool textured = fa
                 out.eye_looks.push_back(look);
             }
         }
-        if (out.textures != nullptr) set_textures(r, refs, *out.textures, m.alpha_cutoff);
+        if (out.textures != nullptr) set_textures(r, refs, *out.textures, w.alpha_cutoff);
         out.materials.push_back(r);
         out.material_textures.push_back(refs);
-        out.material_kind.push_back({m.two_sided, m.alpha_cutoff, r.skin_look, r.eye_look});
+        out.material_kind.push_back({w.two_sided, w.alpha_cutoff, r.skin_look, r.eye_look});
         out.users.push_back(0);
     }
     ++out.users[it->second];
@@ -286,7 +291,8 @@ void emit_lamp(const world::Lamp& lamp, const world::Transform& t, SceneFrame::C
 // One drawable thing (an entity, or a piece of a placed kit).
 void emit(world::Shape shape, const std::string& mesh_path, const world::Transform& t, const world::Material& m,
           const world::DecalSettings& d, const render::Renderer& renderer, const MeshLibrary& meshes,
-          SceneFrame& out, SceneFrame::Cell& cell, render::MeshId own = render::k_no_mesh, bool moves = false) {
+          SceneFrame& out, SceneFrame::Cell& cell, render::MeshId own = render::k_no_mesh, bool moves = false,
+          const std::vector<render::MeshId>* own_parts = nullptr) {
     if (shape == world::Shape::decal) {
         render::Decal decal;
         decal.position = t.position;
@@ -326,9 +332,27 @@ void emit(world::Shape shape, const std::string& mesh_path, const world::Transfo
     if (shape != world::Shape::cloth) i.scale = t.scale;
     i.position = t.position;
     i.rotation = t.rotation;
+    i.moves = moves;
+    if (file != nullptr && !file->parts.empty()) {
+        // In parts, each with its look: the first the entity's own, the rest the file's. Animated, each
+        // part's posed copy (all of them there, or the file's rest pose).
+        const usize parts = file->parts.size();
+        const bool posed = own != render::k_no_mesh && own_parts != nullptr && own_parts->size() + 1 == parts;
+        static const world::Material plain;
+        for (usize p = 0; p < parts; ++p) {
+            const MeshLibrary::Part& part = file->parts[p];
+            i.mesh = !posed ? part.id : p == 0 ? own : (*own_parts)[p - 1];
+            if (i.mesh == render::k_no_mesh) continue;
+            // The others keep what files do not say (how it sways, its sides and cut-out) from
+            // the entity, so the whole thing moves as one.
+            const world::Material& look = p == 0 ? m : part.material ? *part.material : plain;
+            i.material = material_index(look, out, file->has_uvs, false, p == 0 ? nullptr : &m);
+            cell.instances.push_back(i);
+        }
+        return;
+    }
     i.mesh = mesh;
     i.material = material_index(m, out, has_uvs(shape, file));
-    i.moves = moves;
     cell.instances.push_back(i);
 }
 
@@ -389,7 +413,15 @@ void emit_scatter(const world::Scene& scene, const ScatterPlacer::Cell& placed, 
                             lp.mesh = renderer.builtin(builtin(piece.shape));
                         }
                         if (lp.mesh != render::k_no_mesh) {
-                            lp.material = material_index(piece.material, out, has_uvs(piece.shape, found));
+                            // A scattered piece draws its file whole, not in parts: its first
+                            // part's maps (the look pieces take from the file) belong on the
+                            // whole only where the file's whole look keeps them.
+                            bool maps = has_uvs(piece.shape, found);
+                            if (found != nullptr && !found->parts.empty() && found->parts.front().material &&
+                                piece.material.maps == found->parts.front().material->maps) {
+                                maps = maps && found->whole_material && !found->whole_material->maps.empty();
+                            }
+                            lp.material = material_index(piece.material, out, maps);
                             --out.users[lp.material]; // counted per instance below
                         }
                     }
@@ -546,11 +578,16 @@ bool rebuild(const world::Scene& scene, const render::Renderer& renderer, const 
                 const auto s = out.skinned->find(id);
                 if (s != out.skinned->end()) own = s->second;
             }
+            const std::vector<render::MeshId>* own_parts = nullptr;
+            if (own != render::k_no_mesh && out.skinned_parts != nullptr) {
+                const auto s = out.skinned_parts->find(id);
+                if (s != out.skinned_parts->end()) own_parts = &s->second;
+            }
             if (out.cloth != nullptr && e->shape == world::Shape::cloth) {
                 const auto c = out.cloth->find(id);
                 if (c != out.cloth->end()) own = c->second;
             }
-            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own, moves);
+            emit(e->shape, e->mesh, at, e->material, e->decal, renderer, meshes, out, cell, own, moves, own_parts);
             emit_lamp(e->lamp, at, cell, lamp_shadow_id(e->lamp, id, 0), e->shape != world::Shape::cloth);
             slot();
             continue;
@@ -689,7 +726,8 @@ bool rebuild_fallen(const world::Scene& scene, const render::Renderer& renderer,
 // too; false when it needs a full rebuild (one draws other than it did).
 // `in_place`: the cell already changed in place this frame (its ground,
 // its fallen trees): the range the renderer is told of grows to hold both.
-bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell& cell, bool in_place) {
+bool rebuild_moved(const world::Scene& scene, const MeshLibrary& meshes, SceneFrame& out, SceneFrame::Cell& cell,
+                   bool in_place) {
     if (cell.version == 0 || !cell.placed) {
         return false;
     }
@@ -736,11 +774,27 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
                 }
                 return false;
             }
-            // Each piece drew one instance or one decal, in order (else some
-            // draw nothing: rebuilt whole); loose ones where they fell.
+            // Each piece drew a decal or its instances, in order (as emit
+            // draws them: one, one for each part of its mesh, or none while
+            // its file is not there); loose ones where they fell.
+            const auto instances_of = [&meshes](const world::KitPiece& p) -> u32 {
+                if (p.shape == world::Shape::decal || p.shape == world::Shape::kit || p.shape == world::Shape::cloth) return 0;
+                if (p.shape != world::Shape::mesh) return 1;
+                const MeshLibrary::Mesh* file = meshes.find_normalized(p.mesh);
+                if (file == nullptr || file->id == render::k_no_mesh) return 0;
+                return file->parts.empty() ? 1u : static_cast<u32>(file->parts.size());
+            };
+            // (Looked up once a piece: kept in the frame's scratch list.)
+            std::vector<u32>& counts = out.piece_counts;
+            counts.clear();
             u32 decal_pieces = 0;
-            for (const world::KitPiece& p : kit->pieces) decal_pieces += p.shape == world::Shape::decal ? 1u : 0u;
-            if (slot->decals != decal_pieces || slot->count + slot->decals != kit->pieces.size()) return false;
+            u32 piece_instances = 0;
+            for (const world::KitPiece& p : kit->pieces) {
+                decal_pieces += p.shape == world::Shape::decal ? 1u : 0u;
+                counts.push_back(instances_of(p));
+                piece_instances += counts.back();
+            }
+            if (slot->decals != decal_pieces || slot->count != piece_instances) return false;
             u32 lamp_pieces = 0;
             for (const world::KitPiece& p : kit->pieces) lamp_pieces += p.lamp.on ? 1u : 0u;
             if (slot->lights != lamp_pieces + own_lamp) return false;
@@ -762,7 +816,9 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
                 if (p.shape == world::Shape::decal) {
                     put_decal(cell.decals[decal++], t);
                 } else {
-                    put(cell.instances[instance++], t, true, moves || (fell && (*loose)[next].moving()));
+                    for (u32 n = counts[k]; n > 0; --n) {
+                        put(cell.instances[instance++], t, true, moves || (fell && (*loose)[next].moving()));
+                    }
                 }
                 if (p.lamp.on) put_lamp(cell.lights[light++], p.lamp, t, lamp_shadow_id(p.lamp, id, k + 1));
             }
@@ -774,11 +830,15 @@ bool rebuild_moved(const world::Scene& scene, SceneFrame& out, SceneFrame::Cell&
                 lights_moved = true;
             }
             if (slot->count + slot->decals == 0) continue; // draws nothing (a mesh not loaded, a cloth with no mesh yet)
-            if (slot->count + slot->decals != 1) return false;
-            if (slot->decals == 1) {
+            // One decal, or its instances: one, or one for each part of its mesh, all where it is.
+            if (slot->decals == 1 && slot->count == 0) {
                 put_decal(cell.decals[slot->decal_first], at);
+            } else if (slot->decals == 0) {
+                for (u32 k = 0; k < slot->count; ++k) {
+                    put(cell.instances[slot->first + k], at, e->shape != world::Shape::cloth, moves);
+                }
             } else {
-                put(cell.instances[slot->first], at, e->shape != world::Shape::cloth, moves);
+                return false;
             }
         }
         decals_moved = decals_moved || slot->decals > 0;
@@ -1011,7 +1071,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, world::Transform>* swings,
                  const std::unordered_map<world::EntityId, world::Transform>* walkers,
                  const std::unordered_set<world::EntityId>* moving,
-                 const std::unordered_map<world::EntityId, world::Transform>* ragdolls) {
+                 const std::unordered_map<world::EntityId, world::Transform>* ragdolls,
+                 const std::unordered_map<world::EntityId, std::vector<render::MeshId>>* skinned_parts) {
     out.cells_rebuilt = 0;
     out.maps_seen.clear(); // the scene may have changed since: its materials' addresses with it
     out.skin_seen.clear();
@@ -1020,6 +1081,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.walkers = walkers;
     out.ragdolls = ragdolls;
     out.skinned = skinned;
+    out.skinned_parts = skinned_parts;
     out.cloth = cloth;
     out.piece_poses = piece_poses;
     out.moving = moving;
@@ -1169,7 +1231,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
         if (!cell.dirty && !cell.moved.empty()) {
             // Only where things are drawn: in place if it can be, else the
             // whole cell.
-            cell.dirty = !rebuild_moved(scene, out, cell, in_place);
+            cell.dirty = !rebuild_moved(scene, meshes, out, cell, in_place);
         }
         if (cell.dirty) {
             const bool fresh = cell.version == 0; // not laid out yet, even with no instances
@@ -1247,6 +1309,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.piece_poses = nullptr;
     out.moving = nullptr;
     out.skinned = nullptr;
+    out.skinned_parts = nullptr;
     out.cloth = nullptr;
     out.fallen = nullptr;
     const bool layer_textures = terrain_layers(scene, out);

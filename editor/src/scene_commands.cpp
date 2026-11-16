@@ -17,6 +17,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
 namespace giant::editor {
@@ -176,6 +177,11 @@ Json mesh_json(const MeshLibrary::Mesh& m) {
               {"uvs", m.has_uvs},
               {"materials", m.file_materials},
               {"warnings", m.warnings}};
+    if (!m.parts.empty()) {
+        Json parts = Json::array();
+        for (const MeshLibrary::Part& part : m.parts) parts.push_back({{"name", part.name}, {"triangles", part.triangles}});
+        j["parts"] = std::move(parts);
+    }
     if (m.material) {
         const world::Material& f = *m.material;
         j["material"] = {{"base_color", vec3_json(f.base_color)},
@@ -958,11 +964,26 @@ void request_scene_textures(EditorState& state) {
         if (!m.maps.empty()) state.textures->request(m.maps);
         if (detail) state.textures->request(*m.skin);
     };
+    // The other parts of a mesh drawn in parts: the file's looks (entities and placed kits' pieces).
+    const auto ask_parts = [&](world::Shape shape, const std::string& mesh) {
+        if (shape != world::Shape::mesh || state.meshes == nullptr) return;
+        const MeshLibrary::Mesh* found = state.meshes->find_normalized(mesh);
+        if (found == nullptr || !found->has_uvs) return;
+        for (usize p = 1; p < found->parts.size(); ++p) {
+            const std::optional<world::Material>& look = found->parts[p].material;
+            if (look && !look->maps.empty()) state.textures->request(look->maps);
+        }
+    };
     for (const Entity& e : state.scene.entities()) {
-        if (e.visible) ask(e.shape, e.mesh, e.material);
+        if (!e.visible) continue;
+        ask(e.shape, e.mesh, e.material);
+        ask_parts(e.shape, e.mesh);
     }
     for (const world::Kit& k : state.scene.kits) {
-        for (const world::KitPiece& p : k.pieces) ask(p.shape, p.mesh, p.material);
+        for (const world::KitPiece& p : k.pieces) {
+            ask(p.shape, p.mesh, p.material);
+            ask_parts(p.shape, p.mesh);
+        }
     }
     for (const world::ScatterLayer& l : state.scene.scatter) {
         for (const world::ScatterItem& i : l.items) ask(i.shape, i.mesh, i.material);
@@ -1814,9 +1835,12 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "entities can draw it (create_entity with mesh). Returns its triangle and cluster "
          "counts. Already-imported files return at once unless reload is true (to pick up "
          "changes). Large files take a few seconds. Returns the file's own look too (material: "
-         "the material with the most triangles: its values, and its maps when it covers at least "
-         "three quarters of the triangles; images inside the file named \"file.glb#image2\"), which entities given this mesh take, under "
-         "any base_color, roughness, metallic, emissive or maps given with it. Not undoable: it loads an asset and changes no entity.",
+         "the material with the most triangles: its values and maps; images inside the file named "
+         "\"file.glb#image2\"), which entities given this mesh take, under any base_color, roughness, metallic, "
+         "emissive or maps given with it. A file using 2 to 16 materials is drawn in parts (parts: each "
+         "material's name and triangles, most first): the first part takes the entity's look, the others "
+         "the file's own looks, all with the entity's sway, flutter, sides and cut-out. (More than 16: drawn whole with "
+         "the busiest material, its maps only if it covers three quarters of the triangles.) Not undoable: it loads an asset and changes no entity.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"path"}},

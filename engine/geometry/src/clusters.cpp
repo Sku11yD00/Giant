@@ -310,12 +310,12 @@ ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locke
     return build(source, locked, nullptr, nullptr, {}, nullptr, true);
 }
 
-SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& source, bool levels) {
+SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& source, bool levels, std::span<const u8> locked) {
     SkinnedClusterMesh out;
     if (source.weights.size() != source.mesh.vertices.size()) {
         return out; // one weight per vertex, or nothing
     }
-    out.mesh = build(source.mesh, {}, source.weights.data(), &out.weights, source.morphs, &out.morphs, levels);
+    out.mesh = build(source.mesh, locked, source.weights.data(), &out.weights, source.morphs, &out.morphs, levels);
     if (out.mesh.empty()) {
         out.weights.clear();
         out.morphs.clear();

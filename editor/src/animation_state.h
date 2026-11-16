@@ -201,6 +201,9 @@ public:
         const MeshLibrary::Mesh* mesh = nullptr;
         std::shared_ptr<const MeshLibrary::Skinned> skinned; // as copied
         render::MeshId copy = render::k_no_mesh;
+        // A file drawn in parts (MeshLibrary::Mesh::parts): `copy` is its
+        // first part's, these the rest's in order, all given the one pose.
+        std::vector<render::MeshId> part_copies;
         anim::AnimationPlayer player;
         world::EntityAnimation saved; // the entity's own, as last started
         bool by_command = false;      // playing what a command said, not `saved`
@@ -262,6 +265,8 @@ public:
     // What draws each animated entity instead of its file's mesh (the
     // scene frame's skinned meshes); and which to draw again (taken by the frame).
     const std::unordered_map<world::EntityId, render::MeshId>& copies() const { return m_copies; }
+    // Of those, the ones drawn in parts: their other parts' copies, in order.
+    const std::unordered_map<world::EntityId, std::vector<render::MeshId>>& part_copies() const { return m_part_copies; }
     std::vector<world::EntityId> take_redraw();
 
     usize animated() const { return m_animated.size(); }
@@ -344,7 +349,12 @@ private:
     std::unordered_map<world::EntityId, render::MeshId> m_copies;
     // Per skinned file (as copied), its live copies in the renderer: a new
     // one shares their geometry (Renderer::add_skinned_copy).
-    std::unordered_map<const MeshLibrary::Skinned*, std::vector<render::MeshId>> m_copies_of;
+    std::unordered_map<const geometry::SkinnedClusterMesh*, std::vector<render::MeshId>> m_copies_of;
+    std::unordered_map<world::EntityId, std::vector<render::MeshId>> m_part_copies;
+    // A copy of `clusters` in the renderer (k_no_mesh: refused), and one let go.
+    render::MeshId make_copy(const geometry::SkinnedClusterMesh& clusters, u32 joints);
+    void drop_copy(const geometry::SkinnedClusterMesh& clusters, render::MeshId copy);
+    void drop_copies(Animated& a);
     std::vector<world::EntityId> m_redraw;
     std::vector<Animated*> m_work; // scratch
     std::vector<Animated*> m_due;  // scratch

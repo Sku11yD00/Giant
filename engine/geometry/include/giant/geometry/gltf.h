@@ -92,6 +92,8 @@ struct ImportedMaterial {
     u64 triangles = 0;                   // of the mesh drawn with it
 };
 
+inline constexpr u16 k_default_material = 0xffff;
+
 struct SkinnedImport {
     SkinnedTriangleMesh mesh;
     anim::Skeleton skeleton;
@@ -113,6 +115,11 @@ struct ImportResult {
     // its triangles are counted apart).
     std::vector<ImportedMaterial> materials;
     u64 default_material_triangles = 0;
+    // Each triangle's material, one per triangle of `mesh` (and of the
+    // skinned mesh, whose triangles are the same in the same order): its
+    // index in `materials`, or k_default_material for glTF's default. For
+    // geometry::part_of, to draw each material's triangles with its look.
+    std::vector<u16> triangle_materials;
     // Hair curves: the shown meshes' line primitives (a strip or loop is
     // one curve, a list's segments are joined where one starts on the
     // vertex, or at the very place, the last ended), each two or more

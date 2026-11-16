@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <utility>
 
 using namespace giant;
 using namespace giant::editor;
@@ -116,7 +117,8 @@ struct Fixture {
         animation->follow_now(state.scene, *meshes, state.scene.untaken_changes()); // as main, before the cells
         const std::vector<world::EntityId> redraw = animation->take_redraw();
         scene_frame(state.scene, *renderer, *meshes, frame, nullptr, nullptr, nullptr, nullptr, redraw, nullptr,
-                    nullptr, {}, &animation->copies());
+                    nullptr, {}, &animation->copies(), nullptr, {}, nullptr, nullptr, nullptr, nullptr,
+                    &animation->part_copies());
         frame.take_for_followers();
         render::FrameInput input;
         input.view.position = {0.0, 1.0, 6.0};
@@ -1368,4 +1370,164 @@ GIANT_TEST("animation: a pose held from outside shows instead of the clips', unt
     const world::EntityId more = f.add_arm(6.0);
     f.animation->max_animated = 1;
     GIANT_CHECK(!f.animation->hold_pose(f.state.scene, *f.meshes, more).empty() && !f.animation->holds_pose(more));
+}
+
+namespace {
+
+// The arm in material "sleeve" and its sword in "steel" (geometry tests), with the arm's morph targets.
+std::string two_material_arm_file() {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "giant_animation_tests";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path = dir / "two_material_arm.glb";
+    geometry::testing::SkinOptions o;
+    o.materials = true;
+    o.morphs = true;
+    const std::vector<u8> bytes = geometry::testing::skinned_arm(o);
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
+                                                static_cast<std::streamsize>(bytes.size()));
+    return path.generic_string();
+}
+
+} // namespace
+
+GIANT_TEST("mesh parts: a file with two materials is drawn part by part, each with its look, still and animated") {
+    Fixture f(true);
+    if (f.renderer == nullptr) return;
+    f.arm = two_material_arm_file();
+    const world::EntityId arm = f.add_arm();
+    const MeshLibrary::Mesh* mesh = f.meshes->find(f.arm);
+    GIANT_CHECK(mesh != nullptr && mesh->parts.size() == 2 && mesh->skinned != nullptr && mesh->skinned->parts.size() == 2);
+    if (mesh == nullptr || mesh->parts.size() != 2 || mesh->skinned == nullptr || mesh->skinned->parts.size() != 2) return;
+    // Most triangles first: the arm's sleeve, then the sword's steel; the whole is there too.
+    GIANT_CHECK(mesh->parts[0].name == "sleeve" && mesh->parts[1].name == "steel" && mesh->parts[1].triangles == 1 &&
+                mesh->parts[0].triangles + mesh->parts[1].triangles == mesh->triangles);
+    GIANT_CHECK(mesh->id != render::k_no_mesh && mesh->parts[0].id != render::k_no_mesh &&
+                mesh->parts[1].id != render::k_no_mesh && mesh->parts[0].id != mesh->parts[1].id);
+    GIANT_CHECK(mesh->material && mesh->material->base_color == Vec3(0.2f, 0.4f, 0.6f));
+    // Every part has every morph target, by name, in the whole's order.
+    const auto& whole = mesh->skinned->clusters.morphs;
+    for (const geometry::SkinnedClusterMesh& part : mesh->skinned->parts) {
+        GIANT_CHECK(part.morphs.size() == whole.size());
+        for (usize t = 0; t < whole.size() && t < part.morphs.size(); ++t) {
+            GIANT_CHECK(part.morphs[t].name == whole[t].name && part.morphs[t].weight == whole[t].weight);
+        }
+    }
+    // The entity took the first part's look for its own; told to be red, its first part is, the sword stays steel.
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"base_color", {1.0, 0.0, 0.0}}}).ok);
+    f.frame_step(0.0);
+    const auto drawn = [&] {
+        std::vector<std::pair<render::MeshId, render::Material>> out;
+        for (const render::Instance& i : f.frame.instances) {
+            if (i.mesh != render::k_no_mesh) out.emplace_back(i.mesh, f.frame.materials[i.material]);
+        }
+        return out;
+    };
+    auto now = drawn();
+    GIANT_CHECK(now.size() == 2);
+    if (now.size() != 2) return;
+    GIANT_CHECK(now[0].first == mesh->parts[0].id && now[0].second.base_color == Vec3(1.0f, 0.0f, 0.0f));
+    GIANT_CHECK(now[1].first == mesh->parts[1].id && now[1].second.base_color == Vec3(0.8f, 0.8f, 0.8f) &&
+                now[1].second.metallic == 1.0f && now[1].second.roughness == 0.25f);
+
+    // Animated: a posed copy of each part, drawn once all are ready, both given the one pose.
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "bend"}}).ok);
+    const AnimationState::Animated* a = f.animation->find(arm);
+    GIANT_CHECK(a != nullptr && a->copy != render::k_no_mesh && a->part_copies.size() == 1);
+    if (a == nullptr || a->part_copies.size() != 1) return;
+    GIANT_CHECK(f.renderer->skinned(a->copy) && f.renderer->skinned(a->part_copies[0]) && a->copy != a->part_copies[0]);
+    for (int i = 0; i < 8 && !f.get(arm)["drawn"].get<bool>(); ++i) f.frame_step(1.0 / 60.0);
+    GIANT_CHECK(f.get(arm)["drawn"].get<bool>());
+    f.frame_step(1.0 / 60.0);
+    a = f.animation->find(arm);
+    now = drawn();
+    GIANT_CHECK(a != nullptr && now.size() == 2);
+    if (a == nullptr || now.size() != 2) return;
+    GIANT_CHECK(now[0].first == a->copy && now[0].second.base_color == Vec3(1.0f, 0.0f, 0.0f));
+    GIANT_CHECK(now[1].first == a->part_copies[0] && now[1].second.base_color == Vec3(0.8f, 0.8f, 0.8f));
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 2);
+    GIANT_CHECK(f.animation->part_copies().count(arm) == 1);
+    // Each part's copy takes the whole's morph targets (the one set of weights fits them all).
+    GIANT_CHECK(f.renderer->morph_targets(a->copy) == whole.size() && f.renderer->morph_targets(a->part_copies[0]) == whole.size());
+
+    // A second one shares each part's geometry; stopped, both of its copies leave the renderer.
+    const world::EntityId other = f.add_arm(5.0);
+    GIANT_CHECK(f.run("set_animation", {{"id", other}, {"clip", "bend"}}).ok);
+    for (int i = 0; i < 8 && !f.get(other)["drawn"].get<bool>(); ++i) f.frame_step(1.0 / 60.0);
+    f.frame_step(1.0 / 60.0);
+    GIANT_CHECK(drawn().size() == 4 && f.renderer->last_stats().skinned_meshes == 4);
+    const render::MeshId first = a->copy;
+    const render::MeshId second = a->part_copies[0];
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", ""}}).ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(!f.renderer->skinned(first) && !f.renderer->skinned(second) && f.animation->part_copies().count(arm) == 0);
+    now = drawn();
+    GIANT_CHECK(now.size() == 4);
+    usize rest_parts = 0;
+    for (const auto& [id, material] : now) rest_parts += id == mesh->parts[0].id || id == mesh->parts[1].id ? usize{1} : usize{0};
+    GIANT_CHECK(rest_parts == 2);
+    // The other still animates, with what the first uploaded.
+    const AnimationState::Animated* b = f.animation->find(other);
+    GIANT_CHECK(b != nullptr && f.renderer->skinned(b->copy) && b->part_copies.size() == 1 &&
+                f.renderer->skinned(b->part_copies[0]));
+    if (b == nullptr || b->part_copies.size() != 1) return;
+
+    // The file changed to one material while one animates: loaded again, both draw it whole, the
+    // parts and their copies gone from the renderer.
+    const render::MeshId old_copy = b->copy;
+    const render::MeshId old_part_copy = b->part_copies[0];
+    const render::MeshId old_parts[2] = {mesh->parts[0].id, mesh->parts[1].id};
+    const auto write = [&](bool materials) {
+        geometry::testing::SkinOptions o;
+        o.materials = materials;
+        o.morphs = true;
+        const std::vector<u8> bytes = geometry::testing::skinned_arm(o);
+        std::ofstream(f.arm, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
+                                                     static_cast<std::streamsize>(bytes.size()));
+    };
+    write(false);
+    GIANT_CHECK(f.run("import_mesh", {{"path", f.arm}, {"reload", true}}).ok);
+    mesh = f.meshes->find(f.arm);
+    GIANT_CHECK(mesh != nullptr && mesh->parts.empty() && mesh->skinned != nullptr && mesh->skinned->parts.empty());
+    for (int i = 0; i < 8 && !f.get(other)["drawn"].get<bool>(); ++i) f.frame_step(1.0 / 60.0);
+    f.frame_step(1.0 / 60.0);
+    b = f.animation->find(other);
+    now = drawn();
+    GIANT_CHECK(b != nullptr && now.size() == 2 && f.animation->part_copies().count(other) == 0);
+    if (b == nullptr || mesh == nullptr || now.size() != 2) return;
+    GIANT_CHECK(b->part_copies.empty() && now[0].first == mesh->id && now[1].first == b->copy);
+    // (Mesh ids are used again: the old copies are gone when nothing but the one new copy is skinned.)
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 1);
+    for (const render::MeshId old : {old_copy, old_part_copy}) GIANT_CHECK(old == b->copy || !f.renderer->skinned(old));
+    for (const auto& [id, material] : now) GIANT_CHECK(id != old_parts[0] && id != old_parts[1]);
+    // And back to two: in parts again, a copy a part.
+    write(true);
+    GIANT_CHECK(f.run("import_mesh", {{"path", f.arm}, {"reload", true}}).ok);
+    mesh = f.meshes->find(f.arm);
+    GIANT_CHECK(mesh != nullptr && mesh->parts.size() == 2);
+    for (int i = 0; i < 8 && !f.get(other)["drawn"].get<bool>(); ++i) f.frame_step(1.0 / 60.0);
+    f.frame_step(1.0 / 60.0);
+    b = f.animation->find(other);
+    now = drawn();
+    GIANT_CHECK(b != nullptr && b->part_copies.size() == 1 && now.size() == 4);
+    if (b == nullptr || mesh == nullptr || mesh->parts.size() != 2 || b->part_copies.size() != 1 || now.size() != 4) return;
+    GIANT_CHECK(now[0].first == mesh->parts[0].id && now[1].first == mesh->parts[1].id && now[2].first == b->copy &&
+                now[3].first == b->part_copies[0]);
+}
+
+GIANT_TEST("mesh parts: a frame's budget of copies counts every part's") {
+    Fixture f(true);
+    if (f.renderer == nullptr) return;
+    f.arm = two_material_arm_file();
+    std::vector<world::EntityId> ids;
+    for (int i = 0; i < 9; ++i) ids.push_back(f.add_arm(3.0 * i));
+    for (const world::EntityId id : ids) f.state.scene.modify(id)->animation.clip = "bend"; // as a loaded scene has them
+    GIANT_CHECK(f.animation->copies_per_frame == 4);
+    // Two copies a character: a pass over the waiting starts two characters, not four (a step
+    // here passes twice, as the editor's frame does: its update, then following the scene).
+    f.frame_step(0.0);
+    GIANT_CHECK(f.animation->animated() == 4);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.animation->animated() == 8);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.animation->animated() == 9);
 }

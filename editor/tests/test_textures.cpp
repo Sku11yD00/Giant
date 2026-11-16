@@ -2,6 +2,7 @@
 // cache, uploaded under a budget, and drawn by the materials naming them.
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
+#include "../src/scatter_placer.h"
 #include "../src/scene_render.h"
 #include "../src/texture_library.h"
 
@@ -14,6 +15,7 @@
 #include "gltf_test_files.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -888,13 +890,19 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     GIANT_CHECK(imported.value["materials"] == 2 && imported.value["uvs"] == true);
     const Json& look = imported.value["material"];
     GIANT_CHECK(std::fabs(look["roughness"].get<float>() - 0.3f) < 1e-6f && look["emissive"][0] == 4.0f);
-    // Rust covers two of three triangles: under three quarters, so no maps.
-    GIANT_CHECK(look["maps"].empty());
-    bool split_warning = false;
-    for (const Json& w : imported.value["warnings"]) {
-        split_warning = split_warning || w.get<std::string>().find("without its maps") != std::string::npos;
+    // Two materials: drawn in parts, rust (two of three triangles) first, each with its own look and maps.
+    GIANT_CHECK(imported.value["parts"].size() == 2 && imported.value["parts"][0]["name"] == "rust" &&
+                imported.value["parts"][0]["triangles"] == 2 && imported.value["parts"][1]["name"] == "paint" &&
+                imported.value["parts"][1]["triangles"] == 1);
+    GIANT_CHECK(look["maps"]["base_color"] == quad + "#image0");
+    {
+        const MeshLibrary::Mesh* mesh = meshes.find(quad);
+        GIANT_CHECK(mesh != nullptr && mesh->parts.size() == 2 && mesh->parts[1].material &&
+                    mesh->parts[1].material->metallic == 0.0f && mesh->parts[1].material->maps.empty());
+        // Drawn whole (scatter), rust covers under three quarters: its look without its maps.
+        GIANT_CHECK(mesh != nullptr && mesh->whole_material && mesh->whole_material->maps.empty() &&
+                    std::fabs(mesh->whole_material->roughness - 0.3f) < 1e-6f);
     }
-    GIANT_CHECK(split_warning);
     // The quad without "paint": rust alone, with its maps.
     const std::string only = (dir / "only.glb").generic_string();
     {
@@ -935,9 +943,12 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     GIANT_CHECK(run("set_entity", {{"id", id}, {"roughness", 0.9}}).ok);
     GIANT_CHECK(run("set_entity", {{"id", id}, {"position", {1, 2, 3}}, {"mesh", only}}).ok);
     GIANT_CHECK(std::fabs(state.scene.find(id)->material.roughness - 0.9f) < 1e-6f);
-    // Another file given with a colour: its look under the colour, the old file's maps gone.
+    // Another file given with a colour: its look (its first part's, with its maps) under the colour, the
+    // old file's maps gone.
     GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", quad}, {"base_color", {1, 0, 0}}}).ok);
-    GIANT_CHECK(state.scene.find(id)->material.maps.empty() && state.scene.find(id)->material.base_color.x == 1.0f &&
+    GIANT_CHECK(state.scene.find(id)->material.maps.base_color == quad + "#image0" &&
+                state.scene.find(id)->material.maps.occlusion != only + "#image2" &&
+                state.scene.find(id)->material.base_color.x == 1.0f &&
                 std::fabs(state.scene.find(id)->material.roughness - 0.3f) < 1e-6f);
     // Another file without materials: the default look comes.
     GIANT_CHECK(run("set_entity", {{"id", id}, {"mesh", bare}}).ok);
@@ -947,6 +958,10 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     const auto layer = run("add_scatter_layer", {{"name", "crates"}, {"items", {{{"mesh", only}}}}});
     GIANT_CHECK(layer.ok && state.scene.scatter.size() == 1 &&
                 state.scene.scatter[0].items[0].material.maps.occlusion == only + "#image2");
+    // One given the file with two materials draws it whole: rust's values without its maps.
+    const auto mixed = run("add_scatter_layer", {{"name", "quads"}, {"items", {{{"mesh", quad}}}}});
+    GIANT_CHECK(mixed.ok && state.scene.scatter.size() == 2 && state.scene.scatter[1].items[0].material.maps.empty() &&
+                std::fabs(state.scene.scatter[1].items[0].material.roughness - 0.3f) < 1e-6f);
     // Maps may name an image inside a glTF directly.
     GIANT_CHECK(run("set_entity", {{"id", id}, {"maps", {{"base_color", only + "#image0"}}}}).ok);
     GIANT_CHECK(!run("set_entity", {{"id", id}, {"maps", {{"base_color", (dir / "none.glb#image0").generic_string()}}}}).ok);
@@ -967,6 +982,140 @@ GIANT_TEST("textures: a glTF's own look comes with it, its images named inside i
     const TextureLibrary::Ref vrm_base = textures.request({avatar + "#image0", TextureLibrary::Slot::base_color, false, {}});
     textures.finish();
     GIANT_CHECK(textures.entry(vrm_base)->status == TextureLibrary::Status::ready);
+}
+
+GIANT_TEST("mesh parts: waiting for textures asks for every part's maps; a scattered kit's piece, drawn whole, leaves the first part's maps out") {
+    const std::filesystem::path dir = fresh_dir("giant_parts_maps");
+    std::vector<u8> rgba(16 * 16 * 4, 200);
+    const std::string png = encode_png_rgba(16, 16, rgba);
+    const std::vector<u8> glb = geometry::testing::two_material_quad("n.png", png);
+    std::ofstream(dir / "quad.glb", std::ios::binary)
+        .write(reinterpret_cast<const char*>(glb.data()), static_cast<std::streamsize>(glb.size()));
+    const std::string quad = (dir / "quad.glb").generic_string(); // "rust" (with maps) first, "paint" second
+    // The same with the materials' triangles swapped: "paint" first, "rust" and its maps the second part.
+    const std::string flipped = (dir / "flipped.glb").generic_string();
+    {
+        std::string text(glb.begin(), glb.end());
+        const std::string a = R"("indices":2,"material":0})";
+        const std::string b = R"("indices":3,"material":1})";
+        const usize at_a = text.find(a);
+        const usize at_b = text.find(b);
+        GIANT_CHECK(at_a != std::string::npos && at_b != std::string::npos);
+        if (at_a == std::string::npos || at_b == std::string::npos) return;
+        text.replace(at_a, a.size(), R"("indices":3,"material":0})");
+        text.replace(at_b, b.size(), R"("indices":2,"material":1})");
+        std::ofstream(dir / "flipped.glb", std::ios::binary).write(text.data(), static_cast<std::streamsize>(text.size()));
+    }
+    {
+        // "paint" given its metal map on the first uvs: its part keeps it, but drawn whole (it
+        // covers two triangles of three) the map goes and with it the metal, which the file says.
+        std::string text(glb.begin(), glb.end());
+        const std::string a = R"("indices":2,"material":0})";
+        const std::string b = R"("indices":3,"material":1})";
+        const std::string uv = R"("texCoord":1)";
+        const usize at_a = text.find(a);
+        const usize at_b = text.find(b);
+        const usize at_uv = text.find(uv);
+        GIANT_CHECK(at_a != std::string::npos && at_b != std::string::npos && at_uv != std::string::npos);
+        if (at_a == std::string::npos || at_b == std::string::npos || at_uv == std::string::npos) return;
+        text.replace(at_a, a.size(), R"("indices":3,"material":0})");
+        text.replace(at_b, b.size(), R"("indices":2,"material":1})");
+        text.replace(at_uv, uv.size(), R"("texCoord":0)");
+        std::ofstream(dir / "metal.glb", std::ios::binary).write(text.data(), static_cast<std::streamsize>(text.size()));
+        MeshLibrary meshes{nullptr};
+        const MeshLibrary::Mesh* mesh = meshes.load((dir / "metal.glb").generic_string()).mesh;
+        GIANT_CHECK(mesh != nullptr && mesh->parts.size() == 2 && mesh->parts[0].material && mesh->whole_material);
+        if (mesh == nullptr || mesh->parts.size() != 2 || !mesh->parts[0].material || !mesh->whole_material) return;
+        GIANT_CHECK(!mesh->parts[0].material->maps.roughness_metal.empty() && mesh->parts[0].material->metallic == 1.0f);
+        GIANT_CHECK(mesh->whole_material->maps.empty() && mesh->whole_material->metallic == 0.0f);
+        usize told = 0;
+        for (const std::string& w : mesh->warnings) told += w.starts_with("drawn whole (scattered): ") ? usize{1} : usize{0};
+        GIANT_CHECK(told == 1);
+    }
+    {
+        ai::CommandRegistry commands;
+        MeshLibrary meshes{nullptr};
+        TextureLibrary textures(nullptr, dir / "cache");
+        EditorState state;
+        state.meshes = &meshes;
+        state.textures = &textures;
+        register_scene_commands(commands, state);
+        const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, {}); };
+        const auto made = run("create_entity", {{"mesh", flipped}});
+        GIANT_CHECK(made.ok);
+        const MeshLibrary::Mesh* mesh = meshes.find(flipped);
+        GIANT_CHECK(mesh != nullptr && mesh->parts.size() == 2 && mesh->parts[0].name == "paint" &&
+                    mesh->parts[1].material && mesh->parts[1].material->maps.base_color == flipped + "#image0");
+        // The entity's own look ("paint") names no map: the second part's are asked for all the same.
+        const world::Entity* e = made.ok ? state.scene.find(made.value["id"].get<u64>()) : nullptr;
+        GIANT_CHECK(e != nullptr && e->material.maps.empty() && textures.entries().empty());
+        const auto listed = run("get_textures", {{"wait", true}});
+        GIANT_CHECK(listed.ok);
+        bool base = false;
+        if (listed.ok) {
+            for (const Json& t : listed.value["textures"]) base = base || (t["path"] == flipped + "#image0" && t["status"] == "ready");
+        }
+        GIANT_CHECK(base);
+    }
+
+    // Scattered: a kit whose pieces are the quad with the look it took from the file (its first
+    // part's, maps and all), and the quad given a map of its own.
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::null;
+    auto device = rhi::create_device(desc);
+    auto renderer = render::Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    const std::string albedo = write_png(dir / "albedo.png", 32, 32, 200, 100, 50);
+    MeshLibrary meshes(renderer.get());
+    const MeshLibrary::Mesh* mesh = meshes.load(quad).mesh;
+    GIANT_CHECK(mesh != nullptr && mesh->parts.size() == 2 && mesh->material && !mesh->material->maps.empty() &&
+                mesh->whole_material && mesh->whole_material->maps.empty());
+    if (mesh == nullptr || !mesh->material) return;
+    TextureLibrary textures(renderer.get(), {});
+    SceneFrame frame;
+    frame.textures = &textures;
+    world::Scene scene;
+    scene.terrain.set_samples(16);
+    scene.terrain.set({0, 0}, world::Terrain::Heights(256, 3.0f));
+    world::Kit kit;
+    kit.name = "pair";
+    kit.pieces.resize(2);
+    kit.pieces[0].shape = world::Shape::mesh;
+    kit.pieces[0].mesh = mesh->path;
+    kit.pieces[0].material = *mesh->material;
+    kit.pieces[1] = kit.pieces[0];
+    kit.pieces[1].material.maps = {};
+    kit.pieces[1].material.maps.base_color = albedo;
+    kit.pieces[1].material.roughness = 0.9f; // (told apart below)
+    scene.kits.push_back(kit);
+    world::ScatterLayer layer;
+    layer.name = "pairs";
+    layer.spacing = 8.0f;
+    world::ScatterItem item;
+    item.shape = world::Shape::kit;
+    item.kit = "pair";
+    layer.items = {item};
+    scene.scatter.push_back(layer);
+    ScatterPlacer placer;
+    placer.finish(scene, scene.terrain.take_changes());
+    scene_frame(scene, *renderer, meshes, frame, nullptr, nullptr, &placer);
+    usize from_file = 0, own = 0;
+    for (const render::Instance& i : frame.instances) {
+        if (i.mesh == render::k_no_mesh) continue;
+        GIANT_CHECK(i.mesh == mesh->id); // whole, not in parts
+        const std::array<u32, 4>& refs = frame.material_textures[i.material];
+        if (frame.materials[i.material].roughness == 0.9f) {
+            ++own;
+            GIANT_CHECK(refs[0] != TextureLibrary::k_no_ref); // a map given to the piece itself stays
+        } else {
+            ++from_file;
+            GIANT_CHECK(refs[0] == TextureLibrary::k_no_ref && refs[1] == TextureLibrary::k_no_ref &&
+                        refs[3] == TextureLibrary::k_no_ref); // rust's maps would lie over paint's triangle
+        }
+    }
+    GIANT_CHECK(from_file > 0 && own == from_file);
+    textures.finish();
 }
 
 GIANT_TEST("textures: a cut-out material tells the voxel world how much of it its cutoff leaves") {
