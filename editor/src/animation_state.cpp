@@ -3,6 +3,7 @@
 #include "giant/core/log.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <thread>
@@ -15,6 +16,8 @@ namespace {
 constexpr u32 k_workers = 2;
 // A saved animation changing fades into the new one (no pop), once posed.
 constexpr float k_saved_fade_seconds = 0.2f;
+// How fast the velocity a matched entity is taken to move at follows its goal's (halving the gap).
+constexpr float k_goal_half_seconds = 0.2f;
 
 // Where in its pose interval an entity's poses fall, in [0, 1): by its id,
 // so a crowd started at once (or come into a tier at once) is spread over
@@ -141,6 +144,7 @@ void AnimationState::match() {
         a->cut = true;
         a->dirty = true;
         a->matcher.reset();
+        a->going = {a->goal.across, a->goal.along};
         a->match_seconds = 0.0;
         a->player.stop();
     }
@@ -533,6 +537,8 @@ void AnimationState::release_pose(const world::Scene& scene, const MeshLibrary& 
     // Faded from a pose given: each joint as it lies in its parent's space.
     Animated& let = *it->second;
     let.rise_left = 0.0f;
+    // (Its matcher stood still meanwhile: it is taken to move as its goal has it now, not as when it was held.)
+    let.going = {let.goal.across, let.goal.along};
     const anim::Skeleton& skeleton = let.skinned->skeleton;
     if (from.size() == skeleton.size() && std::isfinite(fade) && fade > 0.0f) {
         let.rise_from.resize(from.size());
@@ -690,13 +696,24 @@ void AnimationState::pose(Timed timed) {
                 if (a.held_pose) {
                     a.model = a.given; // (as many as its joints: nothing allocated)
                 } else if (a.matching) {
-                    // Moved on by the time since it was last posed. The way ahead is its goal's, held
-                    // from now on: whoever moves the entity moves it so already (a walker's body does
-                    // not wait for its clip), and the clips are to catch up with it, not it with them.
+                    // Moved on by the time since it was last posed. The way ahead is its goal's:
+                    // whoever moves the entity moves it so already (a walker's body does not wait
+                    // for its clip), and the clips are to catch up with it, not it with them.
                     const anim::MotionDatabase& db = a.motion->db;
-                    const anim::MotionAhead ahead = anim::motion_ahead(db.settings, {a.goal.across, a.goal.along},
-                                                                       {a.goal.across, a.goal.along}, a.goal.turn);
-                    a.matcher.update(db, s.skeleton, s.clips, ahead, static_cast<float>(std::min(a.match_seconds, 1.0)));
+                    // The velocity it eases on from follows the goal with a half-life of
+                    // k_goal_half_seconds (by the time posed, so at any frame rate and pose
+                    // interval alike): a goal that jitters, as one jostled in a crowd's does,
+                    // does not flap between clips, and one that stops at once still plays a
+                    // stop clip, as if slowing.
+                    const float moved = static_cast<float>(std::min(a.match_seconds, 1.0));
+                    const float k = 1.0f - std::exp(-0.69314718f * moved / k_goal_half_seconds);
+                    const std::array<float, 2> wanted{std::isfinite(a.goal.across) ? a.goal.across : 0.0f,
+                                                      std::isfinite(a.goal.along) ? a.goal.along : 0.0f};
+                    for (usize way = 0; way < 2; ++way) {
+                        a.going[way] = std::isfinite(a.going[way]) ? a.going[way] + (wanted[way] - a.going[way]) * k : wanted[way];
+                    }
+                    const anim::MotionAhead ahead = anim::motion_ahead(db.settings, a.going, wanted, a.goal.turn);
+                    a.matcher.update(db, s.skeleton, s.clips, ahead, moved);
                     a.match_seconds = 0.0;
                     a.matcher.evaluate(db, s.skeleton, s.clips, a.local);
                 } else {

@@ -496,10 +496,26 @@ GIANT_TEST("motion: the pose counts by its weight beside the way ahead") {
     GIANT_CHECK(motion_cost(db, running, query, std::nanf("")) == ahead);
     GIANT_CHECK(std::isfinite(motion_cost(db, running, query, 1e30f))); // kept to 1000
 
-    // Posed as a walk and wanting a run's way: the walk is stayed in while the pose counts in full
+    // Posed as a walk and wanting a run's way: the walk is stayed in while the pose counts for much
     // (nothing here goes from one to the other), and left once it counts for little.
-    const MotionMatch staying = motion_search(db, query, {walking, motion_cost(db, walking, query)});
+    const MotionMatch staying = motion_search(db, query, {walking, motion_cost(db, walking, query, 2.0f)}, 2.0f);
     GIANT_CHECK(staying.frame == walking);
     const MotionMatch leaving = motion_search(db, query, {walking, motion_cost(db, walking, query, 0.25f)}, 0.25f);
     GIANT_CHECK(db.range_of(leaving.frame).clip == 2);
+}
+
+GIANT_TEST("motion: a run in the set does not make the way ahead or the hips' speed count for less") {
+    // The way ahead's places and the hips' velocity are scaled by their spread over the set, but by no
+    // more than a set that stands and walks spreads: with a run, as without.
+    const PersonSet walks(false);
+    const PersonSet runs(true);
+    GIANT_CHECK(walks.problem.empty() && runs.problem.empty());
+    const float place = runs.db.scale[k_motion_ahead_places + 5];
+    const float speed = runs.db.scale[k_motion_hips_velocity + 2];
+    GIANT_CHECK(near(place, 1.0f / 0.35f, 1e-4f) && near(speed, 1.0f / 0.4f, 1e-4f));
+    // (Standing and walking alone spread a little less than the caps: scaled by its own spread, as before.)
+    GIANT_CHECK(walks.db.scale[k_motion_ahead_places + 5] > place && walks.db.scale[k_motion_ahead_places + 5] < 1.1f * place);
+    GIANT_CHECK(walks.db.scale[k_motion_hips_velocity + 2] > speed && walks.db.scale[k_motion_hips_velocity + 2] < 1.1f * speed);
+    // The other groups are scaled by all of their spread: the feet's, which a run spreads wider.
+    GIANT_CHECK(runs.db.scale[k_motion_foot_velocities + 2] < 0.6f * walks.db.scale[k_motion_foot_velocities + 2]);
 }

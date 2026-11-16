@@ -911,7 +911,11 @@ GIANT_TEST("animation: an entity matched among its clips stands, walks and runs 
     const auto left = [walker] { return walker->model[1].column(3); };
 
     // Sent walking: the walk plays, its travel taken out (the hips stay over the origin) while the feet swing.
+    // (The velocity it is taken to move at eases toward its goal's: half the gap in a fifth of a second.)
+    go(f, id, 1.4f, 1.0 / 30.0);
+    GIANT_CHECK(walker->going[1] > 0.05f && walker->going[1] < 0.5f);
     go(f, id, 1.4f, 1.0);
+    GIANT_CHECK(near(walker->going[1], 1.4f, 0.05) && walker->going[0] == 0.0f);
     a = f.get(id);
     GIANT_CHECK(a["matching"]["clip"] == "walk" && near(a["matching"]["goal"]["along"].get<double>(), 1.4));
     GIANT_CHECK(near(a["matching"]["root_motion"]["along"].get<double>(), 1.4, 0.05));
@@ -965,6 +969,18 @@ GIANT_TEST("animation: an entity matched among its clips stands, walks and runs 
     const double after = f.get(id)["matching"]["time"].get<double>();
     GIANT_CHECK(near(std::fmod(after - before + 1.0, 1.0), 0.1, 0.035));
     GIANT_CHECK(f.run("step_animation", {{"paused", false}}).ok);
+
+    // Held from outside while going (struck down mid-stride), then let go standing: it is taken to stand,
+    // not to be slowing from the walk it was in when held.
+    go(f, id, 1.4f, 0.5);
+    GIANT_CHECK(walker->going[1] > 1.0f);
+    GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, id).empty());
+    go(f, id, 0.0f, 0.2);
+    GIANT_CHECK(walker->going[1] > 1.0f); // (its matcher stands still while held)
+    f.animation->release_pose(f.state.scene, *f.meshes, id);
+    GIANT_CHECK(walker->going[1] == 0.0f && walker->going[0] == 0.0f);
+    go(f, id, 0.0f, 0.5);
+    GIANT_CHECK(f.get(id)["matching"]["clip"] == "idle");
 
     // A command's play takes over; set_animation hands it back to the matcher.
     const auto played = f.run("play_animation", {{"id", id}, {"clip", "wave"}, {"blend_seconds", 0.0}});

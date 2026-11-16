@@ -1811,6 +1811,20 @@ simulation share one definition and none of it needs a GPU.
   one wanted. With few clips, none recorded going from one to the next,
   being posed alike outweighs going the wanted way and a walk never
   becomes a run, so the matcher counts the pose half (`pose_weight`).
+  Each group of a frame's numbers is scaled by its spread over the set,
+  but the way ahead's places by no more than 0.35 m and the hips'
+  velocity by no more than 0.4 m/s (what a set that stands and walks
+  spreads): a run beside the walk would else make a walk's worth of way
+  ahead count for little, and one sent walking stayed in its idle, whose
+  pose is far from any stride's (found with the gates' person: idle,
+  walk 1.4, run 4). With no slower clip than its walk a character
+  slides in its idle until it nears the walk's speed (those clips: from
+  about three quarters of it; without the run, from 0.85); it changes between walk and run with a wide band
+  between (about 3.1 m/s up, 2.3 down for those clips). The editor
+  eases the velocity it gives `motion_ahead` toward the goal's (half
+  the gap in 0.2 s of posed time) while the goal itself is what is
+  wanted: a goal that jitters does not flap between clips, and one that
+  drops to nothing at once still plays a stop clip.
   The editor's use of it is under "Playing them" below.
 
 The glTF importer reads one skin per file (a second is refused). Its
