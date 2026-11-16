@@ -4,7 +4,10 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <cmath>
+#include <span>
+#include <vector>
 
 using namespace giant;
 using namespace giant::sim;
