@@ -1683,6 +1683,40 @@ bool PhysicsWorld::move_ragdoll(RagdollId id, const DVec3& position, const Quat&
     return true;
 }
 
+bool PhysicsWorld::place_ragdoll(RagdollId id, std::span<const BodyState> states, bool made_now) {
+    const auto it = m_impl->ragdolls.find(id);
+    if (it == m_impl->ragdolls.end() || states.size() != it->second.bodies.size()) return false;
+    bool awake = false;
+    for (const BodyState& s : states) {
+        if (!finite(s.position) || !finite(s.rotation) || !finite(s.linear_velocity) || !finite(s.angular_velocity) ||
+            !(length(s.linear_velocity) <= 1000.0f) || !(length(s.angular_velocity) <= 1000.0f))
+            return false;
+        awake = awake || s.active;
+    }
+    JPH::BodyInterface& bi = m_impl->bodies_interface();
+    const std::vector<BodyId>& bones = it->second.bodies;
+    if (!made_now) {
+        for (const BodyId bone : bones) m_impl->wake_around(from_id(bone)); // what rested on it where it was
+    }
+    for (usize i = 0; i < bones.size(); ++i) {
+        const JPH::BodyID b = from_id(bones[i]);
+        const BodyState& s = states[i];
+        bi.SetPositionAndRotation(b, to_jolt(s.position), to_jolt(s.rotation).Normalized(),
+                                  awake ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
+        if (awake) {
+            bi.SetLinearAndAngularVelocity(b, to_jolt(s.linear_velocity), to_jolt(s.angular_velocity));
+        } else {
+            // (Asleep as it lay: at rest, its bones sleeping together.)
+            bi.SetLinearAndAngularVelocity(b, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+            bi.DeactivateBody(b);
+        }
+    }
+    if (awake) {
+        for (const BodyId bone : bones) m_impl->wake_around(from_id(bone)); // and what it now touches
+    }
+    return true;
+}
+
 bool PhysicsWorld::ragdoll_driven(RagdollId id) const {
     const auto it = m_impl->ragdolls.find(id);
     return it != m_impl->ragdolls.end() && it->second.driven;

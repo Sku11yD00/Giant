@@ -2,17 +2,22 @@
 // (never in its files), shown again on loading over a whole world, with
 // the camera and the weather; only changes written again; another world's
 // save refused unless forced; slots listed and deleted; the game closed.
+#include "../src/animation_state.h"
 #include "../src/clock_state.h"
 #include "../src/editor_commands.h"
 #include "../src/game_saves.h"
+#include "../src/hit_targets.h"
+#include "../src/mesh_library.h"
 #include "../src/nav_state.h"
 #include "../src/physics_state.h"
 #include "../src/play_state.h"
+#include "../src/ragdoll_state.h"
 #include "../src/scatter_placer.h"
 #include "../src/walker_state.h"
 #include "../src/weather_state.h"
 #include "../src/world_streaming.h"
 
+#include "gltf_test_files.h"
 #include "giant_test.h"
 
 #include "giant/world/scene.h"
@@ -26,6 +31,8 @@
 #include <iterator>
 #include <map>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace giant;
 using namespace giant::editor;
@@ -144,7 +151,7 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
         GIANT_CHECK(r.ok && r.value["saves"] == 1 && r.value["error"] == "" && r.value["base_slot"] == "one");
         const u64 cells = r.value["cells"].get<u64>();
-        GIANT_CHECK(cells >= 2 && r.value["written"] == cells + 4); // the cells and the sections (camera, weather, bodies, walkers)
+        GIANT_CHECK(cells >= 2 && r.value["written"] == cells + 5); // the cells and the sections (camera, weather, bodies, walkers, ragdolls)
         // The world itself is untouched.
         GIANT_CHECK(scene.damage().size() == 1 && scene.game_damage().empty() && world_files(folder) == files);
         GIANT_CHECK(std::filesystem::exists(folder / "saves" / "one" / "save.json"));
@@ -170,7 +177,7 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         GIANT_CHECK(!run("keep_damage").ok); // the game's is not the world's
         // Saved again, nothing changed: only the sections are written.
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == 4 && r.value["cells"] == cells);
+        GIANT_CHECK(r.ok && r.value["written"] == 5 && r.value["cells"] == cells);
         GIANT_CHECK(world_files(folder) == files);
         GIANT_CHECK(scene.game_damage_in({3, 0}) == nullptr); // the world's alone there: not the save's
         // The scene's weather changed: it shows again.
@@ -181,11 +188,11 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         GIANT_CHECK(run("delete_save", {{"slot", "one"}, {"wait", true}}).ok);
         GIANT_CHECK(run("get_save").value["base_slot"] == "");
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == cells + 4);
+        GIANT_CHECK(r.ok && r.value["written"] == cells + 5);
 
         // Another slot (whole), then made to look of another world: refused unless forced.
         r = run("save_game", {{"slot", "two"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == cells + 4);
+        GIANT_CHECK(r.ok && r.value["written"] == cells + 5);
         const std::filesystem::path manifest = folder / "saves" / "two" / "save.json";
         std::string text = read_all(manifest);
         const usize at = text.find("\"hash\": \"");
@@ -396,7 +403,7 @@ GIANT_TEST("game saves: the ground dented is saved and pressed in again, never i
         GIANT_CHECK(physics.dent(scene, crater, {20.0, 1.0, 20.0}) == 1);
         GIANT_CHECK(*scene.terrain.find({0, 0}) != dented0);
         r = run("save_game", {{"slot", "dug"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 5); // tile 0's cell, camera, weather, bodies, walkers
+        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 6); // tile 0's cell, camera, weather, bodies, walkers, ragdolls
         GIANT_CHECK(run("simulate", {{"on", false}}).ok);
         frame();
         GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0);
@@ -724,6 +731,198 @@ GIANT_TEST("game saves: walkers walk on from where the save had them; one arrive
                 std::ofstream(e.path(), std::ios::binary) << "{\"walkers\": [{\"entity\": 1}]}";
         }
         GIANT_CHECK(!run("load_game", {{"slot", "walk"}, {"wait", true}}).ok);
+    }
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+}
+
+GIANT_TEST("game saves: ragdolls lie again as the save had them, asleep or still falling; one moved since is skipped") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "giant_save_ragdoll_tests";
+        std::filesystem::create_directories(dir);
+        const std::string file = (dir / "person.glb").generic_string();
+        {
+            const std::vector<u8> bytes = geometry::testing::skinned_person();
+            std::ofstream(file, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
+                                                        static_cast<std::streamsize>(bytes.size()));
+        }
+        HitTargets hits; // before the physics, which reads its shapes
+        PhysicsState physics;
+        NavState nav{nullptr, nullptr, nullptr};
+        WalkerState walkers{physics, nav};
+        MeshLibrary meshes{nullptr};
+        AnimationState animation{nullptr};
+        RagdollState ragdolls{physics, animation, &walkers};
+        WorldStreaming streaming;
+        GameSaves saves;
+        EditorState state;
+        state.physics = &physics;
+        state.nav = &nav;
+        state.walkers = &walkers;
+        state.meshes = &meshes;
+        state.animation = &animation;
+        state.hits = &hits;
+        state.ragdolls = &ragdolls;
+        state.world = &streaming;
+        state.saves = &saves;
+        physics.set_hit_targets(&hits);
+        ai::CommandRegistry commands;
+        register_scene_commands(commands, state);
+        register_physics_commands(commands, state);
+        register_animation_commands(commands, state);
+        register_nav_commands(commands, state);
+        register_walker_commands(commands, state);
+        register_ragdoll_commands(commands, state);
+        register_save_commands(commands, state);
+        connect_walkers(state);
+        connect_ragdolls(state);
+        const auto run = [&](const char* name, const Json& args = Json::object()) {
+            return commands.execute(name, args, {});
+        };
+        world::Scene& scene = state.scene;
+        GIANT_CHECK(run("create_entity", {{"shape", "plane"}, {"position", {32.0, 0.0, 32.0}}, {"scale", {40.0, 1.0, 40.0}}}).ok);
+        const auto person = [&](double x, double z) {
+            const ai::CommandResult r =
+                run("create_entity", {{"shape", "mesh"}, {"mesh", file}, {"position", {x, 0.0, z}}, {"body", "none"}});
+            GIANT_CHECK(r.ok);
+            const world::EntityId id = r.ok ? r.value["id"].get<world::EntityId>() : 0;
+            GIANT_CHECK(run("set_animation", {{"id", id}, {"clip", "idle"}}).ok);
+            return id;
+        };
+        const world::EntityId a = person(24.0, 30.0); // lies asleep when saved
+        const world::EntityId b = person(30.0, 30.0); // thrown up as it is saved
+        const world::EntityId c = person(36.0, 30.0); // moved in the world after the save
+        const world::EntityId d = person(24.0, 30.6); // lies asleep against a
+        const world::EntityId g = person(42.0, 30.0); // scaled in the world after the save
+        GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
+        const auto frame = [&] { // as the editor's frame has them
+            const world::SceneChanges changed = scene.take_changes();
+            walkers.before_step(scene, 1.0 / 60.0);
+            ragdolls.before_step(scene, meshes, 1.0 / 60.0);
+            physics.update(scene, changed, 1.0 / 60.0);
+            walkers.after_step();
+            ragdolls.after_step();
+            animation.update(scene, meshes, changed, 1.0 / 60.0);
+            hits.update(scene, meshes, animation);
+            nav.update(scene);
+            saves.update(state, 1.0 / 60.0);
+        };
+        frame();
+        GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+        frame();
+        GIANT_CHECK(run("ragdoll_entity", {{"id", a}}).ok);
+        GIANT_CHECK(run("ragdoll_entity", {{"id", c}}).ok);
+        GIANT_CHECK(run("ragdoll_entity", {{"id", d}}).ok);
+        GIANT_CHECK(run("ragdoll_entity", {{"id", g}}).ok);
+        const auto still = [&](world::EntityId id) { return ragdolls.find(id)->asleep && ragdolls.find(id)->lying > 0.5; };
+        for (int i = 0; i < 1200 && !(still(a) && still(d)); ++i) frame();
+        GIANT_CHECK(still(a) && still(d));
+        GIANT_CHECK(run("ragdoll_entity", {{"id", b}, {"velocity", {0.0, 6.0, 0.0}}}).ok);
+        for (int i = 0; i < 6; ++i) frame(); // 0.1 s: b on its way up
+        const RagdollState::Resume a_lay = *ragdolls.lies(scene, a);
+        const RagdollState::Resume d_lay = *ragdolls.lies(scene, d);
+        const RagdollState::Resume b_flew = *ragdolls.lies(scene, b);
+        GIANT_CHECK(!a_lay.bones.front().active && a_lay.bones.size() >= 2);
+        GIANT_CHECK(b_flew.bones.front().active && b_flew.bones.front().linear_velocity.y > 3.0f);
+        ai::CommandResult r = run("save_game", {{"slot", "lie"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["ragdolls"] == 5);
+        // Stopped (all let go: standing where the scene has them), then loaded.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(ragdolls.size() == 0);
+        r = run("load_game", {{"slot", "lie"}, {"wait", true}});
+        GIANT_CHECK(r.ok && physics.simulating());
+        // Not at once: each waits a frame after its entity is in (the physics to see its cell).
+        GIANT_CHECK(saves.ragdolls_waiting() == 5 && ragdolls.size() == 0);
+        // Saved before they lie again: those waiting are kept as the save had them.
+        r = run("save_game", {{"slot", "again"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["ragdolls"] == 5);
+        int frames = 0;
+        for (; frames < 8 && saves.ragdolls_waiting() > 0; ++frames) frame();
+        GIANT_CHECK(saves.ragdolls_waiting() == 0);
+        GIANT_CHECK(saves.status().ragdolls_applied == 5 && saves.status().ragdolls_skipped == 0);
+        r = run("get_save");
+        GIANT_CHECK(r.ok && r.value["ragdolls"] == 5 && r.value["ragdolls_applied"] == 5 && r.value["ragdolls_skipped"] == 0 &&
+                    r.value["ragdolls_waiting"] == 0);
+        // a and d, lying against each other, lie bone for bone where they lay, asleep still, their time lying
+        // kept: neither woke the other as it was made standing beside it.
+        for (const auto& [id, lay] : {std::pair{a, &a_lay}, std::pair{d, &d_lay}}) {
+            GIANT_CHECK(ragdolls.find(id) != nullptr && ragdolls.find(id)->asleep);
+            GIANT_CHECK(ragdolls.find(id)->lying >= lay->lying && ragdolls.find(id)->lying < lay->lying + 0.2);
+            const RagdollState::Resume now = *ragdolls.lies(scene, id);
+            GIANT_CHECK(now.joints == lay->joints);
+            for (usize i = 0; i < now.bones.size() && i < lay->bones.size(); ++i) {
+                GIANT_CHECK(length(now.bones[i].position - lay->bones[i].position) < 1e-4 && !now.bones[i].active);
+                const Quat& q = now.bones[i].rotation;
+                const Quat& w = lay->bones[i].rotation;
+                GIANT_CHECK(std::fabs(q.x * w.x + q.y * w.y + q.z * w.z + q.w * w.w) > 0.99999f);
+            }
+            // Drawn there, not standing where the scene has it.
+            GIANT_CHECK(ragdolls.poses().count(id) == 1 && animation.holds_pose(id));
+        }
+        // b flies on from where it was, as it flew (a frame or two of flight since), and comes down.
+        const RagdollState::Resume b_now = *ragdolls.lies(scene, b);
+        GIANT_CHECK(b_now.bones.front().active);
+        GIANT_CHECK(std::fabs(b_now.bones.front().position.y - b_flew.bones.front().position.y) < 0.4 &&
+                    b_now.bones.front().position.y > 0.8);
+        GIANT_CHECK(b_now.bones.front().linear_velocity.y > 2.0f);
+        for (int i = 0; i < 1200 && !ragdolls.find(b)->asleep; ++i) frame();
+        GIANT_CHECK(ragdolls.find(b)->asleep && ragdolls.lies(scene, b)->bones.front().position.y < 1.1);
+        // One put back can get up as any other.
+        GIANT_CHECK(run("get_up", {{"id", a}}).ok);
+        GIANT_CHECK(ragdolls.find(a) == nullptr && walkers.find(a) != nullptr);
+        // Loaded again with c moved, g scaled and d hidden in the world since: those three are not the save's
+        // (each skipped the first time it is looked at; no ragdoll is made and let go for them).
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        scene.modify(c)->transform.position.z = 31.0;
+        scene.modify(g)->transform.scale = {1.5f, 1.5f, 1.5f};
+        scene.modify(d)->visible = false;
+        r = run("load_game", {{"slot", "lie"}, {"wait", true}});
+        GIANT_CHECK(r.ok && physics.simulating() && saves.ragdolls_waiting() == 5 && walkers.find(a) == nullptr);
+        saves.ragdolls_per_frame = 1; // one made a frame
+        for (frames = 0; frames < 8 && saves.ragdolls_waiting() > 0; ++frames) {
+            frame();
+            GIANT_CHECK(physics.world().ragdolls() == ragdolls.size() && ragdolls.size() <= static_cast<usize>(frames) + 1);
+        }
+        GIANT_CHECK(saves.ragdolls_waiting() == 0 && frames >= 2);
+        GIANT_CHECK(saves.status().ragdolls_applied == 2 && saves.status().ragdolls_skipped == 3);
+        GIANT_CHECK(ragdolls.find(a) != nullptr && ragdolls.find(b) != nullptr && ragdolls.size() == 2);
+        // The simulation stopped while some wait: they are let be, and counted.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        r = run("load_game", {{"slot", "lie"}, {"wait", true}});
+        GIANT_CHECK(r.ok && saves.ragdolls_waiting() == 5);
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(saves.ragdolls_waiting() == 0 && saves.status().ragdolls_skipped == 5 && ragdolls.size() == 0);
+        // With a moved in the world since (skipped first, its id the lowest), what d slept against may be gone:
+        // d is made awake where it lay, to settle on what is there, its time lying begun again.
+        scene.modify(d)->visible = true;
+        scene.modify(a)->transform.position.x += 0.25;
+        frame();
+        r = run("load_game", {{"slot", "lie"}, {"wait", true}});
+        GIANT_CHECK(r.ok && saves.ragdolls_waiting() == 5);
+        saves.ragdolls_per_frame = 4;
+        for (frames = 0; frames < 8 && saves.ragdolls_waiting() > 0; ++frames) frame();
+        GIANT_CHECK(saves.ragdolls_waiting() == 0 && saves.status().ragdolls_applied == 2 && saves.status().ragdolls_skipped == 3);
+        GIANT_CHECK(ragdolls.find(a) == nullptr && ragdolls.find(d) != nullptr && ragdolls.find(b) != nullptr);
+        GIANT_CHECK(!ragdolls.find(d)->asleep);
+        frame();
+        GIANT_CHECK(d_lay.lying > 0.5 && ragdolls.find(d)->lying < 0.2);
+        GIANT_CHECK(length(ragdolls.lies(scene, d)->bones.front().position - d_lay.bones.front().position) < 0.2);
+        for (int i = 0; i < 1200 && !ragdolls.find(d)->asleep; ++i) frame();
+        GIANT_CHECK(ragdolls.find(d)->asleep);
+        // A bad ragdolls section is refused whole.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        for (const auto& e : std::filesystem::directory_iterator(folder / "saves" / "lie" / "sections")) {
+            if (e.path().filename().string().rfind("ragdolls.", 0) == 0)
+                std::ofstream(e.path(), std::ios::binary) << "{\"ragdolls\": [{\"entity\": 1}]}";
+        }
+        GIANT_CHECK(!run("load_game", {{"slot", "lie"}, {"wait", true}}).ok);
+        std::error_code gone;
+        std::filesystem::remove_all(dir, gone);
     }
     std::error_code error;
     std::filesystem::remove_all(folder, error);

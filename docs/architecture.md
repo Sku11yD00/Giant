@@ -1352,7 +1352,7 @@ smaller pop still passes for motion: two poses cannot tell). Every
 `play_animation` and `blend_animations` call is a cut, so one driven by
 such calls each frame starts at rest. Not for a mirrored character. Limits:
 let go standing straight on level ground it can balance on its
-shins; joints give some degrees under hard landings; not saved (C8c).
+shins; joints give some degrees under hard landings.
 
 Shots and blasts drop characters (C8b part 2; `connect_blows`). A shot
 whose hit on a standing character's capsule gives it
@@ -1379,6 +1379,37 @@ its bones only. Those waiting are stamped with the scene and the run they were a
 and forgotten when the simulation stops, runs anew or the scene is another; one gone or hidden before its turn
 stays as it was. A weaker shot does nothing to a standing character yet
 (staggering under the animation is left until a game wants it).
+
+Saved games (C8c part 3). `RagdollState::lies` gives how one lies: its
+bones' joints, each bone's body (place, turn, velocities) and how long it
+has lain still; a game save keeps that for every ragdoll in a `ragdolls`
+section beside the walkers' (and for those of a load still waiting).
+Loading lets all go, and once the save's simulation runs again each is
+made anew by `RagdollState::resume`: a ragdoll started at rest as the
+character is drawn at that moment (`start`), then every bone put where
+the save had it (`sim::PhysicsWorld::place_ragdoll`, told it was made
+this moment so that what sleeps where the character stood, another
+already lying there, is not woken: asleep when it slept, so its time
+lying still counts on and one about to get up still does; else moving on
+as it moved, a save mid-fall falling on). Four are made a frame
+(`GameSaves::ragdolls_per_frame`), each once its entity has been in the
+scene a frame, the bodies round it are made (waited for 120 frames at
+most), the ground under its hips is in and its file is read
+(`RagdollState::ready`, 600 frames more at most); it is asked once.
+Skipped: one moved or scaled in the world since, hidden, walking or limp
+already, or whose file now makes other bones than those saved (the
+joints are compared). Once a body or a ragdoll of the load has been
+skipped, what another slept on may not be there: those made after are
+made awake, to settle on what is (their time lying starts again). In the
+save each bone is a row of numbers (its joint, place and turn; velocity
+and spin too for one awake). Limits: joints without a bone of their own
+(fingers, toes) ride as the character is posed when made again, not as
+they were; the joints' anchors and limits are those of the new start, so
+on a rig whose clips move joints apart a sleeper can twitch when woken;
+drops asked for and not yet made (a blast's waiting list) are not saved;
+the section's text is made on the frame, as the bodies' and walkers' is;
+one skipped before those lying on it were made is covered, one skipped
+after is not (the one on it sleeps on in the air until touched).
 
 Getting up (C8c part 2; `RagdollState::get_up`, the `get_up` command, or
 by itself after `Settings::get_up_seconds` at rest, two a step). Only an

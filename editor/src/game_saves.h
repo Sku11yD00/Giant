@@ -10,7 +10,8 @@
 // a change to the scene's clock), and the bodies
 // (whether simulating, and where the moved dynamic entities are), and the
 // walkers (where each stood, faced and moved, where it was going and how
-// far it had got). Loading stops play
+// far it had got), and the ragdolls (where each bone of each lies and how
+// it moves, how long it has lain still). Loading stops play
 // and simulating (what they broke since goes), shows the save's damage as
 // the game's (world::Scene::set_game_damage, a share of cells a frame),
 // presses the save's ground in (PhysicsState::press_game_ground, a few
@@ -20,7 +21,9 @@
 // simulates) again if it was, and puts the bodies back where they were (a
 // share a frame; one not streamed in yet waits while the simulation runs),
 // and the walkers walking again from where they were (a share a frame, each
-// once its entity and the ground under it are in; the way looked for again).
+// once its entity and the ground under it are in; the way looked for again),
+// and the ragdolls lying again as they lay (a few a frame, each once its
+// entity, its file and the ground under it are in).
 //
 // Autosave: while playing, every autosave_seconds of play, a save to the
 // slot "autosave" (its own base: a save to another slot stays a save of
@@ -35,6 +38,7 @@
 
 #include "editor_commands.h"
 
+#include "ragdoll_state.h"
 #include "walker_state.h"
 
 #include "giant/core/jobs.h"
@@ -92,6 +96,9 @@ public:
     usize walkers_per_frame = 64; // a loaded game's walkers made again a frame (each a character)
     // Saved walkers not walking again yet (their entity or the ground under them not in yet).
     usize walkers_waiting() const { return m_walkers_waiting.size(); }
+    usize ragdolls_per_frame = 4; // a loaded game's ragdolls made again a frame (each a body a bone)
+    // Saved ragdolls not lying again yet (their entity, its file or the ground under them not in yet).
+    usize ragdolls_waiting() const { return m_ragdolls_waiting.size(); }
     // Until the job in flight is done (tests, shutdown, a command that waits).
     void wait();
     // A save or load under way (its job, or a load's cells still being applied).
@@ -133,6 +140,11 @@ public:
         usize walkers_applied = 0;     // a load's walking again so far
         usize walkers_skipped = 0;     // a load's not: moved in the world since, given a body, hidden, sent walking
                                        // since, refused, or the simulation stopped
+        usize ragdolls = 0;            // the last save's or load's ragdolls
+        usize ragdolls_applied = 0;    // a load's lying again so far
+        usize ragdolls_skipped = 0;    // a load's not: moved or scaled in the world since, hidden, walking or limp
+                                       // since, refused (other bones now, too many), its file never read, or the
+                                       // simulation stopped
         u64 autosaves = 0;
         std::string autosave_error;    // the last autosave's (kept apart from `error`)
         double gather_ms = 0.0;        // the last save's gathering on the frame
@@ -158,6 +170,9 @@ private:
     // A loaded game's walkers walking again (a share a frame) while the simulation they were for runs.
     void place_walkers(EditorState& state);
     void forget_walkers();
+    // A loaded game's ragdolls lying again (a few a frame) while the simulation they were for runs.
+    void place_ragdolls(EditorState& state);
+    void forget_ragdolls();
     std::string save_to(EditorState& state, const std::string& slot, bool autosave);
 
     JobSystem m_jobs{1};
@@ -200,7 +215,21 @@ public:
         u32 seen = 0; // frames its entity has been in the scene while it waits
     };
 
+    struct SavedRagdoll {
+        world::EntityId entity = 0;
+        RagdollState::Resume resume;
+        DVec3 of_position{}; // where the scene had it (one moved in the world since is not this save's)
+        Quat of_rotation{};
+        Vec3 of_scale{1.0f, 1.0f, 1.0f}; // (its bones are as large as it is)
+        u32 seen = 0;   // frames its entity has been in the scene while it waits
+        u32 unread = 0; // frames it has waited for its file since it could else be made
+    };
+
 private:
+    std::map<world::EntityId, SavedRagdoll> m_ragdolls_waiting;
+    std::optional<world::EntityId> m_ragdolls_from;
+    u64 m_ragdolls_run = 0;
+    bool m_ragdolls_unsure = false; // some body or ragdoll of the load was skipped: what another lay on may be gone
     std::map<world::EntityId, SavedWalker> m_walkers_waiting;
     std::optional<world::EntityId> m_walkers_from;
     u64 m_walkers_run = 0;

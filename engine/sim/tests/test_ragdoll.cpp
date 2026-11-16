@@ -605,3 +605,72 @@ GIANT_TEST("ragdoll: a crowd falls together without flying apart") {
     for (const RagdollId id : ids) physics.remove_ragdoll(id);
     GIANT_CHECK(physics.size() == 1);
 }
+
+GIANT_TEST("ragdoll: placed bone by bone as another lay, asleep or moving on; a bad placing changes nothing") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground_box());
+    // One falls in a heap and sleeps: how it lies is taken.
+    const RagdollId first = physics.add_ragdoll(chain({0.0, 3.0, 0.0}, 5));
+    run(physics, 8.0);
+    std::vector<BodyState> lay;
+    for (const BodyId b : physics.ragdoll_bodies(first)) lay.push_back(*physics.state(b));
+    GIANT_CHECK(lay.size() == 5 && !lay.front().active);
+    physics.remove_ragdoll(first);
+    // Another, made hanging, is put as the first lay: asleep at once, and it stays there.
+    const RagdollId second = physics.add_ragdoll(chain({0.0, 3.0, 0.0}, 5));
+    GIANT_CHECK(physics.place_ragdoll(second, lay));
+    const std::span<const BodyId> bones = physics.ragdoll_bodies(second);
+    for (usize i = 0; i < bones.size(); ++i) {
+        const BodyState s = *physics.state(bones[i]);
+        GIANT_CHECK(!s.active && length(s.position - lay[i].position) < 1e-6 && length(s.linear_velocity) == 0.0f);
+    }
+    run(physics, 1.0);
+    for (usize i = 0; i < bones.size(); ++i) {
+        const BodyState s = *physics.state(bones[i]);
+        GIANT_CHECK(!s.active && length(s.position - lay[i].position) < 1e-6);
+    }
+    // One made beside it and placed away at once (`made_now`) leaves it asleep.
+    const RagdollId third = physics.add_ragdoll(chain(lay[0].position + DVec3{0.0, 0.3, 0.0}, 2));
+    std::vector<BodyState> away(2);
+    for (usize i = 0; i < 2; ++i) {
+        away[i] = *physics.state(physics.ragdoll_bodies(third)[i]);
+        away[i].position.x += 20.0;
+        away[i].active = true;
+    }
+    GIANT_CHECK(physics.place_ragdoll(third, away, true));
+    GIANT_CHECK(!physics.state(bones[0])->active);
+    physics.remove_ragdoll(third);
+    run(physics, 0.5);
+    GIANT_CHECK(!physics.state(bones[0])->active && length(physics.state(bones[0])->position - lay[0].position) < 1e-6);
+    // Refused whole: another count, a number that is none, a speed that is none; no such ragdoll.
+    std::vector<BodyState> bad = lay;
+    bad.pop_back();
+    GIANT_CHECK(!physics.place_ragdoll(second, bad));
+    bad = lay;
+    bad[2].position.y = std::nan("");
+    GIANT_CHECK(!physics.place_ragdoll(second, bad));
+    bad = lay;
+    bad[1].linear_velocity = {0.0f, 2000.0f, 0.0f};
+    GIANT_CHECK(!physics.place_ragdoll(second, bad));
+    GIANT_CHECK(!physics.place_ragdoll(second + 100, lay));
+    for (usize i = 0; i < bones.size(); ++i) GIANT_CHECK(length(physics.state(bones[i])->position - lay[i].position) < 1e-6);
+    // Placed moving: lifted 2 m and thrown along +x, it wakes, flies on and falls joined.
+    std::vector<BodyState> thrown = lay;
+    for (BodyState& s : thrown) {
+        s.position.y += 2.0;
+        s.linear_velocity = {3.0f, 0.0f, 0.0f};
+        s.active = true;
+    }
+    GIANT_CHECK(physics.place_ragdoll(second, thrown));
+    GIANT_CHECK(physics.state(bones[0])->active && std::fabs(physics.state(bones[3])->linear_velocity.x - 3.0f) < 1e-3f);
+    run(physics, 0.2);
+    GIANT_CHECK(physics.state(bones[0])->position.x > lay[0].position.x + 0.4 && physics.state(bones[0])->linear_velocity.y < -1.0f);
+    run(physics, 8.0);
+    for (usize i = 1; i < bones.size(); ++i) {
+        const BodyState s = *physics.state(bones[i]);
+        const BodyState p = *physics.state(bones[i - 1]);
+        const Vec3 end = rotate(p.rotation, Vec3{0.0f, -0.4f, 0.0f});
+        GIANT_CHECK(length(s.position - (p.position + DVec3{end.x, end.y, end.z})) < 0.02 && s.position.y < 0.5);
+    }
+}

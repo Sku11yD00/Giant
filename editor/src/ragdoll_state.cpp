@@ -482,6 +482,52 @@ std::string RagdollState::start(const world::Scene& scene, const MeshLibrary& me
     return {};
 }
 
+std::optional<RagdollState::Resume> RagdollState::lies(const world::Scene& scene, world::EntityId id) const {
+    const auto it = current(scene) && m_physics.world().clears() == m_clears ? m_ragdolls.find(id) : m_ragdolls.end();
+    if (it == m_ragdolls.end()) return std::nullopt;
+    const Ragdoll& r = it->second;
+    const std::span<const sim::BodyId> bodies = m_physics.world().ragdoll_bodies(r.id);
+    if (bodies.size() != r.bones.size() || bodies.empty()) return std::nullopt;
+    Resume out;
+    out.joints.reserve(bodies.size());
+    out.bones.reserve(bodies.size());
+    for (usize b = 0; b < bodies.size(); ++b) {
+        const std::optional<sim::BodyState> s = m_physics.world().state(bodies[b]);
+        if (!s) return std::nullopt;
+        out.joints.push_back(r.bones[b].joint);
+        out.bones.push_back(*s);
+    }
+    out.lying = r.lying;
+    return out;
+}
+
+bool RagdollState::ready(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id) const {
+    const world::Entity* e = scene.find(id);
+    if (e == nullptr || e->shape != world::Shape::mesh || !e->visible) return false;
+    const MeshLibrary::Mesh* mesh = meshes.find_normalized(e->mesh);
+    return mesh != nullptr && mesh->skinned != nullptr;
+}
+
+std::string RagdollState::resume(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id, const Resume& resume) {
+    if (resume.bones.empty() || resume.bones.size() != resume.joints.size() || !(resume.lying >= 0.0)) return "not a ragdoll's bones";
+    // (start would stop a walker before the bones are known to be the same.)
+    if (m_walkers != nullptr && m_walkers->find(id) != nullptr) return "entity " + std::to_string(id) + " is walking";
+    // At rest as it is drawn now, then put as it lay.
+    if (const std::string error = start(scene, meshes, id, Vec3{}); !error.empty()) return error;
+    Ragdoll& r = m_ragdolls.at(id);
+    bool same = r.bones.size() == resume.bones.size();
+    for (usize b = 0; same && b < r.bones.size(); ++b) same = r.bones[b].joint == resume.joints[b];
+    if (!same || !m_physics.world().place_ragdoll(r.id, resume.bones, true)) {
+        drop(scene, meshes, id);
+        return same ? "the physics refused where its bones lay (a number that is none)"
+                    : "entity " + std::to_string(id) + "'s file makes other bones now than those that lay";
+    }
+    // Drawn from where its first bone was made (start's pose), carried to where it lies.
+    r.lying = resume.lying;
+    pose(r);
+    return {};
+}
+
 std::string RagdollState::set_settings(const Settings& settings) {
     if (!(settings.shot_drop >= 0.0f && settings.shot_drop <= 1e6f)) return "shot_drop is not within 0 to 1e6 N s";
     if (!(settings.blast_drop >= 0.0f && settings.blast_drop <= 1e6f)) return "blast_drop is not within 0 to 1e6 N s";
