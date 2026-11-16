@@ -134,6 +134,12 @@ struct Lamp {
 constexpr i32 k_max_hair_strands = 200000;
 constexpr i32 k_max_hair_guides = 1024;
 constexpr usize k_max_hair_joint_bytes = 128;
+// The axes a groom file's points are in (the file does not say): the
+// engine's own, right-handed with +Z up (Houdini or Maya set so), or
+// left-handed with +Z up (a groom made for Unreal).
+enum class HairAxes : u8 { y_up, z_up, z_up_left };
+const char* to_string(HairAxes axes);
+std::optional<HairAxes> hair_axes_from_string(std::string_view name);
 struct Hair {
     bool on = false;
     i32 strands = 20000;            // 1 to k_max_hair_strands
@@ -141,6 +147,13 @@ struct Hair {
     float top = 0.5f;               // 0.01 to 1: the share of the shape's height, from its top, that grows hair
     std::string joint;              // a character's joint it grows round and rides (empty: the first named like a head)
     bool from_file = false;         // a mesh entity's: its file's own hair curves (line primitives) instead of grown ones
+    // A groom file (Alembic, .abc) whose curves are worn instead of grown
+    // ones (and before `from_file`): modelled round the head they are for,
+    // so in a character's model space, where they ride `joint`; else in
+    // the entity's. Up to k_max_mesh_path_bytes; empty: none.
+    std::string file;
+    float file_scale = 1.0f;        // 0.0001 to 10000: the file's units in metres (0.01: centimetres)
+    HairAxes file_axes = HairAxes::y_up;
     float length = 0.25f;           // metres, 0.001 to 10
     float length_variation = 0.2f;  // 0 to 1: strands are shorter by up to this share
     float droop = 0.8f;             // 0 to 1: stands on end to hangs

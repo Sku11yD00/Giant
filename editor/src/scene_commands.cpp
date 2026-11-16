@@ -136,6 +136,9 @@ Json entity_json(const Entity& e) {
                      {"top", h.top},
                      {"joint", h.joint},
                      {"from_file", h.from_file},
+                     {"file", h.file},
+                     {"file_scale", h.file_scale},
+                     {"file_axes", world::to_string(h.file_axes)},
                      {"length", h.length},
                      {"length_variation", h.length_variation},
                      {"droop", h.droop},
@@ -327,6 +330,26 @@ Json entity_properties() {
                                            "kept (evenly), `guides` and `seed` choose the simulated ones, and the "
                                            "growth settings (top, length to clump) are unused. On a character they "
                                            "ride `joint`; on a file without a skeleton, the entity. Default off."}}},
+            {"file", {{"type", "string"},
+                      {"maxLength", world::k_max_mesh_path_bytes},
+                      {"description", "A groom file to wear instead of grown hair: an Alembic file (.abc, the Ogawa "
+                                      "kind) of hair curves, such as a groom exported for Unreal. Read in the "
+                                      "background (get_hair says `reading`, then the strands or a `problem`). Its "
+                                      "curves marked as guides are left out; `strands` is the most kept (evenly), "
+                                      "`guides` and `seed` choose the simulated ones, and the growth settings (top, "
+                                      "length to clump) are unused. The groom is modelled round the head it is for: "
+                                      "on a character it is taken as in the character's model space and rides "
+                                      "`joint`; on other entities it is in the entity's space. Set file_scale and "
+                                      "file_axes to match the file. Wins over from_file. Empty: none (the default)."}}},
+            // (As a float holds it, so what get_entity gives can be set again.)
+            {"file_scale", number(static_cast<double>(0.0001f), 10000, "The groom file's units in metres: 1 for metres (the default), "
+                                                 "0.01 for centimetres (grooms made for Unreal).")},
+            {"file_axes",
+             {{"enum", {"y_up", "z_up", "z_up_left"}},
+              {"description", "The groom file's axes, which the file does not say: y_up (the engine's and glTF's; "
+                              "the default), z_up (right-handed with +Z up: Houdini or Maya set so) or z_up_left "
+                              "(left-handed with +Z up: grooms made for Unreal). If the hair lies on its side or "
+                              "faces backwards, this is the setting to change."}}},
             {"length", number(0.001, 10, "Metres. Default 0.25.")},
             {"length_variation", number(0, 1, "Strands are shorter by up to this share. Default 0.2.")},
             {"droop", number(0, 1, "0 stands on end, 1 hangs. Default 0.8.")},
@@ -497,6 +520,11 @@ std::string apply_fields(const Json& args, Entity& e, EditorState& state) {
         o.top = h.value("top", o.top);
         o.joint = h.value("joint", o.joint);
         o.from_file = h.value("from_file", o.from_file);
+        o.file = h.value("file", o.file);
+        o.file_scale = h.value("file_scale", o.file_scale);
+        if (h.contains("file_axes")) {
+            o.file_axes = world::hair_axes_from_string(h["file_axes"].get<std::string>()).value_or(o.file_axes);
+        }
         o.length = h.value("length", o.length);
         o.length_variation = h.value("length_variation", o.length_variation);
         o.droop = h.value("droop", o.droop);

@@ -7,6 +7,7 @@
 
 #include "../src/animation_state.h"
 
+#include "alembic_test_files.h"
 #include "giant_test.h"
 #include "gltf_test_files.h"
 
@@ -16,7 +17,9 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
 #include <random>
+#include <thread>
 
 using namespace giant;
 using namespace giant::editor;
@@ -582,4 +585,211 @@ GIANT_TEST("hair: a file's own hair curves are worn instead of grown ones, sized
     }
     GIANT_CHECK(hair_strands(one, nullptr, 0, {2.0f, 1.0f, 1.0f}, 0).empty());
     GIANT_CHECK(hair_strands({}, nullptr, 0, {1.0f, 1.0f, 1.0f}, 10).empty());
+}
+
+GIANT_TEST("hair: a groom file is read on a worker and worn, in its units and axes, on shapes and on a character's joint") {
+    // A groom as made for Unreal (centimetres, z up, left-handed): four
+    // strands of three points 10 cm apart along x, each 20 cm straight up
+    // from 150 cm, 5 cm in front (+y), and one guide.
+    std::vector<float> points;
+    for (int k = 0; k < 5; ++k) {
+        for (int i = 0; i < 3; ++i) points.insert(points.end(), {10.0f * static_cast<float>(k), 5.0f, 150.0f + 10.0f * static_cast<float>(i)});
+    }
+    geometry::testing::Ogawa abc;
+    geometry::testing::CurveOptions marked;
+    marked.guide = {0, 0, 0, 0, 1};
+    const u64 strands = geometry::testing::curves(abc, points, {3, 3, 3, 3, 3}, marked);
+    geometry::testing::Compound none;
+    const std::string groom = hair_file("groom.abc", abc.finish(geometry::testing::object(abc, none.write(abc), {strands})));
+    const std::string words = hair_file("groom.txt", {'h', 'a', 'i', 'r'});
+    const std::string broken = hair_file("broken.abc", {'O', 'g', 'a', 'w', 'a'});
+    const std::string arm = hair_file("arm.glb", geometry::testing::skinned_arm());
+    MeshLibrary meshes(nullptr);
+    HairState hair(nullptr, &meshes);
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.meshes = &meshes;
+    state.hair = &hair;
+    register_scene_commands(commands, state);
+    register_hair_commands(commands, state);
+    ai::ExecuteOptions options;
+    options.record_history = true;
+    const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, options); };
+    const Json file_hair = {{"on", true},        {"file", groom},  {"file_scale", 0.01},
+                            {"file_axes", "z_up_left"}, {"strands", 100}, {"guides", 2}};
+
+    // On a sphere twice the size: the file's strands (not its guide), in metres with y up, sized by the entity.
+    ai::CommandResult made = run("create_entity", {{"shape", "sphere"}, {"scale", {2.0, 2.0, 2.0}}, {"hair", file_hair}});
+    GIANT_CHECK(made.ok);
+    const world::EntityId id = made.ok ? made.value["id"].get<world::EntityId>() : 0;
+    Json got = run("get_hair", {{"id", id}}).value;
+    GIANT_CHECK(got["hair"]["problem"] == ""); // (read on a worker: it may or may not be `reading` still)
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 1 && got["reading"] == 0 && got["hair"]["reading"] == false && got["hair"]["problem"] == "");
+    GIANT_CHECK(got["hair"]["strands"] == 4 && got["hair"]["guides"] == 2);
+    GIANT_CHECK_NEAR(got["hair"]["longest"].get<double>(), 0.4, 1e-3);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_max"][0].get<double>(), 0.6, 1e-3);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_min"][1].get<double>(), 3.0, 1e-3);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_max"][1].get<double>(), 3.4, 1e-3);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_max"][2].get<double>(), 0.1, 1e-3); // +y of the file is +z here
+    const Json saved = run("get_entity", {{"id", id}}).value["hair"];
+    GIANT_CHECK(saved["file"] == groom && saved["file_axes"] == "z_up_left");
+    GIANT_CHECK_NEAR(saved["file_scale"].get<double>(), 0.01, 1e-6);
+    // Other axes turn it: right-handed z up puts the file's +y behind.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"file_axes", "z_up"}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["hair"]["strands"] == 4);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_min"][2].get<double>(), -0.1, 1e-3);
+    // And other units size it.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"file_scale", 0.02}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK_NEAR(got["hair"]["longest"].get<double>(), 0.8, 1e-3);
+
+    // Files that cannot be worn say why, and the hair is gone until one can.
+    for (const auto& [path, word] : {std::pair<std::string, const char*>{words, "Alembic"},
+                                     {broken, "Alembic"},
+                                     {groom + ".none.abc", "open"}}) {
+        GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"file", path}}}}).ok);
+        got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+        GIANT_CHECK(got["grown"] == 0);
+        const std::string problem = got["hair"]["problem"].get<std::string>();
+        GIANT_CHECK(problem.find("groom file") != std::string::npos && problem.find(word) != std::string::npos);
+    }
+    // No file again: hair grown from the sphere, as before.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"file", ""}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 1 && got["hair"]["strands"] == 100 && got["hair"]["problem"] == "");
+
+    // On a character: taken as in its model space, about the joint it rides
+    // (the elbow, 1 m up), and before its own file's curves (it has none).
+    GIANT_CHECK(meshes.load(arm).mesh != nullptr);
+    Json on_arm = file_hair;
+    on_arm["joint"] = "elbow";
+    on_arm["from_file"] = true;
+    made = run("create_entity", {{"shape", "mesh"}, {"mesh", arm}, {"hair", on_arm}});
+    GIANT_CHECK(made.ok);
+    const world::EntityId body = made.ok ? made.value["id"].get<world::EntityId>() : 0;
+    got = run("get_hair", {{"wait", true}, {"id", body}}).value;
+    GIANT_CHECK(got["hair"]["problem"] == "" && got["hair"]["strands"] == 4 && got["hair"]["joint"] == "elbow");
+    GIANT_CHECK_NEAR(got["hair"]["bounds_min"][1].get<double>(), 0.5, 1e-3);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_max"][1].get<double>(), 0.7, 1e-3);
+    GIANT_CHECK_NEAR(got["hair"]["bounds_max"][0].get<double>(), 0.3, 1e-3);
+    // Both wear one reading of the file once the sphere wears it again; a
+    // frame's update keeps it (and lets go of the ones no hair wears).
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", file_hair}}).ok);
+    hair.follow(state.scene, state.scene.take_changes());
+    hair.update(wind(0.0f), {0.0, 0.0, 0.0}, 1.0 / 60.0);
+    got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 2 && got["reading"] == 0 && got["hair"]["strands"] == 4);
+    // The smallest units, as get_entity gives them back, can be set again.
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"file_scale", 0.0001}}}}).ok);
+    const Json least = run("get_entity", {{"id", id}}).value["hair"]["file_scale"];
+    GIANT_CHECK(run("set_entity", {{"id", id}, {"hair", {{"file_scale", least}}}}).ok);
+    GIANT_CHECK(!run("set_entity", {{"id", id}, {"hair", {{"file_scale", 0.0}}}}).ok);
+}
+
+GIANT_TEST("hair: more groom files than are held at once: the hair past them waits, and is read when one is let go") {
+    geometry::testing::Ogawa abc;
+    const u64 strands = geometry::testing::curves(abc, {0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0}, {2, 2});
+    geometry::testing::Compound none;
+    const std::vector<u8> bytes = abc.finish(geometry::testing::object(abc, none.write(abc), {strands}));
+    HairState hair(nullptr, nullptr);
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.hair = &hair;
+    register_scene_commands(commands, state);
+    register_hair_commands(commands, state);
+    ai::ExecuteOptions options;
+    options.record_history = true;
+    const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, options); };
+    std::vector<world::EntityId> ids;
+    for (usize i = 0; i <= HairState::k_max_groom_files; ++i) {
+        const std::string file = hair_file(("many" + std::to_string(i) + ".abc").c_str(), bytes);
+        const ai::CommandResult made =
+            run("create_entity", {{"shape", "cube"}, {"hair", {{"on", true}, {"file", file}, {"strands", 10}, {"guides", 1}}}});
+        GIANT_CHECK(made.ok);
+        ids.push_back(made.ok ? made.value["id"].get<world::EntityId>() : 0);
+    }
+    Json got = run("get_hair", {{"wait", true}, {"id", ids.back()}}).value;
+    GIANT_CHECK(got["grown"] == HairState::k_max_groom_files && got["reading"] == 1);
+    GIANT_CHECK(got["hair"]["reading"] == true && got["hair"]["waiting"] == true && got["hair"]["grown"] == false &&
+                got["hair"]["problem"] == "");
+    // Two wearing one file take one place: the first's file on the last is read at once.
+    GIANT_CHECK(run("set_entity", {{"id", ids.back()}, {"hair", {{"file", hair_file("many0.abc", bytes)}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", ids.back()}}).value;
+    GIANT_CHECK(got["reading"] == 0 && got["hair"]["strands"] == 2);
+    // Back to its own: it waits again, showing what it had, until another's hair is gone.
+    GIANT_CHECK(run("set_entity", {{"id", ids.back()}, {"hair", {{"file", hair_file("many8.abc", bytes)}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", ids.back()}}).value;
+    GIANT_CHECK(got["hair"]["reading"] == true && got["hair"]["strands"] == 2);
+    GIANT_CHECK(run("set_entity", {{"id", ids[3]}, {"hair", {{"on", false}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", ids.back()}}).value;
+    GIANT_CHECK(got["reading"] == 0 && got["grown"] == HairState::k_max_groom_files);
+    GIANT_CHECK(got["hair"]["reading"] == false && got["hair"]["strands"] == 2 && got["hair"]["problem"] == "");
+    // Without waiting: an update makes the room, the next ones read and grow it.
+    GIANT_CHECK(run("set_entity", {{"id", ids[3]}, {"hair", {{"on", true}}}}).ok);
+    GIANT_CHECK(run("set_entity", {{"id", ids[4]}, {"hair", {{"on", false}}}}).ok);
+    bool read = false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!read && std::chrono::steady_clock::now() < until) {
+        hair.follow(state.scene, state.scene.take_changes());
+        hair.update(wind(0.0f), {0.0, 0.0, 0.0}, 1.0 / 60.0);
+        HairState::View view;
+        read = hair.view(ids[3], view) && !view.reading && view.grown;
+        if (!read) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    GIANT_CHECK(read);
+}
+
+GIANT_TEST("hair: groom files that cannot be read take no room, are tried again when worn again; units need no second reading") {
+    geometry::testing::Ogawa abc;
+    const u64 strands = geometry::testing::curves(abc, {0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0}, {2, 2});
+    geometry::testing::Compound none;
+    const std::vector<u8> bytes = abc.finish(geometry::testing::object(abc, none.write(abc), {strands}));
+    const std::string good = hair_file("good.abc", bytes);
+    const std::string late = good + ".late.abc"; // not there yet
+    HairState hair(nullptr, nullptr);
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.hair = &hair;
+    register_scene_commands(commands, state);
+    register_hair_commands(commands, state);
+    ai::ExecuteOptions options;
+    options.record_history = true;
+    const auto run = [&](const char* name, const Json& args) { return commands.execute(name, args, options); };
+    const auto wear = [&](const std::string& file) {
+        const ai::CommandResult made =
+            run("create_entity", {{"shape", "cube"}, {"hair", {{"on", true}, {"file", file}, {"strands", 10}, {"guides", 1}}}});
+        GIANT_CHECK(made.ok);
+        return made.ok ? made.value["id"].get<world::EntityId>() : world::EntityId{0};
+    };
+    // As many missing files as files may be held, then a good one: it is read.
+    for (usize i = 0; i < HairState::k_max_groom_files; ++i) wear(good + ".none" + std::to_string(i) + ".abc");
+    const world::EntityId id = wear(good);
+    Json got = run("get_hair", {{"wait", true}, {"id", id}}).value;
+    GIANT_CHECK(got["grown"] == 1 && got["reading"] == 0 && got["hair"]["strands"] == 2 && got["hair"]["problem"] == "");
+    // A file missing, then written: taken off and put on again it is read, with no frame between.
+    const world::EntityId other = wear(late);
+    got = run("get_hair", {{"wait", true}, {"id", other}}).value;
+    GIANT_CHECK(got["hair"]["problem"].get<std::string>().find("open") != std::string::npos);
+    hair_file("good.abc.late.abc", bytes);
+    GIANT_CHECK(run("set_entity", {{"id", other}, {"hair", {{"file", ""}}}}).ok);
+    GIANT_CHECK(run("get_hair", {{"wait", true}, {"id", other}}).value["hair"]["strands"] == 10); // grown from the cube
+    GIANT_CHECK(run("set_entity", {{"id", other}, {"hair", {{"file", late}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", other}}).value;
+    GIANT_CHECK(got["hair"]["problem"] == "" && got["hair"]["strands"] == 2);
+    // Other units or axes turn the reading it has: the file is not read again (it is gone).
+    std::error_code ec;
+    std::filesystem::remove(late, ec);
+    GIANT_CHECK(run("set_entity", {{"id", other}, {"hair", {{"file_scale", 3.0}, {"file_axes", "z_up"}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", other}}).value;
+    GIANT_CHECK(got["hair"]["problem"] == "" && got["hair"]["strands"] == 2);
+    GIANT_CHECK_NEAR(got["hair"]["longest"].get<double>(), 3.0, 1e-3);
+    // Hair taken off and put back within a few frames wears the reading that was kept.
+    GIANT_CHECK(run("set_entity", {{"id", other}, {"hair", {{"on", false}}}}).ok);
+    hair.follow(state.scene, state.scene.take_changes());
+    hair.update(wind(0.0f), {0.0, 0.0, 0.0}, 1.0 / 60.0);
+    GIANT_CHECK(run("set_entity", {{"id", other}, {"hair", {{"on", true}}}}).ok);
+    got = run("get_hair", {{"wait", true}, {"id", other}}).value;
+    GIANT_CHECK(got["hair"]["problem"] == "" && got["hair"]["strands"] == 2);
 }

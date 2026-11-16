@@ -2144,6 +2144,30 @@ file orders them. Limits: mesh files without a skeleton grow no hair of
 their own (they can wear their file's), and kits made from entities do not
 carry hair.
 
+Or hair wears a groom file (`hair.file`: an Alembic `.abc`, read by
+`geometry::read_alembic_curves_file`), which wins over `from_file` and
+grown hair on any entity that may wear hair. `HairState` reads a file on
+its growing workers, never on the main thread (an 84 MB groom of 65,000
+strands takes a few seconds from disk), once for all the hair that wears
+it, and lets it go some 600 updates after the last hair stopped wearing
+it (hair hidden and shown again, or put back by an undo, reads nothing
+again), or at once when hair waits for room; its curves are freed on a
+worker too, wherever the last of them is let go. The curves are kept in the file's own space: the file says neither
+its units nor its axes, so each hair gives them (`file_scale`,
+`file_axes`) and `hair_strands` turns and sizes the strands it picks on
+the grow worker, which makes trying another setting a regrow and not
+another reading. Until the file is read the hair is `reading`: nothing new
+is grown or shown and what it had still shows. At most
+`k_max_groom_files` (8) different files are held (those that could not be
+read hold nothing and take no room); hair past them is `reading` too, and
+`waiting`, until there is room. The curves then go the way a mesh file's
+do: a groom is modelled round the head it is for, so on a character they
+are taken as in its model space, about the joint the hair rides; on a
+shape, in the entity's space. A file that cannot be read is the hair's
+`problem`, and is tried again once the setting changes or nothing wears
+it. A file changed on disk is read again only once its old reading has
+been let go.
+
 ## Ballistics (W1a)
 
 `sim::Ballistics` flies bullets through the physics world as point masses:
