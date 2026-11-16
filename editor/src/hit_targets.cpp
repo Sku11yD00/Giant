@@ -44,6 +44,10 @@ std::string HitTargets::bone_name(world::EntityId id, u32 bone) const {
     return bone < names.size() ? names[bone] : std::string{};
 }
 
+void HitTargets::forget(world::EntityId id) {
+    if (m_fed.erase(id) != 0) m_shapes.remove(id);
+}
+
 void HitTargets::update(const world::Scene& scene, const MeshLibrary& meshes, const AnimationState& animation) {
     if (scene.identity() != m_scene) {
         m_scene = scene.identity();

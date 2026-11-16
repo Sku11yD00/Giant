@@ -91,6 +91,14 @@ std::vector<PhysicsState::ShotHit> PhysicsState::take(std::span<const sim::Bulle
             // Named now: the map or the file may change before it is read.
             s.zone = m_targets->zone_name(hit.owner, hit.zone);
             s.bone = m_targets->bone_name(hit.owner, hit.bone);
+        } else if (const auto bone = m_physics.ragdoll_bone(hit.body); bone && ragdoll_joint) {
+            s.bone = ragdoll_joint(static_cast<world::EntityId>(hit.owner), bone->bone);
+            const world::Entity* e = m_scene_at != nullptr ? m_scene_at->find(static_cast<world::EntityId>(hit.owner)) : nullptr;
+            if (!s.bone.empty() && e != nullptr && m_targets != nullptr) {
+                const sim::HitZoneMap& map = m_targets->zones(e->mesh);
+                const u16 zone = map.zone_of(s.bone);
+                if (zone < map.rules.size()) s.zone = map.rules[zone].zone;
+            }
         }
         if (!apply) continue;
         m_physics.add_impulse(hit.body, hit.impulse, hit.point); // dynamic bodies only

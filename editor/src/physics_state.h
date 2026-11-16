@@ -185,7 +185,7 @@ public:
         bool tree = false;            // a scatter tree's trunk
         bool character = false;       // a character (the player, a skinned one's capsule)
         usize loosened = 0;           // kit pieces it shot out
-        std::string zone;             // a skinned character's capsule: its zone (empty: none) and bone, as hit
+        std::string zone;             // a skinned character's capsule or a ragdoll's bone: its zone (empty: none) and bone, as hit
         std::string bone;
     };
     // What a ray met is made of (the scene as last noticed).
@@ -203,6 +203,9 @@ public:
     static constexpr usize k_kept_hits = 256;
     const std::deque<ShotHit>& recent_hits() const { return m_recent; }
     std::function<void(std::span<const ShotHit>)> on_hits;
+    // The name of the joint a ragdoll's bone follows (entity, bone of its
+    // ragdoll): a hit on one is named by it, and by its zone. Null: unnamed.
+    std::function<std::string(world::EntityId, u32)> ragdoll_joint;
     // Told after each step of what went into water in it (sim::WaterEntry:
     // splashes), and counted.
     std::function<void(std::span<const sim::WaterEntry>)> on_splashes;

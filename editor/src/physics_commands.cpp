@@ -156,8 +156,8 @@ Json shot_hit_json(const PhysicsState::ShotHit& s) {
     if (s.piece) out["piece"] = *s.piece;
     if (s.tree) out["tree"] = true;
     if (s.character) out["character"] = true;
-    if (h.character) {
-        // A skinned character's bone capsule: which bone, in which zone.
+    if (h.character || !s.bone.empty()) {
+        // A skinned character's bone capsule, or a ragdoll's bone: which bone, in which zone.
         out["zone"] = s.zone.empty() ? Json(nullptr) : Json(s.zone);
         out["bone"] = s.bone;
     }

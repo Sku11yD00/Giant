@@ -70,12 +70,16 @@ Json ragdoll_json(const EditorState& state, const RagdollState::Ragdoll& r, bool
     return out;
 }
 
-// Its hit capsules gone (or back) now, not a frame later: a bullet flying this frame meets only its bones (or only them).
+// Its hit capsules back now, not a frame later (one let go: rare, so the look over every character is no matter).
 void follow_hits(EditorState& state) {
     if (state.hits == nullptr || state.animation == nullptr) return;
     // (The animation first: one let go is posed by its clips again before its capsules are made.)
     state.animation->follow_now(state.scene, *state.meshes, state.scene.untaken_changes());
     state.hits->update(state.scene, *state.meshes, *state.animation);
+}
+
+Json settings_json(const RagdollState::Settings& s) {
+    return {{"shot_drop", s.shot_drop}, {"blast_drop", s.blast_drop}, {"starts_per_step", s.starts_per_step}};
 }
 
 std::string unavailable(const EditorState& state) {
@@ -96,6 +100,9 @@ void connect_ragdolls(EditorState& state) {
         if (after) after();
         state.ragdolls->after_step();
     };
+    // A shot that meets a ragdoll's bone names its joint (and its zone by that).
+    state.physics->ragdoll_joint = [&state](world::EntityId id, u32 bone) { return state.ragdolls->joint_name(id, bone); };
+    state.ragdolls->set_hit_targets(state.hits);
 }
 
 void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state) {
@@ -130,9 +137,11 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
                  const Json& v = args["velocity"];
                  velocity = Vec3{v[0].get<float>(), v[1].get<float>(), v[2].get<float>()};
              }
+             // (The physics' world as the scene is now: one made in a scene it has yet to notice would go with its clearing.)
+             state.physics->flush(state.scene);
              const std::string error = state.ragdolls->start(state.scene, *state.meshes, id, velocity);
              if (!error.empty()) return CommandResult::failure(error);
-             follow_hits(state);
+             // (Its hit capsules went as it started: a bullet flying this frame meets only its bones.)
              return CommandResult::success(ragdoll_json(state, *state.ragdolls->find(id), true));
          }});
     add(registry,
@@ -153,8 +162,37 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
              return CommandResult::success(Json{{"stopped", id}});
          }});
     add(registry,
+        {"set_ragdoll_settings",
+         "How shots and blasts drop characters (those bullets meet by their capsules: visible skinned "
+         "entities with a body; and walkers, met by their body). "
+         "`shot_drop`: the push in N s (the momentum a bullet loses in it: about 3 for a pistol round that "
+         "stops, 8 for a rifle's) a shot gives a standing character's capsule for it to go limp, pushed on "
+         "the bone struck (default 3; 0: shots drop none). `blast_drop`: the same for a blast (`impact`), "
+         "by its impulse where it reaches the character (default 150; 0: blasts drop none); a blast also "
+         "throws ragdolls already lying in its reach. `starts_per_step`: how many of those struck down are "
+         "made ragdolls each step, 1 to 64 (default 4: the rest wait their turn standing, oldest first). "
+         "Fields left out stay. Returns the settings. View state.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"properties",
+               {{"shot_drop", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1e6}}},
+                {"blast_drop", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1e6}}},
+                {"starts_per_step", {{"type", "integer"}, {"minimum", 1}, {"maximum", 64}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (const std::string error = unavailable(state); !error.empty()) return CommandResult::failure(error);
+             RagdollState::Settings s = state.ragdolls->settings();
+             if (args.contains("shot_drop")) s.shot_drop = static_cast<float>(args["shot_drop"].get<double>());
+             if (args.contains("blast_drop")) s.blast_drop = static_cast<float>(args["blast_drop"].get<double>());
+             if (args.contains("starts_per_step")) s.starts_per_step = args["starts_per_step"].get<u32>();
+             if (const std::string error = state.ragdolls->set_settings(s); !error.empty()) return CommandResult::failure(error);
+             return CommandResult::success(settings_json(state.ragdolls->settings()));
+         }});
+    add(registry,
         {"get_ragdoll",
-         "The ragdolls: how many, how many are `asleep` (come to rest) and their `bodies` in all. With `id`, "
+         "The ragdolls: how many, how many are `asleep` (come to rest) and their `bodies` in all; how many "
+         "characters struck down are `waiting` to go limp (a few are made each step) and how many shots and "
+         "blasts have `dropped` since the editor opened; the `settings` (set_ragdoll_settings). With `id`, "
          "that one: `bones` (bodies), `joints` (of its skeleton: the rest ride a bone), `mass` kg, `asleep`, "
          "`position` (where the entity is drawn), `root` and `velocity` (its first bone's, the hips), and with "
          "`bones` true its `bone_list`: each bone's `joint`, `parent` (null for the first), `kind` (what its "
@@ -173,13 +211,19 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
                  if (args.contains("id")) {
                      return CommandResult::failure("entity " + std::to_string(args["id"].get<world::EntityId>()) + " is not a ragdoll");
                  }
-                 return CommandResult::success(Json{{"ragdolls", 0}, {"asleep", 0}, {"bodies", 0}});
+                 Json none = {{"ragdolls", 0}, {"asleep", 0}, {"bodies", 0}, {"waiting", state.ragdolls->waiting()}};
+                 none["dropped"] = state.ragdolls->dropped();
+                 none["settings"] = settings_json(state.ragdolls->settings());
+                 return CommandResult::success(std::move(none));
              }
              for (const auto& [id, r] : state.ragdolls->ragdolls()) {
                  asleep += r.asleep ? 1u : 0u;
                  bodies += r.bones.size();
              }
              Json out = {{"ragdolls", state.ragdolls->size()}, {"asleep", asleep}, {"bodies", bodies}};
+             out["waiting"] = state.ragdolls->waiting();
+             out["dropped"] = state.ragdolls->dropped();
+             out["settings"] = settings_json(state.ragdolls->settings());
              if (args.contains("id")) {
                  const world::EntityId id = args["id"].get<world::EntityId>();
                  const RagdollState::Ragdoll* r = state.ragdolls->find(id);

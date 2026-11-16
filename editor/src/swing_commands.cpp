@@ -4,8 +4,11 @@
 // not undoable.
 #include "cloth_state.h"
 #include "editor_commands.h"
+#include "hit_targets.h"
 #include "physics_state.h"
+#include "ragdoll_state.h"
 #include "swing_state.h"
+#include "walker_state.h"
 
 #include "giant/core/assert.h"
 
@@ -40,12 +43,24 @@ Json dvec(const DVec3& v) { return Json::array({v.x, v.y, v.z}); }
 void connect_blows(EditorState& state) {
     if (state.physics == nullptr) return;
     state.physics->on_hits = [&state](std::span<const PhysicsState::ShotHit> hits) {
-        if (state.swing == nullptr) return;
         for (const PhysicsState::ShotHit& h : hits) {
-            if (h.entity != 0) state.swing->swings().knock(h.entity, h.hit.impulse);
+            if (h.entity == 0) continue;
+            if (state.swing != nullptr) state.swing->swings().knock(h.entity, h.hit.impulse);
+            // A standing character's capsule struck hard enough: it drops (at the next step), pushed there.
+            // (A walker has no capsules: its body is met, and the bone nearest the hit pushed.)
+            if (state.ragdolls == nullptr) continue;
+            if (h.hit.character) {
+                state.ragdolls->knock(state.scene.identity(), h.entity, h.hit.bone, h.hit.impulse, h.hit.point);
+            } else if (h.character && state.walkers != nullptr && state.walkers->find(h.entity) != nullptr) {
+                state.ragdolls->knock(state.scene.identity(), h.entity, RagdollState::k_nearest_bone, h.hit.impulse, h.hit.point);
+            }
         }
     };
     state.physics->on_impact = [&state](const DVec3& point, float radius, float impulse) {
+        // Characters: those lying thrown, those standing in reach dropped (as their capsules were last fed).
+        if (state.ragdolls != nullptr && state.hits != nullptr) {
+            state.ragdolls->blast(state.scene.identity(), state.hits->shapes(), point, radius, impulse);
+        }
         if (state.swing != nullptr) {
             state.swing->follow(state.scene, state.scene.untaken_changes()); // one made just now too
             state.swing->swings().blast(point, radius, impulse);

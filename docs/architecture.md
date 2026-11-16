@@ -1308,7 +1308,7 @@ all), so a knee that folds 140 degrees is a hinge of 70 whose `centre` is
 the leg half folded. `sim` does not see
 `anim`: the editor builds descriptions from skeletons.
 
-Editor ragdolls (C8b part 1, `editor/src/ragdoll_state.h`).
+Editor ragdolls (C8b, `editor/src/ragdoll_state.h`).
 `ragdoll_entity` makes a visible skinned mesh entity a ragdoll while
 simulating, as it is posed and drawn at that moment (a walker where it
 walks, with its velocity; it walks no more). Bones come from the capsules
@@ -1333,17 +1333,40 @@ its first bone has carried the entity's transform (`RagdollState::poses`,
 handed to the scene frame, the occluders and the hair before the walkers'
 poses; always marked moving). The scene keeps where the entity was put.
 While it is one it has no hit capsules: bullets meet the bones' bodies (as
-flesh, naming the entity) and push them. Let go (`stop_ragdoll`, the
+flesh, naming the entity, and the bone's joint and its zone by the file's
+zone map: `PhysicsState::ragdoll_joint`) and push them. Let go (`stop_ragdoll`, the
 simulation stopped, another scene, a game loaded, the entity hidden,
 removed or drawing another file) it stands where the scene has it and its
 clips pose it again (one with nothing to play is animated no more). Limits:
 bones start with one velocity (the joints' own motion is not carried over
 yet); let go standing straight on level ground it can balance on its
-shins; joints give some degrees under hard landings; a hit on a bone
-names no zone or bone yet; starting one makes its bodies and, for a
-character not yet animated, its copy at once on the main thread (a crowd
-dropped in one frame wants a budget: with the shots, part 2); not saved
-(C8c).
+shins; joints give some degrees under hard landings; not saved (C8c).
+
+Shots and blasts drop characters (C8b part 2; `connect_blows`). A shot
+whose hit on a standing character's capsule gives it
+`RagdollState::Settings::shot_drop` N s or more (`knock`) and a blast
+(`impact`) that reaches its nearest capsule with `blast_drop` (`blast`)
+only ask for the drop (a walker has no capsules: a shot meets its body and
+pushes the bone nearest the hit, a blast reaches it by its middle): the hit is taken inside the physics' step, and
+making a ragdoll (its bodies, and a copy for a character not yet animated)
+is main-thread work a crowd would turn into a hitch. Those asked for wait
+in a list (1024 at most, oldest first) and `before_step` makes
+`starts_per_step` of them (default 4), each pushed by what dropped it:
+a shot's impulse on the struck joint's bone where it struck, a blast's
+shared among the bones by mass (one asked for twice is made once and
+pushed by both). A blast also throws the ragdolls already lying, bone by
+bone from its point; no blast throws a body faster than 12 m/s at its
+heart, less toward its edge (a blast's impulse is sized for masonry).
+The list is first come, first made, with no entry merged: after a blast
+in a crowd a later shot's drop waits behind the blast's; a blast passes
+through walls; it looks at every skinned character's capsules (no
+cull: a blast is rare); one that cannot be made (a file with no capsules
+fitted, the 256 reached) costs its turn again each time it is struck. A ragdoll's hit capsules are
+forgotten as it starts (`HitTargets::forget`), so a bullet in flight meets
+its bones only. Those waiting are stamped with the scene and the run they were asked in
+and forgotten when the simulation stops, runs anew or the scene is another; one gone or hidden before its turn
+stays as it was. A weaker shot does nothing to a standing character yet
+(staggering under the animation comes with C8c).
 
 ## The player (N4 part 2)
 
