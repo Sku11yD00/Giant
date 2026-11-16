@@ -25,6 +25,7 @@ giant_module_tests(sim
     tests/test_hit_shapes.cpp
     tests/test_ballistics.cpp
     tests/test_physics.cpp
+    tests/test_ragdoll.cpp
     tests/test_scene_physics.cpp
     tests/test_swing.cpp
     tests/test_water_physics.cpp
