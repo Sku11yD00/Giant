@@ -96,6 +96,7 @@ public:
         DVec3 root_start{};         // its first bone's place then
         bool posed = false;         // its pose handed on at least once
         bool asleep = false;        // its bodies at rest (as last looked)
+        double lying = 0.0;         // seconds at rest, on end
         // Scratch (kept: nothing allocated as it moves).
         std::vector<Mat4> placed;   // per bone, in the entity's space
         std::vector<Mat4> model;    // per joint
@@ -108,6 +109,8 @@ public:
         float shot_drop = 3.0f;    // N s a shot gives a standing character to drop it (0: shots drop none)
         float blast_drop = 150.0f; // N s of a blast where it reaches one (0: blasts drop none)
         u32 starts_per_step = 4;   // ragdolls made of those dropped, a before_step (1 to 64)
+        float get_up_seconds = 0.0f; // one that can (get_up) rises by itself after lying still this long (0: never)
+        float get_up_fade = 0.8f;    // seconds it takes from the pose it lay in to its animation's (0 to 5)
     };
     // Empty: set; else why not (a number that is none, or out of range).
     std::string set_settings(const Settings& settings);
@@ -121,6 +124,16 @@ public:
     // capsules, a ragdoll already, too many, a scale of nothing).
     std::string start(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
                       std::optional<Vec3> velocity = std::nullopt);
+    // A ragdoll gets up where it lies: let go as a walker standing there
+    // (WalkerState::resume, arrived: its feet on what is under its hips,
+    // facing the way its hips do, or toward its feet lying on its back, its
+    // head on its front), its pose fading from how it lay into its
+    // animation's over Settings::get_up_fade. Only an entity that can walk
+    // (body none): another's body stands where the scene has it. Empty:
+    // done; else why not (not a ragdoll, cannot walk, no walkers, the
+    // walkers refused: it lies on).
+    std::string get_up(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
+    u64 risen() const { return m_risen; } // got up, ever
     // Lets it go (drawn where the scene has it, its clips playing again). False: not a ragdoll.
     bool stop(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
     void clear(const world::Scene& scene, const MeshLibrary& meshes);
@@ -156,10 +169,12 @@ public:
     usize size() const { return m_ragdolls.size(); }
     const std::unordered_map<world::EntityId, Ragdoll>& ragdolls() const { return m_ragdolls; }
 
-    // Each frame (and fixed step) before the physics steps: those whose
-    // entity went (removed, hidden, another file) are let go, and all of
-    // them when the simulation stopped or the scene is another.
-    void before_step(const world::Scene& scene, const MeshLibrary& meshes);
+    // Each frame (and fixed step) before the physics steps (`seconds` of
+    // it to come): those whose entity went (removed, hidden, another file)
+    // are let go, and all of them when the simulation stopped or the scene
+    // is another; those struck down are made; those lying still long enough
+    // get up (Settings::get_up_seconds; two a step at most).
+    void before_step(const world::Scene& scene, const MeshLibrary& meshes, double seconds = 0.0);
     // After it steps: each one that moved posed by its bones.
     void after_step();
 
@@ -209,6 +224,7 @@ private:
     u64 m_waiting_scene = 0;        // the scene and run they were asked in
     u64 m_waiting_run = 0;
     u64 m_dropped = 0;
+    u64 m_risen = 0;
 };
 
 } // namespace giant::editor

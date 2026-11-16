@@ -1282,6 +1282,55 @@ GIANT_TEST("animation: a pose held from outside shows instead of the clips', unt
     f.frame_step(0.1);
     GIANT_CHECK(std::memcmp(a->model.data(), given.data(), given.size() * sizeof(Mat4)) != 0);
     GIANT_CHECK(!f.animation->set_held_pose(arm, given)); // (held no more)
+    // Let go with a fade from a pose: it shows that pose first, its clip's at the end, between them between.
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "bend"}, {"speed", 0.0}}).ok);
+    f.frame_step(0.1);
+    const std::vector<Mat4> clips = a->model;
+    GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, arm).empty());
+    std::vector<Mat4> lay = clips;
+    for (Mat4& m : lay) m.at(0, 3) += 0.5f; // (every joint half a metre aside: only the first one's own place changes)
+    f.animation->release_pose(f.state.scene, *f.meshes, arm, lay, 1.0f);
+    GIANT_CHECK(!a->held_pose && a->rise_left == 1.0f);
+    const auto aside = [&](usize j) { return a->model[j].at(0, 3) - clips[j].at(0, 3); };
+    f.frame_step(1e-4);
+    GIANT_CHECK(std::fabs(aside(0) - 0.5f) < 1e-3f && std::fabs(aside(1) - 0.5f) < 1e-3f);
+    f.frame_step(0.5);
+    GIANT_CHECK(std::fabs(aside(0) - 0.25f) < 0.01f && std::fabs(aside(1) - 0.25f) < 0.01f); // (eased: half way at half time)
+    f.frame_step(0.25);
+    GIANT_CHECK(aside(0) > 0.02f && aside(0) < 0.15f);
+    f.frame_step(0.3);
+    GIANT_CHECK(a->rise_left == 0.0f && std::fabs(aside(0)) < 1e-5f && std::fabs(aside(1)) < 1e-5f);
+    const u64 settled = a->poses;
+    f.frame_step(0.1);
+    GIANT_CHECK(a->poses == settled); // (the fade over, a clip standing still asks no pose)
+    // Held again mid-fade, the fade is over; a pose not one a joint, or no time, is a cut.
+    GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, arm).empty());
+    f.animation->release_pose(f.state.scene, *f.meshes, arm, lay, 1.0f);
+    GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, arm).empty() && a->rise_left == 0.0f);
+    f.animation->release_pose(f.state.scene, *f.meshes, arm, std::span<const Mat4>(lay).first(1), 1.0f);
+    GIANT_CHECK(a->rise_left == 0.0f);
+    GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, arm).empty());
+    f.animation->release_pose(f.state.scene, *f.meshes, arm, lay, 0.0f);
+    GIANT_CHECK(a->rise_left == 0.0f);
+    // A skeleton hung from a turned, shrunk root (an armature node: Blender's, Mixamo's) fades from the pose given all the same.
+    {
+        anim::Skeleton& skeleton = const_cast<anim::Skeleton&>(a->skinned->skeleton); // (the test's own file, loaded just now)
+        const Mat4 root = skeleton.root;
+        skeleton.root = mat4_from_transform({0.1f, 0.2f, 0.3f}, quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f), {0.5f, 0.5f, 0.5f});
+        GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, arm).empty());
+        f.animation->release_pose(f.state.scene, *f.meshes, arm, lay, 1.0f);
+        f.frame_step(1e-4);
+        for (usize j = 0; j < lay.size(); ++j) {
+            for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 4; ++col) GIANT_CHECK(std::fabs(a->model[j].at(row, col) - lay[j].at(row, col)) < 2e-3f);
+            }
+        }
+        skeleton.root = root;
+        GIANT_CHECK(f.animation->hold_pose(f.state.scene, *f.meshes, arm).empty());
+        f.animation->release_pose(f.state.scene, *f.meshes, arm);
+    }
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "hop"}}).ok);
+    f.frame_step(0.1);
 
     // One with nothing to play is animated only while held.
     const world::EntityId bare = f.add_arm(3.0);
