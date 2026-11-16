@@ -136,6 +136,11 @@ if(GIANT_BUILD_TESTS)
         COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/effects_gate.py
                 $<TARGET_FILE:giant_editor> --hidden --backend null)
       set_tests_properties(editor_effects_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${gate_env}")
+      # The characters gate (characters plan C9): a crowd walking the valley's town, struck down and up again.
+      add_test(NAME editor_characters_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/characters_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set_tests_properties(editor_characters_gate PROPERTIES TIMEOUT 2400 ENVIRONMENT "${gate_env}")
     endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")

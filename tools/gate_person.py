@@ -10,8 +10,9 @@ Left/Right Shoulder, Arm, ForeArm, Hand, UpLeg, Leg, Foot). Each bone is a
 round limb skinned to its joint and, near where it starts, to the joint
 above (so elbows and knees bend smoothly); the head is a sphere with two
 eyes, each a sphere of its own material whose iris is at uv (0.5, 0.5)
-facing +z. Materials: "skin", "clothes", "eye". With `detail` 1 it has
-about 45 thousand triangles (a background NPC's count: enough for the
+facing +z. Materials: "skin", "clothes", "eye" (`materials` writes only
+some: a file apiece for an engine whose meshes take one look each). With `detail` 1 it has
+about 44 thousand triangles (a background NPC's count: enough for the
 skinned levels of detail to have something to drop); 0.1 is a few
 thousand, for tests.
 
@@ -209,8 +210,13 @@ def _clips():
     return clips
 
 
-def write_person(path, detail=1.0):
-    """Writes the person to `path` (a .glb). Returns {"triangles", "vertices", "joints", "clips", "materials"}."""
+def write_person(path, detail=1.0, materials=None):
+    """Writes the person to `path` (a .glb). Returns {"triangles", "vertices", "joints", "clips", "materials"}.
+    `materials`: only those materials' triangles (the skeleton and clips whole), for a file apiece where a
+    mesh takes one look: its skin, its clothes and its eyes drawn as three entities in one place."""
+    wanted = list(MATERIALS) if materials is None else list(materials)
+    if not wanted or any(name not in MATERIALS for name in wanted) or len(set(wanted)) != len(wanted):
+        raise ValueError(f"materials must be some of {list(MATERIALS)}, each once, got {wanted}")
     around = max(6, int(round(40 * math.sqrt(detail))))
     along = max(3, int(round(24 * math.sqrt(detail))))
     index_of = {name: i for i, name in enumerate(NAMES)}
@@ -239,7 +245,7 @@ def write_person(path, detail=1.0):
         return struct.pack(f"<{len(flat)}f", *flat)
 
     primitives = []
-    material_names = list(MATERIALS)
+    material_names = [name for name in MATERIALS if name in wanted]
     triangles = vertices = 0
     for m, name in enumerate(material_names):
         part = parts[name]
