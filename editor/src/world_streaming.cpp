@@ -228,6 +228,7 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
             if (!i.mesh.empty()) i.mesh = MeshLibrary::normalize(i.mesh);
         }
     }
+    for (world::PersonLook& look : index.person_looks) look.mesh = MeshLibrary::normalize(look.mesh);
     close();
     world::Scene base;
     base.lighting = index.lighting;
@@ -236,6 +237,10 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
     base.weather = index.weather;
     base.clock = index.clock;
     base.water = index.water;
+    base.places = index.places;
+    base.person_looks = index.person_looks;
+    base.people = index.people;
+    base.next_person_id = index.next_person_id;
     base.particle_looks = index.particle_looks;
     base.effects = index.effects;
     base.reserve_ids_below(index.next_id);
@@ -703,6 +708,10 @@ WorldStreaming::Saved WorldStreaming::create(const std::filesystem::path& folder
     m_index.weather = scene.weather;
     m_index.clock = scene.clock;
     m_index.water = scene.water;
+    m_index.places = scene.places;
+    m_index.person_looks = scene.person_looks;
+    m_index.people = scene.people;
+    m_index.next_person_id = scene.next_person_id;
     m_index.particle_looks = scene.particle_looks;
     m_index.effects = scene.effects;
     m_index.terrain_samples = scene.terrain.samples();
@@ -966,6 +975,10 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     m_index.weather = scene.weather;
     m_index.clock = scene.clock;
     m_index.water = scene.water;
+    m_index.places = scene.places;
+    m_index.person_looks = scene.person_looks;
+    m_index.people = scene.people;
+    m_index.next_person_id = scene.next_person_id;
     m_index.particle_looks = scene.particle_looks;
     m_index.effects = scene.effects;
     m_index.terrain_cells.assign(m_ground.begin(), m_ground.end());
@@ -1153,6 +1166,8 @@ bool WorldStreaming::unsaved_settings(const world::Scene& scene) const {
     return !(scene.lighting == m_index.lighting) || !(scene.kits == m_index.kits) ||
            !(scene.scatter == m_index.scatter) || !(scene.weather == m_index.weather) ||
            !(scene.clock == m_index.clock) || !(scene.water == m_index.water) ||
+           !(scene.places == m_index.places) || !(scene.person_looks == m_index.person_looks) ||
+           !(scene.people == m_index.people) || scene.next_person_id != m_index.next_person_id ||
            !(scene.particle_looks == m_index.particle_looks) || !(scene.effects == m_index.effects);
 }
 

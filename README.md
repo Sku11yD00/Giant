@@ -370,6 +370,9 @@ Open-world systems:
 - P1 part 2: auto exposure (the image follows the scene's brightness as
   eyes adapt, without smearing), bloom round bright light, and a choice of
   tone mapper (PBR Neutral or AgX).
+- LW1 part 1: the people of a living world as world data: thousands of
+  people, the looks they share and the places they go to, kept by the world
+  whichever part of it is loaded (not drawn yet).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

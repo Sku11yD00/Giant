@@ -3368,6 +3368,60 @@ walker is drawn in the cell the scene puts it in (one walking far may be
 culled with that cell); no animation is chosen for its pace yet; a stuck
 walker's new search waits for frames (not step_physics).
 
+## People (living-world plan LW1a)
+
+The people who live in the world are world data of their own
+(`giant/world/people.h`, the types in `scene.h`), not entities: thousands
+of small records the scene keeps whichever cells are loaded, since people
+cross cells. Three lists:
+
+- `Place`: a named spot people go to (a home, a workplace, a bench) with a
+  position, a radius, the way one stands there and up to 8 tags saying what
+  it is for. At most 65536.
+- `PersonLook`: how a kind of person looks: a skinned mesh file, a height,
+  a material, parts' looks, hair and matched clips, exactly what an entity
+  drawn for one is given. Many people share one, so a crowd costs a few
+  meshes. At most 1024. A look's mesh is among the meshes a scene or a
+  world imports on opening.
+- `Person`: an id (its own for good: `next_person_id` only rises, and
+  undoing a command does not lower it, since a save made meanwhile may
+  hold the person), a name, a look, a home (a place, or none), where it
+  starts, and a seed telling it from others of its look. At most 65536,
+  kept by rising id, so one is found by halving.
+
+`check_place`, `check_person_look` and `check_person` check one;
+`check_people` checks them together (names unique, every look and home
+there, ids rising under the next). Loading keeps the same limits, so a
+loaded scene is one the commands could have made.
+
+Saved in the scene's text and in a world's world.json under `places`,
+`person_looks` and `people`; only what is there is written, so older files
+read and write the same. People are many, so each is a row
+(`[id, name, look, home, x, y, z, yaw, seed]` in `people.list`, beside
+`people.next_id`), not an object. The world's streaming carries the three
+lists between the index and the scene as it does water, and counts a
+change to them as an unsaved setting.
+
+The commands (`people_commands.cpp`): `create_place` / `set_place` /
+`remove_place` / `get_places`, `set_person_look` (which takes a look from a
+dressed entity, so every way of dressing a character serves people too) /
+`remove_person_look` / `get_person_looks`, and `create_people` (up to 4096
+a call) / `set_person` / `remove_people` / `get_people`. An undo step
+keeps what its command changed (the place or look at its index, the people
+taken out and put in, swapped in one pass through the list), never a copy
+of the lists: 65536 people copied twice a command would not do.
+Commands run outside the history (C# scripts) may have changed the lists
+since a step was recorded, so a step finds its place or look by name (the
+index only says where one is put back) and leaves undone what would break
+the scene: taking out a place or look people still have, bringing back
+people whose look is gone (one whose home is gone comes back without one).
+
+Known limits (the next parts of the plan): nobody is drawn yet (LW1b makes
+the people near the camera entities and walkers); places and looks cannot
+be renamed; people stand where they start (routes LW2, routines LW3); the
+lists are whole in world.json, not in chunks by cell (10 to 12 MB for 65536
+people as the file is written, indented).
+
 ## Sound
 
 `engine/audio` (core only) hears the world. `Mixer` (mixer.h) plays a

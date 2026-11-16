@@ -2,6 +2,7 @@
 #include "giant/world/clock.h"
 #include "giant/world/far_ground.h"
 #include "giant/world/scatter.h"
+#include "giant/world/people.h"
 #include "giant/world/water.h"
 
 #include "giant/core/assert.h"
@@ -235,8 +236,9 @@ Scene::Identity& Scene::Identity::operator=(const Identity&) {
 
 Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
-      weather(other.weather), clock(other.clock), water(other.water), particle_looks(other.particle_looks),
-      effects(other.effects), m_entities(other.m_entities),
+      weather(other.weather), clock(other.clock), water(other.water), places(other.places),
+      person_looks(other.person_looks), people(other.people), next_person_id(other.next_person_id),
+      particle_looks(other.particle_looks), effects(other.effects), m_entities(other.m_entities),
       m_index(other.m_index),
       m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
       m_game(other.m_game), m_game_kits(other.m_game_kits), m_damage_edits(other.m_damage_edits) {}
@@ -244,7 +246,9 @@ Scene::Scene(const Scene& other)
 Scene::Scene(Scene&& other) noexcept
     : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
       scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock),
-      water(std::move(other.water)), particle_looks(std::move(other.particle_looks)),
+      water(std::move(other.water)), places(std::move(other.places)), person_looks(std::move(other.person_looks)),
+      people(std::move(other.people)), next_person_id(other.next_person_id),
+      particle_looks(std::move(other.particle_looks)),
       effects(std::move(other.effects)), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
       m_kept_kits(std::move(other.m_kept_kits)), m_game(std::move(other.m_game)),
@@ -272,6 +276,10 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         weather = other.weather;
         clock = other.clock;
         water = std::move(other.water);
+        places = std::move(other.places);
+        person_looks = std::move(other.person_looks);
+        people = std::move(other.people);
+        next_person_id = other.next_person_id;
         particle_looks = std::move(other.particle_looks);
         effects = std::move(other.effects);
         m_entities = std::move(other.m_entities);
@@ -967,6 +975,54 @@ Json terrain_json(const Terrain& t) {
     return {{"samples", t.samples()}, {"material", terrain_material_json(t.material)}, {"tiles", std::move(tiles)}};
 }
 
+Json parts_json(std::span<const PartLook> looks) {
+    Json parts = Json::array();
+    for (const PartLook& p : looks) parts.push_back({{"name", p.name}, {"material", material_json(p.material)}});
+    return parts;
+}
+
+Json places_json(std::span<const Place> places) {
+    Json out = Json::array();
+    for (const Place& p : places) {
+        Json place = {{"name", p.name}, {"position", dvec3_json(p.position)}, {"radius", p.radius}};
+        if (p.yaw != 0.0f) place["yaw"] = p.yaw;
+        if (!p.tags.empty()) place["tags"] = p.tags;
+        out.push_back(std::move(place));
+    }
+    return out;
+}
+
+Json person_looks_json(std::span<const PersonLook> looks) {
+    Json out = Json::array();
+    for (const PersonLook& l : looks) {
+        Json look = {{"name", l.name}, {"mesh", l.mesh}, {"height", l.height}, {"material", material_json(l.material)}};
+        if (!l.parts.empty()) look["parts"] = parts_json(l.parts);
+        if (!(l.hair == Hair{})) look["hair"] = hair_json(l.hair);
+        if (!l.matched.empty()) look["matched"] = l.matched;
+        out.push_back(std::move(look));
+    }
+    return out;
+}
+
+// People are many (tens of thousands), so each is a row, not an object:
+// [id, name, look, home, x, y, z, yaw, seed].
+Json people_json(std::span<const Person> people, PersonId next_person_id) {
+    Json list = Json::array();
+    for (const Person& p : people) {
+        list.push_back(Json::array({p.id, p.name, p.look, p.home, p.position.x, p.position.y, p.position.z, p.yaw, p.seed}));
+    }
+    return {{"next_id", next_person_id}, {"list", std::move(list)}};
+}
+
+// The people's keys of a scene or a world index (only what is there, so
+// older files read and write the same).
+void write_people(Json& out, std::span<const Place> places, std::span<const PersonLook> looks,
+                  std::span<const Person> people, PersonId next_person_id) {
+    if (!places.empty()) out["places"] = places_json(places);
+    if (!looks.empty()) out["person_looks"] = person_looks_json(looks);
+    if (!people.empty() || next_person_id != 1) out["people"] = people_json(people, next_person_id);
+}
+
 Json entity_json(const Entity& e) {
     Json entity = {{"id", e.id}, {"name", e.name}, {"visible", e.visible}};
     write_look(entity, e.shape, e.mesh, e.kit, e.transform, e.material, e.decal);
@@ -982,11 +1038,7 @@ Json entity_json(const Entity& e) {
                            {"weight", w.weight}, {"limit", w.limit}};
     }
     if (!(e.lamp == Lamp{})) entity["lamp"] = lamp_json(e.lamp);
-    if (!e.parts.empty()) {
-        Json parts = Json::array();
-        for (const PartLook& p : e.parts) parts.push_back({{"name", p.name}, {"material", material_json(p.material)}});
-        entity["parts"] = std::move(parts);
-    }
+    if (!e.parts.empty()) entity["parts"] = parts_json(e.parts);
     if (!(e.hair == Hair{})) entity["hair"] = hair_json(e.hair);
     if (!(e.effect == EntityEffect{})) {
         entity["effect"] = {{"on", e.effect.on}, {"effect", e.effect.effect}, {"rate", e.effect.rate}};
@@ -1062,6 +1114,7 @@ std::string save_scene(const Scene& scene) {
     if (!scene.water.empty()) {
         out["water"] = water_json(scene.water);
     }
+    write_people(out, scene.places, scene.person_looks, scene.people, scene.next_person_id);
     if (!scene.particle_looks.empty()) {
         out["particle_looks"] = particle_looks_json(scene.particle_looks);
     }
@@ -1761,6 +1814,60 @@ void read_hair(Reader& r, const std::string& path, Hair& h, std::string& error) 
     }
 }
 
+// The clips a character is motion matched among (key "matched").
+void read_matched(Reader& r, std::vector<std::string>& out) {
+    const Json* matched = r.get("matched", false);
+    if (matched == nullptr || !r.ok()) return;
+    if (!matched->is_array() || matched->size() > k_max_matched_clips) {
+        r.fail("matched", "must be a list of at most " + std::to_string(k_max_matched_clips) + " clip names");
+        return;
+    }
+    for (const Json& name : *matched) {
+        if (!name.is_string() || name.get_ref<const std::string&>().empty() ||
+            name.get_ref<const std::string&>().size() > k_max_name_bytes) {
+            r.fail("matched", "must hold clip names of 1 to " + std::to_string(k_max_name_bytes) + " bytes");
+            return;
+        }
+        out.push_back(name.get<std::string>());
+        if (std::find(out.begin(), out.end() - 1, out.back()) != out.end() - 1) {
+            r.fail("matched", "names " + out.back() + " twice");
+            return;
+        }
+        if (out.size() > 1 && (out.front() == "*" || out.back() == "*")) {
+            r.fail("matched", "must hold \"*\" (every clip) alone");
+            return;
+        }
+    }
+}
+
+// The looks of a mesh's parts (key "parts").
+void read_parts(Reader& r, const std::string& path, std::vector<PartLook>& out, std::string& error) {
+    const Json* parts = r.get("parts", false);
+    if (parts == nullptr || !r.ok()) return;
+    if (!parts->is_array() || parts->size() > k_max_entity_parts) {
+        r.fail("parts", "must be a list of at most " + std::to_string(k_max_entity_parts) + " parts' looks");
+        return;
+    }
+    for (usize i = 0; i < parts->size() && r.ok(); ++i) {
+        const std::string part_path = path + ".parts[" + std::to_string(i) + "]";
+        Reader pr((*parts)[i], part_path, error);
+        PartLook look;
+        pr.string("name", look.name, true, k_max_name_bytes);
+        if (const Json* m = pr.get("material", true); m != nullptr && pr.ok()) {
+            read_material(*m, part_path + ".material", look.material, error);
+        }
+        pr.finish();
+        if (!pr.ok()) return;
+        for (const PartLook& had : out) {
+            if (had.name == look.name) {
+                r.fail("parts", "names \"" + look.name + "\" twice");
+                return;
+            }
+        }
+        out.push_back(std::move(look));
+    }
+}
+
 void read_entity(const Json& json, const std::string& path, Entity& e, std::string& error) {
     Reader r(json, path, error);
     r.id("id", e.id, true);
@@ -1815,55 +1922,10 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         ar.string("clip", e.animation.clip, false, k_max_name_bytes);
         ar.number("speed", e.animation.speed, -k_max_animation_speed, k_max_animation_speed);
         ar.boolean("loop", e.animation.loop);
-        if (const Json* matched = ar.get("matched", false); matched != nullptr && ar.ok()) {
-            if (!matched->is_array() || matched->size() > k_max_matched_clips) {
-                ar.fail("matched", "must be a list of at most " + std::to_string(k_max_matched_clips) + " clip names");
-            } else {
-                for (const Json& name : *matched) {
-                    if (!name.is_string() || name.get_ref<const std::string&>().empty() ||
-                        name.get_ref<const std::string&>().size() > k_max_name_bytes) {
-                        ar.fail("matched", "must hold clip names of 1 to " + std::to_string(k_max_name_bytes) + " bytes");
-                        break;
-                    }
-                    e.animation.matched.push_back(name.get<std::string>());
-                    const std::vector<std::string>& had = e.animation.matched;
-                    if (std::find(had.begin(), had.end() - 1, had.back()) != had.end() - 1) {
-                        ar.fail("matched", "names " + had.back() + " twice");
-                        break;
-                    }
-                    if (had.size() > 1 && (had.front() == "*" || had.back() == "*")) {
-                        ar.fail("matched", "must hold \"*\" (every clip) alone");
-                        break;
-                    }
-                }
-            }
-        }
+        read_matched(ar, e.animation.matched);
         ar.finish();
     }
-    if (const Json* parts = r.get("parts", false); parts != nullptr && r.ok()) {
-        if (!parts->is_array() || parts->size() > k_max_entity_parts) {
-            r.fail("parts", "must be a list of at most " + std::to_string(k_max_entity_parts) + " parts' looks");
-        } else {
-            for (usize i = 0; i < parts->size() && r.ok(); ++i) {
-                const std::string part_path = path + ".parts[" + std::to_string(i) + "]";
-                Reader pr((*parts)[i], part_path, error);
-                PartLook look;
-                pr.string("name", look.name, true, k_max_name_bytes);
-                if (const Json* m = pr.get("material", true); m != nullptr && pr.ok()) {
-                    read_material(*m, part_path + ".material", look.material, error);
-                }
-                pr.finish();
-                if (!pr.ok()) break;
-                for (const PartLook& had : e.parts) {
-                    if (had.name == look.name) {
-                        r.fail("parts", "names \"" + look.name + "\" twice");
-                        break;
-                    }
-                }
-                e.parts.push_back(std::move(look));
-            }
-        }
-    }
+    read_parts(r, path, e.parts, error);
     read_lamp(r, path, e.lamp, error);
     read_hair(r, path, e.hair, error);
     if (const Json* f = r.get("effect", false); f != nullptr && r.ok()) {
@@ -1877,6 +1939,127 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         }
     }
     r.finish();
+}
+
+// The people's keys of a scene or a world index: places, person_looks and
+// people, each checked alone and then together (people.h).
+void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLook>& looks, std::vector<Person>& people,
+                 PersonId& next_person_id, std::string& error) {
+    if (const Json* list = root.get("places", false); list != nullptr && root.ok()) {
+        if (!list->is_array() || list->size() > k_max_places) {
+            root.fail("places", "must be an array of at most " + std::to_string(k_max_places));
+            return;
+        }
+        places.reserve(list->size());
+        for (usize i = 0; i < list->size(); ++i) {
+            const std::string path = "places[" + std::to_string(i) + "]";
+            Reader r((*list)[i], path, error);
+            Place p;
+            r.string("name", p.name, true, k_max_name_bytes);
+            r.get("position", true);
+            r.vec3("position", p.position, -1e8, 1e8);
+            r.number("radius", p.radius, 0.25, 1000);
+            r.number("yaw", p.yaw, -360, 360);
+            if (const Json* tags = r.get("tags", false); tags != nullptr && r.ok()) {
+                if (!tags->is_array() || tags->size() > k_max_place_tags) {
+                    r.fail("tags", "must be a list of at most " + std::to_string(k_max_place_tags) + " tags");
+                } else {
+                    for (const Json& tag : *tags) {
+                        if (!tag.is_string()) {
+                            r.fail("tags", "must hold strings");
+                            break;
+                        }
+                        p.tags.push_back(tag.get<std::string>());
+                    }
+                }
+            }
+            r.finish();
+            if (!error.empty()) return;
+            if (const auto bad = check_place(p)) {
+                error = path + ": " + *bad;
+                return;
+            }
+            places.push_back(std::move(p));
+        }
+    }
+    if (const Json* list = root.get("person_looks", false); list != nullptr && root.ok()) {
+        if (!list->is_array() || list->size() > k_max_person_looks) {
+            root.fail("person_looks", "must be an array of at most " + std::to_string(k_max_person_looks));
+            return;
+        }
+        for (usize i = 0; i < list->size(); ++i) {
+            const std::string path = "person_looks[" + std::to_string(i) + "]";
+            Reader r((*list)[i], path, error);
+            PersonLook l;
+            r.string("name", l.name, true, k_max_name_bytes);
+            r.string("mesh", l.mesh, true, k_max_mesh_path_bytes);
+            r.number("height", l.height, 0.1, 10);
+            if (const Json* m = r.get("material", false); m != nullptr && r.ok()) {
+                read_material(*m, path + ".material", l.material, error);
+            }
+            read_parts(r, path, l.parts, error);
+            read_hair(r, path, l.hair, error);
+            read_matched(r, l.matched);
+            r.finish();
+            if (!error.empty()) return;
+            if (const auto bad = check_person_look(l)) {
+                error = path + ": " + *bad;
+                return;
+            }
+            looks.push_back(std::move(l));
+        }
+    }
+    if (const Json* json = root.get("people", false); json != nullptr && root.ok()) {
+        Reader r(*json, "people", error);
+        u64 next = 1;
+        if (const Json* v = r.get("next_id", true)) {
+            if (!v->is_number_unsigned() || v->get<u64>() == 0 || v->get<u64>() > 0xffffffffu) {
+                r.fail("next_id", "must be a whole number from 1 to 2^32 - 1");
+            } else {
+                next = v->get<u64>();
+            }
+        }
+        const Json* list = r.get("list", true);
+        r.finish();
+        if (!error.empty() || list == nullptr) return;
+        if (!list->is_array() || list->size() > k_max_people) {
+            error = "people.list must be an array of at most " + std::to_string(k_max_people);
+            return;
+        }
+        next_person_id = static_cast<PersonId>(next);
+        people.reserve(list->size());
+        for (usize i = 0; i < list->size(); ++i) {
+            const Json& row = (*list)[i];
+            const std::string path = "people.list[" + std::to_string(i) + "]";
+            const auto number = [&](usize k) { return row[k].is_number() && std::isfinite(row[k].get<double>()); };
+            const auto whole = [&](usize k) { return row[k].is_number_unsigned() && row[k].get<u64>() <= 0xffffffffu; };
+            if (!row.is_array() || row.size() != 9 || !whole(0) || !row[1].is_string() || !row[2].is_string() ||
+                !row[3].is_string() || !number(4) || !number(5) || !number(6) || !number(7) || !whole(8)) {
+                error = path + " must be [id, name, look, home, x, y, z, yaw, seed]";
+                return;
+            }
+            Person p;
+            p.id = row[0].get<PersonId>();
+            p.name = row[1].get<std::string>();
+            p.look = row[2].get<std::string>();
+            p.home = row[3].get<std::string>();
+            p.position = {row[4].get<double>(), row[5].get<double>(), row[6].get<double>()};
+            const double yaw = row[7].get<double>();
+            if (yaw < -360.0 || yaw > 360.0) {
+                error = path + ": yaw must be from -360 to 360 degrees";
+                return;
+            }
+            p.yaw = static_cast<float>(yaw);
+            p.seed = row[8].get<u32>();
+            if (const auto bad = check_person(p)) {
+                error = path + ": " + *bad;
+                return;
+            }
+            people.push_back(std::move(p));
+        }
+    }
+    if (!error.empty()) return;
+    if (const auto bad = check_people(places, looks, people, next_person_id)) error = "people: " + *bad;
 }
 
 void read_kit(const Json& json, const std::string& path, Kit& k, std::string& error) {
@@ -2410,6 +2593,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     read_kits(root, scene.kits, error);
     read_scatter(root, scene.kits, scene.scatter, error);
     read_water(root, scene.water, error);
+    read_people(root, scene.places, scene.person_looks, scene.people, scene.next_person_id, error);
     read_particle_looks(root, scene.particle_looks, error);
     read_effects(root, scene.effects, error);
     if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
@@ -2493,6 +2677,7 @@ std::string save_world_index(const WorldIndex& world) {
     if (!world.water.empty()) {
         out["water"] = water_json(world.water);
     }
+    write_people(out, world.places, world.person_looks, world.people, world.next_person_id);
     if (!world.particle_looks.empty()) {
         out["particle_looks"] = particle_looks_json(world.particle_looks);
     }
@@ -2559,6 +2744,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     read_kits(root, world.kits, error);
     read_scatter(root, world.kits, world.scatter, error);
     read_water(root, world.water, error);
+    read_people(root, world.places, world.person_looks, world.people, world.next_person_id, error);
     read_particle_looks(root, world.particle_looks, error);
     read_effects(root, world.effects, error);
     if (const Json* meshes = root.get("meshes", false); meshes != nullptr && root.ok()) {

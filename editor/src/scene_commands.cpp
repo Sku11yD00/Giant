@@ -981,9 +981,10 @@ void normalize_meshes(world::Scene& scene) {
             if (!i.mesh.empty()) i.mesh = MeshLibrary::normalize(i.mesh);
         }
     }
+    for (world::PersonLook& look : scene.person_looks) look.mesh = MeshLibrary::normalize(look.mesh);
 }
 
-// The mesh files the scene's entities and kits draw (normalized, once each).
+// The mesh files the scene's entities, kits, scatter and people draw (normalized, once each).
 std::vector<std::string> meshes_used(const world::Scene& scene) {
     std::vector<std::string> out;
     for (const Entity& e : scene.entities()) {
@@ -999,6 +1000,7 @@ std::vector<std::string> meshes_used(const world::Scene& scene) {
             if (i.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(i.mesh));
         }
     }
+    for (const world::PersonLook& look : scene.person_looks) out.push_back(MeshLibrary::normalize(look.mesh));
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
@@ -1787,7 +1789,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                      }
                      if (w.unsaved_settings(state.scene)) {
                          return CommandResult::failure(
-                             "the open world's lighting, kits, scatter, weather, clock or water have unsaved changes: "
+                             "the open world's lighting, kits, scatter, weather, clock, water or people have unsaved changes: "
                              "save_world first, or pass discard_unsaved: true");
                      }
                  } else if (w.is_open()) {
