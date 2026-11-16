@@ -85,7 +85,10 @@ Json animation_json(const EditorState& state, world::EntityId id) {
     const world::Entity* e = state.scene.find(id);
     Json out{{"id", id}};
     if (e == nullptr) return out;
-    out["saved"] = {{"clip", e->animation.clip}, {"speed", e->animation.speed}, {"loop", e->animation.loop}};
+    out["saved"] = {{"clip", e->animation.clip},
+                    {"speed", e->animation.speed},
+                    {"loop", e->animation.loop},
+                    {"matched", e->animation.matched}};
     const AnimationState::Animated* a = state.animation->find(id);
     out["animated"] = a != nullptr;
     if (a == nullptr) {
@@ -96,9 +99,18 @@ Json animation_json(const EditorState& state, world::EntityId id) {
             out["why"] = error;
         } else if (const std::string refused = state.animation->refused(id); !refused.empty()) {
             out["why"] = refused;
-        } else if (e->animation.clip.empty()) {
+        } else if (const std::string problem = state.animation->motion_problem(*e, *state.meshes);
+                   e->visible && !e->animation.matched.empty() && problem.empty()) {
+            out["why"] = "waiting for a place (at most " + std::to_string(state.animation->max_animated) +
+                         " animate at once): it stands in its rest pose";
+        } else if (e->visible && !problem.empty() &&
+                   (e->animation.clip.empty() || mesh->skinned->find_clip(e->animation.clip) == anim::k_no_clip)) {
+            out["why"] = mesh->path + " cannot be matched (" + problem +
+                         ") and has no clip to play instead: it stands in its rest pose";
+        } else if (const bool matchable = !e->animation.matched.empty() && problem.empty();
+                   !matchable && e->animation.clip.empty()) {
             out["why"] = "nothing to play: it stands in its rest pose";
-        } else if (mesh->skinned->find_clip(e->animation.clip) == anim::k_no_clip) {
+        } else if (!matchable && mesh->skinned->find_clip(e->animation.clip) == anim::k_no_clip) {
             out["why"] = mesh->path + " has no clip named \"" + e->animation.clip + "\": it stands in its rest pose";
         } else if (!e->visible) {
             out["why"] = "hidden";
@@ -110,6 +122,34 @@ Json animation_json(const EditorState& state, world::EntityId id) {
     }
     const MeshLibrary::Skinned& s = *a->skinned;
     out["by_command"] = a->by_command;
+    // Matched among its saved clips: how that stands, and what the matcher plays.
+    if (a->motion != nullptr) {
+        const AnimationState::Motion& m = *a->motion;
+        Json matching{{"state", AnimationState::motion_state(*a)}};
+        if (m.ready.load(std::memory_order_acquire)) {
+            if (!m.problem.empty()) matching["problem"] = m.problem;
+            if (!m.missing.empty()) matching["missing"] = m.missing; // names the file has no clip for
+            matching["frames"] = m.db.frames();
+            Json clips = Json::array();
+            for (const anim::MotionRange& r : m.db.ranges) {
+                clips.push_back({{"clip", s.clips[r.clip].name}, {"loop", r.loop}, {"frames", r.count}});
+            }
+            matching["clips"] = clips;
+        }
+        if (a->matching) {
+            matching["goal"] = {{"across", a->goal.across}, {"along", a->goal.along}, {"turn", a->goal.turn}};
+            if (a->matcher.playing() && a->matcher.frame() < m.db.frames()) {
+                matching["clip"] = s.clips[m.db.range_of(a->matcher.frame()).clip].name;
+                matching["time"] = a->matcher.seconds();
+                matching["frame"] = a->matcher.frame();
+                matching["cost"] = a->matcher.last_cost();
+                const anim::RootMotion root = a->matcher.root_motion(m.db);
+                matching["root_motion"] = {{"across", root.x}, {"along", root.z}, {"turn", root.yaw}};
+            }
+            matching["jumps"] = a->matcher.jumps();
+        }
+        out["matching"] = matching;
+    }
     out["main"] = clip_state_json(s, a->player.main());
     out["other"] = clip_state_json(s, a->player.other());
     out["other_weight"] = a->player.other_weight();
@@ -204,7 +244,13 @@ void register_animation_commands(ai::CommandRegistry& registry, EditorState& sta
          "(list_animations), looping or once, at a speed. An empty clip stands it in its rest pose (on an "
          "entity that cannot animate it clears the field). It starts playing at once, even when that is "
          "already what is saved (fading from what showed, if it was animated), replacing whatever "
-         "play_animation or blend_animations played. Undoable.",
+         "play_animation or blend_animations played. With `matched` it is motion matched instead: given "
+         "clips of the file that move its hips through model space (an idle, walks, runs, turns, stops), "
+         "the editor plays whichever fits the way the entity is being moved, frame by frame, with no clip "
+         "named for each case (one sent walking by walk_to stands, walks and runs by itself; anything "
+         "else stands); `clip` then plays only until the clips are "
+         "read, or when the file cannot be matched (its joints must be named Hips or pelvis, LeftFoot, "
+         "RightFoot or the like): get_animation's `matching` says. Undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"id", "clip"}},
@@ -212,7 +258,13 @@ void register_animation_commands(ai::CommandRegistry& registry, EditorState& sta
                {{"id", id_schema()},
                 {"clip", clip_schema("The clip's name; empty for none.")},
                 {"speed", speed_schema()},
-                {"loop", {{"type", "boolean"}, {"description", "Default true; false plays it once and holds the end."}}}}}},
+                {"loop", {{"type", "boolean"}, {"description", "Default true; false plays it once and holds the end."}}},
+                {"matched",
+                 {{"type", "array"},
+                  {"maxItems", world::k_max_matched_clips},
+                  {"items", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes}}},
+                  {"description", "Clips of the file to match among, or [\"*\"] for all of them; [] for none "
+                                  "(plain `clip` again). Left out: as it was."}}}}}},
          false,
          [&state](const Json& args, CommandContext& context) {
              const world::EntityId id = args["id"].get<world::EntityId>();
@@ -224,15 +276,31 @@ void register_animation_commands(ai::CommandRegistry& registry, EditorState& sta
              after.clip = args["clip"].get<std::string>();
              if (args.contains("speed")) after.speed = args["speed"].get<float>();
              if (args.contains("loop")) after.loop = args["loop"].get<bool>();
+             const bool matched_given = args.contains("matched");
+             if (matched_given) after.matched = args["matched"].get<std::vector<std::string>>();
              std::string error;
              const MeshLibrary::Mesh* mesh = skinned_of(state, id, error);
-             if (after.clip.empty() && mesh == nullptr) {
+             if (after.clip.empty() && mesh == nullptr && (!matched_given || after.matched.empty())) {
                  after = {}; // clearing what an entity that cannot animate has: back to none at all
-             } else if (!after.clip.empty()) {
+             } else if (!after.clip.empty() || (matched_given && !after.matched.empty())) {
                  if (mesh == nullptr) return CommandResult::failure(error);
-                 if (mesh->skinned->find_clip(after.clip) == anim::k_no_clip) {
+                 if (!after.clip.empty() && mesh->skinned->find_clip(after.clip) == anim::k_no_clip) {
                      return CommandResult::failure(mesh->path + " has no clip named \"" + after.clip +
                                                    "\"; list_animations shows them");
+                 }
+                 // (Checked when given; a list kept from before may name clips a new file lacks: left out.)
+                 const bool all = after.matched.size() == 1 && after.matched.front() == "*";
+                 for (usize i = 0; matched_given && !all && i < after.matched.size(); ++i) {
+                     const std::string& name = after.matched[i];
+                     if (name == "*") return CommandResult::failure("\"*\" (every clip) goes alone in `matched`");
+                     if (mesh->skinned->find_clip(name) == anim::k_no_clip) {
+                         return CommandResult::failure(mesh->path + " has no clip named \"" + name +
+                                                       "\"; list_animations shows them");
+                     }
+                     if (std::find(after.matched.begin(), after.matched.begin() + static_cast<std::ptrdiff_t>(i), name) !=
+                         after.matched.begin() + static_cast<std::ptrdiff_t>(i)) {
+                         return CommandResult::failure("\"" + name + "\" is in `matched` twice");
+                     }
                  }
              }
              const world::EntityAnimation before = found->animation;

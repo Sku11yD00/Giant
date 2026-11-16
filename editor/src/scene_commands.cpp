@@ -98,6 +98,7 @@ Json entity_json(const Entity& e) {
     }
     if (!(e.animation == world::EntityAnimation{})) {
         j["animation"] = {{"clip", e.animation.clip}, {"speed", e.animation.speed}, {"loop", e.animation.loop}}; // set_animation
+        if (!e.animation.matched.empty()) j["animation"]["matched"] = e.animation.matched;
     }
     const world::DecalSettings none;
     if (e.shape == world::Shape::decal || e.decal.shape != none.shape || e.decal.opacity != none.opacity ||

@@ -77,7 +77,7 @@ i64 cell_floor(double metres) { return static_cast<i64>(std::floor(metres / worl
 void nav_obstacles(const world::Scene& scene, const world::Entity& e, const render::Renderer* renderer,
                    const MeshLibrary* meshes, std::vector<nav::Obstacle>& out) {
     if (e.body != world::BodyKind::fixed || e.swing.on) return; // (hidden ones collide too)
-    if (e.shape == world::Shape::mesh && !e.animation.clip.empty()) return; // a character, moving
+    if (e.shape == world::Shape::mesh && (!e.animation.clip.empty() || !e.animation.matched.empty())) return; // a character, moving
     const world::Transform& t = e.transform;
     const Quat rot = normalize(t.rotation);
     if (e.shape != world::Shape::kit) {

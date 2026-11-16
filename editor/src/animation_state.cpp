@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 namespace giant::editor {
 
@@ -22,9 +23,129 @@ double phase_of(world::EntityId id) {
     return static_cast<double>((static_cast<u64>(id) * 0x9E3779B97F4A7C15ull) >> 11) * 0x1.0p-53;
 }
 
+// A number that is one, within `most` either way; else 0.
+float goal_number(float v, float most) { return std::isfinite(v) ? std::clamp(v, -most, most) : 0.0f; }
+
+// The database of `m`'s clips (a build job's whole work).
+void build_motion(AnimationState::Motion& m) {
+    const MeshLibrary::Skinned& s = *m.skinned;
+    const anim::MotionJoints joints = anim::find_motion_joints(s.skeleton);
+    std::vector<anim::MotionClip> chosen;
+    if (m.names.size() == 1 && m.names.front() == "*") {
+        for (u32 c = 0; c < s.clips.size(); ++c) chosen.push_back({c, false});
+    } else {
+        for (const std::string& name : m.names) {
+            const u32 c = s.find_clip(name);
+            if (c == anim::k_no_clip) {
+                m.missing.push_back(name);
+            } else if (std::none_of(chosen.begin(), chosen.end(),
+                                    [c](const anim::MotionClip& had) { return had.clip == c; })) {
+                chosen.push_back({c, false});
+            }
+        }
+    }
+    if (!joints.found()) {
+        m.problem = "its hips and feet were not found by their names (Hips or pelvis, LeftFoot, RightFoot or the like)";
+    } else if (chosen.empty()) {
+        m.problem = "it has none of the clips to match among";
+    } else {
+        for (anim::MotionClip& c : chosen) c.loop = anim::clip_loops(s.skeleton, s.clips[c.clip], joints);
+        m.problem = anim::build_motion_database(s.skeleton, s.clips, chosen, joints, anim::MotionSettings{}, m.db);
+    }
+    m.ready.store(true, std::memory_order_release);
+}
+
 } // namespace
 
-AnimationState::AnimationState(render::Renderer* renderer) : m_renderer(renderer), m_jobs(k_workers) {}
+AnimationState::AnimationState(render::Renderer* renderer)
+    : m_renderer(renderer), m_jobs(k_workers), m_build_jobs(1) {}
+
+void AnimationState::set_goal(world::EntityId id, const MotionGoal& goal) {
+    // (Faster than anything walks; more than a turn right round.)
+    const auto it = m_animated.find(id);
+    if (it == m_animated.end()) return; // (not animated: nothing to steer)
+    it->second->goal = {goal_number(goal.across, 100.0f), goal_number(goal.along, 100.0f),
+                        goal_number(goal.turn, 6.2831853f)};
+    it->second->goal_set = true;
+}
+
+AnimationState::MotionGoal AnimationState::goal_of(const Vec3& velocity, float yaw) {
+    const float s = std::sin(yaw);
+    const float c = std::cos(yaw);
+    return {velocity.x * c - velocity.z * s, velocity.x * s + velocity.z * c, 0.0f};
+}
+
+void AnimationState::finish_motions() {
+    hold_builds(false);
+    m_build_jobs.wait(m_building);
+}
+
+std::string AnimationState::motion_problem(const world::Entity& e, const MeshLibrary& meshes) const {
+    // (Hidden or not.)
+    const MeshLibrary::Mesh* mesh = e.shape == world::Shape::mesh ? meshes.find_normalized(e.mesh) : nullptr;
+    if (mesh == nullptr || mesh->skinned == nullptr || e.animation.matched.empty()) return {};
+    const auto it = m_motions.find({mesh->skinned.get(), e.animation.matched});
+    if (it == m_motions.end() || !it->second->ready.load(std::memory_order_acquire)) return {};
+    return it->second->problem;
+}
+
+const char* AnimationState::motion_state(const Animated& a) {
+    if (a.motion == nullptr) return "";
+    if (!a.motion->ready.load(std::memory_order_acquire)) return "building";
+    if (!a.motion->problem.empty()) return "problem";
+    if (a.by_command) return "command";
+    return a.matching ? "matching" : "ready"; // (built: matching from a coming update, a few a frame)
+}
+
+void AnimationState::release_motion(Animated& a) {
+    a.matching = false;
+    if (a.motion == nullptr) return;
+    // (A build not yet begun is then skipped; one running keeps its own hold and ends unseen.)
+    const bool unmatchable = a.motion->ready.load(std::memory_order_acquire) && !a.motion->problem.empty();
+    if (--a.motion->users == 0 && !unmatchable) m_motions.erase({a.motion->skinned.get(), a.motion->names});
+    a.motion.reset();
+}
+
+void AnimationState::match() {
+    u32 begun = 0;
+    m_unmatched.clear();
+    for (const auto& [id, a] : m_animated) {
+        Motion* m = a->motion.get();
+        const bool ready = m != nullptr && m->ready.load(std::memory_order_acquire);
+        if (ready && !m->reported) {
+            m->reported = true;
+            if (!m->problem.empty()) {
+                log_warning("editor", "animation: " + a->mesh->path + " cannot be matched: " + m->problem);
+            }
+        }
+        if (ready && !m->problem.empty() && !m_commanded.contains(id) &&
+            (a->saved.clip.empty() || a->skinned->find_clip(a->saved.clip) == anim::k_no_clip)) {
+            m_unmatched.push_back(id); // nothing to play after all: its place goes to another
+            continue;
+        }
+        const bool can = ready && m->problem.empty() && !a->by_command;
+        if (can == a->matching) continue;
+        if (!can) {
+            a->matching = false;
+            a->dirty = true;
+            continue;
+        }
+        // From the saved clip (or a command's play) to the matcher: a first
+        // frame picked afresh, posed now. A few a frame: a crowd whose
+        // database arrives is not all searched on one.
+        if (begun >= matches_per_frame) continue;
+        ++begun;
+        a->matching = true;
+        a->dirty = true;
+        a->matcher.reset();
+        a->match_seconds = 0.0;
+        a->player.stop();
+    }
+    for (const world::EntityId id : m_unmatched) {
+        m_wanted.erase(id);
+        stop(id);
+    }
+}
 
 double AnimationState::pose_interval(float pixels) {
     if (!(pixels < 100.0f)) return 0.0; // (NaN too) every frame
@@ -65,6 +186,10 @@ void AnimationState::lod(const world::Scene& scene) {
 }
 
 AnimationState::~AnimationState() {
+    // Builds not begun are skipped (no one holds them); one running ends first (it holds its own data).
+    for (const auto& [id, a] : m_animated) a->motion.reset();
+    m_motions.clear();
+    finish_motions();
     if (m_renderer != nullptr) {
         for (const auto& [id, a] : m_animated) m_renderer->remove_mesh(a->copy);
     }
@@ -80,6 +205,14 @@ bool AnimationState::wants(const world::Entity& e, const MeshLibrary& meshes) co
     const MeshLibrary::Mesh* mesh = skinned_mesh(e, meshes);
     if (mesh == nullptr) return false;
     if (m_commanded.contains(e.id)) return true;
+    // Matched: unless its file is known not to be (then by its clip, as any other).
+    if (!e.animation.matched.empty()) {
+        const auto motion = m_motions.find({mesh->skinned.get(), e.animation.matched});
+        if (motion == m_motions.end() || !motion->second->ready.load(std::memory_order_acquire) ||
+            motion->second->problem.empty()) {
+            return true;
+        }
+    }
     return !e.animation.clip.empty() && mesh->skinned->find_clip(e.animation.clip) != anim::k_no_clip;
 }
 
@@ -204,6 +337,7 @@ void AnimationState::stop(world::EntityId id) {
         m_copies.erase(id);
         m_redraw.push_back(id);
     }
+    release_motion(*it->second);
     if (m_renderer != nullptr) {
         m_renderer->remove_mesh(it->second->copy);
         const auto same = m_copies_of.find(it->second->skinned.get());
@@ -230,6 +364,23 @@ void AnimationState::play_saved(Animated& a, float fade) {
     a.player.set_speed(a.saved.speed);
     a.dirty = true;
     a.fresh = true;
+    // Its database: kept when it is matched among the same clips still.
+    a.matching = false; // (match() takes it up again, from a first frame)
+    if (a.motion != nullptr && a.motion->names == a.saved.matched) return;
+    release_motion(a);
+    if (a.saved.matched.empty()) return;
+    std::shared_ptr<Motion>& held = m_motions[{a.skinned.get(), a.saved.matched}];
+    if (held == nullptr) {
+        held = std::make_shared<Motion>();
+        held->skinned = a.skinned;
+        held->names = a.saved.matched;
+        m_build_jobs.submit(m_building, [motion = held, hold = m_hold] {
+            while (hold->load(std::memory_order_acquire)) std::this_thread::yield(); // (tests)
+            if (motion.use_count() > 1) build_motion(*motion); // (else no one waits for it any more)
+        });
+    }
+    ++held->users;
+    a.motion = held;
 }
 
 AnimationState::Animated* AnimationState::animate_now(const world::Scene& scene, const MeshLibrary& meshes,
@@ -260,6 +411,7 @@ std::string AnimationState::play(const world::Scene& scene, const MeshLibrary& m
     m_commanded.insert(id);
     m_wanted.insert(id);
     a->by_command = true;
+    a->matching = false; // the command's play shows, not the matcher's
     const float from = start >= 0.0f ? start : start_of(a->skinned->clips[index], loop, speed);
     a->player.play(a->skinned->skeleton, a->skinned->clips, index, blend_seconds, loop, from);
     a->player.set_speed(speed);
@@ -285,6 +437,7 @@ std::string AnimationState::blend(const world::Scene& scene, const MeshLibrary& 
     m_commanded.insert(id);
     m_wanted.insert(id);
     a->by_command = true;
+    a->matching = false;
     a->player.set_blend(a->skinned->clips, ia, ib, weight, sync);
     a->dirty = true;
     a->fresh = false;
@@ -338,6 +491,12 @@ void AnimationState::fill(const world::Scene& scene, const MeshLibrary& meshes) 
     for (const world::EntityId id : m_wanted) {
         if (m_animated.size() >= max_animated || made >= copies_per_frame) break;
         if (m_animated.contains(id) || m_refused.contains(id)) continue;
+        // (Wanted while its database was built, which then could not be: not started to be stopped again.)
+        const world::Entity* e = scene.find(id);
+        if (e == nullptr || !wants(*e, meshes)) {
+            failed.push_back(id);
+            continue;
+        }
         std::string error;
         if (start(scene, meshes, id, error) == nullptr) {
             log_warning("editor", "animation: " + error);
@@ -356,6 +515,11 @@ void AnimationState::advance(double seconds) {
     for (const auto& [id, a] : m_animated) {
         a->since_pose += seconds;
         if (a->fresh) continue; // started this update: from its start
+        if (a->matching) {
+            a->match_seconds += seconds; // the matcher is moved on when it is posed
+            a->changed = true;
+            continue;
+        }
         const anim::ClipState main = a->player.main();
         const anim::ClipState other = a->player.other();
         const float weight = a->player.other_weight();
@@ -370,6 +534,7 @@ void AnimationState::advance(double seconds) {
 }
 
 void AnimationState::step(double seconds) {
+    match();
     for (const auto& [id, a] : m_animated) a->fresh = false; // by hand: all of them
     advance(seconds);
     for (const auto& [id, a] : m_animated) a->dirty = a->dirty || a->changed; // by hand: posed now
@@ -427,7 +592,19 @@ void AnimationState::pose(Timed timed) {
             for (usize i = begin; i < end; ++i) {
                 Animated& a = *m_work[i];
                 const MeshLibrary::Skinned& s = *a.skinned;
-                a.player.evaluate(s.skeleton, s.clips, a.scratch, a.local);
+                if (a.matching) {
+                    // Moved on by the time since it was last posed. The way ahead is its goal's, held
+                    // from now on: whoever moves the entity moves it so already (a walker's body does
+                    // not wait for its clip), and the clips are to catch up with it, not it with them.
+                    const anim::MotionDatabase& db = a.motion->db;
+                    const anim::MotionAhead ahead = anim::motion_ahead(db.settings, {a.goal.across, a.goal.along},
+                                                                       {a.goal.across, a.goal.along}, a.goal.turn);
+                    a.matcher.update(db, s.skeleton, s.clips, ahead, static_cast<float>(std::min(a.match_seconds, 1.0)));
+                    a.match_seconds = 0.0;
+                    a.matcher.evaluate(db, s.skeleton, s.clips, a.local);
+                } else {
+                    a.player.evaluate(s.skeleton, s.clips, a.scratch, a.local);
+                }
                 anim::model_matrices(s.skeleton, a.local, a.model);
                 anim::skin_matrices(s.skeleton, a.model, a.skin);
                 const anim::Bounds b = anim::pose_bounds(a.model, a.skin, s.joint_radius);
@@ -494,16 +671,27 @@ void AnimationState::run(const world::Scene& scene, const MeshLibrary& meshes, c
         for (const auto& [id, a] : m_animated) ids.push_back(id);
         for (const world::EntityId id : ids) stop(id);
         m_wanted.clear();
+        m_motions.clear(); // (those kept for what they could not do)
         m_refused.clear();
         m_skinned.clear();
         follow_all(scene, meshes);
     } else if (changed.all || meshes.version() != m_meshes_version) {
         m_meshes_version = meshes.version();
+        // What was kept for a file since imported again (or dropped) goes: it holds the old file.
+        std::erase_if(m_motions, [](const auto& held) { return held.second->users == 0; });
         follow_all(scene, meshes);
     } else {
         for (const world::EntityId id : changed.ids) follow(scene, meshes, id, true);
     }
     fill(scene, meshes);
+    match();
+    if (by_frame) {
+        // This frame's goals; one with none stands.
+        for (const auto& [id, a] : m_animated) {
+            if (!a->goal_set) a->goal = {};
+            a->goal_set = false;
+        }
+    }
     const bool moves = !m_paused && seconds > 0.0;
     if (moves) advance(seconds);
     if (by_frame) lod(scene); // (screen sizes: once a frame)

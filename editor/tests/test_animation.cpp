@@ -5,6 +5,7 @@
 #include "../src/hit_targets.h"
 #include "../src/physics_state.h"
 #include "../src/mesh_library.h"
+#include "../src/nav_state.h"
 #include "../src/scene_render.h"
 
 #include "giant_test.h"
@@ -166,7 +167,7 @@ GIANT_TEST("animation: set_animation saves the clip, undoes, and refuses what ca
     const world::EntityId cube = f.run("create_entity").value["id"].get<world::EntityId>();
     const auto set = f.run("set_animation", {{"id", arm}, {"clip", "bend"}, {"speed", 0.5}, {"loop", false}});
     GIANT_CHECK(set.ok && set.value["animated"].get<bool>());
-    GIANT_CHECK(f.state.scene.find(arm)->animation == (world::EntityAnimation{"bend", 0.5f, false}));
+    GIANT_CHECK(f.state.scene.find(arm)->animation == (world::EntityAnimation{"bend", 0.5f, false, {}}));
     const auto entity = f.run("get_entity", {{"id", arm}});
     GIANT_CHECK(entity.ok && entity.value["animation"]["clip"] == "bend");
     // Saved with the scene.
@@ -854,4 +855,367 @@ GIANT_TEST("animation: morph targets: listed, played by clips, held by set_morph
         f.frame_step(0.25);
         GIANT_CHECK(f.get(big)["poses"].get<u64>() > poses); // handed to the renderer
     }
+}
+
+namespace {
+
+// The walker (geometry tests): Hips, LeftFoot and RightFoot; clips "idle",
+// "walk" (1.4 m/s), "run" (4 m/s) and "wave" (once).
+std::string walker_file() {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "giant_animation_tests";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path = dir / "walker.glb";
+    const std::vector<u8> bytes = geometry::testing::skinned_walker();
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
+                                                static_cast<std::streamsize>(bytes.size()));
+    return path.generic_string();
+}
+
+// Frames of a thirtieth of a second for `seconds`, going `along` m/s (0: no goal set, which stands).
+void go(Fixture& f, world::EntityId id, float along, double seconds) {
+    for (int i = 0; i < static_cast<int>(seconds * 30.0 + 0.5); ++i) {
+        if (along != 0.0f) f.animation->set_goal(id, {0.0f, along, 0.0f});
+        f.frame_step(1.0 / 30.0);
+    }
+}
+
+} // namespace
+
+GIANT_TEST("animation: an entity matched among its clips stands, walks and runs as its goal has it") {
+    Fixture f;
+    f.arm = walker_file();
+    const world::EntityId id = f.add_arm();
+    const auto set = f.run("set_animation", {{"id", id}, {"clip", "idle"}, {"matched", {"idle", "walk", "run"}}});
+    GIANT_CHECK(set.ok && set.value["animated"].get<bool>());
+    if (!set.ok) return;
+    GIANT_CHECK(set.value["saved"]["matched"] == Json({"idle", "walk", "run"}));
+    GIANT_CHECK(set.value["matching"]["state"] == "building" || set.value["matching"]["state"] == "matching");
+    f.animation->finish_motions();
+    f.frame_step(1.0 / 30.0);
+    Json a = f.get(id);
+    GIANT_CHECK(a["matching"]["state"] == "matching" && a["matching"]["clip"] == "idle");
+    GIANT_CHECK(a["main"].is_null()); // the saved clip plays no more
+    GIANT_CHECK(a["matching"]["clips"].size() == 3 && a["matching"]["clips"][1]["clip"] == "walk" &&
+                a["matching"]["clips"][1]["loop"].get<bool>() && a["matching"]["clips"][1]["frames"].get<u32>() == 30);
+    GIANT_CHECK(a["matching"]["frames"].get<u32>() == 30 + 30 + 15 && !a["matching"].contains("problem"));
+
+    const AnimationState::Animated* walker = f.animation->find(id);
+    GIANT_CHECK(walker != nullptr && walker->matching);
+    if (walker == nullptr) return;
+    const auto hips = [walker] { return walker->model[0].column(3); };
+    const auto left = [walker] { return walker->model[1].column(3); };
+
+    // Sent walking: the walk plays, its travel taken out (the hips stay over the origin) while the feet swing.
+    go(f, id, 1.4f, 1.0);
+    a = f.get(id);
+    GIANT_CHECK(a["matching"]["clip"] == "walk" && near(a["matching"]["goal"]["along"].get<double>(), 1.4));
+    GIANT_CHECK(near(a["matching"]["root_motion"]["along"].get<double>(), 1.4, 0.05));
+    float reach = 0.0f;
+    float drift = 0.0f;
+    const u64 poses = walker->poses;
+    for (int i = 0; i < 30; ++i) {
+        go(f, id, 1.4f, 1.0 / 30.0);
+        reach = std::max(reach, std::fabs(left().z));
+        drift = std::max(drift, std::fabs(hips().z) + std::fabs(hips().x));
+    }
+    GIANT_CHECK(reach > 0.25f && reach < 0.35f);
+    GIANT_CHECK(drift < 0.02f && near(hips().y, 1.0));
+    GIANT_CHECK(walker->poses > poses + 20);
+    GIANT_CHECK(f.get(id)["matching"]["clip"] == "walk");
+
+    // Faster: the run. No goal: it stands again.
+    go(f, id, 4.0f, 1.0);
+    a = f.get(id);
+    GIANT_CHECK(a["matching"]["clip"] == "run" && a["matching"]["jumps"].get<u64>() >= 2);
+    go(f, id, 0.0f, 1.0);
+    a = f.get(id);
+    GIANT_CHECK(a["matching"]["clip"] == "idle" && near(a["matching"]["goal"]["along"].get<double>(), 0.0));
+    // A goal that is no number stands too.
+    f.animation->set_goal(id, {std::nanf(""), std::nanf(""), std::nanf("")});
+    f.frame_step(1.0 / 30.0);
+    GIANT_CHECK(near(f.get(id)["matching"]["goal"]["along"].get<double>(), 0.0) && std::isfinite(hips().y));
+
+    // Goals are kept within what moves and turns.
+    f.animation->set_goal(id, {-1000.0f, 1000.0f, 50.0f});
+    f.frame_step(0.0);
+    a = f.get(id);
+    GIANT_CHECK(near(a["matching"]["goal"]["across"].get<double>(), -100.0) &&
+                near(a["matching"]["goal"]["along"].get<double>(), 100.0) &&
+                near(a["matching"]["goal"]["turn"].get<double>(), 6.2831853, 1e-4));
+    // A walker's goal is its velocity seen from where it faces.
+    const AnimationState::MotionGoal ahead = AnimationState::goal_of({1.0f, 0.3f, 1.0f}, 0.7853982f);
+    GIANT_CHECK(near(ahead.along, std::sqrt(2.0)) && near(ahead.across, 0.0) && ahead.turn == 0.0f);
+    const AnimationState::MotionGoal side = AnimationState::goal_of({2.0f, 0.0f, 0.0f}, 0.0f); // facing +z, pushed to +x
+    GIANT_CHECK(near(side.across, 2.0) && near(side.along, 0.0));
+    const AnimationState::MotionGoal behind = AnimationState::goal_of({2.0f, 0.0f, 0.0f}, -1.5707963f); // facing -x
+    GIANT_CHECK(near(behind.along, -2.0) && near(behind.across, 0.0));
+
+    // Paused, nothing moves; a step by hand moves the matcher.
+    go(f, id, 1.4f, 1.0);
+    GIANT_CHECK(f.run("step_animation", {{"paused", true}}).ok);
+    const double before = f.get(id)["matching"]["time"].get<double>();
+    go(f, id, 1.4f, 0.2);
+    GIANT_CHECK(near(f.get(id)["matching"]["time"].get<double>(), before, 1e-6));
+    GIANT_CHECK(f.run("step_animation", {{"seconds", 0.1}}).ok);
+    const double after = f.get(id)["matching"]["time"].get<double>();
+    GIANT_CHECK(near(std::fmod(after - before + 1.0, 1.0), 0.1, 0.035));
+    GIANT_CHECK(f.run("step_animation", {{"paused", false}}).ok);
+
+    // A command's play takes over; set_animation hands it back to the matcher.
+    const auto played = f.run("play_animation", {{"id", id}, {"clip", "wave"}, {"blend_seconds", 0.0}});
+    GIANT_CHECK(played.ok && played.value["matching"]["state"] == "command" && played.value["main"]["clip"] == "wave");
+    GIANT_CHECK(!walker->matching && near(left().y, 0.0, 1e-4) && near(left().z, 0.0, 1e-4)); // the wave's start, at once
+    go(f, id, 1.4f, 0.5);
+    GIANT_CHECK(near(left().y, 0.5, 0.01) && f.get(id)["matching"]["state"] == "command");
+    const auto back = f.run("set_animation", {{"id", id}, {"clip", "idle"}});
+    GIANT_CHECK(back.ok && back.value["matching"]["state"] == "matching" && back.value["saved"]["matched"].size() == 3);
+    go(f, id, 1.4f, 0.5);
+    GIANT_CHECK(f.get(id)["matching"]["clip"] == "walk" && near(left().y, 0.0, 0.02));
+
+    // An empty list: the plain clip again, its database let go.
+    GIANT_CHECK(f.animation->motions() == 1);
+    const auto plain = f.run("set_animation", {{"id", id}, {"clip", "walk"}, {"matched", Json::array()}});
+    GIANT_CHECK(plain.ok && !plain.value.contains("matching") && plain.value["main"]["clip"] == "walk");
+    GIANT_CHECK(f.animation->motions() == 0 && !walker->matching);
+    GIANT_CHECK(f.commands.undo()); // matched again
+    f.frame_step(0.0);
+    f.animation->finish_motions();
+    go(f, id, 0.0f, 0.2);
+    GIANT_CHECK(f.get(id)["matching"]["state"] == "matching" && f.get(id)["matching"]["clip"] == "idle");
+}
+
+GIANT_TEST("animation: a file that cannot be matched plays its saved clip, and says why") {
+    Fixture f;
+    // No hips or feet by name: the arm.
+    const world::EntityId arm = f.add_arm();
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "bend"}, {"matched", {"*"}}}).ok);
+    f.animation->finish_motions();
+    f.frame_step(0.25);
+    f.frame_step(0.25);
+    Json a = f.get(arm);
+    GIANT_CHECK(a["matching"]["state"] == "problem" && a["main"]["clip"] == "bend" && a["main"]["time"].get<double>() > 0.2);
+    GIANT_CHECK(a["matching"]["problem"].get<std::string>().find("hips and feet") != std::string::npos);
+    GIANT_CHECK(!f.animation->find(arm)->matching);
+
+    // Only a clip played once, as long as the look ahead: no frame to start from.
+    f.arm = walker_file();
+    const world::EntityId waver = f.add_arm(3.0);
+    GIANT_CHECK(f.run("set_animation", {{"id", waver}, {"clip", "wave"}, {"loop", false}, {"matched", {"wave"}}}).ok);
+    f.animation->finish_motions();
+    f.frame_step(0.25);
+    a = f.get(waver);
+    GIANT_CHECK(a["matching"]["state"] == "problem" && !a["matching"]["problem"].get<std::string>().empty() &&
+                a["main"]["clip"] == "wave");
+
+    // No clip to fall back on: it is animated all the same, and stands at rest until matched.
+    const world::EntityId bare = f.add_arm(6.0);
+    const auto set = f.run("set_animation", {{"id", bare}, {"clip", ""}, {"matched", {"*"}}});
+    GIANT_CHECK(set.ok && set.value["animated"].get<bool>());
+    f.animation->finish_motions();
+    f.frame_step(0.1);
+    a = f.get(bare);
+    GIANT_CHECK(a["matching"]["state"] == "matching" && a["matching"]["clips"].size() == 4 &&
+                !a["matching"]["clips"][3]["loop"].get<bool>() && a["matching"]["clip"] == "idle");
+}
+
+GIANT_TEST("animation: set_animation checks the clips to match among; entities of a file and list share a database") {
+    Fixture f;
+    f.arm = walker_file();
+    const world::EntityId one = f.add_arm();
+    const world::EntityId two = f.add_arm(2.0);
+    const world::EntityId three = f.add_arm(4.0);
+    const world::EntityId cube = f.run("create_entity").value["id"].get<world::EntityId>();
+    const auto refused = [&f](world::EntityId id, const Json& matched, const char* expected) {
+        const auto r = f.run("set_animation", {{"id", id}, {"clip", ""}, {"matched", matched}});
+        GIANT_CHECK(!r.ok && r.error.find(expected) != std::string::npos);
+        if (r.ok || r.error.find(expected) == std::string::npos) std::fprintf(stderr, "    %s\n", r.error.c_str());
+    };
+    refused(one, {"idle", "trot"}, "has no clip named \"trot\"");
+    refused(one, {"idle", "*"}, "goes alone");
+    refused(one, {"idle", "walk", "idle"}, "\"idle\" is in `matched` twice");
+    refused(cube, {"idle"}, "is not a mesh");
+    GIANT_CHECK(!f.run("set_animation", {{"id", one}, {"clip", ""}, {"matched", {""}}}).ok);
+    GIANT_CHECK(!f.run("set_animation", {{"id", one}, {"clip", ""}, {"matched", "idle"}}).ok);
+    GIANT_CHECK(f.state.scene.find(one)->animation == world::EntityAnimation{} && f.animation->motions() == 0);
+    // Nothing to clear on one that cannot animate.
+    GIANT_CHECK(f.run("set_animation", {{"id", cube}, {"clip", ""}, {"matched", Json::array()}}).ok);
+
+    const Json list{"idle", "walk"};
+    GIANT_CHECK(f.run("set_animation", {{"id", one}, {"clip", ""}, {"matched", list}}).ok);
+    GIANT_CHECK(f.run("set_animation", {{"id", two}, {"clip", "idle"}, {"matched", list}}).ok);
+    GIANT_CHECK(f.animation->motions() == 1);
+    GIANT_CHECK(f.animation->find(one)->motion == f.animation->find(two)->motion);
+    GIANT_CHECK(f.run("set_animation", {{"id", three}, {"clip", ""}, {"matched", {"*"}}}).ok);
+    GIANT_CHECK(f.animation->motions() == 2);
+    // Saved with the scene, and shown on the entity.
+    const auto entity = f.run("get_entity", {{"id", one}});
+    GIANT_CHECK(entity.ok && entity.value["animation"]["matched"] == list);
+    world::Scene loaded;
+    GIANT_CHECK(!world::load_scene(world::save_scene(f.state.scene), loaded).has_value() &&
+                loaded.find(one)->animation.matched == std::vector<std::string>({"idle", "walk"}));
+    // Only speed changed: the same database, kept.
+    const auto* motion = f.animation->find(one)->motion.get();
+    GIANT_CHECK(f.run("set_animation", {{"id", one}, {"clip", ""}, {"speed", 2.0}}).ok);
+    GIANT_CHECK(f.animation->find(one)->motion.get() == motion);
+    // Let go with its last entity (hidden, removed, or matched no more).
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {one}}}).ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.animation->motions() == 2 && f.animation->find(one) == nullptr);
+    GIANT_CHECK(f.run("set_entity", {{"id", two}, {"visible", false}}).ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.animation->motions() == 1);
+    GIANT_CHECK(f.commands.undo());
+    f.frame_step(0.0);
+    GIANT_CHECK(f.animation->motions() == 2);
+    f.animation->finish_motions();
+    f.frame_step(0.1);
+    GIANT_CHECK(f.get(two)["matching"]["state"] == "matching" && f.get(two)["matching"]["frames"].get<u32>() == 60);
+    // A new scene lets all go (builds still running end unseen).
+    GIANT_CHECK(f.run("new_scene").ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.animation->motions() == 0 && f.animation->animated() == 0);
+}
+
+GIANT_TEST("animation: matched entities are posed for the renderer, far ones less often") {
+    Fixture f(true);
+    f.arm = walker_file();
+    const world::EntityId id = f.add_arm();
+    GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", "idle"}, {"matched", {"*"}}}).ok);
+    f.animation->finish_motions();
+    go(f, id, 1.4f, 1.0);
+    const AnimationState::Animated* a = f.animation->find(id);
+    GIANT_CHECK(a != nullptr && a->matching && a->drawn && f.get(id)["matching"]["clip"] == "walk");
+    if (a == nullptr) return;
+    const u64 poses = a->poses;
+    go(f, id, 1.4f, 1.0);
+    GIANT_CHECK(a->poses >= poses + 25);
+    // Small on screen: four poses a second, the matcher moved on by the time between.
+    render::View view;
+    view.position = {0.0, 1.0, 2000.0};
+    f.animation->set_view(view, 1080);
+    go(f, id, 1.4f, 0.5);
+    const u64 far_poses = a->poses;
+    const double time = f.get(id)["matching"]["time"].get<double>();
+    go(f, id, 1.4f, 1.0);
+    GIANT_CHECK(a->poses - far_poses >= 3 && a->poses - far_poses <= 5);
+    GIANT_CHECK(near(f.get(id)["matching"]["time"].get<double>(), time, 0.3)); // a second on: round the walk once
+    GIANT_CHECK(f.get(id)["matching"]["clip"] == "walk");
+}
+
+GIANT_TEST("animation: the saved clip plays while a database is built; a crowd comes to matching a few a frame") {
+    Fixture f;
+    f.arm = walker_file();
+    f.animation->hold_builds(true);
+    std::vector<world::EntityId> ids;
+    for (int i = 0; i < 5; ++i) ids.push_back(f.add_arm(2.0 * i));
+    for (const world::EntityId id : ids) {
+        GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", "walk"}, {"matched", {"idle", "walk", "run"}}}).ok);
+    }
+    for (int i = 0; i < 6; ++i) f.frame_step(0.1);
+    Json a = f.get(ids[0]);
+    GIANT_CHECK(a["matching"]["state"] == "building" && !a["matching"].contains("frames"));
+    GIANT_CHECK(a["main"]["clip"] == "walk" && near(a["main"]["time"].get<double>(), 0.5, 0.11));
+    GIANT_CHECK(!f.animation->find(ids[0])->matching && f.animation->motions() == 1);
+    // A step by hand takes a database that has arrived up at once.
+    f.animation->matches_per_frame = 2;
+    f.animation->finish_motions();
+    const auto matching = [&f, &ids] {
+        usize n = 0;
+        for (const world::EntityId id : ids) n += f.animation->find(id)->matching ? usize{1} : usize{0};
+        return n;
+    };
+    GIANT_CHECK(matching() == 0);
+    f.frame_step(0.1);
+    GIANT_CHECK(matching() == 2 && f.animation->find(ids[0])->matching && !f.animation->find(ids[4])->matching &&
+                f.animation->find(ids[4])->player.main().clip == 1); // the walk still
+    f.frame_step(0.1);
+    GIANT_CHECK(matching() == 4);
+    GIANT_CHECK(f.run("step_animation", {{"seconds", 0.1}}).ok);
+    GIANT_CHECK(matching() == 5 && f.get(ids[4])["matching"]["clip"] == "idle" && f.get(ids[4])["main"].is_null());
+
+    // One let go before its build began is not built at all.
+    f.animation->hold_builds(true);
+    const world::EntityId late = f.add_arm(20.0);
+    GIANT_CHECK(f.run("set_animation", {{"id", late}, {"clip", "walk"}, {"matched", {"run"}}}).ok);
+    const std::weak_ptr<AnimationState::Motion> motion = f.animation->find(late)->motion;
+    const AnimationState::Motion* raw = f.animation->find(late)->motion.get();
+    GIANT_CHECK(f.run("set_animation", {{"id", late}, {"clip", "walk"}, {"matched", Json::array()}}).ok);
+    GIANT_CHECK(f.animation->motions() == 1 && motion.use_count() == 1); // the job's alone
+    GIANT_CHECK(!raw->ready.load() && raw->db.frames() == 0);
+    f.animation->finish_motions();
+    GIANT_CHECK(motion.expired());
+}
+
+GIANT_TEST("animation: one that cannot be matched and has no clip takes no place") {
+    Fixture f;
+    f.animation->max_animated = 1;
+    f.animation->hold_builds(true);
+    const world::EntityId arm = f.add_arm(); // no hips or feet by name
+    const auto set = f.run("set_animation", {{"id", arm}, {"clip", ""}, {"matched", {"*"}}});
+    GIANT_CHECK(set.ok && set.value["animated"].get<bool>()); // until that is known
+    f.arm = walker_file();
+    const world::EntityId walker = f.add_arm(3.0);
+    GIANT_CHECK(f.run("set_animation", {{"id", walker}, {"clip", ""}, {"matched", {"*"}}}).ok);
+    Json waiting = f.get(walker);
+    GIANT_CHECK(!waiting["animated"].get<bool>() && waiting["why"].get<std::string>().find("waiting for a place") == 0);
+    f.animation->finish_motions();
+    f.frame_step(0.1);
+    f.frame_step(0.1);
+    Json a = f.get(arm);
+    GIANT_CHECK(!a["animated"].get<bool>() && a["why"].get<std::string>().find("cannot be matched (its hips and feet") !=
+                                                   std::string::npos);
+    GIANT_CHECK(f.animation->find(arm) == nullptr && f.animation->frozen() == 0 && f.animation->waiting() == 0);
+    f.animation->finish_motions(); // (the walker's, begun when it got the place)
+    f.frame_step(0.1);
+    GIANT_CHECK(f.get(walker)["matching"]["state"] == "matching"); // its place went to the one that can
+    // Not built again each time it is asked for: what could not be done is kept (until a new scene).
+    GIANT_CHECK(f.animation->motions() == 2);
+    GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", ""}, {"matched", {"*"}}}).ok);
+    f.frame_step(0.1);
+    GIANT_CHECK(f.animation->find(arm) == nullptr && f.animation->motions() == 2);
+    // A crowd of them, wanted while that was not yet known, is not started to be stopped again.
+    {
+        Fixture crowd;
+        crowd.animation->max_animated = 2;
+        crowd.animation->hold_builds(true);
+        std::vector<world::EntityId> ids;
+        for (int i = 0; i < 12; ++i) {
+            ids.push_back(crowd.add_arm(2.0 * i));
+            crowd.state.scene.modify(ids.back())->animation.matched = {"*"}; // as loaded
+        }
+        crowd.frame_step(0.1);
+        GIANT_CHECK(crowd.animation->animated() == 2 && crowd.animation->frozen() == 10);
+        crowd.animation->finish_motions();
+        crowd.frame_step(0.1); // the two stopped
+        crowd.frame_step(0.1); // the rest let go, none started
+        GIANT_CHECK(crowd.animation->animated() == 0 && crowd.animation->frozen() == 0 && crowd.animation->waiting() == 0);
+        GIANT_CHECK(crowd.animation->motions() == 1);
+        // Meshes imported again: what was kept for the old file goes.
+        GIANT_CHECK(crowd.run("import_mesh", {{"path", crowd.arm}, {"reload", true}}).ok);
+        crowd.animation->hold_builds(true);
+        crowd.frame_step(0.1);
+        GIANT_CHECK(crowd.animation->motions() == 1 && crowd.animation->animated() == 2); // the new file's, asked afresh
+        crowd.animation->finish_motions();
+    }
+    // A hidden one says so only when it would have played.
+    GIANT_CHECK(f.run("set_entity", {{"id", arm}, {"visible", false}}).ok);
+    GIANT_CHECK(f.get(arm)["why"] == "nothing to play: it stands in its rest pose");
+    GIANT_CHECK(f.run("set_entity", {{"id", walker}, {"visible", false}}).ok);
+    GIANT_CHECK(f.get(walker)["why"] == "hidden");
+    GIANT_CHECK(f.run("new_scene").ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.animation->motions() == 0);
+}
+
+GIANT_TEST("animation: a matched character is no obstacle to walk round, as one playing a clip is none") {
+    Fixture f;
+    f.arm = walker_file();
+    const world::EntityId id = f.add_arm();
+    std::vector<nav::Obstacle> out;
+    nav_obstacles(f.state.scene, *f.state.scene.find(id), nullptr, f.meshes.get(), out);
+    GIANT_CHECK(!out.empty()); // standing at rest: a thing in the way
+    GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", ""}, {"matched", {"*"}}}).ok);
+    out.clear();
+    nav_obstacles(f.state.scene, *f.state.scene.find(id), nullptr, f.meshes.get(), out);
+    GIANT_CHECK(out.empty());
 }
