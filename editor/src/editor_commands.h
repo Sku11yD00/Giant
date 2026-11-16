@@ -61,6 +61,7 @@ class EffectsState;
 class WeatherEffects;
 class NavState;
 class WalkerState;
+class RagdollState;
 class GameUi;
 class GameMenus;
 class AudioState;
@@ -256,6 +257,8 @@ struct EditorState {
     NavState* nav = nullptr;
     // Entities sent walking (walk_to); set by main (and tests). Null: none walk.
     WalkerState* walkers = nullptr;
+    // Characters gone limp (ragdoll_entity); set by main (and tests). Null: none do.
+    RagdollState* ragdolls = nullptr;
     // Sounds played in the scene, heard at the camera; set by main (and
     // tests). Null: no sound.
     AudioState* audio = nullptr;
@@ -335,6 +338,11 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
 // The walkers steered and posed around step_physics's fixed steps
 // (state.physics's before_fixed_step and after_fixed_step). Once both are set.
 void connect_walkers(EditorState& state);
+// ragdoll_entity, stop_ragdoll, get_ragdoll: characters gone limp (ragdoll_state.h).
+void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state);
+// Lets the ragdolls follow the fixed steps run by hand too (state.physics,
+// state.ragdolls and state.meshes set; after connect_walkers).
+void connect_ragdolls(EditorState& state);
 // Shots knock the swinging things they hit and blows (impact) throw them
 // and the cloth near (state.physics's on_hits and on_impact, reading
 // state.swing and state.cloth when they come). Once the physics is set.

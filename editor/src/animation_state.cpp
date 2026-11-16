@@ -118,7 +118,7 @@ void AnimationState::match() {
                 log_warning("editor", "animation: " + a->mesh->path + " cannot be matched: " + m->problem);
             }
         }
-        if (ready && !m->problem.empty() && !m_commanded.contains(id) &&
+        if (ready && !m->problem.empty() && !m_commanded.contains(id) && !m_held.contains(id) &&
             (a->saved.clip.empty() || a->skinned->find_clip(a->saved.clip) == anim::k_no_clip)) {
             m_unmatched.push_back(id); // nothing to play after all: its place goes to another
             continue;
@@ -174,7 +174,7 @@ void AnimationState::lod(const world::Scene& scene) {
         const float s = std::max({std::fabs(t.scale.x), std::fabs(t.scale.y), std::fabs(t.scale.z)});
         const Vec3 c = rotate(t.rotation, Vec3{a->bounds.center.x * t.scale.x, a->bounds.center.y * t.scale.y,
                                                a->bounds.center.z * t.scale.z});
-        const DVec3 centre = t.position + DVec3{c.x, c.y, c.z};
+        const DVec3 centre = (a->drawn_at ? *a->drawn_at : t.position) + DVec3{c.x, c.y, c.z};
         const double r = static_cast<double>(a->bounds.radius * s);
         const double d = std::max(length(centre - m_eye) - r, 0.1);
         a->pixels = static_cast<float>(r / d) * m_pixels_per_unit;
@@ -204,7 +204,7 @@ const MeshLibrary::Mesh* AnimationState::skinned_mesh(const world::Entity& e, co
 bool AnimationState::wants(const world::Entity& e, const MeshLibrary& meshes) const {
     const MeshLibrary::Mesh* mesh = skinned_mesh(e, meshes);
     if (mesh == nullptr) return false;
-    if (m_commanded.contains(e.id)) return true;
+    if (m_commanded.contains(e.id) || m_held.contains(e.id)) return true;
     // Matched: unless its file is known not to be (then by its clip, as any other).
     if (!e.animation.matched.empty()) {
         const auto motion = m_motions.find({mesh->skinned.get(), e.animation.matched});
@@ -338,6 +338,7 @@ void AnimationState::stop(world::EntityId id) {
         m_redraw.push_back(id);
     }
     release_motion(*it->second);
+    m_held.erase(id); // (a pose held on it goes with it)
     if (m_renderer != nullptr) {
         m_renderer->remove_mesh(it->second->copy);
         const auto same = m_copies_of.find(it->second->skinned.get());
@@ -484,6 +485,49 @@ std::string AnimationState::set_morphs(const world::Scene& scene, const MeshLibr
     return {};
 }
 
+std::string AnimationState::hold_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id) {
+    const world::Entity* e = scene.find(id);
+    if (e == nullptr) return "no entity " + std::to_string(id);
+    if (skinned_mesh(*e, meshes) == nullptr) {
+        return "entity " + std::to_string(id) + " does not draw a skinned mesh (or is hidden)";
+    }
+    std::string error;
+    Animated* a = animate_now(scene, meshes, id, error);
+    if (a == nullptr) return error;
+    if (a->held_pose) return {};
+    a->fresh = false;
+    if (!a->posed || a->dirty) pose(Timed::none); // what it shows now, to hold
+    m_held.insert(id);
+    m_wanted.insert(id);
+    a->held_pose = true;
+    a->given = a->model;
+    a->pose_serial = ++m_serial; // (what follows poses sees it held)
+    return {};
+}
+
+bool AnimationState::set_held_pose(world::EntityId id, std::span<const Mat4> model, const DVec3* drawn_at) {
+    const auto it = m_animated.find(id);
+    if (it == m_animated.end() || !it->second->held_pose || model.size() != it->second->given.size()) return false;
+    Animated& a = *it->second;
+    if (drawn_at != nullptr) a.drawn_at = *drawn_at;
+    if (std::memcmp(a.given.data(), model.data(), model.size_bytes()) == 0) return true;
+    std::copy(model.begin(), model.end(), a.given.begin());
+    a.changed = true; // posed when due
+    return true;
+}
+
+void AnimationState::release_pose(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id) {
+    if (m_held.erase(id) == 0) return;
+    const auto it = m_animated.find(id);
+    if (it == m_animated.end()) return;
+    it->second->held_pose = false;
+    it->second->drawn_at.reset();
+    it->second->dirty = true;
+    it->second->pose_serial = ++m_serial;
+    // Nothing of its own to play: its place goes (a new scene or meshes: the next update sees to all).
+    if (scene.identity() == m_scene && meshes.version() == m_meshes_version) follow(scene, meshes, id, false);
+}
+
 void AnimationState::fill(const world::Scene& scene, const MeshLibrary& meshes) {
     if (m_animated.size() >= max_animated || m_wanted.size() <= m_animated.size()) return;
     u32 made = 0;
@@ -515,6 +559,11 @@ void AnimationState::advance(double seconds) {
     for (const auto& [id, a] : m_animated) {
         a->since_pose += seconds;
         if (a->fresh) continue; // started this update: from its start
+        if (a->held_pose) {
+            // Its clip's time moves on underneath, but that changes nothing shown: no pose to work out.
+            if (!a->matching) a->player.advance(static_cast<float>(seconds), a->skinned->clips);
+            continue;
+        }
         if (a->matching) {
             a->match_seconds += seconds; // the matcher is moved on when it is posed
             a->changed = true;
@@ -592,7 +641,9 @@ void AnimationState::pose(Timed timed) {
             for (usize i = begin; i < end; ++i) {
                 Animated& a = *m_work[i];
                 const MeshLibrary::Skinned& s = *a.skinned;
-                if (a.matching) {
+                if (a.held_pose) {
+                    a.model = a.given; // (as many as its joints: nothing allocated)
+                } else if (a.matching) {
                     // Moved on by the time since it was last posed. The way ahead is its goal's, held
                     // from now on: whoever moves the entity moves it so already (a walker's body does
                     // not wait for its clip), and the clips are to catch up with it, not it with them.
@@ -605,7 +656,7 @@ void AnimationState::pose(Timed timed) {
                 } else {
                     a.player.evaluate(s.skeleton, s.clips, a.scratch, a.local);
                 }
-                anim::model_matrices(s.skeleton, a.local, a.model);
+                if (!a.held_pose) anim::model_matrices(s.skeleton, a.local, a.model);
                 anim::skin_matrices(s.skeleton, a.model, a.skin);
                 const anim::Bounds b = anim::pose_bounds(a.model, a.skin, s.joint_radius);
                 a.bounds = {b.center, b.radius};
@@ -667,6 +718,7 @@ void AnimationState::run(const world::Scene& scene, const MeshLibrary& meshes, c
         m_scene = scene.identity();
         m_meshes_version = meshes.version();
         m_commanded.clear();
+        m_held.clear();
         std::vector<world::EntityId> ids;
         for (const auto& [id, a] : m_animated) ids.push_back(id);
         for (const world::EntityId id : ids) stop(id);

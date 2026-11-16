@@ -85,7 +85,7 @@ Json wet_json(const PhysicsState& p) {
         const WetThings::Wet& w = *list[i];
         const bool character = w.character != sim::k_no_character;
         // (A walker's entity is its character body's user; the player's is 0.)
-        const u64 entity = character ? p.world().user(p.world().character_body(w.character)) : p.bodies().entity_of(w.body);
+        const u64 entity = character ? p.world().user(p.world().character_body(w.character)) : p.entity_of(w.body);
         things.push_back({{"entity", entity},
                           {"body", w.body},
                           {"character", character},
@@ -356,9 +356,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              const auto hit = state.physics->world().raycast(origin, direction, args.value("max_distance", 10000.0));
              if (!hit) return CommandResult::success(Json{{"hit", false}});
              Json out{{"hit", true},
-                      {"entity", state.physics->world().is_character_body(hit->body)
-                                     ? state.physics->world().user(hit->body) // a walker's entity (the player: 0)
-                                     : state.physics->bodies().entity_of(hit->body)},
+                      {"entity", state.physics->entity_of(hit->body)}, // (a walker's or a ragdoll's too; the player: 0)
                       {"point", vec(hit->point)},
                       {"normal", vec(hit->normal)},
                       {"distance", hit->distance},

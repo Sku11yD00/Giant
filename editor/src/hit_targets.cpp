@@ -74,6 +74,11 @@ void HitTargets::update(const world::Scene& scene, const MeshLibrary& meshes, co
         const MeshLibrary::Mesh* mesh = meshes.find_normalized(e->mesh);
         if (mesh == nullptr || mesh->skinned == nullptr) continue;
         const AnimationState::Animated* a = animation.find(id);
+        // A ragdoll (its pose held from outside): bullets meet its bones' bodies, not capsules here.
+        if (a != nullptr && a->held_pose) {
+            if (m_fed.erase(id) != 0) m_shapes.remove(id);
+            continue;
+        }
         // As drawn: its pose once its copy shows (the rest pose until then).
         const bool posed = a != nullptr && a->posed && (a->drawn || !animation.draws()) && a->skinned == mesh->skinned &&
                            a->model.size() == mesh->skinned->skeleton.size();
@@ -108,7 +113,8 @@ void HitTargets::update(const world::Scene& scene, const MeshLibrary& meshes, co
 
 void character_occluders(const world::Scene& scene, const MeshLibrary& meshes, const AnimationState& animation,
                          TextureLibrary* textures, const DrawnPoses* moving, const DrawnPoses* walking,
-                         const DrawnPoses* swinging, const DVec3& camera, std::vector<render::Occluder>& out) {
+                         const DrawnPoses* swinging, const DVec3& camera, std::vector<render::Occluder>& out,
+                         const DrawnPoses* fallen) {
     out.clear();
     constexpr double k_reach_from_origin = 5.0; // metres at scale 1: a body's capsules from its origin, at most
     for (const auto& [id, serial] : animation.skinned()) {
@@ -116,7 +122,7 @@ void character_occluders(const world::Scene& scene, const MeshLibrary& meshes, c
         if (e == nullptr || !e->visible) continue;
         // Where it is drawn (as the scene frame's drawn_at), and near enough.
         const world::Transform* drawn = &e->transform;
-        for (const DrawnPoses* poses : {moving, walking, swinging}) {
+        for (const DrawnPoses* poses : {moving, fallen, walking, swinging}) {
             if (poses == nullptr) continue;
             if (const auto it = poses->find(id); it != poses->end()) {
                 drawn = &it->second;

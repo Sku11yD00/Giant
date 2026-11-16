@@ -62,8 +62,8 @@ sim::Ballistics::Target PhysicsState::target_of(const sim::RayHit& hit) const {
         }
         return out;
     }
-    if (m_physics.is_character_body(hit.body)) {
-        out.owner = m_physics.user(hit.body); // a walker's entity (the player: 0)
+    if (m_physics.is_character_body(hit.body) || m_physics.ragdoll_bone(hit.body)) {
+        out.owner = m_physics.user(hit.body); // a walker's entity (the player: 0), a ragdoll's
         out.surface = world::Surface::flesh;
         return out;
     }
@@ -86,7 +86,7 @@ std::vector<PhysicsState::ShotHit> PhysicsState::take(std::span<const sim::Bulle
         s.entity = hit.owner;
         s.piece = hit.piece;
         s.tree = m_forest.tree_of(hit.body).has_value();
-        s.character = hit.character || m_physics.is_character_body(hit.body);
+        s.character = hit.character || m_physics.is_character_body(hit.body) || m_physics.ragdoll_bone(hit.body).has_value();
         if (hit.character && m_targets != nullptr) {
             // Named now: the map or the file may change before it is read.
             s.zone = m_targets->zone_name(hit.owner, hit.zone);
@@ -221,7 +221,9 @@ void PhysicsState::notice_scene(const world::Scene& scene) {
     m_restore_ground = false;
     // The scene's bodies and the trunks all go: the world cleared whole
     // (off the frame) when they are all it holds, the trunks' ids forgotten.
-    if (m_bodies.clear(m_forest.bodies())) {
+    // (Ragdolls' bones go with a world cleared whole: their owner sees
+    // PhysicsWorld::clears move, and lets them go itself otherwise.)
+    if (m_bodies.clear(m_forest.bodies() + m_physics.ragdoll_bones())) {
         m_forest.forget();
     } else {
         m_forest.clear();

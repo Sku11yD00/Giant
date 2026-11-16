@@ -211,6 +211,15 @@ public:
     u64 water_entries() const { return m_water_entries; }
     float blow_per_joule = 0.1f; // N s of wear each joule a bullet leaves in a kit piece
 
+    // The scene's entity a body is of (0: none, the ground, the player): its
+    // own body's, a walker's character's, a ragdoll's bone's.
+    world::EntityId entity_of(sim::BodyId body) const {
+        if (m_physics.is_character_body(body) || m_physics.ragdoll_bone(body)) {
+            return static_cast<world::EntityId>(m_physics.user(body));
+        }
+        return m_bodies.entity_of(body);
+    }
+
     sim::PhysicsWorld& world() { return m_physics; }
     const sim::PhysicsWorld& world() const { return m_physics; }
     const sim::ScenePhysics& bodies() const { return m_bodies; }

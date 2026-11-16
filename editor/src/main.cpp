@@ -26,6 +26,7 @@
 #include "hair_state.h"
 #include "swing_state.h"
 #include "nav_state.h"
+#include "ragdoll_state.h"
 #include "walker_state.h"
 #include "audio_state.h"
 #include "hit_targets.h"
@@ -347,6 +348,9 @@ int run(const Options& options) {
     editor::WalkerState walkers(physics, nav); // after both: its characters and searches go first
     state.walkers = &walkers;
     editor::connect_walkers(state);
+    editor::RagdollState ragdolls(physics, animation, &walkers); // after them: its ragdolls leave the physics first
+    state.ragdolls = &ragdolls;
+    editor::connect_ragdolls(state);
     editor::AudioState audio; // the speakers when shown (hidden runs: tests, gates, stay silent)
     editor::WaterHearing water_hearing; // the water heard round the camera, a few ways a frame
     if (!options.hidden) audio.open_device();
@@ -456,18 +460,22 @@ int run(const Options& options) {
         redraw.insert(redraw.end(), cloth_redraw.begin(), cloth_redraw.end());
         const std::vector<world::EntityId> walker_redraw = walkers.take_redraw();
         redraw.insert(redraw.end(), walker_redraw.begin(), walker_redraw.end());
+        const std::vector<world::EntityId> ragdoll_redraw = ragdolls.take_redraw();
+        redraw.insert(redraw.end(), ragdoll_redraw.begin(), ragdoll_redraw.end());
         // Only drawn elsewhere: moved in place where they can be.
         std::vector<world::EntityId> moved = physics.take_redraw();
         const std::vector<world::EntityId> swung = swing.take_moved();
         moved.insert(moved.end(), swung.begin(), swung.end());
         const std::vector<world::EntityId> walked_ids = walkers.take_moved();
         moved.insert(moved.end(), walked_ids.begin(), walked_ids.end());
+        const std::vector<world::EntityId> fallen_ids = ragdolls.take_moved();
+        moved.insert(moved.end(), fallen_ids.begin(), fallen_ids.end());
         const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();
         textures.update(); // cooked since last frame: uploaded, a budget's worth
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
                             &animation.copies(), &cloth.meshes(), moved, &swing.poses(), &walkers.poses(),
-                            &physics.moving());
+                            &physics.moving(), &ragdolls.poses());
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);
@@ -535,12 +543,12 @@ int run(const Options& options) {
         occluder_frame.clear();
         if (input.settings.character_occlusion) {
             editor::character_occluders(state.scene, meshes, animation, &textures, &physics.poses(), &walkers.poses(),
-                                        &swing.poses(), state.camera.position, occluder_frame);
+                                        &swing.poses(), state.camera.position, occluder_frame, &ragdolls.poses());
         }
         input.occluders = occluder_frame;
         input.wind = weather.wind();
         input.particle_styles = effects.styles();
-        hair.place(&animation, &physics.poses(), &walkers.poses(), &swing.poses()); // where each is drawn this frame
+        hair.place(&animation, &physics.poses(), &walkers.poses(), &swing.poses(), &ragdolls.poses()); // where each is drawn this frame
         input.hair = hair.draws();
         if (!in_screenshot) { // (a screenshot's frame gives no births again, and stands still)
             input.particle_bursts = effects.take();
@@ -712,6 +720,7 @@ int run(const Options& options) {
             }
         }
         walkers.before_step(state.scene, game_delta); // steered towards their paths' corners
+        ragdolls.before_step(state.scene, meshes);    // those whose entity went let go
         // The sea's swell from the wind, at the water's clock, then the clock
         // moved on with the game (paused: the sea stands still with what floats).
         // (Physics stepped on by a command, step_physics or step_play: the clock with it.)
@@ -722,6 +731,7 @@ int run(const Options& options) {
         water_seconds += game_delta;
         physics.update(state.scene, scene_frame.take_for_followers(), game_delta);
         walkers.after_step(); // drawn where they walked
+        ragdolls.after_step(); // posed by their bones (handed to the animation below)
         if (playing) play.after_step(state.camera, game_delta); // the camera at its eyes
         mark(editor::FramePhase::physics);
         animation.set_view(editor::to_view(state.camera), window->pixel_height()); // animation LOD by screen size

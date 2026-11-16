@@ -513,6 +513,11 @@ GIANT_TEST("ragdoll: descriptions that cannot be are refused whole; clear lets e
     refused([](RagdollDesc& d) { d.bones[2].swing_degrees = -1.0f; });
     refused([](RagdollDesc& d) { d.bones[2].twist_degrees = std::nanf(""); });
     refused([](RagdollDesc& d) { d.bones[2].centre = Quat{0.0f, 0.0f, 0.0f, 0.0f}; });
+    refused([](RagdollDesc& d) { d.bones[2].hinge_axis = {0.0f, 2.0f, 0.0f}; }); // along the bone: no way to fold
+    refused([](RagdollDesc& d) { d.bones[2].hinge_axis = {1.0e-6f, 0.0f, 0.0f}; });
+    refused([](RagdollDesc& d) { d.bones[2].hinge_axis = {std::nanf(""), 0.0f, 0.0f}; });
+    refused([](RagdollDesc& d) { d.bones[2].side_degrees = 180.0f; });
+    refused([](RagdollDesc& d) { d.bones[2].side_degrees = -1.0f; });
     refused([](RagdollDesc& d) { d.bones[2].part.shape = CapsuleShape{0.1f, -1.0f}; }); // (after two that could be made)
     refused([](RagdollDesc& d) { d.bones[2].part.shape = HeightShape{}; });
     refused([](RagdollDesc& d) { d.bones[1].linear_velocity.y = std::nanf(""); });
@@ -534,6 +539,49 @@ GIANT_TEST("ragdoll: descriptions that cannot be are refused whole; clear lets e
     const RagdollId next = physics.add_ragdoll(chain({0.0, 3.0, 0.0}, 2));
     GIANT_CHECK(next != k_no_ragdoll && next != big && next != small);
     run(physics, 0.5);
+}
+
+GIANT_TEST("ragdoll: a hinge folds about its axis only, as far as it may, and a little to the side when let") {
+    JobSystem jobs(2);
+    PhysicsWorld physics(jobs);
+    physics.add(ground_box());
+    // (The arm's own z is the world's: about it the arm droops. Its own x points down: about it the arm swings level.)
+    // Hinged to droop: as a cone would, to its limit.
+    RagdollDesc d = block_and_arm(40.0f, 0.0f, 0.7f);
+    d.bones[1].hinge_axis = {0.0f, 0.3f, 2.0f}; // (not quite square, nor of unit length: what is square counts)
+    const RagdollId droops = physics.add_ragdoll(d);
+    GIANT_CHECK(droops != k_no_ragdoll);
+    // Hinged to swing level: its weight folds it nowhere.
+    d = block_and_arm(40.0f, 0.0f);
+    d.bones[0].position.z = d.bones[1].position.z = 5.0;
+    d.bones[1].hinge_axis = {1.0f, 0.0f, 0.0f};
+    const RagdollId level = physics.add_ragdoll(d);
+    // The same, let lean 10 degrees to the side.
+    d.bones[0].position.z = d.bones[1].position.z = 10.0;
+    d.bones[1].side_degrees = 10.0f;
+    const RagdollId leans = physics.add_ragdoll(d);
+    GIANT_CHECK(level != k_no_ragdoll && leans != k_no_ragdoll);
+    run(physics, 3.0);
+    GIANT_CHECK(droop(physics, droops) > 36.0f && droop(physics, droops) < 44.0f);
+    GIANT_CHECK(std::fabs(droop(physics, level)) < 2.0f);
+    GIANT_CHECK(droop(physics, leans) > 7.0f && droop(physics, leans) < 13.0f);
+    GIANT_CHECK(gap(physics, droops) < 0.02 && gap(physics, level) < 0.02 && gap(physics, leans) < 0.02);
+    // Pushed sideways, the level one swings about its hinge: to its limit and no further, still level.
+    const BodyId arm = physics.ragdoll_bodies(level)[1];
+    float most = 0.0f;
+    for (int i = 0; i < 180; ++i) {
+        const BodyState s = *physics.state(arm);
+        const Vec3 tip = rotate(s.rotation, Vec3{0.0f, 0.6f, 0.0f});
+        physics.add_impulse(arm, {0.0f, 0.0f, 0.03f}, s.position + DVec3{tip.x, tip.y, tip.z});
+        physics.step(1.0 / 60.0);
+        // (As the block carries it: the block may be shoved a little.)
+        const BodyState block = *physics.state(physics.ragdoll_bodies(level)[0]);
+        const Vec3 along = rotate(conjugate(block.rotation), rotate(physics.state(arm)->rotation, Vec3{0.0f, 1.0f, 0.0f}));
+        most = std::max(most, std::atan2(along.z, along.x) * k_degrees);
+        GIANT_CHECK(std::fabs(std::asin(std::clamp(along.y, -1.0f, 1.0f))) * k_degrees < 3.0f);
+    }
+    GIANT_CHECK(most > 34.0f && most < 45.0f);
+    GIANT_CHECK(gap(physics, level) < 0.02);
 }
 
 GIANT_TEST("ragdoll: a crowd falls together without flying apart") {

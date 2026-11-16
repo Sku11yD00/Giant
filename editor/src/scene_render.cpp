@@ -469,19 +469,24 @@ void emit_ground(const world::Scene& scene, const TerrainMeshes* terrain, const 
 }
 
 // Whether an entity's instances are kept out of the voxel world as moving
-// (render::Instance::moves): swinging, walking, or its body moving (a
-// floating crate drifting). Its kit's loose pieces: also each moving one.
+// (render::Instance::moves): swinging, walking, a ragdoll, or its body
+// moving (a floating crate drifting). Its kit's loose pieces: also each moving one.
 bool entity_moves(const SceneFrame& out, const world::Entity& e) {
     return (e.swing.on && sim::can_swing(e.shape)) || (out.walkers != nullptr && out.walkers->contains(e.id)) ||
+           (out.ragdolls != nullptr && out.ragdolls->contains(e.id)) ||
            (out.moving != nullptr && out.moving->contains(e.id));
 }
 
-// Where an entity is drawn: the physics' pose, else its walker's, else its
-// swing's, else where the scene has it.
+// Where an entity is drawn: the physics' pose, else its ragdoll's, else
+// its walker's, else its swing's, else where the scene has it.
 const world::Transform& drawn_at(const SceneFrame& out, const world::Entity& e) {
     if (out.poses != nullptr) {
         const auto p = out.poses->find(e.id);
         if (p != out.poses->end()) return p->second;
+    }
+    if (out.ragdolls != nullptr) {
+        const auto p = out.ragdolls->find(e.id);
+        if (p != out.ragdolls->end()) return p->second;
     }
     if (out.walkers != nullptr) {
         const auto p = out.walkers->find(e.id);
@@ -1005,13 +1010,15 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  std::span<const world::EntityId> moved,
                  const std::unordered_map<world::EntityId, world::Transform>* swings,
                  const std::unordered_map<world::EntityId, world::Transform>* walkers,
-                 const std::unordered_set<world::EntityId>* moving) {
+                 const std::unordered_set<world::EntityId>* moving,
+                 const std::unordered_map<world::EntityId, world::Transform>* ragdolls) {
     out.cells_rebuilt = 0;
     out.maps_seen.clear(); // the scene may have changed since: its materials' addresses with it
     out.skin_seen.clear();
     out.poses = poses;
     out.swings = swings;
     out.walkers = walkers;
+    out.ragdolls = ragdolls;
     out.skinned = skinned;
     out.cloth = cloth;
     out.piece_poses = piece_poses;
@@ -1236,6 +1243,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     out.poses = nullptr; // the cells are built
     out.swings = nullptr;
     out.walkers = nullptr;
+    out.ragdolls = nullptr;
     out.piece_poses = nullptr;
     out.moving = nullptr;
     out.skinned = nullptr;

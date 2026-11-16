@@ -83,6 +83,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     register_swing_commands(registry, state);
     register_nav_commands(registry, state);
     register_walker_commands(registry, state);
+    register_ragdoll_commands(registry, state);
     register_audio_commands(registry, state);
     register_save_commands(registry, state);
     register_game_ui_commands(registry, state);

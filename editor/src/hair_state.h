@@ -117,7 +117,7 @@ public:
     // The scene's changes followed (hair put on, changed, moved, gone).
     void follow(const world::Scene& scene, const world::SceneChanges& changed);
     // Before a frame is drawn: where each is drawn (the first of `moving`,
-    // `walking`, `swinging` that poses its entity, else its transform; a
+    // `fallen` (ragdolls), `walking`, `swinging` that poses its entity, else its transform; a
     // character's at its joint as `animation` poses it, or at rest), and
     // its body's capsules. Each may be null. Until first called hair is at
     // its entity's transform (a character's at its joint at rest); from
@@ -125,7 +125,7 @@ public:
     // frame just drawn, so hair answers its head a frame late (its roots
     // stay on).
     void place(const AnimationState* animation, const DrawnPoses* moving, const DrawnPoses* walking,
-               const DrawnPoses* swinging);
+               const DrawnPoses* swinging, const DrawnPoses* fallen = nullptr);
     // Each frame: grooms grown since are taken, the nearest move under
     // `wind`, and the frame's draws are listed.
     void update(const WindState& wind, const DVec3& camera, double seconds);

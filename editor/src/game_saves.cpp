@@ -4,6 +4,7 @@
 
 #include "physics_state.h"
 #include "play_state.h"
+#include "ragdoll_state.h"
 #include "walker_state.h"
 #include "clock_state.h"
 #include "weather_state.h"
@@ -690,6 +691,7 @@ void GameSaves::take(EditorState& state) {
     m_carried_feet.reset();
     forget_walkers();
     if (state.walkers != nullptr) state.walkers->clear(); // (walking in the game being left)
+    if (state.ragdolls != nullptr && state.meshes != nullptr) state.ragdolls->clear(state.scene, *state.meshes); // (lying in it)
     forget_base(); // (another game now: the other base is not of it)
     m_applying = std::move(p->loaded);
     m_sections = std::make_unique<Sections>(std::move(p->sections));
