@@ -573,7 +573,7 @@ GIANT_TEST("world: a mesh entity's animation saves and loads, and only when set"
     Entity walker = named("Walker");
     walker.shape = Shape::mesh;
     walker.mesh = "assets/giantess.glb";
-    walker.animation = {"walk", -2.5f, false};
+    walker.animation = {"walk", -2.5f, false, {}};
     scene.add(walker);
     Entity still = named("Still");
     still.shape = Shape::mesh;
@@ -597,6 +597,57 @@ GIANT_TEST("world: a mesh entity's animation saves and loads, and only when set"
     refused(R"({"clip": "a", "pace": 1})", "pace is not a known key");
     refused(R"({"clip": 3})", "clip must be a string");
     refused(R"("walk")", "must be an object");
+}
+
+GIANT_TEST("world: the clips an entity is matched among save and load") {
+    Scene scene;
+    Entity walker = named("Walker");
+    walker.shape = Shape::mesh;
+    walker.mesh = "assets/giantess.glb";
+    walker.animation.clip = "idle";
+    walker.animation.matched = {"idle", "walk", "run"};
+    scene.add(walker);
+    Entity all = named("All");
+    all.shape = Shape::mesh;
+    all.mesh = "assets/giantess.glb";
+    all.animation.matched = {"*"}; // (no clip to fall back on: still saved)
+    scene.add(all);
+    const std::string text = save_scene(scene);
+    GIANT_CHECK(contains(text, "\"matched\""));
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.find(1) && loaded.find(1)->animation == walker.animation);
+    GIANT_CHECK(loaded.find(2) && loaded.find(2)->animation == all.animation);
+    GIANT_CHECK(save_scene(loaded) == text);
+    // One with none writes no list.
+    Scene plain;
+    Entity one = named("One");
+    one.animation.clip = "walk";
+    plain.add(one);
+    GIANT_CHECK(!contains(save_scene(plain), "matched"));
+    const auto refused = [](const std::string& matched, const char* expected) {
+        const std::string json =
+            R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "animation": {"clip": "a", "matched": )" +
+            matched + "}}]}";
+        Scene bad;
+        const auto error = load_scene(json, bad);
+        GIANT_CHECK(error.has_value() && contains(error->message, expected));
+    };
+    refused(R"("walk")", "matched must be a list of at most 256 clip names");
+    refused(R"(["walk", 3])", "matched must hold clip names of 1 to");
+    refused(R"(["walk", ""])", "matched must hold clip names of 1 to");
+    std::string many = "[";
+    for (int i = 0; i < 257; ++i) many += std::string(i ? "," : "") + "\"c" + std::to_string(i) + "\"";
+    refused(R"(["walk", "run", "walk"])", "matched names walk twice");
+    refused(R"(["walk", "*"])", "matched must hold \"*\" (every clip) alone");
+    refused(R"(["*", "walk"])", "matched must hold \"*\" (every clip) alone");
+    refused(many + "]", "matched must be a list of at most 256 clip names");
+    std::string full = "[";
+    for (int i = 0; i < 256; ++i) full += std::string(i ? "," : "") + "\"c" + std::to_string(i) + "\"";
+    Scene most;
+    GIANT_CHECK(!load_scene(R"({"format": "giant-scene", "version": 1, "entities": [{"id": 1, "animation": {"matched": )" +
+                                full + "]}}]}", most).has_value());
+    GIANT_CHECK(most.find(1) && most.find(1)->animation.matched.size() == 256);
 }
 
 GIANT_TEST("world: kits and decals save and load") {

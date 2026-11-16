@@ -725,6 +725,12 @@ int run(const Options& options) {
         if (playing) play.after_step(state.camera, game_delta); // the camera at its eyes
         mark(editor::FramePhase::physics);
         animation.set_view(editor::to_view(state.camera), window->pixel_height()); // animation LOD by screen size
+        // Matched characters walk as their walkers are steered (the rest stand).
+        for (const auto& [id, walker] : walkers.walkers()) {
+            if (walker.phase == editor::WalkerState::Phase::walking) {
+                animation.set_goal(id, editor::AnimationState::goal_of(walker.velocity, walker.yaw));
+            }
+        }
         animation.update(state.scene, meshes, scene_frame.take_for_animation(), game_delta);
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
         cloth.update(weather.wind(), state.camera.position, game_delta); // drawn as it moved next frame

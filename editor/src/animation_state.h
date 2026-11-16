@@ -25,15 +25,35 @@
 // thread, only when they changed (a pose the same as the last one sent is
 // not sent: it would redraw the shadows under it), and how often by size on
 // screen (animation LOD: pose_interval, within poses_per_frame).
+//
+// Motion matching. An entity whose saved animation names clips to be
+// `matched` among is posed by a matcher (anim/matcher.h) instead: it plays
+// whichever of them fits the way it is going (its goal, set each frame by
+// whoever moves it; none set: standing). The clips' database is built once
+// per file and list of clips, on a worker of its own (never the main
+// thread), and shared by every entity of that file and list; until it is
+// built, or when the file cannot be matched (Motion::problem), the saved
+// `clip` plays as ever (one with no such clip then animates no more: it
+// stands in its rest pose and takes no place). A command's play takes over
+// (a cut: nothing fades between the matcher and a clip). The matcher is
+// moved on when the entity is posed (so by animation LOD, on the pose
+// workers): a far crowd searches four times a second each, not every
+// frame; at most a second at once (a longer step_animation moves a matched
+// entity on by one). Entities come to matching a few a frame
+// (matches_per_frame), so a crowd whose database arrives is not all posed
+// and searched on one frame. Morph weights rest while matching (the
+// matched clips' morph channels do not play).
 #pragma once
 
 #include "mesh_library.h"
 
+#include "giant/anim/matcher.h"
 #include "giant/anim/player.h"
 #include "giant/core/jobs.h"
 #include "giant/render/renderer.h"
 #include "giant/world/scene.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <optional>
@@ -115,6 +135,45 @@ public:
     std::string set_morphs(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
                            std::span<const std::pair<std::string, std::optional<float>>> weights, bool release_all);
 
+    // How a matched entity is being moved, in its own space: metres a
+    // second across (+x) and along (+z) its facing, and how far it will
+    // have turned (radians about +y, +z toward +x) over the next second.
+    // (Its mover does not wait for its clips: they catch up with it.)
+    struct MotionGoal {
+        float across = 0.0f;
+        float along = 0.0f;
+        float turn = 0.0f;
+    };
+    // For the next update (each frame, before it); one not set that frame
+    // stands. Numbers that are none count as 0; an entity not animated
+    // takes none.
+    void set_goal(world::EntityId id, const MotionGoal& goal);
+    // A walker's goal: its velocity in the world (as steered) seen from
+    // where it faces (`yaw` radians about +y, from +z toward +x).
+    static MotionGoal goal_of(const Vec3& velocity, float yaw);
+    u32 matches_per_frame = 16;
+    // Waits for the databases being built, held or not (tests; a frame never does).
+    void finish_motions();
+    // Builds wait until let go again (tests: what shows meanwhile).
+    void hold_builds(bool hold) { m_hold->store(hold, std::memory_order_release); }
+    // Why `e`'s file cannot be matched among its clips, once that is known (else empty).
+    std::string motion_problem(const world::Entity& e, const MeshLibrary& meshes) const;
+    usize motions() const { return m_motions.size(); } // databases held (built or building)
+
+    // A skinned file's clips as a motion database, shared by the entities matched among them.
+    struct Motion {
+        std::shared_ptr<const MeshLibrary::Skinned> skinned;
+        std::vector<std::string> names; // as the entities' `matched` has them
+        std::atomic<bool> ready{false};
+        // The build's, read once ready:
+        anim::MotionDatabase db;
+        std::string problem;              // why the file cannot be matched (empty: it can)
+        std::vector<std::string> missing; // names the file has no clip for (left out)
+        // The main thread's:
+        u32 users = 0;
+        bool reported = false;
+    };
+
     struct Animated {
         world::EntityId id = 0;
         const MeshLibrary::Mesh* mesh = nullptr;
@@ -145,6 +204,15 @@ public:
         std::vector<float> held;      // set_morphs' weights
         std::vector<u8> holding;      // per target: held
         std::vector<float> sent_morphs;
+        // Matching: its clips' database (building, or built), the matcher
+        // posing it once that is ready (and no command plays), where it
+        // should be going and the time the matcher is yet to be moved on.
+        std::shared_ptr<Motion> motion;
+        bool matching = false;
+        anim::MotionMatcher matcher;
+        MotionGoal goal;
+        bool goal_set = false; // since the last frame's update
+        double match_seconds = 0.0;
         u64 poses = 0;         // handed to the renderer
         u64 pose_serial = 0;   // when it last changed (as skinned()'s serials: never the same twice)
     };
@@ -174,6 +242,11 @@ public:
     // Why the renderer refused the entity's copy (empty: it did not); not
     // tried again until the entity or its file changes.
     std::string refused(world::EntityId id) const;
+    // Matched entities' state: "" (not matched at all), "building" (its
+    // database), "ready" (built: it comes to matching within a few
+    // frames), "matching", "command" (a command plays meanwhile) or
+    // "problem" (the file cannot be matched: Motion::problem).
+    static const char* motion_state(const Animated& a);
 
 private:
     // The skinned file an entity draws, or null.
@@ -188,7 +261,12 @@ private:
     void stop(world::EntityId id);
     // The saved animation started over, fading over `fade` seconds (the
     // rest pose when it has none).
-    static void play_saved(Animated& a, float fade);
+    // Its database goes with it: found (or its build begun) for the saved
+    // `matched`, the old one let go.
+    void play_saved(Animated& a, float fade);
+    void release_motion(Animated& a);
+    // Each animated entity matching or not, as its database and commands have it now.
+    void match();
     // Where a clip starts: its end when played once backwards.
     static float start_of(const anim::Clip& clip, bool loop, float speed);
     // Animated now (started if not yet), for a command.
@@ -209,6 +287,15 @@ private:
 
     render::Renderer* m_renderer;
     JobSystem m_jobs;
+    // Databases are built on a worker of their own: the pose jobs' pool is
+    // waited on by the main thread, which would then run a build itself.
+    WaitGroup m_building;
+    JobSystem m_build_jobs;
+    // (One that cannot be matched is kept after its last entity, until a
+    // new scene: it is not built again each time one asks.)
+    std::map<std::pair<const MeshLibrary::Skinned*, std::vector<std::string>>, std::shared_ptr<Motion>> m_motions;
+    std::shared_ptr<std::atomic<bool>> m_hold = std::make_shared<std::atomic<bool>>(false);
+    std::vector<world::EntityId> m_unmatched; // scratch
     std::set<world::EntityId> m_wanted;   // would animate (lowest ids get to)
     std::set<world::EntityId> m_commanded; // playing by command (kept wanted)
     std::map<world::EntityId, std::unique_ptr<Animated>> m_animated;

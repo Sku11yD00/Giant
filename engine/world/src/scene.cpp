@@ -985,6 +985,7 @@ Json entity_json(const Entity& e) {
     if (e.mass != 0.0f) entity["mass"] = e.mass;
     if (!(e.animation == EntityAnimation{})) {
         entity["animation"] = {{"clip", e.animation.clip}, {"speed", e.animation.speed}, {"loop", e.animation.loop}};
+        if (!e.animation.matched.empty()) entity["animation"]["matched"] = e.animation.matched;
     }
     return entity;
 }
@@ -1798,6 +1799,29 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
         ar.string("clip", e.animation.clip, false, k_max_name_bytes);
         ar.number("speed", e.animation.speed, -k_max_animation_speed, k_max_animation_speed);
         ar.boolean("loop", e.animation.loop);
+        if (const Json* matched = ar.get("matched", false); matched != nullptr && ar.ok()) {
+            if (!matched->is_array() || matched->size() > k_max_matched_clips) {
+                ar.fail("matched", "must be a list of at most " + std::to_string(k_max_matched_clips) + " clip names");
+            } else {
+                for (const Json& name : *matched) {
+                    if (!name.is_string() || name.get_ref<const std::string&>().empty() ||
+                        name.get_ref<const std::string&>().size() > k_max_name_bytes) {
+                        ar.fail("matched", "must hold clip names of 1 to " + std::to_string(k_max_name_bytes) + " bytes");
+                        break;
+                    }
+                    e.animation.matched.push_back(name.get<std::string>());
+                    const std::vector<std::string>& had = e.animation.matched;
+                    if (std::find(had.begin(), had.end() - 1, had.back()) != had.end() - 1) {
+                        ar.fail("matched", "names " + had.back() + " twice");
+                        break;
+                    }
+                    if (had.size() > 1 && (had.front() == "*" || had.back() == "*")) {
+                        ar.fail("matched", "must hold \"*\" (every clip) alone");
+                        break;
+                    }
+                }
+            }
+        }
         ar.finish();
     }
     read_lamp(r, path, e.lamp, error);

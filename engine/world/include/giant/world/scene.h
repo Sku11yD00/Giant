@@ -280,11 +280,19 @@ constexpr float k_max_body_mass = 1.0e9f;
 // looping or once, at a speed (1 normal; negative plays back). No clip:
 // it stands in its rest pose. The editor plays it (view state may play
 // something else for a while: play_animation).
+//
+// `matched`: instead of one clip, the editor picks among these clips of
+// the file frame by frame, by how the entity moves (motion matching: a
+// walker walks, runs, turns and stands with whichever fits); "*" alone is
+// every clip of the file. `clip` then plays only while the file cannot be
+// matched (its hips and feet not found, none of the clips there).
 constexpr float k_max_animation_speed = 100.0f;
+constexpr usize k_max_matched_clips = 256;
 struct EntityAnimation {
     std::string clip;
     float speed = 1.0f; // -k_max_animation_speed to k_max_animation_speed
     bool loop = true;
+    std::vector<std::string> matched; // clip names, each once (at most k_max_name_bytes each, k_max_matched_clips in all)
     bool operator==(const EntityAnimation&) const = default;
 };
 

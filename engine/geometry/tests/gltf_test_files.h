@@ -303,4 +303,97 @@ inline std::vector<u8> skinned_arm(const SkinOptions& o = {}) {
     return make_glb(json, bin);
 }
 
+// --- A skinned walker --------------------------------------------------------
+//
+// Three joints by the usual names: "Hips" 1 m up, "LeftFoot" and
+// "RightFoot" under it on the ground, 0.1 m to each side (+x is its left:
+// it faces +z). A triangle rides each. Clips, all moving the hips through
+// model space (root motion): "idle" (1 s, standing), "walk" (1 s, 1.4 m
+// along +z, a foot swinging 0.3 m each way), "run" (0.5 s, 2 m along +z:
+// 4 m/s, feet 0.5 m each way) and "wave" (0.8 s, not a loop: the left
+// foot lifted 0.5 m and held there).
+inline std::vector<u8> skinned_walker() {
+    std::vector<u8> bin;
+    std::vector<std::string> views;
+    std::vector<std::string> accessors;
+    const auto add = [&](const auto& values, const std::string& accessor) {
+        const usize at = bin.size();
+        append(bin, values);
+        views.push_back(R"({"buffer":0,"byteOffset":)" + std::to_string(at) + R"(,"byteLength":)" +
+                        std::to_string(bin.size() - at) + "}");
+        accessors.push_back(R"({"bufferView":)" + std::to_string(views.size() - 1) + "," + accessor + "}");
+        return accessors.size() - 1;
+    };
+    const auto n = [](usize i) { return std::to_string(i); };
+    // A triangle at the hips, one at each foot.
+    const std::vector<float> positions{-0.1f, 1.0f,  0.0f, 0.1f,  1.0f, 0.0f, 0.0f,  1.2f, 0.0f,
+                                       0.05f, 0.0f,  0.0f, 0.15f, 0.0f, 0.0f, 0.1f,  0.1f, 0.0f,
+                                       -0.15f, 0.0f, 0.0f, -0.05f, 0.0f, 0.0f, -0.1f, 0.1f, 0.0f};
+    std::vector<float> normals;
+    for (int i = 0; i < 9; ++i) normals.insert(normals.end(), {0.0f, 0.0f, 1.0f});
+    std::vector<u16> joints;
+    std::vector<float> weights;
+    for (u16 j = 0; j < 3; ++j) {
+        for (int v = 0; v < 3; ++v) {
+            joints.insert(joints.end(), {j, 0, 0, 0});
+            weights.insert(weights.end(), {1.0f, 0.0f, 0.0f, 0.0f});
+        }
+    }
+    const usize pos = add(positions, R"("componentType":5126,"count":9,"type":"VEC3","min":[-0.15,0,0],"max":[0.15,1.2,0])");
+    const usize nrm = add(normals, R"("componentType":5126,"count":9,"type":"VEC3")");
+    const usize jnt = add(joints, R"("componentType":5123,"count":9,"type":"VEC4")");
+    const usize wgt = add(weights, R"("componentType":5126,"count":9,"type":"VEC4")");
+    const usize idx = add(std::vector<u32>{0, 1, 2, 3, 4, 5, 6, 7, 8}, R"("componentType":5125,"count":9,"type":"SCALAR")");
+    const usize inv = add(std::vector<float>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0,     -1, 0, 1,  // hips
+                                             1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -0.1f, 0,  0, 1,  // left foot
+                                             1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.1f,  0,  0, 1}, // right foot
+                          R"("componentType":5126,"count":3,"type":"MAT4")");
+    std::string animations;
+    // A clip of `seconds`: the hips to `travel` along +z, the feet swinging `reach` each way (left first forward).
+    const auto go = [&](const std::string& name, float seconds, float travel, float reach) {
+        const usize t2 = add(std::vector<float>{0.0f, seconds},
+                             R"("componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[)" + std::to_string(seconds) + "]");
+        const usize hips = add(std::vector<float>{0, 1, 0, 0, 1, travel}, R"("componentType":5126,"count":2,"type":"VEC3")");
+        const usize t5 = add(std::vector<float>{0.0f, seconds * 0.25f, seconds * 0.5f, seconds * 0.75f, seconds},
+                             R"("componentType":5126,"count":5,"type":"SCALAR","min":[0],"max":[)" + std::to_string(seconds) + "]");
+        std::vector<float> left, right;
+        for (const float z : {0.0f, reach, 0.0f, -reach, 0.0f}) {
+            left.insert(left.end(), {0.1f, -1.0f, z});
+            right.insert(right.end(), {-0.1f, -1.0f, -z});
+        }
+        const usize lf = add(left, R"("componentType":5126,"count":5,"type":"VEC3")");
+        const usize rf = add(right, R"("componentType":5126,"count":5,"type":"VEC3")");
+        animations += std::string(animations.empty() ? "" : ",") + R"({"name":")" + name + R"(","samplers":[{"input":)" + n(t2) +
+                      R"(,"output":)" + n(hips) + R"(},{"input":)" + n(t5) + R"(,"output":)" + n(lf) + R"(},{"input":)" + n(t5) +
+                      R"(,"output":)" + n(rf) + R"(}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}},)" +
+                      R"({"sampler":1,"target":{"node":1,"path":"translation"}},)" +
+                      R"({"sampler":2,"target":{"node":2,"path":"translation"}}]})";
+    };
+    go("idle", 1.0f, 0.0f, 0.0f);
+    go("walk", 1.0f, 1.4f, 0.3f);
+    go("run", 0.5f, 2.0f, 0.5f);
+    {
+        const usize t = add(std::vector<float>{0.0f, 0.4f, 0.8f}, R"("componentType":5126,"count":3,"type":"SCALAR","min":[0],"max":[0.8])");
+        const usize lift = add(std::vector<float>{0.1f, -1.0f, 0.0f, 0.1f, -0.5f, 0.0f, 0.1f, -0.5f, 0.0f},
+                               R"("componentType":5126,"count":3,"type":"VEC3")");
+        animations += R"(,{"name":"wave","samplers":[{"input":)" + n(t) + R"(,"output":)" + n(lift) +
+                      R"(}],"channels":[{"sampler":0,"target":{"node":1,"path":"translation"}}]})";
+    }
+    std::string json = std::string(R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,3]}],"nodes":[)") +
+                       R"({"name":"Hips","translation":[0,1,0],"children":[1,2]},)" +
+                       R"({"name":"LeftFoot","translation":[0.1,-1,0]},)" +
+                       R"({"name":"RightFoot","translation":[-0.1,-1,0]},)" +
+                       R"({"name":"body","mesh":0,"skin":0}],)" +
+                       R"("meshes":[{"primitives":[{"attributes":{"POSITION":)" + n(pos) + R"(,"NORMAL":)" + n(nrm) +
+                       R"(,"JOINTS_0":)" + n(jnt) + R"(,"WEIGHTS_0":)" + n(wgt) + R"(},"indices":)" + n(idx) + "}]}]," +
+                       R"("skins":[{"joints":[0,1,2],"inverseBindMatrices":)" + n(inv) + "}]," +
+                       R"("animations":[)" + animations + "]," +
+                       R"("buffers":[{"byteLength":)" + n(bin.size()) + R"(}],"bufferViews":[)";
+    for (usize i = 0; i < views.size(); ++i) json += (i ? "," : "") + views[i];
+    json += R"(],"accessors":[)";
+    for (usize i = 0; i < accessors.size(); ++i) json += (i ? "," : "") + accessors[i];
+    json += "]}";
+    return make_glb(json, bin);
+}
+
 } // namespace giant::geometry::testing

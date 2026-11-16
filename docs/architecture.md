@@ -1651,7 +1651,7 @@ simulation share one definition and none of it needs a GPU.
   one wanted. With few clips, none recorded going from one to the next,
   being posed alike outweighs going the wanted way and a walk never
   becomes a run, so the matcher counts the pose half (`pose_weight`).
-  The editor's use of it (C7c) comes next.
+  The editor's use of it is under "Playing them" below.
 
 The glTF importer reads one skin per file (a second is refused). Its
 skeleton is the skin's joints plus any node between two of them (their
@@ -1897,6 +1897,40 @@ the pose's own share, so a face fades and blends with the body. The editor
 works the weights out with the pose, lays the ones `set_morphs` holds over
 them (view state, as `play_animation`'s, let go when the saved animation
 changes) and hands them to `set_pose` beside the joints.
+
+Matched entities (C7c). `EntityAnimation::matched` (saved; `set_animation`)
+names clips of the file the entity is motion matched among (`"*"` alone:
+all of them) instead of playing one. `AnimationState` keeps one
+`MotionDatabase` per file and list of clips, shared by every entity of
+that file and list and let go with the last: built once (joints by
+`find_motion_joints`, each clip a loop or not by `clip_loops`) on a job
+system of its own with one worker, because the main thread helps the pose
+workers' pool while it waits on it and would run a build itself. Until it
+is built, and when the file cannot be matched (the joints not found, none
+of the clips there, no frame to start from: logged once, reported by
+`get_animation`), the saved `clip` plays as ever; one that cannot be
+matched and has no such clip animates no more (its place goes to
+another), and its database is kept until a new scene so it is not built
+again each time it is asked for. A build not begun when its last entity
+lets go is skipped. Once it is built each entity's `MotionMatcher` poses
+it (they come to it 16 a frame, `matches_per_frame`: a first pose and
+search each, which a crowd must not do on one frame): `advance` only adds
+the frame's time up, and the pose job moves the matcher on by that sum
+(a second at most) and searches, so animation LOD spaces a far crowd's
+searches out and they run on the pose workers. The way ahead is the
+entity's goal held from now on (`set_goal`, each frame, by whoever moves
+it; none that frame: standing), not eased from how its clip moves: a
+walker's body does not wait for its clip, the clips catch up with it.
+The editor's main loop sets a walking walker's goal from the velocity it
+is steered at, seen from where it faces (`goal_of`); a walker turns at
+once to where it goes, so its goal has no turn yet and turning clips wait
+for a mover that turns over time. A command's play takes over from the
+matcher and `set_animation` hands it back; both are cuts (nothing fades
+between the matcher and a clip player), as is the change from the saved
+clip to the matcher when the database arrives. Morph weights rest while
+matching (the matched clips' morph channels do not play; `set_morphs`
+holds do). `speed` and `loop` are the saved clip's only. Nothing of the
+matcher is saved: a loaded game picks a first frame again.
 
 ### Hair (C6)
 
