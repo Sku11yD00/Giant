@@ -31,6 +31,7 @@
 #include <optional>
 #include <span>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -260,6 +261,70 @@ struct CharacterState {
     float water_depth = 0.0f; // of the water over its feet (0: none)
 };
 
+// --- Ragdolls -----------------------------------------------------------------
+//
+// A ragdoll is a tree of dynamic bodies (bones) held together at joints:
+// each bone but the first hangs from an earlier one at its own origin, free
+// to lean within a cone and to twist within limits. Limp, it falls as a
+// body does. Driven (drive_ragdoll), each joint's motor turns its bone
+// toward a wanted turn in its parent's space, as hard as it is allowed to:
+// an animated pose it follows while still being pushed about by what hits
+// it (an active ragdoll). A bone and the bone it hangs from never collide,
+// nor do the pairs listed in `no_collide` (bones that overlap as made:
+// both thighs at the hips, the short bones of a spine); other bones of the
+// ragdoll do. Its bones are bodies like any other (ragdoll_bodies: state,
+// set_velocity, add_impulse; rays and contacts name them, with the
+// ragdoll's `user`; a hard contact between two bones of one ragdoll is no
+// hit), but they leave only with the ragdoll and are placed only together
+// (move_ragdoll: set_transform and move_kinematic leave a bone be).
+struct RagdollBone {
+    i32 parent = -1; // an earlier bone; -1 for the first (the root) only
+    Part part;       // its shape in the bone's space (not a height field)
+    DVec3 position{}; // the bone's origin: where it joins its parent
+    Quat rotation{};
+    float mass = 1.0f; // kilograms, 0.001 to 1e6
+    Vec3 linear_velocity{};
+    Vec3 angular_velocity{}; // radians a second
+    // The joint to its parent. The bone leans at most `swing_degrees` (0
+    // to 179) from the middle of its range and twists at most
+    // `twist_degrees` (0 to 179) either way about `twist_axis` (in the
+    // bone's space: along the bone). The middle of the range is where it
+    // is placed, or at `centre` when given: the bone's turn in its
+    // parent's space there (a ragdoll made mid-stride keeps the limits of
+    // its rest pose; a bone placed outside them is pulled back in over
+    // the first steps).
+    Vec3 twist_axis{0.0f, 1.0f, 0.0f}; // its length 0.001 to 1000
+    float swing_degrees = 45.0f;
+    float twist_degrees = 20.0f;
+    std::optional<Quat> centre;
+};
+
+constexpr usize k_max_ragdoll_bones = 128;
+
+struct RagdollDesc {
+    std::vector<RagdollBone> bones; // 1 to k_max_ragdoll_bones, parents first
+    std::vector<std::pair<u32, u32>> no_collide; // more pairs of bones that never collide (two different bones each)
+    float friction = 0.8f;
+    float restitution = 0.0f;
+    float joint_friction = 1.0f; // newton metres resisting a joint no motor drives (0 and up)
+    u64 user = 0;                // on every bone's body
+};
+
+// How hard a driven ragdoll's joints turn toward their targets.
+struct RagdollDrive {
+    float frequency = 6.0f;    // hertz: how fast a joint closes on its target (0.1 to 30)
+    float damping = 1.0f;      // 1: without swinging past (0 to 10)
+    float max_torque = 200.0f; // newton metres a joint's motor may use (over 0)
+};
+
+using RagdollId = u32;
+constexpr RagdollId k_no_ragdoll = 0;
+
+struct RagdollBoneOf {
+    RagdollId ragdoll = k_no_ragdoll;
+    u32 bone = 0;
+};
+
 struct PreparedShapeData;
 
 // A body's shape made ahead (PhysicsWorld::prepare): the costly part of
@@ -394,6 +459,39 @@ public:
     // Whether the body stands for a character (character_body of one).
     bool is_character_body(BodyId id) const;
 
+    // Ragdolls (see RagdollDesc). k_no_ragdoll for a description that
+    // cannot be (no bones or too many, a parent that is not an earlier
+    // bone, a second root, a number that is none or out of range, a shape
+    // that could not be made) or when the world is full: nothing is added.
+    // They are not carried over clear().
+    RagdollId add_ragdoll(const RagdollDesc& desc);
+    void remove_ragdoll(RagdollId id);
+    bool contains_ragdoll(RagdollId id) const;
+    usize ragdolls() const;
+    // Its bones' bodies, in the description's order (none: no such ragdoll).
+    // remove() leaves them be: they go with remove_ragdoll.
+    std::span<const BodyId> ragdoll_bodies(RagdollId id) const;
+    // The ragdoll and bone a body is, if it is one's.
+    std::optional<RagdollBoneOf> ragdoll_bone(BodyId id) const;
+    // Drives each bone toward `turns[bone]`, its turn in its parent's
+    // space (the root's is ignored: its mover sets its body's velocity),
+    // until relax_ragdoll or the next call. A turn outside the joint's
+    // limits is driven to as near as they allow. False (and nothing
+    // changed): no such ragdoll, not a turn for each bone, a number that
+    // is none or out of range.
+    bool drive_ragdoll(RagdollId id, std::span<const Quat> turns, const RagdollDrive& drive = {});
+    // Limp again.
+    void relax_ragdoll(RagdollId id);
+    bool ragdoll_driven(RagdollId id) const;
+    // The whole ragdoll moved as one piece so that its root is at
+    // `position`, turned `rotation`: every bone keeps its place and turn
+    // about the root, and its velocity turned with it. False: no such
+    // ragdoll, or a number that is none.
+    bool move_ragdoll(RagdollId id, const DVec3& position, const Quat& rotation);
+    // How many times clear() has made the world afresh: an owner of
+    // ragdolls (which clear lets go) sees by it that its own are gone.
+    u64 clears() const { return m_clears; }
+
     // The lakes, rivers and sea (world/water.h), copied. In each fixed
     // step a dynamic body in water is buoyed up by the water it displaces
     // (at 1000 kg per cubic metre: lighter than that it floats, heavier it
@@ -457,6 +555,7 @@ private:
     std::unique_ptr<Impl> m_impl;
     std::vector<BodyId> m_moved;
     std::vector<ContactHit> m_hits;
+    u64 m_clears = 0;
     // Cleared worlds being let go, each on a thread of its own (joined once
     // done, or when this world goes).
     struct Disposal;

@@ -16,6 +16,8 @@
 #include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/GroupFilterTable.h>
+#include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/RayCast.h>
@@ -283,6 +285,10 @@ public:
                         JPH::ContactSettings&) override {
         if (manifold.mRelativeContactPointsOn1.empty()) return;
         if (!a.IsDynamic() && !b.IsDynamic()) return;
+        // Two bones of one ragdoll folding onto each other: no hit to report.
+        const JPH::CollisionGroup& ga = a.GetCollisionGroup();
+        const JPH::CollisionGroup& gb = b.GetCollisionGroup();
+        if (ga.GetGroupFilter() != nullptr && ga.GetGroupFilter() == gb.GetGroupFilter()) return;
         const JPH::RVec3 point = manifold.GetWorldSpaceContactPointOn1(0);
         // What it takes to stop each body at the point, along the normal:
         // its mass and, as it turns, its inertia (a long log struck at its
@@ -480,6 +486,12 @@ struct PhysicsWorld::Impl {
         // Characters (their bodies with them), then the bodies, before the
         // system that owns them (then Jolt's types, last).
         characters.clear();
+        for (auto& [id, r] : ragdolls) {
+            for (const JPH::Ref<JPH::SwingTwistConstraint>& joint : r.joints) {
+                if (joint != nullptr) system.RemoveConstraint(joint);
+            }
+        }
+        ragdolls.clear();
         JPH::BodyIDVector all;
         system.GetBodies(all);
         if (!all.empty()) {
@@ -508,6 +520,21 @@ struct PhysicsWorld::Impl {
     u32 dropped = 0;
     double last_step_ms = 0.0;
     u32 bodies = 0;
+
+    struct Ragdoll {
+        std::vector<BodyId> bodies;                              // per bone
+        std::vector<JPH::BodyID> jolt_ids;                       // the same, as Jolt has them
+        std::vector<JPH::Ref<JPH::SwingTwistConstraint>> joints; // per bone; none for the root
+        std::vector<Quat> targets;                               // as last driven
+        RagdollDrive drive;
+        bool driven = false;
+    };
+    std::unordered_map<RagdollId, Ragdoll> ragdolls;
+    RagdollId next_ragdoll = 1;
+    std::unordered_map<BodyId, RagdollBoneOf> ragdoll_bones; // by bone body
+    void wake(const Ragdoll& r) {
+        system.GetBodyInterface().ActivateBodies(r.jolt_ids.data(), static_cast<int>(r.jolt_ids.size()));
+    }
 
     struct Character {
         CharacterDesc desc;
@@ -895,7 +922,8 @@ struct PhysicsWorld::Impl {
     JPH::BodyInterface& bodies_interface() { return system.GetBodyInterface(); }
     const JPH::BodyInterface& bodies_interface() const { return system.GetBodyInterface(); }
 
-    JPH::Body* create(const BodyDesc& d, const JPH::RefConst<JPH::Shape>& shape) {
+    JPH::Body* create(const BodyDesc& d, const JPH::RefConst<JPH::Shape>& shape,
+                      const JPH::CollisionGroup* group = nullptr) {
         if (shape == nullptr || !valid_desc(d)) return nullptr;
         if (d.motion != Motion::fixed && shape->GetSubType() == JPH::EShapeSubType::HeightField) return nullptr;
         const bool moving = d.motion != Motion::fixed;
@@ -910,6 +938,7 @@ struct PhysicsWorld::Impl {
         s.mAngularVelocity = to_jolt(d.angular_velocity);
         s.mUserData = d.user;
         s.mUseManifoldReduction = !d.report_parts; // merged manifolds keep one part's id
+        if (group != nullptr) s.mCollisionGroup = *group;
         if (d.motion == Motion::dynamic) {
             if (d.mass > 0.0f) {
                 s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
@@ -1395,6 +1424,252 @@ struct PhysicsWorld::Impl {
 PhysicsWorld::PhysicsWorld(JobSystem& jobs, const PhysicsSettings& settings)
     : m_impl(std::make_unique<Impl>(jobs, settings)) {}
 
+// --- Ragdolls -----------------------------------------------------------------
+
+namespace {
+
+bool valid_ragdoll(const RagdollDesc& d) {
+    if (d.bones.empty() || d.bones.size() > k_max_ragdoll_bones) return false;
+    if (!(d.friction >= 0.0f && d.friction <= 100.0f) || !(d.restitution >= 0.0f && d.restitution <= 1.0f) ||
+        !(d.joint_friction >= 0.0f && d.joint_friction <= 1.0e6f)) {
+        return false;
+    }
+    for (usize i = 0; i < d.bones.size(); ++i) {
+        const RagdollBone& b = d.bones[i];
+        if (i == 0 ? b.parent != -1 : (b.parent < 0 || static_cast<usize>(b.parent) >= i)) return false;
+        if (!finite(b.position) || !finite(b.rotation) || !finite(b.linear_velocity) || !finite(b.angular_velocity) ||
+            !finite(b.part.offset) || !finite(b.part.rotation) || !finite(b.twist_axis)) {
+            return false;
+        }
+        if (!(b.mass >= 1.0e-3f && b.mass <= 1.0e6f)) return false;
+        if (std::holds_alternative<HeightShape>(b.part.shape)) return false;
+        if (!(length(b.twist_axis) >= 1e-3f && length(b.twist_axis) <= 1e3f)) return false;
+        if (!(b.swing_degrees >= 0.0f && b.swing_degrees <= 179.0f) ||
+            !(b.twist_degrees >= 0.0f && b.twist_degrees <= 179.0f)) {
+            return false;
+        }
+        if (b.centre && !finite(*b.centre)) return false;
+    }
+    for (const auto& [a, b] : d.no_collide) {
+        if (a >= d.bones.size() || b >= d.bones.size() || a == b) return false;
+    }
+    return true;
+}
+
+bool valid_drive(const RagdollDrive& d) {
+    return d.frequency >= 0.1f && d.frequency <= 30.0f && d.damping >= 0.0f && d.damping <= 10.0f &&
+           d.max_torque > 0.0f && d.max_torque <= 1.0e9f;
+}
+
+// A direction square to `axis` (unit length).
+JPH::Vec3 square_to(JPH::Vec3Arg axis) { return axis.GetNormalizedPerpendicular(); }
+
+} // namespace
+
+RagdollId PhysicsWorld::add_ragdoll(const RagdollDesc& desc) {
+    if (!valid_ragdoll(desc)) return k_no_ragdoll;
+    Impl& impl = *m_impl;
+    const usize count = desc.bones.size();
+    // Every shape first: nothing is added unless all of it can be.
+    std::vector<BodyDesc> bodies(count);
+    std::vector<JPH::RefConst<JPH::Shape>> shapes(count);
+    for (usize i = 0; i < count; ++i) {
+        const RagdollBone& b = desc.bones[i];
+        BodyDesc& d = bodies[i];
+        d.parts.push_back(b.part);
+        d.motion = Motion::dynamic;
+        d.position = b.position;
+        d.rotation = b.rotation;
+        d.mass = b.mass;
+        d.friction = desc.friction;
+        d.restitution = desc.restitution;
+        d.linear_velocity = b.linear_velocity;
+        d.angular_velocity = b.angular_velocity;
+        d.user = desc.user;
+        shapes[i] = body_shape(d);
+        if (shapes[i] == nullptr) return k_no_ragdoll;
+    }
+    const RagdollId id = impl.next_ragdoll;
+    // A bone and the one it hangs from overlap at their joint: they never collide.
+    JPH::Ref<JPH::GroupFilterTable> filter = new JPH::GroupFilterTable(static_cast<JPH::uint>(count));
+    for (usize i = 1; i < count; ++i) {
+        filter->DisableCollision(static_cast<JPH::CollisionGroup::SubGroupID>(i),
+                                 static_cast<JPH::CollisionGroup::SubGroupID>(desc.bones[i].parent));
+    }
+    for (const auto& [a, b] : desc.no_collide) {
+        filter->DisableCollision(static_cast<JPH::CollisionGroup::SubGroupID>(a),
+                                 static_cast<JPH::CollisionGroup::SubGroupID>(b));
+    }
+    Impl::Ragdoll ragdoll;
+    std::vector<JPH::Body*> made(count, nullptr);
+    std::vector<JPH::BodyID> ids;
+    ids.reserve(count);
+    JPH::BodyInterface& bi = impl.bodies_interface();
+    for (usize i = 0; i < count; ++i) {
+        const JPH::CollisionGroup group(filter, id, static_cast<JPH::CollisionGroup::SubGroupID>(i));
+        made[i] = impl.create(bodies[i], shapes[i], &group);
+        if (made[i] == nullptr) { // the world is full: what was made goes again
+            if (!ids.empty()) bi.DestroyBodies(ids.data(), static_cast<int>(ids.size()));
+            return k_no_ragdoll;
+        }
+        ids.push_back(made[i]->GetID());
+    }
+    ragdoll.joints.resize(count);
+    for (usize i = 1; i < count; ++i) {
+        const RagdollBone& b = desc.bones[i];
+        const RagdollBone& parent = desc.bones[static_cast<usize>(b.parent)];
+        JPH::SwingTwistConstraintSettings s;
+        s.mSpace = JPH::EConstraintSpace::WorldSpace;
+        s.mPosition1 = s.mPosition2 = to_jolt(b.position);
+        const JPH::Vec3 twist = to_jolt(b.twist_axis).Normalized();
+        const JPH::Vec3 plane = square_to(twist);
+        const JPH::Quat own = to_jolt(b.rotation);
+        // The parent's side of the joint: where the bone's axes are at the middle of its range.
+        const JPH::Quat middle = b.centre ? to_jolt(parent.rotation) * to_jolt(*b.centre) : own;
+        s.mTwistAxis1 = middle * twist;
+        s.mPlaneAxis1 = middle * plane;
+        s.mTwistAxis2 = own * twist;
+        s.mPlaneAxis2 = own * plane;
+        s.mNormalHalfConeAngle = s.mPlaneHalfConeAngle = b.swing_degrees * 0.017453292f;
+        s.mTwistMinAngle = -b.twist_degrees * 0.017453292f;
+        s.mTwistMaxAngle = b.twist_degrees * 0.017453292f;
+        s.mMaxFrictionTorque = desc.joint_friction;
+        ragdoll.joints[i] = static_cast<JPH::SwingTwistConstraint*>(
+            s.Create(*made[static_cast<usize>(b.parent)], *made[i]));
+    }
+    ragdoll.bodies.resize(count);
+    for (usize i = 0; i < count; ++i) {
+        ragdoll.bodies[i] = to_id(ids[i]);
+        impl.ragdoll_bones[ragdoll.bodies[i]] = {id, static_cast<u32>(i)};
+    }
+    // (Adding puts `ids` in an order of its own: the bones' are kept above.)
+    const JPH::BodyInterface::AddState state = bi.AddBodiesPrepare(ids.data(), static_cast<int>(ids.size()));
+    bi.AddBodiesFinalize(ids.data(), static_cast<int>(ids.size()), state, JPH::EActivation::Activate);
+    for (usize i = 1; i < count; ++i) impl.system.AddConstraint(ragdoll.joints[i]);
+    impl.bodies += static_cast<u32>(count);
+    ragdoll.jolt_ids.resize(count);
+    for (usize i = 0; i < count; ++i) ragdoll.jolt_ids[i] = from_id(ragdoll.bodies[i]);
+    ragdoll.targets.assign(count, Quat{});
+    impl.ragdolls.emplace(id, std::move(ragdoll));
+    ++impl.next_ragdoll;
+    // (Never none, nor Jolt's own "no group".)
+    while (impl.next_ragdoll == k_no_ragdoll || impl.next_ragdoll == JPH::CollisionGroup::cInvalidGroup) {
+        ++impl.next_ragdoll;
+    }
+    return id;
+}
+
+void PhysicsWorld::remove_ragdoll(RagdollId id) {
+    Impl& impl = *m_impl;
+    const auto it = impl.ragdolls.find(id);
+    if (it == impl.ragdolls.end()) return;
+    for (const JPH::Ref<JPH::SwingTwistConstraint>& joint : it->second.joints) {
+        if (joint != nullptr) impl.system.RemoveConstraint(joint);
+    }
+    const std::vector<BodyId> bodies = std::move(it->second.bodies);
+    for (const BodyId b : bodies) impl.ragdoll_bones.erase(b);
+    impl.ragdolls.erase(it);
+    remove_many(bodies); // (no longer bones: they go as bodies do, what rested on them woken)
+}
+
+bool PhysicsWorld::contains_ragdoll(RagdollId id) const { return m_impl->ragdolls.contains(id); }
+
+usize PhysicsWorld::ragdolls() const { return m_impl->ragdolls.size(); }
+
+std::span<const BodyId> PhysicsWorld::ragdoll_bodies(RagdollId id) const {
+    const auto it = m_impl->ragdolls.find(id);
+    return it == m_impl->ragdolls.end() ? std::span<const BodyId>() : std::span<const BodyId>(it->second.bodies);
+}
+
+std::optional<RagdollBoneOf> PhysicsWorld::ragdoll_bone(BodyId id) const {
+    const auto it = m_impl->ragdoll_bones.find(id);
+    return it == m_impl->ragdoll_bones.end() ? std::nullopt : std::optional<RagdollBoneOf>(it->second);
+}
+
+bool PhysicsWorld::drive_ragdoll(RagdollId id, std::span<const Quat> turns, const RagdollDrive& drive) {
+    Impl& impl = *m_impl;
+    const auto it = impl.ragdolls.find(id);
+    if (it == impl.ragdolls.end() || turns.size() != it->second.bodies.size() || !valid_drive(drive)) return false;
+    for (usize i = 1; i < turns.size(); ++i) {
+        if (!finite(turns[i])) return false;
+    }
+    Impl::Ragdoll& r = it->second;
+    const bool same_drive = r.driven && r.drive.frequency == drive.frequency && r.drive.damping == drive.damping &&
+                            r.drive.max_torque == drive.max_torque;
+    bool changed = !same_drive;
+    for (usize i = 1; i < turns.size(); ++i) {
+        JPH::SwingTwistConstraint& joint = *r.joints[i];
+        if (!same_drive) {
+            for (JPH::MotorSettings* m : {&joint.GetSwingMotorSettings(), &joint.GetTwistMotorSettings()}) {
+                m->mSpringSettings.mMode = JPH::ESpringMode::FrequencyAndDamping;
+                m->mSpringSettings.mFrequency = drive.frequency;
+                m->mSpringSettings.mDamping = drive.damping;
+                m->SetTorqueLimit(drive.max_torque);
+            }
+            joint.SetSwingMotorState(JPH::EMotorState::Position);
+            joint.SetTwistMotorState(JPH::EMotorState::Position);
+        }
+        // (Of unit length first: the same turn handed in again is then the same numbers. Written
+        // the other way round, q and -q, it is the same target too.)
+        const Quat turn = normalize(turns[i]);
+        const Quat& had = r.targets[i];
+        const bool same = turn == had || Quat{-turn.x, -turn.y, -turn.z, -turn.w} == had;
+        if (!same_drive || !same) {
+            joint.SetTargetOrientationBS(to_jolt(turn));
+            r.targets[i] = turn;
+            changed = true;
+        }
+    }
+    r.drive = drive;
+    r.driven = true;
+    // A motor does not wake a sleeping bone: a new target does.
+    if (changed) impl.wake(r);
+    return true;
+}
+
+void PhysicsWorld::relax_ragdoll(RagdollId id) {
+    const auto it = m_impl->ragdolls.find(id);
+    if (it == m_impl->ragdolls.end() || !it->second.driven) return;
+    for (const JPH::Ref<JPH::SwingTwistConstraint>& joint : it->second.joints) {
+        if (joint == nullptr) continue;
+        joint->SetSwingMotorState(JPH::EMotorState::Off);
+        joint->SetTwistMotorState(JPH::EMotorState::Off);
+    }
+    it->second.driven = false;
+    m_impl->wake(it->second); // held up no more
+}
+
+bool PhysicsWorld::move_ragdoll(RagdollId id, const DVec3& position, const Quat& rotation) {
+    const auto it = m_impl->ragdolls.find(id);
+    if (it == m_impl->ragdolls.end() || !finite(position) || !finite(rotation)) return false;
+    JPH::BodyInterface& bi = m_impl->bodies_interface();
+    const std::vector<BodyId>& bones = it->second.bodies;
+    JPH::RVec3 root_at;
+    JPH::Quat root_turn;
+    bi.GetPositionAndRotation(from_id(bones.front()), root_at, root_turn);
+    const JPH::Quat turn = (to_jolt(rotation) * root_turn.Conjugated()).Normalized();
+    const JPH::RVec3 to = to_jolt(position);
+    for (const BodyId bone : bones) m_impl->wake_around(from_id(bone)); // what rested on it where it was
+    for (const BodyId bone : bones) {
+        const JPH::BodyID b = from_id(bone);
+        JPH::RVec3 at;
+        JPH::Quat q;
+        bi.GetPositionAndRotation(b, at, q);
+        JPH::Vec3 linear, angular;
+        bi.GetLinearAndAngularVelocity(b, linear, angular);
+        bi.SetPositionAndRotation(b, to + turn * JPH::Vec3(at - root_at), (turn * q).Normalized(),
+                                  JPH::EActivation::Activate);
+        bi.SetLinearAndAngularVelocity(b, turn * linear, turn * angular);
+    }
+    for (const BodyId bone : bones) m_impl->wake_around(from_id(bone)); // and what it now touches
+    return true;
+}
+
+bool PhysicsWorld::ragdoll_driven(RagdollId id) const {
+    const auto it = m_impl->ragdolls.find(id);
+    return it != m_impl->ragdolls.end() && it->second.driven;
+}
+
 struct PhysicsWorld::Disposal {
     std::thread thread;
     std::atomic<bool> done{false};
@@ -1410,6 +1685,7 @@ void PhysicsWorld::clear() {
     fresh->steps = m_impl->steps;
     fresh->dropped = m_impl->dropped;
     fresh->next_character = m_impl->next_character;
+    fresh->next_ragdoll = m_impl->next_ragdoll; // (ragdolls themselves go with the old world)
     fresh->carried = m_impl->carried;
     fresh->set_water(m_impl->water);
     fresh->swell = m_impl->swell;
@@ -1428,6 +1704,7 @@ void PhysicsWorld::clear() {
     }
     m_impl->characters.clear(); // their bodies out of the old world here, not on its thread
     std::swap(m_impl, fresh);
+    ++m_clears;
     m_moved.clear();
     m_hits.clear();
     // Letting tens of thousands of bodies go takes tens of milliseconds: on
@@ -1489,7 +1766,9 @@ void PhysicsWorld::remove_many(std::span<const BodyId> ids, bool wake_neighbours
     JPH::BodyInterface& bi = m_impl->bodies_interface();
     for (const BodyId id : ids) {
         const JPH::BodyID b = from_id(id);
-        if (!b.IsInvalid() && bi.IsAdded(b) && !m_impl->is_character_body(b)) gone.push_back(b);
+        if (!b.IsInvalid() && bi.IsAdded(b) && !m_impl->is_character_body(b) && !m_impl->ragdoll_bones.contains(id)) {
+            gone.push_back(b);
+        }
     }
     std::sort(gone.begin(), gone.end());
     gone.erase(std::unique(gone.begin(), gone.end()), gone.end());
@@ -1544,6 +1823,7 @@ u64 PhysicsWorld::user(BodyId id) const {
 
 void PhysicsWorld::set_transform(BodyId id, const DVec3& position, const Quat& rotation) {
     if (!contains(id) || !finite(position) || !finite(rotation) || m_impl->is_character_body(from_id(id))) return;
+    if (m_impl->ragdoll_bones.contains(id)) return; // (a bone alone would tear its joints: move_ragdoll)
     m_impl->wake_around(from_id(id)); // a fixed body: what rested on it where it was
     m_impl->bodies_interface().SetPositionAndRotation(from_id(id), to_jolt(position), to_jolt(rotation),
                                                       JPH::EActivation::Activate);
@@ -1564,6 +1844,7 @@ void PhysicsWorld::add_impulse(BodyId id, const Vec3& impulse, const DVec3& poin
 
 void PhysicsWorld::move_kinematic(BodyId id, const DVec3& position, const Quat& rotation) {
     if (!contains(id) || !finite(position) || !finite(rotation) || m_impl->is_character_body(from_id(id))) return;
+    if (m_impl->ragdoll_bones.contains(id)) return;
     m_impl->bodies_interface().MoveKinematic(from_id(id), to_jolt(position), to_jolt(rotation),
                                              static_cast<float>(k_step_seconds));
 }

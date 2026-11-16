@@ -1275,6 +1275,35 @@ bodies follow the scene while stopped too, so starting costs nothing and a
 raycast answers at once. A body remade while simulating (its size, body
 or mass edited) starts again from where the scene has the entity.
 
+Ragdolls (C8a). `PhysicsWorld::add_ragdoll` makes a tree of dynamic
+bodies (bones, parents first, at most 128) joined each to its parent at
+its own origin by a swing-twist joint: a cone the bone may lean within and
+limits on its twist about its own axis, about where it is placed or about
+a `centre` given (a ragdoll made mid-stride keeps its rest pose's limits).
+A bone and its parent never collide (they overlap at the joint; a group
+filter per ragdoll), nor do pairs the description lists (`no_collide`:
+thighs at the hips, a spine's short bones); other bones, and other
+ragdolls, do, and a hard contact between two bones of one ragdoll is not
+reported as a hit. Limp it falls as
+bodies do, a little friction in each joint. `drive_ragdoll` turns each
+joint's motor on toward a turn in its parent's space, as a spring of a
+frequency, damping and most torque (an active ragdoll: it follows a pose
+and is still pushed about; a motor sags under load as a spring does, less
+the stiffer); a new target wakes it, the same one leaves it asleep;
+`relax_ragdoll` lets it go limp. A turn asked for outside a joint's limits
+is driven to as near as they allow. The root is not driven: its mover
+sets its body's velocity. `move_ragdoll` places the whole of it as one
+piece (a bone alone is not placed: `set_transform` and `move_kinematic`
+leave bones be, as a bone moved alone tears its joints). Bones are bodies like any other with the ragdoll's `user`
+(`ragdoll_bodies`, `ragdoll_bone`: rays, contacts, `add_impulse` and
+`state` work on them), but `remove` leaves them: they go with
+`remove_ragdoll`. A description that cannot be is refused whole. `clear`
+lets every ragdoll go (their owner sees `clears()` move on and makes them
+again; `ScenePhysics::clear` only takes the fresh-world path when every
+body is accounted for, so a ragdolls' owner counts its bones into
+`others` as the forest does). `sim` does not see
+`anim`: the editor builds descriptions from skeletons (C8b).
+
 ## The player (N4 part 2)
 
 `PhysicsWorld` also holds characters (`add_character`, `CharacterDesc`):

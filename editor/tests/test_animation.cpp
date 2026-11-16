@@ -889,7 +889,9 @@ GIANT_TEST("animation: an entity matched among its clips stands, walks and runs 
     GIANT_CHECK(set.ok && set.value["animated"].get<bool>());
     if (!set.ok) return;
     GIANT_CHECK(set.value["saved"]["matched"] == Json({"idle", "walk", "run"}));
-    GIANT_CHECK(set.value["matching"]["state"] == "building" || set.value["matching"]["state"] == "matching");
+    // (Whichever the build's worker has got to: being built, built since the command looked, or taken up.)
+    const std::string began = set.value["matching"]["state"].get<std::string>();
+    GIANT_CHECK(began == "building" || began == "ready" || began == "matching");
     f.animation->finish_motions();
     f.frame_step(1.0 / 30.0);
     Json a = f.get(id);
