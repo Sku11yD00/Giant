@@ -53,6 +53,7 @@
 #include "giant/render/renderer.h"
 #include "giant/world/scene.h"
 
+#include <array>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -241,6 +242,7 @@ public:
         bool matching = false;
         anim::MotionMatcher matcher;
         MotionGoal goal;
+        std::array<float, 2> going{}; // its goal's velocity (across, along), eased: what the way ahead eases on from
         bool goal_set = false; // since the last frame's update
         double match_seconds = 0.0;
         // A pose held from outside (hold_pose): `given` shows instead.

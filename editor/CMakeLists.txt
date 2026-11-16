@@ -103,6 +103,8 @@ if(GIANT_BUILD_TESTS)
     set_tests_properties(editor_mcp PROPERTIES TIMEOUT 3060 ENVIRONMENT "${mcp_env}")
     # The gates' summaries of a flight (no editor).
     add_test(NAME gate_common COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_gate_common.py)
+    # The gates' person (a skinned glTF written from nothing): the file's own checks (no editor).
+    add_test(NAME gate_person COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_gate_person.py)
     # The N2 gate's scene and flight, on the null device (the software
     # renderer would take hours): everything but the speed. Optimised builds
     # only: a debug or sanitizer build takes most of an hour over it.

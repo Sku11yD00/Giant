@@ -4,6 +4,7 @@
 
 #include "giant/anim/motion.h"
 
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 #include <string>
@@ -64,6 +65,34 @@ inline Clip go(const char* name, float speed, float seconds, const Vec3& along =
     return c;
 }
 
+// Going along +z at `speed` with a person's stride: each foot reaching
+// `reach` fore and aft and lifted `lift` as it comes forward (the left
+// first), one cycle over the clip. A loop.
+inline Clip stride(const char* name, float speed, float seconds, float reach, float lift) {
+    Clip c;
+    c.name = name;
+    c.duration = seconds;
+    Channel hips = channel(0, Path::translation);
+    hips.times = {0.0f, seconds};
+    hips.values = {{0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, speed * seconds, 0.0f}};
+    c.channels.push_back(hips);
+    Channel left = channel(1, Path::translation);
+    Channel right = channel(2, Path::translation);
+    const int keys = 32;
+    for (int i = 0; i <= keys; ++i) {
+        const float u = static_cast<float>(i) / static_cast<float>(keys);
+        const float swing = std::sin(k_tau * u);
+        const float forward = std::cos(k_tau * u);
+        left.times.push_back(u * seconds);
+        right.times.push_back(u * seconds);
+        left.values.push_back({0.1f, -1.0f + lift * std::max(0.0f, forward), reach * swing, 0.0f});
+        right.values.push_back({-0.1f, -1.0f + lift * std::max(0.0f, -forward), -reach * swing, 0.0f});
+    }
+    c.channels.push_back(left);
+    c.channels.push_back(right);
+    return c;
+}
+
 // Standing, shifting its feet a little.
 inline Clip idle() {
     Clip c;
@@ -115,6 +144,26 @@ inline Clip turn() {
     swing_feet(c, 0.3f, 2.0f);
     return c;
 }
+
+// A person's set with no clip going from one to the next: standing, a walk
+// at 1.4 m/s, and (`with_run`) a run at 4.
+struct PersonSet {
+    Skeleton skeleton = biped();
+    std::vector<Clip> clips;
+    std::vector<MotionClip> chosen;
+    MotionDatabase db;
+    std::string problem;
+
+    explicit PersonSet(bool with_run = true) {
+        clips = {idle(), stride("walk", 1.4f, 1.0f, 0.39f, 0.16f)};
+        chosen = {{0, true}, {1, true}};
+        if (with_run) {
+            clips.push_back(stride("run", 4.0f, 0.7f, 0.6f, 0.45f));
+            chosen.push_back({2, true});
+        }
+        problem = build_motion_database(skeleton, clips, chosen, find_motion_joints(skeleton), MotionSettings{}, db);
+    }
+};
 
 struct Set {
     Skeleton skeleton = biped();

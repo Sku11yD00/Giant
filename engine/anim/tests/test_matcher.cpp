@@ -600,8 +600,8 @@ GIANT_TEST("matcher: staying is preferred by the bias asked; the cost reported i
     // No number, or under 0: no bias, not a refusal to move.
     GIANT_CHECK(after_wanting_a_run(std::numeric_limits<float>::quiet_NaN(), 0.5f).clip() == 2);
     GIANT_CHECK(after_wanting_a_run(-3.0f, 0.5f).clip() == 2);
-    // With the pose counted in full the walk is stayed in (nothing here goes from one to the other).
-    GIANT_CHECK(after_wanting_a_run(0.05f, 1.0f).clip() == 1);
+    // With the pose counted for much the walk is stayed in (nothing here goes from one to the other).
+    GIANT_CHECK(after_wanting_a_run(0.05f, 2.0f).clip() == 1);
 }
 
 GIANT_TEST("matcher: a jump keeps how fast each joint was moving and turning") {
@@ -694,4 +694,101 @@ GIANT_TEST("matcher: a blend asked to last for ever still dies away within secon
         w.pose();
         GIANT_CHECK(apart(w.local[1].translation, clip_pose[1].translation) < 0.02f);
     }
+}
+
+namespace {
+
+// A person moved as the editor moves one: its goal's velocity eased toward
+// what is wanted (half the gap in 0.2 s), the way ahead from that.
+struct Moved {
+    PersonSet set;
+    MotionMatcher matcher;
+    float going = 0.0f;
+    u32 changes = 0;
+
+    explicit Moved(bool with_run = true) : set(with_run) {}
+    u32 clip() const { return set.db.range_of(matcher.frame()).clip; }
+    void step(float wanted) {
+        going += (wanted - going) * (1.0f - std::exp(-0.69314718f * k_step / 0.2f));
+        const bool playing = matcher.frame() != k_no_frame;
+        const u32 was = playing ? clip() : 0;
+        matcher.update(set.db, set.skeleton, set.clips, motion_ahead(set.db.settings, {0.0f, going}, {0.0f, wanted}, 0.0f), k_step);
+        if (playing && clip() != was) ++changes;
+    }
+    void run(float wanted, float seconds) {
+        for (float t = 0.0f; t < seconds - 0.5f * k_step; t += k_step) step(wanted);
+    }
+};
+
+} // namespace
+
+GIANT_TEST("matcher: one sent walking leaves its idle though its set has a run too, and stands again when it stops") {
+    // (A run beside the walk spreads the set's speeds wide: scaled by all of that spread, a walk's worth of
+    // way ahead counted for too little to leave the idle, whose pose is far from any stride's.)
+    for (const float speed : {1.05f, 1.4f}) {
+        Moved m;
+        GIANT_CHECK(m.set.problem.empty());
+        m.run(0.0f, 1.0f);
+        GIANT_CHECK(m.clip() == 0);
+        m.run(speed, 5.0f);
+        GIANT_CHECK(m.clip() == 1);
+        // Steady from then on: played round, no jump.
+        const u64 jumps = m.matcher.jumps();
+        m.run(speed, 5.0f);
+        GIANT_CHECK(m.clip() == 1 && m.matcher.jumps() == jumps);
+        m.run(0.0f, 2.0f);
+        GIANT_CHECK(m.clip() == 0);
+    }
+    // Faster, it runs; in between, it stays as it is (what plays is left only for something clearly better).
+    Moved m;
+    m.run(1.4f, 3.0f);
+    GIANT_CHECK(m.clip() == 1);
+    m.run(2.7f, 3.0f);
+    GIANT_CHECK(m.clip() == 1);
+    m.run(3.0f, 3.0f);
+    GIANT_CHECK(m.clip() == 1);
+    m.run(4.0f, 3.0f);
+    GIANT_CHECK(m.clip() == 2);
+    m.run(2.7f, 3.0f);
+    GIANT_CHECK(m.clip() == 2);
+    m.run(2.4f, 3.0f);
+    GIANT_CHECK(m.clip() == 2);
+    m.run(1.4f, 3.0f);
+    GIANT_CHECK(m.clip() == 1);
+    // A speed that wavers about the middle (a quarter of a metre a second either way, anew each step, as
+    // one jostled in a crowd) does not change the clip.
+    Moved wavering;
+    wavering.run(1.4f, 3.0f);
+    u32 seed = 12345;
+    wavering.changes = 0;
+    for (int i = 0; i < 3600; ++i) {
+        seed = seed * 1664525u + 1013904223u;
+        wavering.step(2.7f + 0.25f * (static_cast<float>(seed >> 8) / 8388608.0f - 1.0f));
+    }
+    GIANT_CHECK(wavering.changes <= 1);
+    // A set that only stands and walks is left as it was: the caps lie above its own spread.
+    Moved two(false);
+    two.run(0.0f, 1.0f);
+    two.run(1.4f, 3.0f);
+    GIANT_CHECK(two.clip() == 1);
+    two.run(0.0f, 2.0f);
+    GIANT_CHECK(two.clip() == 0);
+}
+
+GIANT_TEST("matcher: one that stops at once still plays its stop clip, its velocity easing off") {
+    Walker w;
+    float going = 1.5f;
+    const auto step = [&](float wanted) {
+        going += (wanted - going) * (1.0f - std::exp(-0.69314718f * k_step / 0.2f));
+        w.update(motion_ahead(w.set.db.settings, {0.0f, going}, {0.0f, wanted}, 0.0f));
+    };
+    for (int i = 0; i < 180; ++i) step(1.5f);
+    GIANT_CHECK(w.clip() == 1);
+    bool stopped = false;
+    for (int i = 0; i < 150; ++i) {
+        step(0.0f);
+        stopped = stopped || w.clip() == 4;
+        GIANT_CHECK(w.clip() == 1 || w.clip() == 4 || (stopped && w.clip() == 0)); // walk, stop, then idle
+    }
+    GIANT_CHECK(stopped && w.clip() == 0);
 }

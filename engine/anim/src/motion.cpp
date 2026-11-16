@@ -160,17 +160,25 @@ std::string plain(const std::string& name) {
     return out;
 }
 
+// A group is not scaled down by more spread than a set that stands and
+// walks has: a run beside the walk must not make a walk's worth of way
+// ahead (or of the hips' speed) count for little, or one sent walking
+// stays in its idle, whose pose is far from any stride's.
+constexpr float k_most_place_spread = 0.35f; // metres
+constexpr float k_most_speed_spread = 0.4f;  // metres a second
+
 struct Group {
     usize first;
     usize count;
     float MotionSettings::* weight;
+    float most; // its spread counts as no more than this
 };
 constexpr Group k_groups[] = {
-    {k_motion_foot_places, 6, &MotionSettings::foot_place_weight},
-    {k_motion_foot_velocities, 6, &MotionSettings::foot_velocity_weight},
-    {k_motion_hips_velocity, 3, &MotionSettings::hips_velocity_weight},
-    {k_motion_ahead_places, 6, &MotionSettings::ahead_place_weight},
-    {k_motion_ahead_facings, 6, &MotionSettings::ahead_facing_weight},
+    {k_motion_foot_places, 6, &MotionSettings::foot_place_weight, k_far},
+    {k_motion_foot_velocities, 6, &MotionSettings::foot_velocity_weight, k_far},
+    {k_motion_hips_velocity, 3, &MotionSettings::hips_velocity_weight, k_most_speed_spread},
+    {k_motion_ahead_places, 6, &MotionSettings::ahead_place_weight, k_most_place_spread},
+    {k_motion_ahead_facings, 6, &MotionSettings::ahead_facing_weight, k_far},
 };
 
 // How much the pose counts, kept to what leaves every cost a float.
@@ -427,7 +435,7 @@ std::string build_motion_database(const Skeleton& skeleton, std::span<const Clip
         const float deviation = static_cast<float>(std::sqrt(sum / static_cast<double>(g.count)));
         for (usize i = g.first; i < g.first + g.count; ++i) {
             offset[i] = static_cast<float>(mean[i]);
-            scale[i] = settings.*g.weight / std::max(deviation, k_least_spread);
+            scale[i] = settings.*g.weight / std::clamp(deviation, k_least_spread, g.most);
         }
     }
     for (usize f = 0; f < total; ++f) {
