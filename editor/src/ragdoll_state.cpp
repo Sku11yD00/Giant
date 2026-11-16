@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
@@ -431,10 +432,208 @@ std::string RagdollState::start(const world::Scene& scene, const MeshLibrary& me
     r.skinned = a->skinned;
     m_poses[id] = at;
     m_redraw.push_back(id); // its cell built again: drawn as moving from now
+    if (m_targets != nullptr) m_targets->forget(id); // bullets meet its bones from now, not its capsules too
     return {};
 }
 
+std::string RagdollState::set_settings(const Settings& settings) {
+    if (!(settings.shot_drop >= 0.0f && settings.shot_drop <= 1e6f)) return "shot_drop is not within 0 to 1e6 N s";
+    if (!(settings.blast_drop >= 0.0f && settings.blast_drop <= 1e6f)) return "blast_drop is not within 0 to 1e6 N s";
+    if (settings.starts_per_step < 1 || settings.starts_per_step > 64) return "starts_per_step is not within 1 to 64";
+    m_settings = settings;
+    return {};
+}
+
+std::string RagdollState::joint_name(world::EntityId id, u32 bone) const {
+    const auto it = m_ragdolls.find(id);
+    if (it == m_ragdolls.end() || bone >= it->second.bones.size()) return {};
+    const std::vector<std::string>& names = it->second.skinned->skeleton.names;
+    const u32 joint = it->second.bones[bone].joint;
+    return joint < names.size() ? names[joint] : std::string{};
+}
+
+namespace {
+
+bool finite(const DVec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+
+// How fast a blast throws a body, at most (m/s): its impulse is a game's number, not a body's.
+constexpr float k_max_throw = 12.0f;
+
+// How far a point is from a capsule's skin (0: inside).
+double reach_of(const DVec3& point, const sim::HitCapsule& c) {
+    const DVec3 ab = c.b - c.a;
+    const double l2 = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+    const DVec3 ap = point - c.a;
+    const double t = l2 > 0.0 ? std::clamp((ap.x * ab.x + ap.y * ab.y + ap.z * ab.z) / l2, 0.0, 1.0) : 0.0;
+    const DVec3 d = c.a + ab * t - point;
+    return std::max(0.0, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) - static_cast<double>(c.radius));
+}
+
+double far_of(const DVec3& d) { return std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z); }
+
+// The way from a blast to what it throws (up, for what sits on it).
+Vec3 away_of(const DVec3& d, double far) {
+    return far > 1e-4 ? Vec3{static_cast<float>(d.x / far), static_cast<float>(d.y / far), static_cast<float>(d.z / far)}
+                      : Vec3{0.0f, 1.0f, 0.0f};
+}
+
+} // namespace
+
+void RagdollState::strike(const Ragdoll& r, const Waiting& w) {
+    sim::PhysicsWorld& world = m_physics.world();
+    const std::span<const sim::BodyId> bodies = world.ragdoll_bodies(r.id);
+    if (bodies.size() != r.bones.size() || bodies.empty()) return;
+    if (!w.whole) {
+        if (w.joint < r.bone_of.size()) {
+            world.add_impulse(bodies[r.bone_of[w.joint]], w.impulse, w.point);
+        } else if (w.joint == k_nearest_bone) {
+            usize nearest = 0;
+            double least = 0.0;
+            bool found = false;
+            for (usize b = 0; b < bodies.size(); ++b) {
+                const std::optional<sim::BodyState> s = world.state(bodies[b]);
+                if (!s) continue;
+                const double far = far_of(s->position - w.point);
+                if (!found || far < least) {
+                    least = far;
+                    nearest = b;
+                    found = true;
+                }
+            }
+            if (found) world.add_impulse(bodies[nearest], w.impulse, w.point);
+        }
+        return;
+    }
+    // A blast's on one it dropped: its bones thrown one way, each by its share.
+    float mass = 0.0f;
+    for (const Bone& b : r.bones) mass += b.mass;
+    if (!(mass > 0.0f)) return;
+    const float taken = std::min(w.blast, mass * k_max_throw) * w.reach;
+    for (usize b = 0; b < bodies.size(); ++b) {
+        if (const std::optional<sim::BodyState> s = world.state(bodies[b])) {
+            world.add_impulse(bodies[b], w.impulse * (taken * r.bones[b].mass / mass), s->position);
+        }
+    }
+}
+
+void RagdollState::ask_in(u64 scene) {
+    if (scene == m_waiting_scene && m_physics.runs() == m_waiting_run) return;
+    m_waiting.clear(); // (asked in another scene or run: never made)
+    m_waiting_scene = scene;
+    m_waiting_run = m_physics.runs();
+}
+
+bool RagdollState::knock(u64 scene, world::EntityId id, u32 joint, const Vec3& impulse, const DVec3& point) {
+    if (!m_physics.simulating() || !(m_settings.shot_drop > 0.0f) || !finite(impulse) || !finite(point)) return false;
+    if (!(length(impulse) >= m_settings.shot_drop)) return false;
+    ask_in(scene);
+    if (m_waiting.size() >= k_max_waiting) return false;
+    Waiting& w = m_waiting.emplace_back();
+    w.entity = id;
+    w.joint = joint;
+    w.impulse = impulse;
+    w.point = point;
+    return true;
+}
+
+RagdollState::Blasted RagdollState::blast(u64 scene, const sim::HitShapes& standing, const DVec3& point, float radius,
+                                          float impulse) {
+    Blasted out;
+    if (!m_physics.simulating() || !std::isfinite(radius) || !(radius > 0.0f) || !std::isfinite(impulse) ||
+        !(impulse > 0.0f) || !finite(point)) {
+        return out;
+    }
+    ask_in(scene);
+    // Those lying about (of this scene and run: others are let go at the next step): each bone thrown from the blast.
+    sim::PhysicsWorld& world = m_physics.world();
+    const bool ours = scene == m_scene && m_physics.runs() == m_run && world.clears() == m_clears;
+    if (ours) {
+        for (const auto& [id, r] : m_ragdolls) {
+            const std::span<const sim::BodyId> bodies = world.ragdoll_bodies(r.id);
+            if (bodies.size() != r.bones.size()) continue;
+            float mass = 0.0f;
+            for (const Bone& b : r.bones) mass += b.mass;
+            if (!(mass > 0.0f)) continue;
+            const float most = std::min(impulse, mass * k_max_throw);
+            bool thrown = false;
+            for (usize b = 0; b < bodies.size(); ++b) {
+                const std::optional<sim::BodyState> s = world.state(bodies[b]);
+                if (!s) continue;
+                const DVec3 d = s->position - point;
+                const double far = far_of(d);
+                if (far >= static_cast<double>(radius)) continue;
+                const float taken = most * (1.0f - static_cast<float>(far) / radius) * (r.bones[b].mass / mass);
+                world.add_impulse(bodies[b], away_of(d, far) * taken, s->position);
+                thrown = true;
+            }
+            out.thrown += thrown ? 1u : 0u;
+        }
+    }
+    if (!(m_settings.blast_drop > 0.0f)) return out;
+    // Those standing it reaches hard enough: to drop, thrown from it.
+    const auto drop = [&](world::EntityId id, double nearest, const DVec3& centre) {
+        if (!(nearest < static_cast<double>(radius)) || m_waiting.size() >= k_max_waiting) return;
+        const float reach = 1.0f - static_cast<float>(nearest) / radius;
+        if (impulse * reach < m_settings.blast_drop) return;
+        const DVec3 d = centre - point;
+        Waiting& w = m_waiting.emplace_back();
+        w.entity = id;
+        w.whole = true;
+        w.impulse = away_of(d, far_of(d));
+        w.point = point;
+        w.blast = impulse;
+        w.reach = reach;
+        ++out.dropped;
+    };
+    for (const auto& [id, serial] : m_animation.skinned()) {
+        if (ours && m_ragdolls.contains(id)) continue;
+        if (const sim::HitCharacter* c = standing.find(id); c != nullptr && !c->capsules.empty()) {
+            double nearest = static_cast<double>(radius);
+            DVec3 centre{};
+            for (const sim::HitCapsule& capsule : c->capsules) {
+                nearest = std::min(nearest, reach_of(point, capsule));
+                centre = centre + (capsule.a + capsule.b) * (0.5 / static_cast<double>(c->capsules.size()));
+            }
+            drop(id, nearest, centre);
+        } else if (m_walkers != nullptr && m_walkers->find(id) != nullptr) {
+            // A walker (no capsules: bullets meet its body): by its middle, a metre up at scale 1, half a metre round.
+            const auto p = m_walkers->poses().find(id);
+            if (p == m_walkers->poses().end()) continue;
+            const double size = static_cast<double>(std::fabs(p->second.scale.y));
+            const DVec3 centre = p->second.position + DVec3{0.0, size, 0.0};
+            drop(id, std::max(0.0, far_of(centre - point) - 0.5 * size), centre);
+        }
+    }
+    return out;
+}
+
+void RagdollState::make_waiting(const world::Scene& scene, const MeshLibrary& meshes) {
+    u32 started = 0;
+    usize done = 0;
+    for (; done < m_waiting.size(); ++done) {
+        const Waiting w = m_waiting[done]; // (a copy: nothing here leans on start leaving the list be)
+        auto it = current(scene) ? m_ragdolls.find(w.entity) : m_ragdolls.end();
+        if (it == m_ragdolls.end()) {
+            if (started >= m_settings.starts_per_step) break; // the rest wait their turn
+            ++started; // (one that cannot be made counts too: the look cost its part)
+            if (!start(scene, meshes, w.entity).empty()) continue; // gone, hidden, too many: it stands
+            ++m_dropped;
+            it = m_ragdolls.find(w.entity);
+            if (it == m_ragdolls.end()) continue;
+        }
+        strike(it->second, w); // (one lying already, dropped by an earlier one: pushed all the same)
+    }
+    m_waiting.erase(m_waiting.begin(), m_waiting.begin() + static_cast<std::ptrdiff_t>(done));
+}
+
 void RagdollState::before_step(const world::Scene& scene, const MeshLibrary& meshes) {
+    // Drops asked for in another scene or run, or with the simulation stopped since: never made.
+    if (scene.identity() != m_waiting_scene || !m_physics.simulating() || m_physics.runs() != m_waiting_run) m_waiting.clear();
+    follow(scene, meshes);
+    if (!m_waiting.empty()) make_waiting(scene, meshes);
+}
+
+void RagdollState::follow(const world::Scene& scene, const MeshLibrary& meshes) {
     if (m_ragdolls.empty()) {
         m_clears = m_physics.world().clears();
         return;

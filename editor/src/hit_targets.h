@@ -37,6 +37,8 @@ public:
     // Names of an entity's zone and bone (empty: unknown).
     std::string zone_name(world::EntityId id, u16 zone) const;
     std::string bone_name(world::EntityId id, u32 bone) const;
+    // An entity's shapes dropped now (a ragdoll from here on: update leaves it be while its pose is held).
+    void forget(world::EntityId id);
     u64 updates() const { return m_updates; } // characters' shapes made again, ever
 
 private:

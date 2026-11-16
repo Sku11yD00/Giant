@@ -24,6 +24,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,7 @@ struct Fixture {
         register_ragdoll_commands(commands, state);
         connect_walkers(state);
         connect_ragdolls(state);
+        connect_blows(state);
     }
     ai::CommandResult run(const char* name, const Json& args = Json::object()) {
         ai::ExecuteOptions options;
@@ -516,4 +518,216 @@ GIANT_TEST("ragdolls: step_physics moves them too, and the scene draws them wher
     double top = -1e9;
     for (const render::Occluder& o : out) top = std::max({top, o.a.y, o.b.y});
     GIANT_CHECK(top < 1.9); // (standing as placed it would reach 2.7)
+}
+
+GIANT_TEST("ragdolls: a shot hard enough drops a standing character, pushed on the bone struck; a light one leaves it standing") {
+    Fixture f;
+    f.floor();
+    const world::EntityId id = f.person(0.0, 0.0, 0.0);
+    const world::EntityId other = f.person(6.0, 0.0, 0.0);
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    f.frames(0.2);
+    // The settings: told, set a field at a time, refused out of range.
+    ai::CommandResult got = f.run("get_ragdoll");
+    GIANT_CHECK(got.ok && got.value["settings"]["shot_drop"] == 3.0 && got.value["settings"]["blast_drop"] == 150.0 &&
+                got.value["settings"]["starts_per_step"] == 4 && got.value["waiting"] == 0 && got.value["dropped"] == 0);
+    GIANT_CHECK(!f.run("set_ragdoll_settings", {{"starts_per_step", 0}}).ok && !f.run("set_ragdoll_settings", {{"shot_drop", -1.0}}).ok);
+    ai::CommandResult set = f.run("set_ragdoll_settings", {{"shot_drop", 1000.0}});
+    GIANT_CHECK(set.ok && set.value["shot_drop"] == 1000.0 && set.value["blast_drop"] == 150.0);
+    // A slug that stops in its chest (all its momentum given: 0.05 kg at 880 m/s, 44 N s): not enough for that.
+    const Json slug = {{"origin", {0.0, 1.3, -5.0}}, {"direction", {0.0, 0.0, 1.0}}, {"resolve", true},
+                       {"mass", 0.05},       {"penetration", 0.05}};
+    ai::CommandResult fired = f.run("fire", slug);
+    GIANT_CHECK(fired.ok && !fired.value["hits"].empty() && fired.value["hits"][0]["entity"] == id);
+    GIANT_CHECK(f.ragdolls.waiting() == 0);
+    f.frames(0.1);
+    GIANT_CHECK(f.ragdolls.size() == 0);
+    // None at all with 0.
+    GIANT_CHECK(f.run("set_ragdoll_settings", {{"shot_drop", 0.0}}).ok);
+    GIANT_CHECK(f.run("fire", slug).ok && f.ragdolls.waiting() == 0);
+    // Enough: it waits for the next step, then lies limp, its capsules gone, its chest moving along the shot.
+    GIANT_CHECK(f.run("set_ragdoll_settings", {{"shot_drop", 3.0}}).ok);
+    fired = f.run("fire", slug);
+    GIANT_CHECK(fired.ok && !fired.value["hits"].empty());
+    if (!fired.ok || fired.value["hits"].empty()) return;
+    const Json first = fired.value["hits"][0];
+    GIANT_CHECK(first["entity"] == id && first["bone"] == "Spine" && first["zone"].is_string());
+    GIANT_CHECK(f.ragdolls.waiting() == 1 && f.ragdolls.find(id) == nullptr && f.hits.shapes().find(id) != nullptr);
+    GIANT_CHECK(f.run("get_ragdoll").value["waiting"] == 1);
+    f.frame();
+    const RagdollState::Ragdoll* r = f.ragdolls.find(id);
+    GIANT_CHECK(r != nullptr && f.ragdolls.waiting() == 0 && f.ragdolls.dropped() == 1);
+    GIANT_CHECK(f.hits.shapes().find(id) == nullptr && f.ragdolls.find(other) == nullptr);
+    if (r == nullptr) return;
+    const sim::BodyId spine = f.physics.world().ragdoll_bodies(r->id)[r->bone_of[joint_named(f, "Spine")]];
+    GIANT_CHECK(f.physics.world().state(spine)->linear_velocity.z > 0.5f);
+    // A shot at it as it lies names the bone it meets and its zone, as it did its capsule's.
+    fired = f.run("fire", slug);
+    GIANT_CHECK(fired.ok && !fired.value["hits"].empty());
+    if (fired.ok && !fired.value["hits"].empty()) {
+        const Json& hit = fired.value["hits"][0];
+        GIANT_CHECK(hit["entity"] == id && hit["character"].get<bool>());
+        GIANT_CHECK(hit["bone"] == "Spine" && hit["zone"] == first["zone"]);
+    }
+    GIANT_CHECK(f.ragdolls.waiting() == 0); // (a bone's body: pushed as any body, nothing to drop)
+    f.frames(1.0);
+    GIANT_CHECK(f.joint(id, joint_named(f, "Head")).y < 1.5 && f.joint(id, joint_named(f, "Hips")).z > 0.05);
+    // One struck that is gone before its turn, and one struck as the simulation stops: no ragdoll, nothing waiting.
+    Json at_other = slug;
+    at_other["origin"] = {6.0, 1.3, -5.0};
+    GIANT_CHECK(f.run("fire", at_other).ok && f.ragdolls.waiting() == 1);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", Json::array({other})}}).ok);
+    f.frame();
+    GIANT_CHECK(f.ragdolls.waiting() == 0 && f.ragdolls.size() == 1);
+    const world::EntityId third = f.person(-6.0, 0.0, 0.0);
+    f.frames(0.2);
+    at_other["origin"] = {-6.0, 1.3, -5.0};
+    GIANT_CHECK(f.run("fire", at_other).ok && f.ragdolls.waiting() == 1);
+    GIANT_CHECK(f.run("simulate", {{"on", false}}).ok && f.run("simulate", {{"on", true}}).ok);
+    f.frame();
+    GIANT_CHECK(f.ragdolls.waiting() == 0 && f.ragdolls.size() == 0 && f.ragdolls.find(third) == nullptr);
+}
+
+GIANT_TEST("ragdolls: a blast drops those standing in its reach, a few a step, and throws them and those lying") {
+    Fixture f;
+    f.floor();
+    // Six in a ring 2 m about the blast, one far off.
+    std::vector<world::EntityId> ring;
+    std::vector<DVec3> where;
+    for (int k = 0; k < 6; ++k) {
+        const double a = 6.283185307179586 * k / 6.0;
+        where.push_back({2.0 * std::cos(a), 0.0, 2.0 * std::sin(a)});
+        ring.push_back(f.person(where.back().x, 0.0, where.back().z));
+    }
+    const world::EntityId far = f.person(30.0, 0.0, 0.0);
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    f.frames(0.2);
+    GIANT_CHECK(f.run("set_ragdoll_settings", {{"starts_per_step", 2}}).ok);
+    // Too weak where it reaches them: all stand.
+    GIANT_CHECK(f.run("impact", {{"point", {0.0, 1.0, 0.0}}, {"radius", 6.0}, {"impulse", 100.0}}).ok);
+    GIANT_CHECK(f.ragdolls.waiting() == 0);
+    // Strong enough: all six wait, two made a step.
+    GIANT_CHECK(f.run("impact", {{"point", {0.0, 1.0, 0.0}}, {"radius", 6.0}, {"impulse", 600.0}}).ok);
+    GIANT_CHECK(f.ragdolls.waiting() == 6 && f.ragdolls.size() == 0);
+    f.frame();
+    GIANT_CHECK(f.ragdolls.waiting() == 4 && f.ragdolls.size() == 2);
+    f.frame();
+    GIANT_CHECK(f.ragdolls.waiting() == 2 && f.ragdolls.size() == 4);
+    f.frame();
+    GIANT_CHECK(f.ragdolls.waiting() == 0 && f.ragdolls.size() == 6 && f.ragdolls.dropped() == 6);
+    GIANT_CHECK(f.ragdolls.find(far) == nullptr && f.hits.shapes().find(far) != nullptr);
+    // Each thrown away from the blast (its hips moving outwards).
+    f.frames(0.3);
+    const usize hips = joint_named(f, "Hips");
+    for (usize k = 0; k < ring.size(); ++k) {
+        const DVec3 at = f.joint(ring[k], hips);
+        const double out = ((at.x - where[k].x) * where[k].x + (at.z - where[k].z) * where[k].z) / 2.0;
+        GIANT_CHECK(out > 0.1);
+    }
+    // Lying at rest, another blast throws them again, no faster than a blast throws (however strong).
+    f.frames(4.0);
+    const RagdollState::Ragdoll* r = f.ragdolls.find(ring[0]);
+    GIANT_CHECK(r != nullptr);
+    if (r == nullptr) return;
+    const sim::BodyId root = f.physics.world().ragdoll_bodies(r->id)[0];
+    const DVec3 lay = f.physics.world().state(root)->position;
+    const Vec3 lying = f.physics.world().state(root)->linear_velocity;
+    GIANT_CHECK(f.run("impact", {{"point", {0.0, 0.0, 0.0}}, {"radius", 20.0}, {"impulse", 1e8}}).ok);
+    GIANT_CHECK(f.ragdolls.waiting() == 0); // (those lying are thrown at once; the far one is out of reach)
+    f.frame();
+    const Vec3 thrown = f.physics.world().state(root)->linear_velocity - lying;
+    const double outwards = (static_cast<double>(thrown.x) * lay.x + static_cast<double>(thrown.z) * lay.z) /
+                            std::sqrt(lay.x * lay.x + lay.z * lay.z);
+    GIANT_CHECK(outwards > 1.0 && length(thrown) < 14.0f);
+    // (And its pose follows: one asleep is woken.)
+    f.frames(0.3);
+    GIANT_CHECK(length(f.physics.world().state(root)->position - lay) > 0.2);
+    GIANT_CHECK(length(f.ragdolls.poses().at(ring[0]).position - (f.physics.world().state(root)->position - r->root_start + r->start.position)) < 1e-6);
+    // Blasts drop none with 0.
+    GIANT_CHECK(f.run("set_ragdoll_settings", {{"blast_drop", 0.0}}).ok);
+    GIANT_CHECK(f.run("impact", {{"point", {29.0, 1.0, 0.0}}, {"radius", 6.0}, {"impulse", 1e6}}).ok);
+    GIANT_CHECK(f.ragdolls.waiting() == 0);
+    // One standing dropped by a mighty blast is thrown no faster either.
+    GIANT_CHECK(f.run("set_ragdoll_settings", {{"blast_drop", 150.0}}).ok);
+    GIANT_CHECK(f.run("impact", {{"point", {29.0, 1.0, 0.0}}, {"radius", 6.0}, {"impulse", 1e6}}).ok);
+    GIANT_CHECK(f.ragdolls.waiting() == 1);
+    f.frame();
+    const RagdollState::Ragdoll* blown = f.ragdolls.find(far);
+    GIANT_CHECK(blown != nullptr);
+    if (blown == nullptr) return;
+    const Vec3 v = f.physics.world().state(f.physics.world().ragdoll_bodies(blown->id)[0])->linear_velocity;
+    GIANT_CHECK(v.x > 3.0f && length(v) < 14.0f);
+}
+
+GIANT_TEST("ragdolls: a shot and a blast on one both push it; walkers are shot down and blown down; asked at once in a new run, made") {
+    Fixture f;
+    f.floor();
+    const world::EntityId id = f.person(0.0, 0.0, 0.0);
+    const world::EntityId walker = f.person(-10.0, 0.0, 8.0, "none");
+    const world::EntityId stroller = f.person(-10.0, 0.0, -8.0, "none");
+    f.frame();
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    // Asked before any step of this run (as a command just after `simulate`): made at the first.
+    const usize spine = joint_named(f, "Spine");
+    GIANT_CHECK(f.ragdolls.knock(f.state.scene.identity(), id, static_cast<u32>(spine), {0.0f, 0.0f, 20.0f}, {0.0, 1.3, 0.0}));
+    GIANT_CHECK(!f.ragdolls.knock(f.state.scene.identity(), id, static_cast<u32>(spine), {0.0f, 0.0f, 2.0f}, {0.0, 1.3, 0.0}));
+    f.frame();
+    GIANT_CHECK(f.ragdolls.find(id) != nullptr && f.ragdolls.dropped() == 1);
+    GIANT_CHECK(f.run("stop_ragdoll", {{"id", id}}).ok);
+    // One asked in another scene is forgotten, with what was asked before it.
+    GIANT_CHECK(f.ragdolls.knock(f.state.scene.identity(), id, static_cast<u32>(spine), {0.0f, 0.0f, 20.0f}, {0.0, 1.3, 0.0}));
+    GIANT_CHECK(f.ragdolls.knock(f.state.scene.identity() + 1, id, static_cast<u32>(spine), {0.0f, 0.0f, 20.0f}, {0.0, 1.3, 0.0}));
+    GIANT_CHECK(f.ragdolls.waiting() == 1);
+    f.frame();
+    GIANT_CHECK(f.ragdolls.waiting() == 0 && f.ragdolls.size() == 0);
+    f.frames(0.2);
+    // A shot, then a blast from its right, before the next step: dropped once, pushed by both.
+    GIANT_CHECK(f.ragdolls.knock(f.state.scene.identity(), id, static_cast<u32>(spine), {0.0f, 0.0f, 60.0f}, {0.0, 1.3, 0.0}));
+    GIANT_CHECK(f.run("impact", {{"point", {-2.0, 1.0, 0.0}}, {"radius", 8.0}, {"impulse", 800.0}}).ok);
+    GIANT_CHECK(f.ragdolls.waiting() == 2);
+    f.frame();
+    const RagdollState::Ragdoll* r = f.ragdolls.find(id);
+    GIANT_CHECK(r != nullptr && f.ragdolls.size() == 1 && f.ragdolls.dropped() == 2 && f.ragdolls.waiting() == 0);
+    if (r == nullptr) return;
+    const std::span<const sim::BodyId> bodies = f.physics.world().ragdoll_bodies(r->id);
+    GIANT_CHECK(f.physics.world().state(bodies[0])->linear_velocity.x > 2.0f);                 // the blast's, on all of it
+    GIANT_CHECK(f.physics.world().state(bodies[r->bone_of[spine]])->linear_velocity.z > 0.3f); // the shot's, on its chest
+    // A walker shot as it walks (its body is met: it has no capsules): down, pushed on the bone nearest.
+    for (const world::EntityId w : {walker, stroller}) {
+        const double z = w == walker ? 8.0 : -8.0;
+        GIANT_CHECK(f.run("walk_to", {{"id", w}, {"to", {10.0, 0.0, z}}, {"speed", 2.0}}).ok);
+    }
+    for (int k = 0; k < 600 && f.run("get_walker", {{"id", walker}}).value["walker"]["phase"] != "walking"; ++k) f.frame();
+    f.frames(1.0);
+    const auto walked = f.walkers.poses().find(walker);
+    GIANT_CHECK(walked != f.walkers.poses().end());
+    if (walked == f.walkers.poses().end()) return;
+    const DVec3 at = walked->second.position;
+    const ai::CommandResult fired = f.run("fire", {{"origin", {at.x + 0.2, 1.0, 3.0}}, {"direction", {0.0, 0.0, 1.0}}, {"resolve", true},
+                                                    {"mass", 0.05},                     {"penetration", 0.05}});
+    GIANT_CHECK(fired.ok && !fired.value["hits"].empty());
+    if (!fired.ok || fired.value["hits"].empty()) return;
+    GIANT_CHECK(fired.value["hits"][0]["entity"] == walker && fired.value["hits"][0]["character"].get<bool>());
+    GIANT_CHECK(f.ragdolls.waiting() == 1);
+    // (Made by a fixed step run by hand as well as by a frame.)
+    GIANT_CHECK(f.run("step_physics", {{"seconds", 1.0 / 60.0}}).ok);
+    const RagdollState::Ragdoll* fell = f.ragdolls.find(walker);
+    GIANT_CHECK(fell != nullptr && f.walkers.find(walker) == nullptr && f.ragdolls.waiting() == 0);
+    if (fell == nullptr) return;
+    f.frames(0.1);
+    float most = 0.0f;
+    for (const sim::BodyId b : f.physics.world().ragdoll_bodies(fell->id)) most = std::max(most, f.physics.world().state(b)->linear_velocity.z);
+    GIANT_CHECK(most > 0.5f);
+    // The other blown down by a blast beside it.
+    const auto strolled = f.walkers.poses().find(stroller);
+    GIANT_CHECK(strolled != f.walkers.poses().end());
+    if (strolled == f.walkers.poses().end()) return;
+    const DVec3 by = strolled->second.position;
+    GIANT_CHECK(f.run("impact", {{"point", {by.x, 1.0, by.z + 1.5}}, {"radius", 6.0}, {"impulse", 800.0}}).ok);
+    GIANT_CHECK(f.ragdolls.waiting() == 1);
+    f.frame();
+    const RagdollState::Ragdoll* blown = f.ragdolls.find(stroller);
+    GIANT_CHECK(blown != nullptr && f.walkers.find(stroller) == nullptr);
+    if (blown == nullptr) return;
+    GIANT_CHECK(f.physics.world().state(f.physics.world().ragdoll_bodies(blown->id)[0])->linear_velocity.z < -2.0f);
 }

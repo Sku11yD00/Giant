@@ -14,8 +14,18 @@
 // the scene keeps where it was put. A walker goes limp where it walks and
 // walks no more.
 //
-// Bullets meet the bones' bodies (as flesh, naming the entity) instead of
-// the character's hit capsules, and push them as any body.
+// Bullets meet the bones' bodies (as flesh, naming the entity, and its bone
+// and zone: PhysicsState::ragdoll_joint) instead of the character's hit
+// capsules, and push them as any body.
+//
+// A shot that gives a standing character's capsule `Settings::shot_drop`
+// N s or more drops it (knock), and so does a blast that reaches it with
+// `blast_drop` (blast, which also throws those lying about): asked for
+// then, they go limp at the next before_step, at most
+// `Settings::starts_per_step` of them a step (the rest wait their turn,
+// oldest first:
+// making a ragdoll is no small thing, and a blast in a crowd would be a
+// hitch), each pushed by what dropped it, where it struck.
 //
 // Its morph weights stay as they were when it went limp (its clips'
 // weight tracks are not played under a held pose).
@@ -26,10 +36,12 @@
 #pragma once
 
 #include "animation_state.h"
+#include "hit_targets.h"
 #include "mesh_library.h"
 #include "physics_state.h"
 #include "walker_state.h"
 
+#include "giant/sim/hit_shapes.h"
 #include "giant/sim/physics.h"
 #include "giant/world/scene.h"
 
@@ -88,6 +100,18 @@ public:
     };
 
     static constexpr usize k_max_ragdolls = 256;
+    static constexpr usize k_max_waiting = 1024; // drops asked for and not yet made (more are forgotten)
+
+    struct Settings {
+        float shot_drop = 3.0f;    // N s a shot gives a standing character to drop it (0: shots drop none)
+        float blast_drop = 150.0f; // N s of a blast where it reaches one (0: blasts drop none)
+        u32 starts_per_step = 4;   // ragdolls made of those dropped, a before_step (1 to 64)
+    };
+    // Empty: set; else why not (a number that is none, or out of range).
+    std::string set_settings(const Settings& settings);
+    const Settings& settings() const { return m_settings; }
+    // Where a ragdoll is told its entity went limp (its hit capsules forgotten at once). Null: no one.
+    void set_hit_targets(HitTargets* targets) { m_targets = targets; }
 
     // Makes `id` a ragdoll as it is drawn now, every bone moving at
     // `velocity` (m/s; none: a walker's own, else at rest). Empty: done;
@@ -99,6 +123,30 @@ public:
     bool stop(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id);
     void clear(const world::Scene& scene, const MeshLibrary& meshes);
     const Ragdoll* find(world::EntityId id) const;
+    // A shot's hit on a standing character, in the scene of identity
+    // `scene`: on its capsule round `joint`, or on a walker's body
+    // (`joint` k_nearest_bone: the bone nearest `point` is pushed). Hard
+    // enough (Settings::shot_drop), it drops at the next before_step,
+    // pushed there. True: it will.
+    static constexpr u32 k_nearest_bone = ~u32{0};
+    bool knock(u64 scene, world::EntityId id, u32 joint, const Vec3& impulse, const DVec3& point);
+    // A blast (as PhysicsState::impact: `impulse` N s at `point`, none at
+    // `radius`): ragdolls in reach are thrown from it (each bone by its
+    // share of the mass and how near it is), and standing characters it
+    // reaches hard enough (Settings::blast_drop: those with capsules among
+    // `standing` by the nearest, walkers by their middle) drop at the
+    // coming before_steps, thrown likewise. No blast throws a body faster
+    // than 12 m/s. Returns those thrown and those to drop.
+    struct Blasted {
+        usize thrown = 0;
+        usize dropped = 0;
+    };
+    Blasted blast(u64 scene, const sim::HitShapes& standing, const DVec3& point, float radius, float impulse);
+    // Asked to drop, not yet made.
+    usize waiting() const { return m_waiting.size(); }
+    u64 dropped() const { return m_dropped; } // made of a shot or a blast, ever
+    // A bone's joint's name (empty: no such ragdoll or bone).
+    std::string joint_name(world::EntityId id, u32 bone) const;
     // Of this scene and the physics' run now (else they are let go at the next step).
     bool current(const world::Scene& scene) const {
         return scene.identity() == m_scene && m_physics.runs() == m_run && m_physics.simulating();
@@ -125,6 +173,22 @@ private:
     // The physics' world made afresh (its ragdolls gone with it): ours forgotten.
     void follow_world(const world::Scene& scene, const MeshLibrary& meshes);
     void pose(Ragdoll& r);
+    // Those gone or of another scene or run let go (before_step's first part).
+    void follow(const world::Scene& scene, const MeshLibrary& meshes);
+    // One asked to drop: a shot's push on a joint's bone, or a blast's on all of it.
+    struct Waiting {
+        world::EntityId entity = 0;
+        bool whole = false; // a blast: each bone by its share
+        u32 joint = 0;      // a shot: the joint struck (k_nearest_bone: the bone nearest `point`)
+        Vec3 impulse{};     // a shot: N s; a blast: the way it throws (unit)
+        DVec3 point{};
+        float blast = 0.0f; // a blast: its impulse, and how much of it reaches this one (0 to 1)
+        float reach = 0.0f;
+    };
+    // Those waiting are of this scene and run, from here on (others forgotten).
+    void ask_in(u64 scene);
+    void strike(const Ragdoll& r, const Waiting& w);
+    void make_waiting(const world::Scene& scene, const MeshLibrary& meshes);
 
     PhysicsState& m_physics;
     AnimationState& m_animation;
@@ -137,6 +201,12 @@ private:
     std::vector<world::EntityId> m_moved;
     std::vector<world::EntityId> m_redraw;
     std::vector<world::EntityId> m_gone; // scratch
+    Settings m_settings;
+    HitTargets* m_targets = nullptr;
+    std::vector<Waiting> m_waiting; // oldest first
+    u64 m_waiting_scene = 0;        // the scene and run they were asked in
+    u64 m_waiting_run = 0;
+    u64 m_dropped = 0;
 };
 
 } // namespace giant::editor

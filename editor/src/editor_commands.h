@@ -345,7 +345,9 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
 void connect_ragdolls(EditorState& state);
 // Shots knock the swinging things they hit and blows (impact) throw them
 // and the cloth near (state.physics's on_hits and on_impact, reading
-// state.swing and state.cloth when they come). Once the physics is set.
+// state.swing and state.cloth when they come); and they drop the characters
+// they strike hard enough, and blows throw those lying (state.ragdolls,
+// state.hits). Once the physics is set.
 void connect_blows(EditorState& state);
 // Bullets' hits heard where they strike (state.physics's on_hits, after what
 // connect_blows set; state.audio). Once both are set, after connect_blows.
