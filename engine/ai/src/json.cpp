@@ -120,6 +120,10 @@ std::string validate(const Json& schema, const Json& value, const std::string& p
                                               number < it->get<double>()) {
             return at(path) + ": below the minimum " + to_json_text(*it);
         }
+        if (auto it = schema.find("exclusiveMinimum"); it != schema.end() && it->is_number() &&
+                                                       number <= it->get<double>()) {
+            return at(path) + ": must be above " + to_json_text(*it);
+        }
         if (auto it = schema.find("maximum"); it != schema.end() && it->is_number() &&
                                               number > it->get<double>()) {
             return at(path) + ": above the maximum " + to_json_text(*it);
@@ -174,7 +178,16 @@ std::string validate(const Json& schema, const Json& value, const std::string& p
                 }
             } else if (closed) {
                 return prefix + key + ": is not a known argument";
+            } else if (extra != schema.end() && extra->is_object()) {
+                // A schema for every other key (a map by name).
+                std::string error = validate(*extra, item, prefix + key);
+                if (!error.empty()) {
+                    return error;
+                }
             }
+        }
+        if (const auto max = count_keyword(schema, "maxProperties"); max && value.size() > *max) {
+            return at(path) + ": allows at most " + std::to_string(*max) + " keys";
         }
     }
     return {};

@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gate_person import JOINTS, RUN_SPEED, WALK_SPEED, write_person  # noqa: E402
+from gate_person import EYE_RADIUS, EYES, HEAD_CENTRE, HEAD_RADIUS, JOINTS, RUN_SPEED, WALK_SPEED, write_person  # noqa: E402
 
 SIZES = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 FORMATS = {5126: "f", 5123: "H", 5125: "I"}
@@ -92,6 +92,12 @@ def main():
                 check(abs(stated["min"][axis] - min(p[axis] for p in positions)) < 1e-6 and
                       abs(stated["max"][axis] - max(p[axis] for p in positions)) < 1e-6, "the positions' stated bounds")
         check(0.0 <= low < 0.05 and 1.75 < high < 1.85, f"it stands from {low:.2f} to {high:.2f} m")
+        # Hair grows from the top 0.3 of the head (the gates' `top`): that must clear the eyes, which
+        # are part of the same file, by a centimetre, or the person grows hair from them.
+        head_low, head_high = HEAD_CENTRE[1] - HEAD_RADIUS, HEAD_CENTRE[1] + HEAD_RADIUS
+        scalp_from = head_high - 0.3 * (head_high - head_low)
+        eyes_top = max(centre[1] for centre in EYES) + EYE_RADIUS
+        check(scalp_from > eyes_top + 0.01, f"the scalp starts at {scalp_from:.3f} m, the eyes reach {eyes_top:.3f} m")
         # The eyes' irises: uv (0.5, 0.5) where they face +z.
         eye = document["meshes"][0]["primitives"][2]
         flat = all(abs(uv[0] - (0.5 + 0.5 * n[0])) < 1e-5 and abs(uv[1] - (0.5 - 0.5 * n[1])) < 1e-5

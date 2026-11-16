@@ -1056,6 +1056,23 @@ GIANT_TEST("mesh parts: waiting for textures asks for every part's maps; a scatt
             for (const Json& t : listed.value["textures"]) base = base || (t["path"] == flipped + "#image0" && t["status"] == "ready");
         }
         GIANT_CHECK(base);
+        // A look of its own for that part: its maps and its skin's detail map are waited for.
+        const std::string albedo = write_png(dir / "own.png", 32, 32, 200, 100, 50);
+        const std::string pores = write_png(dir / "pores.png", 32, 32, 128, 128, 255);
+        const auto own = run("set_entity", {{"id", made.value["id"]},
+                                            {"parts", {{"rust", {{"maps", {{"base_color", albedo}, {"normal", ""}, {"occlusion", ""}}},
+                                                                {"skin", {{"detail_normal", pores}}}}}}}});
+        GIANT_CHECK(own.ok);
+        if (!own.ok) std::fprintf(stderr, "    %s\n", own.error.c_str());
+        const auto again = run("get_textures", {{"wait", true}});
+        bool own_base = false, own_detail = false;
+        if (again.ok) {
+            for (const Json& t : again.value["textures"]) {
+                own_base = own_base || (t["path"] == albedo && t["status"] == "ready");
+                own_detail = own_detail || (t["path"] == pores && t["status"] == "ready");
+            }
+        }
+        GIANT_CHECK(own_base && own_detail);
     }
 
     // Scattered: a kit whose pieces are the quad with the look it took from the file (its first

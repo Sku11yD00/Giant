@@ -296,6 +296,22 @@ struct EntityAnimation {
     bool operator==(const EntityAnimation&) const = default;
 };
 
+// A look of its own for one part of a mesh drawn in parts (a file using
+// several materials: each material's triangles are a part, named as the
+// material is; the editor's MeshLibrary makes them). The part with the
+// most triangles takes the entity's own material; any other takes the
+// file's look for it unless the entity names it here. Its `material` is
+// that part's whole look (colour, maps, skin or an eye, sides, cut-out),
+// but for `sway` and `flutter`, which every part takes from the entity so
+// that the mesh moves as one, and `surface`, which is the entity's.
+// Names no part of the file has (or its first part's) do nothing.
+constexpr usize k_max_entity_parts = 16;
+struct PartLook {
+    std::string name; // the part's name (the material's in the file, "" for triangles with none); each once an entity
+    Material material;
+    bool operator==(const PartLook&) const = default;
+};
+
 struct Entity {
     EntityId id = 0;
     std::string name;
@@ -308,6 +324,7 @@ struct Entity {
     // The kit drawn when shape is `kit` (kept when the shape changes).
     std::string kit;
     Material material; // unused by kits (their pieces have their own)
+    std::vector<PartLook> parts; // when shape is `mesh` (kept otherwise): at most k_max_entity_parts
     DecalSettings decal; // used when shape is `decal`
     ClothSettings cloth; // used when shape is `cloth` (kept when the shape changes)
     SwingSettings swing; // when on: cube, sphere, plane, mesh and kit entities swing (kept otherwise)

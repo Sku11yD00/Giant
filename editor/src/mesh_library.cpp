@@ -6,8 +6,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <filesystem>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace giant::editor {
 
@@ -225,12 +229,36 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
     // would land on the other parts' uvs).
     mesh->file_materials = static_cast<u32>(imported.materials.size());
     if (in_parts) {
+        // Each part by a name of its own (entities name parts to give them looks): its
+        // material's, and where a part before it has that name already (materials alike in
+        // name, or with none), with a number no material of the file and no part has.
+        std::vector<std::string> names(sources.size());
+        for (usize p = 0; p < sources.size(); ++p) {
+            if (sources[p].material != geometry::k_default_material) names[p] = imported.materials[sources[p].material].name;
+        }
+        const std::vector<std::string> given = names;
+        for (usize p = 1; p < names.size(); ++p) {
+            const auto had = [&](const std::string& name) {
+                return std::find(names.begin(), names.begin() + static_cast<std::ptrdiff_t>(p), name) !=
+                       names.begin() + static_cast<std::ptrdiff_t>(p);
+            };
+            if (!had(names[p])) continue;
+            for (usize n = 2;; ++n) {
+                std::string numbered = given[p] + " (" + std::to_string(n) + ")";
+                if (!had(numbered) && std::find(given.begin(), given.end(), numbered) == given.end()) {
+                    names[p] = std::move(numbered);
+                    break;
+                }
+            }
+        }
         for (usize p = 0; p < sources.size(); ++p) {
             Part& part = mesh->parts.emplace_back();
             part.triangles = part_clusters[p].source_triangles;
+            part.name = names[p];
             if (sources[p].material != geometry::k_default_material) {
-                const geometry::ImportedMaterial& m = imported.materials[sources[p].material];
-                part.name = m.name;
+                // (Told of by the part's name, which is what its look is given by.)
+                geometry::ImportedMaterial m = imported.materials[sources[p].material];
+                m.name = part.name;
                 part.material = file_material(m, path, true, mesh->warnings);
             }
         }
