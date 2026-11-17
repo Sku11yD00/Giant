@@ -152,3 +152,25 @@ public sealed class Awaiter : Script
         throw new InvalidOperationException("async throw on purpose");
     }
 }
+
+/// <summary>Records what it is told happened to people.</summary>
+public sealed class Listener : Script
+{
+    private string? _lastTo;
+
+    public override void OnPersonEvent(in PersonEvent e)
+    {
+        // (A name told twice is the same string: nothing was made for it again.)
+        bool again = ReferenceEquals(_lastTo, e.To);
+        _lastTo = e.To;
+        Engine.Execute("record", new
+        {
+            what = "person", person = e.Person, behaviour = e.Behaviour, from = e.From, to = e.To,
+            began = e.Began, seconds = e.Seconds, again,
+        });
+        if (e.To == "reload")
+        {
+            Engine.Execute("reenter");
+        }
+    }
+}

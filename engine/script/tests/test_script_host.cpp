@@ -46,7 +46,7 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     }
     live_host = host.get();
     GIANT_CHECK(host->load_scripts(scripts));
-    GIANT_CHECK(host->running_scripts() == 6); // all but the abstract one
+    GIANT_CHECK(host->running_scripts() == 7); // all but the abstract one
 
     const auto has = [&calls](const std::string& needle) {
         for (const auto& call : calls) {
@@ -84,7 +84,7 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(has("\"what\":\"after task\",\"answer\":42"));
     GIANT_CHECK(has("\"frame\":3"));
     GIANT_CHECK(reentry_refused);              // and the scripts kept running
-    GIANT_CHECK(host->running_scripts() == 5); // Crasher stopped itself on frame 2
+    GIANT_CHECK(host->running_scripts() == 6); // Crasher stopped itself on frame 2
     bool logged_crash = false;
     bool logged_async = false;
     for (const auto& record : log.recent(100, LogLevel::error)) {
@@ -99,7 +99,45 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(host->load_scripts(scripts));
     GIANT_CHECK(has("\"what\":\"stop\""));
     GIANT_CHECK(has("\"what\":\"start\""));
-    GIANT_CHECK(host->running_scripts() == 6);
+    GIANT_CHECK(host->running_scripts() == 7);
+
+    // What happened to people is told in order, names and all (the views' text may go once the call is made).
+    calls.clear();
+    {
+        std::string behaviour = "wary", flee = "fl\xc3\xa9" "e", hide = "hide";
+        const PersonEvent events[] = {{7, behaviour, "", flee, 1.5}, {7, behaviour, flee, hide, 20.25}, {9, behaviour, hide, hide, 21.0}};
+        host->person_events(events);
+        behaviour = "gone";
+    }
+    GIANT_CHECK(calls.size() == 3);
+    if (calls.size() == 3) {
+        // (The scripts' JSON writes a letter that is not ASCII as an escape: é is \\u00E9.)
+        GIANT_CHECK(calls[0] == "record {\"what\":\"person\",\"person\":7,\"behaviour\":\"wary\",\"from\":\"\",\"to\":\"fl\\u00E9e\","
+                                "\"began\":true,\"seconds\":1.5,\"again\":false}");
+        GIANT_CHECK(calls[1] == "record {\"what\":\"person\",\"person\":7,\"behaviour\":\"wary\",\"from\":\"fl\\u00E9e\",\"to\":\"hide\","
+                                "\"began\":false,\"seconds\":20.25,\"again\":false}");
+        GIANT_CHECK(has("\"person\":9,\"behaviour\":\"wary\",\"from\":\"hide\",\"to\":\"hide\",\"began\":false,\"seconds\":21,\"again\":true"));
+    }
+    // None, and more than are told at a time: the first k_most_person_events.
+    calls.clear();
+    host->person_events({});
+    GIANT_CHECK(calls.empty());
+    {
+        std::vector<PersonEvent> many(ScriptHost::k_most_person_events + 5, PersonEvent{1, "b", "x", "y", 0.0});
+        host->person_events(many);
+        GIANT_CHECK(calls.size() == ScriptHost::k_most_person_events);
+    }
+    // A script that asks for scripts to be reloaded while it is told: refused, and the rest are told.
+    calls.clear();
+    reentry_refused = false;
+    {
+        const PersonEvent events[] = {{1, "b", "x", "reload", 0.0}, {2, "b", "x", "y", 0.0}};
+        set_console_logging(false);
+        host->person_events(events);
+        set_console_logging(true);
+    }
+    GIANT_CHECK(reentry_refused && has("\"person\":2") && host->running_scripts() == 7);
+    calls.clear();
 
     host->unload_scripts();
     GIANT_CHECK(host->running_scripts() == 0);

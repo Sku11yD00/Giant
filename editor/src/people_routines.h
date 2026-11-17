@@ -127,6 +127,28 @@ public:
         double seconds = 0.0; // of the simulation's, since it entered the state
     };
     bool behaving(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, Behaving& out) const;
+    // What happened to people's behaviours, for scripts and `get_person_events`
+    // (living-world plan LW6 part 4): one began a behaviour (in its first
+    // state: `from` is ""), or went from a state to another. Each has a
+    // serial, counted from 1 for as long as the editor runs; the last
+    // k_changes_kept are kept, older ones are gone (as are those of another
+    // scene). Names are the scene's as they are when asked for: one whose
+    // behaviour was changed or removed since is not told.
+    struct Change {
+        u64 serial = 0;
+        world::PersonId person = 0;
+        std::string_view behaviour; // (the scene's strings: until the behaviours change)
+        std::string_view from;      // the state it left ("": it began the behaviour)
+        std::string_view to;        // the state it is in since
+        double seconds = 0.0;       // the simulation's, when it happened
+    };
+    static constexpr usize k_changes_kept = 4096;
+    u64 changes() const { return m_changes_made; }     // the serial of the last that happened (0: none yet)
+    u64 changes_from() const;                          // the serial of the oldest still kept (over `changes()`: none)
+    bool change(const world::Scene& scene, u64 serial, Change& out) const;
+    // Up to `most` of those after `told`, oldest first, added to `out`; `told` moves on past them, and
+    // past those gone or not to be told.
+    void changes_since(const world::Scene& scene, u64& told, usize most, std::vector<Change>& out) const;
     // What a person's routine, or its behaviour's state, has it do and
     // where, as it last acted (a frame's, for many). None: neither says
     // anything, not acted on yet, one that could not be acted on, or
@@ -234,6 +256,19 @@ private:
     usize m_place_cursor = 0;
     i64 m_measure_left = 0; // tagged places that may still be measured this frame
     Stats m_stats;
+    struct Changed { // (as it happened: the names are found when asked for)
+        world::PersonId person = 0;
+        double seconds = 0.0;
+        u32 behaviour_name = 0;
+        u16 behaviour = 0;
+        u8 from = k_no_state;
+        u8 to = 0;
+    };
+    static constexpr u8 k_no_state = 0xff;
+    void changed(const Slot& slot, u8 from, double seconds);
+    std::vector<Changed> m_changes; // a ring of k_changes_kept, made once: serial s is at (s - 1) % k_changes_kept
+    u64 m_changes_made = 0;
+    u64 m_changes_from = 1; // older ones are another scene's
 };
 
 } // namespace giant::editor

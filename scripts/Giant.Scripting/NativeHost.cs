@@ -26,6 +26,20 @@ internal unsafe struct NativeApi
     public delegate* unmanaged<byte*, void> FreeString;
 }
 
+/// <summary>An event as the native side hands it over (NativePersonEvent in script_host.cpp).</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativePersonEvent
+{
+    public ulong Person;
+    public byte* Behaviour; // UTF-8, not zero-terminated
+    public byte* From;
+    public byte* To;
+    public int BehaviourLength;
+    public int FromLength;
+    public int ToLength;
+    public double Seconds;
+}
+
 /// <summary>
 /// The entry points the native script host calls (engine use only; scripts
 /// never call these). Everything runs on the engine's main thread, and
@@ -108,6 +122,57 @@ public static unsafe class NativeHost
         {
             Log(3, "script update failed: " + e);
             return 1;
+        }
+    }
+
+    // The events being told (PersonEvents), for the static lambda that tells them.
+    private static NativePersonEvent* s_events;
+    private static int s_eventCount;
+    private static readonly NameCache s_names = new();
+
+    /// <summary>Calls OnPersonEvent on every running script, for each event in order.</summary>
+    [UnmanagedCallersOnly]
+    public static int PersonEvents(void* events, int count, int size)
+    {
+        if (size != sizeof(NativePersonEvent))
+        {
+            return 1; // engine and API built from different sources
+        }
+        if (s_busy || s_scripts == null || count <= 0)
+        {
+            return 0;
+        }
+        try
+        {
+            s_events = (NativePersonEvent*)events;
+            s_eventCount = count;
+            // A static lambda with its state passed in: no allocation per call.
+            RunScripts(static (scripts, _) =>
+            {
+                for (int i = 0; i < s_eventCount; i++)
+                {
+                    ref readonly NativePersonEvent e = ref s_events[i];
+                    // Names seen before are the same strings again: nothing allocates for them.
+                    var told = new PersonEvent(
+                        e.Person,
+                        s_names.Get(e.Behaviour, e.BehaviourLength),
+                        s_names.Get(e.From, e.FromLength),
+                        s_names.Get(e.To, e.ToLength),
+                        e.Seconds);
+                    scripts.PersonEvent(in told);
+                }
+            }, s_scripts, 0f);
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Log(3, "telling scripts of a person's event failed: " + e);
+            return 1;
+        }
+        finally
+        {
+            s_events = null;
+            s_eventCount = 0;
         }
     }
 
@@ -300,6 +365,26 @@ internal sealed class ScriptSet
     // Static lambdas with the state passed in: nothing allocates per frame.
     public void Update(float deltaSeconds) => Each("OnUpdate", static (s, delta) => s.OnUpdate(delta), deltaSeconds);
 
+    public void PersonEvent(in PersonEvent e)
+    {
+        foreach (Script script in _scripts)
+        {
+            if (_stopped.Contains(script))
+            {
+                continue;
+            }
+            try
+            {
+                script.OnPersonEvent(in e);
+            }
+            catch (Exception x)
+            {
+                _stopped.Add(script);
+                NativeHost.Log(3, $"{script.GetType().FullName}.OnPersonEvent threw, script stopped: {x}");
+            }
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     public WeakReference Stop()
     {
@@ -331,6 +416,59 @@ internal sealed class ScriptSet
                 NativeHost.Log(3, $"{script.GetType().FullName}.{what} threw, script stopped: {e}");
             }
         }
+    }
+}
+
+/// <summary>
+/// The strings of names the engine tells again and again (behaviours, states):
+/// each made once and found again by its bytes, so that telling scripts of
+/// events does not allocate. Main thread only.
+/// </summary>
+internal sealed unsafe class NameCache
+{
+    private const int MostKept = 4096;
+    private const int LongestKept = 256; // bytes: longer names are made each time
+    private readonly Dictionary<ulong, string> _byHash = new();
+
+    public string Get(byte* utf8, int length)
+    {
+        if (length <= 0)
+        {
+            return "";
+        }
+        if (length > LongestKept)
+        {
+            return Encoding.UTF8.GetString(utf8, length);
+        }
+        ulong hash = 14695981039346656037UL;
+        for (int i = 0; i < length; i++)
+        {
+            hash = (hash ^ utf8[i]) * 1099511628211UL;
+        }
+        if (_byHash.TryGetValue(hash, out string? kept) && Same(kept, utf8, length))
+        {
+            return kept;
+        }
+        string made = Encoding.UTF8.GetString(utf8, length);
+        if (_byHash.Count >= MostKept)
+        {
+            _byHash.Clear();
+        }
+        _byHash[hash] = made; // (two names with one hash take turns: right, only not kept)
+        return made;
+    }
+
+    private static bool Same(string kept, byte* utf8, int length)
+    {
+        if (kept.Length > length)
+        {
+            return false; // (a string is never longer than its UTF-8)
+        }
+        // (A kept string was made from at most LongestKept bytes; each of them that was not UTF-8
+        // became a character of three, so thrice as many always fit.)
+        byte* bytes = stackalloc byte[LongestKept * 3];
+        int written = Encoding.UTF8.GetBytes(kept, new Span<byte>(bytes, LongestKept * 3));
+        return written == length && new ReadOnlySpan<byte>(bytes, written).SequenceEqual(new ReadOnlySpan<byte>(utf8, length));
     }
 }
 

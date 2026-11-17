@@ -230,15 +230,33 @@ public:
             if (start()) {
                 const std::filesystem::path file(std::u8string(path.begin(), path.end()));
                 m_state.scripts_loaded = m_host->load_scripts(file) ? path : std::string();
+                // (Scripts hear of what happens from when they are loaded.)
+                m_events_told = m_state.routines != nullptr ? m_state.routines->changes() : 0;
             }
         }
         if (m_host != nullptr && !m_state.scripts_loaded.empty()) {
+            tell_person_events();
             m_host->update(delta_seconds);
         }
         m_state.scripts_running = m_host != nullptr ? m_host->running_scripts() : 0;
     }
 
 private:
+    // What happened to people's behaviours since the scripts were last told, a share a frame
+    // (many at once are told over the frames after: never more script time in one).
+    void tell_person_events() {
+        if (m_state.routines == nullptr || m_events_told >= m_state.routines->changes()) {
+            return;
+        }
+        m_changes.clear();
+        m_events.clear();
+        m_state.routines->changes_since(m_state.scene, m_events_told, k_events_a_frame, m_changes);
+        for (const editor::PeopleRoutines::Change& c : m_changes) {
+            m_events.push_back({c.person, c.behaviour, c.from, c.to, c.seconds});
+        }
+        m_host->person_events(m_events);
+    }
+
     bool start() {
         if (m_host != nullptr) {
             return true;
@@ -266,6 +284,10 @@ private:
     ai::CommandRegistry& m_commands;
     editor::EditorState& m_state;
     std::unique_ptr<script::ScriptHost> m_host;
+    static constexpr usize k_events_a_frame = 256;
+    u64 m_events_told = 0;
+    std::vector<editor::PeopleRoutines::Change> m_changes; // (kept: nothing is allocated a frame)
+    std::vector<script::PersonEvent> m_events;
 };
 
 int run(const Options& options) {

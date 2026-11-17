@@ -202,6 +202,8 @@ def build_scene(tool, call, check):
     check(stuck.get("isError") is True and "state of the behaviour" in stuck["content"][0]["text"],
           "a transition to a state not there is refused")
     check(tool("get_behaviours")["behaviours"][0]["states"][1]["at"] == "home", "the behaviour is listed")
+    events = tool("get_person_events", {"limit": 8})
+    check(events["events"] == [] or events["events"][0]["serial"] >= events["oldest"], "what people did is listed")
     tool("undo")
     check(tool("get_behaviours")["behaviours"] == [], "undo takes the behaviour")
     tool("undo")

@@ -74,7 +74,50 @@ constexpr usize k_places_a_frame = 256;    // places looked at for having change
 // (The lists' hashes are this editor's own: no file's names can be made to share one.)
 PeopleRoutines::PeopleRoutines()
     : m_seed(mixed64(static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch().count()) ^
-                     static_cast<u64>(reinterpret_cast<std::uintptr_t>(this)))) {}
+                     static_cast<u64>(reinterpret_cast<std::uintptr_t>(this)))),
+      m_changes(k_changes_kept) {}
+
+void PeopleRoutines::changes_since(const world::Scene& scene, u64& told, usize most, std::vector<Change>& out) const {
+    told = std::min(std::max(told, changes_from() - 1), m_changes_made); // (one told of more than happened: of all)
+    for (usize gathered = 0; told < m_changes_made && gathered < most;) {
+        Change c;
+        if (!change(scene, ++told, c)) continue;
+        out.push_back(c);
+        ++gathered;
+    }
+}
+
+void PeopleRoutines::changed(const Slot& slot, u8 from, double seconds) {
+    Changed& c = m_changes[static_cast<usize>(m_changes_made % k_changes_kept)];
+    ++m_changes_made;
+    c.person = slot.id;
+    c.seconds = seconds;
+    c.behaviour_name = slot.behaviour_name;
+    c.behaviour = slot.behaviour;
+    c.from = from;
+    c.to = slot.state;
+}
+
+u64 PeopleRoutines::changes_from() const {
+    const u64 kept = m_changes_made > k_changes_kept ? m_changes_made - k_changes_kept + 1 : 1;
+    return std::max(kept, m_changes_from);
+}
+
+bool PeopleRoutines::change(const world::Scene& scene, u64 serial, Change& out) const {
+    if (serial < changes_from() || serial > m_changes_made || scene.identity() != m_scene) return false;
+    const Changed& c = m_changes[static_cast<usize>((serial - 1) % k_changes_kept)];
+    if (c.behaviour >= scene.behaviours.size()) return false;
+    const world::Behaviour& behaviour = scene.behaviours[c.behaviour];
+    if (static_cast<u32>(hash_of(behaviour.name)) != c.behaviour_name || c.to >= behaviour.states.size()) return false;
+    if (c.from != k_no_state && c.from >= behaviour.states.size()) return false;
+    out.serial = serial;
+    out.person = c.person;
+    out.behaviour = behaviour.name;
+    out.from = c.from != k_no_state ? std::string_view(behaviour.states[c.from].name) : std::string_view();
+    out.to = behaviour.states[c.to].name;
+    out.seconds = c.seconds;
+    return true;
+}
 
 u64 PeopleRoutines::hash_of(std::string_view text) const {
     u64 h = m_seed;
@@ -273,6 +316,7 @@ void PeopleRoutines::follow(const world::Scene& scene, const PeopleTravel& trave
     bool afresh = travel.resets() != m_resets || travel.running() != m_running;
     if (scene.identity() != m_scene) { // (another scene: its people and places are others)
         m_scene = scene.identity();
+        m_changes_from = m_changes_made + 1;
         m_slots.clear();
         m_indexed = false;
         afresh = true;
@@ -372,13 +416,15 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
                 // (The same one at another place in the list, one before it removed: it is in the state
                 // it was in. Another, though found where the last was: the first.)
                 const u32 name = static_cast<u32>(hash_of(person.behaviour));
-                if (slot.behaviour == k_no_behaviour || slot.behaviour_name != name) {
+                const bool began = slot.behaviour == k_no_behaviour || slot.behaviour_name != name;
+                slot.behaviour = static_cast<u16>(behaviour - behaviours.data());
+                slot.behaviour_name = name;
+                if (began) {
                     slot.state = 0;
                     slot.entered = seconds;
                     slot.settled = false;
+                    changed(slot, k_no_state, seconds);
                 }
-                slot.behaviour = static_cast<u16>(behaviour - behaviours.data());
-                slot.behaviour_name = name;
             }
         }
         if (behaviour == nullptr) {
@@ -387,6 +433,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
             slot.state = 0;
             slot.entered = seconds;
             slot.settled = false;
+            changed(slot, k_no_state, seconds);
         }
         // Its routine: where it was last found, else looked for.
         const world::Routine* routine_found = nullptr;
@@ -480,7 +527,9 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
                     }
                     if (!all) continue;
                     if (const std::optional<usize> to = world::behaviour_state_named(*behaviour, t.to)) {
+                        const u8 from = slot.state;
                         slot.state = static_cast<u8>(*to);
+                        changed(slot, from, seconds);
                         slot.entered = seconds;
                         slot.settled = false;
                         ++m_stats.changed;

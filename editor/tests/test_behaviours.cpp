@@ -539,3 +539,102 @@ GIANT_TEST("behaviours: a state entered is acted on though it says the same; a t
     f.frames(2.0, 4);
     GIANT_CHECK(f.routines.stats().following == following + 2 && f.in(astray) == "wait" && f.told(astray)["doing"].is_null());
 }
+
+GIANT_TEST("behaviours: what happens is kept for scripts and get_person_events, in order, the last few thousand") {
+    Fixture f;
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "wary"}, {"states", wary_states()}}).ok);
+    Json got = f.run("get_person_events").value;
+    GIANT_CHECK(got["events"].empty() && got["latest"] == 0 && got["oldest"] == 1);
+    const world::PersonId id = f.person("wary", "day"), plain = f.person("", "day");
+    f.frames(2.0);
+    // It began its behaviour; the one with none did nothing to tell.
+    got = f.run("get_person_events").value;
+    GIANT_CHECK(got["events"].size() == 1 && got["latest"] == 1 && got["oldest"] == 1);
+    GIANT_CHECK(got["events"][0] == Json({{"serial", 1}, {"person", id}, {"behaviour", "wary"}, {"from", ""}, {"to", "day"},
+                                          {"seconds", got["events"][0]["seconds"]}}));
+    GIANT_CHECK(got["events"][0]["seconds"].get<double>() <= 2.0 && plain != id);
+    // A shot: day to flee; home: flee to hide. Asked after the first: the two, in order.
+    f.shot_by(id);
+    f.frames(10.0, 40);
+    GIANT_CHECK(f.in(id) == "hide");
+    got = f.run("get_person_events", {{"after", 1}}).value;
+    GIANT_CHECK(got["events"].size() == 2 && got["latest"] == 3);
+    GIANT_CHECK(got["events"][0]["serial"] == 2 && got["events"][0]["from"] == "day" && got["events"][0]["to"] == "flee");
+    GIANT_CHECK(got["events"][1]["serial"] == 3 && got["events"][1]["from"] == "flee" && got["events"][1]["to"] == "hide");
+    GIANT_CHECK(got["events"][0]["seconds"].get<double>() < got["events"][1]["seconds"].get<double>());
+    // A limit: the oldest first, and `latest` goes on from there; after the last, none.
+    got = f.run("get_person_events", {{"limit", 2}}).value;
+    GIANT_CHECK(got["events"].size() == 2 && got["latest"] == 2 && got["events"][1]["to"] == "flee");
+    got = f.run("get_person_events", {{"after", 3}}).value;
+    GIANT_CHECK(got["events"].empty() && got["latest"] == 3);
+    got = f.run("get_person_events", {{"after", 1000}}).value; // (more than happened)
+    GIANT_CHECK(got["events"].empty() && got["latest"] == 3);
+    GIANT_CHECK(!f.run("get_person_events", {{"limit", 0}}).ok && !f.run("get_person_events", {{"limit", 257}}).ok);
+    GIANT_CHECK(!f.run("get_person_events", {{"after", -1}}).ok);
+    // As the scripts are told: a share at a time, moving on.
+    std::vector<PeopleRoutines::Change> changes;
+    u64 told = 0;
+    f.routines.changes_since(f.state.scene, told, 2, changes);
+    GIANT_CHECK(changes.size() == 2 && told == 2 && changes[0].from.empty() && changes[1].to == "flee" && changes[1].person == id);
+    f.routines.changes_since(f.state.scene, told, 2, changes);
+    GIANT_CHECK(changes.size() == 3 && told == 3 && changes[2].to == "hide");
+    f.routines.changes_since(f.state.scene, told, 2, changes);
+    GIANT_CHECK(changes.size() == 3 && told == 3);
+    // Another run: everyone begins again, and is told so (the serials go on).
+    f.run_id = 2;
+    f.frames(1.0);
+    got = f.run("get_person_events", {{"after", 3}}).value;
+    GIANT_CHECK(got["events"].size() == 1 && got["events"][0]["serial"] == 4 && got["events"][0]["from"] == "" && got["events"][0]["to"] == "day");
+    // Its behaviour changed since (a state fewer): what happened in the old one is not told with the new one's names.
+    f.shot_by(id);
+    f.frames(0.25, 1); // (a look: it is by its home, and would be there the next)
+    GIANT_CHECK(f.in(id) == "flee" && f.routines.changes() == 5);
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "wary"}, {"states", Json::array({{{"name", "only"}}})}}).ok);
+    got = f.run("get_person_events", {{"after", 4}}).value;
+    GIANT_CHECK(got["events"].empty() && got["latest"] == 5); // (to the state at 1: there is none now)
+    f.frames(1.0);
+    got = f.run("get_person_events", {{"after", 5}}).value;
+    GIANT_CHECK(got["events"].size() == 1 && got["events"][0]["from"] == "" && got["events"][0]["to"] == "only");
+    // The behaviour removed: nothing of it is told.
+    GIANT_CHECK(f.run("set_person", {{"id", id}, {"behaviour", ""}}).ok && f.run("remove_behaviour", {{"name", "wary"}}).ok);
+    f.frames(1.0);
+    got = f.run("get_person_events").value;
+    GIANT_CHECK(got["events"].empty() && got["latest"] == 6 && f.routines.changes() == 6);
+
+    // More than are kept: the oldest are gone, and one asking from the start goes on from the oldest kept.
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "wary"}, {"states", wary_states()}}).ok);
+    Json people = Json::array();
+    const usize count = 3000;
+    for (usize i = 0; i < count; ++i) {
+        people.push_back({{"look", "villager"}, {"home", "cottage"}, {"behaviour", "wary"}, {"position", at(static_cast<double>(i % 100), 0, 1.0)}});
+    }
+    GIANT_CHECK(f.run("create_people", {{"people", people}}).ok);
+    f.routines.settings.looked_a_frame = 1024;
+    f.frames(1.0, 4);
+    GIANT_CHECK(f.routines.changes() == 6 + count && f.routines.changes_from() == 1);
+    GIANT_CHECK(f.senses.noise({50.0, 0.0, 1.0}, 2000.0f, PeopleSenses::Kind::shot));
+    f.frames(10.0, 60); // (those sent a frame are few: the rest wait their turn)
+    const u64 made = f.routines.changes();
+    GIANT_CHECK(made > 6 + count + 1500 && f.routines.changes_from() == made - PeopleRoutines::k_changes_kept + 1);
+    got = f.run("get_person_events", {{"limit", 256}}).value;
+    GIANT_CHECK(got["oldest"] == f.routines.changes_from() && got["events"].size() == 256);
+    GIANT_CHECK(got["events"][0]["serial"] == f.routines.changes_from() && got["latest"] == f.routines.changes_from() + 255);
+    u64 last = 0;
+    usize all = 0;
+    for (u64 after = 0;;) {
+        got = f.run("get_person_events", {{"after", after}, {"limit", 256}}).value;
+        if (got["events"].empty()) break;
+        for (const Json& e : got["events"]) {
+            GIANT_CHECK(e["serial"].get<u64>() > last);
+            last = e["serial"].get<u64>();
+            ++all;
+        }
+        after = got["latest"].get<u64>();
+    }
+    GIANT_CHECK(all == PeopleRoutines::k_changes_kept && last == made);
+    // Another scene: what happened in the last is not told in this one.
+    f.state.scene = world::Scene();
+    f.frames(0.1, 1);
+    got = f.run("get_person_events").value;
+    GIANT_CHECK(got["events"].empty() && got["oldest"] == made + 1 && got["latest"] == made);
+}

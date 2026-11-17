@@ -965,6 +965,36 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              for (usize i = 0; i < behaviours.size(); ++i) list.push_back(behaviour_json(behaviours[i], people[i]));
              return CommandResult::success({{"behaviours", std::move(list)}});
          }});
+    add(registry,
+        {"get_person_events",
+         "What happened to people's behaviours while the world ran, oldest first: each a `serial`, the "
+         "`person`, its `behaviour`, the state it left (`from`: \"\" when it began the behaviour) and the "
+         "one it is in since (`to`), and the simulation's `seconds` then. Give `after` (a serial: only later "
+         "ones; `latest` of the last answer goes on from there) and `limit` (1 to 256, default 64). The last "
+         "4096 are kept (`oldest`: the first serial still kept). C# scripts are told the same as "
+         "`OnPersonEvent`.",
+         object_schema(Json::array(), {{"after", {{"type", "integer"}, {"minimum", 0}}},
+                                       {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 256}}}}),
+         true,
+         [&state](const Json& args, CommandContext&) {
+             Json list = Json::array();
+             u64 latest = 0, oldest = 1;
+             if (state.routines != nullptr) {
+                 const PeopleRoutines& routines = *state.routines;
+                 u64 told = args.contains("after") ? args["after"].get<u64>() : 0;
+                 const usize limit = args.contains("limit") ? args["limit"].get<usize>() : 64;
+                 std::vector<PeopleRoutines::Change> changes;
+                 changes.reserve(limit);
+                 routines.changes_since(state.scene, told, limit, changes);
+                 for (const PeopleRoutines::Change& c : changes) {
+                     list.push_back({{"serial", c.serial}, {"person", c.person}, {"behaviour", c.behaviour},
+                                     {"from", c.from}, {"to", c.to}, {"seconds", c.seconds}});
+                 }
+                 latest = told;
+                 oldest = routines.changes_from();
+             }
+             return CommandResult::success({{"events", std::move(list)}, {"latest", latest}, {"oldest", oldest}});
+         }});
 
     // --- People ---------------------------------------------------------------
     add(registry,

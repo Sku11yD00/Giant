@@ -54,6 +54,29 @@ Rules the host enforces:
   text. Other .NET types, and NaN or infinity, are refused with an
   `ArgumentException`.
 
+## Events
+
+Override `OnPersonEvent` to hear what people do while the world runs: a
+person began its behaviour (`e.Began`, `e.From` is empty), or went from one
+of its states to another.
+
+```csharp
+public override void OnPersonEvent(in PersonEvent e)
+{
+    if (e.To == "flee")
+    {
+        Engine.Execute("send_person", new { id = e.Person, to = "shelter" });
+    }
+}
+```
+
+`e.Person` is the id `get_people` gives; `e.Behaviour`, `e.From` and `e.To`
+are names; `e.Seconds` is the simulation's time. Events come before the
+frame's `OnUpdate`, in order, at most 256 a frame (the rest the frames
+after). The strings are shared between events, so reading them allocates
+nothing; do not allocate in the handler yourself when many may come. The
+command `get_person_events` lists the same events.
+
 The full sample is `scripts/samples/HelloGiant`. The build puts it in
 `build/<preset>/managed/samples/HelloGiant/HelloGiant.dll`.
 
