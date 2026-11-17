@@ -6,6 +6,8 @@
 #include "../src/people_routines.h"
 #include "../src/people_senses.h"
 #include "../src/people_travel.h"
+#include "../src/physics_state.h"
+#include "../src/play_state.h"
 
 #include "giant_test.h"
 
@@ -156,16 +158,38 @@ GIANT_TEST("people list: thousands are gone through a share a frame; the first t
     GIANT_CHECK(list.whole() && list.matching() == count / 2 && list.shown().size() == PeopleList::k_most_shown);
     for (usize i = 1; i < list.shown().size(); ++i) GIANT_CHECK(list.shown()[i - 1] < list.shown()[i]); // ids rising
     for (const world::PersonId id : list.shown()) GIANT_CHECK(f.of(id).look == "guard");
-    // What is shown stays while the next time through is under way, and nothing is allocated for it.
-    const world::PersonId* held = list.shown().data();
+    // What is shown stays while the next time through is under way.
+    const world::PersonId* const one = list.shown().data();
     const world::PersonId first = list.shown()[0];
     list.update(f.state);
-    GIANT_CHECK(list.whole() && list.shown().size() == PeopleList::k_most_shown && list.shown()[0] == first);
-    // The first shown is removed: gone from the list by the end of the next time through.
-    GIANT_CHECK(f.run("remove_people", {{"ids", {first}}}).ok);
-    for (int i = 0; i < 6; ++i) list.update(f.state);
+    GIANT_CHECK(list.whole() && list.shown().size() == PeopleList::k_most_shown && list.shown()[0] == first && list.shown().data() == one);
+    // People removed part way through neither hide nor double anyone: the two lowest go (a villager and
+    // the first guard, both looked at already), and those after the place it has got to are all still looked at.
+    const world::PersonId lowest = f.state.scene.people[0].id;
+    GIANT_CHECK(f.state.scene.people[1].id == first && f.run("remove_people", {{"ids", {lowest, first}}}).ok);
+    list.update(f.state);
+    list.update(f.state);
+    GIANT_CHECK(list.whole() && list.matching() == count / 2 && list.shown()[0] == first); // (this time through began before)
+    const world::PersonId* const other = list.shown().data();
+    GIANT_CHECK(other != one);
+    for (usize i = 1; i < list.shown().size(); ++i) GIANT_CHECK(list.shown()[i - 1] < list.shown()[i]);
+    // The next time through has it right; put back (undo) part way through, right again a time later.
+    for (int i = 0; i < 3; ++i) list.update(f.state);
     GIANT_CHECK(list.shown()[0] != first && list.matching() == count / 2 - 1);
-    GIANT_CHECK(list.shown().data() == held || list.shown().capacity() == PeopleList::k_most_shown); // (the two swap)
+    list.update(f.state);
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.people[1].id == first);
+    for (int i = 0; i < 2; ++i) list.update(f.state);
+    GIANT_CHECK(list.whole() && list.matching() == count / 2 - 1);
+    for (usize i = 1; i < list.shown().size(); ++i) GIANT_CHECK(list.shown()[i - 1] < list.shown()[i]);
+    for (int i = 0; i < 3; ++i) list.update(f.state);
+    GIANT_CHECK(list.shown()[0] == first && list.matching() == count / 2);
+    // The same two lists all along: nothing is allocated for a time through.
+    GIANT_CHECK(list.shown().data() == one || list.shown().data() == other);
+    // Begun again (the panel was not open for a while): empty until a whole time through.
+    list.restart();
+    GIANT_CHECK(!list.whole() && list.shown().empty() && list.matching() == 0);
+    for (int i = 0; i < 3; ++i) list.update(f.state);
+    GIANT_CHECK(list.whole() && list.matching() == count / 2 && (list.shown().data() == one || list.shown().data() == other));
     // Another filter begins again at once.
     list.filter.text = "villager";
     list.update(f.state);
@@ -184,13 +208,13 @@ GIANT_TEST("people list: thousands are gone through a share a frame; the first t
 
 GIANT_TEST("people list: why a person does what it does, in words, and in get_people") {
     Fixture f;
-    const world::PersonId idle = f.person({{"name", "idle"}, {"position", at(40, 0, 0)}});
+    const world::PersonId idle = f.person({{"name", "idle"}, {"position", at(40, 0, -300)}});
     const world::PersonId worker = f.person({{"name", "worker"}, {"home", "cottage"}, {"routine", "day"}});
     GIANT_CHECK(has(f.why(idle), "no routine") && has(f.why(idle), "stands where it is"));
     GIANT_CHECK(has(f.why(worker), "\"day\"") && has(f.why(worker), "not had it do anything yet"));
     f.frames(7.0);
     std::string why = f.why(worker);
-    GIANT_CHECK(has(why, "says work from 06:30") && has(why, "\"mill\"") && !has(why, "Alarmed"));
+    GIANT_CHECK(has(why, "last had it work (from 06:30)") && has(why, "\"mill\"") && !has(why, "Alarmed"));
     GIANT_CHECK(has(why, "Looking for its way") || has(why, "On its way"));
     f.frames(7.0, 20.0);
     why = f.why(worker);
@@ -200,12 +224,16 @@ GIANT_TEST("people list: why a person does what it does, in words, and in get_pe
     GIANT_CHECK(told["why"].get<std::string>() == why);
     // Alarmed by a noise: its routine's alarmed entry, and what alarmed it.
     const DVec3 here = f.travel.where(f.of(worker)).position;
-    GIANT_CHECK(f.run("make_noise", {{"at", at(here.x, here.y, here.z + 3.0)}, {"loudness", 100.0}}).ok);
+    GIANT_CHECK(f.run("make_noise", {{"at", at(here.x, here.y, here.z + 3.0)}, {"loudness", 6.0}}).ok);
     f.frames(7.0, 0.5);
     why = f.why(worker);
-    GIANT_CHECK(has(why, "Alarmed") && has(why, "by a noise") && has(why, "says hide while its alarm is over 0.50"));
-    // Seen: by what it saw.
-    GIANT_CHECK(has(f.why(idle), "Alarmed") == (f.senses.alarm(f.state.scene, idle) > 0.0f));
+    GIANT_CHECK(has(why, "Alarmed") && has(why, "by a noise") && has(why, "last had it hide (for an alarm over 0.50)"));
+    // One with no routine sees something before it (it faces +z): alarmed by what it saw.
+    GIANT_CHECK(!has(f.why(idle), "Alarmed"));
+    GIANT_CHECK(f.run("show_to_people", {{"name", "thing"}, {"at", at(40, 1.6, -292)}}).ok);
+    f.frames(7.0, 0.5);
+    why = f.why(idle);
+    GIANT_CHECK(has(why, "Alarmed") && has(why, "by what it saw") && !has(why, "noise") && has(why, "no routine"));
 }
 
 GIANT_TEST("people list: the camera follows a person, and lets go when it is gone") {
@@ -226,6 +254,10 @@ GIANT_TEST("people list: the camera follows a person, and lets go when it is gon
     GIANT_CHECK(follow_person_camera(f.state));
     GIANT_CHECK(std::fabs(camera().x - (10.0 + 6.0 * std::cos(std::acos(-1.0) / 6.0))) < 1e-4 && std::fabs(camera().z) < 1e-4);
     GIANT_CHECK(std::fabs(camera().y - (1.5 + 3.0)) < 1e-4);
+    // Looking up from behind it: the camera stays over the ground.
+    GIANT_CHECK(f.run("set_camera", {{"yaw", 0.0}, {"pitch", 45.0}}).ok);
+    GIANT_CHECK(follow_person_camera(f.state) && std::fabs(camera().y - 0.3) < 1e-6 && camera().z > 4.0);
+    GIANT_CHECK(f.run("set_camera", {{"yaw", 90.0}, {"pitch", -30.0}}).ok);
     // It walks: the camera goes with it.
     f.frames(3.0);
     GIANT_CHECK(f.run("send_person", {{"id", id}, {"to", at(100, 0, 60)}}).ok);
@@ -255,4 +287,23 @@ GIANT_TEST("people list: the camera follows a person, and lets go when it is gon
     GIANT_CHECK(f.run("follow_person", {{"id", again}}).ok);
     GIANT_CHECK(f.run("new_scene").ok);
     GIANT_CHECK(!follow_person_camera(f.state) && f.state.follow.person == 0);
+}
+
+GIANT_TEST("people list: play ends following, and it does not come back when play stops") {
+    Fixture f;
+    PhysicsState physics;
+    PlayState play{physics};
+    f.state.physics = &physics;
+    f.state.play = &play;
+    register_physics_commands(f.commands, f.state);
+    const world::PersonId id = f.person({{"name", "walker"}, {"position", at(10, 0, 0)}});
+    GIANT_CHECK(f.run("follow_person", {{"id", id}}).ok && follow_person_camera(f.state));
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    GIANT_CHECK(!f.run("follow_person", {{"id", id}}).ok); // the camera is the player's eyes
+    const DVec3 eyes = f.state.camera.position;
+    GIANT_CHECK(!follow_person_camera(f.state) && f.state.follow.person == 0 && f.state.camera.position == eyes);
+    GIANT_CHECK(f.run("follow_person", {{"id", nullptr}}).ok); // nobody: allowed all the same
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+    const DVec3 back = f.state.camera.position;
+    GIANT_CHECK(!follow_person_camera(f.state) && f.state.camera.position == back);
 }

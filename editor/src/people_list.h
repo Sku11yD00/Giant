@@ -13,7 +13,6 @@
 #include "giant/world/scene.h"
 
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace giant::editor {
@@ -37,7 +36,12 @@ public:
     // Each frame the panel is open: a share of the people looked at. The
     // list shown is the last whole time through; another filter or scene
     // begins again at once (the list empty until the first time through).
+    // People removed or put back meanwhile neither hide nor double anyone:
+    // it goes on from the id it last looked at.
     void update(const EditorState& state);
+    // Begins again, the list empty (the panel was not open for a while:
+    // half a time through from then is not put with half from now).
+    void restart();
     const std::vector<world::PersonId>& shown() const { return m_shown; }
     usize matching() const { return m_matching; } // in the last whole time through (more than are shown, maybe)
     bool whole() const { return m_whole; }        // a whole time through has been made with this filter
@@ -45,7 +49,7 @@ public:
 private:
     Filter m_filter;
     u64 m_scene = 0;
-    usize m_cursor = 0;
+    world::PersonId m_last = 0; // the id last looked at this time through (0: none yet)
     usize m_count = 0;
     bool m_whole = false;
     usize m_matching = 0;
@@ -57,11 +61,12 @@ private:
 // and where its trip has got to. For people to read: the words may change.
 std::string person_why(const EditorState& state, const world::Person& person);
 
-// The camera kept `EditorState::follow.distance` behind and above the
-// person followed, looking the way the camera is turned (so turning it
-// looks round the person). Each frame, before the scene is drawn. False:
-// nobody is followed (the one followed is gone, or playing took the
-// camera: following ends).
+// The camera kept `EditorState::follow.distance` behind the person
+// followed, looking the way the camera is turned (so turning it looks
+// round the person), never under the ground. Each frame, playing or not,
+// before the scene is drawn. False: nobody is followed (the one followed
+// is gone, another scene was taken up, or playing took the camera:
+// following ends, and does not come back when play stops).
 bool follow_person_camera(EditorState& state);
 
 } // namespace giant::editor

@@ -1124,7 +1124,17 @@ void EditorPanels::draw_people() {
     ImGui::Checkbox("Alarmed", &m_people_list.filter.alarmed);
     ImGui::SameLine();
     ImGui::Checkbox("Travelling", &m_people_list.filter.travelling);
+    // Not drawn for a while (closed, or behind another tab): the list begins again.
+    const int frame = ImGui::GetFrameCount();
+    if (frame != m_people_frame + 1) {
+        m_people_list.restart();
+    }
+    m_people_frame = frame;
     m_people_list.update(m_state);
+    if (m_person_scene != scene.identity()) { // another scene's ids are other people
+        m_person_scene = scene.identity();
+        m_person_shown = 0;
+    }
 
     const std::vector<world::PersonId>& shown = m_people_list.shown();
     if (!m_people_list.whole()) {
@@ -1154,27 +1164,34 @@ void EditorPanels::draw_people() {
             for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
                 const world::PersonId id = shown[static_cast<usize>(row)];
                 const world::Person* person = world::find_person(scene.people, id);
+                ImGui::TableNextRow(); // (every index a row, or the clipper cannot measure)
+                ImGui::TableNextColumn();
                 if (person == nullptr) {
-                    continue; // removed since the list was made: gone from it the next time through
+                    ImGui::TextDisabled("(gone)"); // removed since the list was made: out of it the next time through
+                    continue;
                 }
                 const usize index = static_cast<usize>(person - scene.people.data());
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::PushID(row);
-                char label[160];
-                std::snprintf(label, sizeof(label), "%s%s##person", id == followed ? "> " : "",
-                              person->name.empty() ? "(no name)" : person->name.c_str());
-                if (ImGui::Selectable(label, id == m_person_shown, ImGuiSelectableFlags_SpanAllColumns)) {
+                ImGui::PushID(static_cast<int>(id));
+                // (The name is drawn apart: "##" in one would cut a label short.)
+                if (ImGui::Selectable("##person", id == m_person_shown, ImGuiSelectableFlags_SpanAllColumns)) {
                     m_person_shown = id;
+                    m_person_why_frame = -1;
                 }
                 ImGui::PopID();
+                ImGui::SameLine(0.0f, 0.0f);
+                if (id == followed) {
+                    ImGui::TextUnformatted("> ");
+                    ImGui::SameLine(0.0f, 0.0f);
+                }
+                ImGui::TextUnformatted(person->name.empty() ? "(no name)" : person->name.c_str());
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(person->look.c_str());
                 ImGui::TableNextColumn();
                 PeopleRoutines::Doing doing;
                 if (m_state.routines != nullptr && m_state.routines->doing(scene, id, doing)) {
                     ImGui::TextUnformatted(doing.activity.data(), doing.activity.data() + doing.activity.size());
-                } else if (m_state.travel != nullptr && m_state.travel->trip(id) != nullptr) {
+                } else if (const PeopleTravel::Trip* trip = m_state.travel != nullptr ? m_state.travel->trip(id) : nullptr;
+                           trip != nullptr && trip->phase != PeopleTravel::Phase::failed) {
                     ImGui::TextUnformatted("travelling");
                 }
                 ImGui::TableNextColumn();
@@ -1192,11 +1209,19 @@ void EditorPanels::draw_people() {
         m_person_shown = 0;
         ImGui::TextDisabled("Pick a person to see what it does and why.");
     } else {
-        ImGui::SeparatorText(person->name.empty() ? "(no name)" : person->name.c_str());
+        ImGui::Separator();
+        ImGui::TextUnformatted(person->name.empty() ? "(no name)" : person->name.c_str());
         ImGui::Text("Id %llu   look %s   home %s", static_cast<unsigned long long>(person->id),
                     person->look.empty() ? "-" : person->look.c_str(),
                     person->home.empty() ? "-" : person->home.c_str());
-        ImGui::TextWrapped("%s", person_why(m_state, *person).c_str());
+        // The words are made anew six times a second or so, not every frame.
+        if (m_person_why_frame < 0 || frame - m_person_why_frame >= 10) {
+            m_person_why = person_why(m_state, *person);
+            m_person_why_frame = frame;
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(m_person_why.c_str());
+        ImGui::PopTextWrapPos();
         const bool playing = m_state.play != nullptr && m_state.play->playing();
         ImGui::BeginDisabled(playing);
         if (followed == person->id) {

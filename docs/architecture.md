@@ -3841,9 +3841,13 @@ has up to 65,536 people, and who is alarmed or travelling changes as
 the world runs, so the list is gone through 4,096 a frame, again and
 again, while the window is open: what is shown is the last whole time
 through (the first 1,024 that match, ids rising, with how many match
-in all), so it is a few frames behind at most and never costs more
-than its share. Another filter or scene begins again at once. Two
-vectors kept at their full size swap; nothing is allocated a frame.
+in all), so it is a frame behind for up to 4,096 people and half a
+second or so for the most a scene holds, and never costs more than
+its share. Each frame goes on from the id last looked at, so people
+removed or put back meanwhile neither hide nor double anyone.
+Another filter or scene begins again at once, and so does a window
+that was closed or behind another tab. Two vectors kept at their full
+size swap; the list allocates nothing a frame.
 `get_people` takes the same filter (`text`, `alarmed`, `travelling`)
 through the same `PeopleList::matches`.
 
@@ -3852,18 +3856,21 @@ it and how long ago (a noise's kind, or what it saw), what its
 routine says (the hour's entry and when it began, or the alarmed
 entry and the alarm it holds over, or that it could not be sent), and
 where its trip has got to (looking for its way, so far along, or why
-it failed). The panel shows it for the one picked; `get_people` gives
-it as `why`. It is for reading: the fields beside it (`doing`,
+it failed). What the routine says is what it last acted on, so just
+after an alarm rises or eases the two may differ until its turn
+comes. The panel shows it for the one picked (made anew a few times a
+second); `get_people` gives it as `why`. It is for reading: the fields beside it (`doing`,
 `alarm`, `heard`, `trip`) are the ones to act on.
 
 `follow_person` has the viewport camera follow a person:
 `EditorState::follow` (the person, the scene it is of, a distance),
 and `follow_person_camera` each frame after the camera's own keys puts
 the camera that far behind the person, 1.5 m over the ground under
-it, along the way the camera looks; so turning the camera (the mouse,
+it, along the way the camera looks, and never under the ground; so turning the camera (the mouse,
 `set_camera`'s yaw and pitch) looks round the person and a position
 given is not kept. Following ends when the person is removed, another
-scene is taken up or play starts. It is view state, as the camera is.
+scene is taken up or play starts (and does not come back when play
+stops). It is view state, as the camera is.
 
 ### Nobody appears close by in view (LW4 part 2)
 

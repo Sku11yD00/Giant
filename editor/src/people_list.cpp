@@ -9,9 +9,12 @@
 #include "giant/world/people.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <string_view>
+#include <system_error>
 
 namespace giant::editor {
 
@@ -50,9 +53,21 @@ bool PeopleList::matches(const EditorState& state, const world::Person& person, 
         holds(person.routine, filter.text)) {
         return true;
     }
-    char id[24];
-    std::snprintf(id, sizeof(id), "%llu", static_cast<unsigned long long>(person.id));
-    return filter.text == id;
+    // Its id, whole (digits alone; "007" is not 7).
+    const std::string& text = filter.text;
+    if (text.size() > 10 || text[0] < '1' || text[0] > '9') return false;
+    world::PersonId id = 0;
+    const std::from_chars_result got = std::from_chars(text.data(), text.data() + text.size(), id);
+    return got.ec == std::errc() && got.ptr == text.data() + text.size() && id == person.id;
+}
+
+void PeopleList::restart() {
+    m_last = 0;
+    m_count = 0;
+    m_whole = false;
+    m_matching = 0;
+    m_shown.clear();
+    m_next.clear();
 }
 
 void PeopleList::update(const EditorState& state) {
@@ -60,42 +75,41 @@ void PeopleList::update(const EditorState& state) {
     if (!(filter == m_filter) || state.scene.identity() != m_scene) {
         m_filter = filter;
         m_scene = state.scene.identity();
-        m_cursor = 0;
-        m_count = 0;
-        m_whole = false;
-        m_matching = 0;
-        m_shown.clear();
-        m_next.clear();
+        restart();
     }
     if (m_next.capacity() < k_most_shown) {
         m_next.reserve(k_most_shown);
         m_shown.reserve(k_most_shown);
     }
-    if (m_cursor > people.size()) m_cursor = people.size(); // (people removed since)
+    // On from the id last looked at (the people are kept by rising id), so
+    // ones removed or put back since shift nobody out of, or twice into, this time through.
+    usize cursor = static_cast<usize>(
+        std::upper_bound(people.begin(), people.end(), m_last, [](world::PersonId id, const world::Person& p) { return id < p.id; }) -
+        people.begin());
     usize left = k_looked_a_frame;
-    while (left > 0 && m_cursor < people.size()) {
-        if (matches(state, people[m_cursor], m_cursor, m_filter)) {
-            if (m_next.size() < k_most_shown) m_next.push_back(people[m_cursor].id);
+    while (left > 0 && cursor < people.size()) {
+        if (matches(state, people[cursor], cursor, m_filter)) {
+            if (m_next.size() < k_most_shown) m_next.push_back(people[cursor].id);
             ++m_count;
         }
-        ++m_cursor;
+        m_last = people[cursor].id;
+        ++cursor;
         --left;
     }
-    if (m_cursor >= people.size()) { // through: what was found is what is shown, and it begins again
+    if (cursor >= people.size()) { // through: what was found is what is shown, and it begins again
         m_shown.swap(m_next);
         m_next.clear();
         m_matching = m_count;
         m_count = 0;
-        m_cursor = 0;
+        m_last = 0;
         m_whole = true;
     }
 }
 
 std::string person_why(const EditorState& state, const world::Person& person) {
     std::string out;
-    const usize index = static_cast<usize>(&person - state.scene.people.data());
     PeopleSenses::Heard heard;
-    const bool alarmed = state.senses != nullptr && index < state.scene.people.size() && state.senses->heard(state.scene, person.id, heard);
+    const bool alarmed = state.senses != nullptr && state.senses->heard(state.scene, person.id, heard);
     PeopleRoutines::Doing doing;
     const bool does = state.routines != nullptr && state.routines->doing(state.scene, person.id, doing);
     if (alarmed) {
@@ -111,14 +125,15 @@ std::string person_why(const EditorState& state, const world::Person& person) {
     } else if (!does) {
         out += "Its routine \"" + person.routine + "\" has not had it do anything yet (the world is not running, or its turn has not come). ";
     } else {
-        out += "Its routine \"" + person.routine + "\" says " + std::string(doing.activity);
+        // (What it last acted on: the senses' alarm now may have moved on before its turn comes again.)
+        out += "Its routine \"" + person.routine + "\" last had it " + std::string(doing.activity);
         if (doing.alarmed) {
-            out += " while its alarm is over " + number(static_cast<double>(doing.at)) + ". ";
+            out += " (for an alarm over " + number(static_cast<double>(doing.at)) + "). ";
         } else {
             const int minutes = static_cast<int>(std::lround(static_cast<double>(doing.at) * 60.0));
             char hour[16];
             std::snprintf(hour, sizeof(hour), "%02d:%02d", (minutes / 60) % 24, minutes % 60);
-            out += std::string(" from ") + hour + ". ";
+            out += std::string(" (from ") + hour + "). ";
         }
         if (doing.failed) out += "It could not be sent there (no such place, no road near, or no way). ";
     }
@@ -155,8 +170,12 @@ bool follow_person_camera(EditorState& state) {
     // (The way the camera looks: yaw 0 along -z, 90 along -x; up is positive.)
     const double fx = -std::sin(yaw) * std::cos(pitch), fy = std::sin(pitch), fz = -std::cos(yaw) * std::cos(pitch);
     const double back = std::clamp(static_cast<double>(state.follow.distance), 1.0, 200.0);
-    state.camera.position = {here.position.x - fx * back, (ground ? *ground : here.position.y) + 1.5 - fy * back,
-                             here.position.z - fz * back};
+    DVec3 eye{here.position.x - fx * back, (ground ? *ground : here.position.y) + 1.5 - fy * back, here.position.z - fz * back};
+    // Looking up from behind would put it under the ground: it stays a little over it.
+    const std::optional<double> under = state.scene.terrain.height_at(eye.x, eye.z);
+    const double floor = (under ? *under : (ground ? *ground : here.position.y)) + 0.3;
+    eye.y = std::max(eye.y, floor);
+    state.camera.position = eye;
     return true;
 }
 

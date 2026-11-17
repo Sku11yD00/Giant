@@ -75,6 +75,10 @@ private:
     PeopleList m_people_list;                       // the People panel's (filter and those shown)
     std::array<char, 96> m_people_filter_buffer{};  // ImGui edits this in place
     world::PersonId m_person_shown = 0;             // the one whose state is shown (0: none)
+    u64 m_person_scene = 0;                         // the scene that one is of
+    std::string m_person_why;                       // person_why of that one, made anew a few times a second
+    int m_person_why_frame = -1;                    // the frame it was made
+    int m_people_frame = -1;                        // the frame the list was last updated
 
     u32 m_edit_epoch = 1; // bumped whenever no widget is being edited
 };

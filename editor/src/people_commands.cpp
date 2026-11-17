@@ -882,10 +882,10 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              const bool filtered = !(filter == PeopleList::Filter{});
              usize count = 0;
              for (const Person& p : people) {
-                 if (filtered && !PeopleList::matches(state, p, static_cast<usize>(&p - people.data()), filter)) continue;
                  if (!look.empty() && p.look != look) continue;
                  if (!home.empty() && p.home != home) continue;
                  if (!routine.empty() && p.routine != routine) continue;
+                 if (filtered && !PeopleList::matches(state, p, static_cast<usize>(&p - people.data()), filter)) continue;
                  if (by_place && !near_enough(p.position, near, within)) continue;
                  if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel, state.routines, state.senses, &state));
                  ++count;
@@ -895,12 +895,14 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
     add(registry,
         {"follow_person",
          "The viewport camera follows a person (`id`; null or left out: nobody): kept `distance` metres "
-         "behind it (1 to 200, default 6, or as last given), looking the way the camera is turned, so "
-         "set_camera's yaw and pitch look round it. Following ends when the person is removed or play "
+         "behind it (1 to 200, default 6, or as last given) and never under the ground, looking the way the camera is turned, so "
+         "set_camera's yaw and pitch look round it. Following ends when the person is removed, another scene is taken up or play "
          "starts. Returns `following` (the id, or null) and `distance`. View state: not undone, not saved.",
          object_schema(Json::array(),
-                       {{"id", {{"type", {"integer", "null"}}, {"minimum", 1}, {"maximum", 4294967295.0}}},
-                        {"distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 200}}}}),
+                       {{"id", {{"type", {"integer", "null"}}, {"minimum", 1}, {"maximum", 4294967295.0},
+                                 {"description", "The person to follow; null or left out: nobody."}}},
+                        {"distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 200},
+                                      {"description", "Metres behind it (default 6, or as last given)."}}}}),
          false,
          [&state](const Json& args, CommandContext&) {
              const bool nobody = !args.contains("id") || args["id"].is_null();
