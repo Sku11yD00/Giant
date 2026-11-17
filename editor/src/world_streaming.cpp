@@ -240,6 +240,7 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
     base.water = index.water;
     base.places = index.places;
     base.person_looks = index.person_looks;
+    base.routines = index.routines;
     base.people = index.people;
     base.next_person_id = index.next_person_id;
     base.routes = index.routes;
@@ -712,6 +713,7 @@ WorldStreaming::Saved WorldStreaming::create(const std::filesystem::path& folder
     m_index.water = scene.water;
     m_index.places = scene.places;
     m_index.person_looks = scene.person_looks;
+    m_index.routines = scene.routines;
     m_index.people = scene.people;
     m_index.next_person_id = scene.next_person_id;
     m_index.routes = scene.routes;
@@ -980,6 +982,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     m_index.water = scene.water;
     m_index.places = scene.places;
     m_index.person_looks = scene.person_looks;
+    m_index.routines = scene.routines;
     m_index.people = scene.people;
     m_index.next_person_id = scene.next_person_id;
     m_index.routes = scene.routes;
@@ -1171,6 +1174,7 @@ bool WorldStreaming::unsaved_settings(const world::Scene& scene) const {
            !(scene.scatter == m_index.scatter) || !(scene.weather == m_index.weather) ||
            !(scene.clock == m_index.clock) || !(scene.water == m_index.water) ||
            !(scene.places == m_index.places) || !(scene.person_looks == m_index.person_looks) ||
+           !(scene.routines == m_index.routines) ||
            !(scene.people == m_index.people) || scene.next_person_id != m_index.next_person_id ||
            !(scene.routes == m_index.routes) ||
            !(scene.particle_looks == m_index.particle_looks) || !(scene.effects == m_index.effects);

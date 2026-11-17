@@ -400,6 +400,17 @@ GIANT_TEST("world streaming: the people, their looks and places are the world's,
     GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
     e.settle(10.0, 10.0);
     GIANT_CHECK(e.state.scene.routes == routes && !e.w.streaming.unsaved_settings(e.state.scene));
+    // Routines are the world's too, and a person's among its fields.
+    GIANT_CHECK(e.run("set_routine", {{"name", "day"}, {"entries", {{{"from", 7.5}, {"activity", "work"}, {"at", "tag"}, {"name", "work"}},
+                                                                     {{"from", 21}, {"activity", "sleep"}, {"at", "home"}}}}}));
+    GIANT_CHECK(e.w.streaming.unsaved_settings(scene) && !e.run("open_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("set_person", {{"id", 2}, {"routine", "day"}}) && e.run("save_world"));
+    GIANT_CHECK(!e.w.streaming.unsaved_settings(scene));
+    const std::vector<world::Routine> kept = scene.routines;
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(kept.size() == 1 && scene.routines == kept && scene.people[0].routine == "day" &&
+                !e.w.streaming.unsaved_settings(scene));
     // A person made and undone leaves its id used (the world then has that to save).
     GIANT_CHECK(e.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}}}}}) && e.commands.undo());
     GIANT_CHECK(scene.people.size() == 1 && scene.next_person_id == 4 && e.w.streaming.unsaved_settings(scene));

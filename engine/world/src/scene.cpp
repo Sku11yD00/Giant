@@ -239,7 +239,7 @@ Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
       weather(other.weather), clock(other.clock), water(other.water), places(other.places),
       person_looks(other.person_looks), people(other.people), next_person_id(other.next_person_id),
-      routes(other.routes),
+      routines(other.routines), routes(other.routes),
       particle_looks(other.particle_looks), effects(other.effects), m_entities(other.m_entities),
       m_index(other.m_index),
       m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
@@ -250,7 +250,7 @@ Scene::Scene(Scene&& other) noexcept
       scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock),
       water(std::move(other.water)), places(std::move(other.places)), person_looks(std::move(other.person_looks)),
       people(std::move(other.people)), next_person_id(other.next_person_id),
-      routes(std::move(other.routes)),
+      routines(std::move(other.routines)), routes(std::move(other.routes)),
       particle_looks(std::move(other.particle_looks)),
       effects(std::move(other.effects)), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
@@ -283,6 +283,7 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         person_looks = std::move(other.person_looks);
         people = std::move(other.people);
         next_person_id = other.next_person_id;
+        routines = std::move(other.routines);
         routes = std::move(other.routes);
         particle_looks = std::move(other.particle_looks);
         effects = std::move(other.effects);
@@ -1041,21 +1042,39 @@ Json person_looks_json(std::span<const PersonLook> looks) {
 }
 
 // People are many (tens of thousands), so each is a row, not an object:
-// [id, name, look, home, x, y, z, yaw, seed].
+// [id, name, look, home, x, y, z, yaw, seed], and its routine after for one that has one.
 Json people_json(std::span<const Person> people, PersonId next_person_id) {
     Json list = Json::array();
     for (const Person& p : people) {
         list.push_back(Json::array({p.id, p.name, p.look, p.home, p.position.x, p.position.y, p.position.z, p.yaw, p.seed}));
+        if (!p.routine.empty()) list.back().push_back(p.routine);
     }
     return {{"next_id", next_person_id}, {"list", std::move(list)}};
+}
+
+Json routines_json(std::span<const Routine> routines) {
+    Json out = Json::array();
+    for (const Routine& r : routines) {
+        Json entries = Json::array();
+        for (const RoutineEntry& e : r.entries) {
+            Json entry = {{"from", e.from}, {"activity", e.activity}};
+            if (e.at != RoutineAt::stay) entry["at"] = routine_at_name(e.at);
+            if (!e.name.empty()) entry["name"] = e.name;
+            if (e.speed != RoutineEntry{}.speed) entry["speed"] = e.speed;
+            entries.push_back(std::move(entry));
+        }
+        out.push_back({{"name", r.name}, {"entries", std::move(entries)}});
+    }
+    return out;
 }
 
 // The people's keys of a scene or a world index (only what is there, so
 // older files read and write the same).
 void write_people(Json& out, std::span<const Place> places, std::span<const PersonLook> looks,
-                  std::span<const Person> people, PersonId next_person_id) {
+                  std::span<const Routine> routines, std::span<const Person> people, PersonId next_person_id) {
     if (!places.empty()) out["places"] = places_json(places);
     if (!looks.empty()) out["person_looks"] = person_looks_json(looks);
+    if (!routines.empty()) out["routines"] = routines_json(routines);
     if (!people.empty() || next_person_id != 1) out["people"] = people_json(people, next_person_id);
 }
 
@@ -1166,7 +1185,7 @@ std::string save_scene(const Scene& scene) {
     if (!scene.water.empty()) {
         out["water"] = water_json(scene.water);
     }
-    write_people(out, scene.places, scene.person_looks, scene.people, scene.next_person_id);
+    write_people(out, scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id);
     write_routes(out, scene.routes);
     if (!scene.particle_looks.empty()) {
         out["particle_looks"] = particle_looks_json(scene.particle_looks);
@@ -1994,10 +2013,10 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
     r.finish();
 }
 
-// The people's keys of a scene or a world index: places, person_looks and
-// people, each checked alone and then together (people.h).
-void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLook>& looks, std::vector<Person>& people,
-                 PersonId& next_person_id, std::string& error) {
+// The people's keys of a scene or a world index: places, person_looks,
+// routines and people, each checked alone and then together (people.h).
+void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLook>& looks, std::vector<Routine>& routines,
+                 std::vector<Person>& people, PersonId& next_person_id, std::string& error) {
     if (const Json* list = root.get("places", false); list != nullptr && root.ok()) {
         if (!list->is_array() || list->size() > k_max_places) {
             root.fail("places", "must be an array of at most " + std::to_string(k_max_places));
@@ -2062,6 +2081,51 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             looks.push_back(std::move(l));
         }
     }
+    if (const Json* list = root.get("routines", false); list != nullptr && root.ok()) {
+        if (!list->is_array() || list->size() > k_max_routines) {
+            root.fail("routines", "must be an array of at most " + std::to_string(k_max_routines));
+            return;
+        }
+        for (usize i = 0; i < list->size(); ++i) {
+            const std::string path = "routines[" + std::to_string(i) + "]";
+            Reader r((*list)[i], path, error);
+            Routine routine;
+            r.string("name", routine.name, true, k_max_name_bytes);
+            const Json* entries = r.get("entries", true);
+            r.finish();
+            if (!error.empty() || entries == nullptr) return;
+            if (!entries->is_array() || entries->empty() || entries->size() > k_max_routine_entries) {
+                error = path + ".entries must be a list of 1 to " + std::to_string(k_max_routine_entries);
+                return;
+            }
+            for (usize k = 0; k < entries->size(); ++k) {
+                const std::string entry_path = path + ".entries[" + std::to_string(k) + "]";
+                Reader e((*entries)[k], entry_path, error);
+                RoutineEntry entry;
+                e.get("from", true);
+                e.number("from", entry.from, 0, 24);
+                e.string("activity", entry.activity, true, k_max_tag_bytes);
+                std::string at = "stay";
+                e.string("at", at, false, 8);
+                e.string("name", entry.name, false, k_max_name_bytes);
+                e.number("speed", entry.speed, 0.1, 20);
+                e.finish();
+                if (!error.empty()) return;
+                const std::optional<RoutineAt> where = routine_at_named(at);
+                if (!where) {
+                    error = entry_path + ".at must be stay, home, place or tag";
+                    return;
+                }
+                entry.at = *where;
+                routine.entries.push_back(std::move(entry));
+            }
+            if (const auto bad = check_routine(routine)) {
+                error = path + ": " + *bad;
+                return;
+            }
+            routines.push_back(std::move(routine));
+        }
+    }
     if (const Json* json = root.get("people", false); json != nullptr && root.ok()) {
         Reader r(*json, "people", error);
         u64 next = 1;
@@ -2086,9 +2150,10 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             const std::string path = "people.list[" + std::to_string(i) + "]";
             const auto number = [&](usize k) { return row[k].is_number() && std::isfinite(row[k].get<double>()); };
             const auto whole = [&](usize k) { return row[k].is_number_unsigned() && row[k].get<u64>() <= 0xffffffffu; };
-            if (!row.is_array() || row.size() != 9 || !whole(0) || !row[1].is_string() || !row[2].is_string() ||
-                !row[3].is_string() || !number(4) || !number(5) || !number(6) || !number(7) || !whole(8)) {
-                error = path + " must be [id, name, look, home, x, y, z, yaw, seed]";
+            if (!row.is_array() || (row.size() != 9 && row.size() != 10) || !whole(0) || !row[1].is_string() ||
+                !row[2].is_string() || !row[3].is_string() || !number(4) || !number(5) || !number(6) || !number(7) ||
+                !whole(8) || (row.size() == 10 && (!row[9].is_string() || row[9].get_ref<const std::string&>().empty()))) {
+                error = path + " must be [id, name, look, home, x, y, z, yaw, seed] or those and its routine's name";
                 return;
             }
             Person p;
@@ -2104,6 +2169,7 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             }
             p.yaw = static_cast<float>(yaw);
             p.seed = row[8].get<u32>();
+            if (row.size() == 10) p.routine = row[9].get<std::string>();
             if (const auto bad = check_person(p)) {
                 error = path + ": " + *bad;
                 return;
@@ -2112,7 +2178,7 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
         }
     }
     if (!error.empty()) return;
-    if (const auto bad = check_people(places, looks, people, next_person_id)) error = "people: " + *bad;
+    if (const auto bad = check_people(places, looks, routines, people, next_person_id)) error = "people: " + *bad;
 }
 
 // The routes' key of a scene or a world index, each row checked alone and
@@ -2722,7 +2788,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     read_kits(root, scene.kits, error);
     read_scatter(root, scene.kits, scene.scatter, error);
     read_water(root, scene.water, error);
-    read_people(root, scene.places, scene.person_looks, scene.people, scene.next_person_id, error);
+    read_people(root, scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id, error);
     read_routes(root, scene.routes, error);
     read_particle_looks(root, scene.particle_looks, error);
     read_effects(root, scene.effects, error);
@@ -2807,7 +2873,7 @@ std::string save_world_index(const WorldIndex& world) {
     if (!world.water.empty()) {
         out["water"] = water_json(world.water);
     }
-    write_people(out, world.places, world.person_looks, world.people, world.next_person_id);
+    write_people(out, world.places, world.person_looks, world.routines, world.people, world.next_person_id);
     write_routes(out, world.routes);
     if (!world.particle_looks.empty()) {
         out["particle_looks"] = particle_looks_json(world.particle_looks);
@@ -2875,7 +2941,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     read_kits(root, world.kits, error);
     read_scatter(root, world.kits, world.scatter, error);
     read_water(root, world.water, error);
-    read_people(root, world.places, world.person_looks, world.people, world.next_person_id, error);
+    read_people(root, world.places, world.person_looks, world.routines, world.people, world.next_person_id, error);
     read_routes(root, world.routes, error);
     read_particle_looks(root, world.particle_looks, error);
     read_effects(root, world.effects, error);

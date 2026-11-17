@@ -570,11 +570,34 @@ struct PersonLook {
 
 // One person. `id` is its own for good (never used again in the scene).
 constexpr usize k_max_people = 65536;
+
+// A routine: what the people who have it do through the day (living-world
+// plan LW3). Each entry begins at an hour and holds until the next (the
+// last holds over midnight until the first), and says what one does then
+// and where: where it is, at its home, at a named place, or at a place
+// with a tag (each person its own: the nearest to its home).
+constexpr usize k_max_routines = 1024;
+constexpr usize k_max_routine_entries = 24;
+enum class RoutineAt : u8 { stay, home, place, tag };
+struct RoutineEntry {
+    float from = 0.0f;    // the hour it begins (0 to under 24), rising through the list
+    std::string activity; // what one does then: a word as a place's tag is ("sleep", "work")
+    RoutineAt at = RoutineAt::stay;
+    std::string name;     // place: a Place's name; tag: a place's tag; else empty
+    float speed = 1.4f;   // metres a second going there (0.1 to 20)
+    bool operator==(const RoutineEntry&) const = default;
+};
+struct Routine {
+    std::string name; // unique in the scene, 1 to k_max_name_bytes
+    std::vector<RoutineEntry> entries; // 1 to k_max_routine_entries
+    bool operator==(const Routine&) const = default;
+};
 struct Person {
     PersonId id = 0;
     std::string name;    // at most k_max_name_bytes; need not be unique
     std::string look;    // a PersonLook's name
     std::string home;    // a Place's name ("" for none)
+    std::string routine; // a Routine's name ("" for none: it stays where it is)
     DVec3 position;      // where it starts (metres)
     float yaw = 0.0f;    // degrees
     u32 seed = 0;        // what tells it apart from others of its look (tint, pace)
@@ -715,6 +738,8 @@ public:
     std::vector<PersonLook> person_looks;
     std::vector<Person> people;
     PersonId next_person_id = 1;
+    // What people do through the day (people.h), by name, in order (not tracked: compare).
+    std::vector<Routine> routines;
     // The roads and paths people travel by (routes.h; not tracked: compare).
     Routes routes;
     // Particle looks and effects (effects.h), by name, in order (not tracked: compare).
@@ -826,6 +851,8 @@ struct WorldIndex {
     std::vector<PersonLook> person_looks;
     std::vector<Person> people;
     PersonId next_person_id = 1;
+    // What people do through the day (people.h), by name, in order (not tracked: compare).
+    std::vector<Routine> routines;
     // The roads and paths people travel by (routes.h; not tracked: compare).
     Routes routes;
     std::vector<ParticleLook> particle_looks;

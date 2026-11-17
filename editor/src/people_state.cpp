@@ -319,6 +319,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     const u64 resets = travel != nullptr ? travel->resets() : 0;
     for (auto& [id, held] : m_held) {
         const world::Person* person = world::find_person(scene.people, id);
+        if (person != nullptr && person->routine != held.was.routine) held.was.routine = person->routine; // (nothing its entity shows)
         bool there = scene.find(world::person_entity_id(id)) != nullptr && person != nullptr && *person == held.was;
         if (there) {
             const PeopleTravel::Where now = where(*person);
