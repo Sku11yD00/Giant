@@ -322,17 +322,47 @@ SceneChanges Scene::take_changes() {
     return out;
 }
 
+// Where the entities standing for people begin (they are kept last).
+usize Scene::authored() const {
+    return static_cast<usize>(std::partition_point(m_entities.begin(), m_entities.end(),
+                                                   [](const Entity& e) { return e.person == 0; }) -
+                              m_entities.begin());
+}
+
 EntityId Scene::add(Entity entity, std::optional<usize> at) {
+    if (entity.person != 0) {
+        // Its person's own id, outside the ids the scene hands out (and saves the next of).
+        entity.id = person_entity_id(entity.person);
+        if (m_index.contains(entity.id)) return 0;
+        const EntityId id = entity.id;
+        m_entities.push_back(std::move(entity));
+        m_index[id] = m_entities.size() - 1;
+        changed(id);
+        return id;
+    }
     if (entity.id == 0) {
         if (m_next_id > k_max_entity_id) {
             return 0; // every id has been used; callers report it
         }
         entity.id = m_next_id;
     }
-    GIANT_ASSERT(entity.id <= k_max_entity_id, "entity ids are at most 2^53 - 1");
+    GIANT_ASSERT(entity.id <= k_max_entity_id, "a scene's own entity ids are at most 2^52 - 1");
     GIANT_ASSERT(!m_index.contains(entity.id), "entity id already in use");
     m_next_id = std::max(m_next_id, entity.id + 1);
-    const usize index = std::min(at.value_or(m_entities.size()), m_entities.size());
+    const usize last = authored();
+    const usize index = std::min(at.value_or(last), last);
+    if (index == last && last < m_entities.size()) {
+        // At the end of the scene's own, with people's entities after: the
+        // first of those goes last and this takes its place (nothing else
+        // moves, however many stand there).
+        const EntityId id = entity.id;
+        m_entities.push_back(std::move(m_entities[last]));
+        m_index[m_entities.back().id] = m_entities.size() - 1;
+        m_entities[last] = std::move(entity);
+        m_index[id] = last;
+        changed(id);
+        return id;
+    }
     const EntityId id = entity.id;
     m_entities.insert(m_entities.begin() + static_cast<std::ptrdiff_t>(index), std::move(entity));
     reindex(index);
@@ -404,13 +434,15 @@ void Scene::restore_many(std::vector<Removed> removed) {
         while (merged.size() < r.index && next < m_entities.size()) {
             merged.push_back(std::move(m_entities[next++]));
         }
-        m_next_id = std::max(m_next_id, r.entity.id + 1);
+        if (r.entity.person == 0) m_next_id = std::max(m_next_id, r.entity.id + 1);
         changed(r.entity.id);
         merged.push_back(std::move(r.entity));
     }
     while (next < m_entities.size()) {
         merged.push_back(std::move(m_entities[next++]));
     }
+    // Those standing for people stay last (one put back may have landed among the others).
+    std::stable_partition(merged.begin(), merged.end(), [](const Entity& e) { return e.person == 0; });
     m_entities = std::move(merged);
     reindex(0);
 }
@@ -1127,7 +1159,7 @@ std::string save_scene(const Scene& scene) {
     }
     Json entities = Json::array();
     for (const Entity& e : scene.entities()) {
-        entities.push_back(entity_json(e));
+        if (e.person == 0) entities.push_back(entity_json(e)); // (one standing for a person is not saved: the person is)
     }
     out["entities"] = std::move(entities);
     if (std::any_of(scene.damage().begin(), scene.damage().end(), [](const auto& d) { return !d.second.empty(); })) {
@@ -1313,7 +1345,7 @@ public:
             if (!v->is_number_unsigned() || v->get<u64>() == 0 ||
                 v->get<u64>() > maximum) {
                 fail(key, "must be a whole number from 1 to " +
-                              std::string(maximum == k_max_entity_id ? "2^53 - 1" : "2^53"));
+                              std::string(maximum == k_max_entity_id ? "2^52 - 1" : "2^52"));
                 return;
             }
             out = v->get<u64>();
@@ -2835,7 +2867,7 @@ std::string save_cell(CellCoord cell, std::span<const Entity> entities, const Te
     std::vector<const Entity*> sorted;
     sorted.reserve(entities.size());
     for (const Entity& e : entities) {
-        sorted.push_back(&e);
+        if (e.person == 0) sorted.push_back(&e);
     }
     std::sort(sorted.begin(), sorted.end(), [](const Entity* a, const Entity* b) { return a->id < b->id; });
     Json out;

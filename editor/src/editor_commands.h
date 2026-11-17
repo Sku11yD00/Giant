@@ -61,6 +61,7 @@ class EffectsState;
 class WeatherEffects;
 class NavState;
 class WalkerState;
+class PeopleState;
 class RagdollState;
 class GameUi;
 class GameMenus;
@@ -257,6 +258,9 @@ struct EditorState {
     NavState* nav = nullptr;
     // Entities sent walking (walk_to); set by main (and tests). Null: none walk.
     WalkerState* walkers = nullptr;
+    // The people near the camera, given entities (people_state.h); set by
+    // main (and tests). Null: people stay records.
+    PeopleState* people = nullptr;
     // Characters gone limp (ragdoll_entity); set by main (and tests). Null: none do.
     RagdollState* ragdolls = nullptr;
     // Sounds played in the scene, heard at the camera; set by main (and

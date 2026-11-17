@@ -3,6 +3,7 @@
 // (saved with the scene and the world's world.json, undoable). People are
 // many, so an undo step keeps what one command changed, never the lists.
 #include "editor_commands.h"
+#include "people_state.h"
 
 #include "giant/core/assert.h"
 #include "giant/world/people.h"
@@ -67,9 +68,30 @@ Json look_json(const PersonLook& l, usize people) {
             {"hair", l.hair.on},    {"matched", l.matched},  {"people", people}};
 }
 
-Json person_json(const Person& p) {
-    return {{"id", p.id},     {"name", p.name}, {"look", p.look}, {"home", p.home},
-            {"position", point_json(p.position)}, {"yaw", p.yaw},   {"seed", p.seed}};
+// `people`: who is given an entity now (null: nobody is), named as `entity`.
+Json person_json(const Person& p, const PeopleState* people = nullptr, const world::Scene* scene = nullptr) {
+    Json j = {{"id", p.id},     {"name", p.name}, {"look", p.look}, {"home", p.home},
+              {"position", point_json(p.position)}, {"yaw", p.yaw},   {"seed", p.seed}};
+    if (scene != nullptr) {
+        const world::EntityId entity = people != nullptr ? people->entity_of(*scene, p.id) : 0;
+        j["entity"] = entity != 0 ? Json(entity) : Json(nullptr);
+    }
+    return j;
+}
+
+Json people_state_json(const PeopleState& people) {
+    const PeopleState::Settings& s = people.settings;
+    const PeopleState::Stats& t = people.stats();
+    return {{"on", s.on},
+            {"embody_distance", s.embody_distance},
+            {"release_distance", s.release_distance},
+            {"most", s.most},
+            {"made_a_frame", s.made_a_frame},
+            {"scanned_a_frame", s.scanned_a_frame},
+            {"embodied", t.embodied},
+            {"waiting", t.waiting},
+            {"made", t.made},
+            {"released", t.released}};
 }
 
 // What one command changed. A place or a look: the one at `index` before
@@ -568,7 +590,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "Lists people as the scene keeps them (where each starts; where each is while the world runs is "
          "the simulation's): those named by `ids`, or all, or those of `look`, living at `home` and/or "
          "within `within` metres of `near`, `limit` at a time from `offset` (by rising id). `count` is how "
-         "many match, `total` how many there are.",
+         "many match, `total` how many there are. `entity`: the entity standing for one near the camera now "
+         "(set_people_settings), else null.",
          object_schema(Json::array(), people_props),
          true,
          [&state](const Json& args, CommandContext&) {
@@ -579,7 +602,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  usize found = 0;
                  for (const Json& id : args["ids"]) {
                      const Person* p = world::find_person(people, id.get<PersonId>());
-                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p));
+                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene));
                      found += p != nullptr ? 1 : 0;
                  }
                  return CommandResult::success({{"count", found}, {"total", people.size()}, {"people", std::move(list)}});
@@ -594,10 +617,46 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  if (!look.empty() && p.look != look) continue;
                  if (!home.empty() && p.home != home) continue;
                  if (by_place && !near_enough(p.position, near, within)) continue;
-                 if (count >= offset && list.size() < limit) list.push_back(person_json(p));
+                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene));
                  ++count;
              }
              return CommandResult::success({{"count", count}, {"total", people.size()}, {"people", std::move(list)}});
+         }});
+    add(registry,
+        {"set_people_settings",
+         "How the people near the camera are given entities (real characters made from their looks, each "
+         "an entity carrying its `person`): `on`; `embody_distance` (metres from the camera within which a "
+         "person gets one, default 60) and `release_distance` (beyond which it is taken away, default 80, "
+         "never under embody_distance); `most` held at once (default 256, at most 1024); `made_a_frame` "
+         "(default 2) and `scanned_a_frame` (people looked at a frame, default 1024). Fields left out stay; "
+         "with none it only reports. Returns the settings with `embodied` (entities held now), `waiting` "
+         "(near enough but over `most`), and `made` and `released` since the scene was taken up. The "
+         "entities are never saved and not undone; deleting one only has it made again. View state.",
+         object_schema(Json::array(),
+                       {{"on", {{"type", "boolean"}}},
+                        {"embody_distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 1000}}},
+                        {"release_distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 2000}}},
+                        {"most", {{"type", "integer"}, {"minimum", 0}, {"maximum", PeopleState::k_max_embodied}}},
+                        {"made_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 64}}},
+                        {"scanned_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65536}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.people == nullptr) return CommandResult::failure("people are not given entities here");
+             PeopleState::Settings s = state.people->settings;
+             s.on = args.value("on", s.on);
+             s.embody_distance = args.value("embody_distance", s.embody_distance);
+             s.release_distance = args.value("release_distance", s.release_distance);
+             s.most = args.value("most", s.most);
+             s.made_a_frame = args.value("made_a_frame", s.made_a_frame);
+             s.scanned_a_frame = args.value("scanned_a_frame", s.scanned_a_frame);
+             if (s.release_distance < s.embody_distance) {
+                 if (args.contains("release_distance")) {
+                     return CommandResult::failure("release_distance must be at least embody_distance");
+                 }
+                 s.release_distance = s.embody_distance;
+             }
+             state.people->settings = s;
+             return CommandResult::success(people_state_json(*state.people));
          }});
 }
 

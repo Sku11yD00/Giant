@@ -183,7 +183,7 @@ GIANT_TEST("world: loading refuses values the editor could never make") {
     refuses(R"({"id": 1, "scale": [1e300, 1, 1]})", "scale values must be from");
     refuses(R"({"id": 1, "material": {"base_color": [-0.1, 0, 0]}})", "base_color values");
     refuses(R"({"id": 1, "material": {"metallic": 2}})", "metallic must be from 0 to 1");
-    refuses(R"({"id": 9007199254740992})", "id must be a whole number from 1 to 2^53 - 1");
+    refuses(R"({"id": 9007199254740992})", "id must be a whole number from 1 to 2^52 - 1");
     refuses(std::string(R"({"id": 1, "name": ")" + std::string(129, 'x') + R"("})").c_str(),
             "name must be at most 128 bytes");
     Scene scene;

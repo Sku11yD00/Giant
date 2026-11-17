@@ -176,6 +176,10 @@ def build_scene(tool, call, check):
     check(nobody.get("isError") is True and "no person look" in nobody["content"][0]["text"],
           "people of a look that is not there are refused")
     check(tool("get_people")["total"] == 0 and tool("get_person_looks")["person_looks"] == [], "nobody yet")
+    near = tool("set_people_settings", {"embody_distance": 40})
+    check(near["on"] is True and near["embody_distance"] == 40 and near["release_distance"] == 80
+          and near["embodied"] == 0, "the people near the camera: settings kept, nobody to embody")
+    tool("set_people_settings", {"embody_distance": 60})
     tool("undo")
     check(tool("get_places")["total"] == 0, "undo takes the place")
     tool("new_scene")  # leave the default empty scene for the checks after this
