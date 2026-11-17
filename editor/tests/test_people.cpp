@@ -2,11 +2,13 @@
 // listed and removed by command (undoable, saved with the scene).
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
+#include "../src/people_state.h"
 
 #include "giant_test.h"
 
 #include "giant/world/people.h"
 
+#include <cmath>
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -275,6 +277,158 @@ GIANT_TEST("people commands: undo after commands outside the history never leave
     GIANT_CHECK(f.run("undo").ok && scene.people.empty()); // their look is gone: they stay away
     world::Scene loaded;
     GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value());
+}
+
+GIANT_TEST("people near the camera are given entities from their looks, a few a frame, and lose them far off") {
+    Fixture f;
+    PeopleState people;
+    f.state.people = &people;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {f.model}}}).ok && scene.size() == 0);
+    // Ten in a row 10 m apart, and one named, facing east.
+    Json batch = Json::array();
+    for (int i = 0; i < 10; ++i) batch.push_back({{"look", "villager"}, {"position", at(10.0 * i, 0, 0)}});
+    batch.push_back({{"look", "villager"}, {"position", at(5, 2, 5)}, {"name", "Ada"}, {"yaw", 90.0}});
+    GIANT_CHECK(f.run("create_people", {{"people", batch}}).ok);
+    GIANT_CHECK(f.run("set_people_settings", {{"embody_distance", 25.0}, {"release_distance", 35.0}}).ok);
+    GIANT_CHECK(!f.run("set_people_settings", {{"release_distance", 5.0}}).ok);
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const world::EntityId before_id = scene.next_id();
+    const std::string before_text = world::save_scene(scene);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(scene.size() == 2 && people.stats().embodied == 2); // two a frame
+    people.update(scene, camera, nullptr);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(scene.size() == 4 && people.stats().embodied == 4 && people.stats().made == 4); // 0, 10, 20 m and Ada
+    // Made from the look, where the person stands, carrying its id.
+    const world::EntityId ada = people.entity_of(scene, 11);
+    const world::Entity* e = scene.find(ada);
+    GIANT_CHECK(e != nullptr && e->person == 11 && e->name == "Ada" && e->mesh == "people/villager.glb");
+    GIANT_CHECK(ada == world::person_entity_id(11) && scene.next_id() == before_id); // its person's own id: none of the scene's used
+    GIANT_CHECK(e->shape == world::Shape::mesh && e->transform.scale.y == 1.2f && e->material.roughness == 0.8f &&
+                e->parts.size() == 1 && e->hair.on && e->animation.matched.size() == 2 && e->body == world::BodyKind::none);
+    GIANT_CHECK(e->transform.position.x == 5.0 && e->transform.position.y == 2.0 && std::fabs(e->transform.rotation.y - 0.70710678f) < 1e-5f);
+    GIANT_CHECK(scene.find(people.entity_of(scene, 1))->name == "person 1" && people.entity_of(scene, 5) == 0);
+    ai::CommandResult r = f.run("get_people", {{"ids", {11, 5}}});
+    GIANT_CHECK(r.ok && r.value["people"][0]["entity"] == ada && r.value["people"][1]["entity"].is_null());
+    GIANT_CHECK(f.run("get_entity", {{"id", ada}}).value["person"] == 11);
+    GIANT_CHECK(!f.run("set_entity", {{"id", ada}, {"name", "Eve"}}).ok); // the person is what to change
+    // Never saved: the person is.
+    world::Scene loaded;
+    GIANT_CHECK(world::save_scene(scene) == before_text && scene.authored() == 0); // looking round changes nothing saved
+    GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value() && loaded.size() == 0 && loaded.people.size() == 11);
+    // Entities made meanwhile go before them; one deleted comes back where it was whoever is near.
+    const ai::CommandResult post = f.run("create_entity", {{"shape", "cube"}, {"name", "post"}});
+    const ai::CommandResult gate = f.run("create_entity", {{"shape", "cube"}, {"name", "gate"}});
+    GIANT_CHECK(post.ok && gate.ok && scene.authored() == 2 && scene.entities()[0].name == "post" && scene.entities()[2].person != 0);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {post.value["id"]}}}).ok);
+    // The camera moves on: those behind go once past the release distance, those ahead come.
+    const DVec3 on{60.0, 0.0, 0.0};
+    for (int i = 0; i < 6; ++i) people.update(scene, on, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 11) == 0 && people.entity_of(scene, 1) == 0 && scene.find(ada) == nullptr);
+    GIANT_CHECK(f.run("undo").ok && scene.entities()[0].name == "post" && scene.entities()[1].name == "gate");
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {post.value["id"], gate.value["id"]}}}).ok && scene.authored() == 0);
+    GIANT_CHECK(people.stats().embodied == 5 && scene.size() == 5); // 40 to 80 m
+    GIANT_CHECK(people.entity_of(scene, 4) == 0 && people.entity_of(scene, 5) != 0 && people.entity_of(scene, 9) != 0 && people.entity_of(scene, 10) == 0);
+    // A person changed is made again as it is now; one removed goes.
+    const world::EntityId five = people.entity_of(scene, 5);
+    GIANT_CHECK(f.run("set_person", {{"id", 5}, {"name", "Bo"}}).ok && f.run("remove_people", {{"ids", {6}}}).ok);
+    people.update(scene, on, nullptr);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 5) == five && scene.find(five)->name == "Bo"); // the same id every time
+    GIANT_CHECK(people.entity_of(scene, 6) == 0 && people.stats().embodied == 4);
+    // An entity deleted by hand is made again; undoing the deletion leaves one, not two.
+    const world::EntityId seven = people.entity_of(scene, 7);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {seven}}}).ok);
+    people.update(scene, on, nullptr);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 7) == seven && scene.size() == 4);
+    GIANT_CHECK(f.run("undo").ok && scene.size() == 4);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 4 && scene.find(seven) != nullptr);
+    // Deleted and asked about before the next frame: not there. Its person removed outside the
+    // history, the deletion undone: a stray, taken away.
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {seven}}}).ok && people.entity_of(scene, 7) == 0);
+    GIANT_CHECK(f.run("get_people", {{"ids", {7}}}).value["people"][0]["entity"].is_null());
+    ai::ExecuteOptions unrecorded;
+    unrecorded.record_history = false;
+    GIANT_CHECK(f.commands.execute("remove_people", {{"ids", {7}}}, unrecorded).ok);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 3 && f.run("undo").ok && scene.size() == 4 && scene.find(seven) != nullptr);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 3 && scene.find(seven) == nullptr);
+    // A look changed: its people are made again from it.
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"height", 0.9}}).ok);
+    for (int i = 0; i < 4; ++i) people.update(scene, on, nullptr);
+    GIANT_CHECK(people.stats().embodied == 3 && scene.find(people.entity_of(scene, 8))->transform.scale.x == 0.9f);
+    // No more than `most` (lowered: some go at once); the rest wait. Off: all go.
+    GIANT_CHECK(f.run("set_people_settings", {{"most", 2}}).ok);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 2);
+    for (int i = 0; i < 4; ++i) people.update(scene, on, nullptr);
+    r = f.run("set_people_settings");
+    GIANT_CHECK(scene.size() == 2 && r.value["embodied"] == 2 && r.value["waiting"] == 1);
+    GIANT_CHECK(f.run("set_people_settings", {{"on", false}}).ok);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 0 && people.stats().embodied == 0);
+    // Another scene (a copy taken while they stood): nothing held, strays gone.
+    GIANT_CHECK(f.run("set_people_settings", {{"on", true}, {"most", 256}}).ok);
+    for (int i = 0; i < 4; ++i) people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 3);
+    world::Scene copy(scene);
+    scene = std::move(copy);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 2 && people.stats().embodied == 2);
+    for (const world::Entity& x : scene.entities()) GIANT_CHECK(people.entity_of(scene, x.person) == x.id);
+    // A look made (their number changes): everyone is made again; the same scene cleared: they come back.
+    for (int i = 0; i < 4; ++i) people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 3);
+    world::PersonLook other = scene.person_looks[0];
+    other.name = "miller";
+    scene.person_looks.push_back(other);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 2 && people.stats().embodied == 2);
+    people.update(scene, on, nullptr);
+    scene.clear();
+    for (int i = 0; i < 3; ++i) people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 3 && people.stats().embodied == 3);
+}
+
+GIANT_TEST("people near the camera: a long list is gone through over frames, on the ground, every clip matched") {
+    Fixture f;
+    PeopleState people;
+    f.state.people = &people;
+    world::Scene& scene = f.state.scene;
+    scene.modify(f.model)->animation.matched.clear(); // a look with no list: every clip
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {f.model}}}).ok);
+    // 3000 far off, then three near at the end of the list.
+    Json batch = Json::array();
+    for (int i = 0; i < 3000; ++i) batch.push_back({{"look", "villager"}, {"position", at(5000.0 + i, 0, 0)}});
+    for (int i = 0; i < 3; ++i) batch.push_back({{"look", "villager"}, {"position", at(1.0 + i, 7.0, 1.0)}});
+    GIANT_CHECK(f.run("create_people", {{"people", batch}}).ok);
+    // Ground under them at 2.5 m: they stand on it, not at the height they were given.
+    world::Terrain::Heights heights(static_cast<usize>(scene.terrain.samples()) * scene.terrain.samples(), 2.5f);
+    scene.terrain.set({0, 0}, std::move(heights));
+    people.settings.most = 2;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    people.update(scene, camera, nullptr); // 1 to 1024
+    people.update(scene, camera, nullptr); // to 2048
+    GIANT_CHECK(scene.size() == 0 && people.stats().embodied == 0);
+    people.update(scene, camera, nullptr); // to 3003: two made, one over `most`
+    GIANT_CHECK(scene.size() == 2 && people.stats().waiting == 0);
+    people.update(scene, camera, nullptr); // from the start again: the count of the last time through is told
+    GIANT_CHECK(people.stats().waiting == 1 && people.stats().embodied == 2);
+    const world::Entity* e = scene.find(world::person_entity_id(3001));
+    GIANT_CHECK(e != nullptr && e->transform.position.y == 2.5 && e->animation.matched == std::vector<std::string>{"*"});
+    // The list shrinks under the cursor: nothing is read past its end.
+    Json ids = Json::array();
+    for (int id = 1; id <= 3000; ++id) ids.push_back(id);
+    GIANT_CHECK(f.run("remove_people", {{"ids", ids}}).ok);
+    people.settings.most = 256;
+    for (int i = 0; i < 3; ++i) people.update(scene, camera, nullptr);
+    GIANT_CHECK(scene.size() == 3 && people.stats().embodied == 3 && people.stats().waiting == 0);
 }
 
 GIANT_TEST("people commands: a look's mesh is one of the scene's, spelt one way when loaded") {

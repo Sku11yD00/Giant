@@ -24,6 +24,7 @@
 #include "animation_state.h"
 #include "cloth_state.h"
 #include "hair_state.h"
+#include "people_state.h"
 #include "swing_state.h"
 #include "nav_state.h"
 #include "ragdoll_state.h"
@@ -347,6 +348,8 @@ int run(const Options& options) {
     state.nav = &nav;
     editor::WalkerState walkers(physics, nav); // after both: its characters and searches go first
     state.walkers = &walkers;
+    editor::PeopleState people; // the people near the camera, as entities
+    state.people = &people;
     editor::connect_walkers(state);
     editor::RagdollState ragdolls(physics, animation, &walkers); // after them: its ragdolls leave the physics first
     state.ragdolls = &ragdolls;
@@ -436,6 +439,9 @@ int run(const Options& options) {
     static_assert(render::k_swell_waves == world::k_swell_waves);
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         mark(editor::FramePhase::other);
+        // The people near the camera get their entities (a few a frame) before the scene is drawn.
+        people.update(state.scene, state.camera.position,
+                      world_streaming.active(state.scene_generation) ? &world_streaming : nullptr);
         terrain_meshes.update(state.scene.terrain);
         terrain_paint.update(state.scene.terrain, *renderer);
         mark(editor::FramePhase::terrain);

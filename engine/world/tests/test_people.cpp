@@ -239,3 +239,77 @@ GIANT_TEST("people: a file with wrong people is refused, saying where") {
     const auto error = load_world_index(index, world);
     GIANT_CHECK(error && error->message.find("look \"w\"") != std::string::npos && world.person_looks.empty());
 }
+
+GIANT_TEST("people: an entity standing for a person has the person's own id, comes last and is never saved") {
+    Scene scene;
+    Entity post;
+    post.name = "post";
+    const EntityId first = scene.add(post);
+    Entity stand;
+    stand.person = 7;
+    stand.id = 99; // (whatever it is given, it takes its person's)
+    const EntityId seven = scene.add(stand, usize{0});
+    GIANT_CHECK(seven == person_entity_id(7) && seven == k_person_entity_base + 7 && scene.next_id() == first + 1);
+    GIANT_CHECK(scene.add(stand) == 0 && scene.size() == 2); // there already
+    stand.person = 3;
+    GIANT_CHECK(scene.add(stand) == person_entity_id(3));
+    // The scene's own go before them, wherever asked; their ids go on from the scene's.
+    Entity gate;
+    gate.name = "gate";
+    const EntityId second = scene.add(gate);
+    Entity wall;
+    wall.name = "wall";
+    const EntityId third = scene.add(wall, usize{100});
+    GIANT_CHECK(second == first + 1 && third == first + 2 && scene.authored() == 3 && scene.size() == 5);
+    GIANT_CHECK(scene.entities()[1].name == "gate" && scene.entities()[2].name == "wall" && scene.entities()[3].person == 7 &&
+                scene.entities()[4].person == 3);
+    // Taken out and put back, with one of the scene's: each where it belongs, the next id untouched.
+    const EntityId out[] = {seven, second};
+    std::vector<Scene::Removed> removed = scene.remove_many(out);
+    GIANT_CHECK(removed.size() == 2 && scene.size() == 3 && scene.authored() == 2);
+    GIANT_CHECK(scene.remove(person_entity_id(3)).has_value() && scene.authored() == 2 && scene.size() == 2);
+    scene.restore_many(std::move(removed));
+    GIANT_CHECK(scene.size() == 4 && scene.authored() == 3 && scene.entities()[1].name == "gate" &&
+                scene.entities()[3].person == 7 && scene.next_id() == first + 3);
+    GIANT_CHECK(scene.find(seven) != nullptr && scene.find(seven)->person == 7);
+    // One put back where one of the scene's own has been added since still comes last.
+    Scene small;
+    small.add(post);
+    stand.person = 7;
+    const EntityId again = small.add(stand);
+    std::vector<Scene::Removed> one;
+    one.push_back(*small.remove(again));
+    GIANT_CHECK(one[0].index == 1 && small.add(gate) != 0);
+    small.restore_many(std::move(one));
+    GIANT_CHECK(small.size() == 3 && small.authored() == 2 && small.entities()[1].name == "gate" &&
+                small.entities()[2].person == 7 && small.find(again) == &small.entities()[2]);
+    // Many of the scene's own added while people stand: each found, the people still last.
+    for (PersonId person = 20; person < 30; ++person) {
+        stand.person = person;
+        GIANT_CHECK(small.add(stand) == person_entity_id(person));
+    }
+    for (int i = 0; i < 25; ++i) GIANT_CHECK(small.add(wall) != 0);
+    GIANT_CHECK(small.size() == 38 && small.authored() == 27);
+    for (usize i = 0; i < small.size(); ++i) {
+        const Entity& e = small.entities()[i];
+        GIANT_CHECK(small.find(e.id) == &e && (e.person != 0) == (i >= 27));
+    }
+    // The scene's own ids stop under the people's.
+    Entity far_id;
+    far_id.id = k_max_entity_id;
+    GIANT_CHECK(k_max_entity_id + 1 == k_person_entity_base && small.add(far_id) == k_max_entity_id && small.add(wall) == 0);
+    GIANT_CHECK(person_entity_id(0xffffffffu) <= k_max_any_entity_id);
+
+    // Saved: the scene's own alone, in a scene's text and in a cell's file.
+    const std::string text = save_scene(scene);
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value() && loaded.size() == 3 && loaded.authored() == 3 &&
+                loaded.next_id() == scene.next_id());
+    const std::string cell = save_cell({0, 0}, scene.entities(), nullptr, nullptr, nullptr);
+    GIANT_CHECK(cell.find("gate") != std::string::npos && cell.find(std::to_string(seven)) == std::string::npos);
+    // A copy keeps them (whoever follows the copy takes them out); cleared, none.
+    Scene copy(scene);
+    GIANT_CHECK(copy.size() == 4 && copy.authored() == 3);
+    copy.clear();
+    GIANT_CHECK(copy.size() == 0 && copy.authored() == 0);
+}

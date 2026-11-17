@@ -80,7 +80,8 @@ std::vector<const Entity*> cell_entities(const world::Scene& scene, const SceneF
     }
     for (const world::EntityId id : it->second.ids) {
         const Entity* e = scene.find(id);
-        if (e != nullptr && world::cell_of(e->transform.position) == cell) {
+        // (One standing for a person is not the cell's: the people's keeper makes and takes it.)
+        if (e != nullptr && e->person == 0 && world::cell_of(e->transform.position) == cell) {
             out.push_back(e);
         }
     }
@@ -93,7 +94,7 @@ bool by_id(const Entity& a, const Entity& b) { return a.id < b.id; }
 bool has_entities(const world::Scene& scene, const SceneFrame::Cell& built, CellCoord cell) {
     for (const world::EntityId id : built.ids) {
         const Entity* e = scene.find(id);
-        if (e != nullptr && world::cell_of(e->transform.position) == cell) {
+        if (e != nullptr && e->person == 0 && world::cell_of(e->transform.position) == cell) {
             return true;
         }
     }
@@ -739,7 +740,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     // What the scene holds, by cell.
     std::unordered_map<CellCoord, std::vector<Entity>, world::CellCoordHash> members;
     for (const Entity& e : scene.entities()) {
-        members[world::cell_of(e.transform.position)].push_back(e);
+        if (e.person == 0) members[world::cell_of(e.transform.position)].push_back(e);
     }
     const world::Terrain& terrain = scene.terrain;
     for (const auto& [coord, heights] : terrain.tiles()) {
@@ -1138,7 +1139,7 @@ bool WorldStreaming::all_loaded() const { return m_loaded.size() == m_cells.size
 u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
     std::unordered_map<CellCoord, std::vector<const Entity*>, world::CellCoordHash> members;
     for (const Entity& e : scene.entities()) {
-        members[world::cell_of(e.transform.position)].push_back(&e);
+        if (e.person == 0) members[world::cell_of(e.transform.position)].push_back(&e);
     }
     for (const auto& [coord, heights] : scene.terrain.tiles()) {
         members[coord];

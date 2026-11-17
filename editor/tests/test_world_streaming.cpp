@@ -2,6 +2,7 @@
 // and edits are never lost by streaming.
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
+#include "../src/people_state.h"
 #include "../src/scene_render.h"
 #include "../src/world_streaming.h"
 
@@ -392,6 +393,41 @@ GIANT_TEST("world streaming: the people, their looks and places are the world's,
     // A person made and undone leaves its id used (the world then has that to save).
     GIANT_CHECK(e.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}}}}}) && e.commands.undo());
     GIANT_CHECK(scene.people.size() == 1 && scene.next_person_id == 4 && e.w.streaming.unsaved_settings(scene));
+}
+
+GIANT_TEST("world streaming: entities standing for people are not the cells': not saved, not unsaved edits") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    PeopleState people;
+    e.state.people = &people;
+    world::PersonLook look;
+    look.name = "villager";
+    look.mesh = "people/villager.glb";
+    e.state.scene.person_looks.push_back(look);
+    GIANT_CHECK(e.run("create_entities", {{"entities", {{{"name", "post"}, {"position", {5, 0, 5}}}}}}));
+    GIANT_CHECK(e.run("create_people", {{"people", {{{"look", "villager"}, {"position", {8, 0, 8}}},
+                                                    {{"look", "villager"}, {"position", {70, 0, 8}}}}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    const DVec3 camera{10.0, 10.0, 10.0};
+    people.update(e.state.scene, camera, &e.w.streaming);
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(people.stats().embodied == 1 && e.state.scene.size() == 2);
+    // One stands in the post's cell, one could stand in a cell with no file: neither is an edit.
+    GIANT_CHECK(e.w.streaming.unsaved_cells(e.state.scene) == 0);
+    people.settings.embody_distance = 100.0f;
+    people.settings.release_distance = 100.0f;
+    people.update(e.state.scene, camera, &e.w.streaming);
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(people.stats().embodied == 2 && e.state.scene.size() == 3 && e.w.streaming.unsaved_cells(e.state.scene) == 0);
+    const auto saved = e.commands.execute("save_world");
+    GIANT_CHECK(saved.ok && saved.value["cells_written"] == 0 && saved.value["cells"] == 1);
+    GIANT_CHECK(e.w.streaming.index().next_id == 2); // the post's alone: people's entities use none of the scene's ids
+    // Opened again: the post alone comes from the files; the people are made again by their keeper.
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.state.scene.size() == 1 && e.state.scene.people.size() == 2);
+    people.update(e.state.scene, camera, &e.w.streaming);
+    GIANT_CHECK(e.state.scene.size() == 3 && people.stats().embodied == 2);
 }
 
 GIANT_TEST("world streaming: a moved entity survives undo and redo of new_scene once, not twice") {

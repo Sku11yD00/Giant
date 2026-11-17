@@ -122,6 +122,7 @@ Json entity_json(const Entity& e) {
         j["animation"] = {{"clip", e.animation.clip}, {"speed", e.animation.speed}, {"loop", e.animation.loop}}; // set_animation
         if (!e.animation.matched.empty()) j["animation"]["matched"] = e.animation.matched;
     }
+    if (e.person != 0) j["person"] = e.person; // it stands for this person (get_people): made by the editor, never saved
     const world::DecalSettings none;
     if (e.shape == world::Shape::decal || e.decal.shape != none.shape || e.decal.opacity != none.opacity ||
         e.decal.softness != none.softness || e.decal.seed != none.seed) {
@@ -909,7 +910,7 @@ Json camera_json(const EditorCamera& c) {
 }
 
 const char* const k_ids_exhausted =
-    "every entity id has been used (the scene's next id is at the limit, 2^53 - 1); no more "
+    "every entity id has been used (the scene's next id is at the limit, 2^52 - 1); no more "
     "entities can be added";
 
 // Replaces the whole scene, undoably (new_scene, load_scene, open_world).
@@ -1539,6 +1540,12 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure("no entity with id " + std::to_string(id) +
                                                "; list_entities shows them");
              }
+             if (found->person != 0) {
+                 return CommandResult::failure("entity " + std::to_string(id) + " stands for person " +
+                                               std::to_string(found->person) +
+                                               " (made from the person and its look as the camera nears): "
+                                               "set_person or set_person_look changes it");
+             }
              const Entity before = *found;
              Entity after = before; // a refused change leaves the entity alone
              if (std::string error = apply_fields(args, after, state); !error.empty()) {
@@ -1725,7 +1732,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              std::error_code error;
              return CommandResult::success(
                  {{"saved_to", path_to_utf8(std::filesystem::absolute(path, error))},
-                  {"entities", state.scene.size()}});
+                  {"entities", state.scene.authored()}});
          }});
 
     add(registry,

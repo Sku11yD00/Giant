@@ -24,10 +24,18 @@
 
 namespace giant::world {
 
-// Stable for the life of the scene and saved with it. 0 is "none". At most
-// k_max_entity_id, so ids survive JSON readers that use doubles.
+// Stable for the life of the scene and saved with it. 0 is "none". No id
+// is over k_max_any_entity_id, so ids survive JSON readers that use
+// doubles. The scene's own entities (those it hands ids to, those files
+// hold) have ids up to k_max_entity_id; the ids from k_person_entity_base
+// on are those of the entities standing for people (Entity::person), each
+// its person's own (person_entity_id).
 using EntityId = u64;
-constexpr EntityId k_max_entity_id = (u64{1} << 53) - 1;
+using PersonId = u32; // a person's id (Person, below); 0: none
+constexpr EntityId k_max_any_entity_id = (u64{1} << 53) - 1;
+constexpr EntityId k_person_entity_base = u64{1} << 52;
+constexpr EntityId k_max_entity_id = k_person_entity_base - 1;
+constexpr EntityId person_entity_id(PersonId person) { return k_person_entity_base + person; }
 
 // Built-in shapes are about one metre: a 1 m cube, a 1 m wide sphere, a 1 m
 // square plane facing +Y. `mesh` draws the imported file in Entity::mesh.
@@ -312,6 +320,8 @@ struct PartLook {
     bool operator==(const PartLook&) const = default;
 };
 
+
+
 struct Entity {
     EntityId id = 0;
     std::string name;
@@ -335,6 +345,12 @@ struct Entity {
     BodyKind body = BodyKind::fixed;
     float mass = 0.0f; // kilograms, when dynamic; 0: from its size (as water)
     EntityAnimation animation; // when shape is `mesh` and the file is skinned (kept otherwise)
+    // Not 0: it stands for this person (people.h) while the person is near:
+    // made and taken away by the editor as the camera moves, so never saved
+    // (not in a scene's text, not in a cell's file): the person is. Its id
+    // is person_entity_id(person), and the scene keeps such entities after
+    // all others in its list (so the others' places never depend on them).
+    PersonId person = 0;
     bool operator==(const Entity&) const = default;
 };
 
@@ -553,7 +569,6 @@ struct PersonLook {
 };
 
 // One person. `id` is its own for good (never used again in the scene).
-using PersonId = u32; // 0: none
 constexpr usize k_max_people = 65536;
 struct Person {
     PersonId id = 0;
@@ -604,10 +619,14 @@ public:
     Scene& operator=(Scene&& other) noexcept;
     ~Scene() = default;
 
-    // Adds `entity` and returns its id (0, adding nothing, once all 2^53 - 1
+    // Adds `entity` and returns its id (0, adding nothing, once all 2^52 - 1
     // ids have been handed out). Id 0 gets a new id; a non-zero id
     // (restoring a deleted entity, loading) must be unused. `at` is its
-    // place in the entity list (default: the end).
+    // place in the entity list (default: the end). One standing for a
+    // person (Entity::person) takes that person's entity id and goes after
+    // all others whatever `at` (0, adding nothing, when it is there already);
+    // the order among those is not kept (one of the scene's own added at the
+    // end takes the first one's place, which goes last: nothing else moves).
     EntityId add(Entity entity, std::optional<usize> at = std::nullopt);
     // Returns the removed entity and where it was, for undo.
     struct Removed {
@@ -628,6 +647,9 @@ public:
     // In creation order (the outliner's order).
     const std::vector<Entity>& entities() const { return m_entities; }
     usize size() const { return m_entities.size(); }
+    // How many are the scene's own: those not standing for people, which
+    // come first in the list (and are what is saved).
+    usize authored() const;
     void clear(); // entities only; lighting, kits, terrain and scatter are kept
 
     // Hands over what changed since the last call (kits, lighting and the

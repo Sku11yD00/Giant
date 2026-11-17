@@ -579,7 +579,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     !read_camera(j["returns_to"], s.returns_to) || !j.value("was_simulating", Json(false)).is_boolean() ||
                     (!climbing.is_null() && !read_vec3f(climbing, 1.01, s.climbing.emplace())) ||
                     (!by.is_null() && (!by.is_number_unsigned() || by.get<u64>() == 0 ||
-                                       by.get<u64>() > world::k_max_entity_id)))
+                                       by.get<u64>() > world::k_max_any_entity_id)))
                     return fail(file + ": a bad player");
                 if (!by.is_null()) s.carried_by = by.get<u64>();
                 s.was_simulating = j.value("was_simulating", false);
@@ -596,7 +596,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     if (!e.is_object() || !only_keys(e, {"entity", "position", "rotation", "of"}) || of == nullptr ||
                         !of->is_object() || !only_keys(*of, {"position", "rotation"}) || !e.contains("entity") ||
                         !e["entity"].is_number_unsigned() || e["entity"].get<u64>() == 0 ||
-                        e["entity"].get<u64>() > world::k_max_entity_id || !e.contains("position") ||
+                        e["entity"].get<u64>() > world::k_max_any_entity_id || !e.contains("position") ||
                         !read_vec(e["position"], pose.position) || !e.contains("rotation") ||
                         !read_quat(e["rotation"], pose.rotation) || !of->contains("position") ||
                         !read_vec((*of)["position"], pose.of_position) || !of->contains("rotation") ||
@@ -620,7 +620,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                         !only_keys(e, {"entity", "feet", "yaw", "velocity", "target", "speed", "phase", "reason", "of"}) ||
                         of == nullptr || !of->is_object() || !only_keys(*of, {"position", "rotation"}) ||
                         !e.contains("entity") || !e["entity"].is_number_unsigned() || e["entity"].get<u64>() == 0 ||
-                        e["entity"].get<u64>() > world::k_max_entity_id || !e.contains("feet") ||
+                        e["entity"].get<u64>() > world::k_max_any_entity_id || !e.contains("feet") ||
                         !read_vec(e["feet"], r.feet) || !e.contains("yaw") || !finite_in(e["yaw"], -10.0, 10.0, yaw) ||
                         !e.contains("velocity") || !read_vec3f(e["velocity"], 1e4, r.velocity) ||
                         !e.contains("target") || !read_vec(e["target"], r.target) || !e.contains("speed") ||
@@ -652,7 +652,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                         !of->is_object() || !only_keys(*of, {"position", "rotation", "scale"}) || !of->contains("scale") ||
                         !read_vec3f((*of)["scale"], 1e3, g.of_scale) || !sound_scale(g.of_scale) || !e.contains("entity") ||
                         !e["entity"].is_number_unsigned() || e["entity"].get<u64>() == 0 ||
-                        e["entity"].get<u64>() > world::k_max_entity_id || !e.contains("asleep") || !e["asleep"].is_boolean() ||
+                        e["entity"].get<u64>() > world::k_max_any_entity_id || !e.contains("asleep") || !e["asleep"].is_boolean() ||
                         !e.contains("lying") || !finite_in(e["lying"], 0.0, k_max_lying, r.lying) || bones == nullptr ||
                         !bones->is_array() || bones->empty() || bones->size() > sim::k_max_ragdoll_bones ||
                         !of->contains("position") || !read_vec((*of)["position"], g.of_position) || !of->contains("rotation") ||

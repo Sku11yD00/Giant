@@ -3416,9 +3416,52 @@ index only says where one is put back) and leaves undone what would break
 the scene: taking out a place or look people still have, bringing back
 people whose look is gone (one whose home is gone comes back without one).
 
-Known limits (the next parts of the plan): nobody is drawn yet (LW1b makes
-the people near the camera entities and walkers); places and looks cannot
-be renamed; people stand where they start (routes LW2, routines LW3); the
+### People near the camera (LW1b)
+
+`PeopleState` (`editor/src/people_state.h`) gives the people within
+`embody_distance` of the camera (60 m) an entity each, made from the
+person's look where the person stands (on the ground there, when the
+scene has a ground tile): its mesh, the look's height as its scale,
+material, parts' looks, hair and matched clips, no body, and the person's
+id in `Entity::person`. Its entity id is the person's own
+(`world::person_entity_id`: 2^52 + the person's id), the same every time
+the person is given one, and outside the ids the scene hands out, so
+looking round a world never changes the `next_id` it saves; the scene
+keeps such entities after all others in its list, so the others' places
+(what an undo puts back, the order a scene is written in) never depend on
+who happened to be near. Past `release_distance` (80 m) the entity is taken
+away (those let go together leave the scene's list in one pass). One of
+the scene's own entities added while people stand costs the same as
+before: the first person's entity goes last and the new one takes its
+place. The scene's own ids stop at 2^52 - 1 (files holding more are
+refused), people's entities have those from 2^52. So is one whose person was removed or changed, or whose look changed
+(it is made again from what is there now), and one in a cell whose ground
+is still on its way from the world's files. Each frame it looks at 1024
+people (the list is gone through over frames), makes at most 2 entities
+and holds at most 256 (those near enough beyond that are counted as
+`waiting`); looks are compared one a frame.
+
+An entity with `person` set is the editor's, not the world's data: scene
+text and cell files leave it out (the person is saved), and the world's
+streaming does not count it among a cell's entities (no unsaved edit, no
+file loaded for it, not unloaded with the cell). It is not in the undo
+history, and `set_entity` refuses it (the person and its look are what to
+change). One deleted by hand is made again; one an undo brings back when
+nobody is held for its person (the person gone since) is taken away (only
+the entities changed since the last frame are looked at); another scene (new, loaded, brought back by
+undo) starts with none held and any that came with it removed.
+`set_people_settings` sets the distances and budgets and reports the
+counts; `get_people` names each person's `entity`; `get_entity` its
+`person`.
+
+Known limits (the next parts of the plan): people stand where they start
+(routes LW2, routines LW3) and are not walkers yet; an entity may be made
+or taken away in view (LW4: out of view or behind the fade); the distance
+is from where the person starts; with more than `most` near enough, those
+earliest in the list are made, not the nearest; an entity stands at the
+ground's height as it was when made (ground sculpted under it since does
+not move it until it is made again); a person's `seed` changes nothing
+yet; a look whose mesh file is not imported draws nothing; places and looks cannot be renamed; the
 lists are whole in world.json, not in chunks by cell (10 to 12 MB for 65536
 people as the file is written, indented).
 
