@@ -591,9 +591,14 @@ GIANT_TEST("routines: an entity made again does not keep its last one's clip; a 
     // Asleep at home, never having moved, with no room to animate it (so its clip waits); the world
     // stopped and begun again (its entity stays): the wait is not carried over to the new run's clock.
     f.frames(12.5, 0.0, 2, 0);
+    // (Its entity let go first, the camera far off for a frame, so that the one made by its home
+    // is not animated already: taken and made again within one frame, whether the animation keeps
+    // its copy goes by when the file's read lands.)
+    f.camera = {5000.0, 0.0, 0.0};
+    f.frames(12.5, 0.0, 2, 0);
+    GIANT_CHECK(f.people.stats().embodied == 0 && f.animation.find(world::person_entity_id(id)) == nullptr);
     f.camera = {0.0, 0.0, -5.0};
     f.animation.max_animated = 0;
-    GIANT_CHECK(f.run("delete_entities", {{"ids", {world::person_entity_id(id)}}}).ok); // (so that it is not animated already)
     f.frames(21.0, 1000.0, 4, 3);
     GIANT_CHECK(f.people.stats().embodied == 1 && f.people.stats().acting == 0 && f.doing(id)["activity"] == "sleep");
     const u64 kept = f.people.stats().made;

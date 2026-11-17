@@ -76,9 +76,12 @@ public:
     // way NavState finds over the next frames. Empty: done; else why not.
     // `pack`: metres from the path's end within which one standing in
     // the way ends the walk (nav::FollowSettings::pack; 0 for a path that
-    // is a stretch of a longer way).
+    // is a stretch of a longer way). `moving`: how one not walking yet
+    // moves already as it begins (a person given its entity part way along
+    // its trip: it does not start from a standstill).
     std::string walk_to(const world::Scene& scene, world::EntityId id, const DVec3& to, float speed,
-                        const std::vector<DVec3>* path = nullptr, float pack = nav::FollowSettings{}.pack);
+                        const std::vector<DVec3>* path = nullptr, float pack = nav::FollowSettings{}.pack,
+                        const Vec3* moving = nullptr);
     // A walker as a game save had it: where its feet were, which way it
     // faced, how it moved, where it was going and how far it had got.
     struct Resume {

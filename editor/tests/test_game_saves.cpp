@@ -1022,7 +1022,7 @@ GIANT_TEST("game saves: people are where the save had them, travel on, and are n
         const DVec3 a_to = travel.trip(a)->to;
         GIANT_CHECK(a_at.position.x > 50.0 && a_at.position.x < 150.0 && c_at.position.x > 5.0 && c_at.position.x < 60.0);
         GIANT_CHECK(std::fabs(d_at.position.x - 100.0) < 1e-6 && e_at.position.z == -5.0);
-        const auto near = [](const PeopleTravel::Where& x, const PeopleTravel::Where& y) {
+        const auto same_spot = [](const PeopleTravel::Where& x, const PeopleTravel::Where& y) {
             return std::hypot(x.position.x - y.position.x, x.position.z - y.position.z) < 1e-6;
         };
         // Stopped: everyone is back. f leaves the world. Loaded, a few a frame.
@@ -1052,7 +1052,7 @@ GIANT_TEST("game saves: people are where the save had them, travel on, and are n
             GIANT_CHECK(std::hypot(where(a).position.x - a_at.position.x, where(a).position.z - a_at.position.z) < 10.0);
             GIANT_CHECK(std::hypot(where(b).position.x - b_at.position.x, where(b).position.z - b_at.position.z) < 10.0);
             GIANT_CHECK(std::hypot(where(c).position.x - c_at.position.x, where(c).position.z - c_at.position.z) < 1.0);
-            GIANT_CHECK(travel.trip(d) == nullptr && near(where(d), d_at) && where(d).yaw == d_at.yaw);
+            GIANT_CHECK(travel.trip(d) == nullptr && same_spot(where(d), d_at) && where(d).yaw == d_at.yaw);
             GIANT_CHECK(travel.trip(e) == nullptr && where(e) == e_at);
             // The routines know what each had acted on: nobody is sent a second time, and what each does is told.
             // (Told, not looked at afresh and found on their way: nobody counted as staying.)

@@ -134,6 +134,7 @@ Json people_state_json(const PeopleState& people) {
     return {{"on", s.on},
             {"embody_distance", s.embody_distance},
             {"release_distance", s.release_distance},
+            {"view_distance", s.view_distance},
             {"most", s.most},
             {"made_a_frame", s.made_a_frame},
             {"scanned_a_frame", s.scanned_a_frame},
@@ -142,7 +143,9 @@ Json people_state_json(const PeopleState& people) {
             {"made", t.made},
             {"released", t.released},
             {"walking", t.walking},
-            {"acting", t.acting}};
+            {"acting", t.acting},
+            {"unseen", t.unseen},
+            {"swapped", t.swapped}};
 }
 
 // What one command changed. A place, a look or a routine: the one at `index` before
@@ -836,17 +839,23 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "How the people near the camera are given entities (real characters made from their looks, each "
          "an entity carrying its `person`): `on`; `embody_distance` (metres from the camera within which a "
          "person gets one, default 60) and `release_distance` (beyond which it is taken away, default 80, "
-         "never under embody_distance); `most` held at once (default 256, at most 1024); `made_a_frame` "
+         "never under embody_distance); `view_distance` (default 200, at most 2000: one the camera looks "
+         "towards, or is about to, gets its entity this far off, so nobody appears or goes close by "
+         "in view; while simulating a near one in view waits until it is out of sight, but for once through the list after a load, "
+         "a camera put elsewhere, an edit or the simulation stopped; an entity in view stays until view_distance and the gap "
+         "between the other two distances is passed); `most` held at once (default 256, at most 1024); `made_a_frame` "
          "(default 2) and `scanned_a_frame` (people looked at a frame, default 1024). Fields left out stay; "
          "with none it only reports. Returns the settings with `embodied` (entities held now), `waiting` "
-         "(near enough but over `most`), `walking` (of them: walking their trips' ways, send_person), "
-         "`acting` (of them: playing their look's clip for what their routine has them do), and "
+         "(wanting one but over `most`), `walking` (of them: walking their trips' ways, send_person), "
+         "`acting` (of them: playing their look's clip for what their routine has them do), `unseen` (near, in view, "
+         "waiting to be out of sight), `swapped` (the farthest given up for someone nearer while `most` were held), and "
          "`made` and `released` since the scene was taken up. The "
          "entities are never saved and not undone; deleting one only has it made again. View state.",
          object_schema(Json::array(),
                        {{"on", {{"type", "boolean"}}},
                         {"embody_distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 1000}}},
                         {"release_distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 2000}}},
+                        {"view_distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 2000}}},
                         {"most", {{"type", "integer"}, {"minimum", 0}, {"maximum", PeopleState::k_max_embodied}}},
                         {"made_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 64}}},
                         {"scanned_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65536}}}}),
@@ -857,6 +866,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              s.on = args.value("on", s.on);
              s.embody_distance = args.value("embody_distance", s.embody_distance);
              s.release_distance = args.value("release_distance", s.release_distance);
+             s.view_distance = args.value("view_distance", s.view_distance);
              s.most = args.value("most", s.most);
              s.made_a_frame = args.value("made_a_frame", s.made_a_frame);
              s.scanned_a_frame = args.value("scanned_a_frame", s.scanned_a_frame);

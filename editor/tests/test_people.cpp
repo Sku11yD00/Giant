@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <initializer_list>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -589,4 +590,192 @@ GIANT_TEST("people commands: a look's mesh is one of the scene's, spelt one way 
     GIANT_CHECK(f.state.scene.person_looks[0].mesh == "people/villager.glb");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
+}
+
+GIANT_TEST("people near the camera: nobody appears or goes close by in view; those looked towards are made far off") {
+    Fixture f;
+    PeopleState people;
+    PeopleTravel travel;
+    people.travel = &travel;
+    f.state.people = &people;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {f.model}}}).ok && scene.size() == 0);
+    // The view of a camera: the way it looks, and the angle to its picture's corner.
+    PeopleState::View west = PeopleState::view_of(90.0f, 0.0f, 60.0f, 16.0f / 9.0f);
+    GIANT_CHECK(west.on && std::fabs(west.forward.x + 1.0f) < 1e-5f && std::fabs(west.forward.z) < 1e-5f);
+    GIANT_CHECK(std::fabs(west.half_angle - 0.8668f) < 1e-3f);
+    GIANT_CHECK(std::fabs(PeopleState::view_of(0.0f, 90.0f, 60.0f, 1.0f).forward.y - 1.0f) < 1e-5f);
+    const PeopleState::View up = PeopleState::view_of(0.0f, 45.0f, 60.0f, 1.0f);
+    GIANT_CHECK(std::fabs(up.forward.y - 0.70711f) < 1e-4f && std::fabs(up.forward.z + 0.70711f) < 1e-4f);
+    const PeopleState::View north = PeopleState::view_of(0.0f, 0.0f, 60.0f, 16.0f / 9.0f); // down -Z
+    const PeopleState::View south = PeopleState::view_of(180.0f, 0.0f, 60.0f, 16.0f / 9.0f);
+    GIANT_CHECK(std::fabs(north.forward.z + 1.0f) < 1e-5f && std::fabs(south.forward.z - 1.0f) < 1e-5f);
+    people.view = north;
+    DVec3 camera{0.0, 0.0, 0.0};
+    u64 run = 0;
+    const auto frames = [&](int count = 4) {
+        for (int i = 0; i < count; ++i) {
+            travel.update(scene, run, 1.0);
+            people.update(scene, camera, nullptr);
+        }
+    };
+    const auto has = [&](world::PersonId id) { return people.entity_of(scene, id) != 0; };
+    const auto make = [&](std::initializer_list<double> zs) {
+        Json batch = Json::array();
+        for (const double z : zs) batch.push_back({{"look", "villager"}, {"position", at(0, 0, z)}});
+        GIANT_CHECK(f.run("create_people", {{"people", batch}}).ok);
+    };
+    frames();
+    // The world stopped: one made in front of the camera is there at once (an edit's doing, nobody walked in).
+    make({-20.0});
+    frames();
+    GIANT_CHECK(has(1) && people.stats().unseen == 0);
+    // The world running (everyone put back: once through the list as it is). From here what is seen counts.
+    run = 1;
+    frames();
+    // 2: near, ahead. 3: near, behind. 4: far ahead. 5: far behind. 6: farther ahead than anyone is
+    // made. 7: ahead, just within embody_distance (one that crossed it before its turn came).
+    make({-30.0, 30.0, -150.0, 150.0, -400.0, -55.0});
+    frames();
+    // The one near and in view waits to be out of sight; the one behind is made; the one far ahead too.
+    GIANT_CHECK(has(1) && !has(2) && has(3) && has(4) && !has(5) && !has(6) && has(7) && people.stats().unseen == 1);
+    ai::CommandResult r = f.run("set_people_settings");
+    GIANT_CHECK(r.ok && r.value["unseen"] == 1 && r.value["view_distance"] == 200.0 && r.value["embodied"] == 4);
+    // Turned round: the one that waited is made (unseen now), the one far behind goes (unseen), the one far ahead is made.
+    people.view = south;
+    frames();
+    GIANT_CHECK(has(2) && has(3) && !has(4) && has(5) && people.stats().unseen == 0);
+    // Turned back: the near ones stay (they have theirs), the far ones change places.
+    people.view = north;
+    frames();
+    GIANT_CHECK(has(2) && has(3) && has(4) && !has(5));
+    // Its entity deleted while looked at, itself edited: made again where it stands (it was there
+    // to be seen). Only it: another near and in view (8, made while the world runs) still waits.
+    make({-25.0});
+    frames();
+    GIANT_CHECK(!has(8) && people.stats().unseen == 1);
+    const u64 made_before = people.stats().made;
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {people.entity_of(scene, 2)}}}).ok);
+    frames();
+    GIANT_CHECK(has(2) && !has(8) && people.stats().made == made_before + 1);
+    GIANT_CHECK(f.run("set_person", {{"id", 2}, {"name", "Ada"}}).ok);
+    frames();
+    GIANT_CHECK(has(2) && !has(8) && scene.find(people.entity_of(scene, 2))->name == "Ada");
+    // Fewer may be held, then as many again: those that had to go come back, seen or not (and
+    // with them the one that waited: everyone near, once).
+    people.settings.most = 1;
+    frames();
+    GIANT_CHECK(people.stats().embodied == 1);
+    people.settings.most = 256;
+    frames();
+    GIANT_CHECK(has(2) && has(3) && has(7) && has(8) && has(4));
+    // Walking backwards from one in view: it stays past view_distance by the gap between the two
+    // distances (200 + 20), then goes; it is not made again until within view_distance.
+    camera.z = 30.0;
+    frames();
+    camera.z = 65.0; // 215 m from 4
+    frames();
+    GIANT_CHECK(has(4));
+    camera.z = 75.0; // 225 m
+    frames();
+    GIANT_CHECK(!has(4));
+    camera.z = 55.0; // 205 m
+    frames();
+    GIANT_CHECK(!has(4));
+    camera.z = 45.0; // 195 m
+    frames();
+    GIANT_CHECK(has(4));
+    // The camera put somewhere else (a load, a teleport): those near are made though seen, once.
+    GIANT_CHECK(!has(6));
+    camera.z = -370.0; // 30 m from 6, looking at it
+    frames();
+    GIANT_CHECK(has(6) && people.stats().unseen == 0);
+    // Held back (a loaded game's people being put back) and let go: the same.
+    people.hold = true;
+    frames(1);
+    GIANT_CHECK(!has(6));
+    people.hold = false;
+    frames();
+    GIANT_CHECK(has(6));
+    // A shorter view_distance by command: nobody far ahead is made.
+    GIANT_CHECK(f.run("set_people_settings", {{"view_distance", 60.0}}).ok && people.settings.view_distance == 60.0f);
+    GIANT_CHECK(!f.run("set_people_settings", {{"view_distance", 5000.0}}).ok);
+    camera.z = -340.0;
+    frames();
+    camera.z = -310.0;
+    frames();
+    camera.z = -280.0; // 4 is 130 m ahead
+    frames();
+    GIANT_CHECK(!has(4));
+    // No view given: as before, by distance alone.
+    people.view = PeopleState::View{};
+    camera.z = -185.0; // 35 m from 4, which is ahead
+    frames();
+    GIANT_CHECK(has(4));
+}
+
+GIANT_TEST("people near the camera: with all the entities there may be held, the farthest gives its up for one nearer") {
+    Fixture f;
+    PeopleState people;
+    f.state.people = &people;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {f.model}}}).ok);
+    people.view = PeopleState::view_of(0.0f, 0.0f, 60.0f, 16.0f / 9.0f);
+    people.settings.most = 2;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const auto has = [&](world::PersonId id) { return people.entity_of(scene, id) != 0; };
+    const auto frames = [&] {
+        for (int i = 0; i < 6; ++i) people.update(scene, camera, nullptr);
+    };
+    const auto make = [&](double x, double z) {
+        GIANT_CHECK(f.run("create_people", {{"people", {{{"look", "villager"}, {"position", at(x, 0, z)}}}}}).ok);
+    };
+    frames();
+    // Two far ahead take both. One 110 m ahead: not 20 m nearer than either, it waits.
+    make(0, -100);
+    make(0, -120);
+    make(0, -110);
+    frames();
+    GIANT_CHECK(has(1) && has(2) && !has(3) && people.stats().swapped == 0 && people.stats().waiting == 1);
+    // One 70 m ahead: the farthest (120 m) gives its up. Nothing goes back and forth.
+    make(0, -70);
+    frames();
+    GIANT_CHECK(has(1) && !has(2) && !has(3) && has(4) && people.stats().swapped == 1 && people.stats().waiting == 2);
+    // One near, behind the camera: the farthest beyond embody_distance (100 m) gives its up.
+    make(0, 20);
+    frames();
+    GIANT_CHECK(!has(1) && has(4) && has(5) && people.stats().swapped == 2 && scene.size() == 2);
+    // Two more near: one takes the 70 m one's; the other finds nobody beyond embody_distance and waits.
+    make(5, 20);
+    make(-5, 20);
+    frames();
+    GIANT_CHECK(!has(4) && has(5) && has(6) && !has(7) && people.stats().swapped == 3 && scene.size() == 2);
+    GIANT_CHECK(people.stats().embodied == 2 && people.stats().waiting == 5);
+}
+
+GIANT_TEST("people near the camera: one near gets its entity however many far ones wait before it in the list") {
+    Fixture f;
+    PeopleState people;
+    f.state.people = &people;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {f.model}}}).ok);
+    people.view = PeopleState::view_of(0.0f, 0.0f, 60.0f, 16.0f / 9.0f);
+    people.settings.most = 2;
+    const DVec3 camera{0.0, 0.0, 0.0};
+    const auto has = [&](world::PersonId id) { return people.entity_of(scene, id) != 0; };
+    for (int i = 0; i < 4; ++i) people.update(scene, camera, nullptr);
+    // Far ahead at 100, 120, 110, 115 and 112 m, and last in the list one near behind the camera.
+    // The first two take both entities; the three after find nobody 20 m farther than themselves
+    // each time through; the near one must still have the farthest's.
+    Json batch = Json::array();
+    for (const double z : {-100.0, -120.0, -110.0, -115.0, -112.0, 20.0}) batch.push_back({{"look", "villager"}, {"position", at(0, 0, z)}});
+    GIANT_CHECK(f.run("create_people", {{"people", batch}}).ok);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(has(1) && has(2) && !has(6)); // (two made a frame)
+    for (int i = 0; i < 6; ++i) people.update(scene, camera, nullptr);
+    GIANT_CHECK(has(1) && !has(2) && has(6) && !has(3) && !has(4) && !has(5) && people.stats().swapped == 1);
+    GIANT_CHECK(scene.size() == 2 && people.stats().waiting == 4);
 }

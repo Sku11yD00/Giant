@@ -9,6 +9,19 @@
 // world's streaming does not count it as a cell's (the person is the
 // world's data, not the entity).
 //
+// Nobody appears or goes close by in view (LW4): with what the camera sees
+// given (`view`), one it sees is made only farther off than
+// `embody_distance` (out to `view_distance`, so those walked or looked
+// towards are there long before they are near) and, while the world runs,
+// one near is made only while unseen; an entity it sees stays until
+// `view_distance` and the gap between the two distances is passed. After
+// what is seen changed at a stroke anyway (a load, a new scene, a run
+// stopped, turned on, the camera put elsewhere, an edit to a look or a
+// person, an entity deleted, ground streamed in) the list is gone through
+// once with everyone near made whether seen or not. When `most` are held
+// the farthest held gives its entity up for one near, or for one 20 m
+// nearer than it: those held are the nearest there are.
+//
 // Nothing here is unbounded a frame: `scanned_a_frame` people are looked
 // at (the list is gone through over frames), `made_a_frame` entities made,
 // at most `most` held. View state: not undone, not saved.
@@ -21,6 +34,7 @@
 #include "giant/world/scene.h"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace giant::editor {
@@ -38,12 +52,31 @@ public:
         bool on = true;
         float embody_distance = 60.0f;  // metres from the camera (1 to 1000)
         float release_distance = 80.0f; // metres: farther, the entity goes (at least embody_distance)
+        float view_distance = 200.0f;   // metres: one the camera looks towards gets its entity this far off (`view` on)
         u32 most = 256;                 // entities held at once (0 to k_max_embodied)
         u32 made_a_frame = 2;           // entities made a frame (1 to 64)
         u32 scanned_a_frame = 1024;     // people looked at a frame (1 to 65536)
     };
     static constexpr u32 k_max_embodied = 1024;
     Settings settings;
+    // What the camera sees (set by main each frame; off: nothing counts as seen, and only
+    // embody_distance and release_distance tell who has an entity).
+    struct View {
+        bool on = false;
+        Vec3 forward{0.0f, 0.0f, -1.0f}; // the way it looks (unit)
+        float half_angle = 0.6f;         // radians from that to the view's corner
+    };
+    View view;
+    // The view of a camera turned `yaw_degrees` (0 looks down -Z, 90 down -X) and `pitch_degrees`
+    // up, seeing `vertical_fov_degrees` in a picture `aspect` wide for its height.
+    static View view_of(float yaw_degrees, float pitch_degrees, float vertical_fov_degrees, float aspect);
+    static constexpr float k_seen_margin = 0.09f;  // radians past the view's corner one still counts as seen
+    static constexpr float k_ahead_margin = 0.45f; // radians past it one is made far off (before it is turned to)
+    static constexpr float k_kept_margin = 0.6f;   // radians past it one made far off is kept
+    static constexpr double k_seen_made_within = 0.85; // of embody_distance: nearer than this one in view is not made
+    static constexpr double k_swap_gap = 20.0;     // metres farther off one held must be to give its entity up for one not near
+    static constexpr double k_set_off_within = 1.0; // seconds after its entity is made one part way along its trip begins at its pace
+    static constexpr double k_camera_jump = 50.0;  // metres in a frame: the camera did not move there, it was put there
     // While set nobody has an entity (a loaded game's people are being put back where they were: game_saves.h).
     bool hold = false;
     // Where the people are while the world runs (people_travel.h); set by
@@ -84,8 +117,10 @@ public:
         u64 made = 0;       // since the scene was taken up
         u64 released = 0;
         u32 walking = 0;    // of those held: walking their trips' ways now
-        u32 waiting = 0;    // near enough last time through the list, not made: `most` reached
+        u32 waiting = 0;    // wanting one last time through the list (near, or far where the camera looks), not made: `most` reached
         u32 acting = 0;     // of those held: playing their activity's clip now
+        u32 unseen = 0;     // near and in view last time through the list, not made: waiting to be out of sight
+        u64 swapped = 0;    // entities far off given up for someone near (`most` held)
     };
 
     // Each frame, before the scene is drawn. `world`: the open world whose
@@ -106,6 +141,7 @@ public:
 private:
     void take_up(world::Scene& scene);
     void release(world::PersonId id);
+    void again(world::PersonId id);
     void flush(world::Scene& scene);
     void strays(world::Scene& scene);
 
@@ -117,6 +153,8 @@ private:
         u64 trip = 0;            // the trip (its serial) the walker's path is of
         bool moved = false;      // its entity was put where it walked to (not where the person was made)
         bool walking = false;    // a walker walks it along its trip's way
+        bool set_off = false;    // its entity has been walked along its trip (the first time, part way, it begins moving)
+        double made_at = 0.0;    // the travel's clock when its entity was made
         bool waited = false;     // its walker failed, and the wait before the next try was begun
         double path_end = 0.0;   // metres along the trip its walker's path goes to
         double retry_at = 0.0;   // the travel's clock before which no walk is begun again
@@ -137,6 +175,18 @@ private:
     usize m_look_cursor = 0;
     usize m_cursor = 0;      // in the scene's people
     u32 m_waiting_now = 0;   // counted this time through the list
+    u32 m_unseen_now = 0;
+    static constexpr usize k_most_again = 2048;
+    static constexpr u32 k_ground_wait_frames = 600; // frames a pass made whether seen or not waits for ground to stream in
+    std::unordered_set<world::PersonId> m_again; // those whose entity an edit took: made again though seen
+    u32 m_free_frames = 0;  // frames since such a pass was begun
+    u32 m_most_seen = 0;    // `most`, last frame
+    bool m_ground_waited = false; // one near waited for its ground this time through the list
+    u32 m_free_passes = 2;   // times the list's end is still to be passed with everyone near made, seen or not
+    bool m_was_off = true;   // nobody could have an entity last frame (off, held back)
+    bool m_camera_known = false;
+    DVec3 m_camera{};        // where the camera was last frame
+    u64 m_resets_seen = 0;   // the travel's, last frame
     std::vector<world::PersonId> m_scratch;
     std::vector<world::EntityId> m_entities; // scratch: entities to take from the scene
     std::vector<DVec3> m_path;               // scratch: a walker's path

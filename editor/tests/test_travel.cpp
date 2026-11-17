@@ -503,6 +503,35 @@ GIANT_TEST("travel: one with an entity walks its trip's way over the ground, rou
     GIANT_CHECK(w.entity() != 0 && w.people.stats().made == 1 && w.people.stats().released == 0); // it stays
 }
 
+GIANT_TEST("travel: one given its entity part way along its trip begins at its pace, not from a standstill") {
+    Walking w;
+    Fixture& f = w.f;
+    // From rest by the camera: its walker begins standing.
+    GIANT_CHECK(f.run("send_person", {{"id", w.id}, {"to", at(12, 0, -486)}, {"speed", 3.0}}).ok);
+    for (int i = 0; i < 8 && w.walkers.size() == 0; ++i) w.frame(0.0);
+    const WalkerState::Walker* walker = w.walkers.find(world::person_entity_id(w.id));
+    GIANT_CHECK(walker != nullptr && walker->velocity.x == 0.0f && walker->velocity.z == 0.0f);
+    const DVec3 rest = w.feet();
+    w.frame(1.0 / 60.0);
+    w.frame(0.0);
+    GIANT_CHECK(w.feet().x - rest.x < 0.02); // (a step on: it has barely begun to move)
+    // The camera away: it goes on by the clock, 2 s at 3 m/s. The camera back: its entity is made
+    // where it has got to and its walker begins moving along the way at its pace.
+    w.camera = {6.0, 0.0, 400.0};
+    w.frame(0.0);
+    GIANT_CHECK(w.entity() == 0 && w.walkers.size() == 0);
+    w.frame(2.0);
+    w.camera = {6.0, 0.0, -494.0};
+    for (int i = 0; i < 8 && w.walkers.size() == 0; ++i) w.frame(0.0);
+    walker = w.walkers.find(world::person_entity_id(w.id));
+    GIANT_CHECK(walker != nullptr && std::fabs(walker->velocity.x - 3.0f) < 1e-3f && std::fabs(walker->velocity.z) < 1e-3f);
+    const DVec3 from = w.feet();
+    GIANT_CHECK(from.x > 2.0 && from.x < 8.0);
+    w.frame(1.0 / 60.0);
+    w.frame(0.0);
+    GIANT_CHECK(w.feet().x - from.x > 0.04); // (a step on: 5 cm, its pace)
+}
+
 GIANT_TEST("travel: one walking is stopped where it stands; left by the camera it goes on by the clock from there") {
     Walking w;
     Fixture& f = w.f;

@@ -73,9 +73,20 @@ std::optional<DVec3> WalkerState::feet_of(const world::Scene& scene, world::Enti
 }
 
 std::string WalkerState::walk_to(const world::Scene& scene, world::EntityId id, const DVec3& to, float speed,
-                                 const std::vector<DVec3>* path, float pack) {
+                                 const std::vector<DVec3>* path, float pack, const Vec3* moving) {
+    const bool was = m_walkers.contains(id) && scene.identity() == m_scene && m_physics.runs() == m_run;
     std::string why = start(scene, id, to, speed, path, nullptr);
-    if (why.empty()) m_walkers.at(id).settings.pack = pack;
+    if (!why.empty()) return why;
+    Walker& w = m_walkers.at(id);
+    w.settings.pack = pack;
+    if (moving != nullptr && !was && std::isfinite(moving->x) && std::isfinite(moving->z)) {
+        // (Over the ground only, and no faster than it walks: falling is the physics'.)
+        Vec3 v{moving->x, 0.0f, moving->z};
+        const float fast = std::sqrt(v.x * v.x + v.z * v.z);
+        if (fast > speed) v = {v.x * speed / fast, 0.0f, v.z * speed / fast};
+        m_physics.world().set_character_velocity(w.character, v);
+        w.velocity = v;
+    }
     return why;
 }
 
