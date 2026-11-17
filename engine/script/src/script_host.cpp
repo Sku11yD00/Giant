@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -74,6 +75,21 @@ struct NativeApi {
     void (*log)(int level, const char* text);
     void (*free_string)(char* text);
 };
+
+// An event as the managed side reads it (NativePersonEvent in NativeHost.cs).
+struct NativePersonEvent {
+    u64 person;
+    const char* behaviour; // UTF-8, not zero-terminated
+    const char* from;
+    const char* to;
+    std::int32_t behaviour_length;
+    std::int32_t from_length;
+    std::int32_t to_length;
+    double seconds;
+};
+static_assert(sizeof(void*) != 8 || (sizeof(NativePersonEvent) == 56 && offsetof(NativePersonEvent, behaviour_length) == 32 &&
+                                     offsetof(NativePersonEvent, seconds) == 48),
+              "NativePersonEvent must match NativeHost.cs");
 
 // The command handler of the one host. Main thread only.
 CommandHandler* g_commands = nullptr;
@@ -244,6 +260,11 @@ struct ScriptHost::Api {
     int (*update)(float delta_seconds) = nullptr;
     int (*unload_scripts)() = nullptr;
     int (*running_script_count)() = nullptr;
+    int (*person_events)(const NativePersonEvent* events, int count, int size) = nullptr;
+    // What person_events hands over: made once, and grown to the most ever told at a time.
+    std::vector<NativePersonEvent> events;
+    std::string names;
+    bool events_failed = false;
     CommandHandler commands;
     NativeApi native{};
 };
@@ -338,6 +359,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
     get(GIANT_NAME("Update"), api->update);
     get(GIANT_NAME("UnloadScripts"), api->unload_scripts);
     get(GIANT_NAME("RunningScriptCount"), api->running_script_count);
+    get(GIANT_NAME("PersonEvents"), api->person_events);
 #undef GIANT_NAME
     if (!ok) {
         log_error("script", "Giant.Scripting.dll does not match this engine build");
@@ -366,6 +388,42 @@ bool ScriptHost::load_scripts(const std::filesystem::path& assembly) {
 }
 
 void ScriptHost::update(float delta_seconds) { m_api->update(delta_seconds); }
+
+void ScriptHost::person_events(std::span<const PersonEvent> events) {
+    const usize count = std::min(events.size(), k_most_person_events);
+    if (count == 0) {
+        return;
+    }
+    // The names, one after another; then where each is (the text no longer moves).
+    std::string& names = m_api->names;
+    std::vector<NativePersonEvent>& out = m_api->events;
+    names.clear();
+    out.clear();
+    for (usize i = 0; i < count; ++i) {
+        names.append(events[i].behaviour).append(events[i].from).append(events[i].to);
+    }
+    const char* at = names.data();
+    const auto take = [&at](std::string_view text, std::int32_t& length) {
+        const char* here = at;
+        at += text.size();
+        length = static_cast<std::int32_t>(text.size());
+        return here;
+    };
+    for (usize i = 0; i < count; ++i) {
+        NativePersonEvent e{};
+        e.person = events[i].person;
+        e.behaviour = take(events[i].behaviour, e.behaviour_length);
+        e.from = take(events[i].from, e.from_length);
+        e.to = take(events[i].to, e.to_length);
+        e.seconds = events[i].seconds;
+        out.push_back(e);
+    }
+    if (m_api->person_events(out.data(), static_cast<int>(count), static_cast<int>(sizeof(NativePersonEvent))) != 0 &&
+        !m_api->events_failed) {
+        m_api->events_failed = true; // (said once: it would be said each frame)
+        log_error("script", "scripts could not be told what people did (see above, or Giant.Scripting.dll does not match this engine build)");
+    }
+}
 
 void ScriptHost::unload_scripts() { m_api->unload_scripts(); }
 

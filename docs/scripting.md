@@ -35,8 +35,8 @@ game logic, so they are not added to the editor's undo history.
 
 Rules the host enforces:
 
-- Call the engine from the main thread: `OnStart`, `OnUpdate`, `OnStop`, or
-  code after an `await` in them. Awaits come back to the main thread at the
+- Call the engine from the main thread: `OnStart`, `OnUpdate`, `OnStop`,
+  `OnPersonEvent`, or code after an `await` in them. Awaits come back to the main thread at the
   start of the next update, so `async void OnUpdate` with `await` works, and
   an exception after an await is logged instead of ending the editor. A
   thread you start yourself (or `Task.Run` code) must not call the engine;
@@ -53,6 +53,31 @@ Rules the host enforces:
   (`"Storm"`), `DateTime` as ISO 8601 text, `TimeSpan` as seconds, `Guid` as
   text. Other .NET types, and NaN or infinity, are refused with an
   `ArgumentException`.
+
+## Events
+
+Override `OnPersonEvent` to hear what people do while the world runs: a
+person began its behaviour (`e.Began`, `e.From` is empty), or went from one
+of its states to another.
+
+```csharp
+public override void OnPersonEvent(in PersonEvent e)
+{
+    if (e.To == "flee")
+    {
+        Engine.Execute("send_person", new { id = e.Person, to = "shelter" });
+    }
+}
+```
+
+`e.Person` is the id `get_people` gives; `e.Behaviour`, `e.From` and `e.To`
+are names; `e.Seconds` is the simulation's time. Events come before the
+frame's `OnUpdate`, in order, at most 256 a frame (the rest the frames
+after; if more than 16384 are waiting, the oldest are dropped and the log
+says so). The strings are shared between events, so reading them allocates
+nothing. A command allocates (its arguments and its answer), which is fine
+for the few events you act on: test first, as above, and do nothing for the
+rest. The command `get_person_events` lists the same events.
 
 The full sample is `scripts/samples/HelloGiant`. The build puts it in
 `build/<preset>/managed/samples/HelloGiant/HelloGiant.dll`.

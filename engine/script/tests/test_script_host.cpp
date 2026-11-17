@@ -46,7 +46,7 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     }
     live_host = host.get();
     GIANT_CHECK(host->load_scripts(scripts));
-    GIANT_CHECK(host->running_scripts() == 6); // all but the abstract one
+    GIANT_CHECK(host->running_scripts() == 8); // all but the abstract one
 
     const auto has = [&calls](const std::string& needle) {
         for (const auto& call : calls) {
@@ -84,7 +84,7 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(has("\"what\":\"after task\",\"answer\":42"));
     GIANT_CHECK(has("\"frame\":3"));
     GIANT_CHECK(reentry_refused);              // and the scripts kept running
-    GIANT_CHECK(host->running_scripts() == 5); // Crasher stopped itself on frame 2
+    GIANT_CHECK(host->running_scripts() == 7); // Crasher stopped itself on frame 2
     bool logged_crash = false;
     bool logged_async = false;
     for (const auto& record : log.recent(100, LogLevel::error)) {
@@ -99,7 +99,70 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(host->load_scripts(scripts));
     GIANT_CHECK(has("\"what\":\"stop\""));
     GIANT_CHECK(has("\"what\":\"start\""));
-    GIANT_CHECK(host->running_scripts() == 6);
+    GIANT_CHECK(host->running_scripts() == 8);
+
+    // What happened to people is told in order, names and all (the views' text may go once the call is made).
+    calls.clear();
+    {
+        std::string behaviour = "wary", flee = "fl\xc3\xa9" "e", hide = "hide";
+        const PersonEvent events[] = {{7, behaviour, "", flee, 1.5}, {7, behaviour, flee, hide, 20.25}, {9, behaviour, hide, hide, 21.0}};
+        host->person_events(events);
+        behaviour = "gone";
+    }
+    GIANT_CHECK(calls.size() == 6); // (two scripts listen: each is told each, in turn)
+    if (calls.size() == 6) {
+        // (The scripts' JSON writes a letter that is not ASCII as an escape: é is \\u00E9.)
+        GIANT_CHECK(has( "record {\"what\":\"person\",\"person\":7,\"behaviour\":\"wary\",\"from\":\"\",\"to\":\"fl\\u00E9e\","
+                                "\"began\":true,\"seconds\":1.5,\"again\":false}"));
+        GIANT_CHECK(has("record {\"what\":\"fragile\",\"person\":7,\"length\":4}")); // (which script first is not said)
+        GIANT_CHECK(has( "record {\"what\":\"person\",\"person\":7,\"behaviour\":\"wary\",\"from\":\"fl\\u00E9e\",\"to\":\"hide\","
+                                "\"began\":false,\"seconds\":20.25,\"again\":false}"));
+        GIANT_CHECK(has("\"person\":9,\"behaviour\":\"wary\",\"from\":\"hide\",\"to\":\"hide\",\"began\":false,\"seconds\":21,\"again\":true"));
+    }
+    // None, and more than are told at a time: the first k_most_person_events.
+    calls.clear();
+    host->person_events({});
+    GIANT_CHECK(calls.empty());
+    {
+        std::vector<PersonEvent> many(ScriptHost::k_most_person_events + 5, PersonEvent{1, "b", "x", "y", 0.0});
+        host->person_events(many);
+        GIANT_CHECK(calls.size() == 2 * ScriptHost::k_most_person_events);
+    }
+    // A script that asks for scripts to be reloaded while it is told: refused, and the rest are told.
+    calls.clear();
+    reentry_refused = false;
+    {
+        const PersonEvent events[] = {{1, "b", "x", "reload", 0.0}, {2, "b", "x", "y", 0.0}};
+        set_console_logging(false);
+        host->person_events(events);
+        set_console_logging(true);
+    }
+    GIANT_CHECK(reentry_refused && has("\"person\":2") && host->running_scripts() == 8);
+    // A name too long to be kept, and one that is not UTF-8: told all the same (the second with its bad byte replaced).
+    calls.clear();
+    {
+        const std::string longest(300, 'n'), bad = "a\xff" "b";
+        const PersonEvent events[] = {{3, longest, "", "y", 0.0}, {4, longest, "", "y", 0.0}, {5, bad, "", bad, 0.0}, {6, bad, "", bad, 0.0}};
+        host->person_events(events);
+    }
+    GIANT_CHECK(has("\"what\":\"fragile\",\"person\":3,\"length\":300") && has("\"what\":\"fragile\",\"person\":4,\"length\":300"));
+    GIANT_CHECK(has("\"what\":\"fragile\",\"person\":6,\"length\":3") && has("\"person\":6,\"behaviour\":\"a\\uFFFDb\""));
+    // A script that throws when told is stopped; the others are still told, of that and of the rest.
+    calls.clear();
+    {
+        const PersonEvent events[] = {{1, "b", "x", "throw", 0.0}, {2, "b", "x", "y", 0.0}};
+        set_console_logging(false);
+        host->person_events(events);
+        set_console_logging(true);
+    }
+    GIANT_CHECK(host->running_scripts() == 7 && calls.size() == 2 && has("\"person\":1,\"behaviour\":\"b\"") && !has("fragile"));
+    bool logged_fragile = false;
+    for (const auto& record : log.recent(100, LogLevel::error)) {
+        logged_fragile = logged_fragile || record.text.find("fragile broke on purpose") != std::string::npos;
+    }
+    GIANT_CHECK(logged_fragile);
+    GIANT_CHECK(host->load_scripts(scripts)); // (all running again for what follows)
+    calls.clear();
 
     host->unload_scripts();
     GIANT_CHECK(host->running_scripts() == 0);

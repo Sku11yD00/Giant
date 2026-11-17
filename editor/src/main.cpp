@@ -230,15 +230,40 @@ public:
             if (start()) {
                 const std::filesystem::path file(std::u8string(path.begin(), path.end()));
                 m_state.scripts_loaded = m_host->load_scripts(file) ? path : std::string();
+                // (Scripts hear of what happens from when they are loaded.)
+                m_events_told = m_state.routines != nullptr ? m_state.routines->changes() : 0;
+                m_events_missed = false;
             }
         }
         if (m_host != nullptr && !m_state.scripts_loaded.empty()) {
+            tell_person_events();
             m_host->update(delta_seconds);
         }
         m_state.scripts_running = m_host != nullptr ? m_host->running_scripts() : 0;
     }
 
 private:
+    // What happened to people's behaviours since the scripts were last told, a share a frame
+    // (many at once are told over the frames after: never more script time in one).
+    void tell_person_events() {
+        if (m_state.routines == nullptr || m_events_told >= m_state.routines->changes()) {
+            return;
+        }
+        // (More waiting than are kept; not those of another scene, which are not told on purpose.)
+        const u64 made = m_state.routines->changes();
+        if (made - m_events_told > editor::PeopleRoutines::k_changes_kept && !m_events_missed) {
+            m_events_missed = true; // (said once a load)
+            log_warning("editor", "more happened to people than scripts are told of a frame: the oldest events were not told");
+        }
+        m_changes.clear();
+        m_events.clear();
+        m_state.routines->changes_since(m_state.scene, m_events_told, k_events_a_frame, m_changes);
+        for (const editor::PeopleRoutines::Change& c : m_changes) {
+            m_events.push_back({c.person, c.behaviour, c.from, c.to, c.seconds});
+        }
+        m_host->person_events(m_events);
+    }
+
     bool start() {
         if (m_host != nullptr) {
             return true;
@@ -266,6 +291,11 @@ private:
     ai::CommandRegistry& m_commands;
     editor::EditorState& m_state;
     std::unique_ptr<script::ScriptHost> m_host;
+    static constexpr usize k_events_a_frame = 256;
+    u64 m_events_told = 0;
+    bool m_events_missed = false;
+    std::vector<editor::PeopleRoutines::Change> m_changes; // (kept: nothing is allocated a frame)
+    std::vector<script::PersonEvent> m_events;
 };
 
 int run(const Options& options) {

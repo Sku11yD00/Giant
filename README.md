@@ -415,6 +415,9 @@ Open-world systems:
 - LW6 part 3: people act on their behaviours while the world runs:
   each is in a state, moves on when a transition's conditions hold,
   and does what the state says in place of its routine.
+- LW6 part 4: scripts hear what people do: C# `OnPersonEvent` when
+  one begins a behaviour or changes state, and `get_person_events`
+  for the AI.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
