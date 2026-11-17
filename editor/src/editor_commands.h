@@ -62,6 +62,7 @@ class WeatherEffects;
 class NavState;
 class WalkerState;
 class PeopleState;
+class PeopleTravel;
 class RagdollState;
 class GameUi;
 class GameMenus;
@@ -261,6 +262,9 @@ struct EditorState {
     // The people near the camera, given entities (people_state.h); set by
     // main (and tests). Null: people stay records.
     PeopleState* people = nullptr;
+    // Where the people are while the world runs, and their trips along
+    // the roads (people_travel.h); set by main (and tests). Null: nobody travels.
+    PeopleTravel* travel = nullptr;
     // Characters gone limp (ragdoll_entity); set by main (and tests). Null: none do.
     RagdollState* ragdolls = nullptr;
     // Sounds played in the scene, heard at the camera; set by main (and

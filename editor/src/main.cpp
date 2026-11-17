@@ -348,7 +348,10 @@ int run(const Options& options) {
     state.nav = &nav;
     editor::WalkerState walkers(physics, nav); // after both: its characters and searches go first
     state.walkers = &walkers;
+    editor::PeopleTravel travel; // where the people are while the world runs, and their trips
+    state.travel = &travel;
     editor::PeopleState people; // the people near the camera, as entities
+    people.travel = &travel;
     state.people = &people;
     editor::connect_walkers(state);
     editor::RagdollState ragdolls(physics, animation, &walkers); // after them: its ragdolls leave the physics first
@@ -439,6 +442,9 @@ int run(const Options& options) {
     static_assert(render::k_swell_waves == world::k_swell_waves);
     const auto record_frame = [&](rhi::CommandList& cmd, rhi::TextureHandle target) {
         mark(editor::FramePhase::other);
+        // The people's trips moved on by the time simulated (stopped: everyone back where the scene has them).
+        const editor::PeopleTravel::Clock travel_clock = editor::PeopleTravel::clock_of(physics);
+        travel.update(state.scene, travel_clock.run, travel_clock.seconds);
         // The people near the camera get their entities (a few a frame) before the scene is drawn.
         people.update(state.scene, state.camera.position,
                       world_streaming.active(state.scene_generation) ? &world_streaming : nullptr);
