@@ -3398,8 +3398,8 @@ Saved in the scene's text and in a world's world.json under `places`,
 `person_looks` and `people`; only what is there is written, so older files
 read and write the same. People are many, so each is a row
 (`[id, name, look, home, x, y, z, yaw, seed]` in `people.list`, beside
-`people.next_id`), not an object. The world's streaming carries the three
-lists between the index and the scene as it does water, and counts a
+`people.next_id`), not an object. The world's streaming carries the
+lists (and the routines' below) between the index and the scene as it does water, and counts a
 change to them as an unsaved setting.
 
 The commands (`people_commands.cpp`): `create_place` / `set_place` /
@@ -3415,6 +3415,39 @@ since a step was recorded, so a step finds its place or look by name (the
 index only says where one is put back) and leaves undone what would break
 the scene: taking out a place or look people still have, bringing back
 people whose look is gone (one whose home is gone comes back without one).
+
+### Routines (LW3 part 1)
+
+What people do through the day is world data too: `world::Routine` (a
+name and 1 to 24 `RoutineEntry`s), at most 1024 in `Scene::routines` and
+`WorldIndex::routines`, and `Person::routine` names one ("" for none). An
+entry begins at an hour (`from`, 0 to under 24, rising through the list)
+and holds until the next; the last holds over midnight until the first
+(`routine_entry_at(routine, hour)` gives the one that holds,
+`routine_entry_ends` when it ends). It says what one does then
+(`activity`, a word as a place's tag is) and where (`at`): `stay` where it
+is, its `home`, the `place` named, or a place with a `tag` (each person
+its own: the nearest to its home), going there at `speed`. This part only
+keeps them: nobody acts on a routine yet (part 2 sets people off).
+
+`check_routine` checks one, `check_people` that names are unique and each
+person's routine is there. A place a routine names need not be there (a
+place may be removed under it: the people stay where they are then), but
+`set_routine` refuses one that is not there when it is set, so a typing
+slip is told. An undo that would put back one more place, look or
+routine than a scene keeps is left undone. Saved as `routines` in the
+scene's or the world index's text (an entry's `at` and `speed` only when
+not `stay` and 1.4); a person with a routine has it as a tenth field of
+its row, one without is written as before, so older files read and write
+the same.
+
+The commands: `set_routine` (makes or replaces one whole) /
+`remove_routine` (refused while people have it) / `get_routines` (with
+`hour`: the entry of each that holds then), and `routine` on
+`create_people`, `set_person` and `get_people`. Undo keeps the routine
+before and after, as for a place or a look; people put back whose routine
+is gone come back without one. An entity standing for a person is not
+made again when only its routine changes.
 
 ### People near the camera (LW1b)
 

@@ -147,7 +147,7 @@ GIANT_TEST("people commands: people made in batches, changed, listed, removed; i
     GIANT_CHECK(scene.people[0].position == scene.places[0].position && scene.people[0].yaw == 45.0f);
     GIANT_CHECK(scene.people[1].position.x == 480.0 && scene.people[1].yaw == -90.0f && scene.people[1].seed == 7);
     GIANT_CHECK(scene.people[2].home.empty() && scene.people[0].seed != scene.people[2].seed);
-    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.people, scene.next_person_id));
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
     // A place is kept while it is someone's home.
     GIANT_CHECK(!f.run("remove_place", {{"name", "inn"}}).ok);
     // Changed: only what is given.
@@ -206,7 +206,7 @@ GIANT_TEST("people commands: thousands a call, up to what a scene keeps") {
     world::Scene& scene = f.state.scene;
     GIANT_CHECK(scene.people.size() == world::k_max_people && scene.next_person_id == 65537);
     GIANT_CHECK(!f.run("create_people", {{"people", {{{"look", "villager"}, {"position", at(0, 0, 0)}}}}}).ok);
-    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.people, scene.next_person_id));
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
     // Every other one of a stretch removed, and one in the middle changed.
     Json ids = Json::array();
     for (int id = 1000; id < 9000; id += 2) ids.push_back(id);
@@ -215,7 +215,7 @@ GIANT_TEST("people commands: thousands a call, up to what a scene keeps") {
     GIANT_CHECK(f.run("set_person", {{"id", 30000}, {"yaw", 12.0}}).ok && world::find_person(scene.people, 30000)->yaw == 12.0f);
     GIANT_CHECK(f.run("get_people", {{"near", at(3000, 0, 3)}, {"within", 10.0}, {"limit", 0}}).value["count"].get<int>() > 0);
     GIANT_CHECK(f.run("undo").ok && f.run("undo").ok && scene.people.size() == world::k_max_people);
-    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.people, scene.next_person_id));
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
     GIANT_CHECK(world::find_person(scene.people, 1000)->position.x == 999.0 && world::find_person(scene.people, 30000)->yaw == 0.0f);
     world::Scene loaded;
     GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value() && loaded.people == scene.people);
@@ -240,7 +240,7 @@ GIANT_TEST("people commands: thousands of people find their homes among tens of 
     GIANT_CHECK(scene.people[0].position.x == 65535.0 && scene.people[4095].position.x == 61440.0);
     batch.back()["home"] = "house 70000";
     GIANT_CHECK(!f.run("create_people", {{"people", batch}}).ok && scene.people.size() == 4096);
-    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.people, scene.next_person_id));
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
     // The largest seed is kept; one past it is refused.
     GIANT_CHECK(f.run("set_person", {{"id", 1}, {"seed", 4294967295.0}}).ok && scene.people[0].seed == 0xffffffffu);
     GIANT_CHECK(!f.run("set_person", {{"id", 1}, {"seed", 4294967296.0}}).ok && !f.run("set_person", {{"id", 1}, {"seed", -1}}).ok);
@@ -265,18 +265,127 @@ GIANT_TEST("people commands: undo after commands outside the history never leave
     GIANT_CHECK(f.run("redo").ok && scene.places.size() == 2 && scene.places[0].name == "inn");
     // Someone moves in outside the history: undoing the inn's making leaves it.
     GIANT_CHECK(script("set_person", {{"id", 1}, {"home", "inn"}}) && f.run("undo").ok);
-    GIANT_CHECK(scene.places.size() == 2 && !world::check_people(scene.places, scene.person_looks, scene.people, scene.next_person_id));
+    GIANT_CHECK(scene.places.size() == 2 && !world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
     // People removed, then their home and look taken away outside the history: undo brings back
     // only what the scene can keep.
     GIANT_CHECK(f.run("create_people", {{"people", {{{"look", "villager"}, {"home", "mill"}}}}}).ok);
     GIANT_CHECK(f.run("remove_people", {{"ids", {1, 2}}}).ok && scene.people.empty());
     GIANT_CHECK(script("remove_place", {{"name", "mill"}}));
     GIANT_CHECK(f.run("undo").ok && scene.people.size() == 2 && scene.people[0].home == "inn" && scene.people[1].home.empty());
-    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.people, scene.next_person_id));
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
     GIANT_CHECK(f.run("redo").ok && scene.people.empty() && script("remove_person_look", {{"name", "villager"}}));
     GIANT_CHECK(f.run("undo").ok && scene.people.empty()); // their look is gone: they stay away
     world::Scene loaded;
     GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value());
+}
+
+GIANT_TEST("people commands: routines made, replaced, listed with the entry at an hour, given to people, kept while had, undone") {
+    Fixture f;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("create_place", {{"name", "inn"}, {"position", at(10, 0, 5)}, {"tags", {"home"}}}).ok);
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    const Json entries = Json::array({{{"from", 6.5}, {"activity", "work"}, {"at", "tag"}, {"name", "work"}, {"speed", 1.6}},
+                                      {{"from", 12}, {"activity", "eat"}, {"at", "place"}, {"name", "inn"}},
+                                      {{"from", 18}, {"activity", "rest"}},
+                                      {{"from", 22}, {"activity", "sleep"}, {"at", "home"}}});
+    ai::CommandResult r = f.run("set_routine", {{"name", "day"}, {"entries", entries}});
+    GIANT_CHECK(r.ok && r.value["entries"].size() == 4 && r.value["people"] == 0);
+    GIANT_CHECK(r.value["entries"][2]["at"] == "stay" && r.value["entries"][2]["speed"].get<float>() == 1.4f);
+    GIANT_CHECK(scene.routines.size() == 1 && scene.routines[0].entries[0].at == world::RoutineAt::tag &&
+                scene.routines[0].entries[0].speed == 1.6f && scene.routines[0].entries[1].name == "inn");
+    // Refused: no entries, hours not rising, 24, a word in capitals, a place not there, a place unnamed, a name with stay.
+    const auto refused = [&](Json wrong) { return !f.run("set_routine", {{"name", "bad"}, {"entries", std::move(wrong)}}).ok; };
+    GIANT_CHECK(refused(Json::array()));
+    GIANT_CHECK(refused(Json::array({{{"from", 8}, {"activity", "a"}}, {{"from", 8}, {"activity", "b"}}})));
+    GIANT_CHECK(refused(Json::array({{{"from", 24}, {"activity", "a"}}})));
+    GIANT_CHECK(refused(Json::array({{{"from", 8}, {"activity", "Work"}}})));
+    GIANT_CHECK(refused(Json::array({{{"from", 8}, {"activity", "a"}, {"at", "place"}, {"name", "mill"}}})));
+    GIANT_CHECK(refused(Json::array({{{"from", 8}, {"activity", "a"}, {"at", "place"}}})));
+    GIANT_CHECK(refused(Json::array({{{"from", 8}, {"activity", "a"}, {"name", "inn"}}})));
+    GIANT_CHECK(refused(Json::array({{{"from", 8}, {"activity", "a"}, {"at", "nowhere"}}})));
+    GIANT_CHECK(refused(Json::array({{{"from", 8}, {"activity", "a"}, {"speed", 30}}})));
+    GIANT_CHECK(scene.routines.size() == 1);
+    // Given to people when made and after; one not there is refused.
+    r = f.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}, {"routine", "day"}}, {{"look", "villager"}, {"home", "inn"}}}}});
+    GIANT_CHECK(r.ok && scene.people[0].routine == "day" && scene.people[1].routine.empty());
+    const world::PersonId second = r.value["ids"][1].get<world::PersonId>();
+    GIANT_CHECK(!f.run("set_person", {{"id", second}, {"routine", "night"}}).ok);
+    r = f.run("set_person", {{"id", second}, {"routine", "day"}});
+    GIANT_CHECK(r.ok && r.value["routine"] == "day" && scene.people[1].routine == "day");
+    GIANT_CHECK(f.run("set_person", {{"id", second}, {"routine", ""}}).ok && scene.people[1].routine.empty());
+    GIANT_CHECK(f.run("undo").ok && scene.people[1].routine == "day");
+    r = f.run("get_people", {{"routine", "day"}});
+    GIANT_CHECK(r.ok && r.value["count"] == 2 && r.value["people"][0]["routine"] == "day");
+    // Listed, with the entry that holds at an hour.
+    r = f.run("get_routines", {{"hour", 3.0}});
+    GIANT_CHECK(r.ok && r.value["routines"].size() == 1 && r.value["routines"][0]["people"] == 2 && r.value["routines"][0]["now"] == 3);
+    GIANT_CHECK(f.run("get_routines", {{"hour", 12.5}}).value["routines"][0]["now"] == 1);
+    GIANT_CHECK(f.run("get_routines", {{"hour", 0.0}}).value["routines"][0]["now"] == 3 &&
+                f.run("get_routines", {{"hour", 24.0}}).value["routines"][0]["now"] == 3 &&
+                f.run("get_routines", {{"hour", 6.5}}).value["routines"][0]["now"] == 0);
+    GIANT_CHECK(!f.run("get_routines").value["routines"][0].contains("now"));
+    // Replaced whole; undone and done again.
+    r = f.run("set_routine", {{"name", "day"}, {"entries", Json::array({{{"from", 0}, {"activity", "idle"}}})}});
+    GIANT_CHECK(r.ok && r.value["people"] == 2 && scene.routines.size() == 1 && scene.routines[0].entries.size() == 1);
+    GIANT_CHECK(f.run("undo").ok && scene.routines[0].entries.size() == 4);
+    GIANT_CHECK(f.run("redo").ok && scene.routines[0].entries.size() == 1);
+    GIANT_CHECK(f.run("undo").ok);
+    // Kept while people have it; removed once they have not; undo brings it back.
+    GIANT_CHECK(!f.run("remove_routine", {{"name", "day"}}).ok && !f.run("remove_routine", {{"name", "night"}}).ok);
+    GIANT_CHECK(f.run("set_person", {{"id", second}, {"routine", ""}}).ok);
+    GIANT_CHECK(f.run("set_person", {{"id", scene.people[0].id}, {"routine", ""}}).ok);
+    GIANT_CHECK(f.run("remove_routine", {{"name", "day"}}).ok && scene.routines.empty());
+    GIANT_CHECK(f.run("undo").ok && scene.routines.size() == 1 && scene.routines[0].entries.size() == 4);
+    // Undone back to people having it, then on to the start: nothing is left that a file could not hold.
+    GIANT_CHECK(f.run("undo").ok && scene.people[0].routine == "day");
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
+    // People removed, then their routine taken away outside the history (a script): undo brings them back without it.
+    const world::PersonId first = scene.people[0].id;
+    GIANT_CHECK(f.run("remove_people", {{"ids", {first}}}).ok && scene.people.size() == 1 && scene.people[0].id == second);
+    ai::ExecuteOptions outside;
+    outside.record_history = false;
+    GIANT_CHECK(f.commands.execute("remove_routine", {{"name", "day"}}, outside).ok && scene.routines.empty());
+    GIANT_CHECK(f.run("undo").ok && scene.people.size() == 2 && scene.people[0].id == first && scene.people[0].routine.empty());
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
+    // A routine removed, another of its name made outside the history: undo leaves that one be.
+    GIANT_CHECK(f.run("set_routine", {{"name", "day"}, {"entries", entries}}).ok && f.run("remove_routine", {{"name", "day"}}).ok);
+    GIANT_CHECK(f.commands.execute("set_routine", {{"name", "day"}, {"entries", Json::array({{{"from", 1}, {"activity", "idle"}}})}}, outside).ok);
+    GIANT_CHECK(f.run("undo").ok && scene.routines.size() == 1 && scene.routines[0].entries.size() == 1);
+    // As many as a scene keeps, one removed, one more made outside the history: undo does not put a 1025th back.
+    scene.routines.clear();
+    for (usize i = 0; i < world::k_max_routines; ++i) {
+        world::Routine filler;
+        filler.name = "r" + std::to_string(i);
+        filler.entries = {{0.0f, "idle", world::RoutineAt::stay, "", 1.4f}};
+        scene.routines.push_back(filler);
+    }
+    GIANT_CHECK(!f.run("set_routine", {{"name", "one more"}, {"entries", entries}}).ok);
+    GIANT_CHECK(f.run("remove_routine", {{"name", "r5"}}).ok && scene.routines.size() == world::k_max_routines - 1);
+    GIANT_CHECK(f.commands.execute("set_routine", {{"name", "one more"}, {"entries", entries}}, outside).ok);
+    GIANT_CHECK(f.run("undo").ok && scene.routines.size() == world::k_max_routines);
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
+    r = f.run("get_routines", {{"hour", 24.0}});
+    GIANT_CHECK(r.ok && r.value["routines"].size() == world::k_max_routines && r.value["routines"][0]["now"] == 0);
+    // Looks likewise.
+    const world::PersonLook villager = scene.person_looks[0];
+    while (scene.person_looks.size() < world::k_max_person_looks) {
+        scene.person_looks.push_back(villager);
+        scene.person_looks.back().name = "look " + std::to_string(scene.person_looks.size());
+    }
+    GIANT_CHECK(f.run("remove_person_look", {{"name", "look 7"}}).ok);
+    GIANT_CHECK(f.commands.execute("set_person_look", {{"name", "another"}, {"entity", f.model}}, outside).ok);
+    GIANT_CHECK(f.run("undo").ok && scene.person_looks.size() == world::k_max_person_looks);
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
+    // People made with a routine not there are refused.
+    GIANT_CHECK(!f.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}, {"routine", "night"}}}}}).ok);
+    // The place a routine names may go: the routine is kept, and still loads.
+    scene.routines.clear();
+    for (world::Person& p : scene.people) p.routine.clear();
+    GIANT_CHECK(f.run("set_routine", {{"name", "lunch"}, {"entries", Json::array({{{"from", 12}, {"activity", "eat"}, {"at", "place"}, {"name", "inn"}}})}}).ok);
+    for (world::Person& p : scene.people) p.home.clear();
+    GIANT_CHECK(f.run("remove_place", {{"name", "inn"}}).ok && scene.routines.size() == 1);
+    world::Scene loaded;
+    GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value() && loaded.routines == scene.routines);
 }
 
 GIANT_TEST("people near the camera are given entities from their looks, a few a frame, and lose them far off") {
@@ -312,6 +421,14 @@ GIANT_TEST("people near the camera are given entities from their looks, a few a 
     GIANT_CHECK(scene.find(people.entity_of(scene, 1))->name == "person 1" && people.entity_of(scene, 5) == 0);
     ai::CommandResult r = f.run("get_people", {{"ids", {11, 5}}});
     GIANT_CHECK(r.ok && r.value["people"][0]["entity"] == ada && r.value["people"][1]["entity"].is_null());
+    // Given a routine, its entity is kept (nothing it shows changed); undone too.
+    GIANT_CHECK(f.run("set_routine", {{"name", "day"}, {"entries", Json::array({{{"from", 8}, {"activity", "work"}}})}}).ok);
+    GIANT_CHECK(f.run("set_person", {{"id", 11}, {"routine", "day"}}).ok);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 11) == ada && people.stats().made == 4 && people.stats().released == 0);
+    GIANT_CHECK(f.run("undo").ok && f.run("undo").ok);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 11) == ada && people.stats().made == 4 && scene.routines.empty());
     GIANT_CHECK(f.run("get_entity", {{"id", ada}}).value["person"] == 11);
     GIANT_CHECK(!f.run("set_entity", {{"id", ada}, {"name", "Eve"}}).ok); // the person is what to change
     // Never saved: the person is.

@@ -383,6 +383,9 @@ Open-world systems:
 - LW2 part 3: those near the camera walk their way over the ground as
   characters, and go on by the clock from where they walked to once out
   of sight.
+- LW3 part 1: routines as world data: what the people who have one do at
+  each hour of the day and where (their home, a named place, a kind of
+  place), made and given to people by command.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

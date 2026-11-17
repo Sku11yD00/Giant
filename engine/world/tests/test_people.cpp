@@ -120,22 +120,22 @@ GIANT_TEST("people: together, names are unique, looks and homes are there, ids r
     const std::vector<Place> places{place("inn", 0, 0), place("mill", 50, 0)};
     const std::vector<PersonLook> looks{look("villager")};
     std::vector<Person> people{person(1, "villager", "inn", 0), person(4, "villager", "", 1)};
-    GIANT_CHECK(!check_people(places, looks, people, 5));
-    GIANT_CHECK(check_people(places, looks, people, 4)); // an id not under the next
-    GIANT_CHECK(check_people(places, looks, people, 0));
-    GIANT_CHECK(!check_people({}, {}, {}, 1) && !check_people({}, {}, {}, 9));
+    GIANT_CHECK(!check_people(places, looks, {}, people, 5));
+    GIANT_CHECK(check_people(places, looks, {}, people, 4)); // an id not under the next
+    GIANT_CHECK(check_people(places, looks, {}, people, 0));
+    GIANT_CHECK(!check_people({}, {}, {}, {}, 1) && !check_people({}, {}, {}, {}, 9));
     people[1].look = "soldier";
-    GIANT_CHECK(check_people(places, looks, people, 5));
+    GIANT_CHECK(check_people(places, looks, {}, people, 5));
     people[1] = person(4, "villager", "barn", 1);
-    GIANT_CHECK(check_people(places, looks, people, 5));
+    GIANT_CHECK(check_people(places, looks, {}, people, 5));
     people[1] = person(1, "villager", "", 1); // an id twice
-    GIANT_CHECK(check_people(places, looks, people, 5));
+    GIANT_CHECK(check_people(places, looks, {}, people, 5));
     people = {person(4, "villager", "", 1), person(1, "villager", "", 1)}; // out of order
-    GIANT_CHECK(check_people(places, looks, people, 5));
+    GIANT_CHECK(check_people(places, looks, {}, people, 5));
     const std::vector<Place> twice{place("inn", 0, 0), place("inn", 5, 0)};
-    GIANT_CHECK(check_people(twice, looks, {}, 1));
+    GIANT_CHECK(check_people(twice, looks, {}, {}, 1));
     const std::vector<PersonLook> looks_twice{look("villager"), look("villager")};
-    GIANT_CHECK(check_people(places, looks_twice, {}, 1));
+    GIANT_CHECK(check_people(places, looks_twice, {}, {}, 1));
 
     people = {person(1, "villager", "inn", 0), person(4, "villager", "", 1), person(9, "villager", "", 2)};
     GIANT_CHECK(find_person(people, 4) == &people[1] && find_person(people, 9) == &people[2]);
@@ -238,6 +238,188 @@ GIANT_TEST("people: a file with wrong people is refused, saying where") {
     WorldIndex world;
     const auto error = load_world_index(index, world);
     GIANT_CHECK(error && error->message.find("look \"w\"") != std::string::npos && world.person_looks.empty());
+}
+
+namespace {
+
+Routine day() {
+    Routine r;
+    r.name = "villager's day";
+    r.entries = {{6.5f, "work", RoutineAt::tag, "work", 1.6f},
+                 {12.0f, "eat", RoutineAt::place, "inn", 1.4f},
+                 {13.0f, "work", RoutineAt::tag, "work", 1.4f},
+                 {18.0f, "rest", RoutineAt::stay, "", 1.4f},
+                 {22.0f, "sleep", RoutineAt::home, "", 1.2f}};
+    return r;
+}
+
+} // namespace
+
+GIANT_TEST("routines: checked entry by entry; the entry that holds at an hour, over midnight too") {
+    const Routine good = day();
+    GIANT_CHECK(!check_routine(good));
+    const auto bad = [&](auto&& change) {
+        Routine r = day();
+        change(r);
+        return check_routine(r).has_value();
+    };
+    GIANT_CHECK(bad([](Routine& r) { r.name.clear(); }));
+    GIANT_CHECK(bad([](Routine& r) { r.name.assign(k_max_name_bytes + 1, 'a'); }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries.clear(); }));
+    GIANT_CHECK(bad([](Routine& r) {
+        const RoutineEntry first = r.entries[0];
+        r.entries.assign(k_max_routine_entries + 1, first);
+    }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries[0].from = -0.5f; }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries[4].from = 24.0f; }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries[0].from = std::numeric_limits<float>::quiet_NaN(); }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries[2].from = 12.0f; })); // not later than the one before
+    GIANT_CHECK(bad([](Routine& r) { r.entries[1].activity = "Eat"; }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries[1].activity.clear(); }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries[1].speed = 0.0f; }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries[1].speed = 25.0f; }));
+    GIANT_CHECK(bad([](Routine& r) { r.entries[1].name.clear(); }));     // a place unnamed
+    GIANT_CHECK(bad([](Routine& r) { r.entries[0].name = "At Work"; })); // not a tag
+    GIANT_CHECK(bad([](Routine& r) { r.entries[3].name = "inn"; }));     // stay names nothing
+    GIANT_CHECK(bad([](Routine& r) { r.entries[4].name = "inn"; }));     // nor home
+    GIANT_CHECK(bad([](Routine& r) { r.entries[0].at = static_cast<RoutineAt>(9); }));
+
+    // The entry at an hour: the last begun; before the first, the last of all.
+    GIANT_CHECK(routine_entry_at(good, 6.5) == 0 && routine_entry_at(good, 11.99) == 0 && routine_entry_at(good, 12.0) == 1);
+    GIANT_CHECK(routine_entry_at(good, 17.0) == 2 && routine_entry_at(good, 23.9) == 4);
+    GIANT_CHECK(routine_entry_at(good, 0.0) == 4 && routine_entry_at(good, 6.49) == 4); // asleep since yesterday
+    GIANT_CHECK(routine_entry_at(good, 30.5) == 0 && routine_entry_at(good, -1.0) == 4); // taken round the day
+    GIANT_CHECK(routine_entry_at(good, std::numeric_limits<double>::infinity()) == 4);
+    GIANT_CHECK(routine_entry_ends(good, 0) == 12.0f && routine_entry_ends(good, 4) == 6.5f);
+    Routine one;
+    one.name = "idle";
+    one.entries = {{9.0f, "idle", RoutineAt::stay, "", 1.4f}};
+    GIANT_CHECK(!check_routine(one) && routine_entry_at(one, 3.0) == 0 && routine_entry_at(one, 20.0) == 0);
+    GIANT_CHECK(routine_entry_ends(one, 0) == 9.0f);
+    GIANT_CHECK(routine_entry_at(Routine{}, 3.0) == 0 && routine_entry_ends(Routine{}, 0) == 0.0f); // (none: nothing read)
+
+    // Together: names once, a person's routine there.
+    const std::vector<PersonLook> looks = {look("villager")};
+    std::vector<Routine> routines = {day()};
+    std::vector<Person> people = {person(1, "villager", "", 0.0)};
+    people[0].routine = "villager's day";
+    GIANT_CHECK(!check_people({}, looks, routines, people, 2));
+    GIANT_CHECK(find_routine(routines, "villager's day") == &routines[0] && find_routine(routines, "night") == nullptr);
+    people[0].routine = "night";
+    const auto missing = check_people({}, looks, routines, people, 2);
+    GIANT_CHECK(missing && missing->find("routine \"night\"") != std::string::npos);
+    people[0].routine.clear();
+    routines.push_back(day());
+    GIANT_CHECK(check_people({}, looks, routines, people, 2)); // a name twice
+    people[0].routine.assign(k_max_name_bytes + 1, 'r');
+    GIANT_CHECK(check_person(people[0]));
+}
+
+GIANT_TEST("routines: saved and loaded with the scene and the world; older files without them read as before") {
+    Scene scene;
+    scene.places = {place("inn", 0.5, -3)};
+    scene.person_looks = {look("villager")};
+    scene.routines = {day()};
+    Routine night;
+    night.name = "watch";
+    night.entries = {{0.0f, "watch", RoutineAt::place, "a place not there", 0.1f}, {23.5f, "walk", RoutineAt::tag, "gate_2", 20.0f}};
+    scene.routines.push_back(night); // (a place that is gone is kept: one stays where it is then)
+    scene.people = {person(2, "villager", "inn", 0.25), person(3, "villager", "", 4.0)};
+    scene.people[0].routine = "villager's day";
+    scene.next_person_id = 4;
+    const std::string text = save_scene(scene);
+    Scene loaded;
+    GIANT_CHECK(!load_scene(text, loaded).has_value());
+    GIANT_CHECK(loaded.routines == scene.routines && loaded.people == scene.people);
+    GIANT_CHECK(save_scene(loaded) == text);
+    // One with a routine has it in its row (the name is written twice: the routine's and the person's);
+    // without, the people are written as they ever were.
+    const auto times = [](const std::string& in, const std::string& what) {
+        usize n = 0;
+        for (usize at = in.find(what); at != std::string::npos; at = in.find(what, at + 1)) ++n;
+        return n;
+    };
+    GIANT_CHECK(times(text, "villager's day") == 2);
+    Scene plain = scene, bare = scene;
+    plain.people[0].routine.clear();
+    bare.routines.clear();
+    bare.people[0].routine.clear();
+    GIANT_CHECK(times(save_scene(plain), "villager's day") == 1);
+    const std::string bare_text = save_scene(bare), plain_text = save_scene(plain);
+    GIANT_CHECK(bare_text.find("routines") == std::string::npos &&
+                plain_text.substr(plain_text.find("\"people\"")) .find("someone") != std::string::npos);
+    // Hours and speeds that are not whole binary fractions come back as they were.
+    Scene odd;
+    odd.routines = {day()};
+    odd.routines[0].entries[0].from = 0.1f;
+    odd.routines[0].entries[1].from = 12.3f;
+    odd.routines[0].entries[4].from = 23.999f;
+    Scene odd_loaded;
+    GIANT_CHECK(!load_scene(save_scene(odd), odd_loaded).has_value() && odd_loaded.routines == odd.routines);
+    GIANT_CHECK(routine_entry_at(odd.routines[0], 0.1) == 0 && routine_entry_at(odd.routines[0], 0.09) == 4 &&
+                routine_entry_at(odd.routines[0], 12.3) == 1 && routine_entry_at(odd.routines[0], 23.999) == 4);
+    Scene copy(loaded);
+    Scene moved(std::move(copy));
+    Scene assigned;
+    assigned = std::move(moved);
+    GIANT_CHECK(assigned.routines == scene.routines);
+    GIANT_CHECK(save_scene(Scene{}).find("routines") == std::string::npos);
+
+    WorldIndex world;
+    world.person_looks = scene.person_looks;
+    world.routines = scene.routines;
+    world.people = scene.people;
+    world.people[0].home.clear();
+    world.next_person_id = 4;
+    WorldIndex world_loaded;
+    GIANT_CHECK(!load_world_index(save_world_index(world), world_loaded).has_value());
+    GIANT_CHECK(world_loaded.routines == world.routines && world_loaded.people == world.people);
+
+    // Refused, saying where.
+    const std::string looks = R"("person_looks":[{"name":"v","mesh":"v.glb"}])";
+    const auto refused = [&](const std::string& people, const char* where) {
+        const std::string error = load_error(scene_with(people));
+        return !error.empty() && error.find(where) != std::string::npos;
+    };
+    const std::string r = R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work","at":"tag","name":"work"}]}])";
+    GIANT_CHECK(load_error(scene_with(looks + "," + r + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"d"]]})")).empty());
+    GIANT_CHECK(refused(looks + "," + r + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"e"]]})", "routine \"e\""));
+    GIANT_CHECK(refused(looks + "," + r + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,7]]})", "people.list[0]"));
+    GIANT_CHECK(refused(looks + "," + r + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"d",1]]})", "people.list[0]"));
+    GIANT_CHECK(refused(R"("routines":{})", "routines"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d"}])", "routines[0].entries"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[]}])", "routines[0].entries"));
+    GIANT_CHECK(refused(R"("routines":[{"entries":[{"from":8,"activity":"work","at":"stay"}]}])", "routines[0].name"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"activity":"work","at":"stay"}]}])", "entries[0].from"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":25,"activity":"work","at":"stay"}]}])", "entries[0].from"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":24,"activity":"work","at":"stay"}]}])", "entries[0]"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"at":"stay"}]}])", "entries[0].activity"));
+    GIANT_CHECK(load_error(scene_with(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work"}]}])")).empty()); // (at: stay)
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work","at":3}]}])", "entries[0].at"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":"8","activity":"work"}]}])", "entries[0].from"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work","speed":"fast"}]}])", "entries[0].speed"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[7]}])", "entries[0]"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":{}}])", "routines[0].entries"));
+    GIANT_CHECK(refused(looks + "," + r + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,""]]})", "people.list[0]"));
+    {
+        std::string many = R"("routines":[{"name":"d","entries":[)";
+        for (usize i = 0; i <= k_max_routine_entries; ++i) {
+            many += std::string(i == 0 ? "" : ",") + R"({"from":)" + std::to_string(i) + R"(,"activity":"a"})";
+        }
+        GIANT_CHECK(refused(many + "]}]", "routines[0].entries"));
+        std::string lots = R"("routines":[)";
+        for (usize i = 0; i <= k_max_routines; ++i) {
+            lots += std::string(i == 0 ? "" : ",") + R"({"name":"r)" + std::to_string(i) + R"(","entries":[{"from":1,"activity":"a"}]})";
+        }
+        GIANT_CHECK(refused(lots + "]", "routines must be an array"));
+    }
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work","at":"away"}]}])", "entries[0].at"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work","at":"place"}]}])", "entries[0]"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work","at":"stay","speed":50}]}])", "entries[0].speed"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work","at":"stay","pace":1}]}])", "entries[0].pace"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"a","at":"stay"},{"from":8,"activity":"b","at":"stay"}]}])", "entries[1]"));
+    GIANT_CHECK(refused(R"("routines":[{"name":"d","entries":[{"from":8,"activity":"a","at":"stay"}],"extra":1}])", "routines[0].extra"));
+    GIANT_CHECK(refused(r.substr(0, r.size() - 1) + "," + r.substr(r.find('[') + 1), "\"d\""));
 }
 
 GIANT_TEST("people: an entity standing for a person has the person's own id, comes last and is never saved") {

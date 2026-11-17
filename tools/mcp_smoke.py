@@ -180,6 +180,19 @@ def build_scene(tool, call, check):
     check(near["on"] is True and near["embody_distance"] == 40 and near["release_distance"] == 80
           and near["embodied"] == 0, "the people near the camera: settings kept, nobody to embody")
     tool("set_people_settings", {"embody_distance": 60})
+    # Routines: what people do through the day, made by command and found by the hour.
+    day = tool("set_routine", {"name": "day", "entries": [
+        {"from": 7, "activity": "work", "at": "tag", "name": "work", "speed": 1.6},
+        {"from": 12, "activity": "eat", "at": "place", "name": "inn"},
+        {"from": 21, "activity": "sleep", "at": "home"}]})
+    check(len(day["entries"]) == 3 and day["people"] == 0, "a routine is made")
+    hours = tool("get_routines", {"hour": 3})["routines"]
+    check(len(hours) == 1 and hours[0]["now"] == 2, "before the first entry begins the last still holds")
+    lost = call("tools/call", {"name": "set_routine", "arguments": {"name": "bad", "entries": [
+        {"from": 9, "activity": "eat", "at": "place", "name": "nowhere"}]}})
+    check(lost.get("isError") is True and "no place" in lost["content"][0]["text"], "a routine naming a place not there is refused")
+    tool("undo")
+    check(tool("get_routines")["routines"] == [], "undo takes the routine")
     tool("undo")
     check(tool("get_places")["total"] == 0, "undo takes the place")
     # Routes: a road laid, a path branching from it, and the way found along them.

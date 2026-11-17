@@ -1,5 +1,7 @@
 #include "giant/world/people.h"
 
+#include "giant/core/assert.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -79,13 +81,56 @@ std::optional<std::string> check_person(const Person& person) {
     if (person.name.size() > k_max_name_bytes) return "name must be at most " + std::to_string(k_max_name_bytes) + " bytes";
     if (person.look.empty() || person.look.size() > k_max_name_bytes) return "look must name a person look";
     if (person.home.size() > k_max_name_bytes) return "home must name a place";
+    if (person.routine.size() > k_max_name_bytes) return "routine must name a routine";
     if (!finite_place(person.position)) return "position must be finite and within 100,000 km";
     if (!yaw_ok(person.yaw)) return "yaw must be from -360 to 360 degrees";
     return std::nullopt;
 }
 
+std::optional<std::string> check_routine(const Routine& routine) {
+    if (routine.name.empty() || routine.name.size() > k_max_name_bytes) {
+        return "name must be 1 to " + std::to_string(k_max_name_bytes) + " bytes";
+    }
+    if (routine.entries.empty() || routine.entries.size() > k_max_routine_entries) {
+        return "entries must be 1 to " + std::to_string(k_max_routine_entries);
+    }
+    for (usize i = 0; i < routine.entries.size(); ++i) {
+        const RoutineEntry& e = routine.entries[i];
+        const std::string which = "entries[" + std::to_string(i) + "]: ";
+        if (!std::isfinite(e.from) || e.from < 0.0f || e.from >= 24.0f) return which + "from must be an hour from 0 to under 24";
+        if (i > 0 && e.from <= routine.entries[i - 1].from) return which + "from must be later than the entry's before it";
+        if (!place_tag_ok(e.activity)) {
+            return which + "activity must be 1 to " + std::to_string(k_max_tag_bytes) + " of a-z, 0-9 and _";
+        }
+        if (!std::isfinite(e.speed) || e.speed < 0.1f || e.speed > 20.0f) return which + "speed must be from 0.1 to 20 m/s";
+        if (static_cast<u8>(e.at) > static_cast<u8>(RoutineAt::tag)) return which + "at must be stay, home, place or tag";
+        switch (e.at) {
+        case RoutineAt::stay:
+        case RoutineAt::home:
+            if (!e.name.empty()) return which + "name is given only with at place or tag";
+            break;
+        case RoutineAt::place:
+            if (e.name.empty() || e.name.size() > k_max_name_bytes) return which + "name must be a place's name";
+            break;
+        case RoutineAt::tag:
+            if (!place_tag_ok(e.name)) return which + "name must be a place's tag";
+            break;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<std::string> check_people(std::span<const Place> places, std::span<const PersonLook> looks,
-                                        std::span<const Person> people, PersonId next_person_id) {
+                                        std::span<const Routine> routines, std::span<const Person> people,
+                                        PersonId next_person_id) {
+    if (routines.size() > k_max_routines) return "at most " + std::to_string(k_max_routines) + " routines";
+    std::vector<std::string_view> routine_names;
+    routine_names.reserve(routines.size());
+    for (const Routine& r : routines) routine_names.push_back(r.name);
+    std::sort(routine_names.begin(), routine_names.end());
+    if (const auto twice = std::adjacent_find(routine_names.begin(), routine_names.end()); twice != routine_names.end()) {
+        return "two routines are named \"" + std::string(*twice) + "\"";
+    }
     if (places.size() > k_max_places) return "at most " + std::to_string(k_max_places) + " places";
     if (looks.size() > k_max_person_looks) return "at most " + std::to_string(k_max_person_looks) + " person looks";
     if (people.size() > k_max_people) return "at most " + std::to_string(k_max_people) + " people";
@@ -112,6 +157,9 @@ std::optional<std::string> check_people(std::span<const Place> places, std::span
         if (!p.home.empty() && !std::binary_search(place_names.begin(), place_names.end(), std::string_view(p.home))) {
             return "person " + std::to_string(p.id) + "'s home \"" + p.home + "\" is not there";
         }
+        if (!p.routine.empty() && !std::binary_search(routine_names.begin(), routine_names.end(), std::string_view(p.routine))) {
+            return "person " + std::to_string(p.id) + "'s routine \"" + p.routine + "\" is not there";
+        }
     }
     if (next_person_id == 0 || last >= next_person_id) return "next_person_id must be past every person's id";
     return std::nullopt;
@@ -130,6 +178,47 @@ const PersonLook* find_person_look(std::span<const PersonLook> looks, std::strin
 const Person* find_person(std::span<const Person> people, PersonId id) {
     const auto it = std::lower_bound(people.begin(), people.end(), id, [](const Person& p, PersonId v) { return p.id < v; });
     return it == people.end() || it->id != id ? nullptr : &*it;
+}
+
+const char* routine_at_name(RoutineAt at) {
+    switch (at) {
+    case RoutineAt::stay: return "stay";
+    case RoutineAt::home: return "home";
+    case RoutineAt::place: return "place";
+    case RoutineAt::tag: return "tag";
+    }
+    return "stay";
+}
+
+std::optional<RoutineAt> routine_at_named(std::string_view name) {
+    for (const RoutineAt at : {RoutineAt::stay, RoutineAt::home, RoutineAt::place, RoutineAt::tag}) {
+        if (name == routine_at_name(at)) return at;
+    }
+    return std::nullopt;
+}
+
+const Routine* find_routine(std::span<const Routine> routines, std::string_view name) {
+    const auto it = std::find_if(routines.begin(), routines.end(), [&](const Routine& r) { return r.name == name; });
+    return it == routines.end() ? nullptr : &*it;
+}
+
+usize routine_entry_at(const Routine& routine, double hour) {
+    const usize count = routine.entries.size();
+    if (count == 0) return 0;
+    double h = std::isfinite(hour) ? std::fmod(hour, 24.0) : 0.0;
+    if (h < 0.0) h += 24.0;
+    // Compared as stored (float): an entry from 0.1 holds at hour 0.1.
+    const float now = static_cast<float>(h);
+    usize at = count - 1; // (before the first begins: the last, held over midnight)
+    for (usize i = 0; i < count && routine.entries[i].from <= now; ++i) at = i;
+    return at;
+}
+
+float routine_entry_ends(const Routine& routine, usize entry) {
+    const usize count = routine.entries.size();
+    if (count == 0) return 0.0f;
+    GIANT_ASSERT(entry < count, "not one of the routine's entries");
+    return routine.entries[(entry + 1) % count].from;
 }
 
 } // namespace giant::world
