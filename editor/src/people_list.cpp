@@ -120,7 +120,19 @@ std::string person_why(const EditorState& state, const world::Person& person) {
             out += std::string(" by a noise (") + PeopleSenses::to_string(heard.kind) + ") " + number(heard.seconds, "%.0f") + " s ago. ";
         }
     }
-    if (person.routine.empty()) {
+    PeopleRoutines::Behaving behaving;
+    const bool behaves = state.routines != nullptr && state.travel != nullptr &&
+                         state.routines->behaving(state.scene, *state.travel, person.id, behaving);
+    if (behaves) {
+        out += "Its behaviour \"" + person.behaviour + "\" has been in the state \"" + std::string(behaving.state) + "\" for " +
+               number(behaving.seconds, "%.0f") + " s. ";
+    } else if (!person.behaviour.empty()) {
+        out += "Its behaviour \"" + person.behaviour + "\" has not begun (the world is not running, or its turn has not come). ";
+    }
+    if (does && doing.own) {
+        out += "The state has it " + std::string(doing.activity) + ". ";
+        if (doing.failed) out += "It could not be sent there (no such place, no road near, or no way). ";
+    } else if (person.routine.empty()) {
         out += "It has no routine. ";
     } else if (!does) {
         out += "Its routine \"" + person.routine + "\" has not had it do anything yet (the world is not running, or its turn has not come). ";

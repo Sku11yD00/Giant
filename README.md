@@ -411,8 +411,10 @@ Open-world systems:
   and have the camera follow one (`follow_person`).
 - LW6 part 2: behaviours as data: small state machines (states,
   transitions on alarm, what was sensed, arriving, time) saved with
-  the world and given to people (`set_behaviour`); acting on them
-  comes next.
+  the world and given to people (`set_behaviour`).
+- LW6 part 3: people act on their behaviours while the world runs:
+  each is in a state, moves on when a transition's conditions hold,
+  and does what the state says in place of its routine.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
