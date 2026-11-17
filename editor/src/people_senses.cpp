@@ -7,9 +7,15 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace giant::editor {
+
+namespace {
+constexpr double k_pi_d = 3.14159265358979323846;
+}
 
 const char* PeopleSenses::to_string(Kind kind) {
     switch (kind) {
@@ -19,12 +25,13 @@ const char* PeopleSenses::to_string(Kind kind) {
     case Kind::splash: return "splash";
     case Kind::voice: return "voice";
     case Kind::other: return "other";
+    case Kind::sight: return "sight";
     }
     return "other";
 }
 
 bool PeopleSenses::from_string(std::string_view text, Kind& out) {
-    for (const Kind kind : {Kind::shot, Kind::impact, Kind::blast, Kind::splash, Kind::voice, Kind::other}) {
+    for (const Kind kind : {Kind::shot, Kind::impact, Kind::blast, Kind::splash, Kind::voice, Kind::other, Kind::sight}) {
         if (text == to_string(kind)) {
             out = kind;
             return true;
@@ -42,12 +49,44 @@ void PeopleSenses::clear() {
     m_noises.clear();
     for (Slot& slot : m_slots) slot = Slot{slot.id};
     m_cursor = k_done;
+    m_watched.clear();
+    player.reset();
+    m_look = 0;
+    m_look_thing = 0;
+    m_holding = 0;
     m_stats = {};
 }
 
 void PeopleSenses::silence() {
     m_noises.clear();
+    m_watched.clear();
+    m_look_thing = 0;
     m_stats.noises = 0;
+}
+
+bool PeopleSenses::watch(std::string_view name, const DVec3& at, float clearance) {
+    if (!settings.on || !m_running || name.empty() || name.size() > k_max_name) return false;
+    if (!(clearance >= 0.0f)) clearance = 0.0f;
+    clearance = std::min(clearance, 50.0f);
+    if (!(std::fabs(at.x) <= 1e8 && std::fabs(at.y) <= 1e8 && std::fabs(at.z) <= 1e8)) return false; // (or not numbers)
+    for (Watched& w : m_watched) {
+        if (w.name == name) {
+            w.at = at;
+            w.clearance = clearance;
+            return true;
+        }
+    }
+    if (m_watched.size() >= k_max_watched) return false;
+    m_watched.push_back({std::string(name), at, clearance});
+    return true;
+}
+
+bool PeopleSenses::unwatch(std::string_view name) {
+    const auto it = std::find_if(m_watched.begin(), m_watched.end(), [&](const Watched& w) { return w.name == name; });
+    if (it == m_watched.end()) return false;
+    m_watched.erase(it);
+    m_look_thing = 0; // (a look that ran out of rays part way through a person begins that person again)
+    return true;
 }
 
 bool PeopleSenses::noise(const DVec3& at, float loudness, Kind kind, double* reach) {
@@ -86,6 +125,8 @@ bool PeopleSenses::noise(const DVec3& at, float loudness, Kind kind, double* rea
 void PeopleSenses::match_slots(const std::vector<world::Person>& people) {
     const bool done = m_cursor >= m_slots.size();
     const world::PersonId next = done ? 0 : m_slots[m_cursor].id;
+    const bool look_done = m_look >= m_slots.size();
+    const world::PersonId look_next = look_done ? 0 : m_slots[m_look].id;
     m_slots_before.swap(m_slots);
     m_slots.clear();
     m_slots.reserve(people.size());
@@ -97,16 +138,21 @@ void PeopleSenses::match_slots(const std::vector<world::Person>& people) {
         slot.id = person.id;
         m_slots.push_back(slot);
     }
-    if (done) {
-        m_cursor = k_done;
-    } else {
-        const auto it = std::lower_bound(m_slots.begin(), m_slots.end(), next,
+    const auto place = [&](world::PersonId wanted) {
+        const auto it = std::lower_bound(m_slots.begin(), m_slots.end(), wanted,
                                          [](const Slot& slot, world::PersonId id) { return slot.id < id; });
-        m_cursor = static_cast<usize>(it - m_slots.begin());
-    }
+        return static_cast<usize>(it - m_slots.begin());
+    };
+    m_cursor = done ? k_done : place(next);
+    m_look = look_done ? 0 : place(look_next);
+    if (look_done || m_look >= m_slots.size() || m_slots[m_look].id != look_next) m_look_thing = 0; // (another's turn now)
+    m_holding = 0;
+    for (const Slot& slot : m_slots) m_holding += slot.held > 0.0f ? 1 : 0;
 }
 
-float PeopleSenses::eased(const Slot& slot) const {
+float PeopleSenses::eased(const Slot& slot) const { return std::max(eased_alone(slot), slot.held); }
+
+float PeopleSenses::eased_alone(const Slot& slot) const {
     if (slot.alarm <= 0.0f) return 0.0f;
     const double calm = std::clamp(static_cast<double>(settings.calm_seconds), 1.0, 3600.0);
     const double left = static_cast<double>(slot.alarm) - std::max(m_seconds - slot.at, 0.0) / calm;
@@ -129,6 +175,12 @@ void PeopleSenses::update(const world::Scene& scene, const PeopleTravel& travel)
     sync(scene, travel);
     const std::vector<world::Person>& people = scene.people;
     if (m_slots.size() != people.size()) match_slots(people); // (what each heard stays its own while it is quiet too)
+    hear(people, travel);
+    look(scene, travel);
+    m_stats.noises = static_cast<u32>(m_noises.size());
+}
+
+void PeopleSenses::hear(const std::vector<world::Person>& people, const PeopleTravel& travel) {
     if (!settings.on || !m_running || m_noises.empty() || people.empty()) {
         if (!settings.on || !m_running) {
             m_noises.clear();
@@ -139,7 +191,6 @@ void PeopleSenses::update(const world::Scene& scene, const PeopleTravel& travel)
         // Quiet: nobody is looked at; the next noise is heard from now, the first time through the list.
         m_cursor = k_done;
         m_heard_from = m_heard_to = m_seconds;
-        m_stats.noises = static_cast<u32>(m_noises.size());
         return;
     }
     const double quietest = std::clamp(static_cast<double>(settings.hear_loudness), 0.01, 100.0);
@@ -182,7 +233,7 @@ void PeopleSenses::update(const world::Scene& scene, const PeopleTravel& travel)
             const float more = static_cast<float>(std::min(level / full, 1.0));
             // Each noise takes its share of what calm is left; the one that alarmed most is remembered.
             const float sum = 1.0f - (1.0f - now) * (1.0f - more);
-            if (more >= now || slot.alarm <= 0.0f) {
+            if (more >= now || now <= 0.0f) {
                 slot.kind = n.kind;
                 slot.from = n.at;
                 slot.level = static_cast<float>(level);
@@ -194,7 +245,123 @@ void PeopleSenses::update(const world::Scene& scene, const PeopleTravel& travel)
         ++m_cursor;
         --left;
     }
-    m_stats.noises = static_cast<u32>(m_noises.size());
+}
+
+// The people's eyes looked through, a share a frame: who sees a thing shown. While one is seen its
+// alarm is held (Slot::held: it does not ease under that); looked through again and not seeing it,
+// the person lets go and eases from there.
+void PeopleSenses::look(const world::Scene& scene, const PeopleTravel& travel) {
+    const std::vector<world::Person>& people = scene.people;
+    if (!settings.on || !m_running) {
+        m_watched.clear();
+        player.reset();
+    }
+    const bool any = settings.sight && (player.has_value() || !m_watched.empty());
+    if (people.empty() || (!any && m_holding == 0)) { // (nothing to see, and nobody still holding what it saw)
+        m_look_thing = 0;
+        return;
+    }
+    const usize things = any ? m_watched.size() + 1 : 0; // (the player's place first, then those shown)
+    // (What a look that ran out of rays had seen is of the things as they were: begun again when the player comes or goes.)
+    if (!any || player.has_value() != m_look_player) m_look_thing = 0;
+    m_look_player = player.has_value();
+    const double reach = std::clamp(static_cast<double>(settings.see_distance), 1.0, k_max_see);
+    const double across = std::clamp(static_cast<double>(settings.see_angle), 10.0, 360.0);
+    const double cosine = across >= 360.0 ? -2.0 : std::cos(across * 0.5 * (k_pi_d / 180.0));
+    u32 rays = std::clamp<u32>(settings.rays_a_frame, 1, k_max_rays);
+    usize left = std::min<usize>(std::clamp<usize>(settings.seen_a_frame, 1, k_max_looked), people.size());
+    while (left > 0) {
+        if (m_look >= people.size()) m_look = 0;
+        const world::Person& person = people[m_look];
+        if (m_slots[m_look].id != person.id) { // (as many people as before, but others)
+            match_slots(people);
+            continue;
+        }
+        Slot& slot = m_slots[m_look];
+        const PeopleTravel::Where here = travel.where(person);
+        const float base = eased_alone(slot); // (what it is alarmed by but for what it sees)
+        // Its eyes and the way it faces are worked out only for one with something near enough.
+        bool have_eyes = false, have_facing = false;
+        double eye_y = 0.0, fx = 0.0, fz = 0.0;
+        float best = 0.0f;
+        DVec3 best_at{};
+        if (m_look_thing > 0) { // (the frame before ran out of rays part way through this one)
+            best = m_look_best;
+            best_at = m_look_at;
+        }
+        for (usize thing = m_look_thing; thing < things; ++thing) {
+            if (thing == 0 && !player) continue;
+            const DVec3 at = thing == 0 ? *player : m_watched[thing - 1].at;
+            const double clearance = thing == 0 ? 0.0 : static_cast<double>(m_watched[thing - 1].clearance);
+            const double dx = at.x - here.position.x, dz = at.z - here.position.z;
+            if (dx * dx + dz * dz > reach * reach) continue;
+            if (!have_eyes) {
+                // On the ground where there is terrain (as its entity stands: a person's own height is not kept to it).
+                const std::optional<double> ground = scene.terrain.height_at(here.position.x, here.position.z);
+                eye_y = (ground ? *ground : here.position.y) + k_eye_height;
+                have_eyes = true;
+            }
+            const double dy = at.y - eye_y;
+            const double square = dx * dx + dy * dy + dz * dz;
+            if (square > reach * reach) continue;
+            const double far_off = std::sqrt(square);
+            if (far_off > k_arms_reach) {
+                if (!have_facing) {
+                    const double turn = static_cast<double>(here.yaw) * (k_pi_d / 180.0);
+                    fx = std::sin(turn); // (the way it faces: yaw 0 looks along +z)
+                    fz = std::cos(turn);
+                    have_facing = true;
+                }
+                if (dx * fx + dz * fz < cosine * far_off) continue; // (behind it, out to the side, or too far up or down)
+            }
+            // Fully alarming within a fifth of the distance, a tenth at its end.
+            const float more = static_cast<float>(std::clamp(1.125 * (1.0 - far_off / reach) + 0.1, 0.1, 1.0));
+            // Seen or not, it would change nothing: no ray is spent (one whose alarm is held by what it
+            // sees is looked through all the same: whether it still sees is what holds it).
+            if (more <= best || (more < base && slot.held <= 0.0f)) continue;
+            const double open = far_off - clearance; // (the thing's own body, within its clearance, does not hide it)
+            if (blocked && open > 0.1) {
+                if (rays == 0) { // out of rays: this one is looked through from this thing on next frame
+                    m_look_thing = thing;
+                    m_look_best = best;
+                    m_look_at = best_at;
+                    return;
+                }
+                --rays;
+                ++m_stats.rays;
+                const double part = open / far_off;
+                const DVec3 eyes{here.position.x, eye_y, here.position.z};
+                if (blocked(eyes, {eyes.x + dx * part, eyes.y + dy * part, eyes.z + dz * part})) continue;
+            }
+            best = more;
+            best_at = at;
+        }
+        if (best > 0.0f) {
+            ++m_stats.seen;
+            if (slot.held <= 0.0f) ++m_holding;
+            float under = base;
+            if (best < slot.held) { // what it sees now alarms less than what it saw: it eases from there, not at once
+                slot.alarm = eased(slot);
+                slot.at = m_seconds;
+                under = slot.alarm;
+            }
+            slot.held = best;
+            if (best > under || slot.kind == Kind::sight) { // (a noise as alarming stays what is remembered)
+                slot.kind = Kind::sight;
+                slot.from = best_at;
+                slot.level = best;
+                slot.heard_at = m_seconds;
+            }
+        } else if (slot.held > 0.0f) { // out of sight: it eases from here
+            slot.alarm = eased(slot);
+            slot.at = m_seconds;
+            slot.held = 0.0f;
+            --m_holding;
+        }
+        m_look_thing = 0;
+        ++m_look;
+        --left;
+    }
 }
 
 bool PeopleSenses::heard(const world::Scene& scene, world::PersonId id, Heard& out) const {

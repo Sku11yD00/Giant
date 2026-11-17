@@ -3714,6 +3714,60 @@ moving fast towards it may miss it and one moving away hear it twice
 `connect_blows` called after `connect_senses` takes the hooks back
 (connect the senses last).
 
+### What people see (LW5b)
+
+`PeopleSenses` also keeps what there is to be seen: the player
+(`PeopleSenses::player`, set by the editor each frame to the camera,
+its eyes, while playing: a place of its own, never crowded out) and up
+to 16 named things, each a point (`watch` / `unwatch`;
+`show_to_people` and `hide_from_people`). While there is any,
+`seen_a_frame` (1024) people's eyes are looked through a frame, in
+turn: a person sees a thing within `see_distance` (60 m, at most 300)
+of its eyes, within `see_angle` (120 degrees across) about the level
+way it faces (a cone: something high above or far below is out of
+it), or within arm's reach (1.5 m) whichever way it faces, and with
+nothing between. Its eyes are 1.6 m over the ground where it stands
+(the terrain's height there, as its entity stands; its own height
+where there is no terrain).
+
+What stands between is asked of `PeopleSenses::blocked`, set by
+`connect_senses`: a ray through the physics' bodies (characters let
+through: its own, the player's) and then the terrain. The ray stops
+the thing's `clearance` short of it (0 for the player and by default;
+about a body's half size for a thing shown at the middle of its own
+body). At most `rays_a_frame` (32, at most 128) rays are cast a frame,
+and none where seeing could change nothing (a thing that would alarm
+less than one already seen this look, or than a person who holds
+nothing by sight is alarmed already); when they run out the look stops at that person and thing
+and goes on from there next frame.
+
+Seeing alarms by nearness: fully within a fifth of the distance,
+falling to a tenth at its end. The alarm is held there (`Slot::held`)
+until the person is next looked through and no longer sees the thing,
+however long a round of looks takes; from then it eases as after a
+noise; seeing only something less alarming than what it saw, it
+eases from where it was down to that. Seeing never lowers an alarm at
+once. What was seen is remembered as what
+was heard is when it alarms more than the noise remembered
+(`get_people`: `heard` with kind `sight`, `from` where the thing was,
+`seconds` since it was last looked at and seen).
+
+Cost: while playing (or while anyone's alarm is still held),
+`seen_a_frame` people are gone through every frame (where each is, and a distance to each thing; the facing and
+the ground under it only for one with something near enough), plus
+the rays. What is shown is forgotten when the simulation stops or
+starts again, with another scene, and when the senses are turned off.
+
+Known limits: one point a thing (a body half behind a wall is seen or
+not by its point); a person given an entity is looked through from
+where its trip has it and the way its path goes, not where its
+walker has stepped aside or turned, and one lying as a ragdoll still
+sees; with many people facing the player a round of rays takes long
+(2000 people in view at 32 rays: about a second before the last
+notices); light and weather do not shorten sight; far from the camera
+the physics holds no bodies, so only the terrain hides things there;
+a person does not see other people or bodies yet.
+
 ### Nobody appears close by in view (LW4 part 2)
 
 `PeopleState` is told what the camera sees (`PeopleState::view`, set by
