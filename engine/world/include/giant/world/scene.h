@@ -601,9 +601,19 @@ struct RoutineEntry {
     float speed = 1.4f;   // metres a second going there (0.1 to 20)
     bool operator==(const RoutineEntry&) const = default;
 };
+// What one with the routine does while alarmed (LW5c: by what it heard or
+// saw) instead of what the hour says: the last of these whose `over` its
+// alarm is at or over. Calm again, it does what the hour says.
+constexpr usize k_max_routine_alarms = 8;
+struct RoutineAlarm {
+    float over = 0.5f; // the alarm (over 0, to 1) at or over which it holds, rising through the list
+    RoutineEntry does; // as an entry of the day's (its `from` is not used: 0)
+    bool operator==(const RoutineAlarm&) const = default;
+};
 struct Routine {
     std::string name; // unique in the scene, 1 to k_max_name_bytes
     std::vector<RoutineEntry> entries; // 1 to k_max_routine_entries
+    std::vector<RoutineAlarm> alarmed; // at most k_max_routine_alarms
     bool operator==(const Routine&) const = default;
 };
 struct Person {

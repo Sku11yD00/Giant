@@ -89,7 +89,12 @@ Json routine_json(const Routine& r, usize people) {
         entries.push_back({{"from", e.from}, {"activity", e.activity}, {"at", world::routine_at_name(e.at)},
                            {"name", e.name}, {"speed", e.speed}});
     }
-    return {{"name", r.name}, {"entries", std::move(entries)}, {"people", people}};
+    Json alarmed = Json::array();
+    for (const world::RoutineAlarm& a : r.alarmed) {
+        alarmed.push_back({{"over", a.over}, {"activity", a.does.activity}, {"at", world::routine_at_name(a.does.at)},
+                           {"name", a.does.name}, {"speed", a.does.speed}});
+    }
+    return {{"name", r.name}, {"entries", std::move(entries)}, {"alarmed", std::move(alarmed)}, {"people", people}};
 }
 
 // The travel's clock brought up to the physics' now (a command between frames: time stepped on
@@ -618,16 +623,26 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes},
                    {"description", "With `at` place: a place's name (it must be there). With `at` tag: a place's tag."}}},
          {"speed", {{"type", "number"}, {"minimum", 0.1}, {"maximum", 20}, {"description", "Metres a second going there (default 1.4)."}}}});
+    Json alarm_schema = entry_schema;
+    alarm_schema["required"] = Json::array({"over", "activity"});
+    alarm_schema["properties"].erase("from");
+    alarm_schema["properties"]["over"] = {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", 1},
+                                           {"description", "The alarm (get_people) at or over which it holds: more than the one's before it."}};
     add(registry,
         {"set_routine",
          "Makes or replaces a routine: what the people who have it (create_people / set_person `routine`) do "
          "through the day. `entries` (1 to 24, by rising `from`): each begins at its hour and holds until the "
          "next; the last holds over midnight until the first. Saved with the scene or the world (at most "
-         "1024). Undoable.",
+         "1024). `alarmed` (at most 8; left out: none): what one does instead while alarmed by what it "
+         "heard or saw, each as an entry with `over` in place of `from`: the last whose `over` its alarm "
+         "is at or over holds (so {over 0.2, activity watch} and {over 0.6, activity flee, at home, speed "
+         "5} has one stop and watch, then run home), and one on it stays until its alarm is 0.05 under; "
+         "calm again it does what the hour says. Undoable.",
          object_schema({"name", "entries"},
                        {{"name", name_schema("Unique among the routines.")},
                         {"entries", {{"type", "array"}, {"minItems", 1}, {"maxItems", world::k_max_routine_entries},
-                                     {"items", entry_schema}}}}),
+                                     {"items", entry_schema}}},
+                        {"alarmed", {{"type", "array"}, {"maxItems", world::k_max_routine_alarms}, {"items", alarm_schema}}}}),
          false,
          [&state](const Json& args, CommandContext& context) {
              std::vector<Routine>& routines = state.scene.routines;
@@ -638,11 +653,13 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  return CommandResult::failure("a scene has at most " + std::to_string(world::k_max_routines) + " routines");
              }
              const Json& entries = args["entries"];
-             for (usize i = 0; i < entries.size(); ++i) {
-                 const Json& j = entries[i];
-                 const std::string which = "entries[" + std::to_string(i) + "]: ";
+             const Json alarmed = args.value("alarmed", Json::array());
+             for (usize i = 0; i < entries.size() + alarmed.size(); ++i) {
+                 const bool alarm = i >= entries.size();
+                 const Json& j = alarm ? alarmed[i - entries.size()] : entries[i];
+                 const std::string which = (alarm ? "alarmed[" + std::to_string(i - entries.size()) : "entries[" + std::to_string(i)) + "]: ";
                  world::RoutineEntry e;
-                 e.from = j["from"].get<float>();
+                 if (!alarm) e.from = j["from"].get<float>();
                  e.activity = j["activity"].get<std::string>();
                  const std::optional<world::RoutineAt> where = world::routine_at_named(j.value("at", std::string("stay")));
                  if (!where) return CommandResult::failure(which + "at must be stay, home, place or tag");
@@ -651,6 +668,10 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  e.speed = j.value("speed", e.speed);
                  if (e.at == world::RoutineAt::place && !e.name.empty() && world::find_place(state.scene.places, e.name) == nullptr) {
                      return CommandResult::failure(which + "no place named \"" + e.name + "\" (create_place makes one)");
+                 }
+                 if (alarm) {
+                     routine.alarmed.push_back({j["over"].get<float>(), std::move(e)});
+                     continue;
                  }
                  routine.entries.push_back(std::move(e));
              }

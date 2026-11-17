@@ -804,7 +804,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                         if (!did.is_object() || !only_keys(did, {"said", "entry", "place", "failed", "own_trip"}) ||
                             !did.contains("said") || !did["said"].is_number_unsigned() || !finite_in(did["said"], 1.0, 4294967295.0, said) ||
                             !did.contains("entry") || !did["entry"].is_number_unsigned() ||
-                            !finite_in(did["entry"], 0.0, static_cast<double>(world::k_max_routine_entries - 1), entry) ||
+                            !finite_in(did["entry"], 0.0, static_cast<double>(world::k_max_routine_entries + world::k_max_routine_alarms - 1), entry) ||
                             !did.value("place", Json("")).is_string() ||
                             did.value("place", std::string()).size() > world::k_max_name_bytes ||
                             !did.value("failed", Json(false)).is_boolean() || !did.value("own_trip", Json(false)).is_boolean())

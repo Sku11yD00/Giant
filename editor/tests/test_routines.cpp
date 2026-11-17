@@ -5,6 +5,7 @@
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
 #include "../src/people_routines.h"
+#include "../src/people_senses.h"
 #include "../src/people_state.h"
 #include "../src/people_travel.h"
 
@@ -656,4 +657,133 @@ GIANT_TEST("routines: what one does is what it last acted on; clips are begun a 
     GIANT_CHECK(f.run("set_routine_settings", {{"on", true}}).ok);
     f.frames(12.2, 0.0, 6);
     GIANT_CHECK(f.people.stats().acting == 12);
+}
+
+GIANT_TEST("routines: alarmed, one does what its routine says for its alarm, and what the hour says again when calm") {
+    PeopleSenses senses; // (before the fixture: the commands' state points at it)
+    senses.settings.hear_loudness = 0.2f;
+    senses.settings.alarm_loudness = 2.0f;
+    senses.settings.calm_seconds = 30.0f;
+    Fixture f;
+    f.state.senses = &senses;
+    ai::CommandResult r = f.run("set_routine", {{"name", "wary"},
+                                                {"entries", {{{"from", 0}, {"activity", "work"}, {"at", "tag"}, {"name", "work"}, {"speed", 2.0}}}},
+                                                {"alarmed", {{{"over", 0.2}, {"activity", "watch"}},
+                                                             {{"over", 0.6}, {"activity", "flee"}, {"at", "home"}, {"speed", 5.0}}}}});
+    GIANT_CHECK(r.ok && r.value["alarmed"].size() == 2 && r.value["alarmed"][1]["activity"] == "flee" && r.value["alarmed"][0]["at"] == "stay");
+    GIANT_CHECK(f.run("get_routines").value["routines"].dump().find("\"over\"") != std::string::npos);
+    // Refused: not rising, an hour given, a place not there.
+    GIANT_CHECK(!f.run("set_routine", {{"name", "bad"}, {"entries", {{{"from", 0}, {"activity", "work"}}}},
+                                       {"alarmed", {{{"over", 0.5}, {"activity", "watch"}}, {{"over", 0.5}, {"activity", "flee"}}}}}).ok);
+    GIANT_CHECK(!f.run("set_routine", {{"name", "bad"}, {"entries", {{{"from", 0}, {"activity", "work"}}}},
+                                       {"alarmed", {{{"over", 0.5}, {"from", 3}, {"activity", "watch"}}}}}).ok);
+    GIANT_CHECK(!f.run("set_routine", {{"name", "bad"}, {"entries", {{{"from", 0}, {"activity", "work"}}}},
+                                       {"alarmed", {{{"over", 0.5}, {"activity", "flee"}, {"at", "place"}, {"name", "nowhere"}}}}}).ok);
+    const world::PersonId id = f.person("cottage", "wary"), calm = f.person("cottage", "day");
+    const auto frames = [&](double more, int count = 4) {
+        for (int i = 0; i < count; ++i) {
+            f.seconds += more / count;
+            f.travel.update(f.state.scene, 1, f.seconds);
+            senses.update(f.state.scene, f.travel);
+            f.routines.update(f.state.scene, f.travel, 7.0, &senses);
+        }
+    };
+    const auto noise = [&](float loudness) { // ten metres from where it is now
+        const DVec3 here = f.where(id);
+        GIANT_CHECK(senses.noise({here.x, here.y, here.z + 10.0}, loudness, PeopleSenses::Kind::other));
+    };
+    // To work, both.
+    frames(10.0);
+    GIANT_CHECK(f.travel.trip(id) != nullptr && f.travel.trip(id)->place == "mill" && f.doing(id)["activity"] == "work");
+    const u64 sent = f.routines.stats().sent;
+    // A noise that alarms it a little (0.6 at its ears: 0.3): it stops and watches where it is; the other, whose routine says nothing of alarm, goes on.
+    noise(6.0f);
+    frames(0.5);
+    GIANT_CHECK(senses.alarm(f.state.scene, id) > 0.25f);
+    GIANT_CHECK(f.travel.trip(id) == nullptr && f.doing(id)["activity"] == "watch" && f.doing(id)["place"] == "");
+    GIANT_CHECK(f.travel.trip(calm) != nullptr && f.doing(calm)["activity"] == "work");
+    const DVec3 stood = f.where(id);
+    // A game save keeps it as any (the entry's number counts on past the day's) and puts it back.
+    PeopleRoutines::Kept kept;
+    f.routines.ready(f.state.scene, f.travel);
+    GIANT_CHECK(f.routines.kept(f.state.scene, f.travel, 0, kept) && kept.entry == 1 && !kept.own_trip);
+    GIANT_CHECK(f.routines.restore(f.state.scene, f.travel, id, kept) && f.doing(id)["activity"] == "watch");
+    // Hovering just under the alarm it watches over (0.2), it goes on watching: 0.05 under, it goes back to work.
+    frames(3.4, 4);
+    GIANT_CHECK(senses.alarm(f.state.scene, id) < 0.2f && senses.alarm(f.state.scene, id) > 0.152f && f.doing(id)["activity"] == "watch");
+    // Calmer than 0.15 (5 s since it heard): to work again from where it stood.
+    frames(3.0, 6);
+    GIANT_CHECK(senses.alarm(f.state.scene, id) < 0.2f && f.travel.trip(id) != nullptr && f.travel.trip(id)->place == "mill");
+    GIANT_CHECK(f.doing(id)["activity"] == "work" && f.routines.stats().sent == sent + 1 && f.from(id, stood.x, stood.z) < 10.0);
+    // One that alarms it fully: it runs home.
+    noise(100.0f);
+    frames(0.5);
+    const PeopleTravel::Trip* trip = f.travel.trip(id);
+    GIANT_CHECK(trip != nullptr && trip->place == "cottage" && trip->speed == 5.0 && f.doing(id)["activity"] == "flee");
+    // Under 0.55 (15 s on) it stops and watches; calm (under 0.15, 12 s more) it sets off to work again.
+    frames(15.0, 30);
+    GIANT_CHECK(senses.alarm(f.state.scene, id) < 0.55f && senses.alarm(f.state.scene, id) > 0.2f);
+    GIANT_CHECK(f.doing(id)["activity"] == "watch" && f.travel.trip(id) == nullptr);
+    frames(12.0, 24);
+    GIANT_CHECK(senses.alarm(f.state.scene, id) < 0.15f);
+    GIANT_CHECK(f.doing(id)["activity"] == "work" && f.travel.trip(id) != nullptr && f.travel.trip(id)->place == "mill");
+    // One with no home told to flee home stays where it is (not told as failed), and one whose hour
+    // has it stay only changes what it does (nobody is sent or stopped).
+    GIANT_CHECK(f.run("set_routine", {{"name", "idle"}, {"entries", {{{"from", 0}, {"activity", "rest"}, {"speed", 3.0}}}},
+                                      {"alarmed", {{{"over", 0.5}, {"activity", "cower"}}}}}).ok);
+    const ai::CommandResult made = f.run("create_people", {{"people", {{{"look", "villager"}, {"routine", "wary"}, {"position", at(40, 0, 40)}}}}});
+    GIANT_CHECK(made.ok);
+    const world::PersonId homeless = made.ok ? made.value["ids"][0].get<world::PersonId>() : 0, idle = f.person("cottage", "idle");
+    frames(1.0);
+    const u64 failed = f.routines.stats().failed, sent_before = f.routines.stats().sent;
+    GIANT_CHECK(f.doing(idle)["activity"] == "rest");
+    const DVec3 by = f.where(homeless);
+    GIANT_CHECK(senses.noise({by.x, by.y, by.z + 2.0}, 100.0f, PeopleSenses::Kind::other));
+    frames(0.5);
+    GIANT_CHECK(f.doing(homeless)["activity"] == "flee" && f.doing(homeless)["failed"] == false && f.travel.trip(homeless) == nullptr);
+    GIANT_CHECK(f.doing(idle)["activity"] == "cower" && f.routines.stats().failed == failed);
+    frames(40.0, 40);
+    GIANT_CHECK(f.doing(idle)["activity"] == "rest" && f.routines.stats().sent >= sent_before);
+    // Only what it does changed for the one that rests: a noise it alone hears has nobody stayed or sent anew.
+    const PeopleRoutines::Stats quiet = f.routines.stats();
+    const DVec3 resting = f.where(idle);
+    GIANT_CHECK(senses.noise({resting.x, resting.y, resting.z - 1.0}, 2.0f, PeopleSenses::Kind::other)); // (reaches 10 m)
+    frames(0.5);
+    GIANT_CHECK(f.doing(idle)["activity"] == "cower" && f.doing(id)["activity"] == "work");
+    GIANT_CHECK(f.routines.stats().stayed == quiet.stayed && f.routines.stats().sent == quiet.sent);
+    frames(40.0, 40);
+    // Fleeing home when the game is saved: kept with its trip as the routine's; loaded (another run,
+    // everyone calm, its trip sent again) the hour's entry turns it to work.
+    noise(100.0f);
+    frames(0.5);
+    GIANT_CHECK(f.doing(id)["activity"] == "flee" && f.travel.trip(id) != nullptr && f.travel.trip(id)->place == "cottage");
+    f.routines.ready(f.state.scene, f.travel);
+    GIANT_CHECK(f.routines.kept(f.state.scene, f.travel, 0, kept) && kept.entry == 2 && kept.own_trip && kept.place == "cottage");
+    const DVec3 fled_to = f.travel.trip(id)->to;
+    f.seconds = 0.0;
+    f.travel.update(f.state.scene, 2, 0.0);
+    senses.update(f.state.scene, f.travel);
+    f.routines.hold = true;
+    f.routines.update(f.state.scene, f.travel, 7.0, &senses);
+    GIANT_CHECK(f.travel.trip(id) == nullptr);
+    GIANT_CHECK(f.travel.send(f.state.scene, id, fled_to, 5.0f, 500.0, "cottage").empty());
+    GIANT_CHECK(f.routines.restore(f.state.scene, f.travel, id, kept) && f.doing(id)["activity"] == "flee");
+    f.routines.hold = false;
+    for (int i = 0; i < 4; ++i) {
+        f.seconds += 0.1;
+        f.travel.update(f.state.scene, 2, f.seconds);
+        senses.update(f.state.scene, f.travel);
+        f.routines.update(f.state.scene, f.travel, 7.0, &senses);
+    }
+    GIANT_CHECK(senses.alarm(f.state.scene, id) == 0.0f && f.doing(id)["activity"] == "work");
+    GIANT_CHECK(f.travel.trip(id) != nullptr && f.travel.trip(id)->place == "mill");
+    // Without the senses nobody is alarmed.
+    noise(100.0f);
+    for (int i = 0; i < 4; ++i) {
+        f.seconds += 0.1;
+        f.travel.update(f.state.scene, 2, f.seconds);
+        senses.update(f.state.scene, f.travel);
+        f.routines.update(f.state.scene, f.travel, 7.0);
+    }
+    GIANT_CHECK(senses.alarm(f.state.scene, id) > 0.9f && f.doing(id)["activity"] == "work");
 }

@@ -383,6 +383,13 @@ bool PeopleSenses::heard(const world::Scene& scene, world::PersonId id, Heard& o
     return true;
 }
 
+float PeopleSenses::alarm_at(const world::Scene& scene, usize index) const {
+    if (!m_running || scene.identity() != m_scene || index >= scene.people.size()) return 0.0f;
+    const world::PersonId id = scene.people[index].id;
+    if (index < m_slots.size() && m_slots[index].id == id) return eased(m_slots[index]);
+    return alarm(scene, id);
+}
+
 float PeopleSenses::alarm(const world::Scene& scene, world::PersonId id) const {
     Heard h;
     return heard(scene, id, h) ? h.alarm : 0.0f;

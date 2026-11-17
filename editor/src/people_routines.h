@@ -51,6 +51,7 @@
 
 namespace giant::editor {
 
+class PeopleSenses;
 class PeopleTravel;
 
 class PeopleRoutines {
@@ -67,6 +68,7 @@ public:
     static constexpr u32 k_most_looked = 8192;
     static constexpr u32 k_most_sent = 128;
     static constexpr double k_most_within = 1000.0;
+    static constexpr float k_alarm_margin = 0.05f; // under an alarmed entry's `over` one stays on it by this much
 
     struct Stats {
         u32 following = 0; // people with a routine that is there, as last counted through
@@ -76,7 +78,11 @@ public:
     };
 
     // Each frame, after PeopleTravel::update. `hours`: the time of day (0 to 24).
-    void update(const world::Scene& scene, PeopleTravel& travel, double hours);
+    // `senses` (null: nobody is alarmed): one alarmed does what its routine's
+    // `alarmed` says for its alarm instead of what the hour says (LW5c), and
+    // what the hour says again when calm: acted on as any entry is, when its
+    // turn comes.
+    void update(const world::Scene& scene, PeopleTravel& travel, double hours, const PeopleSenses* senses = nullptr);
 
     // What a person does now: the entry of its routine it last acted on
     // (one whose turn to be sent has not come yet still does the last).
@@ -134,7 +140,8 @@ private:
         u64 place = 0;   // the name, hashed, of the place it was sent to (0: none)
         u32 acted = 0;   // what it last acted on (what the entry says, hashed); 0: nothing yet
         u16 routine = 0; // its routine's index in the scene's (as last found)
-        u8 entry = 0;    // that routine's entry it last acted on (or the one saying the same that holds now)
+        u8 entry = 0;    // that routine's entry it last acted on (or the one saying the same that holds now);
+                         // from the number of its entries on: one of its `alarmed`
         bool failed = false;
     };
     struct Key { // a place by the hash of its name, or of one of its tags (those of a tag by their x)
