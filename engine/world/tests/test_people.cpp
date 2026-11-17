@@ -314,7 +314,10 @@ GIANT_TEST("routines: checked entry by entry; the entry that holds at an hour, o
     GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[0].does.activity = "Watch"; }));
     GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[1].does.speed = 30.0f; }));
     GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[1].does.name = "inn"; })); // (a name only with place or tag)
-    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed.assign(k_max_routine_alarms + 1, r.alarmed[0]); }));
+    GIANT_CHECK(alarmed([](Routine& r) {
+        const RoutineAlarm first = r.alarmed[0]; // (a copy: assign may not be given one of the list's own)
+        r.alarmed.assign(k_max_routine_alarms + 1, first);
+    }));
     GIANT_CHECK(bad([](Routine& r) { r.entries[1].name.clear(); }));     // a place unnamed
     GIANT_CHECK(bad([](Routine& r) { r.entries[0].name = "At Work"; })); // not a tag
     GIANT_CHECK(bad([](Routine& r) { r.entries[3].name = "inn"; }));     // stay names nothing
