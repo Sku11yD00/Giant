@@ -473,7 +473,7 @@ Behaviour wary() {
     BehaviourState by_day;
     by_day.name = "day";
     by_day.transitions = {{"flee", {{BehaviourWhen::sensed, 0.0f, 0.0f, "shot"}, {BehaviourWhen::alarm_over, 0.5f, 0.0f, ""}}},
-                       {"night", {{BehaviourWhen::hour, 22.0f, 6.0f, ""}}}};
+                          {"night", {{BehaviourWhen::hour, 22.0f, 6.0f, ""}}}};
     BehaviourState flee;
     flee.name = "flee";
     flee.own = true;

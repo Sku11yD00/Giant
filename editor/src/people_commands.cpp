@@ -1,6 +1,6 @@
 // People commands: the people who live in the world, their looks, the
-// places they go to and their routines (world/people.h; living-world plan
-// LW1 and LW3). Scene data
+// places they go to, their routines and their behaviours (world/people.h;
+// living-world plan LW1, LW3 and LW6). Scene data
 // (saved with the scene and the world's world.json, undoable). People are
 // many, so an undo step keeps what one command changed, never the lists.
 #include "editor_commands.h"
@@ -1063,7 +1063,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
         {"get_people",
          "Lists people as the scene keeps them (where each starts; where each is while the world runs is "
          "the simulation's): those named by `ids`, or all, or those of `look`, living at `home`, with `routine` or `behaviour`, "
-         "with `text` in their names, `alarmed` or `travelling` now and/or "
+         "with `text` in their name, look, home, routine or behaviour, `alarmed` or `travelling` now and/or "
          "within `within` metres of `near`, `limit` at a time from `offset` (by rising id). `count` is how "
          "many match, `total` how many there are. `entity`: the entity standing for one near the camera now "
          "(set_people_settings), else null. `at`: where it is now (its `position` until it travels: "

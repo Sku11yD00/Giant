@@ -92,7 +92,7 @@ bool has(const std::string& text, const char* what) { return text.find(what) != 
 
 } // namespace
 
-GIANT_TEST("people list: the filter takes names, looks, homes, routines and ids, letters' case aside") {
+GIANT_TEST("people list: the filter takes names, looks, homes, routines, behaviours and ids, letters' case aside") {
     Fixture f;
     const world::PersonId anna = f.person({{"name", "Anna Miller"}, {"home", "cottage"}, {"routine", "day"}});
     const world::PersonId bo = f.person({{"name", "Bo"}, {"look", "guard"}, {"position", at(30, 0, 0)}});
@@ -110,6 +110,10 @@ GIANT_TEST("people list: the filter takes names, looks, homes, routines and ids,
     GIANT_CHECK(match(anna) && !match(bo));
     filter.text = "day";
     GIANT_CHECK(match(anna) && !match(bo));
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "Watchful"}, {"states", Json::array({{{"name", "only"}}})}}).ok);
+    GIANT_CHECK(f.run("set_person", {{"id", bo}, {"behaviour", "Watchful"}}).ok);
+    filter.text = "watchf";
+    GIANT_CHECK(!match(anna) && match(bo));
     filter.text = std::to_string(bo); // an id: the whole of it, not a part
     GIANT_CHECK(match(bo) && !match(anna));
     for (const char* none : {"nobody such", "0", "02", "2 ", "20", "4294967298", "99999999999", "-2"}) {

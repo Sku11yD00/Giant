@@ -3399,7 +3399,7 @@ Saved in the scene's text and in a world's world.json under `places`,
 read and write the same. People are many, so each is a row
 (`[id, name, look, home, x, y, z, yaw, seed]` in `people.list`, beside
 `people.next_id`), not an object. The world's streaming carries the
-lists (and the routines' below) between the index and the scene as it does water, and counts a
+lists (and the routines' and behaviours' below) between the index and the scene as it does water, and counts a
 change to them as an unsaved setting.
 
 The commands (`people_commands.cpp`): `create_place` / `set_place` /

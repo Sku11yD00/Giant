@@ -111,6 +111,23 @@ GIANT_TEST("senses: a noise spreads at the speed of sound; each in reach hears i
     GIANT_CHECK(f.alarm(near_by) == 0.0f && f.senses.stats().noises == 0);
 }
 
+GIANT_TEST("senses: every kind's word is one a behaviour's `sensed` condition takes, and no other is") {
+    usize kinds = 0;
+    for (const PeopleSenses::Kind kind : {PeopleSenses::Kind::shot, PeopleSenses::Kind::impact, PeopleSenses::Kind::blast, PeopleSenses::Kind::splash,
+                                          PeopleSenses::Kind::voice, PeopleSenses::Kind::other, PeopleSenses::Kind::sight}) {
+        GIANT_CHECK(world::sensed_kind_ok(PeopleSenses::to_string(kind)));
+        ++kinds;
+    }
+    // (A kind added to the senses must be added here and to world::sensed_kind_ok.)
+    PeopleSenses::Kind out = PeopleSenses::Kind::other;
+    usize known = 0;
+    for (const char* word : {"shot", "impact", "blast", "splash", "voice", "other", "sight", "smell", "touch", "noise", "bang"}) {
+        GIANT_CHECK(PeopleSenses::from_string(word, out) == world::sensed_kind_ok(word));
+        if (world::sensed_kind_ok(word)) ++known;
+    }
+    GIANT_CHECK(known == kinds);
+}
+
 GIANT_TEST("senses: noises add up, the loudest is remembered; settings and make_noise by command") {
     Fixture f;
     const world::PersonId a = f.person(100, 0);
