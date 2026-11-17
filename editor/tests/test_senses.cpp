@@ -227,6 +227,219 @@ GIANT_TEST("senses: a shot's report, the bullet striking, and a blast are noises
     GIANT_CHECK(f.senses.heard(f.state.scene, away, h) && h.kind == PeopleSenses::Kind::blast && h.from == DVec3(10.0, 0.0, 5000.0));
     GIANT_CHECK(PeopleSenses::blast_loudness(100.0f) == 100.0f && PeopleSenses::blast_loudness(0.0f) == 0.0f);
     GIANT_CHECK(AudioState::impact_loudness(0.0f) == 0.0f && AudioState::shot_loudness(0.0f, 100.0f) == 0.0f);
+    // Sight through the physics: the wall hides what is behind it from one side, not from the other.
+    const auto one = [&](double x, double yaw) {
+        const ai::CommandResult made = f.run("create_people", {{"people", {{{"look", "villager"}, {"position", at(x, 0, 0)}, {"yaw", yaw}}}}});
+        GIANT_CHECK(made.ok);
+        return made.ok ? made.value["ids"][0].get<world::PersonId>() : world::PersonId{0};
+    };
+    const world::PersonId before_wall = one(190, 90), behind_wall = one(215, -90);
+    frames(60.0, 8); // (everyone calm again)
+    GIANT_CHECK(f.senses.alarm(f.state.scene, by_gun) == 0.0f);
+    GIANT_CHECK(f.run("show_to_people", {{"name", "crate"}, {"at", at(205, 1.6, 0)}}).ok);
+    frames(0.1);
+    GIANT_CHECK(f.senses.alarm(f.state.scene, before_wall) == 0.0f);
+    GIANT_CHECK(f.senses.heard(f.state.scene, behind_wall, h) && h.kind == PeopleSenses::Kind::sight && h.from == DVec3(205, 1.6, 0));
+    GIANT_CHECK(f.senses.stats().rays >= 2);
+    // Moved over the wall's top, both see it.
+    GIANT_CHECK(f.run("show_to_people", {{"name", "crate"}, {"at", at(205, 8.0, 0)}}).ok);
+    frames(0.1);
+    GIANT_CHECK(f.senses.heard(f.state.scene, before_wall, h) && h.kind == PeopleSenses::Kind::sight);
+}
+
+GIANT_TEST("senses: a person sees what is shown within its distance and the way it faces; alarm holds while it is in sight") {
+    Fixture f;
+    const auto one = [&](double x, double z, double yaw) {
+        const ai::CommandResult made = f.run("create_people", {{"people", {{{"look", "villager"}, {"position", at(x, 0, z)}, {"yaw", yaw}}}}});
+        GIANT_CHECK(made.ok);
+        return made.ok ? made.value["ids"][0].get<world::PersonId>() : world::PersonId{0};
+    };
+    // The thing at (0, 1.6, 20): one faces it from 20 m, one has it 20 m behind, one is too far, one
+    // has it behind but within arm's reach, one faces it from the side (90 degrees off: out of 120 across).
+    const world::PersonId facing = one(0, 0, 0), turned = one(0, 40, 0), too_far = one(0, -100, 0), touching = one(0, 21, 0),
+                          side = one(20, 20, 0);
+    f.run_id = 0;
+    f.frames();
+    GIANT_CHECK(!f.run("show_to_people", {{"name", "thing"}, {"at", at(0, 1.6, 20)}}).ok); // not simulating
+    f.run_id = 1;
+    f.frames();
+    ai::CommandResult r = f.run("show_to_people", {{"name", "thing"}, {"at", at(0, 1.6, 20)}});
+    GIANT_CHECK(r.ok && r.value["shown"] == 1);
+    f.frames(0.1);
+    PeopleSenses::Heard h;
+    GIANT_CHECK(f.senses.heard(f.state.scene, facing, h) && h.kind == PeopleSenses::Kind::sight && h.from == DVec3(0, 1.6, 20));
+    GIANT_CHECK(std::fabs(h.alarm - 0.85f) < 0.01f); // 1.125 (1 - 20 / 60) + 0.1
+    GIANT_CHECK(f.alarm(turned) == 0.0f && f.alarm(too_far) == 0.0f && f.alarm(side) == 0.0f && f.alarm(touching) > 0.99f);
+    GIANT_CHECK(f.told(facing)["heard"]["kind"] == "sight" && f.told(turned)["heard"].is_null());
+    // In sight it stays as alarmed, however seldom each is looked through (one a frame here, five
+    // people); hidden, it eases as after a noise (half of calm_seconds: 0.5 gone).
+    f.senses.settings.seen_a_frame = 1;
+    for (int i = 0; i < 40; ++i) {
+        f.frames(0.5, 1);
+        GIANT_CHECK(f.alarm(facing) == h.alarm);
+    }
+    f.senses.settings.seen_a_frame = 1024;
+    f.frames(0.1);
+    GIANT_CHECK(std::fabs(f.alarm(facing) - 0.85f) < 0.01f && f.senses.heard(f.state.scene, facing, h) && h.seconds < 1.0);
+    GIANT_CHECK(f.run("hide_from_people", {{"name", "thing"}}).ok && !f.run("hide_from_people", {{"name", "thing"}}).ok);
+    f.frames(15.0, 30);
+    GIANT_CHECK(std::fabs(f.alarm(facing) - 0.36f) < 0.04f);
+    f.frames(30.0, 30);
+    GIANT_CHECK(f.alarm(facing) == 0.0f);
+    // Shown again by the same name it moves (still one); turned about, the one it was behind sees it; a wider look takes the side in.
+    GIANT_CHECK(f.run("show_to_people", {{"name", "thing"}, {"at", at(0, 1.6, 20)}}).ok);
+    r = f.run("show_to_people", {{"name", "thing"}, {"at", at(0, 1.6, 60)}});
+    GIANT_CHECK(r.ok && r.value["shown"] == 1);
+    f.frames(0.1);
+    GIANT_CHECK(f.alarm(turned) > 0.5f);
+    GIANT_CHECK(f.run("show_to_people", {{"name", "thing"}, {"at", at(0, 1.6, 20)}}).ok);
+    f.frames(60.0, 30);
+    GIANT_CHECK(f.alarm(side) == 0.0f && f.alarm(turned) == 0.0f && f.alarm(facing) > 0.8f);
+    r = f.run("set_sense_settings", {{"see_angle", 200.0}, {"see_distance", 80.0}});
+    GIANT_CHECK(r.ok && r.value["see_angle"] == 200.0 && r.value["watched"].size() == 1 && r.value["watched"][0]["name"] == "thing");
+    f.frames(0.1);
+    GIANT_CHECK(f.alarm(side) > 0.5f);
+    GIANT_CHECK(!f.run("set_sense_settings", {{"see_angle", 5.0}}).ok && !f.run("set_sense_settings", {{"rays_a_frame", 0}}).ok);
+    // Sight off: nobody sees; what they saw eases.
+    GIANT_CHECK(f.run("set_sense_settings", {{"sight", false}}).ok);
+    const u64 seen = f.senses.stats().seen;
+    f.frames(1.0);
+    GIANT_CHECK(f.senses.stats().seen == seen);
+    GIANT_CHECK(f.run("set_sense_settings", {{"sight", true}}).ok);
+    // Something between (here: anything crossing z = 10): the rays are cast a few a frame, each person looked through in turn.
+    f.frames(60.0, 30);
+    f.senses.blocked = [](const DVec3& from, const DVec3& to) { return (from.z - 10.0) * (to.z - 10.0) < 0.0; };
+    f.senses.settings.rays_a_frame = 1;
+    const u64 rays = f.senses.stats().rays;
+    f.frames(0.5, 5);
+    GIANT_CHECK(f.senses.stats().rays == rays + 5); // (one a frame, however many would look)
+    f.senses.settings.rays_a_frame = 32;
+    f.frames(60.0, 30);
+    f.frames(0.1);
+    GIANT_CHECK(f.alarm(facing) == 0.0f && f.alarm(touching) > 0.99f && f.alarm(side) > 0.5f); // (the one at z = 0 has it hidden)
+    // 16 are shown at most; the simulation stopped, all are forgotten.
+    for (int i = 0; i < 15; ++i) GIANT_CHECK(f.run("show_to_people", {{"name", "more " + std::to_string(i)}, {"at", at(1000, 0, 1000)}}).ok);
+    GIANT_CHECK(!f.run("show_to_people", {{"name", "one too many"}, {"at", at(1000, 0, 1000)}}).ok);
+    f.run_id = 0;
+    f.frames();
+    GIANT_CHECK(f.senses.watched().empty() && f.alarm(touching) == 0.0f);
+}
+
+GIANT_TEST("senses: the player has its own place; up and down; rays only where they matter; a thing's own body; eyes on the ground") {
+    Fixture f;
+    const auto one = [&](double x, double z, double yaw) {
+        const ai::CommandResult made = f.run("create_people", {{"people", {{{"look", "villager"}, {"position", at(x, 0, z)}, {"yaw", yaw}}}}});
+        GIANT_CHECK(made.ok);
+        return made.ok ? made.value["ids"][0].get<world::PersonId>() : world::PersonId{0};
+    };
+    const world::PersonId a = one(0, 0, 0);
+    f.frames();
+    // The player is seen without being shown, and with as many shown as can be; its name is its own.
+    for (int i = 0; i < 16; ++i) GIANT_CHECK(f.run("show_to_people", {{"name", "far " + std::to_string(i)}, {"at", at(5000, 0, 5000)}}).ok);
+    GIANT_CHECK(!f.run("show_to_people", {{"name", "player"}, {"at", at(0, 1.6, 10)}}).ok);
+    f.senses.player = DVec3{0, 1.6, 30};
+    f.frames(0.1);
+    PeopleSenses::Heard h;
+    GIANT_CHECK(f.senses.heard(f.state.scene, a, h) && h.kind == PeopleSenses::Kind::sight && h.from == DVec3(0, 1.6, 30));
+    ai::CommandResult r = f.run("set_sense_settings");
+    GIANT_CHECK(r.ok && r.value["watched"].size() == 17 && r.value["watched"][0]["name"] == "player");
+    // Dead ahead but 45 degrees up: within 120 across, not within 60.
+    f.senses.player = DVec3{0, 21.6, 20};
+    f.frames(0.1);
+    GIANT_CHECK(f.senses.heard(f.state.scene, a, h) && h.from == DVec3(0, 21.6, 20));
+    GIANT_CHECK(f.run("set_sense_settings", {{"see_angle", 60.0}}).ok);
+    f.frames(0.1);
+    f.frames(40.0, 20);
+    GIANT_CHECK(f.alarm(a) == 0.0f);
+    GIANT_CHECK(f.run("set_sense_settings", {{"see_angle", 120.0}}).ok);
+    f.senses.player.reset();
+    // The senses off: what is shown is forgotten.
+    r = f.run("set_sense_settings", {{"on", false}});
+    GIANT_CHECK(r.ok && r.value["watched"].empty() && f.senses.watched().empty());
+    GIANT_CHECK(f.run("set_sense_settings", {{"on", true}}).ok);
+    f.frames(0.1);
+    // Two things ahead, the farther shown first, one ray a frame: the look goes on where the rays ran
+    // out, and the person is as alarmed as the nearer makes it once both are looked at.
+    u64 casts = 0;
+    f.senses.blocked = [&](const DVec3&, const DVec3&) {
+        ++casts;
+        return false;
+    };
+    f.senses.settings.rays_a_frame = 1;
+    GIANT_CHECK(f.run("show_to_people", {{"name", "farther"}, {"at", at(0, 1.6, 40)}}).ok);
+    GIANT_CHECK(f.run("show_to_people", {{"name", "nearer"}, {"at", at(0, 1.6, 20)}}).ok);
+    f.frames(0.1, 1);
+    GIANT_CHECK(casts == 1 && f.alarm(a) == 0.0f);
+    f.frames(0.1, 1);
+    GIANT_CHECK(casts == 2 && f.senses.heard(f.state.scene, a, h) && h.from == DVec3(0, 1.6, 20) && std::fabs(h.alarm - 0.85f) < 0.01f);
+    // The nearer first: the farther could change nothing, so no ray is spent on it.
+    GIANT_CHECK(f.run("hide_from_people", {{"name", "farther"}}).ok && f.run("show_to_people", {{"name", "farther"}, {"at", at(0, 1.6, 40)}}).ok);
+    casts = 0;
+    f.frames(0.1, 1);
+    GIANT_CHECK(casts == 1);
+    // More alarmed by a noise than seeing makes it: the noise is what it remembers; holding what it
+    // sees it is still looked through (one ray), and one that held nothing has no ray spent on it.
+    GIANT_CHECK(f.senses.noise({0, 0, 1}, 100.0f, PeopleSenses::Kind::blast));
+    f.frames(0.1, 2);
+    GIANT_CHECK(f.senses.heard(f.state.scene, a, h) && h.kind == PeopleSenses::Kind::blast && h.alarm > 0.99f);
+    casts = 0;
+    f.frames(0.1, 1);
+    GIANT_CHECK(casts == 1);
+    GIANT_CHECK(f.run("hide_from_people", {{"name", "farther"}}).ok && f.run("hide_from_people", {{"name", "nearer"}}).ok);
+    f.frames(0.1, 1); // (it lets go of what it saw)
+    GIANT_CHECK(f.run("show_to_people", {{"name", "nearer"}, {"at", at(0, 1.6, 20)}}).ok);
+    casts = 0;
+    f.frames(0.1, 1);
+    GIANT_CHECK(casts == 0 && f.alarm(a) > 0.9f);
+    GIANT_CHECK(f.run("hide_from_people", {{"name", "nearer"}}).ok);
+    f.frames(60.0, 20);
+    GIANT_CHECK(f.alarm(a) == 0.0f);
+    // Seen near, then only something far: the alarm eases from where it was, not at once.
+    f.senses.blocked = nullptr;
+    f.senses.player = DVec3{0, 1.6, 5};
+    GIANT_CHECK(f.run("show_to_people", {{"name", "far thing"}, {"at", at(0, 1.6, 55)}}).ok);
+    f.frames(0.1);
+    GIANT_CHECK(f.alarm(a) > 0.99f);
+    f.senses.player.reset();
+    f.frames(0.3, 3);
+    GIANT_CHECK(f.alarm(a) > 0.95f);
+    f.frames(15.0, 30);
+    GIANT_CHECK(std::fabs(f.alarm(a) - 0.5f) < 0.05f);
+    f.frames(30.0, 30);
+    GIANT_CHECK(f.senses.heard(f.state.scene, a, h) && std::fabs(h.alarm - 0.19375f) < 0.01f && h.kind == PeopleSenses::Kind::sight);
+    // A quiet noise heard while it sees does not take the sight's place, and it goes on seeing.
+    const u64 seen_before = f.senses.stats().seen;
+    GIANT_CHECK(f.senses.noise({0, 0, 3}, 1.0f, PeopleSenses::Kind::voice)); // (0.33 at its ears: a sixth of full)
+    f.frames(0.2, 4);
+    GIANT_CHECK(f.senses.heard(f.state.scene, a, h) && h.kind == PeopleSenses::Kind::sight && h.alarm > 0.3f && h.seconds < 0.11);
+    GIANT_CHECK(f.senses.stats().seen == seen_before + 4);
+    GIANT_CHECK(f.run("hide_from_people", {{"name", "far thing"}}).ok);
+    f.frames(60.0, 20);
+    GIANT_CHECK(f.alarm(a) == 0.0f);
+    // A thing whose own body stands in the way within a metre of its middle: hidden by itself, but for its clearance.
+    f.senses.settings.rays_a_frame = 32;
+    f.senses.blocked = [](const DVec3&, const DVec3& to) { return giant::length(to - DVec3{0, 1.6, 20}) < 1.0; };
+    GIANT_CHECK(f.run("show_to_people", {{"name", "crate"}, {"at", at(0, 1.6, 20)}}).ok);
+    f.frames(0.1);
+    GIANT_CHECK(f.alarm(a) == 0.0f);
+    GIANT_CHECK(f.run("show_to_people", {{"name", "crate"}, {"at", at(0, 1.6, 20)}, {"clearance", 1.5}}).ok);
+    f.frames(0.1);
+    GIANT_CHECK(f.alarm(a) > 0.8f);
+    GIANT_CHECK(f.run("hide_from_people", {{"name", "crate"}}).ok);
+    // On terrain a person's eyes are over the ground where it stands, whatever height it was made at.
+    world::Terrain& terrain = f.state.scene.terrain;
+    world::Terrain::Heights heights(static_cast<usize>(terrain.samples()) * terrain.samples(), 20.0f);
+    terrain.set({0, 0}, std::move(heights));
+    const world::PersonId on_ground = one(30, 30, 0);
+    f.senses.blocked = [&](const DVec3& from, const DVec3& to) {
+        const DVec3 way = to - from;
+        const double far_off = giant::length(way);
+        const DVec3 unit = way / far_off;
+        return march_terrain(terrain, from, {static_cast<float>(unit.x), static_cast<float>(unit.y), static_cast<float>(unit.z)}, far_off).has_value();
+    };
+    GIANT_CHECK(f.run("show_to_people", {{"name", "on the ground"}, {"at", at(30, 21.6, 50)}}).ok);
+    f.frames(0.1);
+    GIANT_CHECK(f.senses.heard(f.state.scene, on_ground, h) && h.kind == PeopleSenses::Kind::sight);
 }
 
 GIANT_TEST("senses: what each heard stays its own when people are removed; a noise made part way through the list; none left to hear") {

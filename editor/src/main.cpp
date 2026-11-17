@@ -458,8 +458,15 @@ int run(const Options& options) {
         // The people's trips moved on by the time simulated (stopped: everyone back where the scene has them).
         const editor::PeopleTravel::Clock travel_clock = editor::PeopleTravel::clock_of(physics);
         travel.update(state.scene, travel_clock.run, travel_clock.seconds);
-        // What the people hear of the noises made (a share of the people a frame while any spreads).
-        senses.update(state.scene, travel);
+        // What the people hear of the noises made (a share of the people a frame while any spreads),
+        // and who sees the player (at the camera: its eyes while playing).
+        // (A screenshot's frame does not look or listen again.)
+        if (play.playing()) {
+            senses.player = state.camera.position;
+        } else {
+            senses.player.reset();
+        }
+        if (!in_screenshot) senses.update(state.scene, travel);
         // Those whose routines say so set off (a share of the people a frame), by the time of day shown.
         routines.update(state.scene, travel, time_of_day.shown().hours);
         // The people near the camera get their entities (a few a frame) before the scene is drawn.

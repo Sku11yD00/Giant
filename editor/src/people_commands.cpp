@@ -16,6 +16,7 @@
 #include "giant/world/people.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -820,7 +821,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "it do now while the world runs (`activity`, the `place` it was sent to or \"\", and `failed` when it "
          "could not be sent: no such place, no road near, no way found), else null. `alarm` (0 calm to 1) and "
          "`heard`: the noise that alarmed it most of late (`kind`, `from` where it was made, `level` at its "
-         "ears, `seconds` since), else null (make_noise, set_sense_settings). `near` goes by `position`.",
+         "ears, `seconds` since), or what it saw (`kind` \"sight\", `from` where the thing was, `seconds` "
+         "since it last saw it), else null (make_noise, show_to_people, set_sense_settings). `near` goes by `position`.",
          object_schema(Json::array(), people_props),
          true,
          [&state](const Json& args, CommandContext&) {
@@ -933,23 +935,76 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                                             {"noises", state.senses->stats().noises}});
          }});
     add(registry,
+        {"show_to_people",
+         "Something the people may see, by `name`, at `at` (its middle or its eyes; again with the same "
+         "name moves it; 16 at most; the player is seen while playing without being shown, and the name "
+         "\"player\" is its own). `clearance` (metres, 0 to 50, default 0): how far short of `at` the look "
+         "stops, about the half size of the thing's own body so that it does not hide itself (0 for a "
+         "point in the open). While simulating, a person sees it within see_distance of its eyes, within "
+         "see_angle about the level way it faces (or within arm's reach) and with nothing between (bodies "
+         "and terrain; characters are seen through): its `alarm` rises as near as it is and is held while "
+         "it is in sight (get_people: `heard` with kind \"sight\"; set_sense_settings). Forgotten when the "
+         "simulation stops or starts again, with another scene, and when the senses are turned off. View "
+         "state: not undone, not saved.",
+         object_schema({"name", "at"},
+                       {{"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", PeopleSenses::k_max_name}}},
+                        {"at", point_schema("Where it is, metres.")},
+                        {"clearance", {{"type", "number"}, {"minimum", 0}, {"maximum", 50}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.senses == nullptr || state.travel == nullptr) return CommandResult::failure("nobody sees anything here");
+             sync_senses(state);
+             if (!state.travel->running()) return CommandResult::failure("not simulating (simulate on first): what is shown is forgotten when the simulation stops");
+             if (!state.senses->settings.on) return CommandResult::failure("the people's senses are off (set_sense_settings)");
+             const DVec3 where = point(args["at"]);
+             if (!(std::fabs(where.x) <= 1e8 && std::fabs(where.y) <= 1e8 && std::fabs(where.z) <= 1e8)) return CommandResult::failure("`at` is out of the world (1e8 m)");
+             const std::string name = args["name"].get<std::string>();
+             if (name == "player") return CommandResult::failure("\"player\" is the player's own name (seen while playing)");
+             if (!state.senses->watch(name, where, static_cast<float>(args.value("clearance", 0.0)))) {
+                 return CommandResult::failure("as many things are shown as can be (16): hide_from_people one first");
+             }
+             return CommandResult::success({{"shown", state.senses->watched().size()}});
+         }});
+    add(registry,
+        {"hide_from_people",
+         "What show_to_people showed by `name` is no longer there to be seen. View state.",
+         object_schema({"name"}, {{"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", PeopleSenses::k_max_name}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.senses == nullptr) return CommandResult::failure("nobody sees anything here");
+             sync_senses(state);
+             if (!state.senses->unwatch(args["name"].get<std::string>())) return CommandResult::failure("nothing of that name is shown");
+             return CommandResult::success({{"shown", state.senses->watched().size()}});
+         }});
+    add(registry,
         {"set_sense_settings",
-         "How the people hear while simulating: `on`; `hear_loudness` (the level at one's ears below "
+         "How the people hear and see while simulating: `on`; `hear_loudness` (the level at one's ears below "
          "which nobody notices, 0.01 to 100, default 0.2: a rifle's report is heard to 500 m); "
          "`alarm_loudness` (the level that alarms one fully, default 2, never under hear_loudness: quieter "
          "alarms in proportion, and each noise takes its share of what calm is left); `calm_seconds` (a "
          "full alarm eases to nothing over this, 1 to 3600, default 30); `looked_a_frame` (people looked "
          "at a frame while a noise spreads, 1 to 16384, default 4096; fewer when many noises "
-         "spread at once: 262,144 tests of a person against a noise a frame at most). Fields left out stay; with none it "
+         "spread at once: 262,144 tests of a person against a noise a frame at most). Sight: `sight` (on); "
+         "`see_distance` (metres from its eyes, 1 to 300, default 60); `see_angle` (degrees across, about "
+         "the way it faces, 10 to 360, default 120); `seen_a_frame` (people looked at a frame while anything "
+         "is shown, 1 to 16384, default 1024) and `rays_a_frame` (rays cast a frame for what stands "
+         "between, 1 to 128, default 32). Fields left out stay; with none it "
          "only reports. Returns the settings with `noises` (spreading now), `made`, `dropped` (more at "
-         "once than the 64 kept) and `heard` (times someone heard one) since the simulation started. "
+         "once than the 64 kept) and `heard` (times someone heard one), `watched` (what is shown: `name`, "
+         "`at`, `clearance`; the player first while playing), `seen` (times someone looked and saw one) "
+         "and `rays` since the simulation started. Off, the noises spreading and what is shown are forgotten. "
          "View state.",
          object_schema(Json::array(),
                        {{"on", {{"type", "boolean"}}},
                         {"hear_loudness", {{"type", "number"}, {"minimum", 0.01}, {"maximum", 100}}},
                         {"alarm_loudness", {{"type", "number"}, {"minimum", 0.01}, {"maximum", 1000}}},
                         {"calm_seconds", {{"type", "number"}, {"minimum", 1}, {"maximum", 3600}}},
-                        {"looked_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", PeopleSenses::k_max_looked}}}}),
+                        {"looked_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", PeopleSenses::k_max_looked}}},
+                        {"sight", {{"type", "boolean"}}},
+                        {"see_distance", {{"type", "number"}, {"minimum", 1}, {"maximum", PeopleSenses::k_max_see}}},
+                        {"see_angle", {{"type", "number"}, {"minimum", 10}, {"maximum", 360}}},
+                        {"seen_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", PeopleSenses::k_max_looked}}},
+                        {"rays_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", PeopleSenses::k_max_rays}}}}),
          false,
          [&state](const Json& args, CommandContext&) {
              if (state.senses == nullptr) return CommandResult::failure("nobody hears anything here");
@@ -959,6 +1014,11 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              s.alarm_loudness = static_cast<float>(args.value("alarm_loudness", static_cast<double>(s.alarm_loudness)));
              s.calm_seconds = static_cast<float>(args.value("calm_seconds", static_cast<double>(s.calm_seconds)));
              s.looked_a_frame = args.value("looked_a_frame", s.looked_a_frame);
+             s.sight = args.value("sight", s.sight);
+             s.see_distance = static_cast<float>(args.value("see_distance", static_cast<double>(s.see_distance)));
+             s.see_angle = static_cast<float>(args.value("see_angle", static_cast<double>(s.see_angle)));
+             s.seen_a_frame = args.value("seen_a_frame", s.seen_a_frame);
+             s.rays_a_frame = args.value("rays_a_frame", s.rays_a_frame);
              if (s.alarm_loudness < s.hear_loudness) {
                  if (args.contains("alarm_loudness")) return CommandResult::failure("alarm_loudness must be at least hear_loudness");
                  s.alarm_loudness = s.hear_loudness;
@@ -966,6 +1026,11 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              state.senses->settings = s;
              if (!s.on) state.senses->silence();
              const PeopleSenses::Stats& t = state.senses->stats();
+             Json watched = Json::array();
+             if (s.on && state.senses->player) watched.push_back({{"name", "player"}, {"at", point_json(*state.senses->player)}, {"clearance", 0.0}});
+             for (const PeopleSenses::Watched& w : state.senses->watched()) {
+                 watched.push_back({{"name", w.name}, {"at", point_json(w.at)}, {"clearance", w.clearance}});
+             }
              return CommandResult::success({{"on", s.on},
                                             {"hear_loudness", s.hear_loudness},
                                             {"alarm_loudness", s.alarm_loudness},
@@ -974,7 +1039,15 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                                             {"noises", t.noises},
                                             {"made", t.made},
                                             {"dropped", t.dropped},
-                                            {"heard", t.heard}});
+                                            {"heard", t.heard},
+                                            {"sight", s.sight},
+                                            {"see_distance", s.see_distance},
+                                            {"see_angle", s.see_angle},
+                                            {"seen_a_frame", s.seen_a_frame},
+                                            {"rays_a_frame", s.rays_a_frame},
+                                            {"watched", std::move(watched)},
+                                            {"seen", t.seen},
+                                            {"rays", t.rays}});
          }});
     add(registry,
         {"set_routine_settings",
@@ -1111,6 +1184,22 @@ void sync_senses(EditorState& state) {
 void connect_senses(EditorState& state) {
     if (state.physics == nullptr || state.senses == nullptr || state.senses->connected) return;
     state.senses->connected = true;
+    // What stands between a person's eyes and a thing shown: the bodies (characters seen through: the
+    // person's own, the player's) and the terrain past what the physics holds.
+    state.senses->blocked = [&state](const DVec3& from, const DVec3& to) {
+        const DVec3 way = to - from;
+        const double reach = giant::length(way);
+        if (!(reach > 1e-3)) return false;
+        const DVec3 unit = way / reach;
+        const Vec3 dir{static_cast<float>(unit.x), static_cast<float>(unit.y), static_cast<float>(unit.z)};
+        if (state.physics != nullptr) {
+            const sim::PhysicsWorld& w = state.physics->world();
+            sim::PhysicsWorld::RayFilter filter;
+            filter.accept = [&w](sim::BodyId id, u64) { return !w.is_character_body(id); };
+            if (w.raycast(from, dir, reach, filter)) return true;
+        }
+        return march_terrain(state.scene.terrain, from, dir, reach).has_value();
+    };
     std::function<void(std::span<const PhysicsState::ShotHit>)> hits_before = state.physics->on_hits;
     state.physics->on_hits = [&state, hits_before](std::span<const PhysicsState::ShotHit> hits) {
         if (hits_before) hits_before(hits);
