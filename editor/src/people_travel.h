@@ -53,6 +53,7 @@ public:
         DVec3 to{};        // where it is going
         std::string place; // the place asked for by name, if one was
         double speed = 1.4; // m/s
+        double within = 500.0; // metres it and its goal might be from a road when it was sent
         float yaw = 0.0f;   // degrees: the way it faced when it set off (kept where its way has no length)
         world::RouteNodeId first = 0, last = 0; // the nodes it joins and leaves the roads at
         std::vector<DVec3> points; // travelling: the way, from where it set off to `to`
@@ -99,7 +100,9 @@ public:
     double seconds() const { return m_seconds; }
 
     // Sends a person to `to` at `speed` (m/s), `within` metres being how
-    // far from a road it and the goal may be. Empty: on its way (or its way
+    // far from a road it and the goal may be (one going along the roads, or
+    // stopped part way along them, may be on a long stretch far from its
+    // ends: it joins at the nearest node within k_join_within). Empty: on its way (or its way
     // is being looked for); else why not. The graph is built when a run
     // starts, and here when the routes have changed since (a command's
     // cost; in a frame only for the first sent after another scene was
@@ -111,6 +114,11 @@ public:
                      std::string_view place = {}, bool in_frame = false);
     // Ends a person's trip where it is. False: it had none.
     bool stop(world::PersonId id);
+    // Puts a person at `at` (a loaded game's: where it had got to), ending
+    // any trip it has. False: not simulating, or no such person.
+    bool put(const world::Scene& scene, world::PersonId id, const Where& at);
+    // Those kept somewhere they travelled to or were put (those on a trip too: where they set off).
+    const std::unordered_map<world::PersonId, Where>& moved() const { return m_places; }
     void clear();
 
     // Where a person is now.
@@ -178,6 +186,7 @@ private:
     std::unordered_map<world::PersonId, u32> m_index; // into m_trips
     usize m_cursor = 0;                               // in m_trips: looked at for having arrived
     std::unordered_map<world::PersonId, Where> m_places; // those at rest somewhere they travelled to
+    std::unordered_set<world::PersonId> m_on_road; // those stopped part way along the roads (or put: a loaded game's)
     usize m_place_bucket = 0; // in m_places: looked through for people gone, a few buckets a frame
     std::vector<world::PersonId> m_gone; // scratch
     std::unordered_set<world::PersonId> m_held;

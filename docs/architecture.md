@@ -3595,6 +3595,70 @@ is played is the look's, not the place's (a bench and a bed play the
 same `rest`); an entity made again (the camera gone and back) begins
 its clip from the start, a once-only one too.
 
+### Game saves keep the people (LW4 part 1)
+
+A game save made while the world simulates has a `people` section: for
+each person that is not where the scene has it (`at`: x, y, z, yaw), is
+on a trip (`trip`: `to`, `speed`, `within`, the `place` asked for by
+name), and for those what each had acted on of its routine (`did`: what
+it acted on, `said`, a hash of the entry's words; the `entry`; the
+`place` it was sent to; `failed`; `own_trip`, the trip being the
+routine's), in the order of their ids. One that has not left home
+this run is not written (its routine looks at it afresh and finds it
+where it should be); everyone that has travelled is, at every save and
+autosave. A save with nobody still writes the section, empty, so that
+a slot saved again never loads the people it had before. The list is gathered on the frame as plain
+structs (`GameSaves::SavedPerson`: one pass over the scene's people,
+two lookups each and, for those written, the names of the places they
+go to copied; counted in `gather_ms` with the rest of the gathering)
+and made into text on the save's job.
+
+A load starts the simulation again (a new run: everyone is where the
+scene has them, the routines begin afresh) and then puts the people
+back, `GameSaves::people_per_frame` (1024) a frame, of them at most
+`people_sent_per_frame` (64) that are sent on (each a trip made, its
+ends looked for among the road's nodes), in
+`GameSaves::place_people`: `PeopleTravel::put` stands one where it was,
+`PeopleTravel::send` (the in-frame kind: the roads as last seen) sends
+it on to where it was going, the way looked for again from there, and
+`PeopleRoutines::restore` tells its routine what it had acted on, so
+that the routine neither sends it a second time nor takes its trip for
+somebody else's (it is told nothing when the entry says something else
+now: the routine changed since, and is acted on afresh). One whose
+routine's trip cannot be sent again (the roads are others) is left to
+its routine, which sends it afresh; one whose own trip (a command's)
+cannot is still told what its routine had done; one whose routine says
+something else now has the routine's trip stopped where it is. A
+person on the roads may be part way along a long stretch, farther
+from the road's nodes than the `within` it was sent with:
+`PeopleTravel::send` looks for the node it joins at within
+`k_join_within` (4096 m) for one going along the roads, one stopped
+part way along them, and one a loaded game put back (the others, at
+home or where a trip ended, keep `within`). While any wait,
+`PeopleRoutines::hold` and `PeopleState::hold` are set: nobody is
+looked at by the routines (one not put back yet would be sent from its
+home) and nobody has an entity (one would stand at home and then be
+elsewhere). A person gone from the world since is skipped; the
+simulation stopped before all are back skips the rest. A save made
+while some still wait writes those as the save they came from had
+them. A section that is not as written (ids not rising, a place out of
+the world, a speed no trip may have, an entry no routine may have) is
+refused with the whole load. `get_save` tells `people`,
+`people_applied`, `people_skipped` and `people_waiting`.
+
+Known limits: a trip is sent again from where the person was, to the
+nearest road node, so one saved in the middle of a long stretch walks
+straight to the nearer end of it first (back, if that is nearer), and
+one more than 4096 m from every node (a stretch over 8 km with no node
+between) cannot be sent on and stands where it was; with 65,536
+people all away from home the gathering copies as many place names on
+the save's frame (`gather_ms` tells); one that was waiting for its way, or
+whose way had failed, is where it set off from; a person whose routine
+or its entries changed between the save and the load is told nothing
+(its routine sends it afresh); what the hours' spread had not yet sent
+is sent at its own time as before; the clips people play (LW3 part 3)
+begin again from their start.
+
 ### People near the camera (LW1b)
 
 `PeopleState` (`editor/src/people_state.h`) gives the people within
@@ -3703,7 +3767,8 @@ place's name or a point) travels there along the routes. The editor's
 built from the scene's routes when a person is sent after they changed (a
 command's cost), and one `RouteSearch` whose lists every search reuses.
 `send` finds the nodes nearest the person and the goal at once (and says
-so if there is none within `within` metres, or if the two are in parts
+so if there is none within `within` metres (4096 m for a person already
+on the roads, who may be far along a long stretch), or if the two are in parts
 of the roads nothing joins: `build` floods the graph once to number its
 joined-up parts, so no search is spent on a goal that cannot be reached);
 the way between them is
@@ -3792,7 +3857,8 @@ walked. Stopping the simulation lets every walker go and puts everyone
 back: an entity whose person was elsewhere, or that was put where it
 walked to, is taken away and made again (`PeopleTravel::resets` tells),
 the rest stay. Game saves leave out the walkers and the ragdolls of
-people's entities, and a load places none an older save names.
+people's entities, and a load places none an older save names (the
+people themselves are kept: "Game saves keep the people").
 
 Known limits (the next parts): the way between points is walked straight
 (a road through a wall stops its walker: it looks for a way round to the

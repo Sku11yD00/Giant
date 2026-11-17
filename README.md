@@ -392,6 +392,9 @@ Open-world systems:
 - LW3 part 3: a person look names the clip its people play for each
   activity (working, eating, sleeping) once they stand where their
   routine has them.
+- LW4 part 1: game saves keep the people: where each had got to, where
+  it was going and what it had done of its routine, so a loaded game
+  goes on with nobody sent twice.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

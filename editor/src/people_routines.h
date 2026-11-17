@@ -45,6 +45,7 @@
 #include "giant/core/types.h"
 #include "giant/world/scene.h"
 
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -95,6 +96,26 @@ public:
         bool anywhere = false;               // it does it where it stands (`stay`)
     };
     bool activity(const world::Scene& scene, world::PersonId id, Activity& out) const;
+
+    // What a game save keeps of a person's routine: what it last acted on,
+    // so that a loaded game does not send everyone again.
+    struct Kept {
+        u32 said = 0;          // what it acted on (never 0)
+        u8 entry = 0;          // its routine's entry then
+        bool failed = false;
+        bool own_trip = false; // the trip it is on is the routine's
+        std::string place;     // where it was sent ("" for nowhere)
+    };
+    // Before `kept` is asked of many (a save's): the slots as the people are now (people made or
+    // removed since the last frame: an edit's cost).
+    void ready(const world::Scene& scene, const PeopleTravel& travel);
+    // The person at `index` of the scene's people: false when it has acted on nothing.
+    bool kept(const world::Scene& scene, const PeopleTravel& travel, usize index, Kept& out) const;
+    // Puts back what a person had acted on (after its trip, if any, was sent again). False: no such
+    // person, or it has no routine with that entry now, or the entry says something else now.
+    bool restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had);
+    // While set nobody is looked at (a loaded game's people are being put back: game_saves.h).
+    bool hold = false;
     // The hour a person keeps at `hours` (late by its share of spread_minutes; 0 to under 24).
     double hour_of(world::PersonId id, double hours) const;
     // Where `entry` sends `person`, or none (stay, no home, no such place).
@@ -137,6 +158,7 @@ private:
     void follow_places(const world::Scene& scene);
     void match_slots(const std::vector<world::Person>& people);
     void try_failed_again();
+    void follow(const world::Scene& scene, const PeopleTravel& travel);
     const world::Place* sent_to(const world::Scene& scene, const Slot& slot) const;
     const world::Place* named(const world::Scene& scene, std::string_view name) const;
     const world::Place* tagged_nearest(const world::Scene& scene, std::string_view tag, const DVec3& from, i64& measured) const;

@@ -503,6 +503,19 @@ GIANT_TEST("people near the camera are given entities from their looks, a few a 
     GIANT_CHECK(f.run("set_people_settings", {{"on", false}}).ok);
     people.update(scene, on, nullptr);
     GIANT_CHECK(scene.size() == 0 && people.stats().embodied == 0);
+    // Held (a loaded game's people are being put back: game_saves.h): nobody has an entity until let go.
+    GIANT_CHECK(f.run("set_people_settings", {{"on", true}, {"most", 256}}).ok);
+    for (int i = 0; i < 4; ++i) people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 3);
+    people.hold = true;
+    for (int i = 0; i < 2; ++i) people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 0 && people.stats().embodied == 0);
+    people.hold = false;
+    for (int i = 0; i < 4; ++i) people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 3);
+    GIANT_CHECK(f.run("set_people_settings", {{"on", false}}).ok);
+    people.update(scene, on, nullptr);
+    GIANT_CHECK(scene.size() == 0);
     // Another scene (a copy taken while they stood): nothing held, strays gone.
     GIANT_CHECK(f.run("set_people_settings", {{"on", true}, {"most", 256}}).ok);
     for (int i = 0; i < 4; ++i) people.update(scene, on, nullptr);
