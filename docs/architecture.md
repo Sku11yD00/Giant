@@ -3465,6 +3465,58 @@ yet; a look whose mesh file is not imported draws nothing; places and looks cann
 lists are whole in world.json, not in chunks by cell (10 to 12 MB for 65536
 people as the file is written, indented).
 
+## Routes (living-world plan LW2a)
+
+The world's roads and paths are a coarse graph the scene keeps beside the
+people (`world::Routes` in `scene.h`, checked by `giant/world/routes.h`):
+`RouteNode`s (an id that only rises, a point on the ground; at most 65536,
+by rising id) and `RouteLink`s between two of them (the lower id first, a
+pair once, by rising pair; a width and a kind, `path` or `road`; walked
+both ways; at most 262144). It is for travel farther than the walkable
+tiles that are loaded: people far from the camera will move along it by
+the clock, people near walk the ground from node to node. Saved in the
+scene's text and a world's world.json under `routes` (`next_id`, and a
+short list a node `[id, x, y, z]` and a link `[a, b, width, kind]`: the
+text gives a number a line, about 25 MB with every node and link there can
+be, rewritten whole by a save); only when there is anything, so older
+files read and write the same. The world's streaming carries it between the index and the scene and counts a change as an
+unsaved setting.
+
+`giant/nav/route.h` finds the way. `RouteGraph` is built once through the
+nodes and links: every link an edge from both its ends, filed by node, and
+the nodes by the 64 m square they are in for `nearest`. An edge costs its
+length times its kind's pace (a road 1, a path 1.3 a metre) plus 3 a metre
+risen or fallen (`RouteSettings`). `RouteSearch` is A* over it in bounded
+slices (`advance(budget)`: rule 9; the budget counts nodes taken up and
+links looked along, and a slice allocates nothing but the way's list when
+found: the open list's room is taken when the search is made; costs are
+summed in doubles), the straight line at the quickest pace
+as its guess, which never overestimates, so the way found is the cheapest.
+
+The commands (`route_commands.cpp`): `create_route` lays a node at each
+point and links them in order (a point within `join` metres of a node
+there already, or of an earlier point of the call, uses it: roads laid one
+after another meet at crossings), `link_route_nodes` / `unlink_route_nodes`,
+`set_route_node`, `remove_route_nodes` (with their links), `get_routes`
+and `get_route` (from and to a point or a node). An undo step keeps the
+nodes and links its command took out and put in, never the lists, and
+after one is done or undone no link is left whose end is gone (commands
+run outside the history may have removed it), and a step that would leave
+more nodes or links than a scene may hold does nothing. Undoing a change
+to a node or link such a command has since removed brings it back as it
+was before the change (a node without the links it had). A few nodes or
+links changed are changed where they are in the lists; a command that
+changes nothing makes no step.
+
+Known limits (the next parts): nobody travels yet (LW2b: people along
+their routes); no links are made from the terrain itself; `get_route`
+and `create_route` (to find the nodes its points join) build the graph
+within the command, a few milliseconds with every node there can be, and
+`get_route` searches whole there too; a search takes its lists' room when
+made (three by node, one by link: the people's searches will share one
+graph, reuse those lists and spend a budget a frame); a link is a
+straight line between its nodes whatever the ground between.
+
 ## Sound
 
 `engine/audio` (core only) hears the world. `Mixer` (mixer.h) plays a

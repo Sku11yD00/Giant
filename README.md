@@ -375,6 +375,8 @@ Open-world systems:
   whichever part of it is loaded.
 - LW1 part 2: the people near the camera are given real characters made
   from their looks, a few a frame, and lose them again far off.
+- LW2 part 1: roads and paths across the whole world as a graph the world
+  keeps, laid by command, and the cheapest way found along them.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

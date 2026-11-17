@@ -390,6 +390,16 @@ GIANT_TEST("world streaming: the people, their looks and places are the world's,
                 scene.people[0].position.x == 90000.0);
     // The id taken out before the save is not given again.
     GIANT_CHECK(scene.next_person_id == 3 && !e.w.streaming.unsaved_settings(scene));
+    // Roads are the world's too.
+    world::Routes routes;
+    routes.nodes = {{1, {0, 0, 0}}, {2, {90000, 0, 0}}};
+    routes.links = {{1, 2, 4.0f, world::RouteKind::road}};
+    routes.next_id = 3;
+    e.state.scene.routes = routes;
+    GIANT_CHECK(e.w.streaming.unsaved_settings(scene) && !e.run("open_world", {{"folder", e.folder()}}) && e.run("save_world"));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(e.state.scene.routes == routes && !e.w.streaming.unsaved_settings(e.state.scene));
     // A person made and undone leaves its id used (the world then has that to save).
     GIANT_CHECK(e.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}}}}}) && e.commands.undo());
     GIANT_CHECK(scene.people.size() == 1 && scene.next_person_id == 4 && e.w.streaming.unsaved_settings(scene));
