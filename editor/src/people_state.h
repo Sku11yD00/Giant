@@ -44,6 +44,8 @@ public:
     };
     static constexpr u32 k_max_embodied = 1024;
     Settings settings;
+    // While set nobody has an entity (a loaded game's people are being put back where they were: game_saves.h).
+    bool hold = false;
     // Where the people are while the world runs (people_travel.h); set by
     // main (and tests). Null: where the scene has them. One given an
     // entity is held (its trip goes on as the entity walks) until the entity goes.

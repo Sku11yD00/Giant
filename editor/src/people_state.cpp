@@ -369,7 +369,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     if (scene.identity() != m_scene) take_up(scene);
     strays(scene);
     m_entities.clear();
-    if (!settings.on) {
+    if (!settings.on || hold) {
         if (!m_held.empty()) release_all(scene);
         m_stats.waiting = 0;
         return;

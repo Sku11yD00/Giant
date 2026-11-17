@@ -130,6 +130,7 @@ void PeopleTravel::clear() {
     m_trips.clear();
     m_index.clear();
     m_places.clear();
+    m_on_road.clear();
     m_queue.clear();
     m_queue_head = 0;
     m_searching = 0;
@@ -140,7 +141,15 @@ void PeopleTravel::clear() {
 // Takes a trip away: one arrived stays at its end, else where it is.
 void PeopleTravel::end(usize index, bool arrived) {
     Trip& t = m_trips[index];
-    if (t.phase == Phase::travelling) m_places[t.person] = at(t, arrived ? length(t) : gone(t));
+    if (t.phase == Phase::travelling) {
+        m_places[t.person] = at(t, arrived ? length(t) : gone(t));
+        // (Stopped part way along the roads it is on them; arrived, or gone straight, it is where it went.)
+        if (!arrived && t.first != 0) {
+            m_on_road.insert(t.person);
+        } else {
+            m_on_road.erase(t.person);
+        }
+    }
     if (t.phase == Phase::searching) --m_stats.searching;
     if (arrived) ++m_stats.arrived;
     if (m_searching == t.person) m_searching = 0; // (its search's result is nobody's)
@@ -318,10 +327,16 @@ std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, co
         m_trips.reserve(room);
         m_index.reserve(room);
         m_places.reserve(room);
+        m_on_road.reserve(room);
     }
     const Where now = where(*person);
     const DVec3 here = now.position;
-    const auto first = m_graph.nearest(here, within), last = m_graph.nearest(to, within);
+    // (One on the roads, going along them or stopped on them, may be part way along a long stretch,
+    // farther from its ends than `within`: the node it joins at is looked for as far as any may be.)
+    const Trip* going = find(id);
+    const bool on_road = m_on_road.contains(id) || (going != nullptr && going->phase == Phase::travelling && going->first != 0);
+    const double join = on_road ? k_join_within : within;
+    const auto first = m_graph.nearest(here, join), last = m_graph.nearest(to, within);
     const double straight = distance(here, to);
     // The roads are no help to one going no farther than to them and from them (or with none near at
     // either end but the goal within reach): straight there.
@@ -329,7 +344,7 @@ std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, co
                                                                               distance(m_graph.position(*last), to))) ||
                         ((!first || !last) && straight <= within);
     if (!direct && in_frame && (!first || !last)) return "no road near";
-    if (!direct && !first) return "no road or path within " + whole(within) + " m of person " + std::to_string(id);
+    if (!direct && !first) return "no road or path within " + whole(join) + " m of person " + std::to_string(id);
     if (!direct && !last) return "no road or path within " + whole(within) + " m of where it is sent";
     if (!direct && m_island[*first] != m_island[*last]) { // (known at once: no search to spend frames on)
         if (in_frame) return "no way";
@@ -343,6 +358,7 @@ std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, co
     trip.serial = ++m_serial;
     trip.to = to;
     trip.place = place;
+    trip.within = within;
     trip.speed = pace;
     trip.yaw = now.yaw;
     ++m_stats.searching; // (searching until it sets off)
@@ -358,6 +374,21 @@ std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, co
     m_index[id] = static_cast<u32>(m_trips.size());
     m_trips.push_back(std::move(trip));
     return {};
+}
+
+bool PeopleTravel::put(const world::Scene& scene, world::PersonId id, const Where& at) {
+    if (!running() || scene.identity() != m_scene || world::find_person(scene.people, id) == nullptr) return false;
+    if (m_trips.empty() && m_places.empty()) { // (the first of a run: room for everyone, as send takes it)
+        const usize room = std::min(scene.people.size(), k_max_trips);
+        m_trips.reserve(room);
+        m_index.reserve(room);
+        m_places.reserve(room);
+        m_on_road.reserve(room);
+    }
+    if (const auto had = m_index.find(id); had != m_index.end()) end(had->second, false);
+    m_places[id] = at;
+    m_on_road.insert(id); // (where it had travelled to: along a road, as far as is known)
+    return true;
 }
 
 bool PeopleTravel::stop(world::PersonId id) {

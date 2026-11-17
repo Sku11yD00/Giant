@@ -2,6 +2,8 @@
 // applied over frames.
 #include "game_saves.h"
 
+#include "people_state.h"
+
 #include "physics_state.h"
 #include "play_state.h"
 #include "ragdoll_state.h"
@@ -11,6 +13,7 @@
 #include "world_streaming.h"
 
 #include "giant/ai/json.h"
+#include "giant/world/people.h"
 #include "giant/world/scene.h"
 
 #include <algorithm>
@@ -53,6 +56,29 @@ bool finite_in(const Json& j, double lo, double hi, double& out) {
 
 constexpr usize k_max_saved_poses = 65536;
 constexpr usize k_max_reason = 256;
+
+// A save's people as text (made on the job: there may be tens of thousands).
+std::string people_text(const std::vector<GameSaves::SavedPerson>& people) {
+    Json list = Json::array();
+    for (const GameSaves::SavedPerson& s : people) {
+        Json j = {{"id", s.id}};
+        if (s.moved) j["at"] = Json::array({s.at.position.x, s.at.position.y, s.at.position.z, s.at.yaw});
+        if (s.trip) {
+            Json trip = {{"to", Json::array({s.to.x, s.to.y, s.to.z})}, {"speed", s.speed}, {"within", s.within}};
+            if (!s.place.empty()) trip["place"] = s.place;
+            j["trip"] = std::move(trip);
+        }
+        if (s.did) {
+            Json did = {{"said", s.kept.said}, {"entry", s.kept.entry}};
+            if (!s.kept.place.empty()) did["place"] = s.kept.place;
+            if (s.kept.failed) did["failed"] = true;
+            if (s.kept.own_trip) did["own_trip"] = true;
+            j["did"] = std::move(did);
+        }
+        list.push_back(std::move(j));
+    }
+    return Json{{"people", std::move(list)}}.dump(1) + "\n";
+}
 constexpr float k_max_bone_speed = 1000.0f; // m/s and rad/s, each part (what the physics takes back)
 constexpr double k_max_lying = 1e9;         // seconds
 constexpr u32 k_max_joint = 65535;
@@ -155,6 +181,7 @@ struct GameSaves::Sections {
     std::vector<SavedPose> poses;
     std::vector<SavedWalker> walkers;
     std::vector<SavedRagdoll> ragdolls;
+    std::vector<SavedPerson> people;
 };
 
 struct GameSaves::Pending {
@@ -442,6 +469,57 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
         lying = ragdolls.size();
         sections["ragdolls"] = Json{{"ragdolls", std::move(ragdolls)}}.dump(1) + "\n";
     }
+    // The people (only while simulating: they travel by its clock): those not where the scene has
+    // them, on a trip, or following a routine; those of a load not put back yet too.
+    std::vector<SavedPerson> people;
+    if (state.physics != nullptr && state.physics->simulating() && state.travel != nullptr) {
+        const PeopleTravel::Clock clock = PeopleTravel::clock_of(*state.physics);
+        state.travel->sync(state.scene, clock.run, clock.seconds);
+        const auto in = [](const DVec3& v) {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::fabs(v.x) <= 1e8 &&
+                   std::fabs(v.y) <= 1e8 && std::fabs(v.z) <= 1e8;
+        };
+        // (Those waiting are in the order of their ids, as the scene's people are: taken as they come.)
+        usize waiting = state.physics->runs() == m_people_run ? m_people_next : m_people_waiting.size();
+        const auto& moved = state.travel->moved();
+        if (state.routines != nullptr) state.routines->ready(state.scene, *state.travel);
+        people.reserve(std::min(state.scene.people.size(),
+                                moved.size() + state.travel->stats().trips + (m_people_waiting.size() - waiting)));
+        for (usize i = 0; i < state.scene.people.size(); ++i) {
+            const world::Person& person = state.scene.people[i];
+            while (waiting < m_people_waiting.size() && m_people_waiting[waiting].id < person.id) ++waiting;
+            if (waiting < m_people_waiting.size() && m_people_waiting[waiting].id == person.id) {
+                people.push_back(m_people_waiting[waiting]); // (not put back yet: as the save it came from had it)
+                continue;
+            }
+            SavedPerson s;
+            s.id = person.id;
+            const PeopleTravel::Trip* trip = state.travel->trip(person.id);
+            const bool going = trip != nullptr && trip->phase != PeopleTravel::Phase::failed;
+            if (moved.contains(person.id) || (trip != nullptr && trip->phase == PeopleTravel::Phase::travelling)) {
+                s.at = state.travel->where(person);
+                s.moved = in(s.at.position) && std::fabs(s.at.yaw) <= 360.0f;
+            }
+            if (going && in(trip->to) && trip->speed >= 0.1 && trip->speed <= 100.0) {
+                s.trip = true;
+                s.to = trip->to;
+                s.speed = trip->speed;
+                s.within = std::clamp(trip->within, 0.0, PeopleTravel::k_join_within);
+                s.place = trip->place;
+            }
+            // (One at home that is not going anywhere is not written: its routine looks at it afresh
+            // and finds it where it should be, so a world of thousands at home saves nobody.)
+            if ((s.moved || s.trip) && state.routines != nullptr &&
+                state.routines->kept(state.scene, *state.travel, i, s.kept)) {
+                s.did = true;
+                // (Its routine's trip failed and the routine has not looked since: failed, to be tried again.)
+                if (s.kept.own_trip && !s.trip) s.kept.failed = true;
+                if (!s.trip) s.kept.own_trip = false;
+            }
+            if (s.moved || s.trip) people.push_back(std::move(s));
+        }
+    }
+    const usize peopled = people.size();
     save::Meta meta;
     meta.world_name = state.world->folder().filename().string();
     meta.world_hash = world_identity(state.world->index());
@@ -467,10 +545,11 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
     m_status.bodies = posed;
     m_status.walkers = walking;
     m_status.ragdolls = lying;
+    m_status.people = peopled;
     m_status.gather_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gather_from).count();
     m_autosaved_at = m_play_seconds;
-    m_jobs.submit(m_group, [this, slot, path, base, meta, generation, session, autosave, sections = std::move(sections),
+    m_jobs.submit(m_group, [this, slot, path, base, meta, generation, session, autosave, sections = std::move(sections), people = std::move(people),
                             cells = std::shared_ptr<const std::map<save::CellKey, GameCell>>(std::move(cells)),
                             was = std::move(was)]() mutable {
         auto p = std::make_unique<Pending>();
@@ -481,6 +560,7 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
         p->session = session;
         save::Changes changes;
         changes.sections = std::move(sections);
+        changes.sections["people"] = people_text(people); // (with nobody too: the slot's last is not left to be loaded)
         for (const auto& [k, d] : *cells) {
             const auto it = was->find(k);
             if (it == was->end() || !(it->second == d))
@@ -686,6 +766,58 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     if (!ids.insert(g.entity).second) return fail(file + ": a ragdoll twice");
                     p->sections.ragdolls.push_back(std::move(g));
                 }
+            } else if (name == "people") {
+                if (!only_keys(j, {"people"}) || !j.value("people", Json::array()).is_array() ||
+                    j.value("people", Json::array()).size() > world::k_max_people)
+                    return fail(file + ": bad people");
+                world::PersonId last = 0;
+                for (const Json& e : j.value("people", Json::array())) {
+                    SavedPerson s;
+                    if (!e.is_object() || !only_keys(e, {"id", "at", "trip", "did"}) || !e.contains("id") ||
+                        !e["id"].is_number_unsigned() || e["id"].get<u64>() <= last || e["id"].get<u64>() > 0xffffffffull)
+                        return fail(file + ": a bad person (each once, in the order of their ids)");
+                    s.id = static_cast<world::PersonId>(e["id"].get<u64>());
+                    last = s.id;
+                    if (e.contains("at")) {
+                        const Json& at = e["at"];
+                        double v[4];
+                        if (!at.is_array() || at.size() != 4 || !finite_in(at[0], -1e8, 1e8, v[0]) || !finite_in(at[1], -1e8, 1e8, v[1]) ||
+                            !finite_in(at[2], -1e8, 1e8, v[2]) || !finite_in(at[3], -360.0, 360.0, v[3]))
+                            return fail(file + ": a bad person's place");
+                        s.moved = true;
+                        s.at = {{v[0], v[1], v[2]}, static_cast<float>(v[3])};
+                    }
+                    if (e.contains("trip")) {
+                        const Json& trip = e["trip"];
+                        if (!trip.is_object() || !only_keys(trip, {"to", "speed", "within", "place"}) || !trip.contains("to") ||
+                            !read_vec(trip["to"], s.to) || !trip.contains("speed") || !finite_in(trip["speed"], 0.1, 100.0, s.speed) ||
+                            (trip.contains("within") && !finite_in(trip["within"], 0.0, PeopleTravel::k_join_within, s.within)) ||
+                            !trip.value("place", Json("")).is_string() ||
+                            trip.value("place", std::string()).size() > world::k_max_name_bytes)
+                            return fail(file + ": a bad person's trip");
+                        s.trip = true;
+                        s.place = trip.value("place", std::string());
+                    }
+                    if (e.contains("did")) {
+                        const Json& did = e["did"];
+                        double said = 0.0, entry = 0.0;
+                        if (!did.is_object() || !only_keys(did, {"said", "entry", "place", "failed", "own_trip"}) ||
+                            !did.contains("said") || !did["said"].is_number_unsigned() || !finite_in(did["said"], 1.0, 4294967295.0, said) ||
+                            !did.contains("entry") || !did["entry"].is_number_unsigned() ||
+                            !finite_in(did["entry"], 0.0, static_cast<double>(world::k_max_routine_entries - 1), entry) ||
+                            !did.value("place", Json("")).is_string() ||
+                            did.value("place", std::string()).size() > world::k_max_name_bytes ||
+                            !did.value("failed", Json(false)).is_boolean() || !did.value("own_trip", Json(false)).is_boolean())
+                            return fail(file + ": a bad person's routine");
+                        s.did = true;
+                        s.kept.said = static_cast<u32>(said);
+                        s.kept.entry = static_cast<u8>(entry);
+                        s.kept.place = did.value("place", std::string());
+                        s.kept.failed = did.value("failed", false);
+                        s.kept.own_trip = s.trip && did.value("own_trip", false);
+                    }
+                    p->sections.people.push_back(std::move(s));
+                }
             } // (another engine's sections: left)
         }
         auto cells = std::make_shared<std::map<save::CellKey, GameCell>>();
@@ -734,6 +866,7 @@ void GameSaves::close(EditorState& state) {
     m_carried_feet.reset();
     forget_walkers();
     forget_ragdolls();
+    forget_people();
     drop_weather();
     if (state.clock != nullptr) state.clock->show(state.scene.clock); // the scene's time again
     m_applying.clear();
@@ -836,6 +969,7 @@ void GameSaves::take(EditorState& state) {
     m_carried_feet.reset();
     forget_walkers();
     forget_ragdolls();
+    forget_people();
     if (state.walkers != nullptr) state.walkers->clear(); // (walking in the game being left)
     if (state.ragdolls != nullptr && state.meshes != nullptr) state.ragdolls->clear(state.scene, *state.meshes); // (lying in it)
     forget_base(); // (another game now: the other base is not of it)
@@ -865,13 +999,16 @@ void GameSaves::take(EditorState& state) {
     m_status.ragdolls = m_sections->ragdolls.size();
     m_status.ragdolls_applied = 0;
     m_status.ragdolls_skipped = 0;
+    m_status.people = m_sections->people.size();
+    m_status.people_applied = 0;
+    m_status.people_skipped = 0;
     m_play_generation = p->generation;
     m_play_session = p->session;
     ++m_status.loads;
 }
 
 void GameSaves::finish_load(EditorState& state) {
-    const Sections s = std::move(*m_sections);
+    Sections s = std::move(*m_sections);
     m_sections.reset();
     m_status.doing.clear();
     if (s.camera) {
@@ -911,6 +1048,15 @@ void GameSaves::finish_load(EditorState& state) {
             m_status.bodies_skipped += s.poses.size();
         }
     }
+    if (state.physics != nullptr && state.travel != nullptr && state.physics->simulating()) {
+        m_people_waiting = std::move(s.people);
+        m_people_next = 0;
+        m_people_run = state.physics->runs();
+    } else {
+        m_status.people_skipped += s.people.size();
+    }
+    if (state.routines != nullptr) state.routines->hold = !m_people_waiting.empty();
+    if (state.people != nullptr) state.people->hold = !m_people_waiting.empty();
     if (state.physics != nullptr && state.walkers != nullptr && state.physics->simulating()) {
         for (const SavedWalker& w : s.walkers) m_walkers_waiting[w.entity] = w;
         m_walkers_run = state.physics->runs();
@@ -998,6 +1144,58 @@ void GameSaves::place_ragdolls(EditorState& state) {
         it = m_ragdolls_waiting.erase(it);
     }
     m_ragdolls_from = it != m_ragdolls_waiting.end() ? std::optional<world::EntityId>(it->first) : std::nullopt;
+}
+
+void GameSaves::forget_people() {
+    m_people_waiting.clear();
+    m_people_next = 0;
+}
+
+// Each put where it was, sent on where it was going (its way looked for again from there), and its
+// routine told what it had acted on.
+void GameSaves::place_people(EditorState& state) {
+    if (m_people_next >= m_people_waiting.size()) {
+        if (!m_people_waiting.empty()) forget_people();
+        return;
+    }
+    // Only for the simulation they were for (stopped since: everyone is back where the scene has them).
+    if (state.physics == nullptr || state.travel == nullptr || !state.physics->simulating() ||
+        state.physics->runs() != m_people_run) {
+        m_status.people_skipped += m_people_waiting.size() - m_people_next;
+        forget_people();
+        return;
+    }
+    const PeopleTravel::Clock clock = PeopleTravel::clock_of(*state.physics);
+    state.travel->sync(state.scene, clock.run, clock.seconds);
+    usize budget = std::max<usize>(people_per_frame, 1), sends = std::max<usize>(people_sent_per_frame, 1);
+    for (; m_people_next < m_people_waiting.size() && budget > 0; ++m_people_next, --budget) {
+        const SavedPerson& s = m_people_waiting[m_people_next];
+        if (world::find_person(state.scene.people, s.id) == nullptr) { // (gone from the world since)
+            ++m_status.people_skipped;
+            continue;
+        }
+        if (s.trip && sends == 0) break; // (the next frame's)
+        if (s.moved && !state.travel->put(state.scene, s.id, s.at)) {
+            ++m_status.people_skipped;
+            continue;
+        }
+        bool sent = false;
+        if (s.trip) {
+            --sends;
+            // (Part way along a long stretch it is farther from the road's nodes than `within`: one
+            // put where it travelled to joins as far off as any may, people_travel.h.)
+            sent = state.travel->send(state.scene, s.id, s.to, static_cast<float>(s.speed), s.within, s.place, true).empty();
+        }
+        // (One whose routine's trip cannot be sent again, the roads other than they were, is left to
+        // its routine to send afresh; a trip of its own that cannot is not the routine's to mind.)
+        if (s.did && state.routines != nullptr && (!s.trip || sent || !s.kept.own_trip)) {
+            // (Its routine says something else now: the trip that was the routine's is not gone on with.)
+            if (!state.routines->restore(state.scene, *state.travel, s.id, s.kept) && sent && s.kept.own_trip)
+                state.travel->stop(s.id);
+        }
+        ++m_status.people_applied;
+    }
+    if (m_people_next >= m_people_waiting.size()) forget_people();
 }
 
 void GameSaves::forget_walkers() {
@@ -1137,6 +1335,11 @@ void GameSaves::update(EditorState& state, double seconds) {
     place_bodies(state);
     place_walkers(state);
     place_ragdolls(state);
+    place_people(state);
+    // Until everyone is back nobody follows a routine or is given an entity (one would be sent
+    // again, or stand where the scene has it and then be elsewhere).
+    if (state.routines != nullptr) state.routines->hold = !m_people_waiting.empty();
+    if (state.people != nullptr) state.people->hold = !m_people_waiting.empty();
     const bool playing = state.play != nullptr && state.play->playing();
     if (playing && std::isfinite(seconds) && seconds > 0.0)
         m_play_seconds = std::min(m_play_seconds + seconds, save::k_max_play_seconds);
@@ -1198,6 +1401,7 @@ void GameSaves::follow(EditorState& state) {
         m_carried_feet.reset();
         forget_walkers();
         forget_ragdolls();
+        forget_people();
         forget_base();
         if (m_status.doing == "applying") m_status.doing.clear();
         m_generation = 0;

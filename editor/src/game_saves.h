@@ -11,7 +11,9 @@
 // (whether simulating, and where the moved dynamic entities are), and the
 // walkers (where each stood, faced and moved, where it was going and how
 // far it had got), and the ragdolls (where each bone of each lies and how
-// it moves, how long it has lain still). Loading stops play
+// it moves, how long it has lain still), and the people (where each that
+// travelled is, where each on a trip was going and how fast, and what each
+// had last acted on of its routine: only while simulating). Loading stops play
 // and simulating (what they broke since goes), shows the save's damage as
 // the game's (world::Scene::set_game_damage, a share of cells a frame),
 // presses the save's ground in (PhysicsState::press_game_ground, a few
@@ -23,7 +25,11 @@
 // and the walkers walking again from where they were (a share a frame, each
 // once its entity and the ground under it are in; the way looked for again),
 // and the ragdolls lying again as they lay (a few a frame, each once its
-// entity, its file and the ground under it are in).
+// entity, its file and the ground under it are in), and the people where
+// they were (a share a frame: each put there, sent on to where it was
+// going, a way looked for again, and its routine told what it had acted on,
+// so nobody is sent a second time; until all are back nobody follows a
+// routine or is given an entity).
 //
 // Autosave: while playing, every autosave_seconds of play, a save to the
 // slot "autosave" (its own base: a save to another slot stays a save of
@@ -38,6 +44,8 @@
 
 #include "editor_commands.h"
 
+#include "people_routines.h"
+#include "people_travel.h"
 #include "ragdoll_state.h"
 #include "walker_state.h"
 
@@ -47,6 +55,7 @@
 #include "giant/world/terrain.h"
 #include "giant/world/weather.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -99,6 +108,10 @@ public:
     usize ragdolls_per_frame = 4; // a loaded game's ragdolls made again a frame (each a body a bone)
     // Saved ragdolls not lying again yet (their entity, its file or the ground under them not in yet).
     usize ragdolls_waiting() const { return m_ragdolls_waiting.size(); }
+    usize people_per_frame = 1024; // a loaded game's people put back a frame
+    usize people_sent_per_frame = 64; // of those, the most sent on a frame (each a trip made: its ends looked for)
+    // Saved people not put back yet.
+    usize people_waiting() const { return m_people_waiting.size() - std::min(m_people_next, m_people_waiting.size()); }
     // Until the job in flight is done (tests, shutdown, a command that waits).
     void wait();
     // A save or load under way (its job, or a load's cells still being applied).
@@ -145,6 +158,9 @@ public:
         usize ragdolls_skipped = 0;    // a load's not: moved or scaled in the world since, hidden, walking or limp
                                        // since, refused (other bones now, too many), its file never read, or the
                                        // simulation stopped
+        usize people = 0;              // the last save's or load's people (those moved, on a trip, or following a routine)
+        usize people_applied = 0;      // a load's put back so far (sent on too where a way can be looked for)
+        usize people_skipped = 0;      // a load's not: gone from the world since, or the simulation stopped
         u64 autosaves = 0;
         std::string autosave_error;    // the last autosave's (kept apart from `error`)
         double gather_ms = 0.0;        // the last save's gathering on the frame
@@ -173,6 +189,9 @@ private:
     // A loaded game's ragdolls lying again (a few a frame) while the simulation they were for runs.
     void place_ragdolls(EditorState& state);
     void forget_ragdolls();
+    // A loaded game's people put back (a share a frame) while the simulation they were for runs.
+    void place_people(EditorState& state);
+    void forget_people();
     std::string save_to(EditorState& state, const std::string& slot, bool autosave);
 
     JobSystem m_jobs{1};
@@ -225,7 +244,23 @@ public:
         u32 unread = 0; // frames it has waited for its file since it could else be made
     };
 
+    struct SavedPerson {
+        world::PersonId id = 0;
+        bool moved = false; // it is not where the scene has it: `at`
+        PeopleTravel::Where at;
+        bool trip = false; // it was on its way to `to` at `speed` (to `place`, if one was named)
+        DVec3 to{};
+        double speed = 1.4;
+        double within = 500.0;
+        std::string place;
+        bool did = false; // it had acted on its routine: `kept`
+        PeopleRoutines::Kept kept;
+    };
+
 private:
+    std::vector<SavedPerson> m_people_waiting; // in the order of their ids, from m_people_next
+    usize m_people_next = 0;
+    u64 m_people_run = 0;
     std::map<world::EntityId, SavedRagdoll> m_ragdolls_waiting;
     std::optional<world::EntityId> m_ragdolls_from;
     u64 m_ragdolls_run = 0;

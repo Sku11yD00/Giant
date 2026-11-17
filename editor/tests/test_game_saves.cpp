@@ -9,6 +9,9 @@
 #include "../src/hit_targets.h"
 #include "../src/mesh_library.h"
 #include "../src/nav_state.h"
+#include "../src/people_routines.h"
+#include "../src/people_state.h"
+#include "../src/people_travel.h"
 #include "../src/physics_state.h"
 #include "../src/play_state.h"
 #include "../src/ragdoll_state.h"
@@ -20,6 +23,7 @@
 #include "gltf_test_files.h"
 #include "giant_test.h"
 
+#include "giant/world/people.h"
 #include "giant/world/scene.h"
 #include "giant/world/weather.h"
 
@@ -151,7 +155,7 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
         GIANT_CHECK(r.ok && r.value["saves"] == 1 && r.value["error"] == "" && r.value["base_slot"] == "one");
         const u64 cells = r.value["cells"].get<u64>();
-        GIANT_CHECK(cells >= 2 && r.value["written"] == cells + 5); // the cells and the sections (camera, weather, bodies, walkers, ragdolls)
+        GIANT_CHECK(cells >= 2 && r.value["written"] == cells + 6); // the cells and the sections (camera, weather, bodies, walkers, ragdolls, people)
         // The world itself is untouched.
         GIANT_CHECK(scene.damage().size() == 1 && scene.game_damage().empty() && world_files(folder) == files);
         GIANT_CHECK(std::filesystem::exists(folder / "saves" / "one" / "save.json"));
@@ -177,7 +181,7 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         GIANT_CHECK(!run("keep_damage").ok); // the game's is not the world's
         // Saved again, nothing changed: only the sections are written.
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == 5 && r.value["cells"] == cells);
+        GIANT_CHECK(r.ok && r.value["written"] == 6 && r.value["cells"] == cells);
         GIANT_CHECK(world_files(folder) == files);
         GIANT_CHECK(scene.game_damage_in({3, 0}) == nullptr); // the world's alone there: not the save's
         // The scene's weather changed: it shows again.
@@ -188,11 +192,11 @@ GIANT_TEST("game saves: what simulating broke is saved beside the world and show
         GIANT_CHECK(run("delete_save", {{"slot", "one"}, {"wait", true}}).ok);
         GIANT_CHECK(run("get_save").value["base_slot"] == "");
         r = run("save_game", {{"slot", "one"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == cells + 5);
+        GIANT_CHECK(r.ok && r.value["written"] == cells + 6);
 
         // Another slot (whole), then made to look of another world: refused unless forced.
         r = run("save_game", {{"slot", "two"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["written"] == cells + 5);
+        GIANT_CHECK(r.ok && r.value["written"] == cells + 6);
         const std::filesystem::path manifest = folder / "saves" / "two" / "save.json";
         std::string text = read_all(manifest);
         const usize at = text.find("\"hash\": \"");
@@ -403,7 +407,7 @@ GIANT_TEST("game saves: the ground dented is saved and pressed in again, never i
         GIANT_CHECK(physics.dent(scene, crater, {20.0, 1.0, 20.0}) == 1);
         GIANT_CHECK(*scene.terrain.find({0, 0}) != dented0);
         r = run("save_game", {{"slot", "dug"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 6); // tile 0's cell, camera, weather, bodies, walkers, ragdolls
+        GIANT_CHECK(r.ok && r.value["tiles"] == 2 && r.value["written"] == 7); // tile 0's cell, camera, weather, bodies, walkers, ragdolls, people
         GIANT_CHECK(run("simulate", {{"on", false}}).ok);
         frame();
         GIANT_CHECK(*scene.terrain.find({0, 0}) == dented0);
@@ -932,6 +936,315 @@ GIANT_TEST("game saves: ragdolls lie again as the save had them, asleep or still
         GIANT_CHECK(!run("load_game", {{"slot", "lie"}, {"wait", true}}).ok);
         std::error_code gone;
         std::filesystem::remove_all(dir, gone);
+    }
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+}
+
+GIANT_TEST("game saves: people are where the save had them, travel on, and are not sent a second time by their routines") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        PhysicsState physics;
+        MeshLibrary meshes{nullptr};
+        WorldStreaming streaming;
+        GameSaves saves;
+        PeopleTravel travel;
+        PeopleRoutines routines;
+        EditorState state;
+        state.physics = &physics;
+        state.meshes = &meshes;
+        state.world = &streaming;
+        state.saves = &saves;
+        state.travel = &travel;
+        state.routines = &routines;
+        ai::CommandRegistry commands;
+        register_scene_commands(commands, state);
+        register_physics_commands(commands, state);
+        register_people_commands(commands, state);
+        register_route_commands(commands, state);
+        register_save_commands(commands, state);
+        const auto run = [&](const char* name, const Json& args = Json::object()) {
+            return commands.execute(name, args, {});
+        };
+        const auto at = [](double x, double y, double z) { return Json::array({x, y, z}); };
+        world::Scene& scene = state.scene;
+        world::Entity model;
+        model.shape = world::Shape::mesh;
+        model.mesh = "people/villager.glb";
+        const world::EntityId model_id = scene.add(model);
+        GIANT_CHECK(run("set_person_look", {{"name", "villager"}, {"entity", model_id}}).ok);
+        GIANT_CHECK(run("delete_entities", {{"ids", {model_id}}}).ok);
+        // A road 400 m east; a cottage by its start, a mill past its end.
+        GIANT_CHECK(run("create_route", {{"points", {at(0, 0, 0), at(400, 0, 0)}}, {"kind", "road"}}).ok);
+        GIANT_CHECK(run("create_place", {{"name", "cottage"}, {"position", at(0, 0, -5)}, {"tags", {"home"}}}).ok);
+        GIANT_CHECK(run("create_place", {{"name", "mill"}, {"position", at(400, 0, 5)}, {"radius", 4.0}, {"tags", {"work"}}}).ok);
+        GIANT_CHECK(run("set_routine", {{"name", "day"}, {"entries", {{{"from", 6}, {"activity", "work"}, {"at", "tag"}, {"name", "work"}, {"speed", 20.0}},
+                                                                      {{"from", 20}, {"activity", "sleep"}, {"at", "home"}, {"speed", 20.0}}}}}).ok);
+        routines.settings.spread_minutes = 0.0f;
+        const auto person = [&](const char* routine) {
+            Json one = {{"look", "villager"}, {"home", "cottage"}};
+            if (routine[0] != 0) one["routine"] = routine;
+            const ai::CommandResult made = run("create_people", {{"people", {one}}});
+            GIANT_CHECK(made.ok);
+            return made.ok ? made.value["ids"][0].get<world::PersonId>() : world::PersonId{0};
+        };
+        const world::PersonId a = person("day"); // on its way to work when saved
+        const world::PersonId b = person("day"); // the same
+        const world::PersonId c = person("");    // sent by command, on its way
+        const world::PersonId d = person("");    // sent by command, there
+        const world::PersonId e = person("");    // never moved
+        const world::PersonId f = person("day"); // gone from the world before the load
+        GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
+        double hours = 7.0;
+        const auto frame = [&] { // as the editor's frame has them
+            physics.update(scene, scene.take_changes(), 1.0 / 60.0);
+            saves.update(state, 1.0 / 60.0);
+            const PeopleTravel::Clock clock = PeopleTravel::clock_of(physics);
+            travel.update(scene, clock.run, clock.seconds);
+            routines.update(scene, travel, hours);
+        };
+        const auto where = [&](world::PersonId id) { return travel.where(*world::find_person(scene.people, id)); };
+        frame();
+        // Not simulating: a save has nobody.
+        ai::CommandResult r = run("save_game", {{"slot", "still"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["people"] == 0);
+        GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+        frame();
+        GIANT_CHECK(run("send_person", {{"id", c}, {"to", at(300, 0, 0)}, {"speed", 5.0}}).ok);
+        GIANT_CHECK(run("send_person", {{"id", d}, {"to", at(100, 0, 0)}, {"speed", 100.0}}).ok);
+        for (int i = 0; i < 300; ++i) frame(); // 5 s: a, b and f some 100 m on, c 25 m, d there
+        GIANT_CHECK(routines.stats().sent == 3 && travel.trip(d) == nullptr);
+        GIANT_CHECK(travel.trip(a) != nullptr && travel.trip(a)->phase == PeopleTravel::Phase::travelling);
+        GIANT_CHECK(travel.trip(c) != nullptr && travel.trip(c)->phase == PeopleTravel::Phase::travelling);
+        r = run("save_game", {{"slot", "town"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["people"] == 5); // (not e)
+        const PeopleTravel::Where a_at = where(a), b_at = where(b), c_at = where(c), d_at = where(d), e_at = where(e);
+        const DVec3 a_to = travel.trip(a)->to;
+        GIANT_CHECK(a_at.position.x > 50.0 && a_at.position.x < 150.0 && c_at.position.x > 5.0 && c_at.position.x < 60.0);
+        GIANT_CHECK(std::fabs(d_at.position.x - 100.0) < 1e-6 && e_at.position.z == -5.0);
+        const auto near = [](const PeopleTravel::Where& x, const PeopleTravel::Where& y) {
+            return std::hypot(x.position.x - y.position.x, x.position.z - y.position.z) < 1e-6;
+        };
+        // Stopped: everyone is back. f leaves the world. Loaded, a few a frame.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(where(a).position.z == -5.0 && travel.trip(a) == nullptr);
+        GIANT_CHECK(run("remove_people", {{"ids", {f}}}).ok);
+        saves.people_per_frame = 2;
+        r = run("load_game", {{"slot", "town"}, {"wait", true}});
+        GIANT_CHECK(r.ok && physics.simulating() && r.value["people"] == 5 && r.value["people_waiting"] == 3);
+        GIANT_CHECK(saves.people_waiting() == 3 && routines.hold);
+        // Until all are back nobody is sent by a routine (a and b are back, sent on; nobody else looked at).
+        frame();
+        GIANT_CHECK(routines.stats().sent == 0 && saves.people_waiting() == 1 && routines.hold);
+        // Saved while some still wait: they are in it as the save they came from had them.
+        r = run("save_game", {{"slot", "again"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["people"] == 4);
+        frame();
+        GIANT_CHECK(saves.people_waiting() == 0 && !routines.hold);
+        GIANT_CHECK(saves.status().people_applied == 4 && saves.status().people_skipped == 1);
+        const auto check = [&] {
+            // Each where it was: a and b on their way again to the same spot at the same speed, c too, d and e at rest.
+            for (int i = 0; i < 4; ++i) frame();
+            GIANT_CHECK(travel.trip(a) != nullptr && travel.trip(a)->place == "mill" && travel.trip(a)->speed == 20.0);
+            GIANT_CHECK(travel.trip(a)->to == a_to && travel.trip(b) != nullptr);
+            GIANT_CHECK(travel.trip(c) != nullptr && travel.trip(c)->speed == 5.0 && travel.trip(c)->to == DVec3(300.0, 0.0, 0.0));
+            GIANT_CHECK(std::hypot(where(a).position.x - a_at.position.x, where(a).position.z - a_at.position.z) < 10.0);
+            GIANT_CHECK(std::hypot(where(b).position.x - b_at.position.x, where(b).position.z - b_at.position.z) < 10.0);
+            GIANT_CHECK(std::hypot(where(c).position.x - c_at.position.x, where(c).position.z - c_at.position.z) < 1.0);
+            GIANT_CHECK(travel.trip(d) == nullptr && near(where(d), d_at) && where(d).yaw == d_at.yaw);
+            GIANT_CHECK(travel.trip(e) == nullptr && where(e) == e_at);
+            // The routines know what each had acted on: nobody is sent a second time, and what each does is told.
+            // (Told, not looked at afresh and found on their way: nobody counted as staying.)
+            GIANT_CHECK(routines.stats().sent == 0 && routines.stats().failed == 0 && routines.stats().stayed == 0);
+            const Json doing = run("get_people", {{"ids", {a}}}).value["people"][0]["doing"];
+            GIANT_CHECK(doing["activity"] == "work" && doing["place"] == "mill" && doing["failed"] == false);
+        };
+        check();
+        // a gets to the mill (its trip is the routine's: arriving is not failing), and goes home in the evening.
+        for (int i = 0; i < 1800 && travel.trip(a) != nullptr; ++i) frame();
+        GIANT_CHECK(travel.trip(a) == nullptr && std::hypot(where(a).position.x - 400.0, where(a).position.z - 5.0) < 4.0);
+        GIANT_CHECK(routines.stats().sent == 0 && routines.stats().failed == 0);
+        hours = 20.0;
+        for (int i = 0; i < 4; ++i) frame();
+        GIANT_CHECK(routines.stats().sent == 2 && travel.trip(a) != nullptr && travel.trip(a)->place == "cottage");
+        hours = 7.0;
+        // A slot saved again with nobody moved (a new run) has nobody: the people it had are not loaded from it.
+        GIANT_CHECK(run("save_game", {{"slot", "twice"}, {"wait", true}}).value["people"] == 4);
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        routines.settings.on = false;
+        GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+        frame();
+        r = run("save_game", {{"slot", "twice"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["people"] == 0);
+        r = run("load_game", {{"slot", "twice"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["people"] == 0 && where(a).position.z == -5.0 && travel.trip(a) == nullptr);
+        routines.settings.on = true;
+        // The save made while some waited has them all the same.
+        saves.people_per_frame = 1024;
+        r = run("load_game", {{"slot", "again"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["people"] == 4 && r.value["people_applied"] == 4 && r.value["people_waiting"] == 0);
+        check();
+        // Of those put back a frame only so many are sent on (each a trip made): a, then b, then c and d.
+        saves.people_sent_per_frame = 1;
+        r = run("load_game", {{"slot", "again"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["people_applied"] == 1 && r.value["people_waiting"] == 3);
+        frame();
+        GIANT_CHECK(saves.people_waiting() == 2 && routines.hold);
+        frame();
+        GIANT_CHECK(saves.people_waiting() == 0 && !routines.hold);
+        saves.people_sent_per_frame = 64;
+        check();
+        // The simulation stopped before all are back: the rest are skipped, everyone is where the scene has them.
+        saves.people_per_frame = 1;
+        r = run("load_game", {{"slot", "town"}, {"wait", true}});
+        GIANT_CHECK(r.ok && saves.people_waiting() == 4 && routines.hold);
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(saves.people_waiting() == 0 && !routines.hold && saves.status().people_applied == 1 &&
+                    saves.status().people_skipped == 4);
+        GIANT_CHECK(where(a).position.z == -5.0 && travel.trip(a) == nullptr);
+        // A game closed while some wait: forgotten, the routines go on.
+        r = run("load_game", {{"slot", "town"}, {"wait", true}});
+        GIANT_CHECK(r.ok && saves.people_waiting() == 4);
+        GIANT_CHECK(run("close_game").ok);
+        frame();
+        GIANT_CHECK(saves.people_waiting() == 0 && !routines.hold);
+        // Bad people sections are refused whole.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        const auto write = [&](const char* text) {
+            for (const auto& entry : std::filesystem::directory_iterator(folder / "saves" / "town" / "sections")) {
+                if (entry.path().filename().string().rfind("people.", 0) == 0) std::ofstream(entry.path(), std::ios::binary) << text;
+            }
+        };
+        for (const char* bad : {"{\"people\": [{\"id\": 2}, {\"id\": 1}]}", "{\"people\": [{\"id\": 1, \"at\": [0, 0, 0]}]}",
+                                "{\"people\": [{\"id\": 1, \"at\": [0, 1e30, 0, 0]}]}",
+                                "{\"people\": [{\"id\": 1, \"trip\": {\"to\": [0, 0, 0], \"speed\": 0}}]}",
+                                "{\"people\": [{\"id\": 1, \"did\": {\"said\": 0, \"entry\": 0}}]}",
+                                "{\"people\": [{\"id\": 1, \"did\": {\"said\": 5, \"entry\": 4096}}]}",
+                                "{\"people\": [{\"id\": 1, \"other\": 1}]}", "{\"people\": 3}",
+                                "{\"people\": [{\"id\": \"1\"}]}", "{\"people\": [{\"id\": 4294967296}]}",
+                                "{\"people\": [{\"id\": 1, \"at\": [0, 0, 0, 400]}]}",
+                                "{\"people\": [{\"id\": 1, \"trip\": {\"to\": [0, 0], \"speed\": 1}}]}",
+                                "{\"people\": [{\"id\": 1, \"trip\": {\"to\": [0, 0, 0], \"speed\": 1, \"within\": -1}}]}",
+                                "{\"people\": [{\"id\": 1, \"trip\": {\"to\": [0, 0, 0], \"speed\": 1, \"place\": 3}}]}",
+                                "{\"people\": [{\"id\": 1, \"did\": {\"said\": 5, \"entry\": 0, \"failed\": 1}}]}"}) {
+            write(bad);
+            GIANT_CHECK(!run("load_game", {{"slot", "town"}, {"wait", true}}).ok);
+        }
+    }
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+}
+
+GIANT_TEST("game saves: one far along a long road goes on; a trip of its own stays its own; a routine changed since is acted on afresh") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        PhysicsState physics;
+        MeshLibrary meshes{nullptr};
+        WorldStreaming streaming;
+        GameSaves saves;
+        PeopleTravel travel;
+        PeopleRoutines routines;
+        PeopleState people;
+        EditorState state;
+        state.physics = &physics;
+        state.meshes = &meshes;
+        state.world = &streaming;
+        state.saves = &saves;
+        state.travel = &travel;
+        state.routines = &routines;
+        state.people = &people;
+        ai::CommandRegistry commands;
+        register_scene_commands(commands, state);
+        register_physics_commands(commands, state);
+        register_people_commands(commands, state);
+        register_route_commands(commands, state);
+        register_save_commands(commands, state);
+        const auto run = [&](const char* name, const Json& args = Json::object()) {
+            return commands.execute(name, args, {});
+        };
+        const auto at = [](double x, double y, double z) { return Json::array({x, y, z}); };
+        world::Scene& scene = state.scene;
+        world::Entity model;
+        model.shape = world::Shape::mesh;
+        model.mesh = "people/villager.glb";
+        const world::EntityId model_id = scene.add(model);
+        GIANT_CHECK(run("set_person_look", {{"name", "villager"}, {"entity", model_id}}).ok);
+        GIANT_CHECK(run("delete_entities", {{"ids", {model_id}}}).ok);
+        // One stretch of road 3 km long: its only nodes are its ends.
+        GIANT_CHECK(run("create_route", {{"points", {at(0, 0, 0), at(3000, 0, 0)}}, {"kind", "road"}}).ok);
+        GIANT_CHECK(run("create_place", {{"name", "cottage"}, {"position", at(0, 0, -5)}, {"tags", {"home"}}}).ok);
+        GIANT_CHECK(run("create_place", {{"name", "mill"}, {"position", at(3000, 0, 5)}, {"radius", 4.0}, {"tags", {"work"}}}).ok);
+        const auto day = [&](double speed) {
+            return run("set_routine", {{"name", "day"}, {"entries", {{{"from", 6}, {"activity", "work"}, {"at", "tag"}, {"name", "work"}, {"speed", speed}},
+                                                                     {{"from", 20}, {"activity", "sleep"}, {"at", "home"}}}}}).ok;
+        };
+        GIANT_CHECK(day(20.0));
+        routines.settings.spread_minutes = 0.0f;
+        const auto person = [&] {
+            const ai::CommandResult made = run("create_people", {{"people", {{{"look", "villager"}, {"home", "cottage"}, {"routine", "day"}}}}});
+            GIANT_CHECK(made.ok);
+            return made.ok ? made.value["ids"][0].get<world::PersonId>() : world::PersonId{0};
+        };
+        const world::PersonId a = person(); // on the long road to work
+        const world::PersonId b = person(); // sent elsewhere by command on the way
+        GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
+        const DVec3 far_off{1.0e6, 0.0, 0.0}; // (nobody near the camera: all travel by the clock)
+        const auto frame = [&] {
+            physics.update(scene, scene.take_changes(), 1.0 / 60.0);
+            saves.update(state, 1.0 / 60.0);
+            const PeopleTravel::Clock clock = PeopleTravel::clock_of(physics);
+            travel.update(scene, clock.run, clock.seconds);
+            routines.update(scene, travel, 7.0);
+            people.update(scene, far_off, nullptr);
+        };
+        const auto where = [&](world::PersonId id) { return travel.where(*world::find_person(scene.people, id)).position; };
+        const auto doing = [&](world::PersonId id) { return run("get_people", {{"ids", {id}}}).value["people"][0]["doing"]; };
+        frame();
+        GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+        for (int i = 0; i < 3600; ++i) frame(); // a minute: some 1200 m on, over a kilometre from either node
+        GIANT_CHECK(routines.stats().sent == 2 && where(a).x > 1050.0 && where(a).x < 1950.0);
+        GIANT_CHECK(run("send_person", {{"id", b}, {"to", at(1000, 0, 300)}, {"speed", 5.0}, {"within", 4000.0}}).ok);
+        for (int i = 0; i < 8; ++i) frame();
+        const PeopleTravel::Trip* own = travel.trip(b);
+        GIANT_CHECK(own != nullptr && own->speed == 5.0 && own->within == 4000.0);
+        const Json a_did = doing(a), b_did = doing(b);
+        const u64 sent_before = routines.stats().sent;
+        const DVec3 a_at = where(a), b_at = where(b);
+        ai::CommandResult r = run("save_game", {{"slot", "road"}, {"wait", true}});
+        GIANT_CHECK(r.ok && r.value["people"] == 2);
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        // Loaded one a frame: nobody is given an entity or looked at by a routine until both are back.
+        saves.people_per_frame = 1;
+        r = run("load_game", {{"slot", "road"}, {"wait", true}});
+        GIANT_CHECK(r.ok && saves.people_waiting() == 1 && routines.hold && people.hold);
+        // (b is not back yet: looked at now it would be sent from its home. Held, nobody is.)
+        routines.update(scene, travel, 7.0);
+        GIANT_CHECK(routines.stats().sent == 0 && travel.trip(b) == nullptr && where(b).z == -5.0);
+        frame();
+        GIANT_CHECK(saves.people_waiting() == 0 && !routines.hold && !people.hold && saves.status().people_applied == 2);
+        for (int i = 0; i < 8; ++i) frame();
+        // a goes on to the mill from where it was (no node within its 500 m: looked for farther off).
+        GIANT_CHECK(travel.trip(a) != nullptr && travel.trip(a)->phase == PeopleTravel::Phase::travelling &&
+                    travel.trip(a)->place == "mill");
+        GIANT_CHECK(std::fabs(where(a).z - a_at.z) < 1.0 && where(a).x > 1000.0 && where(a).x < 2000.0);
+        // b is on its own trip still, and its routine says of it what it said.
+        GIANT_CHECK(travel.trip(b) != nullptr && travel.trip(b)->to == DVec3(1000.0, 0.0, 300.0) && travel.trip(b)->speed == 5.0);
+        GIANT_CHECK(std::hypot(where(b).x - b_at.x, where(b).z - b_at.z) < 60.0);
+        GIANT_CHECK(routines.stats().sent == 0 && doing(a) == a_did && doing(b) == b_did && sent_before == 2);
+        // The routine changed after the save (another speed: it says something else): acted on afresh.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(day(10.0));
+        saves.people_per_frame = 1024;
+        r = run("load_game", {{"slot", "road"}, {"wait", true}});
+        GIANT_CHECK(r.ok && saves.people_waiting() == 0);
+        for (int i = 0; i < 8; ++i) frame();
+        GIANT_CHECK(routines.stats().sent == 2 && travel.trip(a) != nullptr && travel.trip(a)->speed == 10.0);
+        GIANT_CHECK(where(a).x > 1000.0 && where(a).x < 2000.0); // (from where it was, not from home)
     }
     std::error_code error;
     std::filesystem::remove_all(folder, error);

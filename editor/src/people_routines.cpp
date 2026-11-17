@@ -263,7 +263,8 @@ bool PeopleRoutines::goal(const world::Scene& scene, const world::Person& person
     return true;
 }
 
-void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, double hours) {
+// Another scene, another run, or the simulation stopped: followed (each frame, and before anything is put back).
+void PeopleRoutines::follow(const world::Scene& scene, const PeopleTravel& travel) {
     bool afresh = travel.resets() != m_resets || travel.running() != m_running;
     if (scene.identity() != m_scene) { // (another scene: its people and places are others)
         m_scene = scene.identity();
@@ -286,6 +287,11 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         m_builds = travel.builds();
         m_stats = Stats{};
     }
+}
+
+void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, double hours) {
+    follow(scene, travel);
+    if (hold) return;
     const std::vector<world::Person>& people = scene.people;
     if (!settings.on || !m_running || people.empty() || scene.routines.empty()) {
         if (scene.routines.empty() || people.empty()) m_stats.following = 0;
@@ -441,6 +447,48 @@ bool PeopleRoutines::activity(const world::Scene& scene, world::PersonId id, Act
     out.activity = routine.entries[slot.entry].activity;
     out.place = sent_to(scene, slot);
     out.anywhere = slot.place == 0;
+    return true;
+}
+
+void PeopleRoutines::ready(const world::Scene& scene, const PeopleTravel& travel) {
+    follow(scene, travel);
+    bool same = m_slots.size() == scene.people.size();
+    for (usize i = 0; same && i < m_slots.size(); ++i) same = m_slots[i].id == scene.people[i].id;
+    if (!same) match_slots(scene.people);
+}
+
+bool PeopleRoutines::kept(const world::Scene& scene, const PeopleTravel& travel, usize index, Kept& out) const {
+    if (!m_running || index >= m_slots.size() || index >= scene.people.size()) return false;
+    const Slot& slot = m_slots[index];
+    if (slot.id != scene.people[index].id || slot.acted == 0) return false;
+    out.said = slot.acted;
+    out.entry = slot.entry;
+    out.failed = slot.failed;
+    const PeopleTravel::Trip* trip = travel.trip(slot.id);
+    out.own_trip = slot.trip != 0 && trip != nullptr && trip->serial == slot.trip;
+    const world::Place* place = sent_to(scene, slot);
+    out.place = place != nullptr ? place->name : std::string();
+    return true;
+}
+
+bool PeopleRoutines::restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had) {
+    follow(scene, travel);
+    const world::Person* person = world::find_person(scene.people, id);
+    if (!m_running || person == nullptr || person->routine.empty() || had.said == 0) return false;
+    const world::Routine* routine = world::find_routine(scene.routines, person->routine);
+    if (routine == nullptr || had.entry >= routine->entries.size()) return false;
+    // (Its routine changed since: it says something else now, and is acted on afresh.)
+    if (said(*person, routine->entries[had.entry]) != had.said) return false;
+    const usize index = static_cast<usize>(person - scene.people.data());
+    if (m_slots.size() != scene.people.size() || m_slots[index].id != id) match_slots(scene.people);
+    Slot& slot = m_slots[index];
+    slot.acted = had.said;
+    slot.entry = had.entry;
+    slot.routine = static_cast<u16>(routine - scene.routines.data());
+    slot.failed = had.failed;
+    slot.place = had.place.empty() ? 0 : hash_of(had.place);
+    const PeopleTravel::Trip* trip = travel.trip(id);
+    slot.trip = had.own_trip && trip != nullptr ? trip->serial : 0;
     return true;
 }
 
