@@ -3956,10 +3956,18 @@ on as an entry is, in place of whatever the routine says, alarmed or
 not: sent to its home, a place or a tag's nearest place, or stopped
 where it is. One without leaves it to the routine, the hour's entry
 or an alarmed one, as if it had no behaviour; with no routine either,
-the trip its behaviour began is stopped and it stands. A state's own
-that cannot be done does not leave one walking on with what came
-before: the trip is stopped, and `failed` holds for a transition to
-catch.
+its own trip (one a state or its routine began, not one sent by
+hand) is stopped and it stands. A state's own that cannot be done
+does not leave one walking on with what came before: the trip is
+stopped, and `failed` holds for a transition to catch.
+
+A state's own is acted on before the state is left: while its turn
+to be sent has not come (`sent_a_frame`), its transitions wait. It
+is acted on each time the state is entered, though it says what was
+last acted on, so states that fail into each other go round a look
+each, and each tries again. When the places or the roads change,
+one that had failed is acted on again, and neither `arrived` nor
+`failed` holds until it has been.
 
 `get_people` tells the state (`state`: its name, its place among the
 behaviour's, seconds in it) and whether what it does is the state's
@@ -3969,7 +3977,8 @@ look's clip for the state's activity plays as for any activity.
 
 A behaviour replaced while the world runs: one in a state whose place
 in the list is still there stays at that place, else begins again in
-the first. A game save does not keep the state yet: a loaded game
+the first. Another behaviour removed or added does not disturb it.
+A game save does not keep the state yet: a loaded game
 begins each behaviour in its first state (what a routine had one do
 is kept as before). Script events on a change of state come next.
 

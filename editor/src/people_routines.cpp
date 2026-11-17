@@ -141,6 +141,7 @@ void PeopleRoutines::try_failed_again() {
         if (!slot.failed) continue;
         slot.failed = false;
         slot.acted = 0;
+        slot.settled = false; // (not acted on as things are now: it has neither arrived nor failed)
     }
 }
 
@@ -365,10 +366,15 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
             if (slot.behaviour < behaviours.size() && behaviours[slot.behaviour].name == person.behaviour) {
                 behaviour = &behaviours[slot.behaviour];
             } else if ((behaviour = world::find_behaviour(behaviours, person.behaviour)) != nullptr) {
+                // (The same one at another place in the list, one before it removed: it is in the state it was in.)
+                const u32 name = static_cast<u32>(hash_of(person.behaviour));
+                if (slot.behaviour == k_no_behaviour || slot.behaviour_name != name) {
+                    slot.state = 0;
+                    slot.entered = seconds;
+                    slot.settled = false;
+                }
                 slot.behaviour = static_cast<u16>(behaviour - behaviours.data());
-                slot.state = 0;
-                slot.entered = seconds;
-                slot.settled = false;
+                slot.behaviour_name = name;
             }
         }
         if (behaviour == nullptr) {
@@ -389,6 +395,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
                 if (!slot.by_state) {
                     slot.acted = 0;
                     slot.failed = false;
+                    slot.settled = false;
                 }
             }
         }
@@ -411,10 +418,12 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         if (routine_found == nullptr && behaviour == nullptr) {
             if (slot.by_state) {
                 nothing(); // (its behaviour was taken away)
-            } else { // (as ever for one with no routine: a trip it is on goes on)
+            } else if (person.routine.empty()) { // (as ever for one with no routine: a trip it is on goes on)
                 slot.acted = 0;
                 slot.trip = 0;
                 slot.failed = false;
+            } else { // (its routine is not there)
+                slot.acted = 0;
             }
             continue;
         }
@@ -422,14 +431,15 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         if (behaviour != nullptr) {
             ++m_behaving_counted;
             // The first transition whose conditions all hold is taken (one a look).
+            // (A state's own is acted on before it is left: one whose turn to be sent has not come is not passed by.)
             const world::BehaviourState& in = behaviour->states[slot.state];
-            if (!in.transitions.empty()) {
+            if (!in.transitions.empty() && (slot.settled || !in.own)) {
                 const PeopleTravel::Trip* on = own_trip();
                 const bool trip_failed = on != nullptr && on->phase == PeopleTravel::Phase::failed;
                 const bool could_not = slot.settled && (slot.failed || trip_failed);
                 const bool there = slot.settled && !could_not && on == nullptr;
                 const float alarm = senses != nullptr ? senses->alarm_at(scene, m_cursor - 1) : 0.0f;
-                const double hour = hour_of(person.id, hours);
+                const float hour = static_cast<float>(hour_of(person.id, hours)); // (compared as stored, as a routine's)
                 bool asked = false, alarmed = false; // (what alarmed it: asked once, when a condition wants it)
                 std::string_view kind;
                 for (const world::BehaviourTransition& t : in.transitions) {
@@ -451,11 +461,9 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
                         case world::BehaviourWhen::arrived: holds = there; break;
                         case world::BehaviourWhen::failed: holds = could_not; break;
                         case world::BehaviourWhen::after: holds = seconds - slot.entered >= static_cast<double>(c.value); break;
-                        case world::BehaviourWhen::hour: {
-                            const double from = static_cast<double>(c.value), until = static_cast<double>(c.until);
-                            holds = from < until ? hour >= from && hour < until : hour >= from || hour < until;
+                        case world::BehaviourWhen::hour: // (from over until: a range over midnight)
+                            holds = c.value < c.until ? hour >= c.value && hour < c.until : hour >= c.value || hour < c.until;
                             break;
-                        }
                         }
                         if (!holds) {
                             all = false;
@@ -477,6 +485,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         const world::BehaviourState* state = behaviour != nullptr ? &behaviour->states[slot.state] : nullptr;
         const bool by_state = state != nullptr && state->own;
         if (!by_state && (routine_found == nullptr || routine_found->entries.empty())) {
+            if (behaviour == nullptr && !slot.by_state) continue; // (a routine with no entries: as ever)
             if (slot.acted != 0 || slot.trip != 0 || slot.by_state) nothing();
             slot.settled = true;
             continue;
@@ -501,7 +510,10 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         // An entry for its alarm, or a state's own: one that cannot be done is not walked on past.
         const bool pressing = by_state || now >= routine.entries.size();
         const u32 says = said(person, entry);
-        if (says == slot.acted) {
+        // (A state's own just entered is acted on though it says what was last acted on: what that
+        // began may be over, or have failed.)
+        const bool again = by_state && !slot.settled;
+        if (says == slot.acted && !again) {
             slot.entry = static_cast<u8>(now);
             slot.by_state = by_state; // (the same said by another entry: what it does there may be another)
             slot.settled = true;
@@ -550,7 +562,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         ++acted;
         slot.acted = says;
         slot.entry = static_cast<u8>(now);
-            slot.by_state = by_state;
+        slot.by_state = by_state;
         slot.failed = false;
         slot.place = 0;
         slot.settled = true;

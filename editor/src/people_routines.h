@@ -105,9 +105,10 @@ public:
     // turn comes.
     void update(const world::Scene& scene, PeopleTravel& travel, double hours, const PeopleSenses* senses = nullptr);
 
-    // What a person does now: the entry of its routine it last acted on
-    // (one whose turn to be sent has not come yet still does the last).
-    // None: it has no routine, or was not looked at yet.
+    // What a person does now: the entry of its routine, or its behaviour's
+    // state's own (`own`), it last acted on (one whose turn to be sent has
+    // not come yet still does the last). None: neither says anything, or it
+    // was not looked at yet.
     struct Doing {
         std::string_view activity; // the entry's (the scene's string: until the routines change)
         std::string_view place;    // where it was sent, or was already ("" for none, or a place gone since)
@@ -126,9 +127,10 @@ public:
         double seconds = 0.0; // of the simulation's, since it entered the state
     };
     bool behaving(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, Behaving& out) const;
-    // What a person's routine has it do and where, as it last acted (a
-    // frame's, for many). None: no routine, not acted on yet, one that
-    // could not be acted on, or routines off or not running.
+    // What a person's routine, or its behaviour's state, has it do and
+    // where, as it last acted (a frame's, for many). None: neither says
+    // anything, not acted on yet, one that could not be acted on, or
+    // routines off or not running.
     struct Activity {
         std::string_view activity;
         const world::Place* place = nullptr; // where it was sent (null: nowhere, or a place gone since)
@@ -137,7 +139,8 @@ public:
     bool activity(const world::Scene& scene, world::PersonId id, Activity& out) const;
 
     // What a game save keeps of a person's routine: what it last acted on,
-    // so that a loaded game does not send everyone again.
+    // so that a loaded game does not send everyone again. (What a
+    // behaviour's state had it do is not kept yet: `kept` gives none.)
     struct Kept {
         u32 said = 0;          // what it acted on (never 0)
         u8 entry = 0;          // its routine's entry then
@@ -174,6 +177,7 @@ private:
         u32 acted = 0;   // what it last acted on (what the entry says, hashed); 0: nothing yet
         u16 routine = 0; // its routine's index in the scene's (as last found)
         u16 behaviour = k_no_behaviour; // its behaviour's index in the scene's (as last found); k_no_behaviour: none
+        u32 behaviour_name = 0;         // that behaviour's name, hashed (found at another index: the same one or another)
         double entered = 0.0;           // the simulation's seconds when it entered `state`
         u8 state = 0;                   // the state of its behaviour it is in
         bool by_state = false;          // what it last acted on was a state's own (`entry`: the state then), not its routine's
