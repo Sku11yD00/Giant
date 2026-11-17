@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <span>
 
@@ -23,7 +24,11 @@ RouteGraph::RouteGraph(const world::Routes& routes, const RouteSettings& setting
     m_ids.reserve(n);
     m_positions.reserve(n);
     for (const world::RouteNode& node : routes.nodes) {
-        m_grid[world::cell_of(node.position)].push_back(static_cast<u32>(m_ids.size()));
+        const world::CellCoord cell = world::cell_of(node.position);
+        if (m_ids.empty()) m_grid_min = m_grid_max = cell;
+        m_grid_min = {std::min(m_grid_min.x, cell.x), std::min(m_grid_min.z, cell.z)};
+        m_grid_max = {std::max(m_grid_max.x, cell.x), std::max(m_grid_max.z, cell.z)};
+        m_grid[cell].push_back(static_cast<u32>(m_ids.size()));
         m_ids.push_back(node.id);
         m_positions.push_back(node.position);
     }
@@ -79,21 +84,43 @@ std::optional<u32> RouteGraph::nearest(const DVec3& point, double within) const 
         return std::nullopt;
     }
     within = std::min(within, 4096.0);
-    const world::CellCoord low = world::cell_of({point.x - within, 0.0, point.z - within});
-    const world::CellCoord high = world::cell_of({point.x + within, 0.0, point.z + within});
+    // Square by square in rings round the point's own, nearest first: once a
+    // node is found, no ring whose every square is farther is looked at (one
+    // by a road finds it in a few squares, however far `within` reaches).
+    // Only squares among those that have nodes are looked at (one far from
+    // every road looks at none).
+    const world::CellCoord centre = world::cell_of({point.x, 0.0, point.z});
+    const i64 x0 = m_grid_min.x, x1 = m_grid_max.x, z0 = m_grid_min.z, z1 = m_grid_max.z;
+    const i64 cx = centre.x, cz = centre.z;
+    const i64 farthest = std::max(std::max(std::abs(cx - x0), std::abs(cx - x1)), std::max(std::abs(cz - z0), std::abs(cz - z1)));
+    const i64 rings = std::min(static_cast<i64>(std::ceil(within / world::k_cell_size)) + 1, farthest);
     double best = within;
     std::optional<u32> found;
-    for (i64 z = low.z; z <= high.z; ++z) {
-        for (i64 x = low.x; x <= high.x; ++x) {
-            const auto cell = m_grid.find({static_cast<i32>(x), static_cast<i32>(z)});
-            if (cell == m_grid.end()) continue;
-            for (const u32 node : cell->second) {
-                const double d = distance(m_positions[node], point);
-                if (d < best || (d == best && !found)) {
-                    best = d;
-                    found = node;
-                }
+    const auto look = [&](i64 x, i64 z) {
+        const auto cell = m_grid.find({static_cast<i32>(x), static_cast<i32>(z)});
+        if (cell == m_grid.end()) return;
+        for (const u32 node : cell->second) {
+            const double d = distance(m_positions[node], point);
+            // (Of two as near, the one made first: the same whatever order the squares come in.)
+            if (d < best || (d == best && (!found || node < *found))) {
+                best = d;
+                found = node;
             }
+        }
+    };
+    for (i64 ring = 0; ring <= rings; ++ring) {
+        if (found && static_cast<double>(ring - 1) * world::k_cell_size > best) break;
+        if (ring == 0) {
+            look(cx, cz);
+            continue;
+        }
+        for (i64 x = std::max(cx - ring, x0); x <= std::min(cx + ring, x1); ++x) {
+            if (cz - ring >= z0 && cz - ring <= z1) look(x, cz - ring);
+            if (cz + ring >= z0 && cz + ring <= z1) look(x, cz + ring);
+        }
+        for (i64 z = std::max(cz - ring + 1, z0); z <= std::min(cz + ring - 1, z1); ++z) {
+            if (cx - ring >= x0 && cx - ring <= x1) look(cx - ring, z);
+            if (cx + ring >= x0 && cx + ring <= x1) look(cx + ring, z);
         }
     }
     return found;

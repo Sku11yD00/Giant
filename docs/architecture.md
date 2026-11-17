@@ -3428,7 +3428,7 @@ and holds until the next; the last holds over midnight until the first
 (`activity`, a word as a place's tag is) and where (`at`): `stay` where it
 is, its `home`, the `place` named, or a place with a `tag` (each person
 its own: the nearest to its home), going there at `speed`. This part only
-keeps them: nobody acts on a routine yet (part 2 sets people off).
+keeps them; part 2, below, has people act on them.
 
 `check_routine` checks one, `check_people` that names are unique and each
 person's routine is there. A place a routine names need not be there (a
@@ -3448,6 +3448,101 @@ The commands: `set_routine` (makes or replaces one whole) /
 before and after, as for a place or a look; people put back whose routine
 is gone come back without one. An entity standing for a person is not
 made again when only its routine changes.
+
+### Following routines (LW3 part 2)
+
+`PeopleRoutines` (`editor/src/people_routines.h`) has people act on their
+routines while the physics simulates. Each frame, after
+`PeopleTravel::update`, it looks at the next 512 people of the scene's
+list (`looked_a_frame`). For one with a routine it takes the entry that
+holds at the person's own hour: the time of day shown (`ClockState`),
+late by the person's share of `spread_minutes` (default 20; by its id,
+the same every day), so a village sets off over twenty minutes, not in
+one frame. When what that entry says to the person (where to be and how
+fast to go there, with its home for `home` and `tag`: a hash kept in a
+slot beside the person's place in the list) is another than what it last
+acted on, it acts: `stay` stops the trip the routine began for it;
+otherwise the place is found (its home, the place named, or for a tag
+the place with it nearest its home, nearest where it starts for one with
+no home) and a spot of the person's own within 0.8 of the place's
+radius, and `PeopleTravel::send` sends it there at the entry's speed,
+unless it stands within the place or is on its way to that spot already.
+The next entry at the same place is nothing new: the activity changes,
+nobody is sent. At most 32 are sent or stopped a frame (`sent_a_frame`,
+at most 128); the rest wait their next turn. One that cannot be sent (no
+home, no such place, no road within `within`, or its way not found after
+all: its trip's `failed` phase, seen when it is next looked at) stays
+and is marked `failed`, told once, and is tried again when the places
+change, the route graph is built again (`PeopleTravel::builds`) or its
+entry changes.
+
+A person sent by hand (`send_person`) is left to it until its routine
+next says something else, and `stay` does not stop a trip the routine
+did not begin (the slot keeps its trip's serial). Known limits: a place
+moved after someone set off for it is not followed until that person's
+next entry; `spread_minutes` changed while running has each act on the
+entry its new hour gives.
+
+Slots lie beside the people in the order of their ids. When people are
+made or removed the slots are matched to them again by id in one pass
+(an edit's cost), so the others keep what they acted on and are not sent
+again.
+
+Places are found by halving in two lists of (hash, place index) sorted
+by hash: one of names, one of tags. The hash is seeded per editor, so a
+scene's names cannot be made to share one. No copy of the places is
+kept: every find is checked against the scene as it is (the name is the
+same, the tag is there), so a list out of date finds too little and
+never the wrong place. The lists are made again when the number of
+places changes, or when one of the 256 places looked at that frame no
+longer has the name, tags and position it had (a 32-bit sign of each is
+kept): an edit's cost, like the route graph's. They are kept from one
+run to the next. Until they are made again a place just changed may be
+missed, or for a tag one taken that is no longer the nearest. The places
+with a tag are listed in the order of their x, and the nearest is looked
+for outward from the person's home both ways until x alone is farther
+than the nearest found, so few are measured however many have the tag.
+The answer is kept by (home, tag) in 1024 slots, so those of one home
+measure once; at most 16384 tagged places are measured a frame, the rest
+of the people waiting a frame. `doing` gives the place a person was sent
+to (its name's hash is kept in the slot and found again in the list),
+not where its entry would send it now.
+
+`send` called this way (`in_frame`) takes the routes as `update` last
+saw them: `PeopleTravel::update` now compares a stretch of the routes
+every frame while simulating (not only while a search waits) and builds
+the graph again when they differ, and a run starts by comparing them
+whole (roads edited while stopped). Its refusals in a frame are a few
+words (no memory taken); a trip that is sent takes memory for its way
+and its place in the lists (a few small pieces each, at most
+`sent_a_frame` trips a frame: a known cost). `RouteGraph::nearest`
+looks square by square in rings outward, only among the squares that
+have nodes, and stops at the first ring past the nearest found, so a
+person by a road costs a few squares however far `within` reaches;
+`within` here is at most 1000 m.
+
+So that a village's morning costs one search, `PeopleTravel` keeps the
+last 256 ways found (from one graph node to another; `Way`): a trip
+between the same two nodes takes a copy of the way kept instead of
+searching (`reused` in `get_travel`), without spending a search slice
+for up to 256 trips and 8192 nodes a frame (past that, slices by its
+length). Building the graph again
+forgets them. Ways not kept are still searched for one at a time: many
+people sent at once to places far apart wait their turn (a known limit;
+`PeopleTravel::Settings::search_work_a_frame` is the budget).
+
+Stopping the simulation, another run or another scene empties every
+slot: everyone is back where the scene has them and begins its routine
+afresh. `get_people` gives `doing` (the activity, the place sent to, and
+`failed`); `set_routine_settings` sets and reads the settings with
+`following`, `sent`, `stayed` and `failed`. Not saved, not undone.
+
+Known limits (the next parts): the activity does nothing yet but name
+what one does (animation: part 3); the time of day only moves in play,
+and people travel in real seconds whatever the clock's speed, so at 60
+game seconds a second a ten-minute walk takes ten game hours; game saves
+keep neither trips nor what each was doing; everyone with one home and
+one tag shares a place.
 
 ### People near the camera (LW1b)
 

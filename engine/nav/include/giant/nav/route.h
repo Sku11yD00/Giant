@@ -56,7 +56,8 @@ public:
     // The index of the node with this id, or k_no_route_node.
     u32 index_of(world::RouteNodeId id) const;
     // The node nearest `point` within `within` metres (at most 4096), if any
-    // (none for a point that is not finite or past 200,000 km out).
+    // (none for a point that is not finite or past 200,000 km out). Of two
+    // as near, the one earlier in the routes' list.
     std::optional<u32> nearest(const DVec3& point, double within) const;
     // The least a metre costs (the search's guess is the straight line at this).
     float least_pace() const { return m_least_pace; }
@@ -68,6 +69,7 @@ private:
     std::vector<Edge> m_edges;
     // Nodes by the 64 m square they are in (for nearest).
     std::unordered_map<world::CellCoord, std::vector<u32>, world::CellCoordHash> m_grid;
+    world::CellCoord m_grid_min{}, m_grid_max{}; // the squares that have nodes lie within these
     float m_least_pace = 1.0f;
 };
 

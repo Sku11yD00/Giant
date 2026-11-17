@@ -56,6 +56,18 @@ GIANT_TEST("route: the graph has every link both ways, finds nodes by id and the
     GIANT_CHECK(graph.nearest({29, 4, 41}, 5.0) == 1u && graph.nearest({250, 0, 0}, 200.0) == 2u);
     GIANT_CHECK(graph.nearest({140, 0, -90}, 200.0) == 0u && !graph.nearest({140, 0, -90}, 100.0));
     GIANT_CHECK(graph.nearest({-5000, 0, 9000}, 0.0) == 3u && !graph.nearest({0, 0, 0}, -1.0));
+    // Exactly `within` away is within; of two as near, the one earlier in the list (in whichever square).
+    GIANT_CHECK(graph.nearest({0, 0, -50}, 50.0) == 0u && !graph.nearest({0, 0, -50}, 49.999));
+    world::Routes twins;
+    twins.nodes = {{1, {70, 0, 10}}, {2, {-70, 0, 10}}, {3, {0, 0, -70}}, {4, {0, 300, 5}}, {5, {-1, 0, -129}}};
+    const RouteGraph pair(twins);
+    GIANT_CHECK(pair.nearest({0, 0, 10}, 100.0) == 0u && pair.nearest({0, 0, 10}, 70.0) == 0u && !pair.nearest({0, 0, 10}, 69.0));
+    // One in the point's own square but high above is farther than one two squares off; one in a
+    // farther ring than a node already found is still taken when nearer than it.
+    GIANT_CHECK(pair.nearest({0, 0, 5}, 4096.0) == 0u && pair.nearest({0, 290, 5}, 4096.0) == 3u);
+    GIANT_CHECK(pair.nearest({-1, 0, -100}, 4096.0) == 4u && pair.nearest({-0.5, 0, -64.5}, 4096.0) == 2u);
+    // Far from every square that has a node: none, and no square looked at past theirs.
+    GIANT_CHECK(!pair.nearest({50000, 0, 50000}, 4096.0) && pair.nearest({3000, 0, 10}, 4096.0) == 0u);
     const RouteGraph empty{world::Routes{}};
     GIANT_CHECK(empty.size() == 0 && !empty.nearest({0, 0, 0}, 100.0));
     RouteSearch nothing(empty, 0, 0);

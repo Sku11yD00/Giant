@@ -386,6 +386,9 @@ Open-world systems:
 - LW3 part 1: routines as world data: what the people who have one do at
   each hour of the day and where (their home, a named place, a kind of
   place), made and given to people by command.
+- LW3 part 2: people follow their routines while the world runs: each
+  sets off at its own time for where its routine says, a village's way
+  found once and taken again by the rest.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

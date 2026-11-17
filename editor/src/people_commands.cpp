@@ -4,6 +4,7 @@
 // (saved with the scene and the world's world.json, undoable). People are
 // many, so an undo step keeps what one command changed, never the lists.
 #include "editor_commands.h"
+#include "people_routines.h"
 #include "people_state.h"
 #include "people_travel.h"
 
@@ -103,7 +104,7 @@ Json trip_json(const PeopleTravel& travel, const PeopleTravel::Trip& t) {
 
 // `people`: who is given an entity now (null: nobody is), named as `entity`.
 Json person_json(const Person& p, const PeopleState* people = nullptr, const world::Scene* scene = nullptr,
-                 const PeopleTravel* travel = nullptr) {
+                 const PeopleTravel* travel = nullptr, const PeopleRoutines* routines = nullptr) {
     Json j = {{"id", p.id},     {"name", p.name}, {"look", p.look}, {"home", p.home}, {"routine", p.routine},
               {"position", point_json(p.position)}, {"yaw", p.yaw},   {"seed", p.seed}};
     if (scene != nullptr) {
@@ -113,6 +114,12 @@ Json person_json(const Person& p, const PeopleState* people = nullptr, const wor
         j["at"] = point_json(at.position);
         const PeopleTravel::Trip* trip = travel != nullptr ? travel->trip(p.id) : nullptr;
         j["trip"] = trip != nullptr ? trip_json(*travel, *trip) : Json(nullptr);
+        PeopleRoutines::Doing doing;
+        if (routines != nullptr && routines->doing(*scene, p.id, doing)) {
+            j["doing"] = {{"activity", doing.activity}, {"place", doing.place}, {"failed", doing.failed}};
+        } else {
+            j["doing"] = nullptr;
+        }
     }
     return j;
 }
@@ -759,7 +766,9 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "within `within` metres of `near`, `limit` at a time from `offset` (by rising id). `count` is how "
          "many match, `total` how many there are. `entity`: the entity standing for one near the camera now "
          "(set_people_settings), else null. `at`: where it is now (its `position` until it travels: "
-         "send_person) and `trip`: its trip (as get_travel gives it), else null. `near` goes by `position`.",
+         "send_person) and `trip`: its trip (as get_travel gives it), else null. `doing`: what its routine has "
+         "it do now while the world runs (`activity`, the `place` it was sent to or \"\", and `failed` when it "
+         "could not be sent: no such place, no road near, no way found), else null. `near` goes by `position`.",
          object_schema(Json::array(), people_props),
          true,
          [&state](const Json& args, CommandContext&) {
@@ -771,7 +780,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  usize found = 0;
                  for (const Json& id : args["ids"]) {
                      const Person* p = world::find_person(people, id.get<PersonId>());
-                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene, state.travel));
+                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene, state.travel, state.routines));
                      found += p != nullptr ? 1 : 0;
                  }
                  return CommandResult::success({{"count", found}, {"total", people.size()}, {"people", std::move(list)}});
@@ -788,7 +797,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  if (!home.empty() && p.home != home) continue;
                  if (!routine.empty() && p.routine != routine) continue;
                  if (by_place && !near_enough(p.position, near, within)) continue;
-                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel));
+                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel, state.routines));
                  ++count;
              }
              return CommandResult::success({{"count", count}, {"total", people.size()}, {"people", std::move(list)}});
@@ -829,6 +838,46 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              }
              state.people->settings = s;
              return CommandResult::success(people_state_json(*state.people));
+         }});
+    add(registry,
+        {"set_routine_settings",
+         "How people follow their routines while simulating (set_routine; the time of day is the clock's: "
+         "set_time, moved on by play): `on`; `spread_minutes` (0 to 120, default 20: each person keeps its "
+         "hours late by its own share of this, the same every day, so a village does not set off as one); "
+         "`looked_a_frame` (people looked at a frame, 1 to 8192, default 512) and `sent_a_frame` (of them, "
+         "sent or stopped, 1 to 128, default 32); `within` (metres a person and its goal may be from a "
+         "road, 0 to 1000, default 500). "
+         "An entry sends one to its home, the place named, or the place with the tag nearest its home, to "
+         "a spot of its own within the place's radius (send_person's way of travelling); `stay` stops it "
+         "where it is. No arguments: reads them, with `following` (people with a routine) and `sent`, "
+         "`stayed` and `failed` (entries acted on since the simulation started; one that failed is tried "
+         "again when the places or the roads change). A person sent by hand (send_person) is left to it until its "
+         "routine next says something else. View state.",
+         object_schema(Json::array(),
+                       {{"on", {{"type", "boolean"}}},
+                        {"spread_minutes", {{"type", "number"}, {"minimum", 0}, {"maximum", 120}}},
+                        {"looked_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", PeopleRoutines::k_most_looked}}},
+                        {"sent_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", PeopleRoutines::k_most_sent}}},
+                        {"within", {{"type", "number"}, {"minimum", 0}, {"maximum", PeopleRoutines::k_most_within}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.routines == nullptr) return CommandResult::failure("nobody follows a routine here");
+             PeopleRoutines::Settings& s = state.routines->settings;
+             s.on = args.value("on", s.on);
+             s.spread_minutes = args.value("spread_minutes", s.spread_minutes);
+             s.looked_a_frame = args.value("looked_a_frame", s.looked_a_frame);
+             s.sent_a_frame = args.value("sent_a_frame", s.sent_a_frame);
+             s.within = args.value("within", s.within);
+             const PeopleRoutines::Stats t = state.routines->stats();
+             return CommandResult::success({{"on", s.on},
+                                            {"spread_minutes", s.spread_minutes},
+                                            {"looked_a_frame", s.looked_a_frame},
+                                            {"sent_a_frame", s.sent_a_frame},
+                                            {"within", s.within},
+                                            {"following", t.following},
+                                            {"sent", t.sent},
+                                            {"stayed", t.stayed},
+                                            {"failed", t.failed}});
          }});
     add(registry,
         {"send_person",
@@ -901,7 +950,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              const PeopleTravel::Stats s = travel.stats();
              Json j = {{"running", travel.running()}, {"seconds", travel.seconds()}, {"trips", s.trips},
                        {"searching", s.searching},    {"moved", s.moved},            {"arrived", s.arrived},
-                       {"failed", s.failed},          {"searches", s.searches},      {"opened", s.opened}};
+                       {"failed", s.failed},          {"searches", s.searches},      {"opened", s.opened},
+                       {"reused", s.reused}};
              if (args.contains("id")) {
                  const PersonId id = args["id"].get<PersonId>();
                  const Person* person = world::find_person(state.scene.people, id);
