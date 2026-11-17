@@ -319,7 +319,7 @@ GIANT_TEST("behaviours: thousands are followed a share a frame, each in its own 
     f.routines.settings.looked_a_frame = 512;
     f.frames(1.0, 12); // (twice through)
     GIANT_CHECK(f.routines.stats().following == count && f.routines.stats().behaving == count && f.routines.stats().changed == 0);
-    // A shot in their midst: those who hear it loud flee, at most `sent_a_frame` set off a frame, and all in the end.
+    // A shot in their midst: those who hear it loud flee, those looked at a frame at most, and all in the end.
     GIANT_CHECK(f.senses.noise({50.0, 0.0, 1.0}, 2000.0f, PeopleSenses::Kind::shot));
     f.frames(1.0, 4);
     const u64 changed = f.routines.stats().changed;
@@ -381,6 +381,15 @@ GIANT_TEST("behaviours: an hour's range over midnight holds on both sides; anoth
     GIANT_CHECK(f.run("set_person", {{"id", id}, {"behaviour", "other"}}).ok);
     f.frames(1.0);
     GIANT_CHECK(f.in(id) == "first" && f.told(id)["state"]["seconds"].get<double>() < 2.0);
+    // Given another behaviour, and its old one removed, between two looks: found where the old one was, it is another still.
+    const world::PersonId moved = f.person("sleeper");
+    f.frames(1.0);
+    f.frames(5.0);
+    GIANT_CHECK(f.in(moved) == "abed");
+    GIANT_CHECK(f.run("set_person", {{"id", moved}, {"behaviour", "other"}}).ok && f.run("remove_behaviour", {{"name", "sleeper"}}).ok);
+    f.frames(1.0);
+    GIANT_CHECK(f.in(moved) == "first" && f.told(moved)["state"]["seconds"].get<double>() < 2.0 && f.told(moved)["doing"].is_null());
+    GIANT_CHECK(f.travel.trip(moved) == nullptr);
 }
 
 GIANT_TEST("behaviours: one that failed has neither arrived nor failed until acted on again; a state's own is acted on before it is left") {
@@ -439,13 +448,31 @@ GIANT_TEST("behaviours: one that failed has neither arrived nor failed until act
     world::PersonId queued[6];
     for (world::PersonId& q : queued) q = f.person("queue");
     f.frames(0.5, 3);
-    usize off = 0;
-    for (const world::PersonId q : queued) off += f.in(q) == "gone" ? 1u : 0u;
-    GIANT_CHECK(off <= 3); // (one a frame)
+    usize waiting = 0;
+    for (const world::PersonId q : queued) waiting += f.in(q) == "set_off" ? 1u : 0u;
+    GIANT_CHECK(waiting >= 3 && f.routines.stats().sent <= sent + 3); // (one sent a frame: the rest wait in the state)
     f.frames(4.0, 40);
     for (const world::PersonId q : queued) GIANT_CHECK(f.in(q) == "gone");
     GIANT_CHECK(f.routines.stats().sent == sent + 6);
     GIANT_CHECK(f.run("set_routine_settings", {{"sent_a_frame", 64}}).ok);
+
+    // From a state's own to one that leaves it to a routine that cannot be done: the state's trip does not go on.
+    world::Routine lost;
+    lost.name = "lost";
+    lost.entries.push_back({0.0f, "seek", world::RoutineAt::place, "void", 2.0f});
+    f.state.scene.routines.push_back(lost);
+    GIANT_CHECK(f.run("set_behaviour",
+                      {{"name", "handover"},
+                       {"states", Json::array({{{"name", "run"}, {"activity", "run"}, {"at", "home"}, {"speed", 2.0},
+                                                {"transitions", Json::array({to("led", when({{{"is", "after"}, {"value", 3}}}))})}},
+                                               {{"name", "led"}}})}})
+                    .ok);
+    const world::PersonId handed = f.person("handover", "lost");
+    GIANT_CHECK(f.run("set_person", {{"id", handed}, {"position", at(90, 0, 0)}}).ok);
+    f.frames(2.0, 4);
+    GIANT_CHECK(f.in(handed) == "run" && f.trip_to(handed) == "cottage");
+    f.frames(3.0, 6);
+    GIANT_CHECK(f.in(handed) == "led" && f.travel.trip(handed) == nullptr && f.told(handed)["doing"]["failed"] == true);
 }
 
 GIANT_TEST("behaviours: a state entered is acted on though it says the same; a trip by hand is left; a save keeps a routine's") {
@@ -489,4 +516,26 @@ GIANT_TEST("behaviours: a state entered is acted on though it says the same; a t
     f.frames(2.0, 4);
     GIANT_CHECK(f.in(worker) == "day" && f.trip_to(worker) == "mill" && f.routines.stats().sent == sent);
     GIANT_CHECK(f.told(worker)["doing"]["activity"] == "work" && f.told(worker)["doing"]["own"] == false);
+    // A routine with no entries (a file's), and one that is not there: as ever (the first followed, the
+    // other not; neither does anything). Given a behaviour, the one whose routine is not there is followed,
+    // and has not failed.
+    world::Routine empty;
+    empty.name = "empty";
+    f.state.scene.routines.push_back(empty);
+    const u32 following = f.routines.stats().following;
+    const world::PersonId idle = f.person("", "empty"), astray = f.person("", "empty");
+    for (world::Person& p : f.state.scene.people) {
+        if (p.id == astray) p.routine = "nowhere";
+    }
+    f.frames(2.0, 4);
+    GIANT_CHECK(f.routines.stats().following == following + 1);
+    GIANT_CHECK(f.told(idle)["doing"].is_null() && f.told(astray)["doing"].is_null() && f.travel.trip(idle) == nullptr && f.travel.trip(astray) == nullptr);
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "calm"},
+                                        {"states", Json::array({{{"name", "wait"}, {"transitions", Json::array({to("bad", when({{{"is", "failed"}}}))})}}, {{"name", "bad"}}})}})
+                    .ok);
+    for (world::Person& p : f.state.scene.people) {
+        if (p.id == astray) p.behaviour = "calm";
+    }
+    f.frames(2.0, 4);
+    GIANT_CHECK(f.routines.stats().following == following + 2 && f.in(astray) == "wait" && f.told(astray)["doing"].is_null());
 }

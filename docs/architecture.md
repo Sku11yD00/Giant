@@ -3968,6 +3968,8 @@ last acted on, so states that fail into each other go round a look
 each, and each tries again. When the places or the roads change,
 one that had failed is acted on again, and neither `arrived` nor
 `failed` holds until it has been.
+One that goes from a state's own to a state whose routine entry
+cannot be done does not walk on with the state's trip either.
 
 `get_people` tells the state (`state`: its name, its place among the
 behaviour's, seconds in it) and whether what it does is the state's

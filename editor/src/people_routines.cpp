@@ -365,8 +365,12 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         if (!person.behaviour.empty()) {
             if (slot.behaviour < behaviours.size() && behaviours[slot.behaviour].name == person.behaviour) {
                 behaviour = &behaviours[slot.behaviour];
-            } else if ((behaviour = world::find_behaviour(behaviours, person.behaviour)) != nullptr) {
-                // (The same one at another place in the list, one before it removed: it is in the state it was in.)
+            } else {
+                behaviour = world::find_behaviour(behaviours, person.behaviour);
+            }
+            if (behaviour != nullptr) {
+                // (The same one at another place in the list, one before it removed: it is in the state
+                // it was in. Another, though found where the last was: the first.)
                 const u32 name = static_cast<u32>(hash_of(person.behaviour));
                 if (slot.behaviour == k_no_behaviour || slot.behaviour_name != name) {
                     slot.state = 0;
@@ -436,6 +440,10 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
             if (!in.transitions.empty() && (slot.settled || !in.own)) {
                 const PeopleTravel::Trip* on = own_trip();
                 const bool trip_failed = on != nullptr && on->phase == PeopleTravel::Phase::failed;
+                if (slot.settled && trip_failed && !slot.failed) { // (no way found: told once, though the state is left now)
+                    slot.failed = true;
+                    ++m_stats.failed;
+                }
                 const bool could_not = slot.settled && (slot.failed || trip_failed);
                 const bool there = slot.settled && !could_not && on == nullptr;
                 const float alarm = senses != nullptr ? senses->alarm_at(scene, m_cursor - 1) : 0.0f;
@@ -487,6 +495,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         if (!by_state && (routine_found == nullptr || routine_found->entries.empty())) {
             if (behaviour == nullptr && !slot.by_state) continue; // (a routine with no entries: as ever)
             if (slot.acted != 0 || slot.trip != 0 || slot.by_state) nothing();
+            slot.failed = false; // (nothing was tried: a routine not there before is not this state's failing)
             slot.settled = true;
             continue;
         }
@@ -512,7 +521,8 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         const u32 says = said(person, entry);
         // (A state's own just entered is acted on though it says what was last acted on: what that
         // began may be over, or have failed.)
-        const bool again = by_state && !slot.settled;
+        const bool was_state = slot.by_state;
+        const bool again = !slot.settled && (by_state || was_state);
         if (says == slot.acted && !again) {
             slot.entry = static_cast<u8>(now);
             slot.by_state = by_state; // (the same said by another entry: what it does there may be another)
@@ -576,7 +586,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         if (sought == Sought::none) { // (no home, or no such place: it stays where it is, or goes on where it went)
             slot.failed = true;
             ++m_stats.failed;
-            if (by_state) { // (a state's own that cannot be done: it does not go on with what the last had it do)
+            if (by_state || was_state) { // (a state's own that cannot be done, or what follows one: it does not go on with what the last had it do)
                 if (slot.trip != 0 && trip != nullptr && trip->serial == slot.trip) travel.stop(person.id);
                 slot.trip = 0;
             }
@@ -607,7 +617,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
             slot.failed = true;
             ++m_stats.failed;
             // (Alarmed and not able to go where that says: it does not walk on with its day either.)
-            if (pressing) {
+            if (pressing || was_state) {
                 const PeopleTravel::Trip* still = travel.trip(person.id);
                 if (slot.trip != 0 && still != nullptr && still->serial == slot.trip) travel.stop(person.id);
                 slot.trip = 0;

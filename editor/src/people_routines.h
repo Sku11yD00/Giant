@@ -44,8 +44,8 @@
 // so a chain of states takes a look each). Then the state says what it
 // does: a state with its own activity is acted on as an entry is (in place
 // of what its routine says, alarmed or not); one without leaves it to the
-// routine (and one with no routine then stops the trip its behaviour
-// began, and stands). So a person needs a routine or a behaviour to be
+// routine (and one with no routine then stops its own trip, one a state
+// or its routine began, and stands). So a person needs a routine or a behaviour to be
 // followed, not both. `arrived` holds once the state has been acted on and
 // no trip begun for it is still under way (one that had nowhere to go has
 // arrived); `failed` once it could not be sent, or its trip found no way;
@@ -90,7 +90,7 @@ public:
     static constexpr float k_alarm_margin = 0.05f; // under an alarmed entry's `over` one stays on it by this much
 
     struct Stats {
-        u32 following = 0; // people with a routine that is there, as last counted through
+        u32 following = 0; // people with a routine or a behaviour that is there, as last counted through
         u64 sent = 0;      // since the simulation started
         u64 stayed = 0;    // entries begun that sent nobody anywhere (stay, or there already)
         u64 failed = 0;    // entries that could not be acted on (no such place, no road near, no way found)
