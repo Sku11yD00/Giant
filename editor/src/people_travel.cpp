@@ -174,10 +174,31 @@ void PeopleTravel::set_off(Trip& trip, float yaw) {
 }
 
 // A trip's search found its way: from where the person is, along the nodes, to the goal.
-void PeopleTravel::found(const world::Scene& scene, Trip& trip) {
+const PeopleTravel::Way* PeopleTravel::way(u32 from, u32 to) {
+    for (Way& w : m_ways) {
+        if (w.used != 0 && w.from == from && w.to == to) {
+            w.used = ++m_way_clock;
+            return &w;
+        }
+    }
+    return nullptr;
+}
+
+void PeopleTravel::keep_way(u32 from, u32 to, const std::vector<u32>& nodes) {
+    if (m_ways.empty()) m_ways.resize(k_ways_kept);
+    Way* oldest = &m_ways[0];
+    for (Way& w : m_ways) {
+        if (w.used < oldest->used) oldest = &w;
+    }
+    oldest->from = from;
+    oldest->to = to;
+    oldest->used = ++m_way_clock;
+    oldest->nodes.assign(nodes.begin(), nodes.end()); // (its room kept from the way it held)
+}
+
+void PeopleTravel::found(const world::Scene& scene, Trip& trip, const std::vector<u32>& path) {
     const world::Person* person = world::find_person(scene.people, trip.person);
     if (person == nullptr) return; // (gone: its trip goes when it is next looked at)
-    const std::vector<u32>& path = m_search.path();
     const Where now = where(*person);
     const DVec3 here = now.position;
     usize first = 0, last = path.size();
@@ -205,6 +226,7 @@ void PeopleTravel::build(const world::Routes& routes) {
     m_routes = routes;
     m_graph = nav::RouteGraph(m_routes);
     m_built = true;
+    ++m_builds;
     // Which joined-up part of the roads each node is in (a flood from each not yet reached).
     const u32 n = static_cast<u32>(m_graph.size());
     m_island.assign(n, nav::k_no_route_node);
@@ -225,6 +247,7 @@ void PeopleTravel::build(const world::Routes& routes) {
     }
     m_node_cursor = 0;
     m_link_cursor = 0;
+    for (Way& w : m_ways) w.used = 0; // (ways through the roads as they were)
     if (m_searching != 0) {
         m_queue.insert(m_queue.begin() + static_cast<std::ptrdiff_t>(m_queue_head), m_searching);
         m_searching = 0;
@@ -260,23 +283,36 @@ bool PeopleTravel::routes_changed(const world::Routes& routes) {
 }
 
 std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, const DVec3& to, float speed, double within,
-                               std::string place) {
+                               std::string_view place, bool in_frame) {
+    // (In a frame, why not is a few words: a text that short takes no memory to make.)
     if (!running() || scene.identity() != m_scene) {
+        if (in_frame) return "not simulating";
         return "not simulating (simulate on first): people travel by the simulation's clock";
     }
     const world::Person* person = world::find_person(scene.people, id);
-    if (person == nullptr) return "no person " + std::to_string(id);
+    if (person == nullptr) return in_frame ? std::string("no person") : "no person " + std::to_string(id);
     if (!std::isfinite(to.x) || !std::isfinite(to.y) || !std::isfinite(to.z) || std::fabs(to.x) > 1e8 ||
         std::fabs(to.y) > 1e8 || std::fabs(to.z) > 1e8) {
+        if (in_frame) return "bad place";
         return "where it is sent must be finite and within 100,000 km";
     }
-    if (!(speed >= 0.1f && speed <= 100.0f)) return "speed must be from 0.1 to 100 m/s";
+    if (!(speed >= 0.1f && speed <= 100.0f)) {
+        if (in_frame) return "bad speed";
+        return "speed must be from 0.1 to 100 m/s";
+    }
     // (As the command gave it: 1.4, not the float nearest it, to a few places.)
     const double pace = std::round(static_cast<double>(speed) * 1000.0) / 1000.0;
-    if (!(within >= 0.0)) return "within must be 0 or more";
+    if (!(within >= 0.0)) {
+        if (in_frame) return "bad within";
+        return "within must be 0 or more";
+    }
     within = std::min(within, k_join_within);
-    if (find(id) == nullptr && m_trips.size() >= k_max_trips) return "too many people are travelling";
-    if (!m_built || !(scene.routes == m_routes)) build(scene.routes); // (compared whole: a command's cost)
+    if (find(id) == nullptr && m_trips.size() >= k_max_trips) {
+        if (in_frame) return "too many";
+        return "too many people are travelling";
+    }
+    // (A command compares the routes whole, its own cost; in a frame they are as update last saw them.)
+    if (!m_built || (!in_frame && !(scene.routes == m_routes))) build(scene.routes);
     if (m_trips.empty() && m_places.empty()) { // the first of a run: room for everyone, taken once
         const usize room = std::min(scene.people.size(), k_max_trips);
         m_trips.reserve(room);
@@ -292,19 +328,21 @@ std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, co
     const bool direct = (first && last && (*first == *last || straight <= distance(here, m_graph.position(*first)) +
                                                                               distance(m_graph.position(*last), to))) ||
                         ((!first || !last) && straight <= within);
+    if (!direct && in_frame && (!first || !last)) return "no road near";
     if (!direct && !first) return "no road or path within " + whole(within) + " m of person " + std::to_string(id);
     if (!direct && !last) return "no road or path within " + whole(within) + " m of where it is sent";
     if (!direct && m_island[*first] != m_island[*last]) { // (known at once: no search to spend frames on)
+        if (in_frame) return "no way";
         return "no way along the roads and paths joins where person " + std::to_string(id) + " is and where it is sent";
     }
 
     if (const auto had = m_index.find(id); had != m_index.end()) end(had->second, false); // (it stays where it has got to)
-    m_places.try_emplace(id, now); // (its place made now, in the command: arriving allocates nothing)
+    m_places.try_emplace(id, now); // (its place made now, as it is sent: arriving allocates nothing)
     Trip trip;
     trip.person = id;
     trip.serial = ++m_serial;
     trip.to = to;
-    trip.place = std::move(place);
+    trip.place = place;
     trip.speed = pace;
     trip.yaw = now.yaw;
     ++m_stats.searching; // (searching until it sets off)
@@ -339,11 +377,15 @@ void PeopleTravel::sync(const world::Scene& scene, u64 run, double seconds) {
     if (scene.identity() != m_scene) {
         clear();
         m_held.clear(); // (the entities were the other scene's)
+        m_built = false; // (and the roads: the graph is built for the first sent in this one)
         m_scene = scene.identity();
     }
     if (run != m_run) {
         clear();
         m_run = run;
+        // A run starts with the graph as the roads are now (they may have been edited while stopped;
+        // compared whole: a start's cost, not a frame's).
+        if (run != 0 && (!m_built || !(scene.routes == m_routes))) build(scene.routes);
     }
     m_seconds = run != 0 ? std::max(seconds, 0.0) : 0.0;
 }
@@ -353,12 +395,14 @@ void PeopleTravel::update_rest(const world::Scene& scene) {
         m_queue.erase(m_queue.begin(), m_queue.begin() + static_cast<std::ptrdiff_t>(m_queue_head));
         m_queue_head = 0;
     }
-    // While ways are looked for, the graph follows the roads (edited while the
-    // world runs: built again at once, an editing cost).
-    if (m_built && (m_searching != 0 || m_queue_head < m_queue.size()) && routes_changed(scene.routes)) build(scene.routes);
+    // The graph follows the roads (edited while the world runs: built again
+    // at once, an editing cost): their numbers each frame, what each is a
+    // stretch a frame.
+    if (m_built && routes_changed(scene.routes)) build(scene.routes);
     // The ways looked for: one search at a time, a few slices a frame (starting one is a slice).
     const u32 slices = std::clamp<u32>(settings.search_work_a_frame, k_slice, 1u << 20) / k_slice;
     u32 free_skips = 256;
+    usize free_nodes = 8192; // of ways taken again without a slice spent (each is copied into its trip)
     for (u32 s = 0; s < slices; ++s) {
         if (m_searching == 0) {
             if (m_queue_head >= m_queue.size()) {
@@ -384,7 +428,21 @@ void PeopleTravel::update_rest(const world::Scene& scene) {
                 fail(*t, "no way along the roads and paths joins where it is and where it is sent");
                 continue;
             }
+            if (const Way* known = way(a, b)) { // (found before: no search)
+                found(scene, *t, known->nodes);
+                ++m_stats.reused;
+                if (free_skips > 0 && free_nodes >= known->nodes.size()) {
+                    --free_skips;
+                    free_nodes -= known->nodes.size();
+                    --s;
+                } else { // (past what is free: slices by its length, as a search's work is counted)
+                    s += static_cast<u32>(known->nodes.size() / k_slice);
+                }
+                continue;
+            }
             m_search.start(m_graph, a, b);
+            m_search_from = a;
+            m_search_to = b;
             m_searching = id;
             ++m_stats.searches;
             continue;
@@ -396,7 +454,8 @@ void PeopleTravel::update_rest(const world::Scene& scene) {
         m_searching = 0;
         if (t == nullptr || t->phase != Phase::searching) continue;
         if (state == nav::RouteState::found) {
-            found(scene, *t);
+            keep_way(m_search_from, m_search_to, m_search.path());
+            found(scene, *t, m_search.path());
         } else {
             fail(*t, "no way along the roads and paths joins where it is and where it is sent");
         }

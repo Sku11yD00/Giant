@@ -2,7 +2,8 @@
 // physics simulates, a person sent somewhere (send_person) goes there along
 // the world's roads and paths (world::Routes, nav/route.h): the way is
 // looked for over frames (one shared graph, one search at a time in its own
-// lists, a budget a frame), and the person then moves along it by the
+// lists, a budget a frame: many sent at once to places apart wait their
+// turn, a search each), and the person then moves along it by the
 // simulation's clock at a walking speed. Where one is at any time is worked
 // out from when it set off, so thousands travelling cost nothing a frame
 // but the few looked at for having arrived.
@@ -25,6 +26,7 @@
 #include "giant/world/scene.h"
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -73,6 +75,7 @@ public:
         u64 failed = 0;
         u64 searches = 0;
         u64 opened = 0; // route nodes the searches that came to an end looked at
+        u64 reused = 0; // ways taken from one found before between the same nodes (no search)
     };
 
     static constexpr usize k_max_trips = 65536; // (a scene's most people)
@@ -97,10 +100,15 @@ public:
 
     // Sends a person to `to` at `speed` (m/s), `within` metres being how
     // far from a road it and the goal may be. Empty: on its way (or its way
-    // is being looked for); else why not. The graph is built here when the
-    // routes have changed (a command's cost, not a frame's).
+    // is being looked for); else why not. The graph is built when a run
+    // starts, and here when the routes have changed since (a command's
+    // cost; in a frame only for the first sent after another scene was
+    // opened while running). `in_frame`
+    // (routines send many a frame): the routes are taken as `update` last
+    // saw them (it compares a stretch of them a frame, so a node moved is
+    // seen a few frames late), and why not is a few words.
     std::string send(const world::Scene& scene, world::PersonId id, const DVec3& to, float speed, double within,
-                     std::string place = {});
+                     std::string_view place = {}, bool in_frame = false);
     // Ends a person's trip where it is. False: it had none.
     bool stop(world::PersonId id);
     void clear();
@@ -123,13 +131,26 @@ public:
     // Counts the times everyone was put back (another run or scene): one
     // made an entity before is not where that entity stands.
     u64 resets() const { return m_resets; }
+    // Counts the times the graph was built (the roads changed: one with no road near may have one now).
+    u64 builds() const { return m_builds; }
     Stats stats() const;
 
 private:
     Trip* find(world::PersonId id);
     void end(usize index, bool arrived);
     void fail(Trip& trip, const char* reason);
-    void found(const world::Scene& scene, Trip& trip);
+    void found(const world::Scene& scene, Trip& trip, const std::vector<u32>& path);
+    // A way found before from one node to another, kept for the next going the same (most go
+    // where others go: a village to its mill): its nodes are copied into each trip that takes
+    // it. Forgotten when the graph is built again.
+    struct Way {
+        u32 from = 0, to = 0;
+        u64 used = 0; // m_way_clock when last taken (0: empty)
+        std::vector<u32> nodes;
+    };
+    static constexpr usize k_ways_kept = 256;
+    const Way* way(u32 from, u32 to);
+    void keep_way(u32 from, u32 to, const std::vector<u32>& nodes);
     void set_off(Trip& trip, float yaw);
     void build(const world::Routes& routes);
     bool routes_changed(const world::Routes& routes);
@@ -139,13 +160,17 @@ private:
     u64 m_run = 0;
     u64 m_resets = 0;
     u64 m_serial = 0;
+    u64 m_builds = 0;
     double m_seconds = 0.0;
     world::Routes m_routes; // as the graph was built from them
     nav::RouteGraph m_graph;
     std::vector<u32> m_island; // by the graph's node: which joined-up part of the roads it is in
     bool m_built = false;
     usize m_node_cursor = 0, m_link_cursor = 0; // in the routes: compared with m_routes a stretch a frame
+    std::vector<Way> m_ways;
+    u64 m_way_clock = 0;
     nav::RouteSearch m_search;
+    u32 m_search_from = 0, m_search_to = 0; // the graph's nodes m_search goes between
     world::PersonId m_searching = 0; // whose way m_search looks for (0: nobody's)
     std::vector<world::PersonId> m_queue; // waiting for their way, from m_queue_head
     usize m_queue_head = 0;

@@ -374,7 +374,8 @@ GIANT_TEST("travel: more waiting for their ways than the list is trimmed at all 
     GIANT_CHECK(f.travel.stats().trips == count && f.travel.stats().searching == count);
     for (int i = 0; i < 2000 && f.travel.stats().searching > 0; ++i) f.travel.update(scene, 1, 0.0);
     PeopleTravel::Stats s = f.travel.stats();
-    GIANT_CHECK(s.searching == 0 && s.failed == 0 && s.trips == count && s.searches == count);
+    GIANT_CHECK(s.searching == 0 && s.failed == 0 && s.trips == count);
+    GIANT_CHECK(s.searches == 1 && s.reused == count - 1); // (all join and leave the road at the same nodes: one way found)
     for (int i = 0; i < 4; ++i) f.travel.update(scene, 1, 1000.0);
     s = f.travel.stats();
     GIANT_CHECK(s.arrived == count && s.trips == 0 && s.moved == count);

@@ -62,6 +62,7 @@ class WeatherEffects;
 class NavState;
 class WalkerState;
 class PeopleState;
+class PeopleRoutines;
 class PeopleTravel;
 class RagdollState;
 class GameUi;
@@ -265,6 +266,9 @@ struct EditorState {
     // Where the people are while the world runs, and their trips along
     // the roads (people_travel.h); set by main (and tests). Null: nobody travels.
     PeopleTravel* travel = nullptr;
+    // The people following their routines (people_routines.h); set by main
+    // (and tests). Null: nobody acts on its routine.
+    PeopleRoutines* routines = nullptr;
     // Characters gone limp (ragdoll_entity); set by main (and tests). Null: none do.
     RagdollState* ragdolls = nullptr;
     // Sounds played in the scene, heard at the camera; set by main (and
