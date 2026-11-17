@@ -3508,14 +3508,71 @@ was before the change (a node without the links it had). A few nodes or
 links changed are changed where they are in the lists; a command that
 changes nothing makes no step.
 
-Known limits (the next parts): nobody travels yet (LW2b: people along
-their routes); no links are made from the terrain itself; `get_route`
-and `create_route` (to find the nodes its points join) build the graph
-within the command, a few milliseconds with every node there can be, and
+Known limits: no links are made from the terrain itself; `get_route` and
+`create_route` (to find the nodes its points join) build the graph within
+the command, a few milliseconds with every node there can be, and
 `get_route` searches whole there too; a search takes its lists' room when
-made (three by node, one by link: the people's searches will share one
-graph, reuse those lists and spend a budget a frame); a link is a
-straight line between its nodes whatever the ground between.
+made (three by node, one by link; `RouteSearch::start` begins another in
+the same lists); a link is a straight line between its nodes whatever the
+ground between.
+
+### People travelling (LW2b part 1)
+
+While the physics simulates, a person sent somewhere (`send_person`: a
+place's name or a point) travels there along the routes. The editor's
+`PeopleTravel` (`people_travel.h`) keeps one `RouteGraph` for everyone,
+built from the scene's routes when a person is sent after they changed (a
+command's cost), and one `RouteSearch` whose lists every search reuses.
+`send` finds the nodes nearest the person and the goal at once (and says
+so if there is none within `within` metres, or if the two are in parts
+of the roads nothing joins: `build` floods the graph once to number its
+joined-up parts, so no search is spent on a goal that cannot be reached);
+the way between them is
+looked for over frames, one search at a time, `search_work_a_frame`
+(default 4096) of search work a frame in slices of 256, the rest waiting
+their turn in order. While any wait, the scene's routes are compared with
+those the graph was built from (their numbers each frame, 2048 nodes and
+links a frame) and the graph is built again when they differ: an editing
+cost, never a running game's. A trip whose node went, or whose ends the
+change left in parts nothing joins, fails saying so when its turn comes;
+entries of trips stopped or sent again since are passed over without
+spending a slice (256 a frame at most).
+
+A trip is the way as points (where the person was, the nodes, the goal;
+the first or last node left out when the next is nearer than the road's
+own way to it) with the metres to each, a speed, and when it set off.
+Where the person is at any time is worked out from the clock (`where`:
+the stretch found by halving), so thousands travelling cost nothing a
+frame; `looked_a_frame` trips (default 1024) are looked at a frame for
+having arrived or their person having gone. One arrived (or stopped:
+`stop_person`) stays there: `PeopleTravel` keeps where each person sent
+since the simulation started is (a few buckets of that map are looked
+through a frame for people since removed). Room for everyone's trip is
+taken at the first send of a run and a person's place is made when it is
+sent (the command's cost), so a crowd arriving in one frame allocates
+nothing; a trip's way is allocated when found, a few a frame at most. The clock is the physics' simulated time
+(steps counted), so `step_physics` moves people as it moves bodies and a
+paused game holds them; a command brings the clock up to the physics' now
+first (`sync`, from the one `clock_of` the frame uses too), so one sent straight after `step_physics` sets off from
+then. The scene's `Person` is never changed: stopping
+the simulation (another run, or another scene) puts everyone back.
+
+`PeopleState` asks `where` for each person it looks at, so the entity of
+one who has travelled is made where it has got to, facing along its way.
+While a person has an entity its trip is held (`hold`: it stands, the
+metres gone kept; the entity faces as it was made), and goes on from then
+when the entity goes; an entity whose person is no longer where it was made (the simulation stopped) is
+taken away and made again.
+
+Known limits (the next parts): a person with an entity stands instead of
+walking the ground from node to node (LW2b part 2); a trip's height is
+the straight line between its nodes, not the ground's; game saves do not
+keep trips or where people have got to; nobody sets off by itself
+(routines: LW3); everyone goes at one speed whatever the link's kind;
+`send` compares the scene's routes whole with the graph's (about a
+millisecond with every node and link there can be: a counted revision
+when routines send many a frame); stopping the simulation frees every
+trip in that frame.
 
 ## Sound
 

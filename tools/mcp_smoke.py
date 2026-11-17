@@ -189,6 +189,12 @@ def build_scene(tool, call, check):
     way = tool("get_route", {"from": [1, 0, 1], "to": [81, 0, 88]})
     check(way["found"] and way["nodes"] == [road[0], road[1], lane[1]] and abs(way["length"] - 170) < 0.01,
           "the way is found along the road and up the path")
+    # Travel: nobody travels unless the physics simulates, and only people there are sent.
+    travel = tool("get_travel")
+    check(travel["running"] is False and travel["trips"] == 0, "nobody travels while the simulation is off")
+    stay = call("tools/call", {"name": "send_person", "arguments": {"id": 1, "to": [80, 0, 90]}})
+    check(stay.get("isError") is True and "not simulating" in stay["content"][0]["text"],
+          "a person is only sent while simulating")
     tool("undo")
     tool("undo")
     check(tool("get_routes", {"limit": 0})["nodes"] == 0, "undo takes the routes")

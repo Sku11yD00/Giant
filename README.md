@@ -377,6 +377,9 @@ Open-world systems:
   from their looks, a few a frame, and lose them again far off.
 - LW2 part 1: roads and paths across the whole world as a graph the world
   keeps, laid by command, and the cheapest way found along them.
+- LW2 part 2: people sent somewhere travel there along the roads by the
+  simulation's clock, thousands at once at no cost a frame, their ways
+  found a budget a frame.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

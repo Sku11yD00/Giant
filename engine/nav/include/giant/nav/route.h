@@ -75,8 +75,12 @@ enum class RouteState : u8 { searching, found, none };
 
 class RouteSearch {
 public:
+    RouteSearch() = default; // none, until start
     // From and to are node indices of `graph`, which must outlive the search unchanged.
-    RouteSearch(const RouteGraph& graph, u32 from, u32 to);
+    RouteSearch(const RouteGraph& graph, u32 from, u32 to) { start(graph, from, to); }
+    // Begins another search in this one's lists (their room is kept: a
+    // search over the same graph allocates nothing but its way).
+    void start(const RouteGraph& graph, u32 from, u32 to);
 
     // Does about `budget` of work (1 a node taken from the open ones, 1 a
     // link looked along; always a node at least, and the node begun is
@@ -98,9 +102,9 @@ private:
     };
     double rest(u32 node) const;
 
-    const RouteGraph* m_graph;
-    u32 m_to;
-    RouteState m_state = RouteState::searching;
+    const RouteGraph* m_graph = nullptr;
+    u32 m_to = 0;
+    RouteState m_state = RouteState::none;
     std::vector<double> m_so_far; // by node; infinity: not reached (double: a way across the world is long)
     std::vector<u32> m_came_from; // by node
     std::vector<u8> m_done;       // by node

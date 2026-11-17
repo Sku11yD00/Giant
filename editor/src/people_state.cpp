@@ -21,13 +21,14 @@ double square_distance(const DVec3& a, const DVec3& b) {
 
 } // namespace
 
-world::Entity PeopleState::entity_for(const world::Person& person, const world::PersonLook& look, double ground) {
+world::Entity PeopleState::entity_for(const world::Person& person, const world::PersonLook& look,
+                                      const PeopleTravel::Where& at, double ground) {
     world::Entity e;
     e.name = person.name.empty() ? "person " + std::to_string(person.id) : person.name;
     e.shape = world::Shape::mesh;
     e.mesh = look.mesh;
-    e.transform.position = {person.position.x, ground, person.position.z};
-    e.transform.rotation = quat_from_axis_angle({0.0f, 1.0f, 0.0f}, degrees_to_radians(person.yaw));
+    e.transform.position = {at.position.x, ground, at.position.z};
+    e.transform.rotation = quat_from_axis_angle({0.0f, 1.0f, 0.0f}, degrees_to_radians(at.yaw));
     e.transform.scale = {look.height, look.height, look.height};
     e.material = look.material;
     e.parts = look.parts;
@@ -48,6 +49,7 @@ world::EntityId PeopleState::entity_of(const world::Scene& scene, world::PersonI
 // Lets a person's entity go: taken from the scene with the frame's others, at once (flush).
 void PeopleState::release(world::PersonId id) {
     if (m_held.erase(id) == 0) return;
+    if (travel != nullptr) travel->hold(id, false);
     m_entities.push_back(world::person_entity_id(id));
     ++m_stats.released;
 }
@@ -60,9 +62,12 @@ void PeopleState::flush(world::Scene& scene) {
 void PeopleState::release_all(world::Scene& scene) {
     if (scene.identity() == m_scene) {
         m_entities.clear();
-        for (const auto& [id, person] : m_held) m_entities.push_back(world::person_entity_id(id));
+        for (const auto& [id, held] : m_held) m_entities.push_back(world::person_entity_id(id));
         m_stats.released += m_entities.size();
         flush(scene);
+    }
+    if (travel != nullptr) {
+        for (const auto& [id, held] : m_held) travel->hold(id, false);
     }
     m_held.clear();
     m_stats.embodied = 0;
@@ -73,6 +78,9 @@ void PeopleState::release_all(world::Scene& scene) {
 // taken while they stood) go.
 void PeopleState::take_up(world::Scene& scene) {
     m_scene = scene.identity();
+    if (travel != nullptr) {
+        for (const auto& [id, held] : m_held) travel->hold(id, false);
+    }
     m_held.clear();
     m_looks = scene.person_looks;
     m_look_cursor = 0;
@@ -123,8 +131,8 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     const std::vector<world::PersonLook>& looks = scene.person_looks;
     const auto look_changed = [&](const std::string& name) {
         m_scratch.clear();
-        for (const auto& [id, person] : m_held) {
-            if (person.look == name) m_scratch.push_back(id);
+        for (const auto& [id, held] : m_held) {
+            if (held.was.look == name) m_scratch.push_back(id);
         }
         for (const world::PersonId id : m_scratch) release(id);
     };
@@ -141,14 +149,16 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         ++m_look_cursor;
     }
 
-    // Those held: gone (the entity deleted, the person removed or changed),
-    // too far, or in a cell whose file left the scene.
+    // Those held: gone (the entity deleted, the person removed or changed,
+    // or no longer where the entity stands: the simulation stopped and put
+    // it back; the way it faces is the entity's own while it stands), too far, or in a cell whose file left the scene.
     m_scratch.clear();
-    for (const auto& [id, was] : m_held) {
+    for (const auto& [id, held] : m_held) {
         const world::Person* person = world::find_person(scene.people, id);
-        const bool there = scene.find(world::person_entity_id(id)) != nullptr && person != nullptr && *person == was;
-        if (!there || square_distance(was.position, camera) > let_go * let_go ||
-            (world != nullptr && world->ground_coming(world::cell_of(was.position)))) {
+        const bool there = scene.find(world::person_entity_id(id)) != nullptr && person != nullptr &&
+                           *person == held.was && where(*person).position == held.at.position;
+        if (!there || square_distance(held.at.position, camera) > let_go * let_go ||
+            (world != nullptr && world->ground_coming(world::cell_of(held.at.position)))) {
             m_scratch.push_back(id);
         }
     }
@@ -169,8 +179,9 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     const u32 a_frame = std::clamp<u32>(settings.made_a_frame, 1, 64);
     for (; m_cursor < end; ++m_cursor) {
         const world::Person& person = people[m_cursor];
-        if (square_distance(person.position, camera) > embody * embody || m_held.contains(person.id)) continue;
-        if (world != nullptr && world->ground_coming(world::cell_of(person.position))) continue; // its ground first
+        const PeopleTravel::Where at = where(person);
+        if (square_distance(at.position, camera) > embody * embody || m_held.contains(person.id)) continue;
+        if (world != nullptr && world->ground_coming(world::cell_of(at.position))) continue; // its ground first
         if (m_held.size() >= most) {
             ++m_waiting_now;
             continue;
@@ -178,9 +189,10 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         if (made >= a_frame) break; // (this one first next frame)
         const world::PersonLook* look = world::find_person_look(m_looks, person.look);
         if (look == nullptr) continue; // (a look not taken up yet: next time through)
-        const std::optional<double> ground = scene.terrain.height_at(person.position.x, person.position.z);
-        if (scene.add(entity_for(person, *look, ground ? *ground : person.position.y)) == 0) continue;
-        m_held.emplace(person.id, person);
+        const std::optional<double> ground = scene.terrain.height_at(at.position.x, at.position.z);
+        if (scene.add(entity_for(person, *look, at, ground ? *ground : at.position.y)) == 0) continue;
+        if (travel != nullptr) travel->hold(person.id, true); // (it stands while it has an entity)
+        m_held.emplace(person.id, Held{person, at});
         ++made;
         ++m_stats.made;
     }

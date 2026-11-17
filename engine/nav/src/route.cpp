@@ -99,7 +99,15 @@ std::optional<u32> RouteGraph::nearest(const DVec3& point, double within) const 
     return found;
 }
 
-RouteSearch::RouteSearch(const RouteGraph& graph, u32 from, u32 to) : m_graph(&graph), m_to(to) {
+void RouteSearch::start(const RouteGraph& graph, u32 from, u32 to) {
+    m_graph = &graph;
+    m_to = to;
+    m_state = RouteState::searching;
+    m_open.clear();
+    m_path.clear();
+    m_length = 0.0;
+    m_cost = 0.0;
+    m_opened = 0;
     const usize n = graph.size();
     if (from >= n || to >= n) {
         m_state = RouteState::none;

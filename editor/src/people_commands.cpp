@@ -4,6 +4,7 @@
 // many, so an undo step keeps what one command changed, never the lists.
 #include "editor_commands.h"
 #include "people_state.h"
+#include "people_travel.h"
 
 #include "giant/core/assert.h"
 #include "giant/world/people.h"
@@ -68,13 +69,39 @@ Json look_json(const PersonLook& l, usize people) {
             {"hair", l.hair.on},    {"matched", l.matched},  {"people", people}};
 }
 
+// The travel's clock brought up to the physics' now (a command between frames: time stepped on
+// by step_physics, or the simulation started or stopped, since the last frame counts).
+void sync_travel(EditorState& state) {
+    if (state.travel == nullptr || state.physics == nullptr) return;
+    const PeopleTravel::Clock now = PeopleTravel::clock_of(*state.physics);
+    state.travel->sync(state.scene, now.run, now.seconds);
+}
+
+Json trip_json(const PeopleTravel& travel, const PeopleTravel::Trip& t) {
+    Json j = {{"phase", PeopleTravel::to_string(t.phase)}, {"to", point_json(t.to)}, {"speed", t.speed}, {"standing", t.held}};
+    if (!t.place.empty()) j["place"] = t.place;
+    if (t.phase == PeopleTravel::Phase::travelling) {
+        const double gone = travel.gone(t), length = PeopleTravel::length(t);
+        j["gone"] = gone;
+        j["length"] = length;
+        j["arrives_in"] = t.held ? Json(nullptr) : Json((length - gone) / t.speed); // (standing: not known)
+    }
+    if (t.phase == PeopleTravel::Phase::failed) j["why"] = t.reason;
+    return j;
+}
+
 // `people`: who is given an entity now (null: nobody is), named as `entity`.
-Json person_json(const Person& p, const PeopleState* people = nullptr, const world::Scene* scene = nullptr) {
+Json person_json(const Person& p, const PeopleState* people = nullptr, const world::Scene* scene = nullptr,
+                 const PeopleTravel* travel = nullptr) {
     Json j = {{"id", p.id},     {"name", p.name}, {"look", p.look}, {"home", p.home},
               {"position", point_json(p.position)}, {"yaw", p.yaw},   {"seed", p.seed}};
     if (scene != nullptr) {
         const world::EntityId entity = people != nullptr ? people->entity_of(*scene, p.id) : 0;
         j["entity"] = entity != 0 ? Json(entity) : Json(nullptr);
+        const PeopleTravel::Where at = travel != nullptr ? travel->where(p) : PeopleTravel::Where{p.position, p.yaw};
+        j["at"] = point_json(at.position);
+        const PeopleTravel::Trip* trip = travel != nullptr ? travel->trip(p.id) : nullptr;
+        j["trip"] = trip != nullptr ? trip_json(*travel, *trip) : Json(nullptr);
     }
     return j;
 }
@@ -591,10 +618,12 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "the simulation's): those named by `ids`, or all, or those of `look`, living at `home` and/or "
          "within `within` metres of `near`, `limit` at a time from `offset` (by rising id). `count` is how "
          "many match, `total` how many there are. `entity`: the entity standing for one near the camera now "
-         "(set_people_settings), else null.",
+         "(set_people_settings), else null. `at`: where it is now (its `position` until it travels: "
+         "send_person) and `trip`: its trip (as get_travel gives it), else null. `near` goes by `position`.",
          object_schema(Json::array(), people_props),
          true,
          [&state](const Json& args, CommandContext&) {
+             sync_travel(state);
              const std::vector<Person>& people = state.scene.people;
              Json list = Json::array();
              if (args.contains("ids")) {
@@ -602,7 +631,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  usize found = 0;
                  for (const Json& id : args["ids"]) {
                      const Person* p = world::find_person(people, id.get<PersonId>());
-                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene));
+                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene, state.travel));
                      found += p != nullptr ? 1 : 0;
                  }
                  return CommandResult::success({{"count", found}, {"total", people.size()}, {"people", std::move(list)}});
@@ -617,7 +646,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  if (!look.empty() && p.look != look) continue;
                  if (!home.empty() && p.home != home) continue;
                  if (by_place && !near_enough(p.position, near, within)) continue;
-                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene));
+                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel));
                  ++count;
              }
              return CommandResult::success({{"count", count}, {"total", people.size()}, {"people", std::move(list)}});
@@ -657,6 +686,89 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              }
              state.people->settings = s;
              return CommandResult::success(people_state_json(*state.people));
+         }});
+    add(registry,
+        {"send_person",
+         "While simulating, sends a person (`id`) travelling to `to`: a place's name (anywhere within it "
+         "is there: its middle) or a point [x, y, z]. It goes along the world's roads and paths "
+         "(create_route) at `speed` (m/s, default 1.4, a walk): to the nearest route node within `within` "
+         "metres (default 500, at most 4096), the cheapest way along the links (as get_route finds), and "
+         "from the last node to the goal; straight there when the roads are no help. The way is looked "
+         "for over the next frames (`phase` searching, then travelling, or failed with `why`); then it "
+         "moves by the simulation's clock whether anyone sees it or not (get_people gives `at`). One with "
+         "an entity near the camera stands until the entity goes (`standing`: walking the ground is to "
+         "come). Sent again, it goes on from where it has got to. Stopping the simulation puts everyone "
+         "back where the scene has them. View state: not undone, not saved.",
+         object_schema({"id", "to"},
+                       {{"id", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4294967295.0}}},
+                        {"to", {{"description", "A place's name or a point [x, y, z]."}}},
+                        {"speed", {{"type", "number"}, {"minimum", 0.1}, {"maximum", 100}}},
+                        {"within", {{"type", "number"}, {"minimum", 0}, {"maximum", PeopleTravel::k_join_within}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.travel == nullptr) return CommandResult::failure("nobody travels here");
+             sync_travel(state);
+             const PersonId id = args["id"].get<PersonId>();
+             const Json& to = args["to"];
+             DVec3 goal{};
+             std::string place;
+             if (to.is_string()) {
+                 place = to.get<std::string>();
+                 const Place* found = world::find_place(state.scene.places, place);
+                 if (found == nullptr) return CommandResult::failure("no place \"" + place + "\"");
+                 goal = found->position;
+             } else if (to.is_array() && to.size() == 3 && to[0].is_number() && to[1].is_number() && to[2].is_number()) {
+                 goal = point(to);
+             } else {
+                 return CommandResult::failure("`to` must be a place's name or a point [x, y, z]");
+             }
+             const std::string problem = state.travel->send(state.scene, id, goal, args.value("speed", 1.4f),
+                                                            args.value("within", 500.0), std::move(place));
+             if (!problem.empty()) return CommandResult::failure(problem);
+             return CommandResult::success({{"id", id}, {"trip", trip_json(*state.travel, *state.travel->trip(id))}});
+         }});
+    add(registry,
+        {"stop_person",
+         "Ends a person's trip (`id`): it stays where it has got to. View state.",
+         object_schema({"id"}, {{"id", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4294967295.0}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.travel == nullptr) return CommandResult::failure("nobody travels here");
+             sync_travel(state);
+             const PersonId id = args["id"].get<PersonId>();
+             const Person* person = world::find_person(state.scene.people, id);
+             if (person == nullptr) return CommandResult::failure("no person " + std::to_string(id));
+             if (!state.travel->stop(id)) return CommandResult::failure("person " + std::to_string(id) + " has no trip");
+             return CommandResult::success({{"id", id}, {"at", point_json(state.travel->where(*person).position)}});
+         }});
+    add(registry,
+        {"get_travel",
+         "The people's travelling: whether it is `running` (simulating), the `seconds` simulated, `trips` "
+         "(searching, travelling and failed), `searching` (their way not found yet), `moved` (people sent "
+         "since it started: where each is is the simulation's), and since the simulation started `arrived`, `failed`, "
+         "`searches` and the route nodes they `opened`. With `id`: that person's `at` and `trip` (`phase` "
+         "searching, travelling or failed with `why`; `to`, `place`, `speed`, `standing`; travelling: "
+         "`gone` and `length` in metres, `arrives_in` seconds, null while standing), null when it has none.",
+         object_schema(Json::array(), {{"id", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4294967295.0}}}}),
+         true,
+         [&state](const Json& args, CommandContext&) {
+             if (state.travel == nullptr) return CommandResult::failure("nobody travels here");
+             sync_travel(state);
+             const PeopleTravel& travel = *state.travel;
+             const PeopleTravel::Stats s = travel.stats();
+             Json j = {{"running", travel.running()}, {"seconds", travel.seconds()}, {"trips", s.trips},
+                       {"searching", s.searching},    {"moved", s.moved},            {"arrived", s.arrived},
+                       {"failed", s.failed},          {"searches", s.searches},      {"opened", s.opened}};
+             if (args.contains("id")) {
+                 const PersonId id = args["id"].get<PersonId>();
+                 const Person* person = world::find_person(state.scene.people, id);
+                 if (person == nullptr) return CommandResult::failure("no person " + std::to_string(id));
+                 const PeopleTravel::Trip* trip = travel.trip(id);
+                 j["id"] = id;
+                 j["at"] = point_json(travel.where(*person).position);
+                 j["trip"] = trip != nullptr ? trip_json(travel, *trip) : Json(nullptr);
+             }
+             return CommandResult::success(std::move(j));
          }});
 }
 

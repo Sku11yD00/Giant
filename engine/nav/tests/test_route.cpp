@@ -177,3 +177,34 @@ GIANT_TEST("route: a slice's budget counts the links looked along") {
     while (search.advance(64) == RouteState::searching) ++slices;
     GIANT_CHECK(search.state() == RouteState::found && search.path().size() == 2 && slices <= 2001 / 32 + 2);
 }
+
+GIANT_TEST("route: a search begun again in the same lists finds each way as a new one would") {
+    world::Routes routes;
+    for (u32 i = 1; i <= 6; ++i) routes.nodes.push_back({i, {i * 10.0, 0.0, 0.0}});
+    for (u32 i = 1; i < 6; ++i) {
+        if (i != 3) routes.links.push_back(link(i, i + 1)); // 1-2-3 and 4-5-6
+    }
+    routes.next_id = 7;
+    const RouteGraph graph(routes);
+    RouteSearch search; // none until started
+    GIANT_CHECK(search.state() == RouteState::none && search.advance(10) == RouteState::none && search.path().empty());
+    search.start(graph, graph.index_of(1), graph.index_of(3));
+    GIANT_CHECK(search.advance(100) == RouteState::found && ids(graph, search) == std::vector<world::RouteNodeId>({1, 2, 3}));
+    search.start(graph, graph.index_of(6), graph.index_of(4));
+    GIANT_CHECK(search.state() == RouteState::searching && search.path().empty() && search.opened() == 0);
+    GIANT_CHECK(search.advance(100) == RouteState::found && ids(graph, search) == std::vector<world::RouteNodeId>({6, 5, 4}));
+    GIANT_CHECK(std::fabs(search.length() - 20.0) < 1e-9);
+    search.start(graph, graph.index_of(1), graph.index_of(6)); // no way: nothing of the last is left
+    GIANT_CHECK(search.advance(100) == RouteState::none && search.path().empty() && search.length() == 0.0);
+    search.start(graph, 99, 0); // a node that is not there
+    GIANT_CHECK(search.state() == RouteState::none && search.advance(100) == RouteState::none);
+    // A smaller graph after a larger: its own size.
+    world::Routes two;
+    two.nodes = {{1, {0.0, 0.0, 0.0}}, {2, {5.0, 0.0, 0.0}}};
+    two.links.push_back(link(1, 2));
+    two.next_id = 3;
+    const RouteGraph small(two);
+    search.start(small, 1, 0);
+    GIANT_CHECK(search.advance(100) == RouteState::found && ids(small, search) == std::vector<world::RouteNodeId>({2, 1}));
+}
+

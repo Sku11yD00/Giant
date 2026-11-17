@@ -3,7 +3,8 @@
 // `embody_distance` of the camera are given an entity each, made from the
 // person's look where the person stands ("embodied"), and the entity is
 // taken away again once the camera is `release_distance` off, the person
-// goes or changes, or its cell's ground left the scene. Such an entity
+// goes, changes or is elsewhere (the simulation stopped and put it back),
+// or its cell's ground left the scene. Such an entity
 // carries the person's id (Entity::person): it is never saved and the
 // world's streaming does not count it as a cell's (the person is the
 // world's data, not the entity).
@@ -12,6 +13,8 @@
 // at (the list is gone through over frames), `made_a_frame` entities made,
 // at most `most` held. View state: not undone, not saved.
 #pragma once
+
+#include "people_travel.h"
 
 #include "giant/core/math.h"
 #include "giant/core/types.h"
@@ -36,6 +39,10 @@ public:
     };
     static constexpr u32 k_max_embodied = 1024;
     Settings settings;
+    // Where the people are while the world runs (people_travel.h); set by
+    // main (and tests). Null: where the scene has them. One given an
+    // entity is held there (it stands) until the entity goes.
+    PeopleTravel* travel = nullptr;
 
     struct Stats {
         u32 embodied = 0;   // entities held now
@@ -55,8 +62,9 @@ public:
     world::EntityId entity_of(const world::Scene& scene, world::PersonId id) const;
     const Stats& stats() const { return m_stats; }
 
-    // The entity made for `person` of `look` (not added to a scene).
-    static world::Entity entity_for(const world::Person& person, const world::PersonLook& look, double ground);
+    // The entity made for `person` of `look`, standing at `at` (not added to a scene).
+    static world::Entity entity_for(const world::Person& person, const world::PersonLook& look,
+                                    const PeopleTravel::Where& at, double ground);
 
 private:
     void take_up(world::Scene& scene);
@@ -65,8 +73,15 @@ private:
     void strays(world::Scene& scene);
 
     u64 m_scene = 0; // the scene's identity
-    // Those given an entity (its id: world::person_entity_id), each as it was when made.
-    std::unordered_map<world::PersonId, world::Person> m_held;
+    struct Held {
+        world::Person was;       // as it was when the entity was made
+        PeopleTravel::Where at;  // where that was
+    };
+    PeopleTravel::Where where(const world::Person& person) const {
+        return travel != nullptr ? travel->where(person) : PeopleTravel::Where{person.position, person.yaw};
+    }
+    // Those given an entity (its id: world::person_entity_id).
+    std::unordered_map<world::PersonId, Held> m_held;
     std::vector<world::PersonLook> m_looks; // as the entities were made from them
     usize m_look_cursor = 0;
     usize m_cursor = 0;      // in the scene's people
