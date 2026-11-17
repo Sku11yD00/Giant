@@ -191,6 +191,19 @@ def build_scene(tool, call, check):
     lost = call("tools/call", {"name": "set_routine", "arguments": {"name": "bad", "entries": [
         {"from": 9, "activity": "eat", "at": "place", "name": "nowhere"}]}})
     check(lost.get("isError") is True and "no place" in lost["content"][0]["text"], "a routine naming a place not there is refused")
+    # Behaviours: what people do as things happen, a small state machine made by command.
+    wary = tool("set_behaviour", {"name": "wary", "states": [
+        {"name": "day", "transitions": [{"to": "flee", "when": [{"is": "sensed", "kind": "shot"}]}]},
+        {"name": "flee", "activity": "flee", "at": "home", "speed": 5,
+         "transitions": [{"to": "day", "when": [{"is": "after", "value": 60}, {"is": "alarm_under", "value": 0.1}]}]}]})
+    check(len(wary["states"]) == 2 and wary["people"] == 0, "a behaviour is made")
+    stuck = call("tools/call", {"name": "set_behaviour", "arguments": {"name": "bad", "states": [
+        {"name": "a", "transitions": [{"to": "b", "when": [{"is": "arrived"}]}]}]}})
+    check(stuck.get("isError") is True and "state of the behaviour" in stuck["content"][0]["text"],
+          "a transition to a state not there is refused")
+    check(tool("get_behaviours")["behaviours"][0]["states"][1]["at"] == "home", "the behaviour is listed")
+    tool("undo")
+    check(tool("get_behaviours")["behaviours"] == [], "undo takes the behaviour")
     tool("undo")
     check(tool("get_routines")["routines"] == [], "undo takes the routine")
     tool("undo")

@@ -99,10 +99,36 @@ std::optional<std::string> check_person(const Person& person) {
     if (person.look.empty() || person.look.size() > k_max_name_bytes) return "look must name a person look";
     if (person.home.size() > k_max_name_bytes) return "home must name a place";
     if (person.routine.size() > k_max_name_bytes) return "routine must name a routine";
+    if (person.behaviour.size() > k_max_name_bytes) return "behaviour must name a behaviour";
     if (!finite_place(person.position)) return "position must be finite and within 100,000 km";
     if (!yaw_ok(person.yaw)) return "yaw must be from -360 to 360 degrees";
     return std::nullopt;
 }
+
+namespace {
+
+// What is wrong with what an entry has one do (a routine's, an alarmed one's, a behaviour's state's), or nothing.
+// (`place`: what the place's name or tag is called where it is given: a routine's `name`, a state's `place`.)
+std::optional<std::string> check_does(const RoutineEntry& e, const char* place) {
+    if (!place_tag_ok(e.activity)) return "activity must be 1 to " + std::to_string(k_max_tag_bytes) + " of a-z, 0-9 and _";
+    if (!std::isfinite(e.speed) || e.speed < 0.1f || e.speed > 20.0f) return "speed must be from 0.1 to 20 m/s";
+    if (static_cast<u8>(e.at) > static_cast<u8>(RoutineAt::tag)) return "at must be stay, home, place or tag";
+    switch (e.at) {
+    case RoutineAt::stay:
+    case RoutineAt::home:
+        if (!e.name.empty()) return std::string(place) + " is given only with at place or tag";
+        break;
+    case RoutineAt::place:
+        if (e.name.empty() || e.name.size() > k_max_name_bytes) return std::string(place) + " must be a place's name";
+        break;
+    case RoutineAt::tag:
+        if (!place_tag_ok(e.name)) return std::string(place) + " must be a place's tag";
+        break;
+    }
+    return std::nullopt;
+}
+
+} // namespace
 
 std::optional<std::string> check_routine(const Routine& routine) {
     if (routine.name.empty() || routine.name.size() > k_max_name_bytes) {
@@ -126,23 +152,126 @@ std::optional<std::string> check_routine(const Routine& routine) {
             if (!std::isfinite(e.from) || e.from < 0.0f || e.from >= 24.0f) return which + "from must be an hour from 0 to under 24";
             if (i > 0 && e.from <= routine.entries[i - 1].from) return which + "from must be later than the entry's before it";
         }
-        if (!place_tag_ok(e.activity)) {
-            return which + "activity must be 1 to " + std::to_string(k_max_tag_bytes) + " of a-z, 0-9 and _";
+        if (const auto bad = check_does(e, "name")) return which + *bad;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> check_behaviour(const Behaviour& behaviour) {
+    if (behaviour.name.empty() || behaviour.name.size() > k_max_name_bytes) {
+        return "name must be 1 to " + std::to_string(k_max_name_bytes) + " bytes";
+    }
+    if (behaviour.states.empty() || behaviour.states.size() > k_max_behaviour_states) {
+        return "states must be 1 to " + std::to_string(k_max_behaviour_states);
+    }
+    for (usize i = 0; i < behaviour.states.size(); ++i) {
+        const BehaviourState& s = behaviour.states[i];
+        const std::string which = "states[" + std::to_string(i) + "]: ";
+        if (!place_tag_ok(s.name)) return which + "name must be 1 to " + std::to_string(k_max_tag_bytes) + " of a-z, 0-9 and _";
+        for (usize k = 0; k < i; ++k) {
+            if (behaviour.states[k].name == s.name) return which + "two states are named \"" + s.name + "\"";
         }
-        if (!std::isfinite(e.speed) || e.speed < 0.1f || e.speed > 20.0f) return which + "speed must be from 0.1 to 20 m/s";
-        if (static_cast<u8>(e.at) > static_cast<u8>(RoutineAt::tag)) return which + "at must be stay, home, place or tag";
-        switch (e.at) {
-        case RoutineAt::stay:
-        case RoutineAt::home:
-            if (!e.name.empty()) return which + "name is given only with at place or tag";
-            break;
-        case RoutineAt::place:
-            if (e.name.empty() || e.name.size() > k_max_name_bytes) return which + "name must be a place's name";
-            break;
-        case RoutineAt::tag:
-            if (!place_tag_ok(e.name)) return which + "name must be a place's tag";
-            break;
+        if (s.own) {
+            if (s.does.from != 0.0f) return which + "from is not used (a state has no hour)";
+            if (const auto bad = check_does(s.does, "place")) return which + *bad;
+        } else if (!(s.does == RoutineEntry{})) {
+            return which + "what it does is given only with an activity (without one the routine says)";
         }
+        if (s.transitions.size() > k_max_behaviour_transitions) {
+            return which + "transitions must be at most " + std::to_string(k_max_behaviour_transitions);
+        }
+        for (usize t = 0; t < s.transitions.size(); ++t) {
+            const BehaviourTransition& tr = s.transitions[t];
+            const std::string where = which + "transitions[" + std::to_string(t) + "]: ";
+            if (tr.to == s.name) return where + "to must be another state";
+            if (!behaviour_state_named(behaviour, tr.to)) return where + "to must be a state of the behaviour (\"" + tr.to + "\" is not)";
+            if (tr.conditions.empty() || tr.conditions.size() > k_max_behaviour_conditions) {
+                return where + "when must be 1 to " + std::to_string(k_max_behaviour_conditions) + " conditions";
+            }
+            for (usize c = 0; c < tr.conditions.size(); ++c) {
+                const BehaviourCondition& w = tr.conditions[c];
+                const std::string cond = where + "when[" + std::to_string(c) + "]: ";
+                if (static_cast<u8>(w.when) > static_cast<u8>(BehaviourWhen::hour)) return cond + "is not a condition";
+                const bool alarm = w.when == BehaviourWhen::alarm_over || w.when == BehaviourWhen::alarm_under;
+                if (alarm && !(std::isfinite(w.value) && w.value > 0.0f && w.value <= 1.0f)) return cond + "an alarm must be over 0, to 1";
+                if (w.when == BehaviourWhen::after && !(std::isfinite(w.value) && w.value > 0.0f && w.value <= 86400.0f)) {
+                    return cond + "after must be seconds over 0, to 86400";
+                }
+                if (w.when == BehaviourWhen::hour) {
+                    const auto hour_ok = [](float h) { return std::isfinite(h) && h >= 0.0f && h < 24.0f; };
+                    if (!hour_ok(w.value) || !hour_ok(w.until)) return cond + "hour must be from an hour to an hour, each 0 to under 24";
+                    if (w.value == w.until) return cond + "hour must be from one hour to another";
+                } else if (w.until != 0.0f) {
+                    return cond + "until is given only with hour";
+                }
+                if (!alarm && w.when != BehaviourWhen::after && w.when != BehaviourWhen::hour && w.value != 0.0f) {
+                    return cond + "a value is given only with alarm_over, alarm_under, after and hour";
+                }
+                if (w.when == BehaviourWhen::sensed) {
+                    if (!sensed_kind_ok(w.kind)) return cond + "sensed must be of a kind: shot, impact, blast, splash, voice, other or sight";
+                } else if (!w.kind.empty()) {
+                    return cond + "a kind is given only with sensed";
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> check_behaviours(std::span<const Behaviour> behaviours, std::span<const Person> people) {
+    if (behaviours.size() > k_max_behaviours) return "at most " + std::to_string(k_max_behaviours) + " behaviours";
+    // Sorted, not hashed: n log n whatever the names (a file may be made to collide).
+    std::vector<std::string_view> names;
+    names.reserve(behaviours.size());
+    for (const Behaviour& b : behaviours) names.push_back(b.name);
+    std::sort(names.begin(), names.end());
+    if (const auto twice = std::adjacent_find(names.begin(), names.end()); twice != names.end()) {
+        return "two behaviours are named \"" + std::string(*twice) + "\"";
+    }
+    for (const Person& p : people) {
+        if (!p.behaviour.empty() && !std::binary_search(names.begin(), names.end(), std::string_view(p.behaviour))) {
+            return "person " + std::to_string(p.id) + "'s behaviour \"" + p.behaviour + "\" is not there";
+        }
+    }
+    return std::nullopt;
+}
+
+const Behaviour* find_behaviour(std::span<const Behaviour> behaviours, std::string_view name) {
+    const auto it = std::find_if(behaviours.begin(), behaviours.end(), [&](const Behaviour& b) { return b.name == name; });
+    return it == behaviours.end() ? nullptr : &*it;
+}
+
+std::optional<usize> behaviour_state_named(const Behaviour& behaviour, std::string_view name) {
+    for (usize i = 0; i < behaviour.states.size(); ++i) {
+        if (behaviour.states[i].name == name) return i;
+    }
+    return std::nullopt;
+}
+
+bool sensed_kind_ok(std::string_view kind) {
+    for (const char* known : {"shot", "impact", "blast", "splash", "voice", "other", "sight"}) {
+        if (kind == known) return true;
+    }
+    return false;
+}
+
+const char* behaviour_when_name(BehaviourWhen when) {
+    switch (when) {
+    case BehaviourWhen::alarm_over: return "alarm_over";
+    case BehaviourWhen::alarm_under: return "alarm_under";
+    case BehaviourWhen::sensed: return "sensed";
+    case BehaviourWhen::arrived: return "arrived";
+    case BehaviourWhen::failed: return "failed";
+    case BehaviourWhen::after: return "after";
+    case BehaviourWhen::hour: return "hour";
+    }
+    return "arrived";
+}
+
+std::optional<BehaviourWhen> behaviour_when_named(std::string_view name) {
+    for (const BehaviourWhen when : {BehaviourWhen::alarm_over, BehaviourWhen::alarm_under, BehaviourWhen::sensed, BehaviourWhen::arrived,
+                                     BehaviourWhen::failed, BehaviourWhen::after, BehaviourWhen::hour}) {
+        if (name == behaviour_when_name(when)) return when;
     }
     return std::nullopt;
 }

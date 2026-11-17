@@ -409,6 +409,10 @@ Open-world systems:
 - LW6a: the People panel: list the people, filter them (text, only
   the alarmed, only those travelling), read what one does and why,
   and have the camera follow one (`follow_person`).
+- LW6 part 2: behaviours as data: small state machines (states,
+  transitions on alarm, what was sensed, arriving, time) saved with
+  the world and given to people (`set_behaviour`); acting on them
+  comes next.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

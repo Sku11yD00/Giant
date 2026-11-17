@@ -20,7 +20,7 @@ namespace giant::editor {
 class PeopleList {
 public:
     struct Filter {
-        std::string text;        // in its name, its look, its home or its routine (letters' case aside), or its id; empty: any
+        std::string text;        // in its name, look, home, routine or behaviour (letters' case aside), or its id; empty: any
         bool alarmed = false;    // only those alarmed now
         bool travelling = false; // only those on a trip now
         bool operator==(const Filter&) const = default;

@@ -3399,7 +3399,7 @@ Saved in the scene's text and in a world's world.json under `places`,
 read and write the same. People are many, so each is a row
 (`[id, name, look, home, x, y, z, yaw, seed]` in `people.list`, beside
 `people.next_id`), not an object. The world's streaming carries the
-lists (and the routines' below) between the index and the scene as it does water, and counts a
+lists (and the routines' and behaviours' below) between the index and the scene as it does water, and counts a
 change to them as an unsaved setting.
 
 The commands (`people_commands.cpp`): `create_place` / `set_place` /
@@ -3835,7 +3835,8 @@ made of three things in `editor/src/people_list.h`, and the commands
 give the AI the same.
 
 `PeopleList` finds the people that match a filter: text (in a name, a
-look, a home or a routine, letters' case aside, or a whole id), only
+look, a home, a routine or a behaviour, letters' case aside, or a
+whole id), only
 the alarmed, only those on a trip (one that failed is not). A scene
 has up to 65,536 people, and who is alarmed or travelling changes as
 the world runs, so the list is gone through 4,096 a frame, again and
@@ -3874,6 +3875,58 @@ given is not kept. Following ends when the person is removed, another
 scene is taken up, a game is loaded or play starts (the `play`
 command lets go itself, so a play begun and stopped between two
 frames ends it too; it does not come back when play stops). It is view state, as the camera is.
+
+### Behaviours as data (LW6 part 2)
+
+A behaviour says what the people who have it do as things happen to
+them, as a small state machine kept as world data:
+`world::Behaviour`, a name and up to 16 `BehaviourState`s. One with
+the behaviour is in one of its states, the first to begin with. A
+state says what one does while in it as a routine's entry does (an
+activity, and stay, home, a place or a tag, at a speed), or nothing
+of its own, and then the person's routine says (the hour's entry, or
+an alarmed one). It has up to 8 `BehaviourTransition`s, each naming
+another state and taken when all of its 1 to 4 `BehaviourCondition`s
+hold, the first such in the order written:
+
+| `is` | holds when |
+| --- | --- |
+| `alarm_over`, `alarm_under` | its alarm is at or over, or under, `value` (over 0, to 1) |
+| `sensed` | what alarmed it most of late is of `kind` (shot, impact, blast, splash, voice, other or sight: no other word is taken) |
+| `arrived` | it is where the state sent it (or the state sends it nowhere) |
+| `failed` | it could not be sent where the state says |
+| `after` | it has been in the state `value` seconds of the simulation |
+| `hour` | the time of day is from `value` to `until` (over midnight when `until` is the less) |
+
+So a `day` state that goes to `flee` on a shot, a `flee` state
+(activity flee, at home, speed 5) that goes to `hide` on arriving,
+and a `hide` state that goes back to `day` after two minutes once
+its alarm is under 0.1 is a villager who runs home from gunfire and
+comes out again when it is quiet. A routine's `alarmed` entries are
+the short form of this for "while this alarmed, do that"; a behaviour
+is for what has an order to it.
+
+`Person::behaviour` names one ("" for none). A scene or a world keeps
+up to 256 (`Scene::behaviours`, `WorldIndex::behaviours`), saved as
+`behaviours` and only when there are any; a person's row has its
+behaviour's name after its routine's (the routine's "" when it has
+none), and only for one that has a behaviour, so files without
+behaviours read and write as they did. `check_behaviour` checks one
+(names, what each state does, each transition to another state of
+it, each condition with what it needs and nothing else) and
+`check_behaviours` the lot with the people; a file that fails either
+is refused, saying where. A state's named place need not be there,
+as a routine's need not.
+
+Commands: `set_behaviour` (make or replace), `remove_behaviour`
+(refused while people have it), `get_behaviours`; `create_people`
+and `set_person` take `behaviour`, `get_people` gives it and filters
+by it. All undoable through the same `PeopleChange` as places, looks
+and routines, with the same care for commands run outside the
+history.
+
+This part is the data alone: nothing acts on a behaviour yet. The
+next part has the people follow theirs while the world runs.
 
 ### Nobody appears close by in view (LW4 part 2)
 

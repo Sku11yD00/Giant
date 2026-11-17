@@ -403,6 +403,141 @@ GIANT_TEST("people commands: routines made, replaced, listed with the entry at a
     GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value() && loaded.routines == scene.routines);
 }
 
+GIANT_TEST("people commands: behaviours made, replaced, listed, given to people, kept while had, undone") {
+    Fixture f;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("create_place", {{"name", "inn"}, {"position", at(10, 0, 5)}, {"tags", {"home"}}}).ok);
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    const auto when = [](std::initializer_list<Json> conditions) { return Json(Json::array_t(conditions)); };
+    const Json states = Json::array(
+        {{{"name", "day"},
+          {"transitions",
+           Json::array({{{"to", "flee"}, {"when", when({{{"is", "sensed"}, {"kind", "shot"}}, {{"is", "alarm_over"}, {"value", 0.5}}})}},
+                        {{"to", "night"}, {"when", when({{{"is", "hour"}, {"value", 22}, {"until", 6}}})}}})}},
+         {{"name", "flee"},
+          {"activity", "flee"},
+          {"at", "home"},
+          {"speed", 5.0},
+          {"transitions", Json::array({{{"to", "hide"}, {"when", when({{{"is", "arrived"}}})}}, {{"to", "day"}, {"when", when({{{"is", "failed"}}})}}})}},
+         {{"name", "hide"},
+          {"activity", "hide"},
+          {"transitions", Json::array({{{"to", "day"}, {"when", when({{{"is", "after"}, {"value", 120}}, {{"is", "alarm_under"}, {"value", 0.1}}})}}})}},
+         {{"name", "night"}, {"activity", "sleep"}, {"at", "place"}, {"place", "inn"}}});
+    ai::CommandResult r = f.run("set_behaviour", {{"name", "wary"}, {"states", states}});
+    GIANT_CHECK(r.ok && r.value["states"].size() == 4 && r.value["people"] == 0);
+    // Every field comes back: a state with no activity has none, one with has where and how fast.
+    GIANT_CHECK(!r.value["states"][0].contains("activity") && r.value["states"][0]["transitions"].size() == 2);
+    GIANT_CHECK(r.value["states"][0]["transitions"][0]["when"][0] == Json({{"is", "sensed"}, {"kind", "shot"}}));
+    GIANT_CHECK(r.value["states"][0]["transitions"][1]["when"][0]["until"] == 6.0);
+    GIANT_CHECK(r.value["states"][2]["at"] == "stay" && r.value["states"][2]["speed"].get<float>() == 1.4f && !r.value["states"][2].contains("place"));
+    GIANT_CHECK(r.value["states"][3]["transitions"].empty() && r.value["states"][3]["place"] == "inn");
+    GIANT_CHECK(scene.behaviours.size() == 1 && scene.behaviours[0].states[1].own && !scene.behaviours[0].states[0].own &&
+                scene.behaviours[0].states[1].does.at == world::RoutineAt::home && scene.behaviours[0].states[1].does.speed == 5.0f &&
+                scene.behaviours[0].states[2].transitions[0].conditions[0].value == 120.0f &&
+                scene.behaviours[0].states[0].transitions[0].conditions[0].kind == "shot");
+    GIANT_CHECK(!world::check_behaviour(scene.behaviours[0]) && !world::check_behaviours(scene.behaviours, scene.people));
+    // What it gives is what it takes (but for the count).
+    Json again = f.run("get_behaviours").value["behaviours"][0];
+    again.erase("people");
+    GIANT_CHECK(f.run("set_behaviour", again).ok && scene.behaviours.size() == 1);
+    GIANT_CHECK(f.run("undo").ok);
+    // Refused.
+    const auto refused = [&](Json wrong) { return !f.run("set_behaviour", {{"name", "bad"}, {"states", std::move(wrong)}}).ok; };
+    const auto one = [&](Json condition) {
+        return Json::array({{{"name", "a"}, {"transitions", Json::array({{{"to", "b"}, {"when", Json::array({std::move(condition)})}}})}}, {{"name", "b"}}});
+    };
+    GIANT_CHECK(!refused(one({{"is", "arrived"}})));
+    GIANT_CHECK(f.run("undo").ok && scene.behaviours.size() == 1);
+    GIANT_CHECK(refused(Json::array()));
+    GIANT_CHECK(refused(Json::array({{{"name", "A"}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}}, {{"name", "a"}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"at", "home"}}})));  // where, and nothing to do there
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"speed", 2.0}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"place", "inn"}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"activity", "x"}, {"at", "place"}, {"place", "mill"}}}))); // no such place
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"activity", "x"}, {"at", "place"}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"activity", "x"}, {"place", "inn"}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"activity", "x"}, {"at", "away"}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"activity", "x"}, {"speed", 30}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"transitions", Json::array({{{"to", "a"}, {"when", Json::array({{{"is", "arrived"}}})}}})}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"transitions", Json::array({{{"to", "c"}, {"when", Json::array({{{"is", "arrived"}}})}}})}}})));
+    GIANT_CHECK(refused(Json::array({{{"name", "a"}, {"transitions", Json::array({{{"to", "a"}, {"when", Json::array()}}})}}})));
+    GIANT_CHECK(refused(one({{"is", "soon"}})) && refused(one({{"value", 1}})));
+    GIANT_CHECK(refused(one({{"is", "alarm_over"}})) && refused(one({{"is", "alarm_over"}, {"value", 0}})) && refused(one({{"is", "alarm_under"}, {"value", 1.5}})));
+    GIANT_CHECK(refused(one({{"is", "alarm_over"}, {"value", 0.5}, {"kind", "shot"}})));
+    GIANT_CHECK(refused(one({{"is", "sensed"}})) && refused(one({{"is", "sensed"}, {"kind", "Shot"}})) && refused(one({{"is", "sensed"}, {"kind", "gunshot"}})) && refused(one({{"is", "sensed"}, {"kind", "shot"}, {"value", 1}})));
+    GIANT_CHECK(refused(one({{"is", "arrived"}, {"value", 1}})) && refused(one({{"is", "failed"}, {"until", 1}})));
+    GIANT_CHECK(refused(one({{"is", "after"}})) && refused(one({{"is", "after"}, {"value", 0}})) && refused(one({{"is", "after"}, {"value", 90000}})));
+    GIANT_CHECK(refused(one({{"is", "hour"}, {"value", 22}})) && refused(one({{"is", "hour"}, {"until", 6}})) &&
+                refused(one({{"is", "hour"}, {"value", 24}, {"until", 6}})) && refused(one({{"is", "hour"}, {"value", 6}, {"until", 6}})));
+    GIANT_CHECK(!refused(one({{"is", "hour"}, {"value", 22}, {"until", 0}})) && f.run("undo").ok);
+    GIANT_CHECK(scene.behaviours.size() == 1);
+    // Given to people when made and after; one not there is refused.
+    r = f.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}, {"behaviour", "wary"}}, {{"look", "villager"}, {"home", "inn"}}}}});
+    GIANT_CHECK(r.ok && scene.people[0].behaviour == "wary" && scene.people[1].behaviour.empty());
+    const world::PersonId second = r.value["ids"][1].get<world::PersonId>();
+    GIANT_CHECK(!f.run("set_person", {{"id", second}, {"behaviour", "bold"}}).ok);
+    GIANT_CHECK(!f.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}, {"behaviour", "bold"}}}}}).ok);
+    r = f.run("set_person", {{"id", second}, {"behaviour", "wary"}});
+    GIANT_CHECK(r.ok && r.value["behaviour"] == "wary" && scene.people[1].behaviour == "wary");
+    GIANT_CHECK(f.run("set_person", {{"id", second}, {"behaviour", ""}}).ok && scene.people[1].behaviour.empty());
+    GIANT_CHECK(f.run("undo").ok && scene.people[1].behaviour == "wary");
+    r = f.run("get_people", {{"behaviour", "wary"}});
+    GIANT_CHECK(r.ok && r.value["count"] == 2 && r.value["people"][0]["behaviour"] == "wary");
+    GIANT_CHECK(f.run("get_people", {{"behaviour", "bold"}}).value["count"] == 0);
+    GIANT_CHECK(f.run("get_people", {{"text", "WAR"}}).value["count"] == 2); // (its behaviour is among what text looks in)
+    GIANT_CHECK(f.run("get_behaviours").value["behaviours"][0]["people"] == 2);
+    // Replaced whole; undone and done again.
+    r = f.run("set_behaviour", {{"name", "wary"}, {"states", Json::array({{{"name", "only"}}})}});
+    GIANT_CHECK(r.ok && r.value["people"] == 2 && scene.behaviours.size() == 1 && scene.behaviours[0].states.size() == 1);
+    GIANT_CHECK(f.run("undo").ok && scene.behaviours[0].states.size() == 4);
+    GIANT_CHECK(f.run("redo").ok && scene.behaviours[0].states.size() == 1);
+    GIANT_CHECK(f.run("undo").ok);
+    // Kept while people have it; removed once they have not; undo brings it back.
+    GIANT_CHECK(!f.run("remove_behaviour", {{"name", "wary"}}).ok && !f.run("remove_behaviour", {{"name", "bold"}}).ok);
+    GIANT_CHECK(f.run("set_person", {{"id", second}, {"behaviour", ""}}).ok);
+    GIANT_CHECK(f.run("set_person", {{"id", scene.people[0].id}, {"behaviour", ""}}).ok);
+    GIANT_CHECK(f.run("remove_behaviour", {{"name", "wary"}}).ok && scene.behaviours.empty());
+    GIANT_CHECK(f.run("get_behaviours").value["behaviours"].empty());
+    GIANT_CHECK(f.run("undo").ok && scene.behaviours.size() == 1 && scene.behaviours[0].states.size() == 4);
+    GIANT_CHECK(f.run("undo").ok && scene.people[0].behaviour == "wary");
+    GIANT_CHECK(!world::check_behaviours(scene.behaviours, scene.people));
+    // People removed, then their behaviour taken away outside the history (a script): undo brings them back without it.
+    const world::PersonId first = scene.people[0].id;
+    GIANT_CHECK(f.run("remove_people", {{"ids", {first}}}).ok && scene.people.size() == 1);
+    ai::ExecuteOptions outside;
+    outside.record_history = false;
+    GIANT_CHECK(f.commands.execute("remove_behaviour", {{"name", "wary"}}, outside).ok && scene.behaviours.empty());
+    GIANT_CHECK(f.run("undo").ok && scene.people.size() == 2 && scene.people[0].id == first && scene.people[0].behaviour.empty());
+    GIANT_CHECK(!world::check_behaviours(scene.behaviours, scene.people));
+    // One removed, another of its name made outside the history: undo leaves that one be.
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "wary"}, {"states", states}}).ok && f.run("remove_behaviour", {{"name", "wary"}}).ok);
+    GIANT_CHECK(f.commands.execute("set_behaviour", {{"name", "wary"}, {"states", Json::array({{{"name", "only"}}})}}, outside).ok);
+    GIANT_CHECK(f.run("undo").ok && scene.behaviours.size() == 1 && scene.behaviours[0].states.size() == 1);
+    // As many as a scene keeps, one removed, one more made outside the history: undo does not put a 257th back.
+    scene.behaviours.clear();
+    for (usize i = 0; i < world::k_max_behaviours; ++i) {
+        world::Behaviour filler;
+        filler.name = "b" + std::to_string(i);
+        filler.states.resize(1);
+        filler.states[0].name = "only";
+        scene.behaviours.push_back(filler);
+    }
+    GIANT_CHECK(!f.run("set_behaviour", {{"name", "one more"}, {"states", states}}).ok);
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "b9"}, {"states", states}}).ok && f.run("undo").ok); // (one there may be replaced)
+    GIANT_CHECK(f.run("remove_behaviour", {{"name", "b5"}}).ok && scene.behaviours.size() == world::k_max_behaviours - 1);
+    GIANT_CHECK(f.commands.execute("set_behaviour", {{"name", "one more"}, {"states", states}}, outside).ok);
+    GIANT_CHECK(f.run("undo").ok && scene.behaviours.size() == world::k_max_behaviours);
+    GIANT_CHECK(!world::check_behaviours(scene.behaviours, scene.people));
+    // The place a state names may go: the behaviour is kept, and the scene still loads, with who has what.
+    GIANT_CHECK(f.run("set_person", {{"id", first}, {"behaviour", "one more"}}).ok);
+    for (world::Person& p : scene.people) p.home.clear();
+    GIANT_CHECK(f.run("remove_place", {{"name", "inn"}}).ok);
+    world::Scene loaded;
+    GIANT_CHECK(!world::load_scene(world::save_scene(scene), loaded).has_value() && loaded.behaviours == scene.behaviours &&
+                loaded.people == scene.people);
+}
+
 GIANT_TEST("people near the camera are given entities from their looks, a few a frame, and lose them far off") {
     Fixture f;
     PeopleState people;
@@ -444,6 +579,14 @@ GIANT_TEST("people near the camera are given entities from their looks, a few a 
     GIANT_CHECK(f.run("undo").ok && f.run("undo").ok);
     people.update(scene, camera, nullptr);
     GIANT_CHECK(people.entity_of(scene, 11) == ada && people.stats().made == 4 && scene.routines.empty());
+    // Given a behaviour likewise.
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "still"}, {"states", Json::array({{{"name", "only"}}})}}).ok);
+    GIANT_CHECK(f.run("set_person", {{"id", 11}, {"behaviour", "still"}}).ok);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 11) == ada && people.stats().made == 4 && people.stats().released == 0);
+    GIANT_CHECK(f.run("undo").ok && f.run("undo").ok);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 11) == ada && people.stats().made == 4 && scene.behaviours.empty());
     GIANT_CHECK(f.run("get_entity", {{"id", ada}}).value["person"] == 11);
     GIANT_CHECK(!f.run("set_entity", {{"id", ada}, {"name", "Eve"}}).ok); // the person is what to change
     // Never saved: the person is.

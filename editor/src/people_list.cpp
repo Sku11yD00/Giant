@@ -50,7 +50,7 @@ bool PeopleList::matches(const EditorState& state, const world::Person& person, 
     }
     if (filter.text.empty()) return true;
     if (holds(person.name, filter.text) || holds(person.look, filter.text) || holds(person.home, filter.text) ||
-        holds(person.routine, filter.text)) {
+        holds(person.routine, filter.text) || holds(person.behaviour, filter.text)) {
         return true;
     }
     // Its id, whole (digits alone; "007" is not 7).
