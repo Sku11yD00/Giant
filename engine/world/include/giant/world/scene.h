@@ -516,6 +516,56 @@ struct WaterPoint {
     bool operator==(const WaterPoint&) const = default;
 };
 
+// --- People (living-world plan LW1; people.h checks them) --------------------
+//
+// The people who live in the world: thousands of small records kept by the
+// scene or the world, not by cells (they cross cells). The editor makes the
+// few near the camera real characters (an entity apiece) and keeps the rest
+// as records. Here: who they are and where they start; where each is while
+// the world runs is the simulation's, kept by game saves.
+
+// A spot people go to: a home, a workplace, a bench. `tags` say what it is
+// for ("home", "work", "rest": any words; routines ask for places by tag).
+constexpr usize k_max_places = 65536;
+constexpr usize k_max_place_tags = 8;
+constexpr usize k_max_tag_bytes = 32;
+struct Place {
+    std::string name; // unique in the scene, 1 to k_max_name_bytes
+    DVec3 position;   // metres; its middle, on the ground
+    float radius = 1.0f; // metres (0.25 to 1000): anywhere within is there
+    float yaw = 0.0f;    // degrees: the way one stands there (a bench's front)
+    std::vector<std::string> tags; // each once, 1 to k_max_tag_bytes of lower-case letters, digits and _
+    bool operator==(const Place&) const = default;
+};
+
+// How a kind of person looks: what the entity drawn for one is given. Many
+// people share one, so a crowd costs a few meshes.
+constexpr usize k_max_person_looks = 1024;
+struct PersonLook {
+    std::string name; // unique in the scene, 1 to k_max_name_bytes
+    std::string mesh; // a skinned glTF/GLB file (as Entity::mesh)
+    float height = 1.0f; // the entity's scale, all axes (0.1 to 10)
+    Material material;
+    std::vector<PartLook> parts; // as Entity::parts
+    Hair hair;
+    std::vector<std::string> matched; // the clips it is motion matched among (as EntityAnimation::matched; empty: {"*"})
+    bool operator==(const PersonLook&) const = default;
+};
+
+// One person. `id` is its own for good (never used again in the scene).
+using PersonId = u32; // 0: none
+constexpr usize k_max_people = 65536;
+struct Person {
+    PersonId id = 0;
+    std::string name;    // at most k_max_name_bytes; need not be unique
+    std::string look;    // a PersonLook's name
+    std::string home;    // a Place's name ("" for none)
+    DVec3 position;      // where it starts (metres)
+    float yaw = 0.0f;    // degrees
+    u32 seed = 0;        // what tells it apart from others of its look (tint, pace)
+    bool operator==(const Person&) const = default;
+};
+
 constexpr usize k_max_waters = 256;
 constexpr usize k_max_water_points = 4096;
 
@@ -608,6 +658,13 @@ public:
     Clock clock;
     // Lakes, rivers and the sea (water.h), by name, in order (not tracked: compare).
     std::vector<Water> water;
+    // The people who live here (people.h), their looks and the places they
+    // go to, in order (not tracked: compare). `next_person_id`: one past
+    // the last id any person here ever had.
+    std::vector<Place> places;
+    std::vector<PersonLook> person_looks;
+    std::vector<Person> people;
+    PersonId next_person_id = 1;
     // Particle looks and effects (effects.h), by name, in order (not tracked: compare).
     std::vector<ParticleLook> particle_looks;
     std::vector<Effect> effects;
@@ -713,6 +770,10 @@ struct WorldIndex {
     std::optional<Weather> weather;
     Clock clock;
     std::vector<Water> water;
+    std::vector<Place> places;
+    std::vector<PersonLook> person_looks;
+    std::vector<Person> people;
+    PersonId next_person_id = 1;
     std::vector<ParticleLook> particle_looks;
     std::vector<Effect> effects;
     std::vector<std::string> meshes; // imported when the world opens

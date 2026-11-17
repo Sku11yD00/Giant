@@ -246,6 +246,7 @@ struct Editor {
         register_scene_commands(commands, state);
         register_terrain_commands(commands, state);
         register_effects_commands(commands, state);
+        register_people_commands(commands, state);
     }
     bool run(const char* name, const ai::Json& args = ai::Json::object()) { return commands.execute(name, args).ok; }
     bool script(const char* name, const ai::Json& args = ai::Json::object()) { // outside the history
@@ -359,6 +360,38 @@ GIANT_TEST("world streaming: commands guard what streaming cannot see") {
     GIANT_CHECK(e.run("save_world", {{"folder", e.folder() + "_2"}}));
     std::error_code error;
     std::filesystem::remove_all(e.folder() + "_2", error);
+}
+
+GIANT_TEST("world streaming: the people, their looks and places are the world's, whichever cells are loaded") {
+    Editor e;
+    if (e.w.renderer == nullptr) return;
+    world::PersonLook look;
+    look.name = "villager";
+    look.mesh = "./people/villager.glb"; // (not there: the world opens all the same, saying so)
+    e.state.scene.person_looks.push_back(look);
+    GIANT_CHECK(e.run("create_place", {{"name", "inn"}, {"position", {10, 0, 10}}, {"tags", {"home"}}}));
+    // One near, one far beyond what is ever loaded here.
+    GIANT_CHECK(e.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}},
+                                                    {{"look", "villager"}, {"position", {90000, 0, -90000}}}}}}));
+    GIANT_CHECK(e.run("remove_people", {{"ids", {1}}}));
+    GIANT_CHECK(e.run("save_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(!e.w.streaming.unsaved_settings(e.state.scene));
+    GIANT_CHECK(e.run("set_person", {{"id", 2}, {"yaw", 30.0}}));
+    GIANT_CHECK(e.w.streaming.unsaved_settings(e.state.scene));
+    GIANT_CHECK(!e.run("open_world", {{"folder", e.folder()}})); // unsaved people
+    GIANT_CHECK(e.run("save_world") && !e.w.streaming.unsaved_settings(e.state.scene));
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    const world::Scene& scene = e.state.scene;
+    GIANT_CHECK(scene.places.size() == 1 && scene.places[0].name == "inn" && scene.person_looks.size() == 1);
+    GIANT_CHECK(scene.person_looks[0].mesh == "people/villager.glb"); // spelt one way on opening
+    GIANT_CHECK(scene.people.size() == 1 && scene.people[0].id == 2 && scene.people[0].yaw == 30.0f &&
+                scene.people[0].position.x == 90000.0);
+    // The id taken out before the save is not given again.
+    GIANT_CHECK(scene.next_person_id == 3 && !e.w.streaming.unsaved_settings(scene));
+    // A person made and undone leaves its id used (the world then has that to save).
+    GIANT_CHECK(e.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}}}}}) && e.commands.undo());
+    GIANT_CHECK(scene.people.size() == 1 && scene.next_person_id == 4 && e.w.streaming.unsaved_settings(scene));
 }
 
 GIANT_TEST("world streaming: a moved entity survives undo and redo of new_scene once, not twice") {

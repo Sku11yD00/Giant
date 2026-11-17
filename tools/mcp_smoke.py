@@ -169,6 +169,15 @@ def build_scene(tool, call, check):
     check(abs(tool("get_entity", {"id": head})["hair"]["length"] - 0.2) < 1e-6, "an entity keeps its hair's settings")
     tool("undo")
     check(tool("get_hair")["wearing"] == 0, "undo takes the hair with its entity")
+    # People: places and people are world data made by command (a look needs a character's file).
+    tool("create_place", {"name": "inn", "position": [4, 0, 4], "tags": ["home"]})
+    check(tool("get_places", {"tag": "home"})["count"] == 1, "a place is made and found by its tag")
+    nobody = call("tools/call", {"name": "create_people", "arguments": {"people": [{"look": "villager", "home": "inn"}]}})
+    check(nobody.get("isError") is True and "no person look" in nobody["content"][0]["text"],
+          "people of a look that is not there are refused")
+    check(tool("get_people")["total"] == 0 and tool("get_person_looks")["person_looks"] == [], "nobody yet")
+    tool("undo")
+    check(tool("get_places")["total"] == 0, "undo takes the place")
     tool("new_scene")  # leave the default empty scene for the checks after this
 
 

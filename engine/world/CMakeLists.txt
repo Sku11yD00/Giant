@@ -11,6 +11,7 @@ giant_module(world
   src/weather.cpp
   src/wind.cpp
   src/water.cpp
+  src/people.cpp
   src/effects.cpp
   DEPENDS core
 )
@@ -25,5 +26,6 @@ giant_module_tests(world
     tests/test_weather.cpp
     tests/test_clock.cpp
     tests/test_water.cpp
+    tests/test_people.cpp
     tests/test_effects.cpp
 )
