@@ -39,6 +39,23 @@ const PersonLook* find_person_look(std::span<const PersonLook> looks, std::strin
 const Person* find_person(std::span<const Person> people, PersonId id);
 const Routine* find_routine(std::span<const Routine> routines, std::string_view name);
 
+// What is wrong with a behaviour (its own fields alone), or nothing: its
+// name, its states' names (each once), what each does, and its
+// transitions (each to another state of it, with conditions that can be).
+std::optional<std::string> check_behaviour(const Behaviour& behaviour);
+// What is wrong among the behaviours and the people who have them, or
+// nothing: more than a scene keeps, a name had twice, a person's
+// behaviour that is not there. (Each one's own fields are
+// check_behaviour's: not looked at here.)
+std::optional<std::string> check_behaviours(std::span<const Behaviour> behaviours, std::span<const Person> people);
+const Behaviour* find_behaviour(std::span<const Behaviour> behaviours, std::string_view name);
+// A state of a behaviour by name (its place in `states`), or none.
+std::optional<usize> behaviour_state_named(const Behaviour& behaviour, std::string_view name);
+// A BehaviourWhen's word in files and commands (alarm_over, alarm_under,
+// sensed, arrived, failed, after, hour), and back (none: not one).
+const char* behaviour_when_name(BehaviourWhen when);
+std::optional<BehaviourWhen> behaviour_when_named(std::string_view name);
+
 // The entry of a routine (one that check_routine passes) that holds at
 // `hour` (any finite hour: taken round the day): the last that has begun,
 // or before the first begins, the last of all (held over midnight).

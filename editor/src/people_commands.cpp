@@ -41,6 +41,7 @@ using world::Person;
 using world::PersonId;
 using world::PersonLook;
 using world::Place;
+using world::Behaviour;
 using world::Routine;
 
 constexpr usize k_most_a_call = 4096; // people made or removed by one command
@@ -99,6 +100,44 @@ Json routine_json(const Routine& r, usize people) {
     return {{"name", r.name}, {"entries", std::move(entries)}, {"alarmed", std::move(alarmed)}, {"people", people}};
 }
 
+// A behaviour as commands give and take it (what set_behaviour is given it takes back, but for `people`).
+Json behaviour_json(const Behaviour& b, usize people) {
+    Json states = Json::array();
+    for (const world::BehaviourState& s : b.states) {
+        Json state = {{"name", s.name}};
+        if (s.own) {
+            state["activity"] = s.does.activity;
+            state["at"] = world::routine_at_name(s.does.at);
+            if (!s.does.name.empty()) state["place"] = s.does.name;
+            state["speed"] = s.does.speed;
+        }
+        Json transitions = Json::array();
+        for (const world::BehaviourTransition& t : s.transitions) {
+            Json when = Json::array();
+            for (const world::BehaviourCondition& c : t.conditions) {
+                Json condition = {{"is", world::behaviour_when_name(c.when)}};
+                switch (c.when) {
+                case world::BehaviourWhen::alarm_over:
+                case world::BehaviourWhen::alarm_under:
+                case world::BehaviourWhen::after: condition["value"] = c.value; break;
+                case world::BehaviourWhen::hour:
+                    condition["value"] = c.value;
+                    condition["until"] = c.until;
+                    break;
+                case world::BehaviourWhen::sensed: condition["kind"] = c.kind; break;
+                case world::BehaviourWhen::arrived:
+                case world::BehaviourWhen::failed: break;
+                }
+                when.push_back(std::move(condition));
+            }
+            transitions.push_back({{"to", t.to}, {"when", std::move(when)}});
+        }
+        state["transitions"] = std::move(transitions);
+        states.push_back(std::move(state));
+    }
+    return {{"name", b.name}, {"states", std::move(states)}, {"people", people}};
+}
+
 // The travel's clock brought up to the physics' now (a command between frames: time stepped on
 // by step_physics, or the simulation started or stopped, since the last frame counts).
 void sync_travel(EditorState& state) {
@@ -124,7 +163,7 @@ Json trip_json(const PeopleTravel& travel, const PeopleTravel::Trip& t) {
 Json person_json(const Person& p, const PeopleState* people = nullptr, const world::Scene* scene = nullptr,
                  const PeopleTravel* travel = nullptr, const PeopleRoutines* routines = nullptr,
                  const PeopleSenses* senses = nullptr, const EditorState* state = nullptr) {
-    Json j = {{"id", p.id},     {"name", p.name}, {"look", p.look}, {"home", p.home}, {"routine", p.routine},
+    Json j = {{"id", p.id},     {"name", p.name}, {"look", p.look}, {"home", p.home}, {"routine", p.routine}, {"behaviour", p.behaviour},
               {"position", point_json(p.position)}, {"yaw", p.yaw},   {"seed", p.seed}};
     if (scene != nullptr) {
         const world::EntityId entity = people != nullptr ? people->entity_of(*scene, p.id) : 0;
@@ -188,6 +227,7 @@ struct PeopleChange {
     Edit<Place> place;
     Edit<PersonLook> look;
     Edit<Routine> routine;
+    Edit<Behaviour> behaviour;
     std::vector<Person> out, in; // ids rising
     // The scene's next id after it (0: as it was). Undoing never gives an
     // id back: a save made meanwhile may hold the person it was.
@@ -210,9 +250,13 @@ public:
         m_routines.reserve(scene.routines.size());
         for (const Routine& r : scene.routines) m_routines.push_back(r.name);
         std::sort(m_routines.begin(), m_routines.end());
+        m_behaviours.reserve(scene.behaviours.size());
+        for (const Behaviour& b : scene.behaviours) m_behaviours.push_back(b.name);
+        std::sort(m_behaviours.begin(), m_behaviours.end());
     }
     bool has_look(std::string_view name) const { return std::binary_search(m_looks.begin(), m_looks.end(), name); }
     bool has_routine(std::string_view name) const { return std::binary_search(m_routines.begin(), m_routines.end(), name); }
+    bool has_behaviour(std::string_view name) const { return std::binary_search(m_behaviours.begin(), m_behaviours.end(), name); }
     const Place* place(std::string_view name) const {
         const auto it = std::lower_bound(m_places.begin(), m_places.end(), name,
                                          [](const auto& entry, std::string_view n) { return entry.first < n; });
@@ -220,7 +264,7 @@ public:
     }
 
 private:
-    std::vector<std::string_view> m_looks, m_routines;
+    std::vector<std::string_view> m_looks, m_routines, m_behaviours;
     std::vector<std::pair<std::string_view, const Place*>> m_places;
 };
 
@@ -230,6 +274,7 @@ public:
     explicit Lists(const world::Scene& scene) : m_scene(scene) {}
     bool has_look(std::string_view name) const { return world::find_person_look(m_scene.person_looks, name) != nullptr; }
     bool has_routine(std::string_view name) const { return world::find_routine(m_scene.routines, name) != nullptr; }
+    bool has_behaviour(std::string_view name) const { return world::find_behaviour(m_scene.behaviours, name) != nullptr; }
     const Place* place(std::string_view name) const { return world::find_place(m_scene.places, name); }
 
 private:
@@ -279,6 +324,7 @@ void swap_people(world::Scene& scene, const std::vector<Person>& out, const std:
         next.push_back(p);
         if (!p.home.empty() && names->place(p.home) == nullptr) next.back().home.clear();
         if (!p.routine.empty() && !names->has_routine(p.routine)) next.back().routine.clear();
+        if (!p.behaviour.empty() && !names->has_behaviour(p.behaviour)) next.back().behaviour.clear();
     };
     usize o = 0, i = 0;
     for (Person& p : people) {
@@ -301,6 +347,9 @@ void apply(world::Scene& scene, const PeopleChange& change, bool forward) {
     });
     apply(scene.routines, change.routine, forward, world::k_max_routines, [&](const std::string& name) {
         return std::any_of(scene.people.begin(), scene.people.end(), [&](const Person& p) { return p.routine == name; });
+    });
+    apply(scene.behaviours, change.behaviour, forward, world::k_max_behaviours, [&](const std::string& name) {
+        return std::any_of(scene.people.begin(), scene.people.end(), [&](const Person& p) { return p.behaviour == name; });
     });
     swap_people(scene, forward ? change.out : change.in, forward ? change.in : change.out);
     if (forward) scene.next_person_id = std::max(scene.next_person_id, change.next_after);
@@ -344,6 +393,10 @@ std::string apply_person(const Json& args, const Known& names, Person& p, bool f
     if (!p.routine.empty() && !names.has_routine(p.routine)) {
         return "no routine named \"" + p.routine + "\" (set_routine makes one)";
     }
+    if (args.contains("behaviour")) p.behaviour = args["behaviour"].get<std::string>();
+    if (!p.behaviour.empty() && !names.has_behaviour(p.behaviour)) {
+        return "no behaviour named \"" + p.behaviour + "\" (set_behaviour makes one)";
+    }
     if (!names.has_look(p.look)) return "no person look named \"" + p.look + "\" (set_person_look makes one)";
     const Place* home = p.home.empty() ? nullptr : names.place(p.home);
     if (!p.home.empty() && home == nullptr) return "no place named \"" + p.home + "\" (create_place makes one)";
@@ -381,6 +434,8 @@ Json person_properties() {
                       {"description", "A place's name (\"\" for none)."}}},
             {"routine", {{"type", "string"}, {"maxLength", world::k_max_name_bytes},
                          {"description", "A routine's name: what it does through the day (set_routine; \"\" for none)."}}},
+            {"behaviour", {{"type", "string"}, {"maxLength", world::k_max_name_bytes},
+                           {"description", "A behaviour's name: what it does as things happen to it (set_behaviour; \"\" for none)."}}},
             {"position", point_schema("Where it starts, metres (a new person given none starts at its home).")},
             {"yaw", yaw_schema("Degrees (a new person given no position faces its home's way; else 0).")},
             {"seed", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4294967295.0},
@@ -739,6 +794,171 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              return CommandResult::success({{"routines", std::move(list)}});
          }});
 
+    // --- Behaviours -----------------------------------------------------------
+    const Json condition_schema = object_schema(
+        {"is"},
+        {{"is", {{"type", "string"}, {"enum", {"alarm_over", "alarm_under", "sensed", "arrived", "failed", "after", "hour"}},
+                 {"description", "`alarm_over` / `alarm_under`: its alarm (get_people) is at or over / under `value` (over 0, to 1). "
+                                 "`sensed`: what alarmed it most of late is of `kind`. `arrived`: it is where the state sent it "
+                                 "(or the state sends it nowhere). `failed`: it could not be sent there. `after`: it has been in "
+                                 "the state `value` seconds of the simulation. `hour`: the time of day is from `value` to `until`."}}},
+         {"value", {{"type", "number"}, {"minimum", 0}, {"maximum", 86400},
+                    {"description", "With alarm_over, alarm_under (over 0, to 1), after (seconds, over 0) and hour (0 to under 24)."}}},
+         {"until", {{"type", "number"}, {"minimum", 0}, {"maximum", 24},
+                    {"description", "With hour: when it ends (0 to under 24; less than `value`: over midnight)."}}},
+         {"kind", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_tag_bytes},
+                   {"description", "With sensed: a noise's kind (shot, impact, blast, splash, voice, other) or sight."}}}});
+    const Json transition_schema = object_schema(
+        {"to", "when"},
+        {{"to", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_tag_bytes}, {"description", "Another state of the behaviour."}}},
+         {"when", {{"type", "array"}, {"minItems", 1}, {"maxItems", world::k_max_behaviour_conditions}, {"items", condition_schema},
+                   {"description", "The conditions: all must hold."}}}});
+    const Json state_schema = object_schema(
+        {"name"},
+        {{"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_tag_bytes},
+                   {"description", "Unique in the behaviour: a word of a-z, 0-9 and _."}}},
+         {"activity", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_tag_bytes},
+                       {"description", "What one does in the state, a word of a-z, 0-9 and _ (flee, hide, watch, any word). "
+                                       "Left out: its routine says what it does (the hour's entry, or an alarmed one)."}}},
+         {"at", {{"type", "string"}, {"enum", {"stay", "home", "place", "tag"}},
+                 {"description", "With `activity`, where: `stay` where it is (default), its `home`, the place named by `place`, "
+                                 "or a place with the tag in `place` (each person its own: the nearest to its home)."}}},
+         {"place", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes},
+                    {"description", "With `at` place: a place's name (it must be there). With `at` tag: a place's tag."}}},
+         {"speed", {{"type", "number"}, {"minimum", 0.1}, {"maximum", 20}, {"description", "Metres a second going there (default 1.4)."}}},
+         {"transitions", {{"type", "array"}, {"maxItems", world::k_max_behaviour_transitions}, {"items", transition_schema},
+                          {"description", "When it goes to another state: the first whose conditions all hold, in this order."}}}});
+    add(registry,
+        {"set_behaviour",
+         "Makes or replaces a behaviour: what the people who have it (create_people / set_person `behaviour`) do "
+         "as things happen to them, as a small state machine. `states` (1 to 16): one with the behaviour is "
+         "in one of them, the first to begin with. A state has what one does while in it (`activity` with "
+         "`at`, `place`, `speed`, as a routine's entry; with no activity its routine says) and "
+         "`transitions` (at most 8): each names another state `to` and is taken `when` all its conditions "
+         "(1 to 4) hold. So a state `day` with {to flee, when [{is sensed, kind shot}]}, a state `flee` "
+         "(activity flee, at home, speed 5) with {to hide, when [{is arrived}]} and a state `hide` (activity "
+         "hide) with {to day, when [{is after, value 120}, {is alarm_under, value 0.1}]} has one run home "
+         "from a shot, hide there, and go back to its day two minutes on once calm. Saved with the scene "
+         "or the world (at most 256). Undoable.",
+         object_schema({"name", "states"},
+                       {{"name", name_schema("Unique among the behaviours.")},
+                        {"states", {{"type", "array"}, {"minItems", 1}, {"maxItems", world::k_max_behaviour_states},
+                                    {"items", state_schema}}}}),
+         false,
+         [&state](const Json& args, CommandContext& context) {
+             std::vector<Behaviour>& behaviours = state.scene.behaviours;
+             Behaviour behaviour;
+             behaviour.name = args["name"].get<std::string>();
+             const Behaviour* had = world::find_behaviour(behaviours, behaviour.name);
+             if (had == nullptr && behaviours.size() >= world::k_max_behaviours) {
+                 return CommandResult::failure("a scene has at most " + std::to_string(world::k_max_behaviours) + " behaviours");
+             }
+             const Json& states = args["states"];
+             for (usize i = 0; i < states.size(); ++i) {
+                 const Json& j = states[i];
+                 const std::string which = "states[" + std::to_string(i) + "]: ";
+                 world::BehaviourState s;
+                 s.name = j["name"].get<std::string>();
+                 s.own = j.contains("activity");
+                 if (!s.own && (j.contains("at") || j.contains("place") || j.contains("speed"))) {
+                     return CommandResult::failure(which + "at, place and speed are given only with an activity");
+                 }
+                 if (s.own) {
+                     s.does.activity = j["activity"].get<std::string>();
+                     const std::optional<world::RoutineAt> where = world::routine_at_named(j.value("at", std::string("stay")));
+                     if (!where) return CommandResult::failure(which + "at must be stay, home, place or tag");
+                     s.does.at = *where;
+                     s.does.name = j.value("place", std::string());
+                     s.does.speed = j.value("speed", s.does.speed);
+                     if (s.does.at == world::RoutineAt::place && !s.does.name.empty() &&
+                         world::find_place(state.scene.places, s.does.name) == nullptr) {
+                         return CommandResult::failure(which + "no place named \"" + s.does.name + "\" (create_place makes one)");
+                     }
+                 }
+                 const Json transitions = j.value("transitions", Json::array());
+                 for (usize t = 0; t < transitions.size(); ++t) {
+                     world::BehaviourTransition transition;
+                     transition.to = transitions[t]["to"].get<std::string>();
+                     for (const Json& w : transitions[t]["when"]) {
+                         world::BehaviourCondition c;
+                         const std::optional<world::BehaviourWhen> when = world::behaviour_when_named(w["is"].get<std::string>());
+                         if (!when) return CommandResult::failure(which + "is must be a condition");
+                         c.when = *when;
+                         // Each has what it needs and nothing else (a number left out is not taken as 0).
+                         const bool valued = *when == world::BehaviourWhen::alarm_over || *when == world::BehaviourWhen::alarm_under ||
+                                             *when == world::BehaviourWhen::after || *when == world::BehaviourWhen::hour;
+                         if (w.contains("value") != valued || w.contains("until") != (*when == world::BehaviourWhen::hour) ||
+                             w.contains("kind") != (*when == world::BehaviourWhen::sensed)) {
+                             return CommandResult::failure(which + "to " + transition.to + ": " + world::behaviour_when_name(*when) +
+                                                           (valued ? (*when == world::BehaviourWhen::hour ? " takes a value and an until, and no kind"
+                                                                                                          : " takes a value, and no until or kind")
+                                                                   : (*when == world::BehaviourWhen::sensed ? " takes a kind, and no value or until"
+                                                                                                            : " takes no value, until or kind")));
+                         }
+                         c.value = w.value("value", 0.0f);
+                         c.until = w.value("until", 0.0f);
+                         c.kind = w.value("kind", std::string());
+                         transition.conditions.push_back(std::move(c));
+                     }
+                     s.transitions.push_back(std::move(transition));
+                 }
+                 behaviour.states.push_back(std::move(s));
+             }
+             if (const auto bad = world::check_behaviour(behaviour)) return CommandResult::failure(*bad);
+             PeopleChange change;
+             const auto people = std::count_if(state.scene.people.begin(), state.scene.people.end(),
+                                               [&](const Person& p) { return p.behaviour == behaviour.name; });
+             const usize index = had == nullptr ? behaviours.size() : static_cast<usize>(had - behaviours.data());
+             change.behaviour = {true, index, had != nullptr ? std::optional<Behaviour>(*had) : std::nullopt, behaviour};
+             commit(state, context, std::move(change));
+             return CommandResult::success(behaviour_json(behaviour, static_cast<usize>(people)));
+         }});
+    add(registry,
+        {"remove_behaviour",
+         "Removes a behaviour (by name). Refused while people have it (set_person or remove_people first). Undoable.",
+         object_schema({"name"}, {{"name", name_schema("The behaviour.")}}),
+         false,
+         [&state](const Json& args, CommandContext& context) {
+             std::vector<Behaviour>& behaviours = state.scene.behaviours;
+             const std::string name = args["name"].get<std::string>();
+             const Behaviour* had = world::find_behaviour(behaviours, name);
+             if (had == nullptr) return CommandResult::failure("no behaviour named \"" + name + "\"");
+             const auto people = std::count_if(state.scene.people.begin(), state.scene.people.end(),
+                                               [&](const Person& p) { return p.behaviour == name; });
+             if (people != 0) {
+                 return CommandResult::failure(std::to_string(people) + " people have the behaviour \"" + name +
+                                               "\": give them another (set_person) or remove them first");
+             }
+             PeopleChange change;
+             change.behaviour = {true, static_cast<usize>(had - behaviours.data()), *had, std::nullopt};
+             commit(state, context, std::move(change));
+             return CommandResult::success({{"removed", name}});
+         }});
+    add(registry,
+        {"get_behaviours",
+         "Lists the behaviours: each one's states (what one does in each, its transitions and their "
+         "conditions) and how many `people` have it.",
+         object_schema(Json::array(), Json::object()),
+         true,
+         [&state](const Json&, CommandContext&) {
+             // How many have each: by sorted names (not hashed: a loaded file's may be made to collide).
+             const std::vector<Behaviour>& behaviours = state.scene.behaviours;
+             std::vector<std::pair<std::string_view, usize>> names;
+             names.reserve(behaviours.size());
+             for (usize i = 0; i < behaviours.size(); ++i) names.emplace_back(behaviours[i].name, i);
+             std::sort(names.begin(), names.end());
+             std::vector<usize> people(behaviours.size(), 0);
+             for (const Person& p : state.scene.people) {
+                 if (p.behaviour.empty()) continue;
+                 const auto it = std::lower_bound(names.begin(), names.end(), std::string_view(p.behaviour),
+                                                  [](const auto& entry, std::string_view n) { return entry.first < n; });
+                 if (it != names.end() && it->first == p.behaviour) ++people[it->second];
+             }
+             Json list = Json::array();
+             for (usize i = 0; i < behaviours.size(); ++i) list.push_back(behaviour_json(behaviours[i], people[i]));
+             return CommandResult::success({{"behaviours", std::move(list)}});
+         }});
+
     // --- People ---------------------------------------------------------------
     add(registry,
         {"create_people",
@@ -834,6 +1054,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
     people_props["look"] = name_schema("Only people of this look.");
     people_props["home"] = name_schema("Only people whose home is this place.");
     people_props["routine"] = name_schema("Only people with this routine.");
+    people_props["behaviour"] = name_schema("Only people with this behaviour.");
     people_props["text"] = {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes},
                             {"description", "Only people with this in their name, look, home or routine (letters' case aside), or whose id it is."}};
     people_props["alarmed"] = {{"type", "boolean"}, {"description", "Only people alarmed now (while the world runs)."}};
@@ -841,7 +1062,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
     add(registry,
         {"get_people",
          "Lists people as the scene keeps them (where each starts; where each is while the world runs is "
-         "the simulation's): those named by `ids`, or all, or those of `look`, living at `home`, with `routine`, "
+         "the simulation's): those named by `ids`, or all, or those of `look`, living at `home`, with `routine` or `behaviour`, "
          "with `text` in their names, `alarmed` or `travelling` now and/or "
          "within `within` metres of `near`, `limit` at a time from `offset` (by rising id). `count` is how "
          "many match, `total` how many there are. `entity`: the entity standing for one near the camera now "
@@ -871,6 +1092,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              }
              const std::string look = args.value("look", std::string()), home = args.value("home", std::string());
              const std::string routine = args.value("routine", std::string());
+             const std::string behaviour = args.value("behaviour", std::string());
              const bool by_place = args.contains("near");
              const DVec3 near = by_place ? point(args["near"]) : DVec3{};
              const double within = args.value("within", 100.0);
@@ -885,6 +1107,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  if (!look.empty() && p.look != look) continue;
                  if (!home.empty() && p.home != home) continue;
                  if (!routine.empty() && p.routine != routine) continue;
+                 if (!behaviour.empty() && p.behaviour != behaviour) continue;
                  if (filtered && !PeopleList::matches(state, p, static_cast<usize>(&p - people.data()), filter)) continue;
                  if (by_place && !near_enough(p.position, near, within)) continue;
                  if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel, state.routines, state.senses, &state));

@@ -3875,6 +3875,58 @@ scene is taken up, a game is loaded or play starts (the `play`
 command lets go itself, so a play begun and stopped between two
 frames ends it too; it does not come back when play stops). It is view state, as the camera is.
 
+### Behaviours as data (LW6 part 2)
+
+A behaviour says what the people who have it do as things happen to
+them, as a small state machine kept as world data:
+`world::Behaviour`, a name and up to 16 `BehaviourState`s. One with
+the behaviour is in one of its states, the first to begin with. A
+state says what one does while in it as a routine's entry does (an
+activity, and stay, home, a place or a tag, at a speed), or nothing
+of its own, and then the person's routine says (the hour's entry, or
+an alarmed one). It has up to 8 `BehaviourTransition`s, each naming
+another state and taken when all of its 1 to 4 `BehaviourCondition`s
+hold, the first such in the order written:
+
+| `is` | holds when |
+| --- | --- |
+| `alarm_over`, `alarm_under` | its alarm is at or over, or under, `value` (over 0, to 1) |
+| `sensed` | what alarmed it most of late is of `kind` (a noise's kind, or sight) |
+| `arrived` | it is where the state sent it (or the state sends it nowhere) |
+| `failed` | it could not be sent where the state says |
+| `after` | it has been in the state `value` seconds of the simulation |
+| `hour` | the time of day is from `value` to `until` (over midnight when `until` is the less) |
+
+So a `day` state that goes to `flee` on a shot, a `flee` state
+(activity flee, at home, speed 5) that goes to `hide` on arriving,
+and a `hide` state that goes back to `day` after two minutes once
+its alarm is under 0.1 is a villager who runs home from gunfire and
+comes out again when it is quiet. A routine's `alarmed` entries are
+the short form of this for "while this alarmed, do that"; a behaviour
+is for what has an order to it.
+
+`Person::behaviour` names one ("" for none). A scene or a world keeps
+up to 256 (`Scene::behaviours`, `WorldIndex::behaviours`), saved as
+`behaviours` and only when there are any; a person's row has its
+behaviour's name after its routine's (the routine's "" when it has
+none), and only for one that has a behaviour, so files without
+behaviours read and write as they did. `check_behaviour` checks one
+(names, what each state does, each transition to another state of
+it, each condition with what it needs and nothing else) and
+`check_behaviours` the lot with the people; a file that fails either
+is refused, saying where. A state's named place need not be there,
+as a routine's need not.
+
+Commands: `set_behaviour` (make or replace), `remove_behaviour`
+(refused while people have it), `get_behaviours`; `create_people`
+and `set_person` take `behaviour`, `get_people` gives it and filters
+by it. All undoable through the same `PeopleChange` as places, looks
+and routines, with the same care for commands run outside the
+history.
+
+This part is the data alone: nothing acts on a behaviour yet. The
+next part has the people follow theirs while the world runs.
+
 ### Nobody appears close by in view (LW4 part 2)
 
 `PeopleState` is told what the camera sees (`PeopleState::view`, set by

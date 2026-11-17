@@ -239,7 +239,7 @@ Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
       weather(other.weather), clock(other.clock), water(other.water), places(other.places),
       person_looks(other.person_looks), people(other.people), next_person_id(other.next_person_id),
-      routines(other.routines), routes(other.routes),
+      routines(other.routines), behaviours(other.behaviours), routes(other.routes),
       particle_looks(other.particle_looks), effects(other.effects), m_entities(other.m_entities),
       m_index(other.m_index),
       m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
@@ -250,7 +250,7 @@ Scene::Scene(Scene&& other) noexcept
       scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock),
       water(std::move(other.water)), places(std::move(other.places)), person_looks(std::move(other.person_looks)),
       people(std::move(other.people)), next_person_id(other.next_person_id),
-      routines(std::move(other.routines)), routes(std::move(other.routes)),
+      routines(std::move(other.routines)), behaviours(std::move(other.behaviours)), routes(std::move(other.routes)),
       particle_looks(std::move(other.particle_looks)),
       effects(std::move(other.effects)), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
@@ -284,6 +284,7 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         people = std::move(other.people);
         next_person_id = other.next_person_id;
         routines = std::move(other.routines);
+        behaviours = std::move(other.behaviours);
         routes = std::move(other.routes);
         particle_looks = std::move(other.particle_looks);
         effects = std::move(other.effects);
@@ -1052,12 +1053,14 @@ Json person_looks_json(std::span<const PersonLook> looks) {
 }
 
 // People are many (tens of thousands), so each is a row, not an object:
-// [id, name, look, home, x, y, z, yaw, seed], and its routine after for one that has one.
+// [id, name, look, home, x, y, z, yaw, seed], its routine after for one that has one, and its
+// behaviour after that for one that has one (its routine then "" when it has none).
 Json people_json(std::span<const Person> people, PersonId next_person_id) {
     Json list = Json::array();
     for (const Person& p : people) {
         list.push_back(Json::array({p.id, p.name, p.look, p.home, p.position.x, p.position.y, p.position.z, p.yaw, p.seed}));
-        if (!p.routine.empty()) list.back().push_back(p.routine);
+        if (!p.routine.empty() || !p.behaviour.empty()) list.back().push_back(p.routine);
+        if (!p.behaviour.empty()) list.back().push_back(p.behaviour);
     }
     return {{"next_id", next_person_id}, {"list", std::move(list)}};
 }
@@ -1086,6 +1089,44 @@ Json routines_json(std::span<const Routine> routines) {
             routine["alarmed"] = std::move(alarmed);
         }
         out.push_back(std::move(routine));
+    }
+    return out;
+}
+
+// The behaviours (only what differs from a state as made is written).
+Json behaviours_json(std::span<const Behaviour> behaviours) {
+    Json out = Json::array();
+    for (const Behaviour& b : behaviours) {
+        Json states = Json::array();
+        for (const BehaviourState& s : b.states) {
+            Json state = {{"name", s.name}};
+            if (s.own) {
+                state["activity"] = s.does.activity;
+                if (s.does.at != RoutineAt::stay) state["at"] = routine_at_name(s.does.at);
+                if (!s.does.name.empty()) state["place"] = s.does.name;
+                if (s.does.speed != RoutineEntry{}.speed) state["speed"] = s.does.speed;
+            }
+            if (!s.transitions.empty()) {
+                Json transitions = Json::array();
+                for (const BehaviourTransition& t : s.transitions) {
+                    Json when = Json::array();
+                    for (const BehaviourCondition& c : t.conditions) {
+                        Json condition = {{"is", behaviour_when_name(c.when)}};
+                        if (c.when == BehaviourWhen::alarm_over || c.when == BehaviourWhen::alarm_under ||
+                            c.when == BehaviourWhen::after || c.when == BehaviourWhen::hour) {
+                            condition["value"] = c.value;
+                        }
+                        if (c.when == BehaviourWhen::hour) condition["until"] = c.until;
+                        if (c.when == BehaviourWhen::sensed) condition["kind"] = c.kind;
+                        when.push_back(std::move(condition));
+                    }
+                    transitions.push_back({{"to", t.to}, {"when", std::move(when)}});
+                }
+                state["transitions"] = std::move(transitions);
+            }
+            states.push_back(std::move(state));
+        }
+        out.push_back({{"name", b.name}, {"states", std::move(states)}});
     }
     return out;
 }
@@ -1208,6 +1249,7 @@ std::string save_scene(const Scene& scene) {
         out["water"] = water_json(scene.water);
     }
     write_people(out, scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id);
+    if (!scene.behaviours.empty()) out["behaviours"] = behaviours_json(scene.behaviours);
     write_routes(out, scene.routes);
     if (!scene.particle_looks.empty()) {
         out["particle_looks"] = particle_looks_json(scene.particle_looks);
@@ -2208,10 +2250,13 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             const std::string path = "people.list[" + std::to_string(i) + "]";
             const auto number = [&](usize k) { return row[k].is_number() && std::isfinite(row[k].get<double>()); };
             const auto whole = [&](usize k) { return row[k].is_number_unsigned() && row[k].get<u64>() <= 0xffffffffu; };
-            if (!row.is_array() || (row.size() != 9 && row.size() != 10) || !whole(0) || !row[1].is_string() ||
+            if (!row.is_array() || row.size() < 9 || row.size() > 11 || !whole(0) || !row[1].is_string() ||
                 !row[2].is_string() || !row[3].is_string() || !number(4) || !number(5) || !number(6) || !number(7) ||
-                !whole(8) || (row.size() == 10 && (!row[9].is_string() || row[9].get_ref<const std::string&>().empty()))) {
-                error = path + " must be [id, name, look, home, x, y, z, yaw, seed] or those and its routine's name";
+                !whole(8) || (row.size() >= 10 && !row[9].is_string()) ||
+                (row.size() == 10 && row[9].get_ref<const std::string&>().empty()) ||
+                (row.size() == 11 && (!row[10].is_string() || row[10].get_ref<const std::string&>().empty()))) {
+                error = path + " must be [id, name, look, home, x, y, z, yaw, seed], or those and its routine's name, or "
+                               "those, its routine's name (\"\" for none) and its behaviour's name";
                 return;
             }
             Person p;
@@ -2227,7 +2272,8 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             }
             p.yaw = static_cast<float>(yaw);
             p.seed = row[8].get<u32>();
-            if (row.size() == 10) p.routine = row[9].get<std::string>();
+            if (row.size() >= 10) p.routine = row[9].get<std::string>();
+            if (row.size() == 11) p.behaviour = row[10].get<std::string>();
             if (const auto bad = check_person(p)) {
                 error = path + ": " + *bad;
                 return;
@@ -2237,6 +2283,121 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
     }
     if (!error.empty()) return;
     if (const auto bad = check_people(places, looks, routines, people, next_person_id)) error = "people: " + *bad;
+}
+
+// The behaviours' key of a scene or a world index (after the people are
+// read: a person's behaviour must be there), each checked alone and then
+// all together (people.h).
+void read_behaviours(Reader& root, std::vector<Behaviour>& behaviours, std::span<const Person> people, std::string& error) {
+    if (const Json* list = root.get("behaviours", false); list != nullptr && root.ok()) {
+        if (!list->is_array() || list->size() > k_max_behaviours) {
+            root.fail("behaviours", "must be an array of at most " + std::to_string(k_max_behaviours));
+            return;
+        }
+        for (usize i = 0; i < list->size(); ++i) {
+            const std::string path = "behaviours[" + std::to_string(i) + "]";
+            Reader r((*list)[i], path, error);
+            Behaviour behaviour;
+            r.string("name", behaviour.name, true, k_max_name_bytes);
+            const Json* states = r.get("states", true);
+            r.finish();
+            if (!error.empty() || states == nullptr) return;
+            if (!states->is_array() || states->empty() || states->size() > k_max_behaviour_states) {
+                error = path + ".states must be a list of 1 to " + std::to_string(k_max_behaviour_states);
+                return;
+            }
+            for (usize k = 0; k < states->size(); ++k) {
+                const std::string state_path = path + ".states[" + std::to_string(k) + "]";
+                Reader s((*states)[k], state_path, error);
+                BehaviourState state;
+                s.string("name", state.name, true, k_max_tag_bytes);
+                state.own = s.get("activity", false) != nullptr;
+                s.string("activity", state.does.activity, false, k_max_tag_bytes);
+                std::string at = "stay";
+                const bool has_at = s.get("at", false) != nullptr;
+                s.string("at", at, false, 8);
+                const bool has_place = s.get("place", false) != nullptr;
+                s.string("place", state.does.name, false, k_max_name_bytes);
+                const bool has_speed = s.get("speed", false) != nullptr;
+                s.number("speed", state.does.speed, 0.1, 20);
+                const Json* transitions = s.get("transitions", false);
+                s.finish();
+                if (!error.empty()) return;
+                if (!state.own && (has_at || has_place || has_speed)) {
+                    error = state_path + ": at, place and speed are given only with an activity";
+                    return;
+                }
+                const std::optional<RoutineAt> where = routine_at_named(at);
+                if (!where) {
+                    error = state_path + ".at must be stay, home, place or tag";
+                    return;
+                }
+                state.does.at = *where;
+                if (transitions != nullptr) {
+                    if (!transitions->is_array() || transitions->size() > k_max_behaviour_transitions) {
+                        error = state_path + ".transitions must be a list of at most " + std::to_string(k_max_behaviour_transitions);
+                        return;
+                    }
+                    for (usize t = 0; t < transitions->size(); ++t) {
+                        const std::string transition_path = state_path + ".transitions[" + std::to_string(t) + "]";
+                        Reader tr((*transitions)[t], transition_path, error);
+                        BehaviourTransition transition;
+                        tr.string("to", transition.to, true, k_max_tag_bytes);
+                        const Json* when = tr.get("when", true);
+                        tr.finish();
+                        if (!error.empty() || when == nullptr) return;
+                        if (!when->is_array() || when->empty() || when->size() > k_max_behaviour_conditions) {
+                            error = transition_path + ".when must be a list of 1 to " + std::to_string(k_max_behaviour_conditions);
+                            return;
+                        }
+                        for (usize c = 0; c < when->size(); ++c) {
+                            const std::string condition_path = transition_path + ".when[" + std::to_string(c) + "]";
+                            Reader w((*when)[c], condition_path, error);
+                            BehaviourCondition condition;
+                            std::string is;
+                            w.string("is", is, true, 16);
+                            const bool has_value = w.get("value", false) != nullptr;
+                            w.number("value", condition.value, 0, 86400);
+                            const bool has_until = w.get("until", false) != nullptr;
+                            w.number("until", condition.until, 0, 24);
+                            const bool has_kind = w.get("kind", false) != nullptr;
+                            w.string("kind", condition.kind, false, k_max_tag_bytes);
+                            w.finish();
+                            if (!error.empty()) return;
+                            const std::optional<BehaviourWhen> named = behaviour_when_named(is);
+                            if (!named) {
+                                error = condition_path + ".is must be alarm_over, alarm_under, sensed, arrived, failed, after or hour";
+                                return;
+                            }
+                            condition.when = *named;
+                            // Each has what it needs and nothing else (a number left out is not read as 0).
+                            const bool valued = *named == BehaviourWhen::alarm_over || *named == BehaviourWhen::alarm_under ||
+                                                *named == BehaviourWhen::after || *named == BehaviourWhen::hour;
+                            if (has_value != valued || has_until != (*named == BehaviourWhen::hour) ||
+                                has_kind != (*named == BehaviourWhen::sensed)) {
+                                error = condition_path + ": " + is +
+                                        (valued ? (*named == BehaviourWhen::hour ? " has a value and an until, and no kind"
+                                                                                 : " has a value, and no until or kind")
+                                                : (*named == BehaviourWhen::sensed ? " has a kind, and no value or until"
+                                                                                   : " has no value, until or kind"));
+                                return;
+                            }
+                            transition.conditions.push_back(std::move(condition));
+                        }
+                        state.transitions.push_back(std::move(transition));
+                    }
+                }
+                behaviour.states.push_back(std::move(state));
+            }
+            if (const auto bad = check_behaviour(behaviour)) {
+                error = path + ": " + *bad;
+                return;
+            }
+            behaviours.push_back(std::move(behaviour));
+        }
+    }
+    if (!error.empty()) return;
+    if (const auto bad = check_behaviours(behaviours, people)) error = "behaviours: " + *bad;
 }
 
 // The routes' key of a scene or a world index, each row checked alone and
@@ -2847,6 +3008,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     read_scatter(root, scene.kits, scene.scatter, error);
     read_water(root, scene.water, error);
     read_people(root, scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id, error);
+    read_behaviours(root, scene.behaviours, scene.people, error);
     read_routes(root, scene.routes, error);
     read_particle_looks(root, scene.particle_looks, error);
     read_effects(root, scene.effects, error);
@@ -2932,6 +3094,7 @@ std::string save_world_index(const WorldIndex& world) {
         out["water"] = water_json(world.water);
     }
     write_people(out, world.places, world.person_looks, world.routines, world.people, world.next_person_id);
+    if (!world.behaviours.empty()) out["behaviours"] = behaviours_json(world.behaviours);
     write_routes(out, world.routes);
     if (!world.particle_looks.empty()) {
         out["particle_looks"] = particle_looks_json(world.particle_looks);
@@ -3000,6 +3163,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     read_scatter(root, world.kits, world.scatter, error);
     read_water(root, world.water, error);
     read_people(root, world.places, world.person_looks, world.routines, world.people, world.next_person_id, error);
+    read_behaviours(root, world.behaviours, world.people, error);
     read_routes(root, world.routes, error);
     read_particle_looks(root, world.particle_looks, error);
     read_effects(root, world.effects, error);

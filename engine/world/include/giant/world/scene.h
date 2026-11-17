@@ -616,12 +616,58 @@ struct Routine {
     std::vector<RoutineAlarm> alarmed; // at most k_max_routine_alarms
     bool operator==(const Routine&) const = default;
 };
+// A behaviour: what the people who have it do as things happen to them
+// (living-world plan LW6), as a small state machine. One with it is in one
+// of its states (the first, to begin with). A state says what one does
+// while in it (as a routine's entry does: an activity, and stay, home, a
+// place or a tag, at a speed; or nothing of its own, and then its routine
+// says, the hour's entry or an alarmed one), and has transitions: each
+// names another state, and is taken when all its conditions hold (the
+// first such, in the order written).
+constexpr usize k_max_behaviours = 256;
+constexpr usize k_max_behaviour_states = 16;
+constexpr usize k_max_behaviour_transitions = 8;
+constexpr usize k_max_behaviour_conditions = 4;
+enum class BehaviourWhen : u8 {
+    alarm_over,  // its alarm is at or over `value` (over 0, to 1)
+    alarm_under, // its alarm is under `value` (over 0, to 1)
+    sensed,      // what alarmed it most of late is of `kind` (a noise's: shot, blast, voice...; or sight)
+    arrived,     // it is where the state sent it (or the state sends it nowhere)
+    failed,      // it could not be sent where the state says
+    after,       // it has been in the state `value` seconds (of the simulation's; over 0, to a day's 86400)
+    hour,        // the time of day is from `value` to `until` (hours, 0 to under 24; over midnight when until is the less)
+};
+struct BehaviourCondition {
+    BehaviourWhen when = BehaviourWhen::arrived;
+    float value = 0.0f; // alarm_over, alarm_under, after, hour: see above; else 0
+    float until = 0.0f; // hour: when it ends; else 0
+    std::string kind;   // sensed: a word as a place's tag is; else empty
+    bool operator==(const BehaviourCondition&) const = default;
+};
+struct BehaviourTransition {
+    std::string to;                             // a state of the behaviour (not the one it is in)
+    std::vector<BehaviourCondition> conditions; // 1 to k_max_behaviour_conditions: all must hold
+    bool operator==(const BehaviourTransition&) const = default;
+};
+struct BehaviourState {
+    std::string name;  // unique in the behaviour: a word as a place's tag is
+    bool own = false;  // it says what one does itself (`does`); else the person's routine says
+    RoutineEntry does; // own: as a routine's entry (its `from` is not used: 0); else as made
+    std::vector<BehaviourTransition> transitions; // at most k_max_behaviour_transitions
+    bool operator==(const BehaviourState&) const = default;
+};
+struct Behaviour {
+    std::string name;                   // unique in the scene, 1 to k_max_name_bytes
+    std::vector<BehaviourState> states; // 1 to k_max_behaviour_states; one begins in the first
+    bool operator==(const Behaviour&) const = default;
+};
 struct Person {
     PersonId id = 0;
     std::string name;    // at most k_max_name_bytes; need not be unique
     std::string look;    // a PersonLook's name
     std::string home;    // a Place's name ("" for none)
     std::string routine; // a Routine's name ("" for none: it stays where it is)
+    std::string behaviour; // a Behaviour's name ("" for none: its routine alone says what it does)
     DVec3 position;      // where it starts (metres)
     float yaw = 0.0f;    // degrees
     u32 seed = 0;        // what tells it apart from others of its look (tint, pace)
@@ -764,6 +810,8 @@ public:
     PersonId next_person_id = 1;
     // What people do through the day (people.h), by name, in order (not tracked: compare).
     std::vector<Routine> routines;
+    // How people behave as things happen (people.h), by name, in order (not tracked: compare).
+    std::vector<Behaviour> behaviours;
     // The roads and paths people travel by (routes.h; not tracked: compare).
     Routes routes;
     // Particle looks and effects (effects.h), by name, in order (not tracked: compare).
@@ -877,6 +925,8 @@ struct WorldIndex {
     PersonId next_person_id = 1;
     // What people do through the day (people.h), by name, in order (not tracked: compare).
     std::vector<Routine> routines;
+    // How people behave as things happen (people.h), by name, in order (not tracked: compare).
+    std::vector<Behaviour> behaviours;
     // The roads and paths people travel by (routes.h; not tracked: compare).
     Routes routes;
     std::vector<ParticleLook> particle_looks;
