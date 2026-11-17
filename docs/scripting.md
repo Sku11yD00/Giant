@@ -73,9 +73,11 @@ public override void OnPersonEvent(in PersonEvent e)
 `e.Person` is the id `get_people` gives; `e.Behaviour`, `e.From` and `e.To`
 are names; `e.Seconds` is the simulation's time. Events come before the
 frame's `OnUpdate`, in order, at most 256 a frame (the rest the frames
-after). The strings are shared between events, so reading them allocates
-nothing; do not allocate in the handler yourself when many may come. The
-command `get_person_events` lists the same events.
+after; if more than 16384 are waiting, the oldest are dropped and the log
+says so). The strings are shared between events, so reading them allocates
+nothing. A command allocates (its arguments and its answer), which is fine
+for the few events you act on: test first, as above, and do nothing for the
+rest. The command `get_person_events` lists the same events.
 
 The full sample is `scripts/samples/HelloGiant`. The build puts it in
 `build/<preset>/managed/samples/HelloGiant/HelloGiant.dll`.

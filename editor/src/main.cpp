@@ -232,6 +232,7 @@ public:
                 m_state.scripts_loaded = m_host->load_scripts(file) ? path : std::string();
                 // (Scripts hear of what happens from when they are loaded.)
                 m_events_told = m_state.routines != nullptr ? m_state.routines->changes() : 0;
+                m_events_missed = false;
             }
         }
         if (m_host != nullptr && !m_state.scripts_loaded.empty()) {
@@ -247,6 +248,10 @@ private:
     void tell_person_events() {
         if (m_state.routines == nullptr || m_events_told >= m_state.routines->changes()) {
             return;
+        }
+        if (m_events_told + 1 < m_state.routines->changes_from() && !m_events_missed) {
+            m_events_missed = true; // (said once a load)
+            log_warning("editor", "more happened to people than scripts are told of a frame: the oldest events were not told");
         }
         m_changes.clear();
         m_events.clear();
@@ -286,6 +291,7 @@ private:
     std::unique_ptr<script::ScriptHost> m_host;
     static constexpr usize k_events_a_frame = 256;
     u64 m_events_told = 0;
+    bool m_events_missed = false;
     std::vector<editor::PeopleRoutines::Change> m_changes; // (kept: nothing is allocated a frame)
     std::vector<script::PersonEvent> m_events;
 };

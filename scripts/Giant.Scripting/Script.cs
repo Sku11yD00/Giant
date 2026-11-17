@@ -63,5 +63,5 @@ public readonly struct PersonEvent
     public double Seconds { get; }
 
     /// <summary>True when the person began the behaviour (in its first state).</summary>
-    public bool Began => From.Length == 0;
+    public bool Began => string.IsNullOrEmpty(From);
 }

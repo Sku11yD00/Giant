@@ -174,3 +174,16 @@ public sealed class Listener : Script
         }
     }
 }
+
+/// <summary>Counts what it is told, and throws when told to.</summary>
+public sealed class Fragile : Script
+{
+    public override void OnPersonEvent(in PersonEvent e)
+    {
+        if (e.To == "throw")
+        {
+            throw new InvalidOperationException("fragile broke on purpose");
+        }
+        Engine.Execute("record", new { what = "fragile", person = e.Person, length = e.Behaviour.Length });
+    }
+}

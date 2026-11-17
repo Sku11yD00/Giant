@@ -132,8 +132,8 @@ public:
     // state: `from` is ""), or went from a state to another. Each has a
     // serial, counted from 1 for as long as the editor runs; the last
     // k_changes_kept are kept, older ones are gone (as are those of another
-    // scene). Names are the scene's as they are when asked for: one whose
-    // behaviour was changed or removed since is not told.
+    // scene). Names are the scene's when asked for: one whose behaviour is
+    // gone since, or has other names for those states now, is not told.
     struct Change {
         u64 serial = 0;
         world::PersonId person = 0;
@@ -142,7 +142,7 @@ public:
         std::string_view to;        // the state it is in since
         double seconds = 0.0;       // the simulation's, when it happened
     };
-    static constexpr usize k_changes_kept = 4096;
+    static constexpr usize k_changes_kept = 16384;
     u64 changes() const { return m_changes_made; }     // the serial of the last that happened (0: none yet)
     u64 changes_from() const;                          // the serial of the oldest still kept (over `changes()`: none)
     bool change(const world::Scene& scene, u64 serial, Change& out) const;
@@ -260,12 +260,14 @@ private:
         world::PersonId person = 0;
         double seconds = 0.0;
         u32 behaviour_name = 0;
+        u32 from_name = 0; // the states' names, hashed: the behaviour may be another by the time it is told
+        u32 to_name = 0;
         u16 behaviour = 0;
         u8 from = k_no_state;
         u8 to = 0;
     };
     static constexpr u8 k_no_state = 0xff;
-    void changed(const Slot& slot, u8 from, double seconds);
+    void changed(const world::Behaviour& behaviour, const Slot& slot, u8 from, double seconds);
     std::vector<Changed> m_changes; // a ring of k_changes_kept, made once: serial s is at (s - 1) % k_changes_kept
     u64 m_changes_made = 0;
     u64 m_changes_from = 1; // older ones are another scene's

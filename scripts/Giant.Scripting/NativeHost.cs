@@ -426,7 +426,7 @@ internal sealed class ScriptSet
 /// </summary>
 internal sealed unsafe class NameCache
 {
-    private const int MostKept = 4096;
+    private const int MostKept = 16384; // (more than a scene's behaviours and their states have names)
     private const int LongestKept = 256; // bytes: longer names are made each time
     private readonly Dictionary<ulong, string> _byHash = new();
 
@@ -458,6 +458,7 @@ internal sealed unsafe class NameCache
         return made;
     }
 
+    [SkipLocalsInit] // (the bytes are written before they are read)
     private static bool Same(string kept, byte* utf8, int length)
     {
         if (kept.Length > length)

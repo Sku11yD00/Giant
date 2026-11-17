@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -86,7 +87,9 @@ struct NativePersonEvent {
     std::int32_t to_length;
     double seconds;
 };
-static_assert(sizeof(void*) != 8 || sizeof(NativePersonEvent) == 56, "NativePersonEvent must match NativeHost.cs");
+static_assert(sizeof(void*) != 8 || (sizeof(NativePersonEvent) == 56 && offsetof(NativePersonEvent, behaviour_length) == 32 &&
+                                     offsetof(NativePersonEvent, seconds) == 48),
+              "NativePersonEvent must match NativeHost.cs");
 
 // The command handler of the one host. Main thread only.
 CommandHandler* g_commands = nullptr;
@@ -261,6 +264,7 @@ struct ScriptHost::Api {
     // What person_events hands over: made once, and grown to the most ever told at a time.
     std::vector<NativePersonEvent> events;
     std::string names;
+    bool events_failed = false;
     CommandHandler commands;
     NativeApi native{};
 };
@@ -414,7 +418,11 @@ void ScriptHost::person_events(std::span<const PersonEvent> events) {
         e.seconds = events[i].seconds;
         out.push_back(e);
     }
-    m_api->person_events(out.data(), static_cast<int>(count), static_cast<int>(sizeof(NativePersonEvent)));
+    if (m_api->person_events(out.data(), static_cast<int>(count), static_cast<int>(sizeof(NativePersonEvent))) != 0 &&
+        !m_api->events_failed) {
+        m_api->events_failed = true; // (said once: it would be said each frame)
+        log_error("script", "scripts could not be told what people did (see above, or Giant.Scripting.dll does not match this engine build)");
+    }
 }
 
 void ScriptHost::unload_scripts() { m_api->unload_scripts(); }

@@ -3990,19 +3990,22 @@ So that a game adds its own to what people do, what happens to a
 behaviour is told: a person began one (in its first state), or went
 from a state to another.
 
-- `PeopleRoutines` keeps the last 4096 in a ring made once (person,
-  behaviour, the states by their places, the simulation's seconds),
-  each with a serial that counts on for as long as the editor runs.
-  Nothing is allocated when one happens. The names are found when one
-  is asked for: one whose behaviour was changed or removed since, or
-  of another scene, is not told.
+- `PeopleRoutines` keeps the last 16384 in a ring made once (person,
+  behaviour, the states by their places and their names' hashes, the
+  simulation's seconds), each with a serial that counts on for as
+  long as the editor runs. Nothing is allocated when one happens. The
+  names are found when one is asked for: one whose behaviour is gone
+  since, or has other names for those states now, or of another
+  scene, is not told.
 - `get_person_events {after, limit}` lists them oldest first, with
-  `latest` to go on from and `oldest` still kept: what the AI, or a
-  tool, polls.
+  `after` to go on from, `latest` (the last that happened) and
+  `oldest` still kept: what the AI, or a tool, polls.
 - C# scripts are told the same as `Script.OnPersonEvent(in PersonEvent)`
   before the frame's `OnUpdate`, in order, from when they were loaded:
   at most 256 a frame (many at once are told over the frames after, so
-  a crowd that flees does not make one long frame). The script host
+  a crowd that flees does not make one long frame; when more than the
+  ring keeps are waiting, the oldest are not told, and a warning says
+  so once). The script host
   copies the names before any script runs (a script may run commands
   that change the behaviours), and the C# side keeps each name's
   string and gives the same one again, so telling allocates nothing
