@@ -449,6 +449,8 @@ internal sealed unsafe class NameCache
         {
             return kept;
         }
+        // (A name that is not UTF-8 never matches what was made of it, and is made each time: the
+        // engine's own names are UTF-8.)
         string made = Encoding.UTF8.GetString(utf8, length);
         if (_byHash.Count >= MostKept)
         {

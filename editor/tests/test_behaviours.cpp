@@ -629,12 +629,14 @@ GIANT_TEST("behaviours: what happens is kept for scripts and get_person_events, 
     f.routines.settings.looked_a_frame = 1024;
     f.frames(1.0, 4);
     GIANT_CHECK(f.routines.changes() == 6 + count && f.routines.changes_from() == 1);
+    const u64 begun = f.routines.changes();
+    GIANT_CHECK(f.routines.settings.looked_a_frame * 4 >= f.state.scene.people.size()); // (everyone is looked at in the four frames)
     for (int run = 0; run < 6; ++run) {
         ++f.run_id;
         f.frames(1.0, 4);
     }
     const u64 made = f.routines.changes();
-    GIANT_CHECK(made == 6 + 7 * count && f.routines.changes_from() == made - PeopleRoutines::k_changes_kept + 1);
+    GIANT_CHECK(made == begun + 6 * count && f.routines.changes_from() == made - PeopleRoutines::k_changes_kept + 1);
     got = f.run("get_person_events", {{"limit", 256}}).value;
     GIANT_CHECK(got["oldest"] == f.routines.changes_from() && got["events"].size() == 256);
     GIANT_CHECK(got["events"][0]["serial"] == f.routines.changes_from() && got["after"] == f.routines.changes_from() + 255);

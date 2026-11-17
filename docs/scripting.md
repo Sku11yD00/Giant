@@ -35,8 +35,8 @@ game logic, so they are not added to the editor's undo history.
 
 Rules the host enforces:
 
-- Call the engine from the main thread: `OnStart`, `OnUpdate`, `OnStop`, or
-  code after an `await` in them. Awaits come back to the main thread at the
+- Call the engine from the main thread: `OnStart`, `OnUpdate`, `OnStop`,
+  `OnPersonEvent`, or code after an `await` in them. Awaits come back to the main thread at the
   start of the next update, so `async void OnUpdate` with `await` works, and
   an exception after an await is logged instead of ending the editor. A
   thread you start yourself (or `Task.Run` code) must not call the engine;

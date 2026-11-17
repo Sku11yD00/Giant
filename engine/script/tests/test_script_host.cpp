@@ -112,11 +112,11 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(calls.size() == 6); // (two scripts listen: each is told each, in turn)
     if (calls.size() == 6) {
         // (The scripts' JSON writes a letter that is not ASCII as an escape: é is \\u00E9.)
-        GIANT_CHECK(calls[0] == "record {\"what\":\"person\",\"person\":7,\"behaviour\":\"wary\",\"from\":\"\",\"to\":\"fl\\u00E9e\","
-                                "\"began\":true,\"seconds\":1.5,\"again\":false}");
-        GIANT_CHECK(calls[1] == "record {\"what\":\"fragile\",\"person\":7,\"length\":4}");
-        GIANT_CHECK(calls[2] == "record {\"what\":\"person\",\"person\":7,\"behaviour\":\"wary\",\"from\":\"fl\\u00E9e\",\"to\":\"hide\","
-                                "\"began\":false,\"seconds\":20.25,\"again\":false}");
+        GIANT_CHECK(has( "record {\"what\":\"person\",\"person\":7,\"behaviour\":\"wary\",\"from\":\"\",\"to\":\"fl\\u00E9e\","
+                                "\"began\":true,\"seconds\":1.5,\"again\":false}"));
+        GIANT_CHECK(has("record {\"what\":\"fragile\",\"person\":7,\"length\":4}")); // (which script first is not said)
+        GIANT_CHECK(has( "record {\"what\":\"person\",\"person\":7,\"behaviour\":\"wary\",\"from\":\"fl\\u00E9e\",\"to\":\"hide\","
+                                "\"began\":false,\"seconds\":20.25,\"again\":false}"));
         GIANT_CHECK(has("\"person\":9,\"behaviour\":\"wary\",\"from\":\"hide\",\"to\":\"hide\",\"began\":false,\"seconds\":21,\"again\":true"));
     }
     // None, and more than are told at a time: the first k_most_person_events.

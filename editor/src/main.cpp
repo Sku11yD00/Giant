@@ -249,7 +249,9 @@ private:
         if (m_state.routines == nullptr || m_events_told >= m_state.routines->changes()) {
             return;
         }
-        if (m_events_told + 1 < m_state.routines->changes_from() && !m_events_missed) {
+        // (More waiting than are kept; not those of another scene, which are not told on purpose.)
+        const u64 made = m_state.routines->changes();
+        if (made - m_events_told > editor::PeopleRoutines::k_changes_kept && !m_events_missed) {
             m_events_missed = true; // (said once a load)
             log_warning("editor", "more happened to people than scripts are told of a frame: the oldest events were not told");
         }

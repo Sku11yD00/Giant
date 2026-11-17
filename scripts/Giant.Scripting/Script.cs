@@ -38,12 +38,17 @@ public abstract class Script
 /// <summary>What happened to a person's behaviour (see <see cref="Script.OnPersonEvent"/>).</summary>
 public readonly struct PersonEvent
 {
+    // (Null in a default value: given out as empty.)
+    private readonly string? _behaviour;
+    private readonly string? _from;
+    private readonly string? _to;
+
     internal PersonEvent(ulong person, string behaviour, string from, string to, double seconds)
     {
         Person = person;
-        Behaviour = behaviour;
-        From = from;
-        To = to;
+        _behaviour = behaviour;
+        _from = from;
+        _to = to;
         Seconds = seconds;
     }
 
@@ -51,17 +56,17 @@ public readonly struct PersonEvent
     public ulong Person { get; }
 
     /// <summary>The name of its behaviour.</summary>
-    public string Behaviour { get; }
+    public string Behaviour => _behaviour ?? "";
 
     /// <summary>The state it left; empty when it began the behaviour.</summary>
-    public string From { get; }
+    public string From => _from ?? "";
 
     /// <summary>The state it is in since.</summary>
-    public string To { get; }
+    public string To => _to ?? "";
 
     /// <summary>The simulation's seconds when it happened.</summary>
     public double Seconds { get; }
 
     /// <summary>True when the person began the behaviour (in its first state).</summary>
-    public bool Began => string.IsNullOrEmpty(From);
+    public bool Began => string.IsNullOrEmpty(_from);
 }
