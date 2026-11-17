@@ -24,6 +24,7 @@
 #include "animation_state.h"
 #include "cloth_state.h"
 #include "hair_state.h"
+#include "people_list.h"
 #include "people_routines.h"
 #include "people_senses.h"
 #include "people_state.h"
@@ -458,6 +459,8 @@ int run(const Options& options) {
         // The people's trips moved on by the time simulated (stopped: everyone back where the scene has them).
         const editor::PeopleTravel::Clock travel_clock = editor::PeopleTravel::clock_of(physics);
         travel.update(state.scene, travel_clock.run, travel_clock.seconds);
+        // The one followed keeps the camera by it, where it is this frame (follow_person; play ends it).
+        editor::follow_person_camera(state);
         // What the people hear of the noises made (a share of the people a frame while any spreads),
         // and who sees the player (at the camera: its eyes while playing).
         // (A screenshot's frame does not look or listen again.)

@@ -2324,10 +2324,12 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
     add(registry,
         {"get_camera",
          "Returns the viewport camera: position, yaw (0 looks north along -Z, 90 west), pitch "
-         "(up positive) and field of view.",
+         "(up positive) and field of view; `following`: the person it follows (follow_person), else null.",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
-             return CommandResult::success(camera_json(state.camera));
+             Json out = camera_json(state.camera);
+             out["following"] = state.follow.person != 0 ? Json(state.follow.person) : Json(nullptr);
+             return CommandResult::success(std::move(out));
          }});
 
     add(registry,

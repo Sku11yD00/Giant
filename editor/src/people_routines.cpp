@@ -546,6 +546,8 @@ bool PeopleRoutines::doing(const world::Scene& scene, world::PersonId id, Doing&
     const world::RoutineEntry* entry = entry_of(routine, slot.entry);
     if (routine.name != person->routine || entry == nullptr) return false;
     out.activity = entry->activity;
+    out.alarmed = slot.entry >= routine.entries.size();
+    out.at = out.alarmed ? routine.alarmed[slot.entry - routine.entries.size()].over : entry->from;
     const world::Place* place = sent_to(scene, slot);
     out.place = place != nullptr ? std::string_view(place->name) : std::string_view();
     out.failed = slot.failed;

@@ -1011,6 +1011,7 @@ void GameSaves::finish_load(EditorState& state) {
     Sections s = std::move(*m_sections);
     m_sections.reset();
     m_status.doing.clear();
+    state.follow.person = 0; // a loaded game's view is its own (follow_person)
     if (s.camera) {
         // Where it was and where it looked (the fly speed stays the viewer's).
         state.camera.position = s.camera->position;

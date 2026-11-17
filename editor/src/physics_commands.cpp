@@ -788,6 +788,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          [&state](const Json& args, CommandContext&) {
              if (state.physics == nullptr || state.play == nullptr) return no_play();
              if (args["on"].get<bool>()) {
+                 state.follow.person = 0; // the camera is the player's eyes from here (follow_person)
                  if (!state.play->start(state.scene, state.camera, state.scene_generation)) {
                      return CommandResult::failure("the player could not be put there");
                  }

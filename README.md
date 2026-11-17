@@ -406,6 +406,9 @@ Open-world systems:
 - LW5c: the alarmed react: a routine says what its people do over
   each alarm (watch, flee home, hide at a place), and they go back to
   their day when calm.
+- LW6a: the People panel: list the people, filter them (text, only
+  the alarmed, only those travelling), read what one does and why,
+  and have the camera follow one (`follow_person`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

@@ -91,6 +91,8 @@ public:
         std::string_view activity; // the entry's (the scene's string: until the routines change)
         std::string_view place;    // where it was sent, or was already ("" for none, or a place gone since)
         bool failed = false;       // it could not be acted on
+        bool alarmed = false;      // the entry is one of its routine's `alarmed`
+        float at = 0.0f;           // the hour the entry begins, or the alarm it holds over
     };
     bool doing(const world::Scene& scene, world::PersonId id, Doing& out) const;
     // What a person's routine has it do and where, as it last acted (a

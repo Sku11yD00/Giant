@@ -3827,6 +3827,54 @@ alarmed activity plays where the routine has the person be, so one
 that has run home goes on playing `flee` there while still alarmed
 (name a clip that suits both, or none).
 
+### The People panel (LW6a)
+
+The editor's People window lists the scene's people, filters them,
+shows what one does and why, and has the camera follow one. It is
+made of three things in `editor/src/people_list.h`, and the commands
+give the AI the same.
+
+`PeopleList` finds the people that match a filter: text (in a name, a
+look, a home or a routine, letters' case aside, or a whole id), only
+the alarmed, only those on a trip (one that failed is not). A scene
+has up to 65,536 people, and who is alarmed or travelling changes as
+the world runs, so the list is gone through 4,096 a frame, again and
+again, while the window is open: what is shown is the last whole time
+through (the first 1,024 that match, ids rising, with how many match
+in all), so it is a frame behind for up to 4,096 people and half a
+second or so for the most a scene holds, and never costs more than
+its share. Each frame goes on from the id last looked at, so people
+removed or put back meanwhile neither hide nor double anyone.
+Another filter or scene begins again at once, and so does a window
+that was closed or behind another tab. Two vectors kept at their full
+size swap; the list allocates nothing a frame.
+`get_people` takes the same filter (`text`, `alarmed`, `travelling`)
+through the same `PeopleList::matches`.
+
+`person_why` says in words what a person does and why: what alarmed
+it and how long ago (a noise's kind, or what it saw), what its
+routine says (the hour's entry and when it began, or the alarmed
+entry and the alarm it holds over, or that it could not be sent), and
+where its trip has got to (looking for its way, so far along, or why
+it failed). What the routine says is what it last acted on, so just
+after an alarm rises or eases the two may differ until its turn
+comes. The panel shows it for the one picked (made anew a few times a
+second); `get_people` gives it as `why`. It is for reading: the fields beside it (`doing`,
+`alarm`, `heard`, `trip`) are the ones to act on.
+
+`follow_person` has the viewport camera follow a person:
+`EditorState::follow` (the person, the scene it is of, a distance),
+and `follow_person_camera` each frame, once the people's trips have moved
+on for it (so the camera is where the person is in the frame drawn,
+a screenshot's too), puts
+the camera that far behind the person, 1.5 m over the ground under
+it, along the way the camera looks, and never under the ground; so turning the camera (the mouse,
+`set_camera`'s yaw and pitch) looks round the person and a position
+given is not kept. Following ends when the person is removed, another
+scene is taken up, a game is loaded or play starts (the `play`
+command lets go itself, so a play begun and stopped between two
+frames ends it too; it does not come back when play stops). It is view state, as the camera is.
+
 ### Nobody appears close by in view (LW4 part 2)
 
 `PeopleState` is told what the camera sees (`PeopleState::view`, set by

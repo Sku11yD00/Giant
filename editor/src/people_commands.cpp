@@ -6,11 +6,13 @@
 #include "editor_commands.h"
 
 #include "audio_state.h"
+#include "people_list.h"
 #include "people_routines.h"
 #include "people_senses.h"
 #include "people_state.h"
 #include "people_travel.h"
 #include "physics_state.h"
+#include "play_state.h"
 
 #include "giant/core/assert.h"
 #include "giant/world/people.h"
@@ -121,7 +123,7 @@ Json trip_json(const PeopleTravel& travel, const PeopleTravel::Trip& t) {
 // `people`: who is given an entity now (null: nobody is), named as `entity`.
 Json person_json(const Person& p, const PeopleState* people = nullptr, const world::Scene* scene = nullptr,
                  const PeopleTravel* travel = nullptr, const PeopleRoutines* routines = nullptr,
-                 const PeopleSenses* senses = nullptr) {
+                 const PeopleSenses* senses = nullptr, const EditorState* state = nullptr) {
     Json j = {{"id", p.id},     {"name", p.name}, {"look", p.look}, {"home", p.home}, {"routine", p.routine},
               {"position", point_json(p.position)}, {"yaw", p.yaw},   {"seed", p.seed}};
     if (scene != nullptr) {
@@ -148,6 +150,7 @@ Json person_json(const Person& p, const PeopleState* people = nullptr, const wor
             j["alarm"] = 0.0;
             j["heard"] = nullptr;
         }
+        if (state != nullptr) j["why"] = person_why(*state, p);
     }
     return j;
 }
@@ -831,10 +834,15 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
     people_props["look"] = name_schema("Only people of this look.");
     people_props["home"] = name_schema("Only people whose home is this place.");
     people_props["routine"] = name_schema("Only people with this routine.");
+    people_props["text"] = {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes},
+                            {"description", "Only people with this in their name, look, home or routine (letters' case aside), or whose id it is."}};
+    people_props["alarmed"] = {{"type", "boolean"}, {"description", "Only people alarmed now (while the world runs)."}};
+    people_props["travelling"] = {{"type", "boolean"}, {"description", "Only people on a trip now."}};
     add(registry,
         {"get_people",
          "Lists people as the scene keeps them (where each starts; where each is while the world runs is "
-         "the simulation's): those named by `ids`, or all, or those of `look`, living at `home`, with `routine` and/or "
+         "the simulation's): those named by `ids`, or all, or those of `look`, living at `home`, with `routine`, "
+         "with `text` in their names, `alarmed` or `travelling` now and/or "
          "within `within` metres of `near`, `limit` at a time from `offset` (by rising id). `count` is how "
          "many match, `total` how many there are. `entity`: the entity standing for one near the camera now "
          "(set_people_settings), else null. `at`: where it is now (its `position` until it travels: "
@@ -843,7 +851,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "could not be sent: no such place, no road near, no way found), else null. `alarm` (0 calm to 1) and "
          "`heard`: the noise that alarmed it most of late (`kind`, `from` where it was made, `level` at its "
          "ears, `seconds` since), or what it saw (`kind` \"sight\", `from` where the thing was, `seconds` "
-         "since it last saw it), else null (make_noise, show_to_people, set_sense_settings). `near` goes by `position`.",
+         "since it last saw it), else null (make_noise, show_to_people, set_sense_settings). `why`: what it "
+         "does and why, in words for a person to read (the wording may change). `near` goes by `position`.",
          object_schema(Json::array(), people_props),
          true,
          [&state](const Json& args, CommandContext&) {
@@ -855,7 +864,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  usize found = 0;
                  for (const Json& id : args["ids"]) {
                      const Person* p = world::find_person(people, id.get<PersonId>());
-                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene, state.travel, state.routines, state.senses));
+                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene, state.travel, state.routines, state.senses, &state));
                      found += p != nullptr ? 1 : 0;
                  }
                  return CommandResult::success({{"count", found}, {"total", people.size()}, {"people", std::move(list)}});
@@ -866,16 +875,48 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              const DVec3 near = by_place ? point(args["near"]) : DVec3{};
              const double within = args.value("within", 100.0);
              const usize offset = args.value("offset", usize{0}), limit = args.value("limit", usize{100});
+             PeopleList::Filter filter;
+             filter.text = args.value("text", std::string());
+             filter.alarmed = args.value("alarmed", false);
+             filter.travelling = args.value("travelling", false);
+             const bool filtered = !(filter == PeopleList::Filter{});
              usize count = 0;
              for (const Person& p : people) {
                  if (!look.empty() && p.look != look) continue;
                  if (!home.empty() && p.home != home) continue;
                  if (!routine.empty() && p.routine != routine) continue;
+                 if (filtered && !PeopleList::matches(state, p, static_cast<usize>(&p - people.data()), filter)) continue;
                  if (by_place && !near_enough(p.position, near, within)) continue;
-                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel, state.routines, state.senses));
+                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel, state.routines, state.senses, &state));
                  ++count;
              }
              return CommandResult::success({{"count", count}, {"total", people.size()}, {"people", std::move(list)}});
+         }});
+    add(registry,
+        {"follow_person",
+         "The viewport camera follows a person (`id`; null or left out: nobody): kept `distance` metres "
+         "behind it (1 to 200, default 6, or as last given) and never under the ground, looking the way the camera is turned, so "
+         "set_camera's yaw and pitch look round it (a position given is not kept, and look_at aims from where the camera was). Following ends when the person is removed, another scene is taken up or play "
+         "starts. A loaded game ends it too. Returns `following` (the id, or null; get_camera gives it as well) and `distance`. View state: not undone, not saved.",
+         object_schema(Json::array(),
+                       {{"id", {{"type", {"integer", "null"}}, {"minimum", 1}, {"maximum", 4294967295.0},
+                                 {"description", "The person to follow; null or left out: nobody."}}},
+                        {"distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 200},
+                                      {"description", "Metres behind it (default 6, or as last given)."}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             const bool nobody = !args.contains("id") || args["id"].is_null();
+             if (!nobody) {
+                 if (state.play != nullptr && state.play->playing()) return CommandResult::failure("playing: the camera is the player's eyes (play off first)");
+                 if (world::find_person(state.scene.people, args["id"].get<PersonId>()) == nullptr) return CommandResult::failure("no such person");
+             }
+             state.follow.distance = args.value("distance", state.follow.distance);
+             state.follow.person = nobody ? 0 : args["id"].get<PersonId>();
+             state.follow.scene = state.scene.identity();
+             sync_travel(state);
+             follow_person_camera(state);
+             return CommandResult::success({{"following", state.follow.person != 0 ? Json(state.follow.person) : Json(nullptr)},
+                                            {"distance", state.follow.distance}});
          }});
     add(registry,
         {"set_people_settings",
