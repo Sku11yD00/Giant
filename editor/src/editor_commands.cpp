@@ -76,6 +76,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     register_clock_commands(registry, state);
     register_water_commands(registry, state);
     register_people_commands(registry, state);
+    register_route_commands(registry, state);
     register_effects_commands(registry, state);
     register_physics_commands(registry, state);
     register_animation_commands(registry, state);

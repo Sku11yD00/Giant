@@ -581,6 +581,34 @@ struct Person {
     bool operator==(const Person&) const = default;
 };
 
+// --- Routes (living-world plan LW2; routes.h checks them) --------------------
+//
+// The world's roads and paths as a coarse graph: nodes (points on the
+// ground) and links between them (walked both ways). People far from the
+// camera travel along it by the clock; near, they walk the ground itself
+// from node to node. Kept by the scene or the world, not by cells.
+using RouteNodeId = u32; // 0: none
+constexpr usize k_max_route_nodes = 65536;
+constexpr usize k_max_route_links = 262144;
+struct RouteNode {
+    RouteNodeId id = 0; // its own for good (never used again in the scene)
+    DVec3 position;     // metres, on the ground
+    bool operator==(const RouteNode&) const = default;
+};
+enum class RouteKind : u8 { path, road }; // a road is quicker going (nav/route.h: RouteSettings)
+struct RouteLink {
+    RouteNodeId a = 0, b = 0; // a < b, both nodes there; a pair once
+    float width = 2.0f;       // metres (0.5 to 100)
+    RouteKind kind = RouteKind::path;
+    bool operator==(const RouteLink&) const = default;
+};
+struct Routes {
+    std::vector<RouteNode> nodes; // by rising id
+    std::vector<RouteLink> links; // by rising (a, b)
+    RouteNodeId next_id = 1;      // one past the last id any node here ever had
+    bool operator==(const Routes&) const = default;
+};
+
 constexpr usize k_max_waters = 256;
 constexpr usize k_max_water_points = 4096;
 
@@ -687,6 +715,8 @@ public:
     std::vector<PersonLook> person_looks;
     std::vector<Person> people;
     PersonId next_person_id = 1;
+    // The roads and paths people travel by (routes.h; not tracked: compare).
+    Routes routes;
     // Particle looks and effects (effects.h), by name, in order (not tracked: compare).
     std::vector<ParticleLook> particle_looks;
     std::vector<Effect> effects;
@@ -796,6 +826,8 @@ struct WorldIndex {
     std::vector<PersonLook> person_looks;
     std::vector<Person> people;
     PersonId next_person_id = 1;
+    // The roads and paths people travel by (routes.h; not tracked: compare).
+    Routes routes;
     std::vector<ParticleLook> particle_looks;
     std::vector<Effect> effects;
     std::vector<std::string> meshes; // imported when the world opens

@@ -1796,7 +1796,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                      }
                      if (w.unsaved_settings(state.scene)) {
                          return CommandResult::failure(
-                             "the open world's lighting, kits, scatter, weather, clock, water or people have unsaved changes: "
+                             "the open world's lighting, kits, scatter, weather, clock, water, people or routes have unsaved changes: "
                              "save_world first, or pass discard_unsaved: true");
                      }
                  } else if (w.is_open()) {

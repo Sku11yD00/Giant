@@ -182,6 +182,16 @@ def build_scene(tool, call, check):
     tool("set_people_settings", {"embody_distance": 60})
     tool("undo")
     check(tool("get_places")["total"] == 0, "undo takes the place")
+    # Routes: a road laid, a path branching from it, and the way found along them.
+    road = tool("create_route", {"points": [[0, 0, 0], [80, 0, 0], [160, 0, 0]], "kind": "road"})["nodes"]
+    lane = tool("create_route", {"points": [[80, 0, 0.5], [80, 0, 90]]})["nodes"]
+    check(lane[0] == road[1] and tool("get_routes", {"limit": 0})["links"] == 3, "a path joins the road where they meet")
+    way = tool("get_route", {"from": [1, 0, 1], "to": [81, 0, 88]})
+    check(way["found"] and way["nodes"] == [road[0], road[1], lane[1]] and abs(way["length"] - 170) < 0.01,
+          "the way is found along the road and up the path")
+    tool("undo")
+    tool("undo")
+    check(tool("get_routes", {"limit": 0})["nodes"] == 0, "undo takes the routes")
     tool("new_scene")  # leave the default empty scene for the checks after this
 
 

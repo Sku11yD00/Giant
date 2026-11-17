@@ -3,6 +3,7 @@
 #include "giant/world/far_ground.h"
 #include "giant/world/scatter.h"
 #include "giant/world/people.h"
+#include "giant/world/routes.h"
 #include "giant/world/water.h"
 
 #include "giant/core/assert.h"
@@ -238,6 +239,7 @@ Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
       weather(other.weather), clock(other.clock), water(other.water), places(other.places),
       person_looks(other.person_looks), people(other.people), next_person_id(other.next_person_id),
+      routes(other.routes),
       particle_looks(other.particle_looks), effects(other.effects), m_entities(other.m_entities),
       m_index(other.m_index),
       m_next_id(other.m_next_id), m_damage(other.m_damage), m_kept_kits(other.m_kept_kits),
@@ -248,6 +250,7 @@ Scene::Scene(Scene&& other) noexcept
       scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock),
       water(std::move(other.water)), places(std::move(other.places)), person_looks(std::move(other.person_looks)),
       people(std::move(other.people)), next_person_id(other.next_person_id),
+      routes(std::move(other.routes)),
       particle_looks(std::move(other.particle_looks)),
       effects(std::move(other.effects)), m_entities(std::move(other.m_entities)),
       m_index(std::move(other.m_index)), m_next_id(other.m_next_id), m_damage(std::move(other.m_damage)),
@@ -280,6 +283,7 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         person_looks = std::move(other.person_looks);
         people = std::move(other.people);
         next_person_id = other.next_person_id;
+        routes = std::move(other.routes);
         particle_looks = std::move(other.particle_looks);
         effects = std::move(other.effects);
         m_entities = std::move(other.m_entities);
@@ -1055,6 +1059,22 @@ void write_people(Json& out, std::span<const Place> places, std::span<const Pers
     if (!people.empty() || next_person_id != 1) out["people"] = people_json(people, next_person_id);
 }
 
+// Nodes and links are many, so each is a short list, not an object:
+// [id, x, y, z] and [a, b, width, kind] (the text still gives a number a
+// line: about 25 MB with every node and link there can be).
+void write_routes(Json& out, const Routes& routes) {
+    if (routes.nodes.empty() && routes.links.empty() && routes.next_id == 1) return;
+    Json nodes = Json::array();
+    for (const RouteNode& n : routes.nodes) {
+        nodes.push_back(Json::array({n.id, n.position.x, n.position.y, n.position.z}));
+    }
+    Json links = Json::array();
+    for (const RouteLink& l : routes.links) {
+        links.push_back(Json::array({l.a, l.b, l.width, std::string(route_kind_name(l.kind))}));
+    }
+    out["routes"] = {{"next_id", routes.next_id}, {"nodes", std::move(nodes)}, {"links", std::move(links)}};
+}
+
 Json entity_json(const Entity& e) {
     Json entity = {{"id", e.id}, {"name", e.name}, {"visible", e.visible}};
     write_look(entity, e.shape, e.mesh, e.kit, e.transform, e.material, e.decal);
@@ -1147,6 +1167,7 @@ std::string save_scene(const Scene& scene) {
         out["water"] = water_json(scene.water);
     }
     write_people(out, scene.places, scene.person_looks, scene.people, scene.next_person_id);
+    write_routes(out, scene.routes);
     if (!scene.particle_looks.empty()) {
         out["particle_looks"] = particle_looks_json(scene.particle_looks);
     }
@@ -2094,6 +2115,82 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
     if (const auto bad = check_people(places, looks, people, next_person_id)) error = "people: " + *bad;
 }
 
+// The routes' key of a scene or a world index, each row checked alone and
+// then all together (routes.h).
+void read_routes(Reader& root, Routes& routes, std::string& error) {
+    const Json* json = root.get("routes", false);
+    if (json == nullptr || !root.ok()) return;
+    Reader r(*json, "routes", error);
+    if (const Json* v = r.get("next_id", true)) {
+        if (!v->is_number_unsigned() || v->get<u64>() == 0 || v->get<u64>() > 0xffffffffu) {
+            r.fail("next_id", "must be a whole number from 1 to 2^32 - 1");
+        } else {
+            routes.next_id = static_cast<RouteNodeId>(v->get<u64>());
+        }
+    }
+    const Json* nodes = r.get("nodes", true);
+    const Json* links = r.get("links", true);
+    r.finish();
+    if (!error.empty() || nodes == nullptr || links == nullptr) return;
+    if (!nodes->is_array() || nodes->size() > k_max_route_nodes) {
+        error = "routes.nodes must be an array of at most " + std::to_string(k_max_route_nodes);
+        return;
+    }
+    if (!links->is_array() || links->size() > k_max_route_links) {
+        error = "routes.links must be an array of at most " + std::to_string(k_max_route_links);
+        return;
+    }
+    const auto whole = [](const Json& v) { return v.is_number_unsigned() && v.get<u64>() <= 0xffffffffu; };
+    const auto number = [](const Json& v) { return v.is_number() && std::isfinite(v.get<double>()); };
+    routes.nodes.reserve(nodes->size());
+    for (usize i = 0; i < nodes->size(); ++i) {
+        const Json& row = (*nodes)[i];
+        const std::string path = "routes.nodes[" + std::to_string(i) + "]";
+        if (!row.is_array() || row.size() != 4 || !whole(row[0]) || !number(row[1]) || !number(row[2]) || !number(row[3])) {
+            error = path + " must be [id, x, y, z]";
+            return;
+        }
+        RouteNode n;
+        n.id = row[0].get<RouteNodeId>();
+        n.position = {row[1].get<double>(), row[2].get<double>(), row[3].get<double>()};
+        if (const auto bad = check_route_node(n)) {
+            error = path + ": " + *bad;
+            return;
+        }
+        routes.nodes.push_back(n);
+    }
+    routes.links.reserve(links->size());
+    for (usize i = 0; i < links->size(); ++i) {
+        const Json& row = (*links)[i];
+        const std::string path = "routes.links[" + std::to_string(i) + "]";
+        if (!row.is_array() || row.size() != 4 || !whole(row[0]) || !whole(row[1]) || !number(row[2]) || !row[3].is_string()) {
+            error = path + " must be [a, b, width, kind]";
+            return;
+        }
+        RouteLink l;
+        l.a = row[0].get<RouteNodeId>();
+        l.b = row[1].get<RouteNodeId>();
+        const double width = row[2].get<double>();
+        const auto kind = route_kind_from_name(row[3].get_ref<const std::string&>());
+        if (width < 0.5 || width > 100.0) {
+            error = path + ": width must be from 0.5 to 100 metres";
+            return;
+        }
+        if (!kind) {
+            error = path + ": kind must be path or road";
+            return;
+        }
+        l.width = static_cast<float>(width);
+        l.kind = *kind;
+        if (const auto bad = check_route_link(l)) {
+            error = path + ": " + *bad;
+            return;
+        }
+        routes.links.push_back(l);
+    }
+    if (const auto bad = check_routes(routes)) error = "routes: " + *bad;
+}
+
 void read_kit(const Json& json, const std::string& path, Kit& k, std::string& error) {
     Reader r(json, path, error);
     r.string("name", k.name, true, k_max_name_bytes);
@@ -2626,6 +2723,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     read_scatter(root, scene.kits, scene.scatter, error);
     read_water(root, scene.water, error);
     read_people(root, scene.places, scene.person_looks, scene.people, scene.next_person_id, error);
+    read_routes(root, scene.routes, error);
     read_particle_looks(root, scene.particle_looks, error);
     read_effects(root, scene.effects, error);
     if (const Json* terrain = root.get("terrain", false); terrain != nullptr && root.ok()) {
@@ -2710,6 +2808,7 @@ std::string save_world_index(const WorldIndex& world) {
         out["water"] = water_json(world.water);
     }
     write_people(out, world.places, world.person_looks, world.people, world.next_person_id);
+    write_routes(out, world.routes);
     if (!world.particle_looks.empty()) {
         out["particle_looks"] = particle_looks_json(world.particle_looks);
     }
@@ -2777,6 +2876,7 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     read_scatter(root, world.kits, world.scatter, error);
     read_water(root, world.water, error);
     read_people(root, world.places, world.person_looks, world.people, world.next_person_id, error);
+    read_routes(root, world.routes, error);
     read_particle_looks(root, world.particle_looks, error);
     read_effects(root, world.effects, error);
     if (const Json* meshes = root.get("meshes", false); meshes != nullptr && root.ok()) {
