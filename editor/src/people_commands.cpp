@@ -68,8 +68,12 @@ Json place_json(const Place& p) {
 Json look_json(const PersonLook& l, usize people) {
     Json parts = Json::array();
     for (const world::PartLook& p : l.parts) parts.push_back(p.name);
+    Json activities = Json::array();
+    for (const world::LookActivity& a : l.activities) {
+        activities.push_back({{"activity", a.activity}, {"clip", a.clip}, {"speed", a.speed}, {"loop", a.loop}});
+    }
     return {{"name", l.name},       {"mesh", l.mesh},        {"height", l.height}, {"parts", std::move(parts)},
-            {"hair", l.hair.on},    {"matched", l.matched},  {"people", people}};
+            {"hair", l.hair.on},    {"matched", l.matched},  {"activities", std::move(activities)}, {"people", people}};
 }
 
 Json routine_json(const Routine& r, usize people) {
@@ -137,7 +141,8 @@ Json people_state_json(const PeopleState& people) {
             {"waiting", t.waiting},
             {"made", t.made},
             {"released", t.released},
-            {"walking", t.walking}};
+            {"walking", t.walking},
+            {"acting", t.acting}};
 }
 
 // What one command changed. A place, a look or a routine: the one at `index` before
@@ -469,6 +474,10 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "id) gives it that entity's look: its mesh file (it must draw one), material, parts' looks, hair "
          "and matched clips, and its scale as `height`; so dress a character with create_entity/set_entity, "
          "then keep it as a look (the entity is not needed after). `height` and `matched` set those alone. "
+         "`activities` (replaces the list; `entity` leaves it be): what people of this look show while they "
+         "do an activity of their routine where it has them be, each `{activity, clip, speed, loop}`: the "
+         "file's `clip` plays (at `speed`, default 1; `loop` false: once, its last pose held) instead of "
+         "the motion matching, which takes over when they walk. An activity with none shows as standing. "
          "A new look needs `entity`. Saved with the scene or the world (at most 1024). Undoable.",
          object_schema({"name"},
                        {{"name", name_schema("Unique among the person looks.")},
@@ -478,7 +487,16 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                         {"matched", {{"type", "array"},
                                      {"maxItems", world::k_max_matched_clips},
                                      {"items", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes}}},
-                                     {"description", "The clips they are motion matched among ([\"*\"] or none: every clip)."}}}}),
+                                     {"description", "The clips they are motion matched among ([\"*\"] or none: every clip)."}}},
+                        {"activities",
+                         {{"type", "array"},
+                          {"maxItems", world::k_max_look_activities},
+                          {"items", object_schema({"activity", "clip"},
+                                                  {{"activity", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_tag_bytes}}},
+                                                   {"clip", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes}}},
+                                                   {"speed", {{"type", "number"}, {"minimum", 0.01}, {"maximum", 100}}},
+                                                   {"loop", {{"type", "boolean"}}}})},
+                          {"description", "The clip shown for each activity of a routine (each activity once)."}}}}),
          false,
          [&state](const Json& args, CommandContext& context) {
              std::vector<PersonLook>& looks = state.scene.person_looks;
@@ -511,6 +529,17 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              }
              look.height = args.value("height", look.height);
              if (args.contains("matched")) look.matched = args["matched"].get<std::vector<std::string>>();
+             if (args.contains("activities")) {
+                 look.activities.clear();
+                 for (const Json& a : args["activities"]) {
+                     world::LookActivity activity;
+                     activity.activity = a["activity"].get<std::string>();
+                     activity.clip = a["clip"].get<std::string>();
+                     activity.speed = a.value("speed", 1.0f);
+                     activity.loop = a.value("loop", true);
+                     look.activities.push_back(std::move(activity));
+                 }
+             }
              if (const auto bad = world::check_person_look(look)) return CommandResult::failure(*bad);
              PeopleChange change;
              change.look = {true, index, fresh ? std::nullopt : std::optional<PersonLook>(looks[index]), look};
@@ -543,7 +572,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
     add(registry,
         {"get_person_looks",
          "Lists the person looks: each one's mesh file, height, the parts it gives looks of their own, "
-         "whether it wears hair, its matched clips, and how many `people` have it.",
+         "whether it wears hair, its matched clips, its `activities` (the clip shown for each), and how many `people` have it.",
          object_schema(Json::array(), Json::object()),
          true,
          [&state](const Json&, CommandContext&) {
@@ -810,7 +839,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "never under embody_distance); `most` held at once (default 256, at most 1024); `made_a_frame` "
          "(default 2) and `scanned_a_frame` (people looked at a frame, default 1024). Fields left out stay; "
          "with none it only reports. Returns the settings with `embodied` (entities held now), `waiting` "
-         "(near enough but over `most`), `walking` (of them: walking their trips' ways, send_person), and "
+         "(near enough but over `most`), `walking` (of them: walking their trips' ways, send_person), "
+         "`acting` (of them: playing their look's clip for what their routine has them do), and "
          "`made` and `released` since the scene was taken up. The "
          "entities are never saved and not undone; deleting one only has it made again. View state.",
          object_schema(Json::array(),

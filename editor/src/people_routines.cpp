@@ -330,15 +330,17 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
                 continue;
             }
             slot.routine = static_cast<u16>(found - routines.data());
+            slot.acted = 0; // (another routine, or its place in the list another: what it did was the old one's)
+            slot.failed = false;
         }
         ++m_counted;
         const world::Routine& routine = routines[slot.routine];
         if (routine.entries.empty()) continue;
         const usize now = world::routine_entry_at(routine, hour_of(person.id, hours));
         const world::RoutineEntry& entry = routine.entries[now];
-        slot.entry = static_cast<u8>(now);
         const u32 says = said(person, entry);
         if (says == slot.acted) {
+            slot.entry = static_cast<u8>(now); // (the same said by another entry: what it does there may be another)
             // The trip it began for this: over, another's since, or failed (no way found: told once).
             if (slot.trip != 0) {
                 const PeopleTravel::Trip* trip = travel.trip(person.id);
@@ -363,6 +365,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         if (entry.at == world::RoutineAt::stay) {
             ++acted;
             slot.acted = says;
+            slot.entry = static_cast<u8>(now);
             slot.failed = false;
             slot.place = 0;
             // (Only a trip the routine began: one sent by hand goes on.)
@@ -379,6 +382,7 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         }
         ++acted;
         slot.acted = says;
+        slot.entry = static_cast<u8>(now);
         slot.failed = false;
         slot.place = 0;
         if (sought == Sought::none) { // (no home, or no such place: it stays where it is, or goes on where it went)
@@ -414,6 +418,32 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
     }
 }
 
+// The place a slot's person was sent to: found again by the name's hash (its place in the list may be another since).
+const world::Place* PeopleRoutines::sent_to(const world::Scene& scene, const Slot& slot) const {
+    if (slot.place == 0) return nullptr;
+    for (auto it = std::lower_bound(m_by_name.begin(), m_by_name.end(), Key{slot.place, 0.0, 0});
+         it != m_by_name.end() && it->hash == slot.place; ++it) {
+        if (it->place < scene.places.size() && hash_of(scene.places[it->place].name) == slot.place) return &scene.places[it->place];
+    }
+    return nullptr;
+}
+
+bool PeopleRoutines::activity(const world::Scene& scene, world::PersonId id, Activity& out) const {
+    if (!settings.on || !m_running) return false;
+    const world::Person* person = world::find_person(scene.people, id);
+    if (person == nullptr) return false;
+    const usize index = static_cast<usize>(person - scene.people.data());
+    if (index >= m_slots.size()) return false;
+    const Slot& slot = m_slots[index];
+    if (slot.id != id || slot.acted == 0 || slot.failed || slot.routine >= scene.routines.size()) return false;
+    const world::Routine& routine = scene.routines[slot.routine];
+    if (routine.name != person->routine || slot.entry >= routine.entries.size()) return false;
+    out.activity = routine.entries[slot.entry].activity;
+    out.place = sent_to(scene, slot);
+    out.anywhere = slot.place == 0;
+    return true;
+}
+
 bool PeopleRoutines::doing(const world::Scene& scene, world::PersonId id, Doing& out) const {
     const world::Person* person = world::find_person(scene.people, id);
     if (person == nullptr) return false;
@@ -424,15 +454,8 @@ bool PeopleRoutines::doing(const world::Scene& scene, world::PersonId id, Doing&
     const world::Routine& routine = scene.routines[slot.routine];
     if (routine.name != person->routine || slot.entry >= routine.entries.size()) return false;
     out.activity = routine.entries[slot.entry].activity;
-    // Where it was sent: found again by the name's hash (its place in the list may be another since).
-    out.place = {};
-    for (auto it = std::lower_bound(m_by_name.begin(), m_by_name.end(), Key{slot.place, 0.0, 0});
-         slot.place != 0 && it != m_by_name.end() && it->hash == slot.place; ++it) {
-        if (it->place < scene.places.size() && hash_of(scene.places[it->place].name) == slot.place) {
-            out.place = scene.places[it->place].name;
-            break;
-        }
-    }
+    const world::Place* place = sent_to(scene, slot);
+    out.place = place != nullptr ? std::string_view(place->name) : std::string_view();
     out.failed = slot.failed;
     return true;
 }

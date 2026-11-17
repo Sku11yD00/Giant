@@ -113,6 +113,20 @@ GIANT_TEST("people commands: a look is taken from a dressed entity, changed, and
     GIANT_CHECK(!f.run("set_person_look", {{"name", "villager"}, {"height", 20.0}}).ok);
     GIANT_CHECK(f.run("undo").ok && looks[0].height == 1.2f && looks[0].matched.size() == 2);
     GIANT_CHECK(f.run("redo").ok && looks[0].height == 0.9f);
+    // What they show for their routine's activities: set whole, read back, undone; taking an entity's look leaves it.
+    r = f.run("set_person_look", {{"name", "villager"}, {"activities", {{{"activity", "work"}, {"clip", "hammer"}, {"speed", 1.5}},
+                                                                      {{"activity", "sleep"}, {"clip", "lie"}, {"loop", false}}}}});
+    GIANT_CHECK(r.ok && looks[0].activities.size() == 2 && looks[0].activities[0].speed == 1.5f && looks[0].activities[0].loop &&
+                !looks[0].activities[1].loop && looks[0].activities[1].speed == 1.0f);
+    GIANT_CHECK(r.value["activities"][1] == Json({{"activity", "sleep"}, {"clip", "lie"}, {"speed", 1.0}, {"loop", false}}));
+    GIANT_CHECK(f.run("get_person_looks").value["person_looks"][0]["activities"].size() == 2);
+    GIANT_CHECK(!f.run("set_person_look", {{"name", "villager"}, {"activities", {{{"activity", "work"}, {"clip", "a"}}, {{"activity", "work"}, {"clip", "b"}}}}}).ok);
+    GIANT_CHECK(!f.run("set_person_look", {{"name", "villager"}, {"activities", {{{"activity", "Work"}, {"clip", "a"}}}}}).ok);
+    GIANT_CHECK(!f.run("set_person_look", {{"name", "villager"}, {"activities", {{{"activity", "work"}}}}}).ok && looks[0].activities.size() == 2);
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"height", 1.0}}).ok && looks[0].activities.size() == 2);
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"activities", Json::array()}}).ok && looks[0].activities.empty());
+    GIANT_CHECK(f.run("undo").ok && looks[0].activities.size() == 2 && f.run("undo").ok && f.run("undo").ok && looks[0].activities.empty() &&
+                looks[0].height == 0.9f);
     // Kept while people have it.
     GIANT_CHECK(f.run("create_people", {{"people", {{{"look", "villager"}, {"position", at(1, 0, 1)}}}}}).ok);
     GIANT_CHECK(f.run("get_person_looks").value["person_looks"][0]["people"] == 1);

@@ -1036,6 +1036,16 @@ Json person_looks_json(std::span<const PersonLook> looks) {
         if (!l.parts.empty()) look["parts"] = parts_json(l.parts);
         if (!(l.hair == Hair{})) look["hair"] = hair_json(l.hair);
         if (!l.matched.empty()) look["matched"] = l.matched;
+        if (!l.activities.empty()) {
+            Json activities = Json::array();
+            for (const LookActivity& a : l.activities) {
+                Json activity = {{"activity", a.activity}, {"clip", a.clip}};
+                if (a.speed != 1.0f) activity["speed"] = a.speed;
+                if (!a.loop) activity["loop"] = false;
+                activities.push_back(std::move(activity));
+            }
+            look["activities"] = std::move(activities);
+        }
         out.push_back(std::move(look));
     }
     return out;
@@ -2072,6 +2082,23 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             read_parts(r, path, l.parts, error);
             read_hair(r, path, l.hair, error);
             read_matched(r, l.matched);
+            if (const Json* acts = r.get("activities", false); acts != nullptr && r.ok()) {
+                if (!acts->is_array() || acts->size() > k_max_look_activities) {
+                    r.fail("activities", "must be an array of at most " + std::to_string(k_max_look_activities));
+                    return;
+                }
+                for (usize k = 0; k < acts->size(); ++k) {
+                    Reader ar((*acts)[k], path + ".activities[" + std::to_string(k) + "]", error);
+                    LookActivity a;
+                    ar.string("activity", a.activity, true, k_max_tag_bytes);
+                    ar.string("clip", a.clip, true, k_max_name_bytes);
+                    ar.number("speed", a.speed, 0.01, k_max_animation_speed);
+                    ar.boolean("loop", a.loop);
+                    ar.finish();
+                    if (!error.empty()) return;
+                    l.activities.push_back(std::move(a));
+                }
+            }
             r.finish();
             if (!error.empty()) return;
             if (const auto bad = check_person_look(l)) {

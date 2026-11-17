@@ -441,6 +441,14 @@ AnimationState::Animated* AnimationState::animate_now(const world::Scene& scene,
     return start(scene, meshes, id, error);
 }
 
+AnimationState::Playable AnimationState::playable(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
+                                                  const std::string& clip) {
+    const world::Entity* e = scene.find(id);
+    const MeshLibrary::Mesh* mesh = e != nullptr ? skinned_mesh(*e, meshes) : nullptr;
+    if (mesh == nullptr) return Playable::not_ready;
+    return mesh->skinned->find_clip(clip) == anim::k_no_clip ? Playable::no_clip : Playable::yes;
+}
+
 std::string AnimationState::play(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id,
                                  const std::string& clip, float blend_seconds, bool loop, float speed, float start) {
     const world::Entity* e = scene.find(id);

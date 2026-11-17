@@ -557,6 +557,18 @@ struct Place {
 // How a kind of person looks: what the entity drawn for one is given. Many
 // people share one, so a crowd costs a few meshes.
 constexpr usize k_max_person_looks = 1024;
+// What people of a look show while they do an activity of their routine
+// (RoutineEntry::activity) where it has them be: `clip` of the look's file
+// plays instead of the motion matching (which takes over again when they
+// walk). An activity the look names no clip for shows as standing.
+constexpr usize k_max_look_activities = 32;
+struct LookActivity {
+    std::string activity; // 1 to k_max_tag_bytes of a-z, 0-9 and _ (as a routine's)
+    std::string clip;     // 1 to k_max_name_bytes
+    float speed = 1.0f;   // 0.01 to k_max_animation_speed
+    bool loop = true;     // (once: its last pose is held)
+    bool operator==(const LookActivity&) const = default;
+};
 struct PersonLook {
     std::string name; // unique in the scene, 1 to k_max_name_bytes
     std::string mesh; // a skinned glTF/GLB file (as Entity::mesh)
@@ -565,6 +577,8 @@ struct PersonLook {
     std::vector<PartLook> parts; // as Entity::parts
     Hair hair;
     std::vector<std::string> matched; // the clips it is motion matched among (as EntityAnimation::matched; empty: {"*"})
+    std::vector<LookActivity> activities; // each activity once (at most k_max_look_activities)
+    // (A member added here: editor PeopleState::update tells what an entity is made from, member by member.)
     bool operator==(const PersonLook&) const = default;
 };
 
