@@ -11,9 +11,10 @@
 // has travelled is now is kept here (`where`), and is the simulation's:
 // stopping the simulation (or another scene) puts everyone back.
 //
-// A person given an entity near the camera (people_state.h) stands still
-// while it has one (`hold`): walking the ground from node to node is the
-// next part.
+// A person given an entity near the camera (people_state.h) is held
+// (`hold`): its trip then goes on only as far as the entity has walked
+// (`walked`: PeopleState walks it along the way as a walker), and by the
+// clock again from there once the entity goes.
 //
 // View state: not undone, not saved.
 #pragma once
@@ -45,6 +46,7 @@ public:
 
     struct Trip {
         world::PersonId person = 0;
+        u64 serial = 0; // each trip's own (one sent again has another)
         Phase phase = Phase::searching;
         DVec3 to{};        // where it is going
         std::string place; // the place asked for by name, if one was
@@ -55,7 +57,7 @@ public:
         std::vector<double> along; // metres to each point
         double from = 0.0;  // metres along at `since`
         double since = 0.0; // the clock then
-        bool held = false;  // stands (an entity stands for it)
+        bool held = false;  // an entity stands for it: it goes on as that walks (PeopleState)
         const char* reason = ""; // failed: why
     };
     struct Where {
@@ -109,8 +111,18 @@ public:
     // Metres a trip has gone and has in all (travelling).
     double gone(const Trip& trip) const;
     static double length(const Trip& trip) { return trip.along.empty() ? 0.0 : trip.along.back(); }
-    // An entity stands for the person (it stands still), or no longer.
+    // An entity stands for the person (its trip goes on only as `walked`
+    // says: people_state.h walks it along), or no longer.
     void hold(world::PersonId id, bool held);
+    // A held person's entity has walked to `metres` along its way (never back).
+    void walked(world::PersonId id, double metres);
+    // A held person's entity is at its trip's end, standing at `there`: the trip is over.
+    void arrive(world::PersonId id, const Where& there);
+    // Where a trip is `metres` along its way, facing along it.
+    static Where at(const Trip& trip, double metres);
+    // Counts the times everyone was put back (another run or scene): one
+    // made an entity before is not where that entity stands.
+    u64 resets() const { return m_resets; }
     Stats stats() const;
 
 private:
@@ -122,10 +134,11 @@ private:
     void build(const world::Routes& routes);
     bool routes_changed(const world::Routes& routes);
     void update_rest(const world::Scene& scene);
-    static Where at(const Trip& trip, double metres);
 
     u64 m_scene = 0;
     u64 m_run = 0;
+    u64 m_resets = 0;
+    u64 m_serial = 0;
     double m_seconds = 0.0;
     world::Routes m_routes; // as the graph was built from them
     nav::RouteGraph m_graph;

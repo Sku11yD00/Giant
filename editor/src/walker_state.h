@@ -11,14 +11,15 @@
 // feet are its origin for meshes and kits, its bottom for cubes and
 // spheres; its character is as wide as it (0.2 m round up to the map's
 // agent radius) and, for
-// a cube or sphere, as tall. One stuck (moving under a third of what it
+// a cube or sphere, as tall. One stuck (nearer its path's end by under a third of what it
 // was steered to in 2 s of simulated time) looks for the way again (three
 // times; then it has failed). A shot or a ray that meets one names its
 // entity (its character's body carries it). Stopping the simulation (or another
 // scene) lets every walker go.
 //
 // View state: not undone; game saves keep the walkers (GameSaves: where
-// each stands and is going, made again with `resume`).
+// each stands and is going, made again with `resume`), but not those of
+// people's entities (people_state.h: theirs walk their trips).
 #pragma once
 
 #include "nav_state.h"
@@ -60,6 +61,7 @@ public:
         DVec3 feet{};       // where its feet are (last step)
         DVec3 stuck_from{};
         double stuck_for = 0.0;   // simulated seconds since stuck_from
+        double left_from = 0.0;   // metres of its path it had left then
         double expected = 0.0;    // metres it was steered to walk meanwhile
         double near_end_for = 0.0; // simulated seconds within 3 m of the end
         float height = 1.8f;      // its character's
@@ -72,8 +74,11 @@ public:
     // Sends `id` walking to `to` at `speed` (m/s): along `path` (corners
     // from where it stands, a found search's) when given, else along the
     // way NavState finds over the next frames. Empty: done; else why not.
+    // `pack`: metres from the path's end within which one standing in
+    // the way ends the walk (nav::FollowSettings::pack; 0 for a path that
+    // is a stretch of a longer way).
     std::string walk_to(const world::Scene& scene, world::EntityId id, const DVec3& to, float speed,
-                        const std::vector<DVec3>* path = nullptr);
+                        const std::vector<DVec3>* path = nullptr, float pack = nav::FollowSettings{}.pack);
     // A walker as a game save had it: where its feet were, which way it
     // faced, how it moved, where it was going and how far it had got.
     struct Resume {

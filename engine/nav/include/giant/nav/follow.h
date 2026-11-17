@@ -26,6 +26,7 @@ struct FollowSettings {
     float arrive = 0.25f;       // metres from the end it stops
     float slow = 1.2f;          // metres from the end it starts to slow
     float avoid = 1.5f;         // metres past touching others are steered round
+    float pack = 1.0e9f;        // metres from the end within which one standing nearer it, touching, ends the walk (0: never)
 };
 
 // Another walker near.

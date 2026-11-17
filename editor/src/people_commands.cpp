@@ -78,13 +78,13 @@ void sync_travel(EditorState& state) {
 }
 
 Json trip_json(const PeopleTravel& travel, const PeopleTravel::Trip& t) {
-    Json j = {{"phase", PeopleTravel::to_string(t.phase)}, {"to", point_json(t.to)}, {"speed", t.speed}, {"standing", t.held}};
+    Json j = {{"phase", PeopleTravel::to_string(t.phase)}, {"to", point_json(t.to)}, {"speed", t.speed}, {"embodied", t.held}};
     if (!t.place.empty()) j["place"] = t.place;
     if (t.phase == PeopleTravel::Phase::travelling) {
         const double gone = travel.gone(t), length = PeopleTravel::length(t);
         j["gone"] = gone;
         j["length"] = length;
-        j["arrives_in"] = t.held ? Json(nullptr) : Json((length - gone) / t.speed); // (standing: not known)
+        j["arrives_in"] = t.held ? Json(nullptr) : Json((length - gone) / t.speed); // (as fast as its entity walks)
     }
     if (t.phase == PeopleTravel::Phase::failed) j["why"] = t.reason;
     return j;
@@ -118,7 +118,8 @@ Json people_state_json(const PeopleState& people) {
             {"embodied", t.embodied},
             {"waiting", t.waiting},
             {"made", t.made},
-            {"released", t.released}};
+            {"released", t.released},
+            {"walking", t.walking}};
 }
 
 // What one command changed. A place or a look: the one at `index` before
@@ -659,7 +660,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "never under embody_distance); `most` held at once (default 256, at most 1024); `made_a_frame` "
          "(default 2) and `scanned_a_frame` (people looked at a frame, default 1024). Fields left out stay; "
          "with none it only reports. Returns the settings with `embodied` (entities held now), `waiting` "
-         "(near enough but over `most`), and `made` and `released` since the scene was taken up. The "
+         "(near enough but over `most`), `walking` (of them: walking their trips' ways, send_person), and "
+         "`made` and `released` since the scene was taken up. The "
          "entities are never saved and not undone; deleting one only has it made again. View state.",
          object_schema(Json::array(),
                        {{"on", {{"type", "boolean"}}},
@@ -696,8 +698,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "from the last node to the goal; straight there when the roads are no help. The way is looked "
          "for over the next frames (`phase` searching, then travelling, or failed with `why`); then it "
          "moves by the simulation's clock whether anyone sees it or not (get_people gives `at`). One with "
-         "an entity near the camera stands until the entity goes (`standing`: walking the ground is to "
-         "come). Sent again, it goes on from where it has got to. Stopping the simulation puts everyone "
+         "an entity near the camera (`embodied`) walks its way over the ground as a walker does (20 m/s "
+         "at most), the trip going on as far as it has walked. Sent again, it goes on from where it has got to. Stopping the simulation puts everyone "
          "back where the scene has them. View state: not undone, not saved.",
          object_schema({"id", "to"},
                        {{"id", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4294967295.0}}},
@@ -747,8 +749,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "(searching, travelling and failed), `searching` (their way not found yet), `moved` (people sent "
          "since it started: where each is is the simulation's), and since the simulation started `arrived`, `failed`, "
          "`searches` and the route nodes they `opened`. With `id`: that person's `at` and `trip` (`phase` "
-         "searching, travelling or failed with `why`; `to`, `place`, `speed`, `standing`; travelling: "
-         "`gone` and `length` in metres, `arrives_in` seconds, null while standing), null when it has none.",
+         "searching, travelling or failed with `why`; `to`, `place`, `speed`, `embodied`; travelling: "
+         "`gone` and `length` in metres, `arrives_in` seconds, null while embodied), null when it has none.",
          object_schema(Json::array(), {{"id", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4294967295.0}}}}),
          true,
          [&state](const Json& args, CommandContext&) {

@@ -3559,20 +3559,74 @@ the simulation (another run, or another scene) puts everyone back.
 
 `PeopleState` asks `where` for each person it looks at, so the entity of
 one who has travelled is made where it has got to, facing along its way.
-While a person has an entity its trip is held (`hold`: it stands, the
-metres gone kept; the entity faces as it was made), and goes on from then
-when the entity goes; an entity whose person is no longer where it was made (the simulation stopped) is
-taken away and made again.
+While a person has an entity its trip is held (`hold`): it no longer goes
+by the clock but as far as the entity has walked.
 
-Known limits (the next parts): a person with an entity stands instead of
-walking the ground from node to node (LW2b part 2); a trip's height is
-the straight line between its nodes, not the ground's; game saves do not
-keep trips or where people have got to; nobody sets off by itself
-(routines: LW3); everyone goes at one speed whatever the link's kind;
-`send` compares the scene's routes whole with the graph's (about a
-millisecond with every node and link there can be: a counted revision
-when routines send many a frame); stopping the simulation frees every
-trip in that frame.
+### Walking the way (LW2b part 2)
+
+Each frame `PeopleState::walk` looks at those it holds (at most 1024). One
+on a trip is made a walker (`WalkerState::walk_to` with a path given, so
+no search): its feet, the way's points ahead and the point 40 m on
+(`k_walk_ahead`), straight between them. Roads are laid on the ground, so
+the physics character keeps it there, out of walls and up steps, the
+walkers step round each other, and a matched character's animation walks
+as any walker's does. When it is within 6 m of that stretch's end the
+next is given, before the follower slows (the walker keeps its speed);
+16 walks are begun a frame at most. A trip has a serial: one sent
+elsewhere while it walks is given its new way at once.
+
+How far it has got is its feet's nearest point on the stretches that
+begin within 3 m (`k_walk_reach`) of where it had got to: the one it is
+on, and those a cut corner or a short link has it on already. It never
+goes back, counts 3 m on a frame at most (a way that passes near itself
+is not jumped along), and nothing when 20 m off its way. The trip is told
+(`PeopleTravel::walked`), so `where`, `get_people` and the camera's
+distance follow the entity. Within 0.3 m of the end along the way (and
+3 m of it over the ground), or stopped by its follower on the way's last
+stretch within 6 m of the end (others stand there already), the trip is
+over where it stands (`arrive`). Only on that last stretch, within 3 m of
+the end, does one standing in the way end a walk
+(`nav::FollowSettings::pack`, `walk_to`'s `pack`): anywhere else it is
+stepped round. A walker stopped anywhere else waits 2 s and is given its
+way again.
+
+A walker that failed (stuck four times; after the first it looks for its
+way over the walkable map to the stretch's end) waits 5 s and is given
+its way again; if its detour took it more than 20 m off the way it has
+got no farther and tries the same stretch. (Stuck is judged by how much
+less of a walker's path is left after 2 s against what it was steered to
+go, not by how far it is from where it was: a way that turns back on
+itself is walked through, and one shuffling on the spot is stuck.) One
+sent elsewhere meanwhile takes its new way at once. One whose walker was taken (struck down as a ragdoll, its
+entity hidden, `stop_walker`) waits 2 s, and none is given to one lying
+or hidden. People leave the last 64 of the 512 walkers for `walk_to` and
+for those getting up; one with no walker to be had stands and tries again
+2 s on.
+
+Whenever a walking person stops being a walker with its entity kept (it
+arrived, `stop_person`), the scene's entity is put where the walker stood
+(`stand`: `Scene::modify`, a change of that one entity), so nothing jumps
+back to where the entity was made. An entity let go (the camera left) has
+its walker stopped at once, since the next entity made for that person
+has the same id; the trip then goes on by the clock from as far as it
+walked. Stopping the simulation lets every walker go and puts everyone
+back: an entity whose person was elsewhere, or that was put where it
+walked to, is taken away and made again (`PeopleTravel::resets` tells),
+the rest stay. Game saves leave out the walkers and the ragdolls of
+people's entities, and a load places none an older save names.
+
+Known limits (the next parts): the way between points is walked straight
+(a road through a wall stops its walker: it looks for a way round to the
+stretch's end, which one pressed against a wall often cannot start (no
+walkable ground under it), and tries again every few seconds); a trip's height is the straight
+line between its nodes for those not seen; one stopped by `stop_person`
+is kept on its way's line, up to 20 m from where its entity stands; game
+saves do not keep trips or where people have got to; nobody sets off by
+itself (routines: LW3); everyone goes at one speed whatever the link's
+kind, 20 m/s at most on foot; `send` compares the scene's routes whole
+with the graph's (about a millisecond with every node and link there can
+be: a counted revision when routines send many a frame); stopping the
+simulation frees every trip in that frame.
 
 ## Sound
 
