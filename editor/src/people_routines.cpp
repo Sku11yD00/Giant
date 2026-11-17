@@ -713,16 +713,35 @@ void PeopleRoutines::ready(const world::Scene& scene, const PeopleTravel& travel
     if (!same) match_slots(scene.people);
 }
 
+bool PeopleRoutines::in_later_state(usize index) const {
+    if (!m_running || index >= m_slots.size()) return false;
+    const Slot& slot = m_slots[index];
+    return slot.behaviour != k_no_behaviour && (slot.state != 0 || (slot.acted != 0 && slot.by_state));
+}
+
 bool PeopleRoutines::kept(const world::Scene& scene, const PeopleTravel& travel, usize index, Kept& out) const {
+    out = Kept{};
     if (!m_running || index >= m_slots.size() || index >= scene.people.size()) return false;
     const Slot& slot = m_slots[index];
-    // (What a behaviour's state had it do is not kept yet: a loaded game begins its behaviour afresh.)
-    if (slot.id != scene.people[index].id || slot.acted == 0 || slot.by_state) return false;
+    const world::Person& person = scene.people[index];
+    if (slot.id != person.id) return false;
+    // The state it is in, if its behaviour is still the one the slot found.
+    const world::Behaviour* behaviour = slot.behaviour < scene.behaviours.size() ? &scene.behaviours[slot.behaviour] : nullptr;
+    if (behaviour != nullptr && (behaviour->name != person.behaviour || slot.state >= behaviour->states.size())) behaviour = nullptr;
+    if (behaviour != nullptr) {
+        out.behaviour = behaviour->name;
+        out.state = behaviour->states[slot.state].name;
+        out.in_state = std::max(0.0, travel.seconds() - slot.entered);
+        out.settled = slot.settled;
+    }
+    // (What a state's own had it do is kept only with the state.)
+    if (slot.acted == 0 || (slot.by_state && (behaviour == nullptr || slot.entry != slot.state))) return behaviour != nullptr;
     // (One on an entry for its alarm is kept as any: a loaded game is calm, so the hour's entry is
     // then something else to act on, and the trip its alarm began is the routine's to stop or turn.
     // Whether the entry is still its routine's is restore's to tell.)
     out.said = slot.acted;
     out.entry = slot.entry;
+    out.own = slot.by_state;
     out.failed = slot.failed;
     const PeopleTravel::Trip* trip = travel.trip(slot.id);
     out.own_trip = slot.trip != 0 && trip != nullptr && trip->serial == slot.trip;
@@ -734,19 +753,42 @@ bool PeopleRoutines::kept(const world::Scene& scene, const PeopleTravel& travel,
 bool PeopleRoutines::restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had) {
     follow(scene, travel);
     const world::Person* person = world::find_person(scene.people, id);
-    if (!m_running || person == nullptr || person->routine.empty() || had.said == 0) return false;
-    const world::Routine* routine = world::find_routine(scene.routines, person->routine);
-    const world::RoutineEntry* entry = routine != nullptr ? entry_of(*routine, had.entry) : nullptr;
-    if (entry == nullptr) return false;
-    // (Its routine changed since: it says something else now, and is acted on afresh.)
-    if (said(*person, *entry) != had.said) return false;
+    if (!m_running || person == nullptr) return false;
+    // The state: its behaviour still has one of that name.
+    const world::Behaviour* behaviour = nullptr;
+    std::optional<usize> state;
+    if (!had.behaviour.empty() && person->behaviour == had.behaviour) {
+        behaviour = world::find_behaviour(scene.behaviours, person->behaviour);
+        if (behaviour != nullptr) state = world::behaviour_state_named(*behaviour, had.state);
+    }
+    // What it had acted on: the state's own, or its routine's entry, if that says the same still.
+    const world::Routine* routine = nullptr;
+    bool acted = false;
+    if (had.said != 0 && had.own) {
+        acted = state.has_value() && behaviour->states[*state].own && said(*person, behaviour->states[*state].does) == had.said;
+    } else if (had.said != 0 && !person->routine.empty()) {
+        routine = world::find_routine(scene.routines, person->routine);
+        const world::RoutineEntry* entry = routine != nullptr ? entry_of(*routine, had.entry) : nullptr;
+        // (Its routine changed since: it says something else now, and is acted on afresh.)
+        acted = entry != nullptr && said(*person, *entry) == had.said;
+    }
+    if (!acted && !state.has_value()) return false;
     const usize index = static_cast<usize>(person - scene.people.data());
     if (m_slots.size() != scene.people.size() || m_slots[index].id != id) match_slots(scene.people);
     Slot& slot = m_slots[index];
+    if (state.has_value()) { // (found again, not begun: nothing is told of it)
+        slot.behaviour = static_cast<u16>(behaviour - scene.behaviours.data());
+        slot.behaviour_name = static_cast<u32>(hash_of(behaviour->name));
+        slot.state = static_cast<u8>(*state);
+        slot.entered = travel.seconds() - std::max(0.0, had.in_state);
+        // (A state's own whose doing is not put back is acted on again.)
+        slot.settled = had.settled && (acted || !behaviour->states[*state].own);
+    }
+    if (!acted) return had.said == 0;
     slot.acted = had.said;
-    slot.entry = had.entry;
-    slot.by_state = false;
-    slot.routine = static_cast<u16>(routine - scene.routines.data());
+    slot.entry = had.own ? slot.state : had.entry;
+    slot.by_state = had.own;
+    if (routine != nullptr) slot.routine = static_cast<u16>(routine - scene.routines.data());
     slot.failed = had.failed;
     slot.place = had.place.empty() ? 0 : hash_of(had.place);
     const PeopleTravel::Trip* trip = travel.trip(id);

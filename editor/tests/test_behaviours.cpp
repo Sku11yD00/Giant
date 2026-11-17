@@ -301,12 +301,15 @@ GIANT_TEST("behaviours: a state that cannot be done fails; a behaviour replaced,
     GIANT_CHECK(f.run("send_person", {{"id", other}, {"to", "inn"}}).ok);
     f.frames(2.0);
     GIANT_CHECK(f.trip_to(other) == "inn");
-    // What a state's own had one do is not a game save's to keep yet; what a routine had it do is.
+    // What a game save keeps: what a routine had one do, and the state one is in with what the state had it do.
     PeopleRoutines::Kept kept;
     f.routines.ready(f.state.scene, f.travel);
     const auto index = [&](world::PersonId person) { return static_cast<usize>(&f.of(person) - f.state.scene.people.data()); };
     GIANT_CHECK(f.routines.kept(f.state.scene, f.travel, index(runner), kept));
-    GIANT_CHECK(!f.routines.kept(f.state.scene, f.travel, index(id), kept)); // (shrugging: its state's own)
+    GIANT_CHECK(kept.said != 0 && !kept.own && kept.behaviour.empty()); // (its behaviour was taken away)
+    GIANT_CHECK(f.routines.kept(f.state.scene, f.travel, index(id), kept)); // (shrugging: its state's own)
+    GIANT_CHECK(kept.said != 0 && kept.own && kept.behaviour == "lost" && kept.state == "give_up" && kept.settled && kept.in_state > 0.0);
+    GIANT_CHECK(f.routines.in_later_state(index(id)) && !f.routines.in_later_state(index(runner)));
 }
 
 GIANT_TEST("behaviours: thousands are followed a share a frame, each in its own state") {

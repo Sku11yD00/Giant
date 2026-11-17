@@ -3646,6 +3646,20 @@ the world, a speed no trip may have, an entry no routine may have) is
 refused with the whole load. `get_save` tells `people`,
 `people_applied`, `people_skipped` and `people_waiting`.
 
+The state of its behaviour a person is in is kept too (LW6 part 5):
+`in` {`behaviour`, `state` (by name), `seconds` in it, `settled`},
+and `did.own` when what it had acted on was the state's own. One in a
+later state than the first, or doing what a state says, is written
+though it stands where the scene has it; one at home in its first
+state still is not (a loaded game begins it there). Loaded, it is in
+that state with the seconds it had (one hiding for a minute hides the
+rest of it), its trip is the state's again, and nothing is told of it
+as beginning. A behaviour that has no state of that name now, or a
+person given another behaviour since, begins afresh, and a trip that
+was the state's is not gone on with. A save without `in` (an older
+one) loads as before. What alarmed people is not kept: a loaded game
+is calm.
+
 Known limits: a trip is sent again from where the person was, to the
 nearest road node, so one saved in the middle of a long stretch walks
 straight to the nearer end of it first (back, if that is nearer), and
@@ -3980,9 +3994,7 @@ look's clip for the state's activity plays as for any activity.
 A behaviour replaced while the world runs: one in a state whose place
 in the list is still there stays at that place, else begins again in
 the first. Another behaviour removed or added does not disturb it.
-A game save does not keep the state yet: a loaded game
-begins each behaviour in its first state (what a routine had one do
-is kept as before).
+A game save keeps the state (LW6 part 5, below).
 
 ### Scripts hear what people do (LW6 part 4)
 

@@ -418,6 +418,8 @@ Open-world systems:
 - LW6 part 4: scripts hear what people do: C# `OnPersonEvent` when
   one begins a behaviour or changes state, and `get_person_events`
   for the AI.
+- LW6 part 5: game saves keep the state of its behaviour each person
+  is in, and how long it has been in it.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

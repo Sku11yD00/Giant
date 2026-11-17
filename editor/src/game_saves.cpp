@@ -68,12 +68,18 @@ std::string people_text(const std::vector<GameSaves::SavedPerson>& people) {
             if (!s.place.empty()) trip["place"] = s.place;
             j["trip"] = std::move(trip);
         }
-        if (s.did) {
+        if (s.did && s.kept.said != 0) {
             Json did = {{"said", s.kept.said}, {"entry", s.kept.entry}};
             if (!s.kept.place.empty()) did["place"] = s.kept.place;
             if (s.kept.failed) did["failed"] = true;
             if (s.kept.own_trip) did["own_trip"] = true;
+            if (s.kept.own) did["own"] = true;
             j["did"] = std::move(did);
+        }
+        if (s.did && !s.kept.behaviour.empty()) {
+            Json in = {{"behaviour", s.kept.behaviour}, {"state", s.kept.state}, {"seconds", s.kept.in_state}};
+            if (s.kept.settled) in["settled"] = true;
+            j["in"] = std::move(in);
         }
         list.push_back(std::move(j));
     }
@@ -509,14 +515,17 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
             }
             // (One at home that is not going anywhere is not written: its routine looks at it afresh
             // and finds it where it should be, so a world of thousands at home saves nobody.)
-            if ((s.moved || s.trip) && state.routines != nullptr &&
+            // (Nor one in the first state of its behaviour: a loaded game begins it there. One in a
+            // later state, or doing what a state says, is written wherever it is.)
+            const bool later = state.routines != nullptr && state.routines->in_later_state(i);
+            if ((s.moved || s.trip || later) && state.routines != nullptr &&
                 state.routines->kept(state.scene, *state.travel, i, s.kept)) {
                 s.did = true;
                 // (Its routine's trip failed and the routine has not looked since: failed, to be tried again.)
                 if (s.kept.own_trip && !s.trip) s.kept.failed = true;
                 if (!s.trip) s.kept.own_trip = false;
             }
-            if (s.moved || s.trip) people.push_back(std::move(s));
+            if (s.moved || s.trip || s.did) people.push_back(std::move(s));
         }
     }
     const usize peopled = people.size();
@@ -773,7 +782,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                 world::PersonId last = 0;
                 for (const Json& e : j.value("people", Json::array())) {
                     SavedPerson s;
-                    if (!e.is_object() || !only_keys(e, {"id", "at", "trip", "did"}) || !e.contains("id") ||
+                    if (!e.is_object() || !only_keys(e, {"id", "at", "trip", "did", "in"}) || !e.contains("id") ||
                         !e["id"].is_number_unsigned() || e["id"].get<u64>() <= last || e["id"].get<u64>() > 0xffffffffull)
                         return fail(file + ": a bad person (each once, in the order of their ids)");
                     s.id = static_cast<world::PersonId>(e["id"].get<u64>());
@@ -801,13 +810,14 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     if (e.contains("did")) {
                         const Json& did = e["did"];
                         double said = 0.0, entry = 0.0;
-                        if (!did.is_object() || !only_keys(did, {"said", "entry", "place", "failed", "own_trip"}) ||
+                        if (!did.is_object() || !only_keys(did, {"said", "entry", "place", "failed", "own_trip", "own"}) ||
                             !did.contains("said") || !did["said"].is_number_unsigned() || !finite_in(did["said"], 1.0, 4294967295.0, said) ||
                             !did.contains("entry") || !did["entry"].is_number_unsigned() ||
                             !finite_in(did["entry"], 0.0, static_cast<double>(world::k_max_routine_entries + world::k_max_routine_alarms - 1), entry) ||
                             !did.value("place", Json("")).is_string() ||
                             did.value("place", std::string()).size() > world::k_max_name_bytes ||
-                            !did.value("failed", Json(false)).is_boolean() || !did.value("own_trip", Json(false)).is_boolean())
+                            !did.value("failed", Json(false)).is_boolean() || !did.value("own_trip", Json(false)).is_boolean() ||
+                            !did.value("own", Json(false)).is_boolean() || (did.value("own", false) && !e.contains("in")))
                             return fail(file + ": a bad person's routine");
                         s.did = true;
                         s.kept.said = static_cast<u32>(said);
@@ -815,6 +825,22 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                         s.kept.place = did.value("place", std::string());
                         s.kept.failed = did.value("failed", false);
                         s.kept.own_trip = s.trip && did.value("own_trip", false);
+                        s.kept.own = did.value("own", false);
+                    }
+                    if (e.contains("in")) { // (the state of its behaviour it was in: older saves have none)
+                        const Json& in = e["in"];
+                        const auto named = [&in](const char* key) {
+                            return in.contains(key) && in[key].is_string() && !in[key].get_ref<const std::string&>().empty() &&
+                                   in[key].get_ref<const std::string&>().size() <= world::k_max_name_bytes;
+                        };
+                        if (!in.is_object() || !only_keys(in, {"behaviour", "state", "seconds", "settled"}) || !named("behaviour") ||
+                            !named("state") || !in.contains("seconds") || !finite_in(in["seconds"], 0.0, 1e9, s.kept.in_state) ||
+                            !in.value("settled", Json(false)).is_boolean())
+                            return fail(file + ": a bad person's state");
+                        s.did = true;
+                        s.kept.behaviour = in["behaviour"].get<std::string>();
+                        s.kept.state = in["state"].get<std::string>();
+                        s.kept.settled = in.value("settled", false);
                     }
                     p->sections.people.push_back(std::move(s));
                 }
@@ -1193,6 +1219,13 @@ void GameSaves::place_people(EditorState& state) {
             // (Its routine says something else now: the trip that was the routine's is not gone on with.)
             if (!state.routines->restore(state.scene, *state.travel, s.id, s.kept) && sent && s.kept.own_trip)
                 state.travel->stop(s.id);
+        } else if (s.did && state.routines != nullptr && !s.kept.behaviour.empty()) {
+            // (Its trip could not be sent again: it is in its state still, and what the state or its
+            // routine says is acted on afresh.)
+            PeopleRoutines::Kept only = s.kept;
+            only.said = 0;
+            only.settled = false;
+            (void)state.routines->restore(state.scene, *state.travel, s.id, only);
         }
         ++m_status.people_applied;
     }
