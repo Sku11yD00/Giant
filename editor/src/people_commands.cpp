@@ -4,17 +4,23 @@
 // (saved with the scene and the world's world.json, undoable). People are
 // many, so an undo step keeps what one command changed, never the lists.
 #include "editor_commands.h"
+
+#include "audio_state.h"
 #include "people_routines.h"
+#include "people_senses.h"
 #include "people_state.h"
 #include "people_travel.h"
+#include "physics_state.h"
 
 #include "giant/core/assert.h"
 #include "giant/world/people.h"
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -108,7 +114,8 @@ Json trip_json(const PeopleTravel& travel, const PeopleTravel::Trip& t) {
 
 // `people`: who is given an entity now (null: nobody is), named as `entity`.
 Json person_json(const Person& p, const PeopleState* people = nullptr, const world::Scene* scene = nullptr,
-                 const PeopleTravel* travel = nullptr, const PeopleRoutines* routines = nullptr) {
+                 const PeopleTravel* travel = nullptr, const PeopleRoutines* routines = nullptr,
+                 const PeopleSenses* senses = nullptr) {
     Json j = {{"id", p.id},     {"name", p.name}, {"look", p.look}, {"home", p.home}, {"routine", p.routine},
               {"position", point_json(p.position)}, {"yaw", p.yaw},   {"seed", p.seed}};
     if (scene != nullptr) {
@@ -123,6 +130,17 @@ Json person_json(const Person& p, const PeopleState* people = nullptr, const wor
             j["doing"] = {{"activity", doing.activity}, {"place", doing.place}, {"failed", doing.failed}};
         } else {
             j["doing"] = nullptr;
+        }
+        PeopleSenses::Heard heard;
+        if (senses != nullptr && senses->heard(*scene, p.id, heard)) {
+            j["alarm"] = heard.alarm;
+            j["heard"] = {{"kind", PeopleSenses::to_string(heard.kind)},
+                          {"from", point_json(heard.from)},
+                          {"level", heard.level},
+                          {"seconds", heard.seconds}};
+        } else {
+            j["alarm"] = 0.0;
+            j["heard"] = nullptr;
         }
     }
     return j;
@@ -800,11 +818,13 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "(set_people_settings), else null. `at`: where it is now (its `position` until it travels: "
          "send_person) and `trip`: its trip (as get_travel gives it), else null. `doing`: what its routine has "
          "it do now while the world runs (`activity`, the `place` it was sent to or \"\", and `failed` when it "
-         "could not be sent: no such place, no road near, no way found), else null. `near` goes by `position`.",
+         "could not be sent: no such place, no road near, no way found), else null. `alarm` (0 calm to 1) and "
+         "`heard`: the noise that alarmed it most of late (`kind`, `from` where it was made, `level` at its "
+         "ears, `seconds` since), else null (make_noise, set_sense_settings). `near` goes by `position`.",
          object_schema(Json::array(), people_props),
          true,
          [&state](const Json& args, CommandContext&) {
-             sync_travel(state);
+             sync_senses(state);
              const std::vector<Person>& people = state.scene.people;
              Json list = Json::array();
              if (args.contains("ids")) {
@@ -812,7 +832,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  usize found = 0;
                  for (const Json& id : args["ids"]) {
                      const Person* p = world::find_person(people, id.get<PersonId>());
-                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene, state.travel, state.routines));
+                     list.push_back(p == nullptr ? Json(nullptr) : person_json(*p, state.people, &state.scene, state.travel, state.routines, state.senses));
                      found += p != nullptr ? 1 : 0;
                  }
                  return CommandResult::success({{"count", found}, {"total", people.size()}, {"people", std::move(list)}});
@@ -829,7 +849,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  if (!home.empty() && p.home != home) continue;
                  if (!routine.empty() && p.routine != routine) continue;
                  if (by_place && !near_enough(p.position, near, within)) continue;
-                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel, state.routines));
+                 if (count >= offset && list.size() < limit) list.push_back(person_json(p, state.people, &state.scene, state.travel, state.routines, state.senses));
                  ++count;
              }
              return CommandResult::success({{"count", count}, {"total", people.size()}, {"people", std::move(list)}});
@@ -878,6 +898,83 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              }
              state.people->settings = s;
              return CommandResult::success(people_state_json(*state.people));
+         }});
+    add(registry,
+        {"make_noise",
+         "While simulating, makes a noise at `at` [x, y, z] that the people hear: `loudness` its level at "
+         "1 m (as play_sound's: a rifle's report about 100, a shout about 3) and `kind` (shot, impact, "
+         "blast, splash, voice, other; default other). It spreads at the speed of sound; each person it "
+         "is loud enough for where the person is (the level falls with the distance) hears it once, and "
+         "its `alarm` rises (get_people). Shots fired, bullets striking, blasts and splashes make their "
+         "own. Nothing is played: play_sound is what the listener hears. View state: not undone, not saved.",
+         object_schema({"at", "loudness"},
+                       {{"at", point_schema("Where the noise is made, metres.")},
+                        {"loudness", {{"type", "number"}, {"exclusiveMinimum", 0}, {"maximum", PeopleSenses::k_max_loudness}}},
+                        {"kind", {{"type", "string"}, {"enum", {"shot", "impact", "blast", "splash", "voice", "other"}}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.senses == nullptr || state.travel == nullptr) return CommandResult::failure("nobody hears anything here");
+             sync_senses(state); // (its clock as it is now)
+             PeopleSenses::Kind kind = PeopleSenses::Kind::other;
+             if (!PeopleSenses::from_string(args.value("kind", std::string("other")), kind)) return CommandResult::failure("no such kind of noise");
+             if (!state.travel->running()) return CommandResult::failure("not simulating (simulate on first): sounds spread by the simulation's clock");
+             if (!state.senses->settings.on) return CommandResult::failure("the people's hearing is off (set_sense_settings)");
+             const float loudness = args["loudness"].get<float>();
+             const DVec3 where = point(args["at"]);
+             if (!(std::fabs(where.x) <= 1e8 && std::fabs(where.y) <= 1e8 && std::fabs(where.z) <= 1e8)) return CommandResult::failure("`at` is out of the world (1e8 m)");
+             double reach = 0.0;
+             if (!state.senses->noise(where, loudness, kind, &reach)) {
+                 return CommandResult::failure(loudness <= std::clamp(state.senses->settings.hear_loudness, 0.01f, 100.0f)
+                                                   ? "too quiet for anyone to hear (set_sense_settings hear_loudness)"
+                                                   : "not made: as many louder noises are spreading as are kept");
+             }
+             return CommandResult::success({{"kind", PeopleSenses::to_string(kind)},
+                                            {"reach", reach},
+                                            {"noises", state.senses->stats().noises}});
+         }});
+    add(registry,
+        {"set_sense_settings",
+         "How the people hear while simulating: `on`; `hear_loudness` (the level at one's ears below "
+         "which nobody notices, 0.01 to 100, default 0.2: a rifle's report is heard to 500 m); "
+         "`alarm_loudness` (the level that alarms one fully, default 2, never under hear_loudness: quieter "
+         "alarms in proportion, and each noise takes its share of what calm is left); `calm_seconds` (a "
+         "full alarm eases to nothing over this, 1 to 3600, default 30); `looked_a_frame` (people looked "
+         "at a frame while a noise spreads, 1 to 16384, default 4096; fewer when many noises "
+         "spread at once: 262,144 tests of a person against a noise a frame at most). Fields left out stay; with none it "
+         "only reports. Returns the settings with `noises` (spreading now), `made`, `dropped` (more at "
+         "once than the 64 kept) and `heard` (times someone heard one) since the simulation started. "
+         "View state.",
+         object_schema(Json::array(),
+                       {{"on", {{"type", "boolean"}}},
+                        {"hear_loudness", {{"type", "number"}, {"minimum", 0.01}, {"maximum", 100}}},
+                        {"alarm_loudness", {{"type", "number"}, {"minimum", 0.01}, {"maximum", 1000}}},
+                        {"calm_seconds", {{"type", "number"}, {"minimum", 1}, {"maximum", 3600}}},
+                        {"looked_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", PeopleSenses::k_max_looked}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.senses == nullptr) return CommandResult::failure("nobody hears anything here");
+             PeopleSenses::Settings s = state.senses->settings;
+             s.on = args.value("on", s.on);
+             s.hear_loudness = static_cast<float>(args.value("hear_loudness", static_cast<double>(s.hear_loudness)));
+             s.alarm_loudness = static_cast<float>(args.value("alarm_loudness", static_cast<double>(s.alarm_loudness)));
+             s.calm_seconds = static_cast<float>(args.value("calm_seconds", static_cast<double>(s.calm_seconds)));
+             s.looked_a_frame = args.value("looked_a_frame", s.looked_a_frame);
+             if (s.alarm_loudness < s.hear_loudness) {
+                 if (args.contains("alarm_loudness")) return CommandResult::failure("alarm_loudness must be at least hear_loudness");
+                 s.alarm_loudness = s.hear_loudness;
+             }
+             state.senses->settings = s;
+             if (!s.on) state.senses->silence();
+             const PeopleSenses::Stats& t = state.senses->stats();
+             return CommandResult::success({{"on", s.on},
+                                            {"hear_loudness", s.hear_loudness},
+                                            {"alarm_loudness", s.alarm_loudness},
+                                            {"calm_seconds", s.calm_seconds},
+                                            {"looked_a_frame", s.looked_a_frame},
+                                            {"noises", t.noises},
+                                            {"made", t.made},
+                                            {"dropped", t.dropped},
+                                            {"heard", t.heard}});
          }});
     add(registry,
         {"set_routine_settings",
@@ -1004,6 +1101,41 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              }
              return CommandResult::success(std::move(j));
          }});
+}
+
+void sync_senses(EditorState& state) {
+    sync_travel(state);
+    if (state.senses != nullptr && state.travel != nullptr) state.senses->sync(state.scene, *state.travel);
+}
+
+void connect_senses(EditorState& state) {
+    if (state.physics == nullptr || state.senses == nullptr || state.senses->connected) return;
+    state.senses->connected = true;
+    std::function<void(std::span<const PhysicsState::ShotHit>)> hits_before = state.physics->on_hits;
+    state.physics->on_hits = [&state, hits_before](std::span<const PhysicsState::ShotHit> hits) {
+        if (hits_before) hits_before(hits);
+        if (state.senses == nullptr || hits.empty()) return;
+        sync_senses(state); // (made by the clock as the step has it, a run's first frame too)
+        for (const PhysicsState::ShotHit& h : hits) {
+            state.senses->noise(h.hit.point, AudioState::impact_loudness(h.hit.energy), PeopleSenses::Kind::impact);
+        }
+    };
+    std::function<void(const DVec3&, float, float)> impact_before = state.physics->on_impact;
+    state.physics->on_impact = [&state, impact_before](const DVec3& at, float radius, float impulse) {
+        if (impact_before) impact_before(at, radius, impulse);
+        if (state.senses == nullptr) return;
+        sync_senses(state);
+        state.senses->noise(at, PeopleSenses::blast_loudness(impulse), PeopleSenses::Kind::blast);
+    };
+    std::function<void(std::span<const sim::WaterEntry>)> splashes_before = state.physics->on_splashes;
+    state.physics->on_splashes = [&state, splashes_before](std::span<const sim::WaterEntry> entries) {
+        if (splashes_before) splashes_before(entries);
+        if (state.senses == nullptr || entries.empty()) return;
+        sync_senses(state);
+        for (const sim::WaterEntry& e : entries) {
+            state.senses->noise(e.point, AudioState::splash_loudness(e), PeopleSenses::Kind::splash);
+        }
+    };
 }
 
 } // namespace giant::editor

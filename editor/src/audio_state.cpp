@@ -389,6 +389,18 @@ void AudioState::set_weather(const world::Weather* shown, const world::Ground& g
     m_snow = std::isfinite(ground.snow_cover) ? std::clamp(ground.snow_cover, 0.0f, 1.0f) : 0.0f;
 }
 
+float AudioState::shot_loudness(float mass, float speed) {
+    if (!(speed > 0.0f) || !(mass > 0.0f)) return 0.0f;
+    const double energy = 0.5 * static_cast<double>(mass) * static_cast<double>(speed) * speed;
+    if (!std::isfinite(energy)) return 400.0f;
+    return static_cast<float>(std::clamp(100.0 * std::sqrt(energy / 3100.0), 5.0, 400.0));
+}
+
+float AudioState::impact_loudness(float energy) {
+    if (!std::isfinite(energy) || energy <= 0.0f) return 0.0f;
+    return std::clamp(0.6f * std::sqrt(energy), 0.5f, 60.0f);
+}
+
 AudioState::ShotHeard AudioState::shot(const world::Scene& scene, const PhysicsState* physics, const DVec3& origin,
                                        const Vec3& velocity, float mass, float drag, std::optional<double> range) {
     ShotHeard out;
@@ -396,8 +408,7 @@ AudioState::ShotHeard AudioState::shot(const world::Scene& scene, const PhysicsS
     if (!std::isfinite(speed) || speed <= 0.0f || !(mass > 0.0f)) return out;
     ++m_shots;
     // The report: louder with the round's energy (a rifle's 3100 J about 100 at 1 m).
-    const double energy = 0.5 * static_cast<double>(mass) * static_cast<double>(speed) * speed;
-    out.report_loudness = static_cast<float>(std::clamp(100.0 * std::sqrt(energy / 3100.0), 5.0, 400.0));
+    out.report_loudness = shot_loudness(mass, speed);
     const std::optional<audio::SoundId> report = find("gunshot");
     audio::EchoSettings settings;
     if (++m_shots_this_frame > k_full_shots) {
@@ -460,7 +471,7 @@ void AudioState::impact(const world::Scene& scene, const PhysicsState* physics, 
     s.max_distance = 300.0;
     s.diffract = false;
     const audio::Heard heard = trace_only(scene, physics, point, s);
-    m_mixer.play(audio::to_play(*knock, heard, std::clamp(0.6f * std::sqrt(energy), 0.5f, 60.0f)));
+    m_mixer.play(audio::to_play(*knock, heard, impact_loudness(energy)));
 }
 
 namespace {
@@ -476,6 +487,11 @@ bool splash_finite(const sim::WaterEntry& e) {
 }
 } // namespace
 
+float AudioState::splash_loudness(const sim::WaterEntry& entry) {
+    if (!splash_finite(entry)) return 0.0f;
+    return std::clamp(0.25f * std::sqrt(splash_energy(entry)), 0.2f, 60.0f);
+}
+
 bool AudioState::splash(const world::Scene& scene, const PhysicsState* physics, const sim::WaterEntry& entry) {
     if (!splash_finite(entry)) return false;
     const DVec3 to = entry.point - m_listener;
@@ -484,7 +500,7 @@ bool AudioState::splash(const world::Scene& scene, const PhysicsState* physics, 
     const std::optional<audio::SoundId> sound = find(small ? "plop" : "splash");
     if (!sound) return false;
     ++m_splashes;
-    const float loudness = std::clamp(0.25f * std::sqrt(splash_energy(entry)), 0.2f, 60.0f);
+    const float loudness = splash_loudness(entry);
     m_last_splash = loudness;
     m_last_splash_small = small;
     audio::EchoSettings s;

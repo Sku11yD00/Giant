@@ -63,6 +63,7 @@ class NavState;
 class WalkerState;
 class PeopleState;
 class PeopleRoutines;
+class PeopleSenses;
 class PeopleTravel;
 class RagdollState;
 class GameUi;
@@ -269,6 +270,8 @@ struct EditorState {
     // The people following their routines (people_routines.h); set by main
     // (and tests). Null: nobody acts on its routine.
     PeopleRoutines* routines = nullptr;
+    // What the people hear (people_senses.h); set by main (and tests). Null: nobody hears anything.
+    PeopleSenses* senses = nullptr;
     // Characters gone limp (ragdoll_entity); set by main (and tests). Null: none do.
     RagdollState* ragdolls = nullptr;
     // Sounds played in the scene, heard at the camera; set by main (and
@@ -371,6 +374,14 @@ void connect_sounds(EditorState& state);
 // A shot fired from `origin` at `velocity` heard (state.audio): its report and
 // crack as play_sound's JSON reports them; null without audio. `range`: where
 // the bullet stopped or glanced off, when known (else a ray along the aim).
+// Bullets striking, blasts and splashes are noises the people hear (state.physics's on_hits,
+// on_impact and on_splashes, after what the others set; state.senses). Once both are set, after
+// connect_blows and connect_sounds (connect_blows called later takes the hooks back: connect last). A
+// shot's report is made by the shot's command.
+void connect_senses(EditorState& state);
+// The travel's and the senses' clocks brought up to the physics' now (no pass over the people):
+// before a noise is made or what was heard is reported, by a command or within a physics step.
+void sync_senses(EditorState& state);
 ai::Json hear_shot(EditorState& state, const DVec3& origin, const Vec3& velocity, float mass,
                    std::optional<double> range = std::nullopt);
 

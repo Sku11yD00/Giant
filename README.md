@@ -398,6 +398,8 @@ Open-world systems:
 - LW4 part 2: nobody appears or goes close by in view: those looked
   towards get their characters far off, those near only while out of
   sight, and one met part way along its walk is already walking.
+- LW5a: people hear: shots, strikes, blasts and splashes spread at the
+  speed of sound and alarm whoever they are loud enough for.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

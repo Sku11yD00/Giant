@@ -3659,6 +3659,61 @@ or its entries changed between the save and the load is told nothing
 is sent at its own time as before; the clips people play (LW3 part 3)
 begin again from their start.
 
+### What people hear (LW5a)
+
+`PeopleSenses` (`editor/src/people_senses.h`) is the people's hearing.
+While the world runs, a noise (`noise(at, loudness, kind)`: where, its
+level at 1 m on the audio's scale, and what it was) spreads at 343 m/s
+and is heard by every person it is loud enough for where the person is
+(`PeopleTravel::where`: near the camera or a kilometre off, with an
+entity or without). The level falls with the distance as the audio's
+does; under `hear_loudness` (0.2) nobody notices, so a rifle's report
+(100) is heard to 500 m and a shout (3) to 15 m.
+
+What one heard raises its alarm, 0 to 1: a noise at `alarm_loudness`
+(2) or over alarms fully, a quieter one in proportion, and each takes
+its share of what calm is left (1 - (1 - a)(1 - b)), so a few far
+shots add up. The noise that alarmed most is remembered (`kind`,
+where it came `from`, its `level` at the ears). Alarm eases back in a
+straight line, a full one over `calm_seconds` (30), worked out from
+when it was last raised: nothing is done a frame for the calm.
+`get_people` gives `alarm` and `heard`; what people do about it is
+LW5c.
+
+Noises come from the shots fired by command (the report at the muzzle,
+as loud as the listener's: `AudioState::shot_loudness`), and through
+`connect_senses` from bullets striking (`on_hits`), blasts
+(`on_impact`: 10 times the root of the push, a push of 100 N s as a
+rifle) and splashes (`on_splashes`), and from `make_noise`.
+
+Cost: at most 64 noises are kept (a louder one pushes the quietest
+out); while any spreads, `looked_a_frame` (4096, at most 16,384)
+people are gone through a frame, each against the noises kept (a
+distance each; 262,144 such tests a frame at most, so fewer people
+when many noises spread at once), and none when it is quiet. Each
+time through the list a person hears the noises whose front reached
+it since the time before, so each hears each once whatever the list's
+length, up to two passes late (a front that arrives just after a
+pass began waits for the next: 32 frames for 65,536 people); a pass
+begins only once time has passed, so the first noise after quiet is
+heard on the first pass. A noise is made by the clock as it is then:
+the commands and the physics' hooks bring the clock up first
+(`sync_senses`), so one made in a run's first frame or within a
+`step_physics` is not lost. What each heard is a slot beside the scene's
+people (matched again when people are made or removed), so hearing
+takes no memory on the frame. Stopping the simulation calms everyone.
+
+Known limits: nothing stands in a sound's way (a hill or a wall lets
+it through; only the listener's own ears have the audio's bending and
+muffling); weather neither carries nor drowns it; footsteps and
+voices make no noise yet (LW5c gives people voices); alarm is not in
+game saves; a person made while a noise spreads may miss it; where a
+noise has reached goes by where a person is when looked at, so one
+moving fast towards it may miss it and one moving away hear it twice
+(about its speed over sound's: under half a percent for a walker);
+`connect_blows` called after `connect_senses` takes the hooks back
+(connect the senses last).
+
 ### Nobody appears close by in view (LW4 part 2)
 
 `PeopleState` is told what the camera sees (`PeopleState::view`, set by

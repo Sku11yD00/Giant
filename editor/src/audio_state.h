@@ -160,6 +160,12 @@ public:
     void impact(const world::Scene& scene, const PhysicsState* physics, const DVec3& point, float energy);
     static constexpr u32 k_max_impacts = 8;
     u64 impacts() const { return m_impacts; }
+    // How loud these are at 1 m (what the people hear goes by the same: people_senses.h): a shot's
+    // report by its round's energy (0 for one that is no shot), a knock by the energy left where a
+    // bullet struck, a splash by how hard the thing went in.
+    static float shot_loudness(float mass, float speed);
+    static float impact_loudness(float energy);
+    static float splash_loudness(const sim::WaterEntry& entry);
     // Something gone into water (sim::WaterEntry, water plan W5e) heard
     // where it broke the surface: a splash, or a plop for something small
     // (under k_plop_mass kg or k_plop_size m), as loud as the root of its
