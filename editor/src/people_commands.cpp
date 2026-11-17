@@ -174,9 +174,15 @@ Json person_json(const Person& p, const PeopleState* people = nullptr, const wor
         j["trip"] = trip != nullptr ? trip_json(*travel, *trip) : Json(nullptr);
         PeopleRoutines::Doing doing;
         if (routines != nullptr && routines->doing(*scene, p.id, doing)) {
-            j["doing"] = {{"activity", doing.activity}, {"place", doing.place}, {"failed", doing.failed}};
+            j["doing"] = {{"activity", doing.activity}, {"place", doing.place}, {"failed", doing.failed}, {"own", doing.own}};
         } else {
             j["doing"] = nullptr;
+        }
+        PeopleRoutines::Behaving behaving;
+        if (routines != nullptr && travel != nullptr && routines->behaving(*scene, *travel, p.id, behaving)) {
+            j["state"] = {{"name", behaving.state}, {"index", behaving.index}, {"seconds", behaving.seconds}};
+        } else {
+            j["state"] = nullptr;
         }
         PeopleSenses::Heard heard;
         if (senses != nullptr && senses->heard(*scene, p.id, heard)) {
@@ -838,7 +844,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "(1 to 4) hold. So a state `day` with {to flee, when [{is sensed, kind shot}]}, a state `flee` "
          "(activity flee, at home, speed 5) with {to hide, when [{is arrived}]} and a state `hide` (activity "
          "hide) with {to day, when [{is after, value 120}, {is alarm_under, value 0.1}]} has one run home "
-         "from a shot, hide there, and go back to its day two minutes on once calm. Saved with the scene "
+         "from a shot, hide there, and go back to its day two minutes on once calm. People act on theirs "
+         "while simulating (get_people's `state` and `doing`; set_routine_settings). Saved with the scene "
          "or the world (at most 256). Undoable.",
          object_schema({"name", "states"},
                        {{"name", name_schema("Unique among the behaviours.")},
@@ -1069,7 +1076,9 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "(set_people_settings), else null. `at`: where it is now (its `position` until it travels: "
          "send_person) and `trip`: its trip (as get_travel gives it), else null. `doing`: what its routine has "
          "it do now while the world runs (`activity`, the `place` it was sent to or \"\", and `failed` when it "
-         "could not be sent: no such place, no road near, no way found), else null. `alarm` (0 calm to 1) and "
+         "could not be sent: no such place, no road near, no way found; `own`: it is its behaviour's state's own, not its routine's), "
+         "else null. `state`: the state of its behaviour it is in while the world runs (`name`, its `index` among the "
+         "behaviour's, `seconds` simulated since it entered it), else null. `alarm` (0 calm to 1) and "
          "`heard`: the noise that alarmed it most of late (`kind`, `from` where it was made, `level` at its "
          "ears, `seconds` since), or what it saw (`kind` \"sight\", `from` where the thing was, `seconds` "
          "since it last saw it), else null (make_noise, show_to_people, set_sense_settings). `why`: what it "
@@ -1344,8 +1353,12 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "road, 0 to 1000, default 500). "
          "An entry sends one to its home, the place named, or the place with the tag nearest its home, to "
          "a spot of its own within the place's radius (send_person's way of travelling); `stay` stops it "
-         "where it is. No arguments: reads them, with `following` (people with a routine) and `sent`, "
-         "`stayed` and `failed` (entries acted on since the simulation started; one that failed is tried "
+         "where it is. One with a behaviour (set_behaviour) is in one of its states, "
+         "the first on each run: when looked at, the first of the state's transitions whose conditions all hold is "
+         "taken, and a state with its own activity is acted on in place of what the routine says. "
+         "No arguments: reads them, with `following` (people with a routine or a behaviour), `behaving` (of them, "
+         "with a behaviour) and `sent`, `stayed`, `failed` (entries and states acted on) and `changed` (states gone "
+         "to) since the simulation started (one that failed is tried "
          "again when the places or the roads change). A person sent by hand (send_person) is left to it until its "
          "routine next says something else. View state.",
          object_schema(Json::array(),
@@ -1372,6 +1385,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                                             {"following", t.following},
                                             {"sent", t.sent},
                                             {"stayed", t.stayed},
+                                            {"behaving", t.behaving},
+                                            {"changed", t.changed},
                                             {"failed", t.failed}});
          }});
     add(registry,

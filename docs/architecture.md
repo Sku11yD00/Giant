@@ -3925,8 +3925,53 @@ by it. All undoable through the same `PeopleChange` as places, looks
 and routines, with the same care for commands run outside the
 history.
 
-This part is the data alone: nothing acts on a behaviour yet. The
-next part has the people follow theirs while the world runs.
+### People act on their behaviours (LW6 part 3)
+
+`PeopleRoutines` follows behaviours as it follows routines, in the
+same pass (a share of the people a frame), since what a state has
+one do is done the way an entry is. A person is followed when it has
+a routine or a behaviour. Its slot keeps the state it is in (the
+first, on each run) and when it entered it.
+
+When one is looked at, the transitions of its state are gone through
+in order and the first whose conditions all hold is taken: one a
+look, so a chain of states takes a look each (people are looked at
+many times a second). What each condition asks:
+
+- `alarm_over`, `alarm_under`: the senses' alarm for it now.
+- `sensed`: what alarmed it most of late (`PeopleSenses::heard`,
+  asked once a look and only when a condition wants it); calm,
+  nothing is.
+- `arrived`: the state has been acted on and no trip begun for it is
+  still under way. One the state sent nowhere, or that was there
+  already, has arrived.
+- `failed`: the state has been acted on and it could not be sent
+  (no such place, no home, no road near), or its trip found no way.
+- `after`: the simulation's seconds since it entered the state.
+- `hour`: the person's own hour (late by its share of
+  `spread_minutes`, as its routine's hours are).
+
+Then the state says what it does. One with its own activity is acted
+on as an entry is, in place of whatever the routine says, alarmed or
+not: sent to its home, a place or a tag's nearest place, or stopped
+where it is. One without leaves it to the routine, the hour's entry
+or an alarmed one, as if it had no behaviour; with no routine either,
+the trip its behaviour began is stopped and it stands. A state's own
+that cannot be done does not leave one walking on with what came
+before: the trip is stopped, and `failed` holds for a transition to
+catch.
+
+`get_people` tells the state (`state`: its name, its place among the
+behaviour's, seconds in it) and whether what it does is the state's
+own (`doing.own`); `person_why` and the People panel say it in
+words; `set_routine_settings` counts `behaving` and `changed`. The
+look's clip for the state's activity plays as for any activity.
+
+A behaviour replaced while the world runs: one in a state whose place
+in the list is still there stays at that place, else begins again in
+the first. A game save does not keep the state yet: a loaded game
+begins each behaviour in its first state (what a routine had one do
+is kept as before). Script events on a change of state come next.
 
 ### Nobody appears close by in view (LW4 part 2)
 

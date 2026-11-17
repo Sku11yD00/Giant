@@ -37,6 +37,25 @@
 // near as the nearest are measured, and answers are kept by home and tag,
 // so those of one home ask once.
 //
+// Behaviours (living-world plan LW6 part 3). One with a behaviour
+// (world::Behaviour) is in one of its states, the first to begin with on
+// each run. When it is looked at, the state's transitions are gone through
+// in order and the first whose conditions all hold is taken (one a look,
+// so a chain of states takes a look each). Then the state says what it
+// does: a state with its own activity is acted on as an entry is (in place
+// of what its routine says, alarmed or not); one without leaves it to the
+// routine (and one with no routine then stops the trip its behaviour
+// began, and stands). So a person needs a routine or a behaviour to be
+// followed, not both. `arrived` holds once the state has been acted on and
+// no trip begun for it is still under way (one that had nowhere to go has
+// arrived); `failed` once it could not be sent, or its trip found no way;
+// `after` counts the simulation's seconds since the state was entered;
+// `sensed` asks the senses what alarmed it most of late (calm: nothing);
+// `hour` goes by the person's own hour (spread_minutes).
+// A behaviour replaced while running (set_behaviour): one in a state whose
+// place in the list is still there stays at that place (whatever state is
+// there now), else begins again in the first.
+//
 // View state: not undone, not saved. Stopping the simulation puts everyone
 // back (PeopleTravel), and each begins its routine afresh on the next run.
 #pragma once
@@ -75,6 +94,8 @@ public:
         u64 sent = 0;      // since the simulation started
         u64 stayed = 0;    // entries begun that sent nobody anywhere (stay, or there already)
         u64 failed = 0;    // entries that could not be acted on (no such place, no road near, no way found)
+        u64 changed = 0;   // times one went from a state of its behaviour to another
+        u32 behaving = 0;  // of `following`: people with a behaviour that is there
     };
 
     // Each frame, after PeopleTravel::update. `hours`: the time of day (0 to 24).
@@ -92,9 +113,19 @@ public:
         std::string_view place;    // where it was sent, or was already ("" for none, or a place gone since)
         bool failed = false;       // it could not be acted on
         bool alarmed = false;      // the entry is one of its routine's `alarmed`
-        float at = 0.0f;           // the hour the entry begins, or the alarm it holds over
+        float at = 0.0f;           // the hour the entry begins, or the alarm it holds over (a state's own: 0)
+        bool own = false;          // what it does is its behaviour's state's own, not its routine's
     };
     bool doing(const world::Scene& scene, world::PersonId id, Doing& out) const;
+    // The state of its behaviour a person is in. None: it has no behaviour
+    // that is there, or was not looked at yet (or nothing is running).
+    struct Behaving {
+        std::string_view behaviour; // (the scene's strings: until the behaviours change)
+        std::string_view state;
+        usize index = 0;      // the state's place among the behaviour's
+        double seconds = 0.0; // of the simulation's, since it entered the state
+    };
+    bool behaving(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, Behaving& out) const;
     // What a person's routine has it do and where, as it last acted (a
     // frame's, for many). None: no routine, not acted on yet, one that
     // could not be acted on, or routines off or not running.
@@ -142,6 +173,11 @@ private:
         u64 place = 0;   // the name, hashed, of the place it was sent to (0: none)
         u32 acted = 0;   // what it last acted on (what the entry says, hashed); 0: nothing yet
         u16 routine = 0; // its routine's index in the scene's (as last found)
+        u16 behaviour = k_no_behaviour; // its behaviour's index in the scene's (as last found); k_no_behaviour: none
+        double entered = 0.0;           // the simulation's seconds when it entered `state`
+        u8 state = 0;                   // the state of its behaviour it is in
+        bool by_state = false;          // what it last acted on was a state's own (`entry`: the state then), not its routine's
+        bool settled = false;           // the state it is in has been acted on (or looked at, for one that leaves it to the routine)
         u8 entry = 0;    // that routine's entry it last acted on (or the one saying the same that holds now);
                          // from the number of its entries on: one of its `alarmed`
         bool failed = false;
@@ -160,6 +196,9 @@ private:
         u32 home = 0;
         u32 place = 0; // + 1 (0: none kept)
     };
+    static constexpr u16 k_no_behaviour = 0xffff;
+    // The entry a slot last acted on, by what it keeps (null: none such now).
+    const world::RoutineEntry* acted_on(const world::Scene& scene, const world::Person& person, const Slot& slot) const;
     enum class Sought : u8 { none, found, later };
     u64 hash_of(std::string_view text) const;
     u32 sign_of(const world::Place& place) const;
@@ -179,6 +218,7 @@ private:
     std::vector<Slot> m_slots, m_slots_before; // by the person's place in the scene's list (ids rising)
     usize m_cursor = 0;
     u32 m_counted = 0;
+    u32 m_behaving_counted = 0;
     bool m_miscounted = false; // people came or went while this pass counted: its count is not given out
     u64 m_builds = 0;          // PeopleTravel::builds as last seen
     // The scene's places by name and by tag, and what each was when they were listed.
