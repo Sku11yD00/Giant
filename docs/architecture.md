@@ -3864,13 +3864,16 @@ second); `get_people` gives it as `why`. It is for reading: the fields beside it
 
 `follow_person` has the viewport camera follow a person:
 `EditorState::follow` (the person, the scene it is of, a distance),
-and `follow_person_camera` each frame after the camera's own keys puts
+and `follow_person_camera` each frame, once the people's trips have moved
+on for it (so the camera is where the person is in the frame drawn,
+a screenshot's too), puts
 the camera that far behind the person, 1.5 m over the ground under
 it, along the way the camera looks, and never under the ground; so turning the camera (the mouse,
 `set_camera`'s yaw and pitch) looks round the person and a position
 given is not kept. Following ends when the person is removed, another
-scene is taken up or play starts (and does not come back when play
-stops). It is view state, as the camera is.
+scene is taken up, a game is loaded or play starts (the `play`
+command lets go itself, so a play begun and stopped between two
+frames ends it too; it does not come back when play stops). It is view state, as the camera is.
 
 ### Nobody appears close by in view (LW4 part 2)
 

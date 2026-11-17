@@ -459,6 +459,8 @@ int run(const Options& options) {
         // The people's trips moved on by the time simulated (stopped: everyone back where the scene has them).
         const editor::PeopleTravel::Clock travel_clock = editor::PeopleTravel::clock_of(physics);
         travel.update(state.scene, travel_clock.run, travel_clock.seconds);
+        // The one followed keeps the camera by it, where it is this frame (follow_person; play ends it).
+        editor::follow_person_camera(state);
         // What the people hear of the noises made (a share of the people a frame while any spreads),
         // and who sees the player (at the camera: its eyes while playing).
         // (A screenshot's frame does not look or listen again.)
@@ -739,7 +741,6 @@ int run(const Options& options) {
                                  static_cast<float>(window->point_height()), delta, state, commands);
             viewport_camera.update(state.camera, delta);
         }
-        editor::follow_person_camera(state); // the one followed keeps the camera by it (follow_person; play ends it)
         panels.draw(frame_info);
         ui->end_frame();
         mark(editor::FramePhase::ui);

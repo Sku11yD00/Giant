@@ -896,8 +896,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
         {"follow_person",
          "The viewport camera follows a person (`id`; null or left out: nobody): kept `distance` metres "
          "behind it (1 to 200, default 6, or as last given) and never under the ground, looking the way the camera is turned, so "
-         "set_camera's yaw and pitch look round it. Following ends when the person is removed, another scene is taken up or play "
-         "starts. Returns `following` (the id, or null) and `distance`. View state: not undone, not saved.",
+         "set_camera's yaw and pitch look round it (a position given is not kept, and look_at aims from where the camera was). Following ends when the person is removed, another scene is taken up or play "
+         "starts. A loaded game ends it too. Returns `following` (the id, or null; get_camera gives it as well) and `distance`. View state: not undone, not saved.",
          object_schema(Json::array(),
                        {{"id", {{"type", {"integer", "null"}}, {"minimum", 1}, {"maximum", 4294967295.0},
                                  {"description", "The person to follow; null or left out: nobody."}}},

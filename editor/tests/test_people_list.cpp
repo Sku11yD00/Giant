@@ -112,8 +112,18 @@ GIANT_TEST("people list: the filter takes names, looks, homes, routines and ids,
     GIANT_CHECK(match(anna) && !match(bo));
     filter.text = std::to_string(bo); // an id: the whole of it, not a part
     GIANT_CHECK(match(bo) && !match(anna));
-    filter.text = "nobody such";
-    GIANT_CHECK(!match(anna) && !match(bo));
+    for (const char* none : {"nobody such", "0", "02", "2 ", "20", "4294967298", "99999999999", "-2"}) {
+        filter.text = none; // (not an id: 02 is not 2, and 4294967298 does not wrap round to it)
+        GIANT_CHECK(!match(anna) && !match(bo));
+    }
+    // An id that begins another's is not the other's.
+    world::PersonId tenth = 0;
+    for (int i = 0; i < 8; ++i) tenth = f.person({{"position", at(0, 0, 50)}});
+    GIANT_CHECK(anna == 1 && tenth == 10);
+    filter.text = "1";
+    GIANT_CHECK(match(anna) && !match(tenth));
+    filter.text = "10";
+    GIANT_CHECK(!match(anna) && match(tenth));
     // The command's the same.
     GIANT_CHECK(f.listed({{"text", "mill"}}) == std::vector<world::PersonId>{anna});
     GIANT_CHECK(f.listed({{"text", "GUARD"}}) == std::vector<world::PersonId>{bo});
@@ -134,6 +144,18 @@ GIANT_TEST("people list: only the alarmed, only those travelling") {
     f.frames(3.0, 0.1);
     GIANT_CHECK(f.listed({{"travelling", true}}) == std::vector<world::PersonId>{far_off});
     GIANT_CHECK(f.listed({{"alarmed", false}, {"travelling", false}}).size() == 2); // false: not asked for
+    // A trip that failed is not travelling: a goal across a gap in the roads, found unreachable after a search.
+    GIANT_CHECK(f.run("create_route", {{"points", {at(3000, 0, 0), at(3100, 0, 0)}}, {"kind", "road"}}).ok);
+    if (f.run("send_person", {{"id", near_by}, {"to", at(3050, 0, 0)}}).ok) {
+        f.frames(3.0, 0.5, 64);
+        const PeopleTravel::Trip* trip = f.travel.trip(near_by);
+        if (trip != nullptr && trip->phase == PeopleTravel::Phase::failed) {
+            GIANT_CHECK(f.listed({{"travelling", true}}) == std::vector<world::PersonId>{far_off});
+            GIANT_CHECK(has(f.why(near_by), "failed"));
+        } else {
+            GIANT_CHECK(trip == nullptr || f.listed({{"travelling", true}}).size() == 2);
+        }
+    }
 }
 
 GIANT_TEST("people list: thousands are gone through a share a frame; the first that match are shown, and it keeps up") {
@@ -286,7 +308,20 @@ GIANT_TEST("people list: the camera follows a person, and lets go when it is gon
     const world::PersonId again = f.person({{"name", "again"}, {"position", at(0, 0, 0)}});
     GIANT_CHECK(f.run("follow_person", {{"id", again}}).ok);
     GIANT_CHECK(f.run("new_scene").ok);
-    GIANT_CHECK(!follow_person_camera(f.state) && f.state.follow.person == 0);
+    for (const char* look : {"villager"}) {
+        world::Entity e;
+        e.shape = world::Shape::mesh;
+        e.mesh = "people/villager.glb";
+        const world::EntityId model = f.state.scene.add(e);
+        GIANT_CHECK(f.run("set_person_look", {{"name", look}, {"entity", model}}).ok);
+    }
+    const DVec3 before = camera();
+    world::PersonId another = 0; // the same id, another person
+    while (another < again) another = f.person({{"name", "another"}, {"position", at(500, 0, 500)}});
+    GIANT_CHECK(another == again);
+    GIANT_CHECK(f.run("get_camera").value["following"] == again); // (not let go until a frame)
+    GIANT_CHECK(!follow_person_camera(f.state) && f.state.follow.person == 0 && camera() == before);
+    GIANT_CHECK(f.run("get_camera").value["following"].is_null());
 }
 
 GIANT_TEST("people list: play ends following, and it does not come back when play stops") {
@@ -306,4 +341,8 @@ GIANT_TEST("people list: play ends following, and it does not come back when pla
     GIANT_CHECK(f.run("play", {{"on", false}}).ok);
     const DVec3 back = f.state.camera.position;
     GIANT_CHECK(!follow_person_camera(f.state) && f.state.camera.position == back);
+    // Play begun and stopped with no frame between ends it as well.
+    GIANT_CHECK(f.run("follow_person", {{"id", id}}).ok && f.state.follow.person == id);
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok && f.run("play", {{"on", false}}).ok);
+    GIANT_CHECK(f.state.follow.person == 0 && !follow_person_camera(f.state));
 }
