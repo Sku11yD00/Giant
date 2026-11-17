@@ -25,6 +25,7 @@
 #include "cloth_state.h"
 #include "hair_state.h"
 #include "people_routines.h"
+#include "people_senses.h"
 #include "people_state.h"
 #include "people_travel.h"
 #include "swing_state.h"
@@ -354,6 +355,8 @@ int run(const Options& options) {
     state.travel = &travel;
     editor::PeopleRoutines routines; // who is sent where as the day goes on
     state.routines = &routines;
+    editor::PeopleSenses senses; // what the people hear, and how alarmed each is
+    state.senses = &senses;
     editor::PeopleState people; // the people near the camera, as entities
     people.travel = &travel;
     people.walkers = &walkers;
@@ -374,6 +377,7 @@ int run(const Options& options) {
     state.saves = &saves;
     editor::connect_blows(state); // shots and blasts reach the swings and the cloth
     editor::connect_sounds(state); // after connect_blows: hits knock and are heard
+    editor::connect_senses(state); // after both: the people hear them too
     editor::connect_event_effects(state); // after both: hits and splashes throw up particles too
     state.window = window.get();
     state.device = device.get();
@@ -454,6 +458,8 @@ int run(const Options& options) {
         // The people's trips moved on by the time simulated (stopped: everyone back where the scene has them).
         const editor::PeopleTravel::Clock travel_clock = editor::PeopleTravel::clock_of(physics);
         travel.update(state.scene, travel_clock.run, travel_clock.seconds);
+        // What the people hear of the noises made (a share of the people a frame while any spreads).
+        senses.update(state.scene, travel);
         // Those whose routines say so set off (a share of the people a frame), by the time of day shown.
         routines.update(state.scene, travel, time_of_day.shown().hours);
         // The people near the camera get their entities (a few a frame) before the scene is drawn.

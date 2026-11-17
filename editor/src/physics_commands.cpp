@@ -7,6 +7,7 @@
 #include "physics_state.h"
 #include "hit_targets.h"
 #include "mesh_library.h"
+#include "people_senses.h"
 #include "play_state.h"
 
 #include "giant/core/assert.h"
@@ -471,6 +472,10 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
                  }
                  // Nothing stopped it: it flew on through whatever it passed, as far as it stays fast.
                  if (!range) range = std::numeric_limits<double>::infinity();
+                 if (state.senses != nullptr) { // (the people hear its report too)
+                     sync_senses(state);
+                     state.senses->noise(shot.origin, AudioState::shot_loudness(shot.mass, giant::length(shot.velocity)), PeopleSenses::Kind::shot);
+                 }
                  Json heard = hear_shot(state, shot.origin, shot.velocity, shot.mass, range);
                  Json out{{"hits", std::move(hits)}, {"simulating", state.physics->simulating()}};
                  if (!heard.is_null()) out["heard"] = std::move(heard);
@@ -480,6 +485,10 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              if (id == sim::k_no_bullet) return CommandResult::failure("too many bullets flying");
              Json out{{"bullet", id}};
              if (state.audio != nullptr) state.physics->flush(state.scene); // its crack meets what it will
+             if (state.senses != nullptr) {
+                 sync_senses(state);
+                 state.senses->noise(shot.origin, AudioState::shot_loudness(shot.mass, giant::length(shot.velocity)), PeopleSenses::Kind::shot);
+             }
              Json heard = hear_shot(state, shot.origin, shot.velocity, shot.mass);
              if (!heard.is_null()) out["heard"] = std::move(heard);
              return CommandResult::success(std::move(out));
