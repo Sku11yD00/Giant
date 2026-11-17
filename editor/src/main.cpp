@@ -24,6 +24,7 @@
 #include "animation_state.h"
 #include "cloth_state.h"
 #include "hair_state.h"
+#include "people_list.h"
 #include "people_routines.h"
 #include "people_senses.h"
 #include "people_state.h"
@@ -737,6 +738,7 @@ int run(const Options& options) {
             terrain_brush.update(input, ui->wants_mouse(), static_cast<float>(window->point_width()),
                                  static_cast<float>(window->point_height()), delta, state, commands);
             viewport_camera.update(state.camera, delta);
+            editor::follow_person_camera(state); // the one followed keeps the camera by it (follow_person)
         }
         panels.draw(frame_info);
         ui->end_frame();

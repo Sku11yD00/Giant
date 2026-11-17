@@ -5,6 +5,7 @@
 #pragma once
 
 #include "../editor_commands.h"
+#include "../people_list.h"
 
 #include "giant/ai/commands.h"
 #include "giant/core/log_history.h"
@@ -41,6 +42,7 @@ private:
     void draw_scatter();       // the scatter layers' main settings
     void draw_water();         // the lakes, rivers and sea: level, waves, shown
     void draw_effects();       // effects running, and buttons playing each once
+    void draw_people();        // the People panel: list, filter, follow one, what it does and why
     void draw_log();
     void draw_commands();
     void draw_engine(const FrameInfo& frame);
@@ -55,6 +57,7 @@ private:
     const LogHistory& m_log;
 
     bool m_show_scene = true;
+    bool m_show_people = true;
     bool m_show_log = true;
     bool m_show_commands = true;
     bool m_show_engine = true;
@@ -68,6 +71,10 @@ private:
     std::array<char, 128> m_log_filter_buffer{}; // ImGui edits this in place
     std::string m_log_filter;
     std::array<char, 1024> m_import_path{}; // the "Add mesh" field
+
+    PeopleList m_people_list;                       // the People panel's (filter and those shown)
+    std::array<char, 96> m_people_filter_buffer{};  // ImGui edits this in place
+    world::PersonId m_person_shown = 0;             // the one whose state is shown (0: none)
 
     u32 m_edit_epoch = 1; // bumped whenever no widget is being edited
 };

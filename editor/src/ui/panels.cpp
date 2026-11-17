@@ -3,11 +3,15 @@
 #include "../mesh_library.h"
 #include "../physics_state.h"
 #include "../play_state.h"
+#include "../people_routines.h"
+#include "../people_senses.h"
+#include "../people_travel.h"
 #include "../clock_state.h"
 #include "../weather_state.h"
 
 #include "giant/core/log.h"
 #include "giant/sim/swing.h"
+#include "giant/world/people.h"
 #include "giant/world/water.h"
 #include "giant/world/effects.h"
 #include "../effects_state.h"
@@ -29,6 +33,7 @@ namespace giant::editor {
 namespace {
 
 constexpr const char* k_scene = "Scene";
+constexpr const char* k_people = "People";
 constexpr const char* k_log = "Log";
 constexpr const char* k_commands = "Commands";
 constexpr const char* k_engine = "Engine";
@@ -100,6 +105,7 @@ void EditorPanels::draw(const FrameInfo& frame) {
 
     draw_menu_bar();
     if (m_show_scene) draw_scene_settings();
+    if (m_show_people) draw_people();
     if (m_show_log) draw_log();
     if (m_show_commands) draw_commands();
     if (m_show_engine) draw_engine(frame);
@@ -123,6 +129,7 @@ void EditorPanels::build_default_layout(unsigned int dockspace_id) {
     ImGui::DockBuilderDockWindow(k_scene, left);
     ImGui::DockBuilderDockWindow(k_engine, left);
     ImGui::DockBuilderDockWindow(k_commands, right);
+    ImGui::DockBuilderDockWindow(k_people, right);
     ImGui::DockBuilderDockWindow(k_log, bottom);
     ImGui::DockBuilderFinish(dockspace_id);
 }
@@ -162,6 +169,7 @@ void EditorPanels::draw_menu_bar() {
     }
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem(k_scene, nullptr, &m_show_scene);
+        ImGui::MenuItem(k_people, nullptr, &m_show_people);
         ImGui::MenuItem(k_log, nullptr, &m_show_log);
         ImGui::MenuItem(k_commands, nullptr, &m_show_commands);
         ImGui::MenuItem(k_engine, nullptr, &m_show_engine);
@@ -1099,6 +1107,117 @@ void EditorPanels::draw_clock() {
     const world::SkyBodies b = world::sky_bodies(shown);
     ImGui::TextDisabled("Sun %.1f deg up; moon %.1f deg up, %.0f%% lit; light: %s", b.sun_elevation_degrees,
                         b.moon_elevation_degrees, b.moon_lit * 100.0f, world::moon_leads(b) ? "moon" : "sun");
+}
+
+void EditorPanels::draw_people() {
+    if (!ImGui::Begin(k_people, &m_show_people)) {
+        ImGui::End();
+        return;
+    }
+    const world::Scene& scene = m_state.scene;
+    ImGui::SetNextItemWidth(180.0f);
+    if (ImGui::InputTextWithHint("##people_filter", "name, look, home, routine or id", m_people_filter_buffer.data(),
+                                 m_people_filter_buffer.size())) {
+        m_people_list.filter.text = m_people_filter_buffer.data();
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Alarmed", &m_people_list.filter.alarmed);
+    ImGui::SameLine();
+    ImGui::Checkbox("Travelling", &m_people_list.filter.travelling);
+    m_people_list.update(m_state);
+
+    const std::vector<world::PersonId>& shown = m_people_list.shown();
+    if (!m_people_list.whole()) {
+        ImGui::TextDisabled("Looking through %zu people...", scene.people.size());
+    } else if (m_people_list.matching() > shown.size()) {
+        ImGui::TextDisabled("%zu of %zu people match (the first %zu shown)", m_people_list.matching(),
+                            scene.people.size(), shown.size());
+    } else {
+        ImGui::TextDisabled("%zu of %zu people match", m_people_list.matching(), scene.people.size());
+    }
+
+    const world::PersonId followed = m_state.follow.person;
+    const float list_height = std::max(120.0f, ImGui::GetContentRegionAvail().y * 0.5f);
+    if (ImGui::BeginTable("people", 4,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
+                              ImGuiTableFlags_ScrollY,
+                          ImVec2(0.0f, list_height))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Name");
+        ImGui::TableSetupColumn("Look");
+        ImGui::TableSetupColumn("Doing");
+        ImGui::TableSetupColumn("Alarm", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+        ImGui::TableHeadersRow();
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(shown.size()));
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const world::PersonId id = shown[static_cast<usize>(row)];
+                const world::Person* person = world::find_person(scene.people, id);
+                if (person == nullptr) {
+                    continue; // removed since the list was made: gone from it the next time through
+                }
+                const usize index = static_cast<usize>(person - scene.people.data());
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::PushID(row);
+                char label[160];
+                std::snprintf(label, sizeof(label), "%s%s##person", id == followed ? "> " : "",
+                              person->name.empty() ? "(no name)" : person->name.c_str());
+                if (ImGui::Selectable(label, id == m_person_shown, ImGuiSelectableFlags_SpanAllColumns)) {
+                    m_person_shown = id;
+                }
+                ImGui::PopID();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(person->look.c_str());
+                ImGui::TableNextColumn();
+                PeopleRoutines::Doing doing;
+                if (m_state.routines != nullptr && m_state.routines->doing(scene, id, doing)) {
+                    ImGui::TextUnformatted(doing.activity.data(), doing.activity.data() + doing.activity.size());
+                } else if (m_state.travel != nullptr && m_state.travel->trip(id) != nullptr) {
+                    ImGui::TextUnformatted("travelling");
+                }
+                ImGui::TableNextColumn();
+                const float alarm = m_state.senses != nullptr ? m_state.senses->alarm_at(scene, index) : 0.0f;
+                if (alarm > 0.0f) {
+                    ImGui::Text("%.2f", static_cast<double>(alarm));
+                }
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    const world::Person* person = m_person_shown != 0 ? world::find_person(scene.people, m_person_shown) : nullptr;
+    if (person == nullptr) {
+        m_person_shown = 0;
+        ImGui::TextDisabled("Pick a person to see what it does and why.");
+    } else {
+        ImGui::SeparatorText(person->name.empty() ? "(no name)" : person->name.c_str());
+        ImGui::Text("Id %llu   look %s   home %s", static_cast<unsigned long long>(person->id),
+                    person->look.empty() ? "-" : person->look.c_str(),
+                    person->home.empty() ? "-" : person->home.c_str());
+        ImGui::TextWrapped("%s", person_why(m_state, *person).c_str());
+        const bool playing = m_state.play != nullptr && m_state.play->playing();
+        ImGui::BeginDisabled(playing);
+        if (followed == person->id) {
+            if (ImGui::Button("Stop following")) {
+                run("follow_person", {{"id", nullptr}});
+            }
+        } else if (ImGui::Button("Follow")) {
+            run("follow_person", {{"id", person->id}});
+        }
+        if (followed == person->id) {
+            ImGui::SameLine();
+            float distance = m_state.follow.distance;
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::SliderFloat("Distance (m)", &distance, 1.0f, 200.0f, "%.0f", ImGuiSliderFlags_Logarithmic)) {
+                run("follow_person",
+                    {{"id", person->id}, {"distance", static_cast<double>(std::clamp(distance, 1.0f, 200.0f))}});
+            }
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::End();
 }
 
 void EditorPanels::draw_log() {

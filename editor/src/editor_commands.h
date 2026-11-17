@@ -270,6 +270,13 @@ struct EditorState {
     // The people following their routines (people_routines.h); set by main
     // (and tests). Null: nobody acts on its routine.
     PeopleRoutines* routines = nullptr;
+    // The person the camera follows (follow_person; people_list.h): view state.
+    struct Follow {
+        world::PersonId person = 0; // 0: nobody
+        u64 scene = 0;              // the scene it is one of (another scene: nobody is followed)
+        float distance = 6.0f;      // metres behind it (1 to 200)
+    };
+    Follow follow;
     // What the people hear (people_senses.h); set by main (and tests). Null: nobody hears anything.
     PeopleSenses* senses = nullptr;
     // Characters gone limp (ragdoll_entity); set by main (and tests). Null: none do.

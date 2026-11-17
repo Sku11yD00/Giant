@@ -3827,6 +3827,44 @@ alarmed activity plays where the routine has the person be, so one
 that has run home goes on playing `flee` there while still alarmed
 (name a clip that suits both, or none).
 
+### The People panel (LW6a)
+
+The editor's People window lists the scene's people, filters them,
+shows what one does and why, and has the camera follow one. It is
+made of three things in `editor/src/people_list.h`, and the commands
+give the AI the same.
+
+`PeopleList` finds the people that match a filter: text (in a name, a
+look, a home or a routine, letters' case aside, or a whole id), only
+the alarmed, only those on a trip (one that failed is not). A scene
+has up to 65,536 people, and who is alarmed or travelling changes as
+the world runs, so the list is gone through 4,096 a frame, again and
+again, while the window is open: what is shown is the last whole time
+through (the first 1,024 that match, ids rising, with how many match
+in all), so it is a few frames behind at most and never costs more
+than its share. Another filter or scene begins again at once. Two
+vectors kept at their full size swap; nothing is allocated a frame.
+`get_people` takes the same filter (`text`, `alarmed`, `travelling`)
+through the same `PeopleList::matches`.
+
+`person_why` says in words what a person does and why: what alarmed
+it and how long ago (a noise's kind, or what it saw), what its
+routine says (the hour's entry and when it began, or the alarmed
+entry and the alarm it holds over, or that it could not be sent), and
+where its trip has got to (looking for its way, so far along, or why
+it failed). The panel shows it for the one picked; `get_people` gives
+it as `why`. It is for reading: the fields beside it (`doing`,
+`alarm`, `heard`, `trip`) are the ones to act on.
+
+`follow_person` has the viewport camera follow a person:
+`EditorState::follow` (the person, the scene it is of, a distance),
+and `follow_person_camera` each frame after the camera's own keys puts
+the camera that far behind the person, 1.5 m over the ground under
+it, along the way the camera looks; so turning the camera (the mouse,
+`set_camera`'s yaw and pitch) looks round the person and a position
+given is not kept. Following ends when the person is removed, another
+scene is taken up or play starts. It is view state, as the camera is.
+
 ### Nobody appears close by in view (LW4 part 2)
 
 `PeopleState` is told what the camera sees (`PeopleState::view`, set by
