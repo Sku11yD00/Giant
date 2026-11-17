@@ -352,10 +352,12 @@ int run(const Options& options) {
     state.travel = &travel;
     editor::PeopleState people; // the people near the camera, as entities
     people.travel = &travel;
+    people.walkers = &walkers;
     state.people = &people;
     editor::connect_walkers(state);
     editor::RagdollState ragdolls(physics, animation, &walkers); // after them: its ragdolls leave the physics first
     state.ragdolls = &ragdolls;
+    people.ragdolls = &ragdolls;
     editor::connect_ragdolls(state);
     editor::AudioState audio; // the speakers when shown (hidden runs: tests, gates, stay silent)
     editor::WaterHearing water_hearing; // the water heard round the camera, a few ways a frame

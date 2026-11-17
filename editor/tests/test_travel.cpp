@@ -1,19 +1,24 @@
 // People travelling (people_travel.h): sent along the world's roads by
-// command, moved by the simulation's clock, standing while an entity
-// stands for them, and back where the scene has them when it stops.
+// command, moved by the simulation's clock, walked by the entity that
+// stands for one near the camera (people_state.h), and back where the
+// scene has them when the simulation stops.
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
 #include "../src/people_state.h"
 #include "../src/people_travel.h"
+#include "../src/nav_state.h"
 #include "../src/physics_state.h"
+#include "../src/walker_state.h"
 
 #include "giant_test.h"
 
 #include "giant/world/people.h"
 #include "giant/world/routes.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 
 using namespace giant;
 using namespace giant::editor;
@@ -174,7 +179,7 @@ GIANT_TEST("travel: one with an entity near the camera stands; it is made where 
     GIANT_CHECK(entity != 0 && scene.find(entity)->transform.position == DVec3(0.0, 0.0, -10.0));
     // Sent while it has an entity: its way is found, but it stands.
     ai::CommandResult r = f.run("send_person", {{"id", id}, {"to", "mill"}, {"speed", 2.0}});
-    GIANT_CHECK(r.ok && r.value["trip"]["standing"] == true);
+    GIANT_CHECK(r.ok && r.value["trip"]["embodied"] == true);
     for (int i = 0; i < 4; ++i) {
         f.travel.update(scene, 1, 10.0 * i);
         people.update(scene, {0.0, 0.0, 0.0}, nullptr);
@@ -185,7 +190,7 @@ GIANT_TEST("travel: one with an entity near the camera stands; it is made where 
     people.update(scene, {0.0, 0.0, -500.0}, nullptr);
     GIANT_CHECK(people.entity_of(scene, id) == 0 && scene.size() == 0);
     f.travel.update(scene, 1, 60.0); // 60 m: 50 m along the road
-    GIANT_CHECK(f.near(id, 50, 0, 0) && f.run("get_travel", {{"id", id}}).value["trip"]["standing"] == false);
+    GIANT_CHECK(f.near(id, 50, 0, 0) && f.run("get_travel", {{"id", id}}).value["trip"]["embodied"] == false);
     // The camera is by the road ahead: the entity is made where the person is, facing along the road.
     people.update(scene, {60.0, 0.0, 0.0}, nullptr);
     const world::Entity* made = scene.find(people.entity_of(scene, id));
@@ -429,3 +434,262 @@ GIANT_TEST("travel: roads cut after one was sent cost its trip no search, and tr
     GIANT_CHECK(f.travel.stats().searches == 0 && f.travel.stats().failed == 1 && f.travel.stats().searching == 0);
 }
 
+namespace {
+
+// The people's world with physics, walkers and the people near the camera, stepped as frames are.
+struct Walking {
+    Fixture f;
+    PhysicsState physics;
+    NavState nav{nullptr, nullptr, nullptr};
+    WalkerState walkers{physics, nav};
+    PeopleState people;
+    world::PersonId id = 0;
+    DVec3 camera{6.0, 0.0, -494.0};
+    Walking() {
+        f.state.physics = &physics;
+        f.state.nav = &nav;
+        f.state.walkers = &walkers;
+        f.state.people = &people;
+        people.travel = &f.travel;
+        people.walkers = &walkers;
+        register_physics_commands(f.commands, f.state);
+        connect_walkers(f.state);
+        // A floor, a path east 12 m then north 12 m on it, and someone 2 m before its start.
+        GIANT_CHECK(f.run("create_entity", {{"shape", "plane"}, {"position", at(6, 0, -494)}, {"scale", {80.0, 1.0, 80.0}}}).ok);
+        GIANT_CHECK(f.run("create_route", {{"points", {at(0, 0, -500), at(12, 0, -500), at(12, 0, -488)}}}).ok);
+        id = f.person(-2, -500);
+        GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+        frame(0.0);
+    }
+    // A frame: the travel's clock, the people near the camera, then the physics stepped on.
+    void frame(double seconds) {
+        const PeopleTravel::Clock now = PeopleTravel::clock_of(physics);
+        f.travel.update(f.state.scene, now.run, now.seconds);
+        people.update(f.state.scene, camera, nullptr);
+        if (seconds > 0.0) GIANT_CHECK(f.run("step_physics", {{"seconds", seconds}}).ok);
+    }
+    world::EntityId entity() { return people.entity_of(f.state.scene, id); }
+    double travel_seconds() { return f.travel.seconds(); }
+    DVec3 feet() { return walkers.feet_of(f.state.scene, world::person_entity_id(id)).value_or(DVec3{}); }
+};
+
+} // namespace
+
+GIANT_TEST("travel: one with an entity walks its trip's way over the ground, round the corner, and stands at the end") {
+    Walking w;
+    Fixture& f = w.f;
+    GIANT_CHECK(w.entity() != 0 && w.walkers.size() == 0);
+    GIANT_CHECK(f.run("send_person", {{"id", w.id}, {"to", at(12, 0, -486)}, {"speed", 3.0}}).ok);
+    for (int i = 0; i < 8 && w.walkers.size() == 0; ++i) w.frame(0.05);
+    GIANT_CHECK(w.walkers.size() == 1 && w.people.stats().walking == 1);
+    // It walks: 3 m/s east along the path, the trip going on as far as it has walked (not by the clock).
+    for (int i = 0; i < 8; ++i) w.frame(0.25);
+    DVec3 feet = w.feet();
+    ai::CommandResult r = f.run("get_travel", {{"id", w.id}});
+    const double gone = r.value["trip"]["gone"].get<double>();
+    GIANT_CHECK(feet.x > 1.0 && feet.x < 6.0 && std::fabs(feet.z + 500.0) < 0.5 && std::fabs(feet.y) < 0.2);
+    GIANT_CHECK(std::fabs(gone - (feet.x + 2.0)) < 0.8 && r.value["trip"]["embodied"] == true);
+    GIANT_CHECK(std::fabs(r.value["at"][0].get<double>() - feet.x) < 0.8); // the person is where its entity walks
+    // Round the corner and to the end: there it stands, the scene's entity where it walked to, no walker.
+    for (int i = 0; i < 80 && f.travel.trip(w.id) != nullptr; ++i) w.frame(0.25);
+    r = f.run("get_travel", {{"id", w.id}});
+    GIANT_CHECK(r.value["trip"].is_null() && r.value["arrived"] == 1);
+    GIANT_CHECK(std::fabs(r.value["at"][0].get<double>() - 12.0) < 0.6 && std::fabs(r.value["at"][2].get<double>() + 486.0) < 0.6);
+    const world::Entity* e = f.state.scene.find(w.entity());
+    GIANT_CHECK(e != nullptr && std::fabs(e->transform.position.x - 12.0) < 0.6 && std::fabs(e->transform.position.z + 486.0) < 0.6);
+    GIANT_CHECK(w.walkers.size() == 0 && w.people.stats().walking == 0 && w.people.stats().made == 1);
+    for (int i = 0; i < 4; ++i) w.frame(0.25);
+    GIANT_CHECK(w.entity() != 0 && w.people.stats().made == 1 && w.people.stats().released == 0); // it stays
+}
+
+GIANT_TEST("travel: one walking is stopped where it stands; left by the camera it goes on by the clock from there") {
+    Walking w;
+    Fixture& f = w.f;
+    GIANT_CHECK(f.run("send_person", {{"id", w.id}, {"to", at(12, 0, -486)}, {"speed", 2.0}}).ok);
+    for (int i = 0; i < 12; ++i) w.frame(0.25);
+    const DVec3 walked = w.feet();
+    GIANT_CHECK(w.walkers.size() == 1 && walked.x > 1.0 && walked.x < 6.0);
+    // Stopped: the walker is let go and the entity stands where it walked to.
+    GIANT_CHECK(f.run("stop_person", {{"id", w.id}}).ok);
+    w.frame(0.25);
+    const world::Entity* e = f.state.scene.find(w.entity());
+    GIANT_CHECK(w.walkers.size() == 0 && e != nullptr && std::fabs(e->transform.position.x - walked.x) < 0.3);
+    GIANT_CHECK(std::fabs(f.where(w.id).x - walked.x) < 0.8 && w.people.stats().made == 1);
+    // Sent on, it walks again; the camera leaves: no entity, no walker, and the trip goes on by the clock.
+    GIANT_CHECK(f.run("send_person", {{"id", w.id}, {"to", at(12, 0, -486)}, {"speed", 2.0}}).ok);
+    for (int i = 0; i < 8; ++i) w.frame(0.25);
+    const double before = f.run("get_travel", {{"id", w.id}}).value["trip"]["gone"].get<double>();
+    GIANT_CHECK(w.walkers.size() == 1 && before > 1.0);
+    w.camera = {6.0, 0.0, 400.0};
+    w.frame(0.0);
+    GIANT_CHECK(w.entity() == 0 && w.walkers.size() == 0 && f.run("get_travel", {{"id", w.id}}).value["trip"]["embodied"] == false);
+    w.frame(1.0);
+    w.frame(0.0);
+    const double after = f.run("get_travel", {{"id", w.id}}).value["trip"]["gone"].get<double>();
+    GIANT_CHECK(std::fabs(after - before - 2.0) < 0.1);
+    // The simulation stops: everyone is back where the scene has them, entities too.
+    w.camera = {6.0, 0.0, -494.0};
+    GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
+    for (int i = 0; i < 3; ++i) w.frame(0.0);
+    e = f.state.scene.find(w.entity());
+    GIANT_CHECK(e != nullptr && e->transform.position == DVec3(-2.0, 0.0, -500.0) && w.walkers.size() == 0);
+}
+
+GIANT_TEST("travel: a long way is walked without slowing where the next stretch is given; sent elsewhere it turns at once") {
+    Walking w;
+    Fixture& f = w.f;
+    // A straight path 120 m east from the first's start (joined to it), and the camera following.
+    GIANT_CHECK(f.run("create_entity", {{"shape", "plane"}, {"position", at(60, 0, -520)}, {"scale", {200.0, 1.0, 20.0}}}).ok);
+    GIANT_CHECK(f.run("create_route", {{"points", {at(0, 0, -500), at(0, 0, -520), at(120, 0, -520)}}}).ok);
+    w.frame(0.0);
+    GIANT_CHECK(f.run("send_person", {{"id", w.id}, {"to", at(120, 0, -520)}, {"speed", 6.0}}).ok);
+    double slowest = 100.0, last_x = 0.0;
+    int renewals = 0;
+    double path_end = 0.0;
+    for (int i = 0; i < 320 && f.travel.trip(w.id) != nullptr; ++i) {
+        w.camera = w.feet();
+        w.frame(0.1);
+        const WalkerState::Walker* walker = w.walkers.find(world::person_entity_id(w.id));
+        const DVec3 feet = w.feet();
+        if (walker != nullptr && feet.x > 10.0 && feet.x < 110.0) { // on the long stretch, clear of its ends
+            slowest = std::min(slowest, static_cast<double>(std::hypot(walker->velocity.x, walker->velocity.z)));
+            const double end = walker->follow.path().empty() ? 0.0 : walker->follow.path().back().x;
+            if (end > path_end + 1.0) ++renewals;
+            path_end = std::max(path_end, end);
+        }
+        last_x = feet.x;
+    }
+    GIANT_CHECK(f.travel.trip(w.id) == nullptr && std::fabs(last_x - 120.0) < 0.6 && f.travel.stats().arrived == 1);
+    GIANT_CHECK(renewals >= 2 && slowest > 5.0); // given its way on at least twice, never slowed for it
+    GIANT_CHECK(w.people.stats().made == 1);
+    // Sent back west, and two seconds on sent east again past where it was going: it turns at once.
+    GIANT_CHECK(f.run("send_person", {{"id", w.id}, {"to", at(60, 0, -520)}, {"speed", 6.0}}).ok);
+    for (int i = 0; i < 20; ++i) {
+        w.camera = w.feet();
+        w.frame(0.1);
+    }
+    const double west = w.feet().x;
+    GIANT_CHECK(west < 112.0 && west > 100.0 && w.walkers.size() == 1);
+    GIANT_CHECK(f.run("send_person", {{"id", w.id}, {"to", at(119, 0, -520)}, {"speed", 6.0}}).ok);
+    for (int i = 0; i < 12; ++i) {
+        w.camera = w.feet();
+        w.frame(0.1);
+        GIANT_CHECK(f.travel.trip(w.id) == nullptr || w.feet().x > west - 1.5); // never on west along the old path
+    }
+    for (int i = 0; i < 60 && f.travel.trip(w.id) != nullptr; ++i) w.frame(0.1);
+    GIANT_CHECK(f.travel.trip(w.id) == nullptr && std::fabs(w.feet().x - 119.0) < 0.6 && f.travel.stats().arrived == 2);
+}
+
+GIANT_TEST("travel: a way that turns back on itself by a short link is walked through, not stuck at the turn") {
+    Walking w;
+    Fixture& f = w.f;
+    // West 20 m, a 0.4 m link north, then back east 20 m: the turn's corners are nearer than a walker turns at.
+    GIANT_CHECK(f.run("create_route", {{"points", {at(-4, 0, -480), at(-24, 0, -480), at(-24, 0, -479.6), at(-4, 0, -479.6)}}, {"join", 0}}).ok);
+    const world::PersonId id = f.person(-4, -480); // on the path's start: the way round is the way
+    w.camera = {-14.0, 0.0, -480.0};
+    w.frame(0.0);
+    w.frame(0.0);
+    GIANT_CHECK(w.people.entity_of(f.state.scene, id) != 0);
+    GIANT_CHECK(f.run("send_person", {{"id", id}, {"to", at(-4, 0, -479.6)}, {"speed", 4.0}, {"within", 5.0}}).ok);
+    for (int i = 0; i < 6; ++i) w.frame(0.05);
+    const PeopleTravel::Trip* trip = f.travel.trip(id);
+    GIANT_CHECK(trip != nullptr && trip->points.size() >= 4 && PeopleTravel::length(*trip) > 40.0); // by the way round, not across
+    double walked = 0.0;
+    DVec3 last = w.walkers.feet_of(f.state.scene, world::person_entity_id(id)).value_or(DVec3{});
+    for (int i = 0; i < 300 && f.travel.trip(id) != nullptr; ++i) {
+        w.frame(0.1);
+        const DVec3 feet = w.walkers.feet_of(f.state.scene, world::person_entity_id(id)).value_or(last);
+        walked += std::hypot(feet.x - last.x, feet.z - last.z);
+        last = feet;
+    }
+    GIANT_CHECK(f.travel.trip(id) == nullptr && f.travel.stats().arrived == 1 && std::fabs(last.x + 4.0) < 0.6);
+    GIANT_CHECK(walked < 48.0); // once round (about 42 m), not to and fro
+}
+
+GIANT_TEST("travel: many sent at once all walk; a walker taken away is given again later; another run begins afresh") {
+    Walking w;
+    Fixture& f = w.f;
+    Json batch = Json::array();
+    for (int i = 0; i < 24; ++i) batch.push_back({{"look", "villager"}, {"position", at(-2, 0, -510.0 + i * 0.9)}});
+    const ai::CommandResult made = f.run("create_people", {{"people", batch}});
+    GIANT_CHECK(made.ok && f.run("set_people_settings", {{"made_a_frame", 32}}).ok);
+    for (int i = 0; i < 3; ++i) w.frame(0.0);
+    GIANT_CHECK(w.people.stats().embodied == 25);
+    for (const Json& id : made.value["ids"]) {
+        GIANT_CHECK(f.run("send_person", {{"id", id}, {"to", at(12, 0, -486)}, {"speed", 0.5}}).ok);
+    }
+    for (int i = 0; i < 6; ++i) w.frame(0.0); // the ways found (a few a frame), no time passing
+    w.frame(0.0);
+    GIANT_CHECK(w.people.stats().walking >= 16 && w.walkers.size() >= 16); // sixteen begun a frame
+    w.frame(0.05);
+    w.frame(0.05);
+    GIANT_CHECK(w.people.stats().walking == 24 && w.walkers.size() == 24);
+    // Every walker is let go by command: they stand two seconds, then walk on, sixteen begun a frame.
+    const world::PersonId one = made.value["ids"][0].get<world::PersonId>();
+    for (const Json& id : made.value["ids"]) GIANT_CHECK(w.walkers.stop(world::person_entity_id(id.get<world::PersonId>())));
+    w.frame(0.1);
+    w.frame(0.1);
+    GIANT_CHECK(w.walkers.size() == 0 && w.people.stats().walking == 0);
+    for (int i = 0; i < 30 && w.walkers.size() == 0; ++i) w.frame(0.1);
+    GIANT_CHECK(w.walkers.size() == 16 && w.people.stats().walking == 16 && w.travel_seconds() > 1.9);
+    w.frame(0.1);
+    GIANT_CHECK(w.walkers.find(world::person_entity_id(one)) != nullptr && w.people.stats().walking == 24);
+    // One hidden has its walker taken and is given none while it is; shown again it walks on.
+    const world::EntityId hidden = world::person_entity_id(one);
+    f.state.scene.modify(hidden)->visible = false;
+    for (int i = 0; i < 40; ++i) w.frame(0.1);
+    GIANT_CHECK(w.walkers.find(hidden) == nullptr && w.people.stats().walking == 23 && w.people.entity_of(f.state.scene, one) != 0);
+    f.state.scene.modify(hidden)->visible = true;
+    for (int i = 0; i < 25; ++i) w.frame(0.1);
+    GIANT_CHECK(w.walkers.find(hidden) != nullptr && w.people.stats().walking == 24);
+    // Someone new is sent and its walk begun, but no time passes: it has not moved.
+    const world::PersonId still = f.person(-6, -500);
+    for (int i = 0; i < 3; ++i) w.frame(0.0);
+    GIANT_CHECK(f.run("send_person", {{"id", still}, {"to", at(12, 0, -486)}}).ok);
+    for (int i = 0; i < 3; ++i) w.frame(0.0);
+    GIANT_CHECK(w.walkers.find(world::person_entity_id(still)) != nullptr);
+    const auto made_before = w.people.stats().made;
+    // The simulation stopped and started: those who walked are made again where the scene has them;
+    // the one who never moved keeps its entity, and walks at once when sent (nothing of the old run is kept).
+    GIANT_CHECK(f.run("simulate", {{"on", false}}).ok);
+    for (int i = 0; i < 20; ++i) w.frame(0.0);
+    GIANT_CHECK(w.walkers.size() == 0 && w.people.stats().embodied == 26 && w.people.stats().walking == 0);
+    GIANT_CHECK(w.people.stats().made == made_before + 24);
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    w.frame(0.0);
+    GIANT_CHECK(f.run("send_person", {{"id", still}, {"to", at(12, 0, -486)}}).ok);
+    for (int i = 0; i < 4; ++i) w.frame(0.05);
+    GIANT_CHECK(w.walkers.find(world::person_entity_id(still)) != nullptr && w.people.stats().walking == 1);
+    GIANT_CHECK(w.people.stats().made == made_before + 24);
+}
+
+
+GIANT_TEST("travel: one standing in the road is walked round, not stopped behind; a crowded end is arrived at beside it") {
+    Walking w;
+    Fixture& f = w.f;
+    // Someone standing in the middle of the first stretch, and someone on the very end (walkers, arrived where they stand).
+    const auto stander = [&](double x, double z) {
+        const ai::CommandResult r = f.run("create_entity", {{"shape", "cube"}, {"position", at(x, 0.9, z)}, {"scale", {0.5, 1.8, 0.5}}, {"body", "none"}});
+        GIANT_CHECK(r.ok);
+        const world::EntityId e = r.value["id"].get<world::EntityId>();
+        const std::vector<DVec3> here{{x, 0.0, z}};
+        GIANT_CHECK(w.walkers.walk_to(f.state.scene, e, here.back(), 1.4f, &here).empty());
+        return e;
+    };
+    const world::EntityId in_road = stander(5.0, -500.0);
+    const world::EntityId on_end = stander(12.0, -486.0);
+    w.frame(0.1);
+    GIANT_CHECK(w.walkers.find(in_road)->phase == WalkerState::Phase::arrived && w.walkers.find(on_end)->phase == WalkerState::Phase::arrived);
+    GIANT_CHECK(f.run("send_person", {{"id", w.id}, {"to", at(12, 0, -486)}, {"speed", 3.0}}).ok);
+    double least = 100.0;
+    for (int i = 0; i < 400 && f.travel.trip(w.id) != nullptr; ++i) {
+        w.frame(0.05);
+        least = std::min(least, std::hypot(w.feet().x - 5.0, w.feet().z + 500.0));
+    }
+    // There (in well under the time the wait for one stopped short would add), beside the one on the end, having passed the other.
+    GIANT_CHECK(f.travel.trip(w.id) == nullptr && f.travel.stats().arrived == 1);
+    const DVec3 feet = w.feet();
+    const double from_end = std::hypot(feet.x - 12.0, feet.z + 486.0);
+    GIANT_CHECK(from_end < 2.0 && from_end > 0.4 && least > 0.4 && least < 2.5);
+    GIANT_CHECK(std::fabs(f.where(w.id).x - feet.x) < 0.1 && std::fabs(f.where(w.id).z - feet.z) < 0.1);
+}

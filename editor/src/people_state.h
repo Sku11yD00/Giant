@@ -25,6 +25,8 @@
 
 namespace giant::editor {
 
+class RagdollState;
+class WalkerState;
 class WorldStreaming;
 
 class PeopleState {
@@ -41,13 +43,30 @@ public:
     Settings settings;
     // Where the people are while the world runs (people_travel.h); set by
     // main (and tests). Null: where the scene has them. One given an
-    // entity is held there (it stands) until the entity goes.
+    // entity is held (its trip goes on as the entity walks) until the entity goes.
     PeopleTravel* travel = nullptr;
+    // The walkers (walker_state.h); set by main (and tests). With them, one
+    // on a trip who has an entity walks its way over the ground (the trip
+    // goes on as far as it has walked); null: it stands.
+    WalkerState* walkers = nullptr;
+    // Characters gone limp (ragdoll_state.h); set by main. One lying is given no walker until it is up.
+    RagdollState* ragdolls = nullptr;
+    static constexpr double k_walk_reach = 3.0;     // metres on along its way one's walking counts a frame
+    static constexpr double k_walk_end = 3.0;        // metres from its way's end one stopped by those standing there has arrived
+    static constexpr double k_walk_wait = 2.0;       // seconds one whose walker was taken or stopped short waits
+    static constexpr double k_walk_stuck_wait = 5.0; // and one whose walker failed
+    static constexpr usize k_walkers_kept_back = 64; // of the walkers there can be: for walk_to and those getting up
+    static constexpr double k_walk_ahead = 40.0;    // metres of its way a walker is given at a time
+    static constexpr double k_walk_renew = 6.0;     // metres from that stretch's end the next is given
+    static constexpr double k_walk_arrive = 0.3;    // metres from its trip's end one is there
+    static constexpr double k_walk_astray = 20.0;   // metres from its way one's walking no longer counts
+    static constexpr u32 k_walks_begun_a_frame = 16;
 
     struct Stats {
         u32 embodied = 0;   // entities held now
         u64 made = 0;       // since the scene was taken up
         u64 released = 0;
+        u32 walking = 0;    // of those held: walking their trips' ways now
         u32 waiting = 0;    // near enough last time through the list, not made: `most` reached
     };
 
@@ -75,8 +94,17 @@ private:
     u64 m_scene = 0; // the scene's identity
     struct Held {
         world::Person was;       // as it was when the entity was made
-        PeopleTravel::Where at;  // where that was
+        PeopleTravel::Where at;  // where the person is (as last looked)
+        u64 resets = 0;          // the travel's, then
+        u64 trip = 0;            // the trip (its serial) the walker's path is of
+        bool moved = false;      // its entity was put where it walked to (not where the person was made)
+        bool walking = false;    // a walker walks it along its trip's way
+        bool waited = false;     // its walker failed, and the wait before the next try was begun
+        double path_end = 0.0;   // metres along the trip its walker's path goes to
+        double retry_at = 0.0;   // the travel's clock before which no walk is begun again
     };
+    void walk(world::Scene& scene);
+    PeopleTravel::Where stand(world::Scene& scene, Held& held, world::EntityId entity);
     PeopleTravel::Where where(const world::Person& person) const {
         return travel != nullptr ? travel->where(person) : PeopleTravel::Where{person.position, person.yaw};
     }
@@ -88,6 +116,7 @@ private:
     u32 m_waiting_now = 0;   // counted this time through the list
     std::vector<world::PersonId> m_scratch;
     std::vector<world::EntityId> m_entities; // scratch: entities to take from the scene
+    std::vector<DVec3> m_path;               // scratch: a walker's path
     Stats m_stats;
 };
 

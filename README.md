@@ -380,6 +380,9 @@ Open-world systems:
 - LW2 part 2: people sent somewhere travel there along the roads by the
   simulation's clock, thousands at once at no cost a frame, their ways
   found a budget a frame.
+- LW2 part 3: those near the camera walk their way over the ground as
+  characters, and go on by the clock from where they walked to once out
+  of sight.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

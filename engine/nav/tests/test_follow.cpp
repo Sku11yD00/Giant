@@ -4,6 +4,7 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <cmath>
 
 using namespace giant;
@@ -127,4 +128,32 @@ GIANT_TEST("follow: one walking past the end holds nothing up; one standing besi
         at = at + DVec3{x.velocity.x, 0.0, x.velocity.z} * (1.0 / 60.0);
     }
     GIANT_CHECK(arrived && std::hypot(at.x - 10.0, at.z) < 0.6);
+}
+
+GIANT_TEST("follow: one standing in the way ends a walk only within `pack` of the end; farther off it is stepped round") {
+    FollowSettings s;
+    PathFollower f;
+    f.set_path({{0, 0, 0}, {40, 0, 0}});
+    const Neighbour standing{{1.2, 0.0, 0.3}, {}, s.radius};
+    // As it was (anywhere on the last stretch): there.
+    GIANT_CHECK(f.steer({0, 0, 0}, {&standing, 1}, s).arrived);
+    // A stretch of a longer way: never; it steps round and walks on to the end.
+    s.pack = 0.0f;
+    DVec3 at{0, 0, 0};
+    bool arrived = false;
+    double nearest = 100.0;
+    for (int k = 0; k < 6000 && !arrived; ++k) {
+        const Steering x = f.steer(at, {&standing, 1}, s);
+        arrived = x.arrived;
+        at = at + DVec3{x.velocity.x, 0.0, x.velocity.z} * (1.0 / 60.0);
+        nearest = std::min(nearest, std::hypot(at.x - standing.position.x, at.z - standing.position.z));
+    }
+    GIANT_CHECK(arrived && std::hypot(at.x - 40.0, at.z) < 0.3 && nearest > 0.3);
+    // Within 3 m of the end only: not 30 m from it, but beside one standing at the end.
+    s.pack = 3.0f;
+    f.set_path({{0, 0, 0}, {40, 0, 0}});
+    GIANT_CHECK(!f.steer({0, 0, 0}, {&standing, 1}, s).arrived);
+    const Neighbour at_end{{39.6, 0.0, 0.0}, {}, s.radius};
+    GIANT_CHECK(!f.steer({30, 0, 0}, {&at_end, 1}, s).arrived);
+    GIANT_CHECK(f.steer({38.7, 0, 0}, {&at_end, 1}, s).arrived);
 }

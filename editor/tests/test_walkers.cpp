@@ -10,7 +10,9 @@
 
 #include "giant/world/scene.h"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 using namespace giant;
 using namespace giant::editor;
@@ -132,4 +134,32 @@ GIANT_TEST("walkers: two crossing keep apart and both arrive; stopping the simul
     f.walkers.before_step(f.state.scene, 1.0 / 60.0);
     GIANT_CHECK(f.walkers.size() == 0 && f.walkers.poses().empty());
     GIANT_CHECK(f.physics.world().stats().characters == 0);
+}
+
+GIANT_TEST("walkers: one walked into a wall is stuck and looks for its way again; a path turning back on itself is walked, not stuck") {
+    Fixture f;
+    f.create({{"shape", "plane"}, {"position", {32.0, 0.0, 32.0}}, {"scale", {40.0, 1.0, 40.0}}});
+    f.create({{"shape", "cube"}, {"position", {32.0, 1.5, 32.0}}, {"scale", {0.5, 3.0, 12.0}}});
+    const world::EntityId a = f.person(24.0, 32.0);
+    const world::EntityId b = f.person(24.0, 20.0);
+    GIANT_CHECK(f.run("simulate", {{"on", true}}).ok);
+    // a: a path given straight through the wall. b: 8 m out, a 0.4 m step aside, 8 m back.
+    const std::vector<DVec3> through{{24.0, 0.0, 32.0}, {40.0, 0.0, 32.0}};
+    const std::vector<DVec3> back{{24.0, 0.0, 20.0}, {32.0, 0.0, 20.0}, {32.0, 0.0, 20.4}, {24.0, 0.0, 20.4}};
+    GIANT_CHECK(f.walkers.walk_to(f.state.scene, a, through.back(), 1.4f, &through).empty());
+    GIANT_CHECK(f.walkers.walk_to(f.state.scene, b, back.back(), 1.4f, &back).empty());
+    const auto step = [&] { // (the way one stuck looks for is found over frames)
+        GIANT_CHECK(f.run("step_physics", {{"seconds", 0.5}}).ok);
+        f.nav.update(f.state.scene);
+    };
+    for (int k = 0; k < 20; ++k) step(); // 10 s: a met the wall and was stuck once, b is round its turn
+    const WalkerState::Walker* wa = f.walkers.find(a);
+    GIANT_CHECK(wa != nullptr && wa->searches == 2);
+    const WalkerState::Walker* wb = f.walkers.find(b);
+    GIANT_CHECK(wb != nullptr && wb->searches == 1 && wb->phase == WalkerState::Phase::walking);
+    for (int k = 0; k < 40 && f.walkers.find(b)->phase != WalkerState::Phase::arrived; ++k) step();
+    // b walked its whole way and never looked for another.
+    wb = f.walkers.find(b);
+    GIANT_CHECK(wb->phase == WalkerState::Phase::arrived && wb->searches == 1);
+    GIANT_CHECK(std::hypot(wb->feet.x - 24.0, wb->feet.z - 20.4) < 0.5);
 }

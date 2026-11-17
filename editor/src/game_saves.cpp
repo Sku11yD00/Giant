@@ -343,6 +343,7 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
                 const world::Entity* e = state.scene.find(id);
                 const std::optional<sim::CharacterState> c = state.physics->world().character_state(w.character);
                 if (e == nullptr || !c) continue; // (gone: let go, or its character made again, on the next step)
+                if (e->person != 0) continue; // (a person's entity walking its trip: neither is the save's)
                 SavedWalker saved;
                 saved.entity = id;
                 saved.resume = {c->position, w.yaw, c->velocity, w.target, w.settings.speed, w.phase, w.reason};
@@ -423,6 +424,7 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
                 const world::Entity* e = state.scene.find(id);
                 std::optional<RagdollState::Resume> r = state.ragdolls->lies(state.scene, id);
                 if (e == nullptr || !r) continue; // (gone: let go on the next step)
+                if (e->person != 0) continue; // (a person's entity struck down: made again standing, not the save's)
                 SavedRagdoll saved;
                 saved.entity = id;
                 saved.resume = std::move(*r);
@@ -964,7 +966,8 @@ void GameSaves::place_ragdolls(EditorState& state) {
             continue;
         }
         // Moved or scaled in the world since, hidden, or walking or limp since: not this save's.
-        if (state.ragdolls->find(g.entity) != nullptr || (state.walkers != nullptr && state.walkers->find(g.entity) != nullptr) ||
+        if (e->person != 0 || state.ragdolls->find(g.entity) != nullptr ||
+            (state.walkers != nullptr && state.walkers->find(g.entity) != nullptr) ||
             !(e->transform.position == g.of_position) || !(e->transform.rotation == g.of_rotation) ||
             !(e->transform.scale == g.of_scale) || !e->visible) {
             ++m_status.ragdolls_skipped;
@@ -1035,7 +1038,9 @@ void GameSaves::place_walkers(EditorState& state) {
             continue;
         }
         // Moved in the world since, given a body, hidden, or sent walking since: not this save's.
-        if (state.walkers->find(w.entity) != nullptr || !(e->transform.position == w.of_position) || !(e->transform.rotation == w.of_rotation) ||
+        // (Nor a person's entity, which an older save may name: it walks its trip.)
+        if (e->person != 0 || state.walkers->find(w.entity) != nullptr || !(e->transform.position == w.of_position) ||
+            !(e->transform.rotation == w.of_rotation) ||
             e->body != world::BodyKind::none || !e->visible) {
             ++m_status.walkers_skipped;
             it = m_walkers_waiting.erase(it);

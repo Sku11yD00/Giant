@@ -683,6 +683,14 @@ GIANT_TEST("game saves: walkers walk on from where the save had them; one arrive
         const world::EntityId b = person(16.0, 36.0); // arrives near
         const world::EntityId c = person(16.0, 40.0); // moved in the world after the save
         GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
+        // One standing for a person (people_state.h) walks its trip: its walker is not the save's.
+        world::Entity standing;
+        standing.shape = world::Shape::cube;
+        standing.body = world::BodyKind::none;
+        standing.person = 7;
+        standing.transform.position = {16.0, 0.9, 44.0};
+        standing.transform.scale = {0.5f, 1.8f, 0.5f};
+        const world::EntityId d = scene.add(standing);
         const auto frame = [&] { // as the editor's frame has them
             walkers.before_step(scene, 1.0 / 60.0);
             physics.update(scene, scene.take_changes(), 1.0 / 60.0);
@@ -696,13 +704,14 @@ GIANT_TEST("game saves: walkers walk on from where the save had them; one arrive
         GIANT_CHECK(run("walk_to", {{"id", a}, {"to", {48.0, 0.0, 30.0}}}).ok);
         GIANT_CHECK(run("walk_to", {{"id", b}, {"to", {18.0, 0.0, 36.0}}}).ok);
         GIANT_CHECK(run("walk_to", {{"id", c}, {"to", {30.0, 0.0, 40.0}}}).ok);
+        GIANT_CHECK(run("walk_to", {{"id", d}, {"to", {30.0, 0.0, 44.0}}}).ok);
         for (int i = 0; i < 180; ++i) frame(); // 3 s: a about 4 m on, b there
         GIANT_CHECK(walkers.find(b)->phase == WalkerState::Phase::arrived);
         GIANT_CHECK(walkers.find(a)->phase == WalkerState::Phase::walking);
         const DVec3 a_at = feet(a), b_at = feet(b);
         GIANT_CHECK(a_at.x > 18.0 && a_at.x < 40.0);
         ai::CommandResult r = run("save_game", {{"slot", "walk"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["walkers"] == 3);
+        GIANT_CHECK(walkers.size() == 4 && r.ok && r.value["walkers"] == 3); // (not the person's)
         // Stopped (all let go), c moved in the world, then loaded.
         GIANT_CHECK(run("simulate", {{"on", false}}).ok);
         frame();

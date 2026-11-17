@@ -73,8 +73,10 @@ std::optional<DVec3> WalkerState::feet_of(const world::Scene& scene, world::Enti
 }
 
 std::string WalkerState::walk_to(const world::Scene& scene, world::EntityId id, const DVec3& to, float speed,
-                                 const std::vector<DVec3>* path) {
-    return start(scene, id, to, speed, path, nullptr);
+                                 const std::vector<DVec3>* path, float pack) {
+    std::string why = start(scene, id, to, speed, path, nullptr);
+    if (why.empty()) m_walkers.at(id).settings.pack = pack;
+    return why;
 }
 
 std::string WalkerState::resume(const world::Scene& scene, world::EntityId id, const Resume& r) {
@@ -136,12 +138,14 @@ std::string WalkerState::start(const world::Scene& scene, world::EntityId id, co
     if (const auto s = m_physics.world().character_state(w.character)) w.feet = s->position;
     w.target = to;
     w.settings.speed = speed;
+    w.settings.pack = nav::FollowSettings{}.pack;
     w.follow.clear();
     w.phase = Phase::searching;
     w.reason.clear();
     w.searches = 1;
     w.stuck_for = 0.0;
     w.expected = 0.0;
+    w.left_from = 0.0;
     w.near_end_for = 0.0;
     w.stuck_from = w.feet;
     w.search = 0;
@@ -156,6 +160,7 @@ std::string WalkerState::start(const world::Scene& scene, world::EntityId id, co
     }
     if (path != nullptr && !path->empty()) {
         w.follow.set_path(*path);
+        w.left_from = w.follow.remaining(w.feet);
         w.phase = Phase::walking;
     } else {
         w.search = m_nav.find_path(w.feet, to);
@@ -239,6 +244,7 @@ void WalkerState::before_step(const world::Scene& scene, double seconds) {
                 w.phase = Phase::walking;
                 w.stuck_for = 0.0;
                 w.expected = 0.0;
+                w.left_from = w.follow.remaining(w.feet);
                 w.stuck_from = w.feet;
                 m_nav.cancel(w.search);
                 w.search = 0;
@@ -277,13 +283,18 @@ void WalkerState::before_step(const world::Scene& scene, double seconds) {
             } else {
                 velocity = st.velocity;
                 // Stuck (a door shut, a crowd): the way looked for again.
+                // (By how much less of its path is left, not how far it is from
+                // where it was: a way that turns back on itself is walked, not
+                // stuck, and one shuffling on the spot is.)
                 w.stuck_for += simulated;
                 w.expected += static_cast<double>(std::hypot(velocity.x, velocity.z)) * simulated;
                 if (w.stuck_for >= k_stuck_seconds) {
-                    const double moved = std::hypot(w.feet.x - w.stuck_from.x, w.feet.z - w.stuck_from.z);
+                    const double left = w.follow.remaining(w.feet);
+                    const double moved = w.left_from - left;
                     const double expected = w.expected;
                     w.stuck_for = 0.0;
                     w.expected = 0.0;
+                    w.left_from = left;
                     w.stuck_from = w.feet;
                     if (expected > 0.1 && moved < k_stuck_share * expected) {
                         if (w.searches >= k_max_searches) {

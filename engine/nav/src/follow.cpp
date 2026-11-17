@@ -34,6 +34,7 @@ Steering PathFollower::steer(const DVec3& at, std::span<const Neighbour> near, c
     const float arrive = clean(settings.arrive, 0.01f, 10.0f, d.arrive);
     const float slow = clean(settings.slow, 0.0f, 50.0f, d.slow);
     const float avoid = clean(settings.avoid, 0.0f, 20.0f, d.avoid);
+    const float pack = std::isfinite(settings.pack) ? std::max(settings.pack, 0.0f) : d.pack;
     Steering out;
     if (m_path.empty() || !std::isfinite(at.x) || !std::isfinite(at.z)) {
         out.arrived = m_path.empty();
@@ -61,8 +62,10 @@ Steering PathFollower::steer(const DVec3& at, std::span<const Neighbour> near, c
     }
     // Another standing still nearer the end, touching this one (as near as
     // its push lets it come): as near as it can come. (A crowd sent to one
-    // spot packs round it; one walking past holds nothing up.)
-    if (last) {
+    // spot packs round it; one walking past holds nothing up.) Only within
+    // `pack` of the end: a path that is a stretch of a longer way is not
+    // ended by one standing in it.
+    if (last && to_end <= static_cast<double>(pack)) {
         for (const Neighbour& n : near) {
             if (!std::isfinite(n.position.x) || !std::isfinite(n.position.z) || length(n.velocity) > 0.1f) continue;
             const float touching = radius + clean(n.radius, 0.0f, 5.0f, d.radius);

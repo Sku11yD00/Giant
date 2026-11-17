@@ -1,13 +1,17 @@
 #include "people_state.h"
 
+#include "ragdoll_state.h"
+#include "walker_state.h"
 #include "world_streaming.h"
 
 #include "giant/world/cell.h"
 #include "giant/world/people.h"
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace giant::editor {
@@ -50,6 +54,7 @@ world::EntityId PeopleState::entity_of(const world::Scene& scene, world::PersonI
 void PeopleState::release(world::PersonId id) {
     if (m_held.erase(id) == 0) return;
     if (travel != nullptr) travel->hold(id, false);
+    if (walkers != nullptr) walkers->stop(world::person_entity_id(id)); // (else it would walk on as the next entity of that id)
     m_entities.push_back(world::person_entity_id(id));
     ++m_stats.released;
 }
@@ -69,8 +74,12 @@ void PeopleState::release_all(world::Scene& scene) {
     if (travel != nullptr) {
         for (const auto& [id, held] : m_held) travel->hold(id, false);
     }
+    if (walkers != nullptr) {
+        for (const auto& [id, held] : m_held) walkers->stop(world::person_entity_id(id));
+    }
     m_held.clear();
     m_stats.embodied = 0;
+    m_stats.walking = 0;
 }
 
 // Another scene (a new one, one loaded, one an undo brought back): nothing
@@ -113,6 +122,159 @@ void PeopleState::strays(world::Scene& scene) {
     flush(scene);
 }
 
+namespace {
+
+double flat_distance(const DVec3& a, const DVec3& b) { return std::hypot(a.x - b.x, a.z - b.z); }
+
+// How far along its trip's way one at `feet` is: the nearest point of the
+// stretches that begin within k_walk_reach of where it had got to (the one
+// it is on, and those a corner cut or a short link has it on already),
+// never behind `gone`, and no more than k_walk_reach on at a time (a way
+// that passes near itself is not jumped along). One far off its way has
+// got no farther.
+double along_way(const PeopleTravel::Trip& trip, double gone, const DVec3& feet) {
+    const std::vector<DVec3>& points = trip.points;
+    const std::vector<double>& along = trip.along;
+    if (points.size() < 2) return gone;
+    usize k = static_cast<usize>(std::upper_bound(along.begin(), along.end(), gone) - along.begin());
+    k = std::clamp<usize>(k, 1, points.size() - 1);
+    const double reach = gone + PeopleState::k_walk_reach;
+    double best = gone, nearest = PeopleState::k_walk_astray;
+    for (usize j = k; j < points.size() && along[j - 1] <= reach; ++j) {
+        const DVec3& a = points[j - 1];
+        const DVec3& b = points[j];
+        const double dx = b.x - a.x, dz = b.z - a.z;
+        const double square = dx * dx + dz * dz;
+        const double t = square > 0.0 ? std::clamp(((feet.x - a.x) * dx + (feet.z - a.z) * dz) / square, 0.0, 1.0) : 1.0;
+        const double off = std::hypot(feet.x - (a.x + dx * t), feet.z - (a.z + dz * t));
+        if (off < nearest) {
+            nearest = off;
+            best = along[j - 1] + t * (along[j] - along[j - 1]);
+        }
+    }
+    return std::clamp(best, gone, reach);
+}
+
+} // namespace
+
+// One who was walking stands where it has got to: the scene's entity is
+// put there (it was drawn there by its walker), and the walker let go.
+PeopleTravel::Where PeopleState::stand(world::Scene& scene, Held& held, world::EntityId entity) {
+    PeopleTravel::Where there = held.at;
+    const WalkerState::Walker* walker = walkers != nullptr ? walkers->find(entity) : nullptr;
+    if (walker != nullptr) {
+        WalkerState::Walker now = *walker; // (its feet as the physics has them now, not as last steered)
+        if (const std::optional<DVec3> feet = walkers->feet_of(scene, entity)) now.feet = *feet;
+        if (world::Entity* e = scene.modify(entity)) e->transform = WalkerState::stands(now);
+        there.position = now.feet;
+        there.yaw = radians_to_degrees(now.yaw);
+        walkers->stop(entity);
+        held.moved = true;
+    }
+    held.walking = false;
+    held.waited = false;
+    held.path_end = 0.0;
+    return there;
+}
+
+// Those held who are on a trip walk its way: each as a walker given the
+// next stretch of the way ahead (straight between the way's points: the
+// physics keeps it on the ground and out of walls, walkers step round each
+// other), the trip told how far it has got.
+void PeopleState::walk(world::Scene& scene) {
+    m_stats.walking = 0;
+    if (travel == nullptr || walkers == nullptr || !travel->running()) return;
+    const double now = travel->seconds();
+    u32 begun = 0;
+    for (auto& [id, held] : m_held) {
+        const world::EntityId entity = world::person_entity_id(id);
+        const PeopleTravel::Trip* trip = travel->trip(id);
+        if (trip == nullptr || trip->phase != PeopleTravel::Phase::travelling) {
+            if (held.walking) stand(scene, held, entity); // (stopped on its way)
+            continue;
+        }
+        const WalkerState::Walker* walker = walkers->find(entity);
+        if (held.walking && walker == nullptr) {
+            // Its walker was taken (struck down, hidden, let go by command): it waits before it is given another.
+            held.walking = false;
+            held.path_end = 0.0;
+            held.retry_at = now + k_walk_wait;
+        }
+        const bool fresh = held.trip != trip->serial;
+        if (fresh) { // (sent elsewhere: the path it has, and any wait it was in, are the old trip's)
+            held.path_end = 0.0;
+            held.waited = false;
+            if (walker != nullptr) held.retry_at = 0.0;
+        }
+        held.trip = trip->serial;
+        const std::optional<DVec3> feet = walkers->feet_of(scene, entity);
+        if (!feet) continue;
+        const double length = PeopleTravel::length(*trip);
+        double gone = travel->gone(*trip);
+        if (held.walking) {
+            gone = along_way(*trip, gone, *feet);
+            travel->walked(id, gone);
+        }
+        // There: at its way's end, or stopped by its follower on the way's
+        // last stretch (as near the end as it comes: others stand there).
+        const bool stopped = held.walking && !fresh && walker->phase == WalkerState::Phase::arrived;
+        const double to_end = flat_distance(*feet, trip->points.back());
+        if ((length - gone <= k_walk_arrive && to_end <= k_walk_end) ||
+            (stopped && held.path_end >= length && to_end <= 2.0 * k_walk_end)) {
+            const bool walked = held.walking;
+            const PeopleTravel::Where there = stand(scene, held, entity);
+            travel->arrive(id, walked ? there : PeopleTravel::at(*trip, length));
+            continue;
+        }
+        const bool failed = held.walking && !fresh && walker->phase == WalkerState::Phase::failed;
+        if (held.walking && !failed && !stopped && held.path_end > 0.0 &&
+            (held.path_end >= length || held.path_end - gone >= k_walk_renew)) {
+            ++m_stats.walking;
+            continue; // (walking, with way enough ahead)
+        }
+        if (failed && !held.waited) { // (stuck: it waits a while before it tries again)
+            held.waited = true;
+            held.retry_at = now + k_walk_stuck_wait;
+        } else if (stopped && !held.waited) { // (stopped short of its way's end, or far from it: likewise, sooner)
+            held.waited = true;
+            held.retry_at = now + k_walk_wait;
+        }
+        if (now < held.retry_at || begun >= k_walks_begun_a_frame) continue;
+        // Not one hidden or lying struck down (its walker would be taken again at once), and not
+        // the last walkers there are (kept for walk_to and for those getting up).
+        const world::Entity* e = scene.find(entity);
+        const bool lying = ragdolls != nullptr && ragdolls->find(entity) != nullptr;
+        if (e == nullptr || !e->visible || lying ||
+            (walker == nullptr && walkers->size() + k_walkers_kept_back >= WalkerState::k_max_walkers)) {
+            held.retry_at = now + k_walk_wait;
+            continue;
+        }
+        // The next stretch: from its feet through the way's points to k_walk_ahead on.
+        const double end = std::min(length, gone + k_walk_ahead);
+        m_path.clear();
+        m_path.push_back(*feet);
+        const std::vector<double>& along = trip->along;
+        for (usize j = static_cast<usize>(std::upper_bound(along.begin(), along.end(), gone + 0.5) - along.begin());
+             j < along.size() && along[j] < end - 0.5; ++j) {
+            m_path.push_back(trip->points[j]);
+        }
+        m_path.push_back(PeopleTravel::at(*trip, end).position);
+        ++begun;
+        const float speed = static_cast<float>(std::min(trip->speed, 20.0));
+        // (One standing in a stretch that is not the way's last is walked round, not stopped at.)
+        const float pack = end >= length ? static_cast<float>(k_walk_end) : 0.0f;
+        if (!walkers->walk_to(scene, entity, m_path.back(), speed, &m_path, pack).empty()) {
+            held.walking = false;
+            held.retry_at = now + k_walk_wait; // (no character for it: it stands meanwhile)
+            continue;
+        }
+        held.walking = true;
+        held.waited = false;
+        held.path_end = end;
+        ++m_stats.walking;
+    }
+}
+
 void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldStreaming* world) {
     if (scene.identity() != m_scene) take_up(scene);
     strays(scene);
@@ -150,13 +312,30 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     }
 
     // Those held: gone (the entity deleted, the person removed or changed,
-    // or no longer where the entity stands: the simulation stopped and put
-    // it back; the way it faces is the entity's own while it stands), too far, or in a cell whose file left the scene.
+    // or put back somewhere else: the simulation stopped), too far, or in a
+    // cell whose file left the scene. Where each is is followed (one
+    // walking its trip moves).
     m_scratch.clear();
-    for (const auto& [id, held] : m_held) {
+    const u64 resets = travel != nullptr ? travel->resets() : 0;
+    for (auto& [id, held] : m_held) {
         const world::Person* person = world::find_person(scene.people, id);
-        const bool there = scene.find(world::person_entity_id(id)) != nullptr && person != nullptr &&
-                           *person == held.was && where(*person).position == held.at.position;
+        bool there = scene.find(world::person_entity_id(id)) != nullptr && person != nullptr && *person == held.was;
+        if (there) {
+            const PeopleTravel::Where now = where(*person);
+            if (resets != held.resets && (held.moved || now.position != held.at.position)) {
+                there = false; // (everyone was put back, and this one or its entity was elsewhere)
+            } else {
+                if (resets != held.resets) { // (another run: its clock begins again, nothing of the last holds)
+                    if (held.walking && walkers != nullptr) walkers->stop(world::person_entity_id(id)); // (begun, never stepped)
+                    held.walking = false;
+                    held.waited = false;
+                    held.path_end = 0.0;
+                    held.retry_at = 0.0;
+                }
+                held.at.position = now.position;
+                held.resets = resets;
+            }
+        }
         if (!there || square_distance(held.at.position, camera) > let_go * let_go ||
             (world != nullptr && world->ground_coming(world::cell_of(held.at.position)))) {
             m_scratch.push_back(id);
@@ -166,6 +345,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     // More held than may be (`most` lowered): any go.
     while (m_held.size() > most) release(m_held.begin()->first);
     flush(scene);
+    walk(scene);
 
     // The next stretch of the list: those near enough are made, a few a frame.
     const std::vector<world::Person>& people = scene.people;
@@ -191,8 +371,12 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         if (look == nullptr) continue; // (a look not taken up yet: next time through)
         const std::optional<double> ground = scene.terrain.height_at(at.position.x, at.position.z);
         if (scene.add(entity_for(person, *look, at, ground ? *ground : at.position.y)) == 0) continue;
-        if (travel != nullptr) travel->hold(person.id, true); // (it stands while it has an entity)
-        m_held.emplace(person.id, Held{person, at});
+        if (travel != nullptr) travel->hold(person.id, true); // (its trip goes on as its entity walks)
+        Held held;
+        held.was = person;
+        held.at = at;
+        held.resets = resets;
+        m_held.emplace(person.id, std::move(held));
         ++made;
         ++m_stats.made;
     }

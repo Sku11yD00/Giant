@@ -104,6 +104,20 @@ void PeopleTravel::hold(world::PersonId id, bool held) {
     t->held = held;
 }
 
+void PeopleTravel::walked(world::PersonId id, double metres) {
+    Trip* t = find(id);
+    if (t == nullptr || t->phase != Phase::travelling || !t->held || !(metres > t->from)) return;
+    t->from = std::min(metres, length(*t));
+    t->since = m_seconds;
+}
+
+void PeopleTravel::arrive(world::PersonId id, const Where& there) {
+    const auto it = m_index.find(id);
+    if (it == m_index.end() || m_trips[it->second].phase != Phase::travelling) return;
+    end(it->second, true);
+    m_places[id] = there; // (where it stands, a step from the way's end)
+}
+
 PeopleTravel::Stats PeopleTravel::stats() const {
     Stats s = m_stats;
     s.trips = static_cast<u32>(m_trips.size());
@@ -112,6 +126,7 @@ PeopleTravel::Stats PeopleTravel::stats() const {
 }
 
 void PeopleTravel::clear() {
+    ++m_resets;
     m_trips.clear();
     m_index.clear();
     m_places.clear();
@@ -287,6 +302,7 @@ std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, co
     m_places.try_emplace(id, now); // (its place made now, in the command: arriving allocates nothing)
     Trip trip;
     trip.person = id;
+    trip.serial = ++m_serial;
     trip.to = to;
     trip.place = std::move(place);
     trip.speed = pace;
