@@ -1,18 +1,26 @@
 // People following their routines (people_routines.h): sent where the
 // entry that holds at the hour says, each at its own time, a share a
 // frame, and afresh on every run.
+#include "../src/animation_state.h"
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
 #include "../src/people_routines.h"
+#include "../src/people_state.h"
 #include "../src/people_travel.h"
 
 #include "giant_test.h"
+#include "gltf_test_files.h"
 
 #include "giant/world/people.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 using namespace giant;
@@ -412,4 +420,235 @@ GIANT_TEST("routines: roads changed while stopped or while running are followed;
     GIANT_CHECK(f.run("set_routine", {{"name", "day"}, {"entries", {{{"from", 6}, {"activity", "work"}, {"at", "tag"}, {"name", "work"}, {"speed", 4.0}}}}}).ok);
     f.frames(7.0, 0.1, 4, 2);
     GIANT_CHECK(f.travel.trip(later)->place == place && f.travel.trip(later)->speed == 4.0);
+}
+
+namespace {
+
+// The fixture with people given entities near a camera, of a look whose file has clips (idle, raise):
+// eating shows as an arm raised once, sleeping as idling slowly, working names a clip the file lacks.
+struct Shown : Fixture {
+    AnimationState animation{nullptr};
+    PeopleState people;
+    std::filesystem::path dir;
+    DVec3 camera{5000.0, 0.0, 0.0};
+    Shown() {
+        people.travel = &travel;
+        people.routines = &routines;
+        people.animation = &animation;
+        people.meshes = &meshes;
+        people.settings.made_a_frame = 64;
+        state.animation = &animation;
+        state.people = &people;
+        register_animation_commands(commands, state);
+        // (A folder of this fixture's own: tests run side by side do not write each other's file.)
+        dir = std::filesystem::temp_directory_path() /
+              ("giant_routine_tests_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+               std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        std::filesystem::create_directories(dir);
+        const std::string file = (dir / "person.glb").generic_string();
+        const std::vector<u8> bytes = geometry::testing::skinned_person();
+        std::ofstream(file, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        const ai::CommandResult r = run("create_entity", {{"shape", "mesh"}, {"mesh", file}});
+        GIANT_CHECK(r.ok);
+        GIANT_CHECK(run("set_person_look", {{"name", "villager"}, {"entity", r.value["id"]}, {"activities", shown()}}).ok);
+        GIANT_CHECK(run("delete_entities", {{"ids", {r.value["id"]}}}).ok);
+    }
+    ~Shown() {
+        std::error_code ignored;
+        std::filesystem::remove_all(dir, ignored);
+    }
+    static Json shown() {
+        return {{{"activity", "eat"}, {"clip", "raise"}, {"loop", false}},
+                {{"activity", "sleep"}, {"clip", "idle"}, {"speed", 0.5}},
+                {{"activity", "work"}, {"clip", "no such clip"}}};
+    }
+    void frames(double hours, double more = 0.0, int count = 4, u64 run_id = 1) {
+        for (int i = 0; i < count; ++i) {
+            seconds += more / count;
+            travel.update(state.scene, run_id, seconds);
+            routines.update(state.scene, travel, hours);
+            people.update(state.scene, camera, nullptr);
+            const world::SceneChanges changed = state.scene.take_changes();
+            animation.update(state.scene, meshes, changed, more / count);
+        }
+    }
+    bool by_command(world::PersonId id) const {
+        const AnimationState::Animated* a = animation.find(world::person_entity_id(id));
+        return a != nullptr && a->by_command;
+    }
+    // One gone to the inn out of sight, eating there, then seen.
+    world::PersonId eater() {
+        camera = {5000.0, 0.0, 0.0};
+        frames(12.0, 0.0, 1);
+        const world::PersonId id = person();
+        frames(12.0);
+        frames(12.2, 80.0);
+        GIANT_CHECK(travel.trip(id) == nullptr && doing(id)["activity"] == "eat" && people.stats().embodied == 0);
+        camera = {50.0, 0.0, 3.0};
+        frames(12.3, 0.1);
+        GIANT_CHECK(people.stats().embodied == 1 && people.stats().acting == 1 && by_command(id));
+        return id;
+    }
+};
+
+} // namespace
+
+GIANT_TEST("routines: one standing where its routine has it plays its look's clip for what it does there, and is matched again when it goes") {
+    Shown f;
+    // Gone to the inn out of sight, it eats there; seen, its entity raises its arm (the look's clip for eating).
+    const world::PersonId id = f.eater();
+    const world::EntityId entity = world::person_entity_id(id);
+    ai::CommandResult r = f.run("get_animation", {{"id", entity}});
+    GIANT_CHECK(r.ok && r.value["by_command"] == true && r.value.dump().find("raise") != std::string::npos);
+    GIANT_CHECK(f.run("set_people_settings").value["acting"] == 1);
+    // Resting has no clip in the look: matched again (standing).
+    f.frames(13.0, 0.1);
+    GIANT_CHECK(f.people.stats().acting == 0 && !f.by_command(id) && f.doing(id)["activity"] == "rest");
+    // Sent home at eight: on its way (it stands here: no walkers in this test), so nothing is played.
+    f.frames(20.0, 0.1);
+    GIANT_CHECK(f.travel.trip(id) != nullptr && f.people.stats().acting == 0 && !f.by_command(id));
+    // Stopped and begun again in the evening by its home: asleep there, it idles; stopped, it is matched again.
+    f.camera = {0.0, 0.0, -5.0};
+    f.frames(21.0, 0.0, 4, 0);
+    GIANT_CHECK(f.people.stats().acting == 0);
+    f.frames(21.0, 0.1, 6, 2);
+    GIANT_CHECK(f.doing(id)["activity"] == "sleep" && f.people.stats().embodied == 1 && f.people.stats().acting == 1 && f.by_command(id));
+    const AnimationState::Animated* a = f.animation.find(entity);
+    GIANT_CHECK(a != nullptr && a->player.speed() == 0.5f);
+    f.frames(21.0, 0.0, 2, 0);
+    GIANT_CHECK(f.people.stats().acting == 0 && !f.by_command(id));
+}
+
+GIANT_TEST("routines: a clip is played only where the routine sent one, only while routines run, and never one the file lacks") {
+    Shown f;
+    // Stopped half way to the inn (out of sight, so by the clock), then seen: it eats in name, but is not there.
+    const world::PersonId walker = f.person();
+    f.frames(12.0);
+    f.frames(12.1, 15.0);
+    GIANT_CHECK(f.travel.trip(walker) != nullptr && f.run("stop_person", {{"id", walker}}).ok);
+    const DVec3 stopped_at = f.where(walker);
+    GIANT_CHECK(std::hypot(stopped_at.x - 50.0, stopped_at.z - 3.0) > 10.0);
+    f.camera = stopped_at;
+    f.frames(12.2, 0.1);
+    GIANT_CHECK(f.people.stats().embodied == 1 && f.doing(walker)["activity"] == "eat" && f.people.stats().acting == 0 && !f.by_command(walker));
+    GIANT_CHECK(f.run("remove_people", {{"ids", {walker}}}).ok);
+    // One eating at the inn: routines turned off, its clip ends; on again, it is begun again.
+    const world::PersonId id = f.eater();
+    GIANT_CHECK(f.run("set_routine_settings", {{"on", false}}).ok);
+    f.frames(12.4, 0.1);
+    GIANT_CHECK(f.people.stats().acting == 0 && !f.by_command(id));
+    GIANT_CHECK(f.run("set_routine_settings", {{"on", true}}).ok);
+    f.frames(12.4, 0.1);
+    GIANT_CHECK(f.people.stats().acting == 1 && f.by_command(id));
+    // Its animation set by hand: the count is true at once, and the clip is begun again after a wait.
+    GIANT_CHECK(f.run("set_animation", {{"id", world::person_entity_id(id)}, {"clip", "idle"}}).ok);
+    f.frames(12.4, 0.1, 2);
+    GIANT_CHECK(f.people.stats().acting == 0 && !f.by_command(id));
+    f.frames(12.4, 3.0, 6);
+    GIANT_CHECK(f.people.stats().acting == 1 && f.by_command(id));
+    // At work, whose clip the file does not have: nothing plays, however long.
+    f.frames(12.4, 0.0, 2, 0);
+    f.camera = {5000.0, 0.0, 0.0};
+    f.frames(7.0, 0.0, 2, 2);
+    f.frames(7.5, 200.0, 8, 2);
+    f.camera = {100.0, 0.0, 110.0};
+    f.frames(7.5, 0.1, 2, 2);
+    GIANT_CHECK(f.travel.trip(id) == nullptr && f.doing(id)["activity"] == "work" && f.people.stats().embodied == 1);
+    f.frames(7.6, 10.0, 20, 2);
+    GIANT_CHECK(f.people.stats().acting == 0 && !f.by_command(id));
+}
+
+GIANT_TEST("routines: an entity made again does not keep its last one's clip; a look's activities change without the entities going") {
+    Shown f;
+    // Eating at the inn, seen from where its home is in view too: the world stops, it is back home
+    // (its entity taken and made again the same frame), and plays nothing there.
+    world::PersonId id = f.eater();
+    f.camera = {25.0, 0.0, 0.0};
+    f.frames(12.3, 0.1);
+    GIANT_CHECK(f.people.stats().acting == 1);
+    f.frames(12.3, 0.0, 3, 0);
+    GIANT_CHECK(f.where(id).z == -5.0 && f.people.stats().embodied == 1 && f.people.stats().acting == 0 && !f.by_command(id));
+    // Again; its entity deleted while it eats: the one made in its place begins the clip itself (not left with the old).
+    f.camera = {5000.0, 0.0, 0.0};
+    f.frames(12.0, 0.0, 2, 2);
+    f.frames(12.2, 80.0, 8, 2);
+    f.camera = {50.0, 0.0, 3.0};
+    f.frames(12.3, 0.1, 4, 2);
+    GIANT_CHECK(f.people.stats().acting == 1 && f.by_command(id));
+    const u64 made = f.people.stats().made;
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {world::person_entity_id(id)}}}).ok);
+    f.frames(13.0, 0.1, 4, 2); // (resting now: no clip)
+    GIANT_CHECK(f.people.stats().made == made + 1 && f.people.stats().acting == 0 && !f.by_command(id));
+    // Eating again (the hour set back); the look's list emptied: the entity stays, matched again; given back, the clip plays.
+    f.frames(12.5, 0.1, 4, 2);
+    GIANT_CHECK(f.people.stats().acting == 1 && f.by_command(id));
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"activities", Json::array()}}).ok);
+    f.frames(12.5, 0.1, 4, 2);
+    GIANT_CHECK(f.people.stats().made == made + 1 && f.people.stats().acting == 0 && !f.by_command(id));
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"activities", Shown::shown()}}).ok);
+    f.frames(12.5, 0.1, 4, 2);
+    GIANT_CHECK(f.people.stats().made == made + 1 && f.people.stats().acting == 1 && f.by_command(id));
+    // Asleep at home, never having moved, with no room to animate it (so its clip waits); the world
+    // stopped and begun again (its entity stays): the wait is not carried over to the new run's clock.
+    f.frames(12.5, 0.0, 2, 0);
+    f.camera = {0.0, 0.0, -5.0};
+    f.animation.max_animated = 0;
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {world::person_entity_id(id)}}}).ok); // (so that it is not animated already)
+    f.frames(21.0, 1000.0, 4, 3);
+    GIANT_CHECK(f.people.stats().embodied == 1 && f.people.stats().acting == 0 && f.doing(id)["activity"] == "sleep");
+    const u64 kept = f.people.stats().made;
+    f.animation.max_animated = AnimationState::k_max_animated;
+    f.frames(21.0, 0.0, 2, 0);
+    f.seconds = 0.0; // (the next run's clock begins again)
+    f.frames(21.0, 0.5, 4, 4);
+    GIANT_CHECK(f.people.stats().made == kept && f.people.stats().acting == 1 && f.by_command(id));
+}
+
+GIANT_TEST("routines: what one does is what it last acted on; clips are begun a few a frame") {
+    Shown f;
+    // Twelve at work at the mill; noon comes with one sent a frame: those not sent yet still work (they do not eat at the mill).
+    Json batch = Json::array();
+    for (int i = 0; i < 12; ++i) batch.push_back({{"look", "villager"}, {"home", "cottage"}, {"routine", "day"}});
+    const ai::CommandResult made = f.run("create_people", {{"people", batch}});
+    GIANT_CHECK(made.ok);
+    f.frames(7.0);
+    f.frames(7.5, 200.0, 8);
+    GIANT_CHECK(f.travel.stats().trips == 0);
+    f.routines.settings.sent_a_frame = 1;
+    f.frames(12.0, 0.0, 3);
+    usize eating = 0, working = 0;
+    for (const Json& id : made.value["ids"]) {
+        const world::PersonId p = id.get<world::PersonId>();
+        PeopleRoutines::Activity doing;
+        GIANT_CHECK(f.routines.activity(f.state.scene, p, doing));
+        const bool sent = f.travel.trip(p) != nullptr;
+        GIANT_CHECK((doing.activity == "eat") == sent && (doing.activity == "work") == !sent);
+        eating += sent ? 1 : 0;
+        working += sent ? 0 : 1;
+        GIANT_CHECK(f.doing(p)["activity"] == (sent ? "eat" : "work"));
+    }
+    GIANT_CHECK(eating == 3 && working == 9);
+    // All at the inn, then seen at once: eight begin their clip a frame, the rest the next.
+    f.routines.settings.sent_a_frame = 32;
+    f.frames(12.1, 200.0, 8);
+    GIANT_CHECK(f.travel.stats().trips == 0);
+    f.camera = {50.0, 0.0, 3.0};
+    f.frames(12.2, 0.0, 1);
+    GIANT_CHECK(f.people.stats().embodied == 12 && f.people.stats().acting == 0); // (made this frame: they act from the next)
+    // (At most eight begin a frame, and of those not animated yet, each making its copy, two: this
+    // file cannot be matched, so only the few the animation took up meanwhile are.)
+    f.frames(12.2, 0.0, 1);
+    const u32 first = f.people.stats().acting;
+    GIANT_CHECK(first >= 2 && first <= 8);
+    f.frames(12.2, 0.0, 1);
+    GIANT_CHECK(f.people.stats().acting >= first + 2 && f.people.stats().acting <= first + 8);
+    f.frames(12.2, 0.0, 4);
+    GIANT_CHECK(f.people.stats().acting == 12);
+    // Routines off: every clip ends at once (ending is not put off).
+    GIANT_CHECK(f.run("set_routine_settings", {{"on", false}}).ok);
+    f.frames(12.2, 0.0, 1);
+    GIANT_CHECK(f.people.stats().acting == 0);
+    GIANT_CHECK(f.run("set_routine_settings", {{"on", true}}).ok);
+    f.frames(12.2, 0.0, 6);
+    GIANT_CHECK(f.people.stats().acting == 12);
 }

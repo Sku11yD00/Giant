@@ -357,6 +357,9 @@ int run(const Options& options) {
     editor::PeopleState people; // the people near the camera, as entities
     people.travel = &travel;
     people.walkers = &walkers;
+    people.routines = &routines; // (what each does shows as its look's clip for it)
+    people.animation = &animation;
+    people.meshes = &meshes;
     state.people = &people;
     editor::connect_walkers(state);
     editor::RagdollState ragdolls(physics, animation, &walkers); // after them: its ragdolls leave the physics first

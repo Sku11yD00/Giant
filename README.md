@@ -389,6 +389,9 @@ Open-world systems:
 - LW3 part 2: people follow their routines while the world runs: each
   sets off at its own time for where its routine says, a village's way
   found once and taken again by the rest.
+- LW3 part 3: a person look names the clip its people play for each
+  activity (working, eating, sleeping) once they stand where their
+  routine has them.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

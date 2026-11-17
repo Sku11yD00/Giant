@@ -1,5 +1,8 @@
 #include "people_state.h"
 
+#include "animation_state.h"
+#include "mesh_library.h"
+#include "people_routines.h"
 #include "ragdoll_state.h"
 #include "walker_state.h"
 #include "world_streaming.h"
@@ -10,7 +13,9 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -275,6 +280,91 @@ void PeopleState::walk(world::Scene& scene) {
     }
 }
 
+// Those held who stand where their routine has them show what they do
+// there: the clip their look gives the activity, played as a command would
+// (it takes over from the motion matching, which is given back when one
+// walks again, does something its look has no clip for, or the world stops).
+void PeopleState::act(const world::Scene& scene) {
+    m_stats.acting = 0;
+    if (animation == nullptr || meshes == nullptr) return;
+    const bool running = routines != nullptr && travel != nullptr && travel->running();
+    const double now = travel != nullptr ? travel->seconds() : 0.0;
+    u32 begun = 0, made = 0;
+    for (auto& [id, held] : m_held) {
+        if (held.acting == 0 && !running) continue;
+        const world::EntityId entity = world::person_entity_id(id);
+        if (held.acting != 0) {
+            // What it played was taken from it (set_animation, its file read again): it plays nothing of
+            // ours, and its clip is begun again after a wait. (A clip played on it by hand, play_animation,
+            // is not told from ours: it is left until what the person does next changes.)
+            const AnimationState::Animated* a = animation->find(entity);
+            if (a == nullptr || !a->by_command) {
+                held.acting = 0;
+                held.act_at = now + k_act_wait;
+            }
+        }
+        // Its look (where it was last found, else looked for) and what the look shows for what it does.
+        if (held.look >= m_looks.size() || m_looks[held.look].name != held.was.look) {
+            const world::PersonLook* look = world::find_person_look(m_looks, held.was.look);
+            held.look = look != nullptr ? static_cast<u32>(look - m_looks.data()) : 0;
+        }
+        const bool found = held.look < m_looks.size() && m_looks[held.look].name == held.was.look;
+        const std::span<const world::LookActivity> shown =
+            found ? std::span<const world::LookActivity>(m_looks[held.look].activities) : std::span<const world::LookActivity>();
+        if (shown.empty() && held.acting == 0) continue;
+        u8 wanted = 0;
+        PeopleRoutines::Activity doing;
+        // (A walker left standing, one got up again or walked by hand, is no walk.)
+        const WalkerState::Walker* walker = walkers != nullptr ? walkers->find(entity) : nullptr;
+        const bool walks = walker != nullptr && walker->phase != WalkerState::Phase::arrived;
+        if (running && !shown.empty() && !held.walking && !walks && travel->trip(id) == nullptr &&
+            (ragdolls == nullptr || ragdolls->find(entity) == nullptr) && routines->activity(scene, id, doing)) {
+            // There: told to stay where it is, or within reach of the place it was sent to (one stopped
+            // by those standing there has arrived up to 2 k_walk_end short of its spot: walk).
+            const double reach = doing.place != nullptr ? static_cast<double>(doing.place->radius) + 2.0 * k_walk_end : 0.0;
+            const bool there = doing.anywhere || (doing.place != nullptr && std::hypot(held.at.position.x - doing.place->position.x,
+                                                                                    held.at.position.z - doing.place->position.z) <= reach);
+            for (usize i = 0; i < shown.size() && there; ++i) {
+                if (shown[i].activity == doing.activity) {
+                    wanted = static_cast<u8>(i + 1);
+                    break;
+                }
+            }
+        }
+        if (wanted == held.acting) {
+            m_stats.acting += wanted != 0 ? 1 : 0;
+            continue;
+        }
+        if (held.acting != 0) { // (what it played is over: matched again at once, whatever is begun next)
+            animation->restart_saved(scene, entity);
+            held.acting = 0;
+        }
+        if (wanted == 0 || wanted == held.act_failed || now < held.act_at || begun >= k_acts_begun_a_frame) continue;
+        // One not animated yet (its file cannot be matched, or its turn has not come) is made its copy
+        // of the character by the play: a few of those a frame, beside the animation's own.
+        const bool animated = animation->find(entity) != nullptr;
+        if (!animated && made >= k_acts_made_a_frame) continue;
+        const world::LookActivity& a = shown[wanted - 1];
+        switch (AnimationState::playable(scene, *meshes, entity, a.clip)) {
+        case AnimationState::Playable::no_clip: // (the look names a clip its file does not have: not tried again this run, or until the look's list changes)
+            held.act_failed = wanted;
+            continue;
+        case AnimationState::Playable::not_ready:
+            held.act_at = now + k_act_wait;
+            continue;
+        case AnimationState::Playable::yes: break;
+        }
+        ++begun;
+        made += animated ? 0 : 1;
+        if (animation->play(scene, *meshes, entity, a.clip, k_act_fade, a.loop, a.speed, -1.0f).empty()) {
+            held.acting = wanted;
+            ++m_stats.acting;
+        } else { // (no room to animate one more: tried again later)
+            held.act_at = now + k_act_wait;
+        }
+    }
+}
+
 void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldStreaming* world) {
     if (scene.identity() != m_scene) take_up(scene);
     strays(scene);
@@ -304,9 +394,25 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         m_look_cursor = 0;
     } else if (!looks.empty()) {
         m_look_cursor = m_look_cursor % looks.size();
-        if (!(looks[m_look_cursor] == m_looks[m_look_cursor])) {
-            look_changed(m_looks[m_look_cursor].name);
-            m_looks[m_look_cursor] = looks[m_look_cursor];
+        const world::PersonLook& is = looks[m_look_cursor];
+        world::PersonLook& was = m_looks[m_look_cursor];
+        if (is.name == was.name && is.mesh == was.mesh && is.height == was.height && is.material == was.material &&
+            is.parts == was.parts && is.hair == was.hair && is.matched == was.matched) {
+            // Only what its people show for their activities, if anything: the entities stay, and
+            // those playing a clip of the old list are matched again (and begin the new one's).
+            if (!(is.activities == was.activities)) {
+                for (auto& [id, held] : m_held) {
+                    if (held.was.look != was.name) continue;
+                    if (held.acting != 0 && animation != nullptr) animation->restart_saved(scene, world::person_entity_id(id));
+                    held.acting = 0;
+                    held.act_failed = 0;
+                    held.act_at = 0.0;
+                }
+                was.activities = is.activities;
+            }
+        } else {
+            look_changed(was.name);
+            was = is;
         }
         ++m_look_cursor;
     }
@@ -332,6 +438,8 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
                     held.waited = false;
                     held.path_end = 0.0;
                     held.retry_at = 0.0;
+                    held.act_at = 0.0;
+                    held.act_failed = 0;
                 }
                 held.at.position = now.position;
                 held.resets = resets;
@@ -347,6 +455,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     while (m_held.size() > most) release(m_held.begin()->first);
     flush(scene);
     walk(scene);
+    act(scene);
 
     // The next stretch of the list: those near enough are made, a few a frame.
     const std::vector<world::Person>& people = scene.people;
@@ -372,6 +481,8 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         if (look == nullptr) continue; // (a look not taken up yet: next time through)
         const std::optional<double> ground = scene.terrain.height_at(at.position.x, at.position.z);
         if (scene.add(entity_for(person, *look, at, ground ? *ground : at.position.y)) == 0) continue;
+        // (One made again in the frame its last was taken, under the same id: what that one played is not this one's.)
+        if (animation != nullptr) animation->restart_saved(scene, world::person_entity_id(person.id));
         if (travel != nullptr) travel->hold(person.id, true); // (its trip goes on as its entity walks)
         Held held;
         held.was = person;

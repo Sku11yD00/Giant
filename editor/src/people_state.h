@@ -25,6 +25,9 @@
 
 namespace giant::editor {
 
+class AnimationState;
+class MeshLibrary;
+class PeopleRoutines;
 class RagdollState;
 class WalkerState;
 class WorldStreaming;
@@ -51,6 +54,18 @@ public:
     WalkerState* walkers = nullptr;
     // Characters gone limp (ragdoll_state.h); set by main. One lying is given no walker until it is up.
     RagdollState* ragdolls = nullptr;
+    // What each does by its routine (people_routines.h) and the animation
+    // that shows it (animation_state.h, with the meshes it plays from); set
+    // by main (and tests). With all three, one standing where its routine
+    // has it plays the clip its look gives the activity (LookActivity), and
+    // is motion matched again when it walks or the activity has no clip.
+    const PeopleRoutines* routines = nullptr;
+    AnimationState* animation = nullptr;
+    const MeshLibrary* meshes = nullptr;
+    static constexpr u32 k_acts_begun_a_frame = 8;  // clips begun a frame (each poses its character at once)
+    static constexpr u32 k_acts_made_a_frame = 2;   // of them, on entities not animated yet (each makes a copy of its character)
+    static constexpr double k_act_wait = 2.0;       // seconds before a clip that could not be played is tried again
+    static constexpr float k_act_fade = 0.3f;       // seconds a clip fades in over
     static constexpr double k_walk_reach = 3.0;     // metres on along its way one's walking counts a frame
     static constexpr double k_walk_end = 3.0;        // metres from its way's end one stopped by those standing there has arrived
     static constexpr double k_walk_wait = 2.0;       // seconds one whose walker was taken or stopped short waits
@@ -68,6 +83,7 @@ public:
         u64 released = 0;
         u32 walking = 0;    // of those held: walking their trips' ways now
         u32 waiting = 0;    // near enough last time through the list, not made: `most` reached
+        u32 acting = 0;     // of those held: playing their activity's clip now
     };
 
     // Each frame, before the scene is drawn. `world`: the open world whose
@@ -102,8 +118,13 @@ private:
         bool waited = false;     // its walker failed, and the wait before the next try was begun
         double path_end = 0.0;   // metres along the trip its walker's path goes to
         double retry_at = 0.0;   // the travel's clock before which no walk is begun again
+        u32 look = 0;            // its look's index in m_looks (as last found)
+        u8 acting = 0;           // the look's activity whose clip its entity plays, + 1 (0: none, it is motion matched)
+        u8 act_failed = 0;       // the look's activity, + 1, whose clip the file does not have (0: none found so)
+        double act_at = 0.0;     // the travel's clock before which no clip is tried again
     };
     void walk(world::Scene& scene);
+    void act(const world::Scene& scene);
     PeopleTravel::Where stand(world::Scene& scene, Held& held, world::EntityId entity);
     PeopleTravel::Where where(const world::Person& person) const {
         return travel != nullptr ? travel->where(person) : PeopleTravel::Where{person.position, person.yaw};

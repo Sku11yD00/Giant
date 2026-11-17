@@ -73,6 +73,23 @@ std::optional<std::string> check_person_look(const PersonLook& look) {
             return "matched names " + clip + " twice";
         }
     }
+    if (look.activities.size() > k_max_look_activities) {
+        return "at most " + std::to_string(k_max_look_activities) + " activities";
+    }
+    for (usize i = 0; i < look.activities.size(); ++i) {
+        const LookActivity& a = look.activities[i];
+        const std::string which = "activities[" + std::to_string(i) + "]: ";
+        if (!place_tag_ok(a.activity)) return which + "activity must be 1 to " + std::to_string(k_max_tag_bytes) + " of a-z, 0-9 and _";
+        if (a.clip.empty() || a.clip.size() > k_max_name_bytes) {
+            return which + "clip must be a clip's name of 1 to " + std::to_string(k_max_name_bytes) + " bytes";
+        }
+        if (!std::isfinite(a.speed) || a.speed < 0.01f || a.speed > k_max_animation_speed) {
+            return which + "speed must be from 0.01 to " + std::to_string(static_cast<int>(k_max_animation_speed));
+        }
+        for (usize j = 0; j < i; ++j) {
+            if (look.activities[j].activity == a.activity) return "activities names \"" + a.activity + "\" twice";
+        }
+    }
     return std::nullopt;
 }
 

@@ -34,6 +34,7 @@ PersonLook look(const char* name) {
     l.parts.back().material.roughness = 0.9f;
     l.hair.on = true;
     l.matched = {"walk", "idle"};
+    l.activities = {{"work", "hammer", 1.5f, true}, {"sleep", "lie down", 1.0f, false}};
     return l;
 }
 
@@ -104,6 +105,19 @@ GIANT_TEST("people: a place, a look and a person are checked field by field") {
     GIANT_CHECK(check_person_look(l));
     l.matched = {"*"};
     GIANT_CHECK(!check_person_look(l));
+    // The clips shown for activities: each activity once, a word as a routine's, a clip named, a speed that plays.
+    l.activities.push_back({"work", "saw", 1.0f, true});
+    GIANT_CHECK(check_person_look(l) && check_person_look(l)->find("twice") != std::string::npos);
+    l.activities.back() = {"Work hard", "saw", 1.0f, true};
+    GIANT_CHECK(check_person_look(l));
+    l.activities.back() = {"eat", "", 1.0f, true};
+    GIANT_CHECK(check_person_look(l));
+    l.activities.back() = {"eat", "chew", 0.0f, true};
+    GIANT_CHECK(check_person_look(l));
+    l.activities.back() = {"eat", "chew", 100.0f, false};
+    GIANT_CHECK(!check_person_look(l));
+    l.activities.resize(k_max_look_activities + 1, {"x", "y", 1.0f, true});
+    GIANT_CHECK(check_person_look(l));
 
     GIANT_CHECK(!check_person(person(1, "villager", "", 3)));
     GIANT_CHECK(check_person(person(0, "villager", "", 3)));
@@ -220,6 +234,12 @@ GIANT_TEST("people: a file with wrong people is refused, saying where") {
     GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","colour":1}])", "person_looks[0].colour"));
     GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb"},{"name":"v","mesh":"v.glb"}])", "\"v\""));
     GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","matched":["a","a"]}])", "matched"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":[{"activity":"eat"}]}])", "activities[0].clip"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":[{"activity":"eat","clip":"a","speed":0}]}])", "speed"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":[{"activity":"eat","clip":"a"},{"activity":"eat","clip":"b"}]}])", "twice"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":{"eat":"a"}}])", "activities"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":["eat"]}])", "activities[0]"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":[{"activity":"eat","clip":"a","fade":1}]}])", "activities[0].fade"));
     GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","parts":[{"name":"a"}]}])", "parts[0]"));
     GIANT_CHECK(refused(R"("places":[{"name":"inn"}])", "places[0].position"));
     GIANT_CHECK(refused(R"("places":[{"name":"inn","position":[0,0,0],"radius":0}])", "places[0].radius"));

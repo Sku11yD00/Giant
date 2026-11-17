@@ -3537,12 +3537,63 @@ afresh. `get_people` gives `doing` (the activity, the place sent to, and
 `failed`); `set_routine_settings` sets and reads the settings with
 `following`, `sent`, `stayed` and `failed`. Not saved, not undone.
 
-Known limits (the next parts): the activity does nothing yet but name
-what one does (animation: part 3); the time of day only moves in play,
+Known limits (the next parts): the time of day only moves in play,
 and people travel in real seconds whatever the clock's speed, so at 60
 game seconds a second a ten-minute walk takes ten game hours; game saves
 keep neither trips nor what each was doing; everyone with one home and
 one tag shares a place.
+
+### Activities shown (LW3 part 3)
+
+A person look says what its people show while they do an activity:
+`world::PersonLook::activities`, up to 32 `LookActivity` (`activity`, a
+routine's word; `clip`, one of the look's file; `speed`; `loop`), each
+activity once, saved with the look and set whole by `set_person_look`.
+
+`PeopleState::act` (each frame, after `walk`) goes through the people
+that have an entity. One that is where its routine has it (no trip, no
+walker walking, not lying as a ragdoll; its entry acted on and not failed, and
+either a `stay` or the person within the radius, and 6 m, of the place
+it was sent to: `PeopleRoutines::activity`, which gives nothing while
+routines are off or the world is stopped) and whose look names a clip
+for that activity plays it: `AnimationState::play`, as a command's
+play, fading in over 0.3 s. It takes over from the motion matching,
+which is given back (`AnimationState::restart_saved`) at once when the
+person walks again, does something its look has no clip for, or the
+world stops. At most 8 clips are begun a frame (each poses its
+character at once), at most 2 of them on entities not animated yet
+(each makes its copy of the character, beside the animation's own few
+a frame); ending one is never put off. A clip the file does not have (`AnimationState::playable`,
+asked before playing so that no error text is made) is not tried again
+that run, or until the look's list changes; with the file not read yet
+it is tried again after 2 s. A play taken away (`set_animation` on the
+entity by hand, the file read again) is seen the next frame
+(`by_command` gone) and begun again after 2 s; a clip played on it by
+hand (`play_animation`) is not told from the routine's and is left
+until what the person does next changes.
+`set_people_settings` reads `acting`: how many play their activity's
+clip now.
+
+What one does is the entry it last acted on: a person whose turn to be
+sent has not come yet still does the last entry's activity (so nobody
+eats at the mill for the frames before it sets off). An entity made
+again under the same id (its last deleted, or taken when the world
+stopped and made again the same frame) starts from its saved animation,
+not from what the last one played. A change to a look's `activities`
+alone leaves the entities standing: those playing a clip are matched
+again and begin the new list's.
+
+Known limits: going from the matcher to a clip and back is a cut (the
+matcher's pose is not the player's to fade from); a person given back
+to the matcher shows its rest pose until the matcher takes it up, 16 a
+frame (`matches_per_frame`), so hundreds ending together (the world
+stopped, routines turned off) take some frames; a place list edited
+can end and begin a clip again within a few frames (the lists catch
+up); nobody sits down or
+turns to face anything first (the place's `yaw` is not used yet); what
+is played is the look's, not the place's (a bench and a bed play the
+same `rest`); an entity made again (the camera gone and back) begins
+its clip from the start, a once-only one too.
 
 ### People near the camera (LW1b)
 

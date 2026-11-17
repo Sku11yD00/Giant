@@ -123,6 +123,11 @@ public:
     // again), or the scene is replaced. Both pose it at once.
     std::string play(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id, const std::string& clip,
                      float blend_seconds, bool loop, float speed, float start);
+    // Whether `play` could play `clip` on the entity (asked without making
+    // anything, or a text of why not): its file is not read yet or it
+    // draws none (not_ready), or the file has no such clip.
+    enum class Playable : u8 { yes, not_ready, no_clip };
+    static Playable playable(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id, const std::string& clip);
     // Holds clips `a` and `b` blended by `weight` (0 all a), b's time
     // following a's when `sync`.
     std::string blend(const world::Scene& scene, const MeshLibrary& meshes, world::EntityId id, const std::string& a,

@@ -77,15 +77,24 @@ public:
     // Each frame, after PeopleTravel::update. `hours`: the time of day (0 to 24).
     void update(const world::Scene& scene, PeopleTravel& travel, double hours);
 
-    // What a person does now: its routine's entry that held at its own
-    // hour when it was last looked at. None: it has no routine, or was not
-    // looked at yet.
+    // What a person does now: the entry of its routine it last acted on
+    // (one whose turn to be sent has not come yet still does the last).
+    // None: it has no routine, or was not looked at yet.
     struct Doing {
         std::string_view activity; // the entry's (the scene's string: until the routines change)
         std::string_view place;    // where it was sent, or was already ("" for none, or a place gone since)
         bool failed = false;       // it could not be acted on
     };
     bool doing(const world::Scene& scene, world::PersonId id, Doing& out) const;
+    // What a person's routine has it do and where, as it last acted (a
+    // frame's, for many). None: no routine, not acted on yet, one that
+    // could not be acted on, or routines off or not running.
+    struct Activity {
+        std::string_view activity;
+        const world::Place* place = nullptr; // where it was sent (null: nowhere, or a place gone since)
+        bool anywhere = false;               // it does it where it stands (`stay`)
+    };
+    bool activity(const world::Scene& scene, world::PersonId id, Activity& out) const;
     // The hour a person keeps at `hours` (late by its share of spread_minutes; 0 to under 24).
     double hour_of(world::PersonId id, double hours) const;
     // Where `entry` sends `person`, or none (stay, no home, no such place).
@@ -104,7 +113,7 @@ private:
         u64 place = 0;   // the name, hashed, of the place it was sent to (0: none)
         u32 acted = 0;   // what it last acted on (what the entry says, hashed); 0: nothing yet
         u16 routine = 0; // its routine's index in the scene's (as last found)
-        u8 entry = 0;    // that routine's entry that held when it was last looked at
+        u8 entry = 0;    // that routine's entry it last acted on (or the one saying the same that holds now)
         bool failed = false;
     };
     struct Key { // a place by the hash of its name, or of one of its tags (those of a tag by their x)
@@ -128,6 +137,7 @@ private:
     void follow_places(const world::Scene& scene);
     void match_slots(const std::vector<world::Person>& people);
     void try_failed_again();
+    const world::Place* sent_to(const world::Scene& scene, const Slot& slot) const;
     const world::Place* named(const world::Scene& scene, std::string_view name) const;
     const world::Place* tagged_nearest(const world::Scene& scene, std::string_view tag, const DVec3& from, i64& measured) const;
     Sought seek(const world::Scene& scene, const world::Person& person, const world::RoutineEntry& entry, Goal& out, bool in_frame);
