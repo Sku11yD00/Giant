@@ -23,6 +23,16 @@ namespace giant::editor {
 
 namespace {
 
+// Whether `at` lies within `angle` radians of the way a camera at `camera` looks.
+bool within_angle(const PeopleState::View& view, const DVec3& camera, const DVec3& at, float angle) {
+    const double dx = at.x - camera.x, dy = at.y - camera.y, dz = at.z - camera.z;
+    const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (length < 1e-6) return true;
+    const double along = dx * static_cast<double>(view.forward.x) + dy * static_cast<double>(view.forward.y) +
+                         dz * static_cast<double>(view.forward.z);
+    return along >= length * std::cos(std::min(static_cast<double>(angle), 3.14159265358979));
+}
+
 double square_distance(const DVec3& a, const DVec3& b) {
     const double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
     return dx * dx + dy * dy + dz * dz;
@@ -55,6 +65,17 @@ world::EntityId PeopleState::entity_of(const world::Scene& scene, world::PersonI
     return scene.find(entity) != nullptr ? entity : 0; // (one deleted since the last frame is not there)
 }
 
+PeopleState::View PeopleState::view_of(float yaw_degrees, float pitch_degrees, float vertical_fov_degrees, float aspect) {
+    View v;
+    v.on = true;
+    const float yaw = degrees_to_radians(yaw_degrees), pitch = degrees_to_radians(pitch_degrees);
+    v.forward = {-std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
+    const float half = std::tan(degrees_to_radians(std::clamp(vertical_fov_degrees, 1.0f, 170.0f)) * 0.5f);
+    const float wide = std::isfinite(aspect) ? std::clamp(aspect, 0.1f, 10.0f) : 1.0f;
+    v.half_angle = std::atan(half * std::sqrt(1.0f + wide * wide));
+    return v;
+}
+
 // Lets a person's entity go: taken from the scene with the frame's others, at once (flush).
 void PeopleState::release(world::PersonId id) {
     if (m_held.erase(id) == 0) return;
@@ -62,6 +83,17 @@ void PeopleState::release(world::PersonId id) {
     if (walkers != nullptr) walkers->stop(world::person_entity_id(id)); // (else it would walk on as the next entity of that id)
     m_entities.push_back(world::person_entity_id(id));
     ++m_stats.released;
+}
+
+// One whose entity went by an edit, a deletion or its ground (not by where the camera is): it is
+// made again where it stands, seen or not.
+void PeopleState::again(world::PersonId id) {
+    if (m_again.size() >= k_most_again) { // (more than are ever held: everyone near, once through the list)
+        m_again.clear();
+        m_free_passes = 2;
+        return;
+    }
+    m_again.insert(id);
 }
 
 void PeopleState::flush(world::Scene& scene) {
@@ -100,6 +132,10 @@ void PeopleState::take_up(world::Scene& scene) {
     m_look_cursor = 0;
     m_cursor = 0;
     m_waiting_now = 0;
+    m_unseen_now = 0;
+    m_free_passes = 2;
+    m_again.clear();
+    m_ground_waited = false;
     m_stats = {};
     m_entities.clear();
     for (const world::Entity& e : scene.entities()) {
@@ -268,12 +304,24 @@ void PeopleState::walk(world::Scene& scene) {
         const float speed = static_cast<float>(std::min(trip->speed, 20.0));
         // (One standing in a stretch that is not the way's last is walked round, not stopped at.)
         const float pack = end >= length ? static_cast<float>(k_walk_end) : 0.0f;
-        if (!walkers->walk_to(scene, entity, m_path.back(), speed, &m_path, pack).empty()) {
+        // One given its entity part way along its trip was walking already: it begins at its pace
+        // along the way, not from a standstill (the first time only: after that it stood for a reason).
+        Vec3 moving{};
+        const bool under_way = !held.set_off && gone > 1.0 && m_path.size() >= 2 && now - held.made_at <= k_set_off_within;
+        if (under_way) {
+            const double dx = m_path[1].x - m_path[0].x, dz = m_path[1].z - m_path[0].z;
+            const double flat = std::hypot(dx, dz);
+            if (flat > 1e-3) {
+                moving = {static_cast<float>(dx / flat) * speed, 0.0f, static_cast<float>(dz / flat) * speed};
+            }
+        }
+        if (!walkers->walk_to(scene, entity, m_path.back(), speed, &m_path, pack, under_way ? &moving : nullptr).empty()) {
             held.walking = false;
             held.retry_at = now + k_walk_wait; // (no character for it: it stands meanwhile)
             continue;
         }
         held.walking = true;
+        held.set_off = true;
         held.waited = false;
         held.path_end = end;
         ++m_stats.walking;
@@ -372,11 +420,37 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     if (!settings.on || hold) {
         if (!m_held.empty()) release_all(scene);
         m_stats.waiting = 0;
+        m_stats.unseen = 0;
+        m_was_off = true;
         return;
     }
     const double embody = std::clamp(static_cast<double>(settings.embody_distance), 1.0, 1000.0);
     const double let_go = std::max(embody, static_cast<double>(settings.release_distance));
     const u32 most = std::min(settings.most, k_max_embodied);
+    // What the camera sees: one it looks towards is made out to `far_made` and kept to `far_kept`.
+    // (Only while the world runs: stopped, nobody moves, and what appears is an edit's doing.)
+    const bool looking = view.on;
+    const bool strict = looking && travel != nullptr && travel->running();
+    // (One in view may be made a little within embody_distance: one that crossed it before its turn came.)
+    const double hidden_within = embody * k_seen_made_within;
+    const double far_made = looking ? std::max(embody, std::min(static_cast<double>(settings.view_distance), 2000.0)) : embody;
+    const double far_kept = far_made + (let_go - embody);
+    const float seen_angle = view.half_angle + k_seen_margin, ahead_angle = view.half_angle + k_ahead_margin,
+                kept_angle = view.half_angle + k_kept_margin;
+    // Everyone was put back, the camera was put somewhere, or nobody could have an entity until
+    // now: what is seen changed at a stroke anyway, so those near are made whether seen or not,
+    // once through the list.
+    const u64 resets = travel != nullptr ? travel->resets() : 0;
+    if (m_was_off || resets != m_resets_seen ||
+        (m_camera_known && square_distance(camera, m_camera) > k_camera_jump * k_camera_jump)) {
+        m_free_passes = 2; // (the pass under way ends, and one whole pass more)
+    }
+    if (most > m_most_seen) m_free_passes = 2; // (more may be held: those that had to go come back)
+    m_most_seen = most;
+    m_was_off = false;
+    m_resets_seen = resets;
+    m_camera = camera;
+    m_camera_known = true;
 
     // A look changed (one a frame is compared; all at once when their number
     // changed): the entities made from it go, and are made again from the new one.
@@ -386,9 +460,13 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         for (const auto& [id, held] : m_held) {
             if (held.was.look == name) m_scratch.push_back(id);
         }
-        for (const world::PersonId id : m_scratch) release(id);
+        for (const world::PersonId id : m_scratch) {
+            release(id);
+            again(id); // (an edit's: made again where it stands, seen or not)
+        }
     };
     if (looks.size() != m_looks.size()) {
+        m_free_passes = 2;
         release_all(scene); // (a look made or removed: rare; everyone is made again over the next frames)
         m_looks = looks;
         m_look_cursor = 0;
@@ -422,7 +500,6 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     // cell whose file left the scene. Where each is is followed (one
     // walking its trip moves).
     m_scratch.clear();
-    const u64 resets = travel != nullptr ? travel->resets() : 0;
     for (auto& [id, held] : m_held) {
         const world::Person* person = world::find_person(scene.people, id);
         if (person != nullptr && person->routine != held.was.routine) held.was.routine = person->routine; // (nothing its entity shows)
@@ -435,6 +512,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
                 if (resets != held.resets) { // (another run: its clock begins again, nothing of the last holds)
                     if (held.walking && walkers != nullptr) walkers->stop(world::person_entity_id(id)); // (begun, never stepped)
                     held.walking = false;
+                    held.set_off = true; // (everyone was put back and stands: nobody is part way along anything)
                     held.waited = false;
                     held.path_end = 0.0;
                     held.retry_at = 0.0;
@@ -445,14 +523,25 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
                 held.resets = resets;
             }
         }
-        if (!there || square_distance(held.at.position, camera) > let_go * let_go ||
-            (world != nullptr && world->ground_coming(world::cell_of(held.at.position)))) {
+        const double off = square_distance(held.at.position, camera);
+        // (Too far: past release_distance, unless the camera looks its way and it is within what is kept there.)
+        const bool too_far = off > let_go * let_go &&
+                             !(looking && off <= far_kept * far_kept && within_angle(view, camera, held.at.position, kept_angle));
+        const bool no_ground = world != nullptr && world->ground_coming(world::cell_of(held.at.position));
+        if (!there || too_far || no_ground) {
             m_scratch.push_back(id);
+            // (Gone by an edit, a deletion or its ground: not by where the camera is. It is made
+            // again where it stands, seen or not.)
+            if (!too_far) again(id);
         }
     }
     for (const world::PersonId id : m_scratch) release(id);
-    // More held than may be (`most` lowered): any go.
-    while (m_held.size() > most) release(m_held.begin()->first);
+    // More held than may be (`most` lowered): any go (and come back, seen or not, if it is raised).
+    while (m_held.size() > most) {
+        const world::PersonId id = m_held.begin()->first;
+        release(id);
+        again(id);
+    }
     flush(scene);
     walk(scene);
     act(scene);
@@ -463,24 +552,83 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         m_cursor = 0;
         m_stats.waiting = m_waiting_now;
         m_waiting_now = 0;
+        m_stats.unseen = m_unseen_now;
+        m_unseen_now = 0;
+        // (A pass in which one near waited for its ground does not count, it is still to be made:
+        // for so many frames, since ground that streaming never brings would keep it open.)
+        if (m_free_passes > 0 && (!m_ground_waited || m_free_frames > k_ground_wait_frames)) --m_free_passes;
+        m_ground_waited = false;
     }
+    m_free_frames = m_free_passes > 0 ? m_free_frames + 1 : 0;
     const usize end = std::min(people.size(), m_cursor + std::clamp<usize>(settings.scanned_a_frame, 1, 65536));
-    u32 made = 0;
+    u32 made = 0, swapped = 0;
+    // The farthest held (looked for when first wanted, and again after each that gave its entity up).
+    bool farthest_known = false;
+    world::PersonId farthest = 0;
+    double farthest_off = 0.0;
     const u32 a_frame = std::clamp<u32>(settings.made_a_frame, 1, 64);
     for (; m_cursor < end; ++m_cursor) {
         const world::Person& person = people[m_cursor];
         const PeopleTravel::Where at = where(person);
-        if (square_distance(at.position, camera) > embody * embody || m_held.contains(person.id)) continue;
-        if (world != nullptr && world->ground_coming(world::cell_of(at.position))) continue; // its ground first
+        const double off = square_distance(at.position, camera);
+        const bool back = !m_again.empty() && m_again.contains(person.id);
+        if (off > far_made * far_made || m_held.contains(person.id)) {
+            if (back) m_again.erase(person.id); // (gone off, or made: nothing to come back to)
+            continue;
+        }
+        const bool nearby = off <= embody * embody;
+        if (looking) {
+            // Far off: only where the camera looks or is about to. Near: only while unseen (it
+            // would appear close by), but for one whose entity an edit took, and for the pass
+            // after everything changed at a stroke.
+            if (!nearby && !within_angle(view, camera, at.position, ahead_angle)) continue;
+            if (strict && !back && off < hidden_within * hidden_within && m_free_passes == 0 &&
+                within_angle(view, camera, at.position, seen_angle)) {
+                ++m_unseen_now;
+                continue;
+            }
+        }
+        if (world != nullptr && world->ground_coming(world::cell_of(at.position))) { // its ground first
+            if (nearby) m_ground_waited = true;
+            continue;
+        }
+        const world::PersonLook* look = world::find_person_look(m_looks, person.look);
+        if (look == nullptr) continue; // (a look not taken up yet: next time through)
+        if (m_held.size() >= most && most > 0 && swapped < a_frame && made < a_frame) {
+            // All held: the farthest held gives its entity up for this one, if it is beyond
+            // embody_distance and this one is near, or k_swap_gap farther off than this one (so
+            // those held are the nearest there are, and nothing goes back and forth). Those held
+            // are looked through once a frame and once more after each that gave its up.
+            if (!farthest_known) {
+                farthest = 0;
+                farthest_off = 0.0;
+                for (const auto& [id, held] : m_held) {
+                    const double d = square_distance(held.at.position, camera);
+                    if (d > farthest_off) {
+                        farthest_off = d;
+                        farthest = id;
+                    }
+                }
+                farthest_known = true;
+            }
+            const double beyond = nearby ? embody : std::sqrt(off) + k_swap_gap;
+            if (farthest != 0 && farthest_off > beyond * beyond) {
+                release(farthest);
+                farthest_known = false;
+                ++swapped;
+                ++m_stats.swapped;
+            }
+        }
         if (m_held.size() >= most) {
             ++m_waiting_now;
             continue;
         }
         if (made >= a_frame) break; // (this one first next frame)
-        const world::PersonLook* look = world::find_person_look(m_looks, person.look);
-        if (look == nullptr) continue; // (a look not taken up yet: next time through)
         const std::optional<double> ground = scene.terrain.height_at(at.position.x, at.position.z);
+        // (One that gave its entity up this frame and is wanted again: its last is taken first.)
+        if (std::find(m_entities.begin(), m_entities.end(), world::person_entity_id(person.id)) != m_entities.end()) flush(scene);
         if (scene.add(entity_for(person, *look, at, ground ? *ground : at.position.y)) == 0) continue;
+        if (back) m_again.erase(person.id);
         // (One made again in the frame its last was taken, under the same id: what that one played is not this one's.)
         if (animation != nullptr) animation->restart_saved(scene, world::person_entity_id(person.id));
         if (travel != nullptr) travel->hold(person.id, true); // (its trip goes on as its entity walks)
@@ -488,10 +636,12 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         held.was = person;
         held.at = at;
         held.resets = resets;
+        held.made_at = travel != nullptr ? travel->seconds() : 0.0;
         m_held.emplace(person.id, std::move(held));
         ++made;
         ++m_stats.made;
     }
+    flush(scene); // (those that gave theirs up)
     m_stats.embodied = static_cast<u32>(m_held.size());
 }
 

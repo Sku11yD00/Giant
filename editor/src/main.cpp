@@ -457,6 +457,10 @@ int run(const Options& options) {
         // Those whose routines say so set off (a share of the people a frame), by the time of day shown.
         routines.update(state.scene, travel, time_of_day.shown().hours);
         // The people near the camera get their entities (a few a frame) before the scene is drawn.
+        people.view = editor::PeopleState::view_of(
+            state.camera.yaw_degrees, state.camera.pitch_degrees, state.camera.vertical_fov_degrees,
+            window->pixel_height() > 0 ? static_cast<float>(window->pixel_width()) / static_cast<float>(window->pixel_height())
+                                       : 1.0f);
         people.update(state.scene, state.camera.position,
                       world_streaming.active(state.scene_generation) ? &world_streaming : nullptr);
         terrain_meshes.update(state.scene.terrain);

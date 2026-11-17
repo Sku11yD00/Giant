@@ -3659,6 +3659,64 @@ or its entries changed between the save and the load is told nothing
 is sent at its own time as before; the clips people play (LW3 part 3)
 begin again from their start.
 
+### Nobody appears close by in view (LW4 part 2)
+
+`PeopleState` is told what the camera sees (`PeopleState::view`, set by
+the editor each frame from the camera's turn, its field of view and the
+picture's shape: `view_of`; a cone about the way it looks, to the
+picture's corner). With it:
+
+- One the camera sees (within the cone and 5 degrees) is given its
+  entity only farther off than `embody_distance`, out to
+  `view_distance` (200 m, `set_people_settings`); so are those up to 26
+  degrees outside the picture, which a turn would show next. Whoever is
+  walked or looked towards is there long before it is near.
+- While the world runs, one nearer than 0.85 of `embody_distance` is
+  given its entity only while unseen (`unseen` counts those waiting to
+  be out of sight). Stopped, nobody moves: what appears is an edit's
+  doing, and is made at once.
+- An entity the camera looks towards (to 34 degrees outside the
+  picture) stays until it is `view_distance` and the gap between
+  `release_distance` and `embody_distance` away; any other goes past
+  `release_distance`, as before, out of sight.
+- When what is seen changes at a stroke anyway (a scene taken up, the
+  simulation stopped or a game loaded so that everyone was put back,
+  the camera put more than 50 m off in a frame, the people turned on,
+  a look made or removed, `most` raised), the list is gone through
+  once with those near made whether seen or not; a pass in which
+  someone near still waited for its ground is not that pass (for 600
+  frames at most).
+- One whose entity went by an edit to it or its look, by being
+  deleted, by `most` being lowered or with its ground is made again
+  where it stands, seen or not: that one, nobody else.
+- When `most` entities are held, the farthest held gives its up
+  (`swapped`) for someone near, if it is beyond `embody_distance`, or
+  for someone 20 m nearer than it: those held are the nearest there
+  are, so a crowd far down the road never keeps the people beside the
+  camera from being there, and those walked towards have theirs before
+  they are near. Those held are looked through once a frame and once
+  more after each that gave its up, at most `made_a_frame` a frame.
+
+A person given its entity part way along its trip does not start from
+a standstill: `WalkerState::walk_to` takes how it moves already
+(`moving`: along the way at its pace), for the first walk of an entity
+made within the last second whose trip was under way (it is at its
+pace from the first step; from rest it takes three).
+
+Known limits: what stands between is not asked (one behind a wall
+counts as seen); a fast turn can show people being made at
+`embody_distance` and beyond, two a frame, and the view is the last
+frame's, so a turn of over 300 degrees a second can show one being
+made near; with tens of thousands of people the list takes up to 64
+frames to go through, and one that comes within 0.85 of
+`embody_distance` in view before its turn waits to be unseen; a
+camera flown at over 3 km/s counts as put somewhere each frame; one made in view is made at
+`embody_distance` at the nearest, where it is some 30 pixels tall in a
+1080-line picture (0.85 of it for one that crossed before its turn): there is no fade yet (it would need a dither in the
+visibility pass, not history); a mirror or water showing what is
+behind the camera shows those made there; the clip a walking person
+begins with is the matcher's choice for its pace, not a set phase.
+
 ### People near the camera (LW1b)
 
 `PeopleState` (`editor/src/people_state.h`) gives the people within
