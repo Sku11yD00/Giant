@@ -411,6 +411,18 @@ GIANT_TEST("world streaming: the people, their looks and places are the world's,
     e.settle(10.0, 10.0);
     GIANT_CHECK(kept.size() == 1 && scene.routines == kept && scene.people[0].routine == "day" &&
                 !e.w.streaming.unsaved_settings(scene));
+    // Behaviours likewise.
+    GIANT_CHECK(e.run("set_behaviour", {{"name", "wary"},
+                                        {"states", {{{"name", "day"}, {"transitions", {{{"to", "hide"}, {"when", {{{"is", "alarm_over"}, {"value", 0.5}}}}}}}},
+                                                    {{"name", "hide"}, {"activity", "hide"}, {"at", "home"}, {"speed", 4.0}}}}}));
+    GIANT_CHECK(e.w.streaming.unsaved_settings(scene) && !e.run("open_world", {{"folder", e.folder()}}));
+    GIANT_CHECK(e.run("set_person", {{"id", 2}, {"behaviour", "wary"}}) && e.run("save_world"));
+    GIANT_CHECK(!e.w.streaming.unsaved_settings(scene));
+    const std::vector<world::Behaviour> behaved = scene.behaviours;
+    GIANT_CHECK(e.run("close_world") && e.run("open_world", {{"folder", e.folder()}}));
+    e.settle(10.0, 10.0);
+    GIANT_CHECK(behaved.size() == 1 && scene.behaviours == behaved && scene.people[0].behaviour == "wary" &&
+                scene.people[0].routine == "day" && !e.w.streaming.unsaved_settings(scene));
     // A person made and undone leaves its id used (the world then has that to save).
     GIANT_CHECK(e.run("create_people", {{"people", {{{"look", "villager"}, {"home", "inn"}}}}}) && e.commands.undo());
     GIANT_CHECK(scene.people.size() == 1 && scene.next_person_id == 4 && e.w.streaming.unsaved_settings(scene));

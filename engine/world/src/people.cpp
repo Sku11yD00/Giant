@@ -108,20 +108,21 @@ std::optional<std::string> check_person(const Person& person) {
 namespace {
 
 // What is wrong with what an entry has one do (a routine's, an alarmed one's, a behaviour's state's), or nothing.
-std::optional<std::string> check_does(const RoutineEntry& e) {
+// (`place`: what the place's name or tag is called where it is given: a routine's `name`, a state's `place`.)
+std::optional<std::string> check_does(const RoutineEntry& e, const char* place) {
     if (!place_tag_ok(e.activity)) return "activity must be 1 to " + std::to_string(k_max_tag_bytes) + " of a-z, 0-9 and _";
     if (!std::isfinite(e.speed) || e.speed < 0.1f || e.speed > 20.0f) return "speed must be from 0.1 to 20 m/s";
     if (static_cast<u8>(e.at) > static_cast<u8>(RoutineAt::tag)) return "at must be stay, home, place or tag";
     switch (e.at) {
     case RoutineAt::stay:
     case RoutineAt::home:
-        if (!e.name.empty()) return "name is given only with at place or tag";
+        if (!e.name.empty()) return std::string(place) + " is given only with at place or tag";
         break;
     case RoutineAt::place:
-        if (e.name.empty() || e.name.size() > k_max_name_bytes) return "name must be a place's name";
+        if (e.name.empty() || e.name.size() > k_max_name_bytes) return std::string(place) + " must be a place's name";
         break;
     case RoutineAt::tag:
-        if (!place_tag_ok(e.name)) return "name must be a place's tag";
+        if (!place_tag_ok(e.name)) return std::string(place) + " must be a place's tag";
         break;
     }
     return std::nullopt;
@@ -151,7 +152,7 @@ std::optional<std::string> check_routine(const Routine& routine) {
             if (!std::isfinite(e.from) || e.from < 0.0f || e.from >= 24.0f) return which + "from must be an hour from 0 to under 24";
             if (i > 0 && e.from <= routine.entries[i - 1].from) return which + "from must be later than the entry's before it";
         }
-        if (const auto bad = check_does(e)) return which + *bad;
+        if (const auto bad = check_does(e, "name")) return which + *bad;
     }
     return std::nullopt;
 }
@@ -172,7 +173,7 @@ std::optional<std::string> check_behaviour(const Behaviour& behaviour) {
         }
         if (s.own) {
             if (s.does.from != 0.0f) return which + "from is not used (a state has no hour)";
-            if (const auto bad = check_does(s.does)) return which + *bad;
+            if (const auto bad = check_does(s.does, "place")) return which + *bad;
         } else if (!(s.does == RoutineEntry{})) {
             return which + "what it does is given only with an activity (without one the routine says)";
         }
@@ -207,7 +208,7 @@ std::optional<std::string> check_behaviour(const Behaviour& behaviour) {
                     return cond + "a value is given only with alarm_over, alarm_under, after and hour";
                 }
                 if (w.when == BehaviourWhen::sensed) {
-                    if (!place_tag_ok(w.kind)) return cond + "sensed must be a kind: 1 to " + std::to_string(k_max_tag_bytes) + " of a-z, 0-9 and _";
+                    if (!sensed_kind_ok(w.kind)) return cond + "sensed must be of a kind: shot, impact, blast, splash, voice, other or sight";
                 } else if (!w.kind.empty()) {
                     return cond + "a kind is given only with sensed";
                 }
@@ -245,6 +246,13 @@ std::optional<usize> behaviour_state_named(const Behaviour& behaviour, std::stri
         if (behaviour.states[i].name == name) return i;
     }
     return std::nullopt;
+}
+
+bool sensed_kind_ok(std::string_view kind) {
+    for (const char* known : {"shot", "impact", "blast", "splash", "voice", "other", "sight"}) {
+        if (kind == known) return true;
+    }
+    return false;
 }
 
 const char* behaviour_when_name(BehaviourWhen when) {

@@ -631,7 +631,7 @@ constexpr usize k_max_behaviour_conditions = 4;
 enum class BehaviourWhen : u8 {
     alarm_over,  // its alarm is at or over `value` (over 0, to 1)
     alarm_under, // its alarm is under `value` (over 0, to 1)
-    sensed,      // what alarmed it most of late is of `kind` (a noise's: shot, blast, voice...; or sight)
+    sensed,      // what alarmed it most of late is of `kind` (shot, impact, blast, splash, voice, other, sight)
     arrived,     // it is where the state sent it (or the state sends it nowhere)
     failed,      // it could not be sent where the state says
     after,       // it has been in the state `value` seconds (of the simulation's; over 0, to a day's 86400)
@@ -641,7 +641,7 @@ struct BehaviourCondition {
     BehaviourWhen when = BehaviourWhen::arrived;
     float value = 0.0f; // alarm_over, alarm_under, after, hour: see above; else 0
     float until = 0.0f; // hour: when it ends; else 0
-    std::string kind;   // sensed: a word as a place's tag is; else empty
+    std::string kind;   // sensed: one of the kinds (people.h sensed_kind_ok); else empty
     bool operator==(const BehaviourCondition&) const = default;
 };
 struct BehaviourTransition {

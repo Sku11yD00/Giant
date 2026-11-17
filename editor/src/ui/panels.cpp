@@ -1116,7 +1116,7 @@ void EditorPanels::draw_people() {
     }
     const world::Scene& scene = m_state.scene;
     ImGui::SetNextItemWidth(180.0f);
-    if (ImGui::InputTextWithHint("##people_filter", "name, look, home, routine or id", m_people_filter_buffer.data(),
+    if (ImGui::InputTextWithHint("##people_filter", "name, look, home, routine, behaviour or id", m_people_filter_buffer.data(),
                                  m_people_filter_buffer.size())) {
         m_people_list.filter.text = m_people_filter_buffer.data();
     }

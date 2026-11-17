@@ -465,7 +465,7 @@ GIANT_TEST("people commands: behaviours made, replaced, listed, given to people,
     GIANT_CHECK(refused(one({{"is", "soon"}})) && refused(one({{"value", 1}})));
     GIANT_CHECK(refused(one({{"is", "alarm_over"}})) && refused(one({{"is", "alarm_over"}, {"value", 0}})) && refused(one({{"is", "alarm_under"}, {"value", 1.5}})));
     GIANT_CHECK(refused(one({{"is", "alarm_over"}, {"value", 0.5}, {"kind", "shot"}})));
-    GIANT_CHECK(refused(one({{"is", "sensed"}})) && refused(one({{"is", "sensed"}, {"kind", "Shot"}})) && refused(one({{"is", "sensed"}, {"kind", "shot"}, {"value", 1}})));
+    GIANT_CHECK(refused(one({{"is", "sensed"}})) && refused(one({{"is", "sensed"}, {"kind", "Shot"}})) && refused(one({{"is", "sensed"}, {"kind", "gunshot"}})) && refused(one({{"is", "sensed"}, {"kind", "shot"}, {"value", 1}})));
     GIANT_CHECK(refused(one({{"is", "arrived"}, {"value", 1}})) && refused(one({{"is", "failed"}, {"until", 1}})));
     GIANT_CHECK(refused(one({{"is", "after"}})) && refused(one({{"is", "after"}, {"value", 0}})) && refused(one({{"is", "after"}, {"value", 90000}})));
     GIANT_CHECK(refused(one({{"is", "hour"}, {"value", 22}})) && refused(one({{"is", "hour"}, {"until", 6}})) &&
@@ -485,6 +485,7 @@ GIANT_TEST("people commands: behaviours made, replaced, listed, given to people,
     r = f.run("get_people", {{"behaviour", "wary"}});
     GIANT_CHECK(r.ok && r.value["count"] == 2 && r.value["people"][0]["behaviour"] == "wary");
     GIANT_CHECK(f.run("get_people", {{"behaviour", "bold"}}).value["count"] == 0);
+    GIANT_CHECK(f.run("get_people", {{"text", "WAR"}}).value["count"] == 2); // (its behaviour is among what text looks in)
     GIANT_CHECK(f.run("get_behaviours").value["behaviours"][0]["people"] == 2);
     // Replaced whole; undone and done again.
     r = f.run("set_behaviour", {{"name", "wary"}, {"states", Json::array({{{"name", "only"}}})}});
@@ -578,6 +579,14 @@ GIANT_TEST("people near the camera are given entities from their looks, a few a 
     GIANT_CHECK(f.run("undo").ok && f.run("undo").ok);
     people.update(scene, camera, nullptr);
     GIANT_CHECK(people.entity_of(scene, 11) == ada && people.stats().made == 4 && scene.routines.empty());
+    // Given a behaviour likewise.
+    GIANT_CHECK(f.run("set_behaviour", {{"name", "still"}, {"states", Json::array({{{"name", "only"}}})}}).ok);
+    GIANT_CHECK(f.run("set_person", {{"id", 11}, {"behaviour", "still"}}).ok);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 11) == ada && people.stats().made == 4 && people.stats().released == 0);
+    GIANT_CHECK(f.run("undo").ok && f.run("undo").ok);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.entity_of(scene, 11) == ada && people.stats().made == 4 && scene.behaviours.empty());
     GIANT_CHECK(f.run("get_entity", {{"id", ada}}).value["person"] == 11);
     GIANT_CHECK(!f.run("set_entity", {{"id", ada}, {"name", "Eve"}}).ok); // the person is what to change
     // Never saved: the person is.

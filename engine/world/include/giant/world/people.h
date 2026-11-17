@@ -53,6 +53,9 @@ const Behaviour* find_behaviour(std::span<const Behaviour> behaviours, std::stri
 std::optional<usize> behaviour_state_named(const Behaviour& behaviour, std::string_view name);
 // A BehaviourWhen's word in files and commands (alarm_over, alarm_under,
 // sensed, arrived, failed, after, hour), and back (none: not one).
+// Whether a word is a kind of thing sensed (a `sensed` condition's):
+// shot, impact, blast, splash, voice, other, sight.
+bool sensed_kind_ok(std::string_view kind);
 const char* behaviour_when_name(BehaviourWhen when);
 std::optional<BehaviourWhen> behaviour_when_named(std::string_view name);
 

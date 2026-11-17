@@ -3835,7 +3835,8 @@ made of three things in `editor/src/people_list.h`, and the commands
 give the AI the same.
 
 `PeopleList` finds the people that match a filter: text (in a name, a
-look, a home or a routine, letters' case aside, or a whole id), only
+look, a home, a routine or a behaviour, letters' case aside, or a
+whole id), only
 the alarmed, only those on a trip (one that failed is not). A scene
 has up to 65,536 people, and who is alarmed or travelling changes as
 the world runs, so the list is gone through 4,096 a frame, again and
@@ -3891,7 +3892,7 @@ hold, the first such in the order written:
 | `is` | holds when |
 | --- | --- |
 | `alarm_over`, `alarm_under` | its alarm is at or over, or under, `value` (over 0, to 1) |
-| `sensed` | what alarmed it most of late is of `kind` (a noise's kind, or sight) |
+| `sensed` | what alarmed it most of late is of `kind` (shot, impact, blast, splash, voice, other or sight: no other word is taken) |
 | `arrived` | it is where the state sent it (or the state sends it nowhere) |
 | `failed` | it could not be sent where the state says |
 | `after` | it has been in the state `value` seconds of the simulation |

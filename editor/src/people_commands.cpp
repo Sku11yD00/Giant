@@ -214,7 +214,7 @@ Json people_state_json(const PeopleState& people) {
             {"swapped", t.swapped}};
 }
 
-// What one command changed. A place, a look or a routine: the one at `index` before
+// What one command changed. A place, a look, a routine or a behaviour: the one at `index` before
 // and after (none before: put in there; none after: taken out). People: the
 // ones it took out and the ones it put in, by id (a changed person is both).
 template <typename T>
@@ -281,7 +281,7 @@ private:
     const world::Scene& m_scene;
 };
 
-// Does a place's, a look's or a routine's edit, or undoes it. The one it changes is
+// Does a place's, a look's, a routine's or a behaviour's edit, or undoes it. The one it changes is
 // found by its name, the index only says where one is put back: commands
 // run outside the history (scripts) may have changed the list since. What
 // would leave the scene broken is left undone: putting in a name that is
@@ -311,7 +311,7 @@ void apply(std::vector<T>& list, const Edit<T>& edit, bool forward, usize most, 
 
 // Takes `out` from the people and puts `in` among them (both and the people
 // by rising id): once through the list, whatever their number. One put in
-// whose look is gone since is left out, one whose home or routine is gone has none.
+// whose look is gone since is left out, one whose home, routine or behaviour is gone has none.
 void swap_people(world::Scene& scene, const std::vector<Person>& out, const std::vector<Person>& in) {
     if (out.empty() && in.empty()) return;
     std::vector<Person>& people = scene.people;
@@ -806,8 +806,8 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                     {"description", "With alarm_over, alarm_under (over 0, to 1), after (seconds, over 0) and hour (0 to under 24)."}}},
          {"until", {{"type", "number"}, {"minimum", 0}, {"maximum", 24},
                     {"description", "With hour: when it ends (0 to under 24; less than `value`: over midnight)."}}},
-         {"kind", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_tag_bytes},
-                   {"description", "With sensed: a noise's kind (shot, impact, blast, splash, voice, other) or sight."}}}});
+         {"kind", {{"type", "string"}, {"enum", {"shot", "impact", "blast", "splash", "voice", "other", "sight"}},
+                   {"description", "With sensed: a noise's kind, or sight."}}}});
     const Json transition_schema = object_schema(
         {"to", "when"},
         {{"to", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_tag_bytes}, {"description", "Another state of the behaviour."}}},
@@ -1056,7 +1056,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
     people_props["routine"] = name_schema("Only people with this routine.");
     people_props["behaviour"] = name_schema("Only people with this behaviour.");
     people_props["text"] = {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes},
-                            {"description", "Only people with this in their name, look, home or routine (letters' case aside), or whose id it is."}};
+                            {"description", "Only people with this in their name, look, home, routine or behaviour (letters' case aside), or whose id it is."}};
     people_props["alarmed"] = {{"type", "boolean"}, {"description", "Only people alarmed now (while the world runs)."}};
     people_props["travelling"] = {{"type", "boolean"}, {"description", "Only people on a trip now."}};
     add(registry,

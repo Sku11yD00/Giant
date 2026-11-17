@@ -470,9 +470,9 @@ namespace {
 Behaviour wary() {
     Behaviour b;
     b.name = "wary villager";
-    BehaviourState day;
-    day.name = "day";
-    day.transitions = {{"flee", {{BehaviourWhen::sensed, 0.0f, 0.0f, "shot"}, {BehaviourWhen::alarm_over, 0.5f, 0.0f, ""}}},
+    BehaviourState by_day;
+    by_day.name = "day";
+    by_day.transitions = {{"flee", {{BehaviourWhen::sensed, 0.0f, 0.0f, "shot"}, {BehaviourWhen::alarm_over, 0.5f, 0.0f, ""}}},
                        {"night", {{BehaviourWhen::hour, 22.0f, 6.0f, ""}}}};
     BehaviourState flee;
     flee.name = "flee";
@@ -489,7 +489,7 @@ Behaviour wary() {
     night.own = true;
     night.does = {0.0f, "sleep", RoutineAt::tag, "bed_2", 1.25f};
     night.transitions = {{"day", {{BehaviourWhen::hour, 6.0f, 22.0f, ""}}}};
-    b.states = {day, flee, hide, night};
+    b.states = {by_day, flee, hide, night};
     return b;
 }
 
@@ -556,6 +556,18 @@ GIANT_TEST("behaviours: checked state by state, transition by transition, condit
     GIANT_CHECK(condition({BehaviourWhen::alarm_over, 0.5f, 0.0f, "shot"}));
     GIANT_CHECK(!condition({BehaviourWhen::sensed, 0.0f, 0.0f, "sight"}) && condition({BehaviourWhen::sensed, 0.0f, 0.0f, ""}));
     GIANT_CHECK(condition({BehaviourWhen::sensed, 0.0f, 0.0f, "A Shot"}) && condition({BehaviourWhen::sensed, 1.0f, 0.0f, "shot"}));
+    GIANT_CHECK(condition({BehaviourWhen::sensed, 0.0f, 0.0f, "gunshot"}) && condition({BehaviourWhen::sensed, 0.0f, 0.0f, "shots"}));
+    for (const char* kind : {"shot", "impact", "blast", "splash", "voice", "other", "sight"}) {
+        GIANT_CHECK(sensed_kind_ok(kind) && !condition({BehaviourWhen::sensed, 0.0f, 0.0f, kind}));
+    }
+    GIANT_CHECK(!sensed_kind_ok("") && !sensed_kind_ok("Shot"));
+    // What is wrong with where a state sends one is told by the state's own word for it.
+    {
+        Behaviour named = wary();
+        named.states[1].does.name = "inn";
+        const auto bad = check_behaviour(named);
+        GIANT_CHECK(bad && bad->find("states[1]: place is given only") != std::string::npos);
+    }
     GIANT_CHECK(!condition({BehaviourWhen::arrived, 0.0f, 0.0f, ""}) && condition({BehaviourWhen::arrived, 1.0f, 0.0f, ""}));
     GIANT_CHECK(condition({BehaviourWhen::failed, 0.0f, 2.0f, ""}) && condition({BehaviourWhen::failed, 0.0f, 0.0f, "shot"}));
     GIANT_CHECK(!condition({BehaviourWhen::after, 86400.0f, 0.0f, ""}) && condition({BehaviourWhen::after, 0.0f, 0.0f, ""}));
@@ -652,6 +664,11 @@ GIANT_TEST("behaviours: saved and loaded with the scene and the world; older fil
     WorldIndex world_loaded;
     GIANT_CHECK(!load_world_index(save_world_index(world), world_loaded).has_value());
     GIANT_CHECK(world_loaded.behaviours == world.behaviours && world_loaded.people == world.people);
+    GIANT_CHECK(save_world_index(world_loaded) == save_world_index(world));
+    WorldIndex world_bare = world;
+    world_bare.behaviours.clear();
+    for (Person& p : world_bare.people) p.behaviour.clear();
+    GIANT_CHECK(save_world_index(world_bare).find("behaviour") == std::string::npos);
 
     // Refused, saying where.
     const std::string looks = R"("person_looks":[{"name":"v","mesh":"v.glb"}])";
@@ -659,10 +676,22 @@ GIANT_TEST("behaviours: saved and loaded with the scene and the world; older fil
         const std::string error = load_error(scene_with(json));
         return !error.empty() && error.find(where) != std::string::npos;
     };
+    const auto with_kind = [](const std::string& kind) {
+        return R"("behaviours":[{"name":"b","states":[{"name":"a","transitions":[{"to":"c","when":[{"is":"sensed","kind":")" + kind + R"("}]}]},{"name":"c"}]}])";
+    };
     const std::string b = R"("behaviours":[{"name":"b","states":[{"name":"a","transitions":[{"to":"c","when":[{"is":"alarm_over","value":0.5}]}]},{"name":"c","activity":"hide"}]}])";
     GIANT_CHECK(load_error(scene_with(b)).empty());
     GIANT_CHECK(load_error(scene_with(looks + "," + b + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"","b"]]})")).empty());
     GIANT_CHECK(refused(looks + "," + b + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"","e"]]})", "behaviour \"e\""));
+    {
+        // A routine and a behaviour, as a file has them.
+        const std::string r = R"("routines":[{"name":"d","entries":[{"from":8,"activity":"work"}]}])";
+        Scene both;
+        GIANT_CHECK(!load_scene(scene_with(looks + "," + r + "," + b + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"d","b"]]})"), both).has_value());
+        GIANT_CHECK(both.people.size() == 1 && both.people[0].routine == "d" && both.people[0].behaviour == "b");
+        GIANT_CHECK(refused(looks + "," + b + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"d","b"]]})", "routine \"d\""));
+    }
+    GIANT_CHECK(refused(with_kind("gunshot"), "when[0]"));
     GIANT_CHECK(refused(looks + "," + b + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"",""]]})", "people.list[0]"));
     GIANT_CHECK(refused(looks + "," + b + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,"",7]]})", "people.list[0]"));
     GIANT_CHECK(refused(looks + "," + b + R"(,"people":{"next_id":3,"list":[[2,"a","v","",0,0,0,0,5,7,"b"]]})", "people.list[0]"));
