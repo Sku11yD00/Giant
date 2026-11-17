@@ -298,6 +298,26 @@ GIANT_TEST("routines: checked entry by entry; the entry that holds at an hour, o
     GIANT_CHECK(bad([](Routine& r) { r.entries[1].activity.clear(); }));
     GIANT_CHECK(bad([](Routine& r) { r.entries[1].speed = 0.0f; }));
     GIANT_CHECK(bad([](Routine& r) { r.entries[1].speed = 25.0f; }));
+    // What one does while alarmed: each over an alarm, rising, an entry but for its hour.
+    const auto alarmed = [&](auto&& change) {
+        Routine r = day();
+        r.alarmed = {{0.2f, {0.0f, "watch", RoutineAt::stay, "", 1.4f}}, {0.6f, {0.0f, "flee", RoutineAt::home, "", 5.0f}}};
+        change(r);
+        return check_routine(r).has_value();
+    };
+    GIANT_CHECK(!alarmed([](Routine&) {}));
+    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[0].over = 0.0f; }));
+    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[1].over = 1.5f; }));
+    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[1].over = 0.2f; })); // not more than the one before
+    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[0].over = std::numeric_limits<float>::quiet_NaN(); }));
+    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[0].does.from = 3.0f; }));
+    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[0].does.activity = "Watch"; }));
+    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[1].does.speed = 30.0f; }));
+    GIANT_CHECK(alarmed([](Routine& r) { r.alarmed[1].does.name = "inn"; })); // (a name only with place or tag)
+    GIANT_CHECK(alarmed([](Routine& r) {
+        const RoutineAlarm first = r.alarmed[0]; // (a copy: assign may not be given one of the list's own)
+        r.alarmed.assign(k_max_routine_alarms + 1, first);
+    }));
     GIANT_CHECK(bad([](Routine& r) { r.entries[1].name.clear(); }));     // a place unnamed
     GIANT_CHECK(bad([](Routine& r) { r.entries[0].name = "At Work"; })); // not a tag
     GIANT_CHECK(bad([](Routine& r) { r.entries[3].name = "inn"; }));     // stay names nothing
@@ -343,6 +363,7 @@ GIANT_TEST("routines: saved and loaded with the scene and the world; older files
     Routine night;
     night.name = "watch";
     night.entries = {{0.0f, "watch", RoutineAt::place, "a place not there", 0.1f}, {23.5f, "walk", RoutineAt::tag, "gate_2", 20.0f}};
+    night.alarmed = {{0.25f, {0.0f, "watch", RoutineAt::stay, "", 1.4f}}, {0.7f, {0.0f, "flee", RoutineAt::tag, "gate_2", 6.5f}}};
     scene.routines.push_back(night); // (a place that is gone is kept: one stays where it is then)
     scene.people = {person(2, "villager", "inn", 0.25), person(3, "villager", "", 4.0)};
     scene.people[0].routine = "villager's day";
@@ -360,6 +381,7 @@ GIANT_TEST("routines: saved and loaded with the scene and the world; older files
         return n;
     };
     GIANT_CHECK(times(text, "villager's day") == 2);
+    GIANT_CHECK(times(text, "\"alarmed\"") == 1); // (only the routine that has any)
     Scene plain = scene, bare = scene;
     plain.people[0].routine.clear();
     bare.routines.clear();

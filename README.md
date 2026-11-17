@@ -403,6 +403,9 @@ Open-world systems:
 - LW5b: people see: the player while playing, and whatever
   `show_to_people` shows, within a distance and a cone about the way
   each faces, with nothing between (a few rays a frame).
+- LW5c: the alarmed react: a routine says what its people do over
+  each alarm (watch, flee home, hide at a place), and they go back to
+  their day when calm.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

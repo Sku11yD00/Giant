@@ -139,6 +139,9 @@ public:
     // False: calm (it heard nothing, or has calmed since).
     bool heard(const world::Scene& scene, world::PersonId id, Heard& out) const;
     float alarm(const world::Scene& scene, world::PersonId id) const;
+    // The same for the person at `index` of the scene's people (a frame's, for many: no search
+    // while the slots lie beside the people).
+    float alarm_at(const world::Scene& scene, usize index) const;
 
     struct Stats {
         u32 noises = 0;  // spreading now

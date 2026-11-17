@@ -111,11 +111,21 @@ std::optional<std::string> check_routine(const Routine& routine) {
     if (routine.entries.empty() || routine.entries.size() > k_max_routine_entries) {
         return "entries must be 1 to " + std::to_string(k_max_routine_entries);
     }
-    for (usize i = 0; i < routine.entries.size(); ++i) {
-        const RoutineEntry& e = routine.entries[i];
-        const std::string which = "entries[" + std::to_string(i) + "]: ";
-        if (!std::isfinite(e.from) || e.from < 0.0f || e.from >= 24.0f) return which + "from must be an hour from 0 to under 24";
-        if (i > 0 && e.from <= routine.entries[i - 1].from) return which + "from must be later than the entry's before it";
+    if (routine.alarmed.size() > k_max_routine_alarms) return "alarmed must be at most " + std::to_string(k_max_routine_alarms);
+    const usize days = routine.entries.size();
+    for (usize i = 0; i < days + routine.alarmed.size(); ++i) {
+        const bool alarm = i >= days;
+        const RoutineEntry& e = alarm ? routine.alarmed[i - days].does : routine.entries[i];
+        const std::string which = (alarm ? "alarmed[" + std::to_string(i - days) : "entries[" + std::to_string(i)) + "]: ";
+        if (alarm) {
+            const float over = routine.alarmed[i - days].over;
+            if (!std::isfinite(over) || over <= 0.0f || over > 1.0f) return which + "over must be an alarm over 0, to 1";
+            if (i > days && over <= routine.alarmed[i - days - 1].over) return which + "over must be more than the one's before it";
+            if (e.from != 0.0f) return which + "from is not used (an alarmed entry has over)";
+        } else {
+            if (!std::isfinite(e.from) || e.from < 0.0f || e.from >= 24.0f) return which + "from must be an hour from 0 to under 24";
+            if (i > 0 && e.from <= routine.entries[i - 1].from) return which + "from must be later than the entry's before it";
+        }
         if (!place_tag_ok(e.activity)) {
             return which + "activity must be 1 to " + std::to_string(k_max_tag_bytes) + " of a-z, 0-9 and _";
         }

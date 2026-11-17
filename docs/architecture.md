@@ -3768,6 +3768,65 @@ notices); light and weather do not shorten sight; far from the camera
 the physics holds no bodies, so only the terrain hides things there;
 a person does not see other people or bodies yet.
 
+### What the alarmed do (LW5c)
+
+A routine says what its people do while alarmed as it says what they
+do through the day: `world::Routine::alarmed`, up to 8
+`RoutineAlarm`s, each an alarm `over` (over 0, to 1, rising through
+the list) and what one does then (`does`: a `RoutineEntry` but for
+its hour: an activity, and stay, home, a place or a tag, at a speed).
+Saved with the routine (`alarmed`, written only when there are any);
+`set_routine` takes it.
+
+`PeopleRoutines::update` is given the senses. For a person whose
+routine has any, it asks the person's alarm (`PeopleSenses::alarm_at`,
+the slot beside the person: no search) and, when it is at or over one,
+takes the last such in place of the entry the hour gives. From there
+nothing is new: what it says is acted on as any entry is (a trip sent,
+or the routine's own trip stopped for `stay`), its activity is what
+the person does (`get_people`'s `doing`, the look's clip for it), and
+when the alarm has eased under it the hour's entry says something
+else again, so the person goes back to its day. So `{over 0.2, watch}`
+and `{over 0.6, flee, at home, speed 5}` has one stop and watch at a
+noise, run home from a shot or the player close by, stop when it has
+calmed some, and set off to work again when calm.
+
+One on an alarmed entry leaves it only when its alarm is 0.05 under
+the entry's `over` (`k_alarm_margin`), so an alarm hovering about an
+`over` does not have it start and stop. An alarmed entry with nowhere
+to go (no home, no such place) is acted on as `stay`, not told as
+failed (and not tried again while it holds, should such a place be
+made); one that cannot be sent (no road near, no way) is told as
+failed and stops the routine's own trip, so it does not walk on with
+its day. Staying says nothing of a speed (`said`), so going from one
+`stay` to another only changes what the person does.
+
+Game saves keep a person on an alarmed entry as any other (the
+entry's number counts on past the day's). Alarm itself is not saved,
+so a loaded game is calm: the hour's entry is then something else to
+act on, and the trip the alarm began is the routine's to stop or
+turn.
+
+Bounds: none of its own. People are looked at in their turn
+(`looked_a_frame`, 512) and acted on within `sent_a_frame` (32): each
+change of what an alarm has one do takes one of those, and when a
+frame's are spent the look waits there. So a shot heard by 5,000
+people with alarmed entries takes about 2.6 s to reach the last of
+them, and holds up the hour's changes of those after them meanwhile;
+each `over` crossed on the way back to calm costs the same again.
+
+Known limits: one does not turn to face what alarmed it; there is no
+taking cover (a place with a tag is the nearest thing: `at tag`); a
+person with no routine does not react; an alarmed entry that sends
+one somewhere takes the place of a trip sent by hand (`send_person`),
+`stay` leaves such a trip be, and calm again the hour's entry calls
+the person back to its day; one that fled and turned its back on the
+player calms, walks back, sees the player and flees again (about
+every 25 s while the player stands there); a look's clip for the
+alarmed activity plays where the routine has the person be, so one
+that has run home goes on playing `flee` there while still alarmed
+(name a clip that suits both, or none).
+
 ### Nobody appears close by in view (LW4 part 2)
 
 `PeopleState` is told what the camera sees (`PeopleState::view`, set by

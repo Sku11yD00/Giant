@@ -1073,7 +1073,19 @@ Json routines_json(std::span<const Routine> routines) {
             if (e.speed != RoutineEntry{}.speed) entry["speed"] = e.speed;
             entries.push_back(std::move(entry));
         }
-        out.push_back({{"name", r.name}, {"entries", std::move(entries)}});
+        Json routine = {{"name", r.name}, {"entries", std::move(entries)}};
+        if (!r.alarmed.empty()) { // (only when there: older files read and write the same)
+            Json alarmed = Json::array();
+            for (const RoutineAlarm& a : r.alarmed) {
+                Json entry = {{"over", a.over}, {"activity", a.does.activity}};
+                if (a.does.at != RoutineAt::stay) entry["at"] = routine_at_name(a.does.at);
+                if (!a.does.name.empty()) entry["name"] = a.does.name;
+                if (a.does.speed != RoutineEntry{}.speed) entry["speed"] = a.does.speed;
+                alarmed.push_back(std::move(entry));
+            }
+            routine["alarmed"] = std::move(alarmed);
+        }
+        out.push_back(std::move(routine));
     }
     return out;
 }
@@ -2119,18 +2131,33 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             Routine routine;
             r.string("name", routine.name, true, k_max_name_bytes);
             const Json* entries = r.get("entries", true);
+            const Json* alarmed = r.get("alarmed", false);
             r.finish();
             if (!error.empty() || entries == nullptr) return;
             if (!entries->is_array() || entries->empty() || entries->size() > k_max_routine_entries) {
                 error = path + ".entries must be a list of 1 to " + std::to_string(k_max_routine_entries);
                 return;
             }
-            for (usize k = 0; k < entries->size(); ++k) {
-                const std::string entry_path = path + ".entries[" + std::to_string(k) + "]";
-                Reader e((*entries)[k], entry_path, error);
+            if (alarmed != nullptr && (!alarmed->is_array() || alarmed->size() > k_max_routine_alarms)) {
+                error = path + ".alarmed must be a list of at most " + std::to_string(k_max_routine_alarms);
+                return;
+            }
+            const usize days = entries->size();
+            const usize all = days + (alarmed != nullptr ? alarmed->size() : 0);
+            for (usize k = 0; k < all; ++k) {
+                const bool alarm = k >= days;
+                const std::string entry_path =
+                    path + (alarm ? ".alarmed[" + std::to_string(k - days) : ".entries[" + std::to_string(k)) + "]";
+                Reader e(alarm ? (*alarmed)[k - days] : (*entries)[k], entry_path, error);
                 RoutineEntry entry;
-                e.get("from", true);
-                e.number("from", entry.from, 0, 24);
+                float over = 0.0f;
+                if (alarm) {
+                    e.get("over", true);
+                    e.number("over", over, 0, 1);
+                } else {
+                    e.get("from", true);
+                    e.number("from", entry.from, 0, 24);
+                }
                 e.string("activity", entry.activity, true, k_max_tag_bytes);
                 std::string at = "stay";
                 e.string("at", at, false, 8);
@@ -2144,7 +2171,11 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
                     return;
                 }
                 entry.at = *where;
-                routine.entries.push_back(std::move(entry));
+                if (alarm) {
+                    routine.alarmed.push_back({over, std::move(entry)});
+                } else {
+                    routine.entries.push_back(std::move(entry));
+                }
             }
             if (const auto bad = check_routine(routine)) {
                 error = path + ": " + *bad;

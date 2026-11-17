@@ -1,5 +1,6 @@
 #include "people_routines.h"
 
+#include "people_senses.h"
 #include "people_travel.h"
 
 #include "giant/world/people.h"
@@ -40,7 +41,8 @@ u32 said(const world::Person& person, const world::RoutineEntry& e) {
     u32 h = 2166136261u;
     h = (h ^ static_cast<u32>(e.at)) * 16777619u;
     h = hashed(h, e.name);
-    h = (h ^ static_cast<u32>(std::lround(static_cast<double>(e.speed) * 1000.0))) * 16777619u;
+    // (Staying says nothing of a speed: two that stay say the same.)
+    if (e.at != world::RoutineAt::stay) h = (h ^ static_cast<u32>(std::lround(static_cast<double>(e.speed) * 1000.0))) * 16777619u;
     if (e.at == world::RoutineAt::home || e.at == world::RoutineAt::tag) h = hashed(h, person.home);
     return h == 0 ? 1 : h;
 }
@@ -289,7 +291,16 @@ void PeopleRoutines::follow(const world::Scene& scene, const PeopleTravel& trave
     }
 }
 
-void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, double hours) {
+namespace {
+// A routine's entry by the number a slot keeps: the day's, then those for the alarmed. Null: none such.
+const world::RoutineEntry* entry_of(const world::Routine& routine, usize index) {
+    if (index < routine.entries.size()) return &routine.entries[index];
+    index -= routine.entries.size();
+    return index < routine.alarmed.size() ? &routine.alarmed[index].does : nullptr;
+}
+} // namespace
+
+void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, double hours, const PeopleSenses* senses) {
     follow(scene, travel);
     if (hold) return;
     const std::vector<world::Person>& people = scene.people;
@@ -342,8 +353,22 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         ++m_counted;
         const world::Routine& routine = routines[slot.routine];
         if (routine.entries.empty()) continue;
-        const usize now = world::routine_entry_at(routine, hour_of(person.id, hours));
-        const world::RoutineEntry& entry = routine.entries[now];
+        usize now = world::routine_entry_at(routine, hour_of(person.id, hours));
+        if (senses != nullptr && !routine.alarmed.empty()) {
+            // Alarmed: the last of `alarmed` its alarm is at or over holds instead.
+            // What it does for its alarm already it leaves only when calmer by a margin (an alarm
+            // hovering about an `over` does not have it start and stop).
+            const float alarm = senses->alarm_at(scene, m_cursor - 1);
+            const usize days = routine.entries.size();
+            const usize doing = slot.acted != 0 && slot.entry >= days ? slot.entry - days : routine.alarmed.size();
+            for (usize a = routine.alarmed.size(); a-- > 0 && alarm > 0.0f;) {
+                if (alarm >= routine.alarmed[a].over || (a == doing && alarm >= routine.alarmed[a].over - k_alarm_margin)) {
+                    now = days + a;
+                    break;
+                }
+            }
+        }
+        const world::RoutineEntry& entry = *entry_of(routine, now);
         const u32 says = said(person, entry);
         if (says == slot.acted) {
             slot.entry = static_cast<u8>(now); // (the same said by another entry: what it does there may be another)
@@ -391,6 +416,13 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         slot.entry = static_cast<u8>(now);
         slot.failed = false;
         slot.place = 0;
+        if (sought == Sought::none && now >= routine.entries.size()) {
+            // Alarmed with nowhere to go (no home, no such place): it stays where it is, as for `stay`.
+            if (slot.trip != 0 && trip != nullptr && trip->serial == slot.trip) travel.stop(person.id);
+            slot.trip = 0;
+            ++m_stats.stayed;
+            continue;
+        }
         if (sought == Sought::none) { // (no home, or no such place: it stays where it is, or goes on where it went)
             slot.failed = true;
             ++m_stats.failed;
@@ -420,6 +452,12 @@ void PeopleRoutines::update(const world::Scene& scene, PeopleTravel& travel, dou
         } else {
             slot.failed = true;
             ++m_stats.failed;
+            // (Alarmed and not able to go where that says: it does not walk on with its day either.)
+            if (now >= routine.entries.size()) {
+                const PeopleTravel::Trip* still = travel.trip(person.id);
+                if (slot.trip != 0 && still != nullptr && still->serial == slot.trip) travel.stop(person.id);
+                slot.trip = 0;
+            }
         }
     }
 }
@@ -443,8 +481,9 @@ bool PeopleRoutines::activity(const world::Scene& scene, world::PersonId id, Act
     const Slot& slot = m_slots[index];
     if (slot.id != id || slot.acted == 0 || slot.failed || slot.routine >= scene.routines.size()) return false;
     const world::Routine& routine = scene.routines[slot.routine];
-    if (routine.name != person->routine || slot.entry >= routine.entries.size()) return false;
-    out.activity = routine.entries[slot.entry].activity;
+    const world::RoutineEntry* entry = entry_of(routine, slot.entry);
+    if (routine.name != person->routine || entry == nullptr) return false;
+    out.activity = entry->activity;
     out.place = sent_to(scene, slot);
     out.anywhere = slot.place == 0;
     return true;
@@ -461,6 +500,9 @@ bool PeopleRoutines::kept(const world::Scene& scene, const PeopleTravel& travel,
     if (!m_running || index >= m_slots.size() || index >= scene.people.size()) return false;
     const Slot& slot = m_slots[index];
     if (slot.id != scene.people[index].id || slot.acted == 0) return false;
+    // (One on an entry for its alarm is kept as any: a loaded game is calm, so the hour's entry is
+    // then something else to act on, and the trip its alarm began is the routine's to stop or turn.
+    // Whether the entry is still its routine's is restore's to tell.)
     out.said = slot.acted;
     out.entry = slot.entry;
     out.failed = slot.failed;
@@ -476,9 +518,10 @@ bool PeopleRoutines::restore(const world::Scene& scene, const PeopleTravel& trav
     const world::Person* person = world::find_person(scene.people, id);
     if (!m_running || person == nullptr || person->routine.empty() || had.said == 0) return false;
     const world::Routine* routine = world::find_routine(scene.routines, person->routine);
-    if (routine == nullptr || had.entry >= routine->entries.size()) return false;
+    const world::RoutineEntry* entry = routine != nullptr ? entry_of(*routine, had.entry) : nullptr;
+    if (entry == nullptr) return false;
     // (Its routine changed since: it says something else now, and is acted on afresh.)
-    if (said(*person, routine->entries[had.entry]) != had.said) return false;
+    if (said(*person, *entry) != had.said) return false;
     const usize index = static_cast<usize>(person - scene.people.data());
     if (m_slots.size() != scene.people.size() || m_slots[index].id != id) match_slots(scene.people);
     Slot& slot = m_slots[index];
@@ -500,8 +543,9 @@ bool PeopleRoutines::doing(const world::Scene& scene, world::PersonId id, Doing&
     const Slot& slot = m_slots[index];
     if (slot.id != id || slot.acted == 0 || slot.routine >= scene.routines.size()) return false;
     const world::Routine& routine = scene.routines[slot.routine];
-    if (routine.name != person->routine || slot.entry >= routine.entries.size()) return false;
-    out.activity = routine.entries[slot.entry].activity;
+    const world::RoutineEntry* entry = entry_of(routine, slot.entry);
+    if (routine.name != person->routine || entry == nullptr) return false;
+    out.activity = entry->activity;
     const world::Place* place = sent_to(scene, slot);
     out.place = place != nullptr ? std::string_view(place->name) : std::string_view();
     out.failed = slot.failed;
