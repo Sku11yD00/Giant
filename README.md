@@ -434,6 +434,8 @@ Open-world systems:
   every clash is reported; the world's own files stay its own when saved.
 - LW7 part 3a: a mod brings people of its own, under ids that stay the
   same whatever other mods are on, so saved games find them again.
+- LW7 part 3b: a mod keeps its own art in its folder (`mod:art/guard.glb`),
+  so a mod is one folder that can be copied whole.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

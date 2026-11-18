@@ -1746,14 +1746,18 @@ std::vector<std::filesystem::path> gltf_buffer_files(const std::filesystem::path
     std::unique_ptr<cgltf_data, DataDeleter> data(raw);
     if (r != cgltf_result_success) return files;
     const std::u8string full_u8(full.begin(), full.end());
-    const std::filesystem::path folder = std::filesystem::path(full_u8).parent_path();
+    const std::filesystem::path folder = std::filesystem::path(full_u8).parent_path().lexically_normal(); // (as import's)
     for (cgltf_size i = 0; i < data->buffers_count; ++i) {
         const char* uri = data->buffers[i].uri;
         if (uri == nullptr || std::string_view(uri).starts_with("data:")) continue;
         std::string decoded(uri);
         cgltf_decode_uri(decoded.data());
         decoded.resize(std::strlen(decoded.c_str()));
-        files.push_back(folder / std::filesystem::path(std::u8string(decoded.begin(), decoded.end())));
+        // (As read_file: a buffer may not be outside the file's folder, so none there is ever looked at.)
+        const std::filesystem::path file = folder / std::filesystem::path(std::u8string(decoded.begin(), decoded.end()));
+        const std::filesystem::path relative = file.lexically_normal().lexically_relative(folder);
+        if (relative.empty() || *relative.begin() == "..") continue;
+        files.push_back(file);
     }
     return files;
 }

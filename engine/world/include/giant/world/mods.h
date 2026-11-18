@@ -139,6 +139,31 @@ std::string save_mod_world(const ModWorld& world);
 // use is looked at when it is laid over the world.)
 std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out);
 
+// --- The files a mod names (part 3b) ------------------------------------------
+//
+// A file a mod's world.json names (a look's mesh, its hair's file, its
+// materials' image maps and skin detail) is the mod's own when it is
+// written "mod:<path>": a path in the mod's folder. So a mod is one folder
+// that can be copied whole. Any other is a path from the folder the game
+// runs in, as a world's own are. Either way a mod is not trusted with the
+// rest of the machine: the path has forward slashes and never leaves its
+// folder (no "..", no ".", no empty part, so no root and no server; no
+// colon, so no drive), and has nothing Windows reads as something else (a
+// backslash, a part ending in a dot or a space or beginning with a space,
+// a device's name, any of < > " | ? *) and no control character.
+constexpr std::string_view k_mod_file_prefix = "mod:";
+// What is wrong with a path a mod's world names, or nothing ("": none, nothing wrong).
+std::optional<std::string> check_mod_file_path(std::string_view path);
+// What is wrong among all the files its world names, with which (as "person_looks[2].mesh: ..."), or nothing.
+std::optional<std::string> check_mod_files(const ModWorld& world);
+// Whether its world names any file of the mod's own ("mod:...").
+bool has_mod_own_files(const ModWorld& world);
+// Makes each of the mod's own files' paths one a file is opened by:
+// `mod_folder` (UTF-8, forward slashes, as the editor would open it), "/",
+// and the path in it. What is wrong, or nothing; `world` is changed only
+// when nothing is (a path longer than a scene keeps, k_max_mesh_path_bytes, is).
+std::optional<std::string> resolve_mod_files(ModWorld& world, std::string_view mod_folder);
+
 // The kinds of thing a mod changes, as changes name them.
 enum class ModThing : u8 { place, person_look, routine, behaviour };
 std::string_view mod_thing_name(ModThing thing);

@@ -3117,6 +3117,11 @@ std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out) {
     read_people(root, world.places, world.person_looks, world.routines, world.people, next_person_id, error, PeopleRead::mod);
     read_behaviours(root, world.behaviours, nobody, error);
     root.finish();
+    if (error.empty()) {
+        if (const auto wrong = check_mod_files(world)) {
+            error = *wrong;
+        }
+    }
     if (!error.empty()) {
         return LoadError{error};
     }

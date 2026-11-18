@@ -2,8 +2,8 @@
 // <world>/mods/<id>/mod.json for each, and <world>/mods/enabled.json for
 // which are on. Read when asked (list_mods, enable_mod), never by a frame.
 // A mod's world.json (places, person looks, routines, behaviours, people)
-// is laid over the world when it is opened (lay_mods); assets and scripts
-// are parts to come.
+// is laid over the world when it is opened (lay_mods), its own files
+// ("mod:...") found in its folder; kits and scripts are parts to come.
 #pragma once
 
 #include "giant/core/types.h"
@@ -67,7 +67,8 @@ ModsLaid::File mod_world_file(const std::filesystem::path& world_folder, const s
 // Lays the world's loaded mods over the scene's places, person looks,
 // routines, behaviours and people (the world's own, just read). A mod with no
 // world.json changes nothing; one whose world.json cannot be used is left
-// out with why (in `applied.problems`). Reads the disk.
+// out with why (in `applied.problems`). The mod's own files' paths
+// (world::resolve_mod_files) become paths in <world>/mods/<id>/. Reads the disk.
 ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene);
 
 // Where a world's mods are: <world>/mods.

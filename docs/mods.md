@@ -5,8 +5,9 @@ you can turn it off and the world is as it was. This page is for people
 who make mods and people who install them.
 
 So far a mod can change a world's places, the looks of its people, their
-routines and their behaviours, and bring people of its own. New assets
-and scripts are parts still being built; this page will grow with them.
+routines and their behaviours, and bring people of its own, with its own
+art files. Kits and scripts are parts still being built; this page will
+grow with them.
 
 ## Where mods go
 
@@ -96,6 +97,46 @@ counts are of all).
 A routine or behaviour may send people to a place by name. Nothing checks
 that the place is there, in a mod or in a world: a place that is missing
 is one nobody can be sent to, so name places your mod brings or needs.
+
+### A mod's own files
+
+A look needs a mesh, and may name image maps for its materials and a file
+for its hair. Keep those files in the mod's folder and name them with
+`mod:` and their path inside it:
+
+```json
+"person_looks": [
+  {"name": "guard", "mesh": "mod:art/guard.glb", "height": 1.2}
+]
+```
+
+With the mod in `<world>/mods/guards/`, that is the file
+`<world>/mods/guards/art/guard.glb`. So a mod is one folder: copy it into
+another world's `mods` folder and its art comes with it.
+
+- This works for a look's `mesh`, its `hair.file`, the maps of its
+  `material` and of each of its `parts`, and a skin's `detail_normal`.
+- Use forward slashes. The path may not leave the mod's folder: no `..`,
+  no `.`, no empty part, no backslash, no colon. Nor may it hold what
+  Windows reads as something else: a part that ends in a dot or a space
+  or begins with a space, a device's name (`con`, `prn`, `aux`, `nul`,
+  `conin$`, `conout$`, `com0` to `com9`, `lpt0` to `lpt9`, whatever
+  follows a dot), any of `< > " | ? *`, or a control character. A path that breaks this is an error, and the mod's changes
+  are left out.
+- Put the files themselves in the mod's folder, not links to them. A mod
+  that names files of its own and has a link (or, on Windows, a
+  junction) anywhere in its folder is left out, and `list_mods` says
+  which link.
+- A path without `mod:` is a path from the folder the game runs in, for
+  files every install has (`people/villager.glb`). The same rules hold
+  for it, so a mod can never name a file by a drive, a root, a server or
+  a folder above. (A world's own files may: the world is yours, a mod
+  may be anyone's.)
+- `mod:` means something only in a mod's `world.json`. Do not write it
+  in a world's own files or in a command: there it is taken as part of a
+  file's name, and no such file will be found.
+- The whole path (the world's folder, `mods/<id>/`, and the path in the
+  mod) can be at most 1024 bytes.
 
 ### People
 

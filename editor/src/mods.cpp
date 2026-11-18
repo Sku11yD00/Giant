@@ -30,13 +30,43 @@ bool is_absent(const std::filesystem::path& path) {
     return std::filesystem::symlink_status(path, error).type() == std::filesystem::file_type::not_found;
 }
 
-// The folder's name as text, or nothing when it is not text (Windows: a name that is not Unicode).
-std::optional<std::string> name_of(const std::filesystem::path& folder) {
+// The path as text, or nothing when it is not text (Windows: a name that is not Unicode).
+std::optional<std::string> text_of(const std::filesystem::path& path) {
     try {
-        return path_to_utf8(folder.filename());
+        return path_to_utf8(path);
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+// The folder's name as text.
+std::optional<std::string> name_of(const std::filesystem::path& folder) { return text_of(folder.filename()); }
+
+// A mod's folder holds no links: a link could lead a file of the mod's own (or a glTF's buffer or
+// image beside it) out of the folder, to anywhere on the machine or to a server. The first link in
+// it, with why the mod cannot be used, or nothing. Looks at every name in the folder and follows none.
+constexpr usize k_max_mod_folder_entries = 100000;
+std::optional<std::string> link_in(const std::filesystem::path& folder) {
+    std::error_code error;
+    usize seen = 0;
+    for (std::filesystem::recursive_directory_iterator at(folder, error), end; !error && at != end; at.increment(error)) {
+        if (++seen > k_max_mod_folder_entries) {
+            return "the mod's folder holds more than " + std::to_string(k_max_mod_folder_entries) + " files and folders: too many to look through";
+        }
+        std::error_code ignored;
+        const std::filesystem::file_type type = at->symlink_status(ignored).type();
+        bool link = type == std::filesystem::file_type::symlink;
+#ifdef _WIN32
+        link = link || type == std::filesystem::file_type::junction;
+#endif
+        if (link) {
+            return "\"" + text_of(at->path().lexically_relative(folder)).value_or("(a name that is not text)") +
+                   "\" in the mod's folder is a link: a mod's files are its own folder's (put the file itself there)";
+        }
+    }
+    if (error) {
+        return "the mod's folder could not be looked through: " + error.message();
+    }
+    return std::nullopt;
 }
 
 // The ids on, or why the list cannot be used (no file: none on).
@@ -178,6 +208,18 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
         }
         if (const auto bad = world::load_mod_world(*text, worlds[i])) {
             unread.push_back({i, std::string(k_mod_world) + ": " + bad->message});
+            continue;
+        }
+        // The mod's own files ("mod:...") are in its folder, and nowhere a link in it would lead.
+        const std::filesystem::path own_folder = mods_folder(world_folder) / laid.mods[i];
+        std::optional<std::string> wrong = world::has_mod_own_files(worlds[i]) ? link_in(own_folder) : std::nullopt;
+        if (!wrong) {
+            const std::optional<std::string> folder_text = text_of(own_folder);
+            wrong = folder_text ? world::resolve_mod_files(worlds[i], MeshLibrary::normalize(*folder_text))
+                                : std::optional<std::string>("the mod's folder has a path that is not text");
+        }
+        if (wrong) {
+            unread.push_back({i, std::string(k_mod_world) + ": " + *wrong});
             continue;
         }
         for (world::PersonLook& look : worlds[i].person_looks) {
