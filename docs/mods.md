@@ -90,28 +90,43 @@ The world's own files are never changed by a mod. The changes are laid
 over the world each time it is opened, in the load order, so a later mod's
 thing wins over an earlier mod's of the same name. Every such clash is
 reported: `list_mods` shows under `world` what each mod added and
-replaced, with the clashes first.
+replaced, with the clashes first (at most 256 changes are listed; the
+counts are of all).
+
+A routine or behaviour may send people to a place by name. Nothing checks
+that the place is there, in a mod or in a world: a place that is missing
+is one nobody can be sent to, so name places your mod brings or needs.
 
 A mod's changes go in whole or not at all. If they would leave the world
 broken (more looks than a world keeps, say), that mod's changes are left
 out and `list_mods` says why under `world.problems`. The same goes for a
 `world.json` with a mistake in it.
 
-After turning mods on or off, open the world again to see the change
-(`list_mods` says `reopen` when the world on screen is not what the mods
-now give).
+After turning mods on or off, or changing a mod's `world.json`, open the
+world again to see the change (`list_mods` says `reopen` when other mods
+load now than when the world was opened, or a mod's `world.json` was
+written since).
 
 ### Working on a world while mods are on
 
 You can keep building a world with mods on. When you save:
 
-- What the mods brought and you left alone is not written into the
-  world's files.
-- What you changed or made is the world's own and is saved, including a
-  mod's thing that you changed (it becomes the world's).
+- The world's own things are saved as you changed, made and removed them.
+- What a mod brought is the mod's, and is never written into the world's
+  files. That holds even if you changed it in the editor: the change
+  shows until the world is closed, is not saved, and `save_world` names
+  such things under `mods_things_not_saved`. Where a mod replaced one of
+  the world's own things, the world's own stays in its file as it was.
+  To change what a mod brings, change the mod's `world.json`; to change
+  the world's own, turn the mod off first.
 - The world must still open without the mods. If one of the world's
   people uses a look, home, routine or behaviour that only a mod brings,
-  the save is refused and says which.
+  the save is refused and says which. Give the world one of its own under
+  another name.
+
+If you close a world (`close_world`) the scene keeps what the mods
+brought, as plain things: saved as a new world, they would be that
+world's own.
 
 ## Turning mods on and off
 

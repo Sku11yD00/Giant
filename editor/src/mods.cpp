@@ -4,10 +4,13 @@
 
 #include "giant/core/text.h"
 #include "giant/core/text_files.h"
+#include "giant/world/people.h"
 
 #include <algorithm>
 #include <exception>
 #include <iterator>
+#include <set>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -156,6 +159,7 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
     std::vector<world::ModProblem> unread;
     for (usize i = 0; i < laid.mods.size(); ++i) {
         const std::filesystem::path file = mods_folder(world_folder) / laid.mods[i] / k_mod_world;
+        laid.files.push_back(mod_world_file(world_folder, laid.mods[i]));
         if (is_absent(file)) {
             continue;
         }
@@ -178,14 +182,36 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
     laid.applied.problems.insert(laid.applied.problems.end(), std::make_move_iterator(unread.begin()), std::make_move_iterator(unread.end()));
     std::sort(laid.applied.problems.begin(), laid.applied.problems.end(),
               [](const world::ModProblem& l, const world::ModProblem& r) { return l.mod < r.mod; });
-    if (!laid.applied.changes.empty()) {
+    // The things mods set, each once, as they are now (the last to set it left it so).
+    std::set<std::pair<world::ModThing, std::string_view>> seen;
+    for (const world::ModChange& change : laid.applied.changes) {
+        if (!seen.emplace(change.thing, change.name).second) {
+            continue;
+        }
         laid.any = true;
-        laid.places = scene.places;
-        laid.person_looks = scene.person_looks;
-        laid.routines = scene.routines;
-        laid.behaviours = scene.behaviours;
+        switch (change.thing) {
+        case world::ModThing::place: laid.places.push_back(*world::find_place(scene.places, change.name)); break;
+        case world::ModThing::person_look: laid.person_looks.push_back(*world::find_person_look(scene.person_looks, change.name)); break;
+        case world::ModThing::routine: laid.routines.push_back(*world::find_routine(scene.routines, change.name)); break;
+        case world::ModThing::behaviour: laid.behaviours.push_back(*world::find_behaviour(scene.behaviours, change.name)); break;
+        }
     }
     return laid;
+}
+
+ModsLaid::File mod_world_file(const std::filesystem::path& world_folder, const std::string& id) {
+    const std::filesystem::path file = mods_folder(world_folder) / id / k_mod_world;
+    ModsLaid::File out;
+    if (is_absent(file)) {
+        return out;
+    }
+    out.there = true;
+    std::error_code error;
+    const auto bytes = std::filesystem::file_size(file, error);
+    out.bytes = error ? 0 : static_cast<u64>(bytes);
+    const auto written = std::filesystem::last_write_time(file, error);
+    out.written = error ? 0 : static_cast<i64>(written.time_since_epoch().count());
+    return out;
 }
 
 std::optional<std::string> set_mod_on(const std::filesystem::path& world_folder, const std::string& id, bool on) {

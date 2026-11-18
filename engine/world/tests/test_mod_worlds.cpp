@@ -111,7 +111,7 @@ GIANT_TEST("mod worlds: a mod's world file is saved and loaded as it was, and ch
     ModWorld kept = w;
     GIANT_CHECK(load_mod_world(R"({"format":"giant-world","version":1})", kept) && load_mod_world("{", kept) && kept == w);
     GIANT_CHECK(load_error(R"(,"plcaes":[])").find("plcaes") != std::string::npos);
-    GIANT_CHECK(load_error(R"(,"people":{"next_id":1,"list":[]})").find("people") != std::string::npos);
+    GIANT_CHECK(load_error(R"(,"people":{"next_id":1,"list":[]})").find("people is not a known key") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"kits":[])").find("kits") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"places":[{"name":"a","position":[0,0,0],"radius":5000}])").find("places[0]") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"places":[{"name":"a","position":[0,0,0]},{"name":"a","position":[1,0,1]}])").find("two places are named \"a\"") !=
@@ -203,4 +203,66 @@ GIANT_TEST("mod worlds: a mod whose changes would break the world is left out wh
                 is(applied.changes[1], 3, ModThing::place, "well", ModChange::Did::added) &&
                 is(applied.changes[2], 3, ModThing::behaviour, "brave", ModChange::Did::added));
     GIANT_CHECK(world.behaviours.size() == 2 && find_place(world.places, "tavern")->position.x == 30.0);
+}
+
+GIANT_TEST("mod worlds: a mod left out leaves no trace of what it set, and one setting a thing twice is left out") {
+    World world;
+    ModWorld bad, later, twice;
+    // Replaces the world's smithy and adds a tavern, then cannot go in (a name twice among its looks).
+    bad.places = {place("smithy", 77, "work"), place("tavern", 30, "rest")};
+    bad.person_looks = {look("a"), look("a")};
+    later.places = {place("smithy", 56, "work"), place("tavern", 31, "rest")};
+    // Sets a thing the world has twice: not a clash with itself, a mistake.
+    twice.places = {place("cottage", 1), place("cottage", 2)};
+    const std::vector<Place> before = world.places;
+    const ModsApplied applied = world.apply({&bad, &later, &twice});
+    GIANT_CHECK(applied.problems.size() == 2 && applied.problems[0].mod == 0 && applied.problems[1].mod == 2 &&
+                applied.problems[1].message.find("sets the place \"cottage\" twice") != std::string::npos);
+    // The later mod's are over the world's, not over the mod left out; the lists are the world's with the later mod's.
+    GIANT_CHECK(applied.changes.size() == 2 && is(applied.changes[0], 1, ModThing::place, "smithy", ModChange::Did::replaced_world) &&
+                is(applied.changes[1], 1, ModThing::place, "tavern", ModChange::Did::added));
+    GIANT_CHECK(world.places.size() == 3 && world.places[0] == before[0] && world.places[1] == later.places[0] &&
+                world.places[2] == later.places[1] && world.looks.size() == 1 && world.sound());
+    // Left out after an earlier mod set the same things: they are that mod's again, and the next clash is with it.
+    World again;
+    const ModsApplied second = again.apply({&later, &bad, &later});
+    GIANT_CHECK(second.problems.size() == 1 && second.changes.size() == 4 &&
+                is(second.changes[2], 2, ModThing::place, "smithy", ModChange::Did::replaced_mod, 0) &&
+                is(second.changes[3], 2, ModThing::place, "tavern", ModChange::Did::replaced_mod, 0) && again.places.size() == 3);
+}
+
+GIANT_TEST("mod worlds: the world's own is told from the mods' whatever was done to the mods' things") {
+    // The file's own; what mods set (the smithy replaced, the tavern added); what there is now.
+    const std::vector<Place> own = {place("cottage", 10), place("smithy", 50, "work"), place("pond", 5)};
+    const std::vector<Place> brought = {place("smithy", 55, "work"), place("tavern", 30, "rest")};
+    const auto save = [&](const std::vector<Place>& now, std::vector<std::string>* not_kept = nullptr) {
+        return world_own<Place>(own, brought, now, not_kept);
+    };
+    // As the mods left it: the file's own, nothing to tell.
+    const std::vector<Place> laid = {own[0], brought[0], own[2], brought[1]};
+    std::vector<std::string> not_kept;
+    GIANT_CHECK(save(laid, &not_kept) == own && not_kept.empty());
+    // The world's own changed, removed and made: saved so, in the file's order and then the new ones.
+    std::vector<Place> now = {place("well", -5), place("cottage", 11), brought[0], brought[1], place("mill", 90, "work")};
+    GIANT_CHECK(save(now, &not_kept) == std::vector<Place>({now[1], own[1], now[0], now[4]}) && not_kept.empty());
+    // The mods' things changed or removed: the file's own of those names stays as it was, and they are named.
+    now = {own[0], place("smithy", 99, "work"), own[2]};
+    GIANT_CHECK(save(now, &not_kept) == own && not_kept == std::vector<std::string>({"smithy", "tavern"}));
+    // A mods' thing put to exactly what the world's own is: still the mods' name, still the file's own, and said.
+    not_kept.clear();
+    now = {own[0], own[1], own[2], brought[1]};
+    GIANT_CHECK(save(now, &not_kept) == own && not_kept == std::vector<std::string>{"smithy"});
+    // No mods: what there is now, the file's order first.
+    GIANT_CHECK(world_own<Place>(own, {}, std::vector<Place>{own[2], place("new", 1), own[0]}) == std::vector<Place>({own[0], own[2], place("new", 1)}));
+    GIANT_CHECK(world_own<Place>({}, {}, {}).empty() && world_own<Place>({}, brought, laid) == std::vector<Place>({own[0], own[2]}));
+    // The other kinds go the same way.
+    const std::vector<Routine> routines = {routine("day", "smithy")};
+    const std::vector<Routine> brought_routines = {routine("day", "tavern"), routine("night", "tavern")};
+    GIANT_CHECK(world_own<Routine>(routines, brought_routines, std::vector<Routine>{routine("day", "pond")}, &not_kept) == routines &&
+                not_kept.size() == 3);
+    const std::vector<Behaviour> behaviours = {behaviour("wary")};
+    GIANT_CHECK(world_own<Behaviour>(behaviours, {}, std::vector<Behaviour>{behaviour("wary", 5.0f), behaviour("brave")}).size() == 2);
+    const std::vector<PersonLook> looks = {look("villager")};
+    GIANT_CHECK(world_own<PersonLook>(looks, std::vector<PersonLook>{look("guard")}, std::vector<PersonLook>{look("villager", 1.3f), look("guard")}) ==
+                std::vector<PersonLook>{look("villager", 1.3f)});
 }

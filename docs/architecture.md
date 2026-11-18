@@ -4164,16 +4164,25 @@ given a problem.
 The editor lays the mods when a world is opened (`lay_mods`, from
 `WorldStreaming::open`), over the scene only: `WorldStreaming`'s index
 stays what `world.json` holds. So that saving with mods on keeps the
-world's files its own, the lists as they were just after laying are kept
-(`ModsLaid`), and `world::world_own` tells the world's own from the mods'
-by three-way compare (the file's, as laid, now): a thing as the mods left
-it is the mods'; one changed or made since is the world's; one gone is
-gone. `save_world` writes those, refuses when the world's people would
-need what only a mod brings (the world must load without its mods), and
-`unsaved_settings` compares against the lists as laid. Turning a mod on or
+world's files its own, the things mods set are kept as they left them for
+as long as the world is open (`ModsLaid`), and `world::world_own` tells
+the world's own from the mods' by name: a name a mod set is the mods',
+whatever was done to the thing since (the file's own of that name is kept
+as it was, and a change to the mods' thing is reported, not saved); every
+other name is the world's, as it is now. So what a save writes depends
+only on the scene, never on the saves and undos before it, and a mod's
+thing can never become the world's by accident. `save_world` writes
+those, lists the world's own looks' meshes and not the mods' (`open_world`
+imports the mods' looks' meshes itself), refuses when the world's people
+would need what only a mod brings (the world must load without its mods),
+and `unsaved_settings` compares the world's own so found with the file's.
+Laying keeps an undo list per mod instead of copies, and the mods are
+laid before the old world is closed. Turning a mod on or
 off changes only the list: the scene changes when the world is next
-opened (`list_mods` reports `reopen`), which keeps the undo history
-honest. People of a mod's own, kits, assets and scripts are the parts to
+opened (`list_mods` reports `reopen`, also when a mod's `world.json` was
+written since), which keeps the undo history honest. Known limits: game
+saves do not record which mods were on; a world closed with `close_world`
+keeps the mods' things as plain ones. People of a mod's own, kits, assets and scripts are the parts to
 come.
 
 Whole text files are read and written by `giant/core/text_files.h`

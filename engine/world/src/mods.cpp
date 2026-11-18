@@ -506,41 +506,85 @@ std::string_view mod_thing_name(ModThing thing) {
 
 namespace {
 
-// Who set each thing of a kind last, by name: a mod's place in the list (the world's own are not in it).
-using SetBy = std::map<std::string, usize, std::less<>>;
-
-// Lays `from` over `into` by name, noting each change (and who set what, in `set_by`).
+// One kind of thing while mods are laid over it: where each name is (found
+// once, when a mod first touches the kind), who set each last, and what the
+// mod being laid did, so that it can be undone.
 template <typename T>
-void lay_over(const std::vector<T>& from, std::vector<T>& into, SetBy& set_by, usize mod, ModThing thing,
-              std::vector<ModChange>& changes) {
-    if (from.empty()) {
-        return;
-    }
-    // (Found by a map made once: a mod may bring as many as a world keeps.)
-    // (Its own copies of the names: adding to `into` moves the things it holds.)
-    std::map<std::string, usize, std::less<>> at;
-    for (usize i = 0; i < into.size(); ++i) {
-        at.emplace(into[i].name, i);
-    }
-    for (const T& one : from) {
-        ModChange change{mod, thing, one.name, ModChange::Did::added, 0};
-        if (const auto found = at.find(one.name); found != at.end()) {
-            if (const auto by = set_by.find(one.name); by != set_by.end()) {
-                change.did = ModChange::Did::replaced_mod;
-                change.over = by->second;
-            } else {
-                change.did = ModChange::Did::replaced_world;
-            }
-            into[found->second] = one;
-        } else {
-            // (A name twice within a mod is refused when its file is loaded; given here all the same,
-            // the second is added too, and the check of the whole then refuses the mod.)
-            into.push_back(one);
+struct Laying {
+    std::vector<T>& into;
+    ModThing thing;
+    std::map<std::string, usize, std::less<>> at;     // every name's place in `into` (its own copies: `into` grows)
+    std::map<std::string, usize, std::less<>> set_by; // the mod (its place in the list) that set a name last
+    bool found = false;
+    struct Done {
+        usize index = 0;
+        std::optional<T> was;         // replaced: what was there; added: nothing
+        std::optional<usize> set_was; // who had set the name before, if a mod had
+    };
+    std::vector<Done> done; // what the mod being laid did, in order
+
+    // Lays the mod's things over the kind; what is wrong with them, or nothing.
+    std::optional<std::string> lay(const std::vector<T>& from, usize mod, std::vector<ModChange>& changes) {
+        if (from.empty()) {
+            return std::nullopt;
         }
-        set_by.insert_or_assign(one.name, mod);
-        changes.push_back(std::move(change));
+        if (!found) {
+            found = true;
+            for (usize i = 0; i < into.size(); ++i) {
+                at.emplace(into[i].name, i);
+            }
+        }
+        for (const T& one : from) {
+            ModChange change{mod, thing, one.name, ModChange::Did::added, 0};
+            Done did;
+            if (const auto by = set_by.find(one.name); by != set_by.end()) {
+                if (by->second == mod) { // (refused when a mod's file is loaded; given here all the same)
+                    return "it sets the " + std::string(mod_thing_name(thing)) + " \"" + one.name + "\" twice";
+                }
+                did.set_was = by->second;
+            }
+            if (const auto place = at.find(one.name); place != at.end()) {
+                if (did.set_was) {
+                    change.did = ModChange::Did::replaced_mod;
+                    change.over = *did.set_was;
+                } else {
+                    change.did = ModChange::Did::replaced_world;
+                }
+                did.index = place->second;
+                did.was = std::move(into[place->second]);
+                into[place->second] = one;
+            } else {
+                did.index = into.size();
+                at.emplace(one.name, into.size());
+                into.push_back(one);
+            }
+            set_by.insert_or_assign(one.name, mod);
+            done.push_back(std::move(did));
+            changes.push_back(std::move(change));
+        }
+        return std::nullopt;
     }
-}
+
+    // Undoes what the mod being laid did (the last first).
+    void undo() {
+        for (usize i = done.size(); i-- > 0;) {
+            Done& did = done[i];
+            const std::string name = into[did.index].name;
+            if (did.was) {
+                into[did.index] = std::move(*did.was);
+            } else {
+                into.pop_back(); // (added ones are the last, undone last first)
+                at.erase(name);
+            }
+            if (did.set_was) {
+                set_by.insert_or_assign(name, *did.set_was);
+            } else {
+                set_by.erase(name);
+            }
+        }
+        done.clear();
+    }
+};
 
 } // namespace
 
@@ -548,38 +592,40 @@ ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<
                              std::vector<Routine>& routines, std::vector<Behaviour>& behaviours, std::span<const Person> people,
                              PersonId next_person_id) {
     ModsApplied applied;
-    SetBy set_places, set_looks, set_routines, set_behaviours;
+    Laying<Place> lay_places{places, ModThing::place, {}, {}, false, {}};
+    Laying<PersonLook> lay_looks{person_looks, ModThing::person_look, {}, {}, false, {}};
+    Laying<Routine> lay_routines{routines, ModThing::routine, {}, {}, false, {}};
+    Laying<Behaviour> lay_behaviours{behaviours, ModThing::behaviour, {}, {}, false, {}};
     for (usize m = 0; m < mods.size(); ++m) {
         if (mods[m] == nullptr || mods[m]->empty()) {
             continue;
         }
         const ModWorld& mod = *mods[m];
-        // As they were, for the kinds it touches: back to this when it cannot go in.
-        const std::vector<Place> places_before = mod.places.empty() ? std::vector<Place>() : places;
-        const std::vector<PersonLook> looks_before = mod.person_looks.empty() ? std::vector<PersonLook>() : person_looks;
-        const std::vector<Routine> routines_before = mod.routines.empty() ? std::vector<Routine>() : routines;
-        const std::vector<Behaviour> behaviours_before = mod.behaviours.empty() ? std::vector<Behaviour>() : behaviours;
-        const SetBy set_before[4] = {set_places, set_looks, set_routines, set_behaviours};
         const usize changes_before = applied.changes.size();
-        lay_over(mod.places, places, set_places, m, ModThing::place, applied.changes);
-        lay_over(mod.person_looks, person_looks, set_looks, m, ModThing::person_look, applied.changes);
-        lay_over(mod.routines, routines, set_routines, m, ModThing::routine, applied.changes);
-        lay_over(mod.behaviours, behaviours, set_behaviours, m, ModThing::behaviour, applied.changes);
-        std::optional<std::string> wrong = check_people(places, person_looks, routines, people, next_person_id);
+        std::optional<std::string> wrong = lay_places.lay(mod.places, m, applied.changes);
+        if (!wrong) wrong = lay_looks.lay(mod.person_looks, m, applied.changes);
+        if (!wrong) wrong = lay_routines.lay(mod.routines, m, applied.changes);
+        if (!wrong) wrong = lay_behaviours.lay(mod.behaviours, m, applied.changes);
+        // The world with it must be one that loads.
         if (!wrong) {
-            wrong = check_behaviours(behaviours, people);
+            if (const auto bad = check_people(places, person_looks, routines, people, next_person_id)) {
+                wrong = "with them, " + *bad;
+            } else if (const auto bad_behaviours = check_behaviours(behaviours, people)) {
+                wrong = "with them, " + *bad_behaviours;
+            }
         }
         if (wrong) {
-            if (!mod.places.empty()) places = places_before;
-            if (!mod.person_looks.empty()) person_looks = looks_before;
-            if (!mod.routines.empty()) routines = routines_before;
-            if (!mod.behaviours.empty()) behaviours = behaviours_before;
-            set_places = set_before[0];
-            set_looks = set_before[1];
-            set_routines = set_before[2];
-            set_behaviours = set_before[3];
+            lay_behaviours.undo();
+            lay_routines.undo();
+            lay_looks.undo();
+            lay_places.undo();
             applied.changes.resize(changes_before);
-            applied.problems.push_back({m, "its world changes were left out: with them, " + *wrong});
+            applied.problems.push_back({m, "its world changes were left out: " + *wrong});
+        } else {
+            lay_places.done.clear();
+            lay_looks.done.clear();
+            lay_routines.done.clear();
+            lay_behaviours.done.clear();
         }
     }
     return applied;

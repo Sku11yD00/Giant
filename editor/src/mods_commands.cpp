@@ -66,7 +66,12 @@ Json mod_json(const ModList::Found& found) {
 }
 
 // What the mods did to the world as it was opened; `order` is the load order now.
-Json laid_json(const ModsLaid& laid, const std::vector<std::string>& order) {
+Json laid_json(const ModsLaid& laid, const std::vector<std::string>& order, const std::filesystem::path& world) {
+    // Other mods load now, or one's world.json is not the file it was.
+    bool reopen = laid.mods != order;
+    for (usize i = 0; !reopen && i < laid.mods.size() && i < laid.files.size(); ++i) {
+        reopen = !(mod_world_file(world, laid.mods[i]) == laid.files[i]);
+    }
     constexpr usize k_most_listed = 256; // (a mod may change as many things as a world keeps)
     Json changes = Json::array();
     usize added = 0, replaced = 0, clashes = 0;
@@ -103,7 +108,7 @@ Json laid_json(const ModsLaid& laid, const std::vector<std::string>& order) {
             {"clashes", clashes},
             {"changes", std::move(changes)},
             {"problems", std::move(problems)},
-            {"reopen", laid.mods != order}};
+            {"reopen", reopen}};
 }
 
 } // namespace
@@ -126,7 +131,8 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
          "(those loaded then), counts `added`, `replaced_world` and `clashes` (a thing two mods set: the later one's "
          "is used), `changes` [{mod, thing, name, did: added | replaced_world | replaced_mod, over}] (clashes first, "
          "at most 256), `problems` [{mod, problem}] (mods whose world changes were left out, whole), and `reopen`: "
-         "true when the mods that load now are not those the world was opened with (open_world again to load them).",
+         "true when the mods that load now are not those the world was opened with, or a mod's world.json was written "
+         "since (open_world again to load them).",
          Json::parse(R"({"type": "object", "additionalProperties": false})"),
          true,
          [&state](const Json&, CommandContext&) {
@@ -158,7 +164,7 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                  out["too_many"] = true;
              }
              if (state.mods_world.empty()) { // (the open world's own mods: what they did as it was opened)
-                 out["world"] = laid_json(state.world->mods_laid(), list.order);
+                 out["world"] = laid_json(state.world->mods_laid(), list.order, *world);
              }
              return CommandResult::success(std::move(out));
          }});

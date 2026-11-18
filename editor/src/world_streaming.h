@@ -89,6 +89,10 @@ public:
             std::optional<world::Terrain::Heights> heights;
         };
         std::vector<Chunk> chunks = {};
+        // Things mods brought that were changed or removed in the scene: not
+        // saved (they are the mods', and the world's own of each name is kept
+        // as its file had it).
+        std::vector<std::string> mods_not_kept = {};
     };
     Saved create(const std::filesystem::path& folder, const world::Scene& scene, u64 generation,
                  std::vector<std::string> meshes);
@@ -108,6 +112,7 @@ public:
     const world::WorldIndex& index() const { return m_index; }
     // What the world's mods changed as it was opened (mods.h); none when no world is open.
     const ModsLaid& mods_laid() const { return m_mods; }
+
     // The samples a side of the terrain tiles in the world's files, while
     // any file holds one (the scene's terrain must use the same).
     std::optional<u32> ground_samples() const;
@@ -233,7 +238,7 @@ private:
     u64 m_writes = 0; // cell files written since open (Cell::written)
     u64 m_epoch = 0; // reads from an older epoch (a closed world) are dropped
     world::WorldIndex m_index;
-    ModsLaid m_mods; // what mods laid over the index's places, looks, routines and behaviours at open
+    ModsLaid m_mods; // what mods laid over the index's places, looks, routines and behaviours at open (kept until close)
     // The world's own places, looks, routines and behaviours as the scene has
     // them now: the scene's, less what mods laid over them (world::world_own).
     struct Own {
@@ -242,7 +247,9 @@ private:
         std::vector<world::Routine> routines;
         std::vector<world::Behaviour> behaviours;
     };
-    Own own(const world::Scene& scene) const;
+    // `not_kept`, when given, takes the names of the mods' things changed or
+    // removed in the scene (they are not the world's to save).
+    Own own(const world::Scene& scene, std::vector<std::string>* not_kept = nullptr) const;
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> m_cells; // cells with a file
     std::unordered_set<world::CellCoord, world::CellCoordHash> m_ground;     // whose file holds a tile
     std::array<std::unordered_set<world::CellCoord, world::CellCoordHash>, 2> m_far; // chunk files, levels 1 and 2

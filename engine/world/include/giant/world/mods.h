@@ -106,8 +106,9 @@ struct ModWorld {
 // JSON text, stable key order, with a trailing newline.
 std::string save_mod_world(const ModWorld& world);
 // Replaces `out` only on success; strict, like load_scene. Each thing is
-// checked alone and no name may be there twice; what it names of the world
-// (a routine's place) is looked at when it is applied.
+// checked alone and no name may be there twice. (What it names of the world,
+// a routine's place say, is not looked at: as in a world's own file, a
+// place that is not there is one nobody can be sent to.)
 std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out);
 
 // The kinds of thing a mod changes, as changes name them.
@@ -135,23 +136,25 @@ struct ModsApplied {
 // Lays the mods' changes over the world's lists, in the order given (the
 // load order: a later mod's wins, and every such clash is in `changes`).
 // A mod's changes go in whole or not at all: when the world would not be
-// one that loads with them (more of a kind than a world keeps, a person
-// left without its look, home, routine or behaviour), they are left out
-// and the reason given. `people` are the world's (they are not changed).
+// one that loads with them (more of a kind than a world keeps), or it sets
+// a thing twice, they are left out and the reason given. `people` are the world's (they are not changed).
 ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<Place>& places, std::vector<PersonLook>& person_looks,
                              std::vector<Routine>& routines, std::vector<Behaviour>& behaviours, std::span<const Person> people,
                              PersonId next_person_id);
 
-// The world's own things of a kind, told apart from what mods laid over
-// them, for saving the world while mods are on (its files stay its own):
-// given what the world's file holds (`own`), what there was once the mods
-// were laid (`laid`) and what there is `now`. One that is as the mods left
-// it is the mods' (the world's own of the name is kept as it was, or none
-// if the world had none); one changed since, or made since, is the
-// world's; one gone since is gone from the world too. In the order of
+// The world's own things of a kind, told apart from the mods', for saving
+// the world while mods are on (its files stay its own, and it must load
+// without them): given what the world's file holds (`own`), the things mods
+// set as they left them (`brought`: added or replaced) and what there is
+// `now`. A name mods set is the mods' for as long as the world is open: the
+// world's own of that name is kept as the file has it (none, if it had
+// none), whatever was done to the mods' thing since; those so changed or
+// removed are named in `not_kept`, for telling the person. Every other name
+// is the world's: as it is now, or gone if it is gone. In the order of
 // `own`, then the new ones in the order of `now`.
 template <typename T>
-std::vector<T> world_own(std::span<const T> own, std::span<const T> laid, std::span<const T> now) {
+std::vector<T> world_own(std::span<const T> own, std::span<const T> brought, std::span<const T> now,
+                         std::vector<std::string>* not_kept = nullptr) {
     const auto by_name = [](std::span<const T> list) {
         std::map<std::string_view, const T*> map;
         for (const T& one : list) {
@@ -159,20 +162,26 @@ std::vector<T> world_own(std::span<const T> own, std::span<const T> laid, std::s
         }
         return map;
     };
-    const std::map<std::string_view, const T*> owned = by_name(own), was = by_name(laid), is = by_name(now);
-    const auto as_laid = [&](const T& one) {
-        const auto at = was.find(one.name);
-        return at != was.end() && *at->second == one;
-    };
+    const std::map<std::string_view, const T*> owned = by_name(own), mods = by_name(brought), there = by_name(now);
     std::vector<T> out;
     for (const T& one : own) {
-        if (const auto at = is.find(one.name); at != is.end()) {
-            out.push_back(as_laid(*at->second) ? one : *at->second);
+        if (mods.contains(one.name)) {
+            out.push_back(one);
+        } else if (const auto at = there.find(one.name); at != there.end()) {
+            out.push_back(*at->second);
         }
     }
     for (const T& one : now) {
-        if (!owned.contains(one.name) && !as_laid(one)) {
+        if (!owned.contains(one.name) && !mods.contains(one.name)) {
             out.push_back(one);
+        }
+    }
+    if (not_kept != nullptr) {
+        for (const T& one : brought) {
+            const auto at = there.find(one.name);
+            if (at == there.end() || !(*at->second == one)) {
+                not_kept->push_back(one.name);
+            }
         }
     }
     return out;

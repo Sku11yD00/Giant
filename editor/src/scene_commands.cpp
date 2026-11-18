@@ -986,7 +986,8 @@ void normalize_meshes(world::Scene& scene) {
 }
 
 // The mesh files the scene's entities, kits, scatter and people draw (normalized, once each).
-std::vector<std::string> meshes_used(const world::Scene& scene) {
+// `looks` false: without its person looks' (a world's save adds its own looks': a mod's are not its to list).
+std::vector<std::string> meshes_used(const world::Scene& scene, bool looks = true) {
     std::vector<std::string> out;
     for (const Entity& e : scene.entities()) {
         if (e.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(e.mesh));
@@ -1001,7 +1002,9 @@ std::vector<std::string> meshes_used(const world::Scene& scene) {
             if (i.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(i.mesh));
         }
     }
-    for (const world::PersonLook& look : scene.person_looks) out.push_back(MeshLibrary::normalize(look.mesh));
+    for (const world::PersonLook& look : scene.person_looks) {
+        if (looks) out.push_back(MeshLibrary::normalize(look.mesh));
+    }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
@@ -1813,7 +1816,12 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              // swap_scene takes the next generation: the one open() was given.
              auto memo = w.memo(next);
              swap_scene(state, std::move(next), context, std::move(memo));
-             Json mesh_errors = import_meshes(state, state.world->index().meshes);
+             // The world's meshes, and those of the looks its mods brought (not in its list: they are not its own).
+             std::vector<std::string> meshes = state.world->index().meshes;
+             for (const world::PersonLook& look : state.world->mods_laid().person_looks) {
+                 meshes.push_back(look.mesh);
+             }
+             Json mesh_errors = import_meshes(state, meshes);
              std::error_code error;
              Json result = {{"folder", path_to_utf8(std::filesystem::absolute(folder, error))},
                             {"cells", state.world->index().cells.size()}};
@@ -1828,7 +1836,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "world open, makes a new world there from the scene and opens it (the folder must "
          "not hold one). Cells with unsaved edits never unload, so nothing is lost by "
          "flying away; saving lets them go. Making a new world is refused while one is open "
-         "(close_world first).",
+         "(close_world first). With mods on (list_mods), the places, person looks, routines and behaviours mods "
+         "brought are not written (the world's files stay its own, and its own thing of a name a mod replaced is kept "
+         "as it was); a change made to one of those is not saved, and they are named in `mods_things_not_saved`. "
+         "Refused when the world's people would need what only a mod brings.",
          Json::parse(R"({"type": "object", "additionalProperties": false,
              "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024}}})"),
          false,
@@ -1845,17 +1856,17 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  std::error_code a;
                  if (active && std::filesystem::equivalent(folder, w.folder(), a) && !a) {
                      if (state.far_ground != nullptr) state.far_ground->wait_reads(); // a file read stays open (Windows)
-                     saved = w.save(state.scene, meshes_used(state.scene));
+                     saved = w.save(state.scene, meshes_used(state.scene, false));
                  } else if (active) {
                      return CommandResult::failure(
                          "the open world is saved in " + path_to_utf8(w.folder()) +
                          "; saving it to another folder is not supported yet (copy the folder)");
                  } else {
-                     saved = w.create(folder, state.scene, state.scene_generation, meshes_used(state.scene));
+                     saved = w.create(folder, state.scene, state.scene_generation, meshes_used(state.scene, false));
                  }
              } else if (active) {
                  if (state.far_ground != nullptr) state.far_ground->wait_reads(); // a file read stays open (Windows)
-                 saved = w.save(state.scene, meshes_used(state.scene));
+                 saved = w.save(state.scene, meshes_used(state.scene, false));
              } else {
                  return CommandResult::failure(
                      w.is_open() ? "the scene is no longer the open world's (new_scene or load_scene "
@@ -1868,11 +1879,21 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  return CommandResult::failure(saved.error);
              }
              std::error_code error;
-             return CommandResult::success({{"folder", path_to_utf8(std::filesystem::absolute(w.folder(), error))},
-                                            {"cells_written", saved.cells_written},
-                                            {"cells_removed", saved.cells_removed},
-                                            {"cells", saved.cells},
-                                            {"chunks_written", saved.chunks_written}});
+             Json result = {{"folder", path_to_utf8(std::filesystem::absolute(w.folder(), error))},
+                            {"cells_written", saved.cells_written},
+                            {"cells_removed", saved.cells_removed},
+                            {"cells", saved.cells},
+                            {"chunks_written", saved.chunks_written}};
+             if (!saved.mods_not_kept.empty()) {
+                 // (Named, at most a few: they are what the person may think was saved.)
+                 Json names = Json::array();
+                 for (usize i = 0; i < saved.mods_not_kept.size() && i < 32; ++i) {
+                     names.push_back(saved.mods_not_kept[i]);
+                 }
+                 result["mods_things_not_saved"] = std::move(names);
+                 result["mods_things_not_saved_count"] = saved.mods_not_kept.size();
+             }
+             return CommandResult::success(std::move(result));
          }});
 
     add(registry,
