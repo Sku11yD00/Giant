@@ -76,7 +76,7 @@ struct ModsOn {
     std::vector<ModSlot> slots;   // by id; each id once and each slot once
     bool operator==(const ModsOn&) const = default;
 };
-// (Sorts both, and leaves out what is there twice.)
+// (Sorts both, and leaves out an id there twice and a slot given twice or past the last: what is written loads.)
 std::string save_enabled_mods(const ModsOn& on);
 std::optional<LoadError> load_enabled_mods(std::string_view text, ModsOn& out);
 // The mod's slot, or nothing when it has none.

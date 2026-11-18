@@ -312,9 +312,15 @@ std::string save_enabled_mods(const ModsOn& on) {
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
     Json json = {{"format", k_mods_format}, {"format_version", k_version}, {"enabled", sorted}};
     if (!on.slots.empty()) {
-        Json slots = Json::object(); // (keys in order: by id; an id there twice keeps its first slot)
-        for (const ModSlot& slot : on.slots) {
-            slots.emplace(slot.id, slot.slot);
+        // By id; an id or a slot there twice keeps its first (so that what is written always loads).
+        std::vector<ModSlot> given(on.slots.begin(), on.slots.end());
+        std::stable_sort(given.begin(), given.end(), [](const ModSlot& l, const ModSlot& r) { return l.id < r.id; });
+        std::set<u32> taken;
+        Json slots = Json::object();
+        for (const ModSlot& slot : given) {
+            if (!slots.contains(slot.id) && slot.slot < k_max_mod_slots && taken.insert(slot.slot).second) {
+                slots.emplace(slot.id, slot.slot);
+            }
         }
         json["slots"] = std::move(slots);
     }
@@ -652,7 +658,7 @@ namespace {
 // `at`: where they were put (their count is the mod's).
 std::optional<std::string> lay_people(const std::vector<Person>& from, u32 slot, std::vector<Person>& into, usize& at) {
     if (slot >= k_max_mod_slots) {
-        return "it brings people and has no slot in the world's list of mods (turn it off and on again: enable_mod gives it one)";
+        return "it brings people and has no slot in the world's list of mods (enable_mod it again: that gives it one)";
     }
     if (from.size() > k_max_mod_people) {
         return "a mod brings at most " + std::to_string(k_max_mod_people) + " people";
@@ -667,7 +673,8 @@ std::optional<std::string> lay_people(const std::vector<Person>& from, u32 slot,
     const PersonId first = mod_person_id(slot, 0), past = mod_person_id(slot, k_max_mod_people) + 1;
     const auto where = std::lower_bound(into.begin(), into.end(), first, [](const Person& l, PersonId r) { return l.id < r; });
     if (where != into.end() && where->id < past) {
-        return "the world already has a person of an id that is this mod's to give (person " + std::to_string(where->id) + ")";
+        return "there is already a person of an id that is this mod's to give (person " + std::to_string(where->id) +
+               "): the world's own, or a mod's of the same slot";
     }
     at = static_cast<usize>(where - into.begin());
     into.insert(where, from.begin(), from.end());

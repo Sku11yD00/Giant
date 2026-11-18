@@ -253,7 +253,7 @@ GIANT_TEST("people: a file with wrong people is refused, saying where") {
     GIANT_CHECK(load_error(scene_with(looks + R"(,"people":{"next_id":1073741824,"list":[[1073741823,"a","v","",0,0,0,360,4294967295]]})")).empty());
     // Ids from 2^30 on are those of mods' people (mods.h): kept where they are, and never the next to give.
     GIANT_CHECK(load_error(scene_with(looks + R"(,"people":{"next_id":2,"list":[[1,"a","v","",0,0,0,0,1],[1073741825,"m","v","",0,0,0,0,1]]})")).empty());
-    GIANT_CHECK(refused(looks + R"(,"people":{"next_id":1073741825,"list":[]})", "next_person_id"));
+    GIANT_CHECK(refused(looks + R"(,"people":{"next_id":1073741825,"list":[]})", "people.next_id"));
 
     // A world's index reads them the same way.
     std::string index = save_world_index(WorldIndex{});

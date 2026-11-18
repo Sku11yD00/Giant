@@ -922,3 +922,25 @@ GIANT_TEST("people near the camera: one near gets its entity however many far on
     GIANT_CHECK(has(1) && !has(2) && has(6) && !has(3) && !has(4) && !has(5) && people.stats().swapped == 1);
     GIANT_CHECK(scene.size() == 2 && people.stats().waiting == 4);
 }
+
+GIANT_TEST("people commands: a new person's id is never one of a mod's people's") {
+    Fixture f;
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    world::Scene& scene = f.state.scene;
+    // A mod's person is there (as when a world is opened with mods on): new people come before it, in order.
+    world::Person of_mod;
+    of_mod.id = world::mod_person_id(0, 1);
+    of_mod.look = "villager";
+    scene.people.push_back(of_mod);
+    const Json one = {{{"look", "villager"}, {"position", at(0, 0, 0)}}};
+    GIANT_CHECK(f.run("create_people", {{"people", one}}).ok && scene.people.size() == 2 && scene.people[0].id == 1 &&
+                scene.people[1].id == of_mod.id && scene.next_person_id == 2);
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
+    // The last id of the world's own can be given; the first of the mods' cannot.
+    scene.next_person_id = world::k_mod_person_base - 1;
+    GIANT_CHECK(!f.run("create_people", {{"people", {one[0], one[0]}}}).ok && scene.people.size() == 2);
+    GIANT_CHECK(f.run("create_people", {{"people", one}}).ok && scene.people.size() == 3 && scene.people[1].id == world::k_mod_person_base - 1 &&
+                scene.next_person_id == world::k_mod_person_base);
+    GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
+    GIANT_CHECK(!f.run("create_people", {{"people", one}}).ok && scene.people.size() == 3);
+}

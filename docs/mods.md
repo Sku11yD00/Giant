@@ -5,8 +5,8 @@ you can turn it off and the world is as it was. This page is for people
 who make mods and people who install them.
 
 So far a mod can change a world's places, the looks of its people, their
-routines and their behaviours. People of a mod's own, new assets and
-scripts are parts still being built; this page will grow with them.
+routines and their behaviours, and bring people of its own. New assets
+and scripts are parts still being built; this page will grow with them.
 
 ## Where mods go
 
@@ -137,14 +137,17 @@ world's people.
 
 While the mod is on you can move or change its people in the editor, but
 they are the mod's: `save_world` does not write them into the world, and
-names the ones you changed as `person <id>` under
+names the ones you changed or removed as `person <id>` under
 `mods_things_not_saved`. To change them for good, change the mod's
 `world.json`.
 
-If you write `mods/enabled.json` by hand and leave a mod without a slot,
-a mod with people is left out until you turn it off and on again with
-`enable_mod`, which gives it one. There are 512 slots; a mod keeps its
-slot until you take its line out of `slots` in that file.
+A mod that is on and has no slot (the list was written by hand, or
+before mods had slots) is left out if it brings people, until you run
+`enable_mod` on it again, which gives it one. There are 512 slots; a mod
+keeps its slot until you take its line out of `slots` in that file.
+Do not take a line out, or delete the file, for a mod people have played
+with: the slot goes to the next mod turned on, the mod's people come back
+under other ids, and saved games would take them for someone else.
 
 A mod's changes go in whole or not at all. If they would leave the world
 broken (more looks than a world keeps, say), that mod's changes are left
@@ -153,8 +156,9 @@ out and `list_mods` says why under `world.problems`. The same goes for a
 
 After turning mods on or off, or changing a mod's `world.json`, open the
 world again to see the change. `list_mods` says `reopen` when other mods
-load now than when the world was opened, or a mod's `world.json` has
-appeared, gone, or changed in size or time of writing since. (A file
+load now than when the world was opened, a mod's slot has changed, or a
+mod's `world.json` has appeared, gone, or changed in size or time of
+writing since. (A file
 rewritten at the same size within the same tick of the disk's clock, or
 copied over with its old time kept, is not noticed: open the world again
 anyway after changing one.)

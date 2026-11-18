@@ -241,13 +241,14 @@ std::optional<std::string> set_mod_on(const std::filesystem::path& world_folder,
     const std::filesystem::path mods = mods_folder(world_folder);
     world::ModsOn on_list;
     if (const auto bad = read_enabled(mods, on_list)) {
-        return *bad + " (mend it, or delete it to start with every mod off)";
+        return *bad + " (mend it; deleting it starts with every mod off, and gives up every mod's slot: their people would have other "
+                      "ids, which saved games would not know)";
     }
     std::vector<std::string>& enabled = on_list.ids;
     const auto at = std::lower_bound(enabled.begin(), enabled.end(), id);
     const bool was = at != enabled.end() && *at == id;
-    if (on == was) {
-        return std::nullopt;
+    if (on == was && (!on || world::find_mod_slot(on_list, id))) {
+        return std::nullopt; // (one on without a slot, from a list written by hand or before slots, is given its slot)
     }
     if (on) {
         const ModList list = read_mods(world_folder);
@@ -266,10 +267,12 @@ std::optional<std::string> set_mod_on(const std::filesystem::path& world_folder,
                                   : std::string()) +
                    (list.folder_error.empty() ? std::string() : "; " + list.folder_error);
         }
-        if (enabled.size() >= world::k_max_mods) {
+        if (!was && enabled.size() >= world::k_max_mods) {
             return "at most " + std::to_string(world::k_max_mods) + " mods can be on";
         }
-        enabled.insert(at, id);
+        if (!was) {
+            enabled.insert(at, id);
+        }
         if (!world::give_mod_slot(on_list, id)) {
             return "the world's list of mods has given all its " + std::to_string(world::k_max_mod_slots) +
                    " slots (each mod ever turned on keeps one): take those of mods long gone out of " + path_to_utf8(mods / k_enabled);

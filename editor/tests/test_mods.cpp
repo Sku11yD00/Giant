@@ -577,9 +577,21 @@ GIANT_TEST("mods: a mod's people come under ids of its own, stay the same whatev
     // With the mods off the world has its own two.
     GIANT_CHECK(!set_mod_on(w.folder, "guards", false) && !set_mod_on(w.folder, "a_early", false) && w.open() && w.scene.people.size() == 2 &&
                 !w.streaming.mods_laid().any);
-    // A list written by hand, without slots: a mod with people is left out and says how to mend it; one without loads.
+    // A list written by hand, without slots: a mod with people is left out and says how to mend it.
     w.streaming.close();
     w.enabled(R"({"format":"giant-mods","format_version":1,"enabled":["guards"]})");
     GIANT_CHECK(w.open() && w.scene.people.size() == 2 && w.scene.places.size() == 2 && w.streaming.mods_laid().applied.problems.size() == 1 &&
                 w.streaming.mods_laid().applied.problems[0].message.find("enable_mod") != std::string::npos);
+    // Enabled again (on as it is), it is given a slot, and list_mods says to open the world again for it.
+    GIANT_CHECK(commands.execute("list_mods").value["world"]["reopen"] == false);
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}}).ok && found(read_mods(w.folder), "guards")->slot.has_value());
+    GIANT_CHECK(commands.execute("list_mods").value["world"]["reopen"] == true);
+    w.streaming.close();
+    GIANT_CHECK(w.open() && w.scene.people.size() == 4 && w.streaming.mods_laid().applied.problems.empty());
+    // One of the mod's people removed and the world saved: named, and back when the world is opened again.
+    w.scene.people.pop_back();
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept.size() == 1 && w.file().people.size() == 2);
+    w.streaming.close();
+    GIANT_CHECK(w.open() && w.scene.people.size() == 4);
 }

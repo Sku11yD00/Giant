@@ -2080,11 +2080,10 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
 
 // The people's keys of a scene or a world index: places, person_looks,
 // routines and people, each checked alone and then together (people.h).
-// `read` says whose people are there: a scene's or a world's own; none (a
-// mod's things alone: only the names are checked together); or a mod's,
+// `read` says whose people are there: a scene's or a world's own, or a mod's,
 // numbered in the mod (no next_id, and not checked against the places and
 // looks here: they may be the world's).
-enum class PeopleRead : u8 { world, none, mod };
+enum class PeopleRead : u8 { world, mod };
 void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLook>& looks, std::vector<Routine>& routines,
                  std::vector<Person>& people, PersonId& next_person_id, std::string& error, PeopleRead read = PeopleRead::world) {
     if (const Json* list = root.get("places", false); list != nullptr && root.ok()) {
@@ -2233,12 +2232,12 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
         }
     }
     const bool of_mod = read == PeopleRead::mod;
-    if (const Json* json = read != PeopleRead::none ? root.get("people", false) : nullptr; json != nullptr && root.ok()) {
+    if (const Json* json = root.get("people", false); json != nullptr && root.ok()) {
         Reader r(*json, "people", error);
         u64 next = 1;
         if (const Json* v = of_mod ? nullptr : r.get("next_id", true)) {
-            if (!v->is_number_unsigned() || v->get<u64>() == 0 || v->get<u64>() > 0xffffffffu) {
-                r.fail("next_id", "must be a whole number from 1 to 2^32 - 1");
+            if (!v->is_number_unsigned() || v->get<u64>() == 0 || v->get<u64>() > k_mod_person_base) { // (from there on: mods' people)
+                r.fail("next_id", "must be a whole number from 1 to 2^30");
             } else {
                 next = v->get<u64>();
             }

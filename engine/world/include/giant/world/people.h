@@ -26,7 +26,8 @@ std::optional<RoutineAt> routine_at_named(std::string_view name);
 
 // What is wrong among them all, or nothing: a place's, a look's or a
 // routine's name had twice, a person's look, home or routine that is not there, an id had twice or
-// not under `next_person_id`, more than the scene keeps. (Each one's own
+// not under `next_person_id` (but mods' people, whose ids are from
+// k_mod_person_base on: `next_person_id` is never past that), more than the scene keeps. (Each one's own
 // fields are check_place's, check_person_look's, check_routine's and
 // check_person's: not looked at here.)
 std::optional<std::string> check_people(std::span<const Place> places, std::span<const PersonLook> looks,

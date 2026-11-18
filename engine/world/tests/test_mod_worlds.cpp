@@ -5,6 +5,7 @@
 
 #include "giant_test.h"
 
+#include <initializer_list>
 #include <string>
 #include <utility>
 #include <vector>
@@ -312,9 +313,9 @@ GIANT_TEST("mod worlds: a mod's people are added under the ids of its slot, amon
     // By id: the world's own, then slot 0's, the one of slot 1 that was there, slot 3's.
     GIANT_CHECK(w.people.size() == 6 && w.people[0].id == 1 && w.people[1].id == 2 && w.people[2].id == mod_person_id(0, 2) &&
                 w.people[3].id == mod_person_id(1, 4) && w.people[4].id == mod_person_id(3, 1) && w.people[5].id == mod_person_id(3, 9));
-    GIANT_CHECK(w.people[4].look == "guard" && w.people[4].home == "barracks" && w.people[5].home == "cottage" && w.next_person_id == 3);
+    GIANT_CHECK(w.people[4].look == "guard" && w.people[4].home == "barracks" && w.people[5].home == "cottage");
     GIANT_CHECK(mod_person_id(0, 1) == k_mod_person_base + 1 && mod_person_id(3, 9) == k_mod_person_base + 3 * 65536 + 9 &&
-                mod_person_id(k_max_mod_slots - 1, k_max_mod_people) > k_mod_person_base);
+                mod_person_id(k_max_mod_slots - 1, k_max_mod_people) == 1073741824u + 33554432u - 1u);
     // The same mods, the same slots, another order of loading: the same ids.
     World again;
     again.slots = {0, 3};
@@ -353,15 +354,42 @@ GIANT_TEST("mod worlds: a mod whose people cannot be added is left out whole, wi
     GIANT_CHECK(refused(mod, "has no slot"));
     w.slots = {};
     GIANT_CHECK(refused(mod, "has no slot"));
+    w.slots = {k_max_mod_slots};
+    GIANT_CHECK(refused(mod, "has no slot"));
     w.slots = {2};
     mod.people = {person(2, "villager", "", "", ""), person(2, "villager", "", "", "")};
     GIANT_CHECK(refused(mod, "numbered from 1"));
+    // Left out from among the world's (one after them by id), not only from the end.
+    {
+        World among;
+        among.slots = {2};
+        among.people.push_back(person(mod_person_id(7, 1), "villager", "", "", ""));
+        const std::vector<Person> were = among.people;
+        mod.people = {person(1, "villager", "", "", ""), person(2, "nobody's look", "", "", "")};
+        GIANT_CHECK(among.apply({&mod}).problems.size() == 1 && among.people == were && among.places == before.places);
+        // Two mods of one slot (never from the world's list, which gives each slot once): the second is left out.
+        ModWorld first, second;
+        first.people = {person(1, "villager", "", "", "")};
+        second.people = {person(2, "villager", "", "", "")};
+        among.slots = {2, 2};
+        const ModsApplied shared = among.apply({&first, &second});
+        GIANT_CHECK(shared.people == std::vector<ModPeople>({{0, 1}}) && shared.problems.size() == 1 && shared.problems[0].mod == 1 &&
+                    shared.problems[0].message.find("same slot") != std::string::npos && among.people.size() == 4 && among.sound());
+    }
     // The world has a person of its ids already.
     mod.people = {person(1, "villager", "barracks", "", "")};
     w.people.push_back(person(mod_person_id(2, 500), "villager", "", "", ""));
     const ModsApplied clash = w.apply({&mod});
-    GIANT_CHECK(clash.problems.size() == 1 && clash.problems[0].message.find("already has a person") != std::string::npos && w.people.size() == 3 &&
+    GIANT_CHECK(clash.problems.size() == 1 && clash.problems[0].message.find("already a person") != std::string::npos && w.people.size() == 3 &&
                 w.places == before.places);
+    // Its ids are those of its slot, from number 0 to the last: a person just outside them is no clash.
+    for (const PersonId taken : {mod_person_id(2, 0), mod_person_id(2, k_max_mod_people)}) {
+        w.people.back().id = taken;
+        GIANT_CHECK(w.apply({&mod}).problems.size() == 1 && w.people.size() == 3);
+    }
+    w.people.back().id = mod_person_id(3, 0);
+    w.people.insert(w.people.begin() + 2, person(mod_person_id(2, 0) - 1, "villager", "", "", ""));
+    GIANT_CHECK(w.apply({&mod}).problems.empty() && w.people.size() == 5 && w.people[3].id == mod_person_id(2, 1) && w.sound());
     // More people than a world keeps.
     w = before;
     w.slots = {0, 1};

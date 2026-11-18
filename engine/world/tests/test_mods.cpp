@@ -221,6 +221,9 @@ GIANT_TEST("mods: each mod's slot is its own for good, and the lowest free is gi
                 load_enabled_mods(head + R"({"a":-1}})", back) && load_enabled_mods(head + R"({"a":1,"b":1}})", back) &&
                 load_enabled_mods(head + R"([0]})", back) && load_enabled_mods(head + R"({"a":1.5}})", back) && back == kept);
     GIANT_CHECK(!load_enabled_mods(head + R"({"b":511,"a":0}})", back) && back.slots == std::vector<ModSlot>({{"a", 0}, {"b", 511}}));
+    // Saved by id, whatever the order given; an id or a slot there twice keeps its first, so what is written loads.
+    GIANT_CHECK(!load_enabled_mods(save_enabled_mods({{}, {{"b", 1}, {"a", 0}, {"c", 1}, {"a", 5}, {"d", 600}}}), back) &&
+                back.slots == std::vector<ModSlot>({{"a", 0}, {"b", 1}}));
     // Every slot given: no more.
     ModsOn full;
     for (u32 i = 0; i < k_max_mod_slots; ++i) {
