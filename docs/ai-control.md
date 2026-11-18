@@ -242,7 +242,7 @@ request, Claude's service retries it on the model it recommends instead
 | `get_scripts` | no | The loaded script assembly and how many scripts run |
 | `chat_send`, `stop_chat`, `clear_chat` | the chat only, not undoable | The chat with Claude (above): send a message, stop its work, forget the conversation |
 | `get_chat` | no | The chat's lines and state (above) |
-| `list_mods` | no | The mods beside the open world (`docs/mods.md`): each one's manifest, whether it is enabled and loaded, its place in the load order or its problem; folders that are no mod, with why; and under `world` what the mods changed as the world was opened (added, replaced, clashes between mods, mods left out) |
+| `list_mods` | no | The mods beside the open world (`docs/mods.md`): each one's manifest, whether it is enabled and loaded, its place in the load order or its problem; folders that are no mod, with why; and under `world` what the mods changed as the world was opened (added, replaced, people added, clashes between mods, mods left out); each mod's `slot`, which its people's ids come from |
 | `enable_mod` | writes `mods/enabled.json`, not undoable | Turns a mod on, or off with `enabled: false` |
 | `quit_editor` | closes | Closes the editor |
 

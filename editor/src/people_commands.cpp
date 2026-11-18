@@ -1017,7 +1017,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                  return CommandResult::failure("a scene has at most " + std::to_string(world::k_max_people) +
                                                " people (" + std::to_string(scene.people.size()) + " now)");
              }
-             if (u64{scene.next_person_id} + list.size() > 0xffffffffu) {
+             if (u64{scene.next_person_id} + list.size() > world::k_mod_person_base) { // (from there on: mods' people)
                  return CommandResult::failure("this scene has run out of person ids");
              }
              PeopleChange change;

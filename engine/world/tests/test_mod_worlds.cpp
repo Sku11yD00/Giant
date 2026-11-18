@@ -70,8 +70,9 @@ struct World {
     std::vector<Behaviour> behaviours = {behaviour("wary")};
     std::vector<Person> people = {person(1, "villager", "cottage", "smith's day", "wary"), person(2, "villager", "", "", "")};
     PersonId next_person_id = 3;
+    std::vector<u32> slots = {0, 1, 2, 3}; // (each mod's, by its place in the list)
     ModsApplied apply(const std::vector<const ModWorld*>& mods) {
-        return apply_mod_worlds(mods, places, looks, routines, behaviours, people, next_person_id);
+        return apply_mod_worlds(mods, slots, places, looks, routines, behaviours, people, next_person_id);
     }
     bool sound() const { return !check_people(places, looks, routines, people, next_person_id) && !check_behaviours(behaviours, people); }
 };
@@ -111,7 +112,7 @@ GIANT_TEST("mod worlds: a mod's world file is saved and loaded as it was, and ch
     ModWorld kept = w;
     GIANT_CHECK(load_mod_world(R"({"format":"giant-world","version":1})", kept) && load_mod_world("{", kept) && kept == w);
     GIANT_CHECK(load_error(R"(,"plcaes":[])").find("plcaes") != std::string::npos);
-    GIANT_CHECK(load_error(R"(,"people":{"next_id":1,"list":[]})").find("people is not a known key") != std::string::npos);
+    GIANT_CHECK(load_error(R"(,"people":{"next_id":1,"list":[]})").find("next_id") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"kits":[])").find("kits") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"places":[{"name":"a","position":[0,0,0],"radius":5000}])").find("places[0]") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"places":[{"name":"a","position":[0,0,0]},{"name":"a","position":[1,0,1]}])").find("two places are named \"a\"") !=
@@ -270,4 +271,136 @@ GIANT_TEST("mod worlds: the world's own is told from the mods' whatever was done
     const std::vector<PersonLook> looks = {look("villager")};
     GIANT_CHECK(world_own<PersonLook>(looks, std::vector<PersonLook>{look("guard")}, std::vector<PersonLook>{look("villager", 1.3f), look("guard")}) ==
                 std::vector<PersonLook>{look("villager", 1.3f)});
+}
+
+GIANT_TEST("mod worlds: a mod's people are numbered in its file and loaded strictly") {
+    ModWorld mod;
+    mod.person_looks = {look("guard")};
+    mod.people = {person(1, "guard", "barracks", "", ""), person(7, "villager", "", "smith's day", "wary")};
+    mod.people[0].name = "Captain";
+    mod.people[0].position = {5.0, 1.0, -3.0};
+    const std::string text = save_mod_world(mod);
+    ModWorld back;
+    GIANT_CHECK(!load_mod_world(text, back) && back == mod && save_mod_world(back) == text && !mod.empty());
+    GIANT_CHECK(text.find("next_id") == std::string::npos);
+    // (What they use need not be in the mod: "villager" is the world's.)
+    const auto people = [](const std::string& rows) { return load_error(R"(,"people":{"list":[)" + rows + "]}"); };
+    GIANT_CHECK(people(R"([1,"a","v","",0,0,0,0,5])").empty() && people("").empty());
+    GIANT_CHECK(people(R"([0,"a","v","",0,0,0,0,5])").find("id must not be 0") != std::string::npos);
+    GIANT_CHECK(people(R"([65536,"a","v","",0,0,0,0,5])").find("numbered from 1 to 65535") != std::string::npos);
+    GIANT_CHECK(people(R"([2,"a","v","",0,0,0,0,5],[2,"b","v","",0,0,0,0,5])").find("in order, each once") != std::string::npos);
+    GIANT_CHECK(people(R"([2,"a","v","",0,0,0,0,5],[1,"b","v","",0,0,0,0,5])").find("in order, each once") != std::string::npos);
+    GIANT_CHECK(people(R"([1,"a","","",0,0,0,0,5])").find("look") != std::string::npos);
+    GIANT_CHECK(!load_error(R"(,"people":{"next_id":3,"list":[]})").empty() && !load_error(R"(,"people":[])").empty() &&
+                !load_error(R"(,"people":{})").empty());
+}
+
+GIANT_TEST("mod worlds: a mod's people are added under the ids of its slot, among the world's in order") {
+    World w;
+    w.slots = {3, 0, k_no_mod_slot};
+    w.people.push_back(person(mod_person_id(1, 4), "villager", "", "", "")); // (one of a mod not on now, kept by the world)
+    GIANT_CHECK(w.sound());
+    const std::vector<Person> world_people = w.people;
+    ModWorld guards, traders, plain;
+    guards.person_looks = {look("guard")};
+    guards.places = {place("barracks", 70)};
+    guards.people = {person(1, "guard", "barracks", "smith's day", "wary"), person(9, "villager", "cottage", "", "")};
+    traders.people = {person(2, "guard", "barracks", "", "")}; // (an earlier mod's look and place)
+    plain.places = {place("well", 5)};                          // (no people: needs no slot)
+    const ModsApplied applied = w.apply({&guards, &traders, &plain});
+    GIANT_CHECK(applied.problems.empty() && applied.people == std::vector<ModPeople>({{0, 2}, {1, 1}}) && w.sound());
+    // By id: the world's own, then slot 0's, the one of slot 1 that was there, slot 3's.
+    GIANT_CHECK(w.people.size() == 6 && w.people[0].id == 1 && w.people[1].id == 2 && w.people[2].id == mod_person_id(0, 2) &&
+                w.people[3].id == mod_person_id(1, 4) && w.people[4].id == mod_person_id(3, 1) && w.people[5].id == mod_person_id(3, 9));
+    GIANT_CHECK(w.people[4].look == "guard" && w.people[4].home == "barracks" && w.people[5].home == "cottage" && w.next_person_id == 3);
+    GIANT_CHECK(mod_person_id(0, 1) == k_mod_person_base + 1 && mod_person_id(3, 9) == k_mod_person_base + 3 * 65536 + 9 &&
+                mod_person_id(k_max_mod_slots - 1, k_max_mod_people) > k_mod_person_base);
+    // The same mods, the same slots, another order of loading: the same ids.
+    World again;
+    again.slots = {0, 3};
+    again.people.push_back(world_people.back());
+    ModWorld traders_own = traders;
+    traders_own.people[0] = person(2, "villager", "", "", "");
+    GIANT_CHECK(again.apply({&traders_own, &guards}).problems.empty() && again.people.size() == 6 && again.people[2].id == w.people[2].id &&
+                again.people[5].id == w.people[5].id);
+}
+
+GIANT_TEST("mod worlds: a mod whose people cannot be added is left out whole, with why") {
+    World w;
+    const World before = w;
+    const auto same = [&] {
+        return w.places == before.places && w.looks == before.looks && w.routines == before.routines && w.behaviours == before.behaviours &&
+               w.people == before.people;
+    };
+    const auto refused = [&](const ModWorld& mod, const char* why) {
+        const ModsApplied applied = w.apply({&mod});
+        return applied.problems.size() == 1 && applied.problems[0].message.find(why) != std::string::npos && applied.people.empty() &&
+               applied.changes.empty() && same();
+    };
+    ModWorld mod;
+    mod.places = {place("barracks", 70)};
+    mod.people = {person(1, "nobody's look", "", "", "")};
+    GIANT_CHECK(refused(mod, "look \"nobody's look\" is not there"));
+    mod.people = {person(1, "villager", "nowhere", "", "")};
+    GIANT_CHECK(refused(mod, "home \"nowhere\" is not there"));
+    mod.people = {person(1, "villager", "barracks", "no day", "")};
+    GIANT_CHECK(refused(mod, "routine \"no day\" is not there"));
+    mod.people = {person(1, "villager", "barracks", "", "fearless")};
+    GIANT_CHECK(refused(mod, "fearless"));
+    // No slot; numbers out of order (never from a file: load refuses them).
+    mod.people = {person(1, "villager", "barracks", "", "")};
+    w.slots = {k_no_mod_slot};
+    GIANT_CHECK(refused(mod, "has no slot"));
+    w.slots = {};
+    GIANT_CHECK(refused(mod, "has no slot"));
+    w.slots = {2};
+    mod.people = {person(2, "villager", "", "", ""), person(2, "villager", "", "", "")};
+    GIANT_CHECK(refused(mod, "numbered from 1"));
+    // The world has a person of its ids already.
+    mod.people = {person(1, "villager", "barracks", "", "")};
+    w.people.push_back(person(mod_person_id(2, 500), "villager", "", "", ""));
+    const ModsApplied clash = w.apply({&mod});
+    GIANT_CHECK(clash.problems.size() == 1 && clash.problems[0].message.find("already has a person") != std::string::npos && w.people.size() == 3 &&
+                w.places == before.places);
+    // More people than a world keeps.
+    w = before;
+    w.slots = {0, 1};
+    ModWorld crowd, small;
+    for (u32 i = 1; i <= k_max_mod_people; ++i) {
+        crowd.people.push_back(person(i, "villager", "", "", ""));
+    }
+    small.people = {person(1, "villager", "", "", "")};
+    const ModsApplied full = w.apply({&small, &crowd}); // (2 + 1 + 65535 are more than 65536)
+    GIANT_CHECK(full.people == std::vector<ModPeople>({{0, 1}}) && full.problems.size() == 1 && full.problems[0].mod == 1 && w.people.size() == 3 && w.sound());
+}
+
+GIANT_TEST("mod worlds: the world's own people are told from the mods', and its ids never reach theirs") {
+    const std::vector<Person> brought = {person(mod_person_id(0, 1), "guard", "", "", ""), person(mod_person_id(0, 2), "guard", "", "", ""),
+                                         person(mod_person_id(4, 1), "guard", "", "", "")};
+    const std::vector<Person> own = {person(1, "villager", "", "", ""), person(5, "villager", "", "", "")};
+    std::vector<Person> now = {own[0], own[1], brought[0], brought[1], brought[2]};
+    std::vector<std::string> not_kept;
+    GIANT_CHECK(world_own_people(brought, now, &not_kept) == own && not_kept.empty() && world_own_people_are(own, brought, now));
+    // A mod's person changed, one removed: neither is the world's, and both are named. One of the world's own made, one changed.
+    now[2].home = "cottage";
+    now.erase(now.begin() + 4);
+    now.insert(now.begin() + 2, person(6, "villager", "", "", ""));
+    now[0].name = "Ann";
+    const std::vector<Person> expected = {now[0], now[1], now[2]};
+    GIANT_CHECK(world_own_people(brought, now, &not_kept) == expected &&
+                not_kept == std::vector<std::string>({"person " + std::to_string(mod_person_id(0, 1)), "person " + std::to_string(mod_person_id(4, 1))}));
+    GIANT_CHECK(!world_own_people_are(own, brought, now) && world_own_people_are(expected, brought, now));
+    // All of the mods' removed; none of the world's own; no mods.
+    not_kept.clear();
+    GIANT_CHECK(world_own_people(brought, own, &not_kept) == own && not_kept.size() == 3 && world_own_people_are(own, brought, own));
+    GIANT_CHECK(world_own_people(brought, brought).empty() && world_own_people_are({}, brought, brought) && !world_own_people_are(own, brought, brought));
+    GIANT_CHECK(world_own_people({}, now) == now && world_own_people_are(now, {}, now) && !world_own_people_are(own, {}, now));
+    // A person of a mod that is not on (kept by the world's own file) is the world's.
+    const std::vector<Person> kept = {own[0], person(mod_person_id(1, 1), "villager", "", "", "")};
+    GIANT_CHECK(world_own_people(brought, kept) == kept);
+    // The world's next id is past its own people's only, and never among the mods'.
+    const std::vector<PersonLook> looks = {look("villager"), look("guard")};
+    now[3].home.clear();
+    GIANT_CHECK(!check_people({}, looks, {}, now, 7) && check_people({}, looks, {}, now, 6) && !check_people({}, looks, {}, now, k_mod_person_base) &&
+                check_people({}, looks, {}, now, k_mod_person_base + 1) && check_people({}, looks, {}, own, 0));
 }

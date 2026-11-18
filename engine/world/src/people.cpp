@@ -305,10 +305,11 @@ std::optional<std::string> check_people(std::span<const Place> places, std::span
     if (const auto twice = std::adjacent_find(look_names.begin(), look_names.end()); twice != look_names.end()) {
         return "two person looks are named \"" + std::string(*twice) + "\"";
     }
-    PersonId last = 0;
+    PersonId last = 0, last_own = 0;
     for (const Person& p : people) {
         if (p.id <= last) return "people must be in the order of their ids, each once (person " + std::to_string(p.id) + ")";
         last = p.id;
+        if (p.id < k_mod_person_base) last_own = p.id;
         if (!std::binary_search(look_names.begin(), look_names.end(), std::string_view(p.look))) return "person " + std::to_string(p.id) + "'s look \"" + p.look + "\" is not there";
         if (!p.home.empty() && !std::binary_search(place_names.begin(), place_names.end(), std::string_view(p.home))) {
             return "person " + std::to_string(p.id) + "'s home \"" + p.home + "\" is not there";
@@ -317,7 +318,11 @@ std::optional<std::string> check_people(std::span<const Place> places, std::span
             return "person " + std::to_string(p.id) + "'s routine \"" + p.routine + "\" is not there";
         }
     }
-    if (next_person_id == 0 || last >= next_person_id) return "next_person_id must be past every person's id";
+    // (Ids from k_mod_person_base on are those of mods' people: never given to a new person.)
+    if (next_person_id == 0 || last_own >= next_person_id || next_person_id > k_mod_person_base) {
+        return "next_person_id must be past every person's id (but those of mods' people, from " + std::to_string(k_mod_person_base) +
+               " on) and no more than " + std::to_string(k_mod_person_base);
+    }
     return std::nullopt;
 }
 

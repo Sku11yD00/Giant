@@ -4161,6 +4161,23 @@ not at all: after each mod the lists are checked as a world's are
 (`check_people`, `check_behaviours`), and a mod that fails is undone and
 given a problem.
 
+A mod's people (part 3) are only added. Their ids are not the mod's to
+choose: a mod's file numbers them from 1, and in the world number n of
+the mod in slot s is `mod_person_id(s, n)`, from `k_mod_person_base`
+(2^30) on, 65,536 ids to a slot. A slot is a mod's for good
+(`world::ModsOn::slots` in `enabled.json`, given by `enable_mod` when a
+mod is first turned on and kept while it is off), so the same person has
+the same id whatever else is on and in whatever order mods load, which
+is what a game save needs to find it again. The world's own ids stay
+under the base: `check_people` holds `next_person_id` past the world's
+own people only and never over the base. `apply_mod_worlds` puts each
+mod's people among the world's in id order and refuses the mod, whole,
+when it has no slot, when the world already has a person in its range,
+or when its people use what is not there. At save, `world_own_people`
+leaves out the people mods brought (by id) and names those changed;
+`world_own_people_are` answers "anything unsaved?" without copying
+65,536 people.
+
 The editor lays the mods when a world is opened (`lay_mods`, from
 `WorldStreaming::open`), over the scene only: `WorldStreaming`'s index
 stays what `world.json` holds. So that saving with mods on keeps the
@@ -4182,8 +4199,10 @@ off changes only the list: the scene changes when the world is next
 opened (`list_mods` reports `reopen`, also when a mod's `world.json` was
 written since), which keeps the undo history honest. Known limits: game
 saves do not record which mods were on; a world closed with `close_world`
-keeps the mods' things as plain ones. People of a mod's own, kits, assets and scripts are the parts to
-come.
+keeps the mods' things as plain ones (people among them, under their
+mod ids: saved as a new world's own, the same mod then finds its ids
+taken and is left out with that reason). Kits, assets and scripts are the
+parts to come.
 
 Whole text files are read and written by `giant/core/text_files.h`
 (written beside and renamed over); game saves keep their own writer, which

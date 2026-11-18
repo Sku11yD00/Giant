@@ -246,6 +246,7 @@ private:
         std::vector<world::PersonLook> person_looks;
         std::vector<world::Routine> routines;
         std::vector<world::Behaviour> behaviours;
+        std::vector<world::Person> people;
     };
     // `not_kept`, when given, takes the names of the mods' things changed or
     // removed in the scene (they are not the world's to save).

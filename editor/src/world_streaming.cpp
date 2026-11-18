@@ -721,12 +721,13 @@ WorldStreaming::Saved WorldStreaming::save(const world::Scene& scene, std::vecto
 
 WorldStreaming::Own WorldStreaming::own(const world::Scene& scene, std::vector<std::string>* not_kept) const {
     if (!m_mods.any) {
-        return {scene.places, scene.person_looks, scene.routines, scene.behaviours};
+        return {scene.places, scene.person_looks, scene.routines, scene.behaviours, scene.people};
     }
     return {world::world_own<world::Place>(m_index.places, m_mods.places, scene.places, not_kept),
             world::world_own<world::PersonLook>(m_index.person_looks, m_mods.person_looks, scene.person_looks, not_kept),
             world::world_own<world::Routine>(m_index.routines, m_mods.routines, scene.routines, not_kept),
-            world::world_own<world::Behaviour>(m_index.behaviours, m_mods.behaviours, scene.behaviours, not_kept)};
+            world::world_own<world::Behaviour>(m_index.behaviours, m_mods.behaviours, scene.behaviours, not_kept),
+            world::world_own_people(m_mods.people, scene.people, not_kept)};
 }
 
 WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vector<std::string> meshes) {
@@ -734,9 +735,9 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     // The world's own, without what mods brought: it must load without them.
     Own owned = own(scene, &saved.mods_not_kept);
     if (m_mods.any) {
-        std::optional<std::string> wrong = world::check_people(owned.places, owned.person_looks, owned.routines, scene.people, scene.next_person_id);
+        std::optional<std::string> wrong = world::check_people(owned.places, owned.person_looks, owned.routines, owned.people, scene.next_person_id);
         if (!wrong) {
-            wrong = world::check_behaviours(owned.behaviours, scene.people);
+            wrong = world::check_behaviours(owned.behaviours, owned.people);
         }
         if (wrong) {
             return {"the world cannot be saved: without its mods it would not load (" + *wrong +
@@ -989,7 +990,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     m_index.person_looks = std::move(owned.person_looks);
     m_index.routines = std::move(owned.routines);
     m_index.behaviours = std::move(owned.behaviours);
-    m_index.people = scene.people;
+    m_index.people = std::move(owned.people);
     m_index.next_person_id = scene.next_person_id;
     m_index.routes = scene.routes;
     m_index.particle_looks = scene.particle_looks;
@@ -1178,17 +1179,22 @@ u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
 bool WorldStreaming::unsaved_settings(const world::Scene& scene) const {
     // (With mods on, the scene's are not the file's: the world's own among them are what is compared.
     // A mods' thing changed in the scene is not unsaved: it is not the world's to save.)
-    bool same_people_things = scene.places == m_index.places && scene.person_looks == m_index.person_looks &&
-                              scene.routines == m_index.routines && scene.behaviours == m_index.behaviours;
+    bool same_people_things = false;
     if (m_mods.any) {
-        const Own owned = own(scene);
-        same_people_things = owned.places == m_index.places && owned.person_looks == m_index.person_looks &&
-                             owned.routines == m_index.routines && owned.behaviours == m_index.behaviours;
+        same_people_things =
+            world::world_own<world::Place>(m_index.places, m_mods.places, scene.places) == m_index.places &&
+            world::world_own<world::PersonLook>(m_index.person_looks, m_mods.person_looks, scene.person_looks) == m_index.person_looks &&
+            world::world_own<world::Routine>(m_index.routines, m_mods.routines, scene.routines) == m_index.routines &&
+            world::world_own<world::Behaviour>(m_index.behaviours, m_mods.behaviours, scene.behaviours) == m_index.behaviours &&
+            world::world_own_people_are(m_index.people, m_mods.people, scene.people);
+    } else {
+        same_people_things = scene.places == m_index.places && scene.person_looks == m_index.person_looks &&
+                             scene.routines == m_index.routines && scene.behaviours == m_index.behaviours && scene.people == m_index.people;
     }
     return !(scene.lighting == m_index.lighting) || !(scene.kits == m_index.kits) ||
            !(scene.scatter == m_index.scatter) || !(scene.weather == m_index.weather) ||
            !(scene.clock == m_index.clock) || !(scene.water == m_index.water) || !same_people_things ||
-           !(scene.people == m_index.people) || scene.next_person_id != m_index.next_person_id ||
+           scene.next_person_id != m_index.next_person_id ||
            !(scene.routes == m_index.routes) ||
            !(scene.particle_looks == m_index.particle_looks) || !(scene.effects == m_index.effects);
 }
