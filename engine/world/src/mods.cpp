@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
 #include <functional>
 #include <initializer_list>
 #include <map>
@@ -305,17 +306,59 @@ std::optional<LoadError> load_mod(std::string_view text, Mod& out) {
     return std::nullopt;
 }
 
-std::string save_enabled_mods(std::span<const std::string> ids) {
-    std::vector<std::string> sorted(ids.begin(), ids.end());
+std::string save_enabled_mods(const ModsOn& on) {
+    std::vector<std::string> sorted(on.ids.begin(), on.ids.end());
     std::sort(sorted.begin(), sorted.end());
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
-    const Json json = {{"format", k_mods_format}, {"format_version", k_version}, {"enabled", sorted}};
+    Json json = {{"format", k_mods_format}, {"format_version", k_version}, {"enabled", sorted}};
+    if (!on.slots.empty()) {
+        // By id; an id or a slot there twice keeps its first (so that what is written always loads).
+        std::vector<ModSlot> given(on.slots.begin(), on.slots.end());
+        std::stable_sort(given.begin(), given.end(), [](const ModSlot& l, const ModSlot& r) { return l.id < r.id; });
+        std::set<u32> taken;
+        Json slots = Json::object();
+        for (const ModSlot& slot : given) {
+            if (!slots.contains(slot.id) && slot.slot < k_max_mod_slots && taken.insert(slot.slot).second) {
+                slots.emplace(slot.id, slot.slot);
+            }
+        }
+        json["slots"] = std::move(slots);
+    }
     return json.dump(2, ' ', false, Json::error_handler_t::replace) + "\n";
 }
 
-std::optional<LoadError> load_enabled_mods(std::string_view text, std::vector<std::string>& out) {
+std::optional<u32> find_mod_slot(const ModsOn& on, std::string_view id) {
+    for (const ModSlot& slot : on.slots) {
+        if (slot.id == id) {
+            return slot.slot;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<u32> give_mod_slot(ModsOn& on, std::string_view id) {
+    if (const auto has = find_mod_slot(on, id)) {
+        return has;
+    }
+    std::vector<u8> taken(k_max_mod_slots, 0);
+    for (const ModSlot& slot : on.slots) {
+        if (slot.slot < k_max_mod_slots) {
+            taken[slot.slot] = 1;
+        }
+    }
+    const auto free_one = std::find(taken.begin(), taken.end(), u8{0});
+    if (free_one == taken.end()) {
+        return std::nullopt;
+    }
+    const u32 slot = static_cast<u32>(free_one - taken.begin());
+    const auto at = std::lower_bound(on.slots.begin(), on.slots.end(), id, [](const ModSlot& l, std::string_view r) { return l.id < r; });
+    on.slots.insert(at, ModSlot{std::string(id), slot});
+    return slot;
+}
+
+std::optional<LoadError> load_enabled_mods(std::string_view text, ModsOn& out) {
     Json json;
-    if (auto error = parse_object(text, k_mods_format, "the list of mods that are on", {"enabled"}, json)) {
+    if (auto error = parse_object(text, k_mods_format, "the list of mods that are on", {"enabled", "slots"}, json)) {
         return error;
     }
     const auto enabled = json.find("enabled");
@@ -334,7 +377,28 @@ std::optional<LoadError> load_enabled_mods(std::string_view text, std::vector<st
     if (const auto twice = std::adjacent_find(ids.begin(), ids.end()); twice != ids.end()) {
         return bad("enabled: \"" + *twice + "\" is there twice");
     }
-    out = std::move(ids);
+    // The slots given (need not be there: none given yet). A key written twice is read as its last.
+    std::vector<ModSlot> slots;
+    if (const auto given = json.find("slots"); given != json.end()) {
+        if (!given->is_object() || given->size() > k_max_mod_slots) {
+            return bad("slots: must be an object of at most " + std::to_string(k_max_mod_slots) + " mod ids, each with its slot");
+        }
+        std::vector<u8> taken(k_max_mod_slots, 0);
+        for (const auto& [id, slot] : given->items()) {
+            if (!mod_id_ok(id) || !slot.is_number_unsigned() || slot.get<u64>() >= k_max_mod_slots) {
+                return bad("slots: \"" + id + "\" must be a mod's id with a slot from 0 to " + std::to_string(k_max_mod_slots - 1));
+            }
+            const u32 number = slot.get<u32>();
+            if (taken[number] != 0) {
+                return bad("slots: slot " + std::to_string(number) + " is given twice");
+            }
+            taken[number] = 1;
+            slots.push_back({id, number});
+        }
+        std::sort(slots.begin(), slots.end(), [](const ModSlot& l, const ModSlot& r) { return l.id < r.id; });
+    }
+    out.ids = std::move(ids);
+    out.slots = std::move(slots);
     return std::nullopt;
 }
 
@@ -588,9 +652,85 @@ struct Laying {
 
 } // namespace
 
-ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<Place>& places, std::vector<PersonLook>& person_looks,
-                             std::vector<Routine>& routines, std::vector<Behaviour>& behaviours, std::span<const Person> people,
-                             PersonId next_person_id) {
+namespace {
+
+// Puts the mod's people among the world's, under the ids of its slot; what is wrong, or nothing.
+// `at`: where they were put (their count is the mod's).
+std::optional<std::string> lay_people(const std::vector<Person>& from, u32 slot, std::vector<Person>& into, usize& at) {
+    if (slot >= k_max_mod_slots) {
+        return "it brings people and has no slot in the world's list of mods (enable_mod it again: that gives it one)";
+    }
+    if (from.size() > k_max_mod_people) {
+        return "a mod brings at most " + std::to_string(k_max_mod_people) + " people";
+    }
+    u32 last = 0;
+    for (const Person& one : from) { // (refused when a mod's file is loaded; looked at here all the same)
+        if (one.id <= last || one.id > k_max_mod_people) {
+            return "its people must be numbered from 1 to " + std::to_string(k_max_mod_people) + ", in order, each once";
+        }
+        last = one.id;
+    }
+    const PersonId first = mod_person_id(slot, 0), past = mod_person_id(slot, k_max_mod_people) + 1;
+    const auto where = std::lower_bound(into.begin(), into.end(), first, [](const Person& l, PersonId r) { return l.id < r; });
+    if (where != into.end() && where->id < past) {
+        return "there is already a person of an id that is this mod's to give (person " + std::to_string(where->id) +
+               "): the world's own, or a mod's of the same slot";
+    }
+    at = static_cast<usize>(where - into.begin());
+    into.insert(where, from.begin(), from.end());
+    for (usize i = 0; i < from.size(); ++i) {
+        into[at + i].id = mod_person_id(slot, from[i].id);
+    }
+    return std::nullopt;
+}
+
+template <typename Same>
+void own_people(std::span<const Person> brought, std::span<const Person> now, std::vector<std::string>* not_kept, const Same& own) {
+    usize b = 0;
+    for (const Person& one : now) {
+        while (b < brought.size() && brought[b].id < one.id) {
+            if (not_kept != nullptr) not_kept->push_back("person " + std::to_string(brought[b].id)); // (gone)
+            ++b;
+        }
+        if (b < brought.size() && brought[b].id == one.id) {
+            if (not_kept != nullptr && !(brought[b] == one)) not_kept->push_back("person " + std::to_string(one.id));
+            ++b;
+            continue;
+        }
+        if (!own(one)) {
+            return;
+        }
+    }
+    for (; not_kept != nullptr && b < brought.size(); ++b) {
+        not_kept->push_back("person " + std::to_string(brought[b].id));
+    }
+}
+
+} // namespace
+
+std::vector<Person> world_own_people(std::span<const Person> brought, std::span<const Person> now, std::vector<std::string>* not_kept) {
+    std::vector<Person> out;
+    own_people(brought, now, not_kept, [&out](const Person& one) {
+        out.push_back(one);
+        return true;
+    });
+    return out;
+}
+
+bool world_own_people_are(std::span<const Person> own, std::span<const Person> brought, std::span<const Person> now) {
+    usize count = 0;
+    bool same = true;
+    own_people(brought, now, nullptr, [&](const Person& one) {
+        same = count < own.size() && own[count] == one;
+        ++count;
+        return same;
+    });
+    return same && count == own.size();
+}
+
+ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::span<const u32> slots, std::vector<Place>& places,
+                             std::vector<PersonLook>& person_looks, std::vector<Routine>& routines, std::vector<Behaviour>& behaviours,
+                             std::vector<Person>& people, PersonId next_person_id) {
     ModsApplied applied;
     Laying<Place> lay_places{places, ModThing::place, {}, {}, false, {}};
     Laying<PersonLook> lay_looks{person_looks, ModThing::person_look, {}, {}, false, {}};
@@ -606,6 +746,12 @@ ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<
         if (!wrong) wrong = lay_looks.lay(mod.person_looks, m, applied.changes);
         if (!wrong) wrong = lay_routines.lay(mod.routines, m, applied.changes);
         if (!wrong) wrong = lay_behaviours.lay(mod.behaviours, m, applied.changes);
+        usize people_at = 0;
+        bool people_laid = false;
+        if (!wrong && !mod.people.empty()) {
+            wrong = lay_people(mod.people, m < slots.size() ? slots[m] : k_no_mod_slot, people, people_at);
+            people_laid = !wrong;
+        }
         // The world with it must be one that loads.
         if (!wrong) {
             if (const auto people_wrong = check_people(places, person_looks, routines, people, next_person_id)) {
@@ -615,6 +761,10 @@ ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<
             }
         }
         if (wrong) {
+            if (people_laid) {
+                people.erase(people.begin() + static_cast<std::ptrdiff_t>(people_at),
+                             people.begin() + static_cast<std::ptrdiff_t>(people_at + mod.people.size()));
+            }
             lay_behaviours.undo();
             lay_routines.undo();
             lay_looks.undo();
@@ -622,6 +772,9 @@ ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<
             applied.changes.resize(changes_before);
             applied.problems.push_back({m, "its world changes were left out: " + *wrong});
         } else {
+            if (people_laid) {
+                applied.people.push_back({m, mod.people.size()});
+            }
             lay_places.done.clear();
             lay_looks.done.clear();
             lay_routines.done.clear();

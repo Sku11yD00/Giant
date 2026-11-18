@@ -2080,10 +2080,12 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
 
 // The people's keys of a scene or a world index: places, person_looks,
 // routines and people, each checked alone and then together (people.h).
-// (`with_people` false: a mod's file, which has no people of its own; then
-// only the names are checked together.)
+// `read` says whose people are there: a scene's or a world's own, or a mod's,
+// numbered in the mod (no next_id, and not checked against the places and
+// looks here: they may be the world's).
+enum class PeopleRead : u8 { world, mod };
 void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLook>& looks, std::vector<Routine>& routines,
-                 std::vector<Person>& people, PersonId& next_person_id, std::string& error, bool with_people = true) {
+                 std::vector<Person>& people, PersonId& next_person_id, std::string& error, PeopleRead read = PeopleRead::world) {
     if (const Json* list = root.get("places", false); list != nullptr && root.ok()) {
         if (!list->is_array() || list->size() > k_max_places) {
             root.fail("places", "must be an array of at most " + std::to_string(k_max_places));
@@ -2229,12 +2231,13 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             routines.push_back(std::move(routine));
         }
     }
-    if (const Json* json = with_people ? root.get("people", false) : nullptr; json != nullptr && root.ok()) {
+    const bool of_mod = read == PeopleRead::mod;
+    if (const Json* json = root.get("people", false); json != nullptr && root.ok()) {
         Reader r(*json, "people", error);
         u64 next = 1;
-        if (const Json* v = r.get("next_id", true)) {
-            if (!v->is_number_unsigned() || v->get<u64>() == 0 || v->get<u64>() > 0xffffffffu) {
-                r.fail("next_id", "must be a whole number from 1 to 2^32 - 1");
+        if (const Json* v = of_mod ? nullptr : r.get("next_id", true)) {
+            if (!v->is_number_unsigned() || v->get<u64>() == 0 || v->get<u64>() > k_mod_person_base) { // (from there on: mods' people)
+                r.fail("next_id", "must be a whole number from 1 to 2^30");
             } else {
                 next = v->get<u64>();
             }
@@ -2242,8 +2245,9 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
         const Json* list = r.get("list", true);
         r.finish();
         if (!error.empty() || list == nullptr) return;
-        if (!list->is_array() || list->size() > k_max_people) {
-            error = "people.list must be an array of at most " + std::to_string(k_max_people);
+        const usize most = of_mod ? usize{k_max_mod_people} : k_max_people;
+        if (!list->is_array() || list->size() > most) {
+            error = "people.list must be an array of at most " + std::to_string(most);
             return;
         }
         next_person_id = static_cast<PersonId>(next);
@@ -2281,11 +2285,18 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
                 error = path + ": " + *bad;
                 return;
             }
+            if (of_mod && (p.id > k_max_mod_people || (!people.empty() && p.id <= people.back().id))) {
+                error = path + ": a mod's people are numbered from 1 to " + std::to_string(k_max_mod_people) + ", in order, each once";
+                return;
+            }
             people.push_back(std::move(p));
         }
     }
     if (!error.empty()) return;
-    if (const auto bad = check_people(places, looks, routines, people, next_person_id)) error = "people: " + *bad;
+    // (A mod's people use what the world has too: they are looked at when the mod is laid over it.)
+    if (const auto bad = check_people(places, looks, routines, of_mod ? std::span<const Person>() : std::span<const Person>(people), next_person_id)) {
+        error = "people: " + *bad;
+    }
 }
 
 // The behaviours' key of a scene or a world index (after the people are
@@ -3081,6 +3092,11 @@ std::string save_mod_world(const ModWorld& world) {
     out["format"] = k_mod_world_format;
     out["version"] = k_version;
     write_people(out, world.places, world.person_looks, world.routines, {}, 1);
+    if (!world.people.empty()) {
+        Json people = people_json(world.people, 1);
+        people.erase("next_id"); // (theirs are numbers in the mod, not ids: none is ever made here)
+        out["people"] = std::move(people);
+    }
     if (!world.behaviours.empty()) {
         out["behaviours"] = behaviours_json(world.behaviours);
     }
@@ -3098,7 +3114,7 @@ std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out) {
     ModWorld world;
     std::vector<Person> nobody;
     PersonId next_person_id = 1;
-    read_people(root, world.places, world.person_looks, world.routines, nobody, next_person_id, error, false);
+    read_people(root, world.places, world.person_looks, world.routines, world.people, next_person_id, error, PeopleRead::mod);
     read_behaviours(root, world.behaviours, nobody, error);
     root.finish();
     if (!error.empty()) {

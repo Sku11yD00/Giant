@@ -7,6 +7,7 @@
 #include "giant/world/people.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <exception>
 #include <iterator>
 #include <set>
@@ -39,8 +40,8 @@ std::optional<std::string> name_of(const std::filesystem::path& folder) {
 }
 
 // The ids on, or why the list cannot be used (no file: none on).
-std::optional<std::string> read_enabled(const std::filesystem::path& mods, std::vector<std::string>& ids) {
-    ids.clear();
+std::optional<std::string> read_enabled(const std::filesystem::path& mods, world::ModsOn& on) {
+    on = {};
     const std::filesystem::path file = mods / k_enabled;
     if (is_absent(file)) {
         return std::nullopt;
@@ -49,8 +50,8 @@ std::optional<std::string> read_enabled(const std::filesystem::path& mods, std::
     if (!text) {
         return path_to_utf8(file) + " could not be read (or is over " + std::to_string(world::k_max_mod_file_bytes) + " bytes)";
     }
-    if (const auto bad = world::load_enabled_mods(*text, ids)) {
-        ids.clear();
+    if (const auto bad = world::load_enabled_mods(*text, on)) {
+        on = {};
         return path_to_utf8(file) + ": " + bad->message;
     }
     return std::nullopt;
@@ -120,14 +121,16 @@ ModList read_mods(const std::filesystem::path& world_folder) {
         list.mods.push_back(std::move(found));
     }
     // (By folder name, and each one's id is its folder's name: by id.)
-    std::vector<std::string> enabled;
-    if (const auto bad = read_enabled(mods, enabled)) {
+    world::ModsOn on_list;
+    if (const auto bad = read_enabled(mods, on_list)) {
         list.list_error = *bad;
     }
+    const std::vector<std::string>& enabled = on_list.ids;
     std::vector<world::Mod> manifests;
     std::vector<u8> on;
     for (ModList::Found& found : list.mods) {
         found.on = std::binary_search(enabled.begin(), enabled.end(), found.mod.id);
+        found.slot = world::find_mod_slot(on_list, found.mod.id);
         manifests.push_back(found.mod);
         on.push_back(found.on ? 1 : 0);
     }
@@ -154,6 +157,11 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
         return laid;
     }
     laid.mods = list.order;
+    std::vector<u32>& slots = laid.slots;
+    for (const std::string& id : laid.mods) {
+        const auto found = std::find_if(list.mods.begin(), list.mods.end(), [&](const ModList::Found& f) { return f.mod.id == id; });
+        slots.push_back(found != list.mods.end() && found->slot ? *found->slot : world::k_no_mod_slot);
+    }
     std::vector<world::ModWorld> worlds(laid.mods.size());
     std::vector<const world::ModWorld*> given(laid.mods.size(), nullptr);
     std::vector<world::ModProblem> unread;
@@ -177,7 +185,7 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
         }
         given[i] = &worlds[i];
     }
-    laid.applied = world::apply_mod_worlds(given, scene.places, scene.person_looks, scene.routines, scene.behaviours, scene.people,
+    laid.applied = world::apply_mod_worlds(given, slots, scene.places, scene.person_looks, scene.routines, scene.behaviours, scene.people,
                                            scene.next_person_id);
     laid.applied.problems.insert(laid.applied.problems.end(), std::make_move_iterator(unread.begin()), std::make_move_iterator(unread.end()));
     std::sort(laid.applied.problems.begin(), laid.applied.problems.end(),
@@ -187,7 +195,15 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
     for (const world::ModChange& change : laid.applied.changes) {
         set.emplace(change.thing, change.name);
     }
-    laid.any = !set.empty();
+    laid.any = !set.empty() || !laid.applied.people.empty();
+    // The people mods added: those of the ids of each one's slot.
+    for (const world::ModPeople& added : laid.applied.people) {
+        const world::PersonId first = world::mod_person_id(slots[added.mod], 0);
+        const auto at = std::lower_bound(scene.people.begin(), scene.people.end(), first,
+                                         [](const world::Person& l, world::PersonId r) { return l.id < r; });
+        laid.people.insert(laid.people.end(), at, at + static_cast<std::ptrdiff_t>(added.count));
+    }
+    std::sort(laid.people.begin(), laid.people.end(), [](const world::Person& l, const world::Person& r) { return l.id < r.id; });
     // (One pass over each list: a mod may set as many things as a world keeps.)
     const auto brought = [&set](world::ModThing thing, const auto& now, auto& out) {
         for (const auto& one : now) {
@@ -223,14 +239,16 @@ std::optional<std::string> set_mod_on(const std::filesystem::path& world_folder,
         return "\"" + id + "\" is no mod's id";
     }
     const std::filesystem::path mods = mods_folder(world_folder);
-    std::vector<std::string> enabled;
-    if (const auto bad = read_enabled(mods, enabled)) {
-        return *bad + " (mend it, or delete it to start with every mod off)";
+    world::ModsOn on_list;
+    if (const auto bad = read_enabled(mods, on_list)) {
+        return *bad + " (mend it; deleting it starts with every mod off, and gives up every mod's slot: their people would have other "
+                      "ids, which saved games would not know)";
     }
+    std::vector<std::string>& enabled = on_list.ids;
     const auto at = std::lower_bound(enabled.begin(), enabled.end(), id);
     const bool was = at != enabled.end() && *at == id;
-    if (on == was) {
-        return std::nullopt;
+    if (on == was && (!on || world::find_mod_slot(on_list, id))) {
+        return std::nullopt; // (one on without a slot, from a list written by hand or before slots, is given its slot)
     }
     if (on) {
         const ModList list = read_mods(world_folder);
@@ -249,16 +267,22 @@ std::optional<std::string> set_mod_on(const std::filesystem::path& world_folder,
                                   : std::string()) +
                    (list.folder_error.empty() ? std::string() : "; " + list.folder_error);
         }
-        if (enabled.size() >= world::k_max_mods) {
+        if (!was && enabled.size() >= world::k_max_mods) {
             return "at most " + std::to_string(world::k_max_mods) + " mods can be on";
         }
-        enabled.insert(at, id);
+        if (!was) {
+            enabled.insert(at, id);
+        }
+        if (!world::give_mod_slot(on_list, id)) {
+            return "the world's list of mods has given all its " + std::to_string(world::k_max_mod_slots) +
+                   " slots (each mod ever turned on keeps one): take those of mods long gone out of " + path_to_utf8(mods / k_enabled);
+        }
     } else {
         enabled.erase(at);
     }
     std::error_code error;
     std::filesystem::create_directories(mods, error);
-    if (error || !write_text_file(mods / k_enabled, world::save_enabled_mods(enabled))) {
+    if (error || !write_text_file(mods / k_enabled, world::save_enabled_mods(on_list))) {
         return path_to_utf8(mods / k_enabled) + " could not be written";
     }
     return std::nullopt;

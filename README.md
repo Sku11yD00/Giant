@@ -432,6 +432,8 @@ Open-world systems:
 - LW7 part 2: a mod's `world.json` adds or replaces places, person looks,
   routines and behaviours when the world is opened; a later mod wins and
   every clash is reported; the world's own files stay its own when saved.
+- LW7 part 3a: a mod brings people of its own, under ids that stay the
+  same whatever other mods are on, so saved games find them again.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

@@ -180,26 +180,66 @@ GIANT_TEST("mods: a manifest that is wrong is refused, and nothing of it kept") 
 }
 
 GIANT_TEST("mods: the list of those on is saved sorted and loaded strictly") {
-    const std::vector<std::string> ids = {"winter", "base", "winter"};
-    const std::string text = save_enabled_mods(ids);
-    std::vector<std::string> back = {"kept"};
-    GIANT_CHECK(!load_enabled_mods(text, back) && back == (std::vector<std::string>{"base", "winter"}));
-    GIANT_CHECK(!load_enabled_mods(save_enabled_mods({}), back) && back.empty());
-    back = {"kept"};
-    GIANT_CHECK(load_enabled_mods(R"({"format":"giant-mods","format_version":1,"enabled":["a","a"]})", back));
-    GIANT_CHECK(load_enabled_mods(R"({"format":"giant-mods","format_version":1,"enabled":["A"]})", back));
+    const ModsOn kept{{"kept"}, {}};
+    const std::string text = save_enabled_mods({{"winter", "base", "winter"}, {}});
+    ModsOn back = kept;
+    GIANT_CHECK(!load_enabled_mods(text, back) && back.ids == (std::vector<std::string>{"base", "winter"}) && back.slots.empty());
+    GIANT_CHECK(text.find("slots") == std::string::npos); // (none given: no key)
+    GIANT_CHECK(!load_enabled_mods(save_enabled_mods({}), back) && back.ids.empty() && back.slots.empty());
+    back = kept;
+    const std::string head = R"({"format":"giant-mods","format_version":1,)";
+    GIANT_CHECK(load_enabled_mods(head + R"("enabled":["a","a"]})", back));
+    GIANT_CHECK(load_enabled_mods(head + R"("enabled":["A"]})", back));
     GIANT_CHECK(load_enabled_mods(R"({"format":"giant-mods","format_version":1})", back));
-    GIANT_CHECK(load_enabled_mods(R"({"format":"giant-mods","format_version":1,"enabled":[],"more":1})", back));
+    GIANT_CHECK(load_enabled_mods(head + R"("enabled":[],"more":1})", back));
     GIANT_CHECK(load_enabled_mods(R"({"format":"giant-mod","format_version":1,"enabled":[]})", back));
-    GIANT_CHECK(back == std::vector<std::string>{"kept"});
-    std::string many = R"({"format":"giant-mods","format_version":1,"enabled":[)";
+    GIANT_CHECK(back == kept);
+    std::string many = head + R"("enabled":[)";
     for (usize i = 0; i <= k_max_mods; ++i) {
         many += (i == 0 ? "\"m" : ",\"m") + std::to_string(i) + "\"";
     }
-    GIANT_CHECK(load_enabled_mods(many + "]}", back) && back == std::vector<std::string>{"kept"}); // one too many
+    GIANT_CHECK(load_enabled_mods(many + "]}", back) && back == kept); // one too many
     // Unsorted on disk (written by hand): loaded sorted.
-    GIANT_CHECK(!load_enabled_mods(R"({"format":"giant-mods","format_version":1,"enabled":["b","a"]})", back) &&
-                back == std::vector<std::string>({"a", "b"}));
+    GIANT_CHECK(!load_enabled_mods(head + R"("enabled":["b","a"]})", back) && back.ids == std::vector<std::string>({"a", "b"}));
+}
+
+GIANT_TEST("mods: each mod's slot is its own for good, and the lowest free is given") {
+    ModsOn on;
+    GIANT_CHECK(!find_mod_slot(on, "winter") && give_mod_slot(on, "winter") == 0u && give_mod_slot(on, "base") == 1u);
+    GIANT_CHECK(give_mod_slot(on, "winter") == 0u && find_mod_slot(on, "base") == 1u && on.slots.size() == 2 && on.slots[0].id == "base");
+    // Kept through the file, whether the mod is on or not.
+    on.ids = {"base"};
+    ModsOn back;
+    GIANT_CHECK(!load_enabled_mods(save_enabled_mods(on), back) && back == on);
+    // One taken out by hand frees its slot: the next mod without one gets it.
+    std::erase_if(back.slots, [](const ModSlot& s) { return s.id == "winter"; });
+    GIANT_CHECK(give_mod_slot(back, "summer") == 0u && give_mod_slot(back, "autumn") == 2u);
+    // Strict: an id that is none, a slot past the last, a slot given twice, not an object.
+    const std::string head = R"({"format":"giant-mods","format_version":1,"enabled":[],"slots":)";
+    const ModsOn kept = back;
+    GIANT_CHECK(load_enabled_mods(head + R"({"A":0}})", back) && load_enabled_mods(head + R"({"a":512}})", back) &&
+                load_enabled_mods(head + R"({"a":-1}})", back) && load_enabled_mods(head + R"({"a":1,"b":1}})", back) &&
+                load_enabled_mods(head + R"([0]})", back) && load_enabled_mods(head + R"({"a":1.5}})", back) && back == kept);
+    GIANT_CHECK(!load_enabled_mods(head + R"({"b":511,"a":0}})", back) && back.slots == std::vector<ModSlot>({{"a", 0}, {"b", 511}}));
+    // Saved by id, whatever the order given; an id or a slot there twice keeps its first, so what is written loads.
+    GIANT_CHECK(!load_enabled_mods(save_enabled_mods({{}, {{"b", 1}, {"a", 0}, {"c", 1}, {"a", 5}, {"d", 600}}}), back) &&
+                back.slots == std::vector<ModSlot>({{"a", 0}, {"b", 1}}));
+    // Every slot given: no more.
+    ModsOn full;
+    for (u32 i = 0; i < k_max_mod_slots; ++i) {
+        GIANT_CHECK(give_mod_slot(full, "m" + std::to_string(i)) == i);
+    }
+    GIANT_CHECK(!give_mod_slot(full, "one_more") && give_mod_slot(full, "m7") == 7u);
+    // The whole list, with the longest ids, fits the file it is read from.
+    ModsOn longest;
+    for (u32 i = 0; i < k_max_mod_slots; ++i) {
+        std::string id = "m" + std::to_string(i);
+        id.resize(k_max_mod_id_bytes, 'x');
+        if (i < k_max_mods) longest.ids.push_back(id);
+        longest.slots.push_back({id, i});
+    }
+    GIANT_CHECK(save_enabled_mods(longest).size() <= k_max_mod_file_bytes && !load_enabled_mods(save_enabled_mods(longest), back) &&
+                back.slots.size() == k_max_mod_slots);
 }
 
 GIANT_TEST("mods: load after what is needed and what is asked, otherwise by id, the same every time") {

@@ -60,6 +60,9 @@ Json mod_json(const ModList::Found& found) {
     if (found.place != 0) {
         out["place"] = found.place;
     }
+    if (found.slot) {
+        out["slot"] = *found.slot;
+    }
     if (!found.problem.empty()) {
         out["problem"] = found.problem;
     }
@@ -67,11 +70,13 @@ Json mod_json(const ModList::Found& found) {
 }
 
 // What the mods did to the world as it was opened; `order` is the load order now.
-Json laid_json(const ModsLaid& laid, const std::vector<std::string>& order, const std::filesystem::path& world_folder) {
-    // Other mods load now, or one's world.json is not the file it was.
-    bool reopen = laid.mods != order;
-    for (usize i = 0; !reopen && i < laid.mods.size() && i < laid.files.size(); ++i) {
-        reopen = !(mod_world_file(world_folder, laid.mods[i]) == laid.files[i]);
+Json laid_json(const ModsLaid& laid, const ModList& now, const std::filesystem::path& world_folder) {
+    // Other mods load now, one's world.json is not the file it was, or one's slot is another (its people's ids with it).
+    bool reopen = laid.mods != now.order;
+    for (usize i = 0; !reopen && i < laid.mods.size() && i < laid.files.size() && i < laid.slots.size(); ++i) {
+        const auto found = std::find_if(now.mods.begin(), now.mods.end(), [&](const ModList::Found& f) { return f.mod.id == laid.mods[i]; });
+        const u32 slot = found != now.mods.end() && found->slot ? *found->slot : world::k_no_mod_slot;
+        reopen = slot != laid.slots[i] || !(mod_world_file(world_folder, laid.mods[i]) == laid.files[i]);
     }
     constexpr usize k_most_listed = 256; // (a mod may change as many things as a world keeps)
     Json changes = Json::array();
@@ -103,8 +108,16 @@ Json laid_json(const ModsLaid& laid, const std::vector<std::string>& order, cons
     for (const world::ModProblem& problem : laid.applied.problems) {
         problems.push_back({{"mod", laid.mods[problem.mod]}, {"problem", problem.message}});
     }
+    Json people = Json::array();
+    usize people_added = 0;
+    for (const world::ModPeople& brought : laid.applied.people) {
+        people_added += brought.count;
+        people.push_back({{"mod", laid.mods[brought.mod]}, {"count", brought.count}, {"ids_from", world::mod_person_id(laid.slots[brought.mod], 1)}});
+    }
     return {{"mods", laid.mods},
             {"added", added},
+            {"people_added", people_added},
+            {"people", std::move(people)},
             {"replaced_world", replaced},
             {"clashes", clashes},
             {"changes", std::move(changes)},
@@ -128,12 +141,15 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
          "folders (the rest are not looked at). Reads the disk when called. A mod's world.json (format "
          "\"giant-mod-world\": places, person_looks, routines, behaviours, written as a world's own) is laid over the "
          "world when it is opened, in the load order: a thing whose name is there already is replaced, any other "
-         "added; the world's files are not changed. `world` tells what the mods did as this world was opened: `mods` "
+         "added; the world's files are not changed. A mod's world.json may bring people too (`people`: {list: rows as a "
+         "world's, the id of each its number in the mod, 1 to 65535 in order}): they are always added, under ids of "
+         "the mod's own (`slot`, given when it is first enabled and kept: person ids_from + number - 1), so they are "
+         "the same people whatever else is on. `world` tells what the mods did as this world was opened: `mods` "
          "(those loaded then), counts `added`, `replaced_world` and `clashes` (a thing two mods set: the later one's "
          "is used), `changes` [{mod, thing, name, did: added | replaced_world | replaced_mod, over}] (clashes first, "
-         "at most 256), `problems` [{mod, problem}] (mods whose world changes were left out, whole), and `reopen`: "
+         "at most 256), `people_added` and `people` [{mod, count, ids_from}], `problems` [{mod, problem}] (mods whose world changes were left out, whole), and `reopen`: "
          "true when the mods that load now are not those the world was opened with, or a mod's world.json was written "
-         "since (open_world again to load them).",
+         "since, or a mod's slot is not the one it had (open_world again to load them).",
          Json::parse(R"({"type": "object", "additionalProperties": false})"),
          true,
          [&state](const Json&, CommandContext&) {
@@ -165,7 +181,7 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                  out["too_many"] = true;
              }
              if (state.mods_world.empty()) { // (the open world's own mods: what they did as it was opened)
-                 out["world"] = laid_json(state.world->mods_laid(), list.order, *world);
+                 out["world"] = laid_json(state.world->mods_laid(), list, *world);
              }
              return CommandResult::success(std::move(out));
          }});

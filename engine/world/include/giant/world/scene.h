@@ -661,6 +661,15 @@ struct Behaviour {
     std::vector<BehaviourState> states; // 1 to k_max_behaviour_states; one begins in the first
     bool operator==(const Behaviour&) const = default;
 };
+// The people a mod brings (mods.h) have ids of their own, from
+// k_mod_person_base on: a range for each mod's slot, so the world's own
+// people (ids under the base) and other mods' never meet them, and a mod's
+// people keep their ids whatever else is on.
+constexpr PersonId k_mod_person_base = PersonId{1} << 30;
+constexpr u32 k_max_mod_slots = 512;
+constexpr u32 k_max_mod_people = 65535; // one mod's, numbered from 1 in its file
+constexpr PersonId mod_person_id(u32 slot, u32 number) { return k_mod_person_base + slot * (k_max_mod_people + 1) + number; }
+static_assert(mod_person_id(k_max_mod_slots - 1, k_max_mod_people) == (PersonId{1} << 30) + (PersonId{1} << 25) - 1);
 struct Person {
     PersonId id = 0;
     std::string name;    // at most k_max_name_bytes; need not be unique
@@ -803,7 +812,7 @@ public:
     std::vector<Water> water;
     // The people who live here (people.h), their looks and the places they
     // go to, in order (not tracked: compare). `next_person_id`: one past
-    // the last id any person here ever had.
+    // the last id any person here ever had (but mods' people: theirs are from k_mod_person_base on).
     std::vector<Place> places;
     std::vector<PersonLook> person_looks;
     std::vector<Person> people;

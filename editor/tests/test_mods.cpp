@@ -98,9 +98,14 @@ GIANT_TEST("mods: a world without mods lists none, and its mods are found by fol
                 found(list, "winter")->problem.empty());
     // The list is the world's file, sorted, and survives being read again.
     const std::string text = read_text_file(w.folder / "mods" / "enabled.json").value_or("");
-    GIANT_CHECK(text == world::save_enabled_mods(std::vector<std::string>{"alone", "base", "winter"}));
+    world::ModsOn on;
+    GIANT_CHECK(!world::load_enabled_mods(text, on) && on.ids == std::vector<std::string>({"alone", "base", "winter"}) &&
+                text == world::save_enabled_mods(on));
+    // Each was given its slot as it was turned on, and keeps it when turned off.
+    GIANT_CHECK(on.slots.size() == 3 && found(list, "alone")->slot && found(list, "base")->slot && found(list, "winter")->slot);
+    const std::optional<u32> base_slot = found(list, "base")->slot;
     GIANT_CHECK(!set_mod_on(w.folder, "base", true) && read_text_file(w.folder / "mods" / "enabled.json") == text); // on already
-    GIANT_CHECK(!set_mod_on(w.folder, "base", false));
+    GIANT_CHECK(!set_mod_on(w.folder, "base", false) && found(read_mods(w.folder), "base")->slot == base_slot);
     list = read_mods(w.folder);
     GIANT_CHECK(list.order == std::vector<std::string>{"alone"} && !found(list, "base")->on && !found(list, "winter")->problem.empty());
     // A mod whose folder went: still on in the list, shown missing, and can be turned off.
@@ -177,7 +182,7 @@ GIANT_TEST("mods: a list of those on that cannot be read turns none on and is ne
     w.enabled(R"({"format":"giant-mods","format_version":1,"enabled":["good","also"]})");
     GIANT_CHECK(read_mods(w.folder).order == std::vector<std::string>({"also", "good"}));
     GIANT_CHECK(!set_mod_on(w.folder, "also", false) &&
-                read_text_file(w.folder / "mods" / "enabled.json") == world::save_enabled_mods(std::vector<std::string>{"good"}));
+                read_text_file(w.folder / "mods" / "enabled.json") == world::save_enabled_mods({{"good"}, {}}));
 }
 
 GIANT_TEST("mods: more folders than there may be mods are not all looked at, and it is said") {
@@ -500,4 +505,93 @@ GIANT_TEST("mods: save_world never lists a mod's mesh as the world's, and names 
     saved = commands.execute("save_world");
     GIANT_CHECK(saved.ok && saved.value["mods_things_not_saved"] == Json::array({"tavern", "guard"}) && saved.value["mods_things_not_saved_count"] == 2);
     GIANT_CHECK(w.file().meshes == std::vector<std::string>{"people/villager.glb"} && w.file().places.size() == 2);
+}
+
+GIANT_TEST("mods: a mod's people come under ids of its own, stay the same whatever else is on, and are never saved as the world's") {
+    SavedWorld w("giant_mods_test_people");
+    world::ModWorld guards;
+    guards.person_looks = {look("guard", 1.2f)};
+    guards.places = {place("barracks", 70)};
+    world::Person captain;
+    captain.id = 1;
+    captain.name = "Captain";
+    captain.look = "guard";
+    captain.home = "barracks";
+    world::Person helper = captain;
+    helper.id = 4;
+    helper.name = "Helper";
+    helper.look = "villager"; // (the world's)
+    helper.home = "cottage";
+    helper.routine = "smith's day";
+    guards.people = {captain, helper};
+    w.put_world("guards", guards);
+    const std::optional<u32> slot = found(read_mods(w.folder), "guards")->slot;
+    GIANT_CHECK(slot.has_value());
+    const world::PersonId captain_id = world::mod_person_id(*slot, 1), helper_id = world::mod_person_id(*slot, 4);
+    GIANT_CHECK(w.open() && w.scene.people.size() == 3 && w.scene.people[0].id == 1 && w.scene.people[1].id == captain_id &&
+                w.scene.people[1].name == "Captain" && w.scene.people[2].id == helper_id && w.scene.next_person_id == 2);
+    const ModsLaid& laid = w.streaming.mods_laid();
+    GIANT_CHECK(laid.any && laid.people.size() == 2 && laid.people[0].id == captain_id && laid.slots == std::vector<u32>{*slot} &&
+                laid.applied.people == std::vector<world::ModPeople>({{0, 2}}));
+    // Nothing is unsaved; the world's file keeps its own person alone.
+    const world::WorldIndex authored = w.file();
+    GIANT_CHECK(!w.streaming.unsaved_settings(w.scene));
+    WorldStreaming::Saved saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept.empty() && w.file().people == authored.people && w.file().next_person_id == 2);
+    // A mod's person changed is not unsaved, not saved, and named; one of the world's own made is saved.
+    w.scene.people[1].name = "Major";
+    GIANT_CHECK(!w.streaming.unsaved_settings(w.scene));
+    world::Person made = w.scene.people[0];
+    made.id = 2;
+    made.name = "Newcomer";
+    w.scene.people.insert(w.scene.people.begin() + 1, made);
+    w.scene.next_person_id = 3;
+    GIANT_CHECK(w.streaming.unsaved_settings(w.scene));
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept == std::vector<std::string>{"person " + std::to_string(captain_id)} &&
+                !w.streaming.unsaved_settings(w.scene));
+    GIANT_CHECK(w.file().people.size() == 2 && w.file().people[1] == made && w.file().next_person_id == 3);
+    // list_mods tells whose people they are.
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.world = &w.streaming;
+    register_mod_commands(commands, state);
+    Json told = commands.execute("list_mods").value;
+    GIANT_CHECK(told["world"]["people_added"] == 2 && told["world"]["people"] == Json::array({{{"mod", "guards"}, {"count", 2}, {"ids_from", captain_id}}}) &&
+                (*listed(told["mods"], "guards"))["slot"] == *slot);
+    // Another mod on, loading before it: the same people under the same ids, the mod's as the mod has them.
+    w.streaming.close();
+    world::ModWorld early;
+    early.people = {captain};
+    early.people[0].look = "villager";
+    early.people[0].home = "";
+    w.put_world("a_early", early);
+    const std::optional<u32> early_slot = found(read_mods(w.folder), "a_early")->slot;
+    GIANT_CHECK(early_slot.has_value() && early_slot != slot && w.open() && w.scene.people.size() == 5);
+    const world::Person* again = world::find_person(w.scene.people, captain_id);
+    GIANT_CHECK(again != nullptr && again->name == "Captain" && world::find_person(w.scene.people, helper_id) != nullptr &&
+                world::find_person(w.scene.people, world::mod_person_id(*early_slot, 1)) != nullptr && world::find_person(w.scene.people, 2) != nullptr);
+    // Off and on again: its slot, and so its people's ids, are kept.
+    w.streaming.close();
+    GIANT_CHECK(!set_mod_on(w.folder, "guards", false) && !set_mod_on(w.folder, "guards", true) && found(read_mods(w.folder), "guards")->slot == slot);
+    // With the mods off the world has its own two.
+    GIANT_CHECK(!set_mod_on(w.folder, "guards", false) && !set_mod_on(w.folder, "a_early", false) && w.open() && w.scene.people.size() == 2 &&
+                !w.streaming.mods_laid().any);
+    // A list written by hand, without slots: a mod with people is left out and says how to mend it.
+    w.streaming.close();
+    w.enabled(R"({"format":"giant-mods","format_version":1,"enabled":["guards"]})");
+    GIANT_CHECK(w.open() && w.scene.people.size() == 2 && w.scene.places.size() == 2 && w.streaming.mods_laid().applied.problems.size() == 1 &&
+                w.streaming.mods_laid().applied.problems[0].message.find("enable_mod") != std::string::npos);
+    // Enabled again (on as it is), it is given a slot, and list_mods says to open the world again for it.
+    GIANT_CHECK(commands.execute("list_mods").value["world"]["reopen"] == false);
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}}).ok && found(read_mods(w.folder), "guards")->slot.has_value());
+    GIANT_CHECK(commands.execute("list_mods").value["world"]["reopen"] == true);
+    w.streaming.close();
+    GIANT_CHECK(w.open() && w.scene.people.size() == 4 && w.streaming.mods_laid().applied.problems.empty());
+    // One of the mod's people removed and the world saved: named, and back when the world is opened again.
+    w.scene.people.pop_back();
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept.size() == 1 && w.file().people.size() == 2);
+    w.streaming.close();
+    GIANT_CHECK(w.open() && w.scene.people.size() == 4);
 }

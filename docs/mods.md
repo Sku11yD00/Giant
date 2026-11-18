@@ -5,8 +5,8 @@ you can turn it off and the world is as it was. This page is for people
 who make mods and people who install them.
 
 So far a mod can change a world's places, the looks of its people, their
-routines and their behaviours. People of a mod's own, new assets and
-scripts are parts still being built; this page will grow with them.
+routines and their behaviours, and bring people of its own. New assets
+and scripts are parts still being built; this page will grow with them.
 
 ## Where mods go
 
@@ -61,8 +61,8 @@ to you instead of being ignored.
 
 ## What a mod changes: world.json
 
-A mod's `world.json` holds places, person looks, routines and behaviours,
-written exactly as a world's own `world.json` writes them (the easiest way
+A mod's `world.json` holds places, person looks, routines, behaviours and
+people. All but the people (see below) are written exactly as a world's own `world.json` writes them (the easiest way
 to make one is to build the things in the editor, save the world, and copy
 them out of its `world.json`):
 
@@ -97,6 +97,58 @@ A routine or behaviour may send people to a place by name. Nothing checks
 that the place is there, in a mod or in a world: a place that is missing
 is one nobody can be sent to, so name places your mod brings or needs.
 
+### People
+
+A mod can bring people of its own. They are written as a world's people
+are, one row each, under `people.list`:
+
+```json
+"people": {
+  "list": [
+    [1, "Captain", "guard", "barracks", 70, 0, -70, 0, 5],
+    [2, "Recruit", "guard", "barracks", 72, 0, -70, 90, 6, "guard's day"]
+  ]
+}
+```
+
+A row is `[number, name, look, home, x, y, z, yaw, seed]`, then the
+person's routine if it has one, then its behaviour if it has one (with
+`""` for the routine when it has a behaviour and no routine). The look,
+home, routine and behaviour may be the world's, an earlier mod's, or this
+mod's own; if one is not there, the mod's changes are left out and
+`list_mods` says which.
+
+The first value is the person's **number in the mod**, from 1 to 65535,
+in rising order. It is not the person's id in the world. Each mod is
+given a **slot** the first time it is turned on (`list_mods` shows it,
+and it is kept in `mods/enabled.json` even while the mod is off), and
+person number *n* of the mod in slot *s* has the id
+1073741824 + 65536 × *s* + *n*. So:
+
+- A mod's people never take the id of one of the world's people or of
+  another mod's.
+- They keep their ids whatever other mods are turned on or off, and in
+  whatever order the mods load. A saved game finds them again.
+- Keep a person's number for good once people play with your mod. If you
+  remove a person, leave its number unused.
+
+People are only ever added. A mod cannot replace or remove one of the
+world's people.
+
+While the mod is on you can move or change its people in the editor, but
+they are the mod's: `save_world` does not write them into the world, and
+names the ones you changed or removed as `person <id>` under
+`mods_things_not_saved`. To change them for good, change the mod's
+`world.json`.
+
+A mod that is on and has no slot (the list was written by hand, or
+before mods had slots) is left out if it brings people, until you run
+`enable_mod` on it again, which gives it one. There are 512 slots; a mod
+keeps its slot until you take its line out of `slots` in that file.
+Do not take a line out, or delete the file, for a mod people have played
+with: the slot goes to the next mod turned on, the mod's people come back
+under other ids, and saved games would take them for someone else.
+
 A mod's changes go in whole or not at all. If they would leave the world
 broken (more looks than a world keeps, say), that mod's changes are left
 out and `list_mods` says why under `world.problems`. The same goes for a
@@ -104,8 +156,9 @@ out and `list_mods` says why under `world.problems`. The same goes for a
 
 After turning mods on or off, or changing a mod's `world.json`, open the
 world again to see the change. `list_mods` says `reopen` when other mods
-load now than when the world was opened, or a mod's `world.json` has
-appeared, gone, or changed in size or time of writing since. (A file
+load now than when the world was opened, a mod's slot has changed, or a
+mod's `world.json` has appeared, gone, or changed in size or time of
+writing since. (A file
 rewritten at the same size within the same tick of the disk's clock, or
 copied over with its old time kept, is not noticed: open the world again
 anyway after changing one.)

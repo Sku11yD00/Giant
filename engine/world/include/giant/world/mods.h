@@ -62,9 +62,27 @@ std::string save_mod(const Mod& mod);
 // Replaces `out` only on success; strict, like load_scene.
 std::optional<LoadError> load_mod(std::string_view text, Mod& out);
 
-// The mods that are on, by id (each once, sorted).
-std::string save_enabled_mods(std::span<const std::string> ids);
-std::optional<LoadError> load_enabled_mods(std::string_view text, std::vector<std::string>& out);
+// A mod's number among a world's mods, its own for good (kept when it is
+// turned off): the ids of the people it brings come from it
+// (mod_person_id), so they stay the same whatever else is on.
+struct ModSlot {
+    std::string id;
+    u32 slot = 0; // under k_max_mod_slots
+    bool operator==(const ModSlot&) const = default;
+};
+// The world's list: the mods that are on, and every slot given.
+struct ModsOn {
+    std::vector<std::string> ids; // those on: each once, sorted
+    std::vector<ModSlot> slots;   // by id; each id once and each slot once
+    bool operator==(const ModsOn&) const = default;
+};
+// (Sorts both, and leaves out an id there twice and a slot given twice or past the last: what is written loads.)
+std::string save_enabled_mods(const ModsOn& on);
+std::optional<LoadError> load_enabled_mods(std::string_view text, ModsOn& out);
+// The mod's slot, or nothing when it has none.
+std::optional<u32> find_mod_slot(const ModsOn& on, std::string_view id);
+// The mod's slot, given now when it had none (the lowest free); nothing when none is free.
+std::optional<u32> give_mod_slot(ModsOn& on, std::string_view id);
 
 // Why a mod that is on is not loaded.
 struct ModProblem {
@@ -95,12 +113,21 @@ ModOrder order_mods(std::span<const Mod> mods, std::span<const u8> on);
 // a world's own are. One whose name the world (or an earlier mod) has
 // already takes its place, whole; any other is added. The world's files
 // are not touched: what mods change is laid over the world as it is opened.
+// And people (part 3): always added, never in the place of another. They
+// are written as a world's are but for their ids, which are numbers in the
+// mod (1 to k_max_mod_people, in order; no next_id): in the world, number n
+// of the mod with slot s is person mod_person_id(s, n). They may use the
+// world's looks, places, routines and behaviours, an earlier mod's, or the
+// mod's own.
 struct ModWorld {
     std::vector<Place> places;
     std::vector<PersonLook> person_looks;
     std::vector<Routine> routines;
     std::vector<Behaviour> behaviours;
-    bool empty() const { return places.empty() && person_looks.empty() && routines.empty() && behaviours.empty(); }
+    std::vector<Person> people;
+    bool empty() const {
+        return places.empty() && person_looks.empty() && routines.empty() && behaviours.empty() && people.empty();
+    }
     bool operator==(const ModWorld&) const = default;
 };
 // JSON text, stable key order, with a trailing newline.
@@ -108,7 +135,8 @@ std::string save_mod_world(const ModWorld& world);
 // Replaces `out` only on success; strict, like load_scene. Each thing is
 // checked alone and no name may be there twice. (What it names of the world,
 // a routine's place say, is not looked at: as in a world's own file, a
-// place that is not there is one nobody can be sent to.)
+// place that is not there is one nobody can be sent to. What its people
+// use is looked at when it is laid over the world.)
 std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out);
 
 // The kinds of thing a mod changes, as changes name them.
@@ -128,8 +156,16 @@ struct ModChange {
     usize over = 0; // replaced_mod: the earlier mod's place in the list applied
     bool operator==(const ModChange&) const = default;
 };
+// The people a mod added to the world.
+struct ModPeople {
+    usize mod = 0;   // its place in the list applied
+    usize count = 0; // how many (their ids: mod_person_id of its slot and each one's number)
+    bool operator==(const ModPeople&) const = default;
+};
+constexpr u32 k_no_mod_slot = 0xffffffffu;
 struct ModsApplied {
     std::vector<ModChange> changes;   // in the order done
+    std::vector<ModPeople> people;    // by mod: those that added any
     std::vector<ModProblem> problems; // mods whose world changes were left out, whole, with why (by place)
     bool operator==(const ModsApplied&) const = default;
 };
@@ -137,10 +173,24 @@ struct ModsApplied {
 // load order: a later mod's wins, and every such clash is in `changes`).
 // A mod's changes go in whole or not at all: when the world would not be
 // one that loads with them (more of a kind than a world keeps), or it sets
-// a thing twice, they are left out and the reason given. `people` are the world's (they are not changed).
-ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<Place>& places, std::vector<PersonLook>& person_looks,
-                             std::vector<Routine>& routines, std::vector<Behaviour>& behaviours, std::span<const Person> people,
-                             PersonId next_person_id);
+// a thing twice, they are left out and the reason given. So too when its
+// people use what is not there, when it brings people and has no slot
+// (`slots`, as long as `mods`: each one's, or k_no_mod_slot), or when the
+// world already has a person of an id in its slot's range. The people there
+// are never changed: a mod's are put among them, in the order of their ids.
+ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::span<const u32> slots, std::vector<Place>& places,
+                             std::vector<PersonLook>& person_looks, std::vector<Routine>& routines, std::vector<Behaviour>& behaviours,
+                             std::vector<Person>& people, PersonId next_person_id);
+
+// The world's own people, told from the mods' for saving the world while
+// mods are on: those there `now` but the ones mods brought (`brought`, as
+// the mods left them; both in the order of their ids). A person a mod
+// brought is the mod's for as long as the world is open: never written,
+// whatever was done to it since; those changed or removed are named in
+// `not_kept` ("person <id>").
+std::vector<Person> world_own_people(std::span<const Person> brought, std::span<const Person> now, std::vector<std::string>* not_kept = nullptr);
+// Whether world_own_people(brought, now) would be `own`, without making it.
+bool world_own_people_are(std::span<const Person> own, std::span<const Person> brought, std::span<const Person> now);
 
 // The world's own things of a kind, told apart from the mods', for saving
 // the world while mods are on (its files stay its own, and it must load
