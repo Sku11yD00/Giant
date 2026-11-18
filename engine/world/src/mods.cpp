@@ -1,4 +1,5 @@
 #include "giant/world/mods.h"
+#include "giant/world/material_maps.h"
 #include "giant/world/people.h"
 
 #include <nlohmann/json.hpp>
@@ -651,6 +652,97 @@ struct Laying {
 };
 
 } // namespace
+
+std::optional<std::string> check_mod_file_path(std::string_view path) {
+    if (!path.starts_with(k_mod_file_prefix)) {
+        return std::nullopt;
+    }
+    const std::string_view in = path.substr(k_mod_file_prefix.size());
+    const std::string how = " (\"mod:\" names a file in the mod's own folder: a path like \"mod:art/guard.glb\")";
+    if (in.empty()) {
+        return "names no file" + how;
+    }
+    for (usize from = 0; from <= in.size();) {
+        const usize to = std::min(in.find('/', from), in.size());
+        const std::string_view part = in.substr(from, to - from);
+        if (part.empty() || part == "." || part == "..") {
+            return "must not have an empty part, \".\" or \"..\"" + how;
+        }
+        from = to + 1;
+    }
+    for (const char c : in) {
+        if (c == '\\' || c == ':' || static_cast<unsigned char>(c) < 0x20 || c == 0x7f) {
+            return "must not have a backslash, a colon or a control character" + how;
+        }
+    }
+    return std::nullopt;
+}
+
+namespace {
+
+// Every file path the mod's world names, with what it is called in the file.
+template <typename World, typename Each>
+bool each_mod_file(World& world, const Each& each) {
+    for (usize i = 0; i < world.person_looks.size(); ++i) {
+        auto& look = world.person_looks[i];
+        const std::string at = "person_looks[" + std::to_string(i) + "].";
+        const auto maps = [&](auto& m, const std::string& where) {
+            return each(m.base_color, where + "base_color") && each(m.normal, where + "normal") &&
+                   each(m.roughness_metal, where + "roughness_metal") && each(m.occlusion, where + "occlusion");
+        };
+        if (!each(look.mesh, at + "mesh") || !each(look.hair.file, at + "hair.file") || !maps(look.material.maps, at + "material.maps.")) {
+            return false;
+        }
+        for (usize p = 0; p < look.parts.size(); ++p) {
+            if (!maps(look.parts[p].material.maps, at + "parts[" + std::to_string(p) + "].material.maps.")) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+std::optional<std::string> check_mod_files(const ModWorld& world) {
+    std::optional<std::string> wrong;
+    each_mod_file(world, [&wrong](const std::string& path, const std::string& where) {
+        if (const auto bad = check_mod_file_path(path)) {
+            wrong = where + ": " + *bad;
+        }
+        return !wrong;
+    });
+    return wrong;
+}
+
+std::optional<std::string> resolve_mod_files(ModWorld& world, std::string_view mod_folder) {
+    std::optional<std::string> wrong = check_mod_files(world);
+    if (wrong) {
+        return wrong;
+    }
+    const auto resolved = [mod_folder](const std::string& path) {
+        std::string out(mod_folder);
+        if (!out.empty() && out.back() != '/') out += '/';
+        return out + path.substr(k_mod_file_prefix.size());
+    };
+    each_mod_file(std::as_const(world), [&](const std::string& path, const std::string& where) {
+        if (path.starts_with(k_mod_file_prefix) && resolved(path).size() > k_max_mesh_path_bytes) {
+            wrong = where + ": with the mod's folder before it, the path is over " + std::to_string(k_max_mesh_path_bytes) +
+                    " bytes (keep the world in a folder with a shorter path)";
+        }
+        return !wrong;
+    });
+    if (wrong) {
+        return wrong;
+    }
+    each_mod_file(world, [&](std::string& path, const std::string&) {
+        if (path.starts_with(k_mod_file_prefix)) {
+            path = resolved(path);
+        }
+        return true;
+    });
+    return std::nullopt;
+}
 
 namespace {
 

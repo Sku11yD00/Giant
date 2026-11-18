@@ -1,5 +1,6 @@
 // The mods beside a world (mods.h) and their commands: list_mods, enable_mod.
 #include "../src/editor_commands.h"
+#include "../src/mesh_library.h"
 #include "../src/mods.h"
 #include "../src/world_streaming.h"
 
@@ -594,4 +595,30 @@ GIANT_TEST("mods: a mod's people come under ids of its own, stay the same whatev
     GIANT_CHECK(saved.error.empty() && saved.mods_not_kept.size() == 1 && w.file().people.size() == 2);
     w.streaming.close();
     GIANT_CHECK(w.open() && w.scene.people.size() == 4);
+}
+
+GIANT_TEST("mods: a mod's own files are found in its folder, and stay out of the world's file") {
+    SavedWorld w("giant_mods_test_files");
+    world::ModWorld guards;
+    guards.person_looks = {look("guard", 1.2f), look("villager", 1.1f)};
+    guards.person_looks[0].mesh = "mod:art/guard.glb";
+    guards.person_looks[0].material.maps.base_color = "mod:art/guard.png";
+    guards.person_looks[1].mesh = "shared/winter_villager.glb"; // (not the mod's own: as a world's paths are)
+    w.put_world("guards", guards);
+    const std::string in_mod = MeshLibrary::normalize(path_to_utf8(w.folder / "mods" / "guards")) + "/";
+    GIANT_CHECK(w.open() && w.streaming.mods_laid().applied.problems.empty());
+    const world::PersonLook* guard = world::find_person_look(w.scene.person_looks, "guard");
+    GIANT_CHECK(guard != nullptr && guard->mesh == in_mod + "art/guard.glb" && guard->material.maps.base_color == in_mod + "art/guard.png" &&
+                world::find_person_look(w.scene.person_looks, "villager")->mesh == "shared/winter_villager.glb");
+    // What the editor imports for the mods is those paths; nothing of them is the world's to save.
+    GIANT_CHECK(w.streaming.mods_laid().person_looks.size() == 2 && !w.streaming.unsaved_settings(w.scene));
+    const WorldStreaming::Saved saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept.empty() && w.file().meshes == std::vector<std::string>{"people/villager.glb"} &&
+                w.file().person_looks.size() == 1 && w.file().person_looks[0].mesh == "people/villager.glb");
+    // A path that would leave the mod's folder: the mod is left out, whole, and it is said.
+    w.streaming.close();
+    guards.person_looks[0].mesh = "mod:../../other/guard.glb";
+    GIANT_CHECK(write_text_file(w.folder / "mods" / "guards" / "world.json", world::save_mod_world(guards)));
+    GIANT_CHECK(w.open() && w.scene.person_looks.size() == 1 && w.streaming.mods_laid().applied.problems.size() == 1 &&
+                w.streaming.mods_laid().applied.problems[0].message.find("person_looks[0].mesh") != std::string::npos);
 }

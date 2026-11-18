@@ -139,6 +139,25 @@ std::string save_mod_world(const ModWorld& world);
 // use is looked at when it is laid over the world.)
 std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out);
 
+// --- A mod's own files (part 3b) ----------------------------------------------
+//
+// A file a mod's world.json names (a look's mesh, its hair's file, its
+// materials' image maps) is the mod's own when it is written
+// "mod:<path>": a path in the mod's folder, with forward slashes, that
+// never leaves it (no "..", no ".", no drive or root, no empty part). So a
+// mod is one folder that can be copied whole. Any other path is read as a
+// world's own are.
+constexpr std::string_view k_mod_file_prefix = "mod:";
+// What is wrong with a path so written, or nothing (nothing too for one that is not the mod's own).
+std::optional<std::string> check_mod_file_path(std::string_view path);
+// What is wrong with the mod's own files among those its world names, with which (as "person_looks[2].mesh: ..."), or nothing.
+std::optional<std::string> check_mod_files(const ModWorld& world);
+// Makes each of the mod's own files' paths one a file is opened by:
+// `mod_folder` (UTF-8, forward slashes, as the editor would open it), "/",
+// and the path in it. What is wrong, or nothing; `world` is changed only
+// when nothing is (a path longer than a scene keeps, k_max_mesh_path_bytes, is).
+std::optional<std::string> resolve_mod_files(ModWorld& world, std::string_view mod_folder);
+
 // The kinds of thing a mod changes, as changes name them.
 enum class ModThing : u8 { place, person_look, routine, behaviour };
 std::string_view mod_thing_name(ModThing thing);

@@ -5,8 +5,9 @@ you can turn it off and the world is as it was. This page is for people
 who make mods and people who install them.
 
 So far a mod can change a world's places, the looks of its people, their
-routines and their behaviours, and bring people of its own. New assets
-and scripts are parts still being built; this page will grow with them.
+routines and their behaviours, and bring people of its own, with its own
+art files. Kits and scripts are parts still being built; this page will
+grow with them.
 
 ## Where mods go
 
@@ -96,6 +97,33 @@ counts are of all).
 A routine or behaviour may send people to a place by name. Nothing checks
 that the place is there, in a mod or in a world: a place that is missing
 is one nobody can be sent to, so name places your mod brings or needs.
+
+### A mod's own files
+
+A look needs a mesh, and may name image maps for its materials and a file
+for its hair. Keep those files in the mod's folder and name them with
+`mod:` and their path inside it:
+
+```json
+"person_looks": [
+  {"name": "guard", "mesh": "mod:art/guard.glb", "height": 1.2}
+]
+```
+
+With the mod in `<world>/mods/guards/`, that is the file
+`<world>/mods/guards/art/guard.glb`. So a mod is one folder: copy it into
+another world's `mods` folder and its art comes with it.
+
+- Use forward slashes. The path may not leave the mod's folder (`..`),
+  and may not hold `.`, an empty part, a backslash or a colon. A path
+  that breaks this is an error, and the mod's changes are left out.
+- This works for a look's `mesh`, its `hair.file`, and the maps of its
+  `material` and of each of its `parts`.
+- A path without `mod:` is read the way a world's own paths are (from
+  the folder the editor runs in). Use that only for files every install
+  has.
+- The whole path (the world's folder, `mods/<id>/`, and the path in the
+  mod) can be at most 1024 bytes.
 
 ### People
 

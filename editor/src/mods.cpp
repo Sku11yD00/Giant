@@ -180,6 +180,12 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
             unread.push_back({i, std::string(k_mod_world) + ": " + bad->message});
             continue;
         }
+        // The mod's own files ("mod:...") are in its folder.
+        if (const auto wrong = world::resolve_mod_files(worlds[i], MeshLibrary::normalize(path_to_utf8(mods_folder(world_folder) / laid.mods[i])))) {
+            unread.push_back({i, std::string(k_mod_world) + ": " + *wrong});
+            worlds[i] = {};
+            continue;
+        }
         for (world::PersonLook& look : worlds[i].person_looks) {
             look.mesh = MeshLibrary::normalize(look.mesh); // (one spelling per file, as the world's own)
         }

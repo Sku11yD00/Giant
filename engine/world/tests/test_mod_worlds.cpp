@@ -432,3 +432,61 @@ GIANT_TEST("mod worlds: the world's own people are told from the mods', and its 
     GIANT_CHECK(!check_people({}, looks, {}, now, 7) && check_people({}, looks, {}, now, 6) && !check_people({}, looks, {}, now, k_mod_person_base) &&
                 check_people({}, looks, {}, now, k_mod_person_base + 1) && check_people({}, looks, {}, own, 0));
 }
+
+GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never from outside it") {
+    for (const char* good : {"mod:guard.glb", "mod:art/people/guard v2.glb", "mod:a/b/c/d.png", "art/guard.glb", "", "C:/art/x.glb", "../x.glb",
+                             "mods:x", "Mod:../x"}) { // (the last ones are not the mod's own: paths as a world's are)
+        GIANT_CHECK(!check_mod_file_path(good));
+    }
+    for (const char* bad : {"mod:", "mod:/guard.glb", "mod:art//guard.glb", "mod:art/", "mod:../guard.glb", "mod:art/../../x.glb", "mod:./x.glb",
+                            "mod:art/./x.glb", "mod:..", "mod:art\\x.glb", "mod:C:/x.glb", "mod:x.glb:stream", "mod:a\nb.glb", "mod:a\x7f.glb"}) {
+        GIANT_CHECK(check_mod_file_path(bad).has_value());
+    }
+    // A mod's file with one is refused when loaded, saying which.
+    ModWorld mod;
+    mod.person_looks = {look("guard"), look("captain")};
+    mod.person_looks[0].mesh = "mod:art/guard.glb";
+    mod.person_looks[0].hair.file = "mod:art/guard_hair.glb";
+    mod.person_looks[0].material.maps.base_color = "mod:art/guard.png";
+    mod.person_looks[1].mesh = "shared/captain.glb";
+    mod.person_looks[1].parts = {{"coat", {}}};
+    mod.person_looks[1].parts[0].material.maps.normal = "mod:art/coat_n.png";
+    ModWorld back;
+    GIANT_CHECK(!check_mod_files(mod) && !load_mod_world(save_mod_world(mod), back) && back == mod);
+    ModWorld wrong = mod;
+    wrong.person_looks[1].parts[0].material.maps.normal = "mod:../../secrets.png";
+    const auto refused = check_mod_files(wrong);
+    GIANT_CHECK(refused && refused->find("person_looks[1].parts[0].material.maps.normal") != std::string::npos);
+    const auto load_refused = load_mod_world(save_mod_world(wrong), back);
+    GIANT_CHECK(load_refused && load_refused->message.find("person_looks[1].parts[0]") != std::string::npos && back == mod);
+    wrong = mod;
+    wrong.person_looks[0].hair.file = "mod:";
+    GIANT_CHECK(check_mod_files(wrong).value_or("").find("person_looks[0].hair.file") != std::string::npos);
+    // Resolved: the mod's folder before each of its own, the others as they were.
+    ModWorld resolved = mod;
+    GIANT_CHECK(!resolve_mod_files(resolved, "worlds/valley/mods/guards"));
+    GIANT_CHECK(resolved.person_looks[0].mesh == "worlds/valley/mods/guards/art/guard.glb" &&
+                resolved.person_looks[0].hair.file == "worlds/valley/mods/guards/art/guard_hair.glb" &&
+                resolved.person_looks[0].material.maps.base_color == "worlds/valley/mods/guards/art/guard.png" &&
+                resolved.person_looks[0].material.maps.normal.empty() && resolved.person_looks[1].mesh == "shared/captain.glb" &&
+                resolved.person_looks[1].parts[0].material.maps.normal == "worlds/valley/mods/guards/art/coat_n.png");
+    ModWorld slash = mod;
+    GIANT_CHECK(!resolve_mod_files(slash, "mods/guards/") && slash == [&] {
+        ModWorld same = mod;
+        (void)resolve_mod_files(same, "mods/guards");
+        return same;
+    }());
+    // A path too long once the folder is before it, or a wrong one: said, and nothing is changed.
+    ModWorld kept = mod;
+    const auto too_long = resolve_mod_files(kept, std::string(k_max_mesh_path_bytes - 10, 'w'));
+    GIANT_CHECK(too_long && too_long->find("person_looks[0].") != std::string::npos && too_long->find("bytes") != std::string::npos && kept == mod);
+    kept = wrong;
+    GIANT_CHECK(resolve_mod_files(kept, "mods/guards") && kept == wrong);
+    // At the limit exactly it fits.
+    ModWorld edge;
+    edge.person_looks = {look("guard")};
+    edge.person_looks[0].mesh = "mod:g.glb";
+    GIANT_CHECK(!resolve_mod_files(edge, std::string(k_max_mesh_path_bytes - 6, 'w')) && edge.person_looks[0].mesh.size() == k_max_mesh_path_bytes);
+    edge.person_looks[0].mesh = "mod:g.glb";
+    GIANT_CHECK(resolve_mod_files(edge, std::string(k_max_mesh_path_bytes - 5, 'w')).has_value());
+}
