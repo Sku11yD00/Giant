@@ -258,8 +258,13 @@ GIANT_TEST("mod worlds: the world's own is told from the mods' whatever was done
     // The other kinds go the same way.
     const std::vector<Routine> routines = {routine("day", "smithy")};
     const std::vector<Routine> brought_routines = {routine("day", "tavern"), routine("night", "tavern")};
+    not_kept.clear();
     GIANT_CHECK(world_own<Routine>(routines, brought_routines, std::vector<Routine>{routine("day", "pond")}, &not_kept) == routines &&
-                not_kept.size() == 3);
+                not_kept == std::vector<std::string>({"day", "night"}));
+    // One made anew under a name a mod set is the mod's still: not written, and named when it is not as the mod has it.
+    not_kept.clear();
+    now = {own[0], own[1], own[2], place("tavern", 77)};
+    GIANT_CHECK(save(now, &not_kept) == own && not_kept == std::vector<std::string>({"smithy", "tavern"}));
     const std::vector<Behaviour> behaviours = {behaviour("wary")};
     GIANT_CHECK(world_own<Behaviour>(behaviours, {}, std::vector<Behaviour>{behaviour("wary", 5.0f), behaviour("brave")}).size() == 2);
     const std::vector<PersonLook> looks = {look("villager")};

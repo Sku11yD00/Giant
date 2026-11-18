@@ -987,10 +987,11 @@ void normalize_meshes(world::Scene& scene) {
 
 // The mesh files the scene's entities, kits, scatter and people draw (normalized, once each).
 // `looks` false: without its person looks' (a world's save adds its own looks': a mod's are not its to list).
+// A person's entity is not asked: it draws its look's mesh, and whether it is in the scene is only where the camera is.
 std::vector<std::string> meshes_used(const world::Scene& scene, bool looks = true) {
     std::vector<std::string> out;
     for (const Entity& e : scene.entities()) {
-        if (e.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(e.mesh));
+        if (e.shape == world::Shape::mesh && e.person == 0) out.push_back(MeshLibrary::normalize(e.mesh));
     }
     for (const world::Kit& kit : scene.kits) {
         for (const world::KitPiece& p : kit.pieces) {
@@ -1776,7 +1777,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "The scene becomes the world: cells near the camera load in the background and far "
          "ones unload (get_world shows progress; set_world_streaming sets the radius). Undoable "
          "(undo brings the old scene back, unstreamed). Refused while the open world has unsaved "
-         "edits, unless discard_unsaved is true. Imports the meshes the world lists.",
+         "edits, unless discard_unsaved is true. Imports the meshes the world lists, and those of the person looks its mods bring.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["folder"],
              "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024},
                             "discard_unsaved": {"type": "boolean"}}})"),
@@ -1838,7 +1839,8 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "flying away; saving lets them go. Making a new world is refused while one is open "
          "(close_world first). With mods on (list_mods), the places, person looks, routines and behaviours mods "
          "brought are not written (the world's files stay its own, and its own thing of a name a mod replaced is kept "
-         "as it was); a change made to one of those is not saved, and they are named in `mods_things_not_saved`. "
+         "as it was); a change made to one of those is not saved (nor one made anew under such a name), and they are named in "
+         "`mods_things_not_saved` (names only, at most 32; `mods_things_not_saved_count` is how many there are). "
          "Refused when the world's people would need what only a mod brings.",
          Json::parse(R"({"type": "object", "additionalProperties": false,
              "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024}}})"),

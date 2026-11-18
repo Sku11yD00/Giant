@@ -183,19 +183,23 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
     std::sort(laid.applied.problems.begin(), laid.applied.problems.end(),
               [](const world::ModProblem& l, const world::ModProblem& r) { return l.mod < r.mod; });
     // The things mods set, each once, as they are now (the last to set it left it so).
-    std::set<std::pair<world::ModThing, std::string_view>> seen;
+    std::set<std::pair<world::ModThing, std::string_view>> set;
     for (const world::ModChange& change : laid.applied.changes) {
-        if (!seen.emplace(change.thing, change.name).second) {
-            continue;
-        }
-        laid.any = true;
-        switch (change.thing) {
-        case world::ModThing::place: laid.places.push_back(*world::find_place(scene.places, change.name)); break;
-        case world::ModThing::person_look: laid.person_looks.push_back(*world::find_person_look(scene.person_looks, change.name)); break;
-        case world::ModThing::routine: laid.routines.push_back(*world::find_routine(scene.routines, change.name)); break;
-        case world::ModThing::behaviour: laid.behaviours.push_back(*world::find_behaviour(scene.behaviours, change.name)); break;
-        }
+        set.emplace(change.thing, change.name);
     }
+    laid.any = !set.empty();
+    // (One pass over each list: a mod may set as many things as a world keeps.)
+    const auto brought = [&set](world::ModThing thing, const auto& now, auto& out) {
+        for (const auto& one : now) {
+            if (set.contains({thing, std::string_view(one.name)})) {
+                out.push_back(one);
+            }
+        }
+    };
+    brought(world::ModThing::place, scene.places, laid.places);
+    brought(world::ModThing::person_look, scene.person_looks, laid.person_looks);
+    brought(world::ModThing::routine, scene.routines, laid.routines);
+    brought(world::ModThing::behaviour, scene.behaviours, laid.behaviours);
     return laid;
 }
 

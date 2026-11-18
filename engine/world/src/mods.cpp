@@ -608,10 +608,10 @@ ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<
         if (!wrong) wrong = lay_behaviours.lay(mod.behaviours, m, applied.changes);
         // The world with it must be one that loads.
         if (!wrong) {
-            if (const auto bad = check_people(places, person_looks, routines, people, next_person_id)) {
-                wrong = "with them, " + *bad;
-            } else if (const auto bad_behaviours = check_behaviours(behaviours, people)) {
-                wrong = "with them, " + *bad_behaviours;
+            if (const auto people_wrong = check_people(places, person_looks, routines, people, next_person_id)) {
+                wrong = "the world would not load with them (" + *people_wrong + ")";
+            } else if (const auto behaviours_wrong = check_behaviours(behaviours, people)) {
+                wrong = "the world would not load with them (" + *behaviours_wrong + ")";
             }
         }
         if (wrong) {

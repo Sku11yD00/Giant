@@ -103,9 +103,12 @@ out and `list_mods` says why under `world.problems`. The same goes for a
 `world.json` with a mistake in it.
 
 After turning mods on or off, or changing a mod's `world.json`, open the
-world again to see the change (`list_mods` says `reopen` when other mods
-load now than when the world was opened, or a mod's `world.json` was
-written since).
+world again to see the change. `list_mods` says `reopen` when other mods
+load now than when the world was opened, or a mod's `world.json` has
+appeared, gone, or changed in size or time of writing since. (A file
+rewritten at the same size within the same tick of the disk's clock, or
+copied over with its old time kept, is not noticed: open the world again
+anyway after changing one.)
 
 ### Working on a world while mods are on
 
@@ -113,10 +116,16 @@ You can keep building a world with mods on. When you save:
 
 - The world's own things are saved as you changed, made and removed them.
 - What a mod brought is the mod's, and is never written into the world's
-  files. That holds even if you changed it in the editor: the change
-  shows until the world is closed, is not saved, and `save_world` names
-  such things under `mods_things_not_saved`. Where a mod replaced one of
-  the world's own things, the world's own stays in its file as it was.
+  files (nor is a mod's look's mesh put in the world's list of meshes).
+  That holds even if you changed it in the editor: the change shows until
+  the world is closed, is not saved, and `save_world` names such things
+  under `mods_things_not_saved` (names only, without their kind, at most
+  32 of them; `mods_things_not_saved_count` is how many there are). Where
+  a mod replaced one of the world's own things, the world's own stays in
+  its file as it was.
+- A name a mod set stays the mod's for as long as the world is open. If
+  you remove a mod's thing and make your own under the same name, yours
+  is not saved either (and is named as above): give it another name.
   To change what a mod brings, change the mod's `world.json`; to change
   the world's own, turn the mod off first.
 - The world must still open without the mods. If one of the world's

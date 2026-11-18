@@ -739,8 +739,8 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
             wrong = world::check_behaviours(owned.behaviours, scene.people);
         }
         if (wrong) {
-            return {"the world cannot be saved while its people use what only a mod brings (without the mods, " + *wrong +
-                    "): give them the world's own, or make one for the world under another name"};
+            return {"the world cannot be saved: without its mods it would not load (" + *wrong +
+                    "). Where its people use what only a mod brings, give them the world's own, or make one for the world under another name"};
         }
     }
     for (const world::PersonLook& look : owned.person_looks) {

@@ -364,7 +364,7 @@ GIANT_TEST("mods: a world opens with its mods laid over it, and its own file sta
     w.scene.places[2].radius = 9.0f;             // the mod's tavern (the world has none)
     GIANT_CHECK(w.streaming.unsaved_settings(w.scene));
     saved = w.streaming.save(w.scene, {});
-    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept == std::vector<std::string>({"tavern", "smithy"}) && !w.streaming.unsaved_settings(w.scene));
+    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept == std::vector<std::string>({"smithy", "tavern"}) && !w.streaming.unsaved_settings(w.scene));
     world::WorldIndex file = w.file();
     GIANT_CHECK(file.places.size() == 3 && file.places[0].radius == 3.0f && file.places[1] == authored.places[1] && file.places[2].name == "well");
     GIANT_CHECK(file.person_looks == authored.person_looks && file.routines == authored.routines);
@@ -402,14 +402,15 @@ GIANT_TEST("mods: a world is not saved while its people need what only a mod bri
     brave.states.resize(1);
     brave.states[0].name = "stand";
     guards.behaviours = {brave};
+    guards.routines = {routine("watch", "barracks")};
     w.put_world("guards", guards);
     GIANT_CHECK(w.open() && w.scene.behaviours.size() == 1);
     const std::string before = read_text_file(w.folder / "world.json").value_or("");
     const world::Person as_was = w.scene.people[0];
-    for (int what = 0; what < 3; ++what) {
+    for (int what = 0; what < 4; ++what) {
         w.scene.people[0] = as_was;
-        (what == 0 ? w.scene.people[0].look : what == 1 ? w.scene.people[0].home : w.scene.people[0].behaviour) =
-            what == 0 ? "guard" : what == 1 ? "barracks" : "brave";
+        (what == 0 ? w.scene.people[0].look : what == 1 ? w.scene.people[0].home : what == 2 ? w.scene.people[0].behaviour : w.scene.people[0].routine) =
+            what == 0 ? "guard" : what == 1 ? "barracks" : what == 2 ? "brave" : "watch";
         const std::string error = w.streaming.save(w.scene, {}).error;
         GIANT_CHECK(error.find("only a mod brings") != std::string::npos && read_text_file(w.folder / "world.json") == before);
     }
@@ -449,19 +450,54 @@ GIANT_TEST("mods: mods clash and fail in the open, and list_mods tells what they
     GIANT_CHECK(told["changes"][1]["did"] == "added" && !told["changes"][1].contains("over"));
     GIANT_CHECK(told["problems"].size() == 1 && told["problems"][0]["mod"] == "c_broken" &&
                 told["problems"][0]["problem"].get<std::string>().find("world.json") != std::string::npos);
-    // A mod's world.json written since: the world is not what the mods now give, and that is said.
-    world::ModWorld more = a;
-    more.places.push_back(place("an inn much further off along the road", 500, "rest"));
-    GIANT_CHECK(write_text_file(w.folder / "mods" / "a_first" / "world.json", world::save_mod_world(more)));
-    GIANT_CHECK(commands.execute("list_mods").value["world"]["reopen"] == true);
-    GIANT_CHECK(write_text_file(w.folder / "mods" / "a_first" / "world.json", world::save_mod_world(a)));
-    // A mod turned off since: the world is still as it was opened, and that is said.
+    const auto reopen = [&commands] { return commands.execute("list_mods").value["world"]["reopen"] == true; };
+    // A mod turned off since: the world is still as it was opened, and that is said (until it is on again).
     GIANT_CHECK(commands.execute("enable_mod", {{"id", "b_second"}, {"enabled", false}}).ok && w.scene.places.size() == 4);
     told = commands.execute("list_mods").value["world"];
     GIANT_CHECK(told["reopen"] == true && told["mods"].size() == 4);
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "b_second"}, {"enabled", true}}).ok && !reopen());
+    // A world.json where a mod had none, and gone again.
+    std::error_code error;
+    GIANT_CHECK(write_text_file(w.folder / "mods" / "d_plain" / "world.json", world::save_mod_world(a)) && reopen());
+    GIANT_CHECK(std::filesystem::remove(w.folder / "mods" / "d_plain" / "world.json", error) && !reopen());
+    // A mod's world.json written since: the world is not what the mods now give.
+    world::ModWorld more = a;
+    more.places.push_back(place("an inn much further off along the road", 500, "rest"));
+    GIANT_CHECK(write_text_file(w.folder / "mods" / "a_first" / "world.json", world::save_mod_world(more)) && reopen());
     // No world open: nothing of this, and no failure for another world's mods.
     w.streaming.close();
     GIANT_CHECK(!commands.execute("list_mods").ok);
     state.mods_world = path_to_utf8(w.folder);
     GIANT_CHECK(!commands.execute("list_mods").value.contains("world"));
+}
+
+GIANT_TEST("mods: save_world never lists a mod's mesh as the world's, and names what it did not save") {
+    SavedWorld w("giant_mods_test_commands");
+    world::ModWorld winter;
+    winter.person_looks = {look("villager", 1.1f), look("guard", 1.2f)};
+    winter.person_looks[0].mesh = "mods_art/winter_villager.glb";
+    winter.person_looks[1].mesh = "mods_art/guard.glb";
+    winter.places = {place("tavern", 30, "rest")};
+    w.put_world("winter", winter);
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.world = &w.streaming;
+    register_scene_commands(commands, state);
+    GIANT_CHECK(commands.execute("open_world", {{"folder", path_to_utf8(w.folder)}}).ok && state.scene.person_looks.size() == 2);
+    // The world's person, near the camera, stands in the scene wearing the mod's look.
+    world::Entity body;
+    body.shape = world::Shape::mesh;
+    body.mesh = "mods_art/winter_villager.glb";
+    body.person = 1;
+    state.scene.add(body);
+    auto saved = commands.execute("save_world");
+    GIANT_CHECK(saved.ok && !saved.value.contains("mods_things_not_saved"));
+    GIANT_CHECK(w.file().meshes == std::vector<std::string>{"people/villager.glb"} && w.file().person_looks.size() == 1 &&
+                w.file().person_looks[0].mesh == "people/villager.glb");
+    // What was done to the mod's things is not saved, and they are named.
+    state.scene.person_looks[1].height = 1.3f;
+    std::erase_if(state.scene.places, [](const world::Place& p) { return p.name == "tavern"; });
+    saved = commands.execute("save_world");
+    GIANT_CHECK(saved.ok && saved.value["mods_things_not_saved"] == Json::array({"tavern", "guard"}) && saved.value["mods_things_not_saved_count"] == 2);
+    GIANT_CHECK(w.file().meshes == std::vector<std::string>{"people/villager.glb"} && w.file().places.size() == 2);
 }

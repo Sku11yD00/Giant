@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <utility>
@@ -66,11 +67,11 @@ Json mod_json(const ModList::Found& found) {
 }
 
 // What the mods did to the world as it was opened; `order` is the load order now.
-Json laid_json(const ModsLaid& laid, const std::vector<std::string>& order, const std::filesystem::path& world) {
+Json laid_json(const ModsLaid& laid, const std::vector<std::string>& order, const std::filesystem::path& world_folder) {
     // Other mods load now, or one's world.json is not the file it was.
     bool reopen = laid.mods != order;
     for (usize i = 0; !reopen && i < laid.mods.size() && i < laid.files.size(); ++i) {
-        reopen = !(mod_world_file(world, laid.mods[i]) == laid.files[i]);
+        reopen = !(mod_world_file(world_folder, laid.mods[i]) == laid.files[i]);
     }
     constexpr usize k_most_listed = 256; // (a mod may change as many things as a world keeps)
     Json changes = Json::array();
