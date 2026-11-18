@@ -127,6 +127,8 @@ if(GIANT_BUILD_TESTS)
     add_test(NAME gate_common COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_gate_common.py)
     # The gates' person (a skinned glTF written from nothing): the file's own checks (no editor).
     add_test(NAME gate_person COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_gate_person.py)
+    # The living-world gate's own arithmetic: the valley's plan and its checks of the people (no editor).
+    add_test(NAME living_gate_checks COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_living_gate.py)
     # The N2 gate's scene and flight, on the null device (the software
     # renderer would take hours): everything but the speed. Optimised builds
     # only: a debug or sanitizer build takes most of an hour over it.
@@ -163,6 +165,11 @@ if(GIANT_BUILD_TESTS)
         COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/characters_gate.py
                 $<TARGET_FILE:giant_editor> --hidden --backend null)
       set_tests_properties(editor_characters_gate PROPERTIES TIMEOUT 2400 ENVIRONMENT "${gate_env}")
+      # The living-world gate (living-world plan LW8): the valley's people through their day, a shot, a save loaded.
+      add_test(NAME editor_living_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/living_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set_tests_properties(editor_living_gate PROPERTIES TIMEOUT 2400 ENVIRONMENT "${gate_env}")
     endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")

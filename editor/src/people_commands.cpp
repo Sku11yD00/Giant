@@ -217,7 +217,9 @@ Json people_state_json(const PeopleState& people) {
             {"walking", t.walking},
             {"acting", t.acting},
             {"unseen", t.unseen},
-            {"swapped", t.swapped}};
+            {"swapped", t.swapped},
+            {"appeared_in_view", t.appeared_in_view},
+            {"vanished_in_view", t.vanished_in_view}};
 }
 
 // What one command changed. A place, a look, a routine or a behaviour: the one at `index` before
@@ -1195,7 +1197,9 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "with none it only reports. Returns the settings with `embodied` (entities held now), `waiting` "
          "(wanting one but over `most`), `walking` (of them: walking their trips' ways, send_person), "
          "`acting` (of them: playing their look's clip for what their routine has them do), `unseen` (near, in view, "
-         "waiting to be out of sight), `swapped` (the farthest given up for someone nearer while `most` were held), and "
+         "waiting to be out of sight), `swapped` (the farthest given up for someone nearer while `most` were held), "
+         "`appeared_in_view` and `vanished_in_view` (entities made and taken away close by in view while simulating: "
+         "after a load, a camera put elsewhere or an edit; a flight that counts none saw nobody appear or go), and "
          "`made` and `released` since the scene was taken up. The "
          "entities are never saved and not undone; deleting one only has it made again. View state.",
          object_schema(Json::array(),

@@ -57,8 +57,15 @@ GIANT_TEST("physics commands: a cube falls and rests, stopping puts it back, edi
     GIANT_CHECK(f.run("get_entity", {{"id", cube}}).value["body"] == "dynamic");
     // Not simulating: nothing to step.
     GIANT_CHECK(!f.run("step_physics", {{"seconds", 1}}).ok);
+    // (The clock moving on while simulating is asked for with it, each time, and only with `on`.)
+    GIANT_CHECK(f.run("simulate", {{"on", true}, {"clock", true}}).value["clock"] == true && f.state.simulate_clock);
+    GIANT_CHECK(!f.run("simulate", {{"on", false}, {"clock", true}}).ok && f.run("get_physics").value["simulating"] == true);
+    GIANT_CHECK(f.state.clock_runs(false, true) && f.state.clock_runs(true, false) && !f.state.clock_runs(false, false));
+    // Stopping forgets it: simulating started again some other way (a loaded game) does not run the clock unasked.
+    GIANT_CHECK(f.run("simulate", {{"on", false}, {"clock", false}}).value["clock"] == false && !f.state.clock_runs(false, true));
+    GIANT_CHECK(f.run("simulate", {{"on", true}, {"clock", true}}).ok && f.run("simulate", {{"on", false}}).ok && !f.state.simulate_clock);
     ai::CommandResult r = f.run("simulate", {{"on", true}});
-    GIANT_CHECK(r.ok && r.value["simulating"] == true);
+    GIANT_CHECK(r.ok && r.value["simulating"] == true && r.value["clock"] == false && !f.state.simulate_clock);
     r = f.run("step_physics", {{"seconds", 3}});
     GIANT_CHECK(r.ok && r.value["stepped"] == 180 && r.value["entity_bodies"] == 2 && r.value["dynamic_bodies"] == 1);
     GIANT_CHECK(std::fabs(f.y(cube) - 0.5) < 0.03 && r.value["moved"] == 1);

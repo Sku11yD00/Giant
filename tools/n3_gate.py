@@ -75,6 +75,17 @@ WEATHER_OFF = {"clouds": False, "cloud_shadows": False, "precipitation": False, 
 WEATHER_ON = {k: True for k in WEATHER_OFF}
 
 
+def town_houses():
+    """The town's houses (x, z)."""
+    return [(round(TOWN[0] + (x - (HOUSES_X - 1) / 2) * SPACING, 2), round(TOWN[1] + (z - (HOUSES_Z - 1) / 2) * SPACING, 2))
+            for x in range(HOUSES_X) for z in range(HOUSES_Z)]
+
+
+def hamlet_houses():
+    """The hamlet's houses (x, z)."""
+    return [(HAMLET[0] + (i % 4) * 14.0, HAMLET[1] + (i // 4) * 16.0) for i in range(12)]
+
+
 def build_valley(tool, lantern_lamp=None):
     """The edited valley: terrain, brush strokes, the town and the scatter
     layers. `lantern_lamp(i)`: the lamp the street's i-th lantern carries
@@ -113,13 +124,10 @@ def build_valley(tool, lantern_lamp=None):
         {"name": "canopy", "shape": "sphere", "position": [0, 4.2, 0], "scale": [3, 3.4, 3],
          "base_color": [0.15, 0.4, 0.12], "roughness": 0.8, "sway": 0.3, "flutter": 1.5},  # moves in the wind
     ]})
-    town = [{"kit": "house", "position": [round(TOWN[0] + (x - (HOUSES_X - 1) / 2) * SPACING, 2),
-                                          town_h,
-                                          round(TOWN[1] + (z - (HOUSES_Z - 1) / 2) * SPACING, 2)]}
-            for x in range(HOUSES_X) for z in range(HOUSES_Z)]
+    town = [{"kit": "house", "position": [x, town_h, z]} for x, z in town_houses()]
     tool("create_entities", {"entities": town})
     # A hamlet up the valley: loaded at the start, unloaded as the flight leaves it.
-    spots = [[HAMLET[0] + (i % 4) * 14.0, HAMLET[1] + (i // 4) * 16.0] for i in range(12)]
+    spots = [[x, z] for x, z in hamlet_houses()]
     heights = tool("get_terrain", {"points": spots})["heights"]
     tool("create_entities", {"entities": [{"kit": "house", "position": [x, round(h, 2), z]}
                                           for (x, z), h in zip(spots, heights)]})

@@ -298,6 +298,10 @@ GIANT_TEST("editor: frame phases name the slow frames' parts") {
     GIANT_CHECK(frame_phases(t, 290, 0.0f)["slow"].size() == 10);
     GIANT_CHECK(frame_phase_name(at(FramePhase::count)) == "render/cells");
     GIANT_CHECK(frame_phase_name(at(FramePhase::tail)) == "tail");
+    // (The people's four, which the living-world gate sums by name.)
+    GIANT_CHECK(frame_phase_name(at(FramePhase::travel)) == "travel" && frame_phase_name(at(FramePhase::senses)) == "senses" &&
+                frame_phase_name(at(FramePhase::routines)) == "routines" && frame_phase_name(at(FramePhase::people)) == "people" &&
+                frame_phase_name(at(FramePhase::terrain)) == "terrain" && frame_phase_name(at(FramePhase::other)) == "other");
 }
 
 GIANT_TEST("editor: mesh paths have one spelling") {

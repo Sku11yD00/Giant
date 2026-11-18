@@ -583,6 +583,7 @@ int run(const Options& options) {
         // The people's trips moved on by the time simulated (stopped: everyone back where the scene has them).
         const editor::PeopleTravel::Clock travel_clock = editor::PeopleTravel::clock_of(physics);
         travel.update(state.scene, travel_clock.run, travel_clock.seconds);
+        mark(editor::FramePhase::travel);
         // The one followed keeps the camera by it, where it is this frame (follow_person; play ends it).
         editor::follow_person_camera(state);
         // What the people hear of the noises made (a share of the people a frame while any spreads),
@@ -594,8 +595,10 @@ int run(const Options& options) {
             senses.player.reset();
         }
         if (!in_screenshot) senses.update(state.scene, travel);
+        mark(editor::FramePhase::senses);
         // Those whose routines say so set off (a share of the people a frame), by the time of day shown.
         routines.update(state.scene, travel, time_of_day.shown().hours, &senses);
+        mark(editor::FramePhase::routines);
         // The people near the camera get their entities (a few a frame) before the scene is drawn.
         people.view = editor::PeopleState::view_of(
             state.camera.yaw_degrees, state.camera.pitch_degrees, state.camera.vertical_fov_degrees,
@@ -603,6 +606,7 @@ int run(const Options& options) {
                                        : 1.0f);
         people.update(state.scene, state.camera.position,
                       world_streaming.active(state.scene_generation) ? &world_streaming : nullptr);
+        mark(editor::FramePhase::people);
         terrain_meshes.update(state.scene.terrain);
         terrain_paint.update(state.scene.terrain, *renderer);
         mark(editor::FramePhase::terrain);
@@ -878,7 +882,9 @@ int run(const Options& options) {
         window->set_relative_mouse(playing && !menus.paused()); // mouse look (a menu: the pointer is free)
         weather.update(saves.weather() != nullptr ? *saves.weather() : state.scene.weather, game_delta, state.camera.position,
                        state.scene_generation); // after the panels' changes (a loaded game's shown over the scene's)
-        time_of_day.update(state.scene.clock, game_delta, playing, state.scene_generation); // play moves the time on
+        // Play moves the time on, and simulating when asked to (`simulate` with `clock`).
+        time_of_day.update(state.scene.clock, game_delta, state.clock_runs(playing, physics.simulating()),
+                           state.scene_generation);
         // What the last frame took from the scene; dynamic entities move
         // while simulating (drawn there this frame).
         mark(editor::FramePhase::weather);

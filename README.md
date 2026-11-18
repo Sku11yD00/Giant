@@ -441,6 +441,13 @@ Open-world systems:
 - LW7 part 3d: a mod brings C# scripts, run beside the world's own while
   it is open, and only once allowed on the machine (a script is a
   program; `docs/mods.md`).
+- LW8: the living-world gate (`tools/living_gate.py`): 5,000 people
+  living a day in ten minutes in the valley (sleep, work, a midday meal),
+  flown through, a shot in the street, a game saved and loaded.
+  `simulate` with `clock` lets the day pass while simulating; the frame's
+  phases time the people's share (`travel`, `senses`, `routines`,
+  `people`); `set_people_settings` counts anyone appearing or going
+  close by in view.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
@@ -451,7 +458,8 @@ performance gates come with it: in that folder, run
 (the valley at night, lit by over a thousand lamps) and `python water_gate.py giant_editor.exe`
 (the valley with a lake, a river past the town and a coast, flown over and under the water) and `python effects_gate.py giant_editor.exe`
 (that valley in a storm, with chimney smoke, fires, a boathouse knocked into the river and shots fired) and `python characters_gate.py giant_editor.exe`
-(a crowd walking the valley's town, some struck down by a blast and shots and getting up again, and faces seen close) (Python 3; keep `gate_common.py` and `gate_person.py` beside them). A gate with hitches prints which part of the frame each one spent its time on; set `GIANT_GATE_FRAMES` to a file name to keep the details. C# scripts need the .NET 10 runtime
+(a crowd walking the valley's town, some struck down by a blast and shots and getting up again, and faces seen close) and `python living_gate.py giant_editor.exe`
+(5,000 people living their day in the valley's town and villages, flown through as they wake, a shot in the street, a game saved and loaded; about ten minutes) (Python 3; keep `gate_common.py` and `gate_person.py` beside them). A gate with hitches prints which part of the frame each one spent its time on; set `GIANT_GATE_FRAMES` to a file name to keep the details. C# scripts need the .NET 10 runtime
 (https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
 The earlier Godot-based work is archived on the branches
