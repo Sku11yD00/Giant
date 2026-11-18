@@ -434,14 +434,21 @@ GIANT_TEST("mod worlds: the world's own people are told from the mods', and its 
 }
 
 GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never from outside it") {
-    for (const char* good : {"mod:guard.glb", "mod:art/people/guard v2.glb", "mod:a/b/c/d.png", "art/guard.glb", "", "C:/art/x.glb", "../x.glb",
-                             "mods:x", "Mod:../x"}) { // (the last ones are not the mod's own: paths as a world's are)
+    for (const char* good : {"", "mod:guard.glb", "mod:art/people/guard v2.glb", "mod:a/b/c/d.png", "mod:art/a.gltf#image0", "art/guard.glb",
+                             "shared/x y.png", "console.png", "mod:art/com10.glb", "mod:.hidden/x.glb"}) {
         GIANT_CHECK(!check_mod_file_path(good));
     }
-    for (const char* bad : {"mod:", "mod:/guard.glb", "mod:art//guard.glb", "mod:art/", "mod:../guard.glb", "mod:art/../../x.glb", "mod:./x.glb",
-                            "mod:art/./x.glb", "mod:..", "mod:art\\x.glb", "mod:C:/x.glb", "mod:x.glb:stream", "mod:a\nb.glb", "mod:a\x7f.glb"}) {
+    // Never out of its folder, nor (for a path that is not the mod's own) out of the folder the game runs in;
+    // and nothing that Windows reads as something else.
+    for (const char* bad :
+         {"mod:", "mod:/guard.glb", "mod:art//guard.glb", "mod:art/", "mod:../guard.glb", "mod:art/../../x.glb", "mod:./x.glb", "mod:art/./x.glb",
+          "mod:..", "mod:art\\x.glb", "mod:C:/x.glb", "mod:x.glb:stream", "mod:a\nb.glb", "mod:a\x7f.glb", "C:/art/x.glb", "../x.glb",
+          "a/../../x.glb", "/abs/x.glb", "//server/share/a.glb", "\\\\server\\share\\a.glb", "Mod:../x", "mods:x", " mod:x.glb", "mod: art/x.glb",
+          "mod:CON.glb", "mod:art/nul", "mod:art/Com1.abc", "aux.png", "mod:lpt9", "mod:art/CONOUT$", "mod:con .glb", "mod:art/guard.glb.",
+          "mod:art/guard.glb ", "mod:art /x.glb", "mod:art/x?.glb", "mod:a*.glb", "mod:a<b.glb", "mod:a|b.glb", "mod:a\"b.glb", "x>y.png"}) {
         GIANT_CHECK(check_mod_file_path(bad).has_value());
     }
+    GIANT_CHECK(check_mod_file_path(std::string("mod:a\0b.glb", 12)).has_value() && check_mod_file_path(std::string("a\0b.glb", 8)).has_value());
     // A mod's file with one is refused when loaded, saying which.
     ModWorld mod;
     mod.person_looks = {look("guard"), look("captain")};
@@ -451,6 +458,11 @@ GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never f
     mod.person_looks[1].mesh = "shared/captain.glb";
     mod.person_looks[1].parts = {{"coat", {}}};
     mod.person_looks[1].parts[0].material.maps.normal = "mod:art/coat_n.png";
+    mod.person_looks[1].parts[0].material.skin = SkinLook{};
+    mod.person_looks[1].parts[0].material.skin->detail_normal = "mod:art/pores.png";
+    mod.person_looks[1].material.skin = SkinLook{};
+    mod.person_looks[1].material.skin->detail_normal = "shared/pores.png";
+    GIANT_CHECK(mod_own_files(mod) == std::vector<std::string>({"art/coat_n.png", "art/guard.glb", "art/guard.png", "art/guard_hair.glb", "art/pores.png"}));
     ModWorld back;
     GIANT_CHECK(!check_mod_files(mod) && !load_mod_world(save_mod_world(mod), back) && back == mod);
     ModWorld wrong = mod;
@@ -462,6 +474,22 @@ GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never f
     wrong = mod;
     wrong.person_looks[0].hair.file = "mod:";
     GIANT_CHECK(check_mod_files(wrong).value_or("").find("person_looks[0].hair.file") != std::string::npos);
+    // Each place a file is named is looked at, and a path that is not the mod's own may not leave the game's folder either.
+    const auto named = [&mod](const char* path, int which) {
+        ModWorld w = mod;
+        (which == 0 ? w.person_looks[0].mesh : which == 1 ? w.person_looks[0].material.maps.occlusion :
+         which == 2 ? w.person_looks[1].material.skin->detail_normal : w.person_looks[1].parts[0].material.skin->detail_normal) = path;
+        ModWorld loaded;
+        const auto refused_load = load_mod_world(save_mod_world(w), loaded);
+        return check_mod_files(w).value_or("") + (refused_load ? "" : " (loaded)");
+    };
+    GIANT_CHECK(named("//evil.example/share/a.glb", 0).find("person_looks[0].mesh") == 0 &&
+                named("/etc/passwd", 1).find("person_looks[0].material.maps.occlusion") == 0 &&
+                named("../../x.png", 2).find("person_looks[1].material.skin.detail_normal") == 0 &&
+                named("mod:../x.png", 3).find("person_looks[1].parts[0].material.skin.detail_normal") == 0);
+    for (int which = 0; which < 4; ++which) {
+        GIANT_CHECK(named("C:/x.png", which).find("(loaded)") == std::string::npos && !named("C:/x.png", which).empty());
+    }
     // Resolved: the mod's folder before each of its own, the others as they were.
     ModWorld resolved = mod;
     GIANT_CHECK(!resolve_mod_files(resolved, "worlds/valley/mods/guards"));
@@ -469,7 +497,11 @@ GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never f
                 resolved.person_looks[0].hair.file == "worlds/valley/mods/guards/art/guard_hair.glb" &&
                 resolved.person_looks[0].material.maps.base_color == "worlds/valley/mods/guards/art/guard.png" &&
                 resolved.person_looks[0].material.maps.normal.empty() && resolved.person_looks[1].mesh == "shared/captain.glb" &&
-                resolved.person_looks[1].parts[0].material.maps.normal == "worlds/valley/mods/guards/art/coat_n.png");
+                resolved.person_looks[1].parts[0].material.maps.normal == "worlds/valley/mods/guards/art/coat_n.png" &&
+                resolved.person_looks[1].parts[0].material.skin->detail_normal == "worlds/valley/mods/guards/art/pores.png" &&
+                resolved.person_looks[1].material.skin->detail_normal == "shared/pores.png" && mod_own_files(resolved).empty());
+    ModWorld bare = mod; // (no folder: a path from where the game runs)
+    GIANT_CHECK(!resolve_mod_files(bare, "") && bare.person_looks[0].mesh == "art/guard.glb");
     ModWorld slash = mod;
     GIANT_CHECK(!resolve_mod_files(slash, "mods/guards/") && slash == [&] {
         ModWorld same = mod;

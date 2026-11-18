@@ -654,11 +654,14 @@ struct Laying {
 } // namespace
 
 std::optional<std::string> check_mod_file_path(std::string_view path) {
-    if (!path.starts_with(k_mod_file_prefix)) {
-        return std::nullopt;
+    if (path.empty()) {
+        return std::nullopt; // (none)
     }
-    const std::string_view in = path.substr(k_mod_file_prefix.size());
-    const std::string how = " (\"mod:\" names a file in the mod's own folder: a path like \"mod:art/guard.glb\")";
+    const bool own = path.starts_with(k_mod_file_prefix);
+    const std::string_view in = own ? path.substr(k_mod_file_prefix.size()) : path;
+    const std::string how = own ? " (\"mod:\" names a file in the mod's own folder: a path like \"mod:art/guard.glb\")"
+                                : " (a mod names its own files \"mod:art/guard.glb\", and any other by a path from the folder the "
+                                  "game runs in, never one from a drive, a root or a folder above)";
     if (in.empty()) {
         return "names no file" + how;
     }
@@ -666,13 +669,25 @@ std::optional<std::string> check_mod_file_path(std::string_view path) {
         const usize to = std::min(in.find('/', from), in.size());
         const std::string_view part = in.substr(from, to - from);
         if (part.empty() || part == "." || part == "..") {
-            return "must not have an empty part, \".\" or \"..\"" + how;
+            return "must not have an empty part, \".\" or \"..\", nor begin with a slash" + how;
+        }
+        if (part.front() == ' ' || part.back() == ' ' || part.back() == '.') {
+            return "must not have a part beginning with a space or ending with a space or a dot" + how;
+        }
+        // (Names Windows keeps for devices, whatever comes after a dot: there they are no files.)
+        std::string stem(part.substr(0, part.find('.')));
+        std::transform(stem.begin(), stem.end(), stem.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; });
+        while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+        const bool numbered = stem.size() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem[3] >= '0' && stem[3] <= '9';
+        if (numbered || stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" || stem == "conin$" || stem == "conout$") {
+            return "must not have a part named as a device is on Windows (con, prn, aux, nul, com0 to com9, lpt0 to lpt9)" + how;
         }
         from = to + 1;
     }
     for (const char c : in) {
-        if (c == '\\' || c == ':' || static_cast<unsigned char>(c) < 0x20 || c == 0x7f) {
-            return "must not have a backslash, a colon or a control character" + how;
+        if (c == '\\' || c == ':' || c == '<' || c == '>' || c == '"' || c == '|' || c == '?' || c == '*' ||
+            static_cast<unsigned char>(c) < 0x20 || c == 0x7f) {
+            return "must not have a backslash, a colon, any of < > \" | ? * or a control character" + how;
         }
     }
     return std::nullopt;
@@ -683,18 +698,19 @@ namespace {
 // Every file path the mod's world names, with what it is called in the file.
 template <typename World, typename Each>
 bool each_mod_file(World& world, const Each& each) {
+    const auto material = [&each](auto& m, const std::string& where) {
+        return each(m.maps.base_color, where + "maps.base_color") && each(m.maps.normal, where + "maps.normal") &&
+               each(m.maps.roughness_metal, where + "maps.roughness_metal") && each(m.maps.occlusion, where + "maps.occlusion") &&
+               (!m.skin || each(m.skin->detail_normal, where + "skin.detail_normal"));
+    };
     for (usize i = 0; i < world.person_looks.size(); ++i) {
         auto& look = world.person_looks[i];
         const std::string at = "person_looks[" + std::to_string(i) + "].";
-        const auto maps = [&](auto& m, const std::string& where) {
-            return each(m.base_color, where + "base_color") && each(m.normal, where + "normal") &&
-                   each(m.roughness_metal, where + "roughness_metal") && each(m.occlusion, where + "occlusion");
-        };
-        if (!each(look.mesh, at + "mesh") || !each(look.hair.file, at + "hair.file") || !maps(look.material.maps, at + "material.maps.")) {
+        if (!each(look.mesh, at + "mesh") || !each(look.hair.file, at + "hair.file") || !material(look.material, at + "material.")) {
             return false;
         }
         for (usize p = 0; p < look.parts.size(); ++p) {
-            if (!maps(look.parts[p].material.maps, at + "parts[" + std::to_string(p) + "].material.maps.")) {
+            if (!material(look.parts[p].material, at + "parts[" + std::to_string(p) + "].material.")) {
                 return false;
             }
         }
@@ -713,6 +729,19 @@ std::optional<std::string> check_mod_files(const ModWorld& world) {
         return !wrong;
     });
     return wrong;
+}
+
+std::vector<std::string> mod_own_files(const ModWorld& world) {
+    std::vector<std::string> files;
+    each_mod_file(world, [&files](const std::string& path, const std::string&) {
+        if (path.starts_with(k_mod_file_prefix)) {
+            files.push_back(path.substr(k_mod_file_prefix.size()));
+        }
+        return true;
+    });
+    std::sort(files.begin(), files.end());
+    files.erase(std::unique(files.begin(), files.end()), files.end());
+    return files;
 }
 
 std::optional<std::string> resolve_mod_files(ModWorld& world, std::string_view mod_folder) {

@@ -289,7 +289,7 @@ world::Place place(const char* name, double x, const char* tag = "home") {
 world::PersonLook look(const char* name, float height = 1.0f) {
     world::PersonLook l;
     l.name = name;
-    l.mesh = "people/./villager.glb";
+    l.mesh = "people/villager.glb";
     l.height = height;
     return l;
 }
@@ -342,14 +342,14 @@ GIANT_TEST("mods: a world opens with its mods laid over it, and its own file sta
     world::ModWorld winter;
     winter.places = {place("tavern", 30, "rest"), place("smithy", 55, "work")};
     winter.person_looks = {look("guard", 1.2f)};
-    winter.person_looks[0].mesh = "mods_art/./guard.glb";
+    winter.person_looks[0].mesh = "mods_art/guard.glb";
     winter.routines = {routine("smith's day", "tavern")};
     w.put_world("winter", winter);
     GIANT_CHECK(w.open());
     // The scene is the world with the mod over it; the index is still the file's.
     GIANT_CHECK(w.scene.places.size() == 3 && world::find_place(w.scene.places, "smithy")->position.x == 55.0 &&
                 world::find_place(w.scene.places, "tavern") != nullptr);
-    GIANT_CHECK(w.scene.person_looks.size() == 2 && w.scene.person_looks[1].mesh == "mods_art/guard.glb"); // (one spelling per file)
+    GIANT_CHECK(w.scene.person_looks.size() == 2 && w.scene.person_looks[1].mesh == "mods_art/guard.glb");
     GIANT_CHECK(w.scene.routines[0].entries[0].name == "tavern" && w.streaming.index().places == authored.places);
     const ModsLaid& laid = w.streaming.mods_laid();
     GIANT_CHECK(laid.any && laid.mods == std::vector<std::string>{"winter"} && laid.applied.changes.size() == 4 && laid.applied.problems.empty());
@@ -603,22 +603,52 @@ GIANT_TEST("mods: a mod's own files are found in its folder, and stay out of the
     guards.person_looks = {look("guard", 1.2f), look("villager", 1.1f)};
     guards.person_looks[0].mesh = "mod:art/guard.glb";
     guards.person_looks[0].material.maps.base_color = "mod:art/guard.png";
-    guards.person_looks[1].mesh = "shared/winter_villager.glb"; // (not the mod's own: as a world's paths are)
+    guards.person_looks[0].hair.file = "mod:art/guard_hair.glb";
+    guards.person_looks[1].mesh = "shared/winter_villager.glb"; // (not the mod's own: from the folder the game runs in)
     w.put_world("guards", guards);
     const std::string in_mod = MeshLibrary::normalize(path_to_utf8(w.folder / "mods" / "guards")) + "/";
     GIANT_CHECK(w.open() && w.streaming.mods_laid().applied.problems.empty());
     const world::PersonLook* guard = world::find_person_look(w.scene.person_looks, "guard");
     GIANT_CHECK(guard != nullptr && guard->mesh == in_mod + "art/guard.glb" && guard->material.maps.base_color == in_mod + "art/guard.png" &&
+                guard->hair.file == in_mod + "art/guard_hair.glb" &&
                 world::find_person_look(w.scene.person_looks, "villager")->mesh == "shared/winter_villager.glb");
     // What the editor imports for the mods is those paths; nothing of them is the world's to save.
     GIANT_CHECK(w.streaming.mods_laid().person_looks.size() == 2 && !w.streaming.unsaved_settings(w.scene));
     const WorldStreaming::Saved saved = w.streaming.save(w.scene, {});
     GIANT_CHECK(saved.error.empty() && saved.mods_not_kept.empty() && w.file().meshes == std::vector<std::string>{"people/villager.glb"} &&
                 w.file().person_looks.size() == 1 && w.file().person_looks[0].mesh == "people/villager.glb");
-    // A path that would leave the mod's folder: the mod is left out, whole, and it is said.
+    // A path that would leave the mod's folder, or the folder the game runs in: the mod is left out, whole, and it is said.
+    ai::CommandRegistry commands;
+    EditorState state;
+    state.world = &w.streaming;
+    register_mod_commands(commands, state);
+    const world::ModWorld sound = guards;
+    for (const char* bad : {"mod:../../other/guard.glb", "//server/share/guard.glb", "C:/Users/someone/guard.glb", "../guard.glb"}) {
+        w.streaming.close();
+        guards.person_looks[0].mesh = bad;
+        GIANT_CHECK(write_text_file(w.folder / "mods" / "guards" / "world.json", world::save_mod_world(guards)));
+        GIANT_CHECK(w.open() && w.scene.person_looks.size() == 1 && w.streaming.mods_laid().applied.problems.size() == 1 &&
+                    w.streaming.mods_laid().applied.problems[0].message.find("person_looks[0].mesh") != std::string::npos);
+    }
+    // Mended since: list_mods says to open the world again, and then it is laid.
+    GIANT_CHECK(commands.execute("list_mods").value["world"]["reopen"] == false);
+    GIANT_CHECK(write_text_file(w.folder / "mods" / "guards" / "world.json", world::save_mod_world(sound) + "\n"));
+    GIANT_CHECK(commands.execute("list_mods").value["world"]["reopen"] == true);
     w.streaming.close();
-    guards.person_looks[0].mesh = "mod:../../other/guard.glb";
-    GIANT_CHECK(write_text_file(w.folder / "mods" / "guards" / "world.json", world::save_mod_world(guards)));
-    GIANT_CHECK(w.open() && w.scene.person_looks.size() == 1 && w.streaming.mods_laid().applied.problems.size() == 1 &&
-                w.streaming.mods_laid().applied.problems[0].message.find("person_looks[0].mesh") != std::string::npos);
+    GIANT_CHECK(w.open() && w.scene.person_looks.size() == 2 && w.streaming.mods_laid().applied.problems.empty());
+    // A link in the mod's folder that leads out of it: its files are not the mod's own, and the mod is left out.
+    w.streaming.close();
+    const std::filesystem::path outside = w.folder / "outside";
+    std::error_code error;
+    std::filesystem::create_directories(outside, error);
+    std::filesystem::create_directory_symlink(std::filesystem::absolute(outside), w.folder / "mods" / "guards" / "art", error);
+    if (!error) { // (Windows makes links only for those allowed to)
+        GIANT_CHECK(w.open() && w.scene.person_looks.size() == 1 && w.streaming.mods_laid().applied.problems.size() == 1 &&
+                    w.streaming.mods_laid().applied.problems[0].message.find("a link there leads out") != std::string::npos);
+        w.streaming.close();
+        // A real folder of its own in its place: laid again.
+        std::filesystem::remove(w.folder / "mods" / "guards" / "art", error);
+        std::filesystem::create_directories(w.folder / "mods" / "guards" / "art", error);
+        GIANT_CHECK(w.open() && w.scene.person_looks.size() == 2);
+    }
 }

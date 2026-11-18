@@ -4179,12 +4179,24 @@ leaves out the people mods brought (by id) and names those changed;
 65,536 people.
 
 A mod's own files (part 3b) are named `mod:<path in its folder>` in its
-`world.json` (a look's mesh, its hair's file, its materials' maps).
-`check_mod_file_path` holds such a path inside the folder (no `..`, `.`,
-empty part, backslash or colon), `load_mod_world` refuses a file that
-breaks it, and `resolve_mod_files` turns each into the path the editor
-opens (`<world>/mods/<id>/<path>`) when the mod is laid, so the scene
-only ever holds ordinary paths and a mod folder can be copied whole.
+`world.json` (a look's mesh, its hair's file, its materials' maps and
+skin detail). A mod may be anyone's, so it is not trusted with the rest
+of the machine: `check_mod_file_path` holds every path a mod names, its
+own or not, inside its folder (no `..`, `.`, empty part, backslash or
+colon, so no root, drive or server whose opening alone would tell it of
+the player; nothing Windows reads as something else: a part ending in a
+dot or space, a device's name, `< > " | ? *`; no control character), and
+`load_mod_world` refuses a file that breaks it. When the mod is laid the
+editor looks at its own files on the disk (`mod_own_files`) and leaves it
+out if a link in its folder leads one out of it, then
+`resolve_mod_files` turns each into the path the editor opens
+(`<world>/mods/<id>/<path>`), so the scene only ever holds ordinary
+paths and a mod folder can be copied whole. A path without `mod:` is one
+from the folder the game runs in, under the same rules. (A glTF's own
+buffers and images were already held to its folder; `gltf_buffer_files`
+now leaves out any outside it too, so none is even looked at.) Known
+limit: a look a mod brought, kept by `close_world` and saved as a new
+world's own, has the resolved path, which breaks if that folder moves.
 
 The editor lays the mods when a world is opened (`lay_mods`, from
 `WorldStreaming::open`), over the scene only: `WorldStreaming`'s index

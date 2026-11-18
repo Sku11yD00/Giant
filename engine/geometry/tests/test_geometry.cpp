@@ -697,6 +697,14 @@ GIANT_TEST("geometry: a .gltf file reads its buffer from next to it") {
     GIANT_CHECK(buffers.size() == 1 && buffers[0].filename() == "tri data.bin" &&
                 std::filesystem::exists(buffers[0]));
     GIANT_CHECK(gltf_buffer_files(dir / "missing.gltf").empty());
+    // One outside the file's folder is not among them (never read, so never looked at: a server's path would be called).
+    for (const char* outside : {"../tri%20data.bin", "//server/share/b.bin", "/etc/hostname"}) {
+        std::string json = f.json;
+        const std::string was = R"("uri":"tri%20data.bin")";
+        json.replace(json.find(was), was.size(), std::string(R"("uri":")") + outside + "\"");
+        std::ofstream(dir / "out.gltf", std::ios::binary) << json;
+        GIANT_CHECK(gltf_buffer_files(dir / "out.gltf").empty());
+    }
 
     // A buffer file shorter than its byteLength must not be read past.
     {

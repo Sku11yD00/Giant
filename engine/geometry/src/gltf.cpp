@@ -1753,7 +1753,11 @@ std::vector<std::filesystem::path> gltf_buffer_files(const std::filesystem::path
         std::string decoded(uri);
         cgltf_decode_uri(decoded.data());
         decoded.resize(std::strlen(decoded.c_str()));
-        files.push_back(folder / std::filesystem::path(std::u8string(decoded.begin(), decoded.end())));
+        // (As read_file: a buffer may not be outside the file's folder, so none there is ever looked at.)
+        const std::filesystem::path file = folder / std::filesystem::path(std::u8string(decoded.begin(), decoded.end()));
+        const std::filesystem::path relative = file.lexically_normal().lexically_relative(folder);
+        if (relative.empty() || *relative.begin() == "..") continue;
+        files.push_back(file);
     }
     return files;
 }

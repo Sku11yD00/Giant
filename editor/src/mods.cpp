@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <exception>
+#include <initializer_list>
 #include <iterator>
 #include <set>
 #include <string_view>
@@ -30,13 +31,45 @@ bool is_absent(const std::filesystem::path& path) {
     return std::filesystem::symlink_status(path, error).type() == std::filesystem::file_type::not_found;
 }
 
-// The folder's name as text, or nothing when it is not text (Windows: a name that is not Unicode).
-std::optional<std::string> name_of(const std::filesystem::path& folder) {
+// The path as text, or nothing when it is not text (Windows: a name that is not Unicode).
+std::optional<std::string> text_of(const std::filesystem::path& path) {
     try {
-        return path_to_utf8(folder.filename());
+        return path_to_utf8(path);
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+// The folder's name as text.
+std::optional<std::string> name_of(const std::filesystem::path& folder) { return text_of(folder.filename()); }
+
+// The first of the mod's own files (paths in `folder`) that is not in it on the disk (a link in the
+// mod leads out), with why, or nothing. One that is not there at all is in it.
+std::optional<std::string> led_out(const std::filesystem::path& folder, const std::vector<std::string>& files) {
+    if (files.empty()) {
+        return std::nullopt;
+    }
+    std::error_code error;
+    const std::filesystem::path root = std::filesystem::canonical(folder, error);
+    if (error) {
+        return "the mod's folder could not be looked at: " + error.message();
+    }
+    for (const std::string& file : files) {
+        // (A map may name an image in a glTF, "a.gltf#image0": the file is what is before the #.)
+        for (const std::string& name : {file, file.substr(0, file.rfind('#'))}) {
+            if (name.empty()) {
+                continue;
+            }
+            const std::filesystem::path real = std::filesystem::weakly_canonical(root / path_from_utf8(name), error);
+            if (error) {
+                return "\"mod:" + file + "\" could not be looked at: " + error.message();
+            }
+            const std::filesystem::path relative = real.lexically_relative(root);
+            if (relative.empty() || *relative.begin() == "..") {
+                return "\"mod:" + file + "\" is not in the mod's folder: a link there leads out of it";
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 // The ids on, or why the list cannot be used (no file: none on).
@@ -180,10 +213,16 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
             unread.push_back({i, std::string(k_mod_world) + ": " + bad->message});
             continue;
         }
-        // The mod's own files ("mod:...") are in its folder.
-        if (const auto wrong = world::resolve_mod_files(worlds[i], MeshLibrary::normalize(path_to_utf8(mods_folder(world_folder) / laid.mods[i])))) {
+        // The mod's own files ("mod:...") are in its folder, and nowhere a link in it leads.
+        const std::filesystem::path own_folder = mods_folder(world_folder) / laid.mods[i];
+        std::optional<std::string> wrong = led_out(own_folder, world::mod_own_files(worlds[i]));
+        if (!wrong) {
+            const std::optional<std::string> folder_text = text_of(own_folder);
+            wrong = folder_text ? world::resolve_mod_files(worlds[i], MeshLibrary::normalize(*folder_text))
+                                : std::optional<std::string>("the mod's folder has a path that is not text");
+        }
+        if (wrong) {
             unread.push_back({i, std::string(k_mod_world) + ": " + *wrong});
-            worlds[i] = {};
             continue;
         }
         for (world::PersonLook& look : worlds[i].person_looks) {

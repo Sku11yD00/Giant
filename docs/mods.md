@@ -114,14 +114,24 @@ With the mod in `<world>/mods/guards/`, that is the file
 `<world>/mods/guards/art/guard.glb`. So a mod is one folder: copy it into
 another world's `mods` folder and its art comes with it.
 
-- Use forward slashes. The path may not leave the mod's folder (`..`),
-  and may not hold `.`, an empty part, a backslash or a colon. A path
-  that breaks this is an error, and the mod's changes are left out.
-- This works for a look's `mesh`, its `hair.file`, and the maps of its
-  `material` and of each of its `parts`.
-- A path without `mod:` is read the way a world's own paths are (from
-  the folder the editor runs in). Use that only for files every install
-  has.
+- This works for a look's `mesh`, its `hair.file`, the maps of its
+  `material` and of each of its `parts`, and a skin's `detail_normal`.
+- Use forward slashes. The path may not leave the mod's folder: no `..`,
+  no `.`, no empty part, no backslash, no colon. Nor may it hold what
+  Windows reads as something else: a part that ends in a dot or a space
+  or begins with a space, a device's name (`con`, `nul`, `com1` and the
+  like, whatever follows a dot), any of `< > " | ? *`, or a control
+  character. A path that breaks this is an error, and the mod's changes
+  are left out.
+- A link inside the mod's folder that leads out of it is not followed:
+  a mod whose file is reached through one is left out.
+- A path without `mod:` is a path from the folder the game runs in, for
+  files every install has (`people/villager.glb`). The same rules hold
+  for it, so a mod can never name a file by a drive, a root, a server or
+  a folder above. (A world's own files may: the world is yours, a mod
+  may be anyone's.)
+- `mod:` means something only in a mod's `world.json`. In a world's own
+  files or in a command it is not a path to anything.
 - The whole path (the world's folder, `mods/<id>/`, and the path in the
   mod) can be at most 1024 bytes.
 
