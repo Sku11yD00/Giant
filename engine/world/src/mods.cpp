@@ -331,10 +331,36 @@ std::optional<LoadError> load_mod(std::string_view text, Mod& out) {
 }
 
 namespace {
-bool allowed_ok(const ModScriptsAllowed& one) {
-    return !one.world.empty() && one.world.size() <= k_max_allowed_world_bytes && plain_text(one.world, false) && mod_id_ok(one.mod);
+
+// Well-formed UTF-8 (no overlong form, surrogate or code point past U+10FFFF): JSON keeps it as it is.
+bool is_utf8(std::string_view text) {
+    for (usize i = 0; i < text.size();) {
+        const unsigned char lead = static_cast<unsigned char>(text[i]);
+        const usize more = lead < 0x80 ? 0u : lead >= 0xc2 && lead <= 0xdf ? 1u : lead >= 0xe0 && lead <= 0xef ? 2u : lead >= 0xf0 && lead <= 0xf4 ? 3u : 4u;
+        if (more == 4 || i + more >= text.size() + (more == 0 ? 1u : 0u)) {
+            return false;
+        }
+        for (usize k = 1; k <= more; ++k) {
+            const unsigned char next = static_cast<unsigned char>(text[i + k]);
+            // (The first after the lead is held closer for the leads whose range is cut short.)
+            const unsigned char low = k == 1 && lead == 0xe0 ? 0xa0 : k == 1 && lead == 0xf0 ? 0x90 : 0x80;
+            const unsigned char high = k == 1 && lead == 0xed ? 0x9f : k == 1 && lead == 0xf4 ? 0x8f : 0xbf;
+            if (next < low || next > high) {
+                return false;
+            }
+        }
+        i += more + 1;
+    }
+    return true;
 }
+
+bool allowed_ok(const ModScriptsAllowed& one) { return mod_scripts_world_ok(one.world) && mod_id_ok(one.mod); }
+
 } // namespace
+
+bool mod_scripts_world_ok(std::string_view world) {
+    return !world.empty() && world.size() <= k_max_allowed_world_bytes && plain_text(world, false) && is_utf8(world);
+}
 
 std::string save_mods_scripts_allowed(std::span<const ModScriptsAllowed> allowed) {
     std::vector<ModScriptsAllowed> sorted;

@@ -92,7 +92,8 @@ The full sample is `scripts/samples/HelloGiant`. The build puts it in
 
 A mod can bring scripts too (`docs/mods.md`): they are written the same
 way, run beside these while the mod's world is open, and only after the
-person at the machine has allowed that mod's scripts. `load_scripts` and
+person at the machine has allowed that mod's scripts in the editor's
+window. `load_scripts` and
 `unload_scripts` leave them alone; `get_scripts` lists them under `mods`.
 
 Reloading: rebuild the assembly (`dotnet build`) and load it again. The old

@@ -4262,14 +4262,29 @@ beside the chat's key), never in the world, so a world from someone else
 runs nothing until allowed. `open_world` finds what runs (`mods_scripts`:
 the mod loaded and not left out, allowed, no link in its folder, the
 assembly there) into `EditorState::mods_scripts` with the world's session,
-and the main loop's `ScriptRunner` adds those assemblies when that
-session is the open world's and unloads them when it is not (closed, or
-opened again). `enable_mod` with `scripts` writes the list; turning a mod
-off takes its allowance back. Known limits: allowing is by folder and id,
-not by the assembly's bytes; one assembly per mod; the scripts are loaded
-on the frame after the world is opened, on the main thread; on Windows a
-world folder spelled with other capitals is another world to the list
-(it asks again).
+and the main loop's `ScriptRunner` adds those assemblies while that
+opening's world is the scene's (`mods_scripts_key`: the session and a
+stamp) and unloads them when it is not (closed, opened again, or the
+scene replaced), from a copy of the list, since a script may run
+`open_world` as it starts. Who may allow is `ModsScriptsConsent`: in the
+editor with its window, `enable_mod` with `scripts: true` only leaves a
+request (`EditorState::mods_scripts_request`) and the panels ask the
+person, whose button writes the list. That answer is on purpose not a
+command (the one exception to rule 7): a command may come from the chat's
+AI, an MCP client or a script, and a mod's own text could talk an AI into
+it. `--allow-mods-scripts-by-command` lets the command allow, for
+automated runs; a hidden editor without it allows none. Forbidding
+(`scripts: false`, or turning the mod off) needs no asking, writes the
+list and takes the mod out of what runs at once
+(`forbid_mod_scripts_now` moves the stamp: the rest are loaded again).
+Known limits: allowing is by folder and id, not by the assembly's bytes
+(a mod once allowed stays allowed when its files change, or when another
+world with a mod of that id is put in the same folder); one assembly per
+mod; the scripts are loaded on the frame after the world is opened, on
+the main thread; mods' scripts added beside the world's own hear the
+people's events those have yet to be told, a little from before they
+started; `load_scripts`, as before, loads any assembly a command names
+without asking the person (to come under ask-before-change, LW6b).
 
 Whole text files are read and written by `giant/core/text_files.h`
 (written beside and renamed over); game saves keep their own writer, which

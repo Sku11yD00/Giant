@@ -94,13 +94,16 @@ std::optional<u32> give_mod_slot(ModsOn& on, std::string_view id);
 // the machine (the editor's settings folder), never with the world: a
 // world got from someone else runs nothing until it is allowed here.
 struct ModScriptsAllowed {
-    std::string world; // the world's folder, as the editor names it (whole, from the root): 1 to k_max_allowed_world_bytes
+    std::string world; // the world's folder, as the editor names it (whole, from the root): mod_scripts_world_ok
     std::string mod;   // the mod's id
     auto operator<=>(const ModScriptsAllowed&) const = default;
 };
 constexpr usize k_max_mods_scripts_allowed = 1024;
 constexpr usize k_max_allowed_world_bytes = 1024;
 constexpr usize k_max_mods_scripts_allowed_bytes = usize{4} << 20; // the file
+// Whether a world's folder can be kept in the list: 1 to k_max_allowed_world_bytes of UTF-8 on one line, no
+// control characters (so that what is written is read back the same).
+bool mod_scripts_world_ok(std::string_view world);
 // JSON text (format "giant-mods-scripts"), sorted, each once, with a trailing newline. (Leaves out what
 // would not load: one past the most, a world's folder that is empty or too long, an id that is none.)
 std::string save_mods_scripts_allowed(std::span<const ModScriptsAllowed> allowed);

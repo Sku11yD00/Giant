@@ -116,10 +116,11 @@ public static unsafe class NativeHost
             Log(3, $"at most {MostAdded} script assemblies can be added");
             return 1;
         }
+        ScriptSet? added = null;
         try
         {
             string path = Marshal.PtrToStringUTF8((IntPtr)pathUtf8) ?? "";
-            ScriptSet added = ScriptSet.Load(path);
+            added = ScriptSet.Load(path);
             s_added.Add(added);
             RunScripts(added, static (scripts, _) => scripts.Start(), 0f);
             return 0;
@@ -127,6 +128,18 @@ public static unsafe class NativeHost
         catch (Exception e)
         {
             Log(3, "could not load scripts: " + e);
+            // (One that did not start is not left running, listed where the engine thinks there is none.)
+            if (added != null && s_added.Remove(added))
+            {
+                try
+                {
+                    StopAndRelease(added);
+                }
+                catch (Exception stopping)
+                {
+                    Log(3, "could not unload scripts: " + stopping);
+                }
+            }
             return 1;
         }
     }

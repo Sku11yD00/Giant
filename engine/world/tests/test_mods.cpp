@@ -382,6 +382,14 @@ GIANT_TEST("mods: the list of mods whose scripts are allowed is saved sorted and
     const std::vector<ModScriptsAllowed> some = {{"", "winter"}, {"/w", "Winter"}, {std::string(k_max_allowed_world_bytes + 1, 'w'), "a"}, {"two\nlines", "a"}, {"/w", "a"}};
     GIANT_CHECK(!load_mods_scripts_allowed(save_mods_scripts_allowed(some), back) && back == std::vector<ModScriptsAllowed>({{"/w", "a"}}));
     GIANT_CHECK(!load_mods_scripts_allowed(save_mods_scripts_allowed({}), back) && back.empty());
+    // A folder's name that is not UTF-8 would not be read back as it was written: not kept.
+    GIANT_CHECK(mod_scripts_world_ok("/w/caf\xc3\xa9/\xe2\x82\xac/\xf0\x9f\x98\x80") && mod_scripts_world_ok(std::string(k_max_allowed_world_bytes, 'w')));
+    for (const char* wrong : {"", "/w\xff", "/w\xfe", "/w\xc3", "/w\xc0\xaf", "/w\xe0\x80\xaf", "/w\xed\xa0\x80", "/w\xf4\x90\x80\x80", "/w\x80", "/w\xe2\x82",
+                              "/w\ty", "/w\x7f"}) {
+        GIANT_CHECK(!mod_scripts_world_ok(wrong));
+    }
+    const std::vector<ModScriptsAllowed> bytes = {{"/w\xff", "a"}, {"/w\xfe", "a"}, {"/w/caf\xc3\xa9", "a"}};
+    GIANT_CHECK(!load_mods_scripts_allowed(save_mods_scripts_allowed(bytes), back) && back == std::vector<ModScriptsAllowed>({{"/w/caf\xc3\xa9", "a"}}));
     // Strict: nothing of a list that is wrong is kept.
     back = {{"/kept", "kept"}};
     const std::string head = R"({"format":"giant-mods-scripts","format_version":1,)";

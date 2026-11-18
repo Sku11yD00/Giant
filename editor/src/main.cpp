@@ -4,12 +4,15 @@
 //
 //   giant_editor [--frames N] [--backend null|d3d12] [--software] [--hidden]
 //                [--debug-layer] [--require-validation] [--no-vsync] [--mcp]
-//                [--scripts path/to/Scripts.dll]
+//                [--scripts path/to/Scripts.dll] [--allow-mods-scripts-by-command]
 //
 // --require-validation fails the run if the GPU validation layer is not
 // actually running (CI uses it so "no validation errors" means something).
 // --mcp speaks MCP over stdin/stdout (logs go to stderr); the editor closes
 // when the client disconnects. --scripts loads C# scripts at start-up.
+// --allow-mods-scripts-by-command is for automated runs: enable_mod then
+// allows a mod's scripts itself, where the editor otherwise asks the person
+// in its window (a script is a program with their rights; docs/mods.md).
 #include "chat_bridge.h"
 #include "editor_commands.h"
 #include "mesh_library.h"
@@ -107,6 +110,7 @@ struct Options {
     bool vsync = true;
     bool mcp = false;
     std::string scripts; // C# script assembly to load at start-up
+    bool allow_mods_scripts_by_command = false; // automated runs: enable_mod allows a mod's scripts without asking the person
 };
 
 // The command line as UTF-8. On Windows, main's argv is in the ANSI code
@@ -167,6 +171,8 @@ bool parse_options(const std::vector<std::string>& argv, Options& out) {
             out.vsync = false;
         } else if (arg == "--mcp") {
             out.mcp = true;
+        } else if (arg == "--allow-mods-scripts-by-command") {
+            out.allow_mods_scripts_by_command = true;
         } else if (arg == "--scripts" && i + 1 < argc) {
             out.scripts = argv[++i];
         } else {
@@ -249,9 +255,11 @@ public:
             if (start()) {
                 const std::filesystem::path file(std::u8string(path.begin(), path.end()));
                 m_state.scripts_loaded = m_host->load_scripts(file) ? path : std::string();
-                // (Scripts hear of what happens from when they are loaded.)
-                m_events_told = m_state.routines != nullptr ? m_state.routines->changes() : 0;
-                m_events_missed = false;
+                if (m_state.mods_scripts_loaded.empty()) {
+                    // (Scripts hear of what happens from when they are loaded; beside mods' scripts, what those have yet to hear too.)
+                    m_events_told = m_state.routines != nullptr ? m_state.routines->changes() : 0;
+                    m_events_missed = false;
+                }
             }
         }
         update_mods_scripts();
@@ -269,33 +277,39 @@ private:
     // The open world's mods' scripts (EditorState::mods_scripts, found by open_world): loaded beside the
     // world's own when the world is opened, unloaded when it is closed or opened again.
     void update_mods_scripts() {
-        const editor::ModsScripts& found = m_state.mods_scripts;
-        const bool open = m_state.world != nullptr && m_state.world->is_open() && found.session == m_state.world->session();
-        const u64 want = open && !found.run.empty() ? found.session : 0;
-        if (want == m_mods_session) {
+        const bool active = m_state.world != nullptr && m_state.world->active(m_state.scene_generation);
+        const editor::ModsScriptsKey want =
+            editor::mods_scripts_key(m_state.mods_scripts, active, m_state.world != nullptr ? m_state.world->session() : 0);
+        if (want == m_mods_loaded) {
             return;
         }
-        m_mods_session = want;
-        if (m_host != nullptr && !m_state.mods_scripts_loaded.empty()) {
-            m_host->unload_added_scripts();
+        m_mods_loaded = want;
+        if (m_host != nullptr) {
+            m_host->unload_added_scripts(); // (whatever was added: also one that did not start)
         }
         m_state.mods_scripts_loaded.clear();
-        if (want == 0) {
+        if (want == editor::ModsScriptsKey{}) {
             return;
         }
         if (!start()) {
             log_error("editor", "the mods' scripts were not loaded: .NET could not be started");
             return;
         }
-        for (const editor::ModsScripts::Run& run : found.run) {
-            if (m_host->add_scripts(path_from_utf8(run.path))) {
-                m_state.mods_scripts_loaded.push_back(run.mod);
+        // (A copy: a script may run commands as it starts, open_world among them, which finds the scripts anew.)
+        const std::vector<editor::ModsScripts::Run> run = m_state.mods_scripts.run;
+        for (const editor::ModsScripts::Run& one : run) {
+            if (m_host->add_scripts(path_from_utf8(one.path))) {
+                m_state.mods_scripts_loaded.push_back(one.mod);
             } else {
-                log_error("editor", "the scripts of the mod \"" + run.mod + "\" could not be loaded (see above)");
+                log_error("editor", "the scripts of the mod \"" + one.mod + "\" could not be loaded (see above)");
+            }
+            const bool still = m_state.world != nullptr && m_state.world->active(m_state.scene_generation);
+            if (!(editor::mods_scripts_key(m_state.mods_scripts, still, m_state.world != nullptr ? m_state.world->session() : 0) == want)) {
+                break; // (one of them changed what runs: the next frame loads that)
             }
         }
         if (m_state.scripts_loaded.empty()) {
-            // (Scripts hear of what happens from when they are loaded.)
+            // (Scripts hear of what happens from when they are loaded; beside the world's own, from when those were.)
             m_events_told = m_state.routines != nullptr ? m_state.routines->changes() : 0;
             m_events_missed = false;
         }
@@ -352,7 +366,7 @@ private:
     static constexpr usize k_events_a_frame = 256;
     u64 m_events_told = 0;
     bool m_events_missed = false;
-    u64 m_mods_session = 0; // the world's opening whose mods' scripts are loaded (0: none)
+    editor::ModsScriptsKey m_mods_loaded; // which opening's mods' scripts are loaded ({}: none)
     std::vector<editor::PeopleRoutines::Change> m_changes; // (kept: nothing is allocated a frame)
     std::vector<script::PersonEvent> m_events;
 };
@@ -520,6 +534,9 @@ int run(const Options& options) {
         ~ChatGone() { state.chat = nullptr; }
     } chat_gone{state};
     state.scripts_to_load = options.scripts;
+    state.mods_scripts_consent = options.allow_mods_scripts_by_command ? editor::ModsScriptsConsent::by_command
+                                 : options.hidden                          ? editor::ModsScriptsConsent::none
+                                                                           : editor::ModsScriptsConsent::ask;
     if (const std::filesystem::path settings = settings_folder(); !settings.empty()) {
         try {
             state.mods_scripts_allowed_file = path_to_utf8(settings / "mods_scripts_allowed.json");

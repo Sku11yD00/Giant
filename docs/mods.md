@@ -291,10 +291,11 @@ The path is one inside the mod's folder, under the rules of a mod's own
 files (no `..`, drive, root or backslash), and at most 256 bytes. Other
 libraries the scripts use go beside the `.dll`.
 
-While the world is open, every loaded mod's scripts run beside the
-world's own, each mod's apart from the others: they start when the world
-is opened (in the load order), and stop when it is closed or opened
-again. They reach the engine only through commands, like every script,
+While the world is open and is what the editor shows, every loaded mod's
+scripts run beside the world's own, each mod's apart from the others:
+they start when the world is opened (in the load order), and stop when it
+is closed or opened again, or when another scene takes its place
+(`new_scene`, `load_scene`). They reach the engine only through commands, like every script,
 so they can place the mod's kits, send its people about, and hear what
 people do (`OnPersonEvent`). `load_scripts` and `unload_scripts` do not
 touch them; `get_scripts` lists the mods whose scripts are loaded.
@@ -307,26 +308,38 @@ the game.** Art and a `world.json` cannot do that, which is why a mod's
 scripts are treated differently from the rest of it:
 
 - Turning a mod on does not run its scripts. They run only after you
-  allow them: `enable_mod {"id": "winter", "scripts": true}`.
+  allow them.
+- You allow them yourself, in the editor's window. `enable_mod {"id":
+  "winter", "scripts": true}` (typed, or sent by Claude in the Chat panel
+  or another tool) only asks: the editor then shows "Allow this mod's
+  scripts?" with the mod and the world, and nothing is allowed until you
+  press the button. No command, AI or script can press it for you.
 - What you allowed is kept on your machine, in the editor's settings
-  (`mods_scripts_allowed.json` in `%APPDATA%\Giant`, or
-  `~/.config/Giant`), for that world's folder and that mod. It is never
-  kept with the world, so a world you got from someone else runs nothing
-  until you allow it yourself, and a world you moved or copied asks
-  again.
-- `{"scripts": false}` takes it back, and so does turning the mod off.
-- After allowing or forbidding, open the world again (`list_mods` says
-  `reopen`).
+  (`mods_scripts_allowed.json` in `%APPDATA%\Giant`; elsewhere in
+  `$XDG_CONFIG_HOME/Giant`, or `~/.config/Giant`), for that world's
+  folder and that mod. It is never kept with the world, so a world you
+  got from someone else runs nothing until you allow it yourself, and a
+  world you moved or copied asks again.
+- `{"scripts": false}` takes it back and stops the mod's scripts at once
+  (what the mod laid over the world stays until the world is opened
+  again; the other mods' scripts start afresh). Turning the mod off takes it back too.
+- After allowing, open the world again (`list_mods` says `reopen`).
 
 Allow only a mod whose maker you trust, as you would any program you
-download. If you ask Claude in the Chat panel to turn a mod on, it
-should not allow scripts unless you say so.
+download.
+
+For automated runs with nobody at the window (tests, build machines),
+start the editor with `--allow-mods-scripts-by-command`: `enable_mod`
+then allows at once. An editor started hidden without it can allow none.
 
 `list_mods` tells for each mod with scripts whether they are allowed
 (`scripts_allowed`), and under `world.scripts` which were to `run` as the
-world was opened and which were `not_run`, with why: not allowed, the mod
-was left out, the `.dll` is not there (build it), or the mod's folder
-holds a link (a mod with scripts must be all real files and folders).
+world was opened and which were `not_run`, with why: not allowed, the
+list of allowed mods cannot be read, the mod was left out, the `.dll` is
+not there (build it), or the mod's folder is a link, holds a link or
+could not be looked through (a mod with scripts must be all real files
+and folders). `scripts_asked` marks a mod you have been asked about and
+not answered yet.
 
 Allowing is by folder and id, not by what the `.dll` holds: a mod you
 allowed stays allowed when its files change, so update a mod only from

@@ -48,6 +48,7 @@ private:
     void draw_log();
     void draw_commands();
     void draw_engine(const FrameInfo& frame);
+    void draw_mods_scripts_request(); // asks the person whether a mod's scripts may run (EditorState::mods_scripts_request)
     void build_default_layout(unsigned int dockspace_id);
     // Runs a command from the UI; failures are logged for the person to see.
     void run(const char* command, const ai::Json& args = ai::Json::object(), u64 merge_group = 0);

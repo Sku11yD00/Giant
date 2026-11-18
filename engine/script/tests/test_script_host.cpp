@@ -26,8 +26,9 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
         calls.push_back(std::string(name) + " " + std::string(args));
         if (name == "reenter") {
             // A script asking to reload or unload scripts mid-update.
-            reentry_refused = !live_host->load_scripts(scripts);
+            reentry_refused = !live_host->load_scripts(scripts) && !live_host->add_scripts(scripts);
             live_host->unload_scripts();
+            live_host->unload_added_scripts();
             return {true, "{}"};
         }
         if (name == "echo") {
@@ -197,11 +198,29 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     calls.clear();
     GIANT_CHECK(host->add_scripts(scripts) && host->running_scripts() == 8);
     set_console_logging(false);
+    reentry_refused = false;
+    host->update(0.016f);
+    GIANT_CHECK(has("\"frame\":1"));
+    // Its awaits are its own: what waits on a task comes back in a later update of this assembly,
+    // and a script of it asking for scripts to be added or unloaded while it runs is refused.
+    for (int i = 0; i < 200 && !has("after task"); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        host->update(0.016f);
+    }
     host->update(0.016f);
     set_console_logging(true);
-    GIANT_CHECK(has("\"frame\":1"));
+    GIANT_CHECK(has("\"what\":\"after task\",\"answer\":42") && has("after yield") && reentry_refused && host->running_scripts() == 7);
     host->unload_added_scripts();
-    GIANT_CHECK(host->running_scripts() == 0 && host->load_scripts(scripts));
+    // Unloaded, nothing of it runs again: no update, no event, no await left over.
+    calls.clear();
+    {
+        const PersonEvent events[] = {{12, "b", "x", "y", 0.0}};
+        host->person_events(events);
+    }
+    for (int i = 0; i < 3; ++i) {
+        host->update(0.016f);
+    }
+    GIANT_CHECK(calls.empty() && host->running_scripts() == 0 && host->load_scripts(scripts));
     calls.clear();
 
     host->unload_scripts();

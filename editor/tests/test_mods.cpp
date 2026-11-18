@@ -831,8 +831,11 @@ GIANT_TEST("mods: a mod's scripts run only where they were allowed on this machi
     GIANT_CHECK(write_text_file(w.folder / "mods" / "guards" / "scripts" / "Guards.dll", "not really an assembly"));
     GIANT_CHECK(w.open() && w.streaming.mods_laid().scripts == std::vector<std::string>({"scripts/Guards.dll", "", "Traders.dll"}));
     const ModsLaid& laid = w.streaming.mods_laid();
-    // Nothing allowed (no list at all, or one with nothing in it): nothing runs, and each is told why.
-    for (const std::filesystem::path& file : {std::filesystem::path(), allowed}) {
+    // Nothing allowed (no list at all, none there yet, or one with nothing in it): nothing runs, and each is told why.
+    const std::filesystem::path empty_list = settings / "empty.json";
+    std::filesystem::create_directories(settings);
+    GIANT_CHECK(write_text_file(empty_list, world::save_mods_scripts_allowed({})));
+    for (const std::filesystem::path& file : {std::filesystem::path(), allowed, empty_list}) {
         const ModsScripts none = mods_scripts(w.folder, laid, file);
         GIANT_CHECK(none.run.empty() && none.not_run.size() == 2 && none.not_run[0].mod == "guards" &&
                     none.not_run[0].why.find("not allowed on this machine") != std::string::npos && none.not_run[1].mod == "traders");
@@ -864,6 +867,39 @@ GIANT_TEST("mods: a mod's scripts run only where they were allowed on this machi
         GIANT_CHECK(found.run.empty() && found.not_run.size() == 2 && found.not_run[0].why.find("link") != std::string::npos);
         std::filesystem::remove(w.folder / "mods" / "guards" / "scripts" / "linked.json", error);
     }
+    // The mods folder itself a link to elsewhere: nothing runs from it.
+    std::filesystem::rename(w.folder / "mods", w.folder / "_elsewhere", error);
+    if (!error) {
+        std::filesystem::create_directory_symlink(w.folder / "_elsewhere", w.folder / "mods", error);
+        if (!error) {
+            found = mods_scripts(w.folder, laid, allowed);
+            GIANT_CHECK(found.run.empty() && found.not_run[0].why.find("is a link") != std::string::npos);
+            std::filesystem::remove(w.folder / "mods", error);
+        }
+        std::filesystem::rename(w.folder / "_elsewhere", w.folder / "mods", error);
+        GIANT_CHECK(!error && mods_scripts(w.folder, laid, allowed).run.size() == 1);
+    }
+    // Which the main loop has loaded: those of the world's opening while that world is the scene's, anew when one is forbidden.
+    found = mods_scripts(w.folder, laid, allowed);
+    found.session = 7;
+    const ModsScriptsKey key = mods_scripts_key(found, true, 7);
+    GIANT_CHECK(!(key == ModsScriptsKey{}) && mods_scripts_key(found, false, 7) == ModsScriptsKey{} && mods_scripts_key(found, true, 8) == ModsScriptsKey{} &&
+                mods_scripts_key(ModsScripts{}, true, 0) == ModsScriptsKey{} && mods_scripts_key(found, true, 7) == key);
+    GIANT_CHECK(!forbid_mod_scripts_now(found, "traders") && mods_scripts_key(found, true, 7) == key);
+    GIANT_CHECK(forbid_mod_scripts_now(found, "guards") && found.run.empty() && found.not_run.size() == 2 &&
+                found.not_run[1].why.find("no longer allowed") != std::string::npos && mods_scripts_key(found, true, 7) == ModsScriptsKey{});
+    ModsScripts two = mods_scripts(w.folder, laid, allowed);
+    two.session = 7;
+    two.run.push_back({"other", "x.dll"});
+    const ModsScriptsKey both = mods_scripts_key(two, true, 7);
+    GIANT_CHECK(forbid_mod_scripts_now(two, "guards") && !(mods_scripts_key(two, true, 7) == both) && !(mods_scripts_key(two, true, 7) == ModsScriptsKey{}));
+    // A world whose folder's name the list cannot keep (a line break in it): nothing can be allowed there.
+    const std::filesystem::path odd = settings / "two\nlines";
+    std::filesystem::create_directories(odd / "mods", error);
+    if (!error) {
+        GIANT_CHECK(can_allow_mod_scripts(allowed, odd, "guards").value_or("").find("no path the list") != std::string::npos &&
+                    !mod_scripts_allowed(allowed, odd, "guards") && !allow_mod_scripts(allowed, odd, "guards", false));
+    }
     // A list that cannot be read allows nothing, and is not written over.
     GIANT_CHECK(!allow_mod_scripts(allowed, w.folder, "traders", false) && !mod_scripts_allowed(allowed, w.folder, "traders"));
     GIANT_CHECK(write_text_file(allowed, "{ not json"));
@@ -893,6 +929,7 @@ GIANT_TEST("mods: enable_mod allows a mod's scripts, open_world finds those that
     WorldStreaming streaming;
     state.world = &streaming;
     state.mods_scripts_allowed_file = path_to_utf8(settings / "allowed.json");
+    state.mods_scripts_consent = ModsScriptsConsent::by_command;
     ai::CommandRegistry commands;
     register_scene_commands(commands, state);
     register_mod_commands(commands, state);
@@ -920,10 +957,48 @@ GIANT_TEST("mods: enable_mod allows a mod's scripts, open_world finds those that
     // Turned on again without a word: still allowed. Told not to: taken back. Turned off: taken back too.
     GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}}).value["scripts_allowed"] == true);
     GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}, {"scripts", false}}).value["scripts_allowed"] == false &&
-                commands.execute("list_mods").value["world"]["reopen"] == true);
+                state.mods_scripts.run.empty() && commands.execute("list_mods").value["world"]["reopen"] == false);
     GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}, {"scripts", true}}).ok &&
                 commands.execute("enable_mod", {{"id", "guards"}, {"enabled", false}}).ok &&
                 commands.execute("enable_mod", {{"id", "guards"}}).value["scripts_allowed"] == false);
+    // Forbidden while the world runs them: stopped at once (no longer among those to run), and nothing is left to open again for.
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}, {"scripts", true}}).ok && commands.execute("open_world", folder).ok &&
+                state.mods_scripts.run.size() == 1);
+    const ModsScriptsKey running = mods_scripts_key(state.mods_scripts, true, streaming.session());
+    on = commands.execute("enable_mod", {{"id", "guards"}, {"scripts", false}}).value;
+    GIANT_CHECK(on["enabled"] == true && on["scripts_allowed"] == false && state.mods_scripts.run.empty() &&
+                !(mods_scripts_key(state.mods_scripts, true, streaming.session()) == running) &&
+                commands.execute("list_mods").value["world"]["reopen"] == false);
+    // Only told to forbid: a mod that is off stays off.
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}, {"enabled", false}}).ok);
+    on = commands.execute("enable_mod", {{"id", "guards"}, {"scripts", false}}).value;
+    GIANT_CHECK(on["enabled"] == false && !read_mods(w.folder).mods.empty() && !found(read_mods(w.folder), "guards")->on);
+    // It is the person's to allow: where the editor asks them, a command only asks, and allows nothing.
+    state.mods_scripts_consent = ModsScriptsConsent::ask;
+    on = commands.execute("enable_mod", {{"id", "guards"}, {"scripts", true}}).value;
+    GIANT_CHECK(on["enabled"] == true && on["scripts_allowed"] == false && on["scripts_asked"] == true && state.mods_scripts_request &&
+                state.mods_scripts_request->mod == "guards" && path_from_utf8(state.mods_scripts_request->world) == w.folder);
+    GIANT_CHECK((*listed(commands.execute("list_mods").value["mods"], "guards"))["scripts_asked"] == true &&
+                !mod_scripts_allowed(path_from_utf8(state.mods_scripts_allowed_file), w.folder, "guards"));
+    // (What cannot be allowed is not asked about; forbidding takes the question back.)
+    GIANT_CHECK(!commands.execute("enable_mod", {{"id", "plain"}, {"scripts", true}}).ok && state.mods_scripts_request->mod == "guards");
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}, {"scripts", false}}).ok && !state.mods_scripts_request);
+    // Where there is no window to ask in, none can be allowed.
+    state.mods_scripts_consent = ModsScriptsConsent::none;
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}, {"scripts", true}}).error.find("no window to ask") != std::string::npos &&
+                !state.mods_scripts_request && !mod_scripts_allowed(path_from_utf8(state.mods_scripts_allowed_file), w.folder, "guards"));
+    // One already allowed needs no asking again.
+    state.mods_scripts_consent = ModsScriptsConsent::by_command;
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "guards"}, {"scripts", true}}).ok);
+    state.mods_scripts_consent = ModsScriptsConsent::none;
+    on = commands.execute("enable_mod", {{"id", "guards"}, {"scripts", true}}).value;
+    GIANT_CHECK(on["scripts_allowed"] == true && !on.contains("scripts_asked"));
+    // The machine's list broken: a mod is still turned off, with a warning that its allowance stays in the list.
+    GIANT_CHECK(write_text_file(path_from_utf8(state.mods_scripts_allowed_file), "{ not json"));
+    ai::CommandResult off = commands.execute("enable_mod", {{"id", "guards"}, {"enabled", false}});
+    GIANT_CHECK(off.ok && off.value["enabled"] == false && off.value["warning"].get<std::string>().find("mend it") != std::string::npos);
+    GIANT_CHECK(!commands.execute("enable_mod", {{"id", "guards"}, {"scripts", true}}).ok);
+    std::filesystem::remove(path_from_utf8(state.mods_scripts_allowed_file), error);
     // The world closed: what was found is another opening's.
     GIANT_CHECK(commands.execute("close_world").ok && state.mods_scripts.session != streaming.session());
     std::filesystem::remove_all(settings, error);

@@ -330,6 +330,10 @@ struct EditorState {
     // loads those that run while that world is open, and says which it loaded.
     ModsScripts mods_scripts;
     std::vector<std::string> mods_scripts_loaded; // ids, in the order loaded
+    // Who may allow a mod's scripts (enable_mod with scripts: true). Set by main; tests choose.
+    ModsScriptsConsent mods_scripts_consent = ModsScriptsConsent::none;
+    // A mod whose scripts a command asked to have allowed, until the person answers in the window (the panels').
+    std::optional<ModsScriptsRequest> mods_scripts_request;
 
     u64 chat_stamp = 0;     // another number whenever the conversation may have changed (the main loop's)
     bool chat_busy = false; // Claude is working on a message (the main loop's)

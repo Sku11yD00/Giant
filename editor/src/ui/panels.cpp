@@ -10,6 +10,7 @@
 #include "../weather_state.h"
 
 #include "giant/core/log.h"
+#include "giant/core/text.h"
 #include "giant/sim/swing.h"
 #include "giant/world/people.h"
 #include "giant/world/water.h"
@@ -24,6 +25,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -112,9 +114,57 @@ void EditorPanels::draw(const FrameInfo& frame) {
     if (m_show_commands) draw_commands();
     if (m_show_engine) draw_engine(frame);
     if (m_show_demo) ImGui::ShowDemoWindow(&m_show_demo);
+    draw_mods_scripts_request();
 
     if (!ImGui::IsAnyItemActive()) {
         ++m_edit_epoch; // the next edit starts a new undo step
+    }
+}
+
+// A mod's scripts a command asked to have allowed: the person's to answer, here and nowhere else
+// (not a command: a command may come from the chat's AI, an MCP client or a script).
+void EditorPanels::draw_mods_scripts_request() {
+    if (!m_state.mods_scripts_request) {
+        return;
+    }
+    const ModsScriptsRequest request = *m_state.mods_scripts_request;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Always);
+    bool answered = false, allow = false;
+    if (ImGui::Begin("Allow this mod's scripts?", nullptr,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
+                         ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("The mod \"%s\" of the world in", request.mod.c_str());
+        ImGui::TextWrapped("%s", request.world.c_str());
+        ImGui::TextWrapped("wants to run scripts on this machine.");
+        ImGui::Spacing();
+        ImGui::TextWrapped("A script is a program. It runs with your own rights: it can read and change your files and use the "
+                           "network, not only change the game. Allow it only if you trust who made this mod.");
+        ImGui::Spacing();
+        if (ImGui::Button("Don't allow")) {
+            answered = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Allow this mod's scripts")) {
+            answered = allow = true;
+        }
+    }
+    ImGui::End();
+    if (!answered) {
+        return;
+    }
+    m_state.mods_scripts_request.reset();
+    if (!allow) {
+        log_info("editor", "the scripts of the mod \"" + request.mod + "\" were not allowed");
+        return;
+    }
+    const std::filesystem::path file =
+        m_state.mods_scripts_allowed_file.empty() ? std::filesystem::path() : path_from_utf8(m_state.mods_scripts_allowed_file);
+    if (const auto error = allow_mod_scripts(file, path_from_utf8(request.world), request.mod, true)) {
+        log_error("editor", "the scripts of the mod \"" + request.mod + "\" could not be allowed: " + *error);
+    } else {
+        log_info("editor", "the scripts of the mod \"" + request.mod + "\" are allowed on this machine: open the world again to run them");
     }
 }
 
