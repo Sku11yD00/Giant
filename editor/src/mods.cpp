@@ -270,8 +270,8 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
 
 namespace {
 
-constexpr const char* k_scripts_how = "enable_mod with scripts: true allows them. A script is a program with your own rights on this "
-                                      "machine: allow only a mod you trust";
+constexpr const char* k_scripts_how = "the person allows them in the editor's window (enable_mod with scripts: true asks them). A script is a "
+                                      "program with their own rights on this machine: only for a mod they trust";
 
 // The world's folder as the machine's list names it: whole, from the root, in one spelling (as the
 // disk has it: nothing of it is rewritten, so two folders never share a name). Nothing when it has none.
@@ -441,6 +441,21 @@ ModsScripts mods_scripts(const std::filesystem::path& world_folder, const ModsLa
         return {}; // (the usual: nothing is read)
     }
     return mods_scripts(world_folder, laid, read_scripts_allowed(allowed_file, world_folder));
+}
+
+bool in_mods_folder(const std::filesystem::path& world_folder, const std::filesystem::path& file) {
+    std::error_code error;
+    const std::filesystem::path mods = std::filesystem::weakly_canonical(std::filesystem::absolute(mods_folder(world_folder), error), error);
+    if (error || mods.empty()) {
+        return false;
+    }
+    const std::filesystem::path whole = std::filesystem::weakly_canonical(std::filesystem::absolute(file, error), error);
+    if (error) {
+        return false;
+    }
+    // (Part by part: "mods2" is not in "mods".)
+    const auto [end, at] = std::mismatch(mods.begin(), mods.end(), whole.begin(), whole.end());
+    return end == mods.end() && at != whole.end();
 }
 
 bool forbid_mod_scripts_now(ModsScripts& scripts, const std::string& id) {

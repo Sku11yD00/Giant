@@ -1082,6 +1082,10 @@ def mod_scripts_gate(tool, call, check, sample, settings):
               f"scripts not allowed are not run, got {told}")
         state = tool("get_scripts")
         check(state["mods"] == [] and state["running"] == 0, f"nothing of the mod ran, got {state}")
+        # Not by loading the file either: a mod's scripts start only once allowed.
+        around = call("tools/call", {"name": "load_scripts", "arguments": {"path": os.path.join(mod, "scripts", "HelloGiant.dll")}})
+        check(around.get("isError") is True and "mods folder" in around["content"][0]["text"],
+              f"load_scripts refuses a file in the world's mods folder, got {around}")
         files = listing()
         # Allowed here: said to need the world opened again, then loaded with it.
         on = tool("enable_mod", {"id": "hello", "scripts": True})

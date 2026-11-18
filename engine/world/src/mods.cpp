@@ -343,8 +343,8 @@ bool is_utf8(std::string_view text) {
         for (usize k = 1; k <= more; ++k) {
             const unsigned char next = static_cast<unsigned char>(text[i + k]);
             // (The first after the lead is held closer for the leads whose range is cut short.)
-            const unsigned char low = k == 1 && lead == 0xe0 ? 0xa0 : k == 1 && lead == 0xf0 ? 0x90 : 0x80;
-            const unsigned char high = k == 1 && lead == 0xed ? 0x9f : k == 1 && lead == 0xf4 ? 0x8f : 0xbf;
+            const unsigned low = k == 1 && lead == 0xe0 ? 0xa0u : k == 1 && lead == 0xf0 ? 0x90u : 0x80u;
+            const unsigned high = k == 1 && lead == 0xed ? 0x9fu : k == 1 && lead == 0xf4 ? 0x8fu : 0xbfu;
             if (next < low || next > high) {
                 return false;
             }

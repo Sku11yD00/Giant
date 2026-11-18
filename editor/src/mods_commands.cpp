@@ -156,6 +156,22 @@ Json laid_json(const ModsLaid& laid, const ModList& now, const std::filesystem::
 
 } // namespace
 
+std::string answer_mods_scripts_request(EditorState& state, bool allow) {
+    if (!state.mods_scripts_request) {
+        return "nothing was asked";
+    }
+    const ModsScriptsRequest request = *state.mods_scripts_request;
+    state.mods_scripts_request.reset();
+    if (!allow) {
+        return "the scripts of the mod \"" + request.mod + "\" were not allowed";
+    }
+    // (What the person was shown: the request's own world and mod, whatever is open now.)
+    if (const auto error = allow_mod_scripts(allowed_file(state), path_from_utf8(request.world), request.mod, true)) {
+        return "the scripts of the mod \"" + request.mod + "\" could not be allowed: " + *error;
+    }
+    return "the scripts of the mod \"" + request.mod + "\" are allowed on this machine: open the world again to run them";
+}
+
 void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"list_mods",
@@ -183,9 +199,10 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
          "since, or a mod's slot is not the one it had, or other mods' scripts would run (open_world again to load them). "
          "A mod may bring scripts: its mod.json names a C# assembly in its own folder (`scripts`: \"scripts/MyMod.dll\", built against "
          "Giant.Scripting). They run beside the world's own while the world is open, and reach the engine only through commands. A script is "
-         "a program with the person's own rights on the machine, so a mod's scripts run only once allowed here (enable_mod with scripts: "
-         "true; kept in the editor's settings on this machine, never with the world). Each mod tells `scripts` (the path, when it has any) "
-         "and `scripts_allowed`; `world.scripts` tells which were found to `run` [{mod, path}] as the world was opened and which were "
+         "a program with the person's own rights on the machine, so a mod's scripts run only once the person allowed them here, in the "
+         "editor's window (enable_mod with scripts: true asks them; kept in the editor's settings on this machine, never with the world). "
+         "Each mod tells `scripts` (the path, when it has any), `scripts_allowed`, and `scripts_asked` while the person has been asked "
+         "and not answered; `world.scripts` tells which were found to `run` [{mod, path}] as the world was opened and which were "
          "`not_run` [{mod, why}] (get_scripts tells which are loaded).",
          Json::parse(R"({"type": "object", "additionalProperties": false})"),
          true,
@@ -254,7 +271,7 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["id"],
              "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 64},
                             "enabled": {"type": "boolean", "description": "Default true."},
-                            "scripts": {"type": "boolean", "description": "Allow the mod's scripts on this machine (true), or take that back (false)."}}})"),
+                            "scripts": {"type": "boolean", "description": "true: ask the person, in the editor's window, to allow the mod's scripts on this machine. false: take that back and stop them."}}})"),
          false,
          [&state](const Json& args, CommandContext&) {
              const std::optional<std::filesystem::path> world = world_folder(state);
@@ -262,6 +279,9 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                  return no_world();
              }
              const std::string id = args["id"].get<std::string>();
+             if (!world::mod_id_ok(id)) {
+                 return CommandResult::failure("\"" + id + "\" is no mod's id");
+             }
              const bool allow = args.value("scripts", false);
              const bool forbid = args.contains("scripts") && !allow;
              // (Only told to forbid its scripts: whether it is on is left as it is.)
@@ -291,25 +311,36 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                          return refused(*error);
                      }
                      break;
-                 case ModsScriptsConsent::ask:
-                     // (The person's to say, in the editor's window: not this command's.)
-                     state.mods_scripts_request = ModsScriptsRequest{path_to_utf8(*world), id};
+                 case ModsScriptsConsent::ask: {
+                     // (The person's to say, in the editor's window: not this command's. One question at a
+                     // time: what they are reading is never changed under them.)
+                     const ModsScriptsRequest request{path_to_utf8(*world), id};
+                     if (state.mods_scripts_request && !(*state.mods_scripts_request == request)) {
+                         return refused("the person is still being asked about the scripts of the mod \"" + state.mods_scripts_request->mod +
+                                        "\": ask again once they have answered");
+                     }
+                     state.mods_scripts_request = request;
                      asked = true;
                      break;
+                 }
                  case ModsScriptsConsent::none:
                      return refused("this editor has no window to ask the person in. A script is a program with their rights, so it is theirs "
-                                    "to allow: run the editor with its window, or start it with --allow-mods-scripts-by-command");
+                                    "to allow: they must run the editor with its window and allow it there");
                  }
              } else if (forbid || (set_on && !on)) {
                  // (Turned off, or told so: no longer allowed, and stopped now if the open world runs them.)
                  if (state.mods_scripts_request && state.mods_scripts_request->mod == id) {
                      state.mods_scripts_request.reset();
                  }
-                 if (const auto error = allow_mod_scripts(list_file, *world, id, false)) {
-                     warning = "its scripts' allowance could not be taken back: " + *error;
-                 }
                  if (state.mods_world.empty() && state.world != nullptr && state.mods_scripts.session == state.world->session()) {
                      forbid_mod_scripts_now(state.mods_scripts, id);
+                 }
+                 if (const auto error = allow_mod_scripts(list_file, *world, id, false)) {
+                     if (forbid) { // (what was asked for was not done: they are stopped now, and would run again)
+                         return CommandResult::failure("the mod's scripts are stopped in the open world, but their allowance could not be taken "
+                                                       "back, so they would run when it is opened again: " + *error);
+                     }
+                     warning = "its scripts' allowance could not be taken back: " + *error;
                  }
              }
              const ModList list = read_mods(*world);
@@ -325,7 +356,7 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                      out["scripts"] = found->mod.scripts;
                      out["scripts_allowed"] = mod_scripts_allowed(list_file, *world, id);
                  }
-             } else if (set_on && on) { // (on already, and gone since)
+             } else if (std::find(list.missing.begin(), list.missing.end(), id) != list.missing.end()) { // (on, and gone since)
                  out["enabled"] = true;
                  out["problem"] = "there is no such mod there now (list_mods: `missing`)";
              }

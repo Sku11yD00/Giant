@@ -10,7 +10,6 @@
 #include "../weather_state.h"
 
 #include "giant/core/log.h"
-#include "giant/core/text.h"
 #include "giant/sim/swing.h"
 #include "giant/world/people.h"
 #include "giant/world/water.h"
@@ -25,7 +24,6 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -125,16 +123,25 @@ void EditorPanels::draw(const FrameInfo& frame) {
 // (not a command: a command may come from the chat's AI, an MCP client or a script).
 void EditorPanels::draw_mods_scripts_request() {
     if (!m_state.mods_scripts_request) {
+        m_scripts_asked = {};
         return;
     }
     const ModsScriptsRequest request = *m_state.mods_scripts_request;
+    if (!(m_scripts_asked == request)) {
+        m_scripts_asked = request;
+        m_scripts_asked_at = ImGui::GetTime();
+    }
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Always);
     bool answered = false, allow = false;
+    // (It does not take the keyboard or the mouse's click as it appears: what was being typed or
+    // pressed elsewhere is not an answer.)
     if (ImGui::Begin("Allow this mod's scripts?", nullptr,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
-                         ImGuiWindowFlags_AlwaysAutoResize)) {
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
+        ImGui::PushID(request.world.c_str());
+        ImGui::PushID(request.mod.c_str());
         ImGui::TextWrapped("The mod \"%s\" of the world in", request.mod.c_str());
         ImGui::TextWrapped("%s", request.world.c_str());
         ImGui::TextWrapped("wants to run scripts on this machine.");
@@ -146,25 +153,19 @@ void EditorPanels::draw_mods_scripts_request() {
             answered = true;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Allow this mod's scripts")) {
+        // (Not at once: time to read what is asked, and no click already on its way lands here.)
+        const bool ready = ImGui::GetTime() - m_scripts_asked_at >= k_scripts_ask_seconds;
+        ImGui::BeginDisabled(!ready);
+        if (ImGui::Button("Allow this mod's scripts") && ready) {
             answered = allow = true;
         }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+        ImGui::PopID();
     }
     ImGui::End();
-    if (!answered) {
-        return;
-    }
-    m_state.mods_scripts_request.reset();
-    if (!allow) {
-        log_info("editor", "the scripts of the mod \"" + request.mod + "\" were not allowed");
-        return;
-    }
-    const std::filesystem::path file =
-        m_state.mods_scripts_allowed_file.empty() ? std::filesystem::path() : path_from_utf8(m_state.mods_scripts_allowed_file);
-    if (const auto error = allow_mod_scripts(file, path_from_utf8(request.world), request.mod, true)) {
-        log_error("editor", "the scripts of the mod \"" + request.mod + "\" could not be allowed: " + *error);
-    } else {
-        log_info("editor", "the scripts of the mod \"" + request.mod + "\" are allowed on this machine: open the world again to run them");
+    if (answered) {
+        log_info("editor", answer_mods_scripts_request(m_state, allow));
     }
 }
 

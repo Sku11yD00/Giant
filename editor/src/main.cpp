@@ -280,10 +280,11 @@ private:
         const bool active = m_state.world != nullptr && m_state.world->active(m_state.scene_generation);
         const editor::ModsScriptsKey want =
             editor::mods_scripts_key(m_state.mods_scripts, active, m_state.world != nullptr ? m_state.world->session() : 0);
-        if (want == m_mods_loaded) {
+        if (want == m_mods_loaded && !m_mods_partly) {
             return;
         }
         m_mods_loaded = want;
+        m_mods_partly = false;
         if (m_host != nullptr) {
             m_host->unload_added_scripts(); // (whatever was added: also one that did not start)
         }
@@ -305,7 +306,8 @@ private:
             }
             const bool still = m_state.world != nullptr && m_state.world->active(m_state.scene_generation);
             if (!(editor::mods_scripts_key(m_state.mods_scripts, still, m_state.world != nullptr ? m_state.world->session() : 0) == want)) {
-                break; // (one of them changed what runs: the next frame loads that)
+                m_mods_partly = true; // (one of them changed what runs: the next frame loads what does then, anew)
+                break;
             }
         }
         if (m_state.scripts_loaded.empty()) {
@@ -367,6 +369,7 @@ private:
     u64 m_events_told = 0;
     bool m_events_missed = false;
     editor::ModsScriptsKey m_mods_loaded; // which opening's mods' scripts are loaded ({}: none)
+    bool m_mods_partly = false;           // loading them was broken off: loaded anew next frame, whatever the key
     std::vector<editor::PeopleRoutines::Change> m_changes; // (kept: nothing is allocated a frame)
     std::vector<script::PersonEvent> m_events;
 };

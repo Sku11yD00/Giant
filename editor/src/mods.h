@@ -139,6 +139,10 @@ struct ModsScriptsRequest {
     bool operator==(const ModsScriptsRequest&) const = default;
 };
 
+// Whether `file` is in the world's mods folder (by where both really are on the disk): a mod's
+// scripts are run by allowing the mod, never by a command that names the file (load_scripts).
+bool in_mods_folder(const std::filesystem::path& world_folder, const std::filesystem::path& file);
+
 // The mod's scripts are no longer to run in this opening (they were forbidden while the world is open):
 // taken out of `run`, with why, and the stamp moved on. False when they were not to run.
 bool forbid_mod_scripts_now(ModsScripts& scripts, const std::string& id);

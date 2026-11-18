@@ -1,5 +1,7 @@
 #include "editor_commands.h"
 
+#include "world_streaming.h"
+
 #include "giant/core/assert.h"
 #include "giant/core/image.h"
 #include "giant/core/log.h"
@@ -301,6 +303,10 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
              const std::filesystem::path file(std::u8string(path.begin(), path.end()));
              if (!std::filesystem::is_regular_file(file, error)) {
                  return CommandResult::failure("no such file: " + path);
+             }
+             if (state.world != nullptr && state.world->is_open() && in_mods_folder(state.world->folder(), file)) {
+                 return CommandResult::failure("that file is in the open world's mods folder: a mod's scripts run once the person has allowed "
+                                               "the mod's scripts (enable_mod with scripts: true asks them), not by loading the file");
              }
              state.scripts_to_load = path;
              state.scripts_unload_requested = false; // the latest request wins

@@ -92,6 +92,10 @@ private:
     bool m_chat_focus = false;                // put the keyboard back in the box at the next draw
 
     u32 m_edit_epoch = 1; // bumped whenever no widget is being edited
+    // The question shown now (draw_mods_scripts_request), and since when: Allow can be pressed a moment later.
+    ModsScriptsRequest m_scripts_asked;
+    double m_scripts_asked_at = 0.0;
+    static constexpr double k_scripts_ask_seconds = 1.5;
 };
 
 } // namespace giant::editor

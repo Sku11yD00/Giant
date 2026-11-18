@@ -392,6 +392,10 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
 void register_chat_commands(ai::CommandRegistry& registry, EditorState& state);
 // The mod commands (mods_commands.cpp).
 void register_mod_commands(ai::CommandRegistry& registry, EditorState& state);
+// The person's answer to EditorState::mods_scripts_request, given in the editor's window (the panels'
+// button) and on purpose by no command: a command may come from an AI or a script. Allows the scripts
+// of the mod and world the request named, or not; the request is gone either way. What to tell the person.
+std::string answer_mods_scripts_request(EditorState& state, bool allow);
 // Lets the ragdolls follow the fixed steps run by hand too (state.physics,
 // state.ragdolls and state.meshes set; after connect_walkers).
 void connect_ragdolls(EditorState& state);

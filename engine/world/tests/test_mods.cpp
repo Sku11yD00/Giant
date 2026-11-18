@@ -384,6 +384,13 @@ GIANT_TEST("mods: the list of mods whose scripts are allowed is saved sorted and
     GIANT_CHECK(!load_mods_scripts_allowed(save_mods_scripts_allowed({}), back) && back.empty());
     // A folder's name that is not UTF-8 would not be read back as it was written: not kept.
     GIANT_CHECK(mod_scripts_world_ok("/w/caf\xc3\xa9/\xe2\x82\xac/\xf0\x9f\x98\x80") && mod_scripts_world_ok(std::string(k_max_allowed_world_bytes, 'w')));
+    // (The ends of each range.)
+    for (const char* right : {"\xf4\x8f\xbf\xbf", "\xed\x9f\xbf", "\xe0\xa0\x80", "\xf0\x90\x80\x80", "\xc2\x80", "\xdf\xbf", "\xee\x80\x80"}) {
+        GIANT_CHECK(mod_scripts_world_ok(right));
+    }
+    for (const char* wrong : {"\xf5\x80\x80\x80", "\xf0\x9f\x98", "\xf0\x8f\xbf\xbf", "\xc1\xbf", "\xe0\x9f\xbf", "\xf0\x9f\x98\x41"}) {
+        GIANT_CHECK(!mod_scripts_world_ok(wrong));
+    }
     for (const char* wrong : {"", "/w\xff", "/w\xfe", "/w\xc3", "/w\xc0\xaf", "/w\xe0\x80\xaf", "/w\xed\xa0\x80", "/w\xf4\x90\x80\x80", "/w\x80", "/w\xe2\x82",
                               "/w\ty", "/w\x7f"}) {
         GIANT_CHECK(!mod_scripts_world_ok(wrong));

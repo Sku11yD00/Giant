@@ -298,7 +298,9 @@ is closed or opened again, or when another scene takes its place
 (`new_scene`, `load_scene`). They reach the engine only through commands, like every script,
 so they can place the mod's kits, send its people about, and hear what
 people do (`OnPersonEvent`). `load_scripts` and `unload_scripts` do not
-touch them; `get_scripts` lists the mods whose scripts are loaded.
+touch them, and `load_scripts` refuses a file in the open world's `mods`
+folder (a mod's scripts start only this way); `get_scripts` lists the
+mods whose scripts are loaded.
 
 ### Scripts must be allowed first
 
@@ -313,7 +315,11 @@ scripts are treated differently from the rest of it:
   "winter", "scripts": true}` (typed, or sent by Claude in the Chat panel
   or another tool) only asks: the editor then shows "Allow this mod's
   scripts?" with the mod and the world, and nothing is allowed until you
-  press the button. No command, AI or script can press it for you.
+  press the button. No command, AI or script can press it for you. You
+  are asked about one mod at a time (asking for another meanwhile is
+  refused), and the button can be pressed only after the question has
+  been on screen a moment, so a click meant for something else does not
+  answer it.
 - What you allowed is kept on your machine, in the editor's settings
   (`mods_scripts_allowed.json` in `%APPDATA%\Giant`; elsewhere in
   `$XDG_CONFIG_HOME/Giant`, or `~/.config/Giant`), for that world's
@@ -340,6 +346,12 @@ not there (build it), or the mod's folder is a link, holds a link or
 could not be looked through (a mod with scripts must be all real files
 and folders). `scripts_asked` marks a mod you have been asked about and
 not answered yet.
+
+What this does not cover yet: `load_scripts` loads a script file a
+command names from anywhere outside the open world's `mods` folder
+without asking you. That is how your own project's scripts are loaded,
+and Claude in the Chat panel can call it too, so read what it proposes to
+load. Asking before such changes is still to come.
 
 Allowing is by folder and id, not by what the `.dll` holds: a mod you
 allowed stays allowed when its files change, so update a mod only from
