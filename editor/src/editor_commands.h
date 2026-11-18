@@ -319,6 +319,10 @@ struct EditorState {
 
     // The chat with Claude (chat.h). Null where there is none (tests).
     ChatLink* chat = nullptr;
+    // Tools and tests: the world folder (UTF-8) whose mods are meant (list_mods, enable_mod), whatever is open.
+    // Empty: the open world's.
+    std::string mods_world;
+
     u64 chat_stamp = 0;     // another number whenever the conversation may have changed (the main loop's)
     bool chat_busy = false; // Claude is working on a message (the main loop's)
 };
@@ -374,6 +378,8 @@ void connect_walkers(EditorState& state);
 void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state);
 // chat_send, get_chat, stop_chat, clear_chat: the chat with Claude (chat.h).
 void register_chat_commands(ai::CommandRegistry& registry, EditorState& state);
+// The mod commands (mods_commands.cpp).
+void register_mod_commands(ai::CommandRegistry& registry, EditorState& state);
 // Lets the ragdolls follow the fixed steps run by hand too (state.physics,
 // state.ragdolls and state.meshes set; after connect_walkers).
 void connect_ragdolls(EditorState& state);

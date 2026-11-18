@@ -2,11 +2,10 @@
 
 #include "giant/core/log.h"
 #include "giant/core/text.h"
+#include "giant/core/text_files.h"
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
-#include <sstream>
 
 namespace giant::editor {
 
@@ -14,14 +13,7 @@ namespace {
 
 using world::CellCoord;
 
-std::optional<std::string> read_text(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) return std::nullopt;
-    std::stringstream text;
-    text << file.rdbuf();
-    if (file.bad()) return std::nullopt;
-    return text.str();
-}
+std::optional<std::string> read_text(const std::filesystem::path& path) { return read_text_file(path); }
 
 // How far `p` is from a chunk's square, on the ground.
 double chunk_distance(const DVec3& p, CellCoord c, double size) {

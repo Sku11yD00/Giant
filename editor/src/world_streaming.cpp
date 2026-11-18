@@ -5,6 +5,7 @@
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
 #include "giant/core/text.h"
+#include "giant/core/text_files.h"
 #include "giant/world/far_ground.h"
 
 #include <algorithm>
@@ -12,8 +13,6 @@
 #include <limits>
 #include <cmath>
 #include <cstdint>
-#include <fstream>
-#include <sstream>
 
 namespace giant::editor {
 
@@ -23,35 +22,8 @@ using world::CellCoord;
 using world::Entity;
 
 
-std::optional<std::string> read_text(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return std::nullopt;
-    }
-    std::stringstream text;
-    text << file.rdbuf();
-    if (file.bad()) {
-        return std::nullopt;
-    }
-    return text.str();
-}
-
-// Written beside, then renamed over: a crash mid-save never leaves half a file.
-bool write_text(const std::filesystem::path& path, const std::string& text) {
-    std::filesystem::path partial = path;
-    partial += ".partial";
-    {
-        std::ofstream file(partial, std::ios::binary | std::ios::trunc);
-        file.write(text.data(), static_cast<std::streamsize>(text.size()));
-        file.close();
-        if (!file) {
-            return false;
-        }
-    }
-    std::error_code error;
-    std::filesystem::rename(partial, path, error);
-    return !error;
-}
+std::optional<std::string> read_text(const std::filesystem::path& path) { return read_text_file(path); }
+bool write_text(const std::filesystem::path& path, const std::string& text) { return write_text_file(path, text); }
 
 // How far `p` is from the cell's square, on the ground.
 double square_distance(const DVec3& p, CellCoord c, double size) {

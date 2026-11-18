@@ -4123,6 +4123,35 @@ no longer keeps (cleared, or older than its 2,000) leave the view too. It
 draws the newest 300 (wrapped text is measured as it is drawn). Sending,
 stopping and clearing are the chat's commands.
 
+### Mods (LW7 part 1)
+
+A mod is a folder beside a world, `<world>/mods/<id>/`, with a manifest
+`mod.json` (`docs/mods.md` is the guide for people who make them).
+`giant/world/mods.h` is the manifest (`world::Mod`: id, name, version,
+author, description, `needs` with a least version each, `after`), its
+strict text form (`load_mod`, `save_mod`: unknown keys are errors, as for
+scenes), the world's list of the mods that are on (`load_enabled_mods`,
+`save_enabled_mods`: `<world>/mods/enabled.json`), and the load order
+(`order_mods`). The order puts each mod after all it needs and all it asks
+to come after, and breaks every other tie by id, so the same mods load the
+same way on every machine. A mod that is on and cannot load is left out
+with one reason (a need that is missing, off, too old or itself left out;
+a circle of mods waiting on each other; a second mod of an id): nothing is
+left out silently, and nothing that needs a mod left out is loaded.
+
+The editor reads the folders only when asked (`editor/src/mods.h`:
+`read_mods`, `set_mod_on`, behind `list_mods` and `enable_mod`), never in a
+frame. A folder's name must be its mod's id; folders that are no mod are
+listed with why. A list of enabled mods that cannot be read turns none on
+and is never overwritten. At most 256 mods, manifests of at most 64 KB.
+So far a mod is its manifest and its place in the order: world changes,
+data overrides, assets and scripts are the parts to come, applied in this
+order.
+
+Whole text files are read and written by `giant/core/text_files.h`
+(written beside and renamed over); game saves keep their own writer, which
+also flushes to the disk.
+
 Not yet: Claude's words arriving as they are written
 (replies come whole), pictures (a screenshot's result says there was one),
 asking before each change, shortening a long conversation (clear it when
